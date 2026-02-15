@@ -1,82 +1,61 @@
 # Aimi Engineering Plugin
 
-A Claude Code plugin that extends `compound-engineering-plugin` to generate autonomous task execution files in JSON format.
+Autonomous task execution with Ralph-style JSON tasks for Claude Code.
 
-## Overview
+## Prerequisites
 
-This plugin enables iterative autonomous agent execution by generating structured task files following Ralph's `prd.json` format. Each task is broken down into verifiable user stories that can be completed within a single agent iteration.
-
-## Installation
+**Required:** compound-engineering-plugin must be installed first.
 
 ```bash
-# Clone the repository
-git clone git@github.com:aimi-so/aimi-engineering-plugin.git
+# Install compound-engineering first
+claude /plugin install compound-engineering
 
-# Add to your Claude Code plugins
-claude plugins add ./aimi-engineering-plugin
+# Then install aimi-engineering
+claude /plugin install aimi-engineering
 ```
 
-## Task Output Format
+## Commands
 
-The plugin generates `prd.json` files with the following structure:
+| Command | Description |
+|---------|-------------|
+| `/aimi:brainstorm` | Explore ideas (wraps compound-engineering) |
+| `/aimi:plan` | Create plan + convert to tasks.json |
+| `/aimi:deepen` | Enhance plan + update tasks.json |
+| `/aimi:review` | Code review (wraps compound-engineering) |
+| `/aimi:status` | Show execution progress |
+| `/aimi:next` | Execute next pending story |
+| `/aimi:execute` | Run all stories autonomously |
 
-```json
-{
-  "project": "ProjectName",
-  "branchName": "feature/task-name",
-  "description": "Task description",
-  "userStories": [
-    {
-      "id": "US-001",
-      "title": "Story title",
-      "description": "As a [user], I want [feature] so that [benefit]",
-      "acceptanceCriteria": ["Criterion 1", "Typecheck passes"],
-      "priority": 1,
-      "passes": false,
-      "notes": ""
-    }
-  ]
-}
-```
+## Workflow
 
-## Story Guidelines
+1. **Brainstorm**: `/aimi:brainstorm Add user authentication`
+2. **Plan**: `/aimi:plan` (generates tasks.json)
+3. **Deepen** (optional): `/aimi:deepen docs/plans/[plan].md`
+4. **Execute**: `/aimi:execute` (autonomous loop)
+5. **Review**: `/aimi:review` (code review)
 
-### Sizing
-
-- Each story must be completable in ONE agent iteration (single context window)
-- Acceptance criteria must be verifiable (not vague)
-
-### Ordering
-
-Stories are ordered by dependency:
-
-1. Schema/database changes (migrations)
-2. Server actions / backend logic
-3. UI components that use the backend
-4. Dashboard/summary views that aggregate data
-
-## Project Structure
+## File Structure
 
 ```
-aimi-engineering-plugin/
-├── .claude-plugin/
-│   └── plugin.json           # Plugin manifest
-├── agents/                   # Specialized agents (.md files)
-├── commands/                 # Slash commands (.md files)
-├── skills/                   # Skills (subdirs with SKILL.md)
-│   └── skill-name/
-│       ├── SKILL.md
-│       └── references/
-└── README.md
+docs/tasks/
+├── tasks.json    # Structured task list with user stories
+└── progress.md   # Learnings and execution history
 ```
+
+## How It Works
+
+1. Plan generates markdown plan via compound-engineering
+2. Plan converted to tasks.json with sized user stories
+3. Execute spawns fresh Task agents per story
+4. Each agent reads progress.md for prior learnings
+5. Learnings compound: future stories benefit from past discoveries
 
 ## Components
 
 | Type | Count |
 |------|-------|
-| Agents | 0 |
-| Commands | 0 |
-| Skills | 0 |
+| Commands | 7 |
+| Skills | 2 |
 
 ## License
 
