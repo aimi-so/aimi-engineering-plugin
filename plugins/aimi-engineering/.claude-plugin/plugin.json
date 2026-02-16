@@ -1,0 +1,18 @@
+{
+  "name": "aimi-engineering",
+  "version": "0.2.1",
+  "description": "Autonomous task execution with Ralph-style JSON tasks. Wraps compound-engineering for brainstorm, plan, review workflows.",
+  "author": {
+    "name": "Stanley Takamatsu"
+  },
+  "homepage": "https://github.com/aimi-so/aimi-engineering-plugin",
+  "repository": "https://github.com/aimi-so/aimi-engineering-plugin",
+  "license": "MIT",
+  "keywords": [
+    "autonomous-execution",
+    "task-management",
+    "compound-engineering",
+    "ralph-style",
+    "workflow-automation"
+  ]
+}

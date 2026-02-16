@@ -1,0 +1,139 @@
+# Aimi Engineering Plugin - Development Guidelines
+
+## Versioning Requirements
+
+**Every change to this plugin MUST include:**
+
+1. **Bump version** in `.claude-plugin/plugin.json` (follow semver)
+   - MAJOR: Breaking changes to command syntax or output format
+   - MINOR: New commands, skills, or features
+   - PATCH: Bug fixes, documentation updates
+
+2. **Update CHANGELOG.md** with the change description
+   - Follow [Keep a Changelog](https://keepachangelog.com/) format
+   - Categories: Added, Changed, Fixed, Removed, Security
+
+3. **Update README.md** component counts if adding/removing components
+
+4. **Update marketplace.json** version to match plugin.json
+
+## Plugin Structure
+
+```
+aimi-engineering-plugin/
+├── .claude-plugin/
+│   └── marketplace.json         # Marketplace manifest (points to plugins/)
+├── plugins/aimi-engineering/    # Actual plugin content
+│   ├── .claude-plugin/
+│   │   └── plugin.json          # Plugin manifest
+│   ├── commands/                # Slash commands (.md files)
+│   ├── skills/                  # Skills (subdirs with SKILL.md)
+│   │   └── skill-name/
+│   │       ├── SKILL.md
+│   │       └── references/
+│   └── CLAUDE.md                # This file
+├── CHANGELOG.md                 # Version history
+└── README.md                    # User documentation
+```
+
+## Security Requirements
+
+### Input Validation (CRITICAL)
+
+1. **branchName validation** - Must match `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$`
+   - Prevents command injection in git operations
+   - Reject invalid names before any git command
+
+2. **Story content sanitization** - Before prompt interpolation:
+   - Strip newlines, markdown headers, code fences
+   - Validate field lengths (title: 200, description: 500, criterion: 300)
+   - Reject suspicious content ("ignore previous instructions", shell syntax)
+
+3. **Bash permissions** - Use specific prefixes in allowed-tools:
+   - `Bash(git:*), Bash(npm:*), Bash(bun:*), Bash(tsc:*)` etc.
+   - Never use unrestricted `Bash` in commands that spawn Task agents
+
+## Command Conventions
+
+- Use `aimi:` prefix for all commands
+- Use `disable-model-invocation: true` for side-effect commands
+- Wrapper commands should pass `$ARGUMENTS` to wrapped commands
+- Document allowed-tools in frontmatter with specific Bash prefixes
+- Validate inputs before passing to external commands
+
+## Skill Conventions
+
+- Keep SKILL.md under 300 lines
+- Move detailed schemas/examples to `references/` directory
+- Include trigger phrases in description
+- Use imperative writing style
+- Include Input Sanitization section for skills that process user data
+- Document Available Capabilities for Task-spawned agents
+
+## Output Files
+
+All task execution files go in `docs/tasks/`:
+
+- `tasks.json` - Structured task list with user stories
+- `progress.md` - Learnings log with Codebase Patterns section
+- `progress-archive-YYYY-MM.md` - Archived entries (when progress.md > 50KB)
+
+## tasks.json Schema
+
+### Required Fields
+
+```json
+{
+  "project": "string",
+  "branchName": "string (validated regex)",
+  "description": "string",
+  "userStories": [{
+    "id": "US-XXX",
+    "title": "string (max 200)",
+    "description": "string (max 500)",
+    "acceptanceCriteria": ["string"],
+    "priority": 1,
+    "completed": false,
+    "notes": "",
+    "attempts": 0,
+    "error": null
+  }]
+}
+```
+
+### Error Schema (for failures)
+
+```json
+{
+  "error": {
+    "type": "typecheck_failure|test_failure|lint_failure|runtime_error|dependency_missing|unknown",
+    "message": "Detailed error",
+    "file": "path/to/file (optional)",
+    "line": 42,
+    "suggestion": "Possible fix (optional)"
+  }
+}
+```
+
+## Performance Guidelines
+
+1. **Inline story data** - Pass story content directly in Task prompts
+   - Don't tell agents to re-read tasks.json
+   - Reduces file I/O by ~33%
+
+2. **Extract only patterns** - Read only Codebase Patterns section from progress.md
+   - Don't pass full progress history to agents
+   - Reduces context usage significantly
+
+3. **Compact prompts** - Use compressed prompt format for subsequent stories
+   - Full prompt for first story, compact for rest
+   - ~60% token reduction
+
+4. **Progress rotation** - Archive when progress.md exceeds 50KB
+   - Keep patterns + last 5 entries
+   - Move rest to progress-archive-YYYY-MM.md
+
+## Dependencies
+
+This plugin requires **compound-engineering-plugin** to be installed.
+Document this in README.md (Claude Code does not support plugin dependencies in manifest).
