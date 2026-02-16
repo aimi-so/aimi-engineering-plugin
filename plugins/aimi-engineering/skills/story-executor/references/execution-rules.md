@@ -6,23 +6,28 @@ Each story is executed by a Task-spawned agent with fresh context. This document
 
 ## Execution Flow
 
-### Step 1: Read Progress Log
+### Step 1: Read Project Guidelines
 
-**FIRST**, read `docs/tasks/progress.md`, especially the **Codebase Patterns** section at the top.
+**FIRST**, check for project-specific guidelines in this order:
 
-This contains learnings from previous stories that will help you:
-- Understand project conventions
-- Avoid known gotchas
-- Follow established patterns
+1. **CLAUDE.md** (project root) - Primary project instructions
+2. **AGENTS.md** (directory-specific) - Module-specific patterns and gotchas
+3. **Aimi defaults** - If neither exists, follow standard conventions
+
+These files contain:
+- Project conventions and patterns
+- Commit and PR rules
+- Known gotchas to avoid
+- Module-specific guidance
 
 ### Step 2: Read Story Details
 
-Read your assigned story from `docs/tasks/tasks.json`.
+Your story data is provided inline in the prompt.
 
 Understand:
 - Title and description
 - All acceptance criteria
-- Priority (for context on what came before)
+- Task-specific steps to follow
 
 ### Step 3: Implement the Story
 
@@ -90,38 +95,7 @@ Read `docs/tasks/tasks.json`, update your story:
 
 Write the updated file.
 
-### Step 8: Append to Progress Log
-
-Append your progress entry to `docs/tasks/progress.md`:
-
-```markdown
----
-
-## US-XXX - [Story title]
-
-**Completed:** [ISO 8601 timestamp]
-**Files changed:** `path/to/file1.ts`, `path/to/file2.ts`
-
-**What was implemented:**
-- [Bullet point 1]
-- [Bullet point 2]
-
-**Learnings:**
-- [Pattern discovered]
-- [Gotcha encountered]
-```
-
-### Step 9: Update Codebase Patterns (if applicable)
-
-If you discovered a significant pattern or gotcha, ADD it to the **Codebase Patterns** section at the TOP of progress.md.
-
-Examples of patterns worth adding:
-- Import conventions (e.g., "Use `@/` alias for absolute imports")
-- Required commands after changes (e.g., "Run `prisma generate` after schema changes")
-- Project-specific conventions (e.g., "All services follow repository pattern")
-- Known gotchas (e.g., "Tests require dev server on PORT 3000")
-
-### Step 10: Update AGENTS.md Files
+### Step 8: Update AGENTS.md or CLAUDE.md with Learnings
 
 Before committing, check if any edited files have learnings worth preserving in nearby AGENTS.md files:
 
@@ -140,79 +114,16 @@ Before committing, check if any edited files have learnings worth preserving in 
 - "Tests require the dev server running on PORT 3000"
 - "Field names must match the template exactly"
 
-**Do NOT add to AGENTS.md:**
+**Do NOT add to AGENTS.md or CLAUDE.md:**
 - Story-specific implementation details
 - Temporary debugging notes
-- Information already in progress.md
+- Redundant information already documented
 
-Only update AGENTS.md if you have **genuinely reusable knowledge** that would help future work in that directory.
+Only update these files if you have **genuinely reusable knowledge** that would help future work.
 
-## Progress Rotation (Prevent Unbounded Growth)
-
-When `docs/tasks/progress.md` exceeds **50KB** (~100 stories):
-
-1. Create archive: `docs/tasks/progress-archive-YYYY-MM.md`
-2. Move all story entries (below the Codebase Patterns section) to archive
-3. Keep in progress.md:
-   - Header with project info
-   - Full Codebase Patterns section
-   - Link to archive: `[Previous entries](./progress-archive-YYYY-MM.md)`
-   - Last 5 story entries (for recent context)
-
-This prevents context bloat while preserving learnings.
-
-## progress.md Format
-
-```markdown
-# Aimi Progress Log
-
-**Project:** [project name]
-**Branch:** [branch name]
-**Started:** [timestamp]
-**Plan:** [link to plan file]
-
----
-
-## Codebase Patterns
-
-_Consolidated learnings from all stories (read this first)_
-
-- Pattern: Use `@/` alias for absolute imports in this codebase
-- Pattern: All services follow DDD repository pattern
-- Gotcha: Must run `bun run prisma:generate` after schema changes
-- Gotcha: Tests require dev server running on PORT 3000
-
----
-
-## US-001 - Add database schema
-
-**Completed:** 2026-02-15T10:45:00Z
-**Files changed:** `prisma/schema.prisma`, `src/modules/x/x.repository.ts`
-
-**What was implemented:**
-- Added X table with columns a, b, c
-- Created repository with CRUD operations
-
-**Learnings:**
-- This codebase uses Prisma with Bun runtime
-- Migrations auto-apply in dev mode
-
----
-
-## US-002 - Add password utilities
-
-**Completed:** 2026-02-15T11:15:00Z
-**Files changed:** `src/lib/auth/password.ts`, `src/lib/auth/password.test.ts`
-
-**What was implemented:**
-- Hash function using bcrypt with cost 12
-- Verify function for password comparison
-- Unit tests for both functions
-
-**Learnings:**
-- Project uses vitest for testing
-- Test files co-located with source
-```
+**Where to add learnings:**
+- **CLAUDE.md** (root) - Project-wide patterns, conventions, and setup instructions
+- **AGENTS.md** (directory) - Module-specific patterns and gotchas
 
 ## Failure Handling
 
