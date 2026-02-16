@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-02-16
+
+### Added
+
+- **jq-based task extraction**: Only load ONE story into context at a time
+  - `/aimi:execute` extracts only metadata (project, branchName, counts)
+  - `/aimi:next` extracts only the next pending story
+- **`skipped` field**: Prevents infinite loop on failed tasks
+  - When user says "skip", sets `skipped: true` on the story
+  - jq query filters: `passes == false AND skipped != true`
+
+### Changed
+
+- `/aimi:execute` now shows separate counts for pending, completed, and skipped
+- `/aimi:next` uses jq instead of reading full tasks.json
+- Added `Bash(jq:*)` to allowed-tools for both commands
+
+### Fixed
+
+- Infinite loop when a task keeps failing (now properly excluded after skip)
+
 ## [0.4.2] - 2026-02-16
 
 ### Fixed
