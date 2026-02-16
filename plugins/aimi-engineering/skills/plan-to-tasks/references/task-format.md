@@ -11,6 +11,7 @@ The `tasks.json` file is the structured task list that drives autonomous executi
 **CRITICAL:** Before processing tasks.json, validate the structure:
 
 ### Required Root Fields
+- `schemaVersion` (string, must be "2.0" for task-specific steps)
 - `project` (string, non-empty)
 - `branchName` (string, matches `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$`)
 - `description` (string, non-empty)
@@ -25,8 +26,98 @@ The `tasks.json` file is the structured task list that drives autonomous executi
 - `passes` (boolean)
 - `taskType` (string, snake_case, max 50 chars)
 - `steps` (array of strings, min 1, max 10 items, each max 500 chars)
-- `relevantFiles` (array of strings, max 20 items, valid relative paths)
-- `patternsToFollow` (string, file path or "none")
+- `relevantFiles` (array of strings, max 20 items, valid relative paths - see Path Validation)
+- `patternsToFollow` (string, file path or "none" - see Path Validation)
+- `qualityChecks` (array of strings, 1-5 items, shell commands for verification)
+
+### Path Validation (Security)
+
+**CRITICAL:** All file paths must be validated to prevent path traversal attacks.
+
+#### Validation Rules
+
+1. **No parent directory traversal**: Reject paths containing `..`
+2. **No absolute paths**: Reject paths starting with `/`
+3. **No protocol prefixes**: Reject paths containing `://` or starting with `file:`
+4. **No null bytes**: Reject paths containing `\x00` or `%00`
+5. **Normalized paths only**: After normalization, path must remain within project root
+6. **No hidden system files**: Reject paths to `.git/`, `.env`, `.ssh/`, etc.
+
+#### Blocked Path Patterns
+
+```regex
+# Path traversal
+\.\./
+\.\.\\
+
+# Absolute paths
+^/
+^[A-Za-z]:\\
+
+# Protocol prefixes
+://
+^file:
+
+# Null bytes
+\x00
+%00
+
+# System/sensitive paths
+^\.git/
+^\.env
+^\.ssh/
+/\.git/
+/\.env
+/\.ssh/
+```
+
+#### Validation Function (Pseudocode)
+
+```python
+def validate_path(path: str) -> bool:
+    # Reject empty paths
+    if not path or path.strip() == "":
+        return False
+    
+    # Block dangerous patterns
+    blocked_patterns = [
+        r"\.\./",           # Parent traversal (unix)
+        r"\.\.\\",          # Parent traversal (windows)
+        r"^/",              # Absolute path (unix)
+        r"^[A-Za-z]:\\",    # Absolute path (windows)
+        r"://",             # Protocol prefix
+        r"^file:",          # File protocol
+        r"\x00",            # Null byte
+        r"%00",             # URL-encoded null
+        r"^\.git/",         # Git directory
+        r"^\.env",          # Environment files
+        r"^\.ssh/",         # SSH directory
+        r"/\.git/",         # Nested git
+        r"/\.env",          # Nested env
+        r"/\.ssh/",         # Nested ssh
+    ]
+    
+    for pattern in blocked_patterns:
+        if re.search(pattern, path, re.IGNORECASE):
+            return False
+    
+    # Additional: normalize and verify still relative
+    normalized = os.path.normpath(path)
+    if normalized.startswith("..") or os.path.isabs(normalized):
+        return False
+    
+    return True
+```
+
+#### Validation Error Messages
+
+| Error | Message |
+|-------|---------|
+| Path traversal | `Error: Story [ID] path "[path]" contains path traversal. Remove ".." sequences.` |
+| Absolute path | `Error: Story [ID] path "[path]" is absolute. Use relative paths only.` |
+| Protocol prefix | `Error: Story [ID] path "[path]" contains protocol. Use local paths only.` |
+| Sensitive path | `Error: Story [ID] path "[path]" accesses sensitive location. Remove system paths.` |
+| Invalid format | `Error: Story [ID] path "[path]" has invalid format. Use standard relative paths.` |
 
 ### Validation Errors
 
@@ -38,17 +129,18 @@ Please run /aimi:plan to regenerate tasks.json.
 
 **Validation Error Messages:**
 
-| Error | Message |
-|-------|---------|
-| Missing taskType | `Error: Story [ID] missing required field 'taskType'. Regenerate with /aimi:plan-to-tasks.` |
-| Invalid taskType | `Error: Story [ID] taskType must be snake_case, max 50 chars. Got: "[value]"` |
-| Missing steps | `Error: Story [ID] missing required field 'steps'. Regenerate with /aimi:plan-to-tasks.` |
-| Empty steps | `Error: Story [ID] must have at least 1 step. Got empty array.` |
-| Too many steps | `Error: Story [ID] has [count] steps. Maximum allowed is 10.` |
-| Step too long | `Error: Story [ID] step [index] exceeds 500 chars ([length] chars).` |
-| Missing relevantFiles | `Error: Story [ID] missing required field 'relevantFiles'. Regenerate with /aimi:plan-to-tasks.` |
-| Too many relevantFiles | `Error: Story [ID] has [count] relevantFiles. Maximum allowed is 20.` |
-| Missing patternsToFollow | `Error: Story [ID] missing required field 'patternsToFollow'. Regenerate with /aimi:plan-to-tasks.` |
+All errors follow a consistent format:
+```
+Error: Story [ID] - [field]: [issue]. Fix: [action].
+```
+
+| Category | Example |
+|----------|---------|
+| Missing field | `Error: Story US-001 - taskType: missing. Fix: run /aimi:plan-to-tasks` |
+| Invalid value | `Error: Story US-001 - taskType: invalid (got "Bad Value"). Fix: use snake_case` |
+| Length exceeded | `Error: Story US-001 - steps[2]: too long (520/500 chars). Fix: shorten step` |
+| Count exceeded | `Error: Story US-001 - steps: too many (12/10). Fix: split story` |
+| Security violation | `Error: Story US-001 - relevantFiles[0]: path traversal detected. Fix: remove ".."` |
 
 Do NOT proceed with invalid tasks.json.
 
@@ -56,6 +148,7 @@ Do NOT proceed with invalid tasks.json.
 
 ```json
 {
+  "schemaVersion": "2.0",
   "project": "string",
   "branchName": "string",
   "description": "string",
@@ -65,6 +158,41 @@ Do NOT proceed with invalid tasks.json.
   "userStories": [UserStory]
 }
 ```
+
+### Schema Versioning
+
+The `schemaVersion` field tracks the tasks.json format version for compatibility.
+
+| Version | Changes |
+|---------|---------|
+| `1.0` | Initial schema (implicit if field missing) |
+| `2.0` | Added required fields: `taskType`, `steps`, `relevantFiles`, `patternsToFollow` |
+
+**Version Validation:**
+
+```python
+CURRENT_SCHEMA_VERSION = "2.0"
+SUPPORTED_VERSIONS = ["1.0", "2.0"]
+
+def validate_schema_version(tasks_json: dict) -> tuple[bool, str]:
+    version = tasks_json.get("schemaVersion", "1.0")
+    
+    if version not in SUPPORTED_VERSIONS:
+        return False, f"Unknown schema version: {version}. Supported: {SUPPORTED_VERSIONS}"
+    
+    if version == "1.0":
+        # Warn about missing task-specific fields
+        return True, "Warning: Schema v1.0 detected. Run /aimi:plan-to-tasks to upgrade to v2.0 with task-specific steps."
+    
+    return True, ""
+```
+
+**Migration from v1.0 to v2.0:**
+
+If `schemaVersion` is missing or "1.0", the executor should:
+1. Log a warning about missing task-specific fields
+2. Fall back to generic execution flow (legacy behavior)
+3. Suggest running `/aimi:plan-to-tasks` to regenerate with v2.0 schema
 
 ## Field Definitions
 
@@ -98,6 +226,49 @@ Do NOT proceed with invalid tasks.json.
 | `steps` | array | Yes | Task-specific execution steps (1-10 items, each max 500 chars) |
 | `relevantFiles` | array | Yes | Files to read first (max 20 items, relative paths) |
 | `patternsToFollow` | string | Yes | AGENTS.md path or "none" |
+| `qualityChecks` | array | Yes | Commands to verify acceptance criteria |
+
+### qualityChecks Field
+
+The `qualityChecks` array specifies commands to run for verification.
+
+**Purpose:** Makes quality verification explicit and executable, not implicit.
+
+**Format:**
+```json
+{
+  "qualityChecks": [
+    "npx tsc --noEmit",
+    "npm test -- --testPathPattern=users",
+    "npm run lint"
+  ]
+}
+```
+
+**Guidelines:**
+- Include typecheck command if code changes are involved
+- Include specific test commands (scoped to affected files)
+- Include lint commands if project uses linting
+- Order: typecheck → test → lint (fail fast on type errors)
+- Maximum 5 commands per story
+
+**Common Quality Checks:**
+
+| Check Type | Example Command |
+|------------|-----------------|
+| TypeScript typecheck | `npx tsc --noEmit` |
+| Jest tests (scoped) | `npm test -- --testPathPattern=<pattern>` |
+| Vitest tests (scoped) | `npx vitest run <pattern>` |
+| ESLint | `npm run lint` |
+| Prettier check | `npx prettier --check src/` |
+| Prisma generate | `npx prisma generate` |
+| Build verification | `npm run build` |
+
+**Validation:**
+- Array must have at least 1 item
+- Each command must be a non-empty string
+- Maximum 5 commands
+- Commands must not contain shell injection patterns (see security rules)
 
 ### Task-Specific Fields (New)
 

@@ -19,7 +19,7 @@ Each pattern is a markdown file with YAML frontmatter.
 |-------|------|----------|-------------|
 | `name` | string | Yes | Unique identifier in snake_case (becomes `taskType`) |
 | `keywords` | array | Yes | Words that trigger this pattern when found in story title/description |
-| `file_patterns` | array | Yes | File path patterns that trigger this pattern |
+| `filePatterns` | array | Yes | File path patterns that trigger this pattern |
 
 ### Markdown Body Sections
 
@@ -35,7 +35,7 @@ Each pattern is a markdown file with YAML frontmatter.
 ---
 name: prisma_schema
 keywords: [prisma, schema, model, migration, database, table, column]
-file_patterns: ["prisma/schema.prisma", "*.prisma"]
+filePatterns: ["prisma/schema.prisma", "*.prisma"]
 ---
 
 # Prisma Schema Changes
@@ -67,7 +67,7 @@ file_patterns: ["prisma/schema.prisma", "*.prisma"]
 1. **Extract keywords** from story title and description
 2. **For each pattern file:**
    - Check if any `keywords` appear in story content
-   - Check if any `file_patterns` match files mentioned in story
+   - Check if any `filePatterns` match files mentioned in story
 3. **Score matches** by number of keyword/pattern hits
 4. **Select best match** (highest score wins)
 5. **If no match:** Fall back to LLM inference
@@ -75,7 +75,7 @@ file_patterns: ["prisma/schema.prisma", "*.prisma"]
 ## Creating New Patterns
 
 1. Create a new `.md` file in this directory
-2. Add YAML frontmatter with `name`, `keywords`, `file_patterns`
+2. Add YAML frontmatter with `name`, `keywords`, `filePatterns`
 3. Add `## Steps Template` with numbered steps
 4. Add `## Relevant Files` listing common files
 5. Optionally add `## Gotchas` with pitfalls

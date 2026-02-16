@@ -181,7 +181,7 @@ Match stories to workflow patterns for step generation.
 2. **Parse YAML frontmatter** to extract:
    - `name`: pattern identifier (becomes taskType)
    - `keywords`: words that trigger this pattern
-   - `file_patterns`: file paths that trigger this pattern
+   - `filePatterns`: file paths that trigger this pattern
 3. **Parse markdown body** to extract:
    - `## Steps Template`: numbered step list
    - `## Relevant Files`: common files for this task type
@@ -196,7 +196,7 @@ For each story:
 
 2. **File pattern matching**:
    - Extract file paths from story content
-   - Check against each pattern's `file_patterns` (glob matching)
+   - Check against each pattern's `filePatterns` (glob matching)
 
 3. **Combined score**:
    ```
@@ -204,7 +204,25 @@ For each story:
    ```
    File patterns weighted higher (more specific signal)
 
-4. **Select best match** (highest score wins)
+4. **Select best match** with tie-breaking:
+   - **Primary**: Highest combined score wins
+   - **Tie-breaker 1**: More filePattern matches (more specific)
+   - **Tie-breaker 2**: More keyword matches (broader coverage)
+   - **Tie-breaker 3**: Alphabetical by pattern name (deterministic)
+   
+   ```python
+   def select_best_pattern(matches: list[tuple[str, int, int, int]]) -> str:
+       """
+       matches: list of (pattern_name, total_score, file_matches, keyword_matches)
+       Returns: pattern_name of best match
+       """
+       # Sort by: score DESC, file_matches DESC, keyword_matches DESC, name ASC
+       sorted_matches = sorted(
+           matches,
+           key=lambda m: (-m[1], -m[2], -m[3], m[0])
+       )
+       return sorted_matches[0][0] if sorted_matches else None
+   ```
 
 ---
 

@@ -1,7 +1,7 @@
 ---
 name: react_component
 keywords: [react, component, ui, tsx, jsx, button, form, modal, card, list, table, input, dropdown]
-file_patterns: ["src/components/*", "components/*", "app/**/components/*", "*.tsx"]
+filePatterns: ["src/components/*", "components/*", "app/**/components/*", "*.tsx"]
 ---
 
 # React Component Creation
