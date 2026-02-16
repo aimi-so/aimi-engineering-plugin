@@ -62,7 +62,7 @@ Switched to branch: [branchName]
 
 ## Step 3: Check for Pending Stories
 
-Count pending stories (where `completed === false`).
+Count pending stories (where `passes === false`).
 
 If none pending:
 ```

@@ -93,7 +93,7 @@ All task execution files go in `docs/tasks/`:
     "description": "string (max 500)",
     "acceptanceCriteria": ["string"],
     "priority": 1,
-    "completed": false,
+    "passes": false,
     "notes": "",
     "attempts": 0,
     "error": null

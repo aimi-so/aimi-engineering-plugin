@@ -81,7 +81,7 @@ Read `docs/tasks/tasks.json`, update your story:
 ```json
 {
   "id": "US-XXX",
-  "completed": true,
+  "passes": true,
   "notes": "Completed successfully. [brief notes]",
   "attempts": 1,
   "lastAttempt": "2026-02-15T10:45:00Z"
@@ -218,11 +218,11 @@ _Consolidated learnings from all stories (read this first)_
 
 If you fail to complete a story:
 
-1. **Do NOT** mark `completed: true`
+1. **Do NOT** mark `passes: true`
 2. **Update** tasks.json with structured error:
    ```json
    {
-     "completed": false,
+     "passes": false,
      "notes": "Failed: [brief summary]",
      "attempts": [increment],
      "lastAttempt": "[timestamp]",

@@ -77,7 +77,7 @@ docs/tasks/
       "title": "Add database schema",
       "acceptanceCriteria": ["...", "Typecheck passes"],
       "priority": 1,
-      "completed": false
+      "passes": false
     }
   ]
 }

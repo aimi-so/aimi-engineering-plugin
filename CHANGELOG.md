@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-02-15
+
+### Changed
+
+- **BREAKING:** Rename `completed` field to `passes` in tasks.json schema
+  - Better reflects acceptance criteria validation semantics (pass/fail)
+  - Aligns with testing vocabulary
+  - Updated all commands: deepen, execute, next, status
+  - Updated all skills: plan-to-tasks, story-executor
+  - Existing tasks.json files need field renamed from `completed` to `passes`
+
 ## [0.2.1] - 2026-02-15
 
 ### Added
@@ -29,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **BREAKING:** Rename `passes` field to `completed` in tasks.json schema for clarity
+- **BREAKING:** Introduced `completed` field in tasks.json schema (now renamed to `passes` in v0.3.0)
 - Inline story data in Task prompts (reduces file I/O by ~33%)
 - Extract only Codebase Patterns from progress.md (reduces context usage)
 - Add structured error format with type classification for programmatic handling
