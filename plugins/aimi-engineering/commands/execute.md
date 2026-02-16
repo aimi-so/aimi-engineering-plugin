@@ -152,8 +152,6 @@ Count commits on this branch:
 git log --oneline [default_branch]..HEAD | wc -l
 ```
 
-Read Codebase Patterns from progress.md.
-
 Report:
 ```
 ## Execution Complete
@@ -162,10 +160,6 @@ All [total] stories completed successfully!
 
 Branch: [branchName]
 Commits: [count]
-
-### Codebase Patterns Discovered
-
-[list patterns from progress.md Codebase Patterns section]
 
 ### Next Steps
 

@@ -251,9 +251,9 @@ Type: [TASK_TYPE]
 ...
 [If empty: "No specific files - explore codebase to understand patterns"]
 
-## Patterns to Follow
+## Project Guidelines (MUST FOLLOW)
 
-[PATTERNS_CONTENT - see "AGENTS.md Content Injection" below]
+[PROJECT_GUIDELINES - see "Project Guidelines Injection" below]
 
 ## On Completion
 
@@ -320,60 +320,148 @@ STEPS:
 ...
 
 FILES: [relevantFiles as comma-separated list or "explore codebase"]
-PATTERNS: [patternsToFollow or "use codebase conventions"]
 
+RULES (MUST FOLLOW):
+[PROJECT_GUIDELINES - commit format, PR rules, conventions]
 
-COMPLETE: verify criteria → check (tsc/lint/test) → commit "feat: [ID] - [title]" → tasks.json (passes:true)
+COMPLETE: verify criteria → check (tsc/lint/test) → commit per rules → tasks.json (passes:true)
 FAIL: passes:false, error object (type/message/file/suggestion), return report.
 ```
 
 Use the full prompt template for the first story in a session, then switch to compact for subsequent stories.
 
-## AGENTS.md Content Injection
+## Project Guidelines Injection
 
-When building the prompt, inject AGENTS.md content directly for small files to reduce agent tool calls.
+When building the prompt, inject CLAUDE.md/AGENTS.md content directly for small files to reduce agent tool calls.
+
+### Discovery Order (with Aimi Fallback)
+
+```python
+def get_project_guidelines(project_root: str, story_path: str) -> str:
+    """
+    Returns project guidelines content with Aimi defaults as fallback.
+    
+    Priority:
+    1. CLAUDE.md at project root (project-wide conventions)
+    2. AGENTS.md in story's directory or parents (module-specific)
+    3. Aimi default rules (fallback)
+    """
+    guidelines = []
+    
+    # 1. Check for CLAUDE.md (project-wide)
+    claude_md = find_claude_md(project_root)
+    if claude_md:
+        guidelines.append(("CLAUDE.md", read_file(claude_md)))
+    
+    # 2. Check for AGENTS.md (directory-specific)
+    agents_md = find_agents_md(project_root, story_path)
+    if agents_md:
+        guidelines.append(("AGENTS.md", read_file(agents_md)))
+    
+    # 3. Fallback to Aimi defaults if neither found
+    if not guidelines:
+        return get_aimi_default_rules()
+    
+    # Check if existing files have commit/PR rules
+    has_commit_rules = any(
+        "commit" in content.lower() and ("format" in content.lower() or "message" in content.lower())
+        for _, content in guidelines
+    )
+    
+    # Append Aimi defaults for commit/PR if not covered
+    if not has_commit_rules:
+        guidelines.append(("Aimi Defaults", get_aimi_default_rules()))
+    
+    return format_guidelines(guidelines)
+
+
+def find_claude_md(project_root: str) -> str | None:
+    """Find CLAUDE.md at project root."""
+    paths = [
+        f"{project_root}/CLAUDE.md",
+        f"{project_root}/.claude/CLAUDE.md",
+    ]
+    for path in paths:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def find_agents_md(project_root: str, story_path: str) -> str | None:
+    """
+    Find most relevant AGENTS.md by walking up from story's directory.
+    """
+    # Extract directory from files mentioned in story
+    story_dir = os.path.dirname(story_path) if story_path else project_root
+    
+    # Walk up directory tree
+    current = story_dir
+    while current.startswith(project_root):
+        agents_path = os.path.join(current, "AGENTS.md")
+        if os.path.exists(agents_path):
+            return agents_path
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    
+    return None
+
+
+def get_aimi_default_rules() -> str:
+    """Return Aimi's default commit and PR rules."""
+    # Content from default-rules.md
+    return """## Aimi Default Rules
+
+### Commit Format
+- Format: `<type>: [<story-id>] - <description>`
+- Types: feat, fix, refactor, docs, test, chore
+- Max 72 chars, imperative mood, no trailing period
+
+### Commit Behavior (MANDATORY)
+- One commit per completed story
+- All quality checks MUST pass before commit
+- NEVER use --no-verify or skip hooks
+- NEVER force push unless explicitly instructed
+
+### On Failure
+- Do NOT commit if checks fail
+- Mark story as failed with error details
+- Report the failure clearly
+"""
+```
 
 ### Injection Rules
 
 ```python
-MAX_AGENTS_MD_SIZE = 2000  # characters
+MAX_CONTENT_SIZE = 2000  # characters
 
-def get_patterns_content(patterns_to_follow: str) -> str:
+def format_guidelines(guidelines: list[tuple[str, str]]) -> str:
     """
-    Returns content for the PATTERNS_CONTENT placeholder.
+    Format guidelines for prompt injection.
+    Inline small files, reference large ones.
     """
-    if patterns_to_follow == "none":
-        return "No specific patterns - use codebase conventions"
+    result = []
     
-    # Check if file exists
-    if not os.path.exists(patterns_to_follow):
-        return f"See: {patterns_to_follow} (file not found - explore codebase)"
+    for source, content in guidelines:
+        if len(content) <= MAX_CONTENT_SIZE:
+            result.append(f"### From {source}:\n\n{content}")
+        else:
+            result.append(f"See: {source} for full conventions (file too large to inline)")
     
-    # Read file content
-    content = read_file(patterns_to_follow)
-    
-    # If small enough, inject directly
-    if len(content) <= MAX_AGENTS_MD_SIZE:
-        return f"""### From {patterns_to_follow}:
-
-{content}"""
-    
-    # Otherwise, reference the file
-    return f"See: {patterns_to_follow} for conventions and gotchas (file too large to inline)"
+    return "\n\n".join(result)
 ```
 
 ### Benefits
 
-- **Fewer tool calls**: Agent doesn't need to read AGENTS.md separately
-- **Faster execution**: Content available immediately in prompt
-- **Context preservation**: Pattern guidance is front-loaded
+- **Fewer tool calls**: Agent doesn't need to read files separately
+- **Consistent rules**: Aimi defaults ensure commit/PR rules always exist
+- **Project-specific first**: CLAUDE.md/AGENTS.md take priority over defaults
 
 ### Size Threshold
 
 - **2000 characters**: Inline the full content
 - **> 2000 characters**: Reference the file path (agent will read if needed)
-
-This threshold balances prompt size against the benefit of immediate access.
 
 ## Placeholder Interpolation
 
@@ -388,7 +476,7 @@ The prompt template uses placeholders that are replaced at runtime:
 | `[ACCEPTANCE_CRITERIA]` | `story.acceptanceCriteria` | Bullet list of criteria |
 | `[STEPS]` | `story.steps` | Numbered list of steps |
 | `[RELEVANT_FILES]` | `story.relevantFiles` | Bullet list of files |
-| `[PATTERNS_CONTENT]` | Computed | AGENTS.md content or reference |
+| `[PROJECT_GUIDELINES]` | Computed | CLAUDE.md/AGENTS.md or Aimi defaults |
 | `[QUALITY_CHECKS]` | `story.qualityChecks` | Commands to run for verification |
 
 ### Interpolation Process
@@ -412,7 +500,7 @@ def interpolate_prompt(template: str, story: dict) -> str:
         "[ACCEPTANCE_CRITERIA]": format_bullet_list(story["acceptanceCriteria"]),
         "[STEPS]": format_numbered_list(story["steps"]),
         "[RELEVANT_FILES]": format_bullet_list(story["relevantFiles"]) or "explore codebase",
-        "[PATTERNS_CONTENT]": get_patterns_content(story["patternsToFollow"]),
+        "[PROJECT_GUIDELINES]": get_project_guidelines(project_root, story["relevantFiles"][0] if story["relevantFiles"] else None),
         "[QUALITY_CHECKS]": format_bullet_list(story["qualityChecks"]),
     }
     
