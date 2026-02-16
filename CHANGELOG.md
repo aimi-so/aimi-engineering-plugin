@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-02-16
+
+### Added
+
+- **Task-Specific Step Generation**: Each story now includes pre-computed, domain-aware execution steps
+- **Pattern Library** (`docs/patterns/`): Workflow templates for common task types
+  - `prisma-schema.md` - Database schema changes with Prisma
+  - `server-action.md` - Next.js server actions
+  - `react-component.md` - React component creation
+  - `api-route.md` - API endpoint implementation
+- **AGENTS.md Discovery**: Automatic discovery and matching of AGENTS.md files to tasks
+- **TaskType Inference**: Keyword-based pattern matching with LLM fallback
+
+### Changed
+
+- **BREAKING:** tasks.json schema now requires four new fields per story:
+  - `taskType` (string, snake_case, max 50 chars) - Domain classification
+  - `steps` (array, 1-10 items, each max 500 chars) - Task-specific execution steps
+  - `relevantFiles` (array, max 20 items) - Files to read first
+  - `patternsToFollow` (string) - AGENTS.md path or "none"
+- `/aimi:next` now validates required fields before execution
+- `/aimi:next` prompt template uses story.steps instead of generic execution flow
+- `story-executor` skill updated with STEPS, RELEVANT FILES, and PATTERNS sections
+- `plan-to-tasks` skill now generates task-specific fields during conversion
+
+### Migration
+
+Existing tasks.json files will fail validation. To migrate:
+
+```bash
+# Regenerate tasks.json from your plan file
+/aimi:plan-to-tasks docs/plans/your-plan.md
+```
+
+Or manually add the required fields to each story in tasks.json.
+
 ## [0.3.0] - 2026-02-15
 
 ### Changed
