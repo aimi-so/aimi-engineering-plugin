@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-02-16
+
+### Changed
+
+- **BREAKING:** New tasks.json schema v2.0 with simplified structure
+  - Renamed `userStories` to `stories`
+  - Stories now contain nested `tasks[]` array with task objects
+  - Added `metadata` object with `title`, `type`, `createdAt`, `planPath`, `brainstormPath`
+  - Moved acceptance criteria to root level with `functional`, `nonFunctional`, `qualityGates` arrays
+  - Added `deploymentOrder` array for deployment sequence
+  - Added `successMetrics` object for tracking improvements
+  - Tasks have `id`, `title`, `description`, `file`, `action`, `status` fields
+  - Added `estimatedEffort` field to stories
+
+### Updated
+
+- `plan-to-tasks` skill updated for new schema structure
+- `task-format.md` reference rewritten for v2.0 schema
+- `story-executor` skill updated to work with nested tasks
+- `execution-rules.md` updated for task-based execution flow
+- Task ID convention: `task-{story-index}-{task-index}` (e.g., `task-1-2`)
+- Story ID convention: `story-0`, `story-1`, etc.
+
+### Removed
+
+- Old schema fields: `taskType`, `steps`, `relevantFiles`, `patternsToFollow`, `qualityChecks` (per-story)
+- These are now replaced by the nested `tasks[]` structure and root-level `acceptanceCriteria`
+
+### Migration
+
+Existing tasks.json files need to be regenerated:
+
+```bash
+/aimi:plan-to-tasks docs/plans/your-plan.md
+```
+
 ## [0.8.0] - 2026-02-16
 
 ### Fixed

@@ -2,7 +2,41 @@
 
 ## Overview
 
-Each story is executed by a Task-spawned agent with fresh context. This document defines the execution flow, quality gates, and output formats.
+Each story is executed by a Task-spawned agent with fresh context. This document defines the execution flow, quality gates, and output formats for the v2.0 schema.
+
+## Schema Overview (v2.0)
+
+Stories contain nested tasks:
+
+```json
+{
+  "id": "story-1",
+  "title": "Phase 1: Database Schema",
+  "description": "Add users table with authentication fields.",
+  "estimatedEffort": "1-2 hours",
+  "tasks": [
+    {
+      "id": "task-1-1",
+      "title": "Create migration",
+      "description": "Create Prisma migration for users table",
+      "file": "prisma/migrations/xxx/migration.sql",
+      "status": "pending"
+    }
+  ]
+}
+```
+
+Acceptance criteria are at the root level:
+
+```json
+{
+  "acceptanceCriteria": {
+    "functional": ["Users can register..."],
+    "nonFunctional": ["No TypeScript errors"],
+    "qualityGates": ["bun run lint passes"]
+  }
+}
+```
 
 ## Execution Flow
 
@@ -11,54 +45,48 @@ Each story is executed by a Task-spawned agent with fresh context. This document
 **FIRST**, check for project-specific guidelines in this order:
 
 1. **CLAUDE.md** (project root) - Primary project instructions
-2. **AGENTS.md** (directory-specific) - Module-specific patterns and gotchas
-3. **Aimi defaults** - If neither exists, follow standard conventions
+2. **AGENTS.md** (directory-specific) - Module-specific patterns
+3. **Aimi defaults** - Standard conventions if neither exists
 
-These files contain:
-- Project conventions and patterns
-- Commit and PR rules
-- Known gotchas to avoid
-- Module-specific guidance
+### Step 2: Understand Story Scope
 
-### Step 2: Read Story Details
+Read the story details:
+- Story title and description
+- All tasks with their target files
+- Estimated effort (to pace yourself)
 
-Your story data is provided inline in the prompt.
+### Step 3: Execute Tasks Sequentially
 
-Understand:
-- Title and description
-- All acceptance criteria
-- Task-specific steps to follow
+For each task in the story:
 
-### Step 3: Implement the Story
-
-Follow acceptance criteria exactly:
-- Read existing code to understand patterns
-- Implement the required changes
-- Write tests if required by criteria
+1. **Read the target file** (if it exists)
+2. **Implement the change** described in the task
+3. **Handle special actions**:
+   - `action: "delete"` - Remove the file
+   - `action: "create"` - Create new file
+   - (default) - Modify existing file
+4. **Mark task as completed** in your working state
 
 ### Step 4: Run Quality Checks
 
-Run ALL quality checks required by the project:
+After ALL tasks are complete, run quality checks:
 
 ```bash
-# Typecheck (required for all code changes)
-# Examples: tsc, bun check, npx tsc --noEmit
-
-# Linting
-# Examples: eslint, rubocop, ruff
-
-# Tests
-# Examples: bun test, npm test, pytest, bin/rails test
+# Check for quality gates in acceptanceCriteria.qualityGates
+# Common examples:
+bun run lint
+bun run test
+npx tsc --noEmit
 ```
 
-### Step 5: Quality Gate
+### Step 5: Quality Gate (FAIL FAST)
 
-**FAIL FAST:** If any quality check fails, STOP immediately.
+**If any quality check fails, STOP immediately.**
 
 Do NOT:
 - Continue with partial implementation
-- Mark the story as passed
 - Try to hack around failures
+- Skip failing checks
 
 Instead:
 - Report the failure with full error details
@@ -71,91 +99,122 @@ If all checks pass, commit with this format:
 
 ```bash
 git add [changed files]
-git commit -m "feat: [US-XXX] - [Story title]"
+git commit -m "feat: [story-1] - Phase 1: Database Schema"
 ```
 
-Examples:
-- `feat: [US-001] - Add users database schema`
-- `feat: [US-002] - Add password hashing utility`
-- `fix: [US-005] - Fix login redirect`
+Commit message format:
+- `feat:` for feature/refactor work
+- `fix:` for bug fixes
+- `[story-id]` from the story
+- Title from story title
 
 ### Step 7: Update tasks.json
 
-Read `docs/tasks/tasks.json`, update your story:
+Read `docs/tasks/tasks.json`, update the story's tasks:
 
 ```json
 {
-  "id": "US-XXX",
-  "passes": true,
-  "notes": "Completed successfully. [brief notes]",
-  "attempts": 1,
-  "lastAttempt": "2026-02-15T10:45:00Z"
+  "id": "story-1",
+  "tasks": [
+    {
+      "id": "task-1-1",
+      "status": "completed"
+    },
+    {
+      "id": "task-1-2", 
+      "status": "completed"
+    }
+  ]
 }
 ```
 
-Write the updated file.
+### Step 8: Update AGENTS.md or CLAUDE.md (if learnings)
 
-### Step 8: Update AGENTS.md or CLAUDE.md with Learnings
+If you discovered something future developers/agents should know:
 
-Before committing, check if any edited files have learnings worth preserving in nearby AGENTS.md files:
+**Good additions:**
+- "When modifying X, also update Y"
+- "This module uses pattern Z"
+- "Tests require dev server on PORT 3000"
 
-1. **Identify directories with edited files** - Look at which directories you modified
-2. **Check for existing AGENTS.md** - Look for AGENTS.md in those directories or parent directories
-3. **Add valuable learnings** - If you discovered something future developers/agents should know:
-   - API patterns or conventions specific to that module
-   - Gotchas or non-obvious requirements
-   - Dependencies between files
-   - Testing approaches for that area
-   - Configuration or environment requirements
+**Where to add:**
+- **CLAUDE.md** (root) - Project-wide patterns
+- **AGENTS.md** (directory) - Module-specific patterns
 
-**Examples of good AGENTS.md additions:**
-- "When modifying X, also update Y to keep them in sync"
-- "This module uses pattern Z for all API calls"
-- "Tests require the dev server running on PORT 3000"
-- "Field names must match the template exactly"
-
-**Do NOT add to AGENTS.md or CLAUDE.md:**
-- Story-specific implementation details
-- Temporary debugging notes
-- Redundant information already documented
-
-Only update these files if you have **genuinely reusable knowledge** that would help future work.
-
-**Where to add learnings:**
-- **CLAUDE.md** (root) - Project-wide patterns, conventions, and setup instructions
-- **AGENTS.md** (directory) - Module-specific patterns and gotchas
+Only add **genuinely reusable knowledge**.
 
 ## Failure Handling
 
-If you fail to complete a story:
+If you cannot complete a task:
 
-1. **Do NOT** mark `passes: true`
-2. **Update** tasks.json with structured error:
-   ```json
-   {
-     "passes": false,
-     "notes": "Failed: [brief summary]",
-     "attempts": [increment],
-     "lastAttempt": "[timestamp]",
-     "error": {
-       "type": "typecheck_failure|test_failure|lint_failure|runtime_error|dependency_missing|unknown",
-       "message": "Detailed error message from the failure",
-       "file": "path/to/file.ts (if applicable)",
-       "line": 42,
-       "suggestion": "Possible fix or next step (if known)"
-     }
-   }
-   ```
-   
-   **Error type classification:**
-   - `typecheck_failure`: TypeScript/type errors (tsc failed)
-   - `test_failure`: Unit/integration tests failed
-   - `lint_failure`: ESLint/Prettier violations
-   - `runtime_error`: Execution errors
-   - `dependency_missing`: npm/pip/gem package not found
-   - `unknown`: Cannot classify
-3. **Return** with clear failure report including:
-   - What went wrong
+1. **Do NOT** mark task as completed
+2. **Stop execution** - do not proceed to remaining tasks
+3. **Update tasks.json** with failure details:
+
+```json
+{
+  "id": "task-1-2",
+  "status": "pending",
+  "notes": "Failed: TypeScript error in UserModel - missing field 'createdAt'"
+}
+```
+
+4. **Return** with clear failure report:
+   - Which task failed
    - Error messages
    - Files involved
    - Suggested fix if known
+
+## Task Status Values
+
+| Status | Meaning |
+|--------|---------|
+| `pending` | Not started |
+| `in_progress` | Currently working on |
+| `completed` | Successfully finished |
+| `skipped` | Intentionally skipped (blocked or not applicable) |
+
+## Deployment Order Awareness
+
+The root `deploymentOrder` array indicates the intended deployment sequence:
+
+```json
+{
+  "deploymentOrder": [
+    "Phase 0: Deploy backend with optional fields",
+    "Phase 1-5: Deploy backend changes",
+    "Verify: Test API endpoints",
+    "Phase 6-9: Deploy frontend changes"
+  ]
+}
+```
+
+Stories should be executed in order (story-0, story-1, story-2, etc.) to respect dependencies.
+
+## Quality Gates Reference
+
+Common quality gates from `acceptanceCriteria.qualityGates`:
+
+| Gate | Command |
+|------|---------|
+| Lint | `bun run lint`, `npm run lint` |
+| Test | `bun run test`, `npm test` |
+| Typecheck | `npx tsc --noEmit`, `bun check` |
+| Build | `bun run build`, `npm run build` |
+| E2E test | Manual - report if required |
+
+## Success Metrics
+
+The root `successMetrics` object tracks improvements:
+
+```json
+{
+  "successMetrics": {
+    "apiCalls": "2 → 1",
+    "saveTime": "~400ms → ~200ms",
+    "linesRemoved": "~225"
+  }
+}
+```
+
+These are informational - verify them where possible during implementation.

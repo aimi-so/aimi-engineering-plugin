@@ -18,310 +18,90 @@ A markdown plan file path containing Implementation Phases sections.
 
 A `docs/tasks/tasks.json` file following the schema in [task-format.md](./references/task-format.md).
 
-Each story includes **task-specific execution steps** generated from the pattern library and AGENTS.md files.
-
 ## Conversion Steps
 
 1. **Read the plan file** to extract:
-   - Project name (from title or first heading)
-   - Description (from Overview section)
-   - Implementation phases
+   - Title (from first heading or frontmatter)
+   - Type (feature/refactor/bugfix/chore - infer from title prefix)
+   - Implementation phases with tasks
 
 2. **Generate metadata**:
-   - `branchName`: Derive from project name (e.g., `feature/project-name`)
-   - `createdFrom`: Path to source plan file
-   - `createdAt`: Current ISO 8601 timestamp
-
-3. **Discover AGENTS.md files** (see AGENTS.md Discovery Algorithm below)
-
-4. **Load pattern library** from `docs/patterns/*.md`
-
-5. **Convert each phase to user stories**:
-   - Each phase becomes one or more stories
-   - Assign incrementing IDs: US-001, US-002, etc.
-   - Extract acceptance criteria from phase details
-   - **Generate task-specific fields** (see Step Generation below)
-
-6. **Order stories by dependency**:
-   - Priority 1: Schema/database changes
-   - Priority 2: Backend logic/server actions
-   - Priority 3: UI components
-   - Priority 4: Aggregation/dashboard views
-
-7. **Validate all stories** have required fields:
-   - `taskType`, `steps`, `relevantFiles`, `patternsToFollow`
-
-8. **Ensure acceptance criteria quality**:
-   - Always add "Typecheck passes" for code changes
-   - Add "Verify changes work" for UI stories
-   - Make criteria verifiable, not vague
-
----
-
-## AGENTS.md Discovery Algorithm
-
-Discover project-specific patterns from AGENTS.md files.
-
-### Discovery Steps
-
-1. **Glob for AGENTS.md files**:
-   ```bash
-   find . -name "AGENTS.md" -type f
-   ```
-   Or use glob pattern: `**/AGENTS.md`
-
-2. **Build directory index**:
-   ```
-   ./AGENTS.md
-   ./src/AGENTS.md
-   ./src/components/AGENTS.md
-   ./prisma/AGENTS.md
+   ```json
+   {
+     "title": "feat: Add user authentication",
+     "type": "feature",
+     "createdAt": "2026-02-16",
+     "planPath": "docs/plans/2026-02-16-feat-user-auth-plan.md",
+     "brainstormPath": "docs/brainstorms/..." // if exists
+   }
    ```
 
-3. **Cache results** for the duration of the plan-to-tasks run (no re-discovery per story)
+3. **Convert each phase to a story**:
+   - Each phase becomes one story
+   - Story ID: `story-0`, `story-1`, etc.
+   - Extract estimated effort from phase details
+   - Convert phase tasks to task objects
 
-### Path Matching Algorithm
-
-For each story, find the most relevant AGENTS.md:
-
-1. **Extract file paths** from story description, acceptance criteria, and phase files
-   - Example: "Update prisma/schema.prisma" → extract `prisma/schema.prisma`
-
-2. **For each extracted path**, walk up the directory tree:
-   ```
-   prisma/schema.prisma
-   └── Check: prisma/AGENTS.md (exists? → match!)
-   └── Check: ./AGENTS.md (fallback)
-   ```
-
-3. **Select most specific match**:
-   - If `prisma/AGENTS.md` exists and story mentions `prisma/*` → use `prisma/AGENTS.md`
-   - If only root `./AGENTS.md` exists → use that
-   - If no AGENTS.md found → return `"none"`
-
-4. **Set `patternsToFollow`** to the matched path or `"none"`
-
-### Example
-
-```
-Story: "Add User model to Prisma schema"
-Files mentioned: prisma/schema.prisma
-
-Discovery:
-  1. Check prisma/AGENTS.md → EXISTS
-  2. Return "prisma/AGENTS.md"
-
-Result: patternsToFollow = "prisma/AGENTS.md"
-```
-
-### No AGENTS.md Found
-
-If no AGENTS.md files exist in the project:
-
-```
-patternsToFollow = "none"
-```
-
-The agent will rely on the pattern library and general codebase conventions.
-
----
-
-## TaskType Inference
-
-Determine the `taskType` for each story based on content analysis.
-
-### Inference Algorithm
-
-1. **Extract keywords** from story title and description:
-   ```
-   Title: "Add User model to Prisma schema"
-   Keywords: [add, user, model, prisma, schema]
+4. **Convert phase tasks to task objects**:
+   ```json
+   {
+     "id": "task-1-1",
+     "title": "Create users table migration",
+     "description": "Create Prisma migration to add users table",
+     "file": "prisma/migrations/[timestamp]_add_users/migration.sql",
+     "status": "pending"
+   }
    ```
 
-2. **Load pattern library** from `docs/patterns/*.md`
+5. **Extract acceptance criteria** into three categories:
+   - `functional`: Feature requirements
+   - `nonFunctional`: Performance, security, quality requirements
+   - `qualityGates`: Commands that must pass (lint, test, typecheck)
 
-3. **Score each pattern** by keyword matches:
-   ```
-   prisma-schema.md: keywords=[prisma, schema, model, migration, database]
-   Match score: 3 (prisma, schema, model)
-   ```
+6. **Generate deployment order** from phases:
+   - List deployment steps in order
+   - Include verification steps between phases
 
-4. **Select highest-scoring pattern**:
-   - If score > 0: use pattern's `name` as `taskType`
-   - If tie: prefer more specific pattern (more keywords matched)
+7. **Extract success metrics** if present in plan
 
-5. **Fallback to LLM inference** if no pattern matches:
-   - Analyze story content
-   - Generate a snake_case taskType (max 50 chars)
-   - Common fallback types: `documentation`, `refactor`, `test_implementation`, `configuration`
+## Story Ordering
 
-### Example
+Stories should follow dependency order:
 
-```
-Story: "Create RegisterForm component"
-Keywords: [create, registerform, component]
+1. **Phase 0**: Rolling deploy safety / backward compatibility
+2. **Backend phases**: Schema → Domain → Controllers → Services
+3. **Frontend phases**: Types → API → Hooks → Components
+4. **Data migration phases**: Step remapping, cleanup
+5. **Final phases**: Documentation, tests
 
-Pattern scores:
-  - react-component.md: 1 (component)
-  - server-action.md: 0
-  - prisma-schema.md: 0
+## Task ID Convention
 
-Result: taskType = "react_component"
-```
+Task IDs follow: `task-{story-index}-{task-index}`
 
----
+- `task-0-1`: Story 0, Task 1
+- `task-1-3`: Story 1, Task 3
 
-## Pattern Library Matching
+## Special Task Actions
 
-Match stories to workflow patterns for step generation.
+Use the `action` field for special operations:
 
-### Loading Patterns
+| Action | Description |
+|--------|-------------|
+| `delete` | File should be deleted |
+| `create` | New file to create |
+| (omit) | Default: modify existing file |
 
-1. **Read all files** in `docs/patterns/*.md`
-2. **Parse YAML frontmatter** to extract:
-   - `name`: pattern identifier (becomes taskType)
-   - `keywords`: words that trigger this pattern
-   - `filePatterns`: file paths that trigger this pattern
-3. **Parse markdown body** to extract:
-   - `## Steps Template`: numbered step list
-   - `## Relevant Files`: common files for this task type
+## Effort Estimation
 
-### Matching Algorithm
+Infer effort from task complexity:
 
-For each story:
-
-1. **Keyword matching**:
-   - Extract words from title + description
-   - Count matches against each pattern's `keywords`
-
-2. **File pattern matching**:
-   - Extract file paths from story content
-   - Check against each pattern's `filePatterns` (glob matching)
-
-3. **Combined score**:
-   ```
-   score = keyword_matches + (file_pattern_matches * 2)
-   ```
-   File patterns weighted higher (more specific signal)
-
-4. **Select best match** with tie-breaking:
-   - **Primary**: Highest combined score wins
-   - **Tie-breaker 1**: More filePattern matches (more specific)
-   - **Tie-breaker 2**: More keyword matches (broader coverage)
-   - **Tie-breaker 3**: Alphabetical by pattern name (deterministic)
-   
-   ```python
-   def select_best_pattern(matches: list[tuple[str, int, int, int]]) -> str:
-       """
-       matches: list of (pattern_name, total_score, file_matches, keyword_matches)
-       Returns: pattern_name of best match
-       """
-       # Sort by: score DESC, file_matches DESC, keyword_matches DESC, name ASC
-       sorted_matches = sorted(
-           matches,
-           key=lambda m: (-m[1], -m[2], -m[3], m[0])
-       )
-       return sorted_matches[0][0] if sorted_matches else None
-   ```
-
----
-
-## Step Generation
-
-Generate task-specific steps for each story.
-
-### From Pattern Library
-
-If a pattern matches:
-
-1. **Read pattern's `## Steps Template`**
-2. **Interpolate placeholders** with story-specific values:
-   - `{component_name}` → extracted from story title
-   - `{migration_name}` → derived from story title
-3. **Validate step count**: 1-10 steps, each ≤500 chars
-
-### LLM Fallback
-
-If no pattern matches:
-
-1. **Build context prompt**:
-   ```
-   Generate 4-8 specific execution steps for this task:
-   
-   Title: [story title]
-   Description: [story description]
-   Acceptance Criteria: [criteria list]
-   
-   Guidelines:
-   - Steps should be actionable and specific
-   - Include tool commands where appropriate
-   - Final step should verify the work
-   - Maximum 10 steps, each under 500 characters
-   ```
-
-2. **Parse LLM response** into step array
-
-3. **Validate output**:
-   - Min 1 step, max 10 steps
-   - Each step ≤500 characters
-   - Steps are actionable (not vague)
-
-### Validation Rules
-
-| Rule | Error |
-|------|-------|
-| steps.length < 1 | "Story must have at least 1 step" |
-| steps.length > 10 | "Story has too many steps (max 10)" |
-| step.length > 500 | "Step exceeds 500 character limit" |
-
----
-
-## relevantFiles Extraction
-
-Identify files the agent should read before implementing.
-
-### Extraction Sources
-
-1. **Plan file content**:
-   - Files listed in "Files to create:" or "Files to modify:"
-   - Paths mentioned in phase description
-
-2. **Pattern's `## Relevant Files`**:
-   - If pattern matches, include its relevant files
-
-3. **Story content**:
-   - File paths mentioned in acceptance criteria
-   - Paths derived from component/model names
-
-### Example
-
-```
-Story: "Add User model to Prisma schema"
-Pattern: prisma-schema.md
-
-relevantFiles from pattern:
-  - prisma/schema.prisma
-  - src/lib/db.ts
-
-relevantFiles from story:
-  - (none additional)
-
-Result: relevantFiles = ["prisma/schema.prisma", "src/lib/db.ts"]
-```
-
-### Validation
-
-- Maximum 20 files
-- Paths must be relative (no absolute paths)
-- Duplicates removed
-
----
-
-## Story Sizing
-
-**Critical:** Each story must be completable in ONE Task iteration.
-
-Split stories that are too big. See [task-format.md](./references/task-format.md) for sizing guidelines.
+| Estimate | Scope |
+|----------|-------|
+| "15 minutes" | Single file, small change |
+| "30 minutes" | 1-3 files, straightforward |
+| "1 hour" | Multiple files, some complexity |
+| "1-2 hours" | Significant changes |
+| "2-3 hours" | Complex feature, many files |
 
 ## Example Conversion
 
@@ -332,49 +112,71 @@ Split stories that are too big. See [task-format.md](./references/task-format.md
 
 Create the users table with authentication fields.
 
-**Files to create:**
-- prisma/schema.prisma (add User model)
-- migrations/
+**Estimated effort:** 1-2 hours
 
-**Acceptance criteria:**
-- Users table has email, password_hash, created_at
-- Email has unique constraint
+**Tasks:**
+1. Create audit backup table
+2. Create migration to add users table
+3. Update Prisma schema
+
+**Files:**
+- prisma/migrations/[timestamp]_add_users/migration.sql
+- prisma/schema.prisma
 ```
 
-### Output Story (with task-specific fields)
+### Output Story
 
 ```json
 {
-  "id": "US-001",
-  "title": "Create users database schema",
-  "description": "As a developer, I need the users table schema for authentication",
-  "acceptanceCriteria": [
-    "Users table has email, password_hash, created_at columns",
-    "Email column has unique constraint",
-    "Migration runs successfully",
-    "Typecheck passes"
-  ],
-  "priority": 1,
-  "passes": false,
-  "notes": "",
-  "attempts": 0,
-  "lastAttempt": null,
-  "taskType": "prisma_schema",
-  "steps": [
-    "Read prisma/schema.prisma to understand existing models and relations",
-    "Add User model with fields: id, email, passwordHash, createdAt",
-    "Add unique constraint on email field",
-    "Run: npx prisma generate",
-    "Run: npx prisma migrate dev --name add-users-table",
-    "Verify typecheck passes"
-  ],
-  "relevantFiles": [
-    "prisma/schema.prisma",
-    "src/lib/db.ts"
-  ],
-  "patternsToFollow": "prisma/AGENTS.md"
+  "id": "story-1",
+  "title": "Phase 1: Database Schema",
+  "description": "Create the users table with authentication fields.",
+  "estimatedEffort": "1-2 hours",
+  "tasks": [
+    {
+      "id": "task-1-1",
+      "title": "Create audit backup table",
+      "description": "Create migration to backup existing data before schema changes",
+      "file": "prisma/migrations/[timestamp]_backup/migration.sql",
+      "status": "pending"
+    },
+    {
+      "id": "task-1-2",
+      "title": "Create migration to add users table",
+      "description": "Create Prisma migration to add users table with id, email, password_hash columns",
+      "file": "prisma/migrations/[timestamp]_add_users/migration.sql",
+      "status": "pending"
+    },
+    {
+      "id": "task-1-3",
+      "title": "Update Prisma schema",
+      "description": "Add User model to schema.prisma with email unique constraint",
+      "file": "prisma/schema.prisma",
+      "status": "pending"
+    }
+  ]
 }
 ```
+
+## Acceptance Criteria Categorization
+
+### Functional
+Requirements about what the feature does:
+- "Users can register with email and password"
+- "Invalid credentials show error message"
+- "API returns 404 for removed endpoint"
+
+### Non-Functional
+Quality attributes:
+- "No TypeScript compilation errors"
+- "Response time < 500ms"
+- "Password hashed with bcrypt"
+
+### Quality Gates
+Commands/checks that must pass:
+- "bun run lint passes"
+- "bun run test passes"
+- "Manual E2E test of flow"
 
 ## Output File Structure
 
@@ -382,22 +184,55 @@ Write to `docs/tasks/tasks.json`:
 
 ```json
 {
-  "project": "[extracted from plan]",
-  "branchName": "feature/[project-name]",
-  "description": "[extracted from plan overview]",
-  "createdFrom": "[plan file path]",
-  "createdAt": "[ISO 8601 timestamp]",
-  "userStories": [
-    // converted stories with task-specific fields
-  ]
+  "schemaVersion": "2.0",
+  "metadata": {
+    "title": "refactor: Remove state field",
+    "type": "refactor",
+    "createdAt": "2026-02-16",
+    "planPath": "docs/plans/2026-02-16-refactor-plan.md"
+  },
+  "stories": [
+    // converted stories with tasks
+  ],
+  "acceptanceCriteria": {
+    "functional": [...],
+    "nonFunctional": [...],
+    "qualityGates": [...]
+  },
+  "deploymentOrder": [
+    "Phase 0: Deploy backend with optional fields",
+    "Phase 1-5: Deploy backend changes",
+    "Verify: Test API endpoints",
+    "Phase 6-9: Deploy frontend changes"
+  ],
+  "successMetrics": {
+    "apiCalls": "2 → 1",
+    "linesRemoved": "~225"
+  }
 }
 ```
 
-## No Progress Log
+## Validation
 
-Learnings are stored directly in project files:
+Before writing, validate:
 
-- **CLAUDE.md** (root) - Project-wide conventions and patterns
-- **AGENTS.md** (per-directory) - Module-specific patterns and gotchas
+1. `schemaVersion` is "2.0"
+2. `metadata` has all required fields
+3. At least one story exists
+4. Each story has at least one task
+5. All task IDs are unique
+6. All file paths are relative (no absolute paths, no `..`)
+7. `acceptanceCriteria` has all three arrays
+8. `deploymentOrder` has at least one item
 
-Do NOT create `progress.md`. Each agent reads CLAUDE.md/AGENTS.md at the start of execution and updates them with learnings upon completion.
+## Error Handling
+
+If plan file cannot be parsed:
+```
+Error: Could not parse plan file. Expected markdown with "## Phase" or "### Phase" headings.
+```
+
+If no phases found:
+```
+Error: No implementation phases found in plan. Expected sections like "### Phase 1: ..."
+```
