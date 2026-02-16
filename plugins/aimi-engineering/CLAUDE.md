@@ -75,8 +75,11 @@ aimi-engineering-plugin/
 All task execution files go in `docs/tasks/`:
 
 - `tasks.json` - Structured task list with user stories
-- `progress.md` - Learnings log with Codebase Patterns section
-- `progress-archive-YYYY-MM.md` - Archived entries (when progress.md > 50KB)
+
+Learnings are stored in project files (not separate progress log):
+
+- `CLAUDE.md` (root) - Project-wide patterns and conventions
+- `AGENTS.md` (per-directory) - Module-specific patterns and gotchas
 
 ## tasks.json Schema
 
@@ -121,17 +124,17 @@ All task execution files go in `docs/tasks/`:
    - Don't tell agents to re-read tasks.json
    - Reduces file I/O by ~33%
 
-2. **Extract only patterns** - Read only Codebase Patterns section from progress.md
-   - Don't pass full progress history to agents
-   - Reduces context usage significantly
+2. **Use CLAUDE.md/AGENTS.md** - Project conventions inline or referenced
+   - Small files (<2KB) are inlined in prompt
+   - Larger files are referenced for agent to read
 
 3. **Compact prompts** - Use compressed prompt format for subsequent stories
    - Full prompt for first story, compact for rest
    - ~60% token reduction
 
-4. **Progress rotation** - Archive when progress.md exceeds 50KB
-   - Keep patterns + last 5 entries
-   - Move rest to progress-archive-YYYY-MM.md
+4. **Fresh context per story** - Each Task agent starts with clean context
+   - No memory carryover between stories
+   - Learnings persist via CLAUDE.md/AGENTS.md files
 
 ## Dependencies
 

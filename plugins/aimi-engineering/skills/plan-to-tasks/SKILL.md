@@ -393,27 +393,11 @@ Write to `docs/tasks/tasks.json`:
 }
 ```
 
-## Initialize Progress Log
+## No Progress Log
 
-Also create `docs/tasks/progress.md`:
+Learnings are stored directly in project files:
 
-```markdown
-# Aimi Progress Log
+- **CLAUDE.md** (root) - Project-wide conventions and patterns
+- **AGENTS.md** (per-directory) - Module-specific patterns and gotchas
 
-**Project:** [project name]
-**Branch:** [branch name]
-**Started:** [timestamp]
-**Plan:** [link to plan file]
-
----
-
-## Codebase Patterns
-
-_Consolidated learnings from all stories (read this first)_
-
-- _No patterns discovered yet_
-
----
-
-<!-- Story progress entries will be appended below -->
-```
+Do NOT create `progress.md`. Each agent reads CLAUDE.md/AGENTS.md at the start of execution and updates them with learnings upon completion.

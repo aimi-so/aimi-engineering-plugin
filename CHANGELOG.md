@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-02-16
+
+### Added
+
+- **Project Guidelines Injection**: CLAUDE.md/AGENTS.md content injected into Task prompts
+  - Discovery order: CLAUDE.md (root) → AGENTS.md (directory) → Aimi defaults
+  - Small files (<2KB) inlined, larger files referenced
+- **Aimi Default Commit/PR Rules**: Fallback rules when project lacks CLAUDE.md/AGENTS.md
+  - `default-rules.md` reference file with commit format, behavior, and PR guidelines
+  - Always applied if project files lack commit/PR section
+- **Fresh Context Per Story**: Each Task agent starts with clean context (no memory carryover)
+
+### Changed
+
+- **BREAKING:** Renamed `[PATTERNS_CONTENT]` placeholder to `[PROJECT_GUIDELINES]`
+- Story-executor now uses `get_project_guidelines()` instead of `get_patterns_content()`
+- Execution rules Step 1 now reads CLAUDE.md/AGENTS.md instead of progress.md
+- Learnings stored in CLAUDE.md (project-wide) or AGENTS.md (module-specific)
+
+### Removed
+
+- `patternsToFollow` field is now optional (guidelines discovery is automatic)
+
 ## [0.6.0] - 2026-02-16
 
 ### Changed
@@ -22,7 +45,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `progress.md` file and all references
 - CODEBASE_PATTERNS placeholder
-- Update AGENTS.md instructions from story-executor
 - `Bash(grep:*)`, `Bash(cat:*)`, `Bash(tail:*)` from allowed-tools (no longer needed)
 
 ## [0.5.1] - 2026-02-16
