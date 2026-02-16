@@ -1,7 +1,7 @@
 ---
 name: aimi:status
 description: Show current task execution progress
-allowed-tools: Bash(jq:*), Bash(tail:*), Read
+allowed-tools: Bash(jq:*)
 ---
 
 # Aimi Status
@@ -95,23 +95,4 @@ If a story has notes (especially failures), show them:
   Note: Previous attempt failed - auth middleware missing
 ```
 
-## Step 4: Show Recent Progress (from progress.md)
 
-Read the last 20 lines of `docs/tasks/progress.md` to show recent activity:
-
-```bash
-tail -20 docs/tasks/progress.md
-```
-
-Display as:
-
-```
-## Recent Activity (from progress.md)
-
-[last completed story entry]
-```
-
-If progress.md doesn't exist or is empty:
-```
-No progress recorded yet. Run /aimi:next to start execution.
-```
