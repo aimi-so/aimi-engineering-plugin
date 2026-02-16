@@ -14,11 +14,15 @@ Execute the next pending story using a Task-spawned agent.
 **CRITICAL:** Do NOT read the full tasks.json. Use `jq` to extract ONLY the next pending story.
 
 ```bash
-# Extract only the next pending story (lowest priority, passes=false)
-jq '[.userStories[] | select(.passes == false)] | sort_by(.priority) | .[0]' docs/tasks/tasks.json
+# Extract only the next pending story (lowest priority, passes=false, not skipped)
+jq '[.userStories[] | select(.passes == false and .skipped != true)] | sort_by(.priority) | .[0]' docs/tasks/tasks.json
 ```
 
 This loads only ONE story into memory, not all 10+.
+
+**Filter criteria:**
+- `passes == false` - not completed
+- `skipped != true` - not skipped by user
 
 ### Check if any pending stories exist:
 
@@ -200,8 +204,15 @@ What would you like to do?
 ## Step 6: Handle User Response
 
 ### If user says "skip":
-- Update tasks.json notes: "Skipped by user after 2 failed attempts"
-- Report: "Skipped [STORY_ID]. Run /aimi:next for the next story."
+
+Update tasks.json for this story using `jq`:
+
+```bash
+# Mark story as skipped (prevents infinite loop)
+jq '(.userStories[] | select(.id == "[STORY_ID]")) |= . + {skipped: true, notes: "Skipped by user after failed attempts"}' docs/tasks/tasks.json > tmp.json && mv tmp.json docs/tasks/tasks.json
+```
+
+Report: "Skipped [STORY_ID]. Run /aimi:next for the next story."
 
 ### If user says "retry [guidance]":
 - Spawn another Task with user's guidance included in prompt
