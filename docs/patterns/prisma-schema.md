@@ -1,7 +1,7 @@
 ---
 name: prisma_schema
 keywords: [prisma, schema, model, migration, database, table, column, field, relation, enum]
-file_patterns: ["prisma/schema.prisma", "*.prisma", "prisma/*"]
+filePatterns: ["prisma/schema.prisma", "*.prisma", "prisma/*"]
 ---
 
 # Prisma Schema Changes

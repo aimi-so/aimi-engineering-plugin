@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-02-16
+
+### Security
+
+- **Path Traversal Prevention**: Added comprehensive path validation for `relevantFiles` and `patternsToFollow`
+  - Blocks `..` sequences, absolute paths, protocol prefixes, null bytes
+  - Blocks access to sensitive paths (`.git/`, `.env`, `.ssh/`)
+- **Expanded Command Injection Blocklist**: Now blocks `&&`, `||`, `>`, `>>`, `<`, newlines, and more
+- **Strengthened Prompt Injection Defenses**: Added patterns for role manipulation, system prompt extraction, and boundary breaking
+
+### Added
+
+- **Schema Versioning**: `schemaVersion` field in tasks.json (v2.0 for task-specific steps)
+- **qualityChecks Field**: Explicit verification commands per story (typecheck, test, lint)
+- **AGENTS.md Content Injection**: Small AGENTS.md files (< 2KB) are inlined directly in prompts
+- **Placeholder Interpolation Documentation**: Complete reference for prompt template placeholders
+- **Pattern Matching Tie-Breaking Rules**: Deterministic selection when multiple patterns match
+
+### Changed
+
+- **Naming Consistency**: Renamed `file_patterns` to `filePatterns` (camelCase) in pattern library
+- **Simplified Error Messages**: Consistent format: `Error: Story [ID] - [field]: [issue]. Fix: [action].`
+- **Consolidated Validation Rules**: task-format.md is now the single source of truth
+- **Removed Duplicate Prompt Example**: Task Tool Invocation section now references the main template
+
+### Fixed
+
+- Pattern files now use consistent camelCase for `filePatterns` field
+
 ## [0.4.0] - 2026-02-16
 
 ### Added

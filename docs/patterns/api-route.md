@@ -1,7 +1,7 @@
 ---
 name: api_route
 keywords: [api, route, endpoint, rest, get, post, put, delete, patch, handler, request, response]
-file_patterns: ["app/api/**/route.ts", "pages/api/*", "src/app/api/*"]
+filePatterns: ["app/api/**/route.ts", "pages/api/*", "src/app/api/*"]
 ---
 
 # API Route Implementation

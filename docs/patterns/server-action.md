@@ -1,7 +1,7 @@
 ---
 name: server_action
 keywords: [server, action, next, api, mutation, form, submit, create, update, delete, "use server"]
-file_patterns: ["src/actions/*", "app/**/actions.ts", "src/lib/actions/*", "**/actions/*.ts"]
+filePatterns: ["src/actions/*", "app/**/actions.ts", "src/lib/actions/*", "**/actions/*.ts"]
 ---
 
 # Next.js Server Actions
