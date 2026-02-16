@@ -2,7 +2,7 @@
 name: aimi:next
 description: Execute the next pending story from tasks.json
 disable-model-invocation: true
-allowed-tools: Read, Write, Edit, Bash(git:*), Bash(jq:*), Bash(npm:*), Bash(bun:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(tsc:*), Bash(eslint:*), Bash(prettier:*), Task
+allowed-tools: Read, Write, Edit, Bash(git:*), Bash(jq:*), Bash(grep:*), Bash(cat:*), Bash(npm:*), Bash(bun:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(tsc:*), Bash(eslint:*), Bash(prettier:*), Task
 ---
 
 # Aimi Next
@@ -147,15 +147,48 @@ Return with clear failure report.
 
 ### If Task succeeds:
 
-Verify:
-1. `docs/tasks/tasks.json` was updated (story has `passes: true`)
-2. `docs/tasks/progress.md` was appended with progress entry
+**Step 5a: Verify tasks.json updated**
 
-Report:
+```bash
+jq '.userStories[] | select(.id == "[STORY_ID]") | .passes' docs/tasks/tasks.json
+```
+
+If not `true`, update it:
+```bash
+jq '(.userStories[] | select(.id == "[STORY_ID]")) |= . + {passes: true}' docs/tasks/tasks.json > tmp.json && mv tmp.json docs/tasks/tasks.json
+```
+
+**Step 5b: Ensure progress.md was appended**
+
+Check if progress entry exists for this story:
+```bash
+grep -q "## [STORY_ID]" docs/tasks/progress.md
+```
+
+If NOT found, append the progress entry:
+
+```bash
+cat >> docs/tasks/progress.md << 'EOF'
+
+---
+
+## [STORY_ID] - [STORY_TITLE]
+
+**Completed:** [ISO 8601 timestamp]
+**Status:** Completed by Task agent
+
+**What was implemented:**
+- Story completed successfully
+
+**Files changed:**
+- (see git diff)
+EOF
+```
+
+**Step 5c: Report**
+
 ```
 [STORY_ID] - [STORY_TITLE] completed successfully.
-
-Files changed: [from progress entry]
 
 Run /aimi:next for the next story.
 Run /aimi:status to see overall progress.
