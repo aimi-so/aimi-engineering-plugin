@@ -81,7 +81,7 @@ Read `docs/tasks/tasks.json`, update your story:
 ```json
 {
   "id": "US-XXX",
-  "passes": true,
+  "completed": true,
   "notes": "Completed successfully. [brief notes]",
   "attempts": 1,
   "lastAttempt": "2026-02-15T10:45:00Z"
@@ -120,6 +120,46 @@ Examples of patterns worth adding:
 - Required commands after changes (e.g., "Run `prisma generate` after schema changes")
 - Project-specific conventions (e.g., "All services follow repository pattern")
 - Known gotchas (e.g., "Tests require dev server on PORT 3000")
+
+### Step 10: Update AGENTS.md Files
+
+Before committing, check if any edited files have learnings worth preserving in nearby AGENTS.md files:
+
+1. **Identify directories with edited files** - Look at which directories you modified
+2. **Check for existing AGENTS.md** - Look for AGENTS.md in those directories or parent directories
+3. **Add valuable learnings** - If you discovered something future developers/agents should know:
+   - API patterns or conventions specific to that module
+   - Gotchas or non-obvious requirements
+   - Dependencies between files
+   - Testing approaches for that area
+   - Configuration or environment requirements
+
+**Examples of good AGENTS.md additions:**
+- "When modifying X, also update Y to keep them in sync"
+- "This module uses pattern Z for all API calls"
+- "Tests require the dev server running on PORT 3000"
+- "Field names must match the template exactly"
+
+**Do NOT add to AGENTS.md:**
+- Story-specific implementation details
+- Temporary debugging notes
+- Information already in progress.md
+
+Only update AGENTS.md if you have **genuinely reusable knowledge** that would help future work in that directory.
+
+## Progress Rotation (Prevent Unbounded Growth)
+
+When `docs/tasks/progress.md` exceeds **50KB** (~100 stories):
+
+1. Create archive: `docs/tasks/progress-archive-YYYY-MM.md`
+2. Move all story entries (below the Codebase Patterns section) to archive
+3. Keep in progress.md:
+   - Header with project info
+   - Full Codebase Patterns section
+   - Link to archive: `[Previous entries](./progress-archive-YYYY-MM.md)`
+   - Last 5 story entries (for recent context)
+
+This prevents context bloat while preserving learnings.
 
 ## progress.md Format
 
@@ -178,16 +218,31 @@ _Consolidated learnings from all stories (read this first)_
 
 If you fail to complete a story:
 
-1. **Do NOT** mark `passes: true`
-2. **Update** tasks.json with:
+1. **Do NOT** mark `completed: true`
+2. **Update** tasks.json with structured error:
    ```json
    {
-     "passes": false,
-     "notes": "Failed: [detailed error message]",
+     "completed": false,
+     "notes": "Failed: [brief summary]",
      "attempts": [increment],
-     "lastAttempt": "[timestamp]"
+     "lastAttempt": "[timestamp]",
+     "error": {
+       "type": "typecheck_failure|test_failure|lint_failure|runtime_error|dependency_missing|unknown",
+       "message": "Detailed error message from the failure",
+       "file": "path/to/file.ts (if applicable)",
+       "line": 42,
+       "suggestion": "Possible fix or next step (if known)"
+     }
    }
    ```
+   
+   **Error type classification:**
+   - `typecheck_failure`: TypeScript/type errors (tsc failed)
+   - `test_failure`: Unit/integration tests failed
+   - `lint_failure`: ESLint/Prettier violations
+   - `runtime_error`: Execution errors
+   - `dependency_missing`: npm/pip/gem package not found
+   - `unknown`: Cannot classify
 3. **Return** with clear failure report including:
    - What went wrong
    - Error messages

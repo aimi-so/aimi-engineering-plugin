@@ -1,0 +1,25 @@
+{
+  "name": "aimi-marketplace",
+  "owner": {
+    "name": "Stanley Takamatsu",
+    "url": "https://github.com/aimi-so"
+  },
+  "metadata": {
+    "description": "Aimi Engineering Plugin marketplace",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "aimi-engineering",
+      "description": "Autonomous task execution with Ralph-style JSON tasks. Wraps compound-engineering for brainstorm, plan, review workflows with iterative agent execution support.",
+      "version": "0.2.0",
+      "author": {
+        "name": "Stanley Takamatsu",
+        "url": "https://github.com/aimi-so"
+      },
+      "homepage": "https://github.com/aimi-so/aimi-engineering-plugin",
+      "tags": ["autonomous-execution", "task-management", "compound-engineering", "ralph-style", "workflow-automation"],
+      "source": "./plugins/aimi-engineering"
+    }
+  ]
+}

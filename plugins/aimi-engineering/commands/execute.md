@@ -23,7 +23,22 @@ STOP execution.
 
 Get the branch name from tasks.json `branchName` field.
 
-Check current branch:
+### Validate Branch Name (SECURITY)
+
+**CRITICAL:** Before using branchName in any git command, validate it matches:
+```
+^[a-zA-Z0-9][a-zA-Z0-9/_-]*$
+```
+
+If branchName contains invalid characters (spaces, semicolons, quotes, etc.):
+```
+Error: Invalid branch name "[branchName]". 
+Branch names must contain only letters, numbers, hyphens, underscores, and forward slashes.
+```
+STOP execution.
+
+### Check Current Branch
+
 ```bash
 current_branch=$(git branch --show-current)
 ```
@@ -47,7 +62,7 @@ Switched to branch: [branchName]
 
 ## Step 3: Check for Pending Stories
 
-Count pending stories (where `passes === false`).
+Count pending stories (where `completed === false`).
 
 If none pending:
 ```

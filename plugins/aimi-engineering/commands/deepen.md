@@ -20,7 +20,7 @@ Run compound-engineering's deepen workflow:
 
 After deepening completes, read `docs/tasks/tasks.json` to capture current state:
 
-- Which stories have `passes: true`
+- Which stories have `completed: true`
 - Current `notes` field contents
 - Current `attempts` counts
 - Current `lastAttempt` timestamps
@@ -36,7 +36,7 @@ Re-invoke the plan-to-tasks skill to generate updated stories.
 
 For each story in the new conversion:
 - If a matching story (by ID or title) exists in old state:
-  - Keep `passes` value from old state
+  - Keep `completed` value from old state
   - Keep `notes` value from old state
   - Keep `attempts` value from old state
   - Keep `lastAttempt` value from old state
