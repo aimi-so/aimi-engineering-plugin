@@ -2,16 +2,50 @@
 name: aimi:execute
 description: Execute all pending stories autonomously
 disable-model-invocation: true
-allowed-tools: Read, Write, Edit, Bash(git:*), Task
+allowed-tools: Read, Write, Edit, Bash(git:*), Bash(jq:*), Task
 ---
 
 # Aimi Execute
 
 Execute all pending stories in a loop, managing branches and handling failures.
 
-## Step 1: Read Tasks
+## Step 1: Read Tasks (Metadata Only via jq)
 
-Read `docs/tasks/tasks.json`.
+**CRITICAL:** Do NOT read the full tasks.json file. Use `jq` to extract only metadata.
+
+```bash
+# Extract metadata only (no stories loaded into context)
+jq '{
+  project: .project,
+  branchName: .branchName,
+  pending: [.userStories[] | select(.passes == false and .skipped != true)] | length,
+  completed: [.userStories[] | select(.passes == true)] | length,
+  skipped: [.userStories[] | select(.skipped == true)] | length,
+  total: .userStories | length
+}' docs/tasks/tasks.json
+```
+
+This returns:
+```json
+{
+  "project": "project-name",
+  "branchName": "feature/branch",
+  "pending": 7,
+  "completed": 2,
+  "skipped": 1,
+  "total": 10
+}
+```
+
+**Counts:**
+- `pending` - stories that can be executed (`passes=false`, not skipped)
+- `completed` - stories that passed (`passes=true`)
+- `skipped` - stories marked as skipped by user
+
+**DO NOT:**
+- Read the full tasks.json into memory
+- Use TodoWrite to list all stories
+- Display all stories in the Plan panel
 
 If file doesn't exist:
 ```
@@ -85,17 +119,27 @@ Beginning execution loop...
 
 ## Step 4: Execution Loop
 
+**CRITICAL:** Execute stories ONE AT A TIME. Only the current story should be in context.
+
 ```
 while (pending stories exist):
-    1. Run /aimi:next
+    1. Call /aimi:next (this loads ONLY the next pending story)
     
     2. Check result:
        - If success: continue to next iteration
        - If user chose "skip": continue to next iteration
        - If user chose "stop": break loop
     
-    3. Re-read tasks.json to check remaining pending
+    3. Re-read tasks.json to get updated counts (not full stories)
+       - Count remaining pending
+       - If none pending: exit loop
 ```
+
+**Why one-at-a-time?**
+- Each story gets full context window
+- No wasted tokens on stories not being executed
+- Cleaner UI (only current task visible)
+- Matches the "task-specific step injection" design
 
 ## Step 5: Completion
 
@@ -108,8 +152,6 @@ Count commits on this branch:
 git log --oneline [default_branch]..HEAD | wc -l
 ```
 
-Read Codebase Patterns from progress.md.
-
 Report:
 ```
 ## Execution Complete
@@ -118,10 +160,6 @@ All [total] stories completed successfully!
 
 Branch: [branchName]
 Commits: [count]
-
-### Codebase Patterns Discovered
-
-[list patterns from progress.md Codebase Patterns section]
 
 ### Next Steps
 

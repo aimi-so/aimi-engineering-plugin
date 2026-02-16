@@ -2,69 +2,125 @@
 name: aimi:next
 description: Execute the next pending story from tasks.json
 disable-model-invocation: true
-allowed-tools: Read, Write, Edit, Bash(git:*), Bash(npm:*), Bash(bun:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(tsc:*), Bash(eslint:*), Bash(prettier:*), Task
+allowed-tools: Read, Write, Edit, Bash(git:*), Bash(jq:*), Bash(npm:*), Bash(bun:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(tsc:*), Bash(eslint:*), Bash(prettier:*), Task
 ---
 
 # Aimi Next
 
 Execute the next pending story using a Task-spawned agent.
 
-## Step 1: Find Next Story
+## Step 1: Find Next Story (via jq)
 
-Read `docs/tasks/tasks.json`.
+**CRITICAL:** Do NOT read the full tasks.json. Use `jq` to extract ONLY the next pending story.
 
-Find the story with:
-- Lowest priority value
-- Where `passes === false`
-
-If no pending stories found:
+```bash
+# Extract only the next pending story (lowest priority, passes=false, not skipped)
+jq '[.userStories[] | select(.passes == false and .skipped != true)] | sort_by(.priority) | .[0]' docs/tasks/tasks.json
 ```
-All stories complete! (X/X)
 
-Run /aimi:review to review the implementation.
+This loads only ONE story into memory, not all 10+.
+
+**Filter criteria:**
+- `passes == false` - not completed
+- `skipped != true` - not skipped by user
+
+### Check if any pending stories exist:
+
+```bash
+# Get count of pending stories
+jq '[.userStories[] | select(.passes == false)] | length' docs/tasks/tasks.json
+```
+
+If result is `0`:
+```
+All stories complete! Run /aimi:review to review the implementation.
 ```
 STOP execution.
 
-## Step 2: Extract Codebase Patterns
+### Get total counts for status display:
 
-Read `docs/tasks/progress.md` and extract ONLY the "Codebase Patterns" section.
+```bash
+jq '{
+  pending: [.userStories[] | select(.passes == false)] | length,
+  total: .userStories | length
+}' docs/tasks/tasks.json
+```
 
-This avoids passing the full progress history to the agent (performance optimization).
+## Step 2: Validate Required Fields
 
-## Step 3: Build Inline Prompt (Performance Optimization)
+**CRITICAL:** Before execution, validate the story has all required task-specific fields.
+
+Required fields:
+- `taskType` (string, snake_case)
+- `steps` (array, 1-10 items)
+- `relevantFiles` (array)
+- `patternsToFollow` (string)
+
+### If any field is missing:
+
+```
+Error: Story [STORY_ID] missing required fields for task-specific execution.
+
+Missing: [list missing fields]
+
+This tasks.json was created before task-specific step injection was implemented.
+Please regenerate with: /aimi:plan-to-tasks [plan-file-path]
+```
+
+STOP execution.
+
+## Step 3: Prepare Story Data
+
+The story data was already extracted via jq in Step 1. No additional reads needed.
+
+## Step 4: Build Inline Prompt (Performance Optimization)
 
 **CRITICAL:** Pass story data INLINE to the Task agent. Do NOT tell the agent to re-read tasks.json.
 
-Build the prompt with all story data embedded:
+Build the prompt with all story data embedded, using task-specific steps:
 
 ```
 Task general-purpose: "Execute [STORY_ID]: [STORY_TITLE]
 
-## INLINE STORY DATA (do not read tasks.json)
+## STORY DATA
 
 ID: [STORY_ID]
 Title: [STORY_TITLE]
 Description: [STORY_DESCRIPTION]
+Type: [TASK_TYPE]
 
-Acceptance Criteria:
+## ACCEPTANCE CRITERIA
+
 - [criterion 1]
 - [criterion 2]
 - [criterion N]
 
-## CODEBASE PATTERNS (extracted from progress.md)
+## STEPS (follow these in order)
 
-[paste extracted patterns here, or "No patterns discovered yet" if empty]
+1. [step 1 from story.steps]
+2. [step 2 from story.steps]
+3. [step 3 from story.steps]
+...
+[all steps from story.steps array]
 
-## EXECUTION FLOW
+## RELEVANT FILES (read these first)
 
-1. Read codebase to understand existing patterns
-2. Implement changes to satisfy ALL acceptance criteria above
-3. Run quality checks (typecheck, lint, tests as appropriate)
-4. If checks FAIL: Update tasks.json with error details, return failure
-5. If checks PASS: Commit with message 'feat: [STORY_ID] - [STORY_TITLE]'
-6. Update tasks.json: Set passes: true for story [STORY_ID]
-7. Append progress entry to docs/tasks/progress.md
-8. If you discovered important patterns, add to Codebase Patterns section
+- [file 1 from story.relevantFiles]
+- [file 2 from story.relevantFiles]
+...
+[If empty: "No specific files - explore codebase to understand patterns"]
+
+## PATTERNS TO FOLLOW
+
+[If patternsToFollow != "none": "See: [patternsToFollow] for conventions and gotchas"]
+[If patternsToFollow == "none": "No specific patterns - use codebase conventions"]
+
+## ON COMPLETION
+
+1. Verify ALL acceptance criteria are satisfied
+2. Run quality checks (typecheck, lint, tests as appropriate)
+3. Commit with message: 'feat: [STORY_ID] - [STORY_TITLE]'
+4. Update tasks.json: Set passes: true for story [STORY_ID]
 
 ## ON FAILURE
 
@@ -73,24 +129,31 @@ Do NOT mark passes: true. Update tasks.json with:
 - notes: 'Failed: [detailed error]'
 - attempts: [increment]
 - lastAttempt: [timestamp]
+- error: { type, message, file, line, suggestion }
 
 Return with clear failure report.
 "
 ```
 
-## Step 4: Handle Result
+## Step 5: Handle Result
 
 ### If Task succeeds:
 
-Verify:
-1. `docs/tasks/tasks.json` was updated (story has `passes: true`)
-2. `docs/tasks/progress.md` was appended with progress entry
+**Step 5a: Verify tasks.json updated**
 
-Report:
+```bash
+jq '.userStories[] | select(.id == "[STORY_ID]") | .passes' docs/tasks/tasks.json
 ```
-✓ [STORY_ID] - [STORY_TITLE] completed successfully.
 
-Files changed: [from progress entry]
+If not `true`, update it:
+```bash
+jq '(.userStories[] | select(.id == "[STORY_ID]")) |= . + {passes: true}' docs/tasks/tasks.json > tmp.json && mv tmp.json docs/tasks/tasks.json
+```
+
+**Step 5b: Report**
+
+```
+[STORY_ID] - [STORY_TITLE] completed successfully.
 
 Run /aimi:next for the next story.
 Run /aimi:status to see overall progress.
@@ -113,7 +176,7 @@ PREVIOUS ATTEMPT FAILED with:
 
 Please try a different approach or fix the issue described above.
 
-[Full story-executor prompt]
+[Full prompt from Step 4]
 "
 ```
 
@@ -136,21 +199,28 @@ Options:
 What would you like to do?
 ```
 
-## Step 5: Handle User Response
+## Step 6: Handle User Response
 
 ### If user says "skip":
-- Update tasks.json notes: "Skipped by user after 2 failed attempts"
-- Report: "Skipped [STORY_ID]. Run /aimi:next for the next story."
+
+Update tasks.json for this story using `jq`:
+
+```bash
+# Mark story as skipped (prevents infinite loop)
+jq '(.userStories[] | select(.id == "[STORY_ID]")) |= . + {skipped: true, notes: "Skipped by user after failed attempts"}' docs/tasks/tasks.json > tmp.json && mv tmp.json docs/tasks/tasks.json
+```
+
+Report: "Skipped [STORY_ID]. Run /aimi:next for the next story."
 
 ### If user says "retry [guidance]":
 - Spawn another Task with user's guidance included in prompt
-- Continue from Step 4
+- Continue from Step 5
 
 ### If user says "stop":
 - Report: "Execution stopped. Review the error and run /aimi:next when ready."
 - STOP execution
 
-## Step 6: Update State
+## Step 7: Update State
 
 After any outcome, ensure tasks.json reflects:
 - `attempts`: Total attempt count

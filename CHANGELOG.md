@@ -7,6 +7,160 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-02-16
+
+### Added
+
+- **Project Guidelines Injection**: CLAUDE.md/AGENTS.md content injected into Task prompts
+  - Discovery order: CLAUDE.md (root) → AGENTS.md (directory) → Aimi defaults
+  - Small files (<2KB) inlined, larger files referenced
+- **Aimi Default Commit/PR Rules**: Fallback rules when project lacks CLAUDE.md/AGENTS.md
+  - `default-rules.md` reference file with commit format, behavior, and PR guidelines
+  - Always applied if project files lack commit/PR section
+- **Fresh Context Per Story**: Each Task agent starts with clean context (no memory carryover)
+
+### Changed
+
+- **BREAKING:** Renamed `[PATTERNS_CONTENT]` placeholder to `[PROJECT_GUIDELINES]`
+- Story-executor now uses `get_project_guidelines()` instead of `get_patterns_content()`
+- Execution rules Step 1 now reads CLAUDE.md/AGENTS.md instead of progress.md
+- Learnings stored in CLAUDE.md (project-wide) or AGENTS.md (module-specific)
+
+### Removed
+
+- `patternsToFollow` field is now optional (guidelines discovery is automatic)
+
+## [0.6.0] - 2026-02-16
+
+### Changed
+
+- **BREAKING:** Removed `progress.md` - all state now in `tasks.json`
+  - No more progress.md initialization in `/aimi:plan`
+  - No more progress entry appending in `/aimi:next`
+  - No more CODEBASE_PATTERNS from progress.md
+- Simplified prompt template (removed progress.md references)
+- Simplified interpolation function signature
+
+### Removed
+
+- `progress.md` file and all references
+- CODEBASE_PATTERNS placeholder
+- `Bash(grep:*)`, `Bash(cat:*)`, `Bash(tail:*)` from allowed-tools (no longer needed)
+
+## [0.5.1] - 2026-02-16
+
+### Fixed
+
+- `/aimi:next` now ensures `progress.md` is always updated after task completion
+  - Step 5a: Verify tasks.json updated, fallback update via jq if not
+  - Step 5b: Check if progress entry exists, append if missing
+- `/aimi:status` now uses jq for minimal context usage
+- `/aimi:status` shows skipped stories with `✗` indicator
+- `/aimi:status` displays recent activity from progress.md
+
+### Added
+
+- `Bash(grep:*)`, `Bash(cat:*)` to `/aimi:next` allowed-tools
+- `Bash(tail:*)` to `/aimi:status` allowed-tools
+
+## [0.5.0] - 2026-02-16
+
+### Added
+
+- **jq-based task extraction**: Only load ONE story into context at a time
+  - `/aimi:execute` extracts only metadata (project, branchName, counts)
+  - `/aimi:next` extracts only the next pending story
+- **`skipped` field**: Prevents infinite loop on failed tasks
+  - When user says "skip", sets `skipped: true` on the story
+  - jq query filters: `passes == false AND skipped != true`
+
+### Changed
+
+- `/aimi:execute` now shows separate counts for pending, completed, and skipped
+- `/aimi:next` uses jq instead of reading full tasks.json
+- Added `Bash(jq:*)` to allowed-tools for both commands
+
+### Fixed
+
+- Infinite loop when a task keeps failing (now properly excluded after skip)
+
+## [0.4.2] - 2026-02-16
+
+### Fixed
+
+- `/aimi:plan` now properly runs compound-engineering's `/workflows:plan` first, then automatically converts to tasks.json
+- Added explicit two-phase execution flow with no user prompts between phases
+- Added `Skill(compound-engineering:workflows:plan)` to allowed-tools
+
+### Added
+
+- Error handling section in `/aimi:plan` for failed or cancelled operations
+
+## [0.4.1] - 2026-02-16
+
+### Security
+
+- **Path Traversal Prevention**: Added comprehensive path validation for `relevantFiles` and `patternsToFollow`
+  - Blocks `..` sequences, absolute paths, protocol prefixes, null bytes
+  - Blocks access to sensitive paths (`.git/`, `.env`, `.ssh/`)
+- **Expanded Command Injection Blocklist**: Now blocks `&&`, `||`, `>`, `>>`, `<`, newlines, and more
+- **Strengthened Prompt Injection Defenses**: Added patterns for role manipulation, system prompt extraction, and boundary breaking
+
+### Added
+
+- **Schema Versioning**: `schemaVersion` field in tasks.json (v2.0 for task-specific steps)
+- **qualityChecks Field**: Explicit verification commands per story (typecheck, test, lint)
+- **AGENTS.md Content Injection**: Small AGENTS.md files (< 2KB) are inlined directly in prompts
+- **Placeholder Interpolation Documentation**: Complete reference for prompt template placeholders
+- **Pattern Matching Tie-Breaking Rules**: Deterministic selection when multiple patterns match
+
+### Changed
+
+- **Naming Consistency**: Renamed `file_patterns` to `filePatterns` (camelCase) in pattern library
+- **Simplified Error Messages**: Consistent format: `Error: Story [ID] - [field]: [issue]. Fix: [action].`
+- **Consolidated Validation Rules**: task-format.md is now the single source of truth
+- **Removed Duplicate Prompt Example**: Task Tool Invocation section now references the main template
+
+### Fixed
+
+- Pattern files now use consistent camelCase for `filePatterns` field
+
+## [0.4.0] - 2026-02-16
+
+### Added
+
+- **Task-Specific Step Generation**: Each story now includes pre-computed, domain-aware execution steps
+- **Pattern Library** (`docs/patterns/`): Workflow templates for common task types
+  - `prisma-schema.md` - Database schema changes with Prisma
+  - `server-action.md` - Next.js server actions
+  - `react-component.md` - React component creation
+  - `api-route.md` - API endpoint implementation
+- **AGENTS.md Discovery**: Automatic discovery and matching of AGENTS.md files to tasks
+- **TaskType Inference**: Keyword-based pattern matching with LLM fallback
+
+### Changed
+
+- **BREAKING:** tasks.json schema now requires four new fields per story:
+  - `taskType` (string, snake_case, max 50 chars) - Domain classification
+  - `steps` (array, 1-10 items, each max 500 chars) - Task-specific execution steps
+  - `relevantFiles` (array, max 20 items) - Files to read first
+  - `patternsToFollow` (string) - AGENTS.md path or "none"
+- `/aimi:next` now validates required fields before execution
+- `/aimi:next` prompt template uses story.steps instead of generic execution flow
+- `story-executor` skill updated with STEPS, RELEVANT FILES, and PATTERNS sections
+- `plan-to-tasks` skill now generates task-specific fields during conversion
+
+### Migration
+
+Existing tasks.json files will fail validation. To migrate:
+
+```bash
+# Regenerate tasks.json from your plan file
+/aimi:plan-to-tasks docs/plans/your-plan.md
+```
+
+Or manually add the required fields to each story in tasks.json.
+
 ## [0.3.0] - 2026-02-15
 
 ### Changed
