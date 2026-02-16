@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-02-16
+
+### Fixed
+
+- `/aimi:plan` now properly runs compound-engineering's `/workflows:plan` first, then automatically converts to tasks.json
+- Added explicit two-phase execution flow with no user prompts between phases
+- Added `Skill(compound-engineering:workflows:plan)` to allowed-tools
+
+### Added
+
+- Error handling section in `/aimi:plan` for failed or cancelled operations
+
 ## [0.4.1] - 2026-02-16
 
 ### Security
