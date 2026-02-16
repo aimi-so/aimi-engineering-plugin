@@ -2,28 +2,45 @@
 name: aimi:next
 description: Execute the next pending story from tasks.json
 disable-model-invocation: true
-allowed-tools: Read, Write, Edit, Bash(git:*), Bash(npm:*), Bash(bun:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(tsc:*), Bash(eslint:*), Bash(prettier:*), Task
+allowed-tools: Read, Write, Edit, Bash(git:*), Bash(jq:*), Bash(npm:*), Bash(bun:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(tsc:*), Bash(eslint:*), Bash(prettier:*), Task
 ---
 
 # Aimi Next
 
 Execute the next pending story using a Task-spawned agent.
 
-## Step 1: Find Next Story
+## Step 1: Find Next Story (via jq)
 
-Read `docs/tasks/tasks.json`.
+**CRITICAL:** Do NOT read the full tasks.json. Use `jq` to extract ONLY the next pending story.
 
-Find the story with:
-- Lowest priority value
-- Where `passes === false`
-
-If no pending stories found:
+```bash
+# Extract only the next pending story (lowest priority, passes=false)
+jq '[.userStories[] | select(.passes == false)] | sort_by(.priority) | .[0]' docs/tasks/tasks.json
 ```
-All stories complete! (X/X)
 
-Run /aimi:review to review the implementation.
+This loads only ONE story into memory, not all 10+.
+
+### Check if any pending stories exist:
+
+```bash
+# Get count of pending stories
+jq '[.userStories[] | select(.passes == false)] | length' docs/tasks/tasks.json
+```
+
+If result is `0`:
+```
+All stories complete! Run /aimi:review to review the implementation.
 ```
 STOP execution.
+
+### Get total counts for status display:
+
+```bash
+jq '{
+  pending: [.userStories[] | select(.passes == false)] | length,
+  total: .userStories | length
+}' docs/tasks/tasks.json
+```
 
 ## Step 2: Validate Required Fields
 
