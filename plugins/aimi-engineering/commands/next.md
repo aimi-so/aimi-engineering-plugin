@@ -25,46 +25,89 @@ Run /aimi:review to review the implementation.
 ```
 STOP execution.
 
-## Step 2: Extract Codebase Patterns
+## Step 2: Validate Required Fields
+
+**CRITICAL:** Before execution, validate the story has all required task-specific fields.
+
+Required fields:
+- `taskType` (string, snake_case)
+- `steps` (array, 1-10 items)
+- `relevantFiles` (array)
+- `patternsToFollow` (string)
+
+### If any field is missing:
+
+```
+Error: Story [STORY_ID] missing required fields for task-specific execution.
+
+Missing: [list missing fields]
+
+This tasks.json was created before task-specific step injection was implemented.
+Please regenerate with: /aimi:plan-to-tasks [plan-file-path]
+```
+
+STOP execution.
+
+## Step 3: Extract Codebase Patterns
 
 Read `docs/tasks/progress.md` and extract ONLY the "Codebase Patterns" section.
 
 This avoids passing the full progress history to the agent (performance optimization).
 
-## Step 3: Build Inline Prompt (Performance Optimization)
+## Step 4: Build Inline Prompt (Performance Optimization)
 
 **CRITICAL:** Pass story data INLINE to the Task agent. Do NOT tell the agent to re-read tasks.json.
 
-Build the prompt with all story data embedded:
+Build the prompt with all story data embedded, using task-specific steps:
 
 ```
 Task general-purpose: "Execute [STORY_ID]: [STORY_TITLE]
 
-## INLINE STORY DATA (do not read tasks.json)
+## STORY DATA
 
 ID: [STORY_ID]
 Title: [STORY_TITLE]
 Description: [STORY_DESCRIPTION]
+Type: [TASK_TYPE]
 
-Acceptance Criteria:
+## ACCEPTANCE CRITERIA
+
 - [criterion 1]
 - [criterion 2]
 - [criterion N]
 
-## CODEBASE PATTERNS (extracted from progress.md)
+## STEPS (follow these in order)
+
+1. [step 1 from story.steps]
+2. [step 2 from story.steps]
+3. [step 3 from story.steps]
+...
+[all steps from story.steps array]
+
+## RELEVANT FILES (read these first)
+
+- [file 1 from story.relevantFiles]
+- [file 2 from story.relevantFiles]
+...
+[If empty: "No specific files - explore codebase to understand patterns"]
+
+## PATTERNS TO FOLLOW
+
+[If patternsToFollow != "none": "See: [patternsToFollow] for conventions and gotchas"]
+[If patternsToFollow == "none": "No specific patterns - use codebase conventions"]
+
+## CODEBASE PATTERNS (from progress.md)
 
 [paste extracted patterns here, or "No patterns discovered yet" if empty]
 
-## EXECUTION FLOW
+## ON COMPLETION
 
-1. Read codebase to understand existing patterns
-2. Implement changes to satisfy ALL acceptance criteria above
-3. Run quality checks (typecheck, lint, tests as appropriate)
-4. If checks FAIL: Update tasks.json with error details, return failure
-5. If checks PASS: Commit with message 'feat: [STORY_ID] - [STORY_TITLE]'
-6. Update tasks.json: Set passes: true for story [STORY_ID]
-7. Append progress entry to docs/tasks/progress.md
-8. If you discovered important patterns, add to Codebase Patterns section
+1. Verify ALL acceptance criteria are satisfied
+2. Run quality checks (typecheck, lint, tests as appropriate)
+3. Commit with message: 'feat: [STORY_ID] - [STORY_TITLE]'
+4. Update tasks.json: Set passes: true for story [STORY_ID]
+5. Append progress entry to docs/tasks/progress.md
+6. If you discovered important patterns, add to Codebase Patterns section
 
 ## ON FAILURE
 
@@ -73,12 +116,13 @@ Do NOT mark passes: true. Update tasks.json with:
 - notes: 'Failed: [detailed error]'
 - attempts: [increment]
 - lastAttempt: [timestamp]
+- error: { type, message, file, line, suggestion }
 
 Return with clear failure report.
 "
 ```
 
-## Step 4: Handle Result
+## Step 5: Handle Result
 
 ### If Task succeeds:
 
@@ -88,7 +132,7 @@ Verify:
 
 Report:
 ```
-✓ [STORY_ID] - [STORY_TITLE] completed successfully.
+[STORY_ID] - [STORY_TITLE] completed successfully.
 
 Files changed: [from progress entry]
 
@@ -113,7 +157,7 @@ PREVIOUS ATTEMPT FAILED with:
 
 Please try a different approach or fix the issue described above.
 
-[Full story-executor prompt]
+[Full prompt from Step 4]
 "
 ```
 
@@ -136,7 +180,7 @@ Options:
 What would you like to do?
 ```
 
-## Step 5: Handle User Response
+## Step 6: Handle User Response
 
 ### If user says "skip":
 - Update tasks.json notes: "Skipped by user after 2 failed attempts"
@@ -144,13 +188,13 @@ What would you like to do?
 
 ### If user says "retry [guidance]":
 - Spawn another Task with user's guidance included in prompt
-- Continue from Step 4
+- Continue from Step 5
 
 ### If user says "stop":
 - Report: "Execution stopped. Review the error and run /aimi:next when ready."
 - STOP execution
 
-## Step 6: Update State
+## Step 7: Update State
 
 After any outcome, ensure tasks.json reflects:
 - `attempts`: Total attempt count
