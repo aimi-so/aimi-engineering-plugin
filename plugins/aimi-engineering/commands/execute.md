@@ -2,24 +2,43 @@
 name: aimi:execute
 description: Execute all pending stories autonomously
 disable-model-invocation: true
-allowed-tools: Read, Write, Edit, Bash(git:*), Task
+allowed-tools: Read, Write, Edit, Bash(git:*), Bash(jq:*), Task
 ---
 
 # Aimi Execute
 
 Execute all pending stories in a loop, managing branches and handling failures.
 
-## Step 1: Read Tasks (Metadata Only)
+## Step 1: Read Tasks (Metadata Only via jq)
 
-Read `docs/tasks/tasks.json` but **DO NOT load all stories into context**.
+**CRITICAL:** Do NOT read the full tasks.json file. Use `jq` to extract only metadata.
 
-Only extract:
-- `project` name
-- `branchName`
-- Count of pending stories (`passes === false`)
-- Count of completed stories (`passes === true`)
+```bash
+# Extract metadata only (no stories loaded into context)
+jq '{
+  project: .project,
+  branchName: .branchName,
+  pending: [.userStories[] | select(.passes == false)] | length,
+  completed: [.userStories[] | select(.passes == true)] | length,
+  total: .userStories | length
+}' docs/tasks/tasks.json
+```
 
-**CRITICAL:** Do NOT use TodoWrite to list all stories. Do NOT display all stories in the Plan panel. Each story is executed one-at-a-time by `/aimi:next`.
+This returns:
+```json
+{
+  "project": "project-name",
+  "branchName": "feature/branch",
+  "pending": 8,
+  "completed": 2,
+  "total": 10
+}
+```
+
+**DO NOT:**
+- Read the full tasks.json into memory
+- Use TodoWrite to list all stories
+- Display all stories in the Plan panel
 
 If file doesn't exist:
 ```
