@@ -9,9 +9,17 @@ allowed-tools: Read, Write, Edit, Bash(git:*), Task
 
 Execute all pending stories in a loop, managing branches and handling failures.
 
-## Step 1: Read Tasks
+## Step 1: Read Tasks (Metadata Only)
 
-Read `docs/tasks/tasks.json`.
+Read `docs/tasks/tasks.json` but **DO NOT load all stories into context**.
+
+Only extract:
+- `project` name
+- `branchName`
+- Count of pending stories (`passes === false`)
+- Count of completed stories (`passes === true`)
+
+**CRITICAL:** Do NOT use TodoWrite to list all stories. Do NOT display all stories in the Plan panel. Each story is executed one-at-a-time by `/aimi:next`.
 
 If file doesn't exist:
 ```
@@ -85,17 +93,27 @@ Beginning execution loop...
 
 ## Step 4: Execution Loop
 
+**CRITICAL:** Execute stories ONE AT A TIME. Only the current story should be in context.
+
 ```
 while (pending stories exist):
-    1. Run /aimi:next
+    1. Call /aimi:next (this loads ONLY the next pending story)
     
     2. Check result:
        - If success: continue to next iteration
        - If user chose "skip": continue to next iteration
        - If user chose "stop": break loop
     
-    3. Re-read tasks.json to check remaining pending
+    3. Re-read tasks.json to get updated counts (not full stories)
+       - Count remaining pending
+       - If none pending: exit loop
 ```
+
+**Why one-at-a-time?**
+- Each story gets full context window
+- No wasted tokens on stories not being executed
+- Cleaner UI (only current task visible)
+- Matches the "task-specific step injection" design
 
 ## Step 5: Completion
 
