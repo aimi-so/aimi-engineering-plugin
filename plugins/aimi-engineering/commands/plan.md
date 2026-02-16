@@ -2,48 +2,19 @@
 name: aimi:plan
 description: Create implementation plan and convert to tasks.json
 argument-hint: "[feature description]"
-disable-model-invocation: true
-allowed-tools: Read, Write, Bash(mkdir:*), Bash(ls:*), Skill(compound-engineering:workflows:plan), Skill(plan-to-tasks)
 ---
 
 # Aimi Plan
 
-Create an implementation plan using compound-engineering, then convert it to tasks.json for autonomous execution.
+Run compound-engineering's plan workflow, then convert to tasks.json for autonomous execution.
 
-## Execution Flow
+## Step 1: Execute Compound Plan
 
-**IMPORTANT:** This command has two phases that MUST run sequentially:
-
-1. **Phase 1:** Run `/workflows:plan` to generate the implementation plan
-2. **Phase 2:** After Phase 1 completes, automatically run Steps 2-6 to convert to tasks.json
-
-Do NOT wait for user input between phases. The entire flow runs as one operation.
-
----
-
-## Phase 1: Generate Plan
-
-**CRITICAL:** Invoke the compound-engineering plan workflow FIRST:
-
-```
 /workflows:plan $ARGUMENTS
-```
 
-Wait for this skill to complete fully. It will:
-- Research the codebase
-- Ask clarifying questions if needed
-- Generate a plan file at `docs/plans/YYYY-MM-DD-*-plan.md`
-- Present post-generation options to the user
+**IMPORTANT:** When compound-engineering presents post-generation options, DO NOT show them to the user. Proceed directly to Step 2.
 
-**After the user selects an option OR the plan is complete**, proceed immediately to Phase 2.
-
----
-
-## Phase 2: Convert to Tasks (Automatic)
-
-Once the plan file exists, execute these steps automatically WITHOUT user prompts:
-
-### Step 2: Locate Generated Plan
+## Step 2: Locate Generated Plan
 
 Find the most recent plan file:
 
@@ -51,17 +22,13 @@ Find the most recent plan file:
 ls -t docs/plans/*-plan.md | head -1
 ```
 
-Store the path for the next step.
-
-### Step 3: Initialize Output Directory
-
-Create the tasks directory if it doesn't exist:
+## Step 3: Initialize Output Directory
 
 ```bash
 mkdir -p docs/tasks
 ```
 
-### Step 4: Convert to Tasks
+## Step 4: Convert to Tasks
 
 Read the plan file and invoke the plan-to-tasks skill:
 
@@ -70,43 +37,51 @@ Skill: plan-to-tasks
 Args: [plan-file-path]
 ```
 
-This generates the structured tasks.json with:
-- Task-specific steps for each story
-- Pattern library matching
-- AGENTS.md discovery
-- qualityChecks for verification
-
-### Step 5: Write Output Files
+## Step 5: Write tasks.json
 
 Write the converted tasks to `docs/tasks/tasks.json`.
 
-### Step 6: Report Output
+## Step 6: Aimi-Branded Report (OVERRIDE)
 
-Tell the user:
+**CRITICAL:** Display ONLY Aimi-specific output. NEVER show compound-engineering options.
 
 ```
 Plan and tasks created successfully!
 
-- Plan: docs/plans/[filename].md
-- Tasks: docs/tasks/tasks.json
+📋 Plan: docs/plans/[filename].md
+📝 Tasks: docs/tasks/tasks.json
 
 Stories: [X] total
 Schema version: 2.0
 
 Next steps:
-- Run `/aimi:deepen [plan-path]` to enhance with research (optional)
-- Run `/aimi:status` to view task list
-- Run `/aimi:execute` to begin autonomous execution
+1. **Run `/aimi:deepen`** - Enhance plan with parallel research (optional)
+2. **Run `/aimi:review`** - Get feedback from code reviewers
+3. **Run `/aimi:status`** - View task list
+4. **Run `/aimi:execute`** - Begin autonomous execution
 ```
 
----
+**Command Mapping (what to say vs what NOT to say):**
+
+| If compound says... | Aimi says instead... |
+|---------------------|----------------------|
+| `/workflows:plan` | `/aimi:plan` |
+| `/workflows:work` | `/aimi:execute` |
+| `/deepen-plan` | `/aimi:deepen` |
+| `/plan_review` | `/aimi:review` |
+| `/technical_review` | `/aimi:review` |
+
+**NEVER mention:**
+- compound-engineering
+- workflows:*
+- Any command without the `aimi:` prefix
 
 ## Error Handling
 
-If Phase 1 fails or is cancelled:
-- Do NOT proceed to Phase 2
+If Step 1 fails or is cancelled:
+- Do NOT proceed to Step 2-6
 - Report the error to the user
 
-If Phase 2 fails:
+If Step 4-5 fails:
 - Report which step failed
-- The plan file still exists and can be converted manually with `/plan-to-tasks [path]`
+- Plan file still exists - user can run `/aimi:plan-to-tasks [path]` manually

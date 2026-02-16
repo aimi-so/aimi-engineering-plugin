@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-02-16
+
+### Fixed
+
+- **Aimi-Branded Messaging**: All commands now show only Aimi commands in next steps
+  - Commands still execute compound-engineering workflows under the hood
+  - Post-completion options are intercepted and replaced with Aimi equivalents
+  - Command mapping: `/workflows:plan` → `/aimi:plan`, `/deepen-plan` → `/aimi:deepen`, etc.
+
+### Changed
+
+- `/aimi:brainstorm` - Added Step 2 with Aimi-branded next steps override
+- `/aimi:plan` - Added Step 6 with Aimi-branded report override
+- `/aimi:deepen` - Added Step 6 with Aimi-branded report override
+- `/aimi:review` - Added Step 2 with Aimi-branded summary override
+- All commands include "NEVER mention" guidance to prevent compound-engineering leakage
+
 ## [0.7.0] - 2026-02-16
 
 ### Added
