@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-02-16
+
+### Fixed
+
+- `/aimi:next` now ensures `progress.md` is always updated after task completion
+  - Step 5a: Verify tasks.json updated, fallback update via jq if not
+  - Step 5b: Check if progress entry exists, append if missing
+- `/aimi:status` now uses jq for minimal context usage
+- `/aimi:status` shows skipped stories with `✗` indicator
+- `/aimi:status` displays recent activity from progress.md
+
+### Added
+
+- `Bash(grep:*)`, `Bash(cat:*)` to `/aimi:next` allowed-tools
+- `Bash(tail:*)` to `/aimi:status` allowed-tools
+
 ## [0.5.0] - 2026-02-16
 
 ### Added
