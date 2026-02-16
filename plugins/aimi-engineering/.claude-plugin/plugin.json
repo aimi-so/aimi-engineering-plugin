@@ -1,6 +1,6 @@
 {
   "name": "aimi-engineering",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Autonomous task execution with Ralph-style JSON tasks. Wraps compound-engineering for brainstorm, plan, review workflows.",
   "author": {
     "name": "Stanley Takamatsu"

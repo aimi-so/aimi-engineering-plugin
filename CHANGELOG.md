@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-02-16
+
+### Changed
+
+- **BREAKING:** Removed `progress.md` - all state now in `tasks.json`
+  - No more progress.md initialization in `/aimi:plan`
+  - No more progress entry appending in `/aimi:next`
+  - No more CODEBASE_PATTERNS from progress.md
+- Simplified prompt template (removed progress.md references)
+- Simplified interpolation function signature
+
+### Removed
+
+- `progress.md` file and all references
+- CODEBASE_PATTERNS placeholder
+- Update AGENTS.md instructions from story-executor
+- `Bash(grep:*)`, `Bash(cat:*)`, `Bash(tail:*)` from allowed-tools (no longer needed)
+
 ## [0.5.1] - 2026-02-16
 
 ### Fixed
