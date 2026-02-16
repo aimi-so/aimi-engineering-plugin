@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-02-16
+
+### Changed
+
+- **BREAKING:** New tasks.json schema v3.0 with Ralph-style flat stories
+  - Flat story structure (no nested `tasks[]` array)
+  - Story IDs changed from `story-0` to `US-001` format
+  - Added `priority` field for explicit execution order
+  - Simple `passes: true/false` state tracking (no per-task status)
+  - Per-story `acceptanceCriteria` array (moved from root level)
+  - Required "Typecheck passes" in every story's acceptance criteria
+  - `successMetrics` at root level for tracking improvements
+
+### Added
+
+- **Priority-based execution**: `/aimi:next` uses jq `sort_by(.priority)` to select next story
+- **Project guidelines loading**: CLAUDE.md/AGENTS.md loaded before implementation
+- **Aimi default rules**: Fallback commit format and quality checks when no project guidelines exist
+- Brainstorm document: `docs/brainstorms/2026-02-16-ralph-style-tasks-brainstorm.md`
+
+### Updated
+
+- `plan-to-tasks` skill updated for flat story conversion
+- `task-format.md` reference rewritten for v3.0 schema
+- `story-executor` skill simplified for flat structure
+- `execution-rules.md` updated with "Read Project Guidelines" as Step 1
+- `/aimi:next` loads guidelines before building Task prompt
+- `/aimi:execute` derives branch name from metadata title
+- `/aimi:status` shows priority in story list
+
+### Removed
+
+- Nested `tasks[]` array structure
+- `estimatedEffort` field (agent determines pace from story scope)
+- `taskType`, `steps`, `relevantFiles`, `patternsToFollow` fields
+- Root-level `acceptanceCriteria` (now per-story)
+- `deploymentOrder` field
+
+### Migration
+
+Existing tasks.json files need to be regenerated:
+
+```bash
+/aimi:plan-to-tasks docs/plans/your-plan.md
+```
+
+## [0.9.0] - 2026-02-16
+
+### Changed
+
+- **BREAKING:** New tasks.json schema v2.0 with nested tasks structure
+  - Stories contain nested `tasks[]` array with task objects
+  - Added `metadata` object with `title`, `type`, `createdAt`, `planPath`, `brainstormPath`
+  - Added `successMetrics` object for tracking improvements
+  - Tasks have `id`, `title`, `description`, `file`, `action`, `status` fields
+  - Added `estimatedEffort` field to stories
+
+### Updated
+
+- `plan-to-tasks` skill updated for new schema structure
+- `task-format.md` reference rewritten for v2.0 schema
+- `story-executor` skill updated to work with nested tasks
+- `execution-rules.md` updated for task-based execution flow
+
+### Removed
+
+- Old schema fields: `taskType`, `steps`, `relevantFiles`, `patternsToFollow`, `qualityChecks` (per-story)
+
 ## [0.8.0] - 2026-02-16
 
 ### Fixed

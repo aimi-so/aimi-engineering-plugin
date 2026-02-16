@@ -16,8 +16,7 @@ Execute all pending stories in a loop, managing branches and handling failures.
 ```bash
 # Extract metadata only (no stories loaded into context)
 jq '{
-  project: .project,
-  branchName: .branchName,
+  title: .metadata.title,
   pending: [.userStories[] | select(.passes == false and .skipped != true)] | length,
   completed: [.userStories[] | select(.passes == true)] | length,
   skipped: [.userStories[] | select(.skipped == true)] | length,
@@ -28,8 +27,7 @@ jq '{
 This returns:
 ```json
 {
-  "project": "project-name",
-  "branchName": "feature/branch",
+  "title": "feat: Add task status feature",
   "pending": 7,
   "completed": 2,
   "skipped": 1,
@@ -44,8 +42,7 @@ This returns:
 
 **DO NOT:**
 - Read the full tasks.json into memory
-- Use TodoWrite to list all stories
-- Display all stories in the Plan panel
+- Load all stories into context
 
 If file doesn't exist:
 ```
@@ -55,19 +52,21 @@ STOP execution.
 
 ## Step 2: Branch Setup
 
-Get the branch name from tasks.json `branchName` field.
+Derive branch name from the metadata title:
+- Convert to kebab-case
+- Prefix with `aimi/`
+- Example: "feat: Add task status" → `aimi/feat-add-task-status`
 
 ### Validate Branch Name (SECURITY)
 
-**CRITICAL:** Before using branchName in any git command, validate it matches:
+**CRITICAL:** Branch name must match:
 ```
 ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$
 ```
 
-If branchName contains invalid characters (spaces, semicolons, quotes, etc.):
+If invalid characters found:
 ```
-Error: Invalid branch name "[branchName]". 
-Branch names must contain only letters, numbers, hyphens, underscores, and forward slashes.
+Error: Invalid branch name derived from title.
 ```
 STOP execution.
 
@@ -96,9 +95,7 @@ Switched to branch: [branchName]
 
 ## Step 3: Check for Pending Stories
 
-Count pending stories (where `passes === false`).
-
-If none pending:
+If no pending stories:
 ```
 All stories already complete! ([total]/[total])
 
@@ -110,7 +107,7 @@ Report start:
 ```
 Starting autonomous execution...
 
-Project: [project]
+Feature: [title]
 Branch: [branchName]
 Stories: [pending] pending, [completed] completed
 
@@ -119,27 +116,25 @@ Beginning execution loop...
 
 ## Step 4: Execution Loop
 
-**CRITICAL:** Execute stories ONE AT A TIME. Only the current story should be in context.
+**CRITICAL:** Execute stories ONE AT A TIME by priority order.
 
 ```
 while (pending stories exist):
-    1. Call /aimi:next (this loads ONLY the next pending story)
+    1. Call /aimi:next (loads ONLY the next pending story by priority)
     
     2. Check result:
        - If success: continue to next iteration
        - If user chose "skip": continue to next iteration
        - If user chose "stop": break loop
     
-    3. Re-read tasks.json to get updated counts (not full stories)
-       - Count remaining pending
-       - If none pending: exit loop
+    3. Re-read counts via jq (not full stories)
+       - If no pending: exit loop
 ```
 
 **Why one-at-a-time?**
 - Each story gets full context window
-- No wasted tokens on stories not being executed
-- Cleaner UI (only current task visible)
-- Matches the "task-specific step injection" design
+- No wasted tokens on other stories
+- Cleaner execution flow
 
 ## Step 5: Completion
 
@@ -149,7 +144,7 @@ When loop ends (all stories complete OR user stopped):
 
 Count commits on this branch:
 ```bash
-git log --oneline [default_branch]..HEAD | wc -l
+git log --oneline main..HEAD | wc -l
 ```
 
 Report:
@@ -174,7 +169,6 @@ Commits: [count]
 ## Execution Paused
 
 Completed: [completed]/[total] stories
-Stopped at: [current story ID]
 
 Run `/aimi:status` to see current state.
 Run `/aimi:execute` to resume execution.
@@ -185,7 +179,6 @@ Run `/aimi:execute` to resume execution.
 If execution is interrupted unexpectedly:
 
 1. tasks.json preserves state (completed stories stay completed)
-2. progress.md has all learnings
-3. User can run `/aimi:execute` again to resume
+2. User can run `/aimi:execute` again to resume
 
-The loop will automatically skip completed stories and continue from the next pending one.
+The loop will automatically skip completed stories and continue from the next pending one (by priority).
