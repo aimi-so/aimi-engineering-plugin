@@ -126,6 +126,179 @@ The agent will rely on the pattern library and general codebase conventions.
 
 ---
 
+## TaskType Inference
+
+Determine the `taskType` for each story based on content analysis.
+
+### Inference Algorithm
+
+1. **Extract keywords** from story title and description:
+   ```
+   Title: "Add User model to Prisma schema"
+   Keywords: [add, user, model, prisma, schema]
+   ```
+
+2. **Load pattern library** from `docs/patterns/*.md`
+
+3. **Score each pattern** by keyword matches:
+   ```
+   prisma-schema.md: keywords=[prisma, schema, model, migration, database]
+   Match score: 3 (prisma, schema, model)
+   ```
+
+4. **Select highest-scoring pattern**:
+   - If score > 0: use pattern's `name` as `taskType`
+   - If tie: prefer more specific pattern (more keywords matched)
+
+5. **Fallback to LLM inference** if no pattern matches:
+   - Analyze story content
+   - Generate a snake_case taskType (max 50 chars)
+   - Common fallback types: `documentation`, `refactor`, `test_implementation`, `configuration`
+
+### Example
+
+```
+Story: "Create RegisterForm component"
+Keywords: [create, registerform, component]
+
+Pattern scores:
+  - react-component.md: 1 (component)
+  - server-action.md: 0
+  - prisma-schema.md: 0
+
+Result: taskType = "react_component"
+```
+
+---
+
+## Pattern Library Matching
+
+Match stories to workflow patterns for step generation.
+
+### Loading Patterns
+
+1. **Read all files** in `docs/patterns/*.md`
+2. **Parse YAML frontmatter** to extract:
+   - `name`: pattern identifier (becomes taskType)
+   - `keywords`: words that trigger this pattern
+   - `file_patterns`: file paths that trigger this pattern
+3. **Parse markdown body** to extract:
+   - `## Steps Template`: numbered step list
+   - `## Relevant Files`: common files for this task type
+
+### Matching Algorithm
+
+For each story:
+
+1. **Keyword matching**:
+   - Extract words from title + description
+   - Count matches against each pattern's `keywords`
+
+2. **File pattern matching**:
+   - Extract file paths from story content
+   - Check against each pattern's `file_patterns` (glob matching)
+
+3. **Combined score**:
+   ```
+   score = keyword_matches + (file_pattern_matches * 2)
+   ```
+   File patterns weighted higher (more specific signal)
+
+4. **Select best match** (highest score wins)
+
+---
+
+## Step Generation
+
+Generate task-specific steps for each story.
+
+### From Pattern Library
+
+If a pattern matches:
+
+1. **Read pattern's `## Steps Template`**
+2. **Interpolate placeholders** with story-specific values:
+   - `{component_name}` → extracted from story title
+   - `{migration_name}` → derived from story title
+3. **Validate step count**: 1-10 steps, each ≤500 chars
+
+### LLM Fallback
+
+If no pattern matches:
+
+1. **Build context prompt**:
+   ```
+   Generate 4-8 specific execution steps for this task:
+   
+   Title: [story title]
+   Description: [story description]
+   Acceptance Criteria: [criteria list]
+   
+   Guidelines:
+   - Steps should be actionable and specific
+   - Include tool commands where appropriate
+   - Final step should verify the work
+   - Maximum 10 steps, each under 500 characters
+   ```
+
+2. **Parse LLM response** into step array
+
+3. **Validate output**:
+   - Min 1 step, max 10 steps
+   - Each step ≤500 characters
+   - Steps are actionable (not vague)
+
+### Validation Rules
+
+| Rule | Error |
+|------|-------|
+| steps.length < 1 | "Story must have at least 1 step" |
+| steps.length > 10 | "Story has too many steps (max 10)" |
+| step.length > 500 | "Step exceeds 500 character limit" |
+
+---
+
+## relevantFiles Extraction
+
+Identify files the agent should read before implementing.
+
+### Extraction Sources
+
+1. **Plan file content**:
+   - Files listed in "Files to create:" or "Files to modify:"
+   - Paths mentioned in phase description
+
+2. **Pattern's `## Relevant Files`**:
+   - If pattern matches, include its relevant files
+
+3. **Story content**:
+   - File paths mentioned in acceptance criteria
+   - Paths derived from component/model names
+
+### Example
+
+```
+Story: "Add User model to Prisma schema"
+Pattern: prisma-schema.md
+
+relevantFiles from pattern:
+  - prisma/schema.prisma
+  - src/lib/db.ts
+
+relevantFiles from story:
+  - (none additional)
+
+Result: relevantFiles = ["prisma/schema.prisma", "src/lib/db.ts"]
+```
+
+### Validation
+
+- Maximum 20 files
+- Paths must be relative (no absolute paths)
+- Duplicates removed
+
+---
+
 ## Story Sizing
 
 **Critical:** Each story must be completable in ONE Task iteration.
