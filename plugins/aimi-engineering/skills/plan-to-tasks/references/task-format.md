@@ -221,6 +221,7 @@ If `schemaVersion` is missing or "1.0", the executor should:
 | `notes` | string | Yes | Execution notes or learnings |
 | `attempts` | number | Yes | Number of execution attempts |
 | `lastAttempt` | string | No | ISO 8601 timestamp of last attempt |
+| `skipped` | boolean | No | If true, story is skipped (excluded from execution loop) |
 | `error` | object | No | Structured error details (see Error Schema) |
 | `taskType` | string | Yes | Domain-aware task classification (snake_case, max 50 chars) |
 | `steps` | array | Yes | Task-specific execution steps (1-10 items, each max 500 chars) |

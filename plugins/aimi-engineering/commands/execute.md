@@ -18,8 +18,9 @@ Execute all pending stories in a loop, managing branches and handling failures.
 jq '{
   project: .project,
   branchName: .branchName,
-  pending: [.userStories[] | select(.passes == false)] | length,
+  pending: [.userStories[] | select(.passes == false and .skipped != true)] | length,
   completed: [.userStories[] | select(.passes == true)] | length,
+  skipped: [.userStories[] | select(.skipped == true)] | length,
   total: .userStories | length
 }' docs/tasks/tasks.json
 ```
@@ -29,11 +30,17 @@ This returns:
 {
   "project": "project-name",
   "branchName": "feature/branch",
-  "pending": 8,
+  "pending": 7,
   "completed": 2,
+  "skipped": 1,
   "total": 10
 }
 ```
+
+**Counts:**
+- `pending` - stories that can be executed (`passes=false`, not skipped)
+- `completed` - stories that passed (`passes=true`)
+- `skipped` - stories marked as skipped by user
 
 **DO NOT:**
 - Read the full tasks.json into memory
