@@ -14,10 +14,9 @@ Display the current execution progress using jq (minimal context usage).
 
 ```bash
 jq '{
-  project: .project,
-  branchName: .branchName,
+  title: .metadata.title,
   completed: [.userStories[] | select(.passes == true) | {id, title}],
-  pending: [.userStories[] | select(.passes == false and .skipped != true) | {id, title}],
+  pending: [.userStories[] | select(.passes == false and .skipped != true) | {id, title, priority}] | sort_by(.priority),
   skipped: [.userStories[] | select(.skipped == true) | {id, title, notes}],
   total: .userStories | length
 }' docs/tasks/tasks.json
@@ -41,7 +40,7 @@ From jq output:
 Output format:
 
 ```
-Aimi Status: [project] ([branchName])
+Aimi Status: [title]
 
 Stories: [completed]/[total] complete
 
@@ -56,7 +55,7 @@ For each story, show status indicator:
 
 - `✓` for completed (passes: true)
 - `✗` for skipped (skipped: true)
-- `→` for next pending (first in pending array)
+- `→` for next pending (first in pending array by priority)
 - `○` for other pending
 
 Example:
@@ -64,15 +63,15 @@ Example:
 ✓ US-001: Add database schema          (completed)
 ✓ US-002: Add password utilities       (completed)
 ✗ US-003: Add login UI                 (skipped: auth middleware issue)
-→ US-004: Add registration UI          (next)
-○ US-005: Add session middleware       (pending)
+→ US-004: Add registration UI          (next - priority 4)
+○ US-005: Add session middleware       (pending - priority 5)
 ```
 
 ## Next Steps
 
 If there are pending stories:
 ```
-Next: US-003 - Add login UI
+Next: US-004 - Add registration UI (priority 4)
 
 Run /aimi:next to execute the next story.
 Run /aimi:execute to run all remaining stories.
@@ -91,8 +90,6 @@ Run `git log --oneline` to see commits.
 If a story has notes (especially failures), show them:
 
 ```
-→ US-003: Add login UI                 (next)
-  Note: Previous attempt failed - auth middleware missing
+→ US-004: Add registration UI          (next - priority 4)
+  Note: Previous attempt failed - missing dependency
 ```
-
-

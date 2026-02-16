@@ -2,63 +2,78 @@
 
 ## Overview
 
-Each story is executed by a Task-spawned agent with fresh context. This document defines the execution flow, quality gates, and output formats.
+Each story is executed by a Task-spawned agent with fresh context. This document defines the execution flow, quality gates, and output formats for the v3.0 schema.
+
+## Schema Overview (v3.0)
+
+Stories are flat, atomic units of work:
+
+```json
+{
+  "id": "US-001",
+  "title": "Add status field to tasks table",
+  "description": "As a developer, I need to store task status in the database.",
+  "acceptanceCriteria": [
+    "Add status column: 'pending' | 'in_progress' | 'done' (default 'pending')",
+    "Generate and run migration successfully",
+    "Typecheck passes"
+  ],
+  "priority": 1,
+  "passes": false,
+  "notes": ""
+}
+```
+
+## The Number One Rule
+
+**Each story must be completable in ONE iteration (one context window).**
+
+You spawn fresh with no memory of previous work. If the story is too big, you'll run out of context before finishing.
 
 ## Execution Flow
 
 ### Step 1: Read Project Guidelines
 
-**FIRST**, check for project-specific guidelines in this order:
+**FIRST**, check for project-specific guidelines:
 
 1. **CLAUDE.md** (project root) - Primary project instructions
-2. **AGENTS.md** (directory-specific) - Module-specific patterns and gotchas
-3. **Aimi defaults** - If neither exists, follow standard conventions
+2. **AGENTS.md** (directory-specific) - Module-specific patterns
+3. **Aimi defaults** - Standard conventions if neither exists
 
-These files contain:
-- Project conventions and patterns
-- Commit and PR rules
-- Known gotchas to avoid
-- Module-specific guidance
+### Step 2: Understand Story Scope
 
-### Step 2: Read Story Details
-
-Your story data is provided inline in the prompt.
-
-Understand:
+Read the story details:
 - Title and description
 - All acceptance criteria
-- Task-specific steps to follow
+- Infer which files need modification
 
-### Step 3: Implement the Story
+### Step 3: Implement the Change
 
-Follow acceptance criteria exactly:
-- Read existing code to understand patterns
-- Implement the required changes
-- Write tests if required by criteria
+1. **Read relevant files** to understand current state
+2. **Make the necessary changes** to satisfy acceptance criteria
+3. **Verify each criterion** as you go
 
 ### Step 4: Run Quality Checks
 
-Run ALL quality checks required by the project:
+After implementation, run quality checks:
 
 ```bash
-# Typecheck (required for all code changes)
-# Examples: tsc, bun check, npx tsc --noEmit
-
-# Linting
-# Examples: eslint, rubocop, ruff
-
-# Tests
-# Examples: bun test, npm test, pytest, bin/rails test
+# Standard quality checks
+bun run lint      # or npm run lint
+bun run test      # or npm test  
+npx tsc --noEmit  # typecheck
 ```
 
-### Step 5: Quality Gate
+Then verify ALL acceptance criteria are met.
 
-**FAIL FAST:** If any quality check fails, STOP immediately.
+### Step 5: Quality Gate (FAIL FAST)
+
+**If any quality check or acceptance criterion fails, STOP immediately.**
 
 Do NOT:
 - Continue with partial implementation
-- Mark the story as passed
 - Try to hack around failures
+- Skip failing checks
 
 Instead:
 - Report the failure with full error details
@@ -71,91 +86,91 @@ If all checks pass, commit with this format:
 
 ```bash
 git add [changed files]
-git commit -m "feat: [US-XXX] - [Story title]"
+git commit -m "feat: US-001 - Add status field to tasks table"
 ```
 
-Examples:
-- `feat: [US-001] - Add users database schema`
-- `feat: [US-002] - Add password hashing utility`
-- `fix: [US-005] - Fix login redirect`
+Commit message format:
+- `feat:` for feature work
+- `fix:` for bug fixes
+- `refactor:` for refactoring
+- `[story-id]` from the story
+- Title from story title
 
 ### Step 7: Update tasks.json
 
-Read `docs/tasks/tasks.json`, update your story:
+Update the story to mark it complete:
 
-```json
-{
-  "id": "US-XXX",
-  "passes": true,
-  "notes": "Completed successfully. [brief notes]",
-  "attempts": 1,
-  "lastAttempt": "2026-02-15T10:45:00Z"
-}
+```bash
+jq '(.userStories[] | select(.id == "US-001")) |= . + {passes: true}' docs/tasks/tasks.json > tmp.json && mv tmp.json docs/tasks/tasks.json
 ```
 
-Write the updated file.
+### Step 8: Update AGENTS.md or CLAUDE.md (if learnings)
 
-### Step 8: Update AGENTS.md or CLAUDE.md with Learnings
+If you discovered something future developers/agents should know:
 
-Before committing, check if any edited files have learnings worth preserving in nearby AGENTS.md files:
+**Good additions:**
+- "When modifying X, also update Y"
+- "This module uses pattern Z"
+- "Tests require dev server on PORT 3000"
 
-1. **Identify directories with edited files** - Look at which directories you modified
-2. **Check for existing AGENTS.md** - Look for AGENTS.md in those directories or parent directories
-3. **Add valuable learnings** - If you discovered something future developers/agents should know:
-   - API patterns or conventions specific to that module
-   - Gotchas or non-obvious requirements
-   - Dependencies between files
-   - Testing approaches for that area
-   - Configuration or environment requirements
+**Where to add:**
+- **CLAUDE.md** (root) - Project-wide patterns
+- **AGENTS.md** (directory) - Module-specific patterns
 
-**Examples of good AGENTS.md additions:**
-- "When modifying X, also update Y to keep them in sync"
-- "This module uses pattern Z for all API calls"
-- "Tests require the dev server running on PORT 3000"
-- "Field names must match the template exactly"
-
-**Do NOT add to AGENTS.md or CLAUDE.md:**
-- Story-specific implementation details
-- Temporary debugging notes
-- Redundant information already documented
-
-Only update these files if you have **genuinely reusable knowledge** that would help future work.
-
-**Where to add learnings:**
-- **CLAUDE.md** (root) - Project-wide patterns, conventions, and setup instructions
-- **AGENTS.md** (directory) - Module-specific patterns and gotchas
+Only add **genuinely reusable knowledge**.
 
 ## Failure Handling
 
-If you fail to complete a story:
+If you cannot complete a story:
 
 1. **Do NOT** mark `passes: true`
-2. **Update** tasks.json with structured error:
-   ```json
-   {
-     "passes": false,
-     "notes": "Failed: [brief summary]",
-     "attempts": [increment],
-     "lastAttempt": "[timestamp]",
-     "error": {
-       "type": "typecheck_failure|test_failure|lint_failure|runtime_error|dependency_missing|unknown",
-       "message": "Detailed error message from the failure",
-       "file": "path/to/file.ts (if applicable)",
-       "line": 42,
-       "suggestion": "Possible fix or next step (if known)"
-     }
-   }
-   ```
-   
-   **Error type classification:**
-   - `typecheck_failure`: TypeScript/type errors (tsc failed)
-   - `test_failure`: Unit/integration tests failed
-   - `lint_failure`: ESLint/Prettier violations
-   - `runtime_error`: Execution errors
-   - `dependency_missing`: npm/pip/gem package not found
-   - `unknown`: Cannot classify
-3. **Return** with clear failure report including:
-   - What went wrong
+2. **Update tasks.json** with failure details:
+
+```json
+{
+  "id": "US-001",
+  "passes": false,
+  "notes": "Failed: TypeScript error - User type missing 'status' field"
+}
+```
+
+3. **Return** with clear failure report:
+   - What failed
    - Error messages
    - Files involved
    - Suggested fix if known
+
+## Status Values
+
+| Field | Value | Meaning |
+|-------|-------|---------|
+| `passes` | `false` | Not completed yet |
+| `passes` | `true` | Completed successfully |
+| `skipped` | `true` | Skipped by user (won't retry) |
+
+## Quality Gates Reference
+
+Common quality checks to run:
+
+| Gate | Command |
+|------|---------|
+| Lint | `bun run lint`, `npm run lint` |
+| Test | `bun run test`, `npm test` |
+| Typecheck | `npx tsc --noEmit`, `bun check` |
+| Build | `bun run build`, `npm run build` |
+| Browser | Manual verification for UI changes |
+
+## Success Metrics
+
+The root `successMetrics` object tracks improvements:
+
+```json
+{
+  "successMetrics": {
+    "apiCalls": "2 → 1",
+    "saveTime": "~400ms → ~200ms"
+  }
+}
+```
+
+These are informational - verify them where possible during implementation.
