@@ -80,8 +80,6 @@ This generates the structured tasks.json with:
 
 Write the converted tasks to `docs/tasks/tasks.json`.
 
-Initialize `docs/tasks/progress.md` with the header template (see plan-to-tasks skill).
-
 ### Step 6: Report Output
 
 Tell the user:
@@ -91,7 +89,6 @@ Plan and tasks created successfully!
 
 - Plan: docs/plans/[filename].md
 - Tasks: docs/tasks/tasks.json
-- Progress: docs/tasks/progress.md
 
 Stories: [X] total
 Schema version: 2.0

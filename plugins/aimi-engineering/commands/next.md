@@ -2,7 +2,7 @@
 name: aimi:next
 description: Execute the next pending story from tasks.json
 disable-model-invocation: true
-allowed-tools: Read, Write, Edit, Bash(git:*), Bash(jq:*), Bash(grep:*), Bash(cat:*), Bash(npm:*), Bash(bun:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(tsc:*), Bash(eslint:*), Bash(prettier:*), Task
+allowed-tools: Read, Write, Edit, Bash(git:*), Bash(jq:*), Bash(npm:*), Bash(bun:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(tsc:*), Bash(eslint:*), Bash(prettier:*), Task
 ---
 
 # Aimi Next
@@ -69,11 +69,9 @@ Please regenerate with: /aimi:plan-to-tasks [plan-file-path]
 
 STOP execution.
 
-## Step 3: Extract Codebase Patterns
+## Step 3: Prepare Story Data
 
-Read `docs/tasks/progress.md` and extract ONLY the "Codebase Patterns" section.
-
-This avoids passing the full progress history to the agent (performance optimization).
+The story data was already extracted via jq in Step 1. No additional reads needed.
 
 ## Step 4: Build Inline Prompt (Performance Optimization)
 
@@ -117,18 +115,12 @@ Type: [TASK_TYPE]
 [If patternsToFollow != "none": "See: [patternsToFollow] for conventions and gotchas"]
 [If patternsToFollow == "none": "No specific patterns - use codebase conventions"]
 
-## CODEBASE PATTERNS (from progress.md)
-
-[paste extracted patterns here, or "No patterns discovered yet" if empty]
-
 ## ON COMPLETION
 
 1. Verify ALL acceptance criteria are satisfied
 2. Run quality checks (typecheck, lint, tests as appropriate)
 3. Commit with message: 'feat: [STORY_ID] - [STORY_TITLE]'
 4. Update tasks.json: Set passes: true for story [STORY_ID]
-5. Append progress entry to docs/tasks/progress.md
-6. If you discovered important patterns, add to Codebase Patterns section
 
 ## ON FAILURE
 
@@ -158,34 +150,7 @@ If not `true`, update it:
 jq '(.userStories[] | select(.id == "[STORY_ID]")) |= . + {passes: true}' docs/tasks/tasks.json > tmp.json && mv tmp.json docs/tasks/tasks.json
 ```
 
-**Step 5b: Ensure progress.md was appended**
-
-Check if progress entry exists for this story:
-```bash
-grep -q "## [STORY_ID]" docs/tasks/progress.md
-```
-
-If NOT found, append the progress entry:
-
-```bash
-cat >> docs/tasks/progress.md << 'EOF'
-
----
-
-## [STORY_ID] - [STORY_TITLE]
-
-**Completed:** [ISO 8601 timestamp]
-**Status:** Completed by Task agent
-
-**What was implemented:**
-- Story completed successfully
-
-**Files changed:**
-- (see git diff)
-EOF
-```
-
-**Step 5c: Report**
+**Step 5b: Report**
 
 ```
 [STORY_ID] - [STORY_TITLE] completed successfully.

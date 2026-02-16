@@ -224,12 +224,6 @@ When spawning a Task agent to execute a story, use this template:
 ```
 You are executing a single user story from docs/tasks/tasks.json.
 
-## CRITICAL: Read Progress First
-
-1. Read docs/tasks/progress.md FIRST
-2. Pay special attention to the "Codebase Patterns" section at the top
-3. These patterns will help you avoid known issues and follow conventions
-
 ## Your Story
 
 ID: [STORY_ID]
@@ -261,10 +255,6 @@ Type: [TASK_TYPE]
 
 [PATTERNS_CONTENT - see "AGENTS.md Content Injection" below]
 
-## Codebase Patterns (from progress.md)
-
-[CODEBASE_PATTERNS extracted from progress.md or "No patterns discovered yet"]
-
 ## On Completion
 
 After following the steps above:
@@ -272,50 +262,8 @@ After following the steps above:
 1. Verify ALL acceptance criteria are satisfied
 2. Run quality checks (typecheck, lint, tests as appropriate)
 3. **Fail fast**: If quality checks fail, STOP and report the failure
-4. **Update AGENTS.md**: If you discovered reusable patterns, update nearby AGENTS.md files
-5. **Commit**: If all checks pass, commit with message "feat: [STORY_ID] - [STORY_TITLE]"
-6. **Update tasks.json**: Set passes: true for this story
-7. **Append progress**: Add your progress entry to progress.md
-8. **Update patterns**: If you discovered important patterns, add to Codebase Patterns section
-
-## Update AGENTS.md Files
-
-Before committing, check if edited directories have AGENTS.md files worth updating:
-
-1. Look for AGENTS.md in directories you modified (or parent directories)
-2. Add learnings that future agents/developers should know:
-   - API patterns or conventions specific to that module
-   - Gotchas or non-obvious requirements
-   - Dependencies between files
-   - Testing approaches for that area
-
-**Good AGENTS.md additions:**
-- "When modifying X, also update Y to keep them in sync"
-- "This module uses pattern Z for all API calls"
-- "Tests require the dev server running on PORT 3000"
-
-**Do NOT add:**
-- Story-specific implementation details
-- Temporary debugging notes
-- Information already in progress.md
-
-## Progress Entry Format
-
-Append this to docs/tasks/progress.md:
-
----
-
-## [STORY_ID] - [STORY_TITLE]
-
-**Completed:** [ISO 8601 timestamp]
-**Files changed:** [list files with backticks]
-
-**What was implemented:**
-- [bullet points]
-
-**Learnings:**
-- [patterns discovered]
-- [gotchas encountered]
+4. **Commit**: If all checks pass, commit with message "feat: [STORY_ID] - [STORY_TITLE]"
+5. **Update tasks.json**: Set passes: true for this story
 
 ## On Failure
 
@@ -349,7 +297,7 @@ To spawn a story executor, use the Task tool with the prompt template above:
 Task({
   subagent_type: "general-purpose",
   description: `Execute ${story.id}: ${story.title}`,
-  prompt: interpolate_prompt(FULL_PROMPT_TEMPLATE, story, progress_md)
+  prompt: interpolate_prompt(FULL_PROMPT_TEMPLATE, story)
 })
 ```
 
@@ -373,9 +321,9 @@ STEPS:
 
 FILES: [relevantFiles as comma-separated list or "explore codebase"]
 PATTERNS: [patternsToFollow or "use codebase conventions"]
-CODEBASE: [extracted codebase patterns or "none yet"]
 
-COMPLETE: verify criteria → check (tsc/lint/test) → update AGENTS.md (if patterns) → commit "feat: [ID] - [title]" → tasks.json (passes:true) → progress.md
+
+COMPLETE: verify criteria → check (tsc/lint/test) → commit "feat: [ID] - [title]" → tasks.json (passes:true)
 FAIL: passes:false, error object (type/message/file/suggestion), return report.
 ```
 
@@ -441,13 +389,12 @@ The prompt template uses placeholders that are replaced at runtime:
 | `[STEPS]` | `story.steps` | Numbered list of steps |
 | `[RELEVANT_FILES]` | `story.relevantFiles` | Bullet list of files |
 | `[PATTERNS_CONTENT]` | Computed | AGENTS.md content or reference |
-| `[CODEBASE_PATTERNS]` | `progress.md` | Extracted patterns section |
 | `[QUALITY_CHECKS]` | `story.qualityChecks` | Commands to run for verification |
 
 ### Interpolation Process
 
 ```python
-def interpolate_prompt(template: str, story: dict, progress_md: str) -> str:
+def interpolate_prompt(template: str, story: dict) -> str:
     """
     Replace all placeholders with story data.
     All values are sanitized before interpolation.
@@ -466,7 +413,6 @@ def interpolate_prompt(template: str, story: dict, progress_md: str) -> str:
         "[STEPS]": format_numbered_list(story["steps"]),
         "[RELEVANT_FILES]": format_bullet_list(story["relevantFiles"]) or "explore codebase",
         "[PATTERNS_CONTENT]": get_patterns_content(story["patternsToFollow"]),
-        "[CODEBASE_PATTERNS]": extract_codebase_patterns(progress_md),
         "[QUALITY_CHECKS]": format_bullet_list(story["qualityChecks"]),
     }
     
