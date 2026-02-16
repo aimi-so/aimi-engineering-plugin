@@ -1,16 +1,27 @@
 ---
 name: aimi:status
 description: Show current task execution progress
-allowed-tools: Read
+allowed-tools: Bash(jq:*), Bash(tail:*), Read
 ---
 
 # Aimi Status
 
-Display the current execution progress from tasks.json.
+Display the current execution progress using jq (minimal context usage).
 
-## Step 1: Read Tasks
+## Step 1: Get Status via jq
 
-Read `docs/tasks/tasks.json`.
+**CRITICAL:** Do NOT read full tasks.json. Use jq to extract status:
+
+```bash
+jq '{
+  project: .project,
+  branchName: .branchName,
+  completed: [.userStories[] | select(.passes == true) | {id, title}],
+  pending: [.userStories[] | select(.passes == false and .skipped != true) | {id, title}],
+  skipped: [.userStories[] | select(.skipped == true) | {id, title, notes}],
+  total: .userStories | length
+}' docs/tasks/tasks.json
+```
 
 If file doesn't exist, report:
 ```
@@ -19,10 +30,11 @@ No tasks.json found. Run /aimi:plan to create a task list.
 
 ## Step 2: Calculate Progress
 
-Count stories:
-- Total: length of userStories array
-- Completed: count where passes === true
-- Pending: count where passes === false
+From jq output:
+- Completed: length of completed array
+- Pending: length of pending array  
+- Skipped: length of skipped array
+- Total: total count
 
 ## Step 3: Display Status
 
@@ -43,15 +55,16 @@ Next: [next story info or completion message]
 For each story, show status indicator:
 
 - `✓` for completed (passes: true)
-- `→` for next pending (first story where passes: false)
-- `○` for pending (passes: false)
+- `✗` for skipped (skipped: true)
+- `→` for next pending (first in pending array)
+- `○` for other pending
 
 Example:
 ```
 ✓ US-001: Add database schema          (completed)
 ✓ US-002: Add password utilities       (completed)
-→ US-003: Add login UI                 (next)
-○ US-004: Add registration UI          (pending)
+✗ US-003: Add login UI                 (skipped: auth middleware issue)
+→ US-004: Add registration UI          (next)
 ○ US-005: Add session middleware       (pending)
 ```
 
@@ -80,4 +93,25 @@ If a story has notes (especially failures), show them:
 ```
 → US-003: Add login UI                 (next)
   Note: Previous attempt failed - auth middleware missing
+```
+
+## Step 4: Show Recent Progress (from progress.md)
+
+Read the last 20 lines of `docs/tasks/progress.md` to show recent activity:
+
+```bash
+tail -20 docs/tasks/progress.md
+```
+
+Display as:
+
+```
+## Recent Activity (from progress.md)
+
+[last completed story entry]
+```
+
+If progress.md doesn't exist or is empty:
+```
+No progress recorded yet. Run /aimi:next to start execution.
 ```
