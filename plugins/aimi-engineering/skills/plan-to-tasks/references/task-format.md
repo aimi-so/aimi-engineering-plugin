@@ -20,7 +20,7 @@ The `tasks.json` file is the structured task list that drives autonomous executi
 - `description` (string, non-empty, max 500 chars)
 - `acceptanceCriteria` (array of strings, at least one item)
 - `priority` (number, positive integer)
-- `completed` (boolean)
+- `passes` (boolean)
 
 ### Validation Errors
 
@@ -69,7 +69,7 @@ Do NOT proceed with invalid tasks.json.
 | `description` | string | Yes | User story format: "As a [role], I need [feature]" |
 | `acceptanceCriteria` | array | Yes | List of verifiable criteria |
 | `priority` | number | Yes | Execution order (1 = first) |
-| `completed` | boolean | Yes | Whether story is complete |
+| `passes` | boolean | Yes | Whether story passes (complete) |
 | `notes` | string | Yes | Execution notes or learnings |
 | `attempts` | number | Yes | Number of execution attempts |
 | `lastAttempt` | string | No | ISO 8601 timestamp of last attempt |
@@ -126,7 +126,7 @@ This structured format enables:
         "Typecheck passes"
       ],
       "priority": 1,
-      "completed": false,
+      "passes": false,
       "notes": "",
       "attempts": 0,
       "lastAttempt": null
@@ -142,7 +142,7 @@ This structured format enables:
         "Unit tests pass"
       ],
       "priority": 2,
-      "completed": false,
+      "passes": false,
       "notes": "",
       "attempts": 0,
       "lastAttempt": null
@@ -159,7 +159,7 @@ This structured format enables:
         "Verify changes work in browser"
       ],
       "priority": 3,
-      "completed": false,
+      "passes": false,
       "notes": "",
       "attempts": 0,
       "lastAttempt": null

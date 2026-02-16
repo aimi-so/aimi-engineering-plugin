@@ -15,7 +15,7 @@ Read `docs/tasks/tasks.json`.
 
 Find the story with:
 - Lowest priority value
-- Where `completed === false`
+- Where `passes === false`
 
 If no pending stories found:
 ```
@@ -62,14 +62,14 @@ Acceptance Criteria:
 3. Run quality checks (typecheck, lint, tests as appropriate)
 4. If checks FAIL: Update tasks.json with error details, return failure
 5. If checks PASS: Commit with message 'feat: [STORY_ID] - [STORY_TITLE]'
-6. Update tasks.json: Set completed: true for story [STORY_ID]
+6. Update tasks.json: Set passes: true for story [STORY_ID]
 7. Append progress entry to docs/tasks/progress.md
 8. If you discovered important patterns, add to Codebase Patterns section
 
 ## ON FAILURE
 
-Do NOT mark completed: true. Update tasks.json with:
-- completed: false
+Do NOT mark passes: true. Update tasks.json with:
+- passes: false
 - notes: 'Failed: [detailed error]'
 - attempts: [increment]
 - lastAttempt: [timestamp]
@@ -83,7 +83,7 @@ Return with clear failure report.
 ### If Task succeeds:
 
 Verify:
-1. `docs/tasks/tasks.json` was updated (story has `completed: true`)
+1. `docs/tasks/tasks.json` was updated (story has `passes: true`)
 2. `docs/tasks/progress.md` was appended with progress entry
 
 Report:

@@ -82,7 +82,7 @@ Follow the execution rules in order:
 4. **Fail fast**: If quality checks fail, STOP and report the failure
 5. **Update AGENTS.md**: If you discovered reusable patterns, update nearby AGENTS.md files (see below)
 6. **Commit**: If all checks pass, commit with message "feat: [STORY_ID] - [STORY_TITLE]"
-7. **Update tasks.json**: Set completed: true for this story
+7. **Update tasks.json**: Set passes: true for this story
 8. **Append progress**: Add your progress entry to progress.md
 9. **Update patterns**: If you discovered important patterns, add to Codebase Patterns section
 
@@ -129,11 +129,11 @@ Append this to docs/tasks/progress.md:
 
 If you cannot complete the story:
 
-1. Do NOT mark completed: true
+1. Do NOT mark passes: true
 2. Update tasks.json with structured error:
    ```json
    {
-     "completed": false,
+     "passes": false,
      "notes": "Failed: [brief summary]",
      "attempts": [increment],
      "lastAttempt": "[timestamp]",
@@ -194,8 +194,8 @@ STORY: [STORY_DESCRIPTION]
 CRITERIA: [acceptance criteria as comma-separated list]
 PATTERNS: [extracted codebase patterns or "none yet"]
 
-FLOW: implement → check (tsc/lint/test) → update AGENTS.md (if reusable patterns) → commit "feat: [ID] - [title]" → update tasks.json (completed:true) → append progress.md
-FAIL: Set completed:false, add error object with type/message/file/suggestion, return failure report.
+FLOW: implement → check (tsc/lint/test) → update AGENTS.md (if reusable patterns) → commit "feat: [ID] - [title]" → update tasks.json (passes:true) → append progress.md
+FAIL: Set passes:false, add error object with type/message/file/suggestion, return failure report.
 AGENTS.md: Add reusable patterns to nearby AGENTS.md files (conventions, gotchas, dependencies). Skip story-specific details.
 ```
 

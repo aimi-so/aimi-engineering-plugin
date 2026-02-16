@@ -21,8 +21,8 @@ No tasks.json found. Run /aimi:plan to create a task list.
 
 Count stories:
 - Total: length of userStories array
-- Completed: count where completed === true
-- Pending: count where completed === false
+- Completed: count where passes === true
+- Pending: count where passes === false
 
 ## Step 3: Display Status
 
@@ -42,9 +42,9 @@ Next: [next story info or completion message]
 
 For each story, show status indicator:
 
-- `✓` for completed (completed: true)
-- `→` for next pending (first story where completed: false)
-- `○` for pending (completed: false)
+- `✓` for completed (passes: true)
+- `→` for next pending (first story where passes: false)
+- `○` for pending (passes: false)
 
 Example:
 ```

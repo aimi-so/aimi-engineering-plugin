@@ -8,7 +8,7 @@ description: >
 
 # Plan to Tasks Conversion
 
-Convert a markdown implementation plan into a structured `tasks.json` file for autonomous execution.
+Convert a markdown implementation plan into a structured `docs/tasks/tasks.json` file for autonomous execution.
 
 ## Input
 
@@ -16,7 +16,7 @@ A markdown plan file path containing Implementation Phases sections.
 
 ## Output
 
-A `tasks.json` file following the schema in [task-format.md](./references/task-format.md).
+A `docs/tasks/tasks.json` file following the schema in [task-format.md](./references/task-format.md).
 
 ## Conversion Steps
 
@@ -84,7 +84,7 @@ Create the users table with authentication fields.
     "Typecheck passes"
   ],
   "priority": 1,
-  "completed": false,
+  "passes": false,
   "notes": "",
   "attempts": 0,
   "lastAttempt": null
