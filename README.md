@@ -66,6 +66,8 @@ docs/tasks/
 
 ### tasks.json
 
+Each story includes **task-specific execution steps** generated at plan-to-tasks time:
+
 ```json
 {
   "project": "user-auth",
@@ -75,9 +77,20 @@ docs/tasks/
     {
       "id": "US-001",
       "title": "Add database schema",
+      "description": "As a developer, I need the user table schema",
       "acceptanceCriteria": ["...", "Typecheck passes"],
       "priority": 1,
-      "passes": false
+      "passes": false,
+      "taskType": "prisma_schema",
+      "steps": [
+        "Read prisma/schema.prisma to understand existing models",
+        "Add User model with required fields",
+        "Run: npx prisma generate",
+        "Run: npx prisma migrate dev",
+        "Verify typecheck passes"
+      ],
+      "relevantFiles": ["prisma/schema.prisma", "src/lib/db.ts"],
+      "patternsToFollow": "prisma/AGENTS.md"
     }
   ]
 }
@@ -102,9 +115,44 @@ _Read this section FIRST before implementing_
 
 1. **Plan Generation**: Creates detailed markdown plan via compound-engineering
 2. **Task Conversion**: Converts phases to sized user stories (one context window each)
-3. **Fresh Context**: Each story executed by Task-spawned agent with fresh context
-4. **Learning Capture**: Agents read progress.md patterns before starting
-5. **Compounding**: Future stories benefit from past discoveries
+3. **Step Generation**: Each story gets task-specific steps from pattern library + AGENTS.md discovery
+4. **Fresh Context**: Each story executed by Task-spawned agent with fresh context
+5. **Learning Capture**: Agents read progress.md patterns before starting
+6. **Compounding**: Future stories benefit from past discoveries
+
+## Task-Specific Step Generation
+
+Instead of generic execution instructions, each story gets **domain-aware steps** generated at plan-to-tasks time.
+
+### Pattern Library
+
+Workflow templates in `docs/patterns/`:
+
+| Pattern | Task Type | Description |
+|---------|-----------|-------------|
+| prisma-schema.md | `prisma_schema` | Database schema changes |
+| server-action.md | `server_action` | Next.js server actions |
+| react-component.md | `react_component` | React components |
+| api-route.md | `api_route` | API endpoints |
+
+### AGENTS.md Discovery
+
+The system discovers AGENTS.md files in your project and matches them to tasks based on file paths:
+
+```
+Story mentions: prisma/schema.prisma
+Discovery: prisma/AGENTS.md exists
+Result: patternsToFollow = "prisma/AGENTS.md"
+```
+
+### Step Generation Flow
+
+1. **Extract keywords** from story title/description
+2. **Match against pattern library** (keyword + file pattern matching)
+3. **If match found**: Use pattern's step template
+4. **If no match**: LLM generates domain-aware steps
+5. **Discover AGENTS.md**: Find relevant project patterns
+6. **Store in tasks.json**: taskType, steps, relevantFiles, patternsToFollow
 
 ## Story Sizing
 
