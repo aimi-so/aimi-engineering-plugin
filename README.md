@@ -8,9 +8,11 @@ Autonomous task execution with Ralph-style JSON tasks for Claude Code.
 
 ```bash
 # Install compound-engineering first
+claude /plugin marketplace add https://github.com/EveryInc/compound-engineering-plugin
 claude /plugin install compound-engineering
 
 # Then install aimi-engineering
+claude /plugin marketplace add https://github.com/aimi-so/aimi-engineering-plugin
 claude /plugin install aimi-engineering
 ```
 
@@ -75,7 +77,7 @@ docs/tasks/
       "title": "Add database schema",
       "acceptanceCriteria": ["...", "Typecheck passes"],
       "priority": 1,
-      "passes": false
+      "completed": false
     }
   ]
 }

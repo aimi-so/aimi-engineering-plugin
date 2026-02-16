@@ -4,6 +4,34 @@
 
 The `tasks.json` file is the structured task list that drives autonomous execution. Each user story represents a unit of work completable in a single agent context window.
 
+## Schema Validation
+
+**CRITICAL:** Before processing tasks.json, validate the structure:
+
+### Required Root Fields
+- `project` (string, non-empty)
+- `branchName` (string, matches `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$`)
+- `description` (string, non-empty)
+- `userStories` (array, at least one item)
+
+### Required UserStory Fields
+- `id` (string, matches `^US-\d{3}$`)
+- `title` (string, non-empty, max 200 chars)
+- `description` (string, non-empty, max 500 chars)
+- `acceptanceCriteria` (array of strings, at least one item)
+- `priority` (number, positive integer)
+- `completed` (boolean)
+
+### Validation Errors
+
+If validation fails, report the specific error:
+```
+Error: Invalid tasks.json - [field] is missing or invalid.
+Please run /aimi:plan to regenerate tasks.json.
+```
+
+Do NOT proceed with invalid tasks.json.
+
 ## Schema
 
 ```json
@@ -41,10 +69,42 @@ The `tasks.json` file is the structured task list that drives autonomous executi
 | `description` | string | Yes | User story format: "As a [role], I need [feature]" |
 | `acceptanceCriteria` | array | Yes | List of verifiable criteria |
 | `priority` | number | Yes | Execution order (1 = first) |
-| `passes` | boolean | Yes | Whether story is complete |
-| `notes` | string | Yes | Execution notes, errors, or learnings |
+| `completed` | boolean | Yes | Whether story is complete |
+| `notes` | string | Yes | Execution notes or learnings |
 | `attempts` | number | Yes | Number of execution attempts |
 | `lastAttempt` | string | No | ISO 8601 timestamp of last attempt |
+| `error` | object | No | Structured error details (see Error Schema) |
+
+### Error Schema (for failed stories)
+
+When a story fails, populate the `error` field with structured data:
+
+```json
+{
+  "error": {
+    "type": "typecheck_failure|test_failure|lint_failure|runtime_error|dependency_missing|unknown",
+    "message": "Detailed error message",
+    "file": "path/to/file.ts (optional)",
+    "line": 42,
+    "suggestion": "Possible fix or next step (optional)"
+  }
+}
+```
+
+**Error Types:**
+| Type | Description |
+|------|-------------|
+| `typecheck_failure` | TypeScript/type errors |
+| `test_failure` | Unit/integration test failures |
+| `lint_failure` | ESLint/Prettier/linting errors |
+| `runtime_error` | Errors during execution |
+| `dependency_missing` | Missing npm/pip/gem packages |
+| `unknown` | Unclassified errors |
+
+This structured format enables:
+- Programmatic error categorization
+- Smart retry decisions (transient vs permanent errors)
+- Better error reporting in `/aimi:status`
 
 ## Complete Example
 
@@ -66,7 +126,7 @@ The `tasks.json` file is the structured task list that drives autonomous executi
         "Typecheck passes"
       ],
       "priority": 1,
-      "passes": false,
+      "completed": false,
       "notes": "",
       "attempts": 0,
       "lastAttempt": null
@@ -82,7 +142,7 @@ The `tasks.json` file is the structured task list that drives autonomous executi
         "Unit tests pass"
       ],
       "priority": 2,
-      "passes": false,
+      "completed": false,
       "notes": "",
       "attempts": 0,
       "lastAttempt": null
@@ -99,7 +159,7 @@ The `tasks.json` file is the structured task list that drives autonomous executi
         "Verify changes work in browser"
       ],
       "priority": 3,
-      "passes": false,
+      "completed": false,
       "notes": "",
       "attempts": 0,
       "lastAttempt": null

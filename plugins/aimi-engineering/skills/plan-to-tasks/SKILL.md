@@ -84,7 +84,7 @@ Create the users table with authentication fields.
     "Typecheck passes"
   ],
   "priority": 1,
-  "passes": false,
+  "completed": false,
   "notes": "",
   "attempts": 0,
   "lastAttempt": null
