@@ -222,6 +222,7 @@ All execution state lives in `docs/tasks/tasks.json`. No separate progress file.
       "notes": "",
       "taskType": "prisma_schema",
       "steps": [
+        "Read CLAUDE.md and AGENTS.md for project conventions",
         "Read prisma/schema.prisma to understand existing models",
         "Add User model with id, email, passwordHash, createdAt fields",
         "Add unique constraint on email field",
@@ -230,8 +231,7 @@ All execution state lives in `docs/tasks/tasks.json`. No separate progress file.
         "Verify typecheck passes"
       ],
       "relevantFiles": ["prisma/schema.prisma", "src/lib/db.ts"],
-      "patternsToFollow": "prisma/AGENTS.md",
-      "qualityChecks": ["npx tsc --noEmit", "npm test"]
+      "qualityChecks": ["npx tsc --noEmit"]
     }
   ]
 }
@@ -489,27 +489,25 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 ## Version History
 
-**Current Version:** 0.7.0
+**Current Version:** 2.0.0
 
 ### Recent Changes
+
+**v2.0.0** - Task-Specific Field Restoration
+- Restored `taskType`, `steps`, `relevantFiles`, `qualityChecks` fields
+- Automated field generation via keyword detection (7 task types)
+- CLAUDE.md/AGENTS.md enforced as step 1 in all stories
+- Schema version set to "2.0"
+
+**v1.0.0** - Ralph-Style Flat Stories
+- Flat story structure (no nested tasks array)
+- Priority-based execution order
+- Project guidelines loading from CLAUDE.md/AGENTS.md
 
 **v0.7.0** - Project Guidelines Injection
 - CLAUDE.md/AGENTS.md content injected into Task prompts
 - Aimi default commit/PR rules as fallback
 - Fresh context per story (no memory carryover)
-
-**v0.6.0** - State Consolidation
-- Removed `progress.md` - all state now in `tasks.json`
-- Simplified prompt templates
-
-**v0.5.0** - jq-based Extraction
-- One story loaded at a time via jq
-- Added `skipped` field to prevent infinite loops
-
-**v0.4.0** - Task-Specific Steps
-- Pattern library for domain-aware step generation
-- AGENTS.md discovery and matching
-- Added `taskType`, `steps`, `relevantFiles`, `patternsToFollow` fields
 
 See [CHANGELOG.md](CHANGELOG.md) for complete version history.
 
