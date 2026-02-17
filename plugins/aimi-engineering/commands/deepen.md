@@ -37,7 +37,7 @@ For each story in the new conversion:
   - Keep `notes` value from old state
   - Keep `attempts` value from old state
   - Keep `lastAttempt` value from old state
-  - Update `acceptanceCriteria` with enhanced details
+  - Update story's `acceptanceCriteria` with enhanced details
 - If no match, use new story as-is
 
 ## Step 5: Update tasks.json
