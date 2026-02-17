@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-02-17
+
+### Changed
+
+- **BREAKING:** Restored v2.0 schema with task-specific fields
+  - Re-added `taskType`, `steps`, `relevantFiles`, `qualityChecks` to story schema
+  - `schemaVersion` changed from "3.0" to "2.0"
+  - Improved agent execution with domain-specific guidance
+  - All story `steps` start with "Read CLAUDE.md and AGENTS.md for project conventions"
+
+### Added
+
+- Automated taskType detection via keyword matching (7 types)
+  - `prisma_schema` - Database schema/migration changes
+  - `server_action` - Server-side logic and actions
+  - `react_component` - React/UI component work
+  - `api_route` - API endpoint implementation
+  - `utility` - Helper functions and services
+  - `test` - Test implementation
+  - `other` - Fallback for unclassified tasks
+- Predefined step templates for each taskType
+- `relevantFiles` inference from story content + taskType defaults
+- `qualityChecks` assignment based on taskType
+- New placeholders in prompt template: `[TASK_TYPE]`, `[STEPS_ENUMERATED]`, `[RELEVANT_FILES_BULLETED]`, `[QUALITY_CHECKS_BULLETED]`
+
+### Removed
+
+- v3.0 schema (minimal field set without task-specific guidance)
+
+### Migration
+
+Existing v3.0 tasks.json files must be regenerated:
+
+```bash
+/aimi:plan [feature]
+```
+
 ## [1.0.0] - 2026-02-16
 
 ### Changed

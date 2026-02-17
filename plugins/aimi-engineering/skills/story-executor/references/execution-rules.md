@@ -2,11 +2,11 @@
 
 ## Overview
 
-Each story is executed by a Task-spawned agent with fresh context. This document defines the execution flow, quality gates, and output formats for the v3.0 schema.
+Each story is executed by a Task-spawned agent with fresh context. This document defines the execution flow, quality gates, and output formats for the v2.0 schema.
 
-## Schema Overview (v3.0)
+## Schema Overview (v2.0)
 
-Stories are flat, atomic units of work:
+Stories include task-specific guidance fields:
 
 ```json
 {
@@ -20,7 +20,18 @@ Stories are flat, atomic units of work:
   ],
   "priority": 1,
   "passes": false,
-  "notes": ""
+  "notes": "",
+  "taskType": "prisma_schema",
+  "steps": [
+    "Read CLAUDE.md and AGENTS.md for project conventions",
+    "Read prisma/schema.prisma to understand existing models",
+    "Add/modify the model or field",
+    "Run: npx prisma generate",
+    "Run: npx prisma migrate dev --name [descriptive-name]",
+    "Verify typecheck passes"
+  ],
+  "relevantFiles": ["prisma/schema.prisma"],
+  "qualityChecks": ["npx tsc --noEmit"]
 }
 ```
 
@@ -40,33 +51,55 @@ You spawn fresh with no memory of previous work. If the story is too big, you'll
 2. **AGENTS.md** (directory-specific) - Module-specific patterns
 3. **Aimi defaults** - Standard conventions if neither exists
 
-### Step 2: Understand Story Scope
+### Step 2: Review Task Guidance
 
-Read the story details:
-- Title and description
-- All acceptance criteria
-- Infer which files need modification
+Check the task-specific fields for domain context:
 
-### Step 3: Implement the Change
+- **`taskType`**: Domain classification (e.g., "prisma_schema", "react_component")
+  - Helps understand the type of work being done
+- **`steps`**: Concrete execution steps (follow in order)
+  - The first step is always "Read CLAUDE.md and AGENTS.md for project conventions"
+  - Each step provides specific guidance for this task type
+- **`relevantFiles`**: Files to read first before implementing
+  - Start by reading these to understand current state
+- **`qualityChecks`**: Quality gates that must pass before commit
+  - Run ALL of these commands before committing
 
-1. **Read relevant files** to understand current state
-2. **Make the necessary changes** to satisfy acceptance criteria
-3. **Verify each criterion** as you go
+### Step 3: Follow Execution Steps
 
-### Step 4: Run Quality Checks
+**Execute the steps in order from `story.steps` array.**
 
-After implementation, run quality checks:
+The steps are pre-generated based on the task type and provide domain-specific guidance. Example for `prisma_schema`:
+
+1. Read CLAUDE.md and AGENTS.md for project conventions
+2. Read prisma/schema.prisma to understand existing models
+3. Add/modify the model or field
+4. Run: npx prisma generate
+5. Run: npx prisma migrate dev --name [descriptive-name]
+6. Verify typecheck passes
+
+### Step 4: Verify Acceptance Criteria
+
+After following the steps, verify ALL acceptance criteria are met:
+
+- Check each criterion explicitly
+- For UI stories, verify in browser
+- For logic stories, run tests
+
+### Step 5: Run Quality Checks
+
+Run ALL commands from `story.qualityChecks`:
 
 ```bash
-# Standard quality checks
-bun run lint      # or npm run lint
-bun run test      # or npm test  
-npx tsc --noEmit  # typecheck
+# Example for prisma_schema
+npx tsc --noEmit
+
+# Example for server_action
+npx tsc --noEmit
+npm test
 ```
 
-Then verify ALL acceptance criteria are met.
-
-### Step 5: Quality Gate (FAIL FAST)
+### Step 6: Quality Gate (FAIL FAST)
 
 **If any quality check or acceptance criterion fails, STOP immediately.**
 
@@ -80,7 +113,7 @@ Instead:
 - Include relevant file paths and line numbers
 - Suggest potential fixes if obvious
 
-### Step 6: Commit Changes
+### Step 7: Commit Changes
 
 If all checks pass, commit with this format:
 
@@ -96,7 +129,7 @@ Commit message format:
 - `[story-id]` from the story
 - Title from story title
 
-### Step 7: Update tasks.json
+### Step 8: Update tasks.json
 
 Update the story to mark it complete:
 
@@ -104,7 +137,7 @@ Update the story to mark it complete:
 jq '(.userStories[] | select(.id == "US-001")) |= . + {passes: true}' docs/tasks/tasks.json > tmp.json && mv tmp.json docs/tasks/tasks.json
 ```
 
-### Step 8: Update AGENTS.md or CLAUDE.md (if learnings)
+### Step 9: Update AGENTS.md or CLAUDE.md (if learnings)
 
 If you discovered something future developers/agents should know:
 
@@ -148,17 +181,29 @@ If you cannot complete a story:
 | `passes` | `true` | Completed successfully |
 | `skipped` | `true` | Skipped by user (won't retry) |
 
+## Task Types Reference
+
+| taskType | Description | Typical qualityChecks |
+|----------|-------------|----------------------|
+| `prisma_schema` | Database schema/migration | `npx tsc --noEmit` |
+| `server_action` | Server-side logic | `npx tsc --noEmit`, `npm test` |
+| `react_component` | React/UI components | `npx tsc --noEmit` |
+| `api_route` | API endpoints | `npx tsc --noEmit`, `npm test` |
+| `utility` | Helper functions | `npx tsc --noEmit`, `npm test` |
+| `test` | Test implementation | `npm test` |
+| `other` | Generic tasks | `npx tsc --noEmit` |
+
 ## Quality Gates Reference
 
-Common quality checks to run:
+Common quality checks by task type:
 
-| Gate | Command |
-|------|---------|
-| Lint | `bun run lint`, `npm run lint` |
-| Test | `bun run test`, `npm test` |
-| Typecheck | `npx tsc --noEmit`, `bun check` |
-| Build | `bun run build`, `npm run build` |
-| Browser | Manual verification for UI changes |
+| Gate | Command | When Used |
+|------|---------|-----------|
+| Typecheck | `npx tsc --noEmit` | All TypeScript tasks |
+| Lint | `bun run lint`, `npm run lint` | Code style enforcement |
+| Test | `bun run test`, `npm test` | Backend logic, utilities |
+| Build | `bun run build`, `npm run build` | Production readiness |
+| Browser | Manual verification | UI changes |
 
 ## Success Metrics
 

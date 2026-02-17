@@ -8,7 +8,7 @@ The `tasks.json` file is the structured task list that drives autonomous executi
 
 ```json
 {
-  "schemaVersion": "3.0",
+  "schemaVersion": "2.0",
   "metadata": {
     "title": "string",
     "type": "feature|refactor|bugfix|chore",
@@ -29,7 +29,7 @@ The `tasks.json` file is the structured task list that drives autonomous executi
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `schemaVersion` | string | Yes | Schema version, always "3.0" |
+| `schemaVersion` | string | Yes | Schema version, always "2.0" |
 | `metadata` | object | Yes | Project metadata |
 | `userStories` | array | Yes | Array of Story objects |
 | `successMetrics` | object | No | Key metrics to track |
@@ -48,6 +48,8 @@ The `tasks.json` file is the structured task list that drives autonomous executi
 
 Each story is ONE atomic unit of work completable in a single agent iteration.
 
+#### Core Fields
+
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `id` | string | Yes | Unique identifier (e.g., `US-001`, `US-002`) |
@@ -58,6 +60,29 @@ Each story is ONE atomic unit of work completable in a single agent iteration.
 | `passes` | boolean | Yes | `true` = completed successfully |
 | `notes` | string | No | Error details or learnings |
 | `skipped` | boolean | No | `true` = skipped by user |
+
+#### Task-Specific Fields (v2.0)
+
+These fields provide domain-specific guidance to improve agent execution quality.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `taskType` | string | Yes | Domain classification (one of 7 types, see below) |
+| `steps` | array | Yes | Ordered execution steps (4-7 items, first is always CLAUDE.md read) |
+| `relevantFiles` | array | Yes | Files to read first before implementing |
+| `qualityChecks` | array | Yes | Commands to run before commit (e.g., `npx tsc --noEmit`) |
+
+### TaskType Values
+
+| Value | Description | Example Keywords |
+|-------|-------------|------------------|
+| `prisma_schema` | Database schema/migration changes | schema, migration, database, table, column, model, prisma |
+| `server_action` | Server-side logic and actions | action, server, backend, mutation, query |
+| `react_component` | React/UI component work | component, ui, display, render, page, view |
+| `api_route` | API endpoint implementation | endpoint, route, api, handler, get, post, request |
+| `utility` | Helper functions and services | helper, util, function, service, lib |
+| `test` | Test implementation | test, spec, unit test, integration test |
+| `other` | Fallback for unclassified tasks | (default when no keywords match) |
 
 ## The Number One Rule: Story Size
 
@@ -132,11 +157,11 @@ Story IDs follow the pattern: `US-XXX`
 - `US-002`: Second story
 - `US-010`: Tenth story
 
-## Complete Example
+## Complete Example (v2.0)
 
 ```json
 {
-  "schemaVersion": "3.0",
+  "schemaVersion": "2.0",
   "metadata": {
     "title": "feat: Add task status feature",
     "type": "feature",
@@ -155,7 +180,18 @@ Story IDs follow the pattern: `US-XXX`
       ],
       "priority": 1,
       "passes": false,
-      "notes": ""
+      "notes": "",
+      "taskType": "prisma_schema",
+      "steps": [
+        "Read CLAUDE.md and AGENTS.md for project conventions",
+        "Read prisma/schema.prisma to understand existing models",
+        "Add/modify the model or field",
+        "Run: npx prisma generate",
+        "Run: npx prisma migrate dev --name [descriptive-name]",
+        "Verify typecheck passes"
+      ],
+      "relevantFiles": ["prisma/schema.prisma"],
+      "qualityChecks": ["npx tsc --noEmit"]
     },
     {
       "id": "US-002",
@@ -169,7 +205,18 @@ Story IDs follow the pattern: `US-XXX`
       ],
       "priority": 2,
       "passes": false,
-      "notes": ""
+      "notes": "",
+      "taskType": "react_component",
+      "steps": [
+        "Read CLAUDE.md and AGENTS.md for project conventions",
+        "Read existing components to understand patterns",
+        "Create the component file with proper types",
+        "Import and use in parent component",
+        "Style according to existing patterns",
+        "Verify typecheck passes"
+      ],
+      "relevantFiles": ["src/components/TaskCard.tsx"],
+      "qualityChecks": ["npx tsc --noEmit"]
     },
     {
       "id": "US-003",
@@ -184,7 +231,18 @@ Story IDs follow the pattern: `US-XXX`
       ],
       "priority": 3,
       "passes": false,
-      "notes": ""
+      "notes": "",
+      "taskType": "react_component",
+      "steps": [
+        "Read CLAUDE.md and AGENTS.md for project conventions",
+        "Read existing components to understand patterns",
+        "Create the component file with proper types",
+        "Import and use in parent component",
+        "Style according to existing patterns",
+        "Verify typecheck passes"
+      ],
+      "relevantFiles": ["src/components/TaskList.tsx", "src/components/StatusToggle.tsx"],
+      "qualityChecks": ["npx tsc --noEmit"]
     },
     {
       "id": "US-004",
@@ -198,7 +256,18 @@ Story IDs follow the pattern: `US-XXX`
       ],
       "priority": 4,
       "passes": false,
-      "notes": ""
+      "notes": "",
+      "taskType": "react_component",
+      "steps": [
+        "Read CLAUDE.md and AGENTS.md for project conventions",
+        "Read existing components to understand patterns",
+        "Create the component file with proper types",
+        "Import and use in parent component",
+        "Style according to existing patterns",
+        "Verify typecheck passes"
+      ],
+      "relevantFiles": ["src/components/TaskFilters.tsx", "src/components/TaskList.tsx"],
+      "qualityChecks": ["npx tsc --noEmit"]
     }
   ],
   "successMetrics": {
@@ -224,13 +293,15 @@ Stories use a simple pass/fail model:
 
 Before processing, validate:
 
-1. `schemaVersion` must be "3.0"
+1. `schemaVersion` must be "2.0"
 2. `metadata.title` must be non-empty
 3. `metadata.type` must be one of: feature, refactor, bugfix, chore
 4. `userStories` must have at least one item
 5. Each story must have `id`, `title`, `description`, `acceptanceCriteria`, `priority`, `passes`
-6. Each story's `acceptanceCriteria` must include "Typecheck passes"
-7. Stories must be ordered by `priority` (no duplicates)
+6. Each story must have `taskType`, `steps`, `relevantFiles`, `qualityChecks` (v2.0 required fields)
+7. Each story's `acceptanceCriteria` must include "Typecheck passes"
+8. Each story's `steps[0]` must start with "Read CLAUDE.md"
+9. Stories must be ordered by `priority` (no duplicates)
 
 ### Validation Error Format
 
@@ -239,13 +310,16 @@ Error: Invalid tasks.json - [field] is missing or invalid.
 Fix: [specific action to fix]
 ```
 
-## Migration from v2.0
+## Migration from v3.0
 
-If you have a v2.0 tasks.json with nested tasks:
+If you have a v3.0 tasks.json (flat stories without task-specific fields):
 
-1. Each story's tasks become part of the description/acceptance criteria
-2. Remove the `tasks` array
-3. Add `priority` field based on story order
-4. Add `passes: false` to each story
-5. Ensure "Typecheck passes" is in every story's acceptance criteria
-6. Update `schemaVersion` to "3.0"
+1. Regenerate tasks.json using `/aimi:plan [feature]`
+2. The plan-to-tasks skill will automatically generate all 4 task-specific fields:
+   - `taskType` - detected from story keywords
+   - `steps` - generated from taskType template
+   - `relevantFiles` - inferred from story content
+   - `qualityChecks` - assigned based on taskType
+3. Update `schemaVersion` to "2.0"
+
+No manual migration needed - just regenerate.

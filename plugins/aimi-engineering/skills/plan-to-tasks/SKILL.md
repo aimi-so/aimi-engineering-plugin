@@ -63,15 +63,181 @@ The agent spawns fresh per iteration with no memory of previous work. If a story
    - **Always add "Typecheck passes"** as final criterion
    - Set `passes: false` and `notes: ""`
 
-4. **Order by dependencies** (set priority):
+4. **Generate task-specific fields for each story** (see below)
+
+5. **Order by dependencies** (set priority):
    1. Schema/database changes (migrations)
    2. Server actions / backend logic  
    3. UI components that use the backend
    4. Dashboard/summary views that aggregate data
 
-5. **Extract success metrics** if present in plan
+6. **Set schemaVersion to "2.0"**
 
-## Story Format
+7. **Extract success metrics** if present in plan
+
+## Task-Specific Field Generation
+
+For each story, generate 4 additional fields to guide agent execution.
+
+### Step 1: Detect taskType
+
+Scan the story's title + description for keywords and classify into one of 7 types:
+
+| taskType | Keywords to Match |
+|----------|-------------------|
+| `prisma_schema` | schema, migration, database, table, column, model, prisma, db |
+| `server_action` | action, server, backend, mutation, query, server action, use server |
+| `react_component` | component, ui, display, render, page, view, button, form, modal |
+| `api_route` | endpoint, route, api, handler, get, post, put, delete, request |
+| `utility` | helper, util, function, service, lib, hook, context |
+| `test` | test, spec, unit test, integration test, e2e |
+| `other` | (fallback when no keywords match) |
+
+**Detection logic:**
+```
+text = (story.title + " " + story.description).toLowerCase()
+
+if text matches /schema|migration|database|table|column|model|prisma|db/
+  → return "prisma_schema"
+if text matches /action|server|backend|mutation|query|server action|use server/
+  → return "server_action"
+if text matches /component|ui|display|render|page|view|button|form|modal/
+  → return "react_component"
+if text matches /endpoint|route|api|handler|get|post|put|delete|request/
+  → return "api_route"
+if text matches /helper|util|function|service|lib|hook|context/
+  → return "utility"
+if text matches /test|spec|unit test|integration test|e2e/
+  → return "test"
+else
+  → return "other"
+```
+
+### Step 2: Generate steps
+
+Use predefined templates based on taskType. **Every template starts with "Read CLAUDE.md and AGENTS.md for project conventions"**.
+
+#### prisma_schema steps:
+```json
+[
+  "Read CLAUDE.md and AGENTS.md for project conventions",
+  "Read prisma/schema.prisma to understand existing models",
+  "Add/modify the model or field",
+  "Run: npx prisma generate",
+  "Run: npx prisma migrate dev --name [descriptive-name]",
+  "Verify typecheck passes"
+]
+```
+
+#### server_action steps:
+```json
+[
+  "Read CLAUDE.md and AGENTS.md for project conventions",
+  "Read existing actions in the module to understand patterns",
+  "Create/update the server action function",
+  "Add proper error handling and validation",
+  "Export the action from actions.ts",
+  "Run typecheck and tests"
+]
+```
+
+#### react_component steps:
+```json
+[
+  "Read CLAUDE.md and AGENTS.md for project conventions",
+  "Read existing components to understand patterns",
+  "Create the component file with proper types",
+  "Import and use in parent component",
+  "Style according to existing patterns",
+  "Verify typecheck passes"
+]
+```
+
+#### api_route steps:
+```json
+[
+  "Read CLAUDE.md and AGENTS.md for project conventions",
+  "Read existing API routes to understand patterns",
+  "Create/update the route handler",
+  "Add request validation and error handling",
+  "Test the endpoint manually or with tests",
+  "Verify typecheck passes"
+]
+```
+
+#### utility steps:
+```json
+[
+  "Read CLAUDE.md and AGENTS.md for project conventions",
+  "Read related utility files to understand patterns",
+  "Create/update the utility function",
+  "Add proper types and JSDoc comments",
+  "Write unit tests for the utility",
+  "Verify typecheck and tests pass"
+]
+```
+
+#### test steps:
+```json
+[
+  "Read CLAUDE.md and AGENTS.md for project conventions",
+  "Read the code being tested to understand behavior",
+  "Create test file following project test patterns",
+  "Write test cases covering happy path and edge cases",
+  "Run tests to verify they pass",
+  "Verify typecheck passes"
+]
+```
+
+#### other steps (generic fallback):
+```json
+[
+  "Read CLAUDE.md and AGENTS.md for project conventions",
+  "Read relevant files to understand current state",
+  "Implement the required changes",
+  "Verify acceptance criteria",
+  "Run quality checks",
+  "Verify typecheck passes"
+]
+```
+
+### Step 3: Infer relevantFiles
+
+Extract file paths mentioned in the story content (description + acceptanceCriteria). If none found, use taskType defaults.
+
+**Extraction logic:**
+```
+mentioned = extract file paths from (story.description + story.acceptanceCriteria.join(" "))
+  - Match patterns like: src/..., prisma/..., app/..., pages/..., *.tsx, *.ts
+
+if mentioned is not empty:
+  return mentioned
+
+else return defaults based on taskType:
+  prisma_schema → ["prisma/schema.prisma"]
+  server_action → ["src/actions/", "app/actions/"]
+  react_component → ["src/components/"]
+  api_route → ["app/api/", "pages/api/"]
+  utility → ["src/lib/", "src/utils/"]
+  test → ["__tests__/", "*.test.ts"]
+  other → []
+```
+
+### Step 4: Assign qualityChecks
+
+Assign verification commands based on taskType:
+
+| taskType | qualityChecks |
+|----------|---------------|
+| `prisma_schema` | `["npx tsc --noEmit"]` |
+| `server_action` | `["npx tsc --noEmit", "npm test"]` |
+| `react_component` | `["npx tsc --noEmit"]` |
+| `api_route` | `["npx tsc --noEmit", "npm test"]` |
+| `utility` | `["npx tsc --noEmit", "npm test"]` |
+| `test` | `["npm test"]` |
+| `other` | `["npx tsc --noEmit"]` |
+
+## Story Format (v2.0)
 
 ```json
 {
@@ -85,7 +251,18 @@ The agent spawns fresh per iteration with no memory of previous work. If a story
   ],
   "priority": 1,
   "passes": false,
-  "notes": ""
+  "notes": "",
+  "taskType": "prisma_schema",
+  "steps": [
+    "Read CLAUDE.md and AGENTS.md for project conventions",
+    "Read prisma/schema.prisma to understand existing models",
+    "Add/modify the model or field",
+    "Run: npx prisma generate",
+    "Run: npx prisma migrate dev --name [descriptive-name]",
+    "Verify typecheck passes"
+  ],
+  "relevantFiles": ["prisma/schema.prisma"],
+  "qualityChecks": ["npx tsc --noEmit"]
 }
 ```
 
@@ -127,7 +304,7 @@ If a plan has big features, split them:
 
 Each is one focused change that can be completed and verified independently.
 
-## Example Conversion
+## Example Conversion (v2.0)
 
 ### Input Plan Section
 
@@ -147,7 +324,7 @@ Add ability to mark tasks with different statuses.
 
 ```json
 {
-  "schemaVersion": "3.0",
+  "schemaVersion": "2.0",
   "metadata": {
     "title": "feat: Add task status feature",
     "type": "feature",
@@ -166,7 +343,18 @@ Add ability to mark tasks with different statuses.
       ],
       "priority": 1,
       "passes": false,
-      "notes": ""
+      "notes": "",
+      "taskType": "prisma_schema",
+      "steps": [
+        "Read CLAUDE.md and AGENTS.md for project conventions",
+        "Read prisma/schema.prisma to understand existing models",
+        "Add/modify the model or field",
+        "Run: npx prisma generate",
+        "Run: npx prisma migrate dev --name add-status-field",
+        "Verify typecheck passes"
+      ],
+      "relevantFiles": ["prisma/schema.prisma"],
+      "qualityChecks": ["npx tsc --noEmit"]
     },
     {
       "id": "US-002",
@@ -180,7 +368,18 @@ Add ability to mark tasks with different statuses.
       ],
       "priority": 2,
       "passes": false,
-      "notes": ""
+      "notes": "",
+      "taskType": "react_component",
+      "steps": [
+        "Read CLAUDE.md and AGENTS.md for project conventions",
+        "Read existing components to understand patterns",
+        "Create the component file with proper types",
+        "Import and use in parent component",
+        "Style according to existing patterns",
+        "Verify typecheck passes"
+      ],
+      "relevantFiles": ["src/components/TaskCard.tsx"],
+      "qualityChecks": ["npx tsc --noEmit"]
     },
     {
       "id": "US-003",
@@ -195,7 +394,18 @@ Add ability to mark tasks with different statuses.
       ],
       "priority": 3,
       "passes": false,
-      "notes": ""
+      "notes": "",
+      "taskType": "react_component",
+      "steps": [
+        "Read CLAUDE.md and AGENTS.md for project conventions",
+        "Read existing components to understand patterns",
+        "Create the component file with proper types",
+        "Import and use in parent component",
+        "Style according to existing patterns",
+        "Verify typecheck passes"
+      ],
+      "relevantFiles": ["src/components/TaskList.tsx"],
+      "qualityChecks": ["npx tsc --noEmit"]
     },
     {
       "id": "US-004",
@@ -209,7 +419,18 @@ Add ability to mark tasks with different statuses.
       ],
       "priority": 4,
       "passes": false,
-      "notes": ""
+      "notes": "",
+      "taskType": "react_component",
+      "steps": [
+        "Read CLAUDE.md and AGENTS.md for project conventions",
+        "Read existing components to understand patterns",
+        "Create the component file with proper types",
+        "Import and use in parent component",
+        "Style according to existing patterns",
+        "Verify typecheck passes"
+      ],
+      "relevantFiles": ["src/components/TaskFilters.tsx"],
+      "qualityChecks": ["npx tsc --noEmit"]
     }
   ],
   "successMetrics": {
@@ -229,6 +450,9 @@ Before writing tasks.json, verify:
 - [ ] Acceptance criteria are verifiable (not vague)
 - [ ] No story depends on a later story
 - [ ] All stories have `passes: false` and empty `notes`
+- [ ] **All stories have `taskType`, `steps`, `relevantFiles`, `qualityChecks`** (v2.0)
+- [ ] **All `steps[0]` start with "Read CLAUDE.md and AGENTS.md"**
+- [ ] **schemaVersion is "2.0"**
 
 ## Error Handling
 
