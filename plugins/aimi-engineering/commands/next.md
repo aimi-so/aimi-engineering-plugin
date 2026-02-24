@@ -9,13 +9,28 @@ allowed-tools: Read, Write, Edit, Bash(git:*), Bash(jq:*), Bash(npm:*), Bash(bun
 
 Execute the next pending story using a Task-spawned agent.
 
-## Step 1: Find Next Story (via jq)
+## Step 1: Discover and Find Next Story (via jq)
 
-**CRITICAL:** Do NOT read the full tasks.json. Use `jq` to extract ONLY the next pending story.
+**CRITICAL:** Do NOT read the full tasks file. Use `jq` to extract ONLY the next pending story.
+
+### Find the tasks file:
+
+```bash
+# Find the most recent tasks file
+TASKS_FILE=$(ls -t docs/tasks/*-tasks.json 2>/dev/null | head -1)
+```
+
+If no file found:
+```
+No tasks file found. Run /aimi:plan to create a task list first.
+```
+STOP execution.
+
+### Extract the next pending story:
 
 ```bash
 # Extract the next pending story (lowest priority, passes=false, not skipped)
-jq '[.userStories[] | select(.passes == false and .skipped != true)] | sort_by(.priority) | .[0]' docs/tasks/tasks.json
+jq '[.userStories[] | select(.passes == false and .skipped != true)] | sort_by(.priority) | .[0]' "$TASKS_FILE"
 ```
 
 This loads only ONE story into memory, not all stories.
@@ -29,7 +44,7 @@ This loads only ONE story into memory, not all stories.
 
 ```bash
 # Get count of pending stories
-jq '[.userStories[] | select(.passes == false and .skipped != true)] | length' docs/tasks/tasks.json
+jq '[.userStories[] | select(.passes == false and .skipped != true)] | length' "$TASKS_FILE"
 ```
 
 If result is `0`:
@@ -46,7 +61,7 @@ jq '{
   completed: [.userStories[] | select(.passes == true)] | length,
   skipped: [.userStories[] | select(.skipped == true)] | length,
   total: .userStories | length
-}' docs/tasks/tasks.json
+}' "$TASKS_FILE"
 ```
 
 ## Step 2: Load Project Guidelines
@@ -142,13 +157,13 @@ Description: [STORY_DESCRIPTION]
 3. Implement the changes to satisfy ALL acceptance criteria
 4. Verify each criterion is met
 5. Run quality checks (typecheck, lint, tests as appropriate)
-6. Commit with message: 'feat: [STORY_ID] - [STORY_TITLE]'
-7. Update docs/tasks/tasks.json: Set passes: true for story [STORY_ID]
+6. Commit with message: 'feat(scope): [STORY_TITLE]'
+7. Update the tasks file: Set passes: true for story [STORY_ID]
 
 ## ON FAILURE
 
 Do NOT mark passes: true. Instead:
-1. Update tasks.json with notes describing the failure
+1. Update the tasks file with notes describing the failure
 2. Return with clear failure report including:
    - What failed
    - Error messages
@@ -161,15 +176,15 @@ Do NOT mark passes: true. Instead:
 
 ### If Task succeeds:
 
-**Step 5a: Verify tasks.json updated**
+**Step 5a: Verify tasks file updated**
 
 ```bash
-jq '.userStories[] | select(.id == "[STORY_ID]") | .passes' docs/tasks/tasks.json
+jq '.userStories[] | select(.id == "[STORY_ID]") | .passes' "$TASKS_FILE"
 ```
 
 If not `true`, update it:
 ```bash
-jq '(.userStories[] | select(.id == "[STORY_ID]")) |= . + {passes: true}' docs/tasks/tasks.json > tmp.json && mv tmp.json docs/tasks/tasks.json
+jq '(.userStories[] | select(.id == "[STORY_ID]")) |= . + {passes: true}' "$TASKS_FILE" > tmp.json && mv tmp.json "$TASKS_FILE"
 ```
 
 **Step 5b: Report success**
@@ -183,10 +198,10 @@ Run /aimi:status to see overall progress.
 
 ### If Task fails (first attempt):
 
-1. Update tasks.json with failure notes:
+1. Update the tasks file with failure notes:
 
 ```bash
-jq '(.userStories[] | select(.id == "[STORY_ID]")) |= . + {notes: "Attempt 1 failed: [error summary]"}' docs/tasks/tasks.json > tmp.json && mv tmp.json docs/tasks/tasks.json
+jq '(.userStories[] | select(.id == "[STORY_ID]")) |= . + {notes: "Attempt 1 failed: [error summary]"}' "$TASKS_FILE" > tmp.json && mv tmp.json "$TASKS_FILE"
 ```
 
 2. RETRY automatically with error context:
@@ -205,10 +220,10 @@ Please try a different approach or fix the issue described above.
 
 ### If Task fails (second attempt):
 
-1. Update tasks.json with detailed failure:
+1. Update the tasks file with detailed failure:
 
 ```bash
-jq '(.userStories[] | select(.id == "[STORY_ID]")) |= . + {notes: "Failed after 2 attempts: [error]"}' docs/tasks/tasks.json > tmp.json && mv tmp.json docs/tasks/tasks.json
+jq '(.userStories[] | select(.id == "[STORY_ID]")) |= . + {notes: "Failed after 2 attempts: [error]"}' "$TASKS_FILE" > tmp.json && mv tmp.json "$TASKS_FILE"
 ```
 
 2. Ask user with clear options:
@@ -231,7 +246,7 @@ What would you like to do?
 ### If user says "skip":
 
 ```bash
-jq '(.userStories[] | select(.id == "[STORY_ID]")) |= . + {skipped: true, notes: "Skipped by user after failed attempts"}' docs/tasks/tasks.json > tmp.json && mv tmp.json docs/tasks/tasks.json
+jq '(.userStories[] | select(.id == "[STORY_ID]")) |= . + {skipped: true, notes: "Skipped by user after failed attempts"}' "$TASKS_FILE" > tmp.json && mv tmp.json "$TASKS_FILE"
 ```
 
 Report: "Skipped [STORY_ID]. Run /aimi:next for the next story."

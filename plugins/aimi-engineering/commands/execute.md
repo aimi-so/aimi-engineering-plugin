@@ -9,9 +9,24 @@ allowed-tools: Read, Write, Edit, Bash(git:*), Bash(jq:*), Task
 
 Execute all pending stories in a loop, managing branches and handling failures.
 
-## Step 1: Read Tasks (Metadata Only via jq)
+## Step 1: Discover and Read Tasks (Metadata Only via jq)
 
-**CRITICAL:** Do NOT read the full tasks.json file. Use `jq` to extract only metadata.
+**CRITICAL:** Do NOT read the full tasks file. Use `jq` to extract only metadata.
+
+### Find the tasks file:
+
+```bash
+# Find the most recent tasks file
+TASKS_FILE=$(ls -t docs/tasks/*-tasks.json 2>/dev/null | head -1)
+```
+
+If no file found:
+```
+No tasks file found. Run /aimi:plan to create a task list first.
+```
+STOP execution.
+
+### Extract metadata:
 
 ```bash
 # Extract metadata only (no stories loaded into context)
@@ -21,7 +36,7 @@ jq '{
   completed: [.userStories[] | select(.passes == true)] | length,
   skipped: [.userStories[] | select(.skipped == true)] | length,
   total: .userStories | length
-}' docs/tasks/tasks.json
+}' "$TASKS_FILE"
 ```
 
 This returns:
@@ -41,14 +56,8 @@ This returns:
 - `skipped` - stories marked as skipped by user
 
 **DO NOT:**
-- Read the full tasks.json into memory
+- Read the full tasks file into memory
 - Load all stories into context
-
-If file doesn't exist:
-```
-No tasks.json found. Run /aimi:plan to create a task list first.
-```
-STOP execution.
 
 ## Step 2: Branch Setup
 
@@ -178,7 +187,7 @@ Run `/aimi:execute` to resume execution.
 
 If execution is interrupted unexpectedly:
 
-1. tasks.json preserves state (completed stories stay completed)
+1. Tasks file preserves state (completed stories stay completed)
 2. User can run `/aimi:execute` again to resume
 
 The loop will automatically skip completed stories and continue from the next pending one (by priority).

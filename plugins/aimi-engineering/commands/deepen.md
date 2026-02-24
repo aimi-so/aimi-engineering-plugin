@@ -14,14 +14,18 @@ Run compound-engineering's deepen workflow, then update tasks.json while preserv
 
 **IMPORTANT:** When compound-engineering presents post-enhancement options, DO NOT show them to the user. Proceed directly to Step 2.
 
-## Step 2: Read Current State
+## Step 2: Discover and Read Current State
 
-After deepening completes, read `docs/tasks/tasks.json` to capture current state:
+Find the tasks file:
+
+```bash
+TASKS_FILE=$(ls -t docs/tasks/*-tasks.json 2>/dev/null | head -1)
+```
+
+If found, capture current state:
 
 - Which stories have `passes: true`
 - Current `notes` field contents
-- Current `attempts` counts
-- Current `lastAttempt` timestamps
 
 ## Step 3: Re-Convert to Tasks
 
@@ -35,16 +39,12 @@ For each story in the new conversion:
 - If a matching story (by ID or title) exists in old state:
   - Keep `passes` value from old state
   - Keep `notes` value from old state
-  - Keep `attempts` value from old state
-  - Keep `lastAttempt` value from old state
   - Update story's `acceptanceCriteria` with enhanced details
 - If no match, use new story as-is
 
-## Step 5: Update tasks.json
+## Step 5: Update Tasks File
 
-Write the merged result to `docs/tasks/tasks.json`.
-
-Add or update `deepenedAt` field with current ISO 8601 timestamp.
+Write the merged result back to the same tasks file (preserving the dynamic filename).
 
 ## Step 6: Aimi-Branded Report (OVERRIDE)
 
@@ -54,7 +54,7 @@ Add or update `deepenedAt` field with current ISO 8601 timestamp.
 Plan deepened successfully!
 
 📋 Enhanced: docs/plans/[filename].md
-📝 Updated: docs/tasks/tasks.json
+📝 Updated: docs/tasks/[tasks-filename].json
 
 Changes:
 - [X] stories updated with research insights

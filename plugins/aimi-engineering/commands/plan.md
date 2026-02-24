@@ -37,9 +37,13 @@ Skill: plan-to-tasks
 Args: [plan-file-path]
 ```
 
-## Step 5: Write tasks.json
+## Step 5: Write Tasks File
 
-Write the converted tasks to `docs/tasks/tasks.json`.
+Write the converted tasks to `docs/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
+
+The filename should match the plan filename pattern:
+- Plan: `docs/plans/2026-02-16-task-status-plan.md`
+- Tasks: `docs/tasks/2026-02-16-task-status-tasks.json`
 
 ## Step 6: Aimi-Branded Report (OVERRIDE)
 
@@ -49,7 +53,7 @@ Write the converted tasks to `docs/tasks/tasks.json`.
 Plan and tasks created successfully!
 
 📋 Plan: docs/plans/[filename].md
-📝 Tasks: docs/tasks/tasks.json
+📝 Tasks: docs/tasks/[tasks-filename].json
 
 Stories: [X] total
 Schema version: 2.0
