@@ -8,9 +8,23 @@ allowed-tools: Bash(jq:*)
 
 Display the current execution progress using jq (minimal context usage).
 
-## Step 1: Get Status via jq
+## Step 1: Discover and Get Status via jq
 
-**CRITICAL:** Do NOT read full tasks.json. Use jq to extract status:
+**CRITICAL:** Do NOT read full tasks file. Use jq to extract status.
+
+### Find the tasks file:
+
+```bash
+# Find the most recent tasks file
+TASKS_FILE=$(ls -t docs/tasks/*-tasks.json 2>/dev/null | head -1)
+```
+
+If no file found:
+```
+No tasks file found. Run /aimi:plan to create a task list.
+```
+
+### Extract status:
 
 ```bash
 jq '{
@@ -19,12 +33,7 @@ jq '{
   pending: [.userStories[] | select(.passes == false and .skipped != true) | {id, title, priority}] | sort_by(.priority),
   skipped: [.userStories[] | select(.skipped == true) | {id, title, notes}],
   total: .userStories | length
-}' docs/tasks/tasks.json
-```
-
-If file doesn't exist, report:
-```
-No tasks.json found. Run /aimi:plan to create a task list.
+}' "$TASKS_FILE"
 ```
 
 ## Step 2: Calculate Progress
