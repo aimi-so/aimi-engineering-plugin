@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-02-24
+
+### Added
+
+- **aimi-cli.sh**: Single bash script for deterministic task file operations
+  - 13 subcommands: `init-session`, `find-tasks`, `status`, `metadata`, `next-story`, `current-story`, `mark-complete`, `mark-failed`, `mark-skipped`, `count-pending`, `get-branch`, `get-state`, `clear-state`
+  - State management via `.aimi/` directory (persists across `/clear`)
+  - Atomic file updates using temp file + mv pattern
+  - Comprehensive test suite (33 tests)
+- **Story-by-story execution**: Execute one story at a time with `/clear` between stories
+- `.gitignore` entry for `.aimi/` state directory
+
+### Changed
+
+- **Commands updated to use CLI instead of inline jq**:
+  - `/aimi:execute` - Uses `init-session`, `count-pending`, `get-state`
+  - `/aimi:next` - Uses `next-story`, `mark-complete`, `mark-failed`, `mark-skipped`
+  - `/aimi:status` - Uses `status` command
+- Simplified command files (less error-prone, no jq interpretation by AI)
+
+### Fixed
+
+- AI hallucination when interpreting bash commands embedded in markdown
+  - Variable substitution errors
+  - Command sequence errors
+  - jq query modifications
+  - Path/filename errors
+
 ## [2.0.0] - 2026-02-17
 
 ### Changed
