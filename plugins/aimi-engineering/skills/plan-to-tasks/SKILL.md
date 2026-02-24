@@ -1,28 +1,71 @@
 ---
 name: plan-to-tasks
-description: >
-  Convert markdown implementation plans to structured tasks.json format.
-  Use when user says "convert plan to tasks", "generate tasks from plan",
-  "create tasks.json", or after /aimi:plan completes.
+description: "Convert implementation plans to tasks.json format for autonomous execution. Use when you have a plan and need to convert it to tasks format. Triggers on: convert plan to tasks, create tasks.json, generate tasks from plan."
+user-invocable: true
 ---
 
-# Plan to Tasks Conversion
+# Plan to Tasks Converter
 
-Convert a markdown implementation plan into a structured `docs/tasks/tasks.json` file for autonomous execution.
+Converts implementation plans to the tasks.json format for autonomous agent execution.
 
-## Input
+---
 
-A markdown plan file path containing Implementation Phases sections.
+## The Job
 
-## Output
+Take a plan (markdown file) and convert it to `docs/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
 
-A `docs/tasks/tasks.json` file following the schema in [task-format.md](./references/task-format.md).
+---
 
-## The Number One Rule: Story Size
+## Output Format
+
+**Filename:** `docs/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
+
+Example: `docs/tasks/2026-02-16-task-status-tasks.json`
+
+```json
+{
+  "schemaVersion": "2.0",
+  "metadata": {
+    "title": "feat: Add task status feature",
+    "type": "feat",
+    "branchName": "feat/add-task-status",
+    "createdAt": "2026-02-16",
+    "planPath": "docs/plans/2026-02-16-task-status-plan.md"
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "[Story title]",
+      "description": "As a [user], I want [feature] so that [benefit]",
+      "acceptanceCriteria": [
+        "Criterion 1",
+        "Criterion 2",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
+```
+
+### Type Values
+
+| Type | Use When |
+|------|----------|
+| `feat` | New feature |
+| `ref` | Refactoring |
+| `bug` | Bug fix |
+| `chore` | Maintenance task |
+
+---
+
+## Story Size: The Number One Rule
 
 **Each story must be completable in ONE agent iteration (one context window).**
 
-The agent spawns fresh per iteration with no memory of previous work. If a story is too big, the agent runs out of context before finishing and produces broken code.
+The agent spawns fresh per iteration with no memory of previous work. If a story is too big, the agent runs out of context before finishing.
 
 ### Right-sized stories:
 - Add a database column and migration
@@ -36,258 +79,70 @@ The agent spawns fresh per iteration with no memory of previous work. If a story
 
 **Rule of thumb:** If you cannot describe the change in 2-3 sentences, it is too big.
 
-## Conversion Steps
+---
 
-1. **Read the plan file** to extract:
-   - Title (from first heading or frontmatter)
-   - Type (feature/refactor/bugfix/chore - infer from title prefix)
-   - Implementation phases/requirements
+## Story Ordering: Dependencies First
 
-2. **Generate metadata**:
-   ```json
-   {
-     "title": "feat: Add user authentication",
-     "type": "feature",
-     "createdAt": "2026-02-16",
-     "planPath": "docs/plans/2026-02-16-feat-user-auth-plan.md",
-     "brainstormPath": "docs/brainstorms/..." // if exists
-   }
-   ```
+Stories execute in priority order. Earlier stories must not depend on later ones.
 
-3. **Convert each requirement to a user story**:
-   - Each atomic unit of work becomes ONE story
-   - Story ID: `US-001`, `US-002`, etc.
-   - Set `priority` based on dependency order
-   - Write description in user story format
-   - Extract verifiable acceptance criteria
-   - **Always add "Typecheck passes"** as final criterion
-   - Set `passes: false` and `notes: ""`
+**Correct order:**
+1. Schema/database changes (migrations)
+2. Server actions / backend logic
+3. UI components that use the backend
+4. Dashboard/summary views that aggregate data
 
-4. **Generate task-specific fields for each story** (see below)
+**Wrong order:**
+1. UI component (depends on schema that does not exist yet)
+2. Schema change
 
-5. **Order by dependencies** (set priority):
-   1. Schema/database changes (migrations)
-   2. Server actions / backend logic  
-   3. UI components that use the backend
-   4. Dashboard/summary views that aggregate data
+---
 
-6. **Set schemaVersion to "2.0"**
+## Acceptance Criteria: Must Be Verifiable
 
-7. **Extract success metrics** if present in plan
+Each criterion must be something the agent can CHECK, not something vague.
 
-## Task-Specific Field Generation
-
-For each story, generate 4 additional fields to guide agent execution.
-
-### Step 1: Detect taskType
-
-Scan the story's title + description for keywords and classify into one of 7 types:
-
-| taskType | Keywords to Match |
-|----------|-------------------|
-| `prisma_schema` | schema, migration, database, table, column, model, prisma, db |
-| `server_action` | action, server, backend, mutation, query, server action, use server |
-| `react_component` | component, ui, display, render, page, view, button, form, modal |
-| `api_route` | endpoint, route, api, handler, get, post, put, delete, request |
-| `utility` | helper, util, function, service, lib, hook, context |
-| `test` | test, spec, unit test, integration test, e2e |
-| `other` | (fallback when no keywords match) |
-
-**Detection logic:**
-```
-text = (story.title + " " + story.description).toLowerCase()
-
-if text matches /schema|migration|database|table|column|model|prisma|db/
-  → return "prisma_schema"
-if text matches /action|server|backend|mutation|query|server action|use server/
-  → return "server_action"
-if text matches /component|ui|display|render|page|view|button|form|modal/
-  → return "react_component"
-if text matches /endpoint|route|api|handler|get|post|put|delete|request/
-  → return "api_route"
-if text matches /helper|util|function|service|lib|hook|context/
-  → return "utility"
-if text matches /test|spec|unit test|integration test|e2e/
-  → return "test"
-else
-  → return "other"
-```
-
-### Step 2: Generate steps
-
-Use predefined templates based on taskType. **Every template starts with "Read CLAUDE.md and AGENTS.md for project conventions"**.
-
-#### prisma_schema steps:
-```json
-[
-  "Read CLAUDE.md and AGENTS.md for project conventions",
-  "Read prisma/schema.prisma to understand existing models",
-  "Add/modify the model or field",
-  "Run: npx prisma generate",
-  "Run: npx prisma migrate dev --name [descriptive-name]",
-  "Verify typecheck passes"
-]
-```
-
-#### server_action steps:
-```json
-[
-  "Read CLAUDE.md and AGENTS.md for project conventions",
-  "Read existing actions in the module to understand patterns",
-  "Create/update the server action function",
-  "Add proper error handling and validation",
-  "Export the action from actions.ts",
-  "Run typecheck and tests"
-]
-```
-
-#### react_component steps:
-```json
-[
-  "Read CLAUDE.md and AGENTS.md for project conventions",
-  "Read existing components to understand patterns",
-  "Create the component file with proper types",
-  "Import and use in parent component",
-  "Style according to existing patterns",
-  "Verify typecheck passes"
-]
-```
-
-#### api_route steps:
-```json
-[
-  "Read CLAUDE.md and AGENTS.md for project conventions",
-  "Read existing API routes to understand patterns",
-  "Create/update the route handler",
-  "Add request validation and error handling",
-  "Test the endpoint manually or with tests",
-  "Verify typecheck passes"
-]
-```
-
-#### utility steps:
-```json
-[
-  "Read CLAUDE.md and AGENTS.md for project conventions",
-  "Read related utility files to understand patterns",
-  "Create/update the utility function",
-  "Add proper types and JSDoc comments",
-  "Write unit tests for the utility",
-  "Verify typecheck and tests pass"
-]
-```
-
-#### test steps:
-```json
-[
-  "Read CLAUDE.md and AGENTS.md for project conventions",
-  "Read the code being tested to understand behavior",
-  "Create test file following project test patterns",
-  "Write test cases covering happy path and edge cases",
-  "Run tests to verify they pass",
-  "Verify typecheck passes"
-]
-```
-
-#### other steps (generic fallback):
-```json
-[
-  "Read CLAUDE.md and AGENTS.md for project conventions",
-  "Read relevant files to understand current state",
-  "Implement the required changes",
-  "Verify acceptance criteria",
-  "Run quality checks",
-  "Verify typecheck passes"
-]
-```
-
-### Step 3: Infer relevantFiles
-
-Extract file paths mentioned in the story content (description + acceptanceCriteria). If none found, use taskType defaults.
-
-**Extraction logic:**
-```
-mentioned = extract file paths from (story.description + story.acceptanceCriteria.join(" "))
-  - Match patterns like: src/..., prisma/..., app/..., pages/..., *.tsx, *.ts
-
-if mentioned is not empty:
-  return mentioned
-
-else return defaults based on taskType:
-  prisma_schema → ["prisma/schema.prisma"]
-  server_action → ["src/actions/", "app/actions/"]
-  react_component → ["src/components/"]
-  api_route → ["app/api/", "pages/api/"]
-  utility → ["src/lib/", "src/utils/"]
-  test → ["__tests__/", "*.test.ts"]
-  other → []
-```
-
-### Step 4: Assign qualityChecks
-
-Assign verification commands based on taskType:
-
-| taskType | qualityChecks |
-|----------|---------------|
-| `prisma_schema` | `["npx tsc --noEmit"]` |
-| `server_action` | `["npx tsc --noEmit", "npm test"]` |
-| `react_component` | `["npx tsc --noEmit"]` |
-| `api_route` | `["npx tsc --noEmit", "npm test"]` |
-| `utility` | `["npx tsc --noEmit", "npm test"]` |
-| `test` | `["npm test"]` |
-| `other` | `["npx tsc --noEmit"]` |
-
-## Story Format (v2.0)
-
-```json
-{
-  "id": "US-001",
-  "title": "Add status field to tasks table",
-  "description": "As a developer, I need to store task status in the database.",
-  "acceptanceCriteria": [
-    "Add status column: 'pending' | 'in_progress' | 'done' (default 'pending')",
-    "Generate and run migration successfully",
-    "Typecheck passes"
-  ],
-  "priority": 1,
-  "passes": false,
-  "notes": "",
-  "taskType": "prisma_schema",
-  "steps": [
-    "Read CLAUDE.md and AGENTS.md for project conventions",
-    "Read prisma/schema.prisma to understand existing models",
-    "Add/modify the model or field",
-    "Run: npx prisma generate",
-    "Run: npx prisma migrate dev --name [descriptive-name]",
-    "Verify typecheck passes"
-  ],
-  "relevantFiles": ["prisma/schema.prisma"],
-  "qualityChecks": ["npx tsc --noEmit"]
-}
-```
-
-## Acceptance Criteria Rules
-
-Each criterion must be VERIFIABLE, not vague.
-
-### Good criteria:
+### Good criteria (verifiable):
 - "Add `status` column to tasks table with default 'pending'"
 - "Filter dropdown has options: All, Active, Completed"
 - "Clicking delete shows confirmation dialog"
 - "Typecheck passes"
+- "Tests pass"
 
-### Bad criteria:
+### Bad criteria (vague):
 - "Works correctly"
 - "User can do X easily"
 - "Good UX"
 - "Handles edge cases"
 
-### Always include:
-- `"Typecheck passes"` - EVERY story
-- `"Tests pass"` - stories with testable logic
-- `"Verify in browser"` - UI stories
+### Always include as final criterion:
+```
+"Typecheck passes"
+```
 
-## Splitting Large Features
+For stories with testable logic:
+```
+"Tests pass"
+```
+
+For stories that change UI:
+```
+"Verify in browser"
+```
+
+---
+
+## Conversion Rules
+
+1. **Each requirement becomes one JSON story**
+2. **IDs**: Sequential (US-001, US-002, etc.)
+3. **Priority**: Based on dependency order
+4. **All stories**: `passes: false` and empty `notes`
+5. **branchName**: Derive from feature name, kebab-case, prefixed with type
+6. **Always add**: "Typecheck passes" to every story's acceptance criteria
+
+---
+
+## Splitting Large Plans
 
 If a plan has big features, split them:
 
@@ -296,18 +151,18 @@ If a plan has big features, split them:
 
 **Split into:**
 1. US-001: Add notifications table to database
-2. US-002: Create notification service for sending notifications
+2. US-002: Create notification service for sending
 3. US-003: Add notification bell icon to header
 4. US-004: Create notification dropdown panel
 5. US-005: Add mark-as-read functionality
-6. US-006: Add notification preferences page
 
 Each is one focused change that can be completed and verified independently.
 
-## Example Conversion (v2.0)
+---
 
-### Input Plan Section
+## Example
 
+**Input Plan:**
 ```markdown
 # Task Status Feature
 
@@ -316,18 +171,18 @@ Add ability to mark tasks with different statuses.
 ## Requirements
 - Persist status in database
 - Show status badge on each task
-- Toggle between pending/in-progress/done on task list
+- Toggle between pending/in-progress/done
 - Filter list by status
 ```
 
-### Output tasks.json
-
+**Output `docs/tasks/2026-02-16-task-status-tasks.json`:**
 ```json
 {
   "schemaVersion": "2.0",
   "metadata": {
     "title": "feat: Add task status feature",
-    "type": "feature",
+    "type": "feat",
+    "branchName": "feat/add-task-status",
     "createdAt": "2026-02-16",
     "planPath": "docs/plans/2026-02-16-task-status-plan.md"
   },
@@ -343,18 +198,7 @@ Add ability to mark tasks with different statuses.
       ],
       "priority": 1,
       "passes": false,
-      "notes": "",
-      "taskType": "prisma_schema",
-      "steps": [
-        "Read CLAUDE.md and AGENTS.md for project conventions",
-        "Read prisma/schema.prisma to understand existing models",
-        "Add/modify the model or field",
-        "Run: npx prisma generate",
-        "Run: npx prisma migrate dev --name add-status-field",
-        "Verify typecheck passes"
-      ],
-      "relevantFiles": ["prisma/schema.prisma"],
-      "qualityChecks": ["npx tsc --noEmit"]
+      "notes": ""
     },
     {
       "id": "US-002",
@@ -368,18 +212,7 @@ Add ability to mark tasks with different statuses.
       ],
       "priority": 2,
       "passes": false,
-      "notes": "",
-      "taskType": "react_component",
-      "steps": [
-        "Read CLAUDE.md and AGENTS.md for project conventions",
-        "Read existing components to understand patterns",
-        "Create the component file with proper types",
-        "Import and use in parent component",
-        "Style according to existing patterns",
-        "Verify typecheck passes"
-      ],
-      "relevantFiles": ["src/components/TaskCard.tsx"],
-      "qualityChecks": ["npx tsc --noEmit"]
+      "notes": ""
     },
     {
       "id": "US-003",
@@ -394,18 +227,7 @@ Add ability to mark tasks with different statuses.
       ],
       "priority": 3,
       "passes": false,
-      "notes": "",
-      "taskType": "react_component",
-      "steps": [
-        "Read CLAUDE.md and AGENTS.md for project conventions",
-        "Read existing components to understand patterns",
-        "Create the component file with proper types",
-        "Import and use in parent component",
-        "Style according to existing patterns",
-        "Verify typecheck passes"
-      ],
-      "relevantFiles": ["src/components/TaskList.tsx"],
-      "qualityChecks": ["npx tsc --noEmit"]
+      "notes": ""
     },
     {
       "id": "US-004",
@@ -419,49 +241,21 @@ Add ability to mark tasks with different statuses.
       ],
       "priority": 4,
       "passes": false,
-      "notes": "",
-      "taskType": "react_component",
-      "steps": [
-        "Read CLAUDE.md and AGENTS.md for project conventions",
-        "Read existing components to understand patterns",
-        "Create the component file with proper types",
-        "Import and use in parent component",
-        "Style according to existing patterns",
-        "Verify typecheck passes"
-      ],
-      "relevantFiles": ["src/components/TaskFilters.tsx"],
-      "qualityChecks": ["npx tsc --noEmit"]
+      "notes": ""
     }
-  ],
-  "successMetrics": {
-    "taskCompletionRate": "Increase by 20%"
-  }
+  ]
 }
 ```
 
-## Validation Checklist
+---
+
+## Checklist Before Saving
 
 Before writing tasks.json, verify:
 
 - [ ] Each story is completable in one iteration (small enough)
-- [ ] Stories are ordered by dependency (priority field)
+- [ ] Stories are ordered by dependency (schema → backend → UI)
 - [ ] Every story has "Typecheck passes" as criterion
 - [ ] UI stories have "Verify in browser" as criterion
 - [ ] Acceptance criteria are verifiable (not vague)
 - [ ] No story depends on a later story
-- [ ] All stories have `passes: false` and empty `notes`
-- [ ] **All stories have `taskType`, `steps`, `relevantFiles`, `qualityChecks`** (v2.0)
-- [ ] **All `steps[0]` start with "Read CLAUDE.md and AGENTS.md"**
-- [ ] **schemaVersion is "2.0"**
-
-## Error Handling
-
-If plan file cannot be parsed:
-```
-Error: Could not parse plan file. Expected markdown with requirements or phase sections.
-```
-
-If requirements are too vague to split:
-```
-Error: Requirements too broad. Please specify concrete deliverables.
-```
