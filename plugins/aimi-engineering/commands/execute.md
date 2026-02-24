@@ -2,82 +2,39 @@
 name: aimi:execute
 description: Execute all pending stories autonomously
 disable-model-invocation: true
-allowed-tools: Read, Write, Edit, Bash(git:*), Bash(jq:*), Task
+allowed-tools: Read, Write, Edit, Bash(git:*), Bash(./scripts/aimi-cli.sh:*), Task
 ---
 
 # Aimi Execute
 
 Execute all pending stories in a loop, managing branches and handling failures.
 
-## Step 1: Discover and Read Tasks (Metadata Only via jq)
+## Step 1: Initialize Session
 
-**CRITICAL:** Do NOT read the full tasks file. Use `jq` to extract only metadata.
-
-### Find the tasks file:
+**CRITICAL:** Use the CLI script to initialize session and get metadata. Do NOT interpret jq queries directly.
 
 ```bash
-# Find the most recent tasks file
-TASKS_FILE=$(ls -t docs/tasks/*-tasks.json 2>/dev/null | head -1)
-```
-
-If no file found:
-```
-No tasks file found. Run /aimi:plan to create a task list first.
-```
-STOP execution.
-
-### Extract metadata:
-
-```bash
-# Extract metadata only (no stories loaded into context)
-jq '{
-  title: .metadata.title,
-  pending: [.userStories[] | select(.passes == false and .skipped != true)] | length,
-  completed: [.userStories[] | select(.passes == true)] | length,
-  skipped: [.userStories[] | select(.skipped == true)] | length,
-  total: .userStories | length
-}' "$TASKS_FILE"
+./scripts/aimi-cli.sh init-session
 ```
 
 This returns:
 ```json
 {
-  "title": "feat: Add task status feature",
-  "pending": 7,
-  "completed": 2,
-  "skipped": 1,
-  "total": 10
+  "tasks": "docs/tasks/2026-02-24-feature-tasks.json",
+  "branch": "feat/feature-name",
+  "pending": 7
 }
 ```
 
-**Counts:**
-- `pending` - stories that can be executed (`passes=false`, not skipped)
-- `completed` - stories that passed (`passes=true`)
-- `skipped` - stories marked as skipped by user
-
-**DO NOT:**
-- Read the full tasks file into memory
-- Load all stories into context
+If no tasks file found, the script exits with error. Report:
+```
+No tasks file found. Run /aimi:plan to create a task list first.
+```
+STOP execution.
 
 ## Step 2: Branch Setup
 
-Derive branch name from the metadata title:
-- Convert to kebab-case
-- Prefix with `aimi/`
-- Example: "feat: Add task status" → `aimi/feat-add-task-status`
-
-### Validate Branch Name (SECURITY)
-
-**CRITICAL:** Branch name must match:
-```
-^[a-zA-Z0-9][a-zA-Z0-9/_-]*$
-```
-
-If invalid characters found:
-```
-Error: Invalid branch name derived from title.
-```
-STOP execution.
+Get the branch name from the init-session output (already validated by CLI).
 
 ### Check Current Branch
 
@@ -104,9 +61,13 @@ Switched to branch: [branchName]
 
 ## Step 3: Check for Pending Stories
 
-If no pending stories:
+```bash
+./scripts/aimi-cli.sh count-pending
 ```
-All stories already complete! ([total]/[total])
+
+If result is `0`:
+```
+All stories already complete!
 
 Run /aimi:review to review the implementation.
 ```
@@ -116,9 +77,8 @@ Report start:
 ```
 Starting autonomous execution...
 
-Feature: [title]
 Branch: [branchName]
-Stories: [pending] pending, [completed] completed
+Pending: [pending] stories
 
 Beginning execution loop...
 ```
@@ -130,20 +90,22 @@ Beginning execution loop...
 ```
 while (pending stories exist):
     1. Call /aimi:next (loads ONLY the next pending story by priority)
-    
+
     2. Check result:
        - If success: continue to next iteration
        - If user chose "skip": continue to next iteration
        - If user chose "stop": break loop
-    
-    3. Re-read counts via jq (not full stories)
-       - If no pending: exit loop
+
+    3. Check pending count:
+       ./scripts/aimi-cli.sh count-pending
+       - If 0: exit loop
 ```
 
 **Why one-at-a-time?**
 - Each story gets full context window
 - No wasted tokens on other stories
 - Cleaner execution flow
+- State persists across /clear
 
 ## Step 5: Completion
 
@@ -160,7 +122,7 @@ Report:
 ```
 ## Execution Complete
 
-All [total] stories completed successfully!
+All stories completed successfully!
 
 Branch: [branchName]
 Commits: [count]
@@ -177,17 +139,38 @@ Commits: [count]
 ```
 ## Execution Paused
 
-Completed: [completed]/[total] stories
-
 Run `/aimi:status` to see current state.
 Run `/aimi:execute` to resume execution.
 ```
+
+## Resuming After /clear
+
+If context was cleared (via `/clear`), the CLI maintains state:
+
+```bash
+./scripts/aimi-cli.sh get-state
+```
+
+Returns:
+```json
+{
+  "tasks": "docs/tasks/...",
+  "branch": "feat/...",
+  "story": null,
+  "last": "success"
+}
+```
+
+- If `story` is set, there's an interrupted story
+- If `last` is "success", continue with next story
+- If `last` is "failed", ask user how to proceed
 
 ## Error Recovery
 
 If execution is interrupted unexpectedly:
 
 1. Tasks file preserves state (completed stories stay completed)
-2. User can run `/aimi:execute` again to resume
+2. State files in `.aimi/` track current position
+3. User can run `/aimi:execute` again to resume
 
 The loop will automatically skip completed stories and continue from the next pending one (by priority).

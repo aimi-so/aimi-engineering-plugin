@@ -1,50 +1,43 @@
 ---
 name: aimi:status
 description: Show current task execution progress
-allowed-tools: Bash(jq:*)
+allowed-tools: Bash(./scripts/aimi-cli.sh:*)
 ---
 
 # Aimi Status
 
-Display the current execution progress using jq (minimal context usage).
+Display the current execution progress using the CLI script.
 
-## Step 1: Discover and Get Status via jq
+## Step 1: Get Status via CLI
 
-**CRITICAL:** Do NOT read full tasks file. Use jq to extract status.
-
-### Find the tasks file:
+**CRITICAL:** Use the CLI script. Do NOT interpret jq queries directly.
 
 ```bash
-# Find the most recent tasks file
-TASKS_FILE=$(ls -t docs/tasks/*-tasks.json 2>/dev/null | head -1)
+./scripts/aimi-cli.sh status
 ```
 
-If no file found:
+This returns comprehensive status as JSON:
+```json
+{
+  "title": "feat: Add user authentication",
+  "branch": "feat/user-auth",
+  "pending": 5,
+  "completed": 2,
+  "skipped": 1,
+  "total": 8,
+  "stories": [
+    {"id": "US-001", "title": "Add schema", "passes": true, "skipped": false, "notes": ""},
+    {"id": "US-002", "title": "Add login", "passes": false, "skipped": false, "notes": ""}
+  ]
+}
+```
+
+If no tasks file found, the script exits with error. Report:
 ```
 No tasks file found. Run /aimi:plan to create a task list.
 ```
 
-### Extract status:
-
-```bash
-jq '{
-  title: .metadata.title,
-  completed: [.userStories[] | select(.passes == true) | {id, title}],
-  pending: [.userStories[] | select(.passes == false and .skipped != true) | {id, title, priority}] | sort_by(.priority),
-  skipped: [.userStories[] | select(.skipped == true) | {id, title, notes}],
-  total: .userStories | length
-}' "$TASKS_FILE"
-```
-
-## Step 2: Calculate Progress
-
-From jq output:
-- Completed: length of completed array
-- Pending: length of pending array  
-- Skipped: length of skipped array
-- Total: total count
-
-## Step 3: Display Status
+## Step 2: Display Status
 
 Output format:
 
@@ -64,7 +57,7 @@ For each story, show status indicator:
 
 - `✓` for completed (passes: true)
 - `✗` for skipped (skipped: true)
-- `→` for next pending (first in pending array by priority)
+- `→` for next pending (first pending by priority)
 - `○` for other pending
 
 Example:
@@ -72,15 +65,15 @@ Example:
 ✓ US-001: Add database schema          (completed)
 ✓ US-002: Add password utilities       (completed)
 ✗ US-003: Add login UI                 (skipped: auth middleware issue)
-→ US-004: Add registration UI          (next - priority 4)
-○ US-005: Add session middleware       (pending - priority 5)
+→ US-004: Add registration UI          (next)
+○ US-005: Add session middleware       (pending)
 ```
 
 ## Next Steps
 
 If there are pending stories:
 ```
-Next: US-004 - Add registration UI (priority 4)
+Next: US-004 - Add registration UI
 
 Run /aimi:next to execute the next story.
 Run /aimi:execute to run all remaining stories.
@@ -99,6 +92,20 @@ Run `git log --oneline` to see commits.
 If a story has notes (especially failures), show them:
 
 ```
-→ US-004: Add registration UI          (next - priority 4)
+→ US-004: Add registration UI          (next)
   Note: Previous attempt failed - missing dependency
+```
+
+## Session State
+
+Optionally show session state:
+
+```bash
+./scripts/aimi-cli.sh get-state
+```
+
+If there's a current story in progress:
+```
+Current: US-004 (in progress)
+Last result: success
 ```
