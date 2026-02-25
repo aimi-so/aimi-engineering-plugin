@@ -1,68 +1,38 @@
 ---
 name: aimi:plan
-description: Create implementation plan and convert to tasks.json
+description: Generate tasks.json directly from a feature description
 argument-hint: "[feature description]"
 ---
 
 # Aimi Plan
 
-Run compound-engineering's plan workflow, then convert to tasks.json for autonomous execution.
+Generate `tasks.json` directly from a feature description using the task-planner skill. No intermediate markdown plan.
 
-## Step 1: Execute Compound Plan
+## Step 1: Generate Tasks
 
-/workflows:plan $ARGUMENTS
+**CRITICAL: You MUST use the Skill tool to load the `task-planner` skill.**
 
-**IMPORTANT:** When compound-engineering presents post-generation options, DO NOT show them to the user. Proceed directly to Step 2.
+Do NOT generate tasks.json from memory or inline. The `task-planner` skill contains the authoritative pipeline: research, spec analysis, story decomposition, and output format.
 
-## Step 2: Locate Generated Plan
+1. Call the Skill tool with `skill: "aimi-engineering:task-planner"` and `args: "$ARGUMENTS"`
+2. Follow ALL instructions from the loaded skill to produce the tasks.json
 
-Find the most recent plan file:
+If the Skill tool is unavailable, read the skill file directly at `plugins/aimi-engineering/skills/task-planner/SKILL.md` and follow its instructions exactly.
 
-```bash
-ls -t docs/plans/*-plan.md | head -1
-```
-
-## Step 3: Initialize Output Directory
-
-```bash
-mkdir -p docs/tasks
-```
-
-## Step 4: Convert to Tasks
-
-**CRITICAL: You MUST use the Skill tool to load the `plan-to-tasks` skill before converting.**
-
-Do NOT generate tasks.json from memory or inline. The `plan-to-tasks` skill contains the authoritative conversion rules, story sizing guidelines, ordering rules, and output format.
-
-1. First, read the plan file content using the Read tool
-2. Then, call the Skill tool with `skill: "aimi-engineering:plan-to-tasks"` and `args: "[plan-file-path]"`
-3. Follow ALL instructions from the loaded skill to produce the tasks.json
-
-If the Skill tool is unavailable, read the skill file directly at `plugins/aimi-engineering/skills/plan-to-tasks/SKILL.md` and follow its instructions exactly.
-
-## Step 5: Write Tasks File
-
-The `plan-to-tasks` skill handles writing the output file. The filename should match the plan filename pattern:
-- Plan: `docs/plans/2026-02-16-task-status-plan.md`
-- Tasks: `docs/tasks/2026-02-16-task-status-tasks.json`
-
-Verify the file was written successfully before proceeding.
-
-## Step 6: Aimi-Branded Report (OVERRIDE)
+## Step 2: Aimi-Branded Report (OVERRIDE)
 
 **CRITICAL:** Display ONLY Aimi-specific output. NEVER show compound-engineering options.
 
 ```
-Plan and tasks created successfully!
+Tasks generated successfully!
 
-📋 Plan: docs/plans/[filename].md
-📝 Tasks: docs/tasks/[tasks-filename].json
+Tasks: docs/tasks/[tasks-filename].json
 
 Stories: [X] total
-Schema version: 2.1
+Schema version: 2.2
 
 Next steps:
-1. **Run `/aimi:deepen`** - Enhance plan with parallel research (optional)
+1. **Run `/aimi:deepen`** - Enrich stories with research (optional)
 2. **Run `/aimi:review`** - Get feedback from code reviewers
 3. **Run `/aimi:status`** - View task list
 4. **Run `/aimi:execute`** - Begin autonomous execution
@@ -85,10 +55,10 @@ Next steps:
 
 ## Error Handling
 
-If Step 1 fails or is cancelled:
-- Do NOT proceed to Step 2-6
+If the task-planner skill fails:
 - Report the error to the user
+- Suggest: "Check that compound-engineering plugin is installed for research agents."
 
-If Step 4-5 fails:
-- Report which step failed
-- Plan file still exists - user can run `/aimi:plan-to-tasks [path]` manually
+If the tasks.json file was not written:
+- Report which phase failed
+- Suggest running `/aimi:plan` again with a more specific feature description
