@@ -30,20 +30,23 @@ mkdir -p docs/tasks
 
 ## Step 4: Convert to Tasks
 
-Read the plan file and invoke the plan-to-tasks skill:
+**CRITICAL: You MUST use the Skill tool to load the `plan-to-tasks` skill before converting.**
 
-```
-Skill: plan-to-tasks
-Args: [plan-file-path]
-```
+Do NOT generate tasks.json from memory or inline. The `plan-to-tasks` skill contains the authoritative conversion rules, story sizing guidelines, ordering rules, and output format.
+
+1. First, read the plan file content using the Read tool
+2. Then, call the Skill tool with `skill: "aimi-engineering:plan-to-tasks"` and `args: "[plan-file-path]"`
+3. Follow ALL instructions from the loaded skill to produce the tasks.json
+
+If the Skill tool is unavailable, read the skill file directly at `plugins/aimi-engineering/skills/plan-to-tasks/SKILL.md` and follow its instructions exactly.
 
 ## Step 5: Write Tasks File
 
-Write the converted tasks to `docs/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
-
-The filename should match the plan filename pattern:
+The `plan-to-tasks` skill handles writing the output file. The filename should match the plan filename pattern:
 - Plan: `docs/plans/2026-02-16-task-status-plan.md`
 - Tasks: `docs/tasks/2026-02-16-task-status-tasks.json`
+
+Verify the file was written successfully before proceeding.
 
 ## Step 6: Aimi-Branded Report (OVERRIDE)
 
