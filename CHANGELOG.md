@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-02-25
+
+### Fixed
+
+- **`/aimi:plan` not loading `plan-to-tasks` skill**: Step 4 used ambiguous pseudo-syntax (`Skill: plan-to-tasks`) inside a code block, which Claude interpreted as descriptive text instead of an actionable tool invocation
+  - Replaced with explicit instructions to call the Skill tool with `skill: "aimi-engineering:plan-to-tasks"`
+  - Added "Do NOT generate tasks.json from memory or inline" guardrail
+  - Added fallback: read `SKILL.md` directly if Skill tool is unavailable
+  - Updated Step 5 to clarify the skill handles output writing
+
 ## [1.3.0] - 2026-02-24
 
 ### Fixed
