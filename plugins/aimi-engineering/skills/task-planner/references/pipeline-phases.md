@@ -50,10 +50,10 @@ During refinement, note for Phase 1.5:
 
 Run two agents **in parallel** using the Task tool:
 
-### Agent 1: repo-research-analyst
+### Agent 1: aimi-codebase-researcher
 
 ```
-Task subagent_type="compound-engineering:research:repo-research-analyst"
+Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
   prompt: "Analyze the codebase for patterns relevant to: [feature description].
            Look for: existing patterns, CLAUDE.md guidance, similar features,
            technology familiarity, file structure conventions."
@@ -61,10 +61,10 @@ Task subagent_type="compound-engineering:research:repo-research-analyst"
 
 **What to extract:** File paths, naming conventions, architectural patterns, relevant existing code.
 
-### Agent 2: learnings-researcher
+### Agent 2: aimi-learnings-researcher
 
 ```
-Task subagent_type="compound-engineering:research:learnings-researcher"
+Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
   prompt: "Search docs/solutions/ for learnings relevant to: [feature description].
            Look for: gotchas, patterns, past solutions, lessons learned."
 ```
@@ -111,18 +111,18 @@ Only run if Phase 1.5 decides external research is valuable.
 
 Run two agents **in parallel**:
 
-### Agent 3: best-practices-researcher
+### Agent 3: aimi-best-practices-researcher
 
 ```
-Task subagent_type="compound-engineering:research:best-practices-researcher"
+Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
   prompt: "Research current best practices for: [feature description].
            Focus on: industry standards, common patterns, security considerations."
 ```
 
-### Agent 4: framework-docs-researcher
+### Agent 4: aimi-framework-docs-researcher
 
 ```
-Task subagent_type="compound-engineering:research:framework-docs-researcher"
+Task subagent_type="aimi-engineering:research:aimi-framework-docs-researcher"
   prompt: "Research framework documentation for: [feature description].
            Focus on: official docs, API references, version-specific features."
 ```
@@ -154,7 +154,7 @@ This consolidated context feeds into Phase 2 and Phase 3.
 Run the spec-flow-analyzer agent:
 
 ```
-Task subagent_type="compound-engineering:workflow:spec-flow-analyzer"
+Task subagent_type="aimi-engineering:workflow:aimi-spec-flow-analyzer"
   prompt: "Analyze this feature specification for flow completeness, gaps, and edge cases:
 
            Feature: [feature description]
