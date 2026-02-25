@@ -41,7 +41,7 @@ STOP.
 For each pending story, spawn a research agent **in parallel**:
 
 ```
-Task subagent_type="compound-engineering:research:repo-research-analyst"
+Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
   prompt: "Find codebase patterns relevant to this story:
            Title: [story.title]
            Description: [story.description]
