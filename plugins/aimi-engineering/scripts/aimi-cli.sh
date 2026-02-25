@@ -314,20 +314,23 @@ STATE FILES (.aimi/):
     last-result             Result of last execution (success/failed/skipped)
 
 EXAMPLES:
+    # Resolve CLI path first
+    AIMI_CLI=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+
     # Initialize a new session
-    ./scripts/aimi-cli.sh init-session
+    $AIMI_CLI init-session
 
     # Get next story to work on
-    ./scripts/aimi-cli.sh next-story
+    $AIMI_CLI next-story
 
     # Mark story as complete
-    ./scripts/aimi-cli.sh mark-complete US-001
+    $AIMI_CLI mark-complete US-001
 
     # Check progress
-    ./scripts/aimi-cli.sh status
+    $AIMI_CLI status
 
     # Resume after /clear
-    ./scripts/aimi-cli.sh get-state
+    $AIMI_CLI get-state
 EOF
 }
 

@@ -2,19 +2,31 @@
 name: aimi:next
 description: Execute the next pending story from tasks.json
 disable-model-invocation: true
-allowed-tools: Read, Write, Edit, Bash(git:*), Bash(./scripts/aimi-cli.sh:*), Bash(npm:*), Bash(bun:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(tsc:*), Bash(eslint:*), Bash(prettier:*), Task
+allowed-tools: Read, Write, Edit, Bash(git:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Bash(npm:*), Bash(bun:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(tsc:*), Bash(eslint:*), Bash(prettier:*), Task
 ---
 
 # Aimi Next
 
 Execute the next pending story using a Task-spawned agent.
 
+## Step 0: Resolve CLI Path
+
+**CRITICAL:** The CLI script lives in the plugin install directory, NOT the project directory. Resolve it first:
+
+```bash
+AIMI_CLI=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+```
+
+If empty, report: "aimi-cli.sh not found. Reinstall plugin: `/plugin install aimi-engineering`" and STOP.
+
+**Use `$AIMI_CLI` for ALL subsequent script calls in this command.**
+
 ## Step 1: Get Next Story
 
 **CRITICAL:** Use the CLI script to get the next story. Do NOT interpret jq queries directly.
 
 ```bash
-./scripts/aimi-cli.sh next-story
+$AIMI_CLI next-story
 ```
 
 This returns the next pending story as JSON:
@@ -140,7 +152,7 @@ Do NOT claim success. Instead:
 Mark the story as complete:
 
 ```bash
-./scripts/aimi-cli.sh mark-complete [STORY_ID]
+$AIMI_CLI mark-complete [STORY_ID]
 ```
 
 Report success:
@@ -156,7 +168,7 @@ Run /aimi:status to see overall progress.
 1. Mark the story as failed with notes:
 
 ```bash
-./scripts/aimi-cli.sh mark-failed [STORY_ID] "Attempt 1 failed: [error summary]"
+$AIMI_CLI mark-failed [STORY_ID] "Attempt 1 failed: [error summary]"
 ```
 
 2. RETRY automatically with error context:
@@ -178,7 +190,7 @@ Please try a different approach or fix the issue described above.
 1. Mark with detailed failure:
 
 ```bash
-./scripts/aimi-cli.sh mark-failed [STORY_ID] "Failed after 2 attempts: [error]"
+$AIMI_CLI mark-failed [STORY_ID] "Failed after 2 attempts: [error]"
 ```
 
 2. Ask user with clear options:
@@ -201,7 +213,7 @@ What would you like to do?
 ### If user says "skip":
 
 ```bash
-./scripts/aimi-cli.sh mark-skipped [STORY_ID]
+$AIMI_CLI mark-skipped [STORY_ID]
 ```
 
 Report: "Skipped [STORY_ID]. Run /aimi:next for the next story."
@@ -220,7 +232,7 @@ STOP execution.
 If you need to check the current story after a `/clear`:
 
 ```bash
-./scripts/aimi-cli.sh current-story
+$AIMI_CLI current-story
 ```
 
 Returns the story that was in progress, or `null` if none.
