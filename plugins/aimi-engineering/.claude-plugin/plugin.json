@@ -1,7 +1,7 @@
 {
   "name": "aimi-engineering",
-  "version": "1.4.0",
-  "description": "Autonomous task execution with Ralph-style JSON tasks. Direct tasks.json generation, research-driven planning, iterative execution.",
+  "version": "1.5.0",
+  "description": "Autonomous task execution with standalone aimi-native agents. Direct tasks.json generation, research-driven planning, multi-agent review, iterative execution.",
   "author": {
     "name": "Stanley Takamatsu"
   },
@@ -11,7 +11,7 @@
   "keywords": [
     "autonomous-execution",
     "task-management",
-    "compound-engineering",
+    "standalone-agents",
     "ralph-style",
     "workflow-automation"
   ]

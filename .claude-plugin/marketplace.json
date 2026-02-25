@@ -11,14 +11,14 @@
   "plugins": [
     {
       "name": "aimi-engineering",
-      "description": "Autonomous task execution with Ralph-style JSON tasks. Wraps compound-engineering for brainstorm, plan, review workflows with iterative agent execution support.",
-      "version": "1.4.0",
+      "description": "Autonomous task execution with standalone aimi-native agents. Direct tasks.json generation, multi-agent review, iterative execution. Only requires compound-engineering for brainstorm.",
+      "version": "1.5.0",
       "author": {
         "name": "Stanley Takamatsu",
         "url": "https://github.com/aimi-so"
       },
       "homepage": "https://github.com/aimi-so/aimi-engineering-plugin",
-      "tags": ["autonomous-execution", "task-management", "compound-engineering", "ralph-style", "workflow-automation"],
+      "tags": ["autonomous-execution", "task-management", "standalone-agents", "ralph-style", "workflow-automation"],
       "source": "./plugins/aimi-engineering"
     }
   ]
