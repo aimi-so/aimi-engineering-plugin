@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-02-25
+
+### Changed
+
+- **`/aimi:plan` command**: Inlined full task-planner pipeline directly into plan.md to fix double skill loading issue (both `plan` command and `task-planner` skill were loading into context)
+- **`task-planner` skill**: Set to `user-invocable: false` since pipeline is now embedded in `/aimi:plan`
+
 ## [1.5.1] - 2026-02-25
 
 ### Added
