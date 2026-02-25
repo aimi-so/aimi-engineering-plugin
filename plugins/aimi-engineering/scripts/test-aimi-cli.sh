@@ -31,7 +31,7 @@ setup() {
   # Create test tasks file with future date to ensure it's found first
   cat > "$TASKS_DIR/9999-99-99-test-tasks.json" << 'EOF'
 {
-  "schemaVersion": "2.0",
+  "schemaVersion": "2.1",
   "metadata": {
     "title": "feat: Test feature",
     "type": "feat",

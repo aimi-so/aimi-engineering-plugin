@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-02-24
+
+### Fixed
+
+- **Schema structure divergences** across 7 files:
+  - `commands/plan.md`: Schema version output said "2.0" instead of "2.1"
+  - `README.md`: jq example referenced non-existent top-level `project`/`branchName` fields (now uses `metadata.*`)
+  - `README.md`: Removed stale `steps`/`taskType` from field length limits table (fields removed in v2.1)
+  - `README.md`: Updated intro text (removed references to removed `steps`/`qualityChecks` fields)
+  - `README.md`: Added missing Root Fields table, moved `schemaVersion` out of Metadata table
+  - `README.md`: Added missing `brainstormPath` to Metadata Fields table
+  - Root `CLAUDE.md`: Replaced obsolete pre-v2.0 schema (missing `schemaVersion`, `metadata` wrapper) with current v2.1 structure
+  - `marketplace.json`: Synced version from "0.2.0" to "1.2.2" (matching plugin.json)
+
+## [1.2.1] - 2026-02-24
+
+### Changed
+
+- **Schema version bump**: `schemaVersion` updated from "2.0" to "2.1" across all files
+  - README.md, CLAUDE.md, SKILL.md, task-format.md, test-aimi-cli.sh
+
 ## [1.2.0] - 2026-02-24
 
 ### Added

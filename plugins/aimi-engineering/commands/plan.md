@@ -56,7 +56,7 @@ Plan and tasks created successfully!
 📝 Tasks: docs/tasks/[tasks-filename].json
 
 Stories: [X] total
-Schema version: 2.0
+Schema version: 2.1
 
 Next steps:
 1. **Run `/aimi:deepen`** - Enhance plan with parallel research (optional)
