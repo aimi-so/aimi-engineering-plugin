@@ -71,10 +71,10 @@ Check `docs/brainstorms/` for a matching brainstorm (semantic match, within 14 d
 Run these agents **in parallel**:
 
 ```
-Task subagent_type="compound-engineering:research:repo-research-analyst"
+Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
   prompt: "[feature description + brainstorm context]"
 
-Task subagent_type="compound-engineering:research:learnings-researcher"
+Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
   prompt: "[feature description]"
 ```
 
@@ -89,10 +89,10 @@ Task subagent_type="compound-engineering:research:learnings-researcher"
 Only if Phase 1.5 decides external research is needed:
 
 ```
-Task subagent_type="compound-engineering:research:best-practices-researcher"
+Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
   prompt: "[feature description]"
 
-Task subagent_type="compound-engineering:research:framework-docs-researcher"
+Task subagent_type="aimi-engineering:research:aimi-framework-docs-researcher"
   prompt: "[feature description]"
 ```
 
@@ -107,7 +107,7 @@ Merge findings from all research agents:
 ### Phase 2: Spec Analysis
 
 ```
-Task subagent_type="compound-engineering:workflow:spec-flow-analyzer"
+Task subagent_type="aimi-engineering:workflow:aimi-spec-flow-analyzer"
   prompt: "[feature description + consolidated research]"
 ```
 
@@ -143,8 +143,6 @@ Apply rules from `references/story-decomposition.md`:
 | Phase 3 | Zero stories produced | Report error, ask user to refine scope |
 | Phase 3 | 10+ stories produced | Proceed with warning in report |
 | Phase 4 | File write fails | Report error with path |
-
-If compound-engineering plugin is not installed, report: "compound-engineering plugin is required for research agents. Install it first." and STOP.
 
 ---
 
