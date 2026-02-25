@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-02-24
+
+### Fixed
+
+- **CLI script path resolution**: Commands now resolve `aimi-cli.sh` from plugin install directory (`~/.claude/plugins/cache/*/aimi-engineering/*/scripts/`) instead of using `./scripts/` relative path which fails when cwd is the user's project
+  - Updated `execute.md`, `next.md`, `status.md` with Step 0: Resolve CLI Path
+  - Added `$AIMI_CLI` variable pattern (matches compound-engineering's plugin path convention)
+  - Updated `allowed-tools` frontmatter to permit `$AIMI_CLI` execution
+  - Updated README architecture section and CLI help examples
+
 ## [1.2.2] - 2026-02-24
 
 ### Fixed

@@ -2,19 +2,31 @@
 name: aimi:execute
 description: Execute all pending stories autonomously
 disable-model-invocation: true
-allowed-tools: Read, Write, Edit, Bash(git:*), Bash(./scripts/aimi-cli.sh:*), Task
+allowed-tools: Read, Write, Edit, Bash(git:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Task
 ---
 
 # Aimi Execute
 
 Execute all pending stories in a loop, managing branches and handling failures.
 
+## Step 0: Resolve CLI Path
+
+**CRITICAL:** The CLI script lives in the plugin install directory, NOT the project directory. Resolve it first:
+
+```bash
+AIMI_CLI=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+```
+
+If empty, report: "aimi-cli.sh not found. Reinstall plugin: `/plugin install aimi-engineering`" and STOP.
+
+**Use `$AIMI_CLI` for ALL subsequent script calls in this command.**
+
 ## Step 1: Initialize Session
 
 **CRITICAL:** Use the CLI script to initialize session and get metadata. Do NOT interpret jq queries directly.
 
 ```bash
-./scripts/aimi-cli.sh init-session
+$AIMI_CLI init-session
 ```
 
 This returns:
@@ -62,7 +74,7 @@ Switched to branch: [branchName]
 ## Step 3: Check for Pending Stories
 
 ```bash
-./scripts/aimi-cli.sh count-pending
+$AIMI_CLI count-pending
 ```
 
 If result is `0`:
@@ -97,7 +109,7 @@ while (pending stories exist):
        - If user chose "stop": break loop
 
     3. Check pending count:
-       ./scripts/aimi-cli.sh count-pending
+       $AIMI_CLI count-pending
        - If 0: exit loop
 ```
 
@@ -148,7 +160,7 @@ Run `/aimi:execute` to resume execution.
 If context was cleared (via `/clear`), the CLI maintains state:
 
 ```bash
-./scripts/aimi-cli.sh get-state
+$AIMI_CLI get-state
 ```
 
 Returns:

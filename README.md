@@ -289,15 +289,20 @@ Stories are ordered by dependency:
 
 ### One Story at a Time
 
-Commands use `jq` to extract only what's needed, keeping context clean:
+Commands use `aimi-cli.sh` (installed with the plugin) to extract only what's needed, keeping context clean:
 
 ```bash
-# /aimi:execute - metadata only
-jq '{title: .metadata.title, branch: .metadata.branchName, pending: [.userStories[] | select(.passes == false and .skipped != true)] | length}' "$TASKS_FILE"
+# Resolve CLI path (plugin install directory)
+AIMI_CLI=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
 
-# /aimi:next - ONE story only
-jq '[.userStories[] | select(.passes == false and .skipped != true)]
-    | sort_by(.priority) | .[0]' "$TASKS_FILE"
+# /aimi:execute - initialize session with metadata
+$AIMI_CLI init-session
+
+# /aimi:next - get ONE story only
+$AIMI_CLI next-story
+
+# /aimi:status - get progress summary
+$AIMI_CLI status
 ```
 
 ### Fresh Context Per Story

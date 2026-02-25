@@ -1,19 +1,31 @@
 ---
 name: aimi:status
 description: Show current task execution progress
-allowed-tools: Bash(./scripts/aimi-cli.sh:*)
+allowed-tools: Bash(AIMI_CLI=*), Bash($AIMI_CLI:*)
 ---
 
 # Aimi Status
 
 Display the current execution progress using the CLI script.
 
+## Step 0: Resolve CLI Path
+
+**CRITICAL:** The CLI script lives in the plugin install directory, NOT the project directory. Resolve it first:
+
+```bash
+AIMI_CLI=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+```
+
+If empty, report: "aimi-cli.sh not found. Reinstall plugin: `/plugin install aimi-engineering`" and STOP.
+
+**Use `$AIMI_CLI` for ALL subsequent script calls in this command.**
+
 ## Step 1: Get Status via CLI
 
 **CRITICAL:** Use the CLI script. Do NOT interpret jq queries directly.
 
 ```bash
-./scripts/aimi-cli.sh status
+$AIMI_CLI status
 ```
 
 This returns comprehensive status as JSON:
@@ -101,7 +113,7 @@ If a story has notes (especially failures), show them:
 Optionally show session state:
 
 ```bash
-./scripts/aimi-cli.sh get-state
+$AIMI_CLI get-state
 ```
 
 If there's a current story in progress:
