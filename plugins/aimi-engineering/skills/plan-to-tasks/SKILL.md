@@ -6,7 +6,9 @@ user-invocable: true
 
 # Plan to Tasks Converter
 
-Converts implementation plans to the tasks.json format for autonomous agent execution.
+Converts implementation plans (markdown files) to the tasks.json format for autonomous agent execution.
+
+> **Note:** This skill is for converting external markdown plans. For direct generation from a feature description (no intermediate plan), use the `task-planner` skill instead.
 
 ---
 
@@ -24,7 +26,7 @@ Example: `docs/tasks/2026-02-16-task-status-tasks.json`
 
 ```json
 {
-  "schemaVersion": "2.1",
+  "schemaVersion": "2.2",
   "metadata": {
     "title": "feat: Add task status feature",
     "type": "feat",
@@ -178,7 +180,7 @@ Add ability to mark tasks with different statuses.
 **Output `docs/tasks/2026-02-16-task-status-tasks.json`:**
 ```json
 {
-  "schemaVersion": "2.1",
+  "schemaVersion": "2.2",
   "metadata": {
     "title": "feat: Add task status feature",
     "type": "feat",
