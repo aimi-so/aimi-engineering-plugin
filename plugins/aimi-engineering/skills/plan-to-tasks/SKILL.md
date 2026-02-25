@@ -24,7 +24,7 @@ Example: `docs/tasks/2026-02-16-task-status-tasks.json`
 
 ```json
 {
-  "schemaVersion": "2.0",
+  "schemaVersion": "2.1",
   "metadata": {
     "title": "feat: Add task status feature",
     "type": "feat",
@@ -178,7 +178,7 @@ Add ability to mark tasks with different statuses.
 **Output `docs/tasks/2026-02-16-task-status-tasks.json`:**
 ```json
 {
-  "schemaVersion": "2.0",
+  "schemaVersion": "2.1",
   "metadata": {
     "title": "feat: Add task status feature",
     "type": "feat",

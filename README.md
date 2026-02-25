@@ -2,7 +2,7 @@
 
 Autonomous task execution for Claude Code with structured JSON task management.
 
-Transform implementation plans into executable user stories, then run them one-by-one with full context isolation. Each story gets its own agent with task-specific steps, quality checks, and automatic state tracking.
+Transform implementation plans into executable user stories, then run them one-by-one with full context isolation. Each story gets its own agent with automatic state tracking.
 
 ## Table of Contents
 
@@ -195,11 +195,11 @@ Wraps compound-engineering's review workflow for thorough code review.
 
 All execution state lives in `docs/tasks/YYYY-MM-DD-[feature-name]-tasks.json`. No separate progress file.
 
-### Schema Version 2.0
+### Schema Version 2.1
 
 ```json
 {
-  "schemaVersion": "2.0",
+  "schemaVersion": "2.1",
   "metadata": {
     "title": "feat: Add user authentication",
     "type": "feat",
@@ -227,16 +227,24 @@ All execution state lives in `docs/tasks/YYYY-MM-DD-[feature-name]-tasks.json`. 
 
 ### Field Reference
 
+#### Root Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `schemaVersion` | string | Schema version (currently "2.1") |
+| `metadata` | object | Project metadata |
+| `userStories` | array | Array of Story objects |
+
 #### Metadata Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schemaVersion` | string | Schema version (currently "2.0") |
 | `title` | string | Feature title with type prefix |
 | `type` | string | One of: `feat`, `ref`, `bug`, `chore` |
 | `branchName` | string | Git branch for this feature |
 | `createdAt` | string | Creation date (YYYY-MM-DD) |
 | `planPath` | string | Path to source plan file |
+| `brainstormPath` | string | (optional) Path to brainstorm file |
 
 #### Story Fields
 
@@ -285,7 +293,7 @@ Commands use `jq` to extract only what's needed, keeping context clean:
 
 ```bash
 # /aimi:execute - metadata only
-jq '{project, branchName, pending: [...] | length}' "$TASKS_FILE"
+jq '{title: .metadata.title, branch: .metadata.branchName, pending: [.userStories[] | select(.passes == false and .skipped != true)] | length}' "$TASKS_FILE"
 
 # /aimi:next - ONE story only
 jq '[.userStories[] | select(.passes == false and .skipped != true)]
@@ -358,8 +366,6 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 | `title` | 200 chars |
 | `description` | 500 chars |
 | Each acceptance criterion | 300 chars |
-| Each step | 500 chars |
-| `taskType` | 50 chars |
 
 ## Troubleshooting
 

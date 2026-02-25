@@ -12,7 +12,7 @@ Example: `docs/tasks/2026-02-16-task-status-tasks.json`
 
 ```json
 {
-  "schemaVersion": "2.0",
+  "schemaVersion": "2.1",
   "metadata": {
     "title": "string",
     "type": "feat|ref|bug|chore",
@@ -31,7 +31,7 @@ Example: `docs/tasks/2026-02-16-task-status-tasks.json`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `schemaVersion` | string | Yes | Schema version, always "2.0" |
+| `schemaVersion` | string | Yes | Schema version, always "2.1" |
 | `metadata` | object | Yes | Project metadata |
 | `userStories` | array | Yes | Array of Story objects |
 
@@ -140,7 +140,7 @@ Story IDs follow the pattern: `US-XXX`
 
 ```json
 {
-  "schemaVersion": "2.0",
+  "schemaVersion": "2.1",
   "metadata": {
     "title": "feat: Add task status feature",
     "type": "feat",
@@ -225,7 +225,7 @@ Stories use a simple pass/fail model:
 
 Before processing, validate:
 
-1. `schemaVersion` must be "2.0"
+1. `schemaVersion` must be "2.1"
 2. `metadata.title` must be non-empty
 3. `metadata.type` must be one of: feat, ref, bug, chore
 4. `metadata.branchName` must be non-empty

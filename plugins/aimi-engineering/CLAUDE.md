@@ -87,7 +87,7 @@ Learnings are stored in project files (not separate progress log):
 
 ```json
 {
-  "schemaVersion": "2.0",
+  "schemaVersion": "2.1",
   "metadata": {
     "title": "feat: Add feature name",
     "type": "feat|ref|bug|chore",
