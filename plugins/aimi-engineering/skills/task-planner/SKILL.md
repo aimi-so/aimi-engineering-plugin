@@ -1,7 +1,7 @@
 ---
 name: task-planner
 description: "Generate tasks.json directly from a feature description. Full pipeline: research, spec analysis, story decomposition, JSON output. Triggers on: plan feature, generate tasks, create task list, direct planning."
-user-invocable: true
+user-invocable: false
 ---
 
 # Task Planner
