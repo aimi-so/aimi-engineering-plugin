@@ -4,9 +4,9 @@
 
 The tasks file is the structured task list that drives autonomous execution. Each user story represents ONE atomic unit of work that can be completed in a single agent iteration.
 
-**Filename:** `docs/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
+**Filename:** `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 
-Example: `docs/tasks/2026-02-16-task-status-tasks.json`
+Example: `.aimi/tasks/2026-02-16-task-status-tasks.json`
 
 ## Schema
 
@@ -148,7 +148,7 @@ Story IDs follow the pattern: `US-XXX`
     "type": "feat",
     "branchName": "feat/add-task-status",
     "createdAt": "2026-02-16",
-    "planPath": "docs/plans/2026-02-16-task-status-plan.md"
+    "planPath": ".aimi/plans/2026-02-16-task-status-plan.md"
   },
   "userStories": [
     {

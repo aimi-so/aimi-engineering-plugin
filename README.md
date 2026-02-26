@@ -85,21 +85,21 @@ Wraps compound-engineering's brainstorm workflow. Explores requirements and appr
 
 #### `/aimi:plan`
 
-Generates `docs/tasks/YYYY-MM-DD-[feature]-tasks.json` directly from a feature description. Runs a full pipeline: brainstorm detection, parallel research (codebase + learnings), optional external research, spec-flow analysis, and story decomposition.
+Generates `.aimi/tasks/YYYY-MM-DD-[feature]-tasks.json` directly from a feature description. Runs a full pipeline: brainstorm detection, parallel research (codebase + learnings), optional external research, spec-flow analysis, and story decomposition.
 
 ```bash
 /aimi:plan Add user registration flow
 ```
 
 Output:
-- `docs/tasks/YYYY-MM-DD-feature-name-tasks.json`
+- `.aimi/tasks/YYYY-MM-DD-feature-name-tasks.json`
 
 #### `/aimi:deepen`
 
 Enhances an existing plan with research insights while preserving completion state of existing stories.
 
 ```bash
-/aimi:deepen docs/plans/2026-02-16-user-auth-plan.md
+/aimi:deepen .aimi/plans/2026-02-16-user-auth-plan.md
 ```
 
 #### `/aimi:status`
@@ -192,7 +192,7 @@ Multi-agent code review using aimi-native review agents. Runs parallel agents (a
 
 ## Task Schema
 
-All execution state lives in `docs/tasks/YYYY-MM-DD-[feature-name]-tasks.json`. No separate progress file.
+All execution state lives in `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`. No separate progress file.
 
 ### Schema Version 2.2
 
@@ -204,7 +204,7 @@ All execution state lives in `docs/tasks/YYYY-MM-DD-[feature-name]-tasks.json`. 
     "type": "feat",
     "branchName": "feat/user-auth",
     "createdAt": "2026-02-16",
-    "planPath": "docs/plans/2026-02-16-user-auth-plan.md"
+    "planPath": ".aimi/plans/2026-02-16-user-auth-plan.md"
   },
   "userStories": [
     {
@@ -324,7 +324,7 @@ Small files (< 2KB) are inlined directly in prompts. Larger files are referenced
 ### File Structure
 
 ```
-docs/
+.aimi/
 ├── plans/
 │   └── YYYY-MM-DD-feature-name-plan.md
 └── tasks/

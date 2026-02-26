@@ -7,7 +7,7 @@ set -euo pipefail
 # engineering plugin, preventing AI hallucination of bash commands.
 
 AIMI_DIR=".aimi"
-TASKS_DIR="docs/tasks"
+TASKS_DIR="$AIMI_DIR/tasks"
 
 # ============================================================================
 # Utility Functions
@@ -277,9 +277,9 @@ cmd_get_state() {
     }'
 }
 
-# Clear all state files
+# Clear all state files (preserves tasks directory)
 cmd_clear_state() {
-  rm -rf "$AIMI_DIR"
+  rm -f "$AIMI_DIR/current-tasks" "$AIMI_DIR/current-branch" "$AIMI_DIR/current-story" "$AIMI_DIR/last-result"
   echo "State cleared."
 }
 

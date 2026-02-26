@@ -13,7 +13,7 @@ Enrich tasks.json stories directly with research insights, better acceptance cri
 If `$ARGUMENTS` contains a path, use it. Otherwise, auto-discover:
 
 ```bash
-ls -t docs/tasks/*-tasks.json 2>/dev/null | head -1
+ls -t .aimi/tasks/*-tasks.json 2>/dev/null | head -1
 ```
 
 If no tasks file found:
@@ -93,7 +93,7 @@ Validate the JSON is well-formed before writing.
 ```
 Stories enriched successfully!
 
-Tasks: docs/tasks/[tasks-filename].json
+Tasks: .aimi/tasks/[tasks-filename].json
 
 Changes:
 - [X] stories enriched with research insights

@@ -19,7 +19,7 @@ Run compound-engineering's brainstorm workflow, then present Aimi-branded next s
 ```
 Brainstorm complete!
 
-Document: docs/brainstorms/[filename].md
+Document: .aimi/brainstorms/[filename].md
 
 Next steps:
 1. **Run `/aimi:plan`** - Create implementation plan and tasks.json

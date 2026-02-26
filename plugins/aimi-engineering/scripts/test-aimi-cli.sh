@@ -9,8 +9,8 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLI="$SCRIPT_DIR/aimi-cli.sh"
 TEST_DIR="$(mktemp -d)"
-TASKS_DIR="docs/tasks"
 AIMI_DIR=".aimi"
+TASKS_DIR="$AIMI_DIR/tasks"
 
 # Colors for output
 RED='\033[0;31m'
@@ -37,7 +37,7 @@ setup() {
     "type": "feat",
     "branchName": "feat/test-feature",
     "createdAt": "2026-02-24",
-    "planPath": "docs/plans/test-plan.md"
+    "planPath": ".aimi/plans/test-plan.md"
   },
   "userStories": [
     {
@@ -71,15 +71,15 @@ setup() {
 }
 EOF
 
-  # Clear any existing state
-  rm -rf "$AIMI_DIR"
+  # Clear any existing state files (but keep tasks dir since it's inside AIMI_DIR)
+  rm -f "$AIMI_DIR/current-tasks" "$AIMI_DIR/current-branch" "$AIMI_DIR/current-story" "$AIMI_DIR/last-result"
 }
 
 # Cleanup test environment
 cleanup() {
   echo "Cleaning up..."
-  rm -rf "$AIMI_DIR"
   rm -f "$TASKS_DIR/9999-99-99-test-tasks.json"
+  rm -f "$AIMI_DIR/current-tasks" "$AIMI_DIR/current-branch" "$AIMI_DIR/current-story" "$AIMI_DIR/last-result"
 }
 
 # Test helper
@@ -322,8 +322,9 @@ test_clear_state() {
 
   assert_contains "State cleared" "$output" "clear-state reports success"
 
-  # Check state directory removed
-  [ ! -d "$AIMI_DIR" ] && assert_eq "1" "1" ".aimi directory removed" || assert_eq "1" "0" ".aimi directory removed"
+  # Check state files removed (tasks dir preserved)
+  [ ! -f "$AIMI_DIR/current-tasks" ] && assert_eq "1" "1" "current-tasks state file removed" || assert_eq "1" "0" "current-tasks state file removed"
+  [ ! -f "$AIMI_DIR/current-branch" ] && assert_eq "1" "1" "current-branch state file removed" || assert_eq "1" "0" "current-branch state file removed"
 }
 
 test_error_handling() {
