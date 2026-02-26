@@ -32,7 +32,7 @@ $AIMI_CLI init-session
 This returns:
 ```json
 {
-  "tasks": "docs/tasks/2026-02-24-feature-tasks.json",
+  "tasks": ".aimi/tasks/2026-02-24-feature-tasks.json",
   "branch": "feat/feature-name",
   "pending": 7
 }
@@ -166,7 +166,7 @@ $AIMI_CLI get-state
 Returns:
 ```json
 {
-  "tasks": "docs/tasks/...",
+  "tasks": ".aimi/tasks/...",
   "branch": "feat/...",
   "story": null,
   "last": "success"

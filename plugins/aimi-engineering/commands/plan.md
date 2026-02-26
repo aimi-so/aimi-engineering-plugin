@@ -6,7 +6,7 @@ argument-hint: "[feature description]"
 
 # Aimi Plan
 
-Generate `docs/tasks/YYYY-MM-DD-[feature]-tasks.json` directly from a feature description. Full pipeline: research, spec analysis, story decomposition, JSON output. No intermediate markdown plan.
+Generate `.aimi/tasks/YYYY-MM-DD-[feature]-tasks.json` directly from a feature description. Full pipeline: research, spec analysis, story decomposition, JSON output. No intermediate markdown plan.
 
 ## Feature Description
 
@@ -14,10 +14,10 @@ $ARGUMENTS
 
 ## Phase 0: Idea Refinement
 
-Check `docs/brainstorms/` for a matching brainstorm (semantic match on topic, within 14 days):
+Check `.aimi/brainstorms/` for a matching brainstorm (semantic match on topic, within 14 days):
 
 ```bash
-ls -t docs/brainstorms/*.md 2>/dev/null | head -10
+ls -t .aimi/brainstorms/*.md 2>/dev/null | head -10
 ```
 
 - **If relevant brainstorm found:** Read it, use as context, skip questions.
@@ -35,7 +35,7 @@ Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
            technology familiarity, file structure conventions."
 
 Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
-  prompt: "Search docs/solutions/ for learnings relevant to: [feature description].
+  prompt: "Search .aimi/solutions/ for learnings relevant to: [feature description].
            Look for: gotchas, patterns, past solutions, lessons learned."
 ```
 
@@ -63,7 +63,7 @@ Task subagent_type="aimi-engineering:research:aimi-framework-docs-researcher"
 
 Merge all findings:
 - Relevant file paths and codebase patterns
-- Institutional learnings from `docs/solutions/`
+- Institutional learnings from `.aimi/solutions/`
 - External best practices (if researched)
 - CLAUDE.md conventions
 
@@ -115,13 +115,13 @@ See `references/story-decomposition.md` for detailed rules.
 ### Derive Filename
 
 ```
-docs/tasks/YYYY-MM-DD-[feature-name]-tasks.json
+.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json
 ```
 
 ### Write File
 
 ```bash
-mkdir -p docs/tasks
+mkdir -p .aimi/tasks
 ```
 
 Write JSON using the Write tool. Validate JSON is well-formed before writing.
@@ -168,11 +168,11 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 ```
 Tasks generated successfully!
 
-Tasks: docs/tasks/[tasks-filename].json
+Tasks: .aimi/tasks/[tasks-filename].json
 
 Stories: [X] total
 Schema version: 2.2
-[If brainstorm used]: Context: docs/brainstorms/[brainstorm-file]
+[If brainstorm used]: Context: .aimi/brainstorms/[brainstorm-file]
 [If gaps found]: Gaps identified: [N] (captured as criteria/notes)
 [If 10+ stories]: Warning: [N] stories generated. Consider splitting for parallel work.
 

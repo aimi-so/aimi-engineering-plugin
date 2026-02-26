@@ -33,10 +33,10 @@ Read the changed files to understand the PR content. Collect the diff for agent 
 ### Protected Artifacts
 
 These paths must never be flagged for deletion or removal by any review agent:
-- `docs/plans/*.md` — Plan files
-- `docs/solutions/*.md` — Solution documents
-- `docs/tasks/*.json` — Task files
-- `docs/brainstorms/*.md` — Brainstorm documents
+- `.aimi/plans/*.md` — Plan files
+- `.aimi/solutions/*.md` — Solution documents
+- `.aimi/tasks/*.json` — Task files
+- `.aimi/brainstorms/*.md` — Brainstorm documents
 
 ## Step 2: Run Default Review Agents (Parallel)
 
@@ -64,7 +64,7 @@ Task subagent_type="aimi-engineering:review:aimi-agent-native-reviewer"
            [PR content / diff summary]"
 
 Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
-  prompt: "Search docs/solutions/ for past issues related to this PR:
+  prompt: "Search .aimi/solutions/ for past issues related to this PR:
            [PR content / diff summary]"
 ```
 
@@ -109,7 +109,7 @@ For Rails projects, also consider running:
 ### Consolidate Results
 
 1. Collect findings from all parallel agents
-2. Surface learnings-researcher results: flag relevant past solutions as "Known Pattern" with links to docs/solutions/ files
+2. Surface learnings-researcher results: flag relevant past solutions as "Known Pattern" with links to .aimi/solutions/ files
 3. Discard any findings that recommend deleting protected artifacts (see Step 1)
 4. Remove duplicate or overlapping findings
 

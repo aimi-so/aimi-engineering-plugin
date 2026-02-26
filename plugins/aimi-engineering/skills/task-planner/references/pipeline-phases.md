@@ -4,9 +4,9 @@
 
 ### Brainstorm Auto-Detection
 
-1. List files in `docs/brainstorms/`:
+1. List files in `.aimi/brainstorms/`:
    ```bash
-   ls -t docs/brainstorms/*.md 2>/dev/null | head -10
+   ls -t .aimi/brainstorms/*.md 2>/dev/null | head -10
    ```
 
 2. **Relevance criteria:**
@@ -65,7 +65,7 @@ Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
-  prompt: "Search docs/solutions/ for learnings relevant to: [feature description].
+  prompt: "Search .aimi/solutions/ for learnings relevant to: [feature description].
            Look for: gotchas, patterns, past solutions, lessons learned."
 ```
 
@@ -140,7 +140,7 @@ If external research fails (network issues, agent errors):
 Merge all findings into a structured summary:
 
 1. **Codebase patterns**: Relevant file paths, naming conventions, architectural decisions
-2. **Institutional learnings**: Gotchas, proven patterns from `docs/solutions/`
+2. **Institutional learnings**: Gotchas, proven patterns from `.aimi/solutions/`
 3. **External best practices**: Industry standards, security patterns (if researched)
 4. **Framework documentation**: API references, version constraints (if researched)
 5. **CLAUDE.md conventions**: Project-specific rules and preferences
@@ -205,7 +205,7 @@ Using the consolidated research and spec-flow output:
 ### Derive Filename
 
 ```
-docs/tasks/YYYY-MM-DD-[feature-name]-tasks.json
+.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json
 ```
 
 Strip type prefix, kebab-case the descriptive name, add date prefix and `-tasks.json` suffix.
@@ -213,7 +213,7 @@ Strip type prefix, kebab-case the descriptive name, add date prefix and `-tasks.
 ### Write File
 
 ```bash
-mkdir -p docs/tasks
+mkdir -p .aimi/tasks
 ```
 
 Use the Write tool to save the JSON file. Validate JSON is well-formed before writing.
@@ -225,10 +225,10 @@ After writing, report:
 ```
 Tasks generated successfully!
 
-Tasks: docs/tasks/[filename].json
+Tasks: .aimi/tasks/[filename].json
 Stories: [N] total
 Schema: 2.2
-[If brainstorm used]: Context: docs/brainstorms/[brainstorm-file]
+[If brainstorm used]: Context: .aimi/brainstorms/[brainstorm-file]
 [If gaps found]: Gaps identified: [N] (captured as criteria/notes)
 [If 10+ stories]: Warning: [N] stories generated. Consider splitting for parallel work.
 ```

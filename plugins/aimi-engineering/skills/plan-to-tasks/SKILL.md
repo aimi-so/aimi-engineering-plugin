@@ -14,15 +14,15 @@ Converts implementation plans (markdown files) to the tasks.json format for auto
 
 ## The Job
 
-Take a plan (markdown file) and convert it to `docs/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
+Take a plan (markdown file) and convert it to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
 
 ---
 
 ## Output Format
 
-**Filename:** `docs/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
+**Filename:** `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 
-Example: `docs/tasks/2026-02-16-task-status-tasks.json`
+Example: `.aimi/tasks/2026-02-16-task-status-tasks.json`
 
 ```json
 {
@@ -32,7 +32,7 @@ Example: `docs/tasks/2026-02-16-task-status-tasks.json`
     "type": "feat",
     "branchName": "feat/add-task-status",
     "createdAt": "2026-02-16",
-    "planPath": "docs/plans/2026-02-16-task-status-plan.md"
+    "planPath": ".aimi/plans/2026-02-16-task-status-plan.md"
   },
   "userStories": [
     {
@@ -177,7 +177,7 @@ Add ability to mark tasks with different statuses.
 - Filter list by status
 ```
 
-**Output `docs/tasks/2026-02-16-task-status-tasks.json`:**
+**Output `.aimi/tasks/2026-02-16-task-status-tasks.json`:**
 ```json
 {
   "schemaVersion": "2.2",
@@ -186,7 +186,7 @@ Add ability to mark tasks with different statuses.
     "type": "feat",
     "branchName": "feat/add-task-status",
     "createdAt": "2026-02-16",
-    "planPath": "docs/plans/2026-02-16-task-status-plan.md"
+    "planPath": ".aimi/plans/2026-02-16-task-status-plan.md"
   },
   "userStories": [
     {

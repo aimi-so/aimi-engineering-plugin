@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-02-25
+
+### Changed
+
+- **Output directory**: All document output paths moved from `docs/` to `.aimi/`
+  - `docs/tasks/` → `.aimi/tasks/`
+  - `docs/brainstorms/` → `.aimi/brainstorms/`
+  - `docs/plans/` → `.aimi/plans/`
+  - `docs/solutions/` → `.aimi/solutions/`
+- **`aimi-cli.sh`**: `TASKS_DIR` now derived from `$AIMI_DIR` variable (`$AIMI_DIR/tasks`)
+- All commands, skills, and agents updated with new paths
+
 ## [1.5.2] - 2026-02-25
 
 ### Changed

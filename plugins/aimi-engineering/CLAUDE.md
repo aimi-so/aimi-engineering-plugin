@@ -72,7 +72,7 @@ aimi-engineering-plugin/
 
 ## Output Files
 
-All task execution files go in `docs/tasks/`:
+All task execution files go in `.aimi/tasks/`:
 
 - `YYYY-MM-DD-[feature-name]-tasks.json` - Structured task list with user stories
 
@@ -93,7 +93,7 @@ Learnings are stored in project files (not separate progress log):
     "type": "feat|ref|bug|chore",
     "branchName": "feat/feature-name",
     "createdAt": "YYYY-MM-DD",
-    "planPath": "docs/plans/YYYY-MM-DD-feature-name-plan.md"
+    "planPath": ".aimi/plans/YYYY-MM-DD-feature-name-plan.md"
   },
   "userStories": [{
     "id": "US-XXX",

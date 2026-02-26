@@ -6,7 +6,7 @@ user-invocable: false
 
 # Task Planner
 
-Generate `docs/tasks/YYYY-MM-DD-[feature]-tasks.json` directly from a feature description. No intermediate markdown plan.
+Generate `.aimi/tasks/YYYY-MM-DD-[feature]-tasks.json` directly from a feature description. No intermediate markdown plan.
 
 ---
 
@@ -18,7 +18,7 @@ Take a feature description through research, spec analysis, and story decomposit
 
 ## Output Format
 
-**Filename:** `docs/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
+**Filename:** `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 
 ```json
 {
@@ -29,7 +29,7 @@ Take a feature description through research, spec analysis, and story decomposit
     "branchName": "feat/feature-name",
     "createdAt": "YYYY-MM-DD",
     "planPath": null,
-    "brainstormPath": "docs/brainstorms/... (optional)"
+    "brainstormPath": ".aimi/brainstorms/... (optional)"
   },
   "userStories": [
     {
@@ -64,7 +64,7 @@ Execute these phases in order. See `references/pipeline-phases.md` for detailed 
 
 ### Phase 0: Idea Refinement
 
-Check `docs/brainstorms/` for a matching brainstorm (semantic match, within 14 days). If found, use as context and skip questions. If multiple match, ask user. If none, ask refinement questions via AskUserQuestion until the idea is clear.
+Check `.aimi/brainstorms/` for a matching brainstorm (semantic match, within 14 days). If found, use as context and skip questions. If multiple match, ask user. If none, ask refinement questions via AskUserQuestion until the idea is clear.
 
 ### Phase 1: Local Research (Parallel)
 
@@ -100,7 +100,7 @@ Task subagent_type="aimi-engineering:research:aimi-framework-docs-researcher"
 
 Merge findings from all research agents:
 - Relevant file paths and codebase patterns
-- Institutional learnings from `docs/solutions/`
+- Institutional learnings from `.aimi/solutions/`
 - External best practices (if researched)
 - CLAUDE.md conventions
 
@@ -128,7 +128,7 @@ Apply rules from `references/story-decomposition.md`:
 1. Derive metadata: title, type, branchName (kebab-case), createdAt (today)
 2. Set `planPath: null`
 3. Set `brainstormPath` if a brainstorm was used
-4. Write to `docs/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
+4. Write to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 
 ---
 
