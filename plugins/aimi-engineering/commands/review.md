@@ -175,11 +175,6 @@ For each finding: Small (< 30 min), Medium (30 min - 2 hours), Large (> 2 hours)
 3. **Run `/aimi:status`** — Check current task progress
 ```
 
-**NEVER mention:**
-- compound-engineering
-- workflows:*
-- Any command without the `aimi:` prefix
-
 ## Error Handling
 
 | Failure | Action |
