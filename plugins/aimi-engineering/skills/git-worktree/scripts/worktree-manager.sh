@@ -77,14 +77,10 @@ create_worktree() {
 
   local worktree_path="$WORKTREE_DIR/$branch_name"
 
-  # Check if worktree already exists
+  # Check if worktree already exists — reuse silently (non-interactive)
   if [[ -d "$worktree_path" ]]; then
     echo -e "${YELLOW}Worktree already exists at: $worktree_path${NC}"
-    echo -e "Switch to it instead? (y/n)"
-    read -r response
-    if [[ "$response" == "y" ]]; then
-      switch_worktree "$branch_name"
-    fi
+    echo "$worktree_path"
     return
   fi
 
@@ -92,12 +88,7 @@ create_worktree() {
   echo "  From: $from_branch"
   echo "  Path: $worktree_path"
 
-  # Update main branch
-  echo -e "${BLUE}Updating $from_branch...${NC}"
-  git checkout "$from_branch"
-  git pull origin "$from_branch" || true
-
-  # Create worktree
+  # Create worktree (git worktree add works without checking out from_branch)
   mkdir -p "$WORKTREE_DIR"
   ensure_gitignore
 
@@ -158,9 +149,9 @@ switch_worktree() {
   local worktree_name="$1"
 
   if [[ -z "$worktree_name" ]]; then
-    list_worktrees
-    echo -e "${BLUE}Switch to which worktree? (enter name)${NC}"
-    read -r worktree_name
+    echo -e "${RED}Error: Worktree name required${NC}"
+    echo "Usage: worktree-manager.sh switch <worktree-name>"
+    exit 1
   fi
 
   local worktree_path="$WORKTREE_DIR/$worktree_name"
@@ -244,18 +235,11 @@ cleanup_worktrees() {
   fi
 
   echo ""
-  echo -e "Remove $found worktree(s)? (y/n)"
-  read -r response
-
-  if [[ "$response" != "y" ]]; then
-    echo -e "${YELLOW}Cleanup cancelled${NC}"
-    return
-  fi
-
-  echo -e "${BLUE}Cleaning up worktrees...${NC}"
+  echo -e "${BLUE}Cleaning up $found worktree(s)...${NC}"
   for worktree_path in "${to_remove[@]}"; do
     local worktree_name=$(basename "$worktree_path")
     git worktree remove "$worktree_path" --force 2>/dev/null || true
+    git branch -D "$worktree_name" 2>/dev/null || true
     echo -e "${GREEN}✓ Removed: $worktree_name${NC}"
   done
 
@@ -265,6 +249,36 @@ cleanup_worktrees() {
   fi
 
   echo -e "${GREEN}Cleanup complete!${NC}"
+}
+
+# Remove a specific worktree and its branch (non-interactive)
+remove_worktree() {
+  local worktree_name="$1"
+
+  if [[ -z "$worktree_name" ]]; then
+    echo -e "${RED}Error: Worktree name required${NC}"
+    echo "Usage: worktree-manager.sh remove <worktree-name>"
+    exit 1
+  fi
+
+  local worktree_path="$WORKTREE_DIR/$worktree_name"
+
+  if [[ -d "$worktree_path" ]]; then
+    git worktree remove "$worktree_path" --force 2>/dev/null || true
+    echo -e "${GREEN}✓ Removed worktree: $worktree_name${NC}"
+  else
+    echo -e "${YELLOW}Worktree directory not found: $worktree_name (may already be removed)${NC}"
+    # Still try to clean up git worktree tracking
+    git worktree prune 2>/dev/null || true
+  fi
+
+  # Clean up the associated branch
+  git branch -D "$worktree_name" 2>/dev/null || true
+
+  # Remove empty .worktrees directory
+  if [[ -d "$WORKTREE_DIR" ]] && [[ -z "$(ls -A "$WORKTREE_DIR" 2>/dev/null)" ]]; then
+    rmdir "$WORKTREE_DIR" 2>/dev/null || true
+  fi
 }
 
 # Merge a worktree branch into a target branch
@@ -434,6 +448,9 @@ main() {
     switch|go)
       switch_worktree "$2"
       ;;
+    remove|rm)
+      remove_worktree "$2"
+      ;;
     copy-env|env)
       copy_env_to_worktree "$2"
       ;;
@@ -469,8 +486,9 @@ Usage: worktree-manager.sh <command> [options]
 Commands:
   create <branch-name> [from-branch]  Create new worktree (copies .env files automatically)
                                       (from-branch defaults to main)
+  remove | rm <worktree-name>         Remove a specific worktree and its branch
   list | ls                           List all worktrees
-  switch | go [name]                  Switch to worktree
+  switch | go <name>                  Switch to worktree
   copy-env | env [name]               Copy .env files from main repo to worktree
                                       (if name omitted, uses current worktree)
   merge <worktree-name> [--into <b>]  Merge worktree branch into target branch
