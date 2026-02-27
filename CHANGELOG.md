@@ -11,15 +11,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **v3 task format schema definition**: `skills/task-planner/references/task-format-v3.md`
+- **Schema v3 (`task-format-v3.md`)**: New tasks.json schema with dependency graph and parallel execution support
   - `dependsOn` (string[]) for explicit inter-story dependency graphs (DAG)
-  - `status` enum (`pending`, `in_progress`, `completed`, `failed`, `skipped`) replacing `passes` boolean and `skipped` boolean
+  - `status` enum (`pending`, `in_progress`, `completed`, `failed`, `skipped`) replacing `passes` boolean
   - `maxConcurrency` metadata field (default 4) for parallel story execution
   - `priority` retained as tiebreaker for stories at same dependency depth
   - Status state machine with valid transitions documented
   - `dependsOn` validation rules: no circular deps, no self-refs, all referenced IDs must exist
-  - Backward compatibility section: v2.2 detection and fallback behavior
+  - Backward compatibility with v2.2: auto-detection and fallback behavior
   - Migration guide: v2.2 to v3 conversion rules with priority-layer inference for `dependsOn`
+
+- **Parallel execution in `/aimi:execute`**: Automatic detection and execution of independent stories in parallel
+  - Wave-based execution: independent stories run concurrently within waves
+  - Team/swarm orchestration for parallel workers using Claude Code Teams
+  - Adaptive concurrency: `min(ready stories, maxConcurrency)`
+  - Cascade-skip on failure: dependent stories automatically skipped when a dependency fails
+  - v2.2 fallback: sequential execution preserved for older schema files
+  - v3 with linear deps: runs sequentially without Team/worktree overhead
+
+- **Worktree merge commands** in `worktree-manager.sh`
+  - `merge <worktree-name> [--into <branch>]` — merge worktree branch into target
+  - `merge-all <branch1> <branch2> ... [--into <branch>]` — sequential multi-merge
+  - Merge conflict detection with conflicting file listing
+  - Stop-on-conflict behavior for merge-all
+
+- **CLI extensions** for v3 schema support in `aimi-cli.sh`
+  - `detect-schema` — returns schema version (`2.2` or `3.0`)
+  - `list-ready` — dependency-aware ready story detection (v3)
+  - `mark-in-progress` — sets `status: "in_progress"` for a story (v3)
+  - `validate-deps` — DAG validation for dependency graph (cycles, missing refs, self-refs)
+  - `cascade-skip` — transitive skip on failure for dependent stories
+
+### Changed
+
+- **`/aimi:execute` command**: Rewritten for smart parallel/sequential execution based on schema version and dependency graph shape
+- **`story-decomposition.md`**: Updated with `dependsOn` generation rules, layer-based inference, and parallel grouping examples
+- **`task-planner` SKILL.md**: Phase 3 and Phase 4 updated for v3 output with `dependsOn` arrays and `status` field
+- **`plan.md` command**: Output format updated to v3 schema with `dependsOn` and `status` fields
+- **`story-executor` skill**: Added optional `WORKTREE_PATH` variable for parallel worker context; workers report status instead of writing tasks.json directly
+- **`/aimi:status` command**: v3 display with status values, dependency info, and wave grouping; v2.2 display unchanged
+- **CLI dual-version support**: `mark-complete`, `mark-failed`, `mark-skipped`, `count-pending`, `next-story` all updated for v2.2/v3 compatibility
 
 ## [1.8.0] - 2026-02-27
 
