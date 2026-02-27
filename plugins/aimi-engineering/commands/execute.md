@@ -47,6 +47,38 @@ No tasks file found. Run /aimi:plan to create a task list first.
 ```
 STOP execution.
 
+### Orphaned Story Recovery
+
+Check for stories stuck in `in_progress` status (from interrupted previous runs):
+
+```bash
+orphaned=$($AIMI_CLI status | jq '[.userStories[] | select(.status == "in_progress")] | length')
+```
+
+If orphaned > 0, recover each one:
+```
+For each story with status "in_progress":
+    $AIMI_CLI mark-failed [story.id] "Reset from orphaned in_progress state"
+```
+
+Report: "Recovered [N] orphaned in_progress stories (reset to failed for retry)"
+
+Note: These stories will appear as "failed" in status. The user can review and re-run.
+
+### Content Validation
+
+```bash
+$AIMI_CLI validate-stories
+```
+
+If validation fails (exit non-zero), report the errors and STOP:
+```
+Story content validation failed:
+[error output]
+
+Review the stories for suspicious content and fix before execution.
+```
+
 ## Step 2: Branch Setup
 
 Get the branch name from the init-session output (already validated by CLI).
@@ -97,6 +129,20 @@ Schema: v3.0
 Pending: [pending] stories
 
 Beginning execution loop...
+```
+
+## Step 3.1: Validate Dependencies
+
+```bash
+$AIMI_CLI validate-deps
+```
+
+If validation fails (non-zero exit), report the error and STOP:
+```
+Dependency validation failed:
+[error output]
+
+Fix the dependency graph in the tasks file and re-run /aimi:execute.
 ```
 
 ## Step 3.5: Detect Execution Mode
@@ -171,21 +217,7 @@ After the loop ends, proceed to **Step 5: Completion**.
 
 This path is used only for v3 schemas where multiple independent stories can run concurrently.
 
-### 4b.1: Validate Dependencies
-
-```bash
-$AIMI_CLI validate-deps
-```
-
-If validation fails (non-zero exit), report the error and STOP:
-```
-Dependency validation failed:
-[error output]
-
-Fix the dependency graph in the tasks file and re-run /aimi:execute.
-```
-
-### 4b.2: Resolve Worktree Manager
+### 4b.1: Resolve Worktree Manager
 
 ```bash
 WORKTREE_MGR=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/skills/git-worktree/scripts/worktree-manager.sh 2>/dev/null | tail -1)
@@ -197,7 +229,7 @@ worktree-manager.sh not found. Reinstall plugin: `/plugin install aimi-engineeri
 ```
 STOP execution.
 
-### 4b.3: Read Concurrency Setting
+### 4b.2: Read Concurrency Setting
 
 Read the tasks file metadata to get maxConcurrency:
 
@@ -209,7 +241,7 @@ Parse `maxConcurrency` from metadata. If not set, default to `4`.
 
 Store as `MAX_CONCURRENCY`.
 
-### 4b.4: Load Project Guidelines
+### 4b.3: Load Project Guidelines
 
 Before starting the wave loop, load project guidelines that will be injected into worker prompts.
 
@@ -221,7 +253,7 @@ Before starting the wave loop, load project guidelines that will be injected int
 
 Read these files and store the content as `PROJECT_GUIDELINES`.
 
-### 4b.5: Create Team
+### 4b.4: Create Team
 
 ```
 TeamCreate with:
@@ -229,7 +261,7 @@ TeamCreate with:
   description: "Parallel execution of stories from [tasks file name]"
 ```
 
-### 4b.6: Wave Execution Loop
+### 4b.5: Wave Execution Loop
 
 ```
 wave = 1
@@ -311,6 +343,13 @@ Description: [story.description]
 - [criterion 1]
 - [criterion 2]
 - [criterion N]
+
+## PREVIOUS NOTES
+
+[If story.notes is non-empty, include:]
+[story.notes]
+
+[If story.notes is empty, omit this section entirely]
 
 ## INSTRUCTIONS
 
@@ -405,7 +444,7 @@ Do NOT claim success. Instead send a message with:
     wave += 1
 ```
 
-### 4b.7: Cleanup
+### 4b.6: Cleanup
 
 After the wave loop ends (all stories processed or deadlock):
 
@@ -548,6 +587,6 @@ If execution is interrupted unexpectedly:
 1. Tasks file preserves state (completed stories stay completed, in-progress stories can be retried)
 2. State files in `.aimi/` track current position
 3. User can run `/aimi:execute` again to resume
-4. For parallel mode: orphaned worktrees are cleaned up on next run (safety cleanup in Step 4b.7)
+4. For parallel mode: orphaned worktrees are cleaned up on next run (safety cleanup in Step 4b.6)
 
 The loop will automatically skip completed stories and continue from the next pending/ready one.

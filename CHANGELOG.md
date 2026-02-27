@@ -18,6 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Pattern 3 (NEW): WORKTREE_MGR= assignment validated against expected plugin path
   - Pattern 4 (NEW): $WORKTREE_MGR invocation with subcommand whitelist (create, remove, merge, list, help)
 
+### Changed
+
+- **execute.md**: Hardened orchestration with recovery, validation, and story notes
+  - Step 1: Orphaned `in_progress` story recovery — detects stories stuck from interrupted runs, resets them to `failed` for retry
+  - Step 1: Content validation via `$AIMI_CLI validate-stories` before any execution begins (prompt injection defense)
+  - Step 3.1: Moved `validate-deps` from parallel-only path (4b.1) to shared path before mode detection — both sequential and parallel now validate dependency graph
+  - Worker prompt: Added `## PREVIOUS NOTES` section with `story.notes` content (omitted when empty) for context on retried/failed stories
+  - Renumbered 4b subsections (4b.1-4b.6) after removing duplicate validate-deps
+  - Fixed stale reference to Step 4b.7 in Error Recovery section
+
 ## [1.11.0] - 2026-02-27
 
 ### Removed
