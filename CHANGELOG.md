@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-02-27
+
+### Added
+
+- **`brainstorm` skill**: Standalone process knowledge for brainstorming sessions
+  - `skills/brainstorm/SKILL.md` (229 lines) — hybrid question flow, Ralph-style batched multiple-choice, adaptive exit, YAGNI, design document template
+  - `skills/brainstorm/references/question-patterns.md` (240 lines) — formatting rules, scenario batches, response parsing, contextual question generation
+
+### Changed
+
+- **`/aimi:brainstorm` command**: Full rewrite as standalone (no longer wraps compound-engineering)
+  - Phase 0: Assess requirements clarity
+  - Phase 1: Codebase research via `aimi-codebase-researcher` agent
+  - Phase 2: Batched 3-5 multiple-choice questions with "1A, 2C, 3B" shorthand
+  - Phase 3: Conditional approaches (only when multiple valid paths exist)
+  - Phase 4: Design document capture with slug derivation, collision handling, open questions enforcement
+  - Phase 5: Aimi-branded handoff
+- **compound-engineering dependency fully eliminated**: All commands and skills are now standalone. Zero external plugin dependencies required.
+- **CLAUDE.md**: Dependencies section updated to reflect full independence
+- **`aimi-code-simplicity-reviewer` agent**: Updated pipeline artifacts reference
+- **`aimi-best-practices-researcher` agent**: Removed `compound-docs` from skill mapping
+
 ## [1.7.0] - 2026-02-26
 
 ### Added
