@@ -467,7 +467,7 @@ See [CHANGELOG.md](CHANGELOG.md) for complete version history.
 | Type | Count | Description |
 |------|-------|-------------|
 | Commands | 7 | Slash commands for workflow stages |
-| Skills | 4 | `brainstorm`, `task-planner`, `plan-to-tasks`, `story-executor` |
+| Skills | 3 | `brainstorm`, `task-planner`, `story-executor` |
 | Agents | 28 | 4 research, 15 review, 3 design, 1 docs, 5 workflow |
 
 ## License

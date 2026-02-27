@@ -8,7 +8,6 @@ Each story is executed by a Task-spawned agent with fresh context. This document
 
 ## Story Format
 
-**v3 (current):**
 ```json
 {
   "id": "US-001",
@@ -22,19 +21,6 @@ Each story is executed by a Task-spawned agent with fresh context. This document
   "priority": 1,
   "status": "pending",
   "dependsOn": [],
-  "notes": ""
-}
-```
-
-**v2.2 (legacy):**
-```json
-{
-  "id": "US-001",
-  "title": "Add status field to tasks table",
-  "description": "...",
-  "acceptanceCriteria": ["..."],
-  "priority": 1,
-  "passes": false,
   "notes": ""
 }
 ```
@@ -126,8 +112,6 @@ If you cannot complete a story:
 
 ## Status Values
 
-| Schema | Field | Values |
-|--------|-------|--------|
-| v3 | `status` | `pending`, `in_progress`, `completed`, `failed`, `skipped` |
-| v2.2 | `passes` | `false` (pending), `true` (completed) |
-| v2.2 | `skipped` | `true` (skipped by user) |
+| Field | Values |
+|-------|--------|
+| `status` | `pending`, `in_progress`, `completed`, `failed`, `skipped` |

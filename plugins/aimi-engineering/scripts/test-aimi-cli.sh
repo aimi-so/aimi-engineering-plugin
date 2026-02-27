@@ -3,7 +3,7 @@ set -uo pipefail
 
 # test-aimi-cli.sh - Test suite for aimi-cli.sh
 #
-# Creates a temporary tasks file, exercises all CLI commands,
+# Creates a temporary v3 tasks file, exercises all CLI commands,
 # validates outputs, and cleans up.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,65 +20,83 @@ NC='\033[0m' # No Color
 TESTS_PASSED=0
 TESTS_FAILED=0
 
+TASKS_FILE="$TASKS_DIR/9999-99-99-test-tasks.json"
+
 # Setup test environment
 setup() {
   echo "Setting up test environment..."
   mkdir -p "$TASKS_DIR"
 
-  # Remove any existing test file first
+  # Remove any existing test files
   rm -f "$TASKS_DIR/9999-99-99-test-tasks.json"
+  rm -f "$TASKS_DIR/9999-99-98-test-v3-tasks.json"
 
-  # Create test tasks file with future date to ensure it's found first
-  cat > "$TASKS_DIR/9999-99-99-test-tasks.json" << 'EOF'
+  # Create v3 test tasks file
+  cat > "$TASKS_FILE" << 'EOF'
 {
-  "schemaVersion": "2.1",
+  "schemaVersion": "3.0",
   "metadata": {
     "title": "feat: Test feature",
     "type": "feat",
     "branchName": "feat/test-feature",
-    "createdAt": "2026-02-24",
-    "planPath": ".aimi/plans/test-plan.md"
+    "createdAt": "2026-02-27",
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 4
   },
   "userStories": [
     {
       "id": "US-001",
-      "title": "First story",
-      "description": "Test story 1",
-      "acceptanceCriteria": ["Criterion 1"],
+      "title": "Schema story (root)",
+      "description": "Independent root story",
+      "acceptanceCriteria": ["Typecheck passes"],
       "priority": 1,
-      "passes": false,
+      "status": "pending",
+      "dependsOn": [],
       "notes": ""
     },
     {
       "id": "US-002",
-      "title": "Second story",
-      "description": "Test story 2",
-      "acceptanceCriteria": ["Criterion 2"],
+      "title": "Another root story",
+      "description": "Independent root story 2",
+      "acceptanceCriteria": ["Typecheck passes"],
       "priority": 2,
-      "passes": false,
+      "status": "pending",
+      "dependsOn": [],
       "notes": ""
     },
     {
       "id": "US-003",
-      "title": "Third story",
-      "description": "Test story 3",
-      "acceptanceCriteria": ["Criterion 3"],
+      "title": "Backend depends on US-001",
+      "description": "Depends on schema",
+      "acceptanceCriteria": ["Typecheck passes"],
       "priority": 3,
-      "passes": false,
+      "status": "pending",
+      "dependsOn": ["US-001"],
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "UI depends on US-002 and US-003",
+      "description": "Diamond convergence",
+      "acceptanceCriteria": ["Typecheck passes"],
+      "priority": 4,
+      "status": "pending",
+      "dependsOn": ["US-002", "US-003"],
       "notes": ""
     }
   ]
 }
 EOF
 
-  # Clear any existing state files (but keep tasks dir since it's inside AIMI_DIR)
+  # Clear any existing state files
   rm -f "$AIMI_DIR/current-tasks" "$AIMI_DIR/current-branch" "$AIMI_DIR/current-story" "$AIMI_DIR/last-result"
 }
 
 # Cleanup test environment
 cleanup() {
   echo "Cleaning up..."
-  rm -f "$TASKS_DIR/9999-99-99-test-tasks.json"
+  rm -f "$TASKS_FILE"
   rm -f "$AIMI_DIR/current-tasks" "$AIMI_DIR/current-branch" "$AIMI_DIR/current-story" "$AIMI_DIR/last-result"
 }
 
@@ -132,7 +150,7 @@ assert_exit_code() {
 }
 
 # ============================================================================
-# Tests
+# General Tests
 # ============================================================================
 
 test_help() {
@@ -157,34 +175,6 @@ test_find_tasks() {
   assert_contains "9999-99-99-test-tasks.json" "$output" "find-tasks returns correct file"
 }
 
-test_init_session() {
-  echo ""
-  echo "=== Testing init-session command ==="
-
-  local output
-  output=$("$CLI" init-session)
-
-  assert_contains "feat/test-feature" "$output" "init-session returns branch name"
-  assert_contains '"pending": 3' "$output" "init-session returns pending count"
-
-  # Check state files created
-  [ -f "$AIMI_DIR/current-tasks" ] && assert_eq "1" "1" "current-tasks state file created" || assert_eq "1" "0" "current-tasks state file created"
-  [ -f "$AIMI_DIR/current-branch" ] && assert_eq "1" "1" "current-branch state file created" || assert_eq "1" "0" "current-branch state file created"
-}
-
-test_status() {
-  echo ""
-  echo "=== Testing status command ==="
-
-  local output
-  output=$("$CLI" status)
-
-  assert_contains '"title": "feat: Test feature"' "$output" "status returns title"
-  assert_contains '"pending": 3' "$output" "status returns pending count"
-  assert_contains '"completed": 0' "$output" "status returns completed count"
-  assert_contains '"total": 3' "$output" "status returns total count"
-}
-
 test_metadata() {
   echo ""
   echo "=== Testing metadata command ==="
@@ -194,22 +184,6 @@ test_metadata() {
 
   assert_contains '"title": "feat: Test feature"' "$output" "metadata returns title"
   assert_contains '"branchName": "feat/test-feature"' "$output" "metadata returns branch"
-}
-
-test_next_story() {
-  echo ""
-  echo "=== Testing next-story command ==="
-
-  local output
-  output=$("$CLI" next-story)
-
-  assert_contains '"id": "US-001"' "$output" "next-story returns first story by priority"
-  assert_contains '"title": "First story"' "$output" "next-story returns story title"
-
-  # Check state file
-  local current
-  current=$(cat "$AIMI_DIR/current-story" 2>/dev/null || echo "")
-  assert_eq "US-001" "$current" "current-story state set"
 }
 
 test_current_story() {
@@ -223,73 +197,6 @@ test_current_story() {
   output=$("$CLI" current-story)
 
   assert_contains '"id": "US-001"' "$output" "current-story returns correct story"
-}
-
-test_mark_complete() {
-  echo ""
-  echo "=== Testing mark-complete command ==="
-
-  # First set a current story
-  "$CLI" next-story > /dev/null
-
-  local output
-  output=$("$CLI" mark-complete US-001)
-
-  assert_contains '"passes": true' "$output" "mark-complete sets passes to true"
-
-  # Check state
-  local last
-  last=$(cat "$AIMI_DIR/last-result" 2>/dev/null || echo "")
-  assert_eq "success" "$last" "last-result state set to success"
-
-  # Check current-story cleared
-  local current
-  current=$(cat "$AIMI_DIR/current-story" 2>/dev/null || echo "")
-  assert_eq "" "$current" "current-story cleared"
-}
-
-test_mark_failed() {
-  echo ""
-  echo "=== Testing mark-failed command ==="
-
-  # Get next story (should be US-002 now)
-  "$CLI" next-story > /dev/null
-
-  local output
-  output=$("$CLI" mark-failed US-002 "Test failure notes")
-
-  assert_contains '"notes": "Test failure notes"' "$output" "mark-failed sets notes"
-
-  # Check state
-  local last
-  last=$(cat "$AIMI_DIR/last-result" 2>/dev/null || echo "")
-  assert_eq "failed" "$last" "last-result state set to failed"
-}
-
-test_mark_skipped() {
-  echo ""
-  echo "=== Testing mark-skipped command ==="
-
-  local output
-  output=$("$CLI" mark-skipped US-002)
-
-  assert_contains '"skipped": true' "$output" "mark-skipped sets skipped to true"
-
-  # Check state
-  local last
-  last=$(cat "$AIMI_DIR/last-result" 2>/dev/null || echo "")
-  assert_eq "skipped" "$last" "last-result state set to skipped"
-}
-
-test_count_pending() {
-  echo ""
-  echo "=== Testing count-pending command ==="
-
-  local output
-  output=$("$CLI" count-pending)
-
-  # US-001 is complete, US-002 is skipped, US-003 is pending
-  assert_eq "1" "$output" "count-pending returns correct count"
 }
 
 test_get_branch() {
@@ -310,7 +217,6 @@ test_get_state() {
   output=$("$CLI" get-state)
 
   assert_contains '"branch": "feat/test-feature"' "$output" "get-state returns branch"
-  assert_contains '"last": "skipped"' "$output" "get-state returns last result"
 }
 
 test_clear_state() {
@@ -345,114 +251,34 @@ test_error_handling() {
 # V3 Schema Tests
 # ============================================================================
 
-V3_TASKS_FILE="$TASKS_DIR/9999-99-98-test-v3-tasks.json"
-
-setup_v3() {
+test_init_session() {
   echo ""
-  echo "Setting up v3 test environment..."
-
-  # Clear state from v2.2 tests
-  rm -f "$AIMI_DIR/current-tasks" "$AIMI_DIR/current-branch" "$AIMI_DIR/current-story" "$AIMI_DIR/last-result"
-  rm -f "$TASKS_DIR/9999-99-99-test-tasks.json"
-
-  # Create v3 test tasks file
-  cat > "$V3_TASKS_FILE" << 'EOF'
-{
-  "schemaVersion": "3.0",
-  "metadata": {
-    "title": "feat: Test v3 feature",
-    "type": "feat",
-    "branchName": "feat/test-v3-feature",
-    "createdAt": "2026-02-27",
-    "planPath": null,
-    "brainstormPath": null,
-    "maxConcurrency": 4
-  },
-  "userStories": [
-    {
-      "id": "US-001",
-      "title": "Schema story (root)",
-      "description": "Independent root story",
-      "acceptanceCriteria": ["Typecheck passes"],
-      "priority": 1,
-      "status": "pending",
-      "dependsOn": [],
-      "notes": ""
-    },
-    {
-      "id": "US-002",
-      "title": "Another root story",
-      "description": "Independent root story 2",
-      "acceptanceCriteria": ["Typecheck passes"],
-      "priority": 2,
-      "status": "pending",
-      "dependsOn": [],
-      "notes": ""
-    },
-    {
-      "id": "US-003",
-      "title": "Backend depends on US-001",
-      "description": "Depends on schema",
-      "acceptanceCriteria": ["Typecheck passes"],
-      "priority": 3,
-      "status": "pending",
-      "dependsOn": ["US-001"],
-      "notes": ""
-    },
-    {
-      "id": "US-004",
-      "title": "UI depends on US-002 and US-003",
-      "description": "Diamond convergence",
-      "acceptanceCriteria": ["Typecheck passes"],
-      "priority": 4,
-      "status": "pending",
-      "dependsOn": ["US-002", "US-003"],
-      "notes": ""
-    }
-  ]
-}
-EOF
-}
-
-cleanup_v3() {
-  echo "Cleaning up v3 test environment..."
-  rm -f "$V3_TASKS_FILE"
-  rm -f "$AIMI_DIR/current-tasks" "$AIMI_DIR/current-branch" "$AIMI_DIR/current-story" "$AIMI_DIR/last-result"
-}
-
-test_v3_detect_schema() {
-  echo ""
-  echo "=== Testing v3 detect-schema ==="
-
-  local output
-  output=$("$CLI" detect-schema)
-  assert_eq "3.0" "$output" "detect-schema returns 3.0 for v3 file"
-}
-
-test_v3_init_session() {
-  echo ""
-  echo "=== Testing v3 init-session ==="
+  echo "=== Testing init-session ==="
 
   local output
   output=$("$CLI" init-session)
 
-  assert_contains '"pending": 4' "$output" "v3 init-session counts pending by status"
-  assert_contains '"schemaVersion": "3.0"' "$output" "v3 init-session returns schema version"
-  assert_contains "feat/test-v3-feature" "$output" "v3 init-session returns branch"
+  assert_contains '"pending": 4' "$output" "init-session counts pending by status"
+  assert_contains '"schemaVersion": "3.0"' "$output" "init-session returns schema version"
+  assert_contains "feat/test-feature" "$output" "init-session returns branch"
+
+  # Check state files created
+  [ -f "$AIMI_DIR/current-tasks" ] && assert_eq "1" "1" "current-tasks state file created" || assert_eq "1" "0" "current-tasks state file created"
+  [ -f "$AIMI_DIR/current-branch" ] && assert_eq "1" "1" "current-branch state file created" || assert_eq "1" "0" "current-branch state file created"
 }
 
-test_v3_count_pending() {
+test_count_pending() {
   echo ""
-  echo "=== Testing v3 count-pending ==="
+  echo "=== Testing count-pending ==="
 
   local output
   output=$("$CLI" count-pending)
-  assert_eq "4" "$output" "v3 count-pending counts stories with status pending"
+  assert_eq "4" "$output" "count-pending counts stories with status pending"
 }
 
-test_v3_list_ready() {
+test_list_ready() {
   echo ""
-  echo "=== Testing v3 list-ready ==="
+  echo "=== Testing list-ready ==="
 
   local output
   output=$("$CLI" list-ready)
@@ -472,20 +298,20 @@ test_v3_list_ready() {
   assert_eq "0" "$us004_present" "list-ready excludes US-004 (deps pending)"
 }
 
-test_v3_next_story() {
+test_next_story() {
   echo ""
-  echo "=== Testing v3 next-story ==="
+  echo "=== Testing next-story ==="
 
   local output
   output=$("$CLI" next-story)
 
   # Should return US-001 (ready, lowest priority)
-  assert_contains '"id": "US-001"' "$output" "v3 next-story returns first ready by priority"
+  assert_contains '"id": "US-001"' "$output" "next-story returns first ready by priority"
 }
 
-test_v3_mark_in_progress() {
+test_mark_in_progress() {
   echo ""
-  echo "=== Testing v3 mark-in-progress ==="
+  echo "=== Testing mark-in-progress ==="
 
   local output
   output=$("$CLI" mark-in-progress US-001)
@@ -493,24 +319,29 @@ test_v3_mark_in_progress() {
   assert_contains '"status": "in_progress"' "$output" "mark-in-progress sets status to in_progress"
 }
 
-test_v3_mark_complete() {
+test_mark_complete() {
   echo ""
-  echo "=== Testing v3 mark-complete ==="
+  echo "=== Testing mark-complete ==="
 
   local output
   output=$("$CLI" mark-complete US-001)
 
-  assert_contains '"status": "completed"' "$output" "v3 mark-complete sets status to completed"
+  assert_contains '"status": "completed"' "$output" "mark-complete sets status to completed"
 
   # Check last-result state
   local last
   last=$(cat "$AIMI_DIR/last-result" 2>/dev/null || echo "")
-  assert_eq "success" "$last" "v3 last-result set to success"
+  assert_eq "success" "$last" "last-result set to success"
+
+  # Check current-story cleared
+  local current
+  current=$(cat "$AIMI_DIR/current-story" 2>/dev/null || echo "")
+  assert_eq "" "$current" "current-story cleared"
 }
 
-test_v3_list_ready_after_complete() {
+test_list_ready_after_complete() {
   echo ""
-  echo "=== Testing v3 list-ready after completing US-001 ==="
+  echo "=== Testing list-ready after completing US-001 ==="
 
   local output
   output=$("$CLI" list-ready)
@@ -529,20 +360,25 @@ test_v3_list_ready_after_complete() {
   assert_eq "0" "$us004_present" "list-ready still excludes US-004 (US-002 pending)"
 }
 
-test_v3_mark_failed() {
+test_mark_failed() {
   echo ""
-  echo "=== Testing v3 mark-failed ==="
+  echo "=== Testing mark-failed ==="
 
   local output
   output=$("$CLI" mark-failed US-002 "Build error in module X")
 
-  assert_contains '"status": "failed"' "$output" "v3 mark-failed sets status to failed"
-  assert_contains '"notes": "Build error in module X"' "$output" "v3 mark-failed sets notes"
+  assert_contains '"status": "failed"' "$output" "mark-failed sets status to failed"
+  assert_contains '"notes": "Build error in module X"' "$output" "mark-failed sets notes"
+
+  # Check state
+  local last
+  last=$(cat "$AIMI_DIR/last-result" 2>/dev/null || echo "")
+  assert_eq "failed" "$last" "last-result state set to failed"
 }
 
-test_v3_cascade_skip() {
+test_cascade_skip() {
   echo ""
-  echo "=== Testing v3 cascade-skip ==="
+  echo "=== Testing cascade-skip ==="
 
   local output
   output=$("$CLI" cascade-skip US-002)
@@ -552,28 +388,33 @@ test_v3_cascade_skip() {
 
   # Verify US-004 is now skipped in the file
   local us004_status
-  us004_status=$(jq -r '.userStories[] | select(.id == "US-004") | .status' "$V3_TASKS_FILE")
+  us004_status=$(jq -r '.userStories[] | select(.id == "US-004") | .status' "$TASKS_FILE")
   assert_eq "skipped" "$us004_status" "US-004 status is skipped in file"
 
   # US-003 does NOT depend on US-002, should not be skipped
   local us003_status
-  us003_status=$(jq -r '.userStories[] | select(.id == "US-003") | .status' "$V3_TASKS_FILE")
+  us003_status=$(jq -r '.userStories[] | select(.id == "US-003") | .status' "$TASKS_FILE")
   assert_eq "pending" "$us003_status" "US-003 status still pending (no dep on US-002)"
 }
 
-test_v3_mark_skipped() {
+test_mark_skipped() {
   echo ""
-  echo "=== Testing v3 mark-skipped ==="
+  echo "=== Testing mark-skipped ==="
 
   local output
   output=$("$CLI" mark-skipped US-003)
 
-  assert_contains '"status": "skipped"' "$output" "v3 mark-skipped sets status to skipped"
+  assert_contains '"status": "skipped"' "$output" "mark-skipped sets status to skipped"
+
+  # Check state
+  local last
+  last=$(cat "$AIMI_DIR/last-result" 2>/dev/null || echo "")
+  assert_eq "skipped" "$last" "last-result state set to skipped"
 }
 
-test_v3_validate_deps() {
+test_validate_deps() {
   echo ""
-  echo "=== Testing v3 validate-deps ==="
+  echo "=== Testing validate-deps ==="
 
   local output exit_code
   output=$("$CLI" validate-deps) && exit_code=0 || exit_code=$?
@@ -582,9 +423,9 @@ test_v3_validate_deps() {
   assert_exit_code "0" "$exit_code" "validate-deps exits 0 for valid graph"
 }
 
-test_v3_validate_deps_circular() {
+test_validate_deps_circular() {
   echo ""
-  echo "=== Testing v3 validate-deps with circular dependency ==="
+  echo "=== Testing validate-deps with circular dependency ==="
 
   # Create a file with circular deps
   local circular_file="$TASKS_DIR/9999-99-97-circular-tasks.json"
@@ -636,31 +477,31 @@ EOF
 
   rm -f "$circular_file"
 
-  # Restore pointer to v3 test file
-  echo "$V3_TASKS_FILE" > "$AIMI_DIR/current-tasks"
+  # Restore pointer to test file
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
 }
 
-test_v3_status() {
+test_status() {
   echo ""
-  echo "=== Testing v3 status command ==="
+  echo "=== Testing status command ==="
 
   local output
   output=$("$CLI" status)
 
-  assert_contains '"schemaVersion": "3.0"' "$output" "v3 status shows schema version"
-  assert_contains '"maxConcurrency": 4' "$output" "v3 status shows maxConcurrency"
-  assert_contains '"dependsOn"' "$output" "v3 status includes dependsOn in stories"
+  assert_contains '"schemaVersion": "3.0"' "$output" "status shows schema version"
+  assert_contains '"maxConcurrency": 4' "$output" "status shows maxConcurrency"
+  assert_contains '"dependsOn"' "$output" "status includes dependsOn in stories"
 }
 
-test_v3_count_pending_final() {
+test_count_pending_final() {
   echo ""
-  echo "=== Testing v3 count-pending (final state) ==="
+  echo "=== Testing count-pending (final state) ==="
 
   local output
   output=$("$CLI" count-pending)
 
   # US-001 completed, US-002 failed, US-003 skipped, US-004 skipped = 0 pending
-  assert_eq "0" "$output" "v3 count-pending returns 0 after all stories resolved"
+  assert_eq "0" "$output" "count-pending returns 0 after all stories resolved"
 }
 
 # ============================================================================
@@ -672,51 +513,42 @@ main() {
   echo "  Aimi CLI Test Suite"
   echo "================================================"
 
-  # --- v2.2 Tests ---
-  echo ""
-  echo "--- v2.2 Schema Tests ---"
   setup
 
+  # General tests
+  echo ""
+  echo "--- General Tests ---"
   test_help
   test_find_tasks
   test_init_session
-  test_status
   test_metadata
-  test_next_story
   test_current_story
-  test_mark_complete
-  test_mark_failed
-  test_mark_skipped
-  test_count_pending
   test_get_branch
   test_get_state
   test_clear_state
   test_error_handling
 
-  cleanup
+  # Re-init session after clear-state
+  "$CLI" init-session > /dev/null
 
-  # --- v3.0 Tests ---
+  # Lifecycle tests (order matters — they modify state progressively)
   echo ""
-  echo "--- v3.0 Schema Tests ---"
-  setup_v3
+  echo "--- Lifecycle Tests ---"
+  test_count_pending
+  test_list_ready
+  test_next_story
+  test_mark_in_progress
+  test_mark_complete
+  test_list_ready_after_complete
+  test_mark_failed
+  test_cascade_skip
+  test_mark_skipped
+  test_validate_deps_circular
+  test_validate_deps
+  test_status
+  test_count_pending_final
 
-  test_v3_detect_schema
-  test_v3_init_session
-  test_v3_count_pending
-  test_v3_list_ready
-  test_v3_next_story
-  test_v3_mark_in_progress
-  test_v3_mark_complete
-  test_v3_list_ready_after_complete
-  test_v3_mark_failed
-  test_v3_cascade_skip
-  test_v3_mark_skipped
-  test_v3_validate_deps_circular
-  test_v3_validate_deps
-  test_v3_status
-  test_v3_count_pending_final
-
-  cleanup_v3
+  cleanup
 
   echo ""
   echo "================================================"

@@ -31,7 +31,7 @@ $AIMI_CLI next-story
 
 This returns the next pending story as JSON. Fields depend on schema version:
 
-**v3 (current):**
+**Response format:**
 ```json
 {
   "id": "US-001",
@@ -41,19 +41,6 @@ This returns the next pending story as JSON. Fields depend on schema version:
   "priority": 1,
   "status": "pending",
   "dependsOn": [],
-  "notes": ""
-}
-```
-
-**v2.2 (legacy):**
-```json
-{
-  "id": "US-001",
-  "title": "Add user schema",
-  "description": "As a developer, I need...",
-  "acceptanceCriteria": ["Criterion 1", "Criterion 2"],
-  "priority": 1,
-  "passes": false,
   "notes": ""
 }
 ```

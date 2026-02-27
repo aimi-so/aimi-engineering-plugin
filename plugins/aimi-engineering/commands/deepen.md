@@ -26,9 +26,7 @@ Read the tasks file using the Read tool.
 
 ## Step 2: Identify Pending Stories
 
-Detect schema version and filter accordingly:
-- **v3** (`schemaVersion: "3.0"`): Filter stories where `status == "pending"`
-- **v2.2**: Filter stories where `passes == false` and `skipped != true`
+Filter stories where `status == "pending"`.
 
 If no pending stories:
 ```
@@ -36,7 +34,7 @@ All stories are already complete. Nothing to deepen.
 ```
 STOP.
 
-**CRITICAL:** Never modify or split completed stories (v3: `status == "completed"`, v2.2: `passes: true`). Only enrich pending stories.
+**CRITICAL:** Never modify or split completed stories (`status == "completed"`). Only enrich pending stories.
 
 ## Step 3: Research Per Story (Parallel)
 
@@ -83,8 +81,8 @@ Populate the `notes` field with useful context:
 Write the enriched tasks.json back to the **same file path**. Preserve:
 - `schemaVersion` (unchanged)
 - `metadata` (unchanged)
-- Completed stories (unchanged — v3: `status: "completed"`, v2.2: `passes: true`)
-- Skipped stories (unchanged — v3: `status: "skipped"`, v2.2: `skipped: true`)
+- Completed stories (unchanged — `status: "completed"`)
+- Skipped stories (unchanged — `status: "skipped"`)
 
 Only pending stories should have updated `acceptanceCriteria`, `notes`, and potentially be split.
 

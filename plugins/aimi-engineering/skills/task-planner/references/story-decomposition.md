@@ -157,7 +157,7 @@ US-001  dependsOn: []           priority: 1
 US-002  dependsOn: [US-001]     priority: 2
 US-003  dependsOn: [US-002]     priority: 3
 ```
-No parallel groups. This is equivalent to v2.2 behavior.
+No parallel groups. Stories execute sequentially.
 
 **Pattern 4: Wide parallel (plugin/config type tasks)**
 

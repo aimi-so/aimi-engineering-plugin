@@ -110,7 +110,6 @@ Learnings are stored in project files (not separate progress log):
 }
 ```
 
-> **Backward compatibility:** v2.2 tasks files (with `passes` boolean) are auto-detected and fully supported by the CLI.
 
 ## Performance Guidelines
 

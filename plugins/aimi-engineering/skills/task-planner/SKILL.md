@@ -61,7 +61,7 @@ Take a feature description through research, spec analysis, and story decomposit
 
 **Key fields:**
 - `planPath` is always `null` — this skill generates tasks.json directly, no intermediate plan.
-- `status` replaces the old `passes` boolean. All stories initialize as `"pending"`.
+- `status` tracks story lifecycle. All stories initialize as `"pending"`.
 - `dependsOn` is a string array of story IDs that must complete before this story can start.
 - `maxConcurrency` (optional) controls how many stories execute in parallel (default: `4`).
 
