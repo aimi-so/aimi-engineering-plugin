@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-02-26
+
+### Added
+
+- **PermissionRequest hook**: Auto-approves `$AIMI_CLI` and `AIMI_CLI=` Bash commands during task execution, eliminating manual permission prompts for CLI operations
+  - `hooks/hooks.json` — hook configuration
+  - `hooks/auto-approve-cli.sh` — approval script matching only AIMI CLI patterns
+
 ## [1.6.0] - 2026-02-25
 
 ### Changed
