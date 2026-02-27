@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.1] - 2026-02-27
+
+### Security
+
+- **auto-approve-cli.sh**: Hardened with subcommand whitelist and shell metacharacter rejection
+  - Pattern 1 (AIMI_CLI= assignment): Now validates path matches `~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh` — rejects arbitrary assignments
+  - Pattern 2 ($AIMI_CLI invocation): Replaced permissive regex with explicit subcommand whitelist (19 commands: init-session, find-tasks, status, metadata, next-story, current-story, list-ready, mark-in-progress, mark-complete, mark-failed, mark-skipped, count-pending, validate-deps, validate-stories, cascade-skip, get-branch, get-state, clear-state, help)
+  - Shell chaining rejection: Commands containing `;`, `&&`, `||`, `|`, `$()`, or backticks after `$AIMI_CLI` or `$WORKTREE_MGR` are rejected
+  - Pattern 3 (NEW): WORKTREE_MGR= assignment validated against expected plugin path
+  - Pattern 4 (NEW): $WORKTREE_MGR invocation with subcommand whitelist (create, remove, merge, list, help)
+
 ## [1.11.0] - 2026-02-27
 
 ### Removed
