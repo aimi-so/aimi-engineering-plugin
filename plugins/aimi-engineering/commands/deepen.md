@@ -1,64 +1,105 @@
 ---
 name: aimi:deepen
-description: Enhance plan with research and update tasks.json
-argument-hint: "[path to plan file]"
+description: Enrich tasks.json stories with research insights
+argument-hint: "[path to tasks.json (optional)]"
 ---
 
 # Aimi Deepen
 
-Run compound-engineering's deepen workflow, then update tasks.json while preserving state.
+Enrich tasks.json stories directly with research insights, better acceptance criteria, and story splitting when needed.
 
-## Step 1: Execute Compound Deepen
+## Step 1: Locate Tasks File
 
-/deepen-plan $ARGUMENTS
+If `$ARGUMENTS` contains a path, use it. Otherwise, auto-discover:
 
-**IMPORTANT:** When compound-engineering presents post-enhancement options, DO NOT show them to the user. Proceed directly to Step 2.
+```bash
+ls -t .aimi/tasks/*-tasks.json 2>/dev/null | head -1
+```
 
-## Step 2: Read Current State
+If no tasks file found:
+```
+No tasks file found. Run `/aimi:plan` to create a task list first.
+```
+STOP.
 
-After deepening completes, read `docs/tasks/tasks.json` to capture current state:
+Read the tasks file using the Read tool.
 
-- Which stories have `passes: true`
-- Current `notes` field contents
-- Current `attempts` counts
-- Current `lastAttempt` timestamps
+## Step 2: Identify Pending Stories
 
-## Step 3: Re-Convert to Tasks
+Filter stories where `passes == false` and `skipped != true`. These are the stories to enrich.
 
-Re-read the enhanced plan file and invoke the plan-to-tasks skill to generate updated stories.
+If no pending stories:
+```
+All stories are already complete. Nothing to deepen.
+```
+STOP.
 
-## Step 4: Preserve State
+**CRITICAL:** Never modify or split completed stories (`passes: true`). Only enrich pending stories.
 
-**CRITICAL:** Merge the new conversion with existing state:
+## Step 3: Research Per Story (Parallel)
 
-For each story in the new conversion:
-- If a matching story (by ID or title) exists in old state:
-  - Keep `passes` value from old state
-  - Keep `notes` value from old state
-  - Keep `attempts` value from old state
-  - Keep `lastAttempt` value from old state
-  - Update story's `acceptanceCriteria` with enhanced details
-- If no match, use new story as-is
-
-## Step 5: Update tasks.json
-
-Write the merged result to `docs/tasks/tasks.json`.
-
-Add or update `deepenedAt` field with current ISO 8601 timestamp.
-
-## Step 6: Aimi-Branded Report (OVERRIDE)
-
-**CRITICAL:** Display ONLY Aimi-specific output. NEVER show compound-engineering options.
+For each pending story, spawn a research agent **in parallel**:
 
 ```
-Plan deepened successfully!
+Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
+  prompt: "Find codebase patterns relevant to this story:
+           Title: [story.title]
+           Description: [story.description]
+           Acceptance Criteria: [story.acceptanceCriteria]
 
-📋 Enhanced: docs/plans/[filename].md
-📝 Updated: docs/tasks/tasks.json
+           Look for: relevant files, existing patterns, potential conflicts,
+           edge cases, and anything that would help an agent implement this."
+```
+
+Collect all results.
+
+## Step 4: Enrich Stories
+
+For each pending story, using the research results:
+
+### 4a: Improve Acceptance Criteria
+- Make vague criteria more specific (e.g., "Add column" → "Add `status` column as VARCHAR(20) with CHECK constraint")
+- Add missing criteria discovered by research (edge cases, validation rules)
+- Ensure "Typecheck passes" is present
+- Ensure UI stories have "Verify in browser"
+
+### 4b: Assess Story Size
+If a story appears too large for one context window:
+- Split into smaller stories
+- **Split ID format:** US-003 becomes US-003 + US-003a
+- **Split priority format:** If original priority is 3, split gets 3 and 3.5
+- Each split story must be independently completable
+
+### 4c: Add Research Notes
+Populate the `notes` field with useful context:
+- Relevant file paths discovered by research
+- Patterns to follow
+- Gotchas or warnings
+
+## Step 5: Write Updated Tasks File
+
+Write the enriched tasks.json back to the **same file path**. Preserve:
+- `schemaVersion` (unchanged)
+- `metadata` (unchanged)
+- Completed stories (unchanged — `passes: true`)
+- Skipped stories (unchanged — `skipped: true`)
+
+Only pending stories should have updated `acceptanceCriteria`, `notes`, and potentially be split.
+
+Validate the JSON is well-formed before writing.
+
+## Step 6: Aimi-Branded Report
+
+```
+Stories enriched successfully!
+
+Tasks: .aimi/tasks/[tasks-filename].json
 
 Changes:
-- [X] stories updated with research insights
-- [Y] completed stories preserved their status
+- [X] stories enriched with research insights
+- [Y] stories split (too large for one iteration)
+- [Z] acceptance criteria added
+- [W] completed stories preserved
 
 Next steps:
 1. **Run `/aimi:review`** - Get feedback from code reviewers
@@ -66,15 +107,12 @@ Next steps:
 3. **Run `/aimi:execute`** - Begin autonomous execution
 ```
 
-**Command Mapping (what to say vs what NOT to say):**
+## Error Handling
 
-| If compound says... | Aimi says instead... |
-|---------------------|----------------------|
-| `/workflows:work` | `/aimi:execute` |
-| `/technical_review` | `/aimi:review` |
-| `/plan_review` | `/aimi:review` |
+If research agents fail:
+- Proceed with available results
+- Report: "Some research agents failed. Enrichment may be partial."
 
-**NEVER mention:**
-- compound-engineering
-- workflows:*
-- Any command without the `aimi:` prefix
+If tasks file write fails:
+- Report the error
+- Original file is unchanged (write uses temp file pattern)

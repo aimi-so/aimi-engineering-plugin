@@ -7,6 +7,249 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-02-27
+
+### Added
+
+- **Schema v3 (`task-format-v3.md`)**: New tasks.json schema with dependency graph and parallel execution support
+  - `dependsOn` (string[]) for explicit inter-story dependency graphs (DAG)
+  - `status` enum (`pending`, `in_progress`, `completed`, `failed`, `skipped`) replacing `passes` boolean
+  - `maxConcurrency` metadata field (default 4) for parallel story execution
+  - `priority` retained as tiebreaker for stories at same dependency depth
+  - Status state machine with valid transitions documented
+  - `dependsOn` validation rules: no circular deps, no self-refs, all referenced IDs must exist
+  - Backward compatibility with v2.2: auto-detection and fallback behavior
+  - Migration guide: v2.2 to v3 conversion rules with priority-layer inference for `dependsOn`
+
+- **Parallel execution in `/aimi:execute`**: Automatic detection and execution of independent stories in parallel
+  - Wave-based execution: independent stories run concurrently within waves
+  - Team/swarm orchestration for parallel workers using Claude Code Teams
+  - Adaptive concurrency: `min(ready stories, maxConcurrency)`
+  - Cascade-skip on failure: dependent stories automatically skipped when a dependency fails
+  - v2.2 fallback: sequential execution preserved for older schema files
+  - v3 with linear deps: runs sequentially without Team/worktree overhead
+
+- **Worktree merge commands** in `worktree-manager.sh`
+  - `merge <worktree-name> [--into <branch>]` — merge worktree branch into target
+  - `merge-all <branch1> <branch2> ... [--into <branch>]` — sequential multi-merge
+  - Merge conflict detection with conflicting file listing
+  - Stop-on-conflict behavior for merge-all
+
+- **CLI extensions** for v3 schema support in `aimi-cli.sh`
+  - `detect-schema` — returns schema version (`2.2` or `3.0`)
+  - `list-ready` — dependency-aware ready story detection (v3)
+  - `mark-in-progress` — sets `status: "in_progress"` for a story (v3)
+  - `validate-deps` — DAG validation for dependency graph (cycles, missing refs, self-refs)
+  - `cascade-skip` — transitive skip on failure for dependent stories
+
+### Changed
+
+- **`/aimi:execute` command**: Rewritten for smart parallel/sequential execution based on schema version and dependency graph shape
+- **`story-decomposition.md`**: Updated with `dependsOn` generation rules, layer-based inference, and parallel grouping examples
+- **`task-planner` SKILL.md**: Phase 3 and Phase 4 updated for v3 output with `dependsOn` arrays and `status` field
+- **`plan.md` command**: Output format updated to v3 schema with `dependsOn` and `status` fields
+- **`story-executor` skill**: Added optional `WORKTREE_PATH` variable for parallel worker context; workers report status instead of writing tasks.json directly
+- **`/aimi:status` command**: v3 display with status values, dependency info, and wave grouping; v2.2 display unchanged
+- **CLI dual-version support**: `mark-complete`, `mark-failed`, `mark-skipped`, `count-pending`, `next-story` all updated for v2.2/v3 compatibility
+
+## [1.8.0] - 2026-02-27
+
+### Added
+
+- **`brainstorm` skill**: Standalone process knowledge for brainstorming sessions
+  - `skills/brainstorm/SKILL.md` (229 lines) — hybrid question flow, Ralph-style batched multiple-choice, adaptive exit, YAGNI, design document template
+  - `skills/brainstorm/references/question-patterns.md` (240 lines) — formatting rules, scenario batches, response parsing, contextual question generation
+
+### Changed
+
+- **`/aimi:brainstorm` command**: Full rewrite as standalone (no longer wraps compound-engineering)
+  - Phase 0: Assess requirements clarity
+  - Phase 1: Codebase research via `aimi-codebase-researcher` agent
+  - Phase 2: Batched 3-5 multiple-choice questions with "1A, 2C, 3B" shorthand
+  - Phase 3: Conditional approaches (only when multiple valid paths exist)
+  - Phase 4: Design document capture with slug derivation, collision handling, open questions enforcement
+  - Phase 5: Aimi-branded handoff
+- **compound-engineering dependency fully eliminated**: All commands and skills are now standalone. Zero external plugin dependencies required.
+- **CLAUDE.md**: Dependencies section updated to reflect full independence
+- **`aimi-code-simplicity-reviewer` agent**: Updated pipeline artifacts reference
+- **`aimi-best-practices-researcher` agent**: Removed `compound-docs` from skill mapping
+
+## [1.7.0] - 2026-02-26
+
+### Added
+
+- **PermissionRequest hook**: Auto-approves `$AIMI_CLI` and `AIMI_CLI=` Bash commands during task execution, eliminating manual permission prompts for CLI operations
+  - `hooks/hooks.json` — hook configuration
+  - `hooks/auto-approve-cli.sh` — approval script matching only AIMI CLI patterns
+
+## [1.6.0] - 2026-02-25
+
+### Changed
+
+- **Output directory**: All document output paths moved from `docs/` to `.aimi/`
+  - `docs/tasks/` → `.aimi/tasks/`
+  - `docs/brainstorms/` → `.aimi/brainstorms/`
+  - `docs/plans/` → `.aimi/plans/`
+  - `docs/solutions/` → `.aimi/solutions/`
+- **`aimi-cli.sh`**: `TASKS_DIR` now derived from `$AIMI_DIR` variable (`$AIMI_DIR/tasks`)
+- All commands, skills, and agents updated with new paths
+
+## [1.5.2] - 2026-02-25
+
+### Changed
+
+- **`/aimi:plan` command**: Inlined full task-planner pipeline directly into plan.md to fix double skill loading issue (both `plan` command and `task-planner` skill were loading into context)
+- **`task-planner` skill**: Set to `user-invocable: false` since pipeline is now embedded in `/aimi:plan`
+
+## [1.5.1] - 2026-02-25
+
+### Added
+
+- **Context7 MCP server**: Registered `context7` HTTP MCP server directly in plugin.json so `aimi-best-practices-researcher` and `aimi-framework-docs-researcher` can access documentation without compound-engineering installed
+
+## [1.5.0] - 2026-02-25
+
+### Added
+
+- **28 aimi-native agents**: Standalone agents that eliminate compound-engineering dependency for plan, review, and deepen workflows
+  - 4 research agents: `aimi-codebase-researcher`, `aimi-learnings-researcher`, `aimi-best-practices-researcher`, `aimi-framework-docs-researcher`
+  - 15 review agents: `aimi-architecture-strategist`, `aimi-security-sentinel`, `aimi-code-simplicity-reviewer`, `aimi-performance-oracle`, `aimi-agent-native-reviewer`, `aimi-data-integrity-guardian`, `aimi-data-migration-expert`, `aimi-deployment-verification-agent`, `aimi-schema-drift-detector`, `aimi-pattern-recognition-specialist`, `aimi-dhh-rails-reviewer`, `aimi-kieran-rails-reviewer`, `aimi-kieran-typescript-reviewer`, `aimi-kieran-python-reviewer`, `aimi-julik-frontend-races-reviewer`
+  - 3 design agents: `aimi-design-implementation-reviewer`, `aimi-design-iterator`, `aimi-figma-design-sync`
+  - 1 docs agent: `aimi-ankane-readme-writer`
+  - 5 workflow agents: `aimi-spec-flow-analyzer`, `aimi-bug-reproduction-validator`, `aimi-every-style-editor`, `aimi-lint`, `aimi-pr-comment-resolver`
+
+### Changed
+
+- **`task-planner` skill**: All agent references updated from `compound-engineering:*` to `aimi-engineering:*`
+- **`/aimi:deepen` command**: Now uses `aimi-engineering:research:aimi-codebase-researcher` instead of compound agent
+- **`/aimi:review` command**: Fully rewritten as standalone multi-agent review command. No longer wraps `/workflows:review`. Invokes parallel aimi-native review agents with default agents (architecture, security, simplicity, performance, agent-native), conditional migration agents, language-specific reviewers, and findings synthesis with severity categorization.
+- **Reduced compound-engineering dependency**: Only `/aimi:brainstorm` still requires compound-engineering. Plan, deepen, and review are now fully standalone.
+
+## [1.4.0] - 2026-02-25
+
+### Added
+
+- **`task-planner` skill**: New skill that generates `tasks.json` directly from a feature description. Full pipeline: brainstorm detection, local/external research (parallel), spec-flow analysis, story decomposition, and direct JSON output — no intermediate markdown plan.
+  - `skills/task-planner/SKILL.md` (160 lines) — orchestration overview and agent invocation syntax
+  - `skills/task-planner/references/pipeline-phases.md` — detailed phase-by-phase instructions
+  - `skills/task-planner/references/story-decomposition.md` — sizing, ordering, validation rules
+
+### Changed
+
+- **`/aimi:plan` command**: No longer wraps compound-engineering `/workflows:plan`. Now invokes the `task-planner` skill directly, producing `tasks.json` without an intermediate plan markdown file.
+- **`/aimi:deepen` command**: No longer wraps compound-engineering `/deepen-plan`. Now enriches `tasks.json` directly — spawns research agents per pending story, improves acceptance criteria, splits oversized stories, preserves completed story state. Accepts optional path argument; auto-discovers most recent tasks.json if omitted.
+- **Schema version**: Bumped from 2.1 to 2.2
+  - `metadata.planPath` is now optional/nullable (`null` when generated by task-planner)
+  - `metadata.brainstormPath` documented as optional context reference
+  - Backward compatible with v2.1 — existing files work without modification
+- **`plan-to-tasks` skill**: Updated to output schema v2.2. Added note directing users to `task-planner` for direct generation. Remains functional as standalone converter for external markdown plans.
+
+## [1.3.1] - 2026-02-25
+
+### Fixed
+
+- **`/aimi:plan` not loading `plan-to-tasks` skill**: Step 4 used ambiguous pseudo-syntax (`Skill: plan-to-tasks`) inside a code block, which Claude interpreted as descriptive text instead of an actionable tool invocation
+  - Replaced with explicit instructions to call the Skill tool with `skill: "aimi-engineering:plan-to-tasks"`
+  - Added "Do NOT generate tasks.json from memory or inline" guardrail
+  - Added fallback: read `SKILL.md` directly if Skill tool is unavailable
+  - Updated Step 5 to clarify the skill handles output writing
+
+## [1.3.0] - 2026-02-24
+
+### Fixed
+
+- **CLI script path resolution**: Commands now resolve `aimi-cli.sh` from plugin install directory (`~/.claude/plugins/cache/*/aimi-engineering/*/scripts/`) instead of using `./scripts/` relative path which fails when cwd is the user's project
+  - Updated `execute.md`, `next.md`, `status.md` with Step 0: Resolve CLI Path
+  - Added `$AIMI_CLI` variable pattern (matches compound-engineering's plugin path convention)
+  - Updated `allowed-tools` frontmatter to permit `$AIMI_CLI` execution
+  - Updated README architecture section and CLI help examples
+
+## [1.2.2] - 2026-02-24
+
+### Fixed
+
+- **Schema structure divergences** across 7 files:
+  - `commands/plan.md`: Schema version output said "2.0" instead of "2.1"
+  - `README.md`: jq example referenced non-existent top-level `project`/`branchName` fields (now uses `metadata.*`)
+  - `README.md`: Removed stale `steps`/`taskType` from field length limits table (fields removed in v2.1)
+  - `README.md`: Updated intro text (removed references to removed `steps`/`qualityChecks` fields)
+  - `README.md`: Added missing Root Fields table, moved `schemaVersion` out of Metadata table
+  - `README.md`: Added missing `brainstormPath` to Metadata Fields table
+  - Root `CLAUDE.md`: Replaced obsolete pre-v2.0 schema (missing `schemaVersion`, `metadata` wrapper) with current v2.1 structure
+  - `marketplace.json`: Synced version from "0.2.0" to "1.2.2" (matching plugin.json)
+
+## [1.2.1] - 2026-02-24
+
+### Changed
+
+- **Schema version bump**: `schemaVersion` updated from "2.0" to "2.1" across all files
+  - README.md, CLAUDE.md, SKILL.md, task-format.md, test-aimi-cli.sh
+
+## [1.2.0] - 2026-02-24
+
+### Added
+
+- **aimi-cli.sh**: Single bash script for deterministic task file operations
+  - 13 subcommands: `init-session`, `find-tasks`, `status`, `metadata`, `next-story`, `current-story`, `mark-complete`, `mark-failed`, `mark-skipped`, `count-pending`, `get-branch`, `get-state`, `clear-state`
+  - State management via `.aimi/` directory (persists across `/clear`)
+  - Atomic file updates using temp file + mv pattern
+  - Comprehensive test suite (33 tests)
+- **Story-by-story execution**: Execute one story at a time with `/clear` between stories
+- `.gitignore` entry for `.aimi/` state directory
+
+### Changed
+
+- **Commands updated to use CLI instead of inline jq**:
+  - `/aimi:execute` - Uses `init-session`, `count-pending`, `get-state`
+  - `/aimi:next` - Uses `next-story`, `mark-complete`, `mark-failed`, `mark-skipped`
+  - `/aimi:status` - Uses `status` command
+- Simplified command files (less error-prone, no jq interpretation by AI)
+
+### Fixed
+
+- AI hallucination when interpreting bash commands embedded in markdown
+  - Variable substitution errors
+  - Command sequence errors
+  - jq query modifications
+  - Path/filename errors
+
+## [2.0.0] - 2026-02-17
+
+### Changed
+
+- **BREAKING:** Restored v2.0 schema with task-specific fields
+  - Re-added `taskType`, `steps`, `relevantFiles`, `qualityChecks` to story schema
+  - `schemaVersion` changed from "3.0" to "2.0"
+  - Improved agent execution with domain-specific guidance
+  - All story `steps` start with "Read CLAUDE.md and AGENTS.md for project conventions"
+
+### Added
+
+- Automated taskType detection via keyword matching (7 types)
+  - `prisma_schema` - Database schema/migration changes
+  - `server_action` - Server-side logic and actions
+  - `react_component` - React/UI component work
+  - `api_route` - API endpoint implementation
+  - `utility` - Helper functions and services
+  - `test` - Test implementation
+  - `other` - Fallback for unclassified tasks
+- Predefined step templates for each taskType
+- `relevantFiles` inference from story content + taskType defaults
+- `qualityChecks` assignment based on taskType
+- New placeholders in prompt template: `[TASK_TYPE]`, `[STEPS_ENUMERATED]`, `[RELEVANT_FILES_BULLETED]`, `[QUALITY_CHECKS_BULLETED]`
+
+### Removed
+
+- v3.0 schema (minimal field set without task-specific guidance)
+
+### Migration
+
+Existing v3.0 tasks.json files must be regenerated:
+
+```bash
+/aimi:plan [feature]
+```
+
 ## [1.0.0] - 2026-02-16
 
 ### Changed
@@ -320,4 +563,4 @@ Or manually add the required fields to each story in tasks.json.
 
 ### Dependencies
 
-This plugin requires **compound-engineering-plugin** to be installed first.
+This plugin requires **compound-engineering-plugin** for brainstorm, plan, and review workflows.

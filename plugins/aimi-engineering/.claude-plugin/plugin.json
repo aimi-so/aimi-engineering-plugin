@@ -1,7 +1,7 @@
 {
   "name": "aimi-engineering",
-  "version": "1.0.0",
-  "description": "Autonomous task execution with Ralph-style JSON tasks. Wraps compound-engineering for brainstorm, plan, review workflows.",
+  "version": "1.9.0",
+  "description": "Autonomous task execution with standalone aimi-native agents. Direct tasks.json generation, research-driven planning, multi-agent review, iterative execution.",
   "author": {
     "name": "Stanley Takamatsu"
   },
@@ -11,8 +11,14 @@
   "keywords": [
     "autonomous-execution",
     "task-management",
-    "compound-engineering",
+    "standalone-agents",
     "ralph-style",
     "workflow-automation"
-  ]
+  ],
+  "mcpServers": {
+    "context7": {
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp"
+    }
+  }
 }

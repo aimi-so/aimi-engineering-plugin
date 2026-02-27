@@ -2,52 +2,53 @@
 name: aimi:next
 description: Execute the next pending story from tasks.json
 disable-model-invocation: true
-allowed-tools: Read, Write, Edit, Bash(git:*), Bash(jq:*), Bash(npm:*), Bash(bun:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(tsc:*), Bash(eslint:*), Bash(prettier:*), Task
+allowed-tools: Read, Write, Edit, Bash(git:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Bash(npm:*), Bash(bun:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(tsc:*), Bash(eslint:*), Bash(prettier:*), Task
 ---
 
 # Aimi Next
 
 Execute the next pending story using a Task-spawned agent.
 
-## Step 1: Find Next Story (via jq)
+## Step 0: Resolve CLI Path
 
-**CRITICAL:** Do NOT read the full tasks.json. Use `jq` to extract ONLY the next pending story.
-
-```bash
-# Extract the next pending story (lowest priority, passes=false, not skipped)
-jq '[.userStories[] | select(.passes == false and .skipped != true)] | sort_by(.priority) | .[0]' docs/tasks/tasks.json
-```
-
-This loads only ONE story into memory, not all stories.
-
-**Filter criteria:**
-- `passes == false` - not completed
-- `skipped != true` - not skipped by user
-- Sort by `priority` - execute in dependency order
-
-### Check if any pending stories exist:
+**CRITICAL:** The CLI script lives in the plugin install directory, NOT the project directory. Resolve it first:
 
 ```bash
-# Get count of pending stories
-jq '[.userStories[] | select(.passes == false and .skipped != true)] | length' docs/tasks/tasks.json
+AIMI_CLI=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
 ```
 
-If result is `0`:
+If empty, report: "aimi-cli.sh not found. Reinstall plugin: `/plugin install aimi-engineering`" and STOP.
+
+**Use `$AIMI_CLI` for ALL subsequent script calls in this command.**
+
+## Step 1: Get Next Story
+
+**CRITICAL:** Use the CLI script to get the next story. Do NOT interpret jq queries directly.
+
+```bash
+$AIMI_CLI next-story
+```
+
+This returns the next pending story as JSON:
+```json
+{
+  "id": "US-001",
+  "title": "Add user schema",
+  "description": "As a developer, I need...",
+  "acceptanceCriteria": ["Criterion 1", "Criterion 2"],
+  "priority": 1,
+  "passes": false,
+  "notes": ""
+}
+```
+
+If result is `null`:
 ```
 All stories complete! Run /aimi:review to review the implementation.
 ```
 STOP execution.
 
-### Get total counts for status display:
-
-```bash
-jq '{
-  pending: [.userStories[] | select(.passes == false and .skipped != true)] | length,
-  completed: [.userStories[] | select(.passes == true)] | length,
-  skipped: [.userStories[] | select(.skipped == true)] | length,
-  total: .userStories | length
-}' docs/tasks/tasks.json
-```
+The CLI also saves the story ID to `.aimi/current-story` for tracking.
 
 ## Step 2: Load Project Guidelines
 
@@ -61,19 +62,7 @@ jq '{
 
 ### Load Guidelines:
 
-```bash
-# Check for CLAUDE.md
-if [ -f "CLAUDE.md" ]; then
-  GUIDELINES=$(cat CLAUDE.md)
-elif [ -f ".claude/CLAUDE.md" ]; then
-  GUIDELINES=$(cat .claude/CLAUDE.md)
-fi
-
-# Check for AGENTS.md (optional, module-specific)
-if [ -f "AGENTS.md" ]; then
-  AGENTS_GUIDELINES=$(cat AGENTS.md)
-fi
-```
+Check for CLAUDE.md and AGENTS.md files. Read them if they exist.
 
 ### Aimi Default Rules (fallback):
 
@@ -83,7 +72,7 @@ If no CLAUDE.md or AGENTS.md found, use these defaults:
 ## Aimi Default Rules
 
 ### Commit Format
-- Format: `<type>: <story-id> - <description>`
+- Format: `<type>(<scope>): <description>`
 - Types: feat, fix, refactor, docs, test, chore
 - Max 72 chars, imperative mood, no trailing period
 
@@ -104,7 +93,7 @@ Show what's being executed:
 
 ```
 Executing: [STORY_ID] - [STORY_TITLE]
-Priority: [priority] | Pending: [count] remaining
+Priority: [priority]
 
 Acceptance Criteria:
 - [criterion 1]
@@ -142,14 +131,13 @@ Description: [STORY_DESCRIPTION]
 3. Implement the changes to satisfy ALL acceptance criteria
 4. Verify each criterion is met
 5. Run quality checks (typecheck, lint, tests as appropriate)
-6. Commit with message: 'feat: [STORY_ID] - [STORY_TITLE]'
-7. Update docs/tasks/tasks.json: Set passes: true for story [STORY_ID]
+6. Commit with message: 'feat(scope): [STORY_TITLE]'
+7. Report success when done
 
 ## ON FAILURE
 
-Do NOT mark passes: true. Instead:
-1. Update tasks.json with notes describing the failure
-2. Return with clear failure report including:
+Do NOT claim success. Instead:
+1. Report the failure clearly with:
    - What failed
    - Error messages
    - Suggested fix
@@ -161,19 +149,13 @@ Do NOT mark passes: true. Instead:
 
 ### If Task succeeds:
 
-**Step 5a: Verify tasks.json updated**
+Mark the story as complete:
 
 ```bash
-jq '.userStories[] | select(.id == "[STORY_ID]") | .passes' docs/tasks/tasks.json
+$AIMI_CLI mark-complete [STORY_ID]
 ```
 
-If not `true`, update it:
-```bash
-jq '(.userStories[] | select(.id == "[STORY_ID]")) |= . + {passes: true}' docs/tasks/tasks.json > tmp.json && mv tmp.json docs/tasks/tasks.json
-```
-
-**Step 5b: Report success**
-
+Report success:
 ```
 [STORY_ID] - [STORY_TITLE] completed successfully.
 
@@ -183,10 +165,10 @@ Run /aimi:status to see overall progress.
 
 ### If Task fails (first attempt):
 
-1. Update tasks.json with failure notes:
+1. Mark the story as failed with notes:
 
 ```bash
-jq '(.userStories[] | select(.id == "[STORY_ID]")) |= . + {notes: "Attempt 1 failed: [error summary]"}' docs/tasks/tasks.json > tmp.json && mv tmp.json docs/tasks/tasks.json
+$AIMI_CLI mark-failed [STORY_ID] "Attempt 1 failed: [error summary]"
 ```
 
 2. RETRY automatically with error context:
@@ -205,10 +187,10 @@ Please try a different approach or fix the issue described above.
 
 ### If Task fails (second attempt):
 
-1. Update tasks.json with detailed failure:
+1. Mark with detailed failure:
 
 ```bash
-jq '(.userStories[] | select(.id == "[STORY_ID]")) |= . + {notes: "Failed after 2 attempts: [error]"}' docs/tasks/tasks.json > tmp.json && mv tmp.json docs/tasks/tasks.json
+$AIMI_CLI mark-failed [STORY_ID] "Failed after 2 attempts: [error]"
 ```
 
 2. Ask user with clear options:
@@ -231,7 +213,7 @@ What would you like to do?
 ### If user says "skip":
 
 ```bash
-jq '(.userStories[] | select(.id == "[STORY_ID]")) |= . + {skipped: true, notes: "Skipped by user after failed attempts"}' docs/tasks/tasks.json > tmp.json && mv tmp.json docs/tasks/tasks.json
+$AIMI_CLI mark-skipped [STORY_ID]
 ```
 
 Report: "Skipped [STORY_ID]. Run /aimi:next for the next story."
@@ -244,3 +226,13 @@ Spawn another Task with user's guidance included in prompt. Continue from Step 5
 
 Report: "Execution stopped. Review the error and run /aimi:next when ready."
 STOP execution.
+
+## Resuming After /clear
+
+If you need to check the current story after a `/clear`:
+
+```bash
+$AIMI_CLI current-story
+```
+
+Returns the story that was in progress, or `null` if none.

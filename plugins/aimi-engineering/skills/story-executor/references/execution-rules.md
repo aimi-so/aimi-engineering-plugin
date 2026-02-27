@@ -2,11 +2,11 @@
 
 ## Overview
 
-Each story is executed by a Task-spawned agent with fresh context. This document defines the execution flow, quality gates, and output formats for the v3.0 schema.
+Each story is executed by a Task-spawned agent with fresh context. This document defines the execution flow and output formats.
 
-## Schema Overview (v3.0)
+---
 
-Stories are flat, atomic units of work:
+## Story Format
 
 ```json
 {
@@ -24,51 +24,46 @@ Stories are flat, atomic units of work:
 }
 ```
 
+---
+
 ## The Number One Rule
 
 **Each story must be completable in ONE iteration (one context window).**
 
 You spawn fresh with no memory of previous work. If the story is too big, you'll run out of context before finishing.
 
+---
+
 ## Execution Flow
 
 ### Step 1: Read Project Guidelines
 
-**FIRST**, check for project-specific guidelines:
+Check for project-specific guidelines:
 
 1. **CLAUDE.md** (project root) - Primary project instructions
-2. **AGENTS.md** (directory-specific) - Module-specific patterns
-3. **Aimi defaults** - Standard conventions if neither exists
+2. **Default rules** - Standard conventions if not found
 
-### Step 2: Understand Story Scope
+### Step 2: Implement the Story
 
-Read the story details:
-- Title and description
-- All acceptance criteria
-- Infer which files need modification
+Follow the story description and implement the required changes.
 
-### Step 3: Implement the Change
+### Step 3: Verify Acceptance Criteria
 
-1. **Read relevant files** to understand current state
-2. **Make the necessary changes** to satisfy acceptance criteria
-3. **Verify each criterion** as you go
+After implementation, verify ALL acceptance criteria are met:
+
+- Check each criterion explicitly
+- For UI stories, verify in browser
+- For logic stories, run tests
 
 ### Step 4: Run Quality Checks
 
-After implementation, run quality checks:
-
 ```bash
-# Standard quality checks
-bun run lint      # or npm run lint
-bun run test      # or npm test  
-npx tsc --noEmit  # typecheck
+npx tsc --noEmit
 ```
-
-Then verify ALL acceptance criteria are met.
 
 ### Step 5: Quality Gate (FAIL FAST)
 
-**If any quality check or acceptance criterion fails, STOP immediately.**
+**If any check or criterion fails, STOP immediately.**
 
 Do NOT:
 - Continue with partial implementation
@@ -78,53 +73,42 @@ Do NOT:
 Instead:
 - Report the failure with full error details
 - Include relevant file paths and line numbers
-- Suggest potential fixes if obvious
 
 ### Step 6: Commit Changes
 
-If all checks pass, commit with this format:
+If all checks pass, commit:
 
 ```bash
 git add [changed files]
-git commit -m "feat: US-001 - Add status field to tasks table"
+git commit -m "feat(tasks): Add status field to tasks table"
 ```
 
-Commit message format:
-- `feat:` for feature work
-- `fix:` for bug fixes
-- `refactor:` for refactoring
-- `[story-id]` from the story
-- Title from story title
+Commit format:
+- `<type>(<scope>): <description>`
+- Types: feat, fix, refactor, docs, test, chore
+- Scope: module or feature area (e.g., tasks, auth, users)
+- Use story title as description
 
-### Step 7: Update tasks.json
+### Step 7: Update the Tasks File
 
-Update the story to mark it complete:
+Mark the story complete:
 
-```bash
-jq '(.userStories[] | select(.id == "US-001")) |= . + {passes: true}' docs/tasks/tasks.json > tmp.json && mv tmp.json docs/tasks/tasks.json
+```json
+{
+  "id": "US-001",
+  "passes": true,
+  "notes": ""
+}
 ```
 
-### Step 8: Update AGENTS.md or CLAUDE.md (if learnings)
-
-If you discovered something future developers/agents should know:
-
-**Good additions:**
-- "When modifying X, also update Y"
-- "This module uses pattern Z"
-- "Tests require dev server on PORT 3000"
-
-**Where to add:**
-- **CLAUDE.md** (root) - Project-wide patterns
-- **AGENTS.md** (directory) - Module-specific patterns
-
-Only add **genuinely reusable knowledge**.
+---
 
 ## Failure Handling
 
 If you cannot complete a story:
 
 1. **Do NOT** mark `passes: true`
-2. **Update tasks.json** with failure details:
+2. **Update the tasks file** with failure details:
 
 ```json
 {
@@ -138,7 +122,8 @@ If you cannot complete a story:
    - What failed
    - Error messages
    - Files involved
-   - Suggested fix if known
+
+---
 
 ## Status Values
 
@@ -147,30 +132,3 @@ If you cannot complete a story:
 | `passes` | `false` | Not completed yet |
 | `passes` | `true` | Completed successfully |
 | `skipped` | `true` | Skipped by user (won't retry) |
-
-## Quality Gates Reference
-
-Common quality checks to run:
-
-| Gate | Command |
-|------|---------|
-| Lint | `bun run lint`, `npm run lint` |
-| Test | `bun run test`, `npm test` |
-| Typecheck | `npx tsc --noEmit`, `bun check` |
-| Build | `bun run build`, `npm run build` |
-| Browser | Manual verification for UI changes |
-
-## Success Metrics
-
-The root `successMetrics` object tracks improvements:
-
-```json
-{
-  "successMetrics": {
-    "apiCalls": "2 → 1",
-    "saveTime": "~400ms → ~200ms"
-  }
-}
-```
-
-These are informational - verify them where possible during implementation.

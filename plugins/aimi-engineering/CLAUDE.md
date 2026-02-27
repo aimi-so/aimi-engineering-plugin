@@ -72,24 +72,29 @@ aimi-engineering-plugin/
 
 ## Output Files
 
-All task execution files go in `docs/tasks/`:
+All task execution files go in `.aimi/tasks/`:
 
-- `tasks.json` - Structured task list with user stories
+- `YYYY-MM-DD-[feature-name]-tasks.json` - Structured task list with user stories
 
 Learnings are stored in project files (not separate progress log):
 
 - `CLAUDE.md` (root) - Project-wide patterns and conventions
 - `AGENTS.md` (per-directory) - Module-specific patterns and gotchas
 
-## tasks.json Schema
+## Tasks File Schema
 
 ### Required Fields
 
 ```json
 {
-  "project": "string",
-  "branchName": "string (validated regex)",
-  "description": "string",
+  "schemaVersion": "2.1",
+  "metadata": {
+    "title": "feat: Add feature name",
+    "type": "feat|ref|bug|chore",
+    "branchName": "feat/feature-name",
+    "createdAt": "YYYY-MM-DD",
+    "planPath": ".aimi/plans/YYYY-MM-DD-feature-name-plan.md"
+  },
   "userStories": [{
     "id": "US-XXX",
     "title": "string (max 200)",
@@ -97,31 +102,15 @@ Learnings are stored in project files (not separate progress log):
     "acceptanceCriteria": ["string"],
     "priority": 1,
     "passes": false,
-    "notes": "",
-    "attempts": 0,
-    "error": null
+    "notes": ""
   }]
-}
-```
-
-### Error Schema (for failures)
-
-```json
-{
-  "error": {
-    "type": "typecheck_failure|test_failure|lint_failure|runtime_error|dependency_missing|unknown",
-    "message": "Detailed error",
-    "file": "path/to/file (optional)",
-    "line": 42,
-    "suggestion": "Possible fix (optional)"
-  }
 }
 ```
 
 ## Performance Guidelines
 
 1. **Inline story data** - Pass story content directly in Task prompts
-   - Don't tell agents to re-read tasks.json
+   - Don't tell agents to re-read the tasks file
    - Reduces file I/O by ~33%
 
 2. **Use CLAUDE.md/AGENTS.md** - Project conventions inline or referenced
@@ -138,5 +127,4 @@ Learnings are stored in project files (not separate progress log):
 
 ## Dependencies
 
-This plugin requires **compound-engineering-plugin** to be installed.
-Document this in README.md (Claude Code does not support plugin dependencies in manifest).
+This plugin is fully standalone. No external plugin dependencies required.

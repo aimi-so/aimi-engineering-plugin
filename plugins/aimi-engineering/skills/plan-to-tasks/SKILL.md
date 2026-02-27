@@ -1,28 +1,73 @@
 ---
 name: plan-to-tasks
-description: >
-  Convert markdown implementation plans to structured tasks.json format.
-  Use when user says "convert plan to tasks", "generate tasks from plan",
-  "create tasks.json", or after /aimi:plan completes.
+description: "Convert implementation plans to tasks.json format for autonomous execution. Use when you have a plan and need to convert it to tasks format. Triggers on: convert plan to tasks, create tasks.json, generate tasks from plan."
+user-invocable: true
 ---
 
-# Plan to Tasks Conversion
+# Plan to Tasks Converter
 
-Convert a markdown implementation plan into a structured `docs/tasks/tasks.json` file for autonomous execution.
+Converts implementation plans (markdown files) to the tasks.json format for autonomous agent execution.
 
-## Input
+> **Note:** This skill is for converting external markdown plans. For direct generation from a feature description (no intermediate plan), use the `task-planner` skill instead.
 
-A markdown plan file path containing Implementation Phases sections.
+---
 
-## Output
+## The Job
 
-A `docs/tasks/tasks.json` file following the schema in [task-format.md](./references/task-format.md).
+Take a plan (markdown file) and convert it to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
 
-## The Number One Rule: Story Size
+---
+
+## Output Format
+
+**Filename:** `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
+
+Example: `.aimi/tasks/2026-02-16-task-status-tasks.json`
+
+```json
+{
+  "schemaVersion": "2.2",
+  "metadata": {
+    "title": "feat: Add task status feature",
+    "type": "feat",
+    "branchName": "feat/add-task-status",
+    "createdAt": "2026-02-16",
+    "planPath": ".aimi/plans/2026-02-16-task-status-plan.md"
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "[Story title]",
+      "description": "As a [user], I want [feature] so that [benefit]",
+      "acceptanceCriteria": [
+        "Criterion 1",
+        "Criterion 2",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
+```
+
+### Type Values
+
+| Type | Use When |
+|------|----------|
+| `feat` | New feature |
+| `ref` | Refactoring |
+| `bug` | Bug fix |
+| `chore` | Maintenance task |
+
+---
+
+## Story Size: The Number One Rule
 
 **Each story must be completable in ONE agent iteration (one context window).**
 
-The agent spawns fresh per iteration with no memory of previous work. If a story is too big, the agent runs out of context before finishing and produces broken code.
+The agent spawns fresh per iteration with no memory of previous work. If a story is too big, the agent runs out of context before finishing.
 
 ### Right-sized stories:
 - Add a database column and migration
@@ -36,81 +81,70 @@ The agent spawns fresh per iteration with no memory of previous work. If a story
 
 **Rule of thumb:** If you cannot describe the change in 2-3 sentences, it is too big.
 
-## Conversion Steps
+---
 
-1. **Read the plan file** to extract:
-   - Title (from first heading or frontmatter)
-   - Type (feature/refactor/bugfix/chore - infer from title prefix)
-   - Implementation phases/requirements
+## Story Ordering: Dependencies First
 
-2. **Generate metadata**:
-   ```json
-   {
-     "title": "feat: Add user authentication",
-     "type": "feature",
-     "createdAt": "2026-02-16",
-     "planPath": "docs/plans/2026-02-16-feat-user-auth-plan.md",
-     "brainstormPath": "docs/brainstorms/..." // if exists
-   }
-   ```
+Stories execute in priority order. Earlier stories must not depend on later ones.
 
-3. **Convert each requirement to a user story**:
-   - Each atomic unit of work becomes ONE story
-   - Story ID: `US-001`, `US-002`, etc.
-   - Set `priority` based on dependency order
-   - Write description in user story format
-   - Extract verifiable acceptance criteria
-   - **Always add "Typecheck passes"** as final criterion
-   - Set `passes: false` and `notes: ""`
+**Correct order:**
+1. Schema/database changes (migrations)
+2. Server actions / backend logic
+3. UI components that use the backend
+4. Dashboard/summary views that aggregate data
 
-4. **Order by dependencies** (set priority):
-   1. Schema/database changes (migrations)
-   2. Server actions / backend logic  
-   3. UI components that use the backend
-   4. Dashboard/summary views that aggregate data
+**Wrong order:**
+1. UI component (depends on schema that does not exist yet)
+2. Schema change
 
-5. **Extract success metrics** if present in plan
+---
 
-## Story Format
+## Acceptance Criteria: Must Be Verifiable
 
-```json
-{
-  "id": "US-001",
-  "title": "Add status field to tasks table",
-  "description": "As a developer, I need to store task status in the database.",
-  "acceptanceCriteria": [
-    "Add status column: 'pending' | 'in_progress' | 'done' (default 'pending')",
-    "Generate and run migration successfully",
-    "Typecheck passes"
-  ],
-  "priority": 1,
-  "passes": false,
-  "notes": ""
-}
-```
+Each criterion must be something the agent can CHECK, not something vague.
 
-## Acceptance Criteria Rules
-
-Each criterion must be VERIFIABLE, not vague.
-
-### Good criteria:
+### Good criteria (verifiable):
 - "Add `status` column to tasks table with default 'pending'"
 - "Filter dropdown has options: All, Active, Completed"
 - "Clicking delete shows confirmation dialog"
 - "Typecheck passes"
+- "Tests pass"
 
-### Bad criteria:
+### Bad criteria (vague):
 - "Works correctly"
 - "User can do X easily"
 - "Good UX"
 - "Handles edge cases"
 
-### Always include:
-- `"Typecheck passes"` - EVERY story
-- `"Tests pass"` - stories with testable logic
-- `"Verify in browser"` - UI stories
+### Always include as final criterion:
+```
+"Typecheck passes"
+```
 
-## Splitting Large Features
+For stories with testable logic:
+```
+"Tests pass"
+```
+
+For stories that change UI:
+```
+"Verify in browser"
+```
+
+---
+
+## Conversion Rules
+
+1. **Each requirement becomes one JSON story**
+2. **IDs**: Sequential (US-001, US-002, etc.)
+3. **Priority**: Based on dependency order
+4. **All stories**: `passes: false` and empty `notes`
+5. **branchName**: Derive from feature name, kebab-case, prefixed with type
+6. **Always add**: "Typecheck passes" to every story's acceptance criteria
+
+---
+
+## Splitting Large Plans
 
 If a plan has big features, split them:
 
@@ -119,18 +153,18 @@ If a plan has big features, split them:
 
 **Split into:**
 1. US-001: Add notifications table to database
-2. US-002: Create notification service for sending notifications
+2. US-002: Create notification service for sending
 3. US-003: Add notification bell icon to header
 4. US-004: Create notification dropdown panel
 5. US-005: Add mark-as-read functionality
-6. US-006: Add notification preferences page
 
 Each is one focused change that can be completed and verified independently.
 
-## Example Conversion
+---
 
-### Input Plan Section
+## Example
 
+**Input Plan:**
 ```markdown
 # Task Status Feature
 
@@ -139,20 +173,20 @@ Add ability to mark tasks with different statuses.
 ## Requirements
 - Persist status in database
 - Show status badge on each task
-- Toggle between pending/in-progress/done on task list
+- Toggle between pending/in-progress/done
 - Filter list by status
 ```
 
-### Output tasks.json
-
+**Output `.aimi/tasks/2026-02-16-task-status-tasks.json`:**
 ```json
 {
-  "schemaVersion": "3.0",
+  "schemaVersion": "2.2",
   "metadata": {
     "title": "feat: Add task status feature",
-    "type": "feature",
+    "type": "feat",
+    "branchName": "feat/add-task-status",
     "createdAt": "2026-02-16",
-    "planPath": "docs/plans/2026-02-16-task-status-plan.md"
+    "planPath": ".aimi/plans/2026-02-16-task-status-plan.md"
   },
   "userStories": [
     {
@@ -211,33 +245,19 @@ Add ability to mark tasks with different statuses.
       "passes": false,
       "notes": ""
     }
-  ],
-  "successMetrics": {
-    "taskCompletionRate": "Increase by 20%"
-  }
+  ]
 }
 ```
 
-## Validation Checklist
+---
+
+## Checklist Before Saving
 
 Before writing tasks.json, verify:
 
 - [ ] Each story is completable in one iteration (small enough)
-- [ ] Stories are ordered by dependency (priority field)
+- [ ] Stories are ordered by dependency (schema → backend → UI)
 - [ ] Every story has "Typecheck passes" as criterion
 - [ ] UI stories have "Verify in browser" as criterion
 - [ ] Acceptance criteria are verifiable (not vague)
 - [ ] No story depends on a later story
-- [ ] All stories have `passes: false` and empty `notes`
-
-## Error Handling
-
-If plan file cannot be parsed:
-```
-Error: Could not parse plan file. Expected markdown with requirements or phase sections.
-```
-
-If requirements are too vague to split:
-```
-Error: Requirements too broad. Please specify concrete deliverables.
-```

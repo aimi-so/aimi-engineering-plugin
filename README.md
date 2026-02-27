@@ -2,7 +2,7 @@
 
 Autonomous task execution for Claude Code with structured JSON task management.
 
-Transform implementation plans into executable user stories, then run them one-by-one with full context isolation. Each story gets its own agent with task-specific steps, quality checks, and automatic state tracking.
+Transform implementation plans into executable user stories, then run them autonomously with full context isolation. Stories with independent dependencies execute in parallel via wave-based swarm orchestration. Each story gets its own agent with automatic state tracking.
 
 ## Table of Contents
 
@@ -21,16 +21,12 @@ Transform implementation plans into executable user stories, then run them one-b
 
 ### Prerequisites
 
-This plugin requires **compound-engineering-plugin** to be installed first.
+No external plugin dependencies. This plugin is fully standalone.
 
 ### Install Steps
 
 ```bash
-# 1. Install compound-engineering plugin
-claude /plugin marketplace add https://github.com/EveryInc/compound-engineering-plugin
-claude /plugin install compound-engineering
-
-# 2. Install aimi-engineering plugin
+# Install aimi-engineering plugin
 claude /plugin marketplace add https://github.com/aimi-so/aimi-engineering-plugin
 claude /plugin install aimi-engineering
 ```
@@ -51,7 +47,7 @@ claude /plugin list
 # 1. Brainstorm your feature
 /aimi:brainstorm Add user authentication with email/password
 
-# 2. Create plan and generate tasks
+# 2. Generate tasks directly
 /aimi:plan Add user authentication
 
 # 3. Execute all stories autonomously
@@ -66,18 +62,18 @@ claude /plugin list
 | Command | Description | Usage |
 |---------|-------------|-------|
 | `/aimi:brainstorm` | Explore ideas through guided brainstorming | `/aimi:brainstorm [feature]` |
-| `/aimi:plan` | Create implementation plan and convert to tasks.json | `/aimi:plan [feature]` |
-| `/aimi:deepen` | Enhance plan with research and update tasks.json | `/aimi:deepen [plan-path]` |
+| `/aimi:plan` | Generate tasks.json directly from feature description | `/aimi:plan [feature]` |
+| `/aimi:deepen` | Enrich tasks.json stories with research insights | `/aimi:deepen [tasks-path]` |
 | `/aimi:status` | Show current task execution progress | `/aimi:status` |
 | `/aimi:next` | Execute the next pending story | `/aimi:next` |
-| `/aimi:execute` | Run all stories autonomously in a loop | `/aimi:execute` |
-| `/aimi:review` | Code review using compound-engineering | `/aimi:review` |
+| `/aimi:execute` | Run all stories autonomously (parallel for v3, sequential for v2.2) | `/aimi:execute` |
+| `/aimi:review` | Multi-agent code review with findings synthesis | `/aimi:review [PR or branch]` |
 
 ### Command Details
 
 #### `/aimi:brainstorm`
 
-Wraps compound-engineering's brainstorm workflow. Explores requirements and approaches interactively before committing to implementation.
+Standalone brainstorm workflow with codebase research and Ralph-style batched multiple-choice questions. Explores requirements and approaches interactively before committing to implementation.
 
 ```bash
 /aimi:brainstorm Add social login with Google and GitHub
@@ -85,24 +81,21 @@ Wraps compound-engineering's brainstorm workflow. Explores requirements and appr
 
 #### `/aimi:plan`
 
-Two-phase command that:
-1. Runs compound-engineering's `/workflows:plan` to generate a markdown plan
-2. Automatically converts the plan to `docs/tasks/tasks.json`
+Generates `.aimi/tasks/YYYY-MM-DD-[feature]-tasks.json` directly from a feature description. Runs a full pipeline: brainstorm detection, parallel research (codebase + learnings), optional external research, spec-flow analysis, and story decomposition.
 
 ```bash
 /aimi:plan Add user registration flow
 ```
 
 Output:
-- `docs/plans/YYYY-MM-DD-feature-name-plan.md`
-- `docs/tasks/tasks.json`
+- `.aimi/tasks/YYYY-MM-DD-feature-name-tasks.json`
 
 #### `/aimi:deepen`
 
 Enhances an existing plan with research insights while preserving completion state of existing stories.
 
 ```bash
-/aimi:deepen docs/plans/2026-02-16-user-auth-plan.md
+/aimi:deepen .aimi/plans/2026-02-16-user-auth-plan.md
 ```
 
 #### `/aimi:status`
@@ -136,21 +129,32 @@ Features:
 
 #### `/aimi:execute`
 
-Orchestrates autonomous execution of all pending stories.
+Orchestrates autonomous execution of all pending stories. Automatically detects schema version and dependency graph shape to choose the optimal execution strategy.
 
-Flow:
+**v3 with parallel opportunities:**
+1. Validates branch name and dependency graph (DAG validation)
+2. Creates/checkouts feature branch
+3. Builds execution waves from dependency graph
+4. Executes each wave: independent stories run in parallel via Team/swarm workers
+5. Each worker operates in its own worktree; leader merges results after each wave
+6. Cascade-skips dependent stories on failure
+7. Reports completion with wave progress and commit count
+
+**v3 with linear dependencies / v2.2 fallback:**
 1. Validates branch name (security)
 2. Creates/checkouts feature branch
-3. Loops through stories one-at-a-time via `/aimi:next`
+3. Loops through stories sequentially via `/aimi:next`
 4. Handles skip/retry/stop decisions
 5. Reports completion with commit count
 
 #### `/aimi:review`
 
-Wraps compound-engineering's review workflow for thorough code review.
+Multi-agent code review using aimi-native review agents. Runs parallel agents (architecture, security, simplicity, performance, agent-native), plus conditional migration and language-specific reviewers. Synthesizes findings with severity categorization (P1/P2/P3).
 
 ```bash
-/aimi:review
+/aimi:review           # Review current branch
+/aimi:review 42        # Review PR #42
+/aimi:review feat/auth # Review specific branch
 ```
 
 ## Workflow
@@ -168,7 +172,7 @@ Wraps compound-engineering's review workflow for thorough code review.
          │
          ▼
 ┌─────────────────┐
-│    /aimi:plan      │  Generate plan + tasks.json
+│    /aimi:plan      │  Generate plan + tasks file
 └────────┬────────┘
          │
          ▼
@@ -193,18 +197,21 @@ Wraps compound-engineering's review workflow for thorough code review.
 
 ## Task Schema
 
-All execution state lives in `docs/tasks/tasks.json`. No separate progress file.
+All execution state lives in `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`. No separate progress file.
 
-### Schema Version 2.0
+### Schema Version 3.0 (Current)
 
 ```json
 {
-  "schemaVersion": "2.0",
-  "project": "user-auth",
-  "branchName": "feature/user-auth",
-  "description": "Add user authentication with email/password",
-  "createdFrom": "docs/plans/2026-02-16-user-auth-plan.md",
-  "createdAt": "2026-02-16T10:30:00Z",
+  "schemaVersion": "3.0",
+  "metadata": {
+    "title": "feat: Add user authentication",
+    "type": "feat",
+    "branchName": "feat/user-auth",
+    "createdAt": "2026-02-16",
+    "planPath": ".aimi/plans/2026-02-16-user-auth-plan.md",
+    "maxConcurrency": 4
+  },
   "userStories": [
     {
       "id": "US-001",
@@ -216,22 +223,9 @@ All execution state lives in `docs/tasks/tasks.json`. No separate progress file.
         "Typecheck passes"
       ],
       "priority": 1,
-      "passes": false,
-      "skipped": false,
-      "attempts": 0,
-      "notes": "",
-      "taskType": "prisma_schema",
-      "steps": [
-        "Read prisma/schema.prisma to understand existing models",
-        "Add User model with id, email, passwordHash, createdAt fields",
-        "Add unique constraint on email field",
-        "Run: npx prisma generate",
-        "Run: npx prisma migrate dev --name add-users-table",
-        "Verify typecheck passes"
-      ],
-      "relevantFiles": ["prisma/schema.prisma", "src/lib/db.ts"],
-      "patternsToFollow": "prisma/AGENTS.md",
-      "qualityChecks": ["npx tsc --noEmit", "npm test"]
+      "status": "pending",
+      "dependsOn": [],
+      "notes": ""
     }
   ]
 }
@@ -243,15 +237,23 @@ All execution state lives in `docs/tasks/tasks.json`. No separate progress file.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schemaVersion` | string | Schema version (currently "2.0") |
-| `project` | string | Project name |
-| `branchName` | string | Git branch for this feature |
-| `description` | string | Feature description |
-| `createdFrom` | string | Path to source plan file |
-| `createdAt` | string | ISO 8601 creation timestamp |
-| `userStories` | array | List of user stories |
+| `schemaVersion` | string | Schema version (currently "3.0", also supports "2.2") |
+| `metadata` | object | Project metadata |
+| `userStories` | array | Array of Story objects |
 
-#### Story State Fields
+#### Metadata Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `title` | string | Feature title with type prefix |
+| `type` | string | One of: `feat`, `ref`, `bug`, `chore` |
+| `branchName` | string | Git branch for this feature |
+| `createdAt` | string | Creation date (YYYY-MM-DD) |
+| `planPath` | string | Path to source plan file |
+| `brainstormPath` | string | (optional) Path to brainstorm file |
+| `maxConcurrency` | number | (v3) Max parallel workers (default 4) |
+
+#### Story Fields (v3)
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -259,22 +261,12 @@ All execution state lives in `docs/tasks/tasks.json`. No separate progress file.
 | `title` | string | Short story title |
 | `description` | string | User story format description |
 | `acceptanceCriteria` | array | Verifiable criteria for completion |
-| `priority` | number | Execution order (lower = first) |
-| `passes` | boolean | `true` = completed successfully |
-| `skipped` | boolean | `true` = skipped by user |
-| `attempts` | number | Retry count |
+| `priority` | number | Tiebreaker for stories at same dependency depth |
+| `status` | string | One of: `pending`, `in_progress`, `completed`, `failed`, `skipped` |
+| `dependsOn` | array | Story IDs that must complete before this story can start |
 | `notes` | string | Error details or learnings |
-| `error` | object | Structured error info (type, message, file, line, suggestion) |
 
-#### Task-Specific Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `taskType` | string | Domain classification in snake_case (max 50 chars) |
-| `steps` | array | Ordered execution steps (1-10 items, each max 500 chars) |
-| `relevantFiles` | array | Files to read first (max 20) |
-| `patternsToFollow` | string | AGENTS.md path or "none" |
-| `qualityChecks` | array | Verification commands |
+> **Backward compatibility:** v2.2 tasks files (with `passes` boolean) are auto-detected and fully supported. All CLI commands work with both v2.2 and v3 schemas.
 
 ### Story Sizing
 
@@ -302,70 +294,24 @@ Stories are ordered by dependency:
 | 3 | UI components | Forms, buttons, pages |
 | 4 | Aggregation | Dashboards, summaries |
 
-## Pattern Library
-
-The pattern library provides workflow templates for common task types.
-
-### Available Patterns
-
-| Pattern | Task Type | Trigger Files |
-|---------|-----------|---------------|
-| `prisma-schema.md` | `prisma_schema` | `prisma/schema.prisma`, `*.prisma` |
-| `server-action.md` | `server_action` | `src/actions/*`, `app/**/actions.ts` |
-| `react-component.md` | `react_component` | `src/components/*`, `*.tsx` |
-| `api-route.md` | `api_route` | `app/api/*`, `pages/api/*` |
-
-### How Patterns Work
-
-1. **At plan-to-tasks time:** Each story is analyzed for keywords and file patterns
-2. **Pattern matching:** Stories matched against pattern files using combined keyword + file scoring
-3. **Step generation:** Matched patterns provide step templates with placeholders
-4. **Fallback:** If no pattern matches, LLM inference generates domain-aware steps
-
-### Creating Custom Patterns
-
-Add `.md` files to `docs/patterns/`:
-
-```markdown
----
-name: custom_task
-keywords: [keyword1, keyword2, keyword3]
-filePatterns: ["src/custom/*", "*.custom"]
----
-
-# Custom Task Pattern
-
-## Steps Template
-
-1. Read relevant files to understand context
-2. Implement the required changes
-3. Run: npm test
-4. Verify typecheck passes
-
-## Relevant Files
-
-- src/custom/config.ts
-- src/lib/helpers.ts
-
-## Gotchas
-
-- Watch for edge case X
-- Always check Y before Z
-```
-
 ## Architecture
 
 ### One Story at a Time
 
-Commands use `jq` to extract only what's needed, keeping context clean:
+Commands use `aimi-cli.sh` (installed with the plugin) to extract only what's needed, keeping context clean:
 
 ```bash
-# /aimi:execute - metadata only
-jq '{project, branchName, pending: [...] | length}' tasks.json
+# Resolve CLI path (plugin install directory)
+AIMI_CLI=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
 
-# /aimi:next - ONE story only
-jq '[.userStories[] | select(.passes == false and .skipped != true)] 
-    | sort_by(.priority) | .[0]' tasks.json
+# /aimi:execute - initialize session with metadata
+$AIMI_CLI init-session
+
+# /aimi:next - get ONE story only
+$AIMI_CLI next-story
+
+# /aimi:status - get progress summary
+$AIMI_CLI status
 ```
 
 ### Fresh Context Per Story
@@ -388,17 +334,11 @@ Small files (< 2KB) are inlined directly in prompts. Larger files are referenced
 ### File Structure
 
 ```
-docs/
+.aimi/
 ├── plans/
 │   └── YYYY-MM-DD-feature-name-plan.md
-├── tasks/
-│   └── tasks.json
-└── patterns/
-    ├── README.md
-    ├── prisma-schema.md
-    ├── server-action.md
-    ├── react-component.md
-    └── api-route.md
+└── tasks/
+    └── YYYY-MM-DD-feature-name-tasks.json
 ```
 
 ## Security
@@ -440,12 +380,10 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 | `title` | 200 chars |
 | `description` | 500 chars |
 | Each acceptance criterion | 300 chars |
-| Each step | 500 chars |
-| `taskType` | 50 chars |
 
 ## Troubleshooting
 
-### "No tasks.json found"
+### "No tasks file found"
 
 **Cause:** No task file exists yet.
 
@@ -466,50 +404,61 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 **Fix:** Update to latest version. Skipped stories are excluded from jq query.
 
-### Missing task-specific fields
-
-**Cause:** tasks.json created before v0.4.0.
-
-**Fix:** Regenerate tasks:
-```bash
-/aimi:plan-to-tasks docs/plans/your-plan.md
-```
-
 ### Invalid branch name error
 
 **Cause:** Branch name contains invalid characters.
 
-**Fix:** Edit `branchName` in tasks.json to use only letters, numbers, hyphens, underscores, and forward slashes.
+**Fix:** Edit `branchName` in the tasks file to use only letters, numbers, hyphens, underscores, and forward slashes.
 
 ### Story validation failed
 
 **Cause:** Story content contains potentially malicious patterns.
 
-**Fix:** Review tasks.json manually, remove suspicious content, regenerate with `/aimi:plan-to-tasks`.
+**Fix:** Review the tasks file manually, remove suspicious content, regenerate with `/aimi:plan-to-tasks`.
 
 ## Version History
 
-**Current Version:** 0.7.0
+**Current Version:** 1.9.0
 
 ### Recent Changes
 
-**v0.7.0** - Project Guidelines Injection
-- CLAUDE.md/AGENTS.md content injected into Task prompts
-- Aimi default commit/PR rules as fallback
-- Fresh context per story (no memory carryover)
+**v1.9.0** - Schema v3, Parallel Execution, Worktree Merge
+- Schema v3 with `dependsOn` dependency graph and `status` enum replacing `passes` boolean
+- `/aimi:execute` parallel execution: wave-based swarm orchestration for independent stories
+- Worktree merge commands (`merge`, `merge-all`) in worktree-manager.sh
+- CLI extensions: `detect-schema`, `list-ready`, `mark-in-progress`, `validate-deps`, `cascade-skip`
+- All existing commands updated for dual v2.2/v3 support
 
-**v0.6.0** - State Consolidation
-- Removed `progress.md` - all state now in `tasks.json`
-- Simplified prompt templates
+**v1.8.0** - Fully Standalone (Zero Dependencies)
+- New `brainstorm` skill with process knowledge, Ralph-style questions, adaptive exit
+- `/aimi:brainstorm` rewritten as standalone (codebase research + batched questions)
+- compound-engineering dependency fully eliminated
 
-**v0.5.0** - jq-based Extraction
-- One story loaded at a time via jq
-- Added `skipped` field to prevent infinite loops
+**v1.5.0** - Standalone Agents
+- 28 aimi-native agents (research, review, design, docs, workflow)
+- `/aimi:review` rewritten as standalone multi-agent review
+- Task-planner and deepen use aimi agents directly
 
-**v0.4.0** - Task-Specific Steps
-- Pattern library for domain-aware step generation
-- AGENTS.md discovery and matching
-- Added `taskType`, `steps`, `relevantFiles`, `patternsToFollow` fields
+**v1.4.0** - Direct Generation (Schema v2.2)
+- `planPath` optional/nullable (null when generated by task-planner)
+- `brainstormPath` as optional context reference
+- Backward compatible with v2.1
+
+**v1.2.0** - CLI & State Management
+- Simplified schema: removed `taskType`, `steps`, `relevantFiles`, `qualityChecks`
+- Dynamic task filenames: `YYYY-MM-DD-[feature-name]-tasks.json`
+- Improved commit format: `<type>(<scope>): <description>`
+- Rich PR template with Problem/Solution sections
+
+**v2.0.0** - Metadata Restructure
+- Schema version set to "2.0"
+- Metadata block with `title`, `type`, `branchName`, `createdAt`, `planPath`
+- Shorter type values: `feat`, `ref`, `bug`, `chore`
+
+**v1.0.0** - Ralph-Style Flat Stories
+- Flat story structure (no nested tasks array)
+- Priority-based execution order
+- Project guidelines loading from CLAUDE.md/AGENTS.md
 
 See [CHANGELOG.md](CHANGELOG.md) for complete version history.
 
@@ -518,8 +467,8 @@ See [CHANGELOG.md](CHANGELOG.md) for complete version history.
 | Type | Count | Description |
 |------|-------|-------------|
 | Commands | 7 | Slash commands for workflow stages |
-| Skills | 2 | `plan-to-tasks`, `story-executor` |
-| Patterns | 4 | Workflow templates for task types |
+| Skills | 4 | `brainstorm`, `task-planner`, `plan-to-tasks`, `story-executor` |
+| Agents | 28 | 4 research, 15 review, 3 design, 1 docs, 5 workflow |
 
 ## License
 
