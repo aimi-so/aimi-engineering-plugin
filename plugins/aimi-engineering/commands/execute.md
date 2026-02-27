@@ -341,6 +341,8 @@ while true:
     failed_stories = []
     succeeded_stories = []
     total = len(selected_stories)
+    wave_start_time = current_time()
+    WORKER_TIMEOUT_MINUTES = 15  # configurable, default 15 minutes
 
     # As each worker message arrives:
     for each worker message received:
@@ -352,6 +354,14 @@ while true:
             succeeded_stories.append(story)
         else if worker reports FAILURE:
             failed_stories.append(story)
+
+    # Worker timeout check
+    # If not all workers have reported and elapsed time > WORKER_TIMEOUT_MINUTES:
+    if completed < total and (current_time() - wave_start_time) > WORKER_TIMEOUT_MINUTES * 60:
+        for story in selected_stories not yet reported:
+            $AIMI_CLI mark-failed [story.id] "Worker timeout after [WORKER_TIMEOUT_MINUTES] minutes"
+            failed_stories.append(story)
+            Report: "[story.id] timed out after [WORKER_TIMEOUT_MINUTES] minutes."
 
     # --- Post-Wave Processing ---
 
@@ -374,18 +384,42 @@ while true:
             "Conflicting files:"
             "[conflict output]"
             ""
-            "Resolve the conflict manually and re-run /aimi:execute to continue."
+            "Attempting agent-driven conflict resolution..."
 
-            # Cleanup: remove all worktrees from this wave
-            for wt in worktree_names:
-                $WORKTREE_MGR remove [wt]
+            # Attempt agent-driven conflict resolution
+            conflicting_files = [list of conflicting files from merge output]
+            Task(
+                subagent_type: "general-purpose",
+                description: "Resolve merge conflict for [story.id]",
+                prompt: "Resolve merge conflicts in these files: [conflicting_files].
+                         The target branch is [branchName].
+                         The source branch is [worktree_branch].
+                         Use git diff to see conflicts, resolve them preserving both sides' intent,
+                         then stage resolved files and complete the merge commit."
+            )
 
-            # Shutdown team
-            for worker in worker_names:
-                SendMessage type: "shutdown_request", recipient: worker
-            TeamDelete
+            # Check if resolution succeeded
+            if resolution succeeded (merge commit created):
+                Report: "Merge conflict for [story.id] resolved by agent."
+                # Continue with normal flow (mark complete below)
 
-            STOP execution.
+            else:
+                # Agent could not resolve — fall back to manual
+                Report:
+                "Agent could not resolve the conflict automatically."
+                ""
+                "Resolve the conflict manually and re-run /aimi:execute to continue."
+
+                # Cleanup: remove all worktrees from this wave
+                for wt in worktree_names:
+                    $WORKTREE_MGR remove [wt]
+
+                # Shutdown team
+                for worker in worker_names:
+                    SendMessage type: "shutdown_request", recipient: worker
+                TeamDelete
+
+                STOP execution.
 
         # Mark complete after successful merge
         $AIMI_CLI mark-complete [story.id]
