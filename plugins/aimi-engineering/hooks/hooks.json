@@ -1,0 +1,16 @@
+{
+  "description": "Auto-approve AIMI CLI Bash commands",
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/auto-approve-cli.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
