@@ -86,9 +86,10 @@ Using consolidated research and spec-flow output:
 1. Extract all requirements (explicit + spec-flow identified)
 2. Group by layer (schema → backend → UI → aggregation)
 3. Size check: each story must be completable in ONE agent iteration (one context window)
-4. Order by dependency (assign priority numbers)
+4. Order by dependency: assign `dependsOn` arrays (explicit story IDs) and `priority` as tiebreaker
 5. Generate verifiable acceptance criteria (every story must have "Typecheck passes")
-6. Validate: no circular dependencies, no vague criteria, no story depends on a later story
+6. Initialize every story with `status: "pending"` and appropriate `dependsOn` array
+7. Validate: no circular dependencies in `dependsOn`, no self-references, all referenced IDs exist, no vague criteria
 
 See `references/story-decomposition.md` for detailed rules.
 
@@ -111,6 +112,7 @@ See `references/story-decomposition.md` for detailed rules.
 - **createdAt**: Today's date (YYYY-MM-DD)
 - **planPath**: Always `null`
 - **brainstormPath**: Path to brainstorm if one was used, otherwise omit
+- **maxConcurrency**: Default `4`. Set to `1` for strictly sequential execution.
 
 ### Derive Filename
 
@@ -130,22 +132,54 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 
 ```json
 {
-  "schemaVersion": "2.2",
+  "schemaVersion": "3.0",
   "metadata": {
     "title": "feat: Feature name",
     "type": "feat",
     "branchName": "feat/feature-name",
     "createdAt": "YYYY-MM-DD",
-    "planPath": null
+    "planPath": null,
+    "maxConcurrency": 4
   },
   "userStories": [
     {
       "id": "US-001",
-      "title": "Story title",
+      "title": "Schema/data layer story",
       "description": "As a [user], I want [feature] so that [benefit]",
       "acceptanceCriteria": ["Criterion 1", "Typecheck passes"],
       "priority": 1,
-      "passes": false,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Backend story depending on schema",
+      "description": "As a [user], I want [feature] so that [benefit]",
+      "acceptanceCriteria": ["Criterion 1", "Typecheck passes"],
+      "priority": 2,
+      "status": "pending",
+      "dependsOn": ["US-001"],
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Independent UI story",
+      "description": "As a [user], I want [feature] so that [benefit]",
+      "acceptanceCriteria": ["Criterion 1", "Typecheck passes"],
+      "priority": 3,
+      "status": "pending",
+      "dependsOn": ["US-001"],
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Aggregation story needing both",
+      "description": "As a [user], I want [feature] so that [benefit]",
+      "acceptanceCriteria": ["Criterion 1", "Typecheck passes"],
+      "priority": 4,
+      "status": "pending",
+      "dependsOn": ["US-002", "US-003"],
       "notes": ""
     }
   ]
@@ -158,7 +192,10 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 - [ ] Stories ordered by dependency (schema → backend → UI)
 - [ ] Every story has "Typecheck passes" as criterion
 - [ ] Acceptance criteria are verifiable (not vague)
-- [ ] No story depends on a later story
+- [ ] `dependsOn` arrays are valid: no circular dependencies, no self-references, all referenced IDs exist
+- [ ] No story depends on a story that depends on it (DAG validation)
+- [ ] Every story has `status` initialized to `"pending"`
+- [ ] `dependsOn` is `[]` for root stories with no upstream dependencies
 - [ ] branchName is valid (alphanumeric, hyphens, slashes)
 - [ ] `planPath` is `null`
 - [ ] Field lengths: title ≤ 200, description ≤ 500, criterion ≤ 300
@@ -171,10 +208,11 @@ Tasks generated successfully!
 Tasks: .aimi/tasks/[tasks-filename].json
 
 Stories: [X] total
-Schema version: 2.2
+Schema version: 3.0
 [If brainstorm used]: Context: .aimi/brainstorms/[brainstorm-file]
 [If gaps found]: Gaps identified: [N] (captured as criteria/notes)
-[If 10+ stories]: Warning: [N] stories generated. Consider splitting for parallel work.
+[If 10+ stories]: Warning: [N] stories generated. Consider splitting into smaller feature sets.
+[If parallel stories detected]: Parallel groups: [N] stories can run concurrently (max concurrency: [maxConcurrency])
 
 Next steps:
 1. **Run `/aimi:deepen`** - Enrich stories with research (optional)
