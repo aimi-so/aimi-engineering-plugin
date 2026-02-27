@@ -7,26 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.11.1] - 2026-02-27
+## [1.12.0] - 2026-02-27
 
-### Security
+### Added
 
-- **auto-approve-cli.sh**: Hardened with subcommand whitelist and shell metacharacter rejection
-  - Pattern 1 (AIMI_CLI= assignment): Now validates path matches `~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh` — rejects arbitrary assignments
-  - Pattern 2 ($AIMI_CLI invocation): Replaced permissive regex with explicit subcommand whitelist (19 commands: init-session, find-tasks, status, metadata, next-story, current-story, list-ready, mark-in-progress, mark-complete, mark-failed, mark-skipped, count-pending, validate-deps, validate-stories, cascade-skip, get-branch, get-state, clear-state, help)
-  - Shell chaining rejection: Commands containing `;`, `&&`, `||`, `|`, `$()`, or backticks after `$AIMI_CLI` or `$WORKTREE_MGR` are rejected
-  - Pattern 3 (NEW): WORKTREE_MGR= assignment validated against expected plugin path
-  - Pattern 4 (NEW): $WORKTREE_MGR invocation with subcommand whitelist (create, remove, merge, list, help)
+- **worktree-manager.sh `remove` command**: New `remove <worktree-name>` subcommand for non-interactive worktree cleanup (`git worktree remove --force` + `git branch -D`)
+- **worktree-manager.sh `--from` flag**: `create` now supports `create name --from branch` (and positional backward compat)
+- **worktree-manager.sh input validation**: `validate_branch_name()` with regex `^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$`, path containment check via `realpath -m`
+- **aimi-cli.sh flock-based file locking**: All 5 mutation functions use `flock -x` advisory locking with unique `mktemp` temp files
+- **aimi-cli.sh `validate_story_id()`**: Regex `^US-[0-9]{3}[a-z]?$` validated on all mark-* commands
+- **aimi-cli.sh `validate-stories` command**: Checks field lengths (title: 200, description: 500, criterion: 300) and suspicious content patterns for prompt injection defense
+- **aimi-cli.sh `maxConcurrency` guard**: Values <= 0 default to 4 in status and metadata commands
+- **execute.md orphaned recovery**: Step 1 detects stories stuck in `in_progress` from interrupted runs, resets to `failed`
+- **execute.md content validation**: Step 1 calls `validate-stories` before any execution
+- **execute.md agent-driven merge conflict resolution**: On merge conflict, spawns a Task agent to attempt resolution before falling back to manual
+- **execute.md worker timeout**: Configurable timeout (default 15 min); non-responding workers marked as failed
 
 ### Changed
 
-- **execute.md**: Hardened orchestration with recovery, validation, and story notes
-  - Step 1: Orphaned `in_progress` story recovery — detects stories stuck from interrupted runs, resets them to `failed` for retry
-  - Step 1: Content validation via `$AIMI_CLI validate-stories` before any execution begins (prompt injection defense)
-  - Step 3.1: Moved `validate-deps` from parallel-only path (4b.1) to shared path before mode detection — both sequential and parallel now validate dependency graph
-  - Worker prompt: Added `## PREVIOUS NOTES` section with `story.notes` content (omitted when empty) for context on retried/failed stories
-  - Renumbered 4b subsections (4b.1-4b.6) after removing duplicate validate-deps
-  - Fixed stale reference to Step 4b.7 in Error Recovery section
+- **worktree-manager.sh**: Removed all interactive `read -r` prompts — create reuses existing worktrees silently, cleanup proceeds without confirmation
+- **worktree-manager.sh**: Removed unnecessary `git checkout`/`git pull` from create (worktree add works without checkout)
+- **worktree-manager.sh**: `chmod 600` applied to all copied .env files; git commands use `--` separator before branch arguments
+- **story-executor SKILL.md**: Fixed contradiction (agents report results, callers handle status via CLI), removed duplicated sections (compact prompt, JS examples, default rules), added `story.notes` placeholder, declared as canonical prompt template
+- **execute.md**: Moved `validate-deps` from parallel-only path to shared Step 3.1 — both sequential and parallel validate dependency graph
+- **execute.md**: Worker prompt includes `## PREVIOUS NOTES` section with `story.notes` (omitted when empty)
+- **execute.md + next.md**: Replaced duplicated inline worker prompts with references to story-executor SKILL.md canonical template (net -96 lines)
+- **execute.md + next.md**: Replaced duplicated guideline loading sections with references to story-executor discovery order
+
+### Security
+
+- **auto-approve-cli.sh**: Replaced permissive `$AIMI_CLI` pattern with explicit subcommand whitelist (19 commands) and shell metacharacter rejection
+- **auto-approve-cli.sh**: `AIMI_CLI=` assignment now validates path matches expected plugin install directory
+- **auto-approve-cli.sh**: Added `WORKTREE_MGR` patterns with path validation and subcommand whitelist (create, remove, merge, list, help)
 
 ## [1.11.0] - 2026-02-27
 

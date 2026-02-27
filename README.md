@@ -266,7 +266,7 @@ All execution state lives in `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
 | `dependsOn` | array | Story IDs that must complete before this story can start |
 | `notes` | string | Error details or learnings |
 
-> **Backward compatibility:** v2.2 tasks files (with `passes` boolean) are auto-detected and fully supported. All CLI commands work with both v2.2 and v3 schemas.
+> **Note:** As of v1.11.0, only schema v3.0 is supported. v2.2 backward compatibility was removed.
 
 ### Story Sizing
 
@@ -418,9 +418,16 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 ## Version History
 
-**Current Version:** 1.9.0
+**Current Version:** 1.12.0
 
 ### Recent Changes
+
+**v1.12.0** - Parallel Execution Hardening
+- worktree-manager: `remove` command, `--from` flag, input validation, non-interactive
+- aimi-cli: flock-based locking, story ID validation, `validate-stories` command, maxConcurrency guard
+- execute.md: orphaned recovery, content validation, agent-driven merge conflict resolution, worker timeout, single-sourced worker prompt
+- auto-approve-cli.sh: subcommand whitelist, metacharacter rejection, WORKTREE_MGR support
+- story-executor SKILL.md: canonical prompt template, contradiction fixes
 
 **v1.9.0** - Schema v3, Parallel Execution, Worktree Merge
 - Schema v3 with `dependsOn` dependency graph and `status` enum replacing `passes` boolean
