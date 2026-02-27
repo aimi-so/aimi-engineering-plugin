@@ -243,13 +243,11 @@ Store as `MAX_CONCURRENCY`.
 
 ### 4b.3: Load Project Guidelines
 
-Before starting the wave loop, load project guidelines that will be injected into worker prompts.
-
-**Discovery Order:**
+Load project guidelines following the discovery order defined in `story-executor/SKILL.md` → "PROJECT GUIDELINES" section:
 
 1. **CLAUDE.md** (project root) - Primary project instructions
 2. **AGENTS.md** (any directory) - Module-specific patterns
-3. **Aimi defaults** - Fallback if neither exists
+3. **Aimi defaults** from story-executor - Fallback if neither exists
 
 Read these files and store the content as `PROJECT_GUIDELINES`.
 
@@ -313,69 +311,26 @@ while true:
         worker_names.append(worker_name)
 
         # Spawn worker as Task teammate
+        # Construct the worker prompt following the canonical template in story-executor/SKILL.md
+        # Interpolate: story data, WORKTREE_PATH, PROJECT_GUIDELINES, story.notes (if non-empty)
         Task(
             subagent_type: "general-purpose",
             team_name: "aimi-execute",
             name: worker_name,
             description: "Execute [story.id]: [story.title]",
-            prompt: "You are a parallel execution worker in a Team.
-
-## YOUR WORKTREE
-
-You MUST work inside this worktree directory:
-[worktree_path]
-
-All file operations, git commands, and code changes must happen within this path.
-cd to this path before starting any work.
-
-## PROJECT GUIDELINES (MUST FOLLOW)
-
-[PROJECT_GUIDELINES]
-
-## STORY
-
-ID: [story.id]
-Title: [story.title]
-Description: [story.description]
-
-## ACCEPTANCE CRITERIA
-
-- [criterion 1]
-- [criterion 2]
-- [criterion N]
-
-## PREVIOUS NOTES
-
-[If story.notes is non-empty, include:]
-[story.notes]
-
-[If story.notes is empty, omit this section entirely]
-
-## INSTRUCTIONS
-
-1. cd to your worktree path: [worktree_path]
-2. Read CLAUDE.md and/or AGENTS.md if they exist for project conventions
-3. Read relevant files to understand current state
-4. Implement the changes to satisfy ALL acceptance criteria
-5. Verify each criterion is met
-6. Run quality checks (typecheck, lint, tests as appropriate)
-7. Commit with message: 'feat(scope): [story.title]'
-8. Send a message to the team leader reporting success or failure
-
-## IMPORTANT
-
-- Do NOT modify the tasks.json file directly. The leader handles task status updates.
-- Do NOT leave the worktree directory for file operations.
-- When done, send a message with: SUCCESS or FAILURE and any relevant details.
-
-## ON FAILURE
-
-Do NOT claim success. Instead send a message with:
-- FAILURE
-- What failed
-- Error messages
-- Suggested fix
-",
+            prompt: [story-executor SKILL.md prompt template with:
+                - WORKTREE_PATH = worktree_path
+                - PROJECT_GUIDELINES = PROJECT_GUIDELINES
+                - STORY_ID = story.id
+                - STORY_TITLE = story.title
+                - STORY_DESCRIPTION = story.description
+                - ACCEPTANCE_CRITERIA = story.acceptanceCriteria (bulleted)
+                - story.notes = story.notes (include PREVIOUS NOTES section only if non-empty)
+                - Additional parallel-mode instructions:
+                  "You are a parallel execution worker in a Team."
+                  "Send a message to the team leader reporting SUCCESS or FAILURE when done."
+                  "Do NOT modify the tasks.json file directly. The leader handles task status updates."
+            ],
             run_in_background: true
         )
 

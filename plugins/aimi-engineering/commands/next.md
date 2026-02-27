@@ -55,40 +55,13 @@ The CLI also saves the story ID to `.aimi/current-story` for tracking.
 
 ## Step 2: Load Project Guidelines
 
-**BEFORE building the prompt, load project guidelines to inject into the Task agent.**
-
-### Discovery Order:
+Load project guidelines following the discovery order defined in `story-executor/SKILL.md` → "PROJECT GUIDELINES" section:
 
 1. **CLAUDE.md** (project root) - Primary project instructions
 2. **AGENTS.md** (any directory) - Module-specific patterns
-3. **Aimi defaults** - Fallback if neither exists
+3. **Aimi defaults** from story-executor - Fallback if neither exists
 
-### Load Guidelines:
-
-Check for CLAUDE.md and AGENTS.md files. Read them if they exist.
-
-### Aimi Default Rules (fallback):
-
-If no CLAUDE.md or AGENTS.md found, use these defaults:
-
-```markdown
-## Aimi Default Rules
-
-### Commit Format
-- Format: `<type>(<scope>): <description>`
-- Types: feat, fix, refactor, docs, test, chore
-- Max 72 chars, imperative mood, no trailing period
-
-### Quality Checks
-- Run typecheck before committing
-- Run lint if available
-- Run tests if relevant to changes
-
-### On Failure
-- Do NOT commit if checks fail
-- Update story notes with error details
-- Report the failure clearly
-```
+Read these files and store the content as `PROJECT_GUIDELINES`.
 
 ## Step 3: Display Current Story
 
@@ -104,47 +77,23 @@ Acceptance Criteria:
 ...
 ```
 
-## Step 4: Build Inline Prompt
+## Step 4: Build Worker Prompt
 
-**CRITICAL:** Pass story data AND project guidelines INLINE to the Task agent.
+**CRITICAL:** Construct the worker prompt following the canonical template in `story-executor/SKILL.md`.
+
+Interpolate the following into the template:
+- `PROJECT_GUIDELINES` = guidelines loaded in Step 2
+- `STORY_ID` = story.id
+- `STORY_TITLE` = story.title
+- `STORY_DESCRIPTION` = story.description
+- `ACCEPTANCE_CRITERIA` = story.acceptanceCriteria (bulleted)
+- `story.notes` = story.notes (include PREVIOUS NOTES section only if non-empty)
+- No WORKTREE_PATH (sequential mode — worker operates in current directory)
 
 ```
 Task general-purpose: "Execute [STORY_ID]: [STORY_TITLE]
 
-## PROJECT GUIDELINES (MUST FOLLOW)
-
-[GUIDELINES from CLAUDE.md/AGENTS.md or Aimi defaults]
-
-## STORY
-
-ID: [STORY_ID]
-Title: [STORY_TITLE]
-Description: [STORY_DESCRIPTION]
-
-## ACCEPTANCE CRITERIA
-
-- [criterion 1]
-- [criterion 2]
-- [criterion N]
-
-## INSTRUCTIONS
-
-1. **FIRST**: Read CLAUDE.md and/or AGENTS.md if they exist for project conventions
-2. Read relevant files to understand current state
-3. Implement the changes to satisfy ALL acceptance criteria
-4. Verify each criterion is met
-5. Run quality checks (typecheck, lint, tests as appropriate)
-6. Commit with message: 'feat(scope): [STORY_TITLE]'
-7. Report success when done
-
-## ON FAILURE
-
-Do NOT claim success. Instead:
-1. Report the failure clearly with:
-   - What failed
-   - Error messages
-   - Suggested fix
-
+[story-executor/SKILL.md prompt template with interpolated values]
 "
 ```
 
