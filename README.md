@@ -2,7 +2,7 @@
 
 Autonomous task execution for Claude Code with structured JSON task management.
 
-Transform implementation plans into executable user stories, then run them one-by-one with full context isolation. Each story gets its own agent with automatic state tracking.
+Transform implementation plans into executable user stories, then run them autonomously with full context isolation. Stories with independent dependencies execute in parallel via wave-based swarm orchestration. Each story gets its own agent with automatic state tracking.
 
 ## Table of Contents
 
@@ -66,7 +66,7 @@ claude /plugin list
 | `/aimi:deepen` | Enrich tasks.json stories with research insights | `/aimi:deepen [tasks-path]` |
 | `/aimi:status` | Show current task execution progress | `/aimi:status` |
 | `/aimi:next` | Execute the next pending story | `/aimi:next` |
-| `/aimi:execute` | Run all stories autonomously in a loop | `/aimi:execute` |
+| `/aimi:execute` | Run all stories autonomously (parallel for v3, sequential for v2.2) | `/aimi:execute` |
 | `/aimi:review` | Multi-agent code review with findings synthesis | `/aimi:review [PR or branch]` |
 
 ### Command Details
@@ -129,12 +129,21 @@ Features:
 
 #### `/aimi:execute`
 
-Orchestrates autonomous execution of all pending stories.
+Orchestrates autonomous execution of all pending stories. Automatically detects schema version and dependency graph shape to choose the optimal execution strategy.
 
-Flow:
+**v3 with parallel opportunities:**
+1. Validates branch name and dependency graph (DAG validation)
+2. Creates/checkouts feature branch
+3. Builds execution waves from dependency graph
+4. Executes each wave: independent stories run in parallel via Team/swarm workers
+5. Each worker operates in its own worktree; leader merges results after each wave
+6. Cascade-skips dependent stories on failure
+7. Reports completion with wave progress and commit count
+
+**v3 with linear dependencies / v2.2 fallback:**
 1. Validates branch name (security)
 2. Creates/checkouts feature branch
-3. Loops through stories one-at-a-time via `/aimi:next`
+3. Loops through stories sequentially via `/aimi:next`
 4. Handles skip/retry/stop decisions
 5. Reports completion with commit count
 
@@ -190,17 +199,18 @@ Multi-agent code review using aimi-native review agents. Runs parallel agents (a
 
 All execution state lives in `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`. No separate progress file.
 
-### Schema Version 2.2
+### Schema Version 3.0 (Current)
 
 ```json
 {
-  "schemaVersion": "2.2",
+  "schemaVersion": "3.0",
   "metadata": {
     "title": "feat: Add user authentication",
     "type": "feat",
     "branchName": "feat/user-auth",
     "createdAt": "2026-02-16",
-    "planPath": ".aimi/plans/2026-02-16-user-auth-plan.md"
+    "planPath": ".aimi/plans/2026-02-16-user-auth-plan.md",
+    "maxConcurrency": 4
   },
   "userStories": [
     {
@@ -213,7 +223,8 @@ All execution state lives in `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
         "Typecheck passes"
       ],
       "priority": 1,
-      "passes": false,
+      "status": "pending",
+      "dependsOn": [],
       "notes": ""
     }
   ]
@@ -226,7 +237,7 @@ All execution state lives in `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schemaVersion` | string | Schema version (currently "2.2") |
+| `schemaVersion` | string | Schema version (currently "3.0", also supports "2.2") |
 | `metadata` | object | Project metadata |
 | `userStories` | array | Array of Story objects |
 
@@ -240,8 +251,9 @@ All execution state lives in `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
 | `createdAt` | string | Creation date (YYYY-MM-DD) |
 | `planPath` | string | Path to source plan file |
 | `brainstormPath` | string | (optional) Path to brainstorm file |
+| `maxConcurrency` | number | (v3) Max parallel workers (default 4) |
 
-#### Story Fields
+#### Story Fields (v3)
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -249,10 +261,12 @@ All execution state lives in `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
 | `title` | string | Short story title |
 | `description` | string | User story format description |
 | `acceptanceCriteria` | array | Verifiable criteria for completion |
-| `priority` | number | Execution order (lower = first) |
-| `passes` | boolean | `true` = completed successfully |
+| `priority` | number | Tiebreaker for stories at same dependency depth |
+| `status` | string | One of: `pending`, `in_progress`, `completed`, `failed`, `skipped` |
+| `dependsOn` | array | Story IDs that must complete before this story can start |
 | `notes` | string | Error details or learnings |
-| `skipped` | boolean | (optional) `true` = skipped by user |
+
+> **Backward compatibility:** v2.2 tasks files (with `passes` boolean) are auto-detected and fully supported. All CLI commands work with both v2.2 and v3 schemas.
 
 ### Story Sizing
 
@@ -408,10 +422,12 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 ### Recent Changes
 
-**v1.9.0** - Schema v3 Definition
-- v3 task format reference with `dependsOn` dependency graph and `status` enum
-- Parallel execution support via `maxConcurrency` metadata field
-- Backward compatibility and migration guide for v2.2 to v3
+**v1.9.0** - Schema v3, Parallel Execution, Worktree Merge
+- Schema v3 with `dependsOn` dependency graph and `status` enum replacing `passes` boolean
+- `/aimi:execute` parallel execution: wave-based swarm orchestration for independent stories
+- Worktree merge commands (`merge`, `merge-all`) in worktree-manager.sh
+- CLI extensions: `detect-schema`, `list-ready`, `mark-in-progress`, `validate-deps`, `cascade-skip`
+- All existing commands updated for dual v2.2/v3 support
 
 **v1.8.0** - Fully Standalone (Zero Dependencies)
 - New `brainstorm` skill with process knowledge, Ralph-style questions, adaptive exit
