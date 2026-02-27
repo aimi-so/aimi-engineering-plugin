@@ -15,11 +15,13 @@ Defines how Task-spawned agents execute individual stories from the tasks file.
 ## The Job
 
 Execute ONE story from the tasks file:
+0. If WORKTREE_PATH is provided, cd to it first
 1. Read project guidelines (CLAUDE.md)
 2. Implement the story
 3. Verify acceptance criteria
 4. Commit changes
-5. Update tasks.json
+5. If WORKTREE_PATH is set: report result (do NOT update tasks.json — leader handles it)
+   If no WORKTREE_PATH: update tasks.json directly
 
 ---
 
@@ -62,6 +64,21 @@ You are executing a single story from the tasks file.
 
 [CLAUDE.md content or default rules]
 
+## Worktree Context (if applicable)
+
+[WORKTREE_PATH]  ← optional, provided by execute.md parallel mode
+
+If WORKTREE_PATH is provided:
+- cd to WORKTREE_PATH before any work
+- All file operations happen within the worktree
+- Commit to the worktree's branch (already checked out)
+- Do NOT modify the tasks.json file (leader handles this)
+- Report result (success/failure + details) — the leader processes your report
+
+If no WORKTREE_PATH:
+- Work in current directory (standard sequential behavior)
+- Update tasks.json directly as before
+
 ## Your Story
 
 ID: [STORY_ID]
@@ -74,19 +91,22 @@ Description: [STORY_DESCRIPTION]
 
 ## Execution Flow
 
+0. If WORKTREE_PATH is set, cd to WORKTREE_PATH
 1. Read CLAUDE.md for project conventions
 2. Implement the story requirements
 3. Verify ALL acceptance criteria are met
 4. Run typecheck: npx tsc --noEmit
 5. If all checks pass, commit with: "feat(scope): Story title"
-6. Update the tasks file: set passes: true for this story
+6. If WORKTREE_PATH is set: do NOT update tasks file — return result report instead
+   If no WORKTREE_PATH: update the tasks file — set passes: true for this story
 
 ## On Failure
 
 If you cannot complete the story:
 
 1. Do NOT mark passes: true
-2. Update the tasks file with notes describing the failure
+2. If WORKTREE_PATH is set: do NOT update tasks.json — return failure report to leader
+   If no WORKTREE_PATH: update the tasks file with notes describing the failure
 3. Return with clear failure report
 ```
 
@@ -99,6 +119,8 @@ For token efficiency:
 ```
 Execute [STORY_ID]: [STORY_TITLE]
 
+WORKTREE: [WORKTREE_PATH] (optional — if set, cd here first, do NOT update tasks file)
+
 STORY: [STORY_DESCRIPTION]
 
 CRITERIA:
@@ -108,13 +130,15 @@ CRITERIA:
 
 RULES: [CLAUDE.md conventions]
 
-FLOW: implement → verify criteria → typecheck → commit → update tasks file
-FAIL: stop on failure, report error, do not commit
+FLOW: (cd worktree if set) → implement → verify criteria → typecheck → commit → (worktree: report result | no worktree: update tasks file)
+FAIL: stop on failure, report error, do not commit. If worktree: return failure report to leader, do NOT update tasks file.
 ```
 
 ---
 
 ## Task Tool Invocation
+
+### Sequential mode (no worktree)
 
 ```javascript
 Task({
@@ -123,6 +147,20 @@ Task({
   prompt: interpolate_prompt(PROMPT_TEMPLATE, story)
 })
 ```
+
+### Parallel mode (with worktree)
+
+```javascript
+Task({
+  subagent_type: "general-purpose",
+  description: `Execute ${story.id}: ${story.title}`,
+  prompt: interpolate_prompt(PROMPT_TEMPLATE, story, {
+    worktreePath: "/path/to/worktree"
+  })
+})
+```
+
+When `worktreePath` is provided, the interpolated prompt includes the Worktree Context section with the path filled in. The agent cds to that path and does NOT update tasks.json (the leader handles all task status updates).
 
 ---
 
@@ -158,6 +196,8 @@ When building the prompt, inject CLAUDE.md content. If not found, use default ru
 
 If you cannot complete a story:
 
+### Sequential mode (no worktree)
+
 1. **Do NOT** mark `passes: true`
 2. **Update the tasks file** with failure details:
 
@@ -171,6 +211,16 @@ If you cannot complete a story:
 
 3. **Return** with clear failure report
 
+### Parallel mode (with worktree)
+
+1. **Do NOT** update tasks.json — the leader handles all status changes
+2. **Do NOT** run cascade-skip — the leader handles dependent story skipping
+3. **Return** a clear failure report with:
+   - Story ID
+   - Error description
+   - Any partial work committed (or not)
+4. The leader will mark the story as failed and cascade-skip dependent stories
+
 ---
 
 ## Checklist
@@ -180,4 +230,5 @@ Before completing a story:
 - [ ] All acceptance criteria verified
 - [ ] Typecheck passes (`npx tsc --noEmit`)
 - [ ] Changes committed with proper format
-- [ ] Tasks file updated with `passes: true`
+- [ ] If worktree mode: result report returned to leader (do NOT touch tasks file)
+- [ ] If sequential mode: tasks file updated with `passes: true`
