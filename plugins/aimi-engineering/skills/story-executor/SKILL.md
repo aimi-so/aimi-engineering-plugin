@@ -20,8 +20,7 @@ Execute ONE story from the tasks file:
 2. Implement the story
 3. Verify acceptance criteria
 4. Commit changes
-5. If WORKTREE_PATH is set: report result (do NOT update tasks.json — leader handles it)
-   If no WORKTREE_PATH: update tasks.json directly
+5. Report result — the caller (next.md/execute.md) handles status updates via the CLI
 
 ---
 
@@ -56,6 +55,8 @@ The agent spawns fresh with no memory of previous work. If the story is too big,
 
 ## Prompt Template
 
+> This is the canonical worker prompt template. execute.md and next.md should reference this skill rather than duplicating the prompt inline.
+
 When spawning a Task agent to execute a story:
 
 ```
@@ -78,7 +79,7 @@ If WORKTREE_PATH is provided:
 
 If no WORKTREE_PATH:
 - Work in current directory (standard sequential behavior)
-- Update tasks.json directly as before
+- Report result — the caller (next.md/execute.md) handles status updates via the CLI
 
 ## Your Story
 
@@ -89,6 +90,10 @@ Description: [STORY_DESCRIPTION]
 ## Acceptance Criteria
 
 [ACCEPTANCE_CRITERIA_BULLETED]
+
+## Previous Notes (if non-empty)
+
+[story.notes]
 
 ## Execution Flow
 
@@ -108,86 +113,6 @@ If you cannot complete the story:
 1. Do NOT update the tasks file (the caller handles status via CLI)
 2. Return with clear failure report including error details
 3. The caller will mark the story as failed and handle dependent stories
-```
-
----
-
-## Compact Prompt
-
-For token efficiency:
-
-```
-Execute [STORY_ID]: [STORY_TITLE]
-
-WORKTREE: [WORKTREE_PATH] (optional — if set, cd here first, do NOT update tasks file)
-
-STORY: [STORY_DESCRIPTION]
-
-CRITERIA:
-- [criterion 1]
-- [criterion 2]
-...
-
-RULES: [CLAUDE.md conventions]
-
-FLOW: (cd worktree if set) → implement → verify criteria → typecheck → commit → report result (caller handles tasks file)
-FAIL: stop on failure, report error, do not commit. Return failure report — caller handles status updates.
-```
-
----
-
-## Task Tool Invocation
-
-### Sequential mode (no worktree)
-
-```javascript
-Task({
-  subagent_type: "general-purpose",
-  description: `Execute ${story.id}: ${story.title}`,
-  prompt: interpolate_prompt(PROMPT_TEMPLATE, story)
-})
-```
-
-### Parallel mode (with worktree)
-
-```javascript
-Task({
-  subagent_type: "general-purpose",
-  description: `Execute ${story.id}: ${story.title}`,
-  prompt: interpolate_prompt(PROMPT_TEMPLATE, story, {
-    worktreePath: "/path/to/worktree"
-  })
-})
-```
-
-When `worktreePath` is provided, the interpolated prompt includes the Worktree Context section with the path filled in. The agent cds to that path and does NOT update tasks.json (the leader handles all task status updates).
-
----
-
-## Project Guidelines
-
-When building the prompt, inject CLAUDE.md content. If not found, use default rules:
-
-```markdown
-## Default Rules
-
-### Commit Format
-- Format: `<type>(<scope>): <description>`
-- Example: `feat(tasks): Add status field to tasks table`
-- Types: feat, fix, refactor, docs, test, chore
-- Scope: module or feature area
-- Max 72 chars, imperative mood, no trailing period
-
-### Commit Behavior
-- One commit per completed story
-- Typecheck MUST pass before commit
-- NEVER use --no-verify or skip hooks
-- NEVER force push
-
-### On Failure
-- Do NOT commit if checks fail
-- Update story notes with error details
-- Report the failure clearly
 ```
 
 ---
