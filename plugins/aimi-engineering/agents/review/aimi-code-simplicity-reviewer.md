@@ -48,7 +48,7 @@ When reviewing code, you will:
    - Eliminate extensibility points without clear use cases
    - Question generic solutions for specific problems
    - Remove "just in case" code
-   - Never flag `.aimi/plans/*.md` or `.aimi/solutions/*.md` for removal — these are compound-engineering pipeline artifacts created by `/workflows:plan` and used as living documents by `/workflows:work`
+   - Never flag `.aimi/plans/*.md`, `.aimi/solutions/*.md`, or `.aimi/brainstorms/*.md` for removal — these are aimi pipeline artifacts used as living documents
 
 6. **Optimize for Readability**:
    - Prefer self-documenting code over comments

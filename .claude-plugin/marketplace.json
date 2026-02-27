@@ -11,8 +11,8 @@
   "plugins": [
     {
       "name": "aimi-engineering",
-      "description": "Autonomous task execution with standalone aimi-native agents. Direct tasks.json generation, multi-agent review, iterative execution. Only requires compound-engineering for brainstorm.",
-      "version": "1.7.0",
+      "description": "Fully standalone autonomous task execution with aimi-native agents. Direct tasks.json generation, guided brainstorming, multi-agent review, iterative execution.",
+      "version": "1.8.0",
       "author": {
         "name": "Stanley Takamatsu",
         "url": "https://github.com/aimi-so"

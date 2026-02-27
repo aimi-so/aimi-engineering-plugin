@@ -127,5 +127,4 @@ Learnings are stored in project files (not separate progress log):
 
 ## Dependencies
 
-This plugin requires **compound-engineering-plugin** to be installed.
-Document this in README.md (Claude Code does not support plugin dependencies in manifest).
+This plugin is fully standalone. No external plugin dependencies required.
