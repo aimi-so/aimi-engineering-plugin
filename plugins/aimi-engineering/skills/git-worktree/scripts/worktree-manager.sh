@@ -267,6 +267,159 @@ cleanup_worktrees() {
   echo -e "${GREEN}Cleanup complete!${NC}"
 }
 
+# Merge a worktree branch into a target branch
+merge_worktree() {
+  local worktree_name=""
+  local target_branch=""
+
+  # Parse arguments
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --into)
+        target_branch="$2"
+        shift 2
+        ;;
+      *)
+        if [[ -z "$worktree_name" ]]; then
+          worktree_name="$1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$worktree_name" ]]; then
+    echo -e "${RED}Error: Worktree name required${NC}"
+    echo "Usage: worktree-manager.sh merge <worktree-name> [--into <branch>]"
+    exit 1
+  fi
+
+  # Resolve the worktree branch name
+  local worktree_path="$WORKTREE_DIR/$worktree_name"
+  local worktree_branch=""
+
+  if [[ -d "$worktree_path" && -e "$worktree_path/.git" ]]; then
+    worktree_branch=$(git -C "$worktree_path" rev-parse --abbrev-ref HEAD 2>/dev/null)
+  else
+    # If not found as a worktree dir, treat the name as a branch name directly
+    worktree_branch="$worktree_name"
+  fi
+
+  if [[ -z "$worktree_branch" ]]; then
+    echo -e "${RED}Error: Could not resolve branch for worktree: $worktree_name${NC}"
+    exit 1
+  fi
+
+  # Default target to current branch if not specified
+  if [[ -z "$target_branch" ]]; then
+    target_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+    if [[ -z "$target_branch" ]]; then
+      echo -e "${RED}Error: Could not determine current branch${NC}"
+      exit 1
+    fi
+  fi
+
+  echo -e "${BLUE}Merging branch '$worktree_branch' into '$target_branch'...${NC}"
+
+  # Checkout the target branch
+  git checkout "$target_branch" 2>/dev/null
+  if [[ $? -ne 0 ]]; then
+    echo -e "${RED}Error: Failed to checkout target branch: $target_branch${NC}"
+    exit 1
+  fi
+
+  # Attempt the merge
+  if git merge "$worktree_branch" 2>/dev/null; then
+    local merge_hash
+    merge_hash=$(git rev-parse HEAD)
+    echo -e "${GREEN}Merge successful!${NC}"
+    echo -e "Merge commit: ${GREEN}$merge_hash${NC}"
+  else
+    echo -e "${RED}Merge conflict detected!${NC}"
+    echo -e "${YELLOW}Conflicting files:${NC}"
+    git diff --name-only --diff-filter=U
+    exit 1
+  fi
+}
+
+# Merge multiple worktree branches sequentially into a target branch
+merge_all_worktrees() {
+  local branches=()
+  local target_branch=""
+
+  # Parse arguments: collect branches and optional --into flag
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --into)
+        target_branch="$2"
+        shift 2
+        ;;
+      *)
+        branches+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  if [[ ${#branches[@]} -eq 0 ]]; then
+    echo -e "${RED}Error: At least one branch name required${NC}"
+    echo "Usage: worktree-manager.sh merge-all <branch1> <branch2> ... [--into <branch>]"
+    exit 1
+  fi
+
+  # Default target to current branch if not specified
+  if [[ -z "$target_branch" ]]; then
+    target_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+    if [[ -z "$target_branch" ]]; then
+      echo -e "${RED}Error: Could not determine current branch${NC}"
+      exit 1
+    fi
+  fi
+
+  echo -e "${BLUE}Merging ${#branches[@]} branch(es) into '$target_branch'...${NC}"
+  echo ""
+
+  local merged=0
+  for branch in "${branches[@]}"; do
+    echo -e "${BLUE}[$((merged + 1))/${#branches[@]}] Merging '$branch'...${NC}"
+
+    # Resolve branch name from worktree if applicable
+    local worktree_path="$WORKTREE_DIR/$branch"
+    local resolved_branch=""
+
+    if [[ -d "$worktree_path" && -e "$worktree_path/.git" ]]; then
+      resolved_branch=$(git -C "$worktree_path" rev-parse --abbrev-ref HEAD 2>/dev/null)
+    else
+      resolved_branch="$branch"
+    fi
+
+    # Checkout target branch
+    git checkout "$target_branch" 2>/dev/null
+    if [[ $? -ne 0 ]]; then
+      echo -e "${RED}Error: Failed to checkout target branch: $target_branch${NC}"
+      exit 1
+    fi
+
+    # Attempt merge
+    if git merge "$resolved_branch" 2>/dev/null; then
+      local merge_hash
+      merge_hash=$(git rev-parse HEAD)
+      echo -e "${GREEN}  Merged '$branch' successfully (commit: $merge_hash)${NC}"
+      merged=$((merged + 1))
+    else
+      echo -e "${RED}Merge conflict on branch '$branch'!${NC}"
+      echo -e "${YELLOW}Conflicting files:${NC}"
+      git diff --name-only --diff-filter=U
+      echo ""
+      echo -e "${RED}Stopping merge-all. $merged of ${#branches[@]} branch(es) merged before conflict.${NC}"
+      exit 1
+    fi
+  done
+
+  echo ""
+  echo -e "${GREEN}All ${#branches[@]} branch(es) merged successfully into '$target_branch'!${NC}"
+}
+
 # Main command handler
 main() {
   local command="${1:-list}"
@@ -283,6 +436,14 @@ main() {
       ;;
     copy-env|env)
       copy_env_to_worktree "$2"
+      ;;
+    merge)
+      shift
+      merge_worktree "$@"
+      ;;
+    merge-all)
+      shift
+      merge_all_worktrees "$@"
       ;;
     cleanup|clean)
       cleanup_worktrees
@@ -312,6 +473,10 @@ Commands:
   switch | go [name]                  Switch to worktree
   copy-env | env [name]               Copy .env files from main repo to worktree
                                       (if name omitted, uses current worktree)
+  merge <worktree-name> [--into <b>]  Merge worktree branch into target branch
+                                      (defaults --into to current branch)
+  merge-all <b1> <b2> ... [--into <b>]  Merge multiple branches sequentially
+                                         (stops on first conflict)
   cleanup | clean                     Clean up inactive worktrees
   help                                Show this help message
 
@@ -321,12 +486,21 @@ Environment Files:
   - Creates .backup files if destination already exists
   - Use 'copy-env' to refresh env files after main repo changes
 
+Merge:
+  - merge resolves the worktree's branch name automatically
+  - On success: prints the merge commit hash
+  - On conflict: prints conflicting files and exits with code 1
+  - merge-all stops on first conflict and reports which branch failed
+
 Examples:
   worktree-manager.sh create feature-login
   worktree-manager.sh create feature-auth develop
   worktree-manager.sh switch feature-login
   worktree-manager.sh copy-env feature-login
   worktree-manager.sh copy-env                   # copies to current worktree
+  worktree-manager.sh merge feature-login        # merge into current branch
+  worktree-manager.sh merge feature-login --into main
+  worktree-manager.sh merge-all feat-a feat-b --into develop
   worktree-manager.sh cleanup
   worktree-manager.sh list
 
