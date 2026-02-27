@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-02-27
+
+### Added
+
+- **v3 task format schema definition**: `skills/task-planner/references/task-format-v3.md`
+  - `dependsOn` (string[]) for explicit inter-story dependency graphs (DAG)
+  - `status` enum (`pending`, `in_progress`, `completed`, `failed`, `skipped`) replacing `passes` boolean and `skipped` boolean
+  - `maxConcurrency` metadata field (default 4) for parallel story execution
+  - `priority` retained as tiebreaker for stories at same dependency depth
+  - Status state machine with valid transitions documented
+  - `dependsOn` validation rules: no circular deps, no self-refs, all referenced IDs must exist
+  - Backward compatibility section: v2.2 detection and fallback behavior
+  - Migration guide: v2.2 to v3 conversion rules with priority-layer inference for `dependsOn`
+
 ## [1.8.0] - 2026-02-27
 
 ### Added
