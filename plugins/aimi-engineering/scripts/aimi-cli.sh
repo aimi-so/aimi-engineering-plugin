@@ -208,11 +208,17 @@ cmd_mark_in_progress() {
 
   tasks_file=$(get_tasks_file)
 
-  # Atomic update using temp file
-  local tmp_file="${tasks_file}.tmp"
-  jq --arg id "$story_id" \
-    '(.userStories[] | select(.id == $id)) |= . + {status: "in_progress"}' \
-    "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+  # Atomic update using flock and unique temp file
+  local tmp_file
+  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  (
+    flock -x 200
+    jq --arg id "$story_id" \
+      '(.userStories[] | select(.id == $id)) |= . + {status: "in_progress"}' \
+      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+  ) 200>"${tasks_file}.lock"
+  # Cleanup temp file on failure
+  rm -f "$tmp_file" 2>/dev/null
 
   write_state "current-story" "$story_id"
 
@@ -231,11 +237,17 @@ cmd_mark_complete() {
 
   tasks_file=$(get_tasks_file)
 
-  # Atomic update using temp file
-  local tmp_file="${tasks_file}.tmp"
-  jq --arg id "$story_id" \
-    '(.userStories[] | select(.id == $id)) |= . + {status: "completed"}' \
-    "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+  # Atomic update using flock and unique temp file
+  local tmp_file
+  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  (
+    flock -x 200
+    jq --arg id "$story_id" \
+      '(.userStories[] | select(.id == $id)) |= . + {status: "completed"}' \
+      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+  ) 200>"${tasks_file}.lock"
+  # Cleanup temp file on failure
+  rm -f "$tmp_file" 2>/dev/null
 
   clear_state_file "current-story"
   write_state "last-result" "success"
@@ -256,11 +268,17 @@ cmd_mark_failed() {
 
   tasks_file=$(get_tasks_file)
 
-  # Atomic update using temp file
-  local tmp_file="${tasks_file}.tmp"
-  jq --arg id "$story_id" --arg notes "$notes" \
-    '(.userStories[] | select(.id == $id)) |= . + {status: "failed", notes: $notes}' \
-    "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+  # Atomic update using flock and unique temp file
+  local tmp_file
+  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  (
+    flock -x 200
+    jq --arg id "$story_id" --arg notes "$notes" \
+      '(.userStories[] | select(.id == $id)) |= . + {status: "failed", notes: $notes}' \
+      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+  ) 200>"${tasks_file}.lock"
+  # Cleanup temp file on failure
+  rm -f "$tmp_file" 2>/dev/null
 
   clear_state_file "current-story"
   write_state "last-result" "failed"
@@ -280,11 +298,17 @@ cmd_mark_skipped() {
 
   tasks_file=$(get_tasks_file)
 
-  # Atomic update using temp file
-  local tmp_file="${tasks_file}.tmp"
-  jq --arg id "$story_id" \
-    '(.userStories[] | select(.id == $id)) |= . + {status: "skipped"}' \
-    "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+  # Atomic update using flock and unique temp file
+  local tmp_file
+  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  (
+    flock -x 200
+    jq --arg id "$story_id" \
+      '(.userStories[] | select(.id == $id)) |= . + {status: "skipped"}' \
+      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+  ) 200>"${tasks_file}.lock"
+  # Cleanup temp file on failure
+  rm -f "$tmp_file" 2>/dev/null
 
   clear_state_file "current-story"
   write_state "last-result" "skipped"
@@ -391,7 +415,6 @@ cmd_cascade_skip() {
   tasks_file=$(get_tasks_file)
 
   # Find all stories that transitively depend on the failed story and mark them as skipped
-  local tmp_file="${tasks_file}.tmp"
 
   # First compute which IDs to skip
   local to_skip
@@ -414,20 +437,24 @@ cmd_cascade_skip() {
     ) | map(select(. != $failed_id))
   ' "$tasks_file")
 
-  # Update the file
-  jq --arg failed_id "$failed_id" --argjson to_skip "$to_skip" '
-    .userStories |= [
-      .[] |
-      if (.id as $sid | $to_skip | any(. == $sid)) then
-        . + {status: "skipped", notes: ("Skipped: depends on failed story " + $failed_id)}
-      else
-        .
-      end
-    ]
-  ' "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
-
-  # Clean up the other tmp file if it exists
-  rm -f "${tasks_file}.tmp"
+  # Atomic update using flock and unique temp file
+  local tmp_file
+  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  (
+    flock -x 200
+    jq --arg failed_id "$failed_id" --argjson to_skip "$to_skip" '
+      .userStories |= [
+        .[] |
+        if (.id as $sid | $to_skip | any(. == $sid)) then
+          . + {status: "skipped", notes: ("Skipped: depends on failed story " + $failed_id)}
+        else
+          .
+        end
+      ]
+    ' "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+  ) 200>"${tasks_file}.lock"
+  # Cleanup temp file on failure
+  rm -f "$tmp_file" 2>/dev/null
 
   # Output result
   local count
