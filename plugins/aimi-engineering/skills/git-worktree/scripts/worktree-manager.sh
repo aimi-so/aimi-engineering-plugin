@@ -13,6 +13,15 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Validate branch name to prevent command injection
+validate_branch_name() {
+  local name="$1"
+  if ! [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$ ]]; then
+    echo -e "${RED}Error: Invalid branch name: $name${NC}" >&2
+    exit 1
+  fi
+}
+
 # Get repo root
 GIT_ROOT=$(git rev-parse --show-toplevel)
 WORKTREE_DIR="$GIT_ROOT/.worktrees"
@@ -58,6 +67,7 @@ copy_env_files() {
     fi
 
     cp "$source" "$dest"
+    chmod 600 "$dest"
     echo -e "  ${GREEN}✓ Copied $env_file${NC}"
     copied=$((copied + 1))
   done
@@ -67,15 +77,47 @@ copy_env_files() {
 
 # Create a new worktree
 create_worktree() {
-  local branch_name="$1"
-  local from_branch="${2:-main}"
+  local branch_name=""
+  local from_branch="main"
+
+  # Parse arguments (supports both positional and --from flag)
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --from)
+        from_branch="$2"
+        shift 2
+        ;;
+      *)
+        if [[ -z "$branch_name" ]]; then
+          branch_name="$1"
+        else
+          from_branch="$1"
+        fi
+        shift
+        ;;
+    esac
+  done
 
   if [[ -z "$branch_name" ]]; then
     echo -e "${RED}Error: Branch name required${NC}"
     exit 1
   fi
 
+  # Validate branch names
+  validate_branch_name "$branch_name"
+  validate_branch_name "$from_branch"
+
   local worktree_path="$WORKTREE_DIR/$branch_name"
+
+  # Path containment check — prevent directory traversal
+  local resolved_path
+  resolved_path=$(realpath -m "$worktree_path")
+  local resolved_dir
+  resolved_dir=$(realpath -m "$WORKTREE_DIR")
+  if [[ ! "$resolved_path" == "$resolved_dir"/* ]]; then
+    echo -e "${RED}Error: Worktree path escapes expected directory${NC}" >&2
+    exit 1
+  fi
 
   # Check if worktree already exists — reuse silently (non-interactive)
   if [[ -d "$worktree_path" ]]; then
@@ -93,7 +135,7 @@ create_worktree() {
   ensure_gitignore
 
   echo -e "${BLUE}Creating worktree...${NC}"
-  git worktree add -b "$branch_name" "$worktree_path" "$from_branch"
+  git worktree add -b "$branch_name" "$worktree_path" -- "$from_branch"
 
   # Copy environment files
   copy_env_files "$worktree_path"
@@ -261,6 +303,9 @@ remove_worktree() {
     exit 1
   fi
 
+  # Validate worktree name
+  validate_branch_name "$worktree_name"
+
   local worktree_path="$WORKTREE_DIR/$worktree_name"
 
   if [[ -d "$worktree_path" ]]; then
@@ -333,9 +378,13 @@ merge_worktree() {
     fi
   fi
 
+  # Validate branch names
+  validate_branch_name "$worktree_branch"
+  validate_branch_name "$target_branch"
+
   echo -e "${BLUE}Merging branch '$worktree_branch' into '$target_branch'...${NC}"
 
-  # Checkout the target branch
+  # Checkout the target branch (validated above, -- not used here as it changes checkout semantics)
   git checkout "$target_branch" 2>/dev/null
   if [[ $? -ne 0 ]]; then
     echo -e "${RED}Error: Failed to checkout target branch: $target_branch${NC}"
@@ -343,7 +392,7 @@ merge_worktree() {
   fi
 
   # Attempt the merge
-  if git merge "$worktree_branch" 2>/dev/null; then
+  if git merge -- "$worktree_branch" 2>/dev/null; then
     local merge_hash
     merge_hash=$(git rev-parse HEAD)
     echo -e "${GREEN}Merge successful!${NC}"
@@ -440,7 +489,8 @@ main() {
 
   case "$command" in
     create)
-      create_worktree "$2" "$3"
+      shift
+      create_worktree "$@"
       ;;
     list|ls)
       list_worktrees
@@ -484,8 +534,8 @@ Git Worktree Manager
 Usage: worktree-manager.sh <command> [options]
 
 Commands:
-  create <branch-name> [from-branch]  Create new worktree (copies .env files automatically)
-                                      (from-branch defaults to main)
+  create <branch-name> [--from <branch>]  Create new worktree (copies .env files automatically)
+                                          (from-branch defaults to main)
   remove | rm <worktree-name>         Remove a specific worktree and its branch
   list | ls                           List all worktrees
   switch | go <name>                  Switch to worktree
@@ -512,7 +562,7 @@ Merge:
 
 Examples:
   worktree-manager.sh create feature-login
-  worktree-manager.sh create feature-auth develop
+  worktree-manager.sh create feature-auth --from develop
   worktree-manager.sh switch feature-login
   worktree-manager.sh copy-env feature-login
   worktree-manager.sh copy-env                   # copies to current worktree
