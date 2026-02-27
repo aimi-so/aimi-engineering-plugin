@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-02-27
+
+### Fixed
+
+- **Plugin CLAUDE.md**: Updated schema example from v2.1 to v3 (status, dependsOn, maxConcurrency)
+- **story-executor**: Removed direct tasks file mutation instructions — agents now delegate to CLI for all status updates
+- **execution-rules.md**: Updated with v3 status enum and dual-schema documentation
+- **deepen.md**: Made schema-aware — detects v3 status field instead of v2.2 passes boolean
+- **next.md**: Updated CLI output example with both v3 and v2.2 variants
+- **pipeline-phases.md**: Fixed output report from "Schema: 2.2" to "Schema: 3.0"
+- **story-decomposition.md**: Fixed conversion rule from `passes: false` to `status: "pending"`
+
+### Changed
+
+- **aimi-cli.sh**: Removed dead code (abandoned jq blocks, duplicated ready-story logic); DRYed cmd_next_story to reuse cmd_list_ready
+- **plan-to-tasks**: Added deprecation notice (generates v2.2 only; use task-planner for v3)
+
+### Added
+
+- **test-aimi-cli.sh**: 31 new v3 test cases covering detect-schema, list-ready, mark-in-progress, validate-deps, cascade-skip, dependency resolution, and circular dependency detection (65 total tests)
+
 ## [1.9.0] - 2026-02-27
 
 ### Added
