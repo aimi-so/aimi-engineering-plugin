@@ -9,9 +9,8 @@ allowed-tools: Read, Write, Edit, Bash(git:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:
 
 Execute all pending stories autonomously with smart execution mode detection.
 
-- **v2.2 schema**: Sequential execution (backward-compatible)
-- **v3 schema, linear deps**: Sequential execution (no Team/worktree overhead)
-- **v3 schema, parallel opportunities**: Wave-based parallel execution with worktrees
+- **Linear dependencies**: Sequential execution (no Team/worktree overhead)
+- **Parallel opportunities**: Wave-based parallel execution with worktrees
 
 ## Step 0: Resolve CLI Path
 
@@ -47,16 +46,6 @@ If no tasks file found, the script exits with error. Report:
 No tasks file found. Run /aimi:plan to create a task list first.
 ```
 STOP execution.
-
-### Detect Schema Version
-
-Immediately after init-session, detect the schema version:
-
-```bash
-SCHEMA_VERSION=$($AIMI_CLI detect-schema)
-```
-
-Store `SCHEMA_VERSION` for use in Step 3.5.
 
 ## Step 2: Branch Setup
 
@@ -104,26 +93,13 @@ Report start:
 Starting autonomous execution...
 
 Branch: [branchName]
-Schema: v[SCHEMA_VERSION]
+Schema: v3.0
 Pending: [pending] stories
 
 Beginning execution loop...
 ```
 
 ## Step 3.5: Detect Execution Mode
-
-Based on the schema version detected in Step 1, determine which execution path to follow.
-
-### If SCHEMA_VERSION is "2.2":
-
-Report:
-```
-Mode: Sequential (v2.2 schema)
-```
-
-Proceed to **Step 4a: Sequential Execution**.
-
-### If SCHEMA_VERSION is "3.0":
 
 Check how many stories are immediately ready:
 
@@ -155,25 +131,7 @@ Proceed to **Step 4b: Parallel Execution**.
 
 ## Step 4a: Sequential Execution
 
-This path handles both v2.2 (using next-story) and v3 linear chains (using list-ready).
-
-### For v2.2 Schema:
-
-```
-while (pending stories exist):
-    1. Call /aimi:next (loads ONLY the next pending story by priority)
-
-    2. Check result:
-       - If success: continue to next iteration
-       - If user chose "skip": continue to next iteration
-       - If user chose "stop": break loop
-
-    3. Check pending count:
-       $AIMI_CLI count-pending
-       - If 0: exit loop
-```
-
-### For v3 Schema (linear):
+### Sequential Execution Loop
 
 ```
 while (pending stories exist):

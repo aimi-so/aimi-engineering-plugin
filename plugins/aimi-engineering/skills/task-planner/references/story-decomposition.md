@@ -157,7 +157,7 @@ US-001  dependsOn: []           priority: 1
 US-002  dependsOn: [US-001]     priority: 2
 US-003  dependsOn: [US-002]     priority: 3
 ```
-No parallel groups. This is equivalent to v2.2 behavior.
+No parallel groups. Stories execute sequentially.
 
 **Pattern 4: Wide parallel (plugin/config type tasks)**
 
@@ -214,7 +214,7 @@ Each criterion must be something the agent can CHECK, not something vague.
 1. Each requirement becomes one or more JSON stories
 2. **IDs**: Sequential — `US-001`, `US-002`, etc.
 3. **Priority**: Based on dependency order (lower = executes first)
-4. **All stories**: `passes: false` and empty `notes`
+4. **All stories**: `status: "pending"` and empty `notes`
 5. **branchName**: Derive from feature name, kebab-case, prefixed with type
 6. **Always add**: "Typecheck passes" to every story's acceptance criteria
 

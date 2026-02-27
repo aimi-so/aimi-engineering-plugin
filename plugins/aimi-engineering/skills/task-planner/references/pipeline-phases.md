@@ -227,7 +227,7 @@ Tasks generated successfully!
 
 Tasks: .aimi/tasks/[filename].json
 Stories: [N] total
-Schema: 2.2
+Schema: 3.0
 [If brainstorm used]: Context: .aimi/brainstorms/[brainstorm-file]
 [If gaps found]: Gaps identified: [N] (captured as criteria/notes)
 [If 10+ stories]: Warning: [N] stories generated. Consider splitting for parallel work.

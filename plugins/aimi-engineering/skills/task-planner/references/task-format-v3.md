@@ -2,7 +2,7 @@
 
 ## Overview
 
-Schema v3 replaces the boolean `passes` field with a richer `status` enum and adds explicit `dependsOn` for inter-story dependency tracking. This enables parallel execution of independent stories and clearer lifecycle management.
+Schema v3 uses a `status` enum for lifecycle tracking and explicit `dependsOn` arrays for inter-story dependency graphs. This enables parallel execution of independent stories and clearer lifecycle management.
 
 **Filename:** `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 
@@ -203,7 +203,7 @@ Controls how many stories execute in parallel when their dependencies are satisf
 
 | Value | Behavior |
 |-------|----------|
-| `1` | Sequential execution (same as v2.2 behavior) |
+| `1` | Sequential execution (one story at a time) |
 | `4` (default) | Up to 4 stories run in parallel |
 | `0` or omitted | Uses default (`4`) |
 
@@ -293,102 +293,6 @@ In this example, US-002 and US-003 can run in parallel (both depend only on US-0
 
 ---
 
-## Backward Compatibility (v2.2 Detection and Fallback)
-
-### Detection
-
-Check the `schemaVersion` field to determine which schema to apply:
-
-| `schemaVersion` | Schema |
-|-----------------|--------|
-| `"3.0"` | v3 — use `status`, `dependsOn`, `maxConcurrency` |
-| `"2.2"` or `"2.1"` | v2.x — use `passes`, `skipped`, priority-only ordering |
-
-### Fallback Behavior
-
-When a consumer encounters a v2.2 file:
-
-1. **Treat `passes: true` as `status: "completed"`**
-2. **Treat `passes: false` + `skipped: true` as `status: "skipped"`**
-3. **Treat `passes: false` + (no `skipped` or `skipped: false`) as `status: "pending"`**
-4. **Infer `dependsOn` from priority**: Each story depends on all stories with lower priority values (sequential chain)
-5. **Use `maxConcurrency: 1`** (v2.2 was always sequential)
-
-This means existing tooling (CLI, execute command) can operate on v2.2 files by applying this mapping at load time. No file modification needed.
-
-### Runtime Detection Example
-
-```
-function detectSchema(tasksJson):
-  if tasksJson.schemaVersion == "3.0":
-    return "v3"
-  if tasksJson.schemaVersion in ["2.2", "2.1"]:
-    return "v2"
-  error("Unknown schema version: " + tasksJson.schemaVersion)
-```
-
----
-
-## Migration: v2.2 to v3
-
-### Automatic Conversion Rules
-
-| v2.2 Field | v3 Equivalent | Conversion |
-|------------|---------------|------------|
-| `passes: true` | `status: "completed"` | Direct mapping |
-| `passes: false` + `skipped: true` | `status: "skipped"` | Combine two fields |
-| `passes: false` (no skip) | `status: "pending"` | Default to pending |
-| `schemaVersion: "2.2"` | `schemaVersion: "3.0"` | Bump version |
-| (not present) | `maxConcurrency: 4` | Add with default |
-| (not present) | `dependsOn` | Infer from priority layers |
-
-### Inferring `dependsOn` from Priority
-
-v2.2 used `priority` as the sole ordering mechanism. To convert to v3 dependencies:
-
-1. **Group stories by priority value** (same priority = same layer)
-2. **Each story depends on ALL stories in the previous layer**
-3. **Stories within the same layer have no dependencies on each other** (they were conceptually independent)
-
-**Example:**
-
-v2.2 priorities: `US-001(1), US-002(2), US-003(2), US-004(3)`
-
-Converted `dependsOn`:
-- `US-001`: `[]` (layer 1, no prior layer)
-- `US-002`: `["US-001"]` (layer 2 depends on layer 1)
-- `US-003`: `["US-001"]` (layer 2 depends on layer 1)
-- `US-004`: `["US-002", "US-003"]` (layer 3 depends on layer 2)
-
-### Fields Removed in v3
-
-| Field | Replacement |
-|-------|-------------|
-| `passes` (boolean) | `status` (string enum) |
-| `skipped` (boolean) | `status: "skipped"` |
-
-### Migration Steps
-
-1. Read the v2.2 tasks.json file
-2. For each story:
-   a. Map `passes`/`skipped` to `status` per the table above
-   b. Remove `passes` and `skipped` fields
-   c. Add `dependsOn` by grouping stories into priority layers
-3. Add `maxConcurrency: 4` to metadata (or `1` if sequential execution is preferred)
-4. Set `schemaVersion` to `"3.0"`
-5. Write the updated file
-
-### Migration Validation
-
-After migration, run the full v3 validation:
-- All `dependsOn` references must exist
-- No circular dependencies
-- No self-references
-- All required fields present
-- Status values are valid enum members
-
----
-
 ## Validation Rules
 
 ### Required Fields Check
@@ -430,7 +334,7 @@ Fix: Use one of: pending, in_progress, completed, failed, skipped.
 
 ---
 
-## Story Sizing (Unchanged from v2.2)
+## Story Sizing
 
 **Each story must be completable in ONE agent iteration (one context window).**
 
@@ -438,7 +342,7 @@ See `story-decomposition.md` for full sizing and ordering rules.
 
 ---
 
-## Story ID Convention (Unchanged from v2.2)
+## Story ID Convention
 
 Story IDs follow the pattern: `US-XXX`
 
@@ -446,15 +350,3 @@ Story IDs follow the pattern: `US-XXX`
 - `US-002`: Second story
 - `US-010`: Tenth story
 
----
-
-## Changes from v2.2 Summary
-
-| Aspect | v2.2 | v3 |
-|--------|------|----|
-| Completion tracking | `passes: boolean` + `skipped: boolean` | `status` enum (5 states) |
-| Dependency ordering | `priority` only (implicit sequential) | `dependsOn` (explicit DAG) + `priority` as tiebreaker |
-| Parallel execution | Not supported | Supported via `dependsOn` + `maxConcurrency` |
-| Retry visibility | Re-run same story | `failed` -> `in_progress` transition |
-| In-progress tracking | Not tracked | `in_progress` status |
-| Schema version | `"2.2"` | `"3.0"` |

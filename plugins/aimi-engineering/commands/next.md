@@ -29,7 +29,9 @@ If empty, report: "aimi-cli.sh not found. Reinstall plugin: `/plugin install aim
 $AIMI_CLI next-story
 ```
 
-This returns the next pending story as JSON:
+This returns the next pending story as JSON. Fields depend on schema version:
+
+**Response format:**
 ```json
 {
   "id": "US-001",
@@ -37,7 +39,8 @@ This returns the next pending story as JSON:
   "description": "As a developer, I need...",
   "acceptanceCriteria": ["Criterion 1", "Criterion 2"],
   "priority": 1,
-  "passes": false,
+  "status": "pending",
+  "dependsOn": [],
   "notes": ""
 }
 ```

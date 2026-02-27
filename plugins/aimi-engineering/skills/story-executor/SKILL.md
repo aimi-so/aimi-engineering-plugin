@@ -38,7 +38,8 @@ Execute ONE story from the tasks file:
     "Typecheck passes"
   ],
   "priority": 1,
-  "passes": false,
+  "status": "pending",
+  "dependsOn": [],
   "notes": ""
 }
 ```
@@ -98,16 +99,15 @@ Description: [STORY_DESCRIPTION]
 4. Run typecheck: npx tsc --noEmit
 5. If all checks pass, commit with: "feat(scope): Story title"
 6. If WORKTREE_PATH is set: do NOT update tasks file — return result report instead
-   If no WORKTREE_PATH: update the tasks file — set passes: true for this story
+   If no WORKTREE_PATH: do NOT update tasks file directly — the caller (next.md/execute.md) handles status updates via the CLI
 
 ## On Failure
 
 If you cannot complete the story:
 
-1. Do NOT mark passes: true
-2. If WORKTREE_PATH is set: do NOT update tasks.json — return failure report to leader
-   If no WORKTREE_PATH: update the tasks file with notes describing the failure
-3. Return with clear failure report
+1. Do NOT update the tasks file (the caller handles status via CLI)
+2. Return with clear failure report including error details
+3. The caller will mark the story as failed and handle dependent stories
 ```
 
 ---
@@ -130,8 +130,8 @@ CRITERIA:
 
 RULES: [CLAUDE.md conventions]
 
-FLOW: (cd worktree if set) → implement → verify criteria → typecheck → commit → (worktree: report result | no worktree: update tasks file)
-FAIL: stop on failure, report error, do not commit. If worktree: return failure report to leader, do NOT update tasks file.
+FLOW: (cd worktree if set) → implement → verify criteria → typecheck → commit → report result (caller handles tasks file)
+FAIL: stop on failure, report error, do not commit. Return failure report — caller handles status updates.
 ```
 
 ---
@@ -196,30 +196,13 @@ When building the prompt, inject CLAUDE.md content. If not found, use default ru
 
 If you cannot complete a story:
 
-### Sequential mode (no worktree)
-
-1. **Do NOT** mark `passes: true`
-2. **Update the tasks file** with failure details:
-
-```json
-{
-  "id": "US-001",
-  "passes": false,
-  "notes": "Failed: TypeScript error - User type missing 'status' field"
-}
-```
-
-3. **Return** with clear failure report
-
-### Parallel mode (with worktree)
-
-1. **Do NOT** update tasks.json — the leader handles all status changes
-2. **Do NOT** run cascade-skip — the leader handles dependent story skipping
+1. **Do NOT** update the tasks file — the caller (next.md or execute.md leader) handles all status changes via CLI
+2. **Do NOT** run cascade-skip — the caller handles dependent story skipping
 3. **Return** a clear failure report with:
    - Story ID
    - Error description
    - Any partial work committed (or not)
-4. The leader will mark the story as failed and cascade-skip dependent stories
+4. The caller will mark the story as failed and handle dependent stories
 
 ---
 
@@ -230,5 +213,4 @@ Before completing a story:
 - [ ] All acceptance criteria verified
 - [ ] Typecheck passes (`npx tsc --noEmit`)
 - [ ] Changes committed with proper format
-- [ ] If worktree mode: result report returned to leader (do NOT touch tasks file)
-- [ ] If sequential mode: tasks file updated with `passes: true`
+- [ ] Result report returned to caller (do NOT update tasks file directly — caller handles via CLI)
