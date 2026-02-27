@@ -51,6 +51,15 @@ clear_state_file() {
   rm -f "$AIMI_DIR/$key"
 }
 
+# Validate story ID format (US-NNN or US-NNNa)
+validate_story_id() {
+  local story_id="$1"
+  if ! [[ "$story_id" =~ ^US-[0-9]{3}[a-z]?$ ]]; then
+    echo "Error: Invalid story ID format: $story_id (expected US-NNN)" >&2
+    exit 1
+  fi
+}
+
 # Get the tasks file (from state or discover)
 get_tasks_file() {
   local tasks_file
@@ -119,7 +128,7 @@ cmd_status() {
     schemaVersion: .schemaVersion,
     title: .metadata.title,
     branch: .metadata.branchName,
-    maxConcurrency: (.metadata.maxConcurrency // 4),
+    maxConcurrency: ((.metadata.maxConcurrency // 4) | if . <= 0 then 4 else . end),
     pending: [.userStories[] | select(.status == "pending")] | length,
     in_progress: [.userStories[] | select(.status == "in_progress")] | length,
     completed: [.userStories[] | select(.status == "completed")] | length,
@@ -134,7 +143,7 @@ cmd_status() {
 cmd_metadata() {
   local tasks_file
   tasks_file=$(get_tasks_file)
-  jq '.metadata' "$tasks_file"
+  jq '.metadata | .maxConcurrency = ((.maxConcurrency // 4) | if . <= 0 then 4 else . end)' "$tasks_file"
 }
 
 # List stories that are ready to execute
@@ -206,6 +215,8 @@ cmd_mark_in_progress() {
     exit 1
   fi
 
+  validate_story_id "$story_id"
+
   tasks_file=$(get_tasks_file)
 
   # Atomic update using flock and unique temp file
@@ -234,6 +245,8 @@ cmd_mark_complete() {
     echo "Usage: aimi-cli.sh mark-complete <story-id>" >&2
     exit 1
   fi
+
+  validate_story_id "$story_id"
 
   tasks_file=$(get_tasks_file)
 
@@ -266,6 +279,8 @@ cmd_mark_failed() {
     exit 1
   fi
 
+  validate_story_id "$story_id"
+
   tasks_file=$(get_tasks_file)
 
   # Atomic update using flock and unique temp file
@@ -295,6 +310,8 @@ cmd_mark_skipped() {
     echo "Usage: aimi-cli.sh mark-skipped <story-id>" >&2
     exit 1
   fi
+
+  validate_story_id "$story_id"
 
   tasks_file=$(get_tasks_file)
 
@@ -402,6 +419,30 @@ cmd_validate_deps() {
   fi
 }
 
+# Validate story content (field lengths, suspicious patterns)
+cmd_validate_stories() {
+  local tasks_file
+  tasks_file=$(get_tasks_file)
+
+  jq '
+    .userStories as $stories |
+    [
+      $stories[] |
+      . as $s |
+      (
+        (if ($s.title | length) > 200 then ["\($s.id): title exceeds 200 chars"] else [] end) +
+        (if ($s.description | length) > 500 then ["\($s.id): description exceeds 500 chars"] else [] end) +
+        ([$s.acceptanceCriteria[] | select(length > 300)] | if length > 0 then ["\($s.id): acceptance criterion exceeds 300 chars"] else [] end) +
+        (if ($s.title | test("ignore previous|system:|INSTRUCTIONS|```|\\$\\(|`"; "i")) then ["\($s.id): title contains suspicious content"] else [] end) +
+        (if ($s.description | test("ignore previous|system:|INSTRUCTIONS|```|\\$\\(|`"; "i")) then ["\($s.id): description contains suspicious content"] else [] end)
+      ) | .[]
+    ] |
+    if length == 0 then {valid: true, errors: []}
+    else {valid: false, errors: .}
+    end
+  ' "$tasks_file"
+}
+
 # Cascade skip: given a failed story ID, mark all transitively-dependent stories as skipped
 cmd_cascade_skip() {
   local failed_id="$1"
@@ -411,6 +452,8 @@ cmd_cascade_skip() {
     echo "Usage: aimi-cli.sh cascade-skip <story-id>" >&2
     exit 1
   fi
+
+  validate_story_id "$failed_id"
 
   tasks_file=$(get_tasks_file)
 
@@ -526,6 +569,7 @@ COMMANDS:
     mark-skipped <id>         Mark story as skipped
     count-pending             Count pending stories
     validate-deps             Validate dependency graph (no cycles, no missing refs)
+    validate-stories          Validate story content (length, suspicious patterns)
     cascade-skip <id>         Skip all stories depending on failed story
     get-branch                Get branchName from metadata
     get-state                 Get all state files as JSON
@@ -592,6 +636,7 @@ main() {
     mark-skipped)      cmd_mark_skipped "${2:-}" ;;
     count-pending)     cmd_count_pending ;;
     validate-deps)     cmd_validate_deps ;;
+    validate-stories)  cmd_validate_stories ;;
     cascade-skip)      cmd_cascade_skip "${2:-}" ;;
     get-branch)        cmd_get_branch ;;
     get-state)         cmd_get_state ;;
