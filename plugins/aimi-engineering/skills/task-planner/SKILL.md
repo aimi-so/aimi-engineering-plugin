@@ -20,32 +20,50 @@ Take a feature description through research, spec analysis, and story decomposit
 
 **Filename:** `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 
+**Schema:** v3 — see `references/task-format-v3.md` for the full specification.
+
 ```json
 {
-  "schemaVersion": "2.2",
+  "schemaVersion": "3.0",
   "metadata": {
     "title": "feat: Feature name",
     "type": "feat",
     "branchName": "feat/feature-name",
     "createdAt": "YYYY-MM-DD",
     "planPath": null,
-    "brainstormPath": ".aimi/brainstorms/... (optional)"
+    "brainstormPath": ".aimi/brainstorms/... (optional)",
+    "maxConcurrency": 4
   },
   "userStories": [
     {
       "id": "US-001",
-      "title": "Story title",
+      "title": "Add schema migration",
       "description": "As a [user], I want [feature] so that [benefit]",
       "acceptanceCriteria": ["Criterion 1", "Typecheck passes"],
       "priority": 1,
-      "passes": false,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Add server action",
+      "description": "As a [user], I want [feature] so that [benefit]",
+      "acceptanceCriteria": ["Criterion 1", "Typecheck passes"],
+      "priority": 2,
+      "status": "pending",
+      "dependsOn": ["US-001"],
       "notes": ""
     }
   ]
 }
 ```
 
-**Key:** `planPath` is always `null` — this skill generates tasks.json directly, no intermediate plan.
+**Key fields:**
+- `planPath` is always `null` — this skill generates tasks.json directly, no intermediate plan.
+- `status` replaces the old `passes` boolean. All stories initialize as `"pending"`.
+- `dependsOn` is a string array of story IDs that must complete before this story can start.
+- `maxConcurrency` (optional) controls how many stories execute in parallel (default: `4`).
 
 ### Type Values
 
@@ -120,15 +138,29 @@ Apply rules from `references/story-decomposition.md`:
 2. Group by layer (schema → backend → UI → aggregation)
 3. Size check (one context window per story)
 4. Order by dependency (assign priority numbers)
-5. Generate verifiable acceptance criteria
-6. Validate (no circular dependencies, no vague criteria)
+5. **Generate `dependsOn` arrays** using the inference rules in `references/story-decomposition.md`:
+   - **Same layer, independent concerns** (different tables, different pages) → `dependsOn: []` between them
+   - **Same layer, shared concern** (FK referencing another story's table) → add dependency
+   - **Cross-layer**: backend depends on schema stories it reads/writes; UI depends on backend it calls; aggregation depends on what it consumes
+   - **Skip layers when appropriate**: UI reading directly from a new table depends on the schema story, not a non-existent backend story
+6. Generate verifiable acceptance criteria
+7. Validate dependency graph:
+   - No circular dependencies (DAG check)
+   - No self-references (no story lists its own ID)
+   - All IDs referenced in `dependsOn` exist as story IDs
+   - No vague acceptance criteria
 
 ### Phase 4: Write tasks.json
 
 1. Derive metadata: title, type, branchName (kebab-case), createdAt (today)
-2. Set `planPath: null`
-3. Set `brainstormPath` if a brainstorm was used
-4. Write to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
+2. Set `schemaVersion: "3.0"`
+3. Set `planPath: null`
+4. Set `brainstormPath` if a brainstorm was used
+5. Set `maxConcurrency` (optional — default `4`; set to `1` for fully sequential execution)
+6. For each story: set `status: "pending"`, include `dependsOn` array from Phase 3
+7. Write to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
+
+See `references/task-format-v3.md` for the complete v3 schema definition, status state machine, and validation rules.
 
 ---
 
@@ -148,11 +180,21 @@ Apply rules from `references/story-decomposition.md`:
 
 ## Checklist Before Writing
 
+### Sizing and Content
 - [ ] Each story completable in one agent iteration
 - [ ] Stories ordered by dependency (schema → backend → UI)
 - [ ] Every story has "Typecheck passes" as criterion
 - [ ] Acceptance criteria are verifiable (not vague)
-- [ ] No story depends on a later story
 - [ ] branchName is valid (alphanumeric, hyphens, slashes)
 - [ ] `planPath` is `null`
 - [ ] Field lengths: title ≤ 200, description ≤ 500, criterion ≤ 300
+
+### v3 Schema Validations
+- [ ] `schemaVersion` is `"3.0"`
+- [ ] Every story has `status` initialized to `"pending"`
+- [ ] Every story has a `dependsOn` array (even if empty `[]`)
+- [ ] No circular dependencies in `dependsOn` (graph must be a DAG)
+- [ ] All IDs referenced in `dependsOn` exist as story IDs in the file
+- [ ] No self-references (no story lists its own ID in `dependsOn`)
+- [ ] `priority` values are sequential integers, consistent with dependency depth
+- [ ] `maxConcurrency` (if set) is a positive integer
