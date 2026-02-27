@@ -223,7 +223,7 @@ Before saving the brainstorm document:
 - [ ] All critical topics addressed (Purpose, Users, Success at minimum)
 - [ ] Open Questions resolved or explicitly deferred
 - [ ] Document uses correct frontmatter (date, topic)
-- [ ] Next Steps references `/aimi:plan` (not `/workflows:plan`)
+- [ ] Next Steps references `/aimi:plan`
 - [ ] Directory `.aimi/brainstorms/` exists
 - [ ] No filename collision (append counter if needed)
 - [ ] YAGNI applied — no unnecessary complexity

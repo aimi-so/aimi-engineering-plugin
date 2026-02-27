@@ -107,12 +107,6 @@ Next steps:
 3. **Run `/aimi:execute`** - Begin autonomous execution
 ```
 
-**NEVER mention:**
-- compound-engineering
-- /deepen-plan
-- workflows:*
-- Any command without the `aimi:` prefix
-
 ## Error Handling
 
 If research agents fail:

@@ -183,11 +183,6 @@ Next steps:
 4. **Run `/aimi:execute`** - Begin autonomous execution
 ```
 
-**NEVER mention:**
-- compound-engineering
-- workflows:*
-- Any command without the `aimi:` prefix
-
 ## Error Handling
 
 | Phase | Failure | Action |

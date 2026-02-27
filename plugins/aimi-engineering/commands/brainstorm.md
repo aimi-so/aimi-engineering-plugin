@@ -211,6 +211,3 @@ To start planning: `/aimi:plan`
 - **Keep outputs concise** — 200-300 words per section max
 - **Never code** — just explore and document decisions
 
-**NEVER mention:**
-- workflows:*
-- Any command without the `aimi:` prefix
