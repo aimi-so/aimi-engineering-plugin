@@ -87,13 +87,15 @@ Learnings are stored in project files (not separate progress log):
 
 ```json
 {
-  "schemaVersion": "2.1",
+  "schemaVersion": "3.0",
   "metadata": {
     "title": "feat: Add feature name",
     "type": "feat|ref|bug|chore",
     "branchName": "feat/feature-name",
     "createdAt": "YYYY-MM-DD",
-    "planPath": ".aimi/plans/YYYY-MM-DD-feature-name-plan.md"
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 4
   },
   "userStories": [{
     "id": "US-XXX",
@@ -101,11 +103,14 @@ Learnings are stored in project files (not separate progress log):
     "description": "string (max 500)",
     "acceptanceCriteria": ["string"],
     "priority": 1,
-    "passes": false,
+    "status": "pending",
+    "dependsOn": [],
     "notes": ""
   }]
 }
 ```
+
+> **Backward compatibility:** v2.2 tasks files (with `passes` boolean) are auto-detected and fully supported by the CLI.
 
 ## Performance Guidelines
 

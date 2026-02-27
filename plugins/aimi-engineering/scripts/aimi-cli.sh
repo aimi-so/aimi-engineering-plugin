@@ -187,25 +187,6 @@ cmd_list_ready() {
     exit 1
   fi
 
-  jq '[
-    .userStories[] |
-    select(.status == "pending") |
-    . as $story |
-    if (($story.dependsOn // []) | length) == 0 then
-      $story
-    else
-      # Check that all dependencies are completed or skipped
-      ($story.dependsOn // []) as $deps |
-      [input_filename] |  # dummy to access root
-      $story |
-      select(
-        # We need to check deps against all stories
-        true
-      )
-    end
-  ]' "$tasks_file" > /dev/null 2>&1 || true
-
-  # Use a more straightforward approach: build the ready list with proper root access
   jq '
     . as $root |
     [
@@ -233,25 +214,8 @@ cmd_next_story() {
   version=$(detect_schema)
 
   if [ "$version" = "3.0" ]; then
-    # v3: use dependency-aware ready logic, then sort by priority as tiebreaker
-    story=$(jq '
-      . as $root |
-      [
-        .userStories[] |
-        select(.status == "pending") |
-        . as $story |
-        (
-          ($story.dependsOn // []) | length == 0
-        ) or (
-          ($story.dependsOn // []) |
-          all(. as $dep_id |
-            ($root.userStories[] | select(.id == $dep_id) | .status) as $dep_status |
-            ($dep_status == "completed" or $dep_status == "skipped")
-          )
-        )
-      | if . then $story else empty end
-      ] | sort_by(.priority) | .[0]
-    ' "$tasks_file")
+    # v3: reuse list-ready logic, then pick first by priority
+    story=$(cmd_list_ready | jq 'sort_by(.priority) | .[0]')
   else
     # v2.2: sort by priority, pick first non-completed non-skipped
     story=$(jq '[.userStories[] | select(.passes == false and .skipped != true)] | sort_by(.priority) | .[0]' "$tasks_file")
@@ -527,53 +491,8 @@ cmd_cascade_skip() {
 
   # Find all stories that transitively depend on the failed story and mark them as skipped
   local tmp_file="${tasks_file}.tmp"
-  jq --arg failed_id "$failed_id" '
-    # Iteratively find all transitive dependents
-    . as $root |
 
-    # Start with direct dependents of the failed story
-    (
-      reduce range($root.userStories | length) as $_ (
-        [$failed_id];
-        . as $skip_ids |
-        ($skip_ids + [
-          $root.userStories[] |
-          select(
-            (.status != "completed") and
-            (.status != "skipped") and
-            ((.dependsOn // []) | any(. as $d | $skip_ids | any(. == $d)))
-          ) |
-          .id
-        ]) | unique
-      )
-    ) as $all_skip_ids |
-
-    # Remove the original failed story from skip list (it should stay as failed)
-    ($all_skip_ids | map(select(. != $failed_id))) as $to_skip |
-
-    # Update stories
-    .userStories |= [
-      .[] |
-      if (.id as $sid | $to_skip | any(. == $sid)) then
-        . + {status: "skipped", notes: ("Skipped: depends on failed story " + $failed_id)}
-      else
-        .
-      end
-    ] |
-
-    # Return the list of skipped story IDs
-    . as $updated |
-    {
-      skipped: $to_skip,
-      count: ($to_skip | length),
-      tasks_file_updated: true
-    }
-  ' "$tasks_file" > "$tmp_file"
-
-  # The jq above outputs the result JSON but also transforms the file
-  # We need a different approach: update file in place and output separately
-
-  # Re-do: first compute which IDs to skip, then update the file
+  # First compute which IDs to skip
   local to_skip
   to_skip=$(jq --arg failed_id "$failed_id" '
     . as $root |

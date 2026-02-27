@@ -6,9 +6,9 @@ user-invocable: true
 
 # Plan to Tasks Converter
 
-Converts implementation plans (markdown files) to the tasks.json format for autonomous agent execution.
+> **DEPRECATED:** This skill generates **v2.2 schema only** (uses `passes` boolean, no `dependsOn`, no parallel execution). For v3 schema output with dependency graphs and parallel execution, use `/aimi:plan` which invokes the `task-planner` skill instead.
 
-> **Note:** This skill is for converting external markdown plans. For direct generation from a feature description (no intermediate plan), use the `task-planner` skill instead.
+Converts implementation plans (markdown files) to the tasks.json v2.2 format for autonomous agent execution.
 
 ---
 

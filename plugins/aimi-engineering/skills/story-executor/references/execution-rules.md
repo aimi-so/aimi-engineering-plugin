@@ -2,12 +2,13 @@
 
 ## Overview
 
-Each story is executed by a Task-spawned agent with fresh context. This document defines the execution flow and output formats.
+Each story is executed by a Task-spawned agent with fresh context. This document defines the execution flow and output formats. The caller (next.md or execute.md) handles all tasks file status updates via the CLI.
 
 ---
 
 ## Story Format
 
+**v3 (current):**
 ```json
 {
   "id": "US-001",
@@ -18,6 +19,20 @@ Each story is executed by a Task-spawned agent with fresh context. This document
     "Generate and run migration successfully",
     "Typecheck passes"
   ],
+  "priority": 1,
+  "status": "pending",
+  "dependsOn": [],
+  "notes": ""
+}
+```
+
+**v2.2 (legacy):**
+```json
+{
+  "id": "US-001",
+  "title": "Add status field to tasks table",
+  "description": "...",
+  "acceptanceCriteria": ["..."],
   "priority": 1,
   "passes": false,
   "notes": ""
@@ -89,17 +104,9 @@ Commit format:
 - Scope: module or feature area (e.g., tasks, auth, users)
 - Use story title as description
 
-### Step 7: Update the Tasks File
+### Step 7: Report Result
 
-Mark the story complete:
-
-```json
-{
-  "id": "US-001",
-  "passes": true,
-  "notes": ""
-}
-```
+Do NOT update the tasks file directly. Return a result report to the caller. The caller (next.md or execute.md) handles status updates via the CLI (`mark-complete`, `mark-failed`, etc.).
 
 ---
 
@@ -107,28 +114,20 @@ Mark the story complete:
 
 If you cannot complete a story:
 
-1. **Do NOT** mark `passes: true`
-2. **Update the tasks file** with failure details:
-
-```json
-{
-  "id": "US-001",
-  "passes": false,
-  "notes": "Failed: TypeScript error - User type missing 'status' field"
-}
-```
-
-3. **Return** with clear failure report:
-   - What failed
-   - Error messages
+1. **Do NOT** update the tasks file — the caller handles all status changes via CLI
+2. **Do NOT** commit partial or broken code
+3. **Return** a clear failure report with:
+   - Story ID
+   - Error description
    - Files involved
+   - Any partial work (uncommitted)
 
 ---
 
 ## Status Values
 
-| Field | Value | Meaning |
-|-------|-------|---------|
-| `passes` | `false` | Not completed yet |
-| `passes` | `true` | Completed successfully |
-| `skipped` | `true` | Skipped by user (won't retry) |
+| Schema | Field | Values |
+|--------|-------|--------|
+| v3 | `status` | `pending`, `in_progress`, `completed`, `failed`, `skipped` |
+| v2.2 | `passes` | `false` (pending), `true` (completed) |
+| v2.2 | `skipped` | `true` (skipped by user) |

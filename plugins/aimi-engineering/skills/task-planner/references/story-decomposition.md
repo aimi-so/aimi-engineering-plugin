@@ -214,7 +214,7 @@ Each criterion must be something the agent can CHECK, not something vague.
 1. Each requirement becomes one or more JSON stories
 2. **IDs**: Sequential — `US-001`, `US-002`, etc.
 3. **Priority**: Based on dependency order (lower = executes first)
-4. **All stories**: `passes: false` and empty `notes`
+4. **All stories**: `status: "pending"` and empty `notes`
 5. **branchName**: Derive from feature name, kebab-case, prefixed with type
 6. **Always add**: "Typecheck passes" to every story's acceptance criteria
 
