@@ -404,9 +404,14 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 ## Version History
 
-**Current Version:** 1.8.0
+**Current Version:** 1.9.0
 
 ### Recent Changes
+
+**v1.9.0** - Schema v3 Definition
+- v3 task format reference with `dependsOn` dependency graph and `status` enum
+- Parallel execution support via `maxConcurrency` metadata field
+- Backward compatibility and migration guide for v2.2 to v3
 
 **v1.8.0** - Fully Standalone (Zero Dependencies)
 - New `brainstorm` skill with process knowledge, Ralph-style questions, adaptive exit
