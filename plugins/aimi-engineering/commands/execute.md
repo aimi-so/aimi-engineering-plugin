@@ -17,7 +17,12 @@ Execute all pending stories autonomously with smart execution mode detection.
 **CRITICAL:** The CLI script lives in the plugin install directory, NOT the project directory. Resolve it first:
 
 ```bash
-AIMI_CLI=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+# Try cached cli-path first (set by init-session), fall back to glob discovery
+if [ -f .aimi/cli-path ] && [ -x "$(cat .aimi/cli-path)" ]; then
+  AIMI_CLI=$(cat .aimi/cli-path)
+else
+  AIMI_CLI=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+fi
 ```
 
 If empty, report: "aimi-cli.sh not found. Reinstall plugin: `/plugin install aimi-engineering`" and STOP.
@@ -49,19 +54,18 @@ STOP execution.
 
 ### Orphaned Story Recovery
 
-Check for stories stuck in `in_progress` status (from interrupted previous runs):
+Check for and reset stories stuck in `in_progress` status (from interrupted previous runs):
 
 ```bash
-orphaned=$($AIMI_CLI status | jq '[.userStories[] | select(.status == "in_progress")] | length')
+$AIMI_CLI reset-orphaned
 ```
 
-If orphaned > 0, recover each one:
-```
-For each story with status "in_progress":
-    $AIMI_CLI mark-failed [story.id] "Reset from orphaned in_progress state"
+This atomically marks all `in_progress` stories as `failed` and returns:
+```json
+{"count": 2, "reset": ["US-003", "US-005"]}
 ```
 
-Report: "Recovered [N] orphaned in_progress stories (reset to failed for retry)"
+If count > 0, report: "Recovered [count] orphaned in_progress stories (reset to failed for retry): [reset IDs]"
 
 Note: These stories will appear as "failed" in status. The user can review and re-run.
 

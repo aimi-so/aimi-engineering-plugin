@@ -42,7 +42,7 @@ This returns JSON:
   "failed": 0,
   "skipped": 0,
   "total": 6,
-  "stories": [
+  "userStories": [
     {"id": "US-001", "title": "Story title", "status": "completed", "dependsOn": [], "priority": 1, "notes": ""},
     {"id": "US-002", "title": "Story title", "status": "in_progress", "dependsOn": ["US-001"], "priority": 2, "notes": ""}
   ]

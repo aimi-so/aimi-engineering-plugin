@@ -53,7 +53,7 @@ if echo "$COMMAND" | grep -qE '^\$AIMI_CLI\b|^\$\{AIMI_CLI\}'; then
   case "$SUBCMD" in
     init-session|find-tasks|status|metadata|next-story|current-story|\
     list-ready|mark-in-progress|mark-complete|mark-failed|mark-skipped|\
-    count-pending|validate-deps|validate-stories|cascade-skip|\
+    count-pending|validate-deps|validate-stories|cascade-skip|reset-orphaned|\
     get-branch|get-state|clear-state|help)
       echo "$ALLOW"
       exit 0

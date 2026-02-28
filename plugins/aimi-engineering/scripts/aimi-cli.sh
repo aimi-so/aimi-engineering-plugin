@@ -14,6 +14,16 @@ TASKS_DIR="$AIMI_DIR/tasks"
 # Utility Functions
 # ============================================================================
 
+# Resolve a path to its absolute form (POSIX-compatible)
+resolve_path() {
+  local path="$1"
+  if command -v realpath &> /dev/null; then
+    realpath "$path"
+  else
+    (cd "$(dirname "$path")" && echo "$(pwd)/$(basename "$path")")
+  fi
+}
+
 # Ensure jq is available
 check_jq() {
   if ! command -v jq &> /dev/null; then
@@ -37,18 +47,24 @@ read_state() {
   fi
 }
 
-# Write a value to a state file
+# Write a value to a state file (flock-protected for parallel safety)
 write_state() {
   local key="$1"
   local value="$2"
   ensure_state_dir
-  echo "$value" > "$AIMI_DIR/$key"
+  (
+    flock -x 200
+    echo "$value" > "$AIMI_DIR/$key"
+  ) 200>"$AIMI_DIR/.state.lock"
 }
 
-# Clear a single state file
+# Clear a single state file (flock-protected for parallel safety)
 clear_state_file() {
   local key="$1"
-  rm -f "$AIMI_DIR/$key"
+  (
+    flock -x 200
+    rm -f "$AIMI_DIR/$key"
+  ) 200>"$AIMI_DIR/.state.lock"
 }
 
 # Validate story ID format (US-NNN or US-NNNa)
@@ -60,17 +76,38 @@ validate_story_id() {
   fi
 }
 
+# Validate story ID exists in the tasks file
+validate_story_exists() {
+  local story_id="$1"
+  local tasks_file="$2"
+  if ! jq -e --arg id "$story_id" '.userStories[] | select(.id == $id)' "$tasks_file" > /dev/null 2>&1; then
+    echo "Error: Story $story_id not found in $tasks_file" >&2
+    exit 1
+  fi
+}
+
 # Get the tasks file (from state or discover)
 get_tasks_file() {
   local tasks_file
   tasks_file=$(read_state "current-tasks")
 
-  if [ -z "$tasks_file" ] || [ ! -f "$tasks_file" ]; then
+  if [ -n "$tasks_file" ] && [ ! -f "$tasks_file" ]; then
+    local stale_path="$tasks_file"
     tasks_file=$(ls -t "$TASKS_DIR"/*-tasks.json 2>/dev/null | head -1)
     if [ -z "$tasks_file" ]; then
       echo "No tasks file found in $TASKS_DIR/" >&2
       exit 1
     fi
+    tasks_file=$(resolve_path "$tasks_file")
+    echo "Warning: state file pointed to $stale_path which no longer exists. Using $tasks_file instead." >&2
+    write_state "current-tasks" "$tasks_file"
+  elif [ -z "$tasks_file" ]; then
+    tasks_file=$(ls -t "$TASKS_DIR"/*-tasks.json 2>/dev/null | head -1)
+    if [ -z "$tasks_file" ]; then
+      echo "No tasks file found in $TASKS_DIR/" >&2
+      exit 1
+    fi
+    tasks_file=$(resolve_path "$tasks_file")
   fi
 
   echo "$tasks_file"
@@ -90,7 +127,7 @@ cmd_find_tasks() {
     exit 1
   fi
 
-  echo "$tasks_file"
+  resolve_path "$tasks_file"
 }
 
 # Initialize execution session
@@ -99,6 +136,9 @@ cmd_init_session() {
 
   tasks_file=$(cmd_find_tasks)
   write_state "current-tasks" "$tasks_file"
+
+  # Self-resolve: persist this CLI's absolute path for future sessions
+  write_state "cli-path" "$(resolve_path "$0")"
 
   branch=$(jq -r '.metadata.branchName' "$tasks_file")
 
@@ -135,7 +175,7 @@ cmd_status() {
     failed: [.userStories[] | select(.status == "failed")] | length,
     skipped: [.userStories[] | select(.status == "skipped")] | length,
     total: .userStories | length,
-    stories: [.userStories[] | {id, title, status, dependsOn: (.dependsOn // []), priority, notes}]
+    userStories: [.userStories[] | {id, title, status, dependsOn: (.dependsOn // []), priority, notes}]
   }' "$tasks_file"
 }
 
@@ -218,6 +258,7 @@ cmd_mark_in_progress() {
   validate_story_id "$story_id"
 
   tasks_file=$(get_tasks_file)
+  validate_story_exists "$story_id" "$tasks_file"
 
   # Atomic update using flock and unique temp file
   local tmp_file
@@ -249,6 +290,7 @@ cmd_mark_complete() {
   validate_story_id "$story_id"
 
   tasks_file=$(get_tasks_file)
+  validate_story_exists "$story_id" "$tasks_file"
 
   # Atomic update using flock and unique temp file
   local tmp_file
@@ -282,6 +324,7 @@ cmd_mark_failed() {
   validate_story_id "$story_id"
 
   tasks_file=$(get_tasks_file)
+  validate_story_exists "$story_id" "$tasks_file"
 
   # Atomic update using flock and unique temp file
   local tmp_file
@@ -314,6 +357,7 @@ cmd_mark_skipped() {
   validate_story_id "$story_id"
 
   tasks_file=$(get_tasks_file)
+  validate_story_exists "$story_id" "$tasks_file"
 
   # Atomic update using flock and unique temp file
   local tmp_file
@@ -456,6 +500,7 @@ cmd_cascade_skip() {
   validate_story_id "$failed_id"
 
   tasks_file=$(get_tasks_file)
+  validate_story_exists "$failed_id" "$tasks_file"
 
   # Find all stories that transitively depend on the failed story and mark them as skipped
 
@@ -506,6 +551,37 @@ cmd_cascade_skip() {
     '{skipped: $skipped, count: $count}'
 }
 
+# Reset orphaned in_progress stories to failed
+cmd_reset_orphaned() {
+  local tasks_file
+  tasks_file=$(get_tasks_file)
+
+  # Find all in_progress story IDs
+  local orphaned
+  orphaned=$(jq '[.userStories[] | select(.status == "in_progress") | .id]' "$tasks_file")
+
+  local count
+  count=$(echo "$orphaned" | jq 'length')
+
+  if [ "$count" -eq 0 ]; then
+    jq -n '{count: 0, reset: []}'
+    return
+  fi
+
+  # Atomic update using flock and unique temp file
+  local tmp_file
+  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  (
+    flock -x 200
+    jq '(.userStories[] | select(.status == "in_progress")) |= . + {status: "failed", notes: "Reset: orphaned from previous session"}' \
+      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+  ) 200>"${tasks_file}.lock"
+  rm -f "$tmp_file" 2>/dev/null
+
+  jq -n --argjson reset "$orphaned" --argjson count "$count" \
+    '{count: $count, reset: $reset}'
+}
+
 # Get branch name
 cmd_get_branch() {
   local branch
@@ -543,7 +619,8 @@ cmd_get_state() {
 
 # Clear all state files (preserves tasks directory)
 cmd_clear_state() {
-  rm -f "$AIMI_DIR/current-tasks" "$AIMI_DIR/current-branch" "$AIMI_DIR/current-story" "$AIMI_DIR/last-result"
+  rm -f "$AIMI_DIR/current-tasks" "$AIMI_DIR/current-branch" "$AIMI_DIR/current-story" "$AIMI_DIR/last-result" "$AIMI_DIR/cli-path"
+  rm -f "$AIMI_DIR"/.state.lock "$AIMI_DIR"/*.lock 2>/dev/null
   echo "State cleared."
 }
 
@@ -571,6 +648,7 @@ COMMANDS:
     validate-deps             Validate dependency graph (no cycles, no missing refs)
     validate-stories          Validate story content (length, suspicious patterns)
     cascade-skip <id>         Skip all stories depending on failed story
+    reset-orphaned            Reset all in_progress stories to failed
     get-branch                Get branchName from metadata
     get-state                 Get all state files as JSON
     clear-state               Clear all state files
@@ -638,6 +716,7 @@ main() {
     validate-deps)     cmd_validate_deps ;;
     validate-stories)  cmd_validate_stories ;;
     cascade-skip)      cmd_cascade_skip "${2:-}" ;;
+    reset-orphaned)    cmd_reset_orphaned ;;
     get-branch)        cmd_get_branch ;;
     get-state)         cmd_get_state ;;
     clear-state)       cmd_clear_state ;;

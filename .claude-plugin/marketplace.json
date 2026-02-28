@@ -12,7 +12,7 @@
     {
       "name": "aimi-engineering",
       "description": "Fully standalone autonomous task execution with aimi-native agents. Direct tasks.json generation, guided brainstorming, multi-agent review, iterative execution with parallel story support via dependency graphs and swarm orchestration.",
-      "version": "1.12.0",
+      "version": "1.13.0",
       "author": {
         "name": "Stanley Takamatsu",
         "url": "https://github.com/aimi-so"
