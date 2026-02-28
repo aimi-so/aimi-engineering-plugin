@@ -17,11 +17,11 @@ Execute all pending stories autonomously with smart execution mode detection.
 **CRITICAL:** The CLI script lives in the plugin install directory, NOT the project directory. Resolve it first:
 
 ```bash
-# Try cached cli-path first (set by init-session), fall back to glob discovery
-if [ -f .aimi/cli-path ] && [ -x "$(cat .aimi/cli-path)" ]; then
+# Glob always finds the latest installed version
+AIMI_CLI=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+# Fallback to cached cli-path if glob found nothing (edge case)
+if [ -z "$AIMI_CLI" ] && [ -f .aimi/cli-path ] && [ -x "$(cat .aimi/cli-path)" ]; then
   AIMI_CLI=$(cat .aimi/cli-path)
-else
-  AIMI_CLI=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
 fi
 ```
 

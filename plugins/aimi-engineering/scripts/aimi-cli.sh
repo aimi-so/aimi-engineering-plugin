@@ -14,13 +14,41 @@ TASKS_DIR="$AIMI_DIR/tasks"
 # Utility Functions
 # ============================================================================
 
+# Detect platform capabilities once at startup
+_HAS_FLOCK=$(command -v flock &>/dev/null && echo 1 || echo 0)
+_HAS_REALPATH=$(command -v realpath &>/dev/null && echo 1 || echo 0)
+
 # Resolve a path to its absolute form (POSIX-compatible)
 resolve_path() {
   local path="$1"
-  if command -v realpath &> /dev/null; then
+  if [ "$_HAS_REALPATH" -eq 1 ]; then
     realpath "$path"
   else
     (cd "$(dirname "$path")" && echo "$(pwd)/$(basename "$path")")
+  fi
+}
+
+# Portable exclusive lock (Linux: flock, macOS: mkdir spinlock)
+# Usage: call inside a subshell with FD 200 redirect:
+#   (_lock "lockfile"; ... ) 200>"lockfile"
+# Linux: flock acquires lock on FD 200, auto-releases when subshell exits
+# macOS: mkdir creates atomic lock dir, trap EXIT cleans up on subshell exit
+_lock() {
+  if [ "$_HAS_FLOCK" -eq 1 ]; then
+    flock -x 200
+  else
+    local lockdir="$1.d"
+    local attempts=0
+    while ! mkdir "$lockdir" 2>/dev/null; do
+      sleep 0.05
+      attempts=$((attempts + 1))
+      if [ "$attempts" -ge 200 ]; then
+        echo "Warning: Breaking stale lock on $1" >&2
+        rmdir "$lockdir" 2>/dev/null || rm -rf "$lockdir"
+        attempts=0
+      fi
+    done
+    trap "rmdir '$lockdir' 2>/dev/null" EXIT
   fi
 }
 
@@ -53,7 +81,7 @@ write_state() {
   local value="$2"
   ensure_state_dir
   (
-    flock -x 200
+    _lock "$AIMI_DIR/.state.lock"
     echo "$value" > "$AIMI_DIR/$key"
   ) 200>"$AIMI_DIR/.state.lock"
 }
@@ -62,7 +90,7 @@ write_state() {
 clear_state_file() {
   local key="$1"
   (
-    flock -x 200
+    _lock "$AIMI_DIR/.state.lock"
     rm -f "$AIMI_DIR/$key"
   ) 200>"$AIMI_DIR/.state.lock"
 }
@@ -264,7 +292,7 @@ cmd_mark_in_progress() {
   local tmp_file
   tmp_file=$(mktemp "${tasks_file}.XXXXXX")
   (
-    flock -x 200
+    _lock "${tasks_file}.lock"
     jq --arg id "$story_id" \
       '(.userStories[] | select(.id == $id)) |= . + {status: "in_progress"}' \
       "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
@@ -296,7 +324,7 @@ cmd_mark_complete() {
   local tmp_file
   tmp_file=$(mktemp "${tasks_file}.XXXXXX")
   (
-    flock -x 200
+    _lock "${tasks_file}.lock"
     jq --arg id "$story_id" \
       '(.userStories[] | select(.id == $id)) |= . + {status: "completed"}' \
       "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
@@ -330,7 +358,7 @@ cmd_mark_failed() {
   local tmp_file
   tmp_file=$(mktemp "${tasks_file}.XXXXXX")
   (
-    flock -x 200
+    _lock "${tasks_file}.lock"
     jq --arg id "$story_id" --arg notes "$notes" \
       '(.userStories[] | select(.id == $id)) |= . + {status: "failed", notes: $notes}' \
       "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
@@ -363,7 +391,7 @@ cmd_mark_skipped() {
   local tmp_file
   tmp_file=$(mktemp "${tasks_file}.XXXXXX")
   (
-    flock -x 200
+    _lock "${tasks_file}.lock"
     jq --arg id "$story_id" \
       '(.userStories[] | select(.id == $id)) |= . + {status: "skipped"}' \
       "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
@@ -529,7 +557,7 @@ cmd_cascade_skip() {
   local tmp_file
   tmp_file=$(mktemp "${tasks_file}.XXXXXX")
   (
-    flock -x 200
+    _lock "${tasks_file}.lock"
     jq --arg failed_id "$failed_id" --argjson to_skip "$to_skip" '
       .userStories |= [
         .[] |
@@ -572,7 +600,7 @@ cmd_reset_orphaned() {
   local tmp_file
   tmp_file=$(mktemp "${tasks_file}.XXXXXX")
   (
-    flock -x 200
+    _lock "${tasks_file}.lock"
     jq '(.userStories[] | select(.status == "in_progress")) |= . + {status: "failed", notes: "Reset: orphaned from previous session"}' \
       "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
   ) 200>"${tasks_file}.lock"
@@ -621,6 +649,7 @@ cmd_get_state() {
 cmd_clear_state() {
   rm -f "$AIMI_DIR/current-tasks" "$AIMI_DIR/current-branch" "$AIMI_DIR/current-story" "$AIMI_DIR/last-result" "$AIMI_DIR/cli-path"
   rm -f "$AIMI_DIR"/.state.lock "$AIMI_DIR"/*.lock 2>/dev/null
+  rmdir "$AIMI_DIR"/*.lock.d 2>/dev/null || true
   echo "State cleared."
 }
 
