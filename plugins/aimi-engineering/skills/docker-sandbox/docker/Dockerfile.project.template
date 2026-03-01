@@ -1,0 +1,47 @@
+# =============================================================================
+# Dockerfile.project.template — per-project aimi-sandbox image
+# =============================================================================
+# Layers project-specific dependencies on top of the aimi-sandbox base image.
+#
+# Users copy this template to their project root as:
+#   .aimi/Dockerfile.sandbox
+#
+# Then customise the COPY and RUN directives for their project. The build
+# script (scripts/build-project-image.sh) picks it up automatically.
+#
+# IMPORTANT: The FROM line MUST reference aimi-sandbox — the build script
+# validates this before building.
+# =============================================================================
+
+FROM aimi-sandbox:base
+
+# ---------------------------------------------------------------------------
+# Project-specific system packages (uncomment / edit as needed)
+# ---------------------------------------------------------------------------
+# USER root
+# RUN apt-get update && apt-get install -y --no-install-recommends \
+#         <your-packages-here> \
+#     && rm -rf /var/lib/apt/lists/*
+# USER aimi
+
+# ---------------------------------------------------------------------------
+# Project dependency files — copy lockfiles first for layer caching
+# ---------------------------------------------------------------------------
+# COPY package.json package-lock.json ./
+# COPY requirements.txt ./
+
+# ---------------------------------------------------------------------------
+# Install project dependencies
+# ---------------------------------------------------------------------------
+# RUN npm ci --ignore-scripts
+# RUN pip install --no-cache-dir -r requirements.txt
+
+# ---------------------------------------------------------------------------
+# Copy project source (optional — usually bind-mounted at runtime instead)
+# ---------------------------------------------------------------------------
+# COPY . .
+
+# ---------------------------------------------------------------------------
+# Default working directory (inherited from base: /workspace)
+# ---------------------------------------------------------------------------
+WORKDIR /workspace
