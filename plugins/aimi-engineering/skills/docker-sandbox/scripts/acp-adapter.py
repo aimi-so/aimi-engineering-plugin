@@ -14,7 +14,10 @@ Usage:
     docker exec <container> python /opt/aimi/acp-adapter.py --input /tmp/acp-payload.json
 
 Environment:
-    ANTHROPIC_API_KEY  - Required. Claude API key for headless mode.
+    ANTHROPIC_API_KEY  - Claude API key for headless mode (required unless
+                         CLAUDE_CONFIG_DIR is set with valid subscription auth).
+    CLAUDE_CONFIG_DIR  - Path to mounted Claude config directory containing
+                         .credentials.json for subscription-based auth.
     CONTAINER_ID       - Optional. Docker container ID for message envelope.
     SWARM_ID           - Optional. Swarm UUID for message envelope.
 """
@@ -35,7 +38,7 @@ from datetime import datetime, timezone
 # Constants
 # ---------------------------------------------------------------------------
 
-REQUIRED_ENV_VARS = ["ANTHROPIC_API_KEY"]
+REQUIRED_ENV_VARS = []
 
 VALID_TASK_REQUEST_FIELDS = {"taskFilePath", "branchName", "repoUrl", "envVars"}
 REQUIRED_TASK_REQUEST_FIELDS = {"taskFilePath", "branchName", "repoUrl"}
@@ -512,6 +515,29 @@ def main() -> int:
         log(msg)
         emit_error("MISSING_ENV_VAR", msg)
         return 1
+
+    # --- Validate authentication ---
+    has_api_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    claude_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    has_claude_config = bool(claude_config_dir) and os.path.isdir(claude_config_dir)
+
+    if not has_api_key and not has_claude_config:
+        msg = ("No authentication found. Set ANTHROPIC_API_KEY env var "
+               "or mount Claude config directory (CLAUDE_CONFIG_DIR)")
+        log(msg)
+        emit_error("MISSING_ENV_VAR", msg)
+        return 1
+
+    if has_claude_config:
+        creds_path = os.path.join(claude_config_dir, ".credentials.json")
+        if not os.path.isfile(creds_path):
+            log(f"Warning: CLAUDE_CONFIG_DIR is set but {creds_path} not found — "
+                "subscription auth may fail")
+        else:
+            log(f"Using subscription auth from {claude_config_dir}")
+
+    if has_api_key:
+        log("Using ANTHROPIC_API_KEY for authentication")
 
     # --- Parse --input argument (file-based alternative to stdin) ---
     input_file = None
