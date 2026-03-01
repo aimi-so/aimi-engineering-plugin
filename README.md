@@ -437,9 +437,15 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 ## Version History
 
-**Current Version:** 1.16.0
+**Current Version:** 1.17.0
 
 ### Recent Changes
+
+**v1.17.0** - Sandbox & Swarm Auto-Approve Hooks
+- auto-approve-cli.sh: SANDBOX_MGR path validation + subcommand whitelist
+- auto-approve-cli.sh: BUILD_IMG path validation + invocation approval
+- auto-approve-cli.sh: swarm-* subcommands added to AIMI_CLI whitelist
+- auto-approve-cli.sh: docker exec -i aimi-* pattern for ACP adapter (no wildcard Docker)
 
 **v1.16.0** - Docker Swarm Orchestration
 - `/aimi:swarm` command for multi-task parallel Docker sandbox execution
