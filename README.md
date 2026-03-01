@@ -437,15 +437,18 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 ## Version History
 
-**Current Version:** 1.16.1
+**Current Version:** 1.17.0
 
 ### Recent Changes
 
-**v1.16.1** - Swarm State Reconciliation
+**v1.17.0** - Swarm State Reconciliation & Auto-Approve Hooks
 - Automatic state reconciliation before `status` display and `resume` operations
 - Zombie detection: identifies containers in state but missing from Docker daemon
 - Enhanced `resume` with crash recovery: recreates failed containers, retries pending
 - Enhanced `cleanup` with per-container removal reporting
+- auto-approve-cli.sh: SANDBOX_MGR, BUILD_IMG path validation + subcommand whitelists
+- auto-approve-cli.sh: swarm-* subcommands added to AIMI_CLI whitelist
+- auto-approve-cli.sh: docker exec -i aimi-* pattern for ACP adapter (no wildcard Docker)
 
 **v1.16.0** - Docker Swarm Orchestration
 - `/aimi:swarm` command for multi-task parallel Docker sandbox execution
