@@ -385,14 +385,14 @@ merge_worktree() {
   echo -e "${BLUE}Merging branch '$worktree_branch' into '$target_branch'...${NC}"
 
   # Checkout the target branch (validated above, -- not used here as it changes checkout semantics)
-  git checkout "$target_branch" 2>/dev/null
+  git checkout "$target_branch"
   if [[ $? -ne 0 ]]; then
     echo -e "${RED}Error: Failed to checkout target branch: $target_branch${NC}"
     exit 1
   fi
 
   # Attempt the merge
-  if git merge -- "$worktree_branch" 2>/dev/null; then
+  if git merge -- "$worktree_branch"; then
     local merge_hash
     merge_hash=$(git rev-parse HEAD)
     echo -e "${GREEN}Merge successful!${NC}"
@@ -457,14 +457,14 @@ merge_all_worktrees() {
     fi
 
     # Checkout target branch
-    git checkout "$target_branch" 2>/dev/null
+    git checkout "$target_branch"
     if [[ $? -ne 0 ]]; then
       echo -e "${RED}Error: Failed to checkout target branch: $target_branch${NC}"
       exit 1
     fi
 
     # Attempt merge
-    if git merge "$resolved_branch" 2>/dev/null; then
+    if git merge "$resolved_branch"; then
       local merge_hash
       merge_hash=$(git rev-parse HEAD)
       echo -e "${GREEN}  Merged '$branch' successfully (commit: $merge_hash)${NC}"
