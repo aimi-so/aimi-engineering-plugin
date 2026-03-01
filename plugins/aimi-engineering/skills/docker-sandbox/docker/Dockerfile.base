@@ -90,6 +90,15 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 RUN npm install -g @anthropic-ai/claude-code && npm cache clean --force
 
 # ---------------------------------------------------------------------------
+# Pre-populate SSH known_hosts for common Git hosting providers
+# Prevents host-key verification prompts during git clone over SSH.
+# ---------------------------------------------------------------------------
+RUN mkdir -p /etc/ssh \
+    && ssh-keyscan -t ed25519,rsa,ecdsa github.com gitlab.com bitbucket.org \
+       >> /etc/ssh/ssh_known_hosts 2>/dev/null \
+    && chmod 644 /etc/ssh/ssh_known_hosts
+
+# ---------------------------------------------------------------------------
 # Non-root user: aimi (UID 1001)
 # ---------------------------------------------------------------------------
 RUN groupadd --gid 1001 aimi \
