@@ -13,7 +13,12 @@ Display the current execution progress using the CLI script.
 **CRITICAL:** The CLI script lives in the plugin install directory, NOT the project directory. Resolve it first:
 
 ```bash
+# Glob always finds the latest installed version
 AIMI_CLI=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+# Fallback to cached cli-path if glob found nothing (edge case)
+if [ -z "$AIMI_CLI" ] && [ -f .aimi/cli-path ] && [ -x "$(cat .aimi/cli-path)" ]; then
+  AIMI_CLI=$(cat .aimi/cli-path)
+fi
 ```
 
 If empty, report: "aimi-cli.sh not found. Reinstall plugin: `/plugin install aimi-engineering`" and STOP.
@@ -42,7 +47,7 @@ This returns JSON:
   "failed": 0,
   "skipped": 0,
   "total": 6,
-  "stories": [
+  "userStories": [
     {"id": "US-001", "title": "Story title", "status": "completed", "dependsOn": [], "priority": 1, "notes": ""},
     {"id": "US-002", "title": "Story title", "status": "in_progress", "dependsOn": ["US-001"], "priority": 2, "notes": ""}
   ]

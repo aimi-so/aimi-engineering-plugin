@@ -149,6 +149,22 @@ assert_exit_code() {
   fi
 }
 
+assert_stderr_contains() {
+  local expected="$1"
+  local stderr_output="$2"
+  local test_name="$3"
+
+  if [[ "$stderr_output" == *"$expected"* ]]; then
+    echo -e "${GREEN}✓${NC} $test_name"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} $test_name"
+    echo "  Expected stderr to contain: $expected"
+    echo "  Actual stderr: $stderr_output"
+    ((TESTS_FAILED++))
+  fi
+}
+
 # ============================================================================
 # General Tests
 # ============================================================================
@@ -505,6 +521,171 @@ test_count_pending_final() {
 }
 
 # ============================================================================
+# New Feature Tests (v1.13.0)
+# ============================================================================
+
+test_resolve_path() {
+  echo ""
+  echo "=== Testing resolve_path ==="
+
+  # resolve_path is internal, test via init-session output (tasks path should be absolute)
+  "$CLI" clear-state > /dev/null
+  local output
+  output=$("$CLI" init-session)
+
+  local tasks_path
+  tasks_path=$(echo "$output" | jq -r '.tasks')
+
+  # Absolute paths start with /
+  if [[ "$tasks_path" == /* ]]; then
+    echo -e "${GREEN}✓${NC} init-session returns absolute tasks path"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} init-session returns absolute tasks path"
+    echo "  Path: $tasks_path (expected absolute)"
+    ((TESTS_FAILED++))
+  fi
+}
+
+test_cli_path() {
+  echo ""
+  echo "=== Testing cli-path state file ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  local cli_path
+  cli_path=$(cat "$AIMI_DIR/cli-path" 2>/dev/null)
+
+  # cli-path should exist and be absolute
+  if [ -n "$cli_path" ] && [[ "$cli_path" == /* ]]; then
+    echo -e "${GREEN}✓${NC} cli-path contains absolute path"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} cli-path contains absolute path"
+    echo "  Path: $cli_path"
+    ((TESTS_FAILED++))
+  fi
+
+  # cli-path should point to an executable
+  if [ -x "$cli_path" ]; then
+    echo -e "${GREEN}✓${NC} cli-path points to executable file"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} cli-path points to executable file"
+    ((TESTS_FAILED++))
+  fi
+}
+
+test_status_uses_user_stories_key() {
+  echo ""
+  echo "=== Testing status output key name ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+  local output
+  output=$("$CLI" status)
+
+  # Should contain userStories, not stories as top-level key
+  assert_contains '"userStories"' "$output" "status output uses userStories key"
+
+  # Verify the key works with jq
+  local count
+  count=$(echo "$output" | jq '.userStories | length')
+  if [ "$count" -gt 0 ]; then
+    echo -e "${GREEN}✓${NC} userStories key is iterable (count: $count)"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} userStories key is iterable"
+    ((TESTS_FAILED++))
+  fi
+}
+
+test_story_id_not_found() {
+  echo ""
+  echo "=== Testing story ID existence validation ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  # mark-complete with non-existent ID should fail
+  local stderr_output exit_code
+  stderr_output=$("$CLI" mark-complete US-999 2>&1) || exit_code=$?
+  assert_exit_code "1" "${exit_code:-0}" "mark-complete US-999 returns exit code 1"
+  assert_stderr_contains "not found" "$stderr_output" "mark-complete US-999 shows not found error"
+
+  # mark-in-progress with non-existent ID should fail
+  stderr_output=$("$CLI" mark-in-progress US-999 2>&1) || exit_code=$?
+  assert_exit_code "1" "${exit_code:-0}" "mark-in-progress US-999 returns exit code 1"
+  assert_stderr_contains "not found" "$stderr_output" "mark-in-progress US-999 shows not found error"
+}
+
+test_reset_orphaned_empty() {
+  echo ""
+  echo "=== Testing reset-orphaned with no orphans ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  local output
+  output=$("$CLI" reset-orphaned)
+
+  local count
+  count=$(echo "$output" | jq '.count')
+  assert_eq "0" "$count" "reset-orphaned returns count 0 when no orphans"
+
+  local reset_len
+  reset_len=$(echo "$output" | jq '.reset | length')
+  assert_eq "0" "$reset_len" "reset-orphaned returns empty reset array"
+}
+
+test_reset_orphaned_with_orphans() {
+  echo ""
+  echo "=== Testing reset-orphaned with orphaned stories ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  # Mark two stories as in_progress
+  "$CLI" mark-in-progress US-001 > /dev/null
+  "$CLI" mark-in-progress US-002 > /dev/null
+
+  local output
+  output=$("$CLI" reset-orphaned)
+
+  local count
+  count=$(echo "$output" | jq '.count')
+  assert_eq "2" "$count" "reset-orphaned resets 2 orphaned stories"
+
+  # Verify both IDs are in the reset array
+  assert_contains "US-001" "$output" "reset-orphaned includes US-001"
+  assert_contains "US-002" "$output" "reset-orphaned includes US-002"
+
+  # Verify the stories are now failed in the file
+  local status_output us1_status
+  status_output=$("$CLI" status)
+  us1_status=$(echo "$status_output" | jq -r '.userStories[] | select(.id == "US-001") | .status')
+  assert_eq "failed" "$us1_status" "US-001 status is failed after reset-orphaned"
+}
+
+test_stale_state_warning() {
+  echo ""
+  echo "=== Testing stale state fallback warning ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  # Point current-tasks at a non-existent file
+  echo "/tmp/nonexistent-tasks.json" > "$AIMI_DIR/current-tasks"
+
+  # Call status and capture stderr
+  local stderr_output
+  stderr_output=$("$CLI" status 2>&1 >/dev/null) || true
+
+  assert_stderr_contains "no longer exists" "$stderr_output" "stale state produces warning on stderr"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -547,6 +728,17 @@ main() {
   test_validate_deps
   test_status
   test_count_pending_final
+
+  # New feature tests (v1.13.0) — run with fresh state
+  echo ""
+  echo "--- New Feature Tests (v1.13.0) ---"
+  test_resolve_path
+  test_cli_path
+  test_status_uses_user_stories_key
+  test_story_id_not_found
+  test_reset_orphaned_empty
+  test_reset_orphaned_with_orphans
+  test_stale_state_warning
 
   cleanup
 

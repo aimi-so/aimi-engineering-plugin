@@ -68,6 +68,7 @@ claude /plugin list
 | `/aimi:next` | Execute the next pending story | `/aimi:next` |
 | `/aimi:execute` | Run all stories autonomously (parallel for v3, sequential for v2.2) | `/aimi:execute` |
 | `/aimi:review` | Multi-agent code review with findings synthesis | `/aimi:review [PR or branch]` |
+| `/aimi:swarm` | Execute multiple tasks.json files in parallel Docker sandboxes | `/aimi:swarm [--file path] [--max N]` |
 
 ### Command Details
 
@@ -156,6 +157,24 @@ Multi-agent code review using aimi-native review agents. Runs parallel agents (a
 /aimi:review 42        # Review PR #42
 /aimi:review feat/auth # Review specific branch
 ```
+
+#### `/aimi:swarm`
+
+Executes multiple tasks.json files in parallel Docker sandboxes. Each task file gets its own Sysbox-isolated container with a full Claude Code agent running the story-executor flow inside it.
+
+```bash
+/aimi:swarm                          # Discover and select task files
+/aimi:swarm --file .aimi/tasks/f.json  # Execute a single task file
+/aimi:swarm --max 2                  # Limit to 2 concurrent containers
+/aimi:swarm status                   # View swarm state
+/aimi:swarm resume                   # Resume pending containers
+/aimi:swarm cleanup                  # Remove containers and state
+```
+
+Requirements:
+- Docker with Sysbox runtime installed
+- Git remote `origin` configured (containers clone via URL)
+- `ANTHROPIC_API_KEY` set in environment (injected into containers)
 
 ## Workflow
 
@@ -266,7 +285,7 @@ All execution state lives in `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
 | `dependsOn` | array | Story IDs that must complete before this story can start |
 | `notes` | string | Error details or learnings |
 
-> **Backward compatibility:** v2.2 tasks files (with `passes` boolean) are auto-detected and fully supported. All CLI commands work with both v2.2 and v3 schemas.
+> **Note:** As of v1.11.0, only schema v3.0 is supported. v2.2 backward compatibility was removed.
 
 ### Story Sizing
 
@@ -418,9 +437,31 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 ## Version History
 
-**Current Version:** 1.9.0
+**Current Version:** 1.17.0
 
 ### Recent Changes
+
+**v1.17.0** - Swarm State Reconciliation & Auto-Approve Hooks
+- Automatic state reconciliation before `status` display and `resume` operations
+- Zombie detection: identifies containers in state but missing from Docker daemon
+- Enhanced `resume` with crash recovery: recreates failed containers, retries pending
+- Enhanced `cleanup` with per-container removal reporting
+- auto-approve-cli.sh: SANDBOX_MGR, BUILD_IMG path validation + subcommand whitelists
+- auto-approve-cli.sh: swarm-* subcommands added to AIMI_CLI whitelist
+- auto-approve-cli.sh: docker exec -i aimi-* pattern for ACP adapter (no wildcard Docker)
+
+**v1.16.0** - Docker Swarm Orchestration
+- `/aimi:swarm` command for multi-task parallel Docker sandbox execution
+- Multi-select task file discovery, container provisioning, parallel ACP fan-out
+- Subcommands: status, resume, cleanup
+- Configurable maxContainers limit with partial failure handling
+
+**v1.12.0** - Parallel Execution Hardening
+- worktree-manager: `remove` command, `--from` flag, input validation, non-interactive
+- aimi-cli: flock-based locking, story ID validation, `validate-stories` command, maxConcurrency guard
+- execute.md: orphaned recovery, content validation, agent-driven merge conflict resolution, worker timeout, single-sourced worker prompt
+- auto-approve-cli.sh: subcommand whitelist, metacharacter rejection, WORKTREE_MGR support
+- story-executor SKILL.md: canonical prompt template, contradiction fixes
 
 **v1.9.0** - Schema v3, Parallel Execution, Worktree Merge
 - Schema v3 with `dependsOn` dependency graph and `status` enum replacing `passes` boolean
@@ -466,8 +507,8 @@ See [CHANGELOG.md](CHANGELOG.md) for complete version history.
 
 | Type | Count | Description |
 |------|-------|-------------|
-| Commands | 7 | Slash commands for workflow stages |
-| Skills | 3 | `brainstorm`, `task-planner`, `story-executor` |
+| Commands | 8 | Slash commands for workflow stages |
+| Skills | 4 | `brainstorm`, `task-planner`, `story-executor`, `docker-sandbox` |
 | Agents | 28 | 4 research, 15 review, 3 design, 1 docs, 5 workflow |
 
 ## License

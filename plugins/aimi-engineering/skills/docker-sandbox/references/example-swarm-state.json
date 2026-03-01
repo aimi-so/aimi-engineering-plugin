@@ -1,0 +1,79 @@
+{
+  "swarmId": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+  "createdAt": "2026-03-01T10:00:00Z",
+  "updatedAt": "2026-03-01T11:35:00Z",
+  "containers": [
+    {
+      "containerId": "abc123def456abc123def456abc123def456abc123def456abc123def456abc12345",
+      "containerName": "aimi-sandbox-US-001",
+      "taskFilePath": ".aimi/tasks/2026-03-01-user-auth-tasks.json",
+      "branchName": "feat/user-auth",
+      "status": "completed",
+      "prUrl": "https://github.com/org/repo/pull/42",
+      "storyProgress": {
+        "total": 4,
+        "completed": 4,
+        "failed": 0,
+        "inProgress": 0,
+        "pending": 0
+      },
+      "createdAt": "2026-03-01T10:00:00Z",
+      "updatedAt": "2026-03-01T11:30:00Z",
+      "acpPid": null
+    },
+    {
+      "containerId": "def456abc123def456abc123def456abc123def456abc123def456abc123def45678",
+      "containerName": "aimi-sandbox-US-005",
+      "taskFilePath": ".aimi/tasks/2026-03-01-user-auth-tasks.json",
+      "branchName": "feat/user-auth-ui",
+      "status": "running",
+      "prUrl": null,
+      "storyProgress": {
+        "total": 3,
+        "completed": 1,
+        "failed": 0,
+        "inProgress": 1,
+        "pending": 1
+      },
+      "createdAt": "2026-03-01T10:05:00Z",
+      "updatedAt": "2026-03-01T11:35:00Z",
+      "acpPid": 12345
+    },
+    {
+      "containerId": "789abc123def456789abc123def456789abc123def456789abc123def456789abcd",
+      "containerName": "aimi-sandbox-US-008",
+      "taskFilePath": ".aimi/tasks/2026-03-01-user-auth-tasks.json",
+      "branchName": "feat/user-auth-tests",
+      "status": "failed",
+      "prUrl": null,
+      "storyProgress": {
+        "total": 2,
+        "completed": 0,
+        "failed": 1,
+        "inProgress": 0,
+        "pending": 1
+      },
+      "createdAt": "2026-03-01T10:10:00Z",
+      "updatedAt": "2026-03-01T11:00:00Z",
+      "acpPid": null
+    },
+    {
+      "containerId": "ccc111222333444555666777888999aaabbbccc111222333444555666777888999aa",
+      "containerName": "aimi-sandbox-US-010",
+      "taskFilePath": ".aimi/tasks/2026-03-01-user-auth-tasks.json",
+      "branchName": "feat/user-auth-docs",
+      "status": "pending",
+      "prUrl": null,
+      "storyProgress": {
+        "total": 1,
+        "completed": 0,
+        "failed": 0,
+        "inProgress": 0,
+        "pending": 1
+      },
+      "createdAt": "2026-03-01T10:15:00Z",
+      "updatedAt": "2026-03-01T10:15:00Z",
+      "acpPid": null
+    }
+  ]
+}

@@ -1,0 +1,119 @@
+# =============================================================================
+# Dockerfile.base — aimi-sandbox base image
+# =============================================================================
+# Base image for aimi-sandbox containers. Per-project images (Dockerfile.project)
+# layer on top of this with project-specific dependencies.
+#
+# Included tools:
+#   - Git, curl, jq
+#   - Node.js 20 LTS (from base image)
+#   - Python 3.12
+#   - Docker CLI + Docker Compose plugin (daemon provided by Sysbox)
+#   - GitHub CLI (gh)
+#   - Claude Code CLI (via npm)
+#
+# Build:
+#   docker build -f Dockerfile.base -t aimi-sandbox:base .
+# =============================================================================
+
+FROM node:20-slim AS base
+
+LABEL maintainer="aimi-engineering"
+LABEL description="Base image for aimi-sandbox with common development tools"
+
+# ---------------------------------------------------------------------------
+# Environment variables
+# ---------------------------------------------------------------------------
+# Placeholders — set at container runtime, never bake real secrets into images
+ENV ANTHROPIC_API_KEY=""
+ENV GITHUB_TOKEN=""
+ENV IS_SANDBOX=1
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ---------------------------------------------------------------------------
+# System packages: git, curl, jq, Python 3.12, GPG utilities
+# ---------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        gnupg \
+        jq \
+        lsb-release \
+        openssh-client \
+        python3 \
+        python3-pip \
+        python3-venv \
+        sudo \
+        unzip \
+        wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# Docker CLI + Docker Compose plugin
+# Only the CLI — the daemon is provided by the Sysbox runtime on the host.
+# ---------------------------------------------------------------------------
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg \
+       | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    && chmod a+r /etc/apt/keyrings/docker.gpg \
+    && echo \
+       "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+       https://download.docker.com/linux/debian \
+       $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+       > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        docker-ce-cli \
+        docker-compose-plugin \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# GitHub CLI (gh)
+# ---------------------------------------------------------------------------
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+       | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo \
+       "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] \
+       https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# Claude Code CLI (installed globally via npm)
+# ---------------------------------------------------------------------------
+RUN npm install -g @anthropic-ai/claude-code && npm cache clean --force
+
+# ---------------------------------------------------------------------------
+# Non-root user: aimi (UID 1001)
+# ---------------------------------------------------------------------------
+RUN groupadd --gid 1001 aimi \
+    && useradd --uid 1001 --gid 1001 --create-home --shell /bin/bash aimi \
+    && echo "aimi ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/aimi \
+    && chmod 0440 /etc/sudoers.d/aimi
+
+# Give aimi user access to docker socket (when mounted)
+RUN groupadd -f docker && usermod -aG docker aimi
+
+# ---------------------------------------------------------------------------
+# Workspace
+# ---------------------------------------------------------------------------
+RUN mkdir -p /workspace && chown aimi:aimi /workspace
+WORKDIR /workspace
+
+# Switch to non-root user
+USER aimi
+
+# ---------------------------------------------------------------------------
+# Healthcheck — verify Claude Code CLI is available
+# ---------------------------------------------------------------------------
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD which claude || exit 1
+
+# Default entrypoint
+CMD ["bash"]
