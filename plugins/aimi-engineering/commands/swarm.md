@@ -353,6 +353,90 @@ Only the first [maxContainers] will be executed. Remaining files can be run with
 
 Truncate `SELECTED_TASK_FILES` to `maxContainers`.
 
+## Step 2.5: Detect Credentials
+
+**CRITICAL:** Detect required credentials BEFORE provisioning any containers. This step fails fast if the Anthropic API key is missing, preventing wasted Docker resources.
+
+### Check ANTHROPIC_API_KEY (required)
+
+```bash
+echo "${ANTHROPIC_API_KEY:0:8}..." 2>/dev/null
+```
+
+If the variable is empty or unset, STOP immediately with:
+```
+ANTHROPIC_API_KEY not found in environment. Claude Code requires this to be set.
+Export it with: export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Store the masked key prefix for the summary (e.g., `sk-ant-a...`).
+
+### Detect GitHub credentials (optional, fallback chain)
+
+Try each method in priority order. Stop at the first success.
+
+**Priority 1: GITHUB_TOKEN environment variable**
+
+```bash
+echo "${GITHUB_TOKEN:0:8}..." 2>/dev/null
+```
+
+If non-empty, set `GH_AUTH_METHOD=token` and store the masked prefix. Proceed to the credential summary.
+
+**Priority 2: gh CLI authentication**
+
+```bash
+DETECTED_GH_TOKEN=$(timeout 5 gh auth token 2>/dev/null)
+```
+
+If the command succeeds (exit code 0) and output is non-empty:
+- Export the result so sandbox-manager.sh can pick it up:
+  ```bash
+  export GITHUB_TOKEN="$DETECTED_GH_TOKEN"
+  ```
+- Set `GH_AUTH_METHOD=gh-cli`
+- Store the masked prefix (`${DETECTED_GH_TOKEN:0:8}...`)
+- Proceed to the credential summary.
+
+**Priority 3: SSH agent**
+
+```bash
+test -S "${SSH_AUTH_SOCK:-}" 2>/dev/null && echo "SSH agent available"
+```
+
+If the test succeeds (SSH_AUTH_SOCK points to an existing socket):
+- Set `GH_AUTH_METHOD=ssh`
+- Set `AUTH_METHOD=ssh` for later use by container provisioning
+- Proceed to the credential summary.
+
+**Priority 4: No credentials found**
+
+If none of the above succeeded:
+- Set `GH_AUTH_METHOD=none`
+- WARN (do not stop):
+  ```
+  No GitHub credentials found. Only public repos will work.
+  Set GITHUB_TOKEN, run 'gh auth login', or start an SSH agent.
+  ```
+
+### Credential summary
+
+Display the detected credentials:
+
+```
+Credentials:
+  API Key  : found (sk-ant-a...)
+  GitHub   : gh-cli (ghp_Ax7f...)
+  Auth     : HTTPS
+```
+
+The `Auth` field displays:
+- `HTTPS` when `GH_AUTH_METHOD` is `token` or `gh-cli`
+- `SSH` when `GH_AUTH_METHOD` is `ssh`
+- `none` when `GH_AUTH_METHOD` is `none`
+
+Proceed to Step 3.
+
 ## Step 3: Initialize Swarm State
 
 ### Check for existing active swarm
