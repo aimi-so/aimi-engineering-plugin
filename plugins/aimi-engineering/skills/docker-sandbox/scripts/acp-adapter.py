@@ -11,6 +11,7 @@ Logging: stderr only (to avoid mixing with protocol messages).
 
 Usage:
     docker exec -i <container> python /opt/aimi/acp-adapter.py
+    docker exec <container> python /opt/aimi/acp-adapter.py --input /tmp/acp-payload.json
 
 Environment:
     ANTHROPIC_API_KEY  - Required. Claude API key for headless mode.
@@ -25,6 +26,8 @@ import os
 import signal
 import subprocess
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 
 
@@ -42,6 +45,10 @@ BRANCH_NAME_PATTERN_CHARS = set(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     "0123456789/_-"
 )
+
+# Dangerous patterns in env var values
+DANGEROUS_ENV_VALUE_CHARS = {"\n", "\r", "\0", ";", "`"}
+DANGEROUS_ENV_VALUE_SUBSTRINGS = {"&&", "||", "$("}
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +155,17 @@ def validate_env_var_key(key: str) -> bool:
     return all(c.isupper() or c.isdigit() or c == "_" for c in key)
 
 
+def validate_env_var_value(value: str) -> bool:
+    """Validate env var value: reject newlines, null bytes, shell metacharacters."""
+    if not isinstance(value, str):
+        return False
+    if any(c in value for c in DANGEROUS_ENV_VALUE_CHARS):
+        return False
+    if any(s in value for s in DANGEROUS_ENV_VALUE_SUBSTRINGS):
+        return False
+    return True
+
+
 def validate_task_request(payload: dict) -> list[str]:
     """Validate a task-request payload. Returns list of error strings."""
     errors = []
@@ -179,6 +197,11 @@ def validate_task_request(payload: dict) -> list[str]:
                     )
                 if not isinstance(env_vars[key], str):
                     errors.append(f"envVars value for '{key}' must be a string")
+                elif not validate_env_var_value(env_vars[key]):
+                    errors.append(
+                        f"envVars value for '{key}' contains forbidden characters "
+                        "(newlines, null bytes, or shell metacharacters)"
+                    )
 
     return errors
 
@@ -211,15 +234,146 @@ def handle_sigterm(signum: int, frame: object) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Repository provisioning
+# ---------------------------------------------------------------------------
+
+WORKSPACE_DIR = "/workspace"
+
+
+def provision_repo(payload: dict) -> bool:
+    """
+    Clone the repository into /workspace and checkout the target branch.
+
+    Steps:
+      1. Skip if /workspace/.git already exists (already provisioned).
+      2. Configure git credential helper if GITHUB_TOKEN is set.
+      3. Clone repoUrl into /workspace.
+      4. Checkout or create the target branch.
+      5. Verify the task file exists at the expected path.
+
+    Returns True on success. On failure, emits an error and returns False.
+    """
+    git_dir = os.path.join(WORKSPACE_DIR, ".git")
+
+    # 1. Skip if already provisioned
+    if os.path.isdir(git_dir):
+        log(f"Repository already provisioned at {WORKSPACE_DIR}, skipping clone")
+        os.chdir(WORKSPACE_DIR)
+        return True
+
+    # 2. Set up git credential helper for GITHUB_TOKEN if present
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        log("Configuring git credential helper for GITHUB_TOKEN")
+        try:
+            subprocess.run(
+                [
+                    "git", "config", "--global", "credential.helper",
+                    "!f() { echo username=x-access-token; echo password="
+                    + token + "; }; f",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            log(f"Failed to configure git credential helper: {exc.stderr}")
+            # Non-fatal — clone might still work via other auth methods
+
+    # 3. Clone the repository
+    repo_url = payload["repoUrl"]
+    log(f"Cloning repository {repo_url} into {WORKSPACE_DIR}")
+    try:
+        subprocess.run(
+            ["git", "clone", repo_url, WORKSPACE_DIR],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        msg = f"git clone failed: {exc.stderr.strip() or exc.stdout.strip()}"
+        log(msg)
+        emit_error("GIT_CLONE_FAILED", msg)
+        return False
+
+    # 4. Change into workspace directory
+    os.chdir(WORKSPACE_DIR)
+
+    # 5. Checkout the target branch
+    branch_name = payload["branchName"]
+    log(f"Checking out branch: {branch_name}")
+    try:
+        # Try to checkout from remote tracking branch first
+        subprocess.run(
+            ["git", "checkout", "-b", branch_name, f"origin/{branch_name}"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        log(f"Checked out branch {branch_name} tracking origin/{branch_name}")
+    except subprocess.CalledProcessError:
+        # Remote branch doesn't exist — create a new local branch from HEAD
+        log(f"Remote branch origin/{branch_name} not found, creating from HEAD")
+        try:
+            subprocess.run(
+                ["git", "checkout", "-b", branch_name],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            log(f"Created new branch {branch_name} from HEAD")
+        except subprocess.CalledProcessError as exc:
+            msg = (
+                f"git checkout failed: "
+                f"{exc.stderr.strip() or exc.stdout.strip()}"
+            )
+            log(msg)
+            emit_error("GIT_CHECKOUT_FAILED", msg)
+            return False
+
+    # 6. Verify the task file exists
+    task_file = payload["taskFilePath"]
+    if not os.path.isfile(task_file):
+        msg = f"Task file not found at {task_file} after clone"
+        log(msg)
+        emit_error("TASK_FILE_NOT_FOUND", msg)
+        return False
+
+    log(f"Repository provisioned successfully. Task file found: {task_file}")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Subprocess helpers
+# ---------------------------------------------------------------------------
+
+def _drain_stderr(proc: subprocess.Popen, collected: list[str]) -> None:
+    """Drain stderr from a subprocess in a background thread."""
+    if proc.stderr is None:
+        return
+    for line in proc.stderr:
+        stripped = line.rstrip("\n")
+        if stripped:
+            collected.append(stripped)
+
+
+# ---------------------------------------------------------------------------
 # Core execution
 # ---------------------------------------------------------------------------
 
 def build_prompt(payload: dict) -> str:
     """Build the prompt string for Claude Code CLI from the task payload."""
+    task_file_path = payload["taskFilePath"]
     parts = [
         "You are an autonomous agent executing a task inside a Docker container.",
         "",
-        f"## Task File: {payload['taskFilePath']}",
+        f"Your working directory is {WORKSPACE_DIR}.",
+        f"The task file is at: {task_file_path} (relative to {WORKSPACE_DIR}).",
+        "Read the task file to understand the stories and their acceptance "
+        "criteria.",
+        "For each story, implement the changes, verify criteria, and commit.",
+        "",
+        f"## Task File: {task_file_path}",
         f"## Branch: {payload['branchName']}",
         f"## Repository: {payload['repoUrl']}",
         "",
@@ -260,6 +414,8 @@ def run_claude(prompt: str) -> tuple[int, str]:
     log(f"Launching Claude Code CLI: {' '.join(cmd[:3])} ...")
 
     output_lines = []
+    last_emit_time = 0.0
+    final_line = ""
 
     try:
         _claude_process = subprocess.Popen(
@@ -270,32 +426,42 @@ def run_claude(prompt: str) -> tuple[int, str]:
             bufsize=1,  # line-buffered
         )
 
-        # Stream stdout line by line as progress updates
+        # Start stderr drain thread to prevent deadlock
+        stderr_lines: list[str] = []
+        stderr_thread = threading.Thread(
+            target=_drain_stderr,
+            args=(_claude_process, stderr_lines),
+            daemon=True,
+        )
+        stderr_thread.start()
+
+        # Stream stdout line by line with throttled progress emissions
         if _claude_process.stdout is not None:
             for line in _claude_process.stdout:
                 stripped = line.rstrip("\n")
                 if stripped:
                     output_lines.append(stripped)
-                    # Emit periodic progress with the latest output line
-                    emit_progress(
-                        "US-000",
-                        "in_progress",
-                        stripped,
-                    )
+                    final_line = stripped
+                    now = time.monotonic()
+                    if now - last_emit_time >= 2.0:
+                        emit_progress("US-000", "in_progress", stripped)
+                        last_emit_time = now
+
+        # Always emit the final line
+        if final_line:
+            emit_progress("US-000", "in_progress", final_line)
 
         # Wait for process to finish
         _claude_process.wait()
         exit_code = _claude_process.returncode
 
-        # Capture any stderr
-        stderr_output = ""
-        if _claude_process.stderr is not None:
-            stderr_output = _claude_process.stderr.read()
-        if stderr_output:
-            log(f"Claude Code stderr: {stderr_output.strip()}")
+        # Join stderr thread with timeout
+        stderr_thread.join(timeout=5)
+        if stderr_lines:
+            log(f"Claude Code stderr: {chr(10).join(stderr_lines)}")
 
         log(f"Claude Code exited with code {exit_code}")
-        return exit_code, "\n".join(output_lines[-20:])  # last 20 lines
+        return exit_code, "\n".join(output_lines[-20:])
 
     except FileNotFoundError:
         log("Claude Code CLI not found in PATH")
@@ -321,20 +487,40 @@ def main() -> int:
         emit_error("MISSING_ENV_VAR", msg)
         return 1
 
-    log("ACP adapter started. Waiting for task-request on stdin...")
+    # --- Parse --input argument (file-based alternative to stdin) ---
+    input_file = None
+    if len(sys.argv) >= 3 and sys.argv[1] == "--input":
+        input_file = sys.argv[2]
 
-    # --- Read task-request from stdin ---
+    if input_file:
+        log(f"ACP adapter started. Reading task-request from file: {input_file}")
+    else:
+        log("ACP adapter started. Waiting for task-request on stdin...")
+
+    # --- Read task-request from file or stdin ---
     try:
-        raw_input = sys.stdin.readline()
+        if input_file:
+            with open(input_file) as f:
+                raw_input = f.read()
+        else:
+            raw_input = sys.stdin.readline()
+
         if not raw_input.strip():
-            msg = "Empty input received on stdin"
+            source = f"file {input_file}" if input_file else "stdin"
+            msg = f"Empty input received from {source}"
             log(msg)
             emit_error("INVALID_INPUT", msg)
             return 1
 
         request = json.loads(raw_input)
+    except FileNotFoundError:
+        msg = f"Input file not found: {input_file}"
+        log(msg)
+        emit_error("INVALID_INPUT", msg)
+        return 1
     except json.JSONDecodeError as exc:
-        msg = f"Invalid JSON on stdin: {exc}"
+        source = f"file {input_file}" if input_file else "stdin"
+        msg = f"Invalid JSON from {source}: {exc}"
         log(msg)
         emit_error("INVALID_INPUT", msg)
         return 1
@@ -370,6 +556,10 @@ def main() -> int:
     for key, value in env_vars.items():
         os.environ[key] = value
         log(f"Set env var: {key}")
+
+    # --- Provision repository (clone + checkout) ---
+    if not provision_repo(payload):
+        return 1
 
     # --- Build prompt and run Claude Code ---
     prompt = build_prompt(payload)

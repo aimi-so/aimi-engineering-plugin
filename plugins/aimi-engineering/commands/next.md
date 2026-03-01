@@ -24,6 +24,16 @@ fi
 
 If empty, report: "aimi-cli.sh not found. Reinstall plugin: `/plugin install aimi-engineering`" and STOP.
 
+### Version Check
+
+After resolving `$AIMI_CLI`, verify the cached CLI path is current:
+
+```bash
+$AIMI_CLI check-version --quiet --fix
+```
+
+If `check-version` exits 0, no action is needed — proceed normally. The `--quiet` flag suppresses informational output and `--fix` auto-updates a stale cli-path. This does NOT call `cleanup-versions` (cleanup is manual-only).
+
 **Use `$AIMI_CLI` for ALL subsequent script calls in this command.**
 
 ## Step 1: Get Next Story

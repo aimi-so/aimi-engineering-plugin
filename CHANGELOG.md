@@ -7,6 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.21.0] - 2026-03-01
+
+### Changed
+
+- **README.md**: Added Skills section documenting all 17 skills (4 core, 6 development/style, 4 tooling/automation, 3 disabled/reference)
+- **README.md**: Added Agents section documenting all 28 agents with descriptions per category
+- **README.md**: Updated Components table from 4 skills to 17 skills
+- **README.md**: Updated Table of Contents with Skills and Agents links
+- **orchestrating-swarms SKILL.md**: Replaced all `compound-engineering:*` agent type references with `aimi-engineering:*` equivalents
+- **orchestrating-swarms SKILL.md**: Updated agent lists to match actual aimi-engineering agents (removed non-existent `git-history-analyzer`, `repo-research-analyst`)
+
+### Fixed
+
+- **README.md**: Fixed stale `/aimi:plan-to-tasks` reference in troubleshooting → `/aimi:plan`
+- **README.md**: Fixed "Check both plugins" → "Check plugin" in installation verification
+
+### Removed
+
+- **orchestrating-swarms SKILL.md**: All `compound-engineering` references eliminated — zero remaining in active plugin code
+
+## [1.20.0] - 2026-03-01
+
+### Changed
+
+- **`check-version` CLI subcommand**: `_extract_version_from_path()` now uses bash parameter expansion (`${path%/*}`, `${no_scripts##*/}`) instead of `dirname`/`basename` forks — eliminates 3 subshell spawns per call
+- **`check-version` CLI subcommand**: `current` status path uses `printf` instead of `jq -n` for JSON output — eliminates 1 jq fork on the happy path
+- **`check-version` `--quiet` flag**: Suppresses all stderr warnings (e.g., stale/missing cli-path) for clean machine-readable output
+- **`check-version` `--fix` flag**: Auto-updates `cli-path` via `write_state` on stale detection and outputs `{"status":"fixed",...}` with exit 0 instead of `{"status":"stale",...}` with exit 1
+- **`check-version` dispatch table**: Now passes `"$@"` to `cmd_check_version` for flag forwarding
+- **Command version-check blocks**: Consolidated multi-line `check-version` + jq parsing + `init-session` re-stamp in `execute.md`, `status.md`, `next.md`, and `swarm.md` into single `$AIMI_CLI check-version --quiet --fix` call — eliminates `2>/dev/null`, `VERSION_CHECK`, `VERSION_EXIT`, `STORED_VER`, `LATEST_VER` variables and jq dependency from version-check sections
+
+### Added
+
+- **`check-version` `--quiet` and `--fix` tests**: Tests for `--quiet` flag (suppressed stderr), `--fix` flag (auto-update on stale), combined `--quiet --fix` flags, and backward compatibility (no-flags behavior unchanged)
+
+### Fixed
+
+- **CHANGELOG.md**: Removed redundant `[1.18.1]` entry that duplicated content from `[1.18.0]`
+- **auto-approve-cli.sh path traversal regex**: Version segments in plugin path now require digit-first pattern (`[0-9][0-9.]*`) — prevents crafted directory names from bypassing path validation
+
+### Security
+
+- **auto-approve-cli.sh `has_metacharacters()`**: Added `[<>]` character class to the first grep pattern — now blocks `>`, `>>`, `<`, `<<` redirection operators in addition to existing `;`, `&&`, `||`, backtick, and `$()` patterns
+
+## [1.19.0] - 2026-03-01
+
+### Added
+
+- **`check-version` CLI subcommand**: Compares running plugin version against installed version on disk — returns JSON `{running, installed, match}` result; warns user on mismatch and triggers `init-session` to refresh `cli-path`
+- **`cleanup-versions` CLI subcommand**: Finds and removes stale plugin versions from `~/.claude/plugins/cache/` — keeps only the latest installed version, returns JSON `{kept, removed: [paths]}` result
+- **Step 0 version check integration**: All four execution commands (`execute.md`, `status.md`, `next.md`, `swarm.md`) now call `$AIMI_CLI check-version` after glob resolution — warns user on version mismatch and auto-updates `cli-path` via `init-session`; does NOT call `cleanup-versions` (cleanup is manual-only)
+- **auto-approve-cli.sh whitelist**: Added `check-version` and `cleanup-versions` to the permitted subcommand list for auto-approval during task execution
+- **test-aimi-cli.sh**: New tests covering `check-version` (match and mismatch scenarios) and `cleanup-versions` (no stale versions, stale version removal)
+
+## [1.18.0] - 2026-03-01
+
+### Added
+
+- **Dockerfile.base**: COPY `acp-adapter.py` into base image at `/opt/aimi/acp-adapter.py` — containers now have the ACP adapter available for `docker exec` invocation
+- **acp-adapter.py `provision_repo()`**: Repository cloning and branch checkout inside containers — clones `repoUrl`, configures GITHUB_TOKEN credential helper, checks out target branch (with fallback for new branches), verifies task file exists
+- **acp-adapter.py `--input` flag**: File-based alternative to stdin for receiving task-request payloads — enables auto-approve-compatible `docker cp` + `docker exec --input` pattern
+- **acp-adapter.py env var value sanitization**: `validate_env_var_value()` rejects values containing newlines, null bytes, or shell metacharacters (`;`, `&&`, `||`, backticks, `$(`)
+- **acp-adapter.py progress throttling**: Progress emissions throttled to at most once every 2 seconds (time-based), reducing NDJSON volume by 90%+ with final line always emitted
+- **acp-adapter.py concurrent stderr drain**: `threading.Thread` drains stderr concurrently while streaming stdout, preventing 64KB pipe buffer deadlock
+- **sandbox-manager.sh `--container-id` and `--swarm-id`**: Optional flags for `cmd_create` to pass identity env vars into containers for ACP message envelopes
+- **sandbox-manager.sh advisory disk limit**: Attempts `--storage-opt size=` and falls back gracefully with warning if storage driver doesn't support it
+- **swarm.md non-interactive flags**: `--all`, `--files`, `--force`, `--append` flags skip AskUserQuestion prompts for fully autonomous agent-to-agent orchestration
+- **auto-approve-cli.sh Pattern 9/10**: `docker exec` with optional `--input` flag and `docker cp` for ACP payload delivery — restricted to `aimi-` prefixed containers
+- **SKILL.md total resource table**: Shows CPU, RAM, and swap consumption at 2, 4, and 8 containers with host sizing guidance (2x container RAM recommended)
+
+### Fixed
+
+- **auto-approve-cli.sh path regex**: Changed `skills/sandbox/` to `skills/docker-sandbox/` in `SANDBOX_MGR` and `BUILD_IMG` patterns to match actual plugin directory structure
+- **sandbox-manager.sh swap default**: Changed `AIMI_SANDBOX_SWAP` from `4g` to `8g` — Docker's `--memory-swap` is total (memory + swap), so `4g` with `4g` memory meant zero actual swap
+- **sandbox-manager.sh consolidated inspect**: Replaced 5 separate `docker inspect` calls in `cmd_status` with a single call using combined Go template format string
+- **aimi-cli.sh swarm-cleanup**: Updated jq filter to also exclude `stopped` status (was only excluding `completed` and `failed`)
+- **aimi-cli.sh `_validate_container_name`**: Harmonized with `sandbox-manager.sh` — now requires `aimi-` prefix and same character set (`^aimi-[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
+- **swarm.md Step 5 ACP invocation**: Changed from piped `echo | docker exec -i` to file-based `docker cp` + `docker exec --input` pattern — works with auto-approve hooks
+
+## [1.17.1] - 2026-03-01
+
+### Fixed
+
+- **auto-approve-cli.sh**: Fixed `SANDBOX_MGR` and `BUILD_IMG` path validation regex patterns — changed `skills/sandbox/` to `skills/docker-sandbox/` to match actual plugin directory structure and the glob patterns used in swarm.md Step 0
+
 ## [1.17.0] - 2026-03-01
 
 ### Changed

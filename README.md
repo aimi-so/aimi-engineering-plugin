@@ -9,9 +9,10 @@ Transform implementation plans into executable user stories, then run them auton
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Commands](#commands)
+- [Skills](#skills)
+- [Agents](#agents)
 - [Workflow](#workflow)
 - [Task Schema](#task-schema)
-- [Pattern Library](#pattern-library)
 - [Architecture](#architecture)
 - [Security](#security)
 - [Troubleshooting](#troubleshooting)
@@ -34,7 +35,7 @@ claude /plugin install aimi-engineering
 ### Verify Installation
 
 ```bash
-# Check both plugins are installed
+# Check plugin is installed
 claude /plugin list
 
 # Test aimi commands are available
@@ -175,6 +176,106 @@ Requirements:
 - Docker with Sysbox runtime installed
 - Git remote `origin` configured (containers clone via URL)
 - `ANTHROPIC_API_KEY` set in environment (injected into containers)
+
+## Skills
+
+17 skills providing domain expertise and reusable workflows.
+
+### Core (Internal)
+
+Used internally by commands — not user-invocable.
+
+| Skill | Description |
+|-------|-------------|
+| `brainstorm` | Brainstorming process knowledge (batched questions, adaptive exit, design capture) |
+| `task-planner` | Pipeline for generating tasks.json (research, spec analysis, story decomposition) |
+| `story-executor` | Canonical prompt template for Task-spawned agents executing stories |
+| `docker-sandbox` | Provision and manage Sysbox-isolated Docker containers for parallel execution |
+
+### Development & Code Style
+
+| Skill | Description |
+|-------|-------------|
+| `dhh-rails-style` | Write Ruby/Rails code in DHH's 37signals style |
+| `andrew-kane-gem-writer` | Write Ruby gems following Andrew Kane's patterns |
+| `dspy-ruby` | Build type-safe LLM applications with DSPy.rb |
+| `frontend-design` | Create distinctive, production-grade frontend interfaces |
+| `every-style-editor` | Review and edit copy for Every's editorial style compliance |
+| `agent-native-architecture` | Build apps where agents are first-class citizens |
+
+### Tooling & Automation
+
+| Skill | Description |
+|-------|-------------|
+| `agent-browser` | Browser automation using Vercel's agent-browser CLI |
+| `create-agent-skills` | Expert guidance for creating Claude Code skills and slash commands |
+| `git-worktree` | Manage Git worktrees for isolated parallel development |
+| `rclone` | Upload and sync files to S3, R2, B2, Google Drive, Dropbox |
+
+### Disabled (Reference Only)
+
+| Skill | Description |
+|-------|-------------|
+| `orchestrating-swarms` | Reference guide for multi-agent swarm orchestration patterns |
+| `file-todos` | File-based todo tracking system |
+| `resolve-pr-parallel` | Resolve PR comments using parallel processing |
+
+## Agents
+
+28 aimi-native agents organized into 5 categories.
+
+### Research (4)
+
+| Agent | Description |
+|-------|-------------|
+| `aimi-codebase-researcher` | Repository structure, patterns, and conventions |
+| `aimi-learnings-researcher` | Search `.aimi/solutions/` for past solutions |
+| `aimi-best-practices-researcher` | External best practices and community conventions |
+| `aimi-framework-docs-researcher` | Framework documentation and version-specific guidance |
+
+### Review (15)
+
+| Agent | Description |
+|-------|-------------|
+| `aimi-architecture-strategist` | Architectural compliance and design integrity |
+| `aimi-security-sentinel` | Security vulnerabilities and OWASP compliance |
+| `aimi-code-simplicity-reviewer` | YAGNI violations and simplification opportunities |
+| `aimi-performance-oracle` | Performance bottlenecks and scalability |
+| `aimi-agent-native-reviewer` | Agent-native parity (user actions = agent actions) |
+| `aimi-data-integrity-guardian` | Database migrations, data models, transaction safety |
+| `aimi-data-migration-expert` | Data migrations, backfills, schema changes |
+| `aimi-deployment-verification-agent` | Go/No-Go deployment checklists |
+| `aimi-schema-drift-detector` | Unrelated schema.rb changes in PRs |
+| `aimi-pattern-recognition-specialist` | Design patterns, anti-patterns, naming conventions |
+| `aimi-dhh-rails-reviewer` | DHH/37signals Rails style compliance |
+| `aimi-kieran-rails-reviewer` | Rails conventions, clarity, maintainability |
+| `aimi-kieran-typescript-reviewer` | TypeScript type safety and modern patterns |
+| `aimi-kieran-python-reviewer` | Pythonic patterns, type safety, maintainability |
+| `aimi-julik-frontend-races-reviewer` | JavaScript race conditions and DOM lifecycle |
+
+### Design (3)
+
+| Agent | Description |
+|-------|-------------|
+| `aimi-design-implementation-reviewer` | Compare live UI against Figma designs |
+| `aimi-design-iterator` | Iterative UI refinement through screenshot-analyze-improve cycles |
+| `aimi-figma-design-sync` | Detect and fix visual differences vs Figma |
+
+### Docs (1)
+
+| Agent | Description |
+|-------|-------------|
+| `aimi-ankane-readme-writer` | Create/update READMEs in Ankane-style for Ruby gems |
+
+### Workflow (5)
+
+| Agent | Description |
+|-------|-------------|
+| `aimi-bug-reproduction-validator` | Systematically reproduce and validate bug reports |
+| `aimi-every-style-editor` | Review text for Every editorial style compliance |
+| `aimi-lint` | Run linting and code quality checks on Ruby/ERB |
+| `aimi-pr-comment-resolver` | Address PR review comments with code changes |
+| `aimi-spec-flow-analyzer` | Analyze specs for user flow completeness and gaps |
 
 ## Workflow
 
@@ -433,11 +534,11 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 **Cause:** Story content contains potentially malicious patterns.
 
-**Fix:** Review the tasks file manually, remove suspicious content, regenerate with `/aimi:plan-to-tasks`.
+**Fix:** Review the tasks file manually, remove suspicious content, regenerate with `/aimi:plan`.
 
 ## Version History
 
-**Current Version:** 1.17.0
+**Current Version:** 1.21.0
 
 ### Recent Changes
 
@@ -508,7 +609,7 @@ See [CHANGELOG.md](CHANGELOG.md) for complete version history.
 | Type | Count | Description |
 |------|-------|-------------|
 | Commands | 8 | Slash commands for workflow stages |
-| Skills | 4 | `brainstorm`, `task-planner`, `story-executor`, `docker-sandbox` |
+| Skills | 17 | 4 core, 6 development/style, 4 tooling/automation, 3 disabled/reference |
 | Agents | 28 | 4 research, 15 review, 3 design, 1 docs, 5 workflow |
 
 ## License

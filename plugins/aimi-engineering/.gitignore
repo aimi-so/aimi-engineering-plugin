@@ -1,2 +1,3 @@
 # Aimi execution state (local only)
 .aimi/
+__pycache__
