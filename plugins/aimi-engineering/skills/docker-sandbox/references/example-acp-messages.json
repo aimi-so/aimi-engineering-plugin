@@ -1,0 +1,102 @@
+[
+  {
+    "_comment": "1. Orchestrator sends task-request to a container",
+    "type": "task-request",
+    "timestamp": "2026-03-01T10:00:00Z",
+    "swarmId": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+    "containerId": "abc123def456",
+    "payload": {
+      "taskFilePath": ".aimi/tasks/2026-03-01-user-auth-tasks.json",
+      "branchName": "feat/user-auth",
+      "repoUrl": "https://github.com/org/repo.git",
+      "envVars": {
+        "NODE_ENV": "development",
+        "DATABASE_URL": "postgres://localhost:5432/dev"
+      }
+    }
+  },
+  {
+    "_comment": "2. Container reports story US-001 started",
+    "type": "progress-update",
+    "timestamp": "2026-03-01T10:01:00Z",
+    "swarmId": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+    "containerId": "abc123def456",
+    "payload": {
+      "storyId": "US-001",
+      "status": "in_progress",
+      "output": "Starting story US-001: Add status field to tasks table."
+    }
+  },
+  {
+    "_comment": "3. Container reports story US-001 completed",
+    "type": "progress-update",
+    "timestamp": "2026-03-01T10:15:00Z",
+    "swarmId": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+    "containerId": "abc123def456",
+    "payload": {
+      "storyId": "US-001",
+      "status": "completed",
+      "output": "Migration created and applied. Added status column with enum type. Typecheck passes."
+    }
+  },
+  {
+    "_comment": "4. Container reports story US-002 started",
+    "type": "progress-update",
+    "timestamp": "2026-03-01T10:16:00Z",
+    "swarmId": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+    "containerId": "abc123def456",
+    "payload": {
+      "storyId": "US-002",
+      "status": "in_progress",
+      "output": "Starting story US-002: Display status badge on task cards."
+    }
+  },
+  {
+    "_comment": "5. Container reports story US-002 failed",
+    "type": "progress-update",
+    "timestamp": "2026-03-01T10:30:00Z",
+    "swarmId": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+    "containerId": "abc123def456",
+    "payload": {
+      "storyId": "US-002",
+      "status": "failed",
+      "output": "Typecheck failed: Property 'statusColor' does not exist on type 'TaskCardProps'. Badge component created but type errors remain."
+    }
+  },
+  {
+    "_comment": "6. Container sends completion with partial failure",
+    "type": "completion",
+    "timestamp": "2026-03-01T10:31:00Z",
+    "swarmId": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+    "containerId": "abc123def456",
+    "payload": {
+      "status": "completed",
+      "prUrl": "https://github.com/org/repo/pull/42",
+      "errors": [
+        "US-002 failed: Typecheck error on TaskCardProps"
+      ]
+    }
+  },
+  {
+    "_comment": "7. Container sends error on OOM",
+    "type": "error",
+    "timestamp": "2026-03-01T10:45:00Z",
+    "swarmId": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+    "containerId": "def456abc123",
+    "payload": {
+      "code": "CONTAINER_OOM",
+      "message": "Container exceeded memory limit (4GB). Process killed by OOM killer."
+    }
+  },
+  {
+    "_comment": "8. Container sends error on failed git clone",
+    "type": "error",
+    "timestamp": "2026-03-01T10:02:00Z",
+    "swarmId": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+    "containerId": "789abc123def",
+    "payload": {
+      "code": "GIT_CLONE_FAILED",
+      "message": "Failed to clone repository: authentication required. Verify that the container has access to the repo."
+    }
+  }
+]

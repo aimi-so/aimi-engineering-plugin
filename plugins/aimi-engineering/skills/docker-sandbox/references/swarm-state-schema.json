@@ -1,0 +1,134 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://aimi.engineering/schemas/swarm-state/v1",
+  "title": "Swarm State",
+  "description": "Tracks the state of a docker-sandbox swarm: which containers are running, what tasks they execute, and their current lifecycle status.",
+  "type": "object",
+  "required": ["swarmId", "createdAt", "updatedAt", "containers"],
+  "additionalProperties": false,
+  "properties": {
+    "swarmId": {
+      "type": "string",
+      "description": "Unique identifier for this swarm instance (UUID v4).",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when the swarm was created."
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of the last state mutation."
+    },
+    "containers": {
+      "type": "array",
+      "description": "Array of container entries, one per sandbox worker.",
+      "items": {
+        "$ref": "#/definitions/Container"
+      }
+    }
+  },
+  "definitions": {
+    "Container": {
+      "type": "object",
+      "required": [
+        "containerId",
+        "containerName",
+        "taskFilePath",
+        "branchName",
+        "status",
+        "storyProgress",
+        "createdAt",
+        "updatedAt"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "containerId": {
+          "type": "string",
+          "description": "Docker container ID (full 64-char hex or short 12-char).",
+          "pattern": "^[0-9a-f]{12,64}$"
+        },
+        "containerName": {
+          "type": "string",
+          "description": "Human-readable container name (e.g., 'aimi-sandbox-US-001').",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]*$"
+        },
+        "taskFilePath": {
+          "type": "string",
+          "description": "Relative path to the tasks.json file this container is executing (e.g., '.aimi/tasks/2026-03-01-feature-tasks.json')."
+        },
+        "branchName": {
+          "type": "string",
+          "description": "Git branch the container is working on.",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9/_-]*$"
+        },
+        "status": {
+          "$ref": "#/definitions/ContainerStatus"
+        },
+        "prUrl": {
+          "type": ["string", "null"],
+          "description": "Pull request URL created by this container, or null if not yet created.",
+          "format": "uri"
+        },
+        "storyProgress": {
+          "$ref": "#/definitions/StoryProgress"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp when the container was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of the last status change for this container."
+        },
+        "acpPid": {
+          "type": ["integer", "null"],
+          "description": "Process ID of the ACP (Agent Communication Protocol) process inside this container. Null if not yet started or already exited.",
+          "minimum": 1
+        }
+      }
+    },
+    "ContainerStatus": {
+      "type": "string",
+      "description": "Lifecycle status of a sandbox container.",
+      "enum": ["pending", "running", "completed", "failed", "stopped"]
+    },
+    "StoryProgress": {
+      "type": "object",
+      "description": "Tracks how many stories in the task file have been processed.",
+      "required": ["total", "completed", "failed", "inProgress", "pending"],
+      "additionalProperties": false,
+      "properties": {
+        "total": {
+          "type": "integer",
+          "description": "Total number of user stories in the task file.",
+          "minimum": 0
+        },
+        "completed": {
+          "type": "integer",
+          "description": "Number of stories with status 'completed'.",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "description": "Number of stories with status 'failed'.",
+          "minimum": 0
+        },
+        "inProgress": {
+          "type": "integer",
+          "description": "Number of stories with status 'in_progress'.",
+          "minimum": 0
+        },
+        "pending": {
+          "type": "integer",
+          "description": "Number of stories with status 'pending'.",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}
