@@ -188,12 +188,18 @@ If arguments start with `resume`:
    c. Verify the task file still exists on disk. If not, report error and skip this container.
    d. Recreate the container (follows same pattern as Step 4 in the main flow).
 
-      If `AUTH_METHOD=ssh` (re-detect credentials using the same Step 2.5 logic if not already set in this session), append `--ssh-agent`:
+      Re-detect credentials using the same Step 2.5 logic if not already set in this session. Build the create command with conditional flags:
       ```bash
-      # With SSH auth:
-      $SANDBOX_MGR create <containerName> --image <PROJECT_IMAGE> --task-file <taskFile> --branch <BRANCH> --ssh-agent
-      # Without SSH auth:
-      $SANDBOX_MGR create <containerName> --image <PROJECT_IMAGE> --task-file <taskFile> --branch <BRANCH>
+      # Build create command with conditional flags
+      CREATE_FLAGS=""
+      if [ "$AUTH_METHOD" = "ssh" ]; then
+        CREATE_FLAGS="$CREATE_FLAGS --ssh-agent"
+      fi
+      if [ "$CLAUDE_AUTH" = "subscription" ]; then
+        CREATE_FLAGS="$CREATE_FLAGS --mount-claude-config"
+      fi
+
+      $SANDBOX_MGR create <containerName> --image <PROJECT_IMAGE> --task-file <taskFile> --branch <BRANCH> $CREATE_FLAGS
       ```
       **Log the full container creation command for debugging** before executing it.
 
@@ -206,7 +212,7 @@ If arguments start with `resume`:
 
 7. **Fan out pending containers:**
    If there are containers with status `pending` (either originally pending or reset from failed):
-   - Re-detect credentials using the **same Step 2.5 logic** if `AUTH_METHOD` is not already set in this session. This ensures `AUTH_METHOD=ssh` is available for any container recreation that may have occurred in step 6d.
+   - Re-detect credentials using the **same Step 2.5 logic** if `AUTH_METHOD` or `CLAUDE_AUTH` is not already set in this session. This ensures `AUTH_METHOD=ssh` and `CLAUDE_AUTH=subscription` are available for any container recreation that may have occurred in step 6d.
    - Resolve `REPO_URL` using the **same fallback chain as Step 3** (try `origin`, then `upstream`, then first available remote from `git remote`). If no remotes are found, STOP with: `"No git remotes found. Add one with: git remote add origin <url>"`. Log which remote was selected and its URL. Detect the remote URL protocol (SSH vs HTTPS) and log any AUTH_METHOD mismatch warning, same as Step 3.
    - Proceed to Step 5 (fan-out) for these pending containers only.
    - After fan-out and result collection, proceed to Step 6 for state update and reporting.
@@ -363,21 +369,37 @@ Truncate `SELECTED_TASK_FILES` to `maxContainers`.
 
 ## Step 2.5: Detect Credentials
 
-**CRITICAL:** Detect required credentials BEFORE provisioning any containers. This step fails fast if the Anthropic API key is missing, preventing wasted Docker resources.
+**CRITICAL:** Detect required credentials BEFORE provisioning any containers. This step fails fast if no authentication method is available, preventing wasted Docker resources.
 
-### Check ANTHROPIC_API_KEY (required)
+### Check subscription auth (Claude config directory)
+
+```bash
+CLAUDE_CONFIG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+test -f "$CLAUDE_CONFIG/.credentials.json" 2>/dev/null && echo "Subscription auth found"
+```
+
+If the credentials file exists:
+- Set `CLAUDE_AUTH=subscription`
+- Log: `"Subscription auth detected: $CLAUDE_CONFIG/.credentials.json"`
+
+### Check ANTHROPIC_API_KEY
 
 ```bash
 echo "${ANTHROPIC_API_KEY:0:8}..." 2>/dev/null
 ```
 
-If the variable is empty or unset, STOP immediately with:
-```
-ANTHROPIC_API_KEY not found in environment. Claude Code requires this to be set.
-Export it with: export ANTHROPIC_API_KEY=sk-ant-...
-```
+The behavior depends on whether subscription auth was detected above:
 
-Store the masked key prefix for the summary (e.g., `sk-ant-a...`).
+- **If ANTHROPIC_API_KEY is set:** Store the masked key prefix for the summary (e.g., `sk-ant-a...`). Proceed normally regardless of `CLAUDE_AUTH`.
+- **If ANTHROPIC_API_KEY is NOT set AND `CLAUDE_AUTH=subscription`:** WARN (do not stop):
+  ```
+  ANTHROPIC_API_KEY not set, using subscription auth.
+  ```
+  Proceed — the subscription credentials will be mounted into containers.
+- **If ANTHROPIC_API_KEY is NOT set AND `CLAUDE_AUTH` is NOT `subscription`:** STOP immediately with:
+  ```
+  No authentication found. Set ANTHROPIC_API_KEY or mount Claude config directory (~/.claude/.credentials.json).
+  ```
 
 ### Detect GitHub credentials (optional, fallback chain)
 
@@ -434,9 +456,18 @@ Display the detected credentials:
 ```
 Credentials:
   API Key  : found (sk-ant-a...)
+  Claude   : subscription (config dir)
   GitHub   : gh-cli (ghp_Ax7f...)
   Auth     : HTTPS
 ```
+
+The `API Key` field displays:
+- `found (<masked prefix>)` when `ANTHROPIC_API_KEY` is set
+- `not set (using subscription auth)` when `ANTHROPIC_API_KEY` is not set but `CLAUDE_AUTH=subscription`
+
+The `Claude` field displays:
+- `subscription (config dir)` when `CLAUDE_AUTH=subscription`
+- `none` when subscription auth is not detected
 
 The `Auth` field displays:
 - `HTTPS` when `GH_AUTH_METHOD` is `token` or `gh-cli`
@@ -606,22 +637,26 @@ For each task file in `SELECTED_TASK_FILES`:
 
 3. Create the container:
 
-   Build the create command, conditionally appending `--ssh-agent` when SSH auth was detected in Step 2.5:
+   Build the create command, conditionally appending `--ssh-agent` and/or `--mount-claude-config` based on auth detected in Step 2.5:
 
    ```bash
-   # If AUTH_METHOD=ssh (set in Step 2.5), append --ssh-agent to forward the host SSH agent socket
+   # Build create command with conditional flags
+   CREATE_FLAGS=""
    if [ "$AUTH_METHOD" = "ssh" ]; then
-     $SANDBOX_MGR create <containerName> --image <PROJECT_IMAGE> --task-file <taskFile> --branch <BRANCH> --ssh-agent
-   else
-     $SANDBOX_MGR create <containerName> --image <PROJECT_IMAGE> --task-file <taskFile> --branch <BRANCH>
+     CREATE_FLAGS="$CREATE_FLAGS --ssh-agent"
    fi
+   if [ "$CLAUDE_AUTH" = "subscription" ]; then
+     CREATE_FLAGS="$CREATE_FLAGS --mount-claude-config"
+   fi
+
+   $SANDBOX_MGR create <containerName> --image <PROJECT_IMAGE> --task-file <taskFile> --branch <BRANCH> $CREATE_FLAGS
    ```
 
    **Log the full container creation command for debugging** before executing it:
    ```
-   [swarm] create: $SANDBOX_MGR create <containerName> --image <PROJECT_IMAGE> --task-file <taskFile> --branch <BRANCH> [--ssh-agent]
+   [swarm] create: $SANDBOX_MGR create <containerName> --image <PROJECT_IMAGE> --task-file <taskFile> --branch <BRANCH> [--ssh-agent] [--mount-claude-config]
    ```
-   (Include `--ssh-agent` in the log line only when `AUTH_METHOD=ssh`.)
+   (Include `--ssh-agent` only when `AUTH_METHOD=ssh`. Include `--mount-claude-config` only when `CLAUDE_AUTH=subscription`.)
 
 4. Parse the JSON output to get `containerId`.
 

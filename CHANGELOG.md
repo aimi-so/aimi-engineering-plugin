@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.23.0] - 2026-03-01
+
+### Added
+
+- **swarm.md**: Subscription auth detection in Step 2.5 — checks for `~/.claude/.credentials.json` (or `$CLAUDE_CONFIG_DIR/.credentials.json`)
+- **swarm.md**: `CLAUDE_AUTH=subscription` variable set when subscription credentials found
+- **swarm.md**: `--mount-claude-config` flag passthrough to `sandbox-manager.sh create` when subscription auth detected
+- **swarm.md**: Credential summary now displays `Claude` field showing subscription auth status
+
+### Changed
+
+- **swarm.md**: `ANTHROPIC_API_KEY` check is now a warning (not hard stop) when subscription auth is available
+- **swarm.md**: Hard stop message updated to mention both `ANTHROPIC_API_KEY` and Claude config directory options
+- **swarm.md**: Resume subcommand container recreation now passes `--mount-claude-config` when subscription auth detected
+- **swarm.md**: Resume fan-out re-detection now includes `CLAUDE_AUTH` alongside `AUTH_METHOD`
+
 ## [1.22.0] - 2026-03-01
 
 ### Added
