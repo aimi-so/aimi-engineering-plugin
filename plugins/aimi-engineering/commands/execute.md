@@ -1,16 +1,15 @@
 ---
 name: aimi:execute
-description: Execute all pending stories autonomously (sequential or parallel)
+description: Execute all pending stories autonomously with wave-based parallelism
 disable-model-invocation: true
-allowed-tools: Read, Write, Edit, Bash(git:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Bash(WORKTREE_MGR=*), Bash($WORKTREE_MGR:*), Task, TeamCreate, TeamDelete, SendMessage
+allowed-tools: Read, Write, Edit, Bash(git:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Bash(WORKTREE_MGR=*), Bash($WORKTREE_MGR:*), Task
 ---
 
 # Aimi Execute
 
-Execute all pending stories autonomously with smart execution mode detection.
+Execute all pending stories autonomously using wave-based fan-out.
 
-- **Linear dependencies**: Sequential execution (no Team/worktree overhead)
-- **Parallel opportunities**: Wave-based parallel execution with worktrees
+Each wave collects all ready stories. Single-story waves run inline (no worktree overhead). Multi-story waves spawn N foreground Tasks in one tool-call turn with worktrees, wait for all results, then merge.
 
 ## Step 0: Resolve CLI Path
 
@@ -124,18 +123,7 @@ Run /aimi:review to review the implementation.
 ```
 STOP execution.
 
-Report start:
-```
-Starting autonomous execution...
-
-Branch: [branchName]
-Schema: v3.0
-Pending: [pending] stories
-
-Beginning execution loop...
-```
-
-## Step 3.1: Validate Dependencies
+### Validate Dependencies
 
 ```bash
 $AIMI_CLI validate-deps
@@ -149,79 +137,18 @@ Dependency validation failed:
 Fix the dependency graph in the tasks file and re-run /aimi:execute.
 ```
 
-## Step 3.5: Detect Execution Mode
+Report start:
+```
+Starting autonomous execution...
 
-Check how many stories are immediately ready:
+Branch: [branchName]
+Schema: v3.0
+Pending: [pending] stories
 
-```bash
-$AIMI_CLI list-ready
+Beginning wave execution loop...
 ```
 
-Parse the output. Count the number of ready stories.
-
-**If 1 or fewer stories are ready:**
-
-Report:
-```
-Mode: Sequential (v3 linear dependency chain)
-```
-
-Proceed to **Step 4a: Sequential Execution**.
-
-**If 2 or more stories are ready:**
-
-Report:
-```
-Mode: Parallel (v3 with parallel opportunities detected)
-```
-
-Proceed to **Step 4b: Parallel Execution**.
-
----
-
-## Step 4a: Sequential Execution
-
-### Sequential Execution Loop
-
-```
-while (pending stories exist):
-    1. Get next ready story:
-       ready_json=$($AIMI_CLI list-ready)
-       Parse the first story from the list.
-
-    2. If no stories ready but pending > 0:
-       Report deadlock: "No stories are ready but [N] are still pending. Check dependency graph."
-       STOP execution.
-
-    3. Mark story as in-progress:
-       $AIMI_CLI mark-in-progress [STORY_ID]
-
-    4. Call /aimi:next to execute the story
-       (next-story for v3 uses list-ready logic internally)
-
-    5. Check result:
-       - If success:
-           $AIMI_CLI mark-complete [STORY_ID]
-           Continue to next iteration
-       - If user chose "skip":
-           $AIMI_CLI cascade-skip [STORY_ID]
-           Continue to next iteration
-       - If user chose "stop": break loop
-
-    6. Check pending count:
-       $AIMI_CLI count-pending
-       - If 0: exit loop
-```
-
-After the loop ends, proceed to **Step 5: Completion**.
-
----
-
-## Step 4b: Parallel Execution
-
-This path is used only for v3 schemas where multiple independent stories can run concurrently.
-
-### 4b.1: Resolve Worktree Manager
+## Step 3.1: Resolve Worktree Manager
 
 ```bash
 WORKTREE_MGR=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/skills/git-worktree/scripts/worktree-manager.sh 2>/dev/null | tail -1)
@@ -233,7 +160,7 @@ worktree-manager.sh not found. Reinstall plugin: `/plugin install aimi-engineeri
 ```
 STOP execution.
 
-### 4b.2: Read Concurrency Setting
+## Step 3.2: Read Concurrency Setting
 
 Read the tasks file metadata to get maxConcurrency:
 
@@ -245,9 +172,9 @@ Parse `maxConcurrency` from metadata. If not set, default to `4`.
 
 Store as `MAX_CONCURRENCY`.
 
-### 4b.3: Load Project Guidelines
+## Step 3.3: Load Project Guidelines
 
-Load project guidelines following the discovery order defined in `story-executor/SKILL.md` → "PROJECT GUIDELINES" section:
+Load project guidelines following the discovery order defined in `story-executor/SKILL.md` "PROJECT GUIDELINES" section:
 
 1. **CLAUDE.md** (project root) - Primary project instructions
 2. **AGENTS.md** (any directory) - Module-specific patterns
@@ -255,15 +182,7 @@ Load project guidelines following the discovery order defined in `story-executor
 
 Read these files and store the content as `PROJECT_GUIDELINES`.
 
-### 4b.4: Create Team
-
-```
-TeamCreate with:
-  team_name: "aimi-execute"
-  description: "Parallel execution of stories from [tasks file name]"
-```
-
-### 4b.5: Wave Execution Loop
+## Step 4: Wave Execution Loop
 
 ```
 wave = 1
@@ -279,7 +198,7 @@ while true:
         if pending > 0:
             Report: "Deadlock detected: [pending] stories pending but none are ready."
             Report: "This may indicate circular dependencies or all remaining stories depend on failed/skipped stories."
-            Break loop (proceed to cleanup)
+            Break loop (proceed to completion)
         else:
             break
 
@@ -289,15 +208,52 @@ while true:
 
     Report:
     "--- Wave [wave] ---"
-    "Executing [len(selected_stories)] stories in parallel (max concurrency: [MAX_CONCURRENCY])"
+    "Executing [len(selected_stories)] stories"
     For each story: "  - [story.id]: [story.title]"
 
     # Mark all selected stories as in-progress
     for story in selected_stories:
         $AIMI_CLI mark-in-progress [story.id]
 
-    # Create worktrees and spawn workers
-    worker_names = []
+    # ========================================
+    # SINGLE-STORY WAVE (no worktree overhead)
+    # ========================================
+    if len(selected_stories) == 1:
+        story = selected_stories[0]
+
+        # Spawn a single foreground Task — same pattern as next.md
+        # No worktree, worker operates in current directory
+        Task(
+            subagent_type: "general-purpose",
+            description: "Execute [story.id]: [story.title]",
+            prompt: [story-executor SKILL.md prompt template with:
+                - PROJECT_GUIDELINES = PROJECT_GUIDELINES
+                - STORY_ID = story.id
+                - STORY_TITLE = story.title
+                - STORY_DESCRIPTION = story.description
+                - ACCEPTANCE_CRITERIA = story.acceptanceCriteria (bulleted)
+                - story.notes = story.notes (include PREVIOUS NOTES section only if non-empty)
+                - No WORKTREE_PATH (sequential — worker operates in current directory)
+            ]
+        )
+
+        # Handle result
+        if Task succeeded:
+            $AIMI_CLI mark-complete [story.id]
+            Report: "[story.id] completed."
+        else:
+            $AIMI_CLI mark-failed [story.id] "Failed during wave [wave]"
+            $AIMI_CLI cascade-skip [story.id]
+            Report: "[story.id] failed. Dependent stories cascade-skipped."
+
+        Report: "Wave [wave] complete."
+        wave += 1
+        continue
+
+    # ========================================
+    # MULTI-STORY WAVE (parallel with worktrees)
+    # ========================================
+
     worktree_names = []
 
     for story in selected_stories:
@@ -308,19 +264,19 @@ while true:
         $WORKTREE_MGR create [worktree_name] --from [branchName]
 
         # Get the worktree path from the create output
-        # worktree-manager.sh prints the path on creation
         worktree_path = [path from output]
 
-        worker_name = "worker-[story.id]"
-        worker_names.append(worker_name)
+    # Spawn ALL workers as foreground Tasks in a SINGLE tool-call turn.
+    # Claude Code runs multiple foreground Tasks concurrently and returns
+    # all results before the agent's turn ends.
+    #
+    # In one tool-call turn, emit N Task calls:
+    for story in selected_stories:
+        worktree_name = "aimi-[story.id]"
+        worktree_path = [worktree path for this story]
 
-        # Spawn worker as Task teammate
-        # Construct the worker prompt following the canonical template in story-executor/SKILL.md
-        # Interpolate: story data, WORKTREE_PATH, PROJECT_GUIDELINES, story.notes (if non-empty)
         Task(
             subagent_type: "general-purpose",
-            team_name: "aimi-execute",
-            name: worker_name,
             description: "Execute [story.id]: [story.title]",
             prompt: [story-executor SKILL.md prompt template with:
                 - WORKTREE_PATH = worktree_path
@@ -330,42 +286,19 @@ while true:
                 - STORY_DESCRIPTION = story.description
                 - ACCEPTANCE_CRITERIA = story.acceptanceCriteria (bulleted)
                 - story.notes = story.notes (include PREVIOUS NOTES section only if non-empty)
-                - Additional parallel-mode instructions:
-                  "You are a parallel execution worker in a Team."
-                  "Send a message to the team leader reporting SUCCESS or FAILURE when done."
-                  "Do NOT modify the tasks.json file directly. The leader handles task status updates."
-            ],
-            run_in_background: true
+                - Do NOT modify the tasks.json file — report result (success/failure + details)
+            ]
         )
 
-    # Wait for all workers in this wave to complete
-    # Workers send messages when done (SUCCESS or FAILURE)
-    # Track completion count
-    completed = 0
+    # All Tasks return in the same turn. Collect results.
     failed_stories = []
     succeeded_stories = []
-    total = len(selected_stories)
-    wave_start_time = current_time()
-    WORKER_TIMEOUT_MINUTES = 15  # configurable, default 15 minutes
 
-    # As each worker message arrives:
-    for each worker message received:
-        completed += 1
-
-        Report: "Wave [wave]: [completed]/[total] workers reported"
-
-        if worker reports SUCCESS:
+    for each Task result:
+        if Task succeeded:
             succeeded_stories.append(story)
-        else if worker reports FAILURE:
+        else:
             failed_stories.append(story)
-
-    # Worker timeout check
-    # If not all workers have reported and elapsed time > WORKER_TIMEOUT_MINUTES:
-    if completed < total and (current_time() - wave_start_time) > WORKER_TIMEOUT_MINUTES * 60:
-        for story in selected_stories not yet reported:
-            $AIMI_CLI mark-failed [story.id] "Worker timeout after [WORKER_TIMEOUT_MINUTES] minutes"
-            failed_stories.append(story)
-            Report: "[story.id] timed out after [WORKER_TIMEOUT_MINUTES] minutes."
 
     # --- Post-Wave Processing ---
 
@@ -375,59 +308,30 @@ while true:
         $AIMI_CLI cascade-skip [story.id]
         Report: "[story.id] failed. Dependent stories cascade-skipped."
 
-    # Merge successful worktrees sequentially
-    for story in succeeded_stories:
-        worktree_name = "aimi-[story.id]"
+    # Merge all successful worktrees using merge-all
+    if len(succeeded_stories) > 0:
+        succeeded_worktree_names = ["aimi-[story.id]" for story in succeeded_stories]
 
-        # Merge worktree branch into feature branch
-        merge_result = $WORKTREE_MGR merge [worktree_name] --into [branchName]
+        merge_result = $WORKTREE_MGR merge-all [succeeded_worktree_names...] --into [branchName]
 
         if merge conflict (non-zero exit):
             Report:
-            "MERGE CONFLICT merging [worktree_name] into [branchName]"
+            "MERGE CONFLICT during wave [wave] merge."
             "Conflicting files:"
-            "[conflict output]"
+            "[conflict output from merge-all]"
             ""
-            "Attempting agent-driven conflict resolution..."
+            "Resolve the conflict on branch [branchName] and re-run `/aimi:execute` to continue."
 
-            # Attempt agent-driven conflict resolution
-            conflicting_files = [list of conflicting files from merge output]
-            Task(
-                subagent_type: "general-purpose",
-                description: "Resolve merge conflict for [story.id]",
-                prompt: "Resolve merge conflicts in these files: [conflicting_files].
-                         The target branch is [branchName].
-                         The source branch is [worktree_branch].
-                         Use git diff to see conflicts, resolve them preserving both sides' intent,
-                         then stage resolved files and complete the merge commit."
-            )
+            # Cleanup all worktrees from this wave before stopping
+            for wt in worktree_names:
+                $WORKTREE_MGR remove [wt]
 
-            # Check if resolution succeeded
-            if resolution succeeded (merge commit created):
-                Report: "Merge conflict for [story.id] resolved by agent."
-                # Continue with normal flow (mark complete below)
+            STOP execution.
 
-            else:
-                # Agent could not resolve — fall back to manual
-                Report:
-                "Agent could not resolve the conflict automatically."
-                ""
-                "Resolve the conflict manually and re-run /aimi:execute to continue."
-
-                # Cleanup: remove all worktrees from this wave
-                for wt in worktree_names:
-                    $WORKTREE_MGR remove [wt]
-
-                # Shutdown team
-                for worker in worker_names:
-                    SendMessage type: "shutdown_request", recipient: worker
-                TeamDelete
-
-                STOP execution.
-
-        # Mark complete after successful merge
-        $AIMI_CLI mark-complete [story.id]
-        Report: "[story.id] merged successfully."
+        # All merges succeeded — mark stories complete
+        for story in succeeded_stories:
+            $AIMI_CLI mark-complete [story.id]
+            Report: "[story.id] merged successfully."
 
     # Remove all worktrees from this wave
     for wt in worktree_names:
@@ -437,31 +341,20 @@ while true:
     wave += 1
 ```
 
-### 4b.6: Cleanup
+### Post-Loop Cleanup
 
 After the wave loop ends (all stories processed or deadlock):
 
 ```
-# Shutdown all remaining workers
-for worker in all_worker_names:
-    SendMessage type: "shutdown_request", recipient: worker
-
-# Delete the team
-TeamDelete
-
 # Remove any remaining worktrees (safety cleanup)
 $WORKTREE_MGR list
 # For each worktree matching "aimi-US-*":
 $WORKTREE_MGR remove [worktree_name]
 ```
 
-Proceed to **Step 5: Completion**.
-
----
-
 ## Step 5: Completion
 
-When execution ends (all stories complete, user stopped, or deadlock detected):
+When execution ends (all stories complete, or deadlock detected):
 
 ### If all stories complete:
 
@@ -470,14 +363,13 @@ Count commits on this branch:
 git log --oneline main..HEAD | wc -l
 ```
 
-**For sequential execution:**
 ```
 ## Execution Complete
 
 All stories completed successfully!
 
-Mode: Sequential
 Branch: [branchName]
+Waves: [total_waves]
 Commits: [count]
 
 ### Next Steps
@@ -487,39 +379,7 @@ Commits: [count]
 - Create PR when ready: `gh pr create`
 ```
 
-**For parallel execution:**
-```
-## Execution Complete
-
-All stories completed successfully!
-
-Mode: Parallel ([total_waves] waves)
-Branch: [branchName]
-Commits: [count]
-
-### Execution Summary
-
-[For each wave:]
-Wave [N]: [count] stories executed in parallel
-  - [story.id]: [story.title] - completed
-
-### Next Steps
-
-- Review commits: `git log --oneline -[count]`
-- Run `/aimi:review` for code review
-- Create PR when ready: `gh pr create`
-```
-
-### If user stopped early (sequential mode):
-
-```
-## Execution Paused
-
-Run `/aimi:status` to see current state.
-Run `/aimi:execute` to resume execution.
-```
-
-### If deadlock detected (parallel mode):
+### If deadlock detected:
 
 ```
 ## Execution Stopped - Deadlock
@@ -531,24 +391,13 @@ Run `/aimi:status` to see the dependency state.
 Review failed stories and either retry or adjust dependencies.
 ```
 
-### If merge conflict (parallel mode):
-
-```
-## Execution Stopped - Merge Conflict
-
-A merge conflict occurred while merging worker results.
-Worktrees have been cleaned up. The team has been shut down.
-
-Resolve the conflict on branch [branchName] and re-run `/aimi:execute` to continue.
-```
-
 ## Resuming Execution
 
 The tasks file preserves all state. Re-running `/aimi:execute` will:
 
 1. Detect the schema version again
 2. Skip completed stories automatically
-3. Pick up from the next pending story (sequential) or next ready wave (parallel)
+3. Pick up from the next ready wave
 4. Failed stories remain as "failed" -- use `/aimi:status` to review them
 
 ### After /clear
@@ -580,6 +429,6 @@ If execution is interrupted unexpectedly:
 1. Tasks file preserves state (completed stories stay completed, in-progress stories can be retried)
 2. State files in `.aimi/` track current position
 3. User can run `/aimi:execute` again to resume
-4. For parallel mode: orphaned worktrees are cleaned up on next run (safety cleanup in Step 4b.6)
+4. Orphaned worktrees are cleaned up on next run (safety cleanup in Post-Loop Cleanup)
 
 The loop will automatically skip completed stories and continue from the next pending/ready one.
