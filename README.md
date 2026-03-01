@@ -538,9 +538,17 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 ## Version History
 
-**Current Version:** 1.21.0
+**Current Version:** 1.22.0
 
 ### Recent Changes
+
+**v1.22.0** - Swarm Zero-Config Credentials & Git Remote Fallback
+- Credential auto-detection: ANTHROPIC_API_KEY from env, GITHUB_TOKEN via env/gh-cli/SSH agent priority chain
+- Git remote fallback chain: origin → upstream → first available (no more hard-fail on missing origin)
+- SSH agent forwarding: `--ssh-agent` flag in sandbox-manager.sh, SSH clone support in acp-adapter.py
+- Pre-populated SSH known_hosts in Dockerfile.base (GitHub, GitLab, Bitbucket)
+- AUTH_METHOD-to-protocol mismatch warnings
+- Resume subcommand uses same fallback chain and credential detection
 
 **v1.17.0** - Swarm State Reconciliation & Auto-Approve Hooks
 - Automatic state reconciliation before `status` display and `resume` operations

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.0] - 2026-03-01
+
+### Added
+
+- **Dockerfile.base**: Pre-populate SSH known_hosts for GitHub, GitLab, and Bitbucket during image build
+- **sandbox-manager.sh**: New `--ssh-agent` flag to forward host SSH_AUTH_SOCK into containers
+- **acp-adapter.py**: SSH clone support with protocol detection (git@/ssh:// vs https://)
+- **swarm.md**: Credential auto-detection step (Step 2.5) — detects ANTHROPIC_API_KEY, GITHUB_TOKEN via env/gh-cli/SSH agent
+- **swarm.md**: Git remote fallback chain — tries origin, upstream, then first available remote
+- **swarm.md**: AUTH_METHOD-to-protocol mismatch warnings (SSH auth with HTTPS remote, and vice versa)
+- **swarm.md**: `--ssh-agent` flag passthrough in container provisioning when SSH auth detected
+- **swarm.md**: Container creation command logging for debugging
+- **swarm.md**: Resume subcommand now uses the same fallback chain and credential detection
+
+### Fixed
+
+- **swarm.md**: No longer hard-fails when `origin` remote is missing — falls back to other remotes
+- **swarm.md**: Resume subcommand no longer hard-codes `git remote get-url origin`
+- **acp-adapter.py**: SSH URLs no longer attempt HTTPS credential helper setup
+
 ## [1.21.0] - 2026-03-01
 
 ### Changed
