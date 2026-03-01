@@ -199,7 +199,7 @@ If arguments start with `resume`:
 
 7. **Fan out pending containers:**
    If there are containers with status `pending` (either originally pending or reset from failed):
-   - Resolve `REPO_URL` from `git remote get-url origin` if not already known.
+   - Resolve `REPO_URL` using the **same fallback chain as Step 3** (try `origin`, then `upstream`, then first available remote from `git remote`). If no remotes are found, STOP with: `"No git remotes found. Add one with: git remote add origin <url>"`. Log which remote was selected and its URL. Detect the remote URL protocol (SSH vs HTTPS) and log any AUTH_METHOD mismatch warning, same as Step 3.
    - Proceed to Step 5 (fan-out) for these pending containers only.
    - After fan-out and result collection, proceed to Step 6 for state update and reporting.
 
@@ -492,16 +492,71 @@ $AIMI_CLI swarm-init --force
 
 Store the returned `swarmId`.
 
-### Resolve git remote URL
+### Resolve git remote URL (fallback chain)
+
+Try remotes in priority order: `origin`, `upstream`, then the first available remote.
+
+**Priority 1: origin**
 ```bash
-git remote get-url origin
+REPO_URL=$(git remote get-url origin 2>/dev/null)
+SELECTED_REMOTE="origin"
 ```
 
-Store as `REPO_URL`. If no remote, report error and STOP:
+**Priority 2: upstream** (if origin not found)
+```bash
+if [ -z "$REPO_URL" ]; then
+  REPO_URL=$(git remote get-url upstream 2>/dev/null)
+  SELECTED_REMOTE="upstream"
+fi
 ```
-No git remote 'origin' found. The swarm needs a remote URL so containers can clone the repo.
-Set one with: git remote add origin <url>
+
+**Priority 3: first available remote** (if neither origin nor upstream found)
+```bash
+if [ -z "$REPO_URL" ]; then
+  FIRST_REMOTE=$(git remote | head -1)
+  if [ -n "$FIRST_REMOTE" ]; then
+    REPO_URL=$(git remote get-url "$FIRST_REMOTE" 2>/dev/null)
+    SELECTED_REMOTE="$FIRST_REMOTE"
+  fi
+fi
 ```
+
+**No remotes found — hard stop:**
+
+If `REPO_URL` is still empty after all three attempts, STOP with:
+```
+No git remotes found. Add one with: git remote add origin <url>
+```
+
+If a remote was found, log which remote was selected:
+```
+Git remote: using '[SELECTED_REMOTE]' → [REPO_URL]
+```
+
+### Detect remote URL protocol
+
+After resolving `REPO_URL`, detect whether it uses SSH or HTTPS:
+
+- If `REPO_URL` starts with `git@` or `ssh://` → log: `Remote protocol: SSH`
+- If `REPO_URL` starts with `https://` → log: `Remote protocol: HTTPS`
+- Otherwise → log: `Remote protocol: unknown`
+
+Store the detected protocol as `REMOTE_PROTOCOL` (`ssh`, `https`, or `unknown`).
+
+### AUTH_METHOD vs remote protocol mismatch warning
+
+Compare `AUTH_METHOD` (from Step 2.5 credential detection) with `REMOTE_PROTOCOL`:
+
+- If `AUTH_METHOD` is `ssh` but `REMOTE_PROTOCOL` is `https`:
+  ```
+  Warning: SSH auth detected but remote URL is HTTPS. Clone may need GITHUB_TOKEN.
+  ```
+- If `AUTH_METHOD` is NOT `ssh` (i.e., `token`, `gh-cli`, or `none`) but `REMOTE_PROTOCOL` is `ssh`:
+  ```
+  Warning: No SSH auth detected but remote URL is SSH. Clone may need SSH agent forwarding.
+  ```
+
+**Proceed regardless** — do not block on a mismatch. The actual clone attempt inside the container will determine success or failure.
 
 Report:
 ```
