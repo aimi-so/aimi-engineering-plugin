@@ -13,7 +13,7 @@
 #   sandbox-manager.sh <command> [options]
 #
 # Commands:
-#   create <name> --image <image> [--task-file <path>] [--branch <branch>]
+#   create <name> --image <image> [--task-file <path>] [--branch <branch>] [--ssh-agent]
 #   remove <name>
 #   list
 #   status <name>
@@ -141,6 +141,7 @@ cmd_create() {
   local branch=""
   local container_id_env=""
   local swarm_id_env=""
+  local ssh_agent=false
 
   # Parse arguments
   while [[ $# -gt 0 ]]; do
@@ -164,6 +165,10 @@ cmd_create() {
       --swarm-id)
         swarm_id_env="$2"
         shift 2
+        ;;
+      --ssh-agent)
+        ssh_agent=true
+        shift
         ;;
       -*)
         die "Unknown option: $1"
@@ -275,6 +280,17 @@ cmd_create() {
   fi
   if [[ -n "$swarm_id_env" ]]; then
     run_args+=("--env" "SWARM_ID=${swarm_id_env}")
+  fi
+
+  # SSH agent forwarding
+  if [[ "$ssh_agent" == true ]]; then
+    if [[ -n "${SSH_AUTH_SOCK:-}" ]] && [[ -S "${SSH_AUTH_SOCK}" ]]; then
+      log_info "SSH agent forwarding enabled"
+      run_args+=("-v" "${SSH_AUTH_SOCK}:/tmp/ssh-agent.sock")
+      run_args+=("--env" "SSH_AUTH_SOCK=/tmp/ssh-agent.sock")
+    else
+      log_warn "SSH agent forwarding requested but SSH_AUTH_SOCK is not set or socket does not exist"
+    fi
   fi
 
   # Advisory warning: per-container disk limits require specific storage driver config
@@ -555,6 +571,7 @@ Commands:
     --branch <branch>                      Git branch to pass as AIMI_BRANCH env
     --container-id <id>                    Pass CONTAINER_ID env to container
     --swarm-id <id>                        Pass SWARM_ID env to container
+    --ssh-agent                            Forward host SSH agent into container
 
   remove <name>                  Stop and remove a container (idempotent)
   list                           List all aimi-* containers (JSON output)
