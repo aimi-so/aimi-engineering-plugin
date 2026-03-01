@@ -38,7 +38,9 @@ NC='\033[0m' # No Color
 # ---------------------------------------------------------------------------
 AIMI_SANDBOX_CPUS="${AIMI_SANDBOX_CPUS:-2}"
 AIMI_SANDBOX_MEMORY="${AIMI_SANDBOX_MEMORY:-4g}"
-AIMI_SANDBOX_SWAP="${AIMI_SANDBOX_SWAP:-4g}"
+# Docker's --memory-swap is TOTAL (memory + swap combined).
+# With 4g memory and 8g memory-swap, the container gets 4g actual swap headroom.
+AIMI_SANDBOX_SWAP="${AIMI_SANDBOX_SWAP:-8g}"
 AIMI_SANDBOX_DISK="${AIMI_SANDBOX_DISK:-8g}"
 
 # Container name prefix
@@ -137,6 +139,8 @@ cmd_create() {
   local image=""
   local task_file=""
   local branch=""
+  local container_id_env=""
+  local swarm_id_env=""
 
   # Parse arguments
   while [[ $# -gt 0 ]]; do
@@ -151,6 +155,14 @@ cmd_create() {
         ;;
       --branch)
         branch="$2"
+        shift 2
+        ;;
+      --container-id)
+        container_id_env="$2"
+        shift 2
+        ;;
+      --swarm-id)
+        swarm_id_env="$2"
         shift 2
         ;;
       -*)
@@ -256,6 +268,17 @@ cmd_create() {
   if [[ -n "$branch" ]]; then
     run_args+=("--env" "AIMI_BRANCH=${branch}")
   fi
+
+  # Add container/swarm identity env vars if provided
+  if [[ -n "$container_id_env" ]]; then
+    run_args+=("--env" "CONTAINER_ID=${container_id_env}")
+  fi
+  if [[ -n "$swarm_id_env" ]]; then
+    run_args+=("--env" "SWARM_ID=${swarm_id_env}")
+  fi
+
+  # Advisory warning: per-container disk limits require specific storage driver config
+  log_warn "AIMI_SANDBOX_DISK=${AIMI_SANDBOX_DISK} is advisory — per-container disk limits require overlay2+xfs with pquota"
 
   # Run the container
   log_info "Creating container: ${container_name}"
@@ -417,17 +440,12 @@ EOF
     return 0
   fi
 
-  # Get container details
-  local docker_state
-  docker_state=$(docker inspect --format '{{.State.Status}}' "$container_name" 2>/dev/null)
-  local exit_code
-  exit_code=$(docker inspect --format '{{.State.ExitCode}}' "$container_name" 2>/dev/null)
-  local started_at
-  started_at=$(docker inspect --format '{{.State.StartedAt}}' "$container_name" 2>/dev/null)
-  local finished_at
-  finished_at=$(docker inspect --format '{{.State.FinishedAt}}' "$container_name" 2>/dev/null)
-  local image
-  image=$(docker inspect --format '{{.Config.Image}}' "$container_name" 2>/dev/null)
+  # Get container details with a single docker inspect call
+  local inspect_output
+  inspect_output=$(docker inspect --format '{{.State.Status}}|{{.State.ExitCode}}|{{.State.StartedAt}}|{{.State.FinishedAt}}|{{.Config.Image}}' "$container_name" 2>/dev/null)
+
+  local docker_state exit_code started_at finished_at image
+  IFS='|' read -r docker_state exit_code started_at finished_at image <<< "$inspect_output"
 
   # Map Docker state to swarm-state enum
   # Swarm states: pending, running, completed, failed, stopped
@@ -535,6 +553,8 @@ Commands:
   create <name> --image <image> [options]  Create a new sandbox container
     --task-file <path>                     Associate with a task file
     --branch <branch>                      Git branch to pass as AIMI_BRANCH env
+    --container-id <id>                    Pass CONTAINER_ID env to container
+    --swarm-id <id>                        Pass SWARM_ID env to container
 
   remove <name>                  Stop and remove a container (idempotent)
   list                           List all aimi-* containers (JSON output)
@@ -546,7 +566,7 @@ Commands:
 Environment Variables:
   AIMI_SANDBOX_CPUS     CPU limit (default: 2)
   AIMI_SANDBOX_MEMORY   Memory limit (default: 4g)
-  AIMI_SANDBOX_SWAP     Memory+swap limit (default: 4g)
+  AIMI_SANDBOX_SWAP     Memory+swap total limit (default: 8g)
   AIMI_SANDBOX_DISK     Disk limit label (default: 8g)
   ANTHROPIC_API_KEY     Injected into container
   GITHUB_TOKEN          Injected into container

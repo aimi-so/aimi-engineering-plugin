@@ -96,6 +96,16 @@ clear_state_file() {
   ) 200>"$AIMI_DIR/.state.lock"
 }
 
+# Extract version string from an aimi-cli.sh path
+# Given: ~/.claude/plugins/cache/foo/aimi-engineering/1.4.0/scripts/aimi-cli.sh
+# Returns: 1.4.0
+_extract_version_from_path() {
+  local path="$1"
+  local no_script="${path%/*}"       # strip /aimi-cli.sh -> .../scripts
+  local no_scripts="${no_script%/*}" # strip /scripts -> .../1.4.0
+  printf '%s\n' "${no_scripts##*/}"  # strip prefix -> 1.4.0
+}
+
 # Validate story ID format (US-NNN or US-NNNa)
 validate_story_id() {
   local story_id="$1"
@@ -654,6 +664,125 @@ cmd_clear_state() {
   echo "State cleared."
 }
 
+# Check CLI version staleness
+# Compares stored cli-path against the glob-resolved latest path
+# Flags: --quiet (suppress stderr), --fix (auto-fix stale detection)
+cmd_check_version() {
+  local quiet=false fix=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --quiet) quiet=true ;;
+      --fix)   fix=true ;;
+      *)       break ;;
+    esac
+    shift
+  done
+
+  local stored_path latest_path stored_version latest_version
+
+  # Resolve the latest installed path via glob
+  latest_path=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+
+  # Case: glob returns empty — no installed version found
+  if [ -z "$latest_path" ]; then
+    if [ "$quiet" = false ]; then
+      echo "Warning: No installed aimi-cli.sh found via glob." >&2
+    fi
+    jq -n '{status: "unknown", message: "No installed version found"}'
+    return 0
+  fi
+
+  latest_version=$(_extract_version_from_path "$latest_path")
+
+  # Read stored path from state
+  stored_path=$(read_state "cli-path")
+
+  # Case: .aimi/cli-path does not exist — missing is not stale
+  if [ -z "$stored_path" ]; then
+    if [ "$quiet" = false ]; then
+      echo "Warning: No stored cli-path found. Run init-session to persist." >&2
+    fi
+    jq -n --arg ver "$latest_version" --arg path "$latest_path" \
+      '{status: "missing", latestVersion: $ver, latestPath: $path}'
+    return 0
+  fi
+
+  stored_version=$(_extract_version_from_path "$stored_path")
+
+  # Case: stored path matches latest — current
+  if [ "$stored_path" = "$latest_path" ]; then
+    printf '{"status":"current","version":"%s"}\n' "$stored_version"
+    return 0
+  fi
+
+  # Case: stored path differs — stale
+  if [ "$fix" = true ]; then
+    write_state "cli-path" "$latest_path"
+    jq -n --arg sv "$stored_version" --arg lv "$latest_version" \
+      '{status: "fixed", storedVersion: $sv, latestVersion: $lv}'
+    return 0
+  fi
+
+  if [ "$quiet" = false ]; then
+    echo "Warning: CLI version is stale. Stored: $stored_version, Latest: $latest_version" >&2
+  fi
+  jq -n --arg sv "$stored_version" --arg lv "$latest_version" \
+       --arg sp "$stored_path" --arg lp "$latest_path" \
+    '{status: "stale", storedVersion: $sv, latestVersion: $lv, storedPath: $sp, latestPath: $lp}'
+  return 1
+}
+
+# Remove old cached plugin version directories, keeping only the latest
+# Scans ~/.claude/plugins/cache/*/aimi-engineering/*/ for version dirs
+# Outputs JSON {"removed":<count>,"kept":"<version>"} to stdout
+cmd_cleanup_versions() {
+  local latest_path latest_version latest_version_dir
+  local removed=0
+
+  # Resolve the latest installed path via glob
+  latest_path=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+
+  # No installed versions found
+  if [ -z "$latest_path" ]; then
+    jq -n '{removed: 0, kept: null}'
+    return 0
+  fi
+
+  latest_version=$(_extract_version_from_path "$latest_path")
+  # .../aimi-engineering/1.4.0/scripts/aimi-cli.sh -> .../aimi-engineering/1.4.0
+  latest_version_dir=$(dirname "$(dirname "$latest_path")")
+
+  # Iterate all version directories under all marketplace cache entries
+  local version_dir
+  for version_dir in ~/.claude/plugins/cache/*/aimi-engineering/*/; do
+    # Strip trailing slash for clean comparison
+    version_dir="${version_dir%/}"
+
+    # Skip if this is the latest version directory
+    if [ "$version_dir" = "$latest_version_dir" ]; then
+      continue
+    fi
+
+    # Skip if not actually a directory (glob might not expand)
+    if [ ! -d "$version_dir" ]; then
+      continue
+    fi
+
+    # Attempt removal; log warning and continue on failure
+    if rm -rf "$version_dir" 2>/dev/null; then
+      removed=$((removed + 1))
+    else
+      echo "Warning: Failed to remove $version_dir" >&2
+    fi
+  done
+
+  # Update cli-path state to point to the latest version
+  write_state "cli-path" "$latest_path"
+
+  jq -n --argjson removed "$removed" --arg kept "$latest_version" \
+    '{removed: $removed, kept: $kept}'
+}
+
 # Display help
 cmd_help() {
   cat << 'EOF'
@@ -682,6 +811,11 @@ COMMANDS:
     get-branch                Get branchName from metadata
     get-state                 Get all state files as JSON
     clear-state               Clear all state files
+    check-version [--quiet] [--fix]
+                              Check if stored CLI version matches latest installed
+                              --quiet  Suppress stderr warnings
+                              --fix    Auto-update cli-path on stale detection (exits 0)
+    cleanup-versions          Remove old cached plugin versions, keep latest only
 
   Swarm Management:
     swarm-init [--force]      Initialize swarm state (creates .aimi/swarm-state.json)
@@ -778,15 +912,16 @@ _iso_timestamp() {
   date -u '+%Y-%m-%dT%H:%M:%SZ'
 }
 
-# Validate container name format: ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$
+# Validate container name format: ^aimi-[a-zA-Z0-9][a-zA-Z0-9_-]*$
+# Harmonized with sandbox-manager.sh validate_container_name
 _validate_container_name() {
   local name="$1"
   if [ -z "$name" ]; then
     echo "Error: Container name is required." >&2
     exit 1
   fi
-  if ! [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
-    echo "Error: Invalid container name: $name (must match ^[a-zA-Z0-9][a-zA-Z0-9_.-]*\$)" >&2
+  if ! [[ "$name" =~ ^aimi-[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]]; then
+    echo "Error: Invalid container name: $name (must match ^aimi-[a-zA-Z0-9][a-zA-Z0-9_-]*\$)" >&2
     exit 1
   fi
 }
@@ -1094,16 +1229,16 @@ cmd_swarm_list() {
   jq -r '.containers[] | [.containerName, .status] | @tsv' "$SWARM_STATE_FILE"
 }
 
-# Remove all entries with status completed or failed
+# Remove all entries with terminal status (completed, failed, stopped)
 # Usage: aimi-cli.sh swarm-cleanup
 cmd_swarm_cleanup() {
   _require_swarm_state
 
   local removed_count
-  removed_count=$(jq '[.containers[] | select(.status == "completed" or .status == "failed")] | length' "$SWARM_STATE_FILE")
+  removed_count=$(jq '[.containers[] | select(.status == "completed" or .status == "failed" or .status == "stopped")] | length' "$SWARM_STATE_FILE")
 
   if [ "$removed_count" -eq 0 ]; then
-    echo "No completed or failed containers to clean up."
+    echo "No completed, failed, or stopped containers to clean up."
     return
   fi
 
@@ -1116,7 +1251,7 @@ cmd_swarm_cleanup() {
   (
     _lock "${SWARM_STATE_FILE}.lock"
     jq --arg now "$now" \
-      '.updatedAt = $now | .containers = [.containers[] | select(.status != "completed" and .status != "failed")]' \
+      '.updatedAt = $now | .containers = [.containers[] | select(.status != "completed" and .status != "failed" and .status != "stopped")]' \
       "$SWARM_STATE_FILE" > "$tmp_file" && mv "$tmp_file" "$SWARM_STATE_FILE"
   ) 200>"${SWARM_STATE_FILE}.lock"
   rm -f "$tmp_file" 2>/dev/null
@@ -1151,6 +1286,8 @@ main() {
     get-branch)        cmd_get_branch ;;
     get-state)         cmd_get_state ;;
     clear-state)       cmd_clear_state ;;
+    check-version)     shift; cmd_check_version "$@" ;;
+    cleanup-versions)  cmd_cleanup_versions ;;
     swarm-init)        shift; cmd_swarm_init "$@" ;;
     swarm-add)         cmd_swarm_add "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
     swarm-update)      shift; cmd_swarm_update "$@" ;;

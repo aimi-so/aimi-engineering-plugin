@@ -686,6 +686,208 @@ test_stale_state_warning() {
 }
 
 # ============================================================================
+# Version Staleness Tests
+# ============================================================================
+
+test_check_version() {
+  echo ""
+  echo "=== Testing check-version ==="
+
+  "$CLI" clear-state > /dev/null
+
+  # --- Test 1: Current version (stored cli-path matches glob-resolved latest) ---
+  # Write cli-path to exactly match what the glob resolves, so check-version sees "current"
+  local latest_glob_path
+  latest_glob_path=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+
+  local output exit_code
+
+  if [ -n "$latest_glob_path" ]; then
+    # Force cli-path to the glob-resolved latest so stored == latest
+    "$CLI" init-session > /dev/null
+    echo "$latest_glob_path" > "$AIMI_DIR/cli-path"
+
+    output=$("$CLI" check-version 2>/dev/null) && exit_code=0 || exit_code=$?
+
+    assert_contains '"status":"current"' "$output" "check-version: current version returns status current"
+    assert_exit_code "0" "$exit_code" "check-version: current version exits 0"
+  else
+    # No installed version found — check-version returns "unknown", skip "current" test
+    echo "  (skipping current-version test: no installed version in cache)"
+  fi
+
+  # --- Test 2: Missing cli-path (no .aimi/cli-path file) ---
+  "$CLI" clear-state > /dev/null
+
+  # Do NOT call init-session, so cli-path state file is absent
+  output=$("$CLI" check-version 2>/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_contains '"status": "missing"' "$output" "check-version: missing cli-path returns status missing"
+  assert_exit_code "0" "$exit_code" "check-version: missing cli-path exits 0"
+}
+
+test_check_version_quiet() {
+  echo ""
+  echo "=== Testing check-version --quiet flag ==="
+
+  "$CLI" clear-state > /dev/null
+
+  # With --quiet, stderr should be empty even for the "missing" case
+  # (no cli-path state file => "missing" status, which normally emits a warning)
+  local stderr_output stdout_output exit_code
+  stderr_output=$(mktemp)
+  stdout_output=$("$CLI" check-version --quiet 2>"$stderr_output") && exit_code=0 || exit_code=$?
+  local stderr_content
+  stderr_content=$(cat "$stderr_output")
+  rm -f "$stderr_output"
+
+  assert_eq "" "$stderr_content" "check-version --quiet: stderr is empty for missing cli-path"
+  assert_contains '"status": "missing"' "$stdout_output" "check-version --quiet: still returns missing status on stdout"
+  assert_exit_code "0" "$exit_code" "check-version --quiet: exits 0 for missing"
+}
+
+test_check_version_fix() {
+  echo ""
+  echo "=== Testing check-version --fix flag ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  local latest_glob_path
+  latest_glob_path=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+
+  if [ -z "$latest_glob_path" ]; then
+    echo "  (skipping --fix test: no installed version in cache)"
+    return
+  fi
+
+  # Write a fake stale cli-path pointing to a non-existent old version
+  echo "/fake/old/1.0.0/scripts/aimi-cli.sh" > "$AIMI_DIR/cli-path"
+
+  # Confirm cli-path is stale before fix
+  local pre_check
+  pre_check=$(cat "$AIMI_DIR/cli-path" 2>/dev/null)
+  assert_eq "/fake/old/1.0.0/scripts/aimi-cli.sh" "$pre_check" "check-version --fix: cli-path is stale before fix"
+
+  local output exit_code
+  output=$("$CLI" check-version --fix 2>/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "check-version --fix: exits 0 after fix"
+  assert_contains '"status": "fixed"' "$output" "check-version --fix: returns fixed status"
+
+  # Verify cli-path was updated to the latest
+  local updated_path
+  updated_path=$(cat "$AIMI_DIR/cli-path" 2>/dev/null)
+  assert_eq "$latest_glob_path" "$updated_path" "check-version --fix: cli-path updated to latest"
+}
+
+test_check_version_quiet_fix() {
+  echo ""
+  echo "=== Testing check-version --quiet --fix combined ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  local latest_glob_path
+  latest_glob_path=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+
+  if [ -z "$latest_glob_path" ]; then
+    echo "  (skipping --quiet --fix test: no installed version in cache)"
+    return
+  fi
+
+  # Write a fake stale cli-path again
+  echo "/fake/old/1.0.0/scripts/aimi-cli.sh" > "$AIMI_DIR/cli-path"
+
+  local stderr_output_file stdout_output exit_code
+  stderr_output_file=$(mktemp)
+  stdout_output=$("$CLI" check-version --quiet --fix 2>"$stderr_output_file") && exit_code=0 || exit_code=$?
+  local stderr_content
+  stderr_content=$(cat "$stderr_output_file")
+  rm -f "$stderr_output_file"
+
+  assert_eq "" "$stderr_content" "check-version --quiet --fix: stderr is empty"
+  assert_exit_code "0" "$exit_code" "check-version --quiet --fix: exits 0"
+  assert_contains '"status": "fixed"' "$stdout_output" "check-version --quiet --fix: returns fixed status"
+
+  # Verify cli-path was updated
+  local updated_path
+  updated_path=$(cat "$AIMI_DIR/cli-path" 2>/dev/null)
+  assert_eq "$latest_glob_path" "$updated_path" "check-version --quiet --fix: cli-path updated to latest"
+}
+
+test_check_version_backward_compat() {
+  echo ""
+  echo "=== Testing check-version backward compatibility (no flags) ==="
+
+  "$CLI" clear-state > /dev/null
+
+  # Test 1: No flags, missing cli-path => "missing" status with stderr warning
+  local stderr_output_file stdout_output exit_code
+  stderr_output_file=$(mktemp)
+  stdout_output=$("$CLI" check-version 2>"$stderr_output_file") && exit_code=0 || exit_code=$?
+  local stderr_content
+  stderr_content=$(cat "$stderr_output_file")
+  rm -f "$stderr_output_file"
+
+  assert_contains '"status": "missing"' "$stdout_output" "check-version (no flags): returns missing status"
+  assert_exit_code "0" "$exit_code" "check-version (no flags): exits 0 for missing"
+  # Without --quiet, stderr should contain a warning
+  assert_contains "No stored cli-path" "$stderr_content" "check-version (no flags): stderr contains warning"
+
+  # Test 2: No flags, current version => "current" status
+  local latest_glob_path
+  latest_glob_path=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+
+  if [ -n "$latest_glob_path" ]; then
+    "$CLI" init-session > /dev/null
+    echo "$latest_glob_path" > "$AIMI_DIR/cli-path"
+
+    stdout_output=$("$CLI" check-version 2>/dev/null) && exit_code=0 || exit_code=$?
+    assert_contains '"status":"current"' "$stdout_output" "check-version (no flags): current version returns status current"
+    assert_exit_code "0" "$exit_code" "check-version (no flags): current version exits 0"
+  fi
+
+  # Test 3: No flags, stale version => "stale" status with exit code 1
+  if [ -n "$latest_glob_path" ]; then
+    echo "/fake/old/1.0.0/scripts/aimi-cli.sh" > "$AIMI_DIR/cli-path"
+
+    stderr_output_file=$(mktemp)
+    stdout_output=$("$CLI" check-version 2>"$stderr_output_file") && exit_code=0 || exit_code=$?
+    stderr_content=$(cat "$stderr_output_file")
+    rm -f "$stderr_output_file"
+
+    assert_contains '"status": "stale"' "$stdout_output" "check-version (no flags): stale returns stale status"
+    assert_exit_code "1" "$exit_code" "check-version (no flags): stale exits 1"
+    assert_contains "CLI version is stale" "$stderr_content" "check-version (no flags): stale emits warning"
+  fi
+}
+
+test_cleanup_versions() {
+  echo ""
+  echo "=== Testing cleanup-versions ==="
+
+  "$CLI" clear-state > /dev/null
+
+  # First run may or may not remove old versions depending on environment.
+  # Run once to reach a clean state, then run again to verify the
+  # idempotent "no old versions" path returns removed:0.
+  "$CLI" cleanup-versions > /dev/null 2>&1
+
+  # Second run: only the latest version remains, so removed must be 0
+  local output
+  output=$("$CLI" cleanup-versions 2>/dev/null)
+
+  local removed
+  removed=$(echo "$output" | jq '.removed')
+  assert_eq "0" "$removed" "cleanup-versions: no old versions returns removed:0"
+
+  # Validate JSON output format has both keys
+  assert_contains '"removed"' "$output" "cleanup-versions: output contains removed key"
+  assert_contains '"kept"' "$output" "cleanup-versions: output contains kept key"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -739,6 +941,16 @@ main() {
   test_reset_orphaned_empty
   test_reset_orphaned_with_orphans
   test_stale_state_warning
+
+  # Version staleness tests — run with fresh state
+  echo ""
+  echo "--- Version Staleness Tests ---"
+  test_check_version
+  test_check_version_quiet
+  test_check_version_fix
+  test_check_version_quiet_fix
+  test_check_version_backward_compat
+  test_cleanup_versions
 
   cleanup
 

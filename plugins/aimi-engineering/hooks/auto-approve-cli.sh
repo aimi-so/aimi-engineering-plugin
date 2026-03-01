@@ -17,8 +17,8 @@ ALLOW='{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"b
 # Returns 0 (true) if dangerous metacharacters are found after the variable reference.
 has_metacharacters() {
   local cmd="$1"
-  # Check for: ; && || | $() `` (backticks)
-  if echo "$cmd" | grep -qE ';|&&|\|\||`|\$\('; then
+  # Check for: ; && || | $() `` (backticks) > >> < << (redirection)
+  if echo "$cmd" | grep -qE ';|&&|\|\||`|\$\(|[<>]'; then
     return 0
   fi
   # Check for pipe (|) that is NOT part of || (already caught above)
@@ -32,7 +32,7 @@ has_metacharacters() {
 # --- Pattern 1: AIMI_CLI= assignment ---
 # Validates the assigned path matches the expected plugin cache pattern.
 if echo "$COMMAND" | grep -qE '^AIMI_CLI='; then
-  if echo "$COMMAND" | grep -qE '^AIMI_CLI=\$\(ls ~/.claude/plugins/cache/[a-zA-Z0-9_-]+/aimi-engineering/[a-zA-Z0-9._-]+/scripts/aimi-cli\.sh\)$'; then
+  if echo "$COMMAND" | grep -qE '^AIMI_CLI=\$\(ls ~/.claude/plugins/cache/[a-zA-Z0-9_-]+/aimi-engineering/[0-9][a-zA-Z0-9._-]*/scripts/aimi-cli\.sh\)$'; then
     echo "$ALLOW"
     exit 0
   fi
@@ -56,6 +56,7 @@ if echo "$COMMAND" | grep -qE '^\$AIMI_CLI\b|^\$\{AIMI_CLI\}'; then
     list-ready|mark-in-progress|mark-complete|mark-failed|mark-skipped|\
     count-pending|validate-deps|validate-stories|cascade-skip|reset-orphaned|\
     get-branch|get-state|clear-state|help|\
+    check-version|cleanup-versions|\
     swarm-init|swarm-add|swarm-update|swarm-remove|swarm-status|swarm-list|swarm-cleanup)
       echo "$ALLOW"
       exit 0
@@ -70,7 +71,7 @@ fi
 # --- Pattern 3: WORKTREE_MGR= assignment ---
 # Validates the assigned path matches the expected worktree manager plugin path.
 if echo "$COMMAND" | grep -qE '^WORKTREE_MGR='; then
-  if echo "$COMMAND" | grep -qE '^WORKTREE_MGR=\$\(ls ~/.claude/plugins/cache/[a-zA-Z0-9_-]+/aimi-engineering/[a-zA-Z0-9._-]+/skills/git-worktree/scripts/worktree-manager\.sh\)$'; then
+  if echo "$COMMAND" | grep -qE '^WORKTREE_MGR=\$\(ls ~/.claude/plugins/cache/[a-zA-Z0-9_-]+/aimi-engineering/[0-9][a-zA-Z0-9._-]*/skills/git-worktree/scripts/worktree-manager\.sh\)$'; then
     echo "$ALLOW"
     exit 0
   fi
@@ -104,7 +105,7 @@ fi
 # --- Pattern 5: SANDBOX_MGR= assignment ---
 # Validates the assigned path matches the expected sandbox manager plugin path.
 if echo "$COMMAND" | grep -qE '^SANDBOX_MGR='; then
-  if echo "$COMMAND" | grep -qE '^SANDBOX_MGR=\$\(ls ~/.claude/plugins/cache/[a-zA-Z0-9_-]+/aimi-engineering/[a-zA-Z0-9._-]+/skills/sandbox/scripts/sandbox-manager\.sh\)$'; then
+  if echo "$COMMAND" | grep -qE '^SANDBOX_MGR=\$\(ls ~/.claude/plugins/cache/[a-zA-Z0-9_-]+/aimi-engineering/[0-9][a-zA-Z0-9._-]*/skills/docker-sandbox/scripts/sandbox-manager\.sh\)$'; then
     echo "$ALLOW"
     exit 0
   fi
@@ -138,7 +139,7 @@ fi
 # --- Pattern 7: BUILD_IMG= assignment ---
 # Validates the assigned path matches the expected build image plugin path.
 if echo "$COMMAND" | grep -qE '^BUILD_IMG='; then
-  if echo "$COMMAND" | grep -qE '^BUILD_IMG=\$\(ls ~/.claude/plugins/cache/[a-zA-Z0-9_-]+/aimi-engineering/[a-zA-Z0-9._-]+/skills/sandbox/scripts/build-project-image\.sh\)$'; then
+  if echo "$COMMAND" | grep -qE '^BUILD_IMG=\$\(ls ~/.claude/plugins/cache/[a-zA-Z0-9_-]+/aimi-engineering/[0-9][a-zA-Z0-9._-]*/skills/docker-sandbox/scripts/build-project-image\.sh\)$'; then
     echo "$ALLOW"
     exit 0
   fi
@@ -158,21 +159,41 @@ if echo "$COMMAND" | grep -qE '^\$BUILD_IMG\b|^\$\{BUILD_IMG\}'; then
   exit 0
 fi
 
-# --- Pattern 9: docker exec -i aimi-* for ACP adapter ---
-# Only allows: docker exec -i aimi-<name> python3 /opt/aimi/acp-adapter.py
+# --- Pattern 9: docker exec aimi-* for ACP adapter ---
+# Allows:
+#   docker exec -i aimi-<name> python3 /opt/aimi/acp-adapter.py           (stdin mode)
+#   docker exec aimi-<name> python3 /opt/aimi/acp-adapter.py --input /tmp/acp-payload.json  (file mode)
 # No wildcard Docker approvals — only specific aimi-* container patterns.
-if echo "$COMMAND" | grep -qE '^docker exec -i '; then
+if echo "$COMMAND" | grep -qE '^docker exec '; then
   # Reject any shell metacharacters
   if has_metacharacters "$COMMAND"; then
     exit 0
   fi
 
-  # Validate: docker exec -i aimi-<container> python3 /opt/aimi/acp-adapter.py
-  if echo "$COMMAND" | grep -qE '^docker exec -i aimi-[a-zA-Z0-9_-]+ python3 /opt/aimi/acp-adapter\.py$'; then
+  # Validate: docker exec [-i] aimi-<container> python3 /opt/aimi/acp-adapter.py [--input /tmp/acp-payload.json]
+  if echo "$COMMAND" | grep -qE '^docker exec (-i )?aimi-[a-zA-Z0-9_-]+ python3 /opt/aimi/acp-adapter\.py( --input /tmp/acp-payload\.json)?$'; then
     echo "$ALLOW"
     exit 0
   fi
   # Non-matching docker exec — fall through to normal permission prompt
+  exit 0
+fi
+
+# --- Pattern 10: docker cp for ACP payload files ---
+# Allows: docker cp /tmp/acp-payload-aimi-<name>.json aimi-<name>:/tmp/acp-payload.json
+# Only permits copying ACP payload files into aimi-* containers.
+if echo "$COMMAND" | grep -qE '^docker cp '; then
+  # Reject any shell metacharacters
+  if has_metacharacters "$COMMAND"; then
+    exit 0
+  fi
+
+  # Validate: docker cp /tmp/acp-payload-aimi-<container>.json aimi-<container>:/tmp/acp-payload.json
+  if echo "$COMMAND" | grep -qE '^docker cp /tmp/acp-payload-aimi-[a-zA-Z0-9_-]+\.json aimi-[a-zA-Z0-9_-]+:/tmp/acp-payload\.json$'; then
+    echo "$ALLOW"
+    exit 0
+  fi
+  # Non-matching docker cp — fall through to normal permission prompt
   exit 0
 fi
 

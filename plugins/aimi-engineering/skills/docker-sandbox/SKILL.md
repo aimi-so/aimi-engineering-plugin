@@ -161,8 +161,18 @@ Container resource limits are configurable via environment variables:
 |----------|---------|-------------|
 | `AIMI_SANDBOX_CPUS` | `2` | CPU cores per container |
 | `AIMI_SANDBOX_MEMORY` | `4g` | Memory limit per container |
-| `AIMI_SANDBOX_SWAP` | `4g` | Swap limit per container |
-| `AIMI_SANDBOX_DISK` | `8g` | Disk limit per container |
+| `AIMI_SANDBOX_SWAP` | `8g` | Memory+swap total per container (with 4g memory, gives 4g actual swap) |
+| `AIMI_SANDBOX_DISK` | `8g` | Disk limit per container (advisory — requires storage driver support) |
+
+### Total Resource Consumption
+
+| Containers | CPUs | RAM | Swap (actual) | Total Memory+Swap |
+|------------|------|-----|---------------|-------------------|
+| 2 | 4 | 8 GB | 8 GB | 16 GB |
+| 4 | 8 | 16 GB | 16 GB | 32 GB |
+| 8 | 16 | 32 GB | 32 GB | 64 GB |
+
+> **Host sizing:** The host machine should have at least **2x the total container RAM** for OS overhead, Docker daemon, and other processes. For example, running 4 containers (16 GB container RAM) requires a host with at least 32 GB total RAM.
 
 ---
 

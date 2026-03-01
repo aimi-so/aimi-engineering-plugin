@@ -12,8 +12,8 @@
 #   - GitHub CLI (gh)
 #   - Claude Code CLI (via npm)
 #
-# Build:
-#   docker build -f Dockerfile.base -t aimi-sandbox:base .
+# Build (from skills/docker-sandbox/ directory):
+#   docker build -f docker/Dockerfile.base -t aimi-sandbox:base .
 # =============================================================================
 
 FROM node:20-slim AS base
@@ -99,6 +99,12 @@ RUN groupadd --gid 1001 aimi \
 
 # Give aimi user access to docker socket (when mounted)
 RUN groupadd -f docker && usermod -aG docker aimi
+
+# ---------------------------------------------------------------------------
+# ACP adapter script
+# ---------------------------------------------------------------------------
+RUN mkdir -p /opt/aimi
+COPY scripts/acp-adapter.py /opt/aimi/acp-adapter.py
 
 # ---------------------------------------------------------------------------
 # Workspace

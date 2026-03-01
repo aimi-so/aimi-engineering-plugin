@@ -23,6 +23,16 @@ fi
 
 If empty, report: "aimi-cli.sh not found. Reinstall plugin: `/plugin install aimi-engineering`" and STOP.
 
+### Version Check
+
+After resolving `$AIMI_CLI`, verify the cached CLI path is current:
+
+```bash
+$AIMI_CLI check-version --quiet --fix
+```
+
+If `check-version` exits 0, no action is needed — proceed normally. The `--quiet` flag suppresses informational output and `--fix` auto-updates a stale cli-path. This does NOT call `cleanup-versions` (cleanup is manual-only).
+
 ```bash
 # Sandbox manager
 SANDBOX_MGR=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/skills/docker-sandbox/scripts/sandbox-manager.sh 2>/dev/null | tail -1)
@@ -274,16 +284,7 @@ No task files found in .aimi/tasks/. Run /aimi:plan to create a task list first.
 ```
 STOP.
 
-Present the discovered files to the user:
-```
-Found [N] task file(s):
-
-  1. .aimi/tasks/2026-03-01-feature-auth-tasks.json (feat/auth, 5 stories)
-  2. .aimi/tasks/2026-03-01-feature-ui-tasks.json (feat/ui, 3 stories)
-  3. .aimi/tasks/2026-03-01-bugfix-login-tasks.json (bug/login, 2 stories)
-
-Select files to execute (comma-separated numbers, or "all"):
-```
+Store the discovered files list as `DISCOVERED_FILES`.
 
 For each file, extract metadata with:
 ```bash
@@ -293,6 +294,40 @@ jq -r '.metadata | "\(.branchName) — \(.title)"' <file>
 And count stories:
 ```bash
 jq '[.userStories[] | select(.status == "pending")] | length' <file>
+```
+
+### Non-interactive file selection flags
+
+Before prompting the user, check `$ARGUMENTS` for non-interactive selection flags:
+
+1. **`--all` flag**: If `$ARGUMENTS` contains `--all`, select all discovered files automatically:
+   - Set `SELECTED_TASK_FILES` to all `DISCOVERED_FILES`
+   - Report: `"--all flag: selecting all [N] discovered task file(s)."`
+   - Skip the AskUserQuestion prompt entirely
+   - Proceed to max containers limit check
+
+2. **`--files <path1>,<path2>` flag**: If `$ARGUMENTS` contains `--files` followed by a comma-separated list of paths:
+   - Parse the comma-separated paths (e.g., `--files .aimi/tasks/a-tasks.json,.aimi/tasks/b-tasks.json`)
+   - Validate each path: must exist on disk and end with `.json`
+   - If any path is invalid, report the error and STOP
+   - Set `SELECTED_TASK_FILES` to the validated paths
+   - Report: `"--files flag: selecting [N] specified task file(s)."`
+   - Skip the AskUserQuestion prompt entirely
+   - Proceed to max containers limit check
+
+3. **No flag (default)**: Fall through to the interactive AskUserQuestion flow below.
+
+### Interactive selection (default)
+
+Present the discovered files to the user:
+```
+Found [N] task file(s):
+
+  1. .aimi/tasks/2026-03-01-feature-auth-tasks.json (feat/auth, 5 stories)
+  2. .aimi/tasks/2026-03-01-feature-ui-tasks.json (feat/ui, 3 stories)
+  3. .aimi/tasks/2026-03-01-bugfix-login-tasks.json (bug/login, 2 stories)
+
+Select files to execute (comma-separated numbers, or "all"):
 ```
 
 Use `AskUserQuestion` to get the selection. Parse the response:
@@ -325,7 +360,27 @@ Truncate `SELECTED_TASK_FILES` to `maxContainers`.
 $AIMI_CLI swarm-status 2>/dev/null
 ```
 
-If an active swarm exists with running/pending containers, ask the user:
+If an active swarm exists with running/pending containers:
+
+#### Non-interactive swarm conflict flags
+
+Before prompting the user, check `$ARGUMENTS` for non-interactive conflict resolution flags:
+
+1. **`--force` flag**: If `$ARGUMENTS` contains `--force`, automatically select option 2 (force reinitialize):
+   - Report: `"--force flag: reinitializing existing swarm."`
+   - Skip the AskUserQuestion prompt entirely
+   - Run cleanup first, then reinitialize with `$AIMI_CLI swarm-init --force`
+
+2. **`--append` flag**: If `$ARGUMENTS` contains `--append`, automatically select option 1 (resume/add):
+   - Report: `"--append flag: adding tasks to existing swarm."`
+   - Skip the AskUserQuestion prompt entirely
+   - Proceed without reinitializing, add new containers to existing state
+
+3. **No flag (default)**: Fall through to the interactive AskUserQuestion flow below.
+
+#### Interactive conflict resolution (default)
+
+Ask the user:
 ```
 An active swarm exists with [N] running/pending containers.
 
@@ -476,10 +531,20 @@ You are a swarm worker agent managing a Docker sandbox container.
 
 ## Your Job
 
-1. Send the task-request payload to the ACP adapter inside the container via docker exec:
+1. Send the task-request payload to the ACP adapter inside the container:
 
 ```bash
-echo '<task-request-json>' | docker exec -i [containerName] python3 /opt/aimi/acp-adapter.py
+# Write payload to temp file
+echo '<task-request-json>' > /tmp/acp-payload-[containerName].json
+
+# Copy payload into the container
+docker cp /tmp/acp-payload-[containerName].json [containerName]:/tmp/acp-payload.json
+
+# Clean up host temp file
+rm -f /tmp/acp-payload-[containerName].json
+
+# Run the ACP adapter with file-based input (no pipe needed)
+docker exec [containerName] python3 /opt/aimi/acp-adapter.py --input /tmp/acp-payload.json
 ```
 
 2. Read the NDJSON output lines from stdout. Each line is a JSON message.
