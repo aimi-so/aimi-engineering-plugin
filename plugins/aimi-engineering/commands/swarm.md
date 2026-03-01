@@ -186,10 +186,17 @@ If arguments start with `resume`:
       ```
    b. Read the task file path and branch from the swarm state entry.
    c. Verify the task file still exists on disk. If not, report error and skip this container.
-   d. Recreate the container (follows same pattern as Step 4 in the main flow):
+   d. Recreate the container (follows same pattern as Step 4 in the main flow).
+
+      If `AUTH_METHOD=ssh` (re-detect credentials using the same Step 2.5 logic if not already set in this session), append `--ssh-agent`:
       ```bash
+      # With SSH auth:
+      $SANDBOX_MGR create <containerName> --image <PROJECT_IMAGE> --task-file <taskFile> --branch <BRANCH> --ssh-agent
+      # Without SSH auth:
       $SANDBOX_MGR create <containerName> --image <PROJECT_IMAGE> --task-file <taskFile> --branch <BRANCH>
       ```
+      **Log the full container creation command for debugging** before executing it.
+
       **Note:** `PROJECT_IMAGE` must be resolved. Run `$BUILD_IMG` to build/reuse the project image if not already available.
    e. Parse the new `containerId` from the JSON output.
    f. Update the swarm state with the new container ID and reset status to `pending`:
@@ -199,6 +206,7 @@ If arguments start with `resume`:
 
 7. **Fan out pending containers:**
    If there are containers with status `pending` (either originally pending or reset from failed):
+   - Re-detect credentials using the **same Step 2.5 logic** if `AUTH_METHOD` is not already set in this session. This ensures `AUTH_METHOD=ssh` is available for any container recreation that may have occurred in step 6d.
    - Resolve `REPO_URL` using the **same fallback chain as Step 3** (try `origin`, then `upstream`, then first available remote from `git remote`). If no remotes are found, STOP with: `"No git remotes found. Add one with: git remote add origin <url>"`. Log which remote was selected and its URL. Detect the remote URL protocol (SSH vs HTTPS) and log any AUTH_METHOD mismatch warning, same as Step 3.
    - Proceed to Step 5 (fan-out) for these pending containers only.
    - After fan-out and result collection, proceed to Step 6 for state update and reporting.
@@ -597,15 +605,29 @@ For each task file in `SELECTED_TASK_FILES`:
    - Container name: `aimi-swarm-<slug>` (must match `^aimi-[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 
 3. Create the container:
+
+   Build the create command, conditionally appending `--ssh-agent` when SSH auth was detected in Step 2.5:
+
    ```bash
-   $SANDBOX_MGR create <containerName> --image <PROJECT_IMAGE> --task-file <taskFile> --branch <BRANCH>
+   # If AUTH_METHOD=ssh (set in Step 2.5), append --ssh-agent to forward the host SSH agent socket
+   if [ "$AUTH_METHOD" = "ssh" ]; then
+     $SANDBOX_MGR create <containerName> --image <PROJECT_IMAGE> --task-file <taskFile> --branch <BRANCH> --ssh-agent
+   else
+     $SANDBOX_MGR create <containerName> --image <PROJECT_IMAGE> --task-file <taskFile> --branch <BRANCH>
+   fi
    ```
+
+   **Log the full container creation command for debugging** before executing it:
+   ```
+   [swarm] create: $SANDBOX_MGR create <containerName> --image <PROJECT_IMAGE> --task-file <taskFile> --branch <BRANCH> [--ssh-agent]
+   ```
+   (Include `--ssh-agent` in the log line only when `AUTH_METHOD=ssh`.)
 
 4. Parse the JSON output to get `containerId`.
 
-5. Register in swarm state:
+5. Register in swarm state (include the resolved `REPO_URL` for resume support):
    ```bash
-   $AIMI_CLI swarm-add <containerId> <containerName> <taskFile> <BRANCH>
+   $AIMI_CLI swarm-add <containerId> <containerName> <taskFile> <BRANCH> --repo-url <REPO_URL>
    ```
 
 6. Count stories for progress tracking:
