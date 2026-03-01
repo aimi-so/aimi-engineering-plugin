@@ -68,6 +68,7 @@ claude /plugin list
 | `/aimi:next` | Execute the next pending story | `/aimi:next` |
 | `/aimi:execute` | Run all stories autonomously (parallel for v3, sequential for v2.2) | `/aimi:execute` |
 | `/aimi:review` | Multi-agent code review with findings synthesis | `/aimi:review [PR or branch]` |
+| `/aimi:swarm` | Execute multiple tasks.json files in parallel Docker sandboxes | `/aimi:swarm [--file path] [--max N]` |
 
 ### Command Details
 
@@ -156,6 +157,24 @@ Multi-agent code review using aimi-native review agents. Runs parallel agents (a
 /aimi:review 42        # Review PR #42
 /aimi:review feat/auth # Review specific branch
 ```
+
+#### `/aimi:swarm`
+
+Executes multiple tasks.json files in parallel Docker sandboxes. Each task file gets its own Sysbox-isolated container with a full Claude Code agent running the story-executor flow inside it.
+
+```bash
+/aimi:swarm                          # Discover and select task files
+/aimi:swarm --file .aimi/tasks/f.json  # Execute a single task file
+/aimi:swarm --max 2                  # Limit to 2 concurrent containers
+/aimi:swarm status                   # View swarm state
+/aimi:swarm resume                   # Resume pending containers
+/aimi:swarm cleanup                  # Remove containers and state
+```
+
+Requirements:
+- Docker with Sysbox runtime installed
+- Git remote `origin` configured (containers clone via URL)
+- `ANTHROPIC_API_KEY` set in environment (injected into containers)
 
 ## Workflow
 
@@ -418,9 +437,15 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 ## Version History
 
-**Current Version:** 1.12.0
+**Current Version:** 1.16.0
 
 ### Recent Changes
+
+**v1.16.0** - Docker Swarm Orchestration
+- `/aimi:swarm` command for multi-task parallel Docker sandbox execution
+- Multi-select task file discovery, container provisioning, parallel ACP fan-out
+- Subcommands: status, resume, cleanup
+- Configurable maxContainers limit with partial failure handling
 
 **v1.12.0** - Parallel Execution Hardening
 - worktree-manager: `remove` command, `--from` flag, input validation, non-interactive
@@ -473,7 +498,7 @@ See [CHANGELOG.md](CHANGELOG.md) for complete version history.
 
 | Type | Count | Description |
 |------|-------|-------------|
-| Commands | 7 | Slash commands for workflow stages |
+| Commands | 8 | Slash commands for workflow stages |
 | Skills | 3 | `brainstorm`, `task-planner`, `story-executor` |
 | Agents | 28 | 4 research, 15 review, 3 design, 1 docs, 5 workflow |
 

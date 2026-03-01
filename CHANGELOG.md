@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.0] - 2026-03-01
+
+### Added
+
+- **`/aimi:swarm` command**: Multi-task Docker sandbox orchestration for parallel feature execution
+  - Discovers `.aimi/tasks/*-tasks.json` files, presents multi-select list to user
+  - Supports `--file <path>` flag for single-file execution
+  - Provisions Sysbox-isolated Docker containers via `sandbox-manager.sh` for each task file
+  - Builds per-project images via `build-project-image.sh` with checksum-based rebuild skipping
+  - Fans out parallel Task agents, each communicating with its container via ACP adapter (`docker exec -i`)
+  - Tracks execution via `swarm-state.json` using CLI swarm-* subcommands
+  - Configurable `maxContainers` limit (default 4, override with `--max <N>`)
+  - Subcommands: `status` (view swarm state), `resume` (restart pending containers), `cleanup` (remove containers and state)
+  - Handles partial failure: failed containers marked in state, successful ones continue independently
+  - Reports summary with per-container status, branch names, and PR URLs
+
 ## [1.15.0] - 2026-03-01
 
 ### Changed
