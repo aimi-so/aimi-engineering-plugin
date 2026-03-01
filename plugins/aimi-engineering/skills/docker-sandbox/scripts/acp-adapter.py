@@ -246,10 +246,12 @@ def provision_repo(payload: dict) -> bool:
 
     Steps:
       1. Skip if /workspace/.git already exists (already provisioned).
-      2. Configure git credential helper if GITHUB_TOKEN is set.
-      3. Clone repoUrl into /workspace.
-      4. Checkout or create the target branch.
-      5. Verify the task file exists at the expected path.
+      2. Detect URL protocol (SSH vs HTTPS).
+      3. For HTTPS: configure git credential helper if GITHUB_TOKEN is set.
+         For SSH: set GIT_SSH_COMMAND with BatchMode and ConnectTimeout.
+      4. Clone repoUrl into /workspace.
+      5. Checkout or create the target branch.
+      6. Verify the task file exists at the expected path.
 
     Returns True on success. On failure, emits an error and returns False.
     """
@@ -261,27 +263,38 @@ def provision_repo(payload: dict) -> bool:
         os.chdir(WORKSPACE_DIR)
         return True
 
-    # 2. Set up git credential helper for GITHUB_TOKEN if present
-    token = os.environ.get("GITHUB_TOKEN")
-    if token:
-        log("Configuring git credential helper for GITHUB_TOKEN")
-        try:
-            subprocess.run(
-                [
-                    "git", "config", "--global", "credential.helper",
-                    "!f() { echo username=x-access-token; echo password="
-                    + token + "; }; f",
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except subprocess.CalledProcessError as exc:
-            log(f"Failed to configure git credential helper: {exc.stderr}")
-            # Non-fatal — clone might still work via other auth methods
-
-    # 3. Clone the repository
+    # 2. Detect URL protocol
     repo_url = payload["repoUrl"]
+    is_ssh = repo_url.startswith("git@") or repo_url.startswith("ssh://")
+
+    if is_ssh:
+        # 3a. SSH: configure GIT_SSH_COMMAND to prevent hanging on missing
+        # agent and set a reasonable connect timeout
+        log("SSH URL detected, configuring GIT_SSH_COMMAND for non-interactive clone")
+        os.environ["GIT_SSH_COMMAND"] = (
+            "ssh -o BatchMode=yes -o ConnectTimeout=10"
+        )
+    else:
+        # 3b. HTTPS: set up git credential helper for GITHUB_TOKEN if present
+        token = os.environ.get("GITHUB_TOKEN")
+        if token:
+            log("Configuring git credential helper for GITHUB_TOKEN")
+            try:
+                subprocess.run(
+                    [
+                        "git", "config", "--global", "credential.helper",
+                        "!f() { echo username=x-access-token; echo password="
+                        + token + "; }; f",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.CalledProcessError as exc:
+                log(f"Failed to configure git credential helper: {exc.stderr}")
+                # Non-fatal — clone might still work via other auth methods
+
+    # 4. Clone the repository
     log(f"Cloning repository {repo_url} into {WORKSPACE_DIR}")
     try:
         subprocess.run(
@@ -291,15 +304,28 @@ def provision_repo(payload: dict) -> bool:
             text=True,
         )
     except subprocess.CalledProcessError as exc:
-        msg = f"git clone failed: {exc.stderr.strip() or exc.stdout.strip()}"
+        stderr_text = exc.stderr.strip() or exc.stdout.strip()
+        msg = f"git clone failed: {stderr_text}"
         log(msg)
+
+        # For SSH URLs, provide a helpful hint about SSH agent forwarding
+        if is_ssh:
+            ssh_hint = (
+                "SSH clone failed. Ensure the SSH agent is forwarded into "
+                "the container (docker run --mount type=bind,src=$SSH_AUTH_SOCK,"
+                "target=/ssh-agent -e SSH_AUTH_SOCK=/ssh-agent) and that the "
+                "SSH key has access to the repository."
+            )
+            log(ssh_hint)
+            msg = f"{msg}. {ssh_hint}"
+
         emit_error("GIT_CLONE_FAILED", msg)
         return False
 
-    # 4. Change into workspace directory
+    # 5. Change into workspace directory
     os.chdir(WORKSPACE_DIR)
 
-    # 5. Checkout the target branch
+    # 6. Checkout the target branch
     branch_name = payload["branchName"]
     log(f"Checking out branch: {branch_name}")
     try:
@@ -331,7 +357,7 @@ def provision_repo(payload: dict) -> bool:
             emit_error("GIT_CHECKOUT_FAILED", msg)
             return False
 
-    # 6. Verify the task file exists
+    # 7. Verify the task file exists
     task_file = payload["taskFilePath"]
     if not os.path.isfile(task_file):
         msg = f"Task file not found at {task_file} after clone"
