@@ -437,9 +437,15 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 ## Version History
 
-**Current Version:** 1.16.0
+**Current Version:** 1.16.1
 
 ### Recent Changes
+
+**v1.16.1** - Swarm State Reconciliation
+- Automatic state reconciliation before `status` display and `resume` operations
+- Zombie detection: identifies containers in state but missing from Docker daemon
+- Enhanced `resume` with crash recovery: recreates failed containers, retries pending
+- Enhanced `cleanup` with per-container removal reporting
 
 **v1.16.0** - Docker Swarm Orchestration
 - `/aimi:swarm` command for multi-task parallel Docker sandbox execution

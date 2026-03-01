@@ -43,31 +43,213 @@ If empty, report: "build-project-image.sh not found. Reinstall plugin: `/plugin 
 
 Check if `$ARGUMENTS` contains a subcommand:
 
+### State Reconciliation (shared subroutine)
+
+**This reconciliation runs automatically before `status` display and at the start of `resume`.** It detects zombie entries (containers that exist in `swarm-state.json` but no longer exist as Docker containers) and corrects stale state.
+
+Reconciliation procedure:
+
+1. Load the current swarm state:
+   ```bash
+   $AIMI_CLI swarm-status
+   ```
+   If no active swarm exists, skip reconciliation.
+
+2. For each container entry in the state (parse the JSON output to get the list of containers with their `containerName` and `status`):
+
+   a. **Skip terminal entries:** If `status` is `completed`, `failed`, or `stopped`, skip this container (no reconciliation needed for already-terminal entries).
+
+   b. **Query actual Docker state:**
+      ```bash
+      $SANDBOX_MGR status <containerName>
+      ```
+      Parse the JSON output. Key fields: `exists` (boolean), `swarmState` (string), `exitCode` (integer).
+
+   c. **Zombie detection — container gone from Docker:**
+      If `exists` is `false` (container no longer exists on Docker daemon but state says `pending` or `running`):
+      - This is a **zombie entry**. The container was removed or crashed without updating swarm state.
+      - Update the swarm state to `failed`:
+        ```bash
+        $AIMI_CLI swarm-update <containerName> --status failed
+        ```
+      - Record this zombie for reporting: `"<containerName>: zombie (container not found, was <originalStatus>)"`
+
+   d. **State drift — Docker state disagrees with swarm state:**
+      If `exists` is `true` but `swarmState` from Docker differs from the recorded `status`:
+
+      - If Docker says `completed` (exit code 0) but state says `running` or `pending`:
+        ```bash
+        $AIMI_CLI swarm-update <containerName> --status completed
+        ```
+
+      - If Docker says `failed` (exit code non-zero) but state says `running` or `pending`:
+        ```bash
+        $AIMI_CLI swarm-update <containerName> --status failed
+        ```
+
+      - If Docker says `stopped` (paused/removing) but state says `running`:
+        ```bash
+        $AIMI_CLI swarm-update <containerName> --status stopped
+        ```
+
+      - If Docker says `running` but state says `pending`:
+        ```bash
+        $AIMI_CLI swarm-update <containerName> --status running
+        ```
+
+      - Record any state drift for reporting: `"<containerName>: state corrected <oldStatus> -> <newStatus>"`
+
+3. If any zombies or drift were detected, report them:
+   ```
+   State reconciliation:
+     - aimi-swarm-auth: zombie (container not found, was running)
+     - aimi-swarm-ui: state corrected running -> completed
+   ```
+   If no issues found, report: `"State reconciliation: all entries consistent."`
+
 ### `status`
 If arguments start with `status`:
-```bash
-$AIMI_CLI swarm-status
-```
-Format the output as a summary table showing each container's name, task file, branch, status, and story progress. STOP.
+
+1. **Run state reconciliation** (see subroutine above). This ensures the displayed state reflects reality.
+
+2. Re-read the reconciled swarm state:
+   ```bash
+   $AIMI_CLI swarm-status
+   ```
+
+3. Format the output as a summary table:
+   ```
+   ## Swarm Status
+
+   Swarm ID: <swarmId>
+   Updated: <updatedAt>
+
+   | # | Container | Task File | Branch | Status | Progress |
+   |---|-----------|-----------|--------|--------|----------|
+   | 1 | aimi-swarm-auth | .aimi/tasks/auth-tasks.json | feat/auth | completed | 5/5 |
+   | 2 | aimi-swarm-ui | .aimi/tasks/ui-tasks.json | feat/ui | running | 2/3 |
+   | 3 | aimi-swarm-api | .aimi/tasks/api-tasks.json | feat/api | failed | 0/4 |
+
+   Summary: 1 completed, 1 running, 1 failed (3 total)
+   ```
+
+   The Progress column is derived from `storyProgress`: `<completed>/<total>`.
+
+4. STOP.
 
 ### `resume`
 If arguments start with `resume`:
-1. Run `$AIMI_CLI swarm-status` to load existing swarm state
-2. Identify containers with status `pending` or `running`
-3. For containers with status `pending`: they need ACP adapter invocation (jump to Step 5)
-4. For containers with status `running`: check actual Docker status via `$SANDBOX_MGR status <name>`
-   - If Docker says container is still running, report it and skip
-   - If Docker says container exited, update swarm state to `failed` or `completed` based on exit code
-5. If there are still pending containers, proceed to Step 5 for fan-out
-6. If all containers are terminal, report summary and STOP
+
+1. **Run state reconciliation** (see subroutine above). This corrects zombies and stale state before making resume decisions.
+
+2. Re-read the reconciled swarm state:
+   ```bash
+   $AIMI_CLI swarm-status
+   ```
+   Parse the containers list. Classify each container by its (now-reconciled) status.
+
+3. **Identify resumable containers:**
+   - `pending` containers: Need ACP adapter invocation (were never started or were added after a crash).
+   - `failed` containers: May be retried. Check if they are still present as Docker containers:
+     ```bash
+     $SANDBOX_MGR status <containerName>
+     ```
+     - If the Docker container exists and is stopped/exited, it can be removed and recreated.
+     - If the Docker container does not exist, it needs to be recreated from scratch.
+
+4. **Handle running containers:**
+   For containers still showing `running` after reconciliation (Docker confirms they are actually running):
+   - Report: `"<containerName>: still running in Docker, skipping"`
+   - Do NOT re-invoke the ACP adapter for these.
+
+5. **Handle completed containers:**
+   For containers with status `completed`:
+   - Report: `"<containerName>: already completed"`
+   - Check if a PR URL exists in the state. If so, include it in the report.
+   - Skip these containers.
+
+6. **Recreate failed containers for retry:**
+   For each `failed` container that should be retried:
+   a. Remove the old Docker container if it still exists:
+      ```bash
+      $SANDBOX_MGR remove <containerName>
+      ```
+   b. Read the task file path and branch from the swarm state entry.
+   c. Verify the task file still exists on disk. If not, report error and skip this container.
+   d. Recreate the container (follows same pattern as Step 4 in the main flow):
+      ```bash
+      $SANDBOX_MGR create <containerName> --image <PROJECT_IMAGE> --task-file <taskFile> --branch <BRANCH>
+      ```
+      **Note:** `PROJECT_IMAGE` must be resolved. Run `$BUILD_IMG` to build/reuse the project image if not already available.
+   e. Parse the new `containerId` from the JSON output.
+   f. Update the swarm state with the new container ID and reset status to `pending`:
+      ```bash
+      $AIMI_CLI swarm-update <containerName> --status pending
+      ```
+
+7. **Fan out pending containers:**
+   If there are containers with status `pending` (either originally pending or reset from failed):
+   - Resolve `REPO_URL` from `git remote get-url origin` if not already known.
+   - Proceed to Step 5 (fan-out) for these pending containers only.
+   - After fan-out and result collection, proceed to Step 6 for state update and reporting.
+
+8. **All terminal — nothing to resume:**
+   If all containers are in terminal states (`completed`, `failed`, `stopped`) and there are no `pending` containers after the retry logic:
+   ```
+   All containers are in terminal state. Nothing to resume.
+
+   | Container | Status | PR |
+   |-----------|--------|----|
+   | aimi-swarm-auth | completed | https://github.com/org/repo/pull/42 |
+   | aimi-swarm-api | failed | - |
+
+   To retry failed containers, fix the underlying issues and run `/aimi:swarm --file <taskFile>`.
+   To clean up: `/aimi:swarm cleanup`
+   ```
+   STOP.
 
 ### `cleanup`
 If arguments start with `cleanup`:
-1. Run `$AIMI_CLI swarm-status` to check for active containers
-2. For each container entry:
-   - Run `$SANDBOX_MGR remove <containerName>` to stop and remove the Docker container
-3. Run `$AIMI_CLI swarm-cleanup` to remove terminal entries from state
-4. Report: "Swarm cleanup complete." STOP.
+
+1. Load the current swarm state:
+   ```bash
+   $AIMI_CLI swarm-status
+   ```
+   If no active swarm exists, report: `"No active swarm to clean up."` and STOP.
+
+2. Parse the containers list from the state JSON.
+
+3. **Remove Docker containers:**
+   For each container entry, regardless of status:
+   ```bash
+   $SANDBOX_MGR remove <containerName>
+   ```
+   The `remove` command is idempotent — it handles containers that no longer exist gracefully.
+
+   Track results:
+   - Removed: containers that existed and were removed
+   - Already gone: containers that did not exist in Docker
+
+4. **Clean swarm state:**
+   ```bash
+   $AIMI_CLI swarm-cleanup
+   ```
+   This removes terminal (`completed`, `failed`, `stopped`) entries from swarm-state.json.
+
+5. **Report cleanup results:**
+   ```
+   ## Swarm Cleanup Complete
+
+   Docker containers:
+     - aimi-swarm-auth: removed
+     - aimi-swarm-ui: removed
+     - aimi-swarm-api: already gone (not found in Docker)
+
+   State entries cleaned: 3
+   Remaining active entries: 0
+   ```
+
+6. STOP.
 
 ### Default (no subcommand or `--file`)
 Proceed to Step 2.
@@ -419,12 +601,42 @@ If the swarm is interrupted (e.g., user stops the command):
 - User can check status: `/aimi:swarm status`
 - User can clean up: `/aimi:swarm cleanup`
 
+## State Reconciliation
+
+State reconciliation detects and corrects inconsistencies between `swarm-state.json` and actual Docker daemon state. It runs automatically:
+
+- **Before every `status` display** — so the user always sees accurate state
+- **At the start of every `resume`** — so resume decisions are based on reality
+
+### What It Detects
+
+| Scenario | Detection | Action |
+|----------|-----------|--------|
+| **Zombie entry** | Container ID in state but container does not exist in Docker | Mark as `failed` |
+| **Silent completion** | Docker says exited with code 0 but state says `running` | Mark as `completed` |
+| **Silent failure** | Docker says exited with non-zero code but state says `running` | Mark as `failed` |
+| **Unexpected stop** | Docker says paused/removing but state says `running` | Mark as `stopped` |
+| **Already started** | Docker says running but state says `pending` | Mark as `running` |
+
+### How Zombies Happen
+
+Zombies occur when:
+- The host machine crashes while containers are running
+- Docker daemon restarts and auto-removes containers
+- A user manually runs `docker rm` on a container
+- The ACP adapter process crashes and the container self-terminates
+
+### Reconciliation Is Idempotent
+
+Running reconciliation multiple times produces the same result. Terminal entries (`completed`, `failed`, `stopped`) are never re-reconciled.
+
 ## Resuming Execution
 
 Running `/aimi:swarm resume`:
-1. Loads existing swarm state
-2. Checks each container's actual Docker status
-3. For pending containers: starts ACP adapter invocation
-4. For running containers: waits or checks completion
-5. For terminal containers: updates state if needed
-6. Reports summary when all containers are terminal
+1. **Reconciles state** — detects zombies and corrects stale entries (see State Reconciliation above)
+2. **Identifies resumable containers** — `pending` containers need ACP invocation, `failed` containers can be retried (removed and recreated)
+3. **Skips running containers** — if Docker confirms they are still active
+4. **Skips completed containers** — reports their PR URLs
+5. **Recreates failed containers** — removes old container, rebuilds, resets to `pending`
+6. **Fans out pending containers** — spawns ACP adapter tasks for all pending containers
+7. **Reports summary** when all containers reach terminal state
