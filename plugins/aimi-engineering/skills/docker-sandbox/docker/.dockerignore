@@ -1,0 +1,52 @@
+# =============================================================================
+# .dockerignore — aimi-sandbox Docker build context
+# =============================================================================
+# Exclude files that should never be sent to the Docker daemon during builds.
+
+# Version control
+.git
+.gitignore
+
+# Environment and secrets — never bake into images
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Build artifacts
+dist/
+build/
+*.tar.gz
+
+# Documentation (not needed in image)
+*.md
+!README.md
+LICENSE
+
+# Test fixtures and coverage
+coverage/
+.nyc_output/
