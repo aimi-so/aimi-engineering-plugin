@@ -222,23 +222,47 @@ cmd_init_session() {
 }
 
 # Get comprehensive status summary
+# Flags: --counts-only (return aggregate counts without userStories array)
 cmd_status() {
+  local counts_only=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --counts-only) counts_only=true; shift ;;
+      *) break ;;
+    esac
+  done
+
   local tasks_file
   tasks_file=$(get_tasks_file)
 
-  jq '{
-    schemaVersion: .schemaVersion,
-    title: .metadata.title,
-    branch: .metadata.branchName,
-    maxConcurrency: ((.metadata.maxConcurrency // 4) | if . <= 0 then 4 else . end),
-    pending: [.userStories[] | select(.status == "pending")] | length,
-    in_progress: [.userStories[] | select(.status == "in_progress")] | length,
-    completed: [.userStories[] | select(.status == "completed")] | length,
-    failed: [.userStories[] | select(.status == "failed")] | length,
-    skipped: [.userStories[] | select(.status == "skipped")] | length,
-    total: .userStories | length,
-    userStories: [.userStories[] | {id, title, status, dependsOn: (.dependsOn // []), priority, notes}]
-  }' "$tasks_file"
+  if [ "$counts_only" = true ]; then
+    jq '{
+      schemaVersion: .schemaVersion,
+      title: .metadata.title,
+      branch: .metadata.branchName,
+      maxConcurrency: ((.metadata.maxConcurrency // 4) | if . <= 0 then 4 else . end),
+      pending: [.userStories[] | select(.status == "pending")] | length,
+      in_progress: [.userStories[] | select(.status == "in_progress")] | length,
+      completed: [.userStories[] | select(.status == "completed")] | length,
+      failed: [.userStories[] | select(.status == "failed")] | length,
+      skipped: [.userStories[] | select(.status == "skipped")] | length,
+      total: .userStories | length
+    }' "$tasks_file"
+  else
+    jq '{
+      schemaVersion: .schemaVersion,
+      title: .metadata.title,
+      branch: .metadata.branchName,
+      maxConcurrency: ((.metadata.maxConcurrency // 4) | if . <= 0 then 4 else . end),
+      pending: [.userStories[] | select(.status == "pending")] | length,
+      in_progress: [.userStories[] | select(.status == "in_progress")] | length,
+      completed: [.userStories[] | select(.status == "completed")] | length,
+      failed: [.userStories[] | select(.status == "failed")] | length,
+      skipped: [.userStories[] | select(.status == "skipped")] | length,
+      total: .userStories | length,
+      userStories: [.userStories[] | {id, title, status, dependsOn: (.dependsOn // []), priority, notes}]
+    }' "$tasks_file"
+  fi
 }
 
 # Get metadata only
@@ -250,11 +274,21 @@ cmd_metadata() {
 
 # List stories that are ready to execute
 # A story is ready when: status == "pending" AND all dependsOn stories have status "completed" or "skipped"
+# Flags: --brief (return only {id, title, priority, dependsOn} per story)
 cmd_list_ready() {
+  local brief=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --brief) brief=true; shift ;;
+      *) break ;;
+    esac
+  done
+
   local tasks_file
   tasks_file=$(get_tasks_file)
 
-  jq '
+  local result
+  result=$(jq '
     . as $root |
     [
       .userStories[] |
@@ -271,7 +305,13 @@ cmd_list_ready() {
       )
     | if . then $story else empty end
     ]
-  ' "$tasks_file"
+  ' "$tasks_file")
+
+  if [ "$brief" = true ]; then
+    echo "$result" | jq '[.[] | {id, title, priority, dependsOn}]'
+  else
+    echo "$result"
+  fi
 }
 
 # Get next pending story
@@ -307,6 +347,24 @@ cmd_current_story() {
   jq --arg id "$story_id" '.userStories[] | select(.id == $id)' "$tasks_file"
 }
 
+# Get full story object by ID (read-only)
+cmd_get_story() {
+  local story_id="$1"
+  local tasks_file
+
+  if [ -z "$story_id" ]; then
+    echo "Usage: aimi-cli.sh get-story <story-id>" >&2
+    exit 1
+  fi
+
+  validate_story_id "$story_id"
+
+  tasks_file=$(get_tasks_file)
+  validate_story_exists "$story_id" "$tasks_file"
+
+  jq --arg id "$story_id" '.userStories[] | select(.id == $id)' "$tasks_file"
+}
+
 # Mark a story as in-progress
 cmd_mark_in_progress() {
   local story_id="$1"
@@ -336,7 +394,7 @@ cmd_mark_in_progress() {
 
   write_state "current-story" "$story_id"
 
-  jq --arg id "$story_id" '.userStories[] | select(.id == $id)' "$tasks_file"
+  printf '{"id":"%s","status":"in_progress"}\n' "$story_id"
 }
 
 # Mark a story as complete
@@ -369,7 +427,7 @@ cmd_mark_complete() {
   clear_state_file "current-story"
   write_state "last-result" "success"
 
-  jq --arg id "$story_id" '.userStories[] | select(.id == $id)' "$tasks_file"
+  printf '{"id":"%s","status":"completed"}\n' "$story_id"
 }
 
 # Mark a story as failed with notes
@@ -403,7 +461,7 @@ cmd_mark_failed() {
   clear_state_file "current-story"
   write_state "last-result" "failed"
 
-  jq --arg id "$story_id" '.userStories[] | select(.id == $id)' "$tasks_file"
+  printf '{"id":"%s","status":"failed","notes":"%s"}\n' "$story_id" "$notes"
 }
 
 # Mark a story as skipped
@@ -436,7 +494,7 @@ cmd_mark_skipped() {
   clear_state_file "current-story"
   write_state "last-result" "skipped"
 
-  jq --arg id "$story_id" '.userStories[] | select(.id == $id)' "$tasks_file"
+  printf '{"id":"%s","status":"skipped"}\n' "$story_id"
 }
 
 # Count pending stories
@@ -538,7 +596,7 @@ cmd_validate_stories() {
       (
         (if ($s.title | length) > 200 then ["\($s.id): title exceeds 200 chars"] else [] end) +
         (if ($s.description | length) > 500 then ["\($s.id): description exceeds 500 chars"] else [] end) +
-        ([$s.acceptanceCriteria[] | select(length > 300)] | if length > 0 then ["\($s.id): acceptance criterion exceeds 300 chars"] else [] end) +
+        ([$s.acceptanceCriteria[] | select(length > 600)] | if length > 0 then ["\($s.id): acceptance criterion exceeds 600 chars"] else [] end) +
         (if ($s.title | test("ignore previous|system:|INSTRUCTIONS|```|\\$\\(|`"; "i")) then ["\($s.id): title contains suspicious content"] else [] end) +
         (if ($s.description | test("ignore previous|system:|INSTRUCTIONS|```|\\$\\(|`"; "i")) then ["\($s.id): description contains suspicious content"] else [] end)
       ) | .[]
@@ -817,21 +875,24 @@ USAGE:
 COMMANDS:
     init-session              Initialize execution session, save state
     find-tasks                Find most recent tasks file
-    status                    Get status summary as JSON
+    status [--counts-only]    Get status summary as JSON
+                              --counts-only  Return aggregate counts without userStories array
     metadata                  Get metadata only
     next-story                Get next pending story, save to state
     current-story             Get currently active story from state
-    list-ready                List stories ready to execute (dependency-aware)
-    mark-in-progress <id>     Mark story as in_progress
-    mark-complete <id>        Mark story as completed
-    mark-failed <id> [notes]  Mark story as failed with notes
-    mark-skipped <id>         Mark story as skipped
+    list-ready [--brief]      List stories ready to execute (dependency-aware)
+                              --brief  Return only {id, title, priority, dependsOn} per story
+    mark-in-progress <id>     Mark story as in_progress (returns {id, status} JSON)
+    mark-complete <id>        Mark story as completed (returns {id, status} JSON)
+    mark-failed <id> [notes]  Mark story as failed (returns {id, status, notes} JSON)
+    mark-skipped <id>         Mark story as skipped (returns {id, status} JSON)
     count-pending             Count pending stories
     validate-deps             Validate dependency graph (no cycles, no missing refs)
     validate-stories          Validate story content (length, suspicious patterns)
     cascade-skip <id>         Skip all stories depending on failed story
     reset-orphaned            Reset all in_progress stories to failed
     get-branch                Get branchName from metadata
+    get-story <id>            Get full story object by ID (read-only)
     get-state                 Get all state files as JSON
     clear-state               Clear all state files
     check-version [--quiet] [--fix]
@@ -869,6 +930,9 @@ EXAMPLES:
     # Validate dependency graph
     $AIMI_CLI validate-deps
 
+    # Fetch a specific story by ID
+    $AIMI_CLI get-story US-003
+
     # Cascade skip after failure
     $AIMI_CLI cascade-skip US-003
 
@@ -896,11 +960,11 @@ main() {
   case "${1:-help}" in
     init-session)      cmd_init_session ;;
     find-tasks)        cmd_find_tasks ;;
-    status)            cmd_status ;;
+    status)            shift; cmd_status "$@" ;;
     metadata)          cmd_metadata ;;
     next-story)        cmd_next_story ;;
     current-story)     cmd_current_story ;;
-    list-ready)        cmd_list_ready ;;
+    list-ready)        shift; cmd_list_ready "$@" ;;
     mark-in-progress)  cmd_mark_in_progress "${2:-}" ;;
     mark-complete)     cmd_mark_complete "${2:-}" ;;
     mark-failed)       cmd_mark_failed "${2:-}" "${3:-}" ;;
@@ -911,6 +975,7 @@ main() {
     cascade-skip)      cmd_cascade_skip "${2:-}" ;;
     reset-orphaned)    cmd_reset_orphaned ;;
     get-branch)        cmd_get_branch ;;
+    get-story)         cmd_get_story "${2:-}" ;;
     get-state)         cmd_get_state ;;
     clear-state)       cmd_clear_state ;;
     check-version)     shift; cmd_check_version "$@" ;;

@@ -9,7 +9,11 @@ allowed-tools: Read, Write, Edit, Bash(git:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:
 
 Execute all pending stories autonomously using wave-based fan-out.
 
-Each wave collects all ready stories. Single-story waves run inline (no worktree overhead). Multi-story waves spawn N foreground Tasks in one tool-call turn with worktrees, wait for all results, then merge.
+Each wave uses two-phase story loading to conserve context:
+- **Phase 1 (wave selection):** `list-ready --brief` returns lightweight story stubs `{id, title, priority, dependsOn}` for scheduling decisions.
+- **Phase 2 (prompt construction):** `get-story <id>` fetches full story data `{description, acceptanceCriteria, notes}` only for selected stories, after they are claimed with `mark-in-progress`.
+
+Single-story waves run inline (no worktree overhead). Multi-story waves spawn N foreground Tasks in one tool-call turn with worktrees, wait for all results, then merge.
 
 ## Step 0: Resolve CLI Path
 
@@ -179,8 +183,8 @@ while true:
     pending = $AIMI_CLI count-pending
     if pending == 0: break
 
-    # Get ready stories
-    ready_stories = $AIMI_CLI list-ready
+    # Get ready stories (brief mode — returns {id, title, priority, dependsOn} only)
+    ready_stories = $AIMI_CLI list-ready --brief
     if ready_stories is empty:
         if pending > 0:
             Report: "Deadlock detected: [pending] stories pending but none are ready."
@@ -208,18 +212,29 @@ while true:
     if len(selected_stories) == 1:
         story = selected_stories[0]
 
+        # Fetch full story data (description, acceptanceCriteria, notes)
+        full_story = $AIMI_CLI get-story [story.id]
+        if get-story failed:
+            $AIMI_CLI mark-failed [story.id] "get-story failed"
+            $AIMI_CLI cascade-skip [story.id]
+            Report: "[story.id] failed (could not fetch story data). Dependent stories cascade-skipped."
+            Report: "Wave [wave] complete."
+            wave += 1
+            continue
+
         # Spawn a single foreground Task — same pattern as next.md
         # No worktree, worker operates in current directory
+        # IMPORTANT: subagent_type MUST be "general-purpose" — story-executor is a skill, NOT an agent.
         Task(
             subagent_type: "general-purpose",
-            description: "Execute [story.id]: [story.title]",
+            description: "Execute [full_story.id]: [full_story.title]",
             prompt: [story-executor SKILL.md prompt template with:
                 - PROJECT_GUIDELINES = PROJECT_GUIDELINES
-                - STORY_ID = story.id
-                - STORY_TITLE = story.title
-                - STORY_DESCRIPTION = story.description
-                - ACCEPTANCE_CRITERIA = story.acceptanceCriteria (bulleted)
-                - story.notes = story.notes (include PREVIOUS NOTES section only if non-empty)
+                - STORY_ID = full_story.id
+                - STORY_TITLE = full_story.title
+                - STORY_DESCRIPTION = full_story.description
+                - ACCEPTANCE_CRITERIA = full_story.acceptanceCriteria (bulleted)
+                - full_story.notes = full_story.notes (include PREVIOUS NOTES section only if non-empty)
                 - No WORKTREE_PATH (sequential — worker operates in current directory)
             ]
         )
@@ -241,10 +256,59 @@ while true:
     # MULTI-STORY WAVE (parallel with worktrees)
     # ========================================
 
+    # Fetch full story data for all selected stories (claim-then-fetch)
+    full_stories = []
+    fetch_failed = []
+    for story in selected_stories:
+        full_story = $AIMI_CLI get-story [story.id]
+        if get-story failed:
+            fetch_failed.append(story)
+            $AIMI_CLI mark-failed [story.id] "get-story failed"
+            $AIMI_CLI cascade-skip [story.id]
+            Report: "[story.id] failed (could not fetch story data). Dependent stories cascade-skipped."
+        else:
+            full_stories.append(full_story)
+
+    # If all fetches failed, skip worktree creation entirely
+    if len(full_stories) == 0:
+        Report: "Wave [wave] complete: 0 succeeded, [len(fetch_failed)] failed (all get-story calls failed)"
+        wave += 1
+        continue
+
+    # If only one story remains after fetch failures, use single-story path (no worktree)
+    if len(full_stories) == 1:
+        full_story = full_stories[0]
+        Task(
+            subagent_type: "general-purpose",
+            description: "Execute [full_story.id]: [full_story.title]",
+            prompt: [story-executor SKILL.md prompt template with:
+                - PROJECT_GUIDELINES = PROJECT_GUIDELINES
+                - STORY_ID = full_story.id
+                - STORY_TITLE = full_story.title
+                - STORY_DESCRIPTION = full_story.description
+                - ACCEPTANCE_CRITERIA = full_story.acceptanceCriteria (bulleted)
+                - full_story.notes = full_story.notes (include PREVIOUS NOTES section only if non-empty)
+                - No WORKTREE_PATH (single remaining story — no worktree overhead)
+            ]
+        )
+
+        if Task succeeded:
+            $AIMI_CLI mark-complete [full_story.id]
+            Report: "[full_story.id] completed."
+        else:
+            $AIMI_CLI mark-failed [full_story.id] "Failed during wave [wave]"
+            $AIMI_CLI cascade-skip [full_story.id]
+            Report: "[full_story.id] failed. Dependent stories cascade-skipped."
+
+        Report: "Wave [wave] complete."
+        wave += 1
+        continue
+
+    # Multiple stories remain — proceed with worktree parallelism
     worktree_names = []
 
-    for story in selected_stories:
-        worktree_name = "aimi-[story.id]"
+    for full_story in full_stories:
+        worktree_name = "aimi-[full_story.id]"
         worktree_names.append(worktree_name)
 
         # Create worktree from current feature branch
@@ -257,22 +321,23 @@ while true:
     # Claude Code runs multiple foreground Tasks concurrently and returns
     # all results before the agent's turn ends.
     #
+    # IMPORTANT: subagent_type MUST be "general-purpose" — story-executor is a skill, NOT an agent.
     # In one tool-call turn, emit N Task calls:
-    for story in selected_stories:
-        worktree_name = "aimi-[story.id]"
+    for full_story in full_stories:
+        worktree_name = "aimi-[full_story.id]"
         worktree_path = [worktree path for this story]
 
         Task(
             subagent_type: "general-purpose",
-            description: "Execute [story.id]: [story.title]",
+            description: "Execute [full_story.id]: [full_story.title]",
             prompt: [story-executor SKILL.md prompt template with:
                 - WORKTREE_PATH = worktree_path
                 - PROJECT_GUIDELINES = PROJECT_GUIDELINES
-                - STORY_ID = story.id
-                - STORY_TITLE = story.title
-                - STORY_DESCRIPTION = story.description
-                - ACCEPTANCE_CRITERIA = story.acceptanceCriteria (bulleted)
-                - story.notes = story.notes (include PREVIOUS NOTES section only if non-empty)
+                - STORY_ID = full_story.id
+                - STORY_TITLE = full_story.title
+                - STORY_DESCRIPTION = full_story.description
+                - ACCEPTANCE_CRITERIA = full_story.acceptanceCriteria (bulleted)
+                - full_story.notes = full_story.notes (include PREVIOUS NOTES section only if non-empty)
                 - Do NOT modify the tasks.json file — report result (success/failure + details)
             ]
         )
@@ -283,21 +348,21 @@ while true:
 
     for each Task result:
         if Task succeeded:
-            succeeded_stories.append(story)
+            succeeded_stories.append(full_story)
         else:
-            failed_stories.append(story)
+            failed_stories.append(full_story)
 
     # --- Post-Wave Processing ---
 
     # Handle failures first
-    for story in failed_stories:
-        $AIMI_CLI mark-failed [story.id] "Failed during parallel wave [wave]"
-        $AIMI_CLI cascade-skip [story.id]
-        Report: "[story.id] failed. Dependent stories cascade-skipped."
+    for full_story in failed_stories:
+        $AIMI_CLI mark-failed [full_story.id] "Failed during parallel wave [wave]"
+        $AIMI_CLI cascade-skip [full_story.id]
+        Report: "[full_story.id] failed. Dependent stories cascade-skipped."
 
     # Merge all successful worktrees using merge-all
     if len(succeeded_stories) > 0:
-        succeeded_worktree_names = ["aimi-[story.id]" for story in succeeded_stories]
+        succeeded_worktree_names = ["aimi-[full_story.id]" for full_story in succeeded_stories]
 
         merge_result = $WORKTREE_MGR merge-all [succeeded_worktree_names...] --into [branchName]
 
@@ -316,9 +381,9 @@ while true:
             STOP execution.
 
         # All merges succeeded — mark stories complete
-        for story in succeeded_stories:
-            $AIMI_CLI mark-complete [story.id]
-            Report: "[story.id] merged successfully."
+        for full_story in succeeded_stories:
+            $AIMI_CLI mark-complete [full_story.id]
+            Report: "[full_story.id] merged successfully."
 
     # Remove all worktrees from this wave
     for wt in worktree_names:

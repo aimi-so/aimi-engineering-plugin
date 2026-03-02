@@ -147,7 +147,7 @@ See `references/task-format-v3.md` for the complete v3 schema definition, status
 - [ ] Acceptance criteria are verifiable (not vague)
 - [ ] branchName is valid (alphanumeric, hyphens, slashes)
 - [ ] `planPath` is `null`
-- [ ] Field lengths: title ≤ 200, description ≤ 500, criterion ≤ 300
+- [ ] Field lengths: title ≤ 200, description ≤ 500, criterion ≤ 600
 
 ### v3 Schema Validations
 - [ ] `schemaVersion` is `"3.0"`

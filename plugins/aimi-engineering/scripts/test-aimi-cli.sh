@@ -332,7 +332,7 @@ test_mark_in_progress() {
   local output
   output=$("$CLI" mark-in-progress US-001)
 
-  assert_contains '"status": "in_progress"' "$output" "mark-in-progress sets status to in_progress"
+  assert_contains '"status":"in_progress"' "$output" "mark-in-progress sets status to in_progress"
 }
 
 test_mark_complete() {
@@ -342,7 +342,7 @@ test_mark_complete() {
   local output
   output=$("$CLI" mark-complete US-001)
 
-  assert_contains '"status": "completed"' "$output" "mark-complete sets status to completed"
+  assert_contains '"status":"completed"' "$output" "mark-complete sets status to completed"
 
   # Check last-result state
   local last
@@ -383,8 +383,8 @@ test_mark_failed() {
   local output
   output=$("$CLI" mark-failed US-002 "Build error in module X")
 
-  assert_contains '"status": "failed"' "$output" "mark-failed sets status to failed"
-  assert_contains '"notes": "Build error in module X"' "$output" "mark-failed sets notes"
+  assert_contains '"status":"failed"' "$output" "mark-failed sets status to failed"
+  assert_contains '"notes":"Build error in module X"' "$output" "mark-failed sets notes"
 
   # Check state
   local last
@@ -420,7 +420,7 @@ test_mark_skipped() {
   local output
   output=$("$CLI" mark-skipped US-003)
 
-  assert_contains '"status": "skipped"' "$output" "mark-skipped sets status to skipped"
+  assert_contains '"status":"skipped"' "$output" "mark-skipped sets status to skipped"
 
   # Check state
   local last
@@ -928,6 +928,379 @@ test_auto_discovery_not_found() {
 }
 
 # ============================================================================
+# CLI Output Optimization Tests
+# ============================================================================
+
+# Helper: reset fixture to fresh state with all stories pending
+reset_fixture() {
+  "$CLI" clear-state > /dev/null
+
+  cat > "$TASKS_FILE" << 'EOF'
+{
+  "schemaVersion": "3.0",
+  "metadata": {
+    "title": "feat: Test feature",
+    "type": "feat",
+    "branchName": "feat/test-feature",
+    "createdAt": "2026-02-27",
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 4
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Schema story (root)",
+      "description": "Independent root story",
+      "acceptanceCriteria": ["Typecheck passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Another root story",
+      "description": "Independent root story 2",
+      "acceptanceCriteria": ["Typecheck passes"],
+      "priority": 2,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Backend depends on US-001",
+      "description": "Depends on schema",
+      "acceptanceCriteria": ["Typecheck passes"],
+      "priority": 3,
+      "status": "pending",
+      "dependsOn": ["US-001"],
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "UI depends on US-002 and US-003",
+      "description": "Diamond convergence",
+      "acceptanceCriteria": ["Typecheck passes"],
+      "priority": 4,
+      "status": "pending",
+      "dependsOn": ["US-002", "US-003"],
+      "notes": ""
+    }
+  ]
+}
+EOF
+
+  "$CLI" init-session > /dev/null
+}
+
+test_mark_in_progress_minimal_output() {
+  echo ""
+  echo "=== Testing mark-in-progress minimal output ==="
+
+  reset_fixture
+
+  local output
+  output=$("$CLI" mark-in-progress US-001)
+
+  # Should only have id and status keys (2 keys)
+  local key_count
+  key_count=$(echo "$output" | jq 'keys | length')
+  assert_eq "2" "$key_count" "mark-in-progress output has exactly 2 keys"
+
+  # Verify the keys are id and status
+  local has_id has_status
+  has_id=$(echo "$output" | jq 'has("id")')
+  has_status=$(echo "$output" | jq 'has("status")')
+  assert_eq "true" "$has_id" "mark-in-progress output has id key"
+  assert_eq "true" "$has_status" "mark-in-progress output has status key"
+
+  # Verify values
+  local id_val status_val
+  id_val=$(echo "$output" | jq -r '.id')
+  status_val=$(echo "$output" | jq -r '.status')
+  assert_eq "US-001" "$id_val" "mark-in-progress output id is US-001"
+  assert_eq "in_progress" "$status_val" "mark-in-progress output status is in_progress"
+
+  # Should NOT have title, description, etc
+  local has_title has_description
+  has_title=$(echo "$output" | jq 'has("title")')
+  has_description=$(echo "$output" | jq 'has("description")')
+  assert_eq "false" "$has_title" "mark-in-progress output has no title key"
+  assert_eq "false" "$has_description" "mark-in-progress output has no description key"
+}
+
+test_mark_complete_minimal_output() {
+  echo ""
+  echo "=== Testing mark-complete minimal output ==="
+
+  reset_fixture
+
+  local output
+  output=$("$CLI" mark-complete US-001)
+
+  # Should only have id and status keys (2 keys)
+  local key_count
+  key_count=$(echo "$output" | jq 'keys | length')
+  assert_eq "2" "$key_count" "mark-complete output has exactly 2 keys"
+
+  # Verify values
+  local id_val status_val
+  id_val=$(echo "$output" | jq -r '.id')
+  status_val=$(echo "$output" | jq -r '.status')
+  assert_eq "US-001" "$id_val" "mark-complete output id is US-001"
+  assert_eq "completed" "$status_val" "mark-complete output status is completed"
+
+  # Should NOT have title, description, etc
+  local has_title
+  has_title=$(echo "$output" | jq 'has("title")')
+  assert_eq "false" "$has_title" "mark-complete output has no title key"
+}
+
+test_mark_failed_minimal_output() {
+  echo ""
+  echo "=== Testing mark-failed minimal output ==="
+
+  reset_fixture
+
+  local output
+  output=$("$CLI" mark-failed US-001 "Build error in tests")
+
+  # Should have id, status, and notes keys (3 keys)
+  local key_count
+  key_count=$(echo "$output" | jq 'keys | length')
+  assert_eq "3" "$key_count" "mark-failed output has exactly 3 keys"
+
+  # Verify the keys are id, status, and notes
+  local has_id has_status has_notes
+  has_id=$(echo "$output" | jq 'has("id")')
+  has_status=$(echo "$output" | jq 'has("status")')
+  has_notes=$(echo "$output" | jq 'has("notes")')
+  assert_eq "true" "$has_id" "mark-failed output has id key"
+  assert_eq "true" "$has_status" "mark-failed output has status key"
+  assert_eq "true" "$has_notes" "mark-failed output has notes key"
+
+  # Verify values
+  local id_val status_val notes_val
+  id_val=$(echo "$output" | jq -r '.id')
+  status_val=$(echo "$output" | jq -r '.status')
+  notes_val=$(echo "$output" | jq -r '.notes')
+  assert_eq "US-001" "$id_val" "mark-failed output id is US-001"
+  assert_eq "failed" "$status_val" "mark-failed output status is failed"
+  assert_eq "Build error in tests" "$notes_val" "mark-failed output notes match"
+
+  # Should NOT have title, description, etc
+  local has_title
+  has_title=$(echo "$output" | jq 'has("title")')
+  assert_eq "false" "$has_title" "mark-failed output has no title key"
+}
+
+test_mark_skipped_minimal_output() {
+  echo ""
+  echo "=== Testing mark-skipped minimal output ==="
+
+  reset_fixture
+
+  local output
+  output=$("$CLI" mark-skipped US-001)
+
+  # Should only have id and status keys (2 keys)
+  local key_count
+  key_count=$(echo "$output" | jq 'keys | length')
+  assert_eq "2" "$key_count" "mark-skipped output has exactly 2 keys"
+
+  # Verify values
+  local id_val status_val
+  id_val=$(echo "$output" | jq -r '.id')
+  status_val=$(echo "$output" | jq -r '.status')
+  assert_eq "US-001" "$id_val" "mark-skipped output id is US-001"
+  assert_eq "skipped" "$status_val" "mark-skipped output status is skipped"
+
+  # Should NOT have title, description, etc
+  local has_title has_description
+  has_title=$(echo "$output" | jq 'has("title")')
+  has_description=$(echo "$output" | jq 'has("description")')
+  assert_eq "false" "$has_title" "mark-skipped output has no title key"
+  assert_eq "false" "$has_description" "mark-skipped output has no description key"
+}
+
+test_list_ready_full_default() {
+  echo ""
+  echo "=== Testing list-ready full output (default, no flags) ==="
+
+  reset_fixture
+
+  local output
+  output=$("$CLI" list-ready)
+
+  # Default list-ready should return full story objects with description and acceptanceCriteria
+  local has_description has_criteria
+  has_description=$(echo "$output" | jq '.[0] | has("description")')
+  has_criteria=$(echo "$output" | jq '.[0] | has("acceptanceCriteria")')
+  assert_eq "true" "$has_description" "list-ready default includes description"
+  assert_eq "true" "$has_criteria" "list-ready default includes acceptanceCriteria"
+
+  # Should also have status and notes fields
+  local has_status has_notes
+  has_status=$(echo "$output" | jq '.[0] | has("status")')
+  has_notes=$(echo "$output" | jq '.[0] | has("notes")')
+  assert_eq "true" "$has_status" "list-ready default includes status"
+  assert_eq "true" "$has_notes" "list-ready default includes notes"
+}
+
+test_list_ready_brief() {
+  echo ""
+  echo "=== Testing list-ready --brief output ==="
+
+  reset_fixture
+
+  local output
+  output=$("$CLI" list-ready --brief)
+
+  # Brief output should only have {id, title, priority, dependsOn} per story
+  local key_count
+  key_count=$(echo "$output" | jq '.[0] | keys | length')
+  assert_eq "4" "$key_count" "list-ready --brief: each story has exactly 4 keys"
+
+  # Verify the 4 expected keys exist
+  local has_id has_title has_priority has_depends
+  has_id=$(echo "$output" | jq '.[0] | has("id")')
+  has_title=$(echo "$output" | jq '.[0] | has("title")')
+  has_priority=$(echo "$output" | jq '.[0] | has("priority")')
+  has_depends=$(echo "$output" | jq '.[0] | has("dependsOn")')
+  assert_eq "true" "$has_id" "list-ready --brief has id"
+  assert_eq "true" "$has_title" "list-ready --brief has title"
+  assert_eq "true" "$has_priority" "list-ready --brief has priority"
+  assert_eq "true" "$has_depends" "list-ready --brief has dependsOn"
+
+  # Should NOT have description, acceptanceCriteria, status, or notes
+  local has_description has_criteria has_status has_notes
+  has_description=$(echo "$output" | jq '.[0] | has("description")')
+  has_criteria=$(echo "$output" | jq '.[0] | has("acceptanceCriteria")')
+  has_status=$(echo "$output" | jq '.[0] | has("status")')
+  has_notes=$(echo "$output" | jq '.[0] | has("notes")')
+  assert_eq "false" "$has_description" "list-ready --brief has no description"
+  assert_eq "false" "$has_criteria" "list-ready --brief has no acceptanceCriteria"
+  assert_eq "false" "$has_status" "list-ready --brief has no status"
+  assert_eq "false" "$has_notes" "list-ready --brief has no notes"
+}
+
+test_status_full_default() {
+  echo ""
+  echo "=== Testing status full output (default, no flags) ==="
+
+  reset_fixture
+
+  local output
+  output=$("$CLI" status)
+
+  # Default status should include userStories array
+  local has_stories
+  has_stories=$(echo "$output" | jq 'has("userStories")')
+  assert_eq "true" "$has_stories" "status default includes userStories key"
+
+  # Verify userStories is an array with content
+  local stories_len
+  stories_len=$(echo "$output" | jq '.userStories | length')
+  if [ "$stories_len" -gt 0 ]; then
+    echo -e "${GREEN}✓${NC} status default: userStories array is non-empty (count: $stories_len)"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} status default: userStories array is non-empty"
+    echo "  Actual length: $stories_len"
+    ((TESTS_FAILED++))
+  fi
+
+  # Should also include count fields
+  local has_pending has_completed
+  has_pending=$(echo "$output" | jq 'has("pending")')
+  has_completed=$(echo "$output" | jq 'has("completed")')
+  assert_eq "true" "$has_pending" "status default includes pending count"
+  assert_eq "true" "$has_completed" "status default includes completed count"
+}
+
+test_status_counts_only() {
+  echo ""
+  echo "=== Testing status --counts-only output ==="
+
+  reset_fixture
+
+  local output
+  output=$("$CLI" status --counts-only)
+
+  # --counts-only should NOT include userStories
+  local has_stories
+  has_stories=$(echo "$output" | jq 'has("userStories")')
+  assert_eq "false" "$has_stories" "status --counts-only has no userStories key"
+
+  # Should still have count fields
+  local has_pending has_completed has_failed has_skipped has_in_progress has_total
+  has_pending=$(echo "$output" | jq 'has("pending")')
+  has_completed=$(echo "$output" | jq 'has("completed")')
+  has_failed=$(echo "$output" | jq 'has("failed")')
+  has_skipped=$(echo "$output" | jq 'has("skipped")')
+  has_in_progress=$(echo "$output" | jq 'has("in_progress")')
+  has_total=$(echo "$output" | jq 'has("total")')
+  assert_eq "true" "$has_pending" "status --counts-only has pending count"
+  assert_eq "true" "$has_completed" "status --counts-only has completed count"
+  assert_eq "true" "$has_failed" "status --counts-only has failed count"
+  assert_eq "true" "$has_skipped" "status --counts-only has skipped count"
+  assert_eq "true" "$has_in_progress" "status --counts-only has in_progress count"
+  assert_eq "true" "$has_total" "status --counts-only has total count"
+
+  # Verify count values with fresh fixture (all pending)
+  local pending_val total_val
+  pending_val=$(echo "$output" | jq '.pending')
+  total_val=$(echo "$output" | jq '.total')
+  assert_eq "4" "$pending_val" "status --counts-only pending is 4"
+  assert_eq "4" "$total_val" "status --counts-only total is 4"
+
+  # Should still have metadata fields
+  local has_schema has_branch
+  has_schema=$(echo "$output" | jq 'has("schemaVersion")')
+  has_branch=$(echo "$output" | jq 'has("branch")')
+  assert_eq "true" "$has_schema" "status --counts-only has schemaVersion"
+  assert_eq "true" "$has_branch" "status --counts-only has branch"
+}
+
+test_next_story_returns_full_object() {
+  echo ""
+  echo "=== Testing next-story returns full object (regression) ==="
+
+  reset_fixture
+
+  local output
+  output=$("$CLI" next-story)
+
+  # next-story should return full story object with description and acceptanceCriteria
+  local has_description has_criteria has_id has_title has_status has_priority
+  has_description=$(echo "$output" | jq 'has("description")')
+  has_criteria=$(echo "$output" | jq 'has("acceptanceCriteria")')
+  has_id=$(echo "$output" | jq 'has("id")')
+  has_title=$(echo "$output" | jq 'has("title")')
+  has_status=$(echo "$output" | jq 'has("status")')
+  has_priority=$(echo "$output" | jq 'has("priority")')
+
+  assert_eq "true" "$has_id" "next-story returns id"
+  assert_eq "true" "$has_title" "next-story returns title"
+  assert_eq "true" "$has_description" "next-story returns description"
+  assert_eq "true" "$has_criteria" "next-story returns acceptanceCriteria"
+  assert_eq "true" "$has_status" "next-story returns status"
+  assert_eq "true" "$has_priority" "next-story returns priority"
+
+  # Verify it is the right story (US-001 by priority)
+  local id_val
+  id_val=$(echo "$output" | jq -r '.id')
+  assert_eq "US-001" "$id_val" "next-story returns US-001 (first by priority)"
+
+  # Verify description has actual content (not empty)
+  local desc_val
+  desc_val=$(echo "$output" | jq -r '.description')
+  assert_eq "Independent root story" "$desc_val" "next-story description has content"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -1004,6 +1377,19 @@ main() {
   echo "--- Auto-Discovery Tests ---"
   test_auto_discovery_from_subdirectory
   test_auto_discovery_not_found
+
+  # CLI output optimization tests — run with fresh fixture each time
+  echo ""
+  echo "--- CLI Output Optimization Tests ---"
+  test_mark_in_progress_minimal_output
+  test_mark_complete_minimal_output
+  test_mark_failed_minimal_output
+  test_mark_skipped_minimal_output
+  test_list_ready_full_default
+  test_list_ready_brief
+  test_status_full_default
+  test_status_counts_only
+  test_next_story_returns_full_object
 
   cleanup
 

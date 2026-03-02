@@ -81,6 +81,11 @@ Description: [STORY_DESCRIPTION]
 
 [story.notes]
 
+## Tools
+
+Use built-in tools directly: Read, Write, Edit, Bash, Grep, Glob.
+Do NOT invoke these via the Skill tool — "write" is a Write tool, not a skill.
+
 ## Execution Flow
 
 0. If WORKTREE_PATH is set, cd to WORKTREE_PATH
