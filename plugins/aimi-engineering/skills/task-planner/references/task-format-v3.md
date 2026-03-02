@@ -61,7 +61,7 @@ Each story is ONE atomic unit of work completable in a single agent iteration.
 | `id` | string | Yes | — | Unique identifier (e.g., `US-001`, `US-002`) |
 | `title` | string | Yes | — | Short story title (max 200 chars) |
 | `description` | string | Yes | — | User story format: "As a [user], I want [feature] so that [benefit]" (max 500 chars) |
-| `acceptanceCriteria` | string[] | Yes | — | Verifiable criteria (must include `"Typecheck passes"`, each max 300 chars) |
+| `acceptanceCriteria` | string[] | Yes | — | Verifiable criteria (must include `"Typecheck passes"`, each max 600 chars) |
 | `priority` | number | Yes | — | Tiebreaker for stories at the same dependency depth. Lower = runs first among peers. |
 | `status` | string | Yes | `"pending"` | One of: `"pending"`, `"in_progress"`, `"completed"`, `"failed"`, `"skipped"` |
 | `dependsOn` | string[] | Yes | `[]` | Array of story IDs this story depends on (e.g., `["US-001", "US-002"]`) |

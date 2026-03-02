@@ -244,7 +244,7 @@ When generating stories from research output and user input:
 
 - **Title**: Strip markdown headers (`#`), limit to 200 characters
 - **Description**: Strip code fences, limit to 500 characters
-- **Acceptance criteria**: Strip newlines, limit each to 300 characters
+- **Acceptance criteria**: Strip newlines, limit each to 600 characters
 - **branchName**: Validate against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$`
 
 ---
@@ -260,7 +260,7 @@ Before finalizing stories, verify:
 - [ ] UI stories have "Verify in browser" as criterion
 - [ ] Acceptance criteria are verifiable (not vague)
 - [ ] IDs are sequential (US-001, US-002, ...)
-- [ ] Field lengths within limits (title ≤ 200, description ≤ 500, criterion ≤ 300)
+- [ ] Field lengths within limits (title ≤ 200, description ≤ 500, criterion ≤ 600)
 - [ ] branchName matches validation regex
 
 ### Dependency Graph (`dependsOn`)

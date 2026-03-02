@@ -145,7 +145,7 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 - [ ] `dependsOn` is `[]` for root stories with no upstream dependencies
 - [ ] branchName is valid (alphanumeric, hyphens, slashes)
 - [ ] `planPath` is `null`
-- [ ] Field lengths: title ≤ 200, description ≤ 500, criterion ≤ 300
+- [ ] Field lengths: title ≤ 200, description ≤ 500, criterion ≤ 600
 
 ## Step 5: Aimi-Branded Report
 

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.26.1] - 2026-03-02
+
+### Changed
+
+- **Acceptance criterion limit increased from 300 to 600 chars** across CLI validation, schema docs, skill references, and command checklists (aimi-cli.sh, task-format-v3.md, story-decomposition.md, SKILL.md, plan.md, CLAUDE.md, README.md)
+
 ## [1.26.0] - 2026-03-02
 
 ### Added

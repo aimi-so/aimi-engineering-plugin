@@ -497,7 +497,7 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 |-------|------------|
 | `title` | 200 chars |
 | `description` | 500 chars |
-| Each acceptance criterion | 300 chars |
+| Each acceptance criterion | 600 chars |
 
 ## Troubleshooting
 

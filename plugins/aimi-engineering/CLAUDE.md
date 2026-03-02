@@ -46,7 +46,7 @@ aimi-engineering-plugin/
 
 2. **Story content sanitization** - Before prompt interpolation:
    - Strip newlines, markdown headers, code fences
-   - Validate field lengths (title: 200, description: 500, criterion: 300)
+   - Validate field lengths (title: 200, description: 500, criterion: 600)
    - Reject suspicious content ("ignore previous instructions", shell syntax)
 
 3. **Bash permissions** - Use specific prefixes in allowed-tools:

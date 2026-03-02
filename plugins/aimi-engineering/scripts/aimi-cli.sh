@@ -578,7 +578,7 @@ cmd_validate_stories() {
       (
         (if ($s.title | length) > 200 then ["\($s.id): title exceeds 200 chars"] else [] end) +
         (if ($s.description | length) > 500 then ["\($s.id): description exceeds 500 chars"] else [] end) +
-        ([$s.acceptanceCriteria[] | select(length > 300)] | if length > 0 then ["\($s.id): acceptance criterion exceeds 300 chars"] else [] end) +
+        ([$s.acceptanceCriteria[] | select(length > 600)] | if length > 0 then ["\($s.id): acceptance criterion exceeds 600 chars"] else [] end) +
         (if ($s.title | test("ignore previous|system:|INSTRUCTIONS|```|\\$\\(|`"; "i")) then ["\($s.id): title contains suspicious content"] else [] end) +
         (if ($s.description | test("ignore previous|system:|INSTRUCTIONS|```|\\$\\(|`"; "i")) then ["\($s.id): description contains suspicious content"] else [] end)
       ) | .[]
