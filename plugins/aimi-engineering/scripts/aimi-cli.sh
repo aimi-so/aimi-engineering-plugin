@@ -864,10 +864,10 @@ COMMANDS:
     current-story             Get currently active story from state
     list-ready [--brief]      List stories ready to execute (dependency-aware)
                               --brief  Return only {id, title, priority, dependsOn} per story
-    mark-in-progress <id>     Mark story as in_progress
-    mark-complete <id>        Mark story as completed
-    mark-failed <id> [notes]  Mark story as failed with notes
-    mark-skipped <id>         Mark story as skipped
+    mark-in-progress <id>     Mark story as in_progress (returns {id, status} JSON)
+    mark-complete <id>        Mark story as completed (returns {id, status} JSON)
+    mark-failed <id> [notes]  Mark story as failed (returns {id, status, notes} JSON)
+    mark-skipped <id>         Mark story as skipped (returns {id, status} JSON)
     count-pending             Count pending stories
     validate-deps             Validate dependency graph (no cycles, no missing refs)
     validate-stories          Validate story content (length, suspicious patterns)
