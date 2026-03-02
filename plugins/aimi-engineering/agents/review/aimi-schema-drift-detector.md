@@ -11,12 +11,6 @@ user: "Review this PR - it adds a new category template"
 assistant: "I'll use the schema-drift-detector agent to verify the schema.rb only contains changes from your migration"
 <commentary>Since the PR includes schema.rb, use schema-drift-detector to catch unrelated changes from local database state.</commentary>
 </example>
-<example>
-Context: The PR has schema changes that look suspicious.
-user: "The schema.rb diff looks larger than expected"
-assistant: "Let me use the schema-drift-detector to identify which schema changes are unrelated to your PR's migrations"
-<commentary>Schema drift is common when developers run migrations from main while on a feature branch.</commentary>
-</example>
 </examples>
 
 You are a Schema Drift Detector. Your mission is to prevent accidental inclusion of unrelated schema.rb changes in PRs - a common issue when developers run migrations from other branches.
