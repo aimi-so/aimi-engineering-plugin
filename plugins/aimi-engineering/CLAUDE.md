@@ -76,6 +76,8 @@ All task execution files go in `.aimi/tasks/`:
 
 - `YYYY-MM-DD-[feature-name]-tasks.json` - Structured task list with user stories
 
+> The CLI auto-discovers `.aimi/` by walking up from CWD -- no need to be in the project root to run commands.
+
 Learnings are stored in project files (not separate progress log):
 
 - `CLAUDE.md` (root) - Project-wide patterns and conventions

@@ -9,7 +9,6 @@ set -euo pipefail
 
 AIMI_DIR=".aimi"
 TASKS_DIR="$AIMI_DIR/tasks"
-SWARM_STATE_FILE="$AIMI_DIR/swarm-state.json"
 
 # ============================================================================
 # Utility Functions
@@ -27,6 +26,30 @@ resolve_path() {
   else
     (cd "$(dirname "$path")" && echo "$(pwd)/$(basename "$path")")
   fi
+}
+
+# Auto-discover the project root containing .aimi/ by walking up the directory tree.
+# On success: cd to the discovered root, rewrite AIMI_DIR and TASKS_DIR to absolute paths.
+# On failure (reached /): exit 1 with error to stderr.
+find_aimi_root() {
+  local dir
+  dir=$(pwd)
+  while true; do
+    if [ -d "$dir/.aimi" ]; then
+      cd "$dir"
+      AIMI_DIR="$dir/.aimi"
+      TASKS_DIR="$AIMI_DIR/tasks"
+      return 0
+    fi
+    local parent
+    parent=$(dirname "$dir")
+    if [ "$parent" = "$dir" ]; then
+      # Reached filesystem root without finding .aimi/
+      echo "Error: .aimi/ directory not found in any parent directory" >&2
+      exit 1
+    fi
+    dir="$parent"
+  done
 }
 
 # Portable exclusive lock (Linux: flock, macOS: mkdir spinlock)
@@ -816,18 +839,6 @@ COMMANDS:
                               --quiet  Suppress stderr warnings
                               --fix    Auto-update cli-path on stale detection (exits 0)
     cleanup-versions          Remove old cached plugin versions, keep latest only
-
-  Swarm Management:
-    swarm-init [--force]      Initialize swarm state (creates .aimi/swarm-state.json)
-    swarm-add <cid> <name> <taskFile> <branch>
-                              Add container entry to swarm state
-    swarm-update <name> --status <s> [--pr-url <url>] [--story-progress <json>] [--acp-pid <pid>]
-                              Update container fields by name (flock-protected)
-    swarm-remove <name>       Remove container entry by name
-    swarm-status              Output current swarm state as formatted JSON
-    swarm-list                List container names and statuses (TSV)
-    swarm-cleanup             Remove completed/failed container entries
-
     help                      Show this help message
 
 STATE FILES (.aimi/):
@@ -866,397 +877,7 @@ EXAMPLES:
 
     # Resume after /clear
     $AIMI_CLI get-state
-
-    # --- Swarm management ---
-    # Initialize a new swarm
-    $AIMI_CLI swarm-init
-
-    # Add a container to the swarm
-    $AIMI_CLI swarm-add abc123def456 aimi-sandbox-US-001 .aimi/tasks/2026-03-01-feature-tasks.json feat/feature
-
-    # Update container status and progress
-    $AIMI_CLI swarm-update aimi-sandbox-US-001 --status running --story-progress '{"total":5,"completed":2,"failed":0,"inProgress":1,"pending":2}'
-
-    # List all containers
-    $AIMI_CLI swarm-list
-
-    # Clean up finished containers
-    $AIMI_CLI swarm-cleanup
 EOF
-}
-
-# ============================================================================
-# Swarm State Management Commands
-# ============================================================================
-
-# Portable UUID v4 generator (no external dependencies)
-_generate_uuid() {
-  if command -v uuidgen &>/dev/null; then
-    uuidgen | tr '[:upper:]' '[:lower:]'
-  elif [ -r /proc/sys/kernel/random/uuid ]; then
-    cat /proc/sys/kernel/random/uuid
-  else
-    # Fallback: generate from /dev/urandom
-    local hex
-    hex=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
-    # Format as UUID v4: set version (4) and variant (8-b) bits
-    printf '%s-%s-4%s-%s%s-%s\n' \
-      "${hex:0:8}" "${hex:8:4}" "${hex:13:3}" \
-      "$(printf '%x' $(( 0x${hex:16:2} & 0x3f | 0x80 )))" \
-      "${hex:18:2}" "${hex:20:12}"
-  fi
-}
-
-# Get current ISO 8601 timestamp
-_iso_timestamp() {
-  date -u '+%Y-%m-%dT%H:%M:%SZ'
-}
-
-# Validate container name format: ^aimi-[a-zA-Z0-9][a-zA-Z0-9_-]*$
-# Harmonized with sandbox-manager.sh validate_container_name
-_validate_container_name() {
-  local name="$1"
-  if [ -z "$name" ]; then
-    echo "Error: Container name is required." >&2
-    exit 1
-  fi
-  if ! [[ "$name" =~ ^aimi-[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]]; then
-    echo "Error: Invalid container name: $name (must match ^aimi-[a-zA-Z0-9][a-zA-Z0-9_-]*\$)" >&2
-    exit 1
-  fi
-}
-
-# Validate container ID format: ^[0-9a-f]{12,64}$
-_validate_container_id() {
-  local cid="$1"
-  if [ -z "$cid" ]; then
-    echo "Error: Container ID is required." >&2
-    exit 1
-  fi
-  if ! [[ "$cid" =~ ^[0-9a-f]{12,64}$ ]]; then
-    echo "Error: Invalid container ID: $cid (must be 12-64 hex chars)" >&2
-    exit 1
-  fi
-}
-
-# Validate container status: pending|running|completed|failed|stopped
-_validate_container_status() {
-  local status="$1"
-  case "$status" in
-    pending|running|completed|failed|stopped) ;;
-    *)
-      echo "Error: Invalid container status: $status (must be pending|running|completed|failed|stopped)" >&2
-      exit 1
-      ;;
-  esac
-}
-
-# Validate branch name: ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$
-_validate_branch_name() {
-  local branch="$1"
-  if [ -z "$branch" ]; then
-    echo "Error: Branch name is required." >&2
-    exit 1
-  fi
-  if ! [[ "$branch" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
-    echo "Error: Invalid branch name: $branch" >&2
-    exit 1
-  fi
-}
-
-# Validate swarm state file exists
-_require_swarm_state() {
-  if [ ! -f "$SWARM_STATE_FILE" ]; then
-    echo "Error: No active swarm. Run 'swarm-init' first." >&2
-    exit 1
-  fi
-}
-
-# Validate container name exists in swarm state
-_require_container_exists() {
-  local name="$1"
-  if ! jq -e --arg name "$name" '.containers[] | select(.containerName == $name)' "$SWARM_STATE_FILE" > /dev/null 2>&1; then
-    echo "Error: Container '$name' not found in swarm state." >&2
-    exit 1
-  fi
-}
-
-# Initialize a new swarm state file
-# Usage: aimi-cli.sh swarm-init [--force]
-cmd_swarm_init() {
-  local force=0
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --force) force=1; shift ;;
-      *) echo "Error: Unknown option: $1" >&2; exit 1 ;;
-    esac
-  done
-
-  ensure_state_dir
-
-  # Check for existing active swarm
-  if [ -f "$SWARM_STATE_FILE" ] && [ "$force" -eq 0 ]; then
-    # Check if there are any non-terminal containers
-    local active_count
-    active_count=$(jq '[.containers[] | select(.status == "pending" or .status == "running")] | length' "$SWARM_STATE_FILE" 2>/dev/null || echo 0)
-    if [ "$active_count" -gt 0 ]; then
-      echo "Error: Active swarm exists with $active_count running/pending containers. Use --force to overwrite." >&2
-      exit 1
-    fi
-  fi
-
-  local swarm_id now
-  swarm_id=$(_generate_uuid)
-  now=$(_iso_timestamp)
-
-  # Atomic write using flock
-  local tmp_file
-  tmp_file=$(mktemp "${SWARM_STATE_FILE}.XXXXXX")
-  (
-    _lock "${SWARM_STATE_FILE}.lock"
-    jq -n --arg swarmId "$swarm_id" --arg now "$now" \
-      '{
-        swarmId: $swarmId,
-        createdAt: $now,
-        updatedAt: $now,
-        containers: []
-      }' > "$tmp_file" && mv "$tmp_file" "$SWARM_STATE_FILE"
-  ) 200>"${SWARM_STATE_FILE}.lock"
-  rm -f "$tmp_file" 2>/dev/null
-
-  jq '.' "$SWARM_STATE_FILE"
-}
-
-# Add a container entry to swarm state
-# Usage: aimi-cli.sh swarm-add <containerId> <containerName> <taskFilePath> <branchName>
-cmd_swarm_add() {
-  local container_id="${1:-}"
-  local container_name="${2:-}"
-  local task_file_path="${3:-}"
-  local branch_name="${4:-}"
-
-  if [ -z "$container_id" ] || [ -z "$container_name" ] || [ -z "$task_file_path" ] || [ -z "$branch_name" ]; then
-    echo "Usage: aimi-cli.sh swarm-add <containerId> <containerName> <taskFilePath> <branchName>" >&2
-    exit 1
-  fi
-
-  _require_swarm_state
-  _validate_container_id "$container_id"
-  _validate_container_name "$container_name"
-  _validate_branch_name "$branch_name"
-
-  # Check for duplicate container name
-  if jq -e --arg name "$container_name" '.containers[] | select(.containerName == $name)' "$SWARM_STATE_FILE" > /dev/null 2>&1; then
-    echo "Error: Container '$container_name' already exists in swarm state." >&2
-    exit 1
-  fi
-
-  local now
-  now=$(_iso_timestamp)
-
-  # Atomic update using flock
-  local tmp_file
-  tmp_file=$(mktemp "${SWARM_STATE_FILE}.XXXXXX")
-  (
-    _lock "${SWARM_STATE_FILE}.lock"
-    jq --arg cid "$container_id" \
-       --arg cname "$container_name" \
-       --arg tfp "$task_file_path" \
-       --arg branch "$branch_name" \
-       --arg now "$now" \
-      '.updatedAt = $now |
-       .containers += [{
-         containerId: $cid,
-         containerName: $cname,
-         taskFilePath: $tfp,
-         branchName: $branch,
-         status: "pending",
-         prUrl: null,
-         storyProgress: {total: 0, completed: 0, failed: 0, inProgress: 0, pending: 0},
-         createdAt: $now,
-         updatedAt: $now,
-         acpPid: null
-       }]' "$SWARM_STATE_FILE" > "$tmp_file" && mv "$tmp_file" "$SWARM_STATE_FILE"
-  ) 200>"${SWARM_STATE_FILE}.lock"
-  rm -f "$tmp_file" 2>/dev/null
-
-  # Output the added container entry
-  jq --arg name "$container_name" '.containers[] | select(.containerName == $name)' "$SWARM_STATE_FILE"
-}
-
-# Update a container's status and optional fields
-# Usage: aimi-cli.sh swarm-update <containerName> --status <status> [--pr-url <url>] [--story-progress <json>] [--acp-pid <pid>]
-cmd_swarm_update() {
-  local container_name="${1:-}"
-
-  if [ -z "$container_name" ]; then
-    echo "Usage: aimi-cli.sh swarm-update <containerName> --status <status> [--pr-url <url>] [--story-progress <json>] [--acp-pid <pid>]" >&2
-    exit 1
-  fi
-  shift
-
-  _require_swarm_state
-  _validate_container_name "$container_name"
-  _require_container_exists "$container_name"
-
-  # Parse optional arguments
-  local status="" pr_url="" story_progress="" acp_pid=""
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --status)
-        status="$2"; shift 2
-        _validate_container_status "$status"
-        ;;
-      --pr-url)
-        pr_url="$2"; shift 2 ;;
-      --story-progress)
-        story_progress="$2"; shift 2
-        # Validate JSON structure
-        if ! echo "$story_progress" | jq -e '.total and .completed != null and .failed != null and .inProgress != null and .pending != null' > /dev/null 2>&1; then
-          echo "Error: --story-progress must be JSON with fields: total, completed, failed, inProgress, pending" >&2
-          exit 1
-        fi
-        ;;
-      --acp-pid)
-        acp_pid="$2"; shift 2
-        if [ "$acp_pid" != "null" ] && ! [[ "$acp_pid" =~ ^[0-9]+$ ]]; then
-          echo "Error: --acp-pid must be a positive integer or 'null'" >&2
-          exit 1
-        fi
-        ;;
-      *)
-        echo "Error: Unknown option: $1" >&2
-        echo "Usage: aimi-cli.sh swarm-update <containerName> --status <status> [--pr-url <url>] [--story-progress <json>] [--acp-pid <pid>]" >&2
-        exit 1
-        ;;
-    esac
-  done
-
-  # At least one field must be provided
-  if [ -z "$status" ] && [ -z "$pr_url" ] && [ -z "$story_progress" ] && [ -z "$acp_pid" ]; then
-    echo "Error: At least one update field is required (--status, --pr-url, --story-progress, --acp-pid)" >&2
-    exit 1
-  fi
-
-  local now
-  now=$(_iso_timestamp)
-
-  # Build jq update expression dynamically
-  local jq_expr='.updatedAt = $now | (.containers[] | select(.containerName == $name)) |= (. + {updatedAt: $now}'
-  local jq_args=(--arg name "$container_name" --arg now "$now")
-
-  if [ -n "$status" ]; then
-    jq_expr="$jq_expr | .status = \$new_status"
-    jq_args+=(--arg new_status "$status")
-  fi
-
-  if [ -n "$pr_url" ]; then
-    jq_expr="$jq_expr | .prUrl = \$new_pr_url"
-    jq_args+=(--arg new_pr_url "$pr_url")
-  fi
-
-  if [ -n "$story_progress" ]; then
-    jq_expr="$jq_expr | .storyProgress = \$new_progress"
-    jq_args+=(--argjson new_progress "$story_progress")
-  fi
-
-  if [ -n "$acp_pid" ]; then
-    if [ "$acp_pid" = "null" ]; then
-      jq_expr="$jq_expr | .acpPid = null"
-    else
-      jq_expr="$jq_expr | .acpPid = \$new_pid"
-      jq_args+=(--argjson new_pid "$acp_pid")
-    fi
-  fi
-
-  jq_expr="$jq_expr)"
-
-  # Atomic update using flock
-  local tmp_file
-  tmp_file=$(mktemp "${SWARM_STATE_FILE}.XXXXXX")
-  (
-    _lock "${SWARM_STATE_FILE}.lock"
-    jq "${jq_args[@]}" "$jq_expr" "$SWARM_STATE_FILE" > "$tmp_file" && mv "$tmp_file" "$SWARM_STATE_FILE"
-  ) 200>"${SWARM_STATE_FILE}.lock"
-  rm -f "$tmp_file" 2>/dev/null
-
-  # Output the updated container entry
-  jq --arg name "$container_name" '.containers[] | select(.containerName == $name)' "$SWARM_STATE_FILE"
-}
-
-# Remove a container entry by name
-# Usage: aimi-cli.sh swarm-remove <containerName>
-cmd_swarm_remove() {
-  local container_name="${1:-}"
-
-  if [ -z "$container_name" ]; then
-    echo "Usage: aimi-cli.sh swarm-remove <containerName>" >&2
-    exit 1
-  fi
-
-  _require_swarm_state
-  _validate_container_name "$container_name"
-  _require_container_exists "$container_name"
-
-  local now
-  now=$(_iso_timestamp)
-
-  # Atomic update using flock
-  local tmp_file
-  tmp_file=$(mktemp "${SWARM_STATE_FILE}.XXXXXX")
-  (
-    _lock "${SWARM_STATE_FILE}.lock"
-    jq --arg name "$container_name" --arg now "$now" \
-      '.updatedAt = $now | .containers = [.containers[] | select(.containerName != $name)]' \
-      "$SWARM_STATE_FILE" > "$tmp_file" && mv "$tmp_file" "$SWARM_STATE_FILE"
-  ) 200>"${SWARM_STATE_FILE}.lock"
-  rm -f "$tmp_file" 2>/dev/null
-
-  echo "Removed container: $container_name"
-}
-
-# Output current swarm state as formatted JSON
-# Usage: aimi-cli.sh swarm-status
-cmd_swarm_status() {
-  _require_swarm_state
-  jq '.' "$SWARM_STATE_FILE"
-}
-
-# Output container names and statuses as tab-separated values
-# Usage: aimi-cli.sh swarm-list
-cmd_swarm_list() {
-  _require_swarm_state
-  jq -r '.containers[] | [.containerName, .status] | @tsv' "$SWARM_STATE_FILE"
-}
-
-# Remove all entries with terminal status (completed, failed, stopped)
-# Usage: aimi-cli.sh swarm-cleanup
-cmd_swarm_cleanup() {
-  _require_swarm_state
-
-  local removed_count
-  removed_count=$(jq '[.containers[] | select(.status == "completed" or .status == "failed" or .status == "stopped")] | length' "$SWARM_STATE_FILE")
-
-  if [ "$removed_count" -eq 0 ]; then
-    echo "No completed, failed, or stopped containers to clean up."
-    return
-  fi
-
-  local now
-  now=$(_iso_timestamp)
-
-  # Atomic update using flock
-  local tmp_file
-  tmp_file=$(mktemp "${SWARM_STATE_FILE}.XXXXXX")
-  (
-    _lock "${SWARM_STATE_FILE}.lock"
-    jq --arg now "$now" \
-      '.updatedAt = $now | .containers = [.containers[] | select(.status != "completed" and .status != "failed" and .status != "stopped")]' \
-      "$SWARM_STATE_FILE" > "$tmp_file" && mv "$tmp_file" "$SWARM_STATE_FILE"
-  ) 200>"${SWARM_STATE_FILE}.lock"
-  rm -f "$tmp_file" 2>/dev/null
-
-  jq -n --argjson count "$removed_count" '{removed: $count}'
 }
 
 # ============================================================================
@@ -1264,6 +885,12 @@ cmd_swarm_cleanup() {
 # ============================================================================
 
 main() {
+  # Skip auto-discovery for help command (works without .aimi/ present)
+  case "${1:-help}" in
+    help|--help|-h) cmd_help; return ;;
+  esac
+
+  find_aimi_root
   check_jq
 
   case "${1:-help}" in
@@ -1288,13 +915,6 @@ main() {
     clear-state)       cmd_clear_state ;;
     check-version)     shift; cmd_check_version "$@" ;;
     cleanup-versions)  cmd_cleanup_versions ;;
-    swarm-init)        shift; cmd_swarm_init "$@" ;;
-    swarm-add)         cmd_swarm_add "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
-    swarm-update)      shift; cmd_swarm_update "$@" ;;
-    swarm-remove)      cmd_swarm_remove "${2:-}" ;;
-    swarm-status)      cmd_swarm_status ;;
-    swarm-list)        cmd_swarm_list ;;
-    swarm-cleanup)     cmd_swarm_cleanup ;;
     help|--help|-h)    cmd_help ;;
     *)
       echo "Unknown command: $1" >&2

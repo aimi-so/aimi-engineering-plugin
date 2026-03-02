@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.25.0] - 2026-03-02
+
+### Added
+
+- **aimi-cli.sh**: `find_aimi_root()` auto-discovery — CLI walks up the directory tree from CWD to find `.aimi/`, eliminating silent failures when invoked from subdirectories
+- **test-aimi-cli.sh**: Test isolation via `cd "$TEST_DIR"` and `trap` cleanup; new auto-discovery tests (subdirectory + not-found)
+- **cli-path-resolution.md**: CWD Auto-Discovery section documenting the new behavior
+- **CLAUDE.md**: CWD contract documented in both root and plugin CLAUDE.md files
+
+## [1.24.1] - 2026-03-02
+
+### Added
+
+- **auto-approve-cli.sh**: Docker auto-approve patterns (5–10) for `/aimi:swarm` commands
+  - Pattern 5: `docker version` availability check
+  - Pattern 6: `docker run --rm` with `--name aimi-swarm-*` and `--label aimi-swarm` (worker containers)
+  - Pattern 7: `docker container ls` with `--filter name=aimi-swarm-` (container listing)
+  - Pattern 8: `docker rm -f` with validated `aimi-swarm-*` container names (cleanup)
+  - Pattern 9: `docker container prune -f --filter label=aimi-swarm` (safety net)
+  - Pattern 10: `docker ps --filter name=aimi-*` (status/cleanup checks)
+- All Docker patterns enforce aimi- prefix on container names and reject shell metacharacters
+
+## [1.24.0] - 2026-03-02
+
+### Changed
+
+- **swarm.md**: Complete rewrite — replace Docker/ACP/Sysbox architecture with Team orchestration + git worktrees + simplified `docker run --rm` containers
+- **swarm.md**: New frontmatter with Team/Docker/Worktree allowed-tools (removed SANDBOX_MGR, BUILD_IMG)
+- **swarm.md**: Step 0 resolves only $AIMI_CLI and $WORKTREE_MGR (no SANDBOX_MGR or BUILD_IMG)
+- **swarm.md**: Workers run `docker run --rm` with volume-mounted worktrees and `npx claude` inside generic `node:22-slim` image
+- **swarm.md**: Team lead reads task file content and passes it in worker prompt (no reliance on task file in worktree)
+- **swarm.md**: `status` subcommand reads task files directly (no swarm-state.json)
+- **swarm.md**: `cleanup` subcommand removes aimi-* worktrees and Docker containers
+- **swarm.md**: Merge conflict handling preserves worktrees for manual inspection
+
+### Removed
+
+- **docker-sandbox skill**: Removed entire skill (sandbox-manager.sh, build-project-image.sh, acp-adapter.py, Dockerfile.base)
+- **swarm.md**: All references to Sysbox runtime, ACP protocol, sandbox-manager, build-project-image
+- **swarm.md**: swarm-state.json state management (replaced by Team task list)
+- **swarm.md**: `resume` subcommand (Team workers are foreground, no detached containers to resume)
+- **swarm.md**: State reconciliation subroutine (no persistent container state to reconcile)
+- **swarm.md**: Container provisioning with Sysbox-isolated containers
+- **swarm.md**: ACP adapter invocation via docker exec/docker cp
+
+## [1.23.2] - 2026-03-02
+
+### Removed
+
+- **auto-approve-cli.sh**: Remove swarm-* entries from CLI subcommand whitelist (swarm-init, swarm-add, swarm-update, swarm-remove, swarm-status, swarm-list, swarm-cleanup)
+- **auto-approve-cli.sh**: Remove Pattern 5 (SANDBOX_MGR= assignment) and Pattern 6 ($SANDBOX_MGR invocation)
+- **auto-approve-cli.sh**: Remove Pattern 7 (BUILD_IMG= assignment) and Pattern 8 ($BUILD_IMG invocation)
+- **auto-approve-cli.sh**: Remove Pattern 9 (docker exec aimi-* for ACP adapter)
+- **auto-approve-cli.sh**: Remove Pattern 10 (docker cp for ACP payload files)
+
 ## [1.23.1] - 2026-03-02
 
 ### Changed
