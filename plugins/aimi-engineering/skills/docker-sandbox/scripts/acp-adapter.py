@@ -14,7 +14,10 @@ Usage:
     docker exec <container> python /opt/aimi/acp-adapter.py --input /tmp/acp-payload.json
 
 Environment:
-    ANTHROPIC_API_KEY  - Required. Claude API key for headless mode.
+    ANTHROPIC_API_KEY  - Claude API key for headless mode (required unless
+                         CLAUDE_CONFIG_DIR is set with valid subscription auth).
+    CLAUDE_CONFIG_DIR  - Path to mounted Claude config directory containing
+                         .credentials.json for subscription-based auth.
     CONTAINER_ID       - Optional. Docker container ID for message envelope.
     SWARM_ID           - Optional. Swarm UUID for message envelope.
 """
@@ -35,7 +38,7 @@ from datetime import datetime, timezone
 # Constants
 # ---------------------------------------------------------------------------
 
-REQUIRED_ENV_VARS = ["ANTHROPIC_API_KEY"]
+REQUIRED_ENV_VARS = []
 
 VALID_TASK_REQUEST_FIELDS = {"taskFilePath", "branchName", "repoUrl", "envVars"}
 REQUIRED_TASK_REQUEST_FIELDS = {"taskFilePath", "branchName", "repoUrl"}
@@ -246,10 +249,12 @@ def provision_repo(payload: dict) -> bool:
 
     Steps:
       1. Skip if /workspace/.git already exists (already provisioned).
-      2. Configure git credential helper if GITHUB_TOKEN is set.
-      3. Clone repoUrl into /workspace.
-      4. Checkout or create the target branch.
-      5. Verify the task file exists at the expected path.
+      2. Detect URL protocol (SSH vs HTTPS).
+      3. For HTTPS: configure git credential helper if GITHUB_TOKEN is set.
+         For SSH: set GIT_SSH_COMMAND with BatchMode and ConnectTimeout.
+      4. Clone repoUrl into /workspace.
+      5. Checkout or create the target branch.
+      6. Verify the task file exists at the expected path.
 
     Returns True on success. On failure, emits an error and returns False.
     """
@@ -261,27 +266,38 @@ def provision_repo(payload: dict) -> bool:
         os.chdir(WORKSPACE_DIR)
         return True
 
-    # 2. Set up git credential helper for GITHUB_TOKEN if present
-    token = os.environ.get("GITHUB_TOKEN")
-    if token:
-        log("Configuring git credential helper for GITHUB_TOKEN")
-        try:
-            subprocess.run(
-                [
-                    "git", "config", "--global", "credential.helper",
-                    "!f() { echo username=x-access-token; echo password="
-                    + token + "; }; f",
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except subprocess.CalledProcessError as exc:
-            log(f"Failed to configure git credential helper: {exc.stderr}")
-            # Non-fatal — clone might still work via other auth methods
-
-    # 3. Clone the repository
+    # 2. Detect URL protocol
     repo_url = payload["repoUrl"]
+    is_ssh = repo_url.startswith("git@") or repo_url.startswith("ssh://")
+
+    if is_ssh:
+        # 3a. SSH: configure GIT_SSH_COMMAND to prevent hanging on missing
+        # agent and set a reasonable connect timeout
+        log("SSH URL detected, configuring GIT_SSH_COMMAND for non-interactive clone")
+        os.environ["GIT_SSH_COMMAND"] = (
+            "ssh -o BatchMode=yes -o ConnectTimeout=10"
+        )
+    else:
+        # 3b. HTTPS: set up git credential helper for GITHUB_TOKEN if present
+        token = os.environ.get("GITHUB_TOKEN")
+        if token:
+            log("Configuring git credential helper for GITHUB_TOKEN")
+            try:
+                subprocess.run(
+                    [
+                        "git", "config", "--global", "credential.helper",
+                        "!f() { echo username=x-access-token; echo password="
+                        + token + "; }; f",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.CalledProcessError as exc:
+                log(f"Failed to configure git credential helper: {exc.stderr}")
+                # Non-fatal — clone might still work via other auth methods
+
+    # 4. Clone the repository
     log(f"Cloning repository {repo_url} into {WORKSPACE_DIR}")
     try:
         subprocess.run(
@@ -291,15 +307,28 @@ def provision_repo(payload: dict) -> bool:
             text=True,
         )
     except subprocess.CalledProcessError as exc:
-        msg = f"git clone failed: {exc.stderr.strip() or exc.stdout.strip()}"
+        stderr_text = exc.stderr.strip() or exc.stdout.strip()
+        msg = f"git clone failed: {stderr_text}"
         log(msg)
+
+        # For SSH URLs, provide a helpful hint about SSH agent forwarding
+        if is_ssh:
+            ssh_hint = (
+                "SSH clone failed. Ensure the SSH agent is forwarded into "
+                "the container (docker run --mount type=bind,src=$SSH_AUTH_SOCK,"
+                "target=/ssh-agent -e SSH_AUTH_SOCK=/ssh-agent) and that the "
+                "SSH key has access to the repository."
+            )
+            log(ssh_hint)
+            msg = f"{msg}. {ssh_hint}"
+
         emit_error("GIT_CLONE_FAILED", msg)
         return False
 
-    # 4. Change into workspace directory
+    # 5. Change into workspace directory
     os.chdir(WORKSPACE_DIR)
 
-    # 5. Checkout the target branch
+    # 6. Checkout the target branch
     branch_name = payload["branchName"]
     log(f"Checking out branch: {branch_name}")
     try:
@@ -331,7 +360,7 @@ def provision_repo(payload: dict) -> bool:
             emit_error("GIT_CHECKOUT_FAILED", msg)
             return False
 
-    # 6. Verify the task file exists
+    # 7. Verify the task file exists
     task_file = payload["taskFilePath"]
     if not os.path.isfile(task_file):
         msg = f"Task file not found at {task_file} after clone"
@@ -486,6 +515,29 @@ def main() -> int:
         log(msg)
         emit_error("MISSING_ENV_VAR", msg)
         return 1
+
+    # --- Validate authentication ---
+    has_api_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    claude_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    has_claude_config = bool(claude_config_dir) and os.path.isdir(claude_config_dir)
+
+    if not has_api_key and not has_claude_config:
+        msg = ("No authentication found. Set ANTHROPIC_API_KEY env var "
+               "or mount Claude config directory (CLAUDE_CONFIG_DIR)")
+        log(msg)
+        emit_error("MISSING_ENV_VAR", msg)
+        return 1
+
+    if has_claude_config:
+        creds_path = os.path.join(claude_config_dir, ".credentials.json")
+        if not os.path.isfile(creds_path):
+            log(f"Warning: CLAUDE_CONFIG_DIR is set but {creds_path} not found — "
+                "subscription auth may fail")
+        else:
+            log(f"Using subscription auth from {claude_config_dir}")
+
+    if has_api_key:
+        log("Using ANTHROPIC_API_KEY for authentication")
 
     # --- Parse --input argument (file-based alternative to stdin) ---
     input_file = None

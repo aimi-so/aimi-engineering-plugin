@@ -186,10 +186,23 @@ If arguments start with `resume`:
       ```
    b. Read the task file path and branch from the swarm state entry.
    c. Verify the task file still exists on disk. If not, report error and skip this container.
-   d. Recreate the container (follows same pattern as Step 4 in the main flow):
+   d. Recreate the container (follows same pattern as Step 4 in the main flow).
+
+      Re-detect credentials using the same Step 2.5 logic if not already set in this session. Build the create command with conditional flags:
       ```bash
-      $SANDBOX_MGR create <containerName> --image <PROJECT_IMAGE> --task-file <taskFile> --branch <BRANCH>
+      # Build create command with conditional flags
+      CREATE_FLAGS=""
+      if [ "$AUTH_METHOD" = "ssh" ]; then
+        CREATE_FLAGS="$CREATE_FLAGS --ssh-agent"
+      fi
+      if [ "$CLAUDE_AUTH" = "subscription" ]; then
+        CREATE_FLAGS="$CREATE_FLAGS --mount-claude-config"
+      fi
+
+      $SANDBOX_MGR create <containerName> --image <PROJECT_IMAGE> --task-file <taskFile> --branch <BRANCH> $CREATE_FLAGS
       ```
+      **Log the full container creation command for debugging** before executing it.
+
       **Note:** `PROJECT_IMAGE` must be resolved. Run `$BUILD_IMG` to build/reuse the project image if not already available.
    e. Parse the new `containerId` from the JSON output.
    f. Update the swarm state with the new container ID and reset status to `pending`:
@@ -199,7 +212,8 @@ If arguments start with `resume`:
 
 7. **Fan out pending containers:**
    If there are containers with status `pending` (either originally pending or reset from failed):
-   - Resolve `REPO_URL` from `git remote get-url origin` if not already known.
+   - Re-detect credentials using the **same Step 2.5 logic** if `AUTH_METHOD` or `CLAUDE_AUTH` is not already set in this session. This ensures `AUTH_METHOD=ssh` and `CLAUDE_AUTH=subscription` are available for any container recreation that may have occurred in step 6d.
+   - Resolve `REPO_URL` using the **same fallback chain as Step 3** (try `origin`, then `upstream`, then first available remote from `git remote`). If no remotes are found, STOP with: `"No git remotes found. Add one with: git remote add origin <url>"`. Log which remote was selected and its URL. Detect the remote URL protocol (SSH vs HTTPS) and log any AUTH_METHOD mismatch warning, same as Step 3.
    - Proceed to Step 5 (fan-out) for these pending containers only.
    - After fan-out and result collection, proceed to Step 6 for state update and reporting.
 
@@ -353,6 +367,115 @@ Only the first [maxContainers] will be executed. Remaining files can be run with
 
 Truncate `SELECTED_TASK_FILES` to `maxContainers`.
 
+## Step 2.5: Detect Credentials
+
+**CRITICAL:** Detect required credentials BEFORE provisioning any containers. This step fails fast if no authentication method is available, preventing wasted Docker resources.
+
+### Check subscription auth (Claude config directory)
+
+```bash
+CLAUDE_CONFIG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+test -f "$CLAUDE_CONFIG/.credentials.json" 2>/dev/null && echo "Subscription auth found"
+```
+
+If the credentials file exists:
+- Set `CLAUDE_AUTH=subscription`
+- Log: `"Subscription auth detected: $CLAUDE_CONFIG/.credentials.json"`
+
+### Check ANTHROPIC_API_KEY
+
+```bash
+echo "${ANTHROPIC_API_KEY:0:8}..." 2>/dev/null
+```
+
+The behavior depends on whether subscription auth was detected above:
+
+- **If ANTHROPIC_API_KEY is set:** Store the masked key prefix for the summary (e.g., `sk-ant-a...`). Proceed normally regardless of `CLAUDE_AUTH`.
+- **If ANTHROPIC_API_KEY is NOT set AND `CLAUDE_AUTH=subscription`:** WARN (do not stop):
+  ```
+  ANTHROPIC_API_KEY not set, using subscription auth.
+  ```
+  Proceed — the subscription credentials will be mounted into containers.
+- **If ANTHROPIC_API_KEY is NOT set AND `CLAUDE_AUTH` is NOT `subscription`:** STOP immediately with:
+  ```
+  No authentication found. Set ANTHROPIC_API_KEY or mount Claude config directory (~/.claude/.credentials.json).
+  ```
+
+### Detect GitHub credentials (optional, fallback chain)
+
+Try each method in priority order. Stop at the first success.
+
+**Priority 1: GITHUB_TOKEN environment variable**
+
+```bash
+echo "${GITHUB_TOKEN:0:8}..." 2>/dev/null
+```
+
+If non-empty, set `GH_AUTH_METHOD=token` and store the masked prefix. Proceed to the credential summary.
+
+**Priority 2: gh CLI authentication**
+
+```bash
+DETECTED_GH_TOKEN=$(timeout 5 gh auth token 2>/dev/null)
+```
+
+If the command succeeds (exit code 0) and output is non-empty:
+- Export the result so sandbox-manager.sh can pick it up:
+  ```bash
+  export GITHUB_TOKEN="$DETECTED_GH_TOKEN"
+  ```
+- Set `GH_AUTH_METHOD=gh-cli`
+- Store the masked prefix (`${DETECTED_GH_TOKEN:0:8}...`)
+- Proceed to the credential summary.
+
+**Priority 3: SSH agent**
+
+```bash
+test -S "${SSH_AUTH_SOCK:-}" 2>/dev/null && echo "SSH agent available"
+```
+
+If the test succeeds (SSH_AUTH_SOCK points to an existing socket):
+- Set `GH_AUTH_METHOD=ssh`
+- Set `AUTH_METHOD=ssh` for later use by container provisioning
+- Proceed to the credential summary.
+
+**Priority 4: No credentials found**
+
+If none of the above succeeded:
+- Set `GH_AUTH_METHOD=none`
+- WARN (do not stop):
+  ```
+  No GitHub credentials found. Only public repos will work.
+  Set GITHUB_TOKEN, run 'gh auth login', or start an SSH agent.
+  ```
+
+### Credential summary
+
+Display the detected credentials:
+
+```
+Credentials:
+  API Key  : found (sk-ant-a...)
+  Claude   : subscription (config dir)
+  GitHub   : gh-cli (ghp_Ax7f...)
+  Auth     : HTTPS
+```
+
+The `API Key` field displays:
+- `found (<masked prefix>)` when `ANTHROPIC_API_KEY` is set
+- `not set (using subscription auth)` when `ANTHROPIC_API_KEY` is not set but `CLAUDE_AUTH=subscription`
+
+The `Claude` field displays:
+- `subscription (config dir)` when `CLAUDE_AUTH=subscription`
+- `none` when subscription auth is not detected
+
+The `Auth` field displays:
+- `HTTPS` when `GH_AUTH_METHOD` is `token` or `gh-cli`
+- `SSH` when `GH_AUTH_METHOD` is `ssh`
+- `none` when `GH_AUTH_METHOD` is `none`
+
+Proceed to Step 3.
+
 ## Step 3: Initialize Swarm State
 
 ### Check for existing active swarm
@@ -408,16 +531,71 @@ $AIMI_CLI swarm-init --force
 
 Store the returned `swarmId`.
 
-### Resolve git remote URL
+### Resolve git remote URL (fallback chain)
+
+Try remotes in priority order: `origin`, `upstream`, then the first available remote.
+
+**Priority 1: origin**
 ```bash
-git remote get-url origin
+REPO_URL=$(git remote get-url origin 2>/dev/null)
+SELECTED_REMOTE="origin"
 ```
 
-Store as `REPO_URL`. If no remote, report error and STOP:
+**Priority 2: upstream** (if origin not found)
+```bash
+if [ -z "$REPO_URL" ]; then
+  REPO_URL=$(git remote get-url upstream 2>/dev/null)
+  SELECTED_REMOTE="upstream"
+fi
 ```
-No git remote 'origin' found. The swarm needs a remote URL so containers can clone the repo.
-Set one with: git remote add origin <url>
+
+**Priority 3: first available remote** (if neither origin nor upstream found)
+```bash
+if [ -z "$REPO_URL" ]; then
+  FIRST_REMOTE=$(git remote | head -1)
+  if [ -n "$FIRST_REMOTE" ]; then
+    REPO_URL=$(git remote get-url "$FIRST_REMOTE" 2>/dev/null)
+    SELECTED_REMOTE="$FIRST_REMOTE"
+  fi
+fi
 ```
+
+**No remotes found — hard stop:**
+
+If `REPO_URL` is still empty after all three attempts, STOP with:
+```
+No git remotes found. Add one with: git remote add origin <url>
+```
+
+If a remote was found, log which remote was selected:
+```
+Git remote: using '[SELECTED_REMOTE]' → [REPO_URL]
+```
+
+### Detect remote URL protocol
+
+After resolving `REPO_URL`, detect whether it uses SSH or HTTPS:
+
+- If `REPO_URL` starts with `git@` or `ssh://` → log: `Remote protocol: SSH`
+- If `REPO_URL` starts with `https://` → log: `Remote protocol: HTTPS`
+- Otherwise → log: `Remote protocol: unknown`
+
+Store the detected protocol as `REMOTE_PROTOCOL` (`ssh`, `https`, or `unknown`).
+
+### AUTH_METHOD vs remote protocol mismatch warning
+
+Compare `AUTH_METHOD` (from Step 2.5 credential detection) with `REMOTE_PROTOCOL`:
+
+- If `AUTH_METHOD` is `ssh` but `REMOTE_PROTOCOL` is `https`:
+  ```
+  Warning: SSH auth detected but remote URL is HTTPS. Clone may need GITHUB_TOKEN.
+  ```
+- If `AUTH_METHOD` is NOT `ssh` (i.e., `token`, `gh-cli`, or `none`) but `REMOTE_PROTOCOL` is `ssh`:
+  ```
+  Warning: No SSH auth detected but remote URL is SSH. Clone may need SSH agent forwarding.
+  ```
+
+**Proceed regardless** — do not block on a mismatch. The actual clone attempt inside the container will determine success or failure.
 
 Report:
 ```
@@ -458,15 +636,33 @@ For each task file in `SELECTED_TASK_FILES`:
    - Container name: `aimi-swarm-<slug>` (must match `^aimi-[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 
 3. Create the container:
+
+   Build the create command, conditionally appending `--ssh-agent` and/or `--mount-claude-config` based on auth detected in Step 2.5:
+
    ```bash
-   $SANDBOX_MGR create <containerName> --image <PROJECT_IMAGE> --task-file <taskFile> --branch <BRANCH>
+   # Build create command with conditional flags
+   CREATE_FLAGS=""
+   if [ "$AUTH_METHOD" = "ssh" ]; then
+     CREATE_FLAGS="$CREATE_FLAGS --ssh-agent"
+   fi
+   if [ "$CLAUDE_AUTH" = "subscription" ]; then
+     CREATE_FLAGS="$CREATE_FLAGS --mount-claude-config"
+   fi
+
+   $SANDBOX_MGR create <containerName> --image <PROJECT_IMAGE> --task-file <taskFile> --branch <BRANCH> $CREATE_FLAGS
    ```
+
+   **Log the full container creation command for debugging** before executing it:
+   ```
+   [swarm] create: $SANDBOX_MGR create <containerName> --image <PROJECT_IMAGE> --task-file <taskFile> --branch <BRANCH> [--ssh-agent] [--mount-claude-config]
+   ```
+   (Include `--ssh-agent` only when `AUTH_METHOD=ssh`. Include `--mount-claude-config` only when `CLAUDE_AUTH=subscription`.)
 
 4. Parse the JSON output to get `containerId`.
 
-5. Register in swarm state:
+5. Register in swarm state (include the resolved `REPO_URL` for resume support):
    ```bash
-   $AIMI_CLI swarm-add <containerId> <containerName> <taskFile> <BRANCH>
+   $AIMI_CLI swarm-add <containerId> <containerName> <taskFile> <BRANCH> --repo-url <REPO_URL>
    ```
 
 6. Count stories for progress tracking:

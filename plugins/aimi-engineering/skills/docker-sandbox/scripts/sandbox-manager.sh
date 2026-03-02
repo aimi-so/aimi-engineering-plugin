@@ -13,7 +13,7 @@
 #   sandbox-manager.sh <command> [options]
 #
 # Commands:
-#   create <name> --image <image> [--task-file <path>] [--branch <branch>]
+#   create <name> --image <image> [--task-file <path>] [--branch <branch>] [--ssh-agent] [--mount-claude-config]
 #   remove <name>
 #   list
 #   status <name>
@@ -141,6 +141,8 @@ cmd_create() {
   local branch=""
   local container_id_env=""
   local swarm_id_env=""
+  local ssh_agent=false
+  local mount_claude_config=false
 
   # Parse arguments
   while [[ $# -gt 0 ]]; do
@@ -164,6 +166,14 @@ cmd_create() {
       --swarm-id)
         swarm_id_env="$2"
         shift 2
+        ;;
+      --ssh-agent)
+        ssh_agent=true
+        shift
+        ;;
+      --mount-claude-config)
+        mount_claude_config=true
+        shift
         ;;
       -*)
         die "Unknown option: $1"
@@ -275,6 +285,29 @@ cmd_create() {
   fi
   if [[ -n "$swarm_id_env" ]]; then
     run_args+=("--env" "SWARM_ID=${swarm_id_env}")
+  fi
+
+  # SSH agent forwarding
+  if [[ "$ssh_agent" == true ]]; then
+    if [[ -n "${SSH_AUTH_SOCK:-}" ]] && [[ -S "${SSH_AUTH_SOCK}" ]]; then
+      log_info "SSH agent forwarding enabled"
+      run_args+=("-v" "${SSH_AUTH_SOCK}:/tmp/ssh-agent.sock")
+      run_args+=("--env" "SSH_AUTH_SOCK=/tmp/ssh-agent.sock")
+    else
+      log_warn "SSH agent forwarding requested but SSH_AUTH_SOCK is not set or socket does not exist"
+    fi
+  fi
+
+  # Claude config directory mounting (read-only)
+  if [[ "$mount_claude_config" == true ]]; then
+    local claude_config_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    if [[ -d "$claude_config_dir" ]]; then
+      log_info "Mounting Claude config directory (read-only): $claude_config_dir"
+      run_args+=("-v" "${claude_config_dir}:/home/aimi/.claude:ro")
+      run_args+=("--env" "CLAUDE_CONFIG_DIR=/home/aimi/.claude")
+    else
+      log_warn "Claude config directory not found: $claude_config_dir — skipping mount"
+    fi
   fi
 
   # Advisory warning: per-container disk limits require specific storage driver config
@@ -555,6 +588,8 @@ Commands:
     --branch <branch>                      Git branch to pass as AIMI_BRANCH env
     --container-id <id>                    Pass CONTAINER_ID env to container
     --swarm-id <id>                        Pass SWARM_ID env to container
+    --ssh-agent                            Forward host SSH agent into container
+    --mount-claude-config                  Mount host ~/.claude/ read-only for subscription auth
 
   remove <name>                  Stop and remove a container (idempotent)
   list                           List all aimi-* containers (JSON output)
@@ -570,6 +605,7 @@ Environment Variables:
   AIMI_SANDBOX_DISK     Disk limit label (default: 8g)
   ANTHROPIC_API_KEY     Injected into container
   GITHUB_TOKEN          Injected into container
+  CLAUDE_CONFIG_DIR     Host Claude config path (default: ~/.claude, used with --mount-claude-config)
 
 Container Naming:
   Containers are named as aimi-<slug>
