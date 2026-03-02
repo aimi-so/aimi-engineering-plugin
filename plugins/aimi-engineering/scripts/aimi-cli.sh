@@ -347,6 +347,24 @@ cmd_current_story() {
   jq --arg id "$story_id" '.userStories[] | select(.id == $id)' "$tasks_file"
 }
 
+# Get full story object by ID (read-only)
+cmd_get_story() {
+  local story_id="$1"
+  local tasks_file
+
+  if [ -z "$story_id" ]; then
+    echo "Usage: aimi-cli.sh get-story <story-id>" >&2
+    exit 1
+  fi
+
+  validate_story_id "$story_id"
+
+  tasks_file=$(get_tasks_file)
+  validate_story_exists "$story_id" "$tasks_file"
+
+  jq --arg id "$story_id" '.userStories[] | select(.id == $id)' "$tasks_file"
+}
+
 # Mark a story as in-progress
 cmd_mark_in_progress() {
   local story_id="$1"
@@ -874,6 +892,7 @@ COMMANDS:
     cascade-skip <id>         Skip all stories depending on failed story
     reset-orphaned            Reset all in_progress stories to failed
     get-branch                Get branchName from metadata
+    get-story <id>            Get full story object by ID (read-only)
     get-state                 Get all state files as JSON
     clear-state               Clear all state files
     check-version [--quiet] [--fix]
@@ -910,6 +929,9 @@ EXAMPLES:
 
     # Validate dependency graph
     $AIMI_CLI validate-deps
+
+    # Fetch a specific story by ID
+    $AIMI_CLI get-story US-003
 
     # Cascade skip after failure
     $AIMI_CLI cascade-skip US-003
@@ -953,6 +975,7 @@ main() {
     cascade-skip)      cmd_cascade_skip "${2:-}" ;;
     reset-orphaned)    cmd_reset_orphaned ;;
     get-branch)        cmd_get_branch ;;
+    get-story)         cmd_get_story "${2:-}" ;;
     get-state)         cmd_get_state ;;
     clear-state)       cmd_clear_state ;;
     check-version)     shift; cmd_check_version "$@" ;;
