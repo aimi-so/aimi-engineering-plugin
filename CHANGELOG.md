@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.25.0] - 2026-03-02
+
+### Added
+
+- **aimi-cli.sh**: `find_aimi_root()` auto-discovery — CLI walks up the directory tree from CWD to find `.aimi/`, eliminating silent failures when invoked from subdirectories
+- **test-aimi-cli.sh**: Test isolation via `cd "$TEST_DIR"` and `trap` cleanup; new auto-discovery tests (subdirectory + not-found)
+- **cli-path-resolution.md**: CWD Auto-Discovery section documenting the new behavior
+- **CLAUDE.md**: CWD contract documented in both root and plugin CLAUDE.md files
+
 ## [1.24.1] - 2026-03-02
 
 ### Added
