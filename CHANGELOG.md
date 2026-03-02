@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.23.2] - 2026-03-02
+
+### Removed
+
+- **auto-approve-cli.sh**: Remove swarm-* entries from CLI subcommand whitelist (swarm-init, swarm-add, swarm-update, swarm-remove, swarm-status, swarm-list, swarm-cleanup)
+- **auto-approve-cli.sh**: Remove Pattern 5 (SANDBOX_MGR= assignment) and Pattern 6 ($SANDBOX_MGR invocation)
+- **auto-approve-cli.sh**: Remove Pattern 7 (BUILD_IMG= assignment) and Pattern 8 ($BUILD_IMG invocation)
+- **auto-approve-cli.sh**: Remove Pattern 9 (docker exec aimi-* for ACP adapter)
+- **auto-approve-cli.sh**: Remove Pattern 10 (docker cp for ACP payload files)
+
 ## [1.23.1] - 2026-03-02
 
 ### Changed

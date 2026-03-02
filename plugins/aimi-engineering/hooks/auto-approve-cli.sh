@@ -1,8 +1,7 @@
 #!/bin/bash
 # auto-approve-cli.sh
-# Auto-approves only AIMI CLI, Worktree Manager, Sandbox Manager, Build Image,
-# and specific Docker exec commands. Rejects shell metacharacter chaining and
-# enforces subcommand whitelists.
+# Auto-approves only AIMI CLI and Worktree Manager commands.
+# Rejects shell metacharacter chaining and enforces subcommand whitelists.
 
 INPUT=$(cat)
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
@@ -56,8 +55,7 @@ if echo "$COMMAND" | grep -qE '^\$AIMI_CLI\b|^\$\{AIMI_CLI\}'; then
     list-ready|mark-in-progress|mark-complete|mark-failed|mark-skipped|\
     count-pending|validate-deps|validate-stories|cascade-skip|reset-orphaned|\
     get-branch|get-state|clear-state|help|\
-    check-version|cleanup-versions|\
-    swarm-init|swarm-add|swarm-update|swarm-remove|swarm-status|swarm-list|swarm-cleanup)
+    check-version|cleanup-versions)
       echo "$ALLOW"
       exit 0
       ;;
@@ -100,101 +98,6 @@ if echo "$COMMAND" | grep -qE '^\$WORKTREE_MGR\b|^\$\{WORKTREE_MGR\}'; then
       exit 0
       ;;
   esac
-fi
-
-# --- Pattern 5: SANDBOX_MGR= assignment ---
-# Validates the assigned path matches the expected sandbox manager plugin path.
-if echo "$COMMAND" | grep -qE '^SANDBOX_MGR='; then
-  if echo "$COMMAND" | grep -qE '^SANDBOX_MGR=\$\(ls ~/.claude/plugins/cache/[a-zA-Z0-9_-]+/aimi-engineering/[0-9][a-zA-Z0-9._-]*/skills/docker-sandbox/scripts/sandbox-manager\.sh\)$'; then
-    echo "$ALLOW"
-    exit 0
-  fi
-  # Invalid path pattern — fall through to normal permission prompt
-  exit 0
-fi
-
-# --- Pattern 6: $SANDBOX_MGR invocation with subcommand whitelist ---
-if echo "$COMMAND" | grep -qE '^\$SANDBOX_MGR\b|^\$\{SANDBOX_MGR\}'; then
-  # Reject any shell metacharacters
-  if has_metacharacters "$COMMAND"; then
-    exit 0
-  fi
-
-  # Extract the subcommand (first argument after $SANDBOX_MGR or ${SANDBOX_MGR})
-  SUBCMD=$(echo "$COMMAND" | sed -E 's/^\$SANDBOX_MGR\s+//; s/^\$\{SANDBOX_MGR\}\s+//' | awk '{print $1}')
-
-  # Whitelist of allowed sandbox manager subcommands
-  case "$SUBCMD" in
-    create|remove|list|status|cleanup|check-runtime)
-      echo "$ALLOW"
-      exit 0
-      ;;
-    *)
-      # Unknown subcommand — fall through to normal permission prompt
-      exit 0
-      ;;
-  esac
-fi
-
-# --- Pattern 7: BUILD_IMG= assignment ---
-# Validates the assigned path matches the expected build image plugin path.
-if echo "$COMMAND" | grep -qE '^BUILD_IMG='; then
-  if echo "$COMMAND" | grep -qE '^BUILD_IMG=\$\(ls ~/.claude/plugins/cache/[a-zA-Z0-9_-]+/aimi-engineering/[0-9][a-zA-Z0-9._-]*/skills/docker-sandbox/scripts/build-project-image\.sh\)$'; then
-    echo "$ALLOW"
-    exit 0
-  fi
-  # Invalid path pattern — fall through to normal permission prompt
-  exit 0
-fi
-
-# --- Pattern 8: $BUILD_IMG invocation ---
-if echo "$COMMAND" | grep -qE '^\$BUILD_IMG\b|^\$\{BUILD_IMG\}'; then
-  # Reject any shell metacharacters
-  if has_metacharacters "$COMMAND"; then
-    exit 0
-  fi
-
-  # Allow the build script (no subcommand whitelist needed — the script itself is the operation)
-  echo "$ALLOW"
-  exit 0
-fi
-
-# --- Pattern 9: docker exec aimi-* for ACP adapter ---
-# Allows:
-#   docker exec -i aimi-<name> python3 /opt/aimi/acp-adapter.py           (stdin mode)
-#   docker exec aimi-<name> python3 /opt/aimi/acp-adapter.py --input /tmp/acp-payload.json  (file mode)
-# No wildcard Docker approvals — only specific aimi-* container patterns.
-if echo "$COMMAND" | grep -qE '^docker exec '; then
-  # Reject any shell metacharacters
-  if has_metacharacters "$COMMAND"; then
-    exit 0
-  fi
-
-  # Validate: docker exec [-i] aimi-<container> python3 /opt/aimi/acp-adapter.py [--input /tmp/acp-payload.json]
-  if echo "$COMMAND" | grep -qE '^docker exec (-i )?aimi-[a-zA-Z0-9_-]+ python3 /opt/aimi/acp-adapter\.py( --input /tmp/acp-payload\.json)?$'; then
-    echo "$ALLOW"
-    exit 0
-  fi
-  # Non-matching docker exec — fall through to normal permission prompt
-  exit 0
-fi
-
-# --- Pattern 10: docker cp for ACP payload files ---
-# Allows: docker cp /tmp/acp-payload-aimi-<name>.json aimi-<name>:/tmp/acp-payload.json
-# Only permits copying ACP payload files into aimi-* containers.
-if echo "$COMMAND" | grep -qE '^docker cp '; then
-  # Reject any shell metacharacters
-  if has_metacharacters "$COMMAND"; then
-    exit 0
-  fi
-
-  # Validate: docker cp /tmp/acp-payload-aimi-<container>.json aimi-<container>:/tmp/acp-payload.json
-  if echo "$COMMAND" | grep -qE '^docker cp /tmp/acp-payload-aimi-[a-zA-Z0-9_-]+\.json aimi-[a-zA-Z0-9_-]+:/tmp/acp-payload\.json$'; then
-    echo "$ALLOW"
-    exit 0
-  fi
-  # Non-matching docker cp — fall through to normal permission prompt
-  exit 0
 fi
 
 # --- Everything else — normal permission prompt ---
