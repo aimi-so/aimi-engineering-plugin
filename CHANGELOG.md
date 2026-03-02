@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.26.3] - 2026-03-02
+
+### Changed
+
+- **execute.md**: Two-phase story loading — wave selection uses `list-ready --brief` (returns `{id, title, priority, dependsOn}` stubs), full story data fetched via `get-story <id>` per story after `mark-in-progress` (claim-then-fetch pattern)
+- **execute.md**: Single-story wave path now follows: `list-ready --brief` -> `mark-in-progress` -> `get-story` -> build prompt -> Task
+- **execute.md**: Multi-story wave path now follows: `list-ready --brief` -> select -> `mark-in-progress` all -> `get-story` each -> create worktrees -> spawn Tasks
+- **execute.md**: Error handling for `get-story` failures: marks story failed, cascade-skips dependents, continues with remaining stories in wave
+- **execute.md**: Multi-story wave gracefully degrades — if fetch failures reduce to 1 story, falls back to single-story path (no worktree overhead)
+
 ## [1.26.2] - 2026-03-02
 
 ### Fixed
