@@ -28,3 +28,13 @@ $AIMI_CLI check-version --quiet --fix
 If `check-version` exits 0, no action is needed — proceed normally. The `--quiet` flag suppresses informational output and `--fix` auto-updates a stale cli-path. This does NOT call `cleanup-versions` (cleanup is manual-only).
 
 **Use `$AIMI_CLI` for ALL subsequent script calls in this command.**
+
+## CWD Auto-Discovery
+
+The CLI automatically discovers the project root by walking up the directory tree from CWD looking for `.aimi/`. This means:
+
+- The CLI can be invoked from any subdirectory within the project tree
+- No need to `cd` to the project root before running CLI commands
+- If `.aimi/` is not found in any parent directory, the CLI exits with an error
+
+**Note:** The `.aimi/cli-path` fallback in the resolution snippet above uses a relative path (`.aimi/cli-path`). This fallback only works when CWD is the project root. The primary glob-based resolution is unaffected and works from any directory.
