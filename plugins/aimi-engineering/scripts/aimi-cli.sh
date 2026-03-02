@@ -336,7 +336,7 @@ cmd_mark_in_progress() {
 
   write_state "current-story" "$story_id"
 
-  jq --arg id "$story_id" '.userStories[] | select(.id == $id)' "$tasks_file"
+  printf '{"id":"%s","status":"in_progress"}\n' "$story_id"
 }
 
 # Mark a story as complete
@@ -369,7 +369,7 @@ cmd_mark_complete() {
   clear_state_file "current-story"
   write_state "last-result" "success"
 
-  jq --arg id "$story_id" '.userStories[] | select(.id == $id)' "$tasks_file"
+  printf '{"id":"%s","status":"completed"}\n' "$story_id"
 }
 
 # Mark a story as failed with notes
@@ -403,7 +403,7 @@ cmd_mark_failed() {
   clear_state_file "current-story"
   write_state "last-result" "failed"
 
-  jq --arg id "$story_id" '.userStories[] | select(.id == $id)' "$tasks_file"
+  printf '{"id":"%s","status":"failed","notes":"%s"}\n' "$story_id" "$notes"
 }
 
 # Mark a story as skipped
@@ -436,7 +436,7 @@ cmd_mark_skipped() {
   clear_state_file "current-story"
   write_state "last-result" "skipped"
 
-  jq --arg id "$story_id" '.userStories[] | select(.id == $id)' "$tasks_file"
+  printf '{"id":"%s","status":"skipped"}\n' "$story_id"
 }
 
 # Count pending stories
