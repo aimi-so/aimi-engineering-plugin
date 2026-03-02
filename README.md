@@ -2,7 +2,7 @@
 
 Autonomous task execution for Claude Code with structured JSON task management.
 
-Transform implementation plans into executable user stories, then run them autonomously with full context isolation. Stories with independent dependencies execute in parallel via wave-based swarm orchestration. Each story gets its own agent with automatic state tracking.
+Transform implementation plans into executable user stories, then run them autonomously with full context isolation. Stories with independent dependencies execute in parallel via Team orchestration with git worktrees. Each story gets its own agent with automatic state tracking.
 
 ## Table of Contents
 
@@ -536,15 +536,18 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 ## Version History
 
-**Current Version:** 1.24.0
+**Current Version:** 1.24.1
 
 ### Recent Changes
 
+**v1.24.1** - Auto-approve patterns for swarm Docker commands
+
 **v1.24.0** - Swarm Rewrite: Team + Worktree + Simplified Docker
-- Complete swarm.md rewrite replacing Docker/ACP/Sysbox with Team orchestration + git worktrees + `docker run --rm`
+- Complete swarm.md rewrite with Team orchestration + git worktrees + simplified `docker run --rm` containers
 - Workers use generic `node:22-slim` image with volume-mounted worktrees
 - Team task list replaces swarm-state.json for state management
 - Simplified subcommands: `status` and `cleanup` (no `resume` needed)
+- Removed docker-sandbox skill (sandbox-manager, build-project-image, ACP adapter)
 
 **v1.22.0** - Swarm Zero-Config Credentials & Git Remote Fallback
 - Credential auto-detection: ANTHROPIC_API_KEY from env, GITHUB_TOKEN via env/gh-cli/SSH agent priority chain

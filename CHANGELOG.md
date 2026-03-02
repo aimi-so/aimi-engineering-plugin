@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **docker-sandbox skill**: Removed entire skill (sandbox-manager.sh, build-project-image.sh, acp-adapter.py, Dockerfile.base)
 - **swarm.md**: All references to Sysbox runtime, ACP protocol, sandbox-manager, build-project-image
 - **swarm.md**: swarm-state.json state management (replaced by Team task list)
 - **swarm.md**: `resume` subcommand (Team workers are foreground, no detached containers to resume)
