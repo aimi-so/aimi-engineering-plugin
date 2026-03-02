@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.26.2] - 2026-03-02
+
+### Fixed
+
+- **next.md**: Added `subagent_type` guard comments to both Task spawn locations (line 86 and retry at line 122), matching the pattern already applied in execute.md — prevents agents from substituting `story-executor` as an agent type
+
 ## [1.26.1] - 2026-03-02
 
 ### Changed

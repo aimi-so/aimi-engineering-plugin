@@ -83,6 +83,7 @@ Interpolate the following into the template:
 - No WORKTREE_PATH (sequential mode — worker operates in current directory)
 
 ```
+# IMPORTANT: subagent_type MUST be "general-purpose" — story-executor is a skill, NOT an agent.
 Task general-purpose: "Execute [STORY_ID]: [STORY_TITLE]
 
 [story-executor/SKILL.md prompt template with interpolated values]
@@ -118,6 +119,7 @@ $AIMI_CLI mark-failed [STORY_ID] "Attempt 1 failed: [error summary]"
 2. RETRY automatically with error context:
 
 ```
+# IMPORTANT: subagent_type MUST be "general-purpose" — story-executor is a skill, NOT an agent.
 Task general-purpose: "RETRY: Execute [STORY_ID]: [STORY_TITLE]
 
 PREVIOUS ATTEMPT FAILED:
