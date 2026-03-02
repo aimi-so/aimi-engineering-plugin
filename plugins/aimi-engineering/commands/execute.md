@@ -210,6 +210,7 @@ while true:
 
         # Spawn a single foreground Task — same pattern as next.md
         # No worktree, worker operates in current directory
+        # IMPORTANT: subagent_type MUST be "general-purpose" — story-executor is a skill, NOT an agent.
         Task(
             subagent_type: "general-purpose",
             description: "Execute [story.id]: [story.title]",
@@ -257,6 +258,7 @@ while true:
     # Claude Code runs multiple foreground Tasks concurrently and returns
     # all results before the agent's turn ends.
     #
+    # IMPORTANT: subagent_type MUST be "general-purpose" — story-executor is a skill, NOT an agent.
     # In one tool-call turn, emit N Task calls:
     for story in selected_stories:
         worktree_name = "aimi-[story.id]"
