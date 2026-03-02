@@ -11,12 +11,6 @@ user: "I need to implement file uploads using Active Storage"
 assistant: "I'll use the aimi-framework-docs-researcher agent to gather comprehensive documentation about Active Storage"
 <commentary>Since the user needs to understand a framework/library feature, use the aimi-framework-docs-researcher agent to collect all relevant documentation and best practices.</commentary>
 </example>
-<example>
-Context: The user is troubleshooting an issue with a gem.
-user: "Why is the turbo-rails gem not working as expected?"
-assistant: "Let me use the aimi-framework-docs-researcher agent to investigate the turbo-rails documentation and source code"
-<commentary>The user needs to understand library behavior, so the aimi-framework-docs-researcher agent should be used to gather documentation and explore the gem's source.</commentary>
-</example>
 </examples>
 
 **Note: The current year is 2026.** Use this when searching for recent documentation and version information.

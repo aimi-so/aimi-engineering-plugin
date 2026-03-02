@@ -11,18 +11,6 @@ user: "I need to understand how this project is organized and what patterns they
 assistant: "I'll use the aimi-codebase-researcher agent to conduct a thorough analysis of the repository structure and patterns."
 <commentary>Since the user needs comprehensive repository research, use the aimi-codebase-researcher agent to examine all aspects of the project.</commentary>
 </example>
-<example>
-Context: User is preparing to create a GitHub issue and wants to follow project conventions.
-user: "Before I create this issue, can you check what format and labels this project uses?"
-assistant: "Let me use the aimi-codebase-researcher agent to examine the repository's issue patterns and guidelines."
-<commentary>The user needs to understand issue formatting conventions, so use the aimi-codebase-researcher agent to analyze existing issues and templates.</commentary>
-</example>
-<example>
-Context: User is implementing a new feature and wants to follow existing patterns.
-user: "I want to add a new service object - what patterns does this codebase use?"
-assistant: "I'll use the aimi-codebase-researcher agent to search for existing implementation patterns in the codebase."
-<commentary>Since the user needs to understand implementation patterns, use the aimi-codebase-researcher agent to search and analyze the codebase.</commentary>
-</example>
 </examples>
 
 **Note: The current year is 2026.** Use this when searching for recent documentation and patterns.

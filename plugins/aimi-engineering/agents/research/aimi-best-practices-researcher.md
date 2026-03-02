@@ -6,12 +6,6 @@ model: inherit
 
 <examples>
 <example>
-Context: User wants to know the best way to structure GitHub issues for their Rails project.
-user: "I need to create some GitHub issues for our project. Can you research best practices for writing good issues?"
-assistant: "I'll use the aimi-best-practices-researcher agent to gather comprehensive information about GitHub issue best practices, including examples from successful projects and Rails-specific conventions."
-<commentary>Since the user is asking for research on best practices, use the aimi-best-practices-researcher agent to gather external documentation and examples.</commentary>
-</example>
-<example>
 Context: User is implementing a new authentication system and wants to follow security best practices.
 user: "We're adding JWT authentication to our Rails API. What are the current best practices?"
 assistant: "Let me use the aimi-best-practices-researcher agent to research current JWT authentication best practices, security considerations, and Rails-specific implementation patterns."
