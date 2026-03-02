@@ -6,12 +6,6 @@ model: inherit
 
 <examples>
 <example>
-Context: The user added a new feature to their application.
-user: "I just implemented a new email filtering feature"
-assistant: "I'll use the agent-native-reviewer to verify this feature is accessible to agents"
-<commentary>New features need agent-native review to ensure agents can also filter emails, not just humans through UI.</commentary>
-</example>
-<example>
 Context: The user created a new UI workflow.
 user: "I added a multi-step wizard for creating reports"
 assistant: "Let me check if this workflow is agent-native using the agent-native-reviewer"
