@@ -10,30 +10,7 @@ Display the current execution progress using the CLI script.
 
 ## Step 0: Resolve CLI Path
 
-**CRITICAL:** The CLI script lives in the plugin install directory, NOT the project directory. Resolve it first:
-
-```bash
-# Glob always finds the latest installed version
-AIMI_CLI=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
-# Fallback to cached cli-path if glob found nothing (edge case)
-if [ -z "$AIMI_CLI" ] && [ -f .aimi/cli-path ] && [ -x "$(cat .aimi/cli-path)" ]; then
-  AIMI_CLI=$(cat .aimi/cli-path)
-fi
-```
-
-If empty, report: "aimi-cli.sh not found. Reinstall plugin: `/plugin install aimi-engineering`" and STOP.
-
-### Version Check
-
-After resolving `$AIMI_CLI`, verify the cached CLI path is current:
-
-```bash
-$AIMI_CLI check-version --quiet --fix
-```
-
-If `check-version` exits 0, no action is needed — proceed normally. The `--quiet` flag suppresses informational output and `--fix` auto-updates a stale cli-path. This does NOT call `cleanup-versions` (cleanup is manual-only).
-
-**Use `$AIMI_CLI` for ALL subsequent script calls in this command.**
+Resolve `$AIMI_CLI` path using glob discovery with fallback, then verify version. See `commands/references/cli-path-resolution.md` for the full resolution logic (glob -> fallback -> version check). Use `$AIMI_CLI` for all subsequent script calls.
 
 ## Step 1: Get Status via CLI
 
@@ -43,26 +20,10 @@ If `check-version` exits 0, no action is needed — proceed normally. The `--qui
 $AIMI_CLI status
 ```
 
-This returns JSON:
+This returns JSON with status counts and story list.
 
-```json
-{
-  "schemaVersion": "3.0",
-  "title": "feat: Feature name",
-  "branch": "feat/feature-name",
-  "maxConcurrency": 4,
-  "pending": 3,
-  "in_progress": 1,
-  "completed": 2,
-  "failed": 0,
-  "skipped": 0,
-  "total": 6,
-  "userStories": [
-    {"id": "US-001", "title": "Story title", "status": "completed", "dependsOn": [], "priority": 1, "notes": ""},
-    {"id": "US-002", "title": "Story title", "status": "in_progress", "dependsOn": ["US-001"], "priority": 2, "notes": ""}
-  ]
-}
-```
+> **Schema:** See `task-format-v3.md` in `skills/task-planner/references/`. The CLI status output mirrors the tasks.json structure with added aggregate counts.
+> Key fields: `schemaVersion`, `title`, `branch`, `maxConcurrency`, status counts (`pending`,`in_progress`,`completed`,`failed`,`skipped`,`total`), `userStories[]{id,title,status,dependsOn,priority,notes}`
 
 If no tasks file found, the script exits with error. Report:
 ```
