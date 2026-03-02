@@ -222,23 +222,47 @@ cmd_init_session() {
 }
 
 # Get comprehensive status summary
+# Flags: --counts-only (return aggregate counts without userStories array)
 cmd_status() {
+  local counts_only=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --counts-only) counts_only=true; shift ;;
+      *) break ;;
+    esac
+  done
+
   local tasks_file
   tasks_file=$(get_tasks_file)
 
-  jq '{
-    schemaVersion: .schemaVersion,
-    title: .metadata.title,
-    branch: .metadata.branchName,
-    maxConcurrency: ((.metadata.maxConcurrency // 4) | if . <= 0 then 4 else . end),
-    pending: [.userStories[] | select(.status == "pending")] | length,
-    in_progress: [.userStories[] | select(.status == "in_progress")] | length,
-    completed: [.userStories[] | select(.status == "completed")] | length,
-    failed: [.userStories[] | select(.status == "failed")] | length,
-    skipped: [.userStories[] | select(.status == "skipped")] | length,
-    total: .userStories | length,
-    userStories: [.userStories[] | {id, title, status, dependsOn: (.dependsOn // []), priority, notes}]
-  }' "$tasks_file"
+  if [ "$counts_only" = true ]; then
+    jq '{
+      schemaVersion: .schemaVersion,
+      title: .metadata.title,
+      branch: .metadata.branchName,
+      maxConcurrency: ((.metadata.maxConcurrency // 4) | if . <= 0 then 4 else . end),
+      pending: [.userStories[] | select(.status == "pending")] | length,
+      in_progress: [.userStories[] | select(.status == "in_progress")] | length,
+      completed: [.userStories[] | select(.status == "completed")] | length,
+      failed: [.userStories[] | select(.status == "failed")] | length,
+      skipped: [.userStories[] | select(.status == "skipped")] | length,
+      total: .userStories | length
+    }' "$tasks_file"
+  else
+    jq '{
+      schemaVersion: .schemaVersion,
+      title: .metadata.title,
+      branch: .metadata.branchName,
+      maxConcurrency: ((.metadata.maxConcurrency // 4) | if . <= 0 then 4 else . end),
+      pending: [.userStories[] | select(.status == "pending")] | length,
+      in_progress: [.userStories[] | select(.status == "in_progress")] | length,
+      completed: [.userStories[] | select(.status == "completed")] | length,
+      failed: [.userStories[] | select(.status == "failed")] | length,
+      skipped: [.userStories[] | select(.status == "skipped")] | length,
+      total: .userStories | length,
+      userStories: [.userStories[] | {id, title, status, dependsOn: (.dependsOn // []), priority, notes}]
+    }' "$tasks_file"
+  fi
 }
 
 # Get metadata only
@@ -833,7 +857,8 @@ USAGE:
 COMMANDS:
     init-session              Initialize execution session, save state
     find-tasks                Find most recent tasks file
-    status                    Get status summary as JSON
+    status [--counts-only]    Get status summary as JSON
+                              --counts-only  Return aggregate counts without userStories array
     metadata                  Get metadata only
     next-story                Get next pending story, save to state
     current-story             Get currently active story from state
@@ -913,7 +938,7 @@ main() {
   case "${1:-help}" in
     init-session)      cmd_init_session ;;
     find-tasks)        cmd_find_tasks ;;
-    status)            cmd_status ;;
+    status)            shift; cmd_status "$@" ;;
     metadata)          cmd_metadata ;;
     next-story)        cmd_next_story ;;
     current-story)     cmd_current_story ;;
