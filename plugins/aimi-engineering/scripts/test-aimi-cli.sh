@@ -888,6 +888,46 @@ test_cleanup_versions() {
 }
 
 # ============================================================================
+# Auto-Discovery Tests
+# ============================================================================
+
+test_auto_discovery_from_subdirectory() {
+  echo ""
+  echo "=== Testing auto-discovery from subdirectory ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  # Create a nested subdirectory inside TEST_DIR
+  mkdir -p "$TEST_DIR/sub/dir"
+
+  # Run CLI from the subdirectory — find_aimi_root() should walk up and find .aimi/
+  local output exit_code
+  output=$(cd "$TEST_DIR/sub/dir" && "$CLI" status) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "auto-discovery: CLI succeeds from subdirectory"
+  assert_contains '"schemaVersion": "3.0"' "$output" "auto-discovery: status returns schema from subdirectory"
+  assert_contains '"userStories"' "$output" "auto-discovery: status returns stories from subdirectory"
+}
+
+test_auto_discovery_not_found() {
+  echo ""
+  echo "=== Testing auto-discovery failure (no .aimi/) ==="
+
+  # Create a separate temp directory with no .aimi/ anywhere
+  local no_aimi_dir
+  no_aimi_dir=$(mktemp -d)
+
+  local output exit_code
+  output=$(cd "$no_aimi_dir" && "$CLI" status 2>&1) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "auto-discovery: exits 1 when no .aimi/ found"
+  assert_contains ".aimi/ directory not found" "$output" "auto-discovery: error message mentions .aimi/ not found"
+
+  rm -rf "$no_aimi_dir"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -895,6 +935,13 @@ main() {
   echo "================================================"
   echo "  Aimi CLI Test Suite"
   echo "================================================"
+
+  # Ensure cleanup on exit/abort
+  trap 'rm -rf "$TEST_DIR"' EXIT
+
+  # Run inside isolated temp directory so find_aimi_root() discovers
+  # the test .aimi/ instead of the real project .aimi/
+  cd "$TEST_DIR"
 
   setup
 
@@ -951,6 +998,12 @@ main() {
   test_check_version_quiet_fix
   test_check_version_backward_compat
   test_cleanup_versions
+
+  # Auto-discovery tests
+  echo ""
+  echo "--- Auto-Discovery Tests ---"
+  test_auto_discovery_from_subdirectory
+  test_auto_discovery_not_found
 
   cleanup
 
