@@ -536,9 +536,13 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 ## Version History
 
-**Current Version:** 1.24.1
+**Current Version:** 1.27.0
 
 ### Recent Changes
+
+**v1.27.0** - Lazy Story Loading
+- Added `get-story <id>` CLI command for on-demand story fetching
+- Updated execute.md to use two-phase loading (`list-ready --brief` + `get-story`) for reduced orchestrator context consumption
 
 **v1.24.1** - Auto-approve patterns for swarm Docker commands
 

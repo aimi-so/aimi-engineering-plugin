@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.26.3] - 2026-03-02
+## [1.27.0] - 2026-03-02
+
+### Added
+
+- **aimi-cli.sh**: `get-story <id>` command for on-demand story fetching — returns full story JSON for a single story by ID, enabling lazy loading instead of bulk extraction
 
 ### Changed
 
