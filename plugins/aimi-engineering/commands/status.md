@@ -43,26 +43,10 @@ If `check-version` exits 0, no action is needed — proceed normally. The `--qui
 $AIMI_CLI status
 ```
 
-This returns JSON:
+This returns JSON with status counts and story list.
 
-```json
-{
-  "schemaVersion": "3.0",
-  "title": "feat: Feature name",
-  "branch": "feat/feature-name",
-  "maxConcurrency": 4,
-  "pending": 3,
-  "in_progress": 1,
-  "completed": 2,
-  "failed": 0,
-  "skipped": 0,
-  "total": 6,
-  "userStories": [
-    {"id": "US-001", "title": "Story title", "status": "completed", "dependsOn": [], "priority": 1, "notes": ""},
-    {"id": "US-002", "title": "Story title", "status": "in_progress", "dependsOn": ["US-001"], "priority": 2, "notes": ""}
-  ]
-}
-```
+> **Schema:** See `task-format-v3.md` in `skills/task-planner/references/`. The CLI status output mirrors the tasks.json structure with added aggregate counts.
+> Key fields: `schemaVersion`, `title`, `branch`, `maxConcurrency`, status counts (`pending`,`in_progress`,`completed`,`failed`,`skipped`,`total`), `userStories[]{id,title,status,dependsOn,priority,notes}`
 
 If no tasks file found, the script exits with error. Report:
 ```

@@ -20,50 +20,10 @@ Take a feature description through research, spec analysis, and story decomposit
 
 **Filename:** `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 
-**Schema:** v3 — see `references/task-format-v3.md` for the full specification.
+> **Schema:** See `references/task-format-v3.md` for the full v3 specification with status state machine, dependency system, and validation rules.
+> Key fields: `schemaVersion`, `metadata{title,type,branchName,createdAt,planPath,maxConcurrency}`, `userStories[]{id,title,description,acceptanceCriteria,priority,status,dependsOn,notes}`
 
-```json
-{
-  "schemaVersion": "3.0",
-  "metadata": {
-    "title": "feat: Feature name",
-    "type": "feat",
-    "branchName": "feat/feature-name",
-    "createdAt": "YYYY-MM-DD",
-    "planPath": null,
-    "brainstormPath": ".aimi/brainstorms/... (optional)",
-    "maxConcurrency": 4
-  },
-  "userStories": [
-    {
-      "id": "US-001",
-      "title": "Add schema migration",
-      "description": "As a [user], I want [feature] so that [benefit]",
-      "acceptanceCriteria": ["Criterion 1", "Typecheck passes"],
-      "priority": 1,
-      "status": "pending",
-      "dependsOn": [],
-      "notes": ""
-    },
-    {
-      "id": "US-002",
-      "title": "Add server action",
-      "description": "As a [user], I want [feature] so that [benefit]",
-      "acceptanceCriteria": ["Criterion 1", "Typecheck passes"],
-      "priority": 2,
-      "status": "pending",
-      "dependsOn": ["US-001"],
-      "notes": ""
-    }
-  ]
-}
-```
-
-**Key fields:**
-- `planPath` is always `null` — this skill generates tasks.json directly, no intermediate plan.
-- `status` tracks story lifecycle. All stories initialize as `"pending"`.
-- `dependsOn` is a string array of story IDs that must complete before this story can start.
-- `maxConcurrency` (optional) controls how many stories execute in parallel (default: `4`).
+**Notes:** `planPath` is always `null` (this skill generates tasks.json directly). All stories initialize with `status: "pending"`. `dependsOn` is a string array of story IDs. `maxConcurrency` defaults to `4`.
 
 ### Type Values
 

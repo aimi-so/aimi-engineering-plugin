@@ -26,22 +26,8 @@ Execute ONE story from the tasks file:
 
 ## Story Format
 
-```json
-{
-  "id": "US-001",
-  "title": "Add status field to tasks table",
-  "description": "As a developer, I need to store task status in the database.",
-  "acceptanceCriteria": [
-    "Add status column: 'pending' | 'in_progress' | 'done' (default 'pending')",
-    "Generate and run migration successfully",
-    "Typecheck passes"
-  ],
-  "priority": 1,
-  "status": "pending",
-  "dependsOn": [],
-  "notes": ""
-}
-```
+> **Schema:** See `task-format-v3.md` in `../task-planner/references/`. Each story is one atomic unit of work completable in a single agent iteration.
+> Key fields: `id`, `title`, `description`, `acceptanceCriteria`, `priority`, `status`, `dependsOn`, `notes`
 
 ---
 

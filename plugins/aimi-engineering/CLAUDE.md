@@ -83,32 +83,8 @@ Learnings are stored in project files (not separate progress log):
 
 ## Tasks File Schema
 
-### Required Fields
-
-```json
-{
-  "schemaVersion": "3.0",
-  "metadata": {
-    "title": "feat: Add feature name",
-    "type": "feat|ref|bug|chore",
-    "branchName": "feat/feature-name",
-    "createdAt": "YYYY-MM-DD",
-    "planPath": null,
-    "brainstormPath": null,
-    "maxConcurrency": 4
-  },
-  "userStories": [{
-    "id": "US-XXX",
-    "title": "string (max 200)",
-    "description": "string (max 500)",
-    "acceptanceCriteria": ["string"],
-    "priority": 1,
-    "status": "pending",
-    "dependsOn": [],
-    "notes": ""
-  }]
-}
-```
+> **Schema:** See `task-format-v3.md` in `skills/task-planner/references/`. Full v3 specification with status state machine, dependency system, and validation rules.
+> Key fields: `schemaVersion`, `metadata{title,type,branchName,maxConcurrency}`, `userStories[]{id,title,description,acceptanceCriteria,status,dependsOn}`
 
 
 ## Performance Guidelines

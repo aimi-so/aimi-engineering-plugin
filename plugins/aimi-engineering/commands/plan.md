@@ -130,61 +130,8 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 
 ### Output Format
 
-```json
-{
-  "schemaVersion": "3.0",
-  "metadata": {
-    "title": "feat: Feature name",
-    "type": "feat",
-    "branchName": "feat/feature-name",
-    "createdAt": "YYYY-MM-DD",
-    "planPath": null,
-    "maxConcurrency": 4
-  },
-  "userStories": [
-    {
-      "id": "US-001",
-      "title": "Schema/data layer story",
-      "description": "As a [user], I want [feature] so that [benefit]",
-      "acceptanceCriteria": ["Criterion 1", "Typecheck passes"],
-      "priority": 1,
-      "status": "pending",
-      "dependsOn": [],
-      "notes": ""
-    },
-    {
-      "id": "US-002",
-      "title": "Backend story depending on schema",
-      "description": "As a [user], I want [feature] so that [benefit]",
-      "acceptanceCriteria": ["Criterion 1", "Typecheck passes"],
-      "priority": 2,
-      "status": "pending",
-      "dependsOn": ["US-001"],
-      "notes": ""
-    },
-    {
-      "id": "US-003",
-      "title": "Independent UI story",
-      "description": "As a [user], I want [feature] so that [benefit]",
-      "acceptanceCriteria": ["Criterion 1", "Typecheck passes"],
-      "priority": 3,
-      "status": "pending",
-      "dependsOn": ["US-001"],
-      "notes": ""
-    },
-    {
-      "id": "US-004",
-      "title": "Aggregation story needing both",
-      "description": "As a [user], I want [feature] so that [benefit]",
-      "acceptanceCriteria": ["Criterion 1", "Typecheck passes"],
-      "priority": 4,
-      "status": "pending",
-      "dependsOn": ["US-002", "US-003"],
-      "notes": ""
-    }
-  ]
-}
-```
+> **Schema:** See `task-format-v3.md` in `skills/task-planner/references/`. Full v3 specification with complete example, validation rules, and dependency system.
+> Key fields: `schemaVersion`, `metadata{title,type,branchName,createdAt,planPath,maxConcurrency}`, `userStories[]{id,title,description,acceptanceCriteria,priority,status,dependsOn,notes}`
 
 ### Checklist Before Writing
 
