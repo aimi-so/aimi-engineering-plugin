@@ -1,265 +1,112 @@
 ---
 name: aimi:swarm
-description: "Execute multiple tasks.json files in parallel Docker sandboxes"
+description: "Execute multiple tasks.json files in parallel using Team orchestration, git worktrees, and simplified Docker containers"
 disable-model-invocation: true
-allowed-tools: Read, Bash(SANDBOX_MGR=*), Bash($SANDBOX_MGR:*), Bash(BUILD_IMG=*), Bash($BUILD_IMG:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Bash(docker:*), Bash(git:*), Task, Glob, AskUserQuestion
+allowed-tools: Read, Write, Edit, Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Bash(WORKTREE_MGR=*), Bash($WORKTREE_MGR:*), Bash(docker:*), Bash(git:*), Bash(id:*), Bash(jq:*), Bash(ls:*), Bash(test:*), Bash(echo:*), Bash(timeout:*), Task, TeamCreate, TeamDelete, SendMessage, Glob, AskUserQuestion
 ---
 
 # Aimi Swarm
 
-Execute multiple tasks.json files in parallel Docker sandboxes. Each task file runs inside its own Sysbox-isolated container with a full Claude Code agent executing the story-executor flow.
+Execute multiple tasks.json files in parallel. Each task file gets its own git worktree and Team worker that runs Claude Code inside a Docker container (`docker run --rm`). No Sysbox, no ACP protocol, no persistent containers.
+
+```
+User runs /aimi:swarm
+         |
+         v
+    Team Lead (this agent, runs on host)
+         |  TeamCreate + worktree per task file
+         |
+    Worker 1    Worker 2    Worker 3
+         |          |          |
+    docker run  docker run  docker run
+    --rm -v     --rm -v     --rm -v
+    (volume-mounts worktree)
+```
 
 ## Step 0: Resolve Tool Paths
-
-**CRITICAL:** Resolve all tool paths from the plugin install directory first.
 
 ### AIMI CLI
 
 Resolve `$AIMI_CLI` path using glob discovery with fallback, then verify version. See `commands/references/cli-path-resolution.md` for the full resolution logic (glob -> fallback -> version check).
 
-```bash
-# Sandbox manager
-SANDBOX_MGR=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/skills/docker-sandbox/scripts/sandbox-manager.sh 2>/dev/null | tail -1)
-```
-
-If empty, report: "sandbox-manager.sh not found. Reinstall plugin: `/plugin install aimi-engineering`" and STOP.
+### Worktree Manager
 
 ```bash
-# Build image script
-BUILD_IMG=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/skills/docker-sandbox/scripts/build-project-image.sh 2>/dev/null | tail -1)
+WORKTREE_MGR=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/skills/git-worktree/scripts/worktree-manager.sh 2>/dev/null | tail -1)
 ```
 
-If empty, report: "build-project-image.sh not found. Reinstall plugin: `/plugin install aimi-engineering`" and STOP.
+If empty, report: "worktree-manager.sh not found. Reinstall plugin: `/plugin install aimi-engineering`" and STOP.
 
-**Use `$AIMI_CLI`, `$SANDBOX_MGR`, and `$BUILD_IMG` for ALL subsequent script calls.**
+**Use `$AIMI_CLI` and `$WORKTREE_MGR` for ALL subsequent script calls.**
 
 ## Step 1: Handle Subcommands
 
 Check if `$ARGUMENTS` contains a subcommand:
 
-### State Reconciliation (shared subroutine)
-
-**This reconciliation runs automatically before `status` display and at the start of `resume`.** It detects zombie entries (containers that exist in `swarm-state.json` but no longer exist as Docker containers) and corrects stale state.
-
-Reconciliation procedure:
-
-1. Load the current swarm state:
-   ```bash
-   $AIMI_CLI swarm-status
-   ```
-   If no active swarm exists, skip reconciliation.
-
-2. For each container entry in the state (parse the JSON output to get the list of containers with their `containerName` and `status`):
-
-   a. **Skip terminal entries:** If `status` is `completed`, `failed`, or `stopped`, skip this container (no reconciliation needed for already-terminal entries).
-
-   b. **Query actual Docker state:**
-      ```bash
-      $SANDBOX_MGR status <containerName>
-      ```
-      Parse the JSON output. Key fields: `exists` (boolean), `swarmState` (string), `exitCode` (integer).
-
-   c. **Zombie detection — container gone from Docker:**
-      If `exists` is `false` (container no longer exists on Docker daemon but state says `pending` or `running`):
-      - This is a **zombie entry**. The container was removed or crashed without updating swarm state.
-      - Update the swarm state to `failed`:
-        ```bash
-        $AIMI_CLI swarm-update <containerName> --status failed
-        ```
-      - Record this zombie for reporting: `"<containerName>: zombie (container not found, was <originalStatus>)"`
-
-   d. **State drift — Docker state disagrees with swarm state:**
-      If `exists` is `true` but `swarmState` from Docker differs from the recorded `status`:
-
-      - If Docker says `completed` (exit code 0) but state says `running` or `pending`:
-        ```bash
-        $AIMI_CLI swarm-update <containerName> --status completed
-        ```
-
-      - If Docker says `failed` (exit code non-zero) but state says `running` or `pending`:
-        ```bash
-        $AIMI_CLI swarm-update <containerName> --status failed
-        ```
-
-      - If Docker says `stopped` (paused/removing) but state says `running`:
-        ```bash
-        $AIMI_CLI swarm-update <containerName> --status stopped
-        ```
-
-      - If Docker says `running` but state says `pending`:
-        ```bash
-        $AIMI_CLI swarm-update <containerName> --status running
-        ```
-
-      - Record any state drift for reporting: `"<containerName>: state corrected <oldStatus> -> <newStatus>"`
-
-3. If any zombies or drift were detected, report them:
-   ```
-   State reconciliation:
-     - aimi-swarm-auth: zombie (container not found, was running)
-     - aimi-swarm-ui: state corrected running -> completed
-   ```
-   If no issues found, report: `"State reconciliation: all entries consistent."`
-
 ### `status`
+
 If arguments start with `status`:
 
-1. **Run state reconciliation** (see subroutine above). This ensures the displayed state reflects reality.
-
-2. Re-read the reconciled swarm state:
+1. Read all task files from `.aimi/tasks/*-tasks.json`
+2. For each file, report story progress using `jq`:
    ```bash
-   $AIMI_CLI swarm-status
+   jq -r '.metadata | "\(.branchName) — \(.title)"' <file>
+   jq '[.userStories[] | select(.status == "completed")] | length' <file>
+   jq '.userStories | length' <file>
    ```
-
-3. Format the output as a summary table:
+3. Check for any active aimi-* worktrees:
+   ```bash
+   git worktree list --porcelain | grep -c "aimi-"
+   ```
+4. Report:
    ```
    ## Swarm Status
 
-   Swarm ID: <swarmId>
-   Updated: <updatedAt>
+   | # | Task File | Branch | Progress |
+   |---|-----------|--------|----------|
+   | 1 | .aimi/tasks/auth-tasks.json | feat/auth | 5/5 |
+   | 2 | .aimi/tasks/ui-tasks.json | feat/ui | 2/3 |
 
-   | # | Container | Task File | Branch | Status | Progress |
-   |---|-----------|-----------|--------|--------|----------|
-   | 1 | aimi-swarm-auth | .aimi/tasks/auth-tasks.json | feat/auth | completed | 5/5 |
-   | 2 | aimi-swarm-ui | .aimi/tasks/ui-tasks.json | feat/ui | running | 2/3 |
-   | 3 | aimi-swarm-api | .aimi/tasks/api-tasks.json | feat/api | failed | 0/4 |
-
-   Summary: 1 completed, 1 running, 1 failed (3 total)
+   Active worktrees: 0
    ```
-
-   The Progress column is derived from `storyProgress`: `<completed>/<total>`.
-
-4. STOP.
-
-### `resume`
-If arguments start with `resume`:
-
-1. **Run state reconciliation** (see subroutine above). This corrects zombies and stale state before making resume decisions.
-
-2. Re-read the reconciled swarm state:
-   ```bash
-   $AIMI_CLI swarm-status
-   ```
-   Parse the containers list. Classify each container by its (now-reconciled) status.
-
-3. **Identify resumable containers:**
-   - `pending` containers: Need ACP adapter invocation (were never started or were added after a crash).
-   - `failed` containers: May be retried. Check if they are still present as Docker containers:
-     ```bash
-     $SANDBOX_MGR status <containerName>
-     ```
-     - If the Docker container exists and is stopped/exited, it can be removed and recreated.
-     - If the Docker container does not exist, it needs to be recreated from scratch.
-
-4. **Handle running containers:**
-   For containers still showing `running` after reconciliation (Docker confirms they are actually running):
-   - Report: `"<containerName>: still running in Docker, skipping"`
-   - Do NOT re-invoke the ACP adapter for these.
-
-5. **Handle completed containers:**
-   For containers with status `completed`:
-   - Report: `"<containerName>: already completed"`
-   - Check if a PR URL exists in the state. If so, include it in the report.
-   - Skip these containers.
-
-6. **Recreate failed containers for retry:**
-   For each `failed` container that should be retried:
-   a. Remove the old Docker container if it still exists:
-      ```bash
-      $SANDBOX_MGR remove <containerName>
-      ```
-   b. Read the task file path and branch from the swarm state entry.
-   c. Verify the task file still exists on disk. If not, report error and skip this container.
-   d. Recreate the container (follows same pattern as Step 4 in the main flow).
-
-      Re-detect credentials using the same Step 2.5 logic if not already set in this session. Build the create command with conditional flags:
-      ```bash
-      # Build create command with conditional flags
-      CREATE_FLAGS=""
-      if [ "$AUTH_METHOD" = "ssh" ]; then
-        CREATE_FLAGS="$CREATE_FLAGS --ssh-agent"
-      fi
-      if [ "$CLAUDE_AUTH" = "subscription" ]; then
-        CREATE_FLAGS="$CREATE_FLAGS --mount-claude-config"
-      fi
-
-      $SANDBOX_MGR create <containerName> --image <PROJECT_IMAGE> --task-file <taskFile> --branch <BRANCH> $CREATE_FLAGS
-      ```
-      **Log the full container creation command for debugging** before executing it.
-
-      **Note:** `PROJECT_IMAGE` must be resolved. Run `$BUILD_IMG` to build/reuse the project image if not already available.
-   e. Parse the new `containerId` from the JSON output.
-   f. Update the swarm state with the new container ID and reset status to `pending`:
-      ```bash
-      $AIMI_CLI swarm-update <containerName> --status pending
-      ```
-
-7. **Fan out pending containers:**
-   If there are containers with status `pending` (either originally pending or reset from failed):
-   - Re-detect credentials using the **same Step 2.5 logic** if `AUTH_METHOD` or `CLAUDE_AUTH` is not already set in this session. This ensures `AUTH_METHOD=ssh` and `CLAUDE_AUTH=subscription` are available for any container recreation that may have occurred in step 6d.
-   - Resolve `REPO_URL` using the **same fallback chain as Step 3** (try `origin`, then `upstream`, then first available remote from `git remote`). If no remotes are found, STOP with: `"No git remotes found. Add one with: git remote add origin <url>"`. Log which remote was selected and its URL. Detect the remote URL protocol (SSH vs HTTPS) and log any AUTH_METHOD mismatch warning, same as Step 3.
-   - Proceed to Step 5 (fan-out) for these pending containers only.
-   - After fan-out and result collection, proceed to Step 6 for state update and reporting.
-
-8. **All terminal — nothing to resume:**
-   If all containers are in terminal states (`completed`, `failed`, `stopped`) and there are no `pending` containers after the retry logic:
-   ```
-   All containers are in terminal state. Nothing to resume.
-
-   | Container | Status | PR |
-   |-----------|--------|----|
-   | aimi-swarm-auth | completed | https://github.com/org/repo/pull/42 |
-   | aimi-swarm-api | failed | - |
-
-   To retry failed containers, fix the underlying issues and run `/aimi:swarm --file <taskFile>`.
-   To clean up: `/aimi:swarm cleanup`
-   ```
-   STOP.
+5. STOP.
 
 ### `cleanup`
+
 If arguments start with `cleanup`:
 
-1. Load the current swarm state:
+1. Remove all aimi-* worktrees:
    ```bash
-   $AIMI_CLI swarm-status
+   $WORKTREE_MGR list
    ```
-   If no active swarm exists, report: `"No active swarm to clean up."` and STOP.
-
-2. Parse the containers list from the state JSON.
-
-3. **Remove Docker containers:**
-   For each container entry, regardless of status:
+   For each worktree matching `aimi-*`:
    ```bash
-   $SANDBOX_MGR remove <containerName>
+   $WORKTREE_MGR remove <worktree_name>
    ```
-   The `remove` command is idempotent — it handles containers that no longer exist gracefully.
 
-   Track results:
-   - Removed: containers that existed and were removed
-   - Already gone: containers that did not exist in Docker
-
-4. **Clean swarm state:**
+2. Remove any leftover Docker containers:
    ```bash
-   $AIMI_CLI swarm-cleanup
+   docker container ls -a --filter "name=aimi-swarm-" --format '{{.Names}}' | while read name; do
+     docker rm -f "$name" 2>/dev/null
+   done
    ```
-   This removes terminal (`completed`, `failed`, `stopped`) entries from swarm-state.json.
 
-5. **Report cleanup results:**
+3. Prune stopped containers (safety net):
+   ```bash
+   docker container prune -f --filter "label=aimi-swarm" 2>/dev/null
+   ```
+
+4. Report:
    ```
    ## Swarm Cleanup Complete
 
-   Docker containers:
-     - aimi-swarm-auth: removed
-     - aimi-swarm-ui: removed
-     - aimi-swarm-api: already gone (not found in Docker)
-
-   State entries cleaned: 3
-   Remaining active entries: 0
+   Worktrees removed: [N]
+   Docker containers removed: [N]
    ```
+5. STOP.
 
-6. STOP.
+### Default (no subcommand)
 
-### Default (no subcommand or `--file`)
 Proceed to Step 2.
 
 ## Step 2: Discover Task Files
@@ -270,8 +117,14 @@ If `$ARGUMENTS` contains `--file <path>`:
 - Use that single file as the selection
 - Skip to Step 3
 
-### Multi-select discovery mode
-Glob for task files:
+### Multi-file flags
+
+1. **`--all` flag**: Select all discovered files automatically.
+2. **`--files <path1>,<path2>`**: Select specified files (comma-separated).
+3. **No flag**: Fall through to interactive selection.
+
+### Discovery
+
 ```bash
 ls -t .aimi/tasks/*-tasks.json 2>/dev/null
 ```
@@ -282,606 +135,334 @@ No task files found in .aimi/tasks/. Run /aimi:plan to create a task list first.
 ```
 STOP.
 
-Store the discovered files list as `DISCOVERED_FILES`.
-
-For each file, extract metadata with:
+For each file, extract metadata:
 ```bash
 jq -r '.metadata | "\(.branchName) — \(.title)"' <file>
-```
-
-And count stories:
-```bash
 jq '[.userStories[] | select(.status == "pending")] | length' <file>
 ```
 
-### Non-interactive file selection flags
-
-Before prompting the user, check `$ARGUMENTS` for non-interactive selection flags:
-
-1. **`--all` flag**: If `$ARGUMENTS` contains `--all`, select all discovered files automatically:
-   - Set `SELECTED_TASK_FILES` to all `DISCOVERED_FILES`
-   - Report: `"--all flag: selecting all [N] discovered task file(s)."`
-   - Skip the AskUserQuestion prompt entirely
-   - Proceed to max containers limit check
-
-2. **`--files <path1>,<path2>` flag**: If `$ARGUMENTS` contains `--files` followed by a comma-separated list of paths:
-   - Parse the comma-separated paths (e.g., `--files .aimi/tasks/a-tasks.json,.aimi/tasks/b-tasks.json`)
-   - Validate each path: must exist on disk and end with `.json`
-   - If any path is invalid, report the error and STOP
-   - Set `SELECTED_TASK_FILES` to the validated paths
-   - Report: `"--files flag: selecting [N] specified task file(s)."`
-   - Skip the AskUserQuestion prompt entirely
-   - Proceed to max containers limit check
-
-3. **No flag (default)**: Fall through to the interactive AskUserQuestion flow below.
-
 ### Interactive selection (default)
 
-Present the discovered files to the user:
+Present files to user:
 ```
 Found [N] task file(s):
 
   1. .aimi/tasks/2026-03-01-feature-auth-tasks.json (feat/auth, 5 stories)
   2. .aimi/tasks/2026-03-01-feature-ui-tasks.json (feat/ui, 3 stories)
-  3. .aimi/tasks/2026-03-01-bugfix-login-tasks.json (bug/login, 2 stories)
 
 Select files to execute (comma-separated numbers, or "all"):
 ```
 
-Use `AskUserQuestion` to get the selection. Parse the response:
-- `all` -> select all files
-- `1,3` -> select files 1 and 3
-- `1` -> select file 1
+Use `AskUserQuestion` to get the selection. Store as `SELECTED_TASK_FILES`.
 
-Validate the selection. If invalid, ask again.
-
-Store the selected files as `SELECTED_TASK_FILES`.
-
-### Max containers limit
-
-Read `maxContainers` from context. Default: **4**.
-
-If the user provides `--max <N>` in arguments, use that value instead.
-
-If `len(SELECTED_TASK_FILES) > maxContainers`:
-```
-Selected [N] task files but maxContainers is [maxContainers].
-Only the first [maxContainers] will be executed. Remaining files can be run with /aimi:swarm resume.
-```
-
-Truncate `SELECTED_TASK_FILES` to `maxContainers`.
-
-## Step 2.5: Detect Credentials
-
-**CRITICAL:** Detect required credentials BEFORE provisioning any containers. This step fails fast if no authentication method is available, preventing wasted Docker resources.
-
-### Check subscription auth (Claude config directory)
+## Step 3: Docker Availability Check
 
 ```bash
-CLAUDE_CONFIG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-test -f "$CLAUDE_CONFIG/.credentials.json" 2>/dev/null && echo "Subscription auth found"
+docker version --format '{{.Server.Version}}' 2>/dev/null
 ```
 
-If the credentials file exists:
-- Set `CLAUDE_AUTH=subscription`
-- Log: `"Subscription auth detected: $CLAUDE_CONFIG/.credentials.json"`
+If Docker is not available (non-zero exit), report:
+```
+Docker is not available.
 
-### Check ANTHROPIC_API_KEY
+The swarm command requires Docker to isolate each task file in its own container.
+Install Docker: https://docs.docker.com/get-docker/
+
+Alternative: Use /aimi:execute to run a single task file without Docker.
+```
+STOP.
+
+## Step 4: Detect Credentials
+
+**CRITICAL:** Detect credentials BEFORE provisioning any containers. Fail fast if no authentication method exists.
+
+### ANTHROPIC_API_KEY
 
 ```bash
 echo "${ANTHROPIC_API_KEY:0:8}..." 2>/dev/null
 ```
 
-The behavior depends on whether subscription auth was detected above:
+If not set, STOP:
+```
+ANTHROPIC_API_KEY not set. Docker containers need this to run Claude Code.
 
-- **If ANTHROPIC_API_KEY is set:** Store the masked key prefix for the summary (e.g., `sk-ant-a...`). Proceed normally regardless of `CLAUDE_AUTH`.
-- **If ANTHROPIC_API_KEY is NOT set AND `CLAUDE_AUTH=subscription`:** WARN (do not stop):
-  ```
-  ANTHROPIC_API_KEY not set, using subscription auth.
-  ```
-  Proceed — the subscription credentials will be mounted into containers.
-- **If ANTHROPIC_API_KEY is NOT set AND `CLAUDE_AUTH` is NOT `subscription`:** STOP immediately with:
-  ```
-  No authentication found. Set ANTHROPIC_API_KEY or mount Claude config directory (~/.claude/.credentials.json).
-  ```
+Export it: export ANTHROPIC_API_KEY=sk-ant-...
+```
 
-### Detect GitHub credentials (optional, fallback chain)
-
-Try each method in priority order. Stop at the first success.
-
-**Priority 1: GITHUB_TOKEN environment variable**
+### GITHUB_TOKEN (optional)
 
 ```bash
 echo "${GITHUB_TOKEN:0:8}..." 2>/dev/null
 ```
 
-If non-empty, set `GH_AUTH_METHOD=token` and store the masked prefix. Proceed to the credential summary.
-
-**Priority 2: gh CLI authentication**
-
+If not set, try `gh auth token`:
 ```bash
 DETECTED_GH_TOKEN=$(timeout 5 gh auth token 2>/dev/null)
 ```
 
-If the command succeeds (exit code 0) and output is non-empty:
-- Export the result so sandbox-manager.sh can pick it up:
-  ```bash
-  export GITHUB_TOKEN="$DETECTED_GH_TOKEN"
-  ```
-- Set `GH_AUTH_METHOD=gh-cli`
-- Store the masked prefix (`${DETECTED_GH_TOKEN:0:8}...`)
-- Proceed to the credential summary.
+If found, export it:
+```bash
+export GITHUB_TOKEN="$DETECTED_GH_TOKEN"
+```
 
-**Priority 3: SSH agent**
+### SSH_AUTH_SOCK (optional)
 
 ```bash
 test -S "${SSH_AUTH_SOCK:-}" 2>/dev/null && echo "SSH agent available"
 ```
 
-If the test succeeds (SSH_AUTH_SOCK points to an existing socket):
-- Set `GH_AUTH_METHOD=ssh`
-- Set `AUTH_METHOD=ssh` for later use by container provisioning
-- Proceed to the credential summary.
-
-**Priority 4: No credentials found**
-
-If none of the above succeeded:
-- Set `GH_AUTH_METHOD=none`
-- WARN (do not stop):
-  ```
-  No GitHub credentials found. Only public repos will work.
-  Set GITHUB_TOKEN, run 'gh auth login', or start an SSH agent.
-  ```
-
 ### Credential summary
-
-Display the detected credentials:
 
 ```
 Credentials:
-  API Key  : found (sk-ant-a...)
-  Claude   : subscription (config dir)
-  GitHub   : gh-cli (ghp_Ax7f...)
-  Auth     : HTTPS
+  ANTHROPIC_API_KEY : found (sk-ant-a...)
+  GITHUB_TOKEN      : found (ghp_Ax7f...) | not set
+  SSH_AUTH_SOCK     : available | not available
 ```
 
-The `API Key` field displays:
-- `found (<masked prefix>)` when `ANTHROPIC_API_KEY` is set
-- `not set (using subscription auth)` when `ANTHROPIC_API_KEY` is not set but `CLAUDE_AUTH=subscription`
+## Step 5: Create Team and Spawn Workers
 
-The `Claude` field displays:
-- `subscription (config dir)` when `CLAUDE_AUTH=subscription`
-- `none` when subscription auth is not detected
+### Read Docker image preference
 
-The `Auth` field displays:
-- `HTTPS` when `GH_AUTH_METHOD` is `token` or `gh-cli`
-- `SSH` when `GH_AUTH_METHOD` is `ssh`
-- `none` when `GH_AUTH_METHOD` is `none`
-
-Proceed to Step 3.
-
-## Step 3: Initialize Swarm State
-
-### Check for existing active swarm
+For each task file, check metadata for a custom image:
 ```bash
-$AIMI_CLI swarm-status 2>/dev/null
+jq -r '.metadata.dockerImage // "node:22-slim"' <file>
 ```
 
-If an active swarm exists with running/pending containers:
+Default: `node:22-slim`.
 
-#### Non-interactive swarm conflict flags
+### Create team
 
-Before prompting the user, check `$ARGUMENTS` for non-interactive conflict resolution flags:
-
-1. **`--force` flag**: If `$ARGUMENTS` contains `--force`, automatically select option 2 (force reinitialize):
-   - Report: `"--force flag: reinitializing existing swarm."`
-   - Skip the AskUserQuestion prompt entirely
-   - Run cleanup first, then reinitialize with `$AIMI_CLI swarm-init --force`
-
-2. **`--append` flag**: If `$ARGUMENTS` contains `--append`, automatically select option 1 (resume/add):
-   - Report: `"--append flag: adding tasks to existing swarm."`
-   - Skip the AskUserQuestion prompt entirely
-   - Proceed without reinitializing, add new containers to existing state
-
-3. **No flag (default)**: Fall through to the interactive AskUserQuestion flow below.
-
-#### Interactive conflict resolution (default)
-
-Ask the user:
 ```
-An active swarm exists with [N] running/pending containers.
-
-Options:
-  1. Resume existing swarm (add new tasks alongside)
-  2. Force reinitialize (stops existing containers)
-  3. Cancel
-
-Select option:
+TeamCreate({ team_name: "aimi-swarm" })
 ```
 
-- Option 1: Proceed without reinitializing, add new containers to existing state
-- Option 2: Run cleanup first, then reinitialize
-- Option 3: STOP
+### For each task file in SELECTED_TASK_FILES
 
-### Initialize new swarm state
-```bash
-$AIMI_CLI swarm-init
-```
+1. **Read the task file content** — the team lead reads the full file and extracts all story data. Workers receive story details in their prompt (the task file may be gitignored from the worktree).
 
-If using `--force` (option 2 above):
-```bash
-$AIMI_CLI swarm-init --force
-```
-
-Store the returned `swarmId`.
-
-### Resolve git remote URL (fallback chain)
-
-Try remotes in priority order: `origin`, `upstream`, then the first available remote.
-
-**Priority 1: origin**
-```bash
-REPO_URL=$(git remote get-url origin 2>/dev/null)
-SELECTED_REMOTE="origin"
-```
-
-**Priority 2: upstream** (if origin not found)
-```bash
-if [ -z "$REPO_URL" ]; then
-  REPO_URL=$(git remote get-url upstream 2>/dev/null)
-  SELECTED_REMOTE="upstream"
-fi
-```
-
-**Priority 3: first available remote** (if neither origin nor upstream found)
-```bash
-if [ -z "$REPO_URL" ]; then
-  FIRST_REMOTE=$(git remote | head -1)
-  if [ -n "$FIRST_REMOTE" ]; then
-    REPO_URL=$(git remote get-url "$FIRST_REMOTE" 2>/dev/null)
-    SELECTED_REMOTE="$FIRST_REMOTE"
-  fi
-fi
-```
-
-**No remotes found — hard stop:**
-
-If `REPO_URL` is still empty after all three attempts, STOP with:
-```
-No git remotes found. Add one with: git remote add origin <url>
-```
-
-If a remote was found, log which remote was selected:
-```
-Git remote: using '[SELECTED_REMOTE]' → [REPO_URL]
-```
-
-### Detect remote URL protocol
-
-After resolving `REPO_URL`, detect whether it uses SSH or HTTPS:
-
-- If `REPO_URL` starts with `git@` or `ssh://` → log: `Remote protocol: SSH`
-- If `REPO_URL` starts with `https://` → log: `Remote protocol: HTTPS`
-- Otherwise → log: `Remote protocol: unknown`
-
-Store the detected protocol as `REMOTE_PROTOCOL` (`ssh`, `https`, or `unknown`).
-
-### AUTH_METHOD vs remote protocol mismatch warning
-
-Compare `AUTH_METHOD` (from Step 2.5 credential detection) with `REMOTE_PROTOCOL`:
-
-- If `AUTH_METHOD` is `ssh` but `REMOTE_PROTOCOL` is `https`:
-  ```
-  Warning: SSH auth detected but remote URL is HTTPS. Clone may need GITHUB_TOKEN.
-  ```
-- If `AUTH_METHOD` is NOT `ssh` (i.e., `token`, `gh-cli`, or `none`) but `REMOTE_PROTOCOL` is `ssh`:
-  ```
-  Warning: No SSH auth detected but remote URL is SSH. Clone may need SSH agent forwarding.
-  ```
-
-**Proceed regardless** — do not block on a mismatch. The actual clone attempt inside the container will determine success or failure.
-
-Report:
-```
-Swarm initialized: [swarmId]
-Task files: [count]
-Max containers: [maxContainers]
-```
-
-## Step 4: Provision Containers
-
-### Check Sysbox runtime
-```bash
-$SANDBOX_MGR check-runtime
-```
-
-If Sysbox is not available, report the error and STOP.
-
-### Build project image
-```bash
-$BUILD_IMG
-```
-
-This builds (or reuses) `aimi-sandbox-<project-slug>:latest`. Store the image tag from the output.
-
-Parse the image tag from the build output. The script logs `Image tag    : <tag>` or `Done. Image: <tag>`. Extract the tag value and store as `PROJECT_IMAGE`.
-
-### Create containers sequentially
-
-For each task file in `SELECTED_TASK_FILES`:
-1. Read metadata:
+2. **Extract metadata**:
    ```bash
-   jq -r '.metadata.branchName' <taskFile>
+   jq -r '.metadata.branchName' <file>
    ```
    Store as `BRANCH`.
 
-2. Derive container name from the task file:
-   - Extract the feature slug from the filename (e.g., `2026-03-01-feature-auth-tasks.json` -> `feature-auth`)
-   - Container name: `aimi-swarm-<slug>` (must match `^aimi-[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
+3. **Derive worker name** from the task file:
+   - Extract slug from filename (e.g., `2026-03-01-feature-auth-tasks.json` -> `feature-auth`)
+   - Worker name: `worker-<slug>`
 
-3. Create the container:
+4. **Create worktree**:
+   ```bash
+   $WORKTREE_MGR create aimi-<slug> --from <BRANCH>
+   ```
+   Parse the worktree path from output. Store as `WORKTREE_PATH`.
 
-   Build the create command, conditionally appending `--ssh-agent` and/or `--mount-claude-config` based on auth detected in Step 2.5:
+5. **Build the Docker command** that will run inside the worker Task:
 
    ```bash
-   # Build create command with conditional flags
-   CREATE_FLAGS=""
-   if [ "$AUTH_METHOD" = "ssh" ]; then
-     CREATE_FLAGS="$CREATE_FLAGS --ssh-agent"
-   fi
-   if [ "$CLAUDE_AUTH" = "subscription" ]; then
-     CREATE_FLAGS="$CREATE_FLAGS --mount-claude-config"
-   fi
-
-   $SANDBOX_MGR create <containerName> --image <PROJECT_IMAGE> --task-file <taskFile> --branch <BRANCH> $CREATE_FLAGS
+   docker run --rm \
+     --label aimi-swarm \
+     --name aimi-swarm-<slug> \
+     --user $(id -u):$(id -g) \
+     -v <WORKTREE_PATH>:/workspace \
+     -v ~/.claude:/home/user/.claude:ro \
+     -e ANTHROPIC_API_KEY \
+     -e GITHUB_TOKEN \
+     -w /workspace \
+     <DOCKER_IMAGE> \
+     npx claude --dangerously-skip-permissions \
+       -p "<WORKER_PROMPT>"
    ```
 
-   **Log the full container creation command for debugging** before executing it:
+   If `SSH_AUTH_SOCK` is available, add:
    ```
-   [swarm] create: $SANDBOX_MGR create <containerName> --image <PROJECT_IMAGE> --task-file <taskFile> --branch <BRANCH> [--ssh-agent] [--mount-claude-config]
+   -v ${SSH_AUTH_SOCK}:/tmp/ssh-agent.sock -e SSH_AUTH_SOCK=/tmp/ssh-agent.sock
    ```
-   (Include `--ssh-agent` only when `AUTH_METHOD=ssh`. Include `--mount-claude-config` only when `CLAUDE_AUTH=subscription`.)
 
-4. Parse the JSON output to get `containerId`.
+6. **Build the worker prompt** (passed to Claude Code inside the container):
 
-5. Register in swarm state (include the resolved `REPO_URL` for resume support):
+   ```
+   You are executing stories from a task file inside a Docker container.
+
+   ## PROJECT GUIDELINES
+
+   Read /workspace/CLAUDE.md for project conventions before starting.
+
+   ## Task File Content
+
+   [Inline the full JSON content of the task file here]
+
+   ## Execution Instructions
+
+   Execute ALL pending stories sequentially, in order of their ID.
+   For each story:
+   1. Read the story's description and acceptance criteria
+   2. Implement the requirements
+   3. Verify acceptance criteria are met
+   4. Run typecheck if applicable (npx tsc --noEmit)
+   5. Commit with: "feat(<scope>): <Story title>"
+
+   Skip stories with status "completed", "failed", or "skipped".
+   If a story fails, note the error and continue with the next story.
+
+   After all stories are done, report a summary:
+   - Which stories completed successfully
+   - Which stories failed (with error details)
+   - Total commits made
+   ```
+
+7. **Spawn a Team worker** that runs the Docker command:
+
+   In a SINGLE tool-call turn, emit ALL Task calls for all task files:
+
+   ```
+   Task(
+     team_name: "aimi-swarm",
+     name: "worker-<slug>",
+     subagent_type: "general-purpose",
+     description: "Swarm worker: <slug> executing <taskFile>",
+     prompt: """
+   You are a swarm worker managing a Docker container for task execution.
+
+   ## Your Job
+
+   Run this Docker command and monitor it to completion:
+
    ```bash
-   $AIMI_CLI swarm-add <containerId> <containerName> <taskFile> <BRANCH> --repo-url <REPO_URL>
+   <DOCKER_COMMAND>
    ```
 
-6. Count stories for progress tracking:
-   ```bash
-   jq '.userStories | length' <taskFile>
-   ```
-   Update initial story progress:
-   ```bash
-   $AIMI_CLI swarm-update <containerName> --status pending --story-progress '{"total":<N>,"completed":0,"failed":0,"inProgress":0,"pending":<N>}'
-   ```
+   ## Instructions
 
-Report container creation:
-```
-Provisioned [N] containers:
-  - [containerName]: [taskFile] ([branch])
-  ...
-```
+   1. Run the docker command above using Bash
+   2. Wait for it to complete (docker run --rm is foreground, blocks until done)
+   3. When it exits:
+      - Exit code 0: report SUCCESS
+      - Exit code non-zero: capture last 30 lines of output, report FAILURE
 
-If any container creation fails, mark it as `failed` in swarm state and continue with the rest. Report which containers failed.
+   4. Report your result:
 
-## Step 5: Fan Out — Parallel ACP Adapter Invocations
+   SWARM_WORKER_RESULT:
+   taskFile: <taskFile>
+   branch: <BRANCH>
+   worktree: aimi-<slug>
+   status: [completed|failed]
+   exitCode: [code]
+   summary: [last few lines of output or success message]
 
-**CRITICAL:** This step spawns one Task agent per container. All Task calls MUST be emitted in a SINGLE tool-call turn so they execute concurrently.
-
-For each container with status `pending` in the swarm state:
-
-1. First, update its status to `running`:
-   ```bash
-   $AIMI_CLI swarm-update <containerName> --status running
+   Do NOT modify any files outside the Docker command. Just run it and report.
+   """,
+     run_in_background: true
+   )
    ```
 
-2. Build the ACP task-request payload:
-   ```json
-   {
-     "type": "task-request",
-     "timestamp": "<ISO 8601 now>",
-     "swarmId": "<swarmId>",
-     "containerId": "<containerId>",
-     "payload": {
-       "taskFilePath": "<taskFile>",
-       "branchName": "<branch>",
-       "repoUrl": "<REPO_URL>"
-     }
-   }
-   ```
+### Monitor workers
 
-3. Spawn a Task agent for this container. In a SINGLE tool-call turn, emit ALL Task calls:
+After spawning all workers, the team lead monitors progress:
 
-```
-Task(
-    subagent_type: "general-purpose",
-    description: "Swarm worker: [containerName] executing [taskFile]",
-    prompt: """
-You are a swarm worker agent managing a Docker sandbox container.
+1. Workers send messages when they complete (automatic via Team system)
+2. For each worker completion message, parse the `SWARM_WORKER_RESULT` block
+3. Track results: `succeeded_workers`, `failed_workers`
 
-## Container Info
-- Name: [containerName]
-- Container ID: [containerId]
-- Task File: [taskFile]
-- Branch: [branch]
-- Swarm ID: [swarmId]
+Wait for all workers to finish (all teammates go idle with results).
 
-## Your Job
+## Step 6: Merge Worktrees
 
-1. Send the task-request payload to the ACP adapter inside the container:
+After ALL workers complete:
+
+### Merge successful worktrees
+
+For workers that reported `status: completed`:
 
 ```bash
-# Write payload to temp file
-echo '<task-request-json>' > /tmp/acp-payload-[containerName].json
-
-# Copy payload into the container
-docker cp /tmp/acp-payload-[containerName].json [containerName]:/tmp/acp-payload.json
-
-# Clean up host temp file
-rm -f /tmp/acp-payload-[containerName].json
-
-# Run the ACP adapter with file-based input (no pipe needed)
-docker exec [containerName] python3 /opt/aimi/acp-adapter.py --input /tmp/acp-payload.json
+$WORKTREE_MGR merge-all [succeeded_worktree_names...] --into <mainBranch>
 ```
 
-2. Read the NDJSON output lines from stdout. Each line is a JSON message.
+Where `mainBranch` is the current branch (or a shared integration branch).
 
-3. For each message received:
-   - **progress-update**: Log the story ID and status. If you can parse story progress counts, report them.
-   - **completion**: Record the final status and PR URL (if any). This is the last message.
-   - **error**: Record the error code and message. The container may exit after this.
-
-4. When the process exits (docker exec returns):
-   - If exit code 0 and last message was completion with status "completed": report SUCCESS
-   - If exit code non-zero or last message was error/failed: report FAILURE with details
-   - Capture the last 20 lines of output for the summary
-
-5. Report your result as a structured summary:
+**If merge conflict** (non-zero exit):
 ```
-SWARM_WORKER_RESULT:
-container: [containerName]
-taskFile: [taskFile]
-branch: [branch]
-status: [completed|failed|stopped]
-prUrl: [url or null]
-errors: [list or empty]
+MERGE CONFLICT during swarm merge.
+
+Conflicting files:
+[conflict output from merge-all]
+
+Resolve conflicts on the current branch and re-run merges manually.
+Worktrees preserved for inspection:
+  - aimi-<slug1>: <WORKTREE_PATH1>
+  - aimi-<slug2>: <WORKTREE_PATH2>
 ```
+STOP (do NOT remove worktrees so user can inspect).
 
-Do NOT modify the tasks.json file. Do NOT modify swarm-state.json. Just run the docker exec and report results.
-"""
-)
-```
+### Handle failed workers
 
-**All Task calls must be in ONE tool-call turn.** Wait for all to return.
+For workers that reported `status: failed`:
+- Log the failure details
+- Do NOT attempt to merge their worktree
 
-## Step 6: Collect Results and Update State
+## Step 7: Cleanup
 
-After ALL Task agents return, process each result:
+After successful merges:
 
-### Parse results
+1. **Remove all worktrees**:
+   ```bash
+   for each worktree in aimi-<slug>:
+     $WORKTREE_MGR remove <worktree_name>
+   ```
 
-For each Task agent result, look for the `SWARM_WORKER_RESULT:` block and parse:
-- `container`: container name
-- `status`: completed, failed, or stopped
-- `prUrl`: PR URL or null
-- `errors`: error list
+2. **Prune Docker containers** (safety net — `--rm` should have handled it):
+   ```bash
+   docker container prune -f --filter "label=aimi-swarm" 2>/dev/null
+   ```
 
-### Update swarm state
+3. **Delete team**:
+   ```
+   TeamDelete()
+   ```
 
-For each result:
-
-```bash
-$AIMI_CLI swarm-update <containerName> --status <status>
-```
-
-If a PR URL was returned:
-```bash
-$AIMI_CLI swarm-update <containerName> --status <status> --pr-url <prUrl>
-```
-
-### Remove containers
-
-For each container (success or failure):
-```bash
-$SANDBOX_MGR remove <containerName>
-```
-
-### Report summary
+## Step 8: Report Summary
 
 ```
 ## Swarm Execution Complete
 
-Swarm ID: [swarmId]
-Duration: [estimated from timestamps]
-
 ### Results
 
-| Container | Task File | Branch | Status | PR |
-|-----------|-----------|--------|--------|-----|
-| [name] | [file] | [branch] | completed | [PR URL] |
-| [name] | [file] | [branch] | failed | - |
-...
+| # | Task File | Branch | Status | Stories |
+|---|-----------|--------|--------|---------|
+| 1 | .aimi/tasks/auth-tasks.json | feat/auth | completed | 5/5 |
+| 2 | .aimi/tasks/ui-tasks.json | feat/ui | failed | 2/3 |
 
 ### Summary
-- Total: [N] containers
+- Total: [N] task files
 - Completed: [N]
 - Failed: [N]
+- Merges: [N] successful
 
-### Failed Containers
-[For each failed container, show error details]
+### Failed Workers
+[For each failed worker, show error summary]
 
 ### Next Steps
-- Review PRs: [list PR URLs]
-- Check failures: `/aimi:swarm status`
-- Clean up: `/aimi:swarm cleanup`
+- Review changes on the current branch
+- Run /aimi:review for code review
+- Fix failed task files and re-run: /aimi:swarm --file <path>
+- Clean up leftovers: /aimi:swarm cleanup
 ```
 
 ## Error Recovery
 
-### Container creation failure
-If `$SANDBOX_MGR create` fails for a specific container:
-- Mark it as `failed` in swarm state
-- Continue with remaining containers
-- Report the failure in the summary
+### Docker not available
+The swarm requires Docker. Use `/aimi:execute` for single-file execution without Docker.
 
-### ACP adapter failure
-If `docker exec` fails or returns non-zero:
-- Parse any error messages from the output
-- Mark the container as `failed` in swarm state
-- Continue processing other containers
+### Worker failure
+Successful workers merge independently. Failed workers are reported. The user can:
+- Fix the issue in the task file
+- Re-run: `/aimi:swarm --file <path>`
 
-### Partial failure
-Successful containers proceed independently. Failed containers are marked in state. The user can:
-- Review failures: `/aimi:swarm status`
-- Fix and retry individual task files: `/aimi:swarm --file <path>`
-- Clean up: `/aimi:swarm cleanup`
+### Merge conflict
+Worktrees are preserved for manual inspection. The user resolves conflicts and re-runs.
 
 ### Interrupted swarm
-If the swarm is interrupted (e.g., user stops the command):
-- Containers continue running in Docker (they are detached)
-- User can resume: `/aimi:swarm resume`
-- User can check status: `/aimi:swarm status`
-- User can clean up: `/aimi:swarm cleanup`
-
-## State Reconciliation
-
-State reconciliation detects and corrects inconsistencies between `swarm-state.json` and actual Docker daemon state. It runs automatically:
-
-- **Before every `status` display** — so the user always sees accurate state
-- **At the start of every `resume`** — so resume decisions are based on reality
-
-### What It Detects
-
-| Scenario | Detection | Action |
-|----------|-----------|--------|
-| **Zombie entry** | Container ID in state but container does not exist in Docker | Mark as `failed` |
-| **Silent completion** | Docker says exited with code 0 but state says `running` | Mark as `completed` |
-| **Silent failure** | Docker says exited with non-zero code but state says `running` | Mark as `failed` |
-| **Unexpected stop** | Docker says paused/removing but state says `running` | Mark as `stopped` |
-| **Already started** | Docker says running but state says `pending` | Mark as `running` |
-
-### How Zombies Happen
-
-Zombies occur when:
-- The host machine crashes while containers are running
-- Docker daemon restarts and auto-removes containers
-- A user manually runs `docker rm` on a container
-- The ACP adapter process crashes and the container self-terminates
-
-### Reconciliation Is Idempotent
-
-Running reconciliation multiple times produces the same result. Terminal entries (`completed`, `failed`, `stopped`) are never re-reconciled.
-
-## Resuming Execution
-
-Running `/aimi:swarm resume`:
-1. **Reconciles state** — detects zombies and corrects stale entries (see State Reconciliation above)
-2. **Identifies resumable containers** — `pending` containers need ACP invocation, `failed` containers can be retried (removed and recreated)
-3. **Skips running containers** — if Docker confirms they are still active
-4. **Skips completed containers** — reports their PR URLs
-5. **Recreates failed containers** — removes old container, rebuilds, resets to `pending`
-6. **Fans out pending containers** — spawns ACP adapter tasks for all pending containers
-7. **Reports summary** when all containers reach terminal state
+If interrupted mid-execution:
+- Docker containers with `--rm` self-clean on exit
+- Worktrees persist until cleanup: `/aimi:swarm cleanup`
+- Task file state is preserved — re-run picks up where it left off

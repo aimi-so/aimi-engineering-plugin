@@ -161,25 +161,24 @@ Multi-agent code review using aimi-native review agents. Runs parallel agents (a
 
 #### `/aimi:swarm`
 
-Executes multiple tasks.json files in parallel Docker sandboxes. Each task file gets its own Sysbox-isolated container with a full Claude Code agent running the story-executor flow inside it.
+Executes multiple tasks.json files in parallel using Team orchestration, git worktrees, and simplified Docker containers. Each task file gets its own worktree and a Team worker that runs Claude Code inside a `docker run --rm` container with the worktree volume-mounted.
 
 ```bash
-/aimi:swarm                          # Discover and select task files
+/aimi:swarm                            # Discover and select task files
 /aimi:swarm --file .aimi/tasks/f.json  # Execute a single task file
-/aimi:swarm --max 2                  # Limit to 2 concurrent containers
-/aimi:swarm status                   # View swarm state
-/aimi:swarm resume                   # Resume pending containers
-/aimi:swarm cleanup                  # Remove containers and state
+/aimi:swarm --all                      # Execute all discovered task files
+/aimi:swarm --files a.json,b.json      # Execute specific files
+/aimi:swarm status                     # View task file progress
+/aimi:swarm cleanup                    # Remove worktrees and containers
 ```
 
 Requirements:
-- Docker with Sysbox runtime installed
-- Git remote `origin` configured (containers clone via URL)
-- `ANTHROPIC_API_KEY` set in environment (injected into containers)
+- Docker installed and running
+- `ANTHROPIC_API_KEY` set in environment
 
 ## Skills
 
-17 skills providing domain expertise and reusable workflows.
+16 skills providing domain expertise and reusable workflows.
 
 ### Core (Internal)
 
@@ -190,7 +189,6 @@ Used internally by commands — not user-invocable.
 | `brainstorm` | Brainstorming process knowledge (batched questions, adaptive exit, design capture) |
 | `task-planner` | Pipeline for generating tasks.json (research, spec analysis, story decomposition) |
 | `story-executor` | Canonical prompt template for Task-spawned agents executing stories |
-| `docker-sandbox` | Provision and manage Sysbox-isolated Docker containers for parallel execution |
 
 ### Development & Code Style
 
@@ -538,9 +536,15 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 ## Version History
 
-**Current Version:** 1.22.0
+**Current Version:** 1.24.0
 
 ### Recent Changes
+
+**v1.24.0** - Swarm Rewrite: Team + Worktree + Simplified Docker
+- Complete swarm.md rewrite replacing Docker/ACP/Sysbox with Team orchestration + git worktrees + `docker run --rm`
+- Workers use generic `node:22-slim` image with volume-mounted worktrees
+- Team task list replaces swarm-state.json for state management
+- Simplified subcommands: `status` and `cleanup` (no `resume` needed)
 
 **v1.22.0** - Swarm Zero-Config Credentials & Git Remote Fallback
 - Credential auto-detection: ANTHROPIC_API_KEY from env, GITHUB_TOKEN via env/gh-cli/SSH agent priority chain
@@ -617,7 +621,7 @@ See [CHANGELOG.md](CHANGELOG.md) for complete version history.
 | Type | Count | Description |
 |------|-------|-------------|
 | Commands | 8 | Slash commands for workflow stages |
-| Skills | 17 | 4 core, 6 development/style, 4 tooling/automation, 3 disabled/reference |
+| Skills | 16 | 3 core, 6 development/style, 4 tooling/automation, 3 disabled/reference |
 | Agents | 28 | 4 research, 15 review, 3 design, 1 docs, 5 workflow |
 
 ## License

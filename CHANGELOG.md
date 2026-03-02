@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.24.0] - 2026-03-02
+
+### Changed
+
+- **swarm.md**: Complete rewrite — replace Docker/ACP/Sysbox architecture with Team orchestration + git worktrees + simplified `docker run --rm` containers
+- **swarm.md**: New frontmatter with Team/Docker/Worktree allowed-tools (removed SANDBOX_MGR, BUILD_IMG)
+- **swarm.md**: Step 0 resolves only $AIMI_CLI and $WORKTREE_MGR (no SANDBOX_MGR or BUILD_IMG)
+- **swarm.md**: Workers run `docker run --rm` with volume-mounted worktrees and `npx claude` inside generic `node:22-slim` image
+- **swarm.md**: Team lead reads task file content and passes it in worker prompt (no reliance on task file in worktree)
+- **swarm.md**: `status` subcommand reads task files directly (no swarm-state.json)
+- **swarm.md**: `cleanup` subcommand removes aimi-* worktrees and Docker containers
+- **swarm.md**: Merge conflict handling preserves worktrees for manual inspection
+
+### Removed
+
+- **swarm.md**: All references to Sysbox runtime, ACP protocol, sandbox-manager, build-project-image
+- **swarm.md**: swarm-state.json state management (replaced by Team task list)
+- **swarm.md**: `resume` subcommand (Team workers are foreground, no detached containers to resume)
+- **swarm.md**: State reconciliation subroutine (no persistent container state to reconcile)
+- **swarm.md**: Container provisioning with Sysbox-isolated containers
+- **swarm.md**: ACP adapter invocation via docker exec/docker cp
+
 ## [1.23.2] - 2026-03-02
 
 ### Removed
