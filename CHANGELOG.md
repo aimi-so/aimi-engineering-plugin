@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.24.1] - 2026-03-02
+
+### Added
+
+- **auto-approve-cli.sh**: Docker auto-approve patterns (5–10) for `/aimi:swarm` commands
+  - Pattern 5: `docker version` availability check
+  - Pattern 6: `docker run --rm` with `--name aimi-swarm-*` and `--label aimi-swarm` (worker containers)
+  - Pattern 7: `docker container ls` with `--filter name=aimi-swarm-` (container listing)
+  - Pattern 8: `docker rm -f` with validated `aimi-swarm-*` container names (cleanup)
+  - Pattern 9: `docker container prune -f --filter label=aimi-swarm` (safety net)
+  - Pattern 10: `docker ps --filter name=aimi-*` (status/cleanup checks)
+- All Docker patterns enforce aimi- prefix on container names and reject shell metacharacters
+
 ## [1.24.0] - 2026-03-02
 
 ### Changed
