@@ -250,11 +250,21 @@ cmd_metadata() {
 
 # List stories that are ready to execute
 # A story is ready when: status == "pending" AND all dependsOn stories have status "completed" or "skipped"
+# Flags: --brief (return only {id, title, priority, dependsOn} per story)
 cmd_list_ready() {
+  local brief=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --brief) brief=true; shift ;;
+      *) break ;;
+    esac
+  done
+
   local tasks_file
   tasks_file=$(get_tasks_file)
 
-  jq '
+  local result
+  result=$(jq '
     . as $root |
     [
       .userStories[] |
@@ -271,7 +281,13 @@ cmd_list_ready() {
       )
     | if . then $story else empty end
     ]
-  ' "$tasks_file"
+  ' "$tasks_file")
+
+  if [ "$brief" = true ]; then
+    echo "$result" | jq '[.[] | {id, title, priority, dependsOn}]'
+  else
+    echo "$result"
+  fi
 }
 
 # Get next pending story
@@ -821,7 +837,8 @@ COMMANDS:
     metadata                  Get metadata only
     next-story                Get next pending story, save to state
     current-story             Get currently active story from state
-    list-ready                List stories ready to execute (dependency-aware)
+    list-ready [--brief]      List stories ready to execute (dependency-aware)
+                              --brief  Return only {id, title, priority, dependsOn} per story
     mark-in-progress <id>     Mark story as in_progress
     mark-complete <id>        Mark story as completed
     mark-failed <id> [notes]  Mark story as failed with notes
@@ -900,7 +917,7 @@ main() {
     metadata)          cmd_metadata ;;
     next-story)        cmd_next_story ;;
     current-story)     cmd_current_story ;;
-    list-ready)        cmd_list_ready ;;
+    list-ready)        shift; cmd_list_ready "$@" ;;
     mark-in-progress)  cmd_mark_in_progress "${2:-}" ;;
     mark-complete)     cmd_mark_complete "${2:-}" ;;
     mark-failed)       cmd_mark_failed "${2:-}" "${3:-}" ;;
