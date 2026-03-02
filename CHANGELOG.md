@@ -11,8 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **aimi-cli.sh**: `--brief` flag on `list-ready` command — outputs a summary line (count + story IDs) instead of full JSON story objects, reducing output for wave orchestration
 - **aimi-cli.sh**: `--counts-only` flag on `status` command — returns aggregate counts (`pending`, `in_progress`, `completed`, `failed`, `skipped`, `total`) without the `userStories` array, enabling lightweight progress checks in wave loops
 - **aimi-cli.sh**: `status` dispatch updated to `shift; cmd_status "$@"` pattern for flag forwarding
+
+### Changed
+
+- **aimi-cli.sh**: `mark-in-progress`, `mark-completed`, `mark-failed`, `mark-skipped` commands now return minimal `{id, status}` JSON confirmation instead of the full story object, reducing output noise in agent loops
 
 ## [1.25.0] - 2026-03-02
 
