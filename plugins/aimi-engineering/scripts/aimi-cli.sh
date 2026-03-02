@@ -28,6 +28,30 @@ resolve_path() {
   fi
 }
 
+# Auto-discover the project root containing .aimi/ by walking up the directory tree.
+# On success: cd to the discovered root, rewrite AIMI_DIR and TASKS_DIR to absolute paths.
+# On failure (reached /): exit 1 with error to stderr.
+find_aimi_root() {
+  local dir
+  dir=$(pwd)
+  while true; do
+    if [ -d "$dir/.aimi" ]; then
+      cd "$dir"
+      AIMI_DIR="$dir/.aimi"
+      TASKS_DIR="$AIMI_DIR/tasks"
+      return 0
+    fi
+    local parent
+    parent=$(dirname "$dir")
+    if [ "$parent" = "$dir" ]; then
+      # Reached filesystem root without finding .aimi/
+      echo "Error: .aimi/ directory not found in any parent directory" >&2
+      exit 1
+    fi
+    dir="$parent"
+  done
+}
+
 # Portable exclusive lock (Linux: flock, macOS: mkdir spinlock)
 # Usage: call inside a subshell with FD 200 redirect:
 #   (_lock "lockfile"; ... ) 200>"lockfile"
@@ -861,6 +885,12 @@ EOF
 # ============================================================================
 
 main() {
+  # Skip auto-discovery for help command (works without .aimi/ present)
+  case "${1:-help}" in
+    help|--help|-h) cmd_help; return ;;
+  esac
+
+  find_aimi_root
   check_jq
 
   case "${1:-help}" in
