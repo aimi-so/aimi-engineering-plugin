@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.23.1] - 2026-03-02
+
+### Changed
+
+- **commands**: Extract CLI path resolution boilerplate to shared reference at `commands/references/cli-path-resolution.md`
+- **execute.md**: Replace Step 0 CLI resolution block with pointer to shared reference
+- **status.md**: Replace Step 0 CLI resolution block with pointer to shared reference
+- **next.md**: Replace Step 0 CLI resolution block with pointer to shared reference
+- **swarm.md**: Replace AIMI CLI resolution block in Step 0 with pointer to shared reference
+
 ## [1.23.0] - 2026-03-01
 
 ### Added
