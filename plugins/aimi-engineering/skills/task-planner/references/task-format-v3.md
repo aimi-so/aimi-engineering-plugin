@@ -58,7 +58,7 @@ Each story is ONE atomic unit of work completable in a single agent iteration.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `id` | string | Yes | — | Unique identifier (e.g., `US-001`, `US-002`) |
+| `id` | string | Yes | — | Unique identifier. **Must follow `US-NNN` format** (e.g., `US-001`, `US-002`). Three zero-padded digits, optionally followed by a lowercase letter for sub-stories (e.g., `US-001a`). |
 | `title` | string | Yes | — | Short story title (max 200 chars) |
 | `description` | string | Yes | — | User story format: "As a [user], I want [feature] so that [benefit]" (max 500 chars) |
 | `acceptanceCriteria` | string[] | Yes | — | Verifiable criteria (must include `"Typecheck passes"`, each max 600 chars) |
@@ -153,10 +153,11 @@ Before processing a tasks.json file, validate the dependency graph:
 
 | Rule | Check | Error |
 |------|-------|-------|
+| Valid story ID format | Every story `id` matches `^US-\d{3}[a-z]?$` (e.g., `US-001`, `US-012a`) | `Error: Invalid story ID format: [ID] (expected US-NNN)` |
 | No self-references | No story lists its own ID in `dependsOn` | `Error: Story [ID] depends on itself.` |
 | All references exist | Every ID in `dependsOn` must match an existing story ID | `Error: Story [ID] depends on [REF] which does not exist.` |
 | No circular dependencies | The dependency graph must be a DAG (directed acyclic graph) | `Error: Circular dependency detected: [ID] -> ... -> [ID].` |
-| Valid ID format | All IDs in `dependsOn` match `US-\d{3}` pattern | `Error: Story [ID] has invalid dependsOn reference [REF].` |
+| Valid dependsOn format | All IDs in `dependsOn` match `US-\d{3}` pattern | `Error: Story [ID] has invalid dependsOn reference [REF].` |
 
 ### Circular Dependency Detection
 
