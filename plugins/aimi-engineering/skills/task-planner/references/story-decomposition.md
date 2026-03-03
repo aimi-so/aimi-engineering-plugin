@@ -209,6 +209,32 @@ Each criterion must be something the agent can CHECK, not something vague.
 
 ---
 
+## Description Format
+
+Every story description **must** follow the user story format:
+
+```
+As a [specific role], I want [feature] so that [benefit]
+```
+
+### Rules
+
+- **`[specific role]`** must name the actor — never use the generic word "user"
+- Identify the role from the feature context (who benefits from or interacts with this change)
+- Keep under 500 characters
+
+### Good descriptions:
+- "As a store admin, I want to export orders so that I can reconcile monthly revenue"
+- "As a plugin developer, I want CLI path resolution to use CLAUDE_CONFIG_DIR so that custom config locations are supported"
+- "As an API consumer, I want paginated responses so that I can handle large datasets efficiently"
+
+### Bad descriptions:
+- "As a user, I want to export orders" (generic role, missing benefit)
+- "Add export functionality" (not user story format)
+- "Implement the orders export feature for admins" (missing structure)
+
+---
+
 ## Conversion Rules
 
 1. Each requirement becomes one or more JSON stories
