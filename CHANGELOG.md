@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.27.2] - 2026-03-03
+
+### Added
+
+- **react-best-practices skill**: Add AGENTS.md compiled guide with all React and Next.js rules expanded
+- **react-native-skills skill**: Add AGENTS.md compiled guide and move rule files into skill's own rules/ directory
+
+### Fixed
+
+- **marketplace.json**: Sync version to match plugin.json
+
 ## [1.27.1] - 2026-03-02
 
 ### Added
