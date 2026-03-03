@@ -151,6 +151,7 @@ See `references/task-format-v3.md` for the complete v3 schema definition, status
 
 ### v3 Schema Validations
 - [ ] `schemaVersion` is `"3.0"`
+- [ ] Every story `id` follows `US-NNN` format (e.g., `US-001`, `US-002`) — not `S1`, `F1`, `TASK-1`, or any other format
 - [ ] Every story has `status` initialized to `"pending"`
 - [ ] Every story has a `dependsOn` array (even if empty `[]`)
 - [ ] No circular dependencies in `dependsOn` (graph must be a DAG)

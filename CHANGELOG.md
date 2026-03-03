@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.27.3] - 2026-03-03
+
+### Fixed
+
+- **task-format-v3.md**: Add explicit validation rule requiring story `id` fields to match `^US-\d{3}[a-z]?$` format — previously only `dependsOn` references were validated, allowing LLMs to generate invalid IDs like `S1` or `F1` that are rejected by aimi-cli.sh at runtime
+- **task-planner/SKILL.md**: Add checklist item enforcing US-NNN format for story IDs in the v3 Schema Validations section
+
 ## [1.27.2] - 2026-03-03
 
 ### Added
