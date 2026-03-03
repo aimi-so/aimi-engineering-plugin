@@ -165,6 +165,13 @@ assert_stderr_contains() {
   fi
 }
 
+# Helper: resolve the Claude config directory exactly as the CLI does.
+# Honors CLAUDE_CONFIG_DIR, falls back to $HOME/.claude, strips trailing slash.
+_test_claude_config_dir() {
+  local dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  printf '%s\n' "${dir%/}"
+}
+
 # ============================================================================
 # General Tests
 # ============================================================================
@@ -697,8 +704,9 @@ test_check_version() {
 
   # --- Test 1: Current version (stored cli-path matches glob-resolved latest) ---
   # Write cli-path to exactly match what the glob resolves, so check-version sees "current"
-  local latest_glob_path
-  latest_glob_path=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+  local latest_glob_path config_dir
+  config_dir=$(_test_claude_config_dir)
+  latest_glob_path=$(ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
 
   local output exit_code
 
@@ -753,8 +761,9 @@ test_check_version_fix() {
   "$CLI" clear-state > /dev/null
   "$CLI" init-session > /dev/null
 
-  local latest_glob_path
-  latest_glob_path=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+  local latest_glob_path config_dir
+  config_dir=$(_test_claude_config_dir)
+  latest_glob_path=$(ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
 
   if [ -z "$latest_glob_path" ]; then
     echo "  (skipping --fix test: no installed version in cache)"
@@ -788,8 +797,9 @@ test_check_version_quiet_fix() {
   "$CLI" clear-state > /dev/null
   "$CLI" init-session > /dev/null
 
-  local latest_glob_path
-  latest_glob_path=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+  local latest_glob_path config_dir
+  config_dir=$(_test_claude_config_dir)
+  latest_glob_path=$(ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
 
   if [ -z "$latest_glob_path" ]; then
     echo "  (skipping --quiet --fix test: no installed version in cache)"
@@ -836,8 +846,9 @@ test_check_version_backward_compat() {
   assert_contains "No stored cli-path" "$stderr_content" "check-version (no flags): stderr contains warning"
 
   # Test 2: No flags, current version => "current" status
-  local latest_glob_path
-  latest_glob_path=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+  local latest_glob_path config_dir
+  config_dir=$(_test_claude_config_dir)
+  latest_glob_path=$(ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
 
   if [ -n "$latest_glob_path" ]; then
     "$CLI" init-session > /dev/null
@@ -885,6 +896,58 @@ test_cleanup_versions() {
   # Validate JSON output format has both keys
   assert_contains '"removed"' "$output" "cleanup-versions: output contains removed key"
   assert_contains '"kept"' "$output" "cleanup-versions: output contains kept key"
+}
+
+# ============================================================================
+# CLAUDE_CONFIG_DIR Tests
+# ============================================================================
+
+test_claude_config_dir_default() {
+  echo ""
+  echo "=== Testing _claude_config_dir: unset falls back to \$HOME/.claude ==="
+
+  # Source only the _claude_config_dir function from the CLI script
+  eval "$(sed -n '/^_claude_config_dir()/,/^}/p' "$CLI")"
+
+  # Ensure CLAUDE_CONFIG_DIR is unset
+  local result
+  result=$(unset CLAUDE_CONFIG_DIR; _claude_config_dir)
+
+  assert_eq "$HOME/.claude" "$result" "_claude_config_dir: unset CLAUDE_CONFIG_DIR falls back to \$HOME/.claude"
+}
+
+test_claude_config_dir_custom_absolute() {
+  echo ""
+  echo "=== Testing _claude_config_dir: custom absolute path resolves correctly ==="
+
+  # Source only the _claude_config_dir function from the CLI script
+  eval "$(sed -n '/^_claude_config_dir()/,/^}/p' "$CLI")"
+
+  # Test with a custom absolute path
+  local result
+  result=$(CLAUDE_CONFIG_DIR="/tmp/custom-claude" _claude_config_dir)
+
+  assert_eq "/tmp/custom-claude" "$result" "_claude_config_dir: custom absolute path resolves correctly"
+
+  # Test that trailing slash is stripped
+  result=$(CLAUDE_CONFIG_DIR="/tmp/custom-claude/" _claude_config_dir)
+
+  assert_eq "/tmp/custom-claude" "$result" "_claude_config_dir: trailing slash is stripped from custom path"
+}
+
+test_claude_config_dir_relative_path_error() {
+  echo ""
+  echo "=== Testing _claude_config_dir: relative path produces validation error ==="
+
+  # Source only the _claude_config_dir function from the CLI script
+  eval "$(sed -n '/^_claude_config_dir()/,/^}/p' "$CLI")"
+
+  # Test with a relative path — should produce an error on stderr and exit non-zero
+  local stderr_output exit_code
+  stderr_output=$(CLAUDE_CONFIG_DIR="relative/path" _claude_config_dir 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_contains "must be an absolute path" "$stderr_output" "_claude_config_dir: relative path produces error message"
+  assert_exit_code "1" "$exit_code" "_claude_config_dir: relative path exits with code 1"
 }
 
 # ============================================================================
@@ -1371,6 +1434,13 @@ main() {
   test_check_version_quiet_fix
   test_check_version_backward_compat
   test_cleanup_versions
+
+  # CLAUDE_CONFIG_DIR tests
+  echo ""
+  echo "--- CLAUDE_CONFIG_DIR Tests ---"
+  test_claude_config_dir_default
+  test_claude_config_dir_custom_absolute
+  test_claude_config_dir_relative_path_error
 
   # Auto-discovery tests
   echo ""
