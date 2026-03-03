@@ -536,9 +536,13 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 ## Version History
 
-**Current Version:** 1.28.0
+**Current Version:** 1.28.1
 
 ### Recent Changes
+
+**v1.28.1** - Enforce Ralph-style User Story Descriptions
+- Task generation now enforces "As a [specific role], I want [feature] so that [benefit]" format
+- Description format rules added to schema spec, story decomposition, task-planner skill, and plan command
 
 **v1.28.0** - CLAUDE_CONFIG_DIR Support & Project-Root Security
 - New `_claude_config_dir()` helper supporting `CLAUDE_CONFIG_DIR` env var with `~/.claude` fallback

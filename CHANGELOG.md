@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.28.1] - 2026-03-03
+
+### Fixed
+
+- **task-format-v3.md**: Enforce specific role in user story descriptions — `[user]` replaced with `[specific role]` with examples (e.g., "store admin", "developer"), preventing generic "As a user" descriptions
+- **story-decomposition.md**: Add "Description Format" section with required format, good/bad examples, and 500-char limit
+- **task-planner/SKILL.md**: Add description format step to Phase 3 story decomposition and checklist validation
+- **plan.md**: Add description format step to Phase 3 story decomposition and checklist validation
+
 ## [1.28.0] - 2026-03-03
 
 ### Added

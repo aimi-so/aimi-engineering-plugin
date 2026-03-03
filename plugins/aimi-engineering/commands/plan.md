@@ -87,9 +87,10 @@ Using consolidated research and spec-flow output:
 2. Group by layer (schema → backend → UI → aggregation)
 3. Size check: each story must be completable in ONE agent iteration (one context window)
 4. Order by dependency: assign `dependsOn` arrays (explicit story IDs) and `priority` as tiebreaker
-5. Generate verifiable acceptance criteria (every story must have "Typecheck passes")
-6. Initialize every story with `status: "pending"` and appropriate `dependsOn` array
-7. Validate: no circular dependencies in `dependsOn`, no self-references, all referenced IDs exist, no vague criteria
+5. Write descriptions in user story format: "As a [specific role], I want [feature] so that [benefit]" — role must name the actor, never just "user"
+6. Generate verifiable acceptance criteria (every story must have "Typecheck passes")
+7. Initialize every story with `status: "pending"` and appropriate `dependsOn` array
+8. Validate: no circular dependencies in `dependsOn`, no self-references, all referenced IDs exist, no vague criteria
 
 See `references/story-decomposition.md` for detailed rules.
 
@@ -145,6 +146,7 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 - [ ] `dependsOn` is `[]` for root stories with no upstream dependencies
 - [ ] branchName is valid (alphanumeric, hyphens, slashes)
 - [ ] `planPath` is `null`
+- [ ] Every description follows "As a [specific role], I want [feature] so that [benefit]" format — role names the actor, never just "user"
 - [ ] Field lengths: title ≤ 200, description ≤ 500, criterion ≤ 600
 
 ## Step 5: Aimi-Branded Report
