@@ -120,13 +120,28 @@ clear_state_file() {
 }
 
 # Extract version string from an aimi-cli.sh path
-# Given: ~/.claude/plugins/cache/foo/aimi-engineering/1.4.0/scripts/aimi-cli.sh
+# Given: <config_dir>/plugins/cache/foo/aimi-engineering/1.4.0/scripts/aimi-cli.sh
 # Returns: 1.4.0
 _extract_version_from_path() {
   local path="$1"
   local no_script="${path%/*}"       # strip /aimi-cli.sh -> .../scripts
   local no_scripts="${no_script%/*}" # strip /scripts -> .../1.4.0
   printf '%s\n' "${no_scripts##*/}"  # strip prefix -> 1.4.0
+}
+
+# Resolve the Claude config directory.
+# Honors CLAUDE_CONFIG_DIR env var; falls back to ~/.claude.
+# When CLAUDE_CONFIG_DIR is set, validates it is an absolute path.
+# Always returns the path with any trailing slash stripped.
+_claude_config_dir() {
+  local dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  # Validate absolute path when explicitly set
+  if [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ "${dir#/}" = "$dir" ]; then
+    echo "Error: CLAUDE_CONFIG_DIR must be an absolute path, got: $dir" >&2
+    exit 1
+  fi
+  # Strip trailing slash
+  printf '%s\n' "${dir%/}"
 }
 
 # Validate story ID format (US-NNN or US-NNNa)
@@ -760,9 +775,11 @@ cmd_check_version() {
   done
 
   local stored_path latest_path stored_version latest_version
+  local config_dir
+  config_dir=$(_claude_config_dir)
 
   # Resolve the latest installed path via glob
-  latest_path=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+  latest_path=$(ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
 
   # Case: glob returns empty — no installed version found
   if [ -z "$latest_path" ]; then
@@ -814,14 +831,16 @@ cmd_check_version() {
 }
 
 # Remove old cached plugin version directories, keeping only the latest
-# Scans ~/.claude/plugins/cache/*/aimi-engineering/*/ for version dirs
+# Scans <config_dir>/plugins/cache/*/aimi-engineering/*/ for version dirs
 # Outputs JSON {"removed":<count>,"kept":"<version>"} to stdout
 cmd_cleanup_versions() {
   local latest_path latest_version latest_version_dir
   local removed=0
+  local config_dir
+  config_dir=$(_claude_config_dir)
 
   # Resolve the latest installed path via glob
-  latest_path=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+  latest_path=$(ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
 
   # No installed versions found
   if [ -z "$latest_path" ]; then
@@ -835,7 +854,7 @@ cmd_cleanup_versions() {
 
   # Iterate all version directories under all marketplace cache entries
   local version_dir
-  for version_dir in ~/.claude/plugins/cache/*/aimi-engineering/*/; do
+  for version_dir in "$config_dir"/plugins/cache/*/aimi-engineering/*/; do
     # Strip trailing slash for clean comparison
     version_dir="${version_dir%/}"
 
@@ -908,9 +927,14 @@ STATE FILES (.aimi/):
     current-story             ID of story being executed
     last-result               Result of last execution (success/failed/skipped)
 
+ENVIRONMENT:
+    CLAUDE_CONFIG_DIR  Override Claude config directory (default: ~/.claude)
+                       Must be an absolute path when set.
+
 EXAMPLES:
-    # Resolve CLI path first
-    AIMI_CLI=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+    # Resolve CLI path first (honors CLAUDE_CONFIG_DIR)
+    CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    AIMI_CLI=$(ls "$CONFIG_DIR"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
 
     # Initialize a new session
     $AIMI_CLI init-session
