@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.28.0] - 2026-03-03
+
+### Added
+
+- **aimi-cli.sh**: New `_claude_config_dir()` helper that resolves the Claude config directory from `CLAUDE_CONFIG_DIR` env var, falling back to `~/.claude` -- validates the path is absolute when set, and strips trailing slashes
+- **aimi-cli.sh**: All hardcoded `~/.claude/plugins/cache/` glob patterns in `cmd_check_version()`, `cmd_cleanup_versions()`, and help text examples now use the resolved config dir variable, enabling custom config directory support
+- **test-aimi-cli.sh**: New test cases for `CLAUDE_CONFIG_DIR` support — validates custom config dir resolution, absolute path enforcement, and trailing slash stripping
+
+### Changed
+
+- **auto-approve-cli.sh**: Dynamic config dir resolution using `CONFIG_DIR_RE` alternation — auto-approve patterns now match both `~/.claude` and custom `CLAUDE_CONFIG_DIR` paths
+- **cli-path-resolution.md**: Parameterized CLI resolution example to use `${CLAUDE_CONFIG_DIR:-$HOME/.claude}` instead of hardcoded `~/.claude`
+- **execute.md**: Parameterized CLI path resolution to support custom config directories via `CLAUDE_CONFIG_DIR`
+- **swarm.md**: Parameterized CLI path resolution to support custom config directories via `CLAUDE_CONFIG_DIR`
+
+### Security
+
+- **aimi-cli.sh**: Add `PROJECT_ROOT` export to `find_aimi_root()` — discovers git repository root and exports it for use by other functions
+- **aimi-cli.sh**: Add `validate_path_in_project()` function — validates resolved paths are under `PROJECT_ROOT` using realpath comparison, exits with clear error if path escapes project root
+- **aimi-cli.sh**: Add path validation to file operation functions (`read_state`, `write_state`, `clear_state_file`, `get_tasks_file`) — prevents directory traversal attacks
+- **story-executor/SKILL.md**: Add explicit project-root boundary guardrails — agents must not read or modify files outside the git repository root, worktree paths are explicitly allowed
+
 ## [1.27.4] - 2026-03-03
 
 ### Fixed

@@ -29,7 +29,8 @@ resolve_path() {
 }
 
 # Auto-discover the project root containing .aimi/ by walking up the directory tree.
-# On success: cd to the discovered root, rewrite AIMI_DIR and TASKS_DIR to absolute paths.
+# On success: cd to the discovered root, rewrite AIMI_DIR and TASKS_DIR to absolute paths,
+#             and export PROJECT_ROOT for use by other functions.
 # On failure (reached /): exit 1 with error to stderr.
 find_aimi_root() {
   local dir
@@ -39,6 +40,13 @@ find_aimi_root() {
       cd "$dir"
       AIMI_DIR="$dir/.aimi"
       TASKS_DIR="$AIMI_DIR/tasks"
+
+      # Discover the git repository root and export as PROJECT_ROOT
+      local git_root
+      git_root=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || git_root="$dir"
+      PROJECT_ROOT=$(resolve_path "$git_root")
+      export PROJECT_ROOT
+
       return 0
     fi
     local parent
@@ -50,6 +58,51 @@ find_aimi_root() {
     fi
     dir="$parent"
   done
+}
+
+# Validate that a given path resolves to a location within PROJECT_ROOT.
+# Worktree paths (under .worktrees/ inside PROJECT_ROOT) are explicitly allowed.
+# Usage: validate_path_in_project "/some/path"
+# Returns 0 if path is within PROJECT_ROOT, exits with error otherwise.
+validate_path_in_project() {
+  local target_path="$1"
+
+  if [ -z "$target_path" ]; then
+    echo "Error: validate_path_in_project requires a path argument" >&2
+    exit 1
+  fi
+
+  if [ -z "$PROJECT_ROOT" ]; then
+    echo "Error: PROJECT_ROOT is not set — call find_aimi_root() first" >&2
+    exit 1
+  fi
+
+  # Resolve the target path to its absolute form
+  local resolved_target
+  if [ -e "$target_path" ]; then
+    resolved_target=$(resolve_path "$target_path")
+  else
+    # For paths that don't exist yet, resolve the parent directory
+    local parent_dir
+    parent_dir=$(dirname "$target_path")
+    if [ -e "$parent_dir" ]; then
+      resolved_target="$(resolve_path "$parent_dir")/$(basename "$target_path")"
+    else
+      resolved_target="$target_path"
+    fi
+  fi
+
+  # Check if the resolved path is under PROJECT_ROOT
+  case "$resolved_target" in
+    "$PROJECT_ROOT"/*) return 0 ;;  # Under project root (includes .worktrees/)
+    "$PROJECT_ROOT")   return 0 ;;  # Exactly the project root
+    *)
+      echo "Error: Path escapes project root — access denied" >&2
+      echo "  Path:         $resolved_target" >&2
+      echo "  Project root: $PROJECT_ROOT" >&2
+      exit 1
+      ;;
+  esac
 }
 
 # Portable exclusive lock (Linux: flock, macOS: mkdir spinlock)
@@ -94,6 +147,7 @@ ensure_state_dir() {
 read_state() {
   local key="$1"
   local file="$AIMI_DIR/$key"
+  validate_path_in_project "$file"
   if [ -f "$file" ]; then
     cat "$file"
   fi
@@ -104,6 +158,7 @@ write_state() {
   local key="$1"
   local value="$2"
   ensure_state_dir
+  validate_path_in_project "$AIMI_DIR/$key"
   (
     _lock "$AIMI_DIR/.state.lock"
     echo "$value" > "$AIMI_DIR/$key"
@@ -113,6 +168,7 @@ write_state() {
 # Clear a single state file (flock-protected for parallel safety)
 clear_state_file() {
   local key="$1"
+  validate_path_in_project "$AIMI_DIR/$key"
   (
     _lock "$AIMI_DIR/.state.lock"
     rm -f "$AIMI_DIR/$key"
@@ -120,13 +176,28 @@ clear_state_file() {
 }
 
 # Extract version string from an aimi-cli.sh path
-# Given: ~/.claude/plugins/cache/foo/aimi-engineering/1.4.0/scripts/aimi-cli.sh
+# Given: <config_dir>/plugins/cache/foo/aimi-engineering/1.4.0/scripts/aimi-cli.sh
 # Returns: 1.4.0
 _extract_version_from_path() {
   local path="$1"
   local no_script="${path%/*}"       # strip /aimi-cli.sh -> .../scripts
   local no_scripts="${no_script%/*}" # strip /scripts -> .../1.4.0
   printf '%s\n' "${no_scripts##*/}"  # strip prefix -> 1.4.0
+}
+
+# Resolve the Claude config directory.
+# Honors CLAUDE_CONFIG_DIR env var; falls back to ~/.claude.
+# When CLAUDE_CONFIG_DIR is set, validates it is an absolute path.
+# Always returns the path with any trailing slash stripped.
+_claude_config_dir() {
+  local dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  # Validate absolute path when explicitly set
+  if [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ "${dir#/}" = "$dir" ]; then
+    echo "Error: CLAUDE_CONFIG_DIR must be an absolute path, got: $dir" >&2
+    exit 1
+  fi
+  # Strip trailing slash
+  printf '%s\n' "${dir%/}"
 }
 
 # Validate story ID format (US-NNN or US-NNNa)
@@ -161,6 +232,7 @@ get_tasks_file() {
       exit 1
     fi
     tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
     echo "Warning: state file pointed to $stale_path which no longer exists. Using $tasks_file instead." >&2
     write_state "current-tasks" "$tasks_file"
   elif [ -z "$tasks_file" ]; then
@@ -170,6 +242,9 @@ get_tasks_file() {
       exit 1
     fi
     tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    validate_path_in_project "$tasks_file"
   fi
 
   echo "$tasks_file"
@@ -760,9 +835,11 @@ cmd_check_version() {
   done
 
   local stored_path latest_path stored_version latest_version
+  local config_dir
+  config_dir=$(_claude_config_dir)
 
   # Resolve the latest installed path via glob
-  latest_path=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+  latest_path=$(ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
 
   # Case: glob returns empty — no installed version found
   if [ -z "$latest_path" ]; then
@@ -814,14 +891,16 @@ cmd_check_version() {
 }
 
 # Remove old cached plugin version directories, keeping only the latest
-# Scans ~/.claude/plugins/cache/*/aimi-engineering/*/ for version dirs
+# Scans <config_dir>/plugins/cache/*/aimi-engineering/*/ for version dirs
 # Outputs JSON {"removed":<count>,"kept":"<version>"} to stdout
 cmd_cleanup_versions() {
   local latest_path latest_version latest_version_dir
   local removed=0
+  local config_dir
+  config_dir=$(_claude_config_dir)
 
   # Resolve the latest installed path via glob
-  latest_path=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+  latest_path=$(ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
 
   # No installed versions found
   if [ -z "$latest_path" ]; then
@@ -835,7 +914,7 @@ cmd_cleanup_versions() {
 
   # Iterate all version directories under all marketplace cache entries
   local version_dir
-  for version_dir in ~/.claude/plugins/cache/*/aimi-engineering/*/; do
+  for version_dir in "$config_dir"/plugins/cache/*/aimi-engineering/*/; do
     # Strip trailing slash for clean comparison
     version_dir="${version_dir%/}"
 
@@ -902,15 +981,25 @@ COMMANDS:
     cleanup-versions          Remove old cached plugin versions, keep latest only
     help                      Show this help message
 
+ENVIRONMENT:
+    PROJECT_ROOT              Exported by find_aimi_root(); git repository root path
+                              All file operations are validated to stay within this boundary
+                              Worktree paths (.worktrees/ inside git root) are allowed
+
 STATE FILES (.aimi/):
     current-tasks             Path to active tasks file
     current-branch            Current working branch name
     current-story             ID of story being executed
     last-result               Result of last execution (success/failed/skipped)
 
+ENVIRONMENT:
+    CLAUDE_CONFIG_DIR  Override Claude config directory (default: ~/.claude)
+                       Must be an absolute path when set.
+
 EXAMPLES:
-    # Resolve CLI path first
-    AIMI_CLI=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+    # Resolve CLI path first (honors CLAUDE_CONFIG_DIR)
+    CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    AIMI_CLI=$(ls "$CONFIG_DIR"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
 
     # Initialize a new session
     $AIMI_CLI init-session

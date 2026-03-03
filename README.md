@@ -420,7 +420,7 @@ Commands use `aimi-cli.sh` (installed with the plugin) to extract only what's ne
 
 ```bash
 # Resolve CLI path (plugin install directory)
-AIMI_CLI=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+AIMI_CLI=$(ls "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
 
 # /aimi:execute - initialize session with metadata
 $AIMI_CLI init-session
@@ -536,9 +536,15 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 ## Version History
 
-**Current Version:** 1.27.4
+**Current Version:** 1.28.0
 
 ### Recent Changes
+
+**v1.28.0** - CLAUDE_CONFIG_DIR Support & Project-Root Security
+- New `_claude_config_dir()` helper supporting `CLAUDE_CONFIG_DIR` env var with `~/.claude` fallback
+- All CLI glob patterns, auto-approve hooks, and command markdown files parameterized for custom config directories
+- `PROJECT_ROOT` export and `validate_path_in_project()` guardrails prevent directory traversal
+- Story-executor agents restricted to git repository root boundary
 
 **v1.27.4** - Worktree Branch Prefix
 - Use task branch name as worktree branch prefix instead of hardcoded `aimi-`
