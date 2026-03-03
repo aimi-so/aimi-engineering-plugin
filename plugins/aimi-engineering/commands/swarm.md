@@ -32,7 +32,7 @@ Resolve `$AIMI_CLI` path using glob discovery with fallback, then verify version
 ### Worktree Manager
 
 ```bash
-WORKTREE_MGR=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/skills/git-worktree/scripts/worktree-manager.sh 2>/dev/null | tail -1)
+WORKTREE_MGR=$(ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/skills/git-worktree/scripts/worktree-manager.sh 2>/dev/null | tail -1)
 ```
 
 If empty, report: "worktree-manager.sh not found. Reinstall plugin: `/plugin install aimi-engineering`" and STOP.
@@ -260,12 +260,13 @@ TeamCreate({ team_name: "aimi-swarm" })
 5. **Build the Docker command** that will run inside the worker Task:
 
    ```bash
+   CLAUDE_DIR=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
    docker run --rm \
      --label aimi-swarm \
      --name aimi-swarm-<slug> \
      --user $(id -u):$(id -g) \
      -v <WORKTREE_PATH>:/workspace \
-     -v ~/.claude:/home/user/.claude:ro \
+     -v $CLAUDE_DIR:/home/user/.claude:ro \
      -e ANTHROPIC_API_KEY \
      -e GITHUB_TOKEN \
      -w /workspace \

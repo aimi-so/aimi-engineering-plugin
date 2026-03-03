@@ -142,7 +142,7 @@ Beginning wave execution loop...
 ## Step 3.1: Resolve Worktree Manager
 
 ```bash
-WORKTREE_MGR=$(ls ~/.claude/plugins/cache/*/aimi-engineering/*/skills/git-worktree/scripts/worktree-manager.sh 2>/dev/null | tail -1)
+WORKTREE_MGR=$(ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/skills/git-worktree/scripts/worktree-manager.sh 2>/dev/null | tail -1)
 ```
 
 If empty, report:
