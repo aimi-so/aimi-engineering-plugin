@@ -12,6 +12,22 @@ fi
 
 ALLOW='{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
 
+# --- Resolve config directory for dynamic path matching ---
+# The hook receives literal command text BEFORE shell expansion.
+# Commands may reference the config dir as:
+#   1. ~/.claude                              (old/default form)
+#   2. ${CLAUDE_CONFIG_DIR:-$HOME/.claude}    (parameterized form)
+#   3. /absolute/path/.claude                 (resolved absolute path)
+# We build a regex alternation that matches any of these forms.
+RESOLVED_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+# Remove trailing slash if present
+RESOLVED_CONFIG_DIR="${RESOLVED_CONFIG_DIR%/}"
+# Escape special regex characters in the resolved path (. / are the main ones)
+ESCAPED_CONFIG_DIR=$(printf '%s' "$RESOLVED_CONFIG_DIR" | sed 's/[.[\*^$()+?{|\\]/\\&/g; s/\//\\\//g')
+# Build the config dir regex alternation:
+#   ~\/.claude  |  \$\{CLAUDE_CONFIG_DIR:-\$HOME\/\.claude\}  |  /resolved/path
+CONFIG_DIR_RE="(~/\\.claude|\\\$\\{CLAUDE_CONFIG_DIR:-\\\$HOME/\\.claude\\}|${ESCAPED_CONFIG_DIR})"
+
 # --- Helper: Reject shell metacharacters ---
 # Returns 0 (true) if dangerous metacharacters are found after the variable reference.
 has_metacharacters() {
@@ -30,8 +46,9 @@ has_metacharacters() {
 
 # --- Pattern 1: AIMI_CLI= assignment ---
 # Validates the assigned path matches the expected plugin cache pattern.
+# Accepts config dir as ~/.claude, ${CLAUDE_CONFIG_DIR:-$HOME/.claude}, or resolved absolute path.
 if echo "$COMMAND" | grep -qE '^AIMI_CLI='; then
-  if echo "$COMMAND" | grep -qE '^AIMI_CLI=\$\(ls ~/.claude/plugins/cache/[a-zA-Z0-9_-]+/aimi-engineering/[0-9][a-zA-Z0-9._-]*/scripts/aimi-cli\.sh\)$'; then
+  if echo "$COMMAND" | grep -qE "^AIMI_CLI=\\$\\(ls ${CONFIG_DIR_RE}/plugins/cache/[a-zA-Z0-9_-]+/aimi-engineering/[0-9][a-zA-Z0-9._-]*/scripts/aimi-cli\\.sh\\)\$"; then
     echo "$ALLOW"
     exit 0
   fi
@@ -68,8 +85,9 @@ fi
 
 # --- Pattern 3: WORKTREE_MGR= assignment ---
 # Validates the assigned path matches the expected worktree manager plugin path.
+# Accepts config dir as ~/.claude, ${CLAUDE_CONFIG_DIR:-$HOME/.claude}, or resolved absolute path.
 if echo "$COMMAND" | grep -qE '^WORKTREE_MGR='; then
-  if echo "$COMMAND" | grep -qE '^WORKTREE_MGR=\$\(ls ~/.claude/plugins/cache/[a-zA-Z0-9_-]+/aimi-engineering/[0-9][a-zA-Z0-9._-]*/skills/git-worktree/scripts/worktree-manager\.sh\)$'; then
+  if echo "$COMMAND" | grep -qE "^WORKTREE_MGR=\\$\\(ls ${CONFIG_DIR_RE}/plugins/cache/[a-zA-Z0-9_-]+/aimi-engineering/[0-9][a-zA-Z0-9._-]*/skills/git-worktree/scripts/worktree-manager\\.sh\\)\$"; then
     echo "$ALLOW"
     exit 0
   fi
