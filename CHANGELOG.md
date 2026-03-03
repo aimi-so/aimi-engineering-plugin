@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.27.4] - 2026-03-03
+
+### Fixed
+
+- **execute.md**: Use task branch name as worktree branch prefix instead of hardcoded `aimi-` — worktree branches are now named `[branchName]-[storyId]` (e.g., `feat/feature-name-US-001`) for clearer branch association
+
 ## [1.27.3] - 2026-03-03
 
 ### Fixed

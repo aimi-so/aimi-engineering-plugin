@@ -308,7 +308,7 @@ while true:
     worktree_names = []
 
     for full_story in full_stories:
-        worktree_name = "aimi-[full_story.id]"
+        worktree_name = "[branchName]-[full_story.id]"
         worktree_names.append(worktree_name)
 
         # Create worktree from current feature branch
@@ -324,7 +324,7 @@ while true:
     # IMPORTANT: subagent_type MUST be "general-purpose" — story-executor is a skill, NOT an agent.
     # In one tool-call turn, emit N Task calls:
     for full_story in full_stories:
-        worktree_name = "aimi-[full_story.id]"
+        worktree_name = "[branchName]-[full_story.id]"
         worktree_path = [worktree path for this story]
 
         Task(
@@ -362,7 +362,7 @@ while true:
 
     # Merge all successful worktrees using merge-all
     if len(succeeded_stories) > 0:
-        succeeded_worktree_names = ["aimi-[full_story.id]" for full_story in succeeded_stories]
+        succeeded_worktree_names = ["[branchName]-[full_story.id]" for full_story in succeeded_stories]
 
         merge_result = $WORKTREE_MGR merge-all [succeeded_worktree_names...] --into [branchName]
 
@@ -400,7 +400,7 @@ After the wave loop ends (all stories processed or deadlock):
 ```
 # Remove any remaining worktrees (safety cleanup)
 $WORKTREE_MGR list
-# For each worktree matching "aimi-US-*":
+# For each worktree matching "[branchName]-US-*":
 $WORKTREE_MGR remove [worktree_name]
 ```
 
