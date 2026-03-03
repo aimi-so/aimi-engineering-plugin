@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.27.1] - 2026-03-02
+
+### Added
+
+- **react-best-practices skill**: Vercel React and Next.js performance optimization guidelines — 58 rules across 8 categories covering waterfalls, bundle size, server-side performance, and client-side data fetching
+- **react-native-skills skill**: React Native and Expo best practices — rules for list performance, animations with Reanimated, UI patterns, image handling, navigation, monorepo configuration, and platform-specific optimizations
+
 ## [1.27.0] - 2026-03-02
 
 ### Added
