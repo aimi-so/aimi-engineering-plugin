@@ -39,6 +39,19 @@ The agent spawns fresh with no memory of previous work. If the story is too big,
 
 ---
 
+## Project Root Boundary (CRITICAL)
+
+**Agents must NOT read or modify files outside the git repository root.**
+
+- All file operations (Read, Write, Edit, Bash) must target paths within the project root directory
+- The project root is the git repository root (where `.git/` lives)
+- Worktree paths under `.worktrees/` inside the git root are explicitly allowed
+- Never use `../` traversal to escape the project root
+- Never read system files, home directory configs, or files in parent directories
+- If a task seems to require accessing files outside the project root, report failure instead of proceeding
+
+---
+
 ## Prompt Template
 
 > This is the canonical worker prompt template. execute.md and next.md should reference this skill rather than duplicating the prompt inline.
@@ -86,6 +99,14 @@ Description: [STORY_DESCRIPTION]
 Use built-in tools directly: Read, Write, Edit, Bash, Grep, Glob.
 Do NOT invoke these via the Skill tool — "write" is a Write tool, not a skill.
 
+## Project Root Boundary (CRITICAL)
+
+All file operations MUST stay within the git repository root directory.
+- Do NOT read or modify files outside the project root
+- Worktree paths (.worktrees/ inside git root) are allowed
+- Never use ../ traversal to escape the project root
+- If a task requires accessing external files, report failure instead
+
 ## Execution Flow
 
 0. If WORKTREE_PATH is set, cd to WORKTREE_PATH
@@ -126,6 +147,7 @@ If you cannot complete a story:
 
 Before completing a story:
 
+- [ ] All file operations stayed within project root (no parent directory access)
 - [ ] All acceptance criteria verified
 - [ ] Typecheck passes (`npx tsc --noEmit`)
 - [ ] Changes committed with proper format
