@@ -536,9 +536,12 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 ## Version History
 
-**Current Version:** 1.27.0
+**Current Version:** 1.27.4
 
 ### Recent Changes
+
+**v1.27.4** - Worktree Branch Prefix
+- Use task branch name as worktree branch prefix instead of hardcoded `aimi-`
 
 **v1.27.0** - Lazy Story Loading
 - Added `get-story <id>` CLI command for on-demand story fetching
