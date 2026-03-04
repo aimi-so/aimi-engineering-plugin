@@ -103,9 +103,10 @@ Apply rules from `references/story-decomposition.md`:
    - **Same layer, shared concern** (FK referencing another story's table) → add dependency
    - **Cross-layer**: backend depends on schema stories it reads/writes; UI depends on backend it calls; aggregation depends on what it consumes
    - **Skip layers when appropriate**: UI reading directly from a new table depends on the schema story, not a non-existent backend story
-6. Write descriptions in user story format: "As a [specific role], I want [feature] so that [benefit]" — role must name the actor, never just "user"
-7. Generate verifiable acceptance criteria
-8. Validate dependency graph:
+6. Assign IDs in `US-NNN` zero-padded format (`US-001`, `US-002`, ...) — never `US-1`, `story-1`, `S1`, or any other format
+7. Write descriptions in user story format: "As a [specific role], I want [feature] so that [benefit]" — role must name the actor, never just "user"
+8. Generate verifiable acceptance criteria
+9. Validate dependency graph:
    - No circular dependencies (DAG check)
    - No self-references (no story lists its own ID)
    - All IDs referenced in `dependsOn` exist as story IDs
@@ -122,6 +123,23 @@ Apply rules from `references/story-decomposition.md`:
 7. Write to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 
 See `references/task-format-v3.md` for the complete v3 schema definition, status state machine, and validation rules.
+
+### Phase 4.5: Post-Generation Validation
+
+After writing the tasks.json file, validate the generated output:
+
+```bash
+$AIMI_CLI validate-ids
+$AIMI_CLI validate-deps
+```
+
+**If either validation fails (non-zero exit):**
+1. Read the error output to identify the issues
+2. Fix the offending story IDs, `dependsOn` references, or dependency cycles
+3. Re-write the tasks.json file using the Write tool
+4. Re-run both validations until they pass
+
+Do **not** proceed to the report step until both validations succeed.
 
 ---
 
