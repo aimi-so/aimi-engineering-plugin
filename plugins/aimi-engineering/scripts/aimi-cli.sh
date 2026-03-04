@@ -682,6 +682,33 @@ cmd_validate_stories() {
   ' "$tasks_file"
 }
 
+# Validate all story IDs in the tasks file against the US-NNN format
+cmd_validate_ids() {
+  local tasks_file
+  tasks_file=$(get_tasks_file)
+
+  local ids errors=() count=0
+  ids=$(jq -r '.userStories[].id' "$tasks_file")
+
+  while IFS= read -r id; do
+    [ -z "$id" ] && continue
+    count=$((count + 1))
+    if ! [[ "$id" =~ ^US-[0-9]{3}[a-z]?$ ]]; then
+      errors+=("Invalid story ID: $id (expected US-NNN)")
+    fi
+  done <<< "$ids"
+
+  if [ ${#errors[@]} -eq 0 ]; then
+    jq -n --argjson count "$count" '{valid: true, count: $count}'
+    return 0
+  else
+    local errors_json
+    errors_json=$(printf '%s\n' "${errors[@]}" | jq -R . | jq -s .)
+    jq -n --argjson errors "$errors_json" '{valid: false, errors: $errors}'
+    return 1
+  fi
+}
+
 # Cascade skip: given a failed story ID, mark all transitively-dependent stories as skipped
 cmd_cascade_skip() {
   local failed_id="$1"
@@ -968,6 +995,7 @@ COMMANDS:
     count-pending             Count pending stories
     validate-deps             Validate dependency graph (no cycles, no missing refs)
     validate-stories          Validate story content (length, suspicious patterns)
+    validate-ids              Validate all story IDs match US-NNN format
     cascade-skip <id>         Skip all stories depending on failed story
     reset-orphaned            Reset all in_progress stories to failed
     get-branch                Get branchName from metadata
@@ -1061,6 +1089,7 @@ main() {
     count-pending)     cmd_count_pending ;;
     validate-deps)     cmd_validate_deps ;;
     validate-stories)  cmd_validate_stories ;;
+    validate-ids)      cmd_validate_ids ;;
     cascade-skip)      cmd_cascade_skip "${2:-}" ;;
     reset-orphaned)    cmd_reset_orphaned ;;
     get-branch)        cmd_get_branch ;;
