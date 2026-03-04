@@ -85,12 +85,13 @@ Using consolidated research and spec-flow output:
 
 1. Extract all requirements (explicit + spec-flow identified)
 2. Group by layer (schema → backend → UI → aggregation)
-3. Size check: each story must be completable in ONE agent iteration (one context window)
-4. Order by dependency: assign `dependsOn` arrays (explicit story IDs) and `priority` as tiebreaker
-5. Write descriptions in user story format: "As a [specific role], I want [feature] so that [benefit]" — role must name the actor, never just "user"
-6. Generate verifiable acceptance criteria (every story must have "Typecheck passes")
-7. Initialize every story with `status: "pending"` and appropriate `dependsOn` array
-8. Validate: no circular dependencies in `dependsOn`, no self-references, all referenced IDs exist, no vague criteria
+3. Assign IDs in `US-NNN` zero-padded format (`US-001`, `US-002`, ...) — never `US-1`, `story-1`, `S1`, or any other format
+4. Size check: each story must be completable in ONE agent iteration (one context window)
+5. Order by dependency: assign `dependsOn` arrays (explicit story IDs) and `priority` as tiebreaker
+6. Write descriptions in user story format: "As a [specific role], I want [feature] so that [benefit]" — role must name the actor, never just "user"
+7. Generate verifiable acceptance criteria (every story must have "Typecheck passes")
+8. Initialize every story with `status: "pending"` and appropriate `dependsOn` array
+9. Validate: no circular dependencies in `dependsOn`, no self-references, all referenced IDs exist, no vague criteria
 
 See `references/story-decomposition.md` for detailed rules.
 
@@ -136,6 +137,7 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 
 ### Checklist Before Writing
 
+- [ ] Every story `id` uses `US-NNN` zero-padded format (`US-001`, `US-002`, ...) — not `US-1`, `S1`, `TASK-1`, or any other format
 - [ ] Each story completable in one agent iteration
 - [ ] Stories ordered by dependency (schema → backend → UI)
 - [ ] Every story has "Typecheck passes" as criterion

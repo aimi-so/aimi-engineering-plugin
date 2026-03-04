@@ -184,10 +184,11 @@ Using the consolidated research and spec-flow output:
 
 1. Extract all requirements (explicit + spec-flow identified)
 2. Group by layer (schema → backend → UI → aggregation)
-3. Apply sizing rules (one context window per story)
-4. Assign priority numbers by dependency order
-5. Generate verifiable acceptance criteria per story
-6. Run validation checklist
+3. Assign IDs in `US-NNN` zero-padded format (`US-001`, `US-002`, ...) — never `US-1`, `story-1`, `S1`, or any other format
+4. Apply sizing rules (one context window per story)
+5. Assign priority numbers by dependency order
+6. Generate verifiable acceptance criteria per story
+7. Run validation checklist
 
 ---
 
@@ -201,6 +202,7 @@ Using the consolidated research and spec-flow output:
 - **createdAt**: Today's date (YYYY-MM-DD)
 - **planPath**: Always `null`
 - **brainstormPath**: Path to brainstorm if one was used, otherwise omit
+- **Story IDs**: Must use `US-NNN` zero-padded format (`US-001`, `US-002`, ...) — never `US-1`, `story-1`, `S1`, or any other format
 
 ### Derive Filename
 
