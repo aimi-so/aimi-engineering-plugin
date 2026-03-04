@@ -238,7 +238,9 @@ As a [specific role], I want [feature] so that [benefit]
 ## Conversion Rules
 
 1. Each requirement becomes one or more JSON stories
-2. **IDs**: Sequential — `US-001`, `US-002`, etc.
+2. **IDs**: Sequential — `US-001`, `US-002`, etc. The numeric portion is **zero-padded to 3 digits** (e.g., `001`, `012`, `099`). IDs must match the regex `^US-\d{3}$`.
+   - **Valid**: `US-001`, `US-012`, `US-100`
+   - **Invalid**: `US-1`, `US-01`, `story-1`, `S1`, `F1`, `US-1234` (no abbreviations, no missing padding, no alternative prefixes, no more than 3 digits)
 3. **Priority**: Based on dependency order (lower = executes first)
 4. **All stories**: `status: "pending"` and empty `notes`
 5. **branchName**: Derive from feature name, kebab-case, prefixed with type
@@ -285,7 +287,7 @@ Before finalizing stories, verify:
 - [ ] Every story has "Typecheck passes" as criterion
 - [ ] UI stories have "Verify in browser" as criterion
 - [ ] Acceptance criteria are verifiable (not vague)
-- [ ] IDs are sequential (US-001, US-002, ...)
+- [ ] IDs are sequential, zero-padded to 3 digits, and match `^US-\d{3}$` (e.g., `US-001`, `US-002`). Reject: `US-1`, `story-1`, `S1`, `F1`
 - [ ] Field lengths within limits (title ≤ 200, description ≤ 500, criterion ≤ 600)
 - [ ] branchName matches validation regex
 
