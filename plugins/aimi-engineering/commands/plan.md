@@ -151,6 +151,30 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 - [ ] Every description follows "As a [specific role], I want [feature] so that [benefit]" format — role names the actor, never just "user"
 - [ ] Field lengths: title ≤ 200, description ≤ 500, criterion ≤ 600
 
+## Phase 4.5: Post-Generation Validation
+
+After writing the tasks.json file, validate the generated output using the CLI:
+
+### Validate Story IDs
+
+```bash
+$AIMI_CLI validate-ids
+```
+
+### Validate Dependency Graph
+
+```bash
+$AIMI_CLI validate-deps
+```
+
+**If either validation fails (non-zero exit):**
+1. Read the error output to identify the issues
+2. Fix the offending story IDs, `dependsOn` references, or dependency cycles
+3. Re-write the tasks.json file using the Write tool
+4. Re-run both validations until they pass
+
+Do **not** proceed to the report step until both validations succeed.
+
 ## Step 5: Aimi-Branded Report
 
 ```

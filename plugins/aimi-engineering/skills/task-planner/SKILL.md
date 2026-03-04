@@ -124,6 +124,23 @@ Apply rules from `references/story-decomposition.md`:
 
 See `references/task-format-v3.md` for the complete v3 schema definition, status state machine, and validation rules.
 
+### Phase 4.5: Post-Generation Validation
+
+After writing the tasks.json file, validate the generated output:
+
+```bash
+$AIMI_CLI validate-ids
+$AIMI_CLI validate-deps
+```
+
+**If either validation fails (non-zero exit):**
+1. Read the error output to identify the issues
+2. Fix the offending story IDs, `dependsOn` references, or dependency cycles
+3. Re-write the tasks.json file using the Write tool
+4. Re-run both validations until they pass
+
+Do **not** proceed to the report step until both validations succeed.
+
 ---
 
 ## Error Handling
