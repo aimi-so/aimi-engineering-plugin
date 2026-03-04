@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.28.2] - 2026-03-04
+
+### Fixed
+
+- **plan.md**: Add explicit US-NNN ID format step to Phase 3 story decomposition and checklist — LLM now sees the format requirement before generating IDs, not just in reference docs
+- **task-planner/SKILL.md**: Add US-NNN ID format step to Phase 3 between dependency assignment and description writing
+- **pipeline-phases.md**: Add US-NNN ID format to Phase 3 and Phase 4 metadata derivation
+- **story-decomposition.md**: Strengthen ID format with explicit zero-padding language, regex pattern, and negative examples (US-1, story-1, S1, F1)
+
+### Added
+
+- **aimi-cli.sh**: New `validate-ids` command — validates all story IDs in a tasks file match `^US-[0-9]{3}[a-z]?$` regex, returns JSON with valid/count or errors array
+- **plan.md**: Phase 4.5 post-generation validation step — runs `validate-ids` and `validate-deps` after writing tasks.json, with fix-and-rewrite loop if validation fails
+- **task-planner/SKILL.md**: Matching Phase 4.5 post-generation validation step
+
 ## [1.28.1] - 2026-03-03
 
 ### Fixed

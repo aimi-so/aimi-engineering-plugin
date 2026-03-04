@@ -544,6 +544,12 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 - Task generation now enforces "As a [specific role], I want [feature] so that [benefit]" format
 - Description format rules added to schema spec, story decomposition, task-planner skill, and plan command
 
+**v1.28.2** - US-NNN ID Format Enforcement & Post-Generation Validation
+- Add US-NNN format step to Phase 3 in plan.md, SKILL.md, pipeline-phases.md — LLM sees format before generating IDs
+- Strengthen story-decomposition.md with zero-padding language and negative examples
+- New `validate-ids` CLI command checks all story IDs at once
+- Phase 4.5 post-generation validation runs `validate-ids` + `validate-deps` after writing tasks.json
+
 **v1.28.0** - CLAUDE_CONFIG_DIR Support & Project-Root Security
 - New `_claude_config_dir()` helper supporting `CLAUDE_CONFIG_DIR` env var with `~/.claude` fallback
 - All CLI glob patterns, auto-approve hooks, and command markdown files parameterized for custom config directories
