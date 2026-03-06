@@ -1364,6 +1364,336 @@ test_next_story_returns_full_object() {
 }
 
 # ============================================================================
+# Global Cache Tests
+# ============================================================================
+#
+# These tests exercise the global cache functions (write_global_cli_cache,
+# read_global_cli_cache, write_global_worktree_cache, read_global_worktree_cache)
+# and their integration with init-session and check-version --fix.
+#
+# NOTE: These tests run under bash. The zsh-specific resolution paths
+# (e.g., ${(%):-%x} vs BASH_SOURCE) cannot be tested here. For zsh
+# behavior, manually source aimi-cli.sh in a zsh shell and verify
+# _global_cache_path and read_global_cli_cache return correct results.
+
+# Helper: set up an isolated CLAUDE_CONFIG_DIR with a mock plugin cache
+# structure so the CLI's glob-based resolution finds a fake aimi-cli.sh.
+# Sets CLAUDE_CONFIG_DIR, MOCK_CLI_PATH, and MOCK_WORKTREE_PATH globals.
+setup_global_cache_env() {
+  GLOBAL_CACHE_TMPDIR=$(mktemp -d)
+  export CLAUDE_CONFIG_DIR="$GLOBAL_CACHE_TMPDIR/claude-config"
+  mkdir -p "$CLAUDE_CONFIG_DIR"
+
+  # Build a mock plugin cache directory structure:
+  #   <config>/plugins/cache/marketplace-hash/aimi-engineering/1.99.0/scripts/aimi-cli.sh
+  #   <config>/plugins/cache/marketplace-hash/aimi-engineering/1.99.0/skills/git-worktree/scripts/worktree-manager.sh
+  local mock_scripts_dir="$CLAUDE_CONFIG_DIR/plugins/cache/abc123/aimi-engineering/1.99.0/scripts"
+  local mock_worktree_dir="$CLAUDE_CONFIG_DIR/plugins/cache/abc123/aimi-engineering/1.99.0/skills/git-worktree/scripts"
+  mkdir -p "$mock_scripts_dir"
+  mkdir -p "$mock_worktree_dir"
+
+  # Create mock executables (content doesn't matter for cache tests)
+  echo '#!/usr/bin/env bash' > "$mock_scripts_dir/aimi-cli.sh"
+  chmod +x "$mock_scripts_dir/aimi-cli.sh"
+  MOCK_CLI_PATH="$mock_scripts_dir/aimi-cli.sh"
+
+  echo '#!/usr/bin/env bash' > "$mock_worktree_dir/worktree-manager.sh"
+  chmod +x "$mock_worktree_dir/worktree-manager.sh"
+  MOCK_WORKTREE_PATH="$mock_worktree_dir/worktree-manager.sh"
+}
+
+# Helper: tear down the isolated environment
+teardown_global_cache_env() {
+  rm -rf "$GLOBAL_CACHE_TMPDIR"
+  unset CLAUDE_CONFIG_DIR
+  unset GLOBAL_CACHE_TMPDIR
+  unset MOCK_CLI_PATH
+  unset MOCK_WORKTREE_PATH
+}
+
+# Source the global cache functions from aimi-cli.sh for direct testing.
+# We extract the needed functions using sed so we can call them directly.
+source_cache_functions() {
+  eval "$(sed -n '/^_claude_config_dir()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_global_cache_path()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_global_worktree_cache_path()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^write_global_cli_cache()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^read_global_cli_cache()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^write_global_worktree_cache()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^read_global_worktree_cache()/,/^}/p' "$CLI")"
+}
+
+test_write_global_cli_cache() {
+  echo ""
+  echo "=== Testing write_global_cli_cache creates file with correct content and permissions ==="
+
+  setup_global_cache_env
+  source_cache_functions
+
+  local test_path="$MOCK_CLI_PATH"
+  write_global_cli_cache "$test_path"
+
+  local cache_file
+  cache_file=$(_global_cache_path)
+
+  # File should exist
+  if [ -f "$cache_file" ]; then
+    echo -e "${GREEN}✓${NC} write_global_cli_cache: cache file exists"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} write_global_cli_cache: cache file exists"
+    echo "  Expected file at: $cache_file"
+    ((TESTS_FAILED++))
+    teardown_global_cache_env
+    return
+  fi
+
+  # Content should match the written path
+  local content
+  content=$(cat "$cache_file")
+  assert_eq "$test_path" "$content" "write_global_cli_cache: file content matches written path"
+
+  # Permissions should be 0600
+  local perms
+  perms=$(stat -c '%a' "$cache_file" 2>/dev/null || stat -f '%Lp' "$cache_file" 2>/dev/null)
+  assert_eq "600" "$perms" "write_global_cli_cache: file permissions are 0600"
+
+  teardown_global_cache_env
+}
+
+test_read_global_cli_cache_valid() {
+  echo ""
+  echo "=== Testing read_global_cli_cache returns cached path when valid ==="
+
+  setup_global_cache_env
+  source_cache_functions
+
+  # Write a valid path that matches the expected pattern
+  write_global_cli_cache "$MOCK_CLI_PATH"
+
+  local result
+  result=$(read_global_cli_cache)
+
+  assert_eq "$MOCK_CLI_PATH" "$result" "read_global_cli_cache: returns valid cached path"
+
+  teardown_global_cache_env
+}
+
+test_read_global_cli_cache_missing() {
+  echo ""
+  echo "=== Testing read_global_cli_cache returns empty when file is missing ==="
+
+  setup_global_cache_env
+  source_cache_functions
+
+  # Do NOT write any cache file — it should not exist
+  local result
+  result=$(read_global_cli_cache)
+
+  assert_eq "" "$result" "read_global_cli_cache: returns empty when cache file missing"
+
+  teardown_global_cache_env
+}
+
+test_read_global_cli_cache_tampered() {
+  echo ""
+  echo "=== Testing read_global_cli_cache returns empty when path doesn't match pattern ==="
+
+  setup_global_cache_env
+  source_cache_functions
+
+  # Write a tampered/invalid path that does not match the expected glob pattern
+  local cache_file
+  cache_file=$(_global_cache_path)
+  printf '%s\n' "/tmp/hacked/evil-script.sh" > "$cache_file"
+
+  local result
+  result=$(read_global_cli_cache)
+
+  assert_eq "" "$result" "read_global_cli_cache: returns empty for tampered path (no pattern match)"
+
+  teardown_global_cache_env
+}
+
+test_read_global_cli_cache_stale() {
+  echo ""
+  echo "=== Testing read_global_cli_cache returns path even when cached file no longer exists on disk ==="
+
+  setup_global_cache_env
+  source_cache_functions
+
+  # Write a valid-pattern path, then delete the actual file
+  write_global_cli_cache "$MOCK_CLI_PATH"
+  rm -f "$MOCK_CLI_PATH"
+
+  # read_global_cli_cache only validates the pattern, not file existence
+  # (staleness detection is done by the caller, e.g., check-version)
+  local result
+  result=$(read_global_cli_cache)
+
+  # The function returns the path because it matches the pattern
+  # even though the file no longer exists on disk
+  assert_eq "$MOCK_CLI_PATH" "$result" "read_global_cli_cache: returns pattern-valid path even if file deleted (caller detects staleness)"
+
+  teardown_global_cache_env
+}
+
+test_write_global_worktree_cache() {
+  echo ""
+  echo "=== Testing write_global_worktree_cache and read_global_worktree_cache ==="
+
+  setup_global_cache_env
+  source_cache_functions
+
+  # Write the worktree manager path
+  write_global_worktree_cache "$MOCK_WORKTREE_PATH"
+
+  local cache_file
+  cache_file=$(_global_worktree_cache_path)
+
+  # File should exist
+  if [ -f "$cache_file" ]; then
+    echo -e "${GREEN}✓${NC} write_global_worktree_cache: cache file exists"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} write_global_worktree_cache: cache file exists"
+    ((TESTS_FAILED++))
+    teardown_global_cache_env
+    return
+  fi
+
+  # Content should match
+  local content
+  content=$(cat "$cache_file")
+  assert_eq "$MOCK_WORKTREE_PATH" "$content" "write_global_worktree_cache: file content matches"
+
+  # Permissions should be 0600
+  local perms
+  perms=$(stat -c '%a' "$cache_file" 2>/dev/null || stat -f '%Lp' "$cache_file" 2>/dev/null)
+  assert_eq "600" "$perms" "write_global_worktree_cache: file permissions are 0600"
+
+  # Read it back
+  local result
+  result=$(read_global_worktree_cache)
+  assert_eq "$MOCK_WORKTREE_PATH" "$result" "read_global_worktree_cache: returns valid cached path"
+
+  teardown_global_cache_env
+}
+
+test_read_global_worktree_cache_tampered() {
+  echo ""
+  echo "=== Testing read_global_worktree_cache returns empty for invalid pattern ==="
+
+  setup_global_cache_env
+  source_cache_functions
+
+  local cache_file
+  cache_file=$(_global_worktree_cache_path)
+  printf '%s\n' "/tmp/bad-path/not-worktree.sh" > "$cache_file"
+
+  local result
+  result=$(read_global_worktree_cache)
+
+  assert_eq "" "$result" "read_global_worktree_cache: returns empty for tampered path"
+
+  teardown_global_cache_env
+}
+
+test_init_session_writes_global_cache() {
+  echo ""
+  echo "=== Testing init-session writes global cache alongside per-project cache ==="
+
+  setup_global_cache_env
+  source_cache_functions
+
+  # init-session calls write_global_cli_cache internally.
+  # We need to run the actual CLI with our custom CLAUDE_CONFIG_DIR.
+  # First, reset and run init-session.
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  "$CLI" init-session > /dev/null
+
+  # The global cache file should now exist
+  local cache_file
+  cache_file=$(_global_cache_path)
+
+  if [ -f "$cache_file" ]; then
+    echo -e "${GREEN}✓${NC} init-session: global CLI cache file created"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} init-session: global CLI cache file created"
+    echo "  Expected file at: $cache_file"
+    ((TESTS_FAILED++))
+    teardown_global_cache_env
+    return
+  fi
+
+  # The content should be a path ending in aimi-cli.sh
+  local content
+  content=$(cat "$cache_file")
+  assert_contains "aimi-cli.sh" "$content" "init-session: global cache contains aimi-cli.sh path"
+
+  # The per-project state should also be set
+  local state_path
+  state_path=$(cat "$AIMI_DIR/cli-path" 2>/dev/null)
+  assert_eq "$content" "$state_path" "init-session: global cache matches per-project cli-path state"
+
+  teardown_global_cache_env
+}
+
+test_check_version_fix_updates_global_cache() {
+  echo ""
+  echo "=== Testing check-version --fix updates global cache when stale ==="
+
+  setup_global_cache_env
+  source_cache_functions
+
+  # Initialize session first to set up state
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  "$CLI" init-session > /dev/null
+
+  # Resolve the latest path in our mock env
+  local latest_glob_path
+  latest_glob_path=$(ls "$CLAUDE_CONFIG_DIR"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+
+  if [ -z "$latest_glob_path" ]; then
+    echo "  (skipping: no mock CLI in plugin cache)"
+    teardown_global_cache_env
+    return
+  fi
+
+  # Write a stale cli-path to force check-version to detect staleness
+  echo "/fake/old/plugins/cache/abc/aimi-engineering/0.0.1/scripts/aimi-cli.sh" > "$AIMI_DIR/cli-path"
+
+  # Also clear the global cache to verify --fix writes it
+  local cache_file
+  cache_file=$(_global_cache_path)
+  rm -f "$cache_file"
+
+  local output exit_code
+  output=$("$CLI" check-version --fix 2>/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "check-version --fix: exits 0"
+  assert_contains '"status": "fixed"' "$output" "check-version --fix: returns fixed status"
+
+  # Verify the global cache was updated
+  if [ -f "$cache_file" ]; then
+    echo -e "${GREEN}✓${NC} check-version --fix: global cache file exists after fix"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} check-version --fix: global cache file exists after fix"
+    ((TESTS_FAILED++))
+    teardown_global_cache_env
+    return
+  fi
+
+  local cached_content
+  cached_content=$(cat "$cache_file")
+  assert_eq "$latest_glob_path" "$cached_content" "check-version --fix: global cache updated to latest path"
+
+  teardown_global_cache_env
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -1447,6 +1777,19 @@ main() {
   echo "--- Auto-Discovery Tests ---"
   test_auto_discovery_from_subdirectory
   test_auto_discovery_not_found
+
+  # Global cache tests — run with isolated CLAUDE_CONFIG_DIR
+  echo ""
+  echo "--- Global Cache Tests ---"
+  test_write_global_cli_cache
+  test_read_global_cli_cache_valid
+  test_read_global_cli_cache_missing
+  test_read_global_cli_cache_tampered
+  test_read_global_cli_cache_stale
+  test_write_global_worktree_cache
+  test_read_global_worktree_cache_tampered
+  test_init_session_writes_global_cache
+  test_check_version_fix_updates_global_cache
 
   # CLI output optimization tests — run with fresh fixture each time
   echo ""

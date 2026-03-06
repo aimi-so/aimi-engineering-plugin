@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.29.0] - 2026-03-06
+
+### Changed
+
+- **cli-path-resolution.md**: Rewrite CLI resolution with three-layer strategy — global cache, zsh-safe glob fallback, per-project fallback — for reliable path discovery across shells and plugin updates
+- **cli-path-resolution.md**: Add equivalent WORKTREE_MGR three-layer resolution section
+- **cli-path-resolution.md**: Structure resolution as sequential commands (no compound `&&` or `||`) for auto-approve hook compatibility
+
+### Added
+
+- **aimi-cli.sh**: Global cache functions (`_cache_path`, `_read_cache`, `_write_cache`) for persistent CLI and worktree manager path storage across sessions
+- **auto-approve-cli.sh**: Auto-approve patterns for three-layer CLI resolution commands (cache read via `cat`, Layer 1 validation, Layer 2 `bash -c` glob fallback, Layer 2 cache write via `printf`/`mv`/`chmod`, Layer 3 per-project fallback)
+- **aimi-cli.sh / worktree-manager.sh**: Tests for global cache read/write/invalidation functions
+
 ## [1.28.2] - 2026-03-04
 
 ### Fixed
