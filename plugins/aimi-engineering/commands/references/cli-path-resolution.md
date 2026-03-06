@@ -1,21 +1,82 @@
 # CLI Path Resolution
 
-Shared reference for resolving `$AIMI_CLI` across all commands. This file is the single source of truth for the CLI resolution logic.
+Shared reference for resolving `$AIMI_CLI` and `$WORKTREE_MGR` across all commands. This file is the single source of truth for the CLI resolution logic.
 
 ## Resolve CLI Path
 
-**CRITICAL:** The CLI script lives in the plugin install directory, NOT the project directory. Resolve it first:
+**CRITICAL:** The CLI script lives in the plugin install directory, NOT the project directory. Resolve it using the three-layer strategy below. Each command is a separate Bash call (no compound operators).
+
+### Layer 1: Global cache (fast path)
 
 ```bash
-# Glob always finds the latest installed version
-AIMI_CLI=$(ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
-# Fallback to cached cli-path if glob found nothing (edge case)
-if [ -z "$AIMI_CLI" ] && [ -f .aimi/cli-path ] && [ -x "$(cat .aimi/cli-path)" ]; then
-  AIMI_CLI=$(cat .aimi/cli-path)
-fi
+AIMI_CLI=$(cat ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path 2>/dev/null)
+```
+
+### Layer 1 validation: verify cached path exists and is executable
+
+```bash
+if [ -n "$AIMI_CLI" ] && [ ! -x "$AIMI_CLI" ]; then AIMI_CLI=""; fi
+```
+
+### Layer 2: Glob fallback (zsh-safe)
+
+Only runs if Layer 1 failed. Uses `bash -c` to avoid zsh `NOMATCH` errors.
+
+```bash
+if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1'); fi
+```
+
+### Layer 2 cache update: save for next time
+
+```bash
+if [ -n "$AIMI_CLI" ]; then printf '%s\n' "$AIMI_CLI" > "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path.tmp" && mv "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path.tmp" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" && chmod 600 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path"; fi
+```
+
+### Layer 3: Per-project fallback (last resort)
+
+```bash
+if [ -z "$AIMI_CLI" ] && [ -f .aimi/cli-path ] && [ -x "$(cat .aimi/cli-path)" ]; then AIMI_CLI=$(cat .aimi/cli-path); fi
 ```
 
 If empty, report: "aimi-cli.sh not found. Reinstall plugin: `/plugin install aimi-engineering`" and STOP.
+
+## Resolve Worktree Manager Path
+
+**CRITICAL:** The worktree manager script lives alongside the CLI. Resolve `$WORKTREE_MGR` using the same three-layer strategy.
+
+### Layer 1: Global cache (fast path)
+
+```bash
+WORKTREE_MGR=$(cat ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path 2>/dev/null)
+```
+
+### Layer 1 validation: verify cached path exists and is executable
+
+```bash
+if [ -n "$WORKTREE_MGR" ] && [ ! -x "$WORKTREE_MGR" ]; then WORKTREE_MGR=""; fi
+```
+
+### Layer 2: Glob fallback (zsh-safe)
+
+Only runs if Layer 1 failed. Uses `bash -c` to avoid zsh `NOMATCH` errors.
+
+```bash
+if [ -z "$WORKTREE_MGR" ]; then WORKTREE_MGR=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/worktree-manager.sh 2>/dev/null | tail -1'); fi
+```
+
+### Layer 2 cache update: save for next time
+
+```bash
+if [ -n "$WORKTREE_MGR" ]; then printf '%s\n' "$WORKTREE_MGR" > "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path.tmp" && mv "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path.tmp" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" && chmod 600 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path"; fi
+```
+
+### Layer 3: Per-project fallback (last resort)
+
+```bash
+if [ -z "$WORKTREE_MGR" ] && [ -f .aimi/cli-path ]; then WORKTREE_MGR=$(dirname "$(cat .aimi/cli-path)")/worktree-manager.sh; if [ ! -x "$WORKTREE_MGR" ]; then WORKTREE_MGR=""; fi; fi
+```
+
+If empty, report: "worktree-manager.sh not found. Reinstall plugin: `/plugin install aimi-engineering`" and STOP.
 
 ## Version Check
 
