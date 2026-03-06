@@ -353,7 +353,10 @@ cmd_init_session() {
   write_state "current-tasks" "$tasks_file"
 
   # Self-resolve: persist this CLI's absolute path for future sessions
-  write_state "cli-path" "$(resolve_path "$0")"
+  local self_path
+  self_path=$(resolve_path "$0")
+  write_state "cli-path" "$self_path"
+  write_global_cli_cache "$self_path"
 
   branch=$(jq -r '.metadata.branchName' "$tasks_file")
 
@@ -981,6 +984,7 @@ cmd_check_version() {
   # Case: stored path differs — stale
   if [ "$fix" = true ]; then
     write_state "cli-path" "$latest_path"
+    write_global_cli_cache "$latest_path"
     jq -n --arg sv "$stored_version" --arg lv "$latest_version" \
       '{status: "fixed", storedVersion: $sv, latestVersion: $lv}'
     return 0
@@ -1043,6 +1047,7 @@ cmd_cleanup_versions() {
 
   # Update cli-path state to point to the latest version
   write_state "cli-path" "$latest_path"
+  write_global_cli_cache "$latest_path"
 
   jq -n --argjson removed "$removed" --arg kept "$latest_version" \
     '{removed: $removed, kept: $kept}'
