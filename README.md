@@ -536,19 +536,25 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 ## Version History
 
-**Current Version:** 1.28.1
+**Current Version:** 1.29.0
 
 ### Recent Changes
 
-**v1.28.1** - Enforce Ralph-style User Story Descriptions
-- Task generation now enforces "As a [specific role], I want [feature] so that [benefit]" format
-- Description format rules added to schema spec, story decomposition, task-planner skill, and plan command
+**v1.29.0** - Three-Layer CLI Resolution with Global Cache
+- Rewrite CLI path resolution with three-layer strategy: global cache, zsh-safe glob fallback, per-project fallback
+- Global cache functions for persistent CLI and worktree manager path storage across sessions
+- Auto-approve hook patterns for all resolution layers
+- Tests for global cache read/write/invalidation
 
 **v1.28.2** - US-NNN ID Format Enforcement & Post-Generation Validation
 - Add US-NNN format step to Phase 3 in plan.md, SKILL.md, pipeline-phases.md — LLM sees format before generating IDs
 - Strengthen story-decomposition.md with zero-padding language and negative examples
 - New `validate-ids` CLI command checks all story IDs at once
 - Phase 4.5 post-generation validation runs `validate-ids` + `validate-deps` after writing tasks.json
+
+**v1.28.1** - Enforce Ralph-style User Story Descriptions
+- Task generation now enforces "As a [specific role], I want [feature] so that [benefit]" format
+- Description format rules added to schema spec, story decomposition, task-planner skill, and plan command
 
 **v1.28.0** - CLAUDE_CONFIG_DIR Support & Project-Root Security
 - New `_claude_config_dir()` helper supporting `CLAUDE_CONFIG_DIR` env var with `~/.claude` fallback
