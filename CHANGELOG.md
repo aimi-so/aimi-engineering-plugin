@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.28.3] - 2026-03-06
+
+### Fixed
+
+- **cli-path-resolution.md**: Rewrite CLI resolution with three-layer strategy (global cache, zsh-safe glob fallback, per-project fallback) for reliable path discovery across shells and plugin updates
+- **cli-path-resolution.md**: Add equivalent WORKTREE_MGR three-layer resolution section
+- **cli-path-resolution.md**: Structure resolution as sequential commands (no compound && or ||) for auto-approve hook compatibility
+
 ## [1.28.2] - 2026-03-04
 
 ### Fixed
