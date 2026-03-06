@@ -200,6 +200,84 @@ _claude_config_dir() {
   printf '%s\n' "${dir%/}"
 }
 
+# Return the global cache file path for aimi-cli.sh
+_global_cache_path() {
+  local config_dir
+  config_dir=$(_claude_config_dir)
+  printf '%s\n' "$config_dir/aimi-engineering-cli-path"
+}
+
+# Return the global cache file path for worktree-manager.sh
+_global_worktree_cache_path() {
+  local config_dir
+  config_dir=$(_claude_config_dir)
+  printf '%s\n' "$config_dir/aimi-engineering-worktree-path"
+}
+
+# Atomically write the CLI path to the global cache file
+# Usage: write_global_cli_cache "/path/to/aimi-cli.sh"
+write_global_cli_cache() {
+  local path="$1"
+  local cache_file
+  cache_file=$(_global_cache_path)
+  local tmp_file
+  tmp_file=$(mktemp "${cache_file}.XXXXXX")
+  printf '%s\n' "$path" > "$tmp_file"
+  chmod 0600 "$tmp_file"
+  mv "$tmp_file" "$cache_file"
+}
+
+# Read and validate the cached CLI path from the global cache file
+# Returns the cached path if valid, empty string otherwise
+read_global_cli_cache() {
+  local cache_file
+  cache_file=$(_global_cache_path)
+  if [ ! -f "$cache_file" ] || [ ! -r "$cache_file" ]; then
+    return 0
+  fi
+  local cached_path
+  cached_path=$(cat "$cache_file" 2>/dev/null) || return 0
+  # Validate path matches expected pattern
+  # Expected: */plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh
+  case "$cached_path" in
+    */plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh)
+      printf '%s\n' "$cached_path"
+      ;;
+  esac
+}
+
+# Atomically write the worktree manager path to the global cache file
+# Usage: write_global_worktree_cache "/path/to/worktree-manager.sh"
+write_global_worktree_cache() {
+  local path="$1"
+  local cache_file
+  cache_file=$(_global_worktree_cache_path)
+  local tmp_file
+  tmp_file=$(mktemp "${cache_file}.XXXXXX")
+  printf '%s\n' "$path" > "$tmp_file"
+  chmod 0600 "$tmp_file"
+  mv "$tmp_file" "$cache_file"
+}
+
+# Read and validate the cached worktree manager path from the global cache file
+# Returns the cached path if valid, empty string otherwise
+read_global_worktree_cache() {
+  local cache_file
+  cache_file=$(_global_worktree_cache_path)
+  if [ ! -f "$cache_file" ] || [ ! -r "$cache_file" ]; then
+    return 0
+  fi
+  local cached_path
+  cached_path=$(cat "$cache_file" 2>/dev/null) || return 0
+  # Validate path matches expected pattern
+  # Expected: */plugins/cache/*/aimi-engineering/*/skills/git-worktree/scripts/worktree-manager.sh
+  case "$cached_path" in
+    */plugins/cache/*/aimi-engineering/*/skills/git-worktree/scripts/worktree-manager.sh)
+      printf '%s\n' "$cached_path"
+      ;;
+  esac
+}
+
 # Validate story ID format (US-NNN or US-NNNa)
 validate_story_id() {
   local story_id="$1"
