@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.31.0] - 2026-03-26
+
+### Added
+
+- **execute.md**: Per-project worktree grouping for multi-repo execution — wave stories are grouped by `project` field before worktree creation, worktrees are created within each project's git repo, merge-all runs per-project group
+- **execute.md**: Per-project branch setup — creates/checks out the feature branch in each unique project's git repo when stories target different repos
+- **execute.md**: Per-project guidelines loading — builds `PROJECT_GUIDELINES_MAP` from each project's CLAUDE.md/AGENTS.md
+- **execute.md**: Single-story waves pass `PROJECT_PATH` to worker prompt when story has `project` field
+- **execute.md**: Post-loop cleanup handles per-project worktree removal
+
 ## [1.30.0] - 2026-03-26
 
 ### Added
