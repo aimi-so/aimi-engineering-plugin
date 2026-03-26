@@ -36,7 +36,7 @@ Example: `.aimi/tasks/2026-02-27-dep-graph-tasks.json`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `schemaVersion` | string | Yes | Must be `"3.0"` |
+| `schemaVersion` | string | Yes | Must be `"3.0"` or `"3.1"` |
 | `metadata` | object | Yes | Project metadata |
 | `userStories` | array | Yes | Array of Story objects |
 
@@ -66,6 +66,7 @@ Each story is ONE atomic unit of work completable in a single agent iteration.
 | `status` | string | Yes | `"pending"` | One of: `"pending"`, `"in_progress"`, `"completed"`, `"failed"`, `"skipped"` |
 | `dependsOn` | string[] | Yes | `[]` | Array of story IDs this story depends on (e.g., `["US-001", "US-002"]`) |
 | `notes` | string | No | `""` | Error details, learnings, or skip reason |
+| `project` | string | No | absent | Relative path to the sub-project directory (relative to the parent folder where `.aimi/` lives). When absent, the story falls back to CWD (backwards compatible). |
 
 ---
 
@@ -294,13 +295,81 @@ In this example, US-002 and US-003 can run in parallel (both depend only on US-0
 
 ---
 
+## Multi-Repo Example (with `project` field)
+
+When a plan spans multiple sub-projects within a monorepo, use the `project` field to indicate which sub-project each story targets. The path is relative to the parent folder where `.aimi/` lives.
+
+```json
+{
+  "schemaVersion": "3.1",
+  "metadata": {
+    "title": "feat: Add cross-service authentication",
+    "type": "feat",
+    "branchName": "feat/cross-service-auth",
+    "createdAt": "2026-03-26",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Add auth token schema to shared library",
+      "description": "As a backend developer, I want a shared auth token type so that both services use the same contract.",
+      "acceptanceCriteria": [
+        "AuthToken type exported from shared/types",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "project": "packages/shared"
+    },
+    {
+      "id": "US-002",
+      "title": "Implement token validation middleware in API gateway",
+      "description": "As a platform engineer, I want the API gateway to validate auth tokens so that downstream services receive verified requests.",
+      "acceptanceCriteria": [
+        "Middleware validates token signature and expiry",
+        "Returns 401 on invalid token",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "status": "pending",
+      "dependsOn": ["US-001"],
+      "notes": "",
+      "project": "services/api-gateway"
+    },
+    {
+      "id": "US-003",
+      "title": "Add token refresh endpoint to auth service",
+      "description": "As an end user, I want my session to refresh automatically so that I stay logged in.",
+      "acceptanceCriteria": [
+        "POST /auth/refresh returns new token pair",
+        "Old refresh token is invalidated",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "status": "pending",
+      "dependsOn": ["US-001"],
+      "notes": "",
+      "project": "services/auth"
+    }
+  ]
+}
+```
+
+In this example, US-001 targets `packages/shared`, while US-002 and US-003 target different services. The executor uses the `project` path to set the working directory for each story. Stories without a `project` field default to CWD.
+
+---
+
 ## Validation Rules
 
 ### Required Fields Check
 
 Before processing, validate:
 
-1. `schemaVersion` must be `"3.0"`
+1. `schemaVersion` must be `"3.0"` or `"3.1"`
 2. `metadata.title` must be non-empty
 3. `metadata.type` must be one of: `feat`, `ref`, `bug`, `chore`
 4. `metadata.branchName` must be non-empty and match `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$`
@@ -313,6 +382,7 @@ Before processing, validate:
 11. No duplicate story IDs
 12. No duplicate priority values
 13. Dependency graph must be a valid DAG (no cycles, no self-refs, all refs exist)
+14. Each story's `project` (if present) must be a relative path with no `..` components and must match `^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$`
 
 ### Validation Error Format
 
