@@ -86,7 +86,8 @@ Learnings are stored in project files (not separate progress log):
 ## Tasks File Schema
 
 > **Schema:** See `task-format-v3.md` in `skills/task-planner/references/`. Full v3 specification with status state machine, dependency system, and validation rules.
-> Key fields: `schemaVersion`, `metadata{title,type,branchName,maxConcurrency}`, `userStories[]{id,title,description,acceptanceCriteria,status,dependsOn}`
+> Key fields: `schemaVersion`, `metadata{title,type,branchName,maxConcurrency}`, `userStories[]{id,title,description,acceptanceCriteria,status,dependsOn,project}`
+> The `project` field is optional on stories — when present, it specifies the relative path from AIMI_ROOT to the target git repository for multi-repo execution.
 
 
 ## Performance Guidelines
