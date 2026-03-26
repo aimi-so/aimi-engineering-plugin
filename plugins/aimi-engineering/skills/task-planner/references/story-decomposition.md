@@ -48,6 +48,29 @@ Earlier stories must NOT depend on later stories.
 
 ---
 
+## Multi-Repo Project Assignment
+
+When the `.aimi/` parent folder contains multiple git repos and stories target different repos, set the `project` field on each story.
+
+### When to set `project`
+
+- The workspace has multiple repos under one parent (monorepo siblings, separate services)
+- Stories target different repos (e.g., US-001 in `backend`, US-002 in `frontend`)
+
+### When to omit `project`
+
+- Only one repo exists in the workspace
+- All stories target the same repo
+
+### Format rules
+
+- Value is a **relative path** from the `.aimi/` parent folder to the target repo (e.g., `backend`, `services/api`)
+- No `..` path components allowed
+- No absolute paths allowed
+- Cross-repo dependencies in `dependsOn` are valid (US-001 in `backend` can depend on US-002 in `frontend`)
+
+---
+
 ## `dependsOn` Generation Rules
 
 Every v3 story MUST include a `dependsOn` array (string array of story IDs). The planner infers dependencies using two strategies: **layer-based** and **cross-layer**.
@@ -245,6 +268,7 @@ As a [specific role], I want [feature] so that [benefit]
 4. **All stories**: `status: "pending"` and empty `notes`
 5. **branchName**: Derive from feature name, kebab-case, prefixed with type
 6. **Always add**: "Typecheck passes" to every story's acceptance criteria
+7. **`project`** (optional): Set only when stories target different repos — see [Multi-Repo Project Assignment](#multi-repo-project-assignment)
 
 ---
 
@@ -298,6 +322,11 @@ Before finalizing stories, verify:
 - [ ] No self-references (no story lists its own ID in `dependsOn`)
 - [ ] Cross-layer dependencies are correct (backend → schema, UI → backend)
 - [ ] Same-layer stories with no shared concerns are independent (`dependsOn` does not link them)
+
+### Project Field
+- [ ] `project` is set only when stories target different repos
+- [ ] `project` value is a valid relative path (no `..` components, no absolute paths)
+- [ ] All stories in a multi-repo plan have `project` set
 
 ### Priority
 - [ ] No duplicate priority numbers
