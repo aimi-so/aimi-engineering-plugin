@@ -46,11 +46,13 @@ Check `.aimi/brainstorms/` for a matching brainstorm (semantic match, within 14 
 
 ### Phase 1: Local Research (Parallel)
 
+**Auto-scan for git repos:** Before launching research agents, scan immediate child directories for `.git/` directories to discover sub-projects. Exclude `.worktrees/`, `node_modules/`, `.aimi/`, `vendor/`. List discovered repos with their relative paths from the `.aimi/` parent. See `references/pipeline-phases.md` for the scan command.
+
 Run these agents **in parallel**:
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
-  prompt: "[feature description + brainstorm context]"
+  prompt: "[feature description + brainstorm context + discovered repos]"
 
 Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
   prompt: "[feature description]"
@@ -103,14 +105,18 @@ Apply rules from `references/story-decomposition.md`:
    - **Same layer, shared concern** (FK referencing another story's table) → add dependency
    - **Cross-layer**: backend depends on schema stories it reads/writes; UI depends on backend it calls; aggregation depends on what it consumes
    - **Skip layers when appropriate**: UI reading directly from a new table depends on the schema story, not a non-existent backend story
-6. Assign IDs in `US-NNN` zero-padded format (`US-001`, `US-002`, ...) — never `US-1`, `story-1`, `S1`, or any other format
-7. Write descriptions in user story format: "As a [specific role], I want [feature] so that [benefit]" — role must name the actor, never just "user"
-8. Generate verifiable acceptance criteria
-9. Validate dependency graph:
-   - No circular dependencies (DAG check)
-   - No self-references (no story lists its own ID)
-   - All IDs referenced in `dependsOn` exist as story IDs
-   - No vague acceptance criteria
+6. **Assign `project` field** when multiple repos were discovered in Phase 1:
+   - Set `project` to the repo's relative path (e.g., `backend`, `services/api`)
+   - Omit `project` when only one repo exists or the story targets the CWD repo
+   - See `references/pipeline-phases.md` for project assignment rules
+7. Assign IDs in `US-NNN` zero-padded format (`US-001`, `US-002`, ...) — never `US-1`, `story-1`, `S1`, or any other format
+8. Write descriptions in user story format: "As a [specific role], I want [feature] so that [benefit]" — role must name the actor, never just "user"
+9. Generate verifiable acceptance criteria
+10. Validate dependency graph:
+    - No circular dependencies (DAG check)
+    - No self-references (no story lists its own ID)
+    - All IDs referenced in `dependsOn` exist as story IDs
+    - No vague acceptance criteria
 
 ### Phase 4: Write tasks.json
 
@@ -131,15 +137,16 @@ After writing the tasks.json file, validate the generated output:
 ```bash
 $AIMI_CLI validate-ids
 $AIMI_CLI validate-deps
+$AIMI_CLI validate-stories
 ```
 
-**If either validation fails (non-zero exit):**
+**If any validation fails (non-zero exit):**
 1. Read the error output to identify the issues
-2. Fix the offending story IDs, `dependsOn` references, or dependency cycles
+2. Fix the offending story IDs, `dependsOn` references, dependency cycles, or `project` fields
 3. Re-write the tasks.json file using the Write tool
-4. Re-run both validations until they pass
+4. Re-run all validations until they pass
 
-Do **not** proceed to the report step until both validations succeed.
+Do **not** proceed to the report step until all validations succeed.
 
 ---
 
@@ -179,3 +186,5 @@ Do **not** proceed to the report step until both validations succeed.
 - [ ] No self-references (no story lists its own ID in `dependsOn`)
 - [ ] `priority` values are sequential integers, consistent with dependency depth
 - [ ] `maxConcurrency` (if set) is a positive integer
+- [ ] `project` (if present) is a relative path with no `..` components, matching `^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$`
+- [ ] `project` is omitted when only one repo exists or story targets CWD repo
