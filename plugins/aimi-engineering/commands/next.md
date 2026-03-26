@@ -45,11 +45,21 @@ STOP execution.
 
 The CLI also saves the story ID to `.aimi/current-story` for tracking.
 
+## Step 1b: Resolve Project Path
+
+If the story JSON contains a `project` field:
+
+1. Determine `AIMI_ROOT` — the parent directory of `.aimi/` (the CLI auto-discovers `.aimi/` by walking up from CWD)
+2. Resolve `PROJECT_PATH = realpath(AIMI_ROOT / story.project)`
+3. Verify `PROJECT_PATH` exists as a directory; if not, report failure and STOP
+
+If the story does **not** have a `project` field, skip this step — `PROJECT_PATH` remains unset and behavior is unchanged (CWD fallback).
+
 ## Step 2: Load Project Guidelines
 
 Load project guidelines following the discovery order defined in `story-executor/SKILL.md` → "PROJECT GUIDELINES" section:
 
-1. **CLAUDE.md** (project root) - Primary project instructions
+1. **CLAUDE.md** — If `PROJECT_PATH` is set, look for `CLAUDE.md` in `PROJECT_PATH` first. Otherwise use the current project root.
 2. **AGENTS.md** (any directory) - Module-specific patterns
 3. **Aimi defaults** from story-executor - Fallback if neither exists
 
@@ -75,12 +85,13 @@ Acceptance Criteria:
 
 Interpolate the following into the template:
 - `PROJECT_GUIDELINES` = guidelines loaded in Step 2
+- `PROJECT_PATH` = resolved project path from Step 1b (include `## Project Context` section only if set)
 - `STORY_ID` = story.id
 - `STORY_TITLE` = story.title
 - `STORY_DESCRIPTION` = story.description
 - `ACCEPTANCE_CRITERIA` = story.acceptanceCriteria (bulleted)
 - `story.notes` = story.notes (include PREVIOUS NOTES section only if non-empty)
-- No WORKTREE_PATH (sequential mode — worker operates in current directory)
+- No WORKTREE_PATH (sequential mode — worker operates in current directory, or PROJECT_PATH if set)
 
 ```
 # IMPORTANT: subagent_type MUST be "general-purpose" — story-executor is a skill, NOT an agent.
