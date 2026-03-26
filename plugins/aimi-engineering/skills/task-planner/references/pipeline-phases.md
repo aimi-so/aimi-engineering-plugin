@@ -48,6 +48,26 @@ During refinement, note for Phase 1.5:
 
 ## Phase 1: Local Research (Always Runs)
 
+### Auto-Scan for Git Repos
+
+Before launching research agents, scan immediate child directories of the `.aimi/` parent folder for git repositories:
+
+```bash
+for dir in */; do
+  case "$dir" in .worktrees/|node_modules/|.aimi/|vendor/) continue;; esac
+  [ -d "$dir/.git" ] && echo "$dir"
+done
+```
+
+**Rules:**
+- Only scan **immediate** children (no recursive search)
+- Exclude: `.worktrees/`, `node_modules/`, `.aimi/`, `vendor/`
+- Record discovered repos with their relative paths (e.g., `backend`, `services/api`, `packages/shared`)
+- If **zero** or **one** repo is found, no multi-repo handling is needed
+- If **multiple** repos are found, pass the list to research agents and use it in Phase 3 for project assignment
+
+### Research Agents
+
 Run two agents **in parallel** using the Task tool:
 
 ### Agent 1: aimi-codebase-researcher
@@ -188,7 +208,30 @@ Using the consolidated research and spec-flow output:
 4. Apply sizing rules (one context window per story)
 5. Assign priority numbers by dependency order
 6. Generate verifiable acceptance criteria per story
-7. Run validation checklist
+7. **Assign `project` field** (multi-repo only)
+8. Run validation checklist
+
+### Project Assignment Rules
+
+When Phase 1 discovered **multiple** git repos, assign the `project` field to each story:
+
+1. **Infer target repo** from the story's feature description, affected file paths, and codebase research results
+2. **Set `project`** to the repo's relative path from the `.aimi/` parent (e.g., `backend`, `services/api`, `packages/shared`)
+3. **Omit `project`** when:
+   - Only one repo was discovered (or zero)
+   - The story targets the CWD repo (the repo where `.aimi/` lives)
+4. **Path format**: Use forward slashes, no leading `./`, no `..` components. Must match `^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$`
+5. **Cross-repo dependencies**: Stories in different repos can still depend on each other via `dependsOn`. The executor handles repo switching.
+
+**Example:**
+```
+Phase 1 discovered: backend/, frontend/, packages/shared/
+
+US-001 → changes packages/shared/types.ts     → project: "packages/shared"
+US-002 → changes backend/src/api/routes.ts    → project: "backend"
+US-003 → changes frontend/src/pages/Home.tsx  → project: "frontend"
+US-004 → changes only CWD files               → project: omitted
+```
 
 ---
 
