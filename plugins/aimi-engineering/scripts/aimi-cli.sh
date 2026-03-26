@@ -464,7 +464,7 @@ cmd_list_ready() {
   ' "$tasks_file")
 
   if [ "$brief" = true ]; then
-    echo "$result" | jq '[.[] | {id, title, priority, dependsOn}]'
+    echo "$result" | jq '[.[] | {id, title, priority, dependsOn, project}]'
   else
     echo "$result"
   fi
@@ -754,7 +754,14 @@ cmd_validate_stories() {
         (if ($s.description | length) > 500 then ["\($s.id): description exceeds 500 chars"] else [] end) +
         ([$s.acceptanceCriteria[] | select(length > 600)] | if length > 0 then ["\($s.id): acceptance criterion exceeds 600 chars"] else [] end) +
         (if ($s.title | test("ignore previous|system:|INSTRUCTIONS|```|\\$\\(|`"; "i")) then ["\($s.id): title contains suspicious content"] else [] end) +
-        (if ($s.description | test("ignore previous|system:|INSTRUCTIONS|```|\\$\\(|`"; "i")) then ["\($s.id): description contains suspicious content"] else [] end)
+        (if ($s.description | test("ignore previous|system:|INSTRUCTIONS|```|\\$\\(|`"; "i")) then ["\($s.id): description contains suspicious content"] else [] end) +
+        (if ($s.project != null) then
+          (if ($s.project | test("^/")) then ["\($s.id): project must not be an absolute path"]
+           elif ($s.project | test("\\.\\.")) then ["\($s.id): project must not contain path traversal (..)"]
+           elif ($s.project | test("[\\$`;|&]")) then ["\($s.id): project contains shell metacharacters"]
+           elif ($s.project | test("^[a-zA-Z0-9_.][a-zA-Z0-9_./@-]*$") | not) then ["\($s.id): project contains invalid characters"]
+           else [] end)
+         else [] end)
       ) | .[]
     ] |
     if length == 0 then {valid: true, errors: []}

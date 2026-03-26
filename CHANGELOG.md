@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.30.0] - 2026-03-26
+
+### Added
+
+- **aimi-cli.sh**: Project field validation in `cmd_validate_stories()` — rejects absolute paths, path traversal (`..`), and shell metacharacters (`$`, `` ` ``, `;`, `|`, `&`); accepts valid relative paths; backwards compatible when project is absent
+- **aimi-cli.sh**: Project field included in `cmd_list_ready --brief` output (`{id, title, priority, dependsOn, project}`)
+- **test-aimi-cli.sh**: Updated `--brief` key count assertion to include project field
+
 ## [1.29.0] - 2026-03-06
 
 ### Changed

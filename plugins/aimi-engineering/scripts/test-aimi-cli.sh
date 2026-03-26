@@ -1221,21 +1221,23 @@ test_list_ready_brief() {
   local output
   output=$("$CLI" list-ready --brief)
 
-  # Brief output should only have {id, title, priority, dependsOn} per story
+  # Brief output should only have {id, title, priority, dependsOn, project} per story
   local key_count
   key_count=$(echo "$output" | jq '.[0] | keys | length')
-  assert_eq "4" "$key_count" "list-ready --brief: each story has exactly 4 keys"
+  assert_eq "5" "$key_count" "list-ready --brief: each story has exactly 5 keys"
 
-  # Verify the 4 expected keys exist
-  local has_id has_title has_priority has_depends
+  # Verify the 5 expected keys exist
+  local has_id has_title has_priority has_depends has_project
   has_id=$(echo "$output" | jq '.[0] | has("id")')
   has_title=$(echo "$output" | jq '.[0] | has("title")')
   has_priority=$(echo "$output" | jq '.[0] | has("priority")')
   has_depends=$(echo "$output" | jq '.[0] | has("dependsOn")')
+  has_project=$(echo "$output" | jq '.[0] | has("project")')
   assert_eq "true" "$has_id" "list-ready --brief has id"
   assert_eq "true" "$has_title" "list-ready --brief has title"
   assert_eq "true" "$has_priority" "list-ready --brief has priority"
   assert_eq "true" "$has_depends" "list-ready --brief has dependsOn"
+  assert_eq "true" "$has_project" "list-ready --brief has project"
 
   # Should NOT have description, acceptanceCriteria, status, or notes
   local has_description has_criteria has_status has_notes
