@@ -1696,6 +1696,238 @@ test_check_version_fix_updates_global_cache() {
 }
 
 # ============================================================================
+# Project Field Validation Tests
+# ============================================================================
+
+# Helper: create a project-field test fixture and point CLI at it.
+# Accepts a JSON string to write and sets PROJECT_FIXTURE_FILE.
+_setup_project_fixture() {
+  local json="$1"
+  PROJECT_FIXTURE_FILE="$TASKS_DIR/9999-99-96-project-test.json"
+  printf '%s\n' "$json" > "$PROJECT_FIXTURE_FILE"
+  echo "$PROJECT_FIXTURE_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+_teardown_project_fixture() {
+  rm -f "$PROJECT_FIXTURE_FILE"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_stories_with_valid_project() {
+  echo ""
+  echo "=== Testing validate-stories with valid project fields ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  _setup_project_fixture '{
+  "schemaVersion": "3.0",
+  "metadata": {
+    "title": "feat: Project test",
+    "type": "feat",
+    "branchName": "feat/project-test",
+    "createdAt": "2026-03-26",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story with simple project",
+      "description": "Has a simple project field",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "project": "backend"
+    },
+    {
+      "id": "US-002",
+      "title": "Story with nested project",
+      "description": "Has a nested project field",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 2,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "project": "services/api"
+    },
+    {
+      "id": "US-003",
+      "title": "Story without project",
+      "description": "No project field at all",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 3,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": ""
+    }
+  ]
+}'
+
+  local output exit_code
+  output=$("$CLI" validate-stories) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": true' "$output" "validate-stories: valid project fields pass validation"
+  assert_exit_code "0" "$exit_code" "validate-stories: exits 0 for valid projects"
+
+  # Verify no errors reported
+  local error_count
+  error_count=$(echo "$output" | jq '.errors | length')
+  assert_eq "0" "$error_count" "validate-stories: zero errors for valid/missing project fields"
+
+  _teardown_project_fixture
+}
+
+test_validate_stories_with_traversal_project() {
+  echo ""
+  echo "=== Testing validate-stories rejects '..' traversal in project ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  _setup_project_fixture '{
+  "schemaVersion": "3.0",
+  "metadata": {
+    "title": "feat: Traversal test",
+    "type": "feat",
+    "branchName": "feat/traversal-test",
+    "createdAt": "2026-03-26",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Traversal project",
+      "description": "Project with path traversal",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "project": "../escape/hack"
+    }
+  ]
+}'
+
+  local output exit_code
+  output=$("$CLI" validate-stories) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": false' "$output" "validate-stories: traversal project fails validation"
+  assert_contains "path traversal" "$output" "validate-stories: error mentions path traversal"
+
+  _teardown_project_fixture
+}
+
+test_validate_stories_with_absolute_project() {
+  echo ""
+  echo "=== Testing validate-stories rejects absolute paths in project ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  _setup_project_fixture '{
+  "schemaVersion": "3.0",
+  "metadata": {
+    "title": "feat: Absolute path test",
+    "type": "feat",
+    "branchName": "feat/absolute-test",
+    "createdAt": "2026-03-26",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Absolute path project",
+      "description": "Project with absolute path",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "project": "/etc/passwd"
+    }
+  ]
+}'
+
+  local output exit_code
+  output=$("$CLI" validate-stories) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": false' "$output" "validate-stories: absolute path project fails validation"
+  assert_contains "absolute path" "$output" "validate-stories: error mentions absolute path"
+
+  _teardown_project_fixture
+}
+
+test_list_ready_brief_includes_project() {
+  echo ""
+  echo "=== Testing list-ready --brief includes project in output ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  _setup_project_fixture '{
+  "schemaVersion": "3.0",
+  "metadata": {
+    "title": "feat: Brief project test",
+    "type": "feat",
+    "branchName": "feat/brief-project",
+    "createdAt": "2026-03-26",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story with project",
+      "description": "Has project field",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "project": "backend"
+    },
+    {
+      "id": "US-002",
+      "title": "Story without project",
+      "description": "No project field",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 2,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": ""
+    }
+  ]
+}'
+
+  local output
+  output=$("$CLI" list-ready --brief)
+
+  # US-001 should have project: "backend"
+  local us001_project
+  us001_project=$(echo "$output" | jq -r '.[] | select(.id == "US-001") | .project')
+  assert_eq "backend" "$us001_project" "list-ready --brief: US-001 project is 'backend'"
+
+  # US-002 should have project: null (field missing in source)
+  local us002_project
+  us002_project=$(echo "$output" | jq -r '.[] | select(.id == "US-002") | .project')
+  assert_eq "null" "$us002_project" "list-ready --brief: US-002 project is null (backwards compat)"
+
+  # Verify project key is present on both stories
+  local has_project_us001 has_project_us002
+  has_project_us001=$(echo "$output" | jq '[.[] | select(.id == "US-001") | has("project")] | .[0]')
+  has_project_us002=$(echo "$output" | jq '[.[] | select(.id == "US-002") | has("project")] | .[0]')
+  assert_eq "true" "$has_project_us001" "list-ready --brief: US-001 has project key"
+  assert_eq "true" "$has_project_us002" "list-ready --brief: US-002 has project key"
+
+  _teardown_project_fixture
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -1792,6 +2024,14 @@ main() {
   test_read_global_worktree_cache_tampered
   test_init_session_writes_global_cache
   test_check_version_fix_updates_global_cache
+
+  # Project field validation tests — run with fresh state
+  echo ""
+  echo "--- Project Field Validation Tests ---"
+  test_validate_stories_with_valid_project
+  test_validate_stories_with_traversal_project
+  test_validate_stories_with_absolute_project
+  test_list_ready_brief_includes_project
 
   # CLI output optimization tests — run with fresh fixture each time
   echo ""
