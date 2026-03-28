@@ -49,6 +49,11 @@ find_aimi_root() {
 
       return 0
     fi
+    # Stop at HOME — never scan above the user's home directory
+    if [ "$dir" = "$HOME" ]; then
+      echo "Error: .aimi/ directory not found (searched up to \$HOME)" >&2
+      exit 1
+    fi
     local parent
     parent=$(dirname "$dir")
     if [ "$parent" = "$dir" ]; then
