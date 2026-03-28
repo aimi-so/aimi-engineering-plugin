@@ -126,7 +126,7 @@ Incorporate identified gaps as acceptance criteria or story notes.
 ### Phase 4: Write tasks.json
 
 1. Derive metadata: title, type, branchName (kebab-case), createdAt (today)
-2. Set `schemaVersion: "3.0"`
+2. Set `schemaVersion: "3.1"` if any story has a `project` field, otherwise `"3.0"`
 3. Set `planPath: null`
 4. Set `brainstormPath` if a brainstorm was used
 5. Set `maxConcurrency` (optional — default `4`; set to `1` for fully sequential execution)
@@ -180,7 +180,7 @@ Do **not** proceed to the report step until all validations succeed.
 - [ ] Field lengths: title ≤ 200, description ≤ 500, criterion ≤ 600
 
 ### v3 Schema Validations
-- [ ] `schemaVersion` is `"3.0"`
+- [ ] `schemaVersion` is `"3.1"` when any story has `project`, otherwise `"3.0"`
 - [ ] Every story `id` follows `US-NNN` format (e.g., `US-001`, `US-002`) — not `S1`, `F1`, `TASK-1`, or any other format
 - [ ] Every story has `status` initialized to `"pending"`
 - [ ] Every story has a `dependsOn` array (even if empty `[]`)
