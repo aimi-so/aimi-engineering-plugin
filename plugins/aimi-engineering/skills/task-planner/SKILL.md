@@ -20,8 +20,7 @@ Take a feature description through research, spec analysis, and story decomposit
 
 **Filename:** `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 
-> **Schema:** See `references/task-format-v3.md` for the full v3 specification with status state machine, dependency system, and validation rules.
-> Key fields: `schemaVersion`, `metadata{title,type,branchName,createdAt,planPath,maxConcurrency}`, `userStories[]{id,title,description,acceptanceCriteria,priority,status,dependsOn,notes}`
+> Key fields: `schemaVersion` ("3.0"), `metadata{title,type,branchName,createdAt,planPath(null),maxConcurrency(4)}`, `userStories[]{id(US-NNN),title(≤200),description(≤500),acceptanceCriteria(each≤600),priority,status("pending"),dependsOn([]),notes,project(optional)}`
 
 **Notes:** `planPath` is always `null` (this skill generates tasks.json directly). All stories initialize with `status: "pending"`. `dependsOn` is a string array of story IDs. `maxConcurrency` defaults to `4`.
 
@@ -38,7 +37,7 @@ Take a feature description through research, spec analysis, and story decomposit
 
 ## Pipeline Overview
 
-Execute these phases in order. See `references/pipeline-phases.md` for detailed instructions per phase.
+Execute these phases in order.
 
 ### Phase 0: Idea Refinement
 
@@ -46,7 +45,14 @@ Check `.aimi/brainstorms/` for a matching brainstorm (semantic match, within 14 
 
 ### Phase 1: Local Research (Parallel)
 
-**Auto-scan for git repos:** Before launching research agents, scan immediate child directories for `.git/` directories to discover sub-projects. Exclude `.worktrees/`, `node_modules/`, `.aimi/`, `vendor/`. List discovered repos with their relative paths from the `.aimi/` parent. See `references/pipeline-phases.md` for the scan command.
+**Auto-scan for git repos:** Before launching research agents, scan immediate child directories for `.git/` directories to discover sub-projects:
+```bash
+for dir in */; do
+  case "$dir" in .worktrees/|node_modules/|.aimi/|vendor/) continue;; esac
+  [ -d "$dir/.git" ] && echo "$dir"
+done
+```
+List discovered repos with their relative paths from the `.aimi/` parent.
 
 Run these agents **in parallel**:
 
@@ -95,12 +101,11 @@ Incorporate identified gaps as acceptance criteria or story notes.
 
 ### Phase 3: Story Decomposition
 
-Apply rules from `references/story-decomposition.md`:
 1. Extract requirements from research + spec-flow output
 2. Group by layer (schema → backend → UI → aggregation)
 3. Size check (one context window per story)
 4. Order by dependency (assign priority numbers)
-5. **Generate `dependsOn` arrays** using the inference rules in `references/story-decomposition.md`:
+5. **Generate `dependsOn` arrays**:
    - **Same layer, independent concerns** (different tables, different pages) → `dependsOn: []` between them
    - **Same layer, shared concern** (FK referencing another story's table) → add dependency
    - **Cross-layer**: backend depends on schema stories it reads/writes; UI depends on backend it calls; aggregation depends on what it consumes
@@ -108,7 +113,7 @@ Apply rules from `references/story-decomposition.md`:
 6. **Assign `project` field** when multiple repos were discovered in Phase 1:
    - Set `project` to the repo's relative path (e.g., `backend`, `services/api`)
    - Omit `project` when only one repo exists or the story targets the CWD repo
-   - See `references/pipeline-phases.md` for project assignment rules
+   - Path format: no leading `./`, no `..` components, must match `^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$`
 7. Assign IDs in `US-NNN` zero-padded format (`US-001`, `US-002`, ...) — never `US-1`, `story-1`, `S1`, or any other format
 8. Write descriptions in user story format: "As a [specific role], I want [feature] so that [benefit]" — role must name the actor, never just "user"
 9. Generate verifiable acceptance criteria
@@ -127,8 +132,6 @@ Apply rules from `references/story-decomposition.md`:
 5. Set `maxConcurrency` (optional — default `4`; set to `1` for fully sequential execution)
 6. For each story: set `status: "pending"`, include `dependsOn` array from Phase 3
 7. Write to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
-
-See `references/task-format-v3.md` for the complete v3 schema definition, status state machine, and validation rules.
 
 ### Phase 4.5: Post-Generation Validation
 
