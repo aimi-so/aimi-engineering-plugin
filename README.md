@@ -355,7 +355,7 @@ All execution state lives in `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schemaVersion` | string | Schema version (currently "3.0", also supports "2.2") |
+| `schemaVersion` | string | Schema version: `"3.0"` or `"3.1"` (use 3.1 for multi-repo with `project` field) |
 | `metadata` | object | Project metadata |
 | `userStories` | array | Array of Story objects |
 
