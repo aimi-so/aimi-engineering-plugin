@@ -146,7 +146,7 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 
 ```json
 {
-  "schemaVersion": "3.0 (use 3.1 when any story has project field)",
+  "schemaVersion": "3.1",
   "metadata": {
     "title": "string (required)",
     "type": "feat|ref|bug|chore (required)",

@@ -14,7 +14,7 @@ Example: `.aimi/tasks/2026-02-27-dep-graph-tasks.json`
 
 ```json
 {
-  "schemaVersion": "3.0",
+  "schemaVersion": "3.1",
   "metadata": {
     "title": "string",
     "type": "feat|ref|bug|chore",
@@ -36,7 +36,7 @@ Example: `.aimi/tasks/2026-02-27-dep-graph-tasks.json`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `schemaVersion` | string | Yes | Must be `"3.0"` or `"3.1"` |
+| `schemaVersion` | string | Yes | Must be `"3.1"` |
 | `metadata` | object | Yes | Project metadata |
 | `userStories` | array | Yes | Array of Story objects |
 
@@ -217,7 +217,7 @@ The executor picks up to `maxConcurrency` ready stories, ordered by `priority`, 
 
 ```json
 {
-  "schemaVersion": "3.0",
+  "schemaVersion": "3.1",
   "metadata": {
     "title": "feat: Add task status feature",
     "type": "feat",
@@ -369,7 +369,7 @@ In this example, US-001 targets `packages/shared`, while US-002 and US-003 targe
 
 Before processing, validate:
 
-1. `schemaVersion` must be `"3.0"` or `"3.1"`
+1. `schemaVersion` must be `"3.1"`
 2. `metadata.title` must be non-empty
 3. `metadata.type` must be one of: `feat`, `ref`, `bug`, `chore`
 4. `metadata.branchName` must be non-empty and match `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$`

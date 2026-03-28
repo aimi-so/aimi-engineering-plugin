@@ -321,7 +321,7 @@ All execution state lives in `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
 
 ```json
 {
-  "schemaVersion": "3.0",
+  "schemaVersion": "3.1",
   "metadata": {
     "title": "feat: Add user authentication",
     "type": "feat",
@@ -355,7 +355,7 @@ All execution state lives in `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schemaVersion` | string | Schema version: `"3.0"` or `"3.1"` (use 3.1 for multi-repo with `project` field) |
+| `schemaVersion` | string | Schema version: `"3.1"` |
 | `metadata` | object | Project metadata |
 | `userStories` | array | Array of Story objects |
 

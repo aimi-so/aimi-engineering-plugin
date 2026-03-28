@@ -34,7 +34,7 @@ setup() {
   # Create v3 test tasks file
   cat > "$TASKS_FILE" << 'EOF'
 {
-  "schemaVersion": "3.0",
+  "schemaVersion": "3.1",
   "metadata": {
     "title": "feat: Test feature",
     "type": "feat",
@@ -282,7 +282,7 @@ test_init_session() {
   output=$("$CLI" init-session)
 
   assert_contains '"pending": 4' "$output" "init-session counts pending by status"
-  assert_contains '"schemaVersion": "3.0"' "$output" "init-session returns schema version"
+  assert_contains '"schemaVersion": "3.1"' "$output" "init-session returns schema version"
   assert_contains "feat/test-feature" "$output" "init-session returns branch"
 
   # Check state files created
@@ -454,7 +454,7 @@ test_validate_deps_circular() {
   local circular_file="$TASKS_DIR/9999-99-97-circular-tasks.json"
   cat > "$circular_file" << 'EOF'
 {
-  "schemaVersion": "3.0",
+  "schemaVersion": "3.1",
   "metadata": {
     "title": "feat: Circular test",
     "type": "feat",
@@ -511,7 +511,7 @@ test_status() {
   local output
   output=$("$CLI" status)
 
-  assert_contains '"schemaVersion": "3.0"' "$output" "status shows schema version"
+  assert_contains '"schemaVersion": "3.1"' "$output" "status shows schema version"
   assert_contains '"maxConcurrency": 4' "$output" "status shows maxConcurrency"
   assert_contains '"dependsOn"' "$output" "status includes dependsOn in stories"
 }
@@ -969,7 +969,7 @@ test_auto_discovery_from_subdirectory() {
   output=$(cd "$TEST_DIR/sub/dir" && "$CLI" status) && exit_code=0 || exit_code=$?
 
   assert_exit_code "0" "$exit_code" "auto-discovery: CLI succeeds from subdirectory"
-  assert_contains '"schemaVersion": "3.0"' "$output" "auto-discovery: status returns schema from subdirectory"
+  assert_contains '"schemaVersion": "3.1"' "$output" "auto-discovery: status returns schema from subdirectory"
   assert_contains '"userStories"' "$output" "auto-discovery: status returns stories from subdirectory"
 }
 
@@ -1000,7 +1000,7 @@ reset_fixture() {
 
   cat > "$TASKS_FILE" << 'EOF'
 {
-  "schemaVersion": "3.0",
+  "schemaVersion": "3.1",
   "metadata": {
     "title": "feat: Test feature",
     "type": "feat",
@@ -1721,7 +1721,7 @@ test_validate_stories_with_valid_project() {
   "$CLI" init-session > /dev/null
 
   _setup_project_fixture '{
-  "schemaVersion": "3.0",
+  "schemaVersion": "3.1",
   "metadata": {
     "title": "feat: Project test",
     "type": "feat",
@@ -1788,7 +1788,7 @@ test_validate_stories_with_traversal_project() {
   "$CLI" init-session > /dev/null
 
   _setup_project_fixture '{
-  "schemaVersion": "3.0",
+  "schemaVersion": "3.1",
   "metadata": {
     "title": "feat: Traversal test",
     "type": "feat",
@@ -1829,7 +1829,7 @@ test_validate_stories_with_absolute_project() {
   "$CLI" init-session > /dev/null
 
   _setup_project_fixture '{
-  "schemaVersion": "3.0",
+  "schemaVersion": "3.1",
   "metadata": {
     "title": "feat: Absolute path test",
     "type": "feat",
@@ -1870,7 +1870,7 @@ test_list_ready_brief_includes_project() {
   "$CLI" init-session > /dev/null
 
   _setup_project_fixture '{
-  "schemaVersion": "3.0",
+  "schemaVersion": "3.1",
   "metadata": {
     "title": "feat: Brief project test",
     "type": "feat",
