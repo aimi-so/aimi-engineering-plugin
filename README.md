@@ -321,7 +321,7 @@ All execution state lives in `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
 
 ```json
 {
-  "schemaVersion": "3.0",
+  "schemaVersion": "3.1",
   "metadata": {
     "title": "feat: Add user authentication",
     "type": "feat",
@@ -355,7 +355,7 @@ All execution state lives in `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schemaVersion` | string | Schema version (currently "3.0", also supports "2.2") |
+| `schemaVersion` | string | Schema version: `"3.1"` |
 | `metadata` | object | Project metadata |
 | `userStories` | array | Array of Story objects |
 
@@ -383,6 +383,7 @@ All execution state lives in `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
 | `status` | string | One of: `pending`, `in_progress`, `completed`, `failed`, `skipped` |
 | `dependsOn` | array | Story IDs that must complete before this story can start |
 | `notes` | string | Error details or learnings |
+| `project` | string | (optional) Relative path from AIMI_ROOT to the target git repository for multi-repo execution |
 
 > **Note:** As of v1.11.0, only schema v3.0 is supported. v2.2 backward compatibility was removed.
 
@@ -536,9 +537,15 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 ## Version History
 
-**Current Version:** 1.29.0
+**Current Version:** 1.30.0
 
 ### Recent Changes
+
+**v1.30.0** - Per-Story Project Field for Multi-Repo Execution
+- Optional `project` field on stories for targeting specific git repositories in multi-repo setups
+- CLI validation for project paths (blocks traversal, absolute paths, metacharacters) and --brief output includes project
+- next.md and execute.md resolve PROJECT_PATH, group worktrees per project, and load per-project guidelines
+- Planner auto-scans subfolders for git repos and assigns project fields during story decomposition
 
 **v1.29.0** - Three-Layer CLI Resolution with Global Cache
 - Rewrite CLI path resolution with three-layer strategy: global cache, zsh-safe glob fallback, per-project fallback

@@ -93,7 +93,19 @@ Using consolidated research and spec-flow output:
 8. Initialize every story with `status: "pending"` and appropriate `dependsOn` array
 9. Validate: no circular dependencies in `dependsOn`, no self-references, all referenced IDs exist, no vague criteria
 
-See `references/story-decomposition.md` for detailed rules.
+### `dependsOn` Inference Rules
+
+- **Same layer, independent concerns** (different tables, different pages, different routes) → no dependency between them (`dependsOn: []`)
+- **Same layer, shared concern** (FK referencing another story's table, component extending another) → add dependency
+- **Cross-layer**: backend depends on schema stories it reads/writes; UI depends on backend it calls; aggregation depends on what it consumes
+- **Skip layers when appropriate**: UI reading directly from a new table depends on the schema story, not a non-existent backend story
+
+### Multi-Repo Project Assignment
+
+When the workspace has multiple git repos under one parent folder:
+- Set `project` to relative path from `.aimi/` parent (e.g., `backend`, `services/api`)
+- Omit `project` when only one repo exists or all stories target the same repo
+- Cross-repo dependencies in `dependsOn` are valid
 
 ### Type Values
 
@@ -130,10 +142,35 @@ mkdir -p .aimi/tasks
 
 Write JSON using the Write tool. Validate JSON is well-formed before writing.
 
-### Output Format
+### Schema v3 Structure
 
-> **Schema:** See `task-format-v3.md` in `skills/task-planner/references/`. Full v3 specification with complete example, validation rules, and dependency system.
-> Key fields: `schemaVersion`, `metadata{title,type,branchName,createdAt,planPath,maxConcurrency}`, `userStories[]{id,title,description,acceptanceCriteria,priority,status,dependsOn,notes}`
+```json
+{
+  "schemaVersion": "3.1",
+  "metadata": {
+    "title": "string (required)",
+    "type": "feat|ref|bug|chore (required)",
+    "branchName": "string (required, regex: ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$)",
+    "createdAt": "YYYY-MM-DD (required)",
+    "planPath": "null (always null for planner-generated)",
+    "brainstormPath": "string (optional)",
+    "maxConcurrency": "number (optional, default 4)"
+  },
+  "userStories": [
+    {
+      "id": "US-NNN (required, zero-padded, regex: ^US-[0-9]{3}[a-z]?$)",
+      "title": "string (required, max 200 chars)",
+      "description": "string (required, max 500 chars, user story format)",
+      "acceptanceCriteria": ["string[] (required, each max 600 chars, must include 'Typecheck passes')"],
+      "priority": "number (required, sequential integers, tiebreaker for same-depth stories)",
+      "status": "pending (required, always 'pending' for new stories)",
+      "dependsOn": ["US-NNN (required, array of story IDs, empty [] for root stories)"],
+      "notes": "string (optional, default '')",
+      "project": "string (optional, relative path for multi-repo, no '..' components)"
+    }
+  ]
+}
+```
 
 ### Checklist Before Writing
 
@@ -167,7 +204,13 @@ $AIMI_CLI validate-ids
 $AIMI_CLI validate-deps
 ```
 
-**If either validation fails (non-zero exit):**
+### Validate Story Content
+
+```bash
+$AIMI_CLI validate-stories
+```
+
+**If any validation fails (non-zero exit):**
 1. Read the error output to identify the issues
 2. Fix the offending story IDs, `dependsOn` references, or dependency cycles
 3. Re-write the tasks.json file using the Write tool

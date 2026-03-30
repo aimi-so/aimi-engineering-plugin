@@ -11,7 +11,41 @@ Execute the next pending story using a Task-spawned agent.
 
 ## Step 0: Resolve CLI Path
 
-Resolve `$AIMI_CLI` path using glob discovery with fallback, then verify version. See `commands/references/cli-path-resolution.md` for the full resolution logic (glob -> fallback -> version check). Use `$AIMI_CLI` for all subsequent script calls.
+Resolve `$AIMI_CLI` path using the three-layer strategy below. Each command is a separate Bash call (no compound operators).
+
+**Layer 1 — Global cache (fast path):**
+```bash
+AIMI_CLI=$(cat ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path 2>/dev/null)
+```
+
+**Layer 1 validation:**
+```bash
+if [ -n "$AIMI_CLI" ] && [ ! -x "$AIMI_CLI" ]; then AIMI_CLI=""; fi
+```
+
+**Layer 2 — Glob fallback (zsh-safe, only if Layer 1 failed):**
+```bash
+if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1'); fi
+```
+
+**Layer 2 cache update:**
+```bash
+if [ -n "$AIMI_CLI" ]; then printf '%s\n' "$AIMI_CLI" > "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path.tmp" && mv "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path.tmp" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" && chmod 600 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path"; fi
+```
+
+**Layer 3 — Per-project fallback (last resort):**
+```bash
+if [ -z "$AIMI_CLI" ] && [ -f .aimi/cli-path ] && [ -x "$(cat .aimi/cli-path)" ]; then AIMI_CLI=$(cat .aimi/cli-path); fi
+```
+
+If empty, report: "aimi-cli.sh not found. Reinstall plugin: `/plugin install aimi-engineering`" and STOP.
+
+**Version check:**
+```bash
+$AIMI_CLI check-version --quiet --fix
+```
+
+Use `$AIMI_CLI` for all subsequent script calls.
 
 ## Step 1: Get Next Story
 
@@ -45,11 +79,21 @@ STOP execution.
 
 The CLI also saves the story ID to `.aimi/current-story` for tracking.
 
+## Step 1b: Resolve Project Path
+
+If the story JSON contains a `project` field:
+
+1. Determine `AIMI_ROOT` — the parent directory of `.aimi/` (the CLI auto-discovers `.aimi/` by walking up from CWD)
+2. Resolve `PROJECT_PATH = realpath(AIMI_ROOT / story.project)`
+3. Verify `PROJECT_PATH` exists as a directory; if not, report failure and STOP
+
+If the story does **not** have a `project` field, skip this step — `PROJECT_PATH` remains unset and behavior is unchanged (CWD fallback).
+
 ## Step 2: Load Project Guidelines
 
 Load project guidelines following the discovery order defined in `story-executor/SKILL.md` → "PROJECT GUIDELINES" section:
 
-1. **CLAUDE.md** (project root) - Primary project instructions
+1. **CLAUDE.md** — If `PROJECT_PATH` is set, look for `CLAUDE.md` in `PROJECT_PATH` first. Otherwise use the current project root.
 2. **AGENTS.md** (any directory) - Module-specific patterns
 3. **Aimi defaults** from story-executor - Fallback if neither exists
 
@@ -75,12 +119,13 @@ Acceptance Criteria:
 
 Interpolate the following into the template:
 - `PROJECT_GUIDELINES` = guidelines loaded in Step 2
+- `PROJECT_PATH` = resolved project path from Step 1b (include `## Project Context` section only if set)
 - `STORY_ID` = story.id
 - `STORY_TITLE` = story.title
 - `STORY_DESCRIPTION` = story.description
 - `ACCEPTANCE_CRITERIA` = story.acceptanceCriteria (bulleted)
 - `story.notes` = story.notes (include PREVIOUS NOTES section only if non-empty)
-- No WORKTREE_PATH (sequential mode — worker operates in current directory)
+- No WORKTREE_PATH (sequential mode — worker operates in current directory, or PROJECT_PATH if set)
 
 ```
 # IMPORTANT: subagent_type MUST be "general-purpose" — story-executor is a skill, NOT an agent.

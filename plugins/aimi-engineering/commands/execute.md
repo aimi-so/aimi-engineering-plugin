@@ -10,14 +10,48 @@ allowed-tools: Read, Write, Edit, Bash(git:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:
 Execute all pending stories autonomously using wave-based fan-out.
 
 Each wave uses two-phase story loading to conserve context:
-- **Phase 1 (wave selection):** `list-ready --brief` returns lightweight story stubs `{id, title, priority, dependsOn}` for scheduling decisions.
+- **Phase 1 (wave selection):** `list-ready --brief` returns lightweight story stubs `{id, title, priority, dependsOn, project}` for scheduling decisions.
 - **Phase 2 (prompt construction):** `get-story <id>` fetches full story data `{description, acceptanceCriteria, notes}` only for selected stories, after they are claimed with `mark-in-progress`.
 
 Single-story waves run inline (no worktree overhead). Multi-story waves spawn N foreground Tasks in one tool-call turn with worktrees, wait for all results, then merge.
 
 ## Step 0: Resolve CLI Path
 
-Resolve `$AIMI_CLI` path using glob discovery with fallback, then verify version. See `commands/references/cli-path-resolution.md` for the full resolution logic (glob -> fallback -> version check). Use `$AIMI_CLI` for all subsequent script calls.
+Resolve `$AIMI_CLI` path using the three-layer strategy below. Each command is a separate Bash call (no compound operators).
+
+**Layer 1 — Global cache (fast path):**
+```bash
+AIMI_CLI=$(cat ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path 2>/dev/null)
+```
+
+**Layer 1 validation:**
+```bash
+if [ -n "$AIMI_CLI" ] && [ ! -x "$AIMI_CLI" ]; then AIMI_CLI=""; fi
+```
+
+**Layer 2 — Glob fallback (zsh-safe, only if Layer 1 failed):**
+```bash
+if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1'); fi
+```
+
+**Layer 2 cache update:**
+```bash
+if [ -n "$AIMI_CLI" ]; then printf '%s\n' "$AIMI_CLI" > "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path.tmp" && mv "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path.tmp" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" && chmod 600 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path"; fi
+```
+
+**Layer 3 — Per-project fallback (last resort):**
+```bash
+if [ -z "$AIMI_CLI" ] && [ -f .aimi/cli-path ] && [ -x "$(cat .aimi/cli-path)" ]; then AIMI_CLI=$(cat .aimi/cli-path); fi
+```
+
+If empty, report: "aimi-cli.sh not found. Reinstall plugin: `/plugin install aimi-engineering`" and STOP.
+
+**Version check:**
+```bash
+$AIMI_CLI check-version --quiet --fix
+```
+
+Use `$AIMI_CLI` for all subsequent script calls.
 
 ## Step 1: Initialize Session
 
@@ -100,6 +134,30 @@ Report:
 Switched to branch: [branchName]
 ```
 
+### Per-Project Branch Setup
+
+After setting up the branch in the current repo, check if any stories have a `project` field by running `$AIMI_CLI list-ready --brief` and inspecting the results.
+
+If any story has a non-null `project` field:
+
+1. Collect unique project paths from ALL pending stories (not just ready ones — use `$AIMI_CLI status` and filter stories with a `project` field).
+2. Resolve each project path to an absolute path: `AIMI_ROOT / story.project` where AIMI_ROOT is the directory containing `.aimi/`.
+3. For each unique project path:
+   ```bash
+   cd [resolved_project_path]
+   git branch --list [branchName]
+   ```
+   - If branch exists: `git checkout [branchName]`
+   - If not exists: `git checkout -b [branchName]`
+   - Then return to the original directory.
+
+Report for each project:
+```
+Branch [branchName] set up in project: [project_path]
+```
+
+If no stories have a `project` field, skip this step (backwards compatible).
+
 ## Step 3: Check for Pending Stories
 
 ```bash
@@ -173,6 +231,14 @@ Load project guidelines following the discovery order defined in `story-executor
 
 Read these files and store the content as `PROJECT_GUIDELINES`.
 
+### Per-Project Guidelines
+
+When stories target different projects (via the `project` field), each project may have its own `CLAUDE.md` and `AGENTS.md`. Load guidelines per unique project path and store as a map: `PROJECT_GUIDELINES_MAP[project_path] = guidelines_content`.
+
+- For stories without a `project` field, use the default `PROJECT_GUIDELINES` (loaded from the current repo root).
+- For stories with a `project` field, look up `PROJECT_GUIDELINES_MAP[story.project]` and pass it as `PROJECT_GUIDELINES` in the worker prompt.
+- If no stories have `project` fields, skip this map and use default `PROJECT_GUIDELINES` (backwards compatible).
+
 ## Step 4: Wave Execution Loop
 
 ```
@@ -183,7 +249,7 @@ while true:
     pending = $AIMI_CLI count-pending
     if pending == 0: break
 
-    # Get ready stories (brief mode — returns {id, title, priority, dependsOn} only)
+    # Get ready stories (brief mode — returns {id, title, priority, dependsOn, project} only)
     ready_stories = $AIMI_CLI list-ready --brief
     if ready_stories is empty:
         if pending > 0:
@@ -222,20 +288,29 @@ while true:
             wave += 1
             continue
 
+        # Resolve PROJECT_PATH from story.project if present
+        # AIMI_ROOT = directory containing .aimi/ (resolved during init-session)
+        project_path = null
+        project_guidelines = PROJECT_GUIDELINES
+        if full_story.project is not null/absent:
+            project_path = AIMI_ROOT / full_story.project  (resolve to absolute path)
+            project_guidelines = PROJECT_GUIDELINES_MAP[full_story.project] or PROJECT_GUIDELINES
+
         # Spawn a single foreground Task — same pattern as next.md
-        # No worktree, worker operates in current directory
+        # No worktree, worker operates in current directory (or PROJECT_PATH if set)
         # IMPORTANT: subagent_type MUST be "general-purpose" — story-executor is a skill, NOT an agent.
         Task(
             subagent_type: "general-purpose",
             description: "Execute [full_story.id]: [full_story.title]",
             prompt: [story-executor SKILL.md prompt template with:
-                - PROJECT_GUIDELINES = PROJECT_GUIDELINES
+                - PROJECT_GUIDELINES = project_guidelines
+                - PROJECT_PATH = project_path (only include if non-null)
                 - STORY_ID = full_story.id
                 - STORY_TITLE = full_story.title
                 - STORY_DESCRIPTION = full_story.description
                 - ACCEPTANCE_CRITERIA = full_story.acceptanceCriteria (bulleted)
                 - full_story.notes = full_story.notes (include PREVIOUS NOTES section only if non-empty)
-                - No WORKTREE_PATH (sequential — worker operates in current directory)
+                - No WORKTREE_PATH (sequential — worker operates in current directory or PROJECT_PATH)
             ]
         )
 
@@ -278,11 +353,20 @@ while true:
     # If only one story remains after fetch failures, use single-story path (no worktree)
     if len(full_stories) == 1:
         full_story = full_stories[0]
+
+        # Resolve PROJECT_PATH if story has project field
+        project_path = null
+        project_guidelines = PROJECT_GUIDELINES
+        if full_story.project is not null/absent:
+            project_path = AIMI_ROOT / full_story.project
+            project_guidelines = PROJECT_GUIDELINES_MAP[full_story.project] or PROJECT_GUIDELINES
+
         Task(
             subagent_type: "general-purpose",
             description: "Execute [full_story.id]: [full_story.title]",
             prompt: [story-executor SKILL.md prompt template with:
-                - PROJECT_GUIDELINES = PROJECT_GUIDELINES
+                - PROJECT_GUIDELINES = project_guidelines
+                - PROJECT_PATH = project_path (only include if non-null)
                 - STORY_ID = full_story.id
                 - STORY_TITLE = full_story.title
                 - STORY_DESCRIPTION = full_story.description
@@ -305,34 +389,72 @@ while true:
         continue
 
     # Multiple stories remain — proceed with worktree parallelism
-    worktree_names = []
 
+    # ========================================
+    # GROUP STORIES BY PROJECT
+    # ========================================
+    # Group full_stories by their `project` field.
+    # Stories without a `project` field (null/absent) go into the DEFAULT group.
+    # DEFAULT group uses the current repo (no cd needed).
+    # Each project group has its own git root for worktree operations.
+
+    project_groups = {}  # key: project_path (or "DEFAULT"), value: list of full_story
     for full_story in full_stories:
-        worktree_name = "[branchName]-[full_story.id]"
-        worktree_names.append(worktree_name)
+        if full_story.project is not null/absent:
+            group_key = full_story.project
+        else:
+            group_key = "DEFAULT"
+        project_groups[group_key].append(full_story)
 
-        # Create worktree from current feature branch
-        $WORKTREE_MGR create [worktree_name] --from [branchName]
+    # Resolve absolute paths for each project group
+    # AIMI_ROOT = directory containing .aimi/ (resolved during init-session)
+    project_roots = {}  # key: group_key, value: absolute path to git root
+    for group_key in project_groups:
+        if group_key == "DEFAULT":
+            project_roots[group_key] = CWD  (current working directory / git root)
+        else:
+            project_roots[group_key] = AIMI_ROOT / group_key  (resolve to absolute path)
 
-        # Get the worktree path from the create output
-        worktree_path = [path from output]
+    # ========================================
+    # CREATE WORKTREES PER PROJECT GROUP
+    # ========================================
+    all_worktrees = {}  # key: full_story.id, value: {worktree_name, worktree_path, group_key}
+
+    for group_key, stories in project_groups:
+        project_root = project_roots[group_key]
+
+        for full_story in stories:
+            worktree_name = "[branchName]-[full_story.id]"
+
+            # cd to the project's git root before creating worktree
+            cd [project_root]
+            $WORKTREE_MGR create [worktree_name] --from [branchName]
+
+            worktree_path = [path from output]
+            all_worktrees[full_story.id] = {
+                worktree_name: worktree_name,
+                worktree_path: worktree_path,
+                group_key: group_key
+            }
 
     # Spawn ALL workers as foreground Tasks in a SINGLE tool-call turn.
     # Claude Code runs multiple foreground Tasks concurrently and returns
     # all results before the agent's turn ends.
     #
     # IMPORTANT: subagent_type MUST be "general-purpose" — story-executor is a skill, NOT an agent.
-    # In one tool-call turn, emit N Task calls:
+    # In one tool-call turn, emit N Task calls (across ALL project groups):
     for full_story in full_stories:
-        worktree_name = "[branchName]-[full_story.id]"
-        worktree_path = [worktree path for this story]
+        wt = all_worktrees[full_story.id]
+        project_path = project_roots[wt.group_key] if wt.group_key != "DEFAULT" else null
+        project_guidelines = PROJECT_GUIDELINES_MAP[wt.group_key] if wt.group_key != "DEFAULT" else PROJECT_GUIDELINES
 
         Task(
             subagent_type: "general-purpose",
             description: "Execute [full_story.id]: [full_story.title]",
             prompt: [story-executor SKILL.md prompt template with:
-                - WORKTREE_PATH = worktree_path
-                - PROJECT_GUIDELINES = PROJECT_GUIDELINES
+                - WORKTREE_PATH = wt.worktree_path
+                - PROJECT_PATH = project_path (only include if non-null)
+                - PROJECT_GUIDELINES = project_guidelines
                 - STORY_ID = full_story.id
                 - STORY_TITLE = full_story.title
                 - STORY_DESCRIPTION = full_story.description
@@ -360,34 +482,51 @@ while true:
         $AIMI_CLI cascade-skip [full_story.id]
         Report: "[full_story.id] failed. Dependent stories cascade-skipped."
 
-    # Merge all successful worktrees using merge-all
+    # ========================================
+    # MERGE PER PROJECT GROUP (not across repos)
+    # ========================================
+    # Merge successful worktrees grouped by project.
+    # Each project group merges independently into its own repo's branch.
+
     if len(succeeded_stories) > 0:
-        succeeded_worktree_names = ["[branchName]-[full_story.id]" for full_story in succeeded_stories]
-
-        merge_result = $WORKTREE_MGR merge-all [succeeded_worktree_names...] --into [branchName]
-
-        if merge conflict (non-zero exit):
-            Report:
-            "MERGE CONFLICT during wave [wave] merge."
-            "Conflicting files:"
-            "[conflict output from merge-all]"
-            ""
-            "Resolve the conflict on branch [branchName] and re-run `/aimi:execute` to continue."
-
-            # Cleanup all worktrees from this wave before stopping
-            for wt in worktree_names:
-                $WORKTREE_MGR remove [wt]
-
-            STOP execution.
-
-        # All merges succeeded — mark stories complete
+        # Group succeeded stories by project
+        succeeded_by_project = {}
         for full_story in succeeded_stories:
-            $AIMI_CLI mark-complete [full_story.id]
-            Report: "[full_story.id] merged successfully."
+            group_key = all_worktrees[full_story.id].group_key
+            succeeded_by_project[group_key].append(full_story)
 
-    # Remove all worktrees from this wave
-    for wt in worktree_names:
-        $WORKTREE_MGR remove [wt]
+        for group_key, stories in succeeded_by_project:
+            project_root = project_roots[group_key]
+            succeeded_worktree_names = [all_worktrees[s.id].worktree_name for s in stories]
+
+            # cd to the project's git root before merging
+            cd [project_root]
+            merge_result = $WORKTREE_MGR merge-all [succeeded_worktree_names...] --into [branchName]
+
+            if merge conflict (non-zero exit):
+                Report:
+                "MERGE CONFLICT during wave [wave] merge in project [group_key]."
+                "Conflicting files:"
+                "[conflict output from merge-all]"
+                ""
+                "Resolve the conflict on branch [branchName] in [project_root] and re-run `/aimi:execute` to continue."
+
+                # Cleanup ALL worktrees from this wave (across all project groups) before stopping
+                for full_story_id, wt in all_worktrees:
+                    cd [project_roots[wt.group_key]]
+                    $WORKTREE_MGR remove [wt.worktree_name]
+
+                STOP execution.
+
+            # Merges succeeded for this project group — mark stories complete
+            for full_story in stories:
+                $AIMI_CLI mark-complete [full_story.id]
+                Report: "[full_story.id] merged successfully."
+
+    # Remove all worktrees from this wave (per project group)
+    for full_story_id, wt in all_worktrees:
+        cd [project_roots[wt.group_key]]
+        $WORKTREE_MGR remove [wt.worktree_name]
 
     Report: "Wave [wave] complete: [len(succeeded_stories)] succeeded, [len(failed_stories)] failed"
     wave += 1
@@ -399,6 +538,14 @@ After the wave loop ends (all stories processed or deadlock):
 
 ```
 # Remove any remaining worktrees (safety cleanup)
+# When stories have project fields, clean up per project root:
+for each unique project_root (including CWD for DEFAULT group):
+    cd [project_root]
+    $WORKTREE_MGR list
+    # For each worktree matching "[branchName]-US-*":
+    $WORKTREE_MGR remove [worktree_name]
+
+# When no stories have project fields, use current directory (backwards compatible):
 $WORKTREE_MGR list
 # For each worktree matching "[branchName]-US-*":
 $WORKTREE_MGR remove [worktree_name]

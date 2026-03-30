@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.30.2] - 2026-03-30
+
+### Fixed
+
+- **execute.md, next.md, status.md, swarm.md**: Inline CLI path resolution logic — removes broken `See commands/references/cli-path-resolution.md` references that fail when plugin is installed outside the repo
+- **status.md**: Remove broken `See task-format-v3.md` reference
+- **SKILL.md (story-executor)**: Remove broken `See task-format-v3.md in ../task-planner/references/` reference — inline key fields with constraints instead
+- **CLAUDE.md**: Remove broken `See task-format-v3.md` reference — inline schema version and key fields
+
+## [1.30.1] - 2026-03-27
+
+### Fixed
+
+- **plan.md**: Inline schema v3 structure and dependsOn inference rules — planner agent no longer fails to find reference files when running outside the plugin repo
+- **plan.md**: Add `validate-stories` to Phase 4.5 validation step
+- **SKILL.md (task-planner)**: Remove broken relative path references to `references/task-format-v3.md`, `references/pipeline-phases.md`, and `references/story-decomposition.md` — inline essential content instead
+- **SKILL.md (task-planner)**: Inline git repo auto-scan bash command (previously only in pipeline-phases.md)
+
+## [1.30.0] - 2026-03-26
+
+### Added
+
+- **task-format-v3.md**: Optional per-story `project` field added to task schema v3 — specifies the relative path from AIMI_ROOT to the target git repository for multi-repo story execution
+- **aimi-cli.sh**: Project field validation in `cmd_validate_stories()` — rejects absolute paths, path traversal (`..`), and shell metacharacters (`$`, `` ` ``, `;`, `|`, `&`); accepts valid relative paths; backwards compatible when project is absent
+- **aimi-cli.sh**: Project field included in `cmd_list_ready --brief` output (`{id, title, priority, dependsOn, project}`)
+- **next.md**: Per-story project path resolution — when a story has a `project` field, resolves PROJECT_PATH relative to AIMI_ROOT and passes it to the worker agent prompt; loads CLAUDE.md from PROJECT_PATH when set; backwards compatible when project field is absent
+- **execute.md**: Per-project worktree grouping for multi-repo execution — wave stories are grouped by `project` field before worktree creation, worktrees are created within each project's git repo, merge-all runs per-project group
+- **execute.md**: Per-project branch setup — creates/checks out the feature branch in each unique project's git repo when stories target different repos
+- **execute.md**: Per-project guidelines loading — builds `PROJECT_GUIDELINES_MAP` from each project's CLAUDE.md/AGENTS.md
+- **execute.md**: Single-story waves pass `PROJECT_PATH` to worker prompt when story has `project` field
+- **execute.md**: Post-loop cleanup handles per-project worktree removal
+- **plan.md / story-decomposition.md**: Multi-repo project assignment rules — planner auto-scans subfolders for git repos and assigns `project` field to stories targeting specific repositories
+- **test-aimi-cli.sh**: Updated `--brief` key count assertion to include project field
+
 ## [1.29.0] - 2026-03-06
 
 ### Changed

@@ -10,7 +10,41 @@ Display the current execution progress using the CLI script.
 
 ## Step 0: Resolve CLI Path
 
-Resolve `$AIMI_CLI` path using glob discovery with fallback, then verify version. See `commands/references/cli-path-resolution.md` for the full resolution logic (glob -> fallback -> version check). Use `$AIMI_CLI` for all subsequent script calls.
+Resolve `$AIMI_CLI` path using the three-layer strategy below. Each command is a separate Bash call (no compound operators).
+
+**Layer 1 — Global cache (fast path):**
+```bash
+AIMI_CLI=$(cat ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path 2>/dev/null)
+```
+
+**Layer 1 validation:**
+```bash
+if [ -n "$AIMI_CLI" ] && [ ! -x "$AIMI_CLI" ]; then AIMI_CLI=""; fi
+```
+
+**Layer 2 — Glob fallback (zsh-safe, only if Layer 1 failed):**
+```bash
+if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1'); fi
+```
+
+**Layer 2 cache update:**
+```bash
+if [ -n "$AIMI_CLI" ]; then printf '%s\n' "$AIMI_CLI" > "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path.tmp" && mv "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path.tmp" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" && chmod 600 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path"; fi
+```
+
+**Layer 3 — Per-project fallback (last resort):**
+```bash
+if [ -z "$AIMI_CLI" ] && [ -f .aimi/cli-path ] && [ -x "$(cat .aimi/cli-path)" ]; then AIMI_CLI=$(cat .aimi/cli-path); fi
+```
+
+If empty, report: "aimi-cli.sh not found. Reinstall plugin: `/plugin install aimi-engineering`" and STOP.
+
+**Version check:**
+```bash
+$AIMI_CLI check-version --quiet --fix
+```
+
+Use `$AIMI_CLI` for all subsequent script calls.
 
 ## Step 1: Get Status via CLI
 
@@ -22,7 +56,7 @@ $AIMI_CLI status
 
 This returns JSON with status counts and story list.
 
-> **Schema:** See `task-format-v3.md` in `skills/task-planner/references/`. The CLI status output mirrors the tasks.json structure with added aggregate counts.
+> The CLI status output mirrors the tasks.json structure with added aggregate counts.
 > Key fields: `schemaVersion`, `title`, `branch`, `maxConcurrency`, status counts (`pending`,`in_progress`,`completed`,`failed`,`skipped`,`total`), `userStories[]{id,title,status,dependsOn,priority,notes}`
 
 If no tasks file found, the script exits with error. Report:
