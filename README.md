@@ -53,26 +53,20 @@ Install the Aimi Engineering Plugin in OpenCode using the built-in installer. No
 # Clone and install
 git clone https://github.com/aimi-so/aimi-engineering-plugin
 cd aimi-engineering-plugin
-./install.sh
-```
-
-Or install directly:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/aimi-so/aimi-engineering-plugin/main/install.sh -o /tmp/aimi-install.sh && bash /tmp/aimi-install.sh
+./install.sh --to opencode
 ```
 
 ### Project-Level Install
 
 ```bash
 # Install into .opencode/ in your project directory
-./install.sh --project
+./install.sh --to opencode --project
 ```
 
 ### Uninstall
 
 ```bash
-./install.sh --uninstall
+./install.sh --uninstall --from opencode
 ```
 
 ### What the Installer Does

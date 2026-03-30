@@ -12,6 +12,7 @@ DRY_RUN=0
 PROJECT_MODE=0
 UNINSTALL=0
 VERBOSE=0
+TARGET=""
 
 log()  { printf '\033[0;34m%s\033[0m\n' "$*"; }
 ok()   { printf '\033[0;32m%s\033[0m\n' "$*"; }
@@ -23,28 +24,35 @@ die()  { printf '\033[0;31mError: %s\033[0m\n' "$*" >&2; exit 1; }
 # ---------------------------------------------------------------------------
 while [ $# -gt 0 ]; do
   case "$1" in
+    --to)        shift; TARGET="$1" ;;
+    --from)      shift; TARGET="$1"; UNINSTALL=1 ;;
     --project)   PROJECT_MODE=1 ;;
     --uninstall) UNINSTALL=1 ;;
     --dry-run)   DRY_RUN=1 ;;
     --verbose)   VERBOSE=1 ;;
     --help|-h)
       cat <<'USAGE'
-Usage: ./install.sh [OPTIONS]
+Usage: ./install.sh --to opencode [OPTIONS]
+       ./install.sh --uninstall --from opencode [OPTIONS]
 
-Install aimi-engineering plugin for OpenCode.
+Install aimi-engineering plugin for AI coding tools.
 
 Options:
-  --project     Install into .opencode/ in current directory (project-level)
+  --to TARGET   Install for target tool (required for install)
+  --from TARGET Uninstall from target tool (implies --uninstall)
+  --project     Install into project directory instead of global
   --uninstall   Remove installed files
   --dry-run     Show what would be done without doing it
   --verbose     Print detailed progress
   --help        Show this help
 
+Supported targets: opencode
+
 Examples:
-  ./install.sh                  # Global install to ~/.config/opencode/
-  ./install.sh --project        # Project install to .opencode/
-  ./install.sh --uninstall      # Remove global install
-  ./install.sh --dry-run        # Preview changes
+  ./install.sh --to opencode              # Global install
+  ./install.sh --to opencode --project    # Project install to .opencode/
+  ./install.sh --uninstall --from opencode  # Remove install
+  ./install.sh --to opencode --dry-run    # Preview changes
 USAGE
       exit 0
       ;;
@@ -52,6 +60,15 @@ USAGE
   esac
   shift
 done
+
+# Validate target
+if [ -z "$TARGET" ]; then
+  die "Missing --to flag. Usage: ./install.sh --to opencode"
+fi
+case "$TARGET" in
+  opencode) ;;
+  *) die "Unsupported target: $TARGET. Supported: opencode" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # detect_plugin_source — find plugins/aimi-engineering/ relative to script
