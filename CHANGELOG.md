@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.31.0] - 2026-03-30
+
+### Changed
+
+- **brainstorm.md**: Make command self-contained by inlining all brainstorm skill content — removes dependency on SKILL.md and reference files
+- **brainstorm.md**: Conditional codebase research — skip research phase when no codebase context is available, reducing latency for greenfield brainstorms
+
+### Removed
+
+- **question-patterns.md**: Delete unused reference file from brainstorm skill — content was already inlined into brainstorm.md
+- **SKILL.md (brainstorm)**: Remove reference to deleted question-patterns.md; add deprecation notice — skill is retained for reference only
+
+## [1.30.3] - 2026-03-30
+
+### Changed
+
+- **brainstorm.md**: Make command self-contained by inlining all brainstorm skill content — response parsing table, formatting constraints, contextual question rules, topic addressed signals, input sanitization, pre-save checklist, and incremental validation guidance. Removes all references to the brainstorm skill, reducing token usage per session.
+
 ## [1.30.2] - 2026-03-30
 
 ### Fixed

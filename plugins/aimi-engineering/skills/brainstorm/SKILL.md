@@ -4,6 +4,8 @@ description: "Guide collaborative brainstorming sessions to clarify requirements
 user-invocable: false
 ---
 
+> **Deprecated:** This skill is no longer loaded by brainstorm.md. The command is self-contained. Retained for reference only.
+
 # Brainstorm
 
 Clarify **WHAT** to build through collaborative dialogue before planning **HOW** to build it.
@@ -58,8 +60,6 @@ Present questions as **batched multiple-choice** using Ralph-style formatting:
 - Every question includes an "Other: [please specify]" escape hatch
 - Present 3-5 questions per batch
 - Questions presented as formatted text (user responds as regular chat message)
-
-See [question-patterns.md](./references/question-patterns.md) for detailed examples and scenario batches.
 
 ---
 
