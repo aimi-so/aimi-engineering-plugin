@@ -44,6 +44,21 @@ has_metacharacters() {
   return 1
 }
 
+# --- Pattern 0a: Layer 0 AIMI_CLI assignment via AIMI_PLUGIN_DIR ---
+# Approves: if [ -n "$AIMI_PLUGIN_DIR" ] && [ -x "$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh" ]; then AIMI_CLI="$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh"; fi
+# The path inside AIMI_PLUGIN_DIR must be free of shell metacharacters.
+if echo "$COMMAND" | grep -qE '^if \[ -n "\$AIMI_PLUGIN_DIR" \] && \[ -x "\$AIMI_PLUGIN_DIR/scripts/aimi-cli\.sh" \]; then AIMI_CLI="\$AIMI_PLUGIN_DIR/scripts/aimi-cli\.sh"; fi$'; then
+  echo "$ALLOW"
+  exit 0
+fi
+
+# --- Pattern 0b: Layer 0 WORKTREE_MGR assignment via AIMI_PLUGIN_DIR ---
+# Approves: if [ -n "$AIMI_PLUGIN_DIR" ] && [ -x "$AIMI_PLUGIN_DIR/skills/git-worktree/scripts/worktree-manager.sh" ]; then WORKTREE_MGR="$AIMI_PLUGIN_DIR/skills/git-worktree/scripts/worktree-manager.sh"; fi
+if echo "$COMMAND" | grep -qE '^if \[ -n "\$AIMI_PLUGIN_DIR" \] && \[ -x "\$AIMI_PLUGIN_DIR/skills/git-worktree/scripts/worktree-manager\.sh" \]; then WORKTREE_MGR="\$AIMI_PLUGIN_DIR/skills/git-worktree/scripts/worktree-manager\.sh"; fi$'; then
+  echo "$ALLOW"
+  exit 0
+fi
+
 # --- Pattern 1: AIMI_CLI= assignment ---
 # Validates the assigned path matches the expected plugin cache pattern.
 # Accepts config dir as ~/.claude, ${CLAUDE_CONFIG_DIR:-$HOME/.claude}, or resolved absolute path.

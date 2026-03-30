@@ -1413,10 +1413,35 @@ teardown_global_cache_env() {
   unset MOCK_WORKTREE_PATH
 }
 
+# Helper: set up an isolated AIMI_PLUGIN_DIR environment with stub scripts
+# so Layer 0 resolution finds executable aimi-cli.sh and worktree-manager.sh.
+# Sets AIMI_PLUGIN_DIR and PLUGIN_DIR_TMPDIR globals.
+setup_aimi_plugin_dir_env() {
+  PLUGIN_DIR_TMPDIR=$(mktemp -d)
+  export AIMI_PLUGIN_DIR="$PLUGIN_DIR_TMPDIR/aimi-engineering"
+  mkdir -p "$AIMI_PLUGIN_DIR/scripts"
+  mkdir -p "$AIMI_PLUGIN_DIR/skills/git-worktree/scripts"
+
+  # Create executable stubs
+  echo '#!/usr/bin/env bash' > "$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh"
+  chmod +x "$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh"
+
+  echo '#!/usr/bin/env bash' > "$AIMI_PLUGIN_DIR/skills/git-worktree/scripts/worktree-manager.sh"
+  chmod +x "$AIMI_PLUGIN_DIR/skills/git-worktree/scripts/worktree-manager.sh"
+}
+
+# Helper: tear down the AIMI_PLUGIN_DIR environment
+teardown_aimi_plugin_dir_env() {
+  rm -rf "$PLUGIN_DIR_TMPDIR"
+  unset AIMI_PLUGIN_DIR
+  unset PLUGIN_DIR_TMPDIR
+}
+
 # Source the global cache functions from aimi-cli.sh for direct testing.
 # We extract the needed functions using sed so we can call them directly.
 source_cache_functions() {
   eval "$(sed -n '/^_claude_config_dir()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_validate_plugin_dir()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_global_cache_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_global_worktree_cache_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^write_global_cli_cache()/,/^}/p' "$CLI")"
@@ -1928,6 +1953,127 @@ test_list_ready_brief_includes_project() {
 }
 
 # ============================================================================
+# AIMI_PLUGIN_DIR Tests
+# ============================================================================
+
+test_aimi_plugin_dir_valid() {
+  echo ""
+  echo "=== Testing read_global_cli_cache accepts AIMI_PLUGIN_DIR-prefixed path ==="
+
+  setup_aimi_plugin_dir_env
+  setup_global_cache_env
+  source_cache_functions
+
+  # Write a path prefixed with AIMI_PLUGIN_DIR
+  write_global_cli_cache "$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh"
+
+  local result
+  result=$(read_global_cli_cache)
+
+  assert_eq "$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh" "$result" \
+    "read_global_cli_cache: accepts AIMI_PLUGIN_DIR-prefixed path"
+
+  teardown_global_cache_env
+  teardown_aimi_plugin_dir_env
+}
+
+test_aimi_plugin_dir_invalid() {
+  echo ""
+  echo "=== Testing read_global_cli_cache with non-existent AIMI_PLUGIN_DIR ==="
+
+  setup_global_cache_env
+  source_cache_functions
+
+  # Set AIMI_PLUGIN_DIR to a non-existent directory
+  export AIMI_PLUGIN_DIR="/tmp/nonexistent-plugin-dir-$$"
+
+  # Write a path that would match if the dir existed
+  write_global_cli_cache "$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh"
+
+  # _validate_plugin_dir exits 1 for non-existent dir, so read_global_cli_cache
+  # should fail in a subshell
+  local result
+  result=$(read_global_cli_cache 2>/dev/null) || true
+
+  assert_eq "" "$result" \
+    "read_global_cli_cache: returns empty for non-existent AIMI_PLUGIN_DIR"
+
+  unset AIMI_PLUGIN_DIR
+  teardown_global_cache_env
+}
+
+test_aimi_plugin_dir_unset() {
+  echo ""
+  echo "=== Testing read_global_cli_cache with AIMI_PLUGIN_DIR unset ==="
+
+  unset AIMI_PLUGIN_DIR 2>/dev/null || true
+  setup_global_cache_env
+  source_cache_functions
+
+  # Write a valid Claude cache path
+  write_global_cli_cache "$MOCK_CLI_PATH"
+
+  local result
+  result=$(read_global_cli_cache)
+
+  assert_eq "$MOCK_CLI_PATH" "$result" \
+    "read_global_cli_cache: accepts Claude cache pattern when AIMI_PLUGIN_DIR unset"
+
+  teardown_global_cache_env
+}
+
+test_check_version_plugin_dir() {
+  echo ""
+  echo "=== Testing check-version with AIMI_PLUGIN_DIR set ==="
+
+  setup_aimi_plugin_dir_env
+
+  local output
+  output=$("$CLI" check-version 2>/dev/null)
+
+  assert_contains '"status":"ok"' "$output" \
+    "check-version: returns ok status when AIMI_PLUGIN_DIR set"
+
+  teardown_aimi_plugin_dir_env
+}
+
+test_cleanup_versions_plugin_dir() {
+  echo ""
+  echo "=== Testing cleanup-versions with AIMI_PLUGIN_DIR set ==="
+
+  setup_aimi_plugin_dir_env
+
+  local output
+  output=$("$CLI" cleanup-versions 2>/dev/null)
+
+  assert_contains '"skipped":true' "$output" \
+    "cleanup-versions: returns skipped when AIMI_PLUGIN_DIR set"
+
+  teardown_aimi_plugin_dir_env
+}
+
+test_read_global_cli_cache_rejects_arbitrary() {
+  echo ""
+  echo "=== Testing read_global_cli_cache rejects arbitrary paths with AIMI_PLUGIN_DIR set ==="
+
+  setup_aimi_plugin_dir_env
+  setup_global_cache_env
+  source_cache_functions
+
+  # Write an arbitrary path that matches neither AIMI_PLUGIN_DIR nor Claude cache pattern
+  write_global_cli_cache "/tmp/evil/scripts/aimi-cli.sh"
+
+  local result
+  result=$(read_global_cli_cache 2>/dev/null)
+
+  assert_eq "" "$result" \
+    "read_global_cli_cache: rejects arbitrary path with AIMI_PLUGIN_DIR set"
+
+  teardown_global_cache_env
+  teardown_aimi_plugin_dir_env
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -2005,6 +2151,16 @@ main() {
   test_claude_config_dir_default
   test_claude_config_dir_custom_absolute
   test_claude_config_dir_relative_path_error
+
+  # AIMI_PLUGIN_DIR tests
+  echo ""
+  echo "--- AIMI_PLUGIN_DIR Tests ---"
+  test_aimi_plugin_dir_valid
+  test_aimi_plugin_dir_invalid
+  test_aimi_plugin_dir_unset
+  test_check_version_plugin_dir
+  test_cleanup_versions_plugin_dir
+  test_read_global_cli_cache_rejects_arbitrary
 
   # Auto-discovery tests
   echo ""
