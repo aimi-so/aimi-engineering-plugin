@@ -205,6 +205,26 @@ _claude_config_dir() {
   printf '%s\n' "${dir%/}"
 }
 
+# Validate and resolve AIMI_PLUGIN_DIR when set by compound-plugin converter.
+# Returns stripped path on success, empty string when unset; exits 1 on invalid.
+_validate_plugin_dir() {
+  if [ -z "${AIMI_PLUGIN_DIR:-}" ]; then
+    return 0
+  fi
+  # Must be an absolute path
+  if [ "${AIMI_PLUGIN_DIR#/}" = "$AIMI_PLUGIN_DIR" ]; then
+    echo "Error: AIMI_PLUGIN_DIR must be an absolute path, got: $AIMI_PLUGIN_DIR" >&2
+    exit 1
+  fi
+  # Directory must exist
+  if [ ! -d "$AIMI_PLUGIN_DIR" ]; then
+    echo "Error: AIMI_PLUGIN_DIR directory does not exist: $AIMI_PLUGIN_DIR" >&2
+    exit 1
+  fi
+  # Strip trailing slash
+  printf '%s\n' "${AIMI_PLUGIN_DIR%/}"
+}
+
 # Return the global cache file path for aimi-cli.sh
 _global_cache_path() {
   local config_dir
@@ -244,7 +264,15 @@ read_global_cli_cache() {
   cached_path=$(cat "$cache_file" 2>/dev/null) || return 0
   # Validate path matches expected pattern
   # Expected: */plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh
+  # Or: $AIMI_PLUGIN_DIR/scripts/aimi-cli.sh (compound-plugin converter)
+  local plugin_dir
+  plugin_dir=$(_validate_plugin_dir)
   case "$cached_path" in
+    "${plugin_dir}"/scripts/aimi-cli.sh)
+      if [ -n "$plugin_dir" ]; then
+        printf '%s\n' "$cached_path"
+      fi
+      ;;
     */plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh)
       printf '%s\n' "$cached_path"
       ;;
@@ -276,7 +304,15 @@ read_global_worktree_cache() {
   cached_path=$(cat "$cache_file" 2>/dev/null) || return 0
   # Validate path matches expected pattern
   # Expected: */plugins/cache/*/aimi-engineering/*/skills/git-worktree/scripts/worktree-manager.sh
+  # Or: $AIMI_PLUGIN_DIR/skills/git-worktree/scripts/worktree-manager.sh (compound-plugin converter)
+  local plugin_dir
+  plugin_dir=$(_validate_plugin_dir)
   case "$cached_path" in
+    "${plugin_dir}"/skills/git-worktree/scripts/worktree-manager.sh)
+      if [ -n "$plugin_dir" ]; then
+        printf '%s\n' "$cached_path"
+      fi
+      ;;
     */plugins/cache/*/aimi-engineering/*/skills/git-worktree/scripts/worktree-manager.sh)
       printf '%s\n' "$cached_path"
       ;;
@@ -958,6 +994,14 @@ cmd_check_version() {
   local config_dir
   config_dir=$(_claude_config_dir)
 
+  # When AIMI_PLUGIN_DIR is set, the converter manages the lifecycle — skip glob
+  local plugin_dir
+  plugin_dir=$(_validate_plugin_dir)
+  if [ -n "$plugin_dir" ]; then
+    printf '{"status":"ok","path":"%s/scripts/aimi-cli.sh","message":"managed by compound-plugin converter"}\n' "$plugin_dir"
+    return 0
+  fi
+
   # Resolve the latest installed path via glob
   latest_path=$(ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
 
@@ -1015,6 +1059,14 @@ cmd_check_version() {
 # Scans <config_dir>/plugins/cache/*/aimi-engineering/*/ for version dirs
 # Outputs JSON {"removed":<count>,"kept":"<version>"} to stdout
 cmd_cleanup_versions() {
+  # When AIMI_PLUGIN_DIR is set, the converter manages the lifecycle — skip cleanup
+  local plugin_dir
+  plugin_dir=$(_validate_plugin_dir)
+  if [ -n "$plugin_dir" ]; then
+    printf '{"removed":0,"skipped":true,"message":"converter manages lifecycle"}\n'
+    return 0
+  fi
+
   local latest_path latest_version latest_version_dir
   local removed=0
   local config_dir
@@ -1118,6 +1170,8 @@ STATE FILES (.aimi/):
 ENVIRONMENT:
     CLAUDE_CONFIG_DIR  Override Claude config directory (default: ~/.claude)
                        Must be an absolute path when set.
+    AIMI_PLUGIN_DIR    Plugin install directory set by compound-plugin converter;
+                       bypasses Claude cache resolution.
 
 EXAMPLES:
     # Resolve CLI path first (honors CLAUDE_CONFIG_DIR)
