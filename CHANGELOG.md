@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.30.3] - 2026-03-30
+
+### Changed
+
+- **brainstorm.md**: Make command self-contained by inlining all brainstorm skill content — response parsing table, formatting constraints, contextual question rules, topic addressed signals, input sanitization, pre-save checklist, and incremental validation guidance. Removes all references to the brainstorm skill, reducing token usage per session.
+
 ## [1.30.2] - 2026-03-30
 
 ### Fixed
