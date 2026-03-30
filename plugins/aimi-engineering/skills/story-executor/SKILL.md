@@ -26,8 +26,8 @@ Execute ONE story from the tasks file:
 
 ## Story Format
 
-> **Schema:** See `task-format-v3.md` in `../task-planner/references/`. Each story is one atomic unit of work completable in a single agent iteration.
-> Key fields: `id`, `title`, `description`, `acceptanceCriteria`, `priority`, `status`, `dependsOn`, `notes`
+> Each story is one atomic unit of work completable in a single agent iteration.
+> Key fields: `id(US-NNN)`, `title(<=200)`, `description(<=500)`, `acceptanceCriteria(each<=600)`, `priority`, `status`, `dependsOn([])`, `notes`, `project(optional, relative path for multi-repo)`
 
 ---
 

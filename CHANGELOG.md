@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.30.2] - 2026-03-30
+
+### Fixed
+
+- **execute.md, next.md, status.md, swarm.md**: Inline CLI path resolution logic — removes broken `See commands/references/cli-path-resolution.md` references that fail when plugin is installed outside the repo
+- **status.md**: Remove broken `See task-format-v3.md` reference
+- **SKILL.md (story-executor)**: Remove broken `See task-format-v3.md in ../task-planner/references/` reference — inline key fields with constraints instead
+- **CLAUDE.md**: Remove broken `See task-format-v3.md` reference — inline schema version and key fields
+
 ## [1.30.1] - 2026-03-27
 
 ### Fixed
