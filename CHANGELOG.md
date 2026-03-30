@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.33.0] - 2026-03-30
+
+### Added
+
+- **install.sh**: Self-contained installer script for OpenCode cross-platform installation (no external dependencies)
+- **install.sh**: Translates Claude Code commands and agents to OpenCode-native format
+- **install.sh**: Automatic context7 MCP configuration in opencode.json
+- **install.sh**: Uninstall support with `--uninstall` flag
+
+### Changed
+
+- **README.md**: Replaced compound-plugin converter instructions with install.sh usage
+
 ## [1.32.0] - 2026-03-30
 
 ### Added

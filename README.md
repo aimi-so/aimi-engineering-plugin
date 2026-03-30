@@ -45,39 +45,47 @@ claude /plugin list
 
 ## Cross-Platform Installation
 
-Install the Aimi Engineering Plugin in AI coding tools other than Claude Code using the compound-plugin converter.
+Install the Aimi Engineering Plugin in OpenCode using the built-in installer. No external dependencies required.
 
 ### OpenCode
 
 ```bash
-# Install for OpenCode
-bunx @every-env/compound-plugin install aimi-engineering --to opencode
+# Clone and install
+git clone https://github.com/aimi-so/aimi-engineering-plugin
+cd aimi-engineering-plugin
+./install.sh
 ```
 
-### Codex
+Or install directly:
 
 ```bash
-# Install for Codex
-bunx @every-env/compound-plugin install aimi-engineering --to codex
+curl -fsSL https://raw.githubusercontent.com/aimi-so/aimi-engineering-plugin/main/install.sh -o /tmp/aimi-install.sh && bash /tmp/aimi-install.sh
 ```
 
-### Copilot
+### Project-Level Install
 
 ```bash
-# Install for Copilot
-bunx @every-env/compound-plugin install aimi-engineering --to copilot
+# Install into .opencode/ in your project directory
+./install.sh --project
 ```
 
-### Auto-Detect
+### Uninstall
 
 ```bash
-# Install for all detected AI coding tools
-bunx @every-env/compound-plugin install aimi-engineering --to all
+./install.sh --uninstall
 ```
+
+### What the Installer Does
+
+1. Copies plugin source to `~/.config/opencode/plugins/aimi-engineering/`
+2. Translates commands to `~/.config/opencode/commands/aimi-*.md`
+3. Translates agents to `~/.config/opencode/agents/aimi-*.md`
+4. Adds context7 MCP server to `opencode.json`
+5. Sets `AIMI_PLUGIN_DIR` in shell profile
 
 ### Environment Variable
 
-The `AIMI_PLUGIN_DIR` environment variable controls where the plugin resolves its internal files (CLI scripts, skill references, agent definitions). The compound-plugin converter sets this variable automatically during installation so that commands work outside the Claude Code plugin directory structure. Do not set this variable manually unless you have a custom installation layout.
+The `AIMI_PLUGIN_DIR` environment variable points to the installed plugin directory so that commands can locate CLI scripts, skill references, and agent definitions. The installer sets this automatically. Do not set this variable manually unless you have a custom installation layout.
 
 ## Quick Start
 
@@ -574,7 +582,7 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 ## Version History
 
-**Current Version:** 1.32.0
+**Current Version:** 1.33.0
 
 ### Recent Changes
 
