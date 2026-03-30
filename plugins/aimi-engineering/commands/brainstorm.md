@@ -31,7 +31,23 @@ Use **AskUserQuestion** to suggest: "Your requirements seem detailed enough to p
 
 **If unclear or vague:** proceed to Phase 1.
 
-## Phase 1: Codebase Research
+## Phase 1: Codebase Research (Conditional)
+
+### Step 1a: Specificity Assessment
+
+Before spawning the research agent, assess whether the feature description is specific enough to skip codebase research.
+
+| Bucket | Signals | Action |
+|--------|---------|--------|
+| **Skip research** | Description references specific file paths, names technologies/frameworks, or describes exact patterns to follow | Proceed directly to Phase 2 — questions leverage the stated specifics |
+| **Run research** | Description is vague, conceptual, or exploratory (e.g., "improve performance", "add a settings page") | Continue to Step 1b |
+| **Run research** | Uncertain whether description is specific enough | Continue to Step 1b |
+
+Do not mention the skip decision to the user — just proceed to Phase 2 seamlessly.
+
+**When research is skipped:** Phase 2 generates topic-based questions that reference the specific technologies, file paths, or patterns the user already mentioned in their description. These are not generic fallback questions — they are informed by the concrete details the user provided.
+
+### Step 1b: Run Research
 
 Run a lightweight research scan to understand existing patterns:
 
@@ -242,6 +258,7 @@ To start planning: `/aimi:plan`
 | Phase | Failure | Action |
 |-------|---------|--------|
 | Pre-Phase 0 | No feature description | Prompt user for input |
+| Phase 1 | Description sufficiently specific | Skip research; Phase 2 uses topic-based questions informed by description specifics |
 | Phase 1 | Research agent fails or times out | Proceed without codebase context; questions will be generic |
 | Phase 1 | Greenfield project (no codebase) | Proceed with generic topic-based questions |
 | Phase 4 | `.aimi/brainstorms/` directory creation fails | Report error with path |
