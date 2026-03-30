@@ -7,6 +7,7 @@ Transform implementation plans into executable user stories, then run them auton
 ## Table of Contents
 
 - [Installation](#installation)
+- [Cross-Platform Installation](#cross-platform-installation)
 - [Quick Start](#quick-start)
 - [Commands](#commands)
 - [Skills](#skills)
@@ -41,6 +42,42 @@ claude /plugin list
 # Test aimi commands are available
 /aimi:status
 ```
+
+## Cross-Platform Installation
+
+Install the Aimi Engineering Plugin in AI coding tools other than Claude Code using the compound-plugin converter.
+
+### OpenCode
+
+```bash
+# Install for OpenCode
+bunx @every-env/compound-plugin install aimi-engineering --to opencode
+```
+
+### Codex
+
+```bash
+# Install for Codex
+bunx @every-env/compound-plugin install aimi-engineering --to codex
+```
+
+### Copilot
+
+```bash
+# Install for Copilot
+bunx @every-env/compound-plugin install aimi-engineering --to copilot
+```
+
+### Auto-Detect
+
+```bash
+# Install for all detected AI coding tools
+bunx @every-env/compound-plugin install aimi-engineering --to all
+```
+
+### Environment Variable
+
+The `AIMI_PLUGIN_DIR` environment variable controls where the plugin resolves its internal files (CLI scripts, skill references, agent definitions). The compound-plugin converter sets this variable automatically during installation so that commands work outside the Claude Code plugin directory structure. Do not set this variable manually unless you have a custom installation layout.
 
 ## Quick Start
 
@@ -537,7 +574,7 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 ## Version History
 
-**Current Version:** 1.30.0
+**Current Version:** 1.32.0
 
 ### Recent Changes
 
