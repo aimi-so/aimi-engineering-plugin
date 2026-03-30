@@ -332,7 +332,7 @@ install_mcp() {
     if command -v jq >/dev/null 2>&1; then
       local tmp
       tmp=$(mktemp)
-      jq '.mcp = (.mcp // {}) + {"context7": {"type": "http", "url": "https://mcp.context7.com/mcp"}}' "$config_file" > "$tmp" && mv "$tmp" "$config_file"
+      jq '.mcp = (.mcp // {}) + {"context7": {"type": "remote", "url": "https://mcp.context7.com/mcp"}}' "$config_file" > "$tmp" && mv "$tmp" "$config_file"
     # Try python3 fallback
     elif command -v python3 >/dev/null 2>&1; then
       python3 -c "
@@ -355,7 +355,7 @@ with open('$config_file', 'w') as f:
 {
   "mcp": {
     "context7": {
-      "type": "http",
+      "type": "remote",
       "url": "https://mcp.context7.com/mcp"
     }
   }
