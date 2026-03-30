@@ -194,7 +194,7 @@ translate_agent() {
 
   {
     printf '%s\n' "---"
-    printf '%s\n' "mode: agent"
+    printf '%s\n' "mode: subagent"
     printf 'description: %s\n' "$desc"
     printf '%s\n' "---"
     printf '%s' "$FM_BODY"
