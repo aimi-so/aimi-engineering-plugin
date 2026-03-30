@@ -4,12 +4,20 @@ Shared reference for resolving `$AIMI_CLI` and `$WORKTREE_MGR` across all comman
 
 ## Resolve CLI Path
 
-**CRITICAL:** The CLI script lives in the plugin install directory, NOT the project directory. Resolve it using the three-layer strategy below. Each command is a separate Bash call (no compound operators).
+**CRITICAL:** The CLI script lives in the plugin install directory, NOT the project directory. Resolve it using the four-layer strategy below. Each command is a separate Bash call (no compound operators).
+
+### Layer 0: AIMI_PLUGIN_DIR (env var override)
+
+```bash
+if [ -n "$AIMI_PLUGIN_DIR" ] && [ "${AIMI_PLUGIN_DIR#/}" != "$AIMI_PLUGIN_DIR" ] && [ -d "$AIMI_PLUGIN_DIR" ] && [ -x "$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh" ]; then AIMI_CLI="$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh"; fi
+```
+
+Layer 0 validates AIMI_PLUGIN_DIR with four checks: (1) env var is non-empty, (2) path starts with `/` (absolute), (3) directory exists, (4) target script is executable. If any check fails, silently falls through to Layer 1. Layer 0 does NOT write to global cache — env var check is negligible cost, no side effects.
 
 ### Layer 1: Global cache (fast path)
 
 ```bash
-AIMI_CLI=$(cat ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path 2>/dev/null)
+if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(cat ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path 2>/dev/null); fi
 ```
 
 ### Layer 1 validation: verify cached path exists and is executable
@@ -38,16 +46,26 @@ if [ -n "$AIMI_CLI" ]; then printf '%s\n' "$AIMI_CLI" > "${CLAUDE_CONFIG_DIR:-$H
 if [ -z "$AIMI_CLI" ] && [ -f .aimi/cli-path ] && [ -x "$(cat .aimi/cli-path)" ]; then AIMI_CLI=$(cat .aimi/cli-path); fi
 ```
 
-If empty, report: "aimi-cli.sh not found. Reinstall plugin: `/plugin install aimi-engineering`" and STOP.
+If empty, report error and STOP:
+- If `$AIMI_PLUGIN_DIR` is set: "aimi-cli.sh not found. Check AIMI_PLUGIN_DIR path: $AIMI_PLUGIN_DIR"
+- Otherwise: "aimi-cli.sh not found. Reinstall plugin: `/plugin install aimi-engineering`"
 
 ## Resolve Worktree Manager Path
 
-**CRITICAL:** The worktree manager script lives alongside the CLI. Resolve `$WORKTREE_MGR` using the same three-layer strategy.
+**CRITICAL:** The worktree manager script lives alongside the CLI. Resolve `$WORKTREE_MGR` using the same four-layer strategy.
+
+### Layer 0: AIMI_PLUGIN_DIR (env var override)
+
+```bash
+if [ -n "$AIMI_PLUGIN_DIR" ] && [ "${AIMI_PLUGIN_DIR#/}" != "$AIMI_PLUGIN_DIR" ] && [ -d "$AIMI_PLUGIN_DIR" ] && [ -x "$AIMI_PLUGIN_DIR/skills/git-worktree/scripts/worktree-manager.sh" ]; then WORKTREE_MGR="$AIMI_PLUGIN_DIR/skills/git-worktree/scripts/worktree-manager.sh"; fi
+```
+
+Layer 0 validates AIMI_PLUGIN_DIR with four checks: (1) env var is non-empty, (2) path starts with `/` (absolute), (3) directory exists, (4) target script is executable. If any check fails, silently falls through to Layer 1. Layer 0 does NOT write to global cache — env var check is negligible cost, no side effects.
 
 ### Layer 1: Global cache (fast path)
 
 ```bash
-WORKTREE_MGR=$(cat ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path 2>/dev/null)
+if [ -z "$WORKTREE_MGR" ]; then WORKTREE_MGR=$(cat ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path 2>/dev/null); fi
 ```
 
 ### Layer 1 validation: verify cached path exists and is executable
@@ -76,7 +94,9 @@ if [ -n "$WORKTREE_MGR" ]; then printf '%s\n' "$WORKTREE_MGR" > "${CLAUDE_CONFIG
 if [ -z "$WORKTREE_MGR" ] && [ -f .aimi/cli-path ]; then WORKTREE_MGR=$(dirname "$(cat .aimi/cli-path)")/worktree-manager.sh; if [ ! -x "$WORKTREE_MGR" ]; then WORKTREE_MGR=""; fi; fi
 ```
 
-If empty, report: "worktree-manager.sh not found. Reinstall plugin: `/plugin install aimi-engineering`" and STOP.
+If empty, report error and STOP:
+- If `$AIMI_PLUGIN_DIR` is set: "worktree-manager.sh not found. Check AIMI_PLUGIN_DIR path: $AIMI_PLUGIN_DIR"
+- Otherwise: "worktree-manager.sh not found. Reinstall plugin: `/plugin install aimi-engineering`"
 
 ## Version Check
 
