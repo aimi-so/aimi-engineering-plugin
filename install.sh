@@ -252,7 +252,7 @@ install_plugin_source() {
 install_commands() {
   local src="$1"
   local target_dir="$2"
-  local cmd_dir="$target_dir/commands"
+  local cmd_dir="$target_dir/commands/aimi"
   local count=0
 
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -267,20 +267,19 @@ install_commands() {
     local basename
     basename=$(basename "$src_file")
 
-    # Derive OpenCode filename: aimi:plan.md -> aimi-plan.md
-    local dst_name
-    dst_name=$(printf '%s' "$basename" | sed 's/://g')
-    # Prefix with aimi- if not already
-    case "$dst_name" in
-      aimi-*|aimi*) ;; # already prefixed via name
-    esac
-    dst_name="aimi-${dst_name#aimi}"
-    # Normalize: aimi-aimi -> aimi, handle edge cases
-    dst_name=$(printf '%s' "$dst_name" | sed 's/^aimi-aimi/aimi/')
+    # Derive command name from frontmatter "name:" field (e.g., "aimi:plan" -> "plan")
+    local cmd_name
+    cmd_name=$(sed -n 's/^name:[[:space:]]*aimi:\(.*\)/\1/p' "$src_file" | head -1)
+    # Fallback to filename without extension if frontmatter parsing fails
+    if [ -z "$cmd_name" ]; then
+      cmd_name="${basename%.md}"
+    fi
+
+    local dst_name="${cmd_name}.md"
 
     translate_command "$src_file" "$cmd_dir/$dst_name"
     count=$((count + 1))
-    [ "$VERBOSE" -eq 1 ] && log "  Command: $dst_name"
+    [ "$VERBOSE" -eq 1 ] && log "  Command: aimi/$dst_name"
   done
 
   ok "Installed $count commands to $cmd_dir"
@@ -453,7 +452,7 @@ install_opencode() {
   ok "Installation complete!"
   echo
   log "Plugin source: $plugin_dir"
-  log "Commands:      $target_dir/commands/aimi-*.md"
+  log "Commands:      $target_dir/commands/aimi/*.md"
   log "Agents:        $target_dir/agents/aimi-*.md"
   log "MCP:           $target_dir/opencode.json"
   echo
@@ -471,7 +470,7 @@ uninstall_opencode() {
   log "Uninstalling $PLUGIN_NAME from OpenCode..."
 
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "[dry-run] Would remove $target_dir/commands/aimi-*.md"
+    log "[dry-run] Would remove $target_dir/commands/aimi/"
     log "[dry-run] Would remove $target_dir/agents/aimi-*.md"
     log "[dry-run] Would remove $target_dir/plugins/$PLUGIN_NAME/"
     log "[dry-run] Would remove context7 from $target_dir/opencode.json"
@@ -481,11 +480,14 @@ uninstall_opencode() {
 
   # Remove commands
   local count=0
-  for f in "$target_dir/commands/"aimi-*.md; do
-    [ -f "$f" ] || continue
-    rm "$f"
-    count=$((count + 1))
-  done
+  if [ -d "$target_dir/commands/aimi" ]; then
+    for f in "$target_dir/commands/aimi/"*.md; do
+      [ -f "$f" ] || continue
+      rm "$f"
+      count=$((count + 1))
+    done
+    rmdir "$target_dir/commands/aimi" 2>/dev/null
+  fi
   [ "$count" -gt 0 ] && ok "Removed $count commands"
 
   # Remove agents
