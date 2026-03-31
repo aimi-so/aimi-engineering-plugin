@@ -184,18 +184,31 @@ fm_get() {
 translate_command_body() {
   local body="$1"
 
-  # If the body does not reference named agents, return unchanged
+  # --- CLI path rewriting (applies to all commands) ---
+  # Replace Claude config dir references with OpenCode config dir
+  body="${body//\$\{CLAUDE_CONFIG_DIR:-\$HOME\/.claude\}/\$\{OPENCODE_CONFIG_DIR:-\$HOME\/.config\/opencode\}}"
+
+  # --- Error message rewriting (applies to all commands) ---
+  # Replace plugin install instructions with OpenCode installer
+  body="${body//\/plugin install aimi-engineering/.\/install.sh --to opencode}"
+
+  # --- AskUserQuestion rewriting (applies to all commands) ---
+  # Replace various AskUserQuestion references with natural conversation note
+  # Order matters: match longer/more-specific patterns first
+  body="${body//Use \*\*AskUserQuestion\*\*/Ask the user by outputting your question directly in the conversation}"
+  body="${body//Use AskUserQuestion/Ask the user by outputting your question directly in the conversation}"
+  body="${body//via AskUserQuestion/by outputting your question directly in the conversation}"
+  body="${body//AskUserQuestion/ask the user by outputting your question directly in the conversation}"
+
+  # --- Agent invocation preamble (only for commands referencing named agents) ---
   case "$body" in
-    *'subagent_type="aimi-engineering:'*) ;;
-    *) printf '%s' "$body"; return 0 ;;
-  esac
+    *'subagent_type="aimi-engineering:'*)
+      # Replace general-purpose with general
+      body="${body//general-purpose/general}"
 
-  # Replace general-purpose with general
-  body="${body//general-purpose/general}"
-
-  # Prepend the OpenCode agent invocation preamble
-  local preamble
-  preamble='## OpenCode Agent Invocation
+      # Prepend the OpenCode agent invocation preamble
+      local preamble
+      preamble='## OpenCode Agent Invocation
 
 When this command references agents via `Task subagent_type="aimi-engineering:CATEGORY:NAME"`, follow this pattern instead:
 
@@ -210,8 +223,11 @@ Run all agent Tasks in parallel as instructed by the command below.
 ---
 
 '
+      body="${preamble}${body}"
+      ;;
+  esac
 
-  printf '%s%s' "$preamble" "$body"
+  printf '%s' "$body"
 }
 
 # ---------------------------------------------------------------------------
