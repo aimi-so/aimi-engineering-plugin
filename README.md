@@ -7,7 +7,6 @@ Transform implementation plans into executable user stories, then run them auton
 ## Table of Contents
 
 - [Installation](#installation)
-- [Cross-Platform Installation](#cross-platform-installation)
 - [Quick Start](#quick-start)
 - [Commands](#commands)
 - [Skills](#skills)
@@ -21,61 +20,66 @@ Transform implementation plans into executable user stories, then run them auton
 
 ## Installation
 
-### Prerequisites
+### Claude Code
 
-No external plugin dependencies. This plugin is fully standalone.
-
-### Install Steps
+No external dependencies. This plugin is fully standalone.
 
 ```bash
-# Install aimi-engineering plugin
+# Add marketplace and install
 claude /plugin marketplace add https://github.com/aimi-so/aimi-engineering-plugin
 claude /plugin install aimi-engineering
 ```
 
-### Verify Installation
+Verify installation:
 
 ```bash
-# Check plugin is installed
 claude /plugin list
-
-# Test aimi commands are available
 /aimi:status
 ```
 
-## Cross-Platform Installation
-
-Install the Aimi Engineering Plugin in OpenCode using the built-in installer. No external dependencies required.
-
 ### OpenCode
 
+Install using the built-in installer script. No external dependencies required.
+
 ```bash
-# Clone and install
 git clone https://github.com/aimi-so/aimi-engineering-plugin
 cd aimi-engineering-plugin
 ./install.sh --to opencode
 ```
 
-### Project-Level Install
+This installs the plugin into OpenCode's global config directory (`~/.config/opencode/`):
+
+- **Commands** are translated to `~/.config/opencode/commands/aimi-*.md`
+- **Agents** are translated to `~/.config/opencode/agents/aimi-*.md`
+- **Plugin source** (CLI scripts, skills, hooks) is copied to `~/.config/opencode/plugins/aimi-engineering/`
+- **context7 MCP** server is added to `opencode.json`
+- **`AIMI_PLUGIN_DIR`** is set in your shell profile
+
+After installation, restart your shell or run:
 
 ```bash
-# Install into .opencode/ in your project directory
+export AIMI_PLUGIN_DIR="$HOME/.config/opencode/plugins/aimi-engineering"
+```
+
+#### Project-Level Install
+
+To install into `.opencode/` in your project directory instead of globally:
+
+```bash
 ./install.sh --to opencode --project
 ```
 
-### Uninstall
+#### Uninstall
 
 ```bash
 ./install.sh --uninstall --from opencode
 ```
 
-### What the Installer Does
+#### Preview Changes
 
-1. Copies plugin source to `~/.config/opencode/plugins/aimi-engineering/`
-2. Translates commands to `~/.config/opencode/commands/aimi-*.md`
-3. Translates agents to `~/.config/opencode/agents/aimi-*.md`
-4. Adds context7 MCP server to `opencode.json`
-5. Sets `AIMI_PLUGIN_DIR` in shell profile
+```bash
+./install.sh --to opencode --dry-run
+```
 
 ### Environment Variable
 
