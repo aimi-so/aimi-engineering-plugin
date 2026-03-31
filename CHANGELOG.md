@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.34.0] - 2026-03-31
+
+### Added
+
+- **install.sh**: Full OpenCode command body translation — agent invocations rewritten for OpenCode Task tool compatibility
+- **install.sh**: Skills installation (`install_skills()`) — copies SKILL.md and references to OpenCode skills directory
+- **install.sh**: Nested command directories — commands installed as `commands/aimi/plan.md` for `/aimi:plan` naming
+- **install.sh**: Bash permission auto-approval (`install_permissions()`) — configures opencode.json for autonomous execution
+- **install.sh**: CLI path resolution rewriting — `CLAUDE_CONFIG_DIR` references replaced with `OPENCODE_CONFIG_DIR`
+- **install.sh**: Error message rewriting — recovery instructions point to `./install.sh --to opencode`
+- **install.sh**: AskUserQuestion fallback — replaced with natural conversation prompts
+- **install.sh**: `disable-model-invocation` workaround — side-effect warning prepended to command bodies
+- **install.sh**: Agent model field preservation — `model: haiku` preserved in translated agents
+
+### Fixed
+
+- **install.sh**: Python3 MCP fallback now uses `type: remote` instead of `type: http`
+
 ## [1.33.0] - 2026-03-30
 
 ### Added

@@ -178,6 +178,59 @@ fm_get() {
 }
 
 # ---------------------------------------------------------------------------
+# translate_command_body — rewrite command body for OpenCode compatibility
+# Prepends agent invocation preamble and fixes subagent_type references
+# ---------------------------------------------------------------------------
+translate_command_body() {
+  local body="$1"
+
+  # --- CLI path rewriting (applies to all commands) ---
+  # Replace Claude config dir references with OpenCode config dir
+  body="${body//\$\{CLAUDE_CONFIG_DIR:-\$HOME\/.claude\}/\$\{OPENCODE_CONFIG_DIR:-\$HOME\/.config\/opencode\}}"
+
+  # --- Error message rewriting (applies to all commands) ---
+  # Replace plugin install instructions with OpenCode installer
+  body="${body//\/plugin install aimi-engineering/.\/install.sh --to opencode}"
+
+  # --- AskUserQuestion rewriting (applies to all commands) ---
+  # Replace various AskUserQuestion references with natural conversation note
+  # Order matters: match longer/more-specific patterns first
+  body="${body//Use \*\*AskUserQuestion\*\*/Ask the user by outputting your question directly in the conversation}"
+  body="${body//Use AskUserQuestion/Ask the user by outputting your question directly in the conversation}"
+  body="${body//via AskUserQuestion/by outputting your question directly in the conversation}"
+  body="${body//AskUserQuestion/ask the user by outputting your question directly in the conversation}"
+
+  # --- Agent invocation preamble (only for commands referencing named agents) ---
+  case "$body" in
+    *'subagent_type="aimi-engineering:'*)
+      # Replace general-purpose with general
+      body="${body//general-purpose/general}"
+
+      # Prepend the OpenCode agent invocation preamble
+      local preamble
+      preamble='## OpenCode Agent Invocation
+
+When this command references agents via `Task subagent_type="aimi-engineering:CATEGORY:NAME"`, follow this pattern instead:
+
+1. Extract CATEGORY and NAME from the reference (e.g., `aimi-engineering:review:aimi-security-sentinel` -> category=review, name=aimi-security-sentinel)
+2. Read the agent definition file: `$AIMI_PLUGIN_DIR/agents/CATEGORY/NAME.md`
+3. Strip the YAML frontmatter (everything between the first two `---` lines)
+4. Use the remaining body as the agent'"'"'s system prompt
+5. Spawn: `Task(subagent_type="general", prompt="[agent system prompt]\n\n[original task prompt]")`
+
+Run all agent Tasks in parallel as instructed by the command below.
+
+---
+
+'
+      body="${preamble}${body}"
+      ;;
+  esac
+
+  printf '%s' "$body"
+}
+
+# ---------------------------------------------------------------------------
 # translate_command — convert Claude command .md to OpenCode command .md
 # ---------------------------------------------------------------------------
 translate_command() {
@@ -189,11 +242,34 @@ translate_command() {
   local desc
   desc=$(fm_get "description") || desc=""
 
+  # Append argument-hint to description if present
+  local arg_hint
+  arg_hint=$(fm_get "argument-hint") || arg_hint=""
+  if [ -n "$arg_hint" ]; then
+    desc="$desc $arg_hint"
+  fi
+
+  # Check for disable-model-invocation
+  local disable_invoke
+  disable_invoke=$(fm_get "disable-model-invocation") || disable_invoke=""
+
+  local translated_body
+  translated_body=$(translate_command_body "$FM_BODY")
+
+  # Prepend side-effect warning if disable-model-invocation: true
+  if [ "$disable_invoke" = "true" ]; then
+    local warning
+    warning='## WARNING: This command has side effects. Only invoke when explicitly requested by the user.
+
+'
+    translated_body="${warning}${translated_body}"
+  fi
+
   {
     printf '%s\n' "---"
     printf 'description: %s\n' "$desc"
     printf '%s\n' "---"
-    printf '%s' "$FM_BODY"
+    printf '%s' "$translated_body"
   } > "$dst_file"
 }
 
@@ -209,10 +285,16 @@ translate_agent() {
   local desc
   desc=$(fm_get "description") || desc=""
 
+  local model
+  model=$(fm_get "model") || model=""
+
   {
     printf '%s\n' "---"
     printf '%s\n' "mode: subagent"
     printf 'description: %s\n' "$desc"
+    if [ -n "$model" ] && [ "$model" != "inherit" ]; then
+      printf 'model: %s\n' "$model"
+    fi
     printf '%s\n' "---"
     printf '%s' "$FM_BODY"
   } > "$dst_file"
@@ -252,7 +334,7 @@ install_plugin_source() {
 install_commands() {
   local src="$1"
   local target_dir="$2"
-  local cmd_dir="$target_dir/commands"
+  local cmd_dir="$target_dir/commands/aimi"
   local count=0
 
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -267,20 +349,19 @@ install_commands() {
     local basename
     basename=$(basename "$src_file")
 
-    # Derive OpenCode filename: aimi:plan.md -> aimi-plan.md
-    local dst_name
-    dst_name=$(printf '%s' "$basename" | sed 's/://g')
-    # Prefix with aimi- if not already
-    case "$dst_name" in
-      aimi-*|aimi*) ;; # already prefixed via name
-    esac
-    dst_name="aimi-${dst_name#aimi}"
-    # Normalize: aimi-aimi -> aimi, handle edge cases
-    dst_name=$(printf '%s' "$dst_name" | sed 's/^aimi-aimi/aimi/')
+    # Derive command name from frontmatter "name:" field (e.g., "aimi:plan" -> "plan")
+    local cmd_name
+    cmd_name=$(sed -n 's/^name:[[:space:]]*aimi:\(.*\)/\1/p' "$src_file" | head -1)
+    # Fallback to filename without extension if frontmatter parsing fails
+    if [ -z "$cmd_name" ]; then
+      cmd_name="${basename%.md}"
+    fi
+
+    local dst_name="${cmd_name}.md"
 
     translate_command "$src_file" "$cmd_dir/$dst_name"
     count=$((count + 1))
-    [ "$VERBOSE" -eq 1 ] && log "  Command: $dst_name"
+    [ "$VERBOSE" -eq 1 ] && log "  Command: aimi/$dst_name"
   done
 
   ok "Installed $count commands to $cmd_dir"
@@ -324,6 +405,71 @@ install_agents() {
 }
 
 # ---------------------------------------------------------------------------
+# install_skills — copy skills to OpenCode's skill discovery directory
+# ---------------------------------------------------------------------------
+install_skills() {
+  local src="$1"
+  local target_dir="$2"
+  local skill_dir="$target_dir/skills"
+  local count=0
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] Would install skills to $skill_dir"
+    for src_skill in "$src/skills/"*/SKILL.md; do
+      [ -f "$src_skill" ] || continue
+      local skillname
+      skillname=$(basename "$(dirname "$src_skill")")
+      log "[dry-run]   Would install skill: aimi-$skillname"
+      local skill_parent
+      skill_parent=$(dirname "$src_skill")
+      [ -d "$skill_parent/references" ] && log "[dry-run]     + references/"
+      [ -d "$skill_parent/scripts" ]    && log "[dry-run]     + scripts/"
+      [ -d "$skill_parent/templates" ]  && log "[dry-run]     + templates/"
+    done
+    return 0
+  fi
+
+  mkdir -p "$skill_dir"
+
+  for src_skill in "$src/skills/"*/SKILL.md; do
+    [ -f "$src_skill" ] || continue
+    local skillname
+    skillname=$(basename "$(dirname "$src_skill")")
+    local dst="$skill_dir/aimi-$skillname"
+
+    mkdir -p "$dst"
+    cp "$src_skill" "$dst/SKILL.md"
+
+    local skill_parent
+    skill_parent=$(dirname "$src_skill")
+
+    # Copy references/ if present
+    if [ -d "$skill_parent/references" ]; then
+      cp -R "$skill_parent/references" "$dst/"
+      [ "$VERBOSE" -eq 1 ] && log "    + references/"
+    fi
+
+    # Copy scripts/ if present, mark .sh files executable
+    if [ -d "$skill_parent/scripts" ]; then
+      cp -R "$skill_parent/scripts" "$dst/"
+      find "$dst/scripts" -name '*.sh' -exec chmod +x {} +
+      [ "$VERBOSE" -eq 1 ] && log "    + scripts/ (executables marked)"
+    fi
+
+    # Copy templates/ if present
+    if [ -d "$skill_parent/templates" ]; then
+      cp -R "$skill_parent/templates" "$dst/"
+      [ "$VERBOSE" -eq 1 ] && log "    + templates/"
+    fi
+
+    count=$((count + 1))
+    [ "$VERBOSE" -eq 1 ] && log "  Skill: aimi-$skillname"
+  done
+
+  ok "Installed $count skills to $skill_dir"
+}
+
+# ---------------------------------------------------------------------------
 # install_mcp — add context7 to opencode.json
 # ---------------------------------------------------------------------------
 install_mcp() {
@@ -357,7 +503,7 @@ import json, sys
 with open('$config_file') as f:
     try: cfg = json.load(f)
     except: cfg = {}
-cfg.setdefault('mcp', {})['context7'] = {'type': 'http', 'url': 'https://mcp.context7.com/mcp'}
+cfg.setdefault('mcp', {})['context7'] = {'type': 'remote', 'url': 'https://mcp.context7.com/mcp'}
 with open('$config_file', 'w') as f:
     json.dump(cfg, f, indent=2)
     f.write('\n')
@@ -381,6 +527,107 @@ JSON
   fi
 
   ok "Added context7 MCP to $config_file"
+}
+
+# ---------------------------------------------------------------------------
+# install_permissions — add Bash auto-approval rules to opencode.json
+# ---------------------------------------------------------------------------
+install_permissions() {
+  local target_dir="$1"
+  local plugin_dir="$target_dir/plugins/$PLUGIN_NAME"
+  local config_file="$target_dir/opencode.json"
+
+  local aimi_cli="$plugin_dir/scripts/aimi-cli.sh *"
+  local worktree_mgr="$plugin_dir/skills/git-worktree/scripts/worktree-manager.sh *"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] Would add permissions to $config_file:"
+    log "[dry-run]   bash: git * -> allow"
+    log "[dry-run]   bash: $aimi_cli -> allow"
+    log "[dry-run]   bash: $worktree_mgr -> allow"
+    log "[dry-run]   bash: docker version * -> allow"
+    log "[dry-run]   bash: docker run --rm --name aimi-swarm-* -> allow"
+    log "[dry-run]   bash: docker container ls * -> allow"
+    log "[dry-run]   bash: docker container prune * -> allow"
+    log "[dry-run]   bash: docker ps * -> allow"
+    log "[dry-run]   bash: docker rm -f aimi-* -> allow"
+    log "[dry-run]   bash: jq * -> allow"
+    log "[dry-run]   bash: ls * -> allow"
+    log "[dry-run]   bash: test * -> allow"
+    log "[dry-run]   bash: id * -> allow"
+    return 0
+  fi
+
+  mkdir -p "$target_dir"
+
+  # Build the permissions JSON fragment
+  local perms_json
+  perms_json=$(cat <<PERMS
+{
+  "permissions": {
+    "bash": {
+      "git *": "allow",
+      "$aimi_cli": "allow",
+      "$worktree_mgr": "allow",
+      "docker version *": "allow",
+      "docker run --rm --name aimi-swarm-*": "allow",
+      "docker container ls *": "allow",
+      "docker container prune *": "allow",
+      "docker ps *": "allow",
+      "docker rm -f aimi-*": "allow",
+      "jq *": "allow",
+      "ls *": "allow",
+      "test *": "allow",
+      "id *": "allow"
+    }
+  }
+}
+PERMS
+)
+
+  if [ -f "$config_file" ]; then
+    # Check if permissions.bash already has our rules
+    if grep -q '"git \*"' "$config_file" 2>/dev/null; then
+      [ "$VERBOSE" -eq 1 ] && log "Permissions already in $config_file, skipping"
+      return 0
+    fi
+
+    backup_file "$config_file"
+
+    if command -v jq >/dev/null 2>&1; then
+      local tmp
+      tmp=$(mktemp)
+      jq --argjson perms "$perms_json" '.permissions = ((.permissions // {}) * $perms.permissions)' "$config_file" > "$tmp" && mv "$tmp" "$config_file"
+    elif command -v python3 >/dev/null 2>&1; then
+      python3 -c "
+import json, sys
+
+perms = json.loads('''$perms_json''')
+
+with open('$config_file') as f:
+    try: cfg = json.load(f)
+    except: cfg = {}
+
+existing = cfg.get('permissions', {})
+for section, rules in perms['permissions'].items():
+    existing.setdefault(section, {}).update(rules)
+cfg['permissions'] = existing
+
+with open('$config_file', 'w') as f:
+    json.dump(cfg, f, indent=2)
+    f.write('\n')
+"
+    else
+      warn "Neither jq nor python3 found. Add permissions manually to $config_file"
+      return 0
+    fi
+  else
+    # Create new opencode.json with permissions
+    mkdir -p "$target_dir"
+    printf '%s\n' "$perms_json" > "$config_file"
+  fi
+
+  ok "Added Bash auto-approval permissions to $config_file"
 }
 
 # ---------------------------------------------------------------------------
@@ -444,7 +691,9 @@ install_opencode() {
   install_plugin_source "$src" "$target_dir"
   install_commands "$src" "$target_dir"
   install_agents "$src" "$target_dir"
+  install_skills "$src" "$target_dir"
   install_mcp "$target_dir"
+  install_permissions "$target_dir"
 
   local plugin_dir="$target_dir/plugins/$PLUGIN_NAME"
   set_env_var "$plugin_dir"
@@ -453,8 +702,9 @@ install_opencode() {
   ok "Installation complete!"
   echo
   log "Plugin source: $plugin_dir"
-  log "Commands:      $target_dir/commands/aimi-*.md"
+  log "Commands:      $target_dir/commands/aimi/*.md"
   log "Agents:        $target_dir/agents/aimi-*.md"
+  log "Skills:        $target_dir/skills/aimi-*/"
   log "MCP:           $target_dir/opencode.json"
   echo
   log "Restart your shell or run:"
@@ -471,22 +721,37 @@ uninstall_opencode() {
   log "Uninstalling $PLUGIN_NAME from OpenCode..."
 
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "[dry-run] Would remove $target_dir/commands/aimi-*.md"
+    log "[dry-run] Would remove $target_dir/commands/aimi/"
+    log "[dry-run] Would remove $target_dir/commands/aimi-*.md (legacy flat files)"
     log "[dry-run] Would remove $target_dir/agents/aimi-*.md"
+    log "[dry-run] Would remove $target_dir/skills/aimi-*/"
     log "[dry-run] Would remove $target_dir/plugins/$PLUGIN_NAME/"
     log "[dry-run] Would remove context7 from $target_dir/opencode.json"
+    log "[dry-run] Would remove permissions from $target_dir/opencode.json"
     log "[dry-run] Would remove AIMI_PLUGIN_DIR from shell profiles"
     return 0
   fi
 
   # Remove commands
   local count=0
+  if [ -d "$target_dir/commands/aimi" ]; then
+    for f in "$target_dir/commands/aimi/"*.md; do
+      [ -f "$f" ] || continue
+      rm "$f"
+      count=$((count + 1))
+    done
+    rmdir "$target_dir/commands/aimi" 2>/dev/null
+  fi
+  [ "$count" -gt 0 ] && ok "Removed $count commands (nested)"
+
+  # Remove legacy flat command files (backwards compat with older installs)
+  count=0
   for f in "$target_dir/commands/"aimi-*.md; do
     [ -f "$f" ] || continue
     rm "$f"
     count=$((count + 1))
   done
-  [ "$count" -gt 0 ] && ok "Removed $count commands"
+  [ "$count" -gt 0 ] && ok "Removed $count legacy command files"
 
   # Remove agents
   count=0
@@ -496,6 +761,15 @@ uninstall_opencode() {
     count=$((count + 1))
   done
   [ "$count" -gt 0 ] && ok "Removed $count agents"
+
+  # Remove skills
+  count=0
+  for d in "$target_dir/skills/"aimi-*/; do
+    [ -d "$d" ] || continue
+    rm -rf "$d"
+    count=$((count + 1))
+  done
+  [ "$count" -gt 0 ] && ok "Removed $count skills"
 
   # Remove plugin source
   if [ -d "$target_dir/plugins/$PLUGIN_NAME" ]; then
@@ -525,6 +799,29 @@ with open('$config_file', 'w') as f:
       ok "Removed context7 MCP from $config_file"
     else
       warn "Remove context7 from $config_file manually (no jq or python3)"
+    fi
+  fi
+
+  # Remove permissions from opencode.json
+  if [ -f "$config_file" ] && grep -q '"permissions"' "$config_file" 2>/dev/null; then
+    if command -v jq >/dev/null 2>&1; then
+      local tmp
+      tmp=$(mktemp)
+      jq 'del(.permissions)' "$config_file" > "$tmp" && mv "$tmp" "$config_file"
+      ok "Removed permissions from $config_file"
+    elif command -v python3 >/dev/null 2>&1; then
+      python3 -c "
+import json
+with open('$config_file') as f:
+    cfg = json.load(f)
+cfg.pop('permissions', None)
+with open('$config_file', 'w') as f:
+    json.dump(cfg, f, indent=2)
+    f.write('\n')
+"
+      ok "Removed permissions from $config_file"
+    else
+      warn "Remove permissions from $config_file manually (no jq or python3)"
     fi
   fi
 

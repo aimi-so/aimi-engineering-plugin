@@ -47,11 +47,14 @@ cd aimi-engineering-plugin
 ./install.sh --to opencode
 ```
 
-This installs the plugin into OpenCode's global config directory (`~/.config/opencode/`):
+This installs the plugin into OpenCode's global config directory (`~/.config/opencode/`) with full compatibility translation:
 
-- **Commands** are translated to `~/.config/opencode/commands/aimi-*.md`
-- **Agents** are translated to `~/.config/opencode/agents/aimi-*.md`
-- **Plugin source** (CLI scripts, skills, hooks) is copied to `~/.config/opencode/plugins/aimi-engineering/`
+- **Commands** are translated and installed as nested directories (e.g., `commands/aimi/plan.md`) so they appear as `/aimi:plan`, `/aimi:execute`, etc.
+- **Command bodies** are fully rewritten for OpenCode compatibility — agent invocations use the Task tool, CLI path references use `OPENCODE_CONFIG_DIR`, and error messages point to the OpenCode installer
+- **Skills** are copied to `~/.config/opencode/skills/` with SKILL.md and reference files preserved
+- **Agents** are translated to `~/.config/opencode/agents/aimi-*.md` with model fields preserved
+- **Permissions** are auto-configured in `opencode.json` for autonomous Bash execution
+- **Plugin source** (CLI scripts, hooks) is copied to `~/.config/opencode/plugins/aimi-engineering/`
 - **context7 MCP** server is added to `opencode.json`
 - **`AIMI_PLUGIN_DIR`** is set in your shell profile
 
@@ -60,6 +63,12 @@ After installation, restart your shell or run:
 ```bash
 export AIMI_PLUGIN_DIR="$HOME/.config/opencode/plugins/aimi-engineering"
 ```
+
+#### Known Limitations
+
+- **`disable-model-invocation`** is not supported in OpenCode. The installer prepends a side-effect warning to command bodies as a workaround, instructing the model not to invoke sub-agents autonomously.
+- **`AskUserQuestion`** tool is not available in OpenCode. Commands that use it are rewritten to use natural conversation prompts instead (asking the user directly in the response).
+- **Custom `subagent_type`** (e.g., `subagent_type: researcher`) is not yet supported in OpenCode. Agents are installed as general-purpose with the agent prompt inlined into the Task tool invocation.
 
 #### Project-Level Install
 
@@ -580,9 +589,17 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 ## Version History
 
-**Current Version:** 1.33.0
+**Current Version:** 1.34.0
 
 ### Recent Changes
+
+**v1.34.0** - Full OpenCode Compatibility
+- Full command body translation for OpenCode Task tool compatibility
+- Skills installation to OpenCode's skills directory
+- Nested command directories for `/aimi:plan` naming convention
+- Bash permission auto-approval for autonomous execution
+- CLI path resolution, error message, and AskUserQuestion rewriting
+- `disable-model-invocation` workaround and agent model field preservation
 
 **v1.30.0** - Per-Story Project Field for Multi-Repo Execution
 - Optional `project` field on stories for targeting specific git repositories in multi-repo setups
