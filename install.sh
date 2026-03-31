@@ -209,10 +209,16 @@ translate_agent() {
   local desc
   desc=$(fm_get "description") || desc=""
 
+  local model
+  model=$(fm_get "model") || model=""
+
   {
     printf '%s\n' "---"
     printf '%s\n' "mode: subagent"
     printf 'description: %s\n' "$desc"
+    if [ -n "$model" ] && [ "$model" != "inherit" ]; then
+      printf 'model: %s\n' "$model"
+    fi
     printf '%s\n' "---"
     printf '%s' "$FM_BODY"
   } > "$dst_file"
