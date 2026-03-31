@@ -242,8 +242,28 @@ translate_command() {
   local desc
   desc=$(fm_get "description") || desc=""
 
+  # Append argument-hint to description if present
+  local arg_hint
+  arg_hint=$(fm_get "argument-hint") || arg_hint=""
+  if [ -n "$arg_hint" ]; then
+    desc="$desc $arg_hint"
+  fi
+
+  # Check for disable-model-invocation
+  local disable_invoke
+  disable_invoke=$(fm_get "disable-model-invocation") || disable_invoke=""
+
   local translated_body
   translated_body=$(translate_command_body "$FM_BODY")
+
+  # Prepend side-effect warning if disable-model-invocation: true
+  if [ "$disable_invoke" = "true" ]; then
+    local warning
+    warning='## WARNING: This command has side effects. Only invoke when explicitly requested by the user.
+
+'
+    translated_body="${warning}${translated_body}"
+  fi
 
   {
     printf '%s\n' "---"
