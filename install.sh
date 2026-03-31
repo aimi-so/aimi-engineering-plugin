@@ -178,6 +178,43 @@ fm_get() {
 }
 
 # ---------------------------------------------------------------------------
+# translate_command_body — rewrite command body for OpenCode compatibility
+# Prepends agent invocation preamble and fixes subagent_type references
+# ---------------------------------------------------------------------------
+translate_command_body() {
+  local body="$1"
+
+  # If the body does not reference named agents, return unchanged
+  case "$body" in
+    *'subagent_type="aimi-engineering:'*) ;;
+    *) printf '%s' "$body"; return 0 ;;
+  esac
+
+  # Replace general-purpose with general
+  body="${body//general-purpose/general}"
+
+  # Prepend the OpenCode agent invocation preamble
+  local preamble
+  preamble='## OpenCode Agent Invocation
+
+When this command references agents via `Task subagent_type="aimi-engineering:CATEGORY:NAME"`, follow this pattern instead:
+
+1. Extract CATEGORY and NAME from the reference (e.g., `aimi-engineering:review:aimi-security-sentinel` -> category=review, name=aimi-security-sentinel)
+2. Read the agent definition file: `$AIMI_PLUGIN_DIR/agents/CATEGORY/NAME.md`
+3. Strip the YAML frontmatter (everything between the first two `---` lines)
+4. Use the remaining body as the agent'"'"'s system prompt
+5. Spawn: `Task(subagent_type="general", prompt="[agent system prompt]\n\n[original task prompt]")`
+
+Run all agent Tasks in parallel as instructed by the command below.
+
+---
+
+'
+
+  printf '%s%s' "$preamble" "$body"
+}
+
+# ---------------------------------------------------------------------------
 # translate_command — convert Claude command .md to OpenCode command .md
 # ---------------------------------------------------------------------------
 translate_command() {
@@ -189,11 +226,14 @@ translate_command() {
   local desc
   desc=$(fm_get "description") || desc=""
 
+  local translated_body
+  translated_body=$(translate_command_body "$FM_BODY")
+
   {
     printf '%s\n' "---"
     printf 'description: %s\n' "$desc"
     printf '%s\n' "---"
-    printf '%s' "$FM_BODY"
+    printf '%s' "$translated_body"
   } > "$dst_file"
 }
 
