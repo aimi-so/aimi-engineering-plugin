@@ -702,6 +702,7 @@ uninstall_opencode() {
 
   if [ "$DRY_RUN" -eq 1 ]; then
     log "[dry-run] Would remove $target_dir/commands/aimi/"
+    log "[dry-run] Would remove $target_dir/commands/aimi-*.md (legacy flat files)"
     log "[dry-run] Would remove $target_dir/agents/aimi-*.md"
     log "[dry-run] Would remove $target_dir/skills/aimi-*/"
     log "[dry-run] Would remove $target_dir/plugins/$PLUGIN_NAME/"
@@ -721,7 +722,16 @@ uninstall_opencode() {
     done
     rmdir "$target_dir/commands/aimi" 2>/dev/null
   fi
-  [ "$count" -gt 0 ] && ok "Removed $count commands"
+  [ "$count" -gt 0 ] && ok "Removed $count commands (nested)"
+
+  # Remove legacy flat command files (backwards compat with older installs)
+  count=0
+  for f in "$target_dir/commands/"aimi-*.md; do
+    [ -f "$f" ] || continue
+    rm "$f"
+    count=$((count + 1))
+  done
+  [ "$count" -gt 0 ] && ok "Removed $count legacy command files"
 
   # Remove agents
   count=0
