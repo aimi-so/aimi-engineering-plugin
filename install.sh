@@ -324,6 +324,71 @@ install_agents() {
 }
 
 # ---------------------------------------------------------------------------
+# install_skills — copy skills to OpenCode's skill discovery directory
+# ---------------------------------------------------------------------------
+install_skills() {
+  local src="$1"
+  local target_dir="$2"
+  local skill_dir="$target_dir/skills"
+  local count=0
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] Would install skills to $skill_dir"
+    for src_skill in "$src/skills/"*/SKILL.md; do
+      [ -f "$src_skill" ] || continue
+      local skillname
+      skillname=$(basename "$(dirname "$src_skill")")
+      log "[dry-run]   Would install skill: aimi-$skillname"
+      local skill_parent
+      skill_parent=$(dirname "$src_skill")
+      [ -d "$skill_parent/references" ] && log "[dry-run]     + references/"
+      [ -d "$skill_parent/scripts" ]    && log "[dry-run]     + scripts/"
+      [ -d "$skill_parent/templates" ]  && log "[dry-run]     + templates/"
+    done
+    return 0
+  fi
+
+  mkdir -p "$skill_dir"
+
+  for src_skill in "$src/skills/"*/SKILL.md; do
+    [ -f "$src_skill" ] || continue
+    local skillname
+    skillname=$(basename "$(dirname "$src_skill")")
+    local dst="$skill_dir/aimi-$skillname"
+
+    mkdir -p "$dst"
+    cp "$src_skill" "$dst/SKILL.md"
+
+    local skill_parent
+    skill_parent=$(dirname "$src_skill")
+
+    # Copy references/ if present
+    if [ -d "$skill_parent/references" ]; then
+      cp -R "$skill_parent/references" "$dst/"
+      [ "$VERBOSE" -eq 1 ] && log "    + references/"
+    fi
+
+    # Copy scripts/ if present, mark .sh files executable
+    if [ -d "$skill_parent/scripts" ]; then
+      cp -R "$skill_parent/scripts" "$dst/"
+      find "$dst/scripts" -name '*.sh' -exec chmod +x {} +
+      [ "$VERBOSE" -eq 1 ] && log "    + scripts/ (executables marked)"
+    fi
+
+    # Copy templates/ if present
+    if [ -d "$skill_parent/templates" ]; then
+      cp -R "$skill_parent/templates" "$dst/"
+      [ "$VERBOSE" -eq 1 ] && log "    + templates/"
+    fi
+
+    count=$((count + 1))
+    [ "$VERBOSE" -eq 1 ] && log "  Skill: aimi-$skillname"
+  done
+
+  ok "Installed $count skills to $skill_dir"
+}
+
+# ---------------------------------------------------------------------------
 # install_mcp — add context7 to opencode.json
 # ---------------------------------------------------------------------------
 install_mcp() {
@@ -444,6 +509,7 @@ install_opencode() {
   install_plugin_source "$src" "$target_dir"
   install_commands "$src" "$target_dir"
   install_agents "$src" "$target_dir"
+  install_skills "$src" "$target_dir"
   install_mcp "$target_dir"
 
   local plugin_dir="$target_dir/plugins/$PLUGIN_NAME"
@@ -455,6 +521,7 @@ install_opencode() {
   log "Plugin source: $plugin_dir"
   log "Commands:      $target_dir/commands/aimi-*.md"
   log "Agents:        $target_dir/agents/aimi-*.md"
+  log "Skills:        $target_dir/skills/aimi-*/"
   log "MCP:           $target_dir/opencode.json"
   echo
   log "Restart your shell or run:"
@@ -473,6 +540,7 @@ uninstall_opencode() {
   if [ "$DRY_RUN" -eq 1 ]; then
     log "[dry-run] Would remove $target_dir/commands/aimi-*.md"
     log "[dry-run] Would remove $target_dir/agents/aimi-*.md"
+    log "[dry-run] Would remove $target_dir/skills/aimi-*/"
     log "[dry-run] Would remove $target_dir/plugins/$PLUGIN_NAME/"
     log "[dry-run] Would remove context7 from $target_dir/opencode.json"
     log "[dry-run] Would remove AIMI_PLUGIN_DIR from shell profiles"
@@ -496,6 +564,15 @@ uninstall_opencode() {
     count=$((count + 1))
   done
   [ "$count" -gt 0 ] && ok "Removed $count agents"
+
+  # Remove skills
+  count=0
+  for d in "$target_dir/skills/"aimi-*/; do
+    [ -d "$d" ] || continue
+    rm -rf "$d"
+    count=$((count + 1))
+  done
+  [ "$count" -gt 0 ] && ok "Removed $count skills"
 
   # Remove plugin source
   if [ -d "$target_dir/plugins/$PLUGIN_NAME" ]; then
