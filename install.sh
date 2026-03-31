@@ -357,7 +357,7 @@ import json, sys
 with open('$config_file') as f:
     try: cfg = json.load(f)
     except: cfg = {}
-cfg.setdefault('mcp', {})['context7'] = {'type': 'http', 'url': 'https://mcp.context7.com/mcp'}
+cfg.setdefault('mcp', {})['context7'] = {'type': 'remote', 'url': 'https://mcp.context7.com/mcp'}
 with open('$config_file', 'w') as f:
     json.dump(cfg, f, indent=2)
     f.write('\n')
