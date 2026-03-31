@@ -20,27 +20,70 @@ Transform implementation plans into executable user stories, then run them auton
 
 ## Installation
 
-### Prerequisites
+### Claude Code
 
-No external plugin dependencies. This plugin is fully standalone.
-
-### Install Steps
+No external dependencies. This plugin is fully standalone.
 
 ```bash
-# Install aimi-engineering plugin
+# Add marketplace and install
 claude /plugin marketplace add https://github.com/aimi-so/aimi-engineering-plugin
 claude /plugin install aimi-engineering
 ```
 
-### Verify Installation
+Verify installation:
 
 ```bash
-# Check plugin is installed
 claude /plugin list
-
-# Test aimi commands are available
 /aimi:status
 ```
+
+### OpenCode
+
+Install using the built-in installer script. No external dependencies required.
+
+```bash
+git clone https://github.com/aimi-so/aimi-engineering-plugin
+cd aimi-engineering-plugin
+./install.sh --to opencode
+```
+
+This installs the plugin into OpenCode's global config directory (`~/.config/opencode/`):
+
+- **Commands** are translated to `~/.config/opencode/commands/aimi-*.md`
+- **Agents** are translated to `~/.config/opencode/agents/aimi-*.md`
+- **Plugin source** (CLI scripts, skills, hooks) is copied to `~/.config/opencode/plugins/aimi-engineering/`
+- **context7 MCP** server is added to `opencode.json`
+- **`AIMI_PLUGIN_DIR`** is set in your shell profile
+
+After installation, restart your shell or run:
+
+```bash
+export AIMI_PLUGIN_DIR="$HOME/.config/opencode/plugins/aimi-engineering"
+```
+
+#### Project-Level Install
+
+To install into `.opencode/` in your project directory instead of globally:
+
+```bash
+./install.sh --to opencode --project
+```
+
+#### Uninstall
+
+```bash
+./install.sh --uninstall --from opencode
+```
+
+#### Preview Changes
+
+```bash
+./install.sh --to opencode --dry-run
+```
+
+### Environment Variable
+
+The `AIMI_PLUGIN_DIR` environment variable points to the installed plugin directory so that commands can locate CLI scripts, skill references, and agent definitions. The installer sets this automatically. Do not set this variable manually unless you have a custom installation layout.
 
 ## Quick Start
 
@@ -537,7 +580,7 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 ## Version History
 
-**Current Version:** 1.30.0
+**Current Version:** 1.33.0
 
 ### Recent Changes
 

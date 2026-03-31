@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.33.0] - 2026-03-30
+
+### Added
+
+- **install.sh**: Self-contained installer script for OpenCode cross-platform installation (no external dependencies)
+- **install.sh**: Translates Claude Code commands and agents to OpenCode-native format
+- **install.sh**: Automatic context7 MCP configuration in opencode.json
+- **install.sh**: Uninstall support with `--uninstall` flag
+
+### Changed
+
+- **README.md**: Replaced compound-plugin converter instructions with install.sh usage
+
+## [1.32.0] - 2026-03-30
+
+### Added
+
+- **cross-platform**: Cross-platform installation via compound-plugin converter for OpenCode, Codex, Copilot, and auto-detect
+- **AIMI_PLUGIN_DIR**: Environment variable support for custom plugin directory resolution in all CLI commands
+- **Layer 0**: CLI path resolution in all commands using AIMI_PLUGIN_DIR as Layer 0
+- **auto-approve**: Hook patterns for Layer 0 resolution
+- **tests**: Coverage for AIMI_PLUGIN_DIR paths
+
 ## [1.31.0] - 2026-03-30
 
 ### Changed
