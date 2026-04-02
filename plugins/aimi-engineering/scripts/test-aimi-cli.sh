@@ -34,7 +34,7 @@ setup() {
   # Create v3 test tasks file
   cat > "$TASKS_FILE" << 'EOF'
 {
-  "schemaVersion": "3.1",
+  "schemaVersion": "3.2",
   "metadata": {
     "title": "feat: Test feature",
     "type": "feat",
@@ -282,7 +282,7 @@ test_init_session() {
   output=$("$CLI" init-session)
 
   assert_contains '"pending": 4' "$output" "init-session counts pending by status"
-  assert_contains '"schemaVersion": "3.1"' "$output" "init-session returns schema version"
+  assert_contains '"schemaVersion": "3.2"' "$output" "init-session returns schema version"
   assert_contains "feat/test-feature" "$output" "init-session returns branch"
 
   # Check state files created
@@ -454,7 +454,7 @@ test_validate_deps_circular() {
   local circular_file="$TASKS_DIR/9999-99-97-circular-tasks.json"
   cat > "$circular_file" << 'EOF'
 {
-  "schemaVersion": "3.1",
+  "schemaVersion": "3.2",
   "metadata": {
     "title": "feat: Circular test",
     "type": "feat",
@@ -511,7 +511,7 @@ test_status() {
   local output
   output=$("$CLI" status)
 
-  assert_contains '"schemaVersion": "3.1"' "$output" "status shows schema version"
+  assert_contains '"schemaVersion": "3.2"' "$output" "status shows schema version"
   assert_contains '"maxConcurrency": 4' "$output" "status shows maxConcurrency"
   assert_contains '"dependsOn"' "$output" "status includes dependsOn in stories"
 }
@@ -969,7 +969,7 @@ test_auto_discovery_from_subdirectory() {
   output=$(cd "$TEST_DIR/sub/dir" && "$CLI" status) && exit_code=0 || exit_code=$?
 
   assert_exit_code "0" "$exit_code" "auto-discovery: CLI succeeds from subdirectory"
-  assert_contains '"schemaVersion": "3.1"' "$output" "auto-discovery: status returns schema from subdirectory"
+  assert_contains '"schemaVersion": "3.2"' "$output" "auto-discovery: status returns schema from subdirectory"
   assert_contains '"userStories"' "$output" "auto-discovery: status returns stories from subdirectory"
 }
 
@@ -1000,7 +1000,7 @@ reset_fixture() {
 
   cat > "$TASKS_FILE" << 'EOF'
 {
-  "schemaVersion": "3.1",
+  "schemaVersion": "3.2",
   "metadata": {
     "title": "feat: Test feature",
     "type": "feat",
@@ -1221,23 +1221,25 @@ test_list_ready_brief() {
   local output
   output=$("$CLI" list-ready --brief)
 
-  # Brief output should only have {id, title, priority, dependsOn, project} per story
+  # Brief output should only have {id, title, priority, dependsOn, project, gate} per story
   local key_count
   key_count=$(echo "$output" | jq '.[0] | keys | length')
-  assert_eq "5" "$key_count" "list-ready --brief: each story has exactly 5 keys"
+  assert_eq "6" "$key_count" "list-ready --brief: each story has exactly 6 keys"
 
-  # Verify the 5 expected keys exist
-  local has_id has_title has_priority has_depends has_project
+  # Verify the 6 expected keys exist
+  local has_id has_title has_priority has_depends has_project has_gate
   has_id=$(echo "$output" | jq '.[0] | has("id")')
   has_title=$(echo "$output" | jq '.[0] | has("title")')
   has_priority=$(echo "$output" | jq '.[0] | has("priority")')
   has_depends=$(echo "$output" | jq '.[0] | has("dependsOn")')
   has_project=$(echo "$output" | jq '.[0] | has("project")')
+  has_gate=$(echo "$output" | jq '.[0] | has("gate")')
   assert_eq "true" "$has_id" "list-ready --brief has id"
   assert_eq "true" "$has_title" "list-ready --brief has title"
   assert_eq "true" "$has_priority" "list-ready --brief has priority"
   assert_eq "true" "$has_depends" "list-ready --brief has dependsOn"
   assert_eq "true" "$has_project" "list-ready --brief has project"
+  assert_eq "true" "$has_gate" "list-ready --brief has gate"
 
   # Should NOT have description, acceptanceCriteria, status, or notes
   local has_description has_criteria has_status has_notes
@@ -1746,7 +1748,7 @@ test_validate_stories_with_valid_project() {
   "$CLI" init-session > /dev/null
 
   _setup_project_fixture '{
-  "schemaVersion": "3.1",
+  "schemaVersion": "3.2",
   "metadata": {
     "title": "feat: Project test",
     "type": "feat",
@@ -1813,7 +1815,7 @@ test_validate_stories_with_traversal_project() {
   "$CLI" init-session > /dev/null
 
   _setup_project_fixture '{
-  "schemaVersion": "3.1",
+  "schemaVersion": "3.2",
   "metadata": {
     "title": "feat: Traversal test",
     "type": "feat",
@@ -1854,7 +1856,7 @@ test_validate_stories_with_absolute_project() {
   "$CLI" init-session > /dev/null
 
   _setup_project_fixture '{
-  "schemaVersion": "3.1",
+  "schemaVersion": "3.2",
   "metadata": {
     "title": "feat: Absolute path test",
     "type": "feat",
@@ -1895,7 +1897,7 @@ test_list_ready_brief_includes_project() {
   "$CLI" init-session > /dev/null
 
   _setup_project_fixture '{
-  "schemaVersion": "3.1",
+  "schemaVersion": "3.2",
   "metadata": {
     "title": "feat: Brief project test",
     "type": "feat",
@@ -2074,6 +2076,380 @@ test_read_global_cli_cache_rejects_arbitrary() {
 }
 
 # ============================================================================
+# V3.2 Schema Tests — Gates, Waves & Field Preservation
+# ============================================================================
+
+# Helper: create a gate-test fixture and point CLI at it.
+_setup_gate_fixture() {
+  GATE_FIXTURE_FILE="$TASKS_DIR/9999-99-95-gate-test.json"
+  cat > "$GATE_FIXTURE_FILE" << 'GATEOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Gate test",
+    "type": "feat",
+    "branchName": "feat/gate-test",
+    "createdAt": "2026-03-30",
+    "planPath": null,
+    "maxConcurrency": 4
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story with decision gate",
+      "description": "Decision gate pending",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 0,
+      "gate": {
+        "type": "decision",
+        "status": "pending",
+        "prompt": "Pick approach",
+        "options": ["A", "B"]
+      }
+    },
+    {
+      "id": "US-002",
+      "title": "Story with action gate",
+      "description": "Action gate pending",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 2,
+      "status": "completed",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 0,
+      "gate": {
+        "type": "action",
+        "status": "pending",
+        "prompt": "Deploy infra"
+      }
+    },
+    {
+      "id": "US-003",
+      "title": "Story with verify gate",
+      "description": "Verify gate pending",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 3,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 0,
+      "gate": {
+        "type": "verify",
+        "status": "pending",
+        "prompt": "Check logs"
+      }
+    },
+    {
+      "id": "US-004",
+      "title": "Story depending on action-gated",
+      "description": "Depends on US-002 (action gate pending)",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 4,
+      "status": "pending",
+      "dependsOn": ["US-002"],
+      "notes": "",
+      "wave": 1
+    },
+    {
+      "id": "US-005",
+      "title": "No gate story",
+      "description": "No gate field at all",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 5,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 0
+    }
+  ]
+}
+GATEOF
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$GATE_FIXTURE_FILE" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$GATE_FIXTURE_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+_teardown_gate_fixture() {
+  rm -f "$GATE_FIXTURE_FILE"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_gate_pass() {
+  echo ""
+  echo "=== Testing gate-pass sets gate.status to passed ==="
+
+  _setup_gate_fixture
+
+  local output
+  output=$("$CLI" gate-pass US-001)
+
+  local gate_status
+  gate_status=$(echo "$output" | jq -r '.gate.status')
+  assert_eq "passed" "$gate_status" "gate-pass: gate.status set to passed"
+
+  _teardown_gate_fixture
+}
+
+test_gate_fail() {
+  echo ""
+  echo "=== Testing gate-fail sets gate.status to failed ==="
+
+  _setup_gate_fixture
+
+  local output
+  output=$("$CLI" gate-fail US-001)
+
+  local gate_status
+  gate_status=$(echo "$output" | jq -r '.gate.status')
+  assert_eq "failed" "$gate_status" "gate-fail: gate.status set to failed"
+
+  _teardown_gate_fixture
+}
+
+test_gate_pass_with_option() {
+  echo ""
+  echo "=== Testing gate-pass --option stores selected option ==="
+
+  _setup_gate_fixture
+
+  local output
+  output=$("$CLI" gate-pass US-001 --option "A")
+
+  local gate_status selected_option
+  gate_status=$(echo "$output" | jq -r '.gate.status')
+  selected_option=$(echo "$output" | jq -r '.gate.selectedOption')
+  assert_eq "passed" "$gate_status" "gate-pass --option: gate.status set to passed"
+  assert_eq "A" "$selected_option" "gate-pass --option: selectedOption is 'A'"
+
+  _teardown_gate_fixture
+}
+
+test_list_ready_decision_gate_pending() {
+  echo ""
+  echo "=== Testing list-ready excludes story with pending decision gate ==="
+
+  _setup_gate_fixture
+
+  local output
+  output=$("$CLI" list-ready)
+
+  # US-001 has decision gate pending — should be excluded
+  local us001_present
+  us001_present=$(echo "$output" | jq '[.[] | select(.id == "US-001")] | length')
+  assert_eq "0" "$us001_present" "list-ready: excludes US-001 (decision gate pending)"
+
+  # US-005 has no gate — should be included
+  local us005_present
+  us005_present=$(echo "$output" | jq '[.[] | select(.id == "US-005")] | length')
+  assert_eq "1" "$us005_present" "list-ready: includes US-005 (no gate)"
+
+  _teardown_gate_fixture
+}
+
+test_list_ready_action_gate_pending_dependency() {
+  echo ""
+  echo "=== Testing list-ready excludes story whose dependency has pending action gate ==="
+
+  _setup_gate_fixture
+
+  local output
+  output=$("$CLI" list-ready)
+
+  # US-004 depends on US-002 which has action gate pending — should be excluded
+  local us004_present
+  us004_present=$(echo "$output" | jq '[.[] | select(.id == "US-004")] | length')
+  assert_eq "0" "$us004_present" "list-ready: excludes US-004 (dep US-002 has action gate pending)"
+
+  _teardown_gate_fixture
+}
+
+test_list_ready_verify_gate_non_blocking() {
+  echo ""
+  echo "=== Testing list-ready does NOT exclude story with pending verify gate ==="
+
+  _setup_gate_fixture
+
+  local output
+  output=$("$CLI" list-ready)
+
+  # US-003 has verify gate pending — should NOT be excluded (verify is non-blocking)
+  local us003_present
+  us003_present=$(echo "$output" | jq '[.[] | select(.id == "US-003")] | length')
+  assert_eq "1" "$us003_present" "list-ready: includes US-003 (verify gate is non-blocking)"
+
+  _teardown_gate_fixture
+}
+
+test_validate_waves_correct() {
+  echo ""
+  echo "=== Testing validate-waves: correct waves pass ==="
+
+  _setup_gate_fixture
+
+  local output exit_code
+  output=$("$CLI" validate-waves) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": true' "$output" "validate-waves: correct waves pass validation"
+  assert_exit_code "0" "$exit_code" "validate-waves: exits 0 for correct waves"
+
+  _teardown_gate_fixture
+}
+
+test_validate_waves_mismatch() {
+  echo ""
+  echo "=== Testing validate-waves: mismatched waves fail ==="
+
+  # Create a fixture with wrong wave values
+  local wave_fixture="$TASKS_DIR/9999-99-94-wave-mismatch.json"
+  cat > "$wave_fixture" << 'WAVEOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Wave mismatch test",
+    "type": "feat",
+    "branchName": "feat/wave-mismatch",
+    "createdAt": "2026-03-30",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Root story",
+      "description": "No deps",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 0
+    },
+    {
+      "id": "US-002",
+      "title": "Depends on US-001",
+      "description": "Should be wave 1 but stored as 0",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 2,
+      "status": "pending",
+      "dependsOn": ["US-001"],
+      "notes": "",
+      "wave": 0
+    }
+  ]
+}
+WAVEOF
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$wave_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$wave_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-waves) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": false' "$output" "validate-waves: mismatched waves fail validation"
+  assert_contains "Wave mismatch" "$output" "validate-waves: reports wave mismatch error"
+  assert_contains "US-002" "$output" "validate-waves: identifies US-002 as mismatched"
+
+  rm -f "$wave_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_mark_complete_preserves_new_fields() {
+  echo ""
+  echo "=== Testing mark-complete preserves gate, verification, implementation, and wave fields ==="
+
+  # Create a fixture with all v3.2 fields
+  local preserve_fixture="$TASKS_DIR/9999-99-93-preserve-test.json"
+  cat > "$preserve_fixture" << 'PRESERVEOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Field preservation test",
+    "type": "feat",
+    "branchName": "feat/preserve-test",
+    "createdAt": "2026-03-30",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story with all v3.2 fields",
+      "description": "Has gate, verification, implementation, wave",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "in_progress",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 0,
+      "gate": {
+        "type": "decision",
+        "status": "passed",
+        "prompt": "Pick approach",
+        "options": ["A", "B"],
+        "selectedOption": "A"
+      },
+      "verification": {
+        "strategy": "ci",
+        "status": "pending",
+        "url": "https://ci.example.com/run/123",
+        "expect": "green"
+      },
+      "implementation": {
+        "files": ["src/main.ts", "src/utils.ts"],
+        "approach": "Refactor module X",
+        "verify": "Run npm test"
+      }
+    }
+  ]
+}
+PRESERVEOF
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$preserve_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$preserve_fixture" > "$AIMI_DIR/current-tasks"
+
+  # Mark story complete
+  "$CLI" mark-complete US-001 > /dev/null
+
+  # Read the file and verify all fields are preserved
+  local story
+  story=$(jq '.userStories[] | select(.id == "US-001")' "$preserve_fixture")
+
+  local status wave gate_type gate_status gate_option verify_strategy impl_approach
+  status=$(echo "$story" | jq -r '.status')
+  wave=$(echo "$story" | jq -r '.wave')
+  gate_type=$(echo "$story" | jq -r '.gate.type')
+  gate_status=$(echo "$story" | jq -r '.gate.status')
+  gate_option=$(echo "$story" | jq -r '.gate.selectedOption')
+  verify_strategy=$(echo "$story" | jq -r '.verification.strategy')
+  impl_approach=$(echo "$story" | jq -r '.implementation.approach')
+
+  assert_eq "completed" "$status" "mark-complete preserves: status is completed"
+  assert_eq "0" "$wave" "mark-complete preserves: wave field preserved"
+  assert_eq "decision" "$gate_type" "mark-complete preserves: gate.type preserved"
+  assert_eq "passed" "$gate_status" "mark-complete preserves: gate.status preserved"
+  assert_eq "A" "$gate_option" "mark-complete preserves: gate.selectedOption preserved"
+  assert_eq "ci" "$verify_strategy" "mark-complete preserves: verification.strategy preserved"
+  assert_eq "Refactor module X" "$impl_approach" "mark-complete preserves: implementation.approach preserved"
+
+  # Verify implementation.files array is preserved
+  local files_count
+  files_count=$(echo "$story" | jq '.implementation.files | length')
+  assert_eq "2" "$files_count" "mark-complete preserves: implementation.files array preserved"
+
+  rm -f "$preserve_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -2188,6 +2564,19 @@ main() {
   test_validate_stories_with_traversal_project
   test_validate_stories_with_absolute_project
   test_list_ready_brief_includes_project
+
+  # V3.2 schema tests — gates, waves & field preservation
+  echo ""
+  echo "--- V3.2 Schema Tests ---"
+  test_gate_pass
+  test_gate_fail
+  test_gate_pass_with_option
+  test_list_ready_decision_gate_pending
+  test_list_ready_action_gate_pending_dependency
+  test_list_ready_verify_gate_non_blocking
+  test_validate_waves_correct
+  test_validate_waves_mismatch
+  test_mark_complete_preserves_new_fields
 
   # CLI output optimization tests — run with fresh fixture each time
   echo ""
