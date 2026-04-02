@@ -99,6 +99,18 @@ Merge the results from whichever agents completed successfully. Handle all four 
 
 **Conflict surfacing:** When both agents succeed, compare their findings. If internal codebase patterns diverge from external best practices (e.g., the codebase uses pattern A but best practices recommend pattern B), capture each conflict as a candidate question for Phase 2. Present these as explicit choices: "The codebase currently uses [X], but industry best practices recommend [Y]. Which approach should we follow?"
 
+### Quality Gate: Research Adequacy
+
+Before generating questions, review the research output from Phase 1.
+
+**Check:** Did research produce at least one **actionable finding** — a specific file path, pattern name, technology reference, or best practice?
+
+- **If yes:** Proceed to Phase 2 normally. Research findings inform question generation.
+- **If no (and research was run):** Use a conversational nudge before continuing:
+  > "Before we continue, I notice the research didn't surface concrete patterns or references in the codebase. Could you point me to any relevant files or existing features I should look at? Or if you'd prefer, we can proceed with general exploration."
+  Accept the user's response (additional context or confirmation to proceed) and continue to Phase 2.
+- **If research was skipped by specificity logic (Step 1a):** This gate is **advisory only** — the user already provided specific details that made research unnecessary. Proceed to Phase 2 without prompting.
+
 ## Phase 2: Batched Questions
 
 Using the user's feature description and consolidated research findings (from Step 1c), generate **3-5 batched multiple-choice questions**. Include any conflict-based questions surfaced during consolidation.
@@ -176,6 +188,25 @@ After each response, assess which topic categories remain unaddressed:
 - **If all 7 key topics covered** OR **user says "proceed"/"let's move on"** → advance to Phase 3
 - **If topics remain uncovered** AND **under 4 rounds** → generate follow-up batch targeting uncovered topics
 - **If 4 rounds completed** → advance to Phase 3 regardless
+
+### Quality Gate: Topic Coverage
+
+Before advancing to Phase 3, check whether the **minimum topic categories** have been addressed across all Phase 2 rounds:
+
+**Required categories:** Purpose, Users, Success
+
+Review the user's answers across all rounds. A category counts as addressed if the user provided any relevant information — even brief or partial.
+
+- **If all three are addressed:** Proceed to Phase 3 (or skip it per its own rules).
+- **If any are missing:** Issue a **one-time** conversational warning listing the gaps:
+  > "Before we continue, I notice we haven't covered [list uncovered categories, e.g., 'who the target users are' or 'how we'd measure success']. Want to explore those, or should we proceed?"
+  - If the user provides answers, incorporate them and proceed.
+  - If the user says "proceed", "let's move on", or similar, accept the override and proceed.
+  - **Do not repeat this warning** — it fires at most once per session.
+
+**Precedence rules:**
+- A user "proceed" directive always takes precedence over this gate.
+- The 4-round limit takes precedence over this gate — if 4 rounds are completed, proceed regardless.
 
 ## Phase 3: Resolve Approach (Fallback)
 
@@ -270,17 +301,23 @@ topic: <topic-slug>
 2. Move resolved questions to a "Resolved Questions" section
 3. Only proceed when Open Questions is empty or user explicitly defers them
 
-### Pre-Save Checklist
+### Pre-Save Checklist (Blocking with Override)
 
-Before writing the document, verify:
+Before writing the document, verify **all** of the following criteria. If any criterion fails, pause and ask the user before saving — do not silently skip.
 
 - [ ] All critical topics addressed (Purpose, Users, Success at minimum)
 - [ ] Open Questions resolved or explicitly deferred
+- [ ] At least 2 approaches compared in the "Why This Approach" section **OR** explicit justification that only one viable approach exists (e.g., "Single obvious approach: [reason]")
 - [ ] Document uses correct frontmatter (date, topic)
 - [ ] Next Steps references `/aimi:plan`
 - [ ] Directory `.aimi/brainstorms/` exists
 - [ ] No filename collision (append counter if needed)
 - [ ] YAGNI applied — no unnecessary complexity
+
+**On failure:** Use a conversational nudge for each unmet criterion:
+> "Before I save the document, I noticed [specific gap]. For example: 'we only explored one approach without noting why alternatives weren't considered.' Want to address that, or should I save as-is?"
+
+Accept the user's override ("save as-is", "proceed", etc.) and continue. The goal is awareness, not obstruction.
 
 ## Phase 5: Handoff
 
@@ -332,4 +369,5 @@ To start planning: `/aimi:plan`
 - **Apply YAGNI** — prefer simpler approaches
 - **Keep outputs concise** — 200-300 words per section max
 - **Never code** — just explore and document decisions
+- **Gate state persistence** — Gate state persists across "Continue brainstorming" re-entry. Topics covered in the original session remain covered and are not re-checked. The Topic Coverage warning does not fire again if it already fired once in the session.
 
