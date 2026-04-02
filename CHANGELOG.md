@@ -11,17 +11,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **schema**: `researchDepth` metadata field for controlling research thoroughness (quick, standard, deep)
+- **schema**: `wave` field on stories for explicit wave assignment and parallel execution grouping
+- **schema**: `implementation` object on stories with `files`, `approach`, and `verify` fields for structured implementation guidance
+- **schema**: `verification` object on stories with `strategy`, `status`, `url`, and `expect` fields for post-execution verification
+- **schema**: `gate` object on stories with `type`, `status`, `prompt`, and `options` fields for decision/action/verify gates
+- **aimi-cli**: `gate-pass` command to resolve a gate as passed
+- **aimi-cli**: `gate-fail` command to resolve a gate as failed
+- **aimi-cli**: `validate-waves` validator for checking wave assignment consistency and dependency ordering
+- **aimi-cli**: `update-field` command for updating nested story fields (e.g., `verification.status`)
 - **execute**: Gate handling in wave execution loop — decision gates block story start with log message, action gates log post-completion with dependent pause, verify gates log as non-blocking
 - **execute**: Gate-blocked story detection — differentiates gate-blocked from true deadlocks when no stories are ready
 - **execute**: Wave summary includes gate status counts (action/verify gates pending)
 - **execute**: Completion summary includes pending gate inventory with resolution instructions
 - **execute**: Executor updates `verification.status` to `passed` when story-executor reports verification success
-- **aimi-cli**: New `update-field` command for updating nested story fields (e.g., `verification.status`)
-
-## [1.35.1] - 2026-04-02
 
 ### Changed
 
+- **schema**: Schema version bumped from 3.1 to 3.2
+- **execute**: `list-ready` gate filtering — stories with pending gates excluded from ready list
 - **story-executor**: Prompt template now includes `implementation.files` (Key Files), `implementation.approach` (Approach), `implementation.verify` (Verification Command), and `verification.strategy`/`verification.expect` (Verification) sections when present in v3.2 story data
 - **story-executor**: Story format summary in SKILL.md updated with `implementation` and `verification` field descriptions
 - **story-executor**: execution-rules.md inline JSON example updated with `implementation` and `verification` objects
