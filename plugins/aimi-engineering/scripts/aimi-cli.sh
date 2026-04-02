@@ -1228,6 +1228,42 @@ cmd_gate_fail() {
   jq --arg id "$story_id" '.userStories[] | select(.id == $id) | {id, gate}' "$tasks_file"
 }
 
+# Update a nested field on a story
+# Usage: update-field US-NNN field.path value
+# Supports dotted paths like "verification.status"
+cmd_update_field() {
+  local story_id="$1"
+  local field_path="$2"
+  local value="$3"
+
+  if [ -z "$story_id" ] || [ -z "$field_path" ] || [ -z "$value" ]; then
+    echo "Usage: aimi-cli.sh update-field <story-id> <field.path> <value>" >&2
+    exit 1
+  fi
+
+  validate_story_id "$story_id"
+
+  local tasks_file
+  tasks_file=$(get_tasks_file)
+  validate_story_exists "$story_id" "$tasks_file"
+
+  # Build jq path from dotted notation (e.g., "verification.status" -> .verification.status)
+  local jq_path
+  jq_path=$(printf '%s' "$field_path" | sed 's/\./\n/g' | while read -r part; do printf '.%s' "$part"; done)
+
+  local tmp_file
+  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  (
+    _lock "${tasks_file}.lock"
+    jq --arg id "$story_id" --arg val "$value" \
+      "(.userStories[] | select(.id == \$id) | ${jq_path}) = \$val" \
+      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+  ) 200>"${tasks_file}.lock"
+  rm -f "$tmp_file" 2>/dev/null
+
+  jq --arg id "$story_id" ".userStories[] | select(.id == \$id) | {id, ${field_path%%.*}}" "$tasks_file"
+}
+
 # Validate waves: compute waves from dependsOn, compare to stored wave, report mismatches
 cmd_validate_waves() {
   local tasks_file
@@ -1315,6 +1351,8 @@ COMMANDS:
     gate-pass <id> [--option 'value']
                               Pass a gate on a story; optionally store selected option
     gate-fail <id>            Fail a gate on a story
+    update-field <id> <field.path> <value>
+                              Update a nested field on a story (e.g., verification.status passed)
     validate-waves            Compute waves from dependsOn, compare to stored wave, report mismatches
     cascade-skip <id>         Skip all stories depending on failed story
     reset-orphaned            Reset all in_progress stories to failed
@@ -1414,6 +1452,7 @@ main() {
     validate-ids)      cmd_validate_ids ;;
     gate-pass)         shift; cmd_gate_pass "$@" ;;
     gate-fail)         cmd_gate_fail "${2:-}" ;;
+    update-field)      cmd_update_field "${2:-}" "${3:-}" "${4:-}" ;;
     validate-waves)    cmd_validate_waves ;;
     cascade-skip)      cmd_cascade_skip "${2:-}" ;;
     reset-orphaned)    cmd_reset_orphaned ;;

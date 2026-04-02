@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.36.0] - 2026-04-02
+
+### Added
+
+- **execute**: Gate handling in wave execution loop — decision gates block story start with log message, action gates log post-completion with dependent pause, verify gates log as non-blocking
+- **execute**: Gate-blocked story detection — differentiates gate-blocked from true deadlocks when no stories are ready
+- **execute**: Wave summary includes gate status counts (action/verify gates pending)
+- **execute**: Completion summary includes pending gate inventory with resolution instructions
+- **execute**: Executor updates `verification.status` to `passed` when story-executor reports verification success
+- **aimi-cli**: New `update-field` command for updating nested story fields (e.g., `verification.status`)
+
 ## [1.35.1] - 2026-04-02
 
 ### Changed
