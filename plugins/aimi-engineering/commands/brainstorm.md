@@ -107,12 +107,23 @@ Using the user's feature description and consolidated research findings (from St
 
 - Questions are informed by research findings when available (contextual options)
 - Fall back to generic topic-based questions when research is empty
-- Cover topic categories: Purpose, Users, Constraints, Success, Edge Cases, Existing Patterns
+- Cover topic categories: Purpose, Users, Constraints, Success, Edge Cases, Existing Patterns, Approach
 - 3-4 options per question (not more)
 - Question text under 20 words
 - Option text under 15 words
 - Every question includes an "Other: [please specify]" escape hatch
 - When research returns findings, make option A the "follow existing pattern" choice and reference specific patterns found by the research agent in the question text
+
+#### Approach Questions
+
+When consolidated research (Step 1c) reveals **multiple valid approaches**, include **one** approach selection question in the current batch. Rules:
+
+- Options are derived from research findings, each with a brief tradeoff hint (e.g., "Event-driven — scales independently, more complex")
+- Follow standard format: 3-4 options, under 20 words question text, under 15 words per option, last option is "Other: [please specify]"
+- Maximum **1 approach question per batch** — do not crowd out other topic categories
+- **Do NOT generate an approach question when:**
+  - Research context is insufficient (both agents failed/skipped or returned no approach-relevant findings) — rely on Phase 3 fallback instead
+  - Research reveals a clearly superior single approach — skip the question and let Phase 3 handle it (or skip entirely)
 
 ### Present Questions
 
@@ -160,8 +171,9 @@ After each response, assess which topic categories remain unaddressed:
 | Success | Measurable outcome defined |
 | Edge Cases | Error states/boundaries discussed |
 | Existing Patterns | Codebase context available (from research or user) |
+| Approach | At least one approach preference expressed by user via selection or free-form response |
 
-- **If all key topics covered** OR **user says "proceed"/"let's move on"** → advance to Phase 3
+- **If all 7 key topics covered** OR **user says "proceed"/"let's move on"** → advance to Phase 3
 - **If topics remain uncovered** AND **under 4 rounds** → generate follow-up batch targeting uncovered topics
 - **If 4 rounds completed** → advance to Phase 3 regardless
 
