@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **brainstorm**: Decoupled specificity-skip logic — codebase and best-practices researchers assessed independently with distinct skip criteria
 - **brainstorm**: Research Consolidation step (1c) merges internal patterns and external best practices, surfaces conflicts as candidate Phase 2 questions
 - **brainstorm**: Graceful degradation for all 4 research permutations (both succeed, either fails/skipped, both fail)
+- **brainstorm**: Approach-in-questions integration — Phase 2 includes approach selection questions when research reveals multiple valid approaches, with tradeoff hints per option
+- **brainstorm**: Phase 3 Resolve Approach fallback — lightweight approach resolution only when not addressed in Phase 2, with skip conditions for already-resolved or single-obvious-approach cases
+- **brainstorm**: Progressive quality gates — Research Adequacy gate (Phase 1→2), Topic Coverage gate (Phase 2→3/4), and Pre-Save Checklist (Phase 4) with conversational nudges and user override support
+- **brainstorm**: Document template "Why This Approach" guidance updated for 3 resolution paths (Phase 2 questions, Phase 3 fallback, single obvious approach with justification)
+- **brainstorm**: Error handling table expanded with quality gate failure scenarios and research agent failure combinations
 
 ## [1.34.0] - 2026-03-31
 

@@ -280,7 +280,10 @@ topic: <topic-slug>
 [Concise description from brainstorm dialogue]
 
 ## Why This Approach
-[Approaches considered, rationale for choice — or "Single obvious approach" if Phase 3 was skipped]
+[Fill based on how the approach was resolved:
+ - **Resolved in Phase 2 questions:** "User selected [approach] during exploration. Alternatives considered: [list from question options]. Rationale: [user's reasoning or tradeoff that drove the selection]."
+ - **Resolved in Phase 3 fallback:** "Approaches compared: [list]. Recommendation was [approach] because [rationale]. User confirmed."
+ - **Single obvious approach:** "Single obvious approach: [approach]. [Why alternatives were not viable or relevant — e.g., codebase already uses this pattern, only one technology fits the constraint, etc.]"]
 
 ## Key Decisions
 - [Decision 1]: [Rationale]
@@ -359,6 +362,9 @@ To start planning: `/aimi:plan`
 | Phase 1 | Best-practices researcher fails or times out | Proceed with codebase results only (or generic if both fail) |
 | Phase 1 | Both researchers fail | Proceed with generic topic-based questions |
 | Phase 1 | Greenfield project (no codebase) | Codebase researcher returns empty; best-practices results used if available |
+| Phase 1→2 | Research Adequacy gate — no actionable findings | Conversational nudge asking user for context; accept response or override and proceed |
+| Phase 2→3/4 | Topic Coverage gate — required categories missing | One-time warning listing gaps; accept user answers or override to proceed |
+| Phase 4 | Pre-Save Checklist — criterion not met | Conversational nudge per unmet criterion; accept user override ("save as-is") and continue |
 | Phase 4 | `.aimi/brainstorms/` directory creation fails | Report error with path |
 | Phase 4 | File write fails | Report error; no document saved |
 | Phase 4 | Filename collision | Append counter (-2, -3) to filename |
