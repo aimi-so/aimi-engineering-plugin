@@ -85,7 +85,7 @@ Learnings are stored in project files (not separate progress log):
 
 ## Tasks File Schema
 
-> Key fields: `schemaVersion` ("3.1"), `metadata{title,type,branchName,maxConcurrency}`, `userStories[]{id(US-NNN),title,description,acceptanceCriteria,status,dependsOn,project}`
+> Key fields: `schemaVersion` ("3.2"), `metadata{title,type,branchName,researchDepth,maxConcurrency}`, `userStories[]{id(US-NNN),title,description,acceptanceCriteria,status,dependsOn,project,wave,implementation,verification,gate}`
 > The `project` field is optional on stories — when present, it specifies the relative path from AIMI_ROOT to the target git repository for multi-repo execution.
 
 
