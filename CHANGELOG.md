@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.35.0] - 2026-04-02
+
+### Added
+
+- **brainstorm**: Parallel best-practices research in Phase 1 — spawns aimi-best-practices-researcher alongside aimi-codebase-researcher
+- **brainstorm**: Decoupled specificity-skip logic — codebase and best-practices researchers assessed independently with distinct skip criteria
+- **brainstorm**: Research Consolidation step (1c) merges internal patterns and external best practices, surfaces conflicts as candidate Phase 2 questions
+- **brainstorm**: Graceful degradation for all 4 research permutations (both succeed, either fails/skipped, both fail)
+
 ## [1.34.0] - 2026-03-31
 
 ### Added
