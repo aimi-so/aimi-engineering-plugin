@@ -74,9 +74,22 @@ This returns the next pending story as JSON. Fields depend on schema version:
   "priority": 1,
   "status": "pending",
   "dependsOn": [],
-  "notes": ""
+  "notes": "",
+  "wave": 1,
+  "implementation": {
+    "files": ["src/db/schema.ts"],
+    "approach": "Add user table with Drizzle ORM",
+    "verify": "npm test"
+  },
+  "gate": {
+    "type": "decision",
+    "status": "pending",
+    "prompt": "Approve schema design before proceeding"
+  }
 }
 ```
+
+> The `implementation` and `gate` fields are optional in schema v3.2. Include them in the display only when present in the story JSON.
 
 If result is `null`:
 ```
@@ -118,6 +131,22 @@ Acceptance Criteria:
 - [criterion 1]
 - [criterion 2]
 ...
+```
+
+If the story has an `implementation` field, also display:
+
+```
+Implementation Hints:
+- Files: [implementation.files joined by ", "]
+- Approach: [implementation.approach]
+- Verify: [implementation.verify]
+```
+
+If the story has a `gate` field, also display:
+
+```
+Gate: [gate.type] ([gate.status])
+- [gate.prompt]
 ```
 
 ## Step 4: Build Worker Prompt

@@ -70,7 +70,17 @@ If a story appears too large for one context window:
 - **Split priority format:** If original priority is 3, split gets 3 and 3.5
 - Each split story must be independently completable
 
-### 4c: Add Research Notes
+### 4c: Enrich Implementation
+
+For each pending story, populate or merge the `implementation` object:
+
+- **If `implementation` is absent:** Create it from research results with `files`, `approach`, and `verify` fields.
+- **If `implementation` already exists:**
+  - `files`: Append newly discovered file paths. Deduplicate the array (no repeated entries).
+  - `approach`: Overwrite only if the research yields a more specific or detailed approach. If the existing approach is already specific, keep it.
+  - `verify`: Overwrite only if the research yields a more specific verification command. If the existing verify is already specific, keep it.
+
+### 4d: Add Research Notes
 Populate the `notes` field with useful context:
 - Relevant file paths discovered by research
 - Patterns to follow
