@@ -177,11 +177,22 @@ After each response, assess which topic categories remain unaddressed:
 - **If topics remain uncovered** AND **under 4 rounds** → generate follow-up batch targeting uncovered topics
 - **If 4 rounds completed** → advance to Phase 3 regardless
 
-## Phase 3: Explore Approaches (Conditional)
+## Phase 3: Resolve Approach (Fallback)
 
-**Only propose approaches when research + answers reveal multiple genuinely valid paths.** Skip this phase when there is one obvious direction.
+This phase activates **only** when the Approach topic category was **not** addressed during Phase 2 rounds. It is a lightweight fallback, not a repeat of Phase 2.
 
-If proposing approaches, present 2-3 with:
+### Skip Conditions
+
+Skip Phase 3 when **either** condition is true:
+
+1. **Approach resolved in Phase 2** — The user selected or expressed an approach preference during any Phase 2 round (via an approach question or free-form response). Carry that selection forward as the chosen direction for the Phase 4 document.
+2. **One obvious direction** — Research and answers point to a single clear path with no viable alternatives.
+
+When skipped, proceed directly to Phase 4. If the approach was resolved in Phase 2, use that selection as the chosen direction in the "Why This Approach" section of the design document.
+
+### When Phase 3 Triggers
+
+If the Approach category remains unaddressed after all Phase 2 rounds complete, present 2-3 approaches with:
 - Brief description (2-3 sentences)
 - Pros and cons
 - When it's best suited
