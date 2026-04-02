@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.35.1] - 2026-04-02
+
+### Changed
+
+- **story-executor**: Prompt template now includes `implementation.files` (Key Files), `implementation.approach` (Approach), `implementation.verify` (Verification Command), and `verification.strategy`/`verification.expect` (Verification) sections when present in v3.2 story data
+- **story-executor**: Story format summary in SKILL.md updated with `implementation` and `verification` field descriptions
+- **story-executor**: execution-rules.md inline JSON example updated with `implementation` and `verification` objects
+
 ## [1.35.0] - 2026-04-02
 
 ### Added

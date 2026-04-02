@@ -27,7 +27,7 @@ Execute ONE story from the tasks file:
 ## Story Format
 
 > Each story is one atomic unit of work completable in a single agent iteration.
-> Key fields: `id(US-NNN)`, `title(<=200)`, `description(<=500)`, `acceptanceCriteria(each<=600)`, `priority`, `status`, `dependsOn([])`, `notes`, `project(optional, relative path for multi-repo)`
+> Key fields: `id(US-NNN)`, `title(<=200)`, `description(<=500)`, `acceptanceCriteria(each<=600)`, `priority`, `status`, `dependsOn([])`, `notes`, `project(optional, relative path for multi-repo)`, `implementation{files[], approach, verify}(optional)`, `verification{strategy, status, url?, expect?}(optional)`
 
 ---
 
@@ -105,6 +105,23 @@ Description: [STORY_DESCRIPTION]
 ## Acceptance Criteria
 
 [ACCEPTANCE_CRITERIA_BULLETED]
+
+## Key Files (if implementation.files present)
+
+[implementation.files — bulleted list of file paths the story is expected to touch]
+
+## Approach (if implementation.approach present)
+
+[implementation.approach — brief description of the implementation approach]
+
+## Verification Command (if implementation.verify present)
+
+[implementation.verify — command or instruction to verify the implementation]
+
+## Verification (if verification.strategy present)
+
+Strategy: [verification.strategy]
+Expected: [verification.expect — omit line if absent]
 
 ## Previous Notes (if non-empty)
 

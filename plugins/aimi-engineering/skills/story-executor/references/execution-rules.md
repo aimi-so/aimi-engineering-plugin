@@ -21,7 +21,17 @@ Each story is executed by a Task-spawned agent with fresh context. This document
   "priority": 1,
   "status": "pending",
   "dependsOn": [],
-  "notes": ""
+  "notes": "",
+  "implementation": {
+    "files": ["src/db/migrations/001_add_status.sql", "src/db/schema.ts"],
+    "approach": "Add status enum column with default 'pending'",
+    "verify": "npm run db:migrate && npm test"
+  },
+  "verification": {
+    "strategy": "test",
+    "status": "pending",
+    "expect": "Migration runs and all tests pass"
+  }
 }
 ```
 
