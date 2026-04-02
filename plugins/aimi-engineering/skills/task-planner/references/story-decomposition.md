@@ -196,6 +196,107 @@ Parallel groups:
 
 ---
 
+## Wave Computation
+
+Each story is assigned a **wave number** that determines its execution group. Stories in the same wave can run in parallel; stories in later waves wait for earlier waves to complete.
+
+### Algorithm
+
+1. Initialize a wave map: `{story_id -> wave_number}`
+2. Stories with empty `dependsOn` are **wave 1** (root stories)
+3. For each remaining story: `wave = max(wave(dep) for dep in dependsOn) + 1`
+4. If a dependency's wave is not yet assigned, resolve dependencies first (topological order)
+
+### Rules
+
+- **Roots = wave 1**: Any story with `dependsOn: []` is a root and belongs to wave 1
+- **Derived wave**: A story's wave is always one greater than the highest wave among its dependencies
+- **No gaps**: Wave numbers are contiguous (1, 2, 3, ...) — there are no skipped wave numbers
+- **Parallel within wave**: All stories in the same wave are structurally independent of each other and can execute concurrently (subject to `maxConcurrency`)
+
+### Example
+
+```
+US-001  dependsOn: []              -> wave 1
+US-002  dependsOn: []              -> wave 1
+US-003  dependsOn: [US-001]        -> wave 2
+US-004  dependsOn: [US-002]        -> wave 2
+US-005  dependsOn: [US-003, US-004] -> wave 3
+```
+
+Wave 1: US-001, US-002 (parallel). Wave 2: US-003, US-004 (parallel). Wave 3: US-005.
+
+---
+
+## Gate Detection
+
+Gates are special markers on stories that signal the executor to pause and request human intervention before proceeding. The planner detects gates from the story's context and acceptance criteria.
+
+### Gate Types and Heuristics
+
+| Gate Type | Trigger Heuristics | Example |
+|-----------|-------------------|---------|
+| `verify` | Story involves OAuth, email delivery, webhooks, third-party API integration, or any external service that requires manual confirmation | "Verify OAuth callback works with Google" |
+| `decision` | Multiple viable implementation approaches exist and the choice has significant downstream impact; the planner cannot determine the best path without human input | "Choose between REST and GraphQL for the public API" |
+| `action` | Story requires an external manual action that the agent cannot perform (e.g., DNS configuration, app store submission, manual server provisioning) | "Configure DNS A record for production domain" |
+
+### Detection Rules
+
+1. **Verify gate**: If acceptance criteria reference OAuth flows, email sending/receiving, webhook endpoints, payment processing, or SMS delivery, add `"gate": "verify"`.
+2. **Decision gate**: If the codebase research surfaces multiple architecturally distinct approaches and the story title or description implies a choice, add `"gate": "decision"`. Do NOT add a decision gate when one approach is clearly superior.
+3. **Action gate**: If completing the story requires a human to perform an action outside the codebase (deploy, configure infrastructure, approve access), add `"gate": "action"`.
+4. **No gate**: Most stories have no gate. Only add a gate when the heuristics clearly match. When in doubt, omit the gate.
+
+---
+
+## Implementation Hints
+
+The `implementationHints` object provides the executing agent with a head start by narrowing scope and suggesting an approach. The planner populates this from prior research phases.
+
+### Field Population Guidance
+
+| Sub-field | Source | How to Populate |
+|-----------|--------|----------------|
+| `files` | Codebase research output | List the specific file paths (relative to project root) that the agent will need to read or modify. Pull these from the codebase researcher's file inventory. Include only files directly relevant to this story — not the entire research output. |
+| `approach` | Best practices and codebase patterns | Summarize the recommended implementation strategy in 1-3 sentences. Reference specific patterns found in the codebase (e.g., "Follow the existing server action pattern in `actions/tasks.ts`"). Draw from best-practice research when introducing new patterns. |
+| `verify` | Acceptance criteria | Map each acceptance criterion to a concrete verification step. For testable criteria, specify the test command or assertion. For visual criteria, specify what to check in the browser. |
+
+### Rules
+
+- **`files` must be concrete**: Use actual file paths discovered during research, not placeholders like "the relevant file". If research did not identify files, omit the field rather than guessing.
+- **`approach` must be actionable**: Describe what to do, not what to consider. Bad: "Think about whether to use a server action." Good: "Create a server action in `actions/notifications.ts` following the pattern in `actions/tasks.ts`."
+- **`verify` must be executable**: Each entry should be something the agent can run or check. Bad: "Make sure it works." Good: "Run `npx jest notifications.test.ts` and confirm all tests pass."
+
+---
+
+## Verification Strategy Assignment
+
+Each story receives a `verification` field that tells the executor how to confirm the story is complete. The planner assigns this based on the story's layer and content.
+
+### Assignment Rules
+
+| Story Type | Verification Strategy | When to Use |
+|------------|----------------------|-------------|
+| `test` | Run automated tests | Backend logic, server actions, utility functions, data transformations, business rules — any story where correctness can be asserted programmatically |
+| `visual` | Manual browser inspection | UI components, layout changes, styling, animations, responsive behavior — any story where the output is visual |
+| `api` | Hit endpoint and check response | API routes, REST endpoints, GraphQL resolvers — any story that exposes an HTTP interface |
+| `typecheck` | Run `tsc --noEmit` | Schema changes, type definitions, refactors that only affect types — stories with no runtime behavior to test |
+
+### Fallback Logic
+
+1. If the story touches an API endpoint → `api`
+2. If the story modifies UI components or pages → `visual`
+3. If the story contains backend logic or services → `test`
+4. If none of the above match → `typecheck`
+
+### Combining Strategies
+
+A story may warrant multiple strategies. When this happens, list the primary strategy first:
+- A server action with a UI form: `["test", "visual"]`
+- An API endpoint with a frontend consumer: `["api", "visual"]`
+
+---
+
 ## Acceptance Criteria Generation
 
 Each criterion must be something the agent can CHECK, not something vague.
@@ -332,3 +433,27 @@ Before finalizing stories, verify:
 - [ ] No duplicate priority numbers
 - [ ] Priority values are consistent with dependency depth (earlier layers get lower values)
 - [ ] Priority serves as tiebreaker only — execution order is driven by `dependsOn`
+
+### Waves
+- [ ] Every root story (empty `dependsOn`) is wave 1
+- [ ] Each non-root story's wave = max(wave of dependencies) + 1
+- [ ] Wave numbers are contiguous with no gaps
+- [ ] Stories within the same wave have no mutual dependencies
+
+### Gates
+- [ ] `verify` gate is set for stories involving OAuth, email, webhooks, or external service integration
+- [ ] `decision` gate is set only when multiple viable approaches exist with significant downstream impact
+- [ ] `action` gate is set for stories requiring external manual actions the agent cannot perform
+- [ ] No gate is set when heuristics do not clearly match
+
+### Implementation Hints
+- [ ] `files` lists concrete file paths from codebase research (no placeholders)
+- [ ] `approach` is actionable and references specific codebase patterns
+- [ ] `verify` entries are executable commands or checkable assertions
+
+### Verification Strategy
+- [ ] Backend/logic stories use `test` verification
+- [ ] UI stories use `visual` verification
+- [ ] API endpoint stories use `api` verification
+- [ ] Type-only stories use `typecheck` verification
+- [ ] Combined strategies list primary strategy first
