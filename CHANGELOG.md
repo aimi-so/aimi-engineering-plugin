@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.37.0] - 2026-04-06
+
+### Added
+
+- **commands**: `/aimi:open-pr` command for opening pull requests from executed task branches with structured PR descriptions
+
 ## [1.36.0] - 2026-04-02
 
 ### Added
