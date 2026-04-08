@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.38.0] - 2026-04-07
+
+### Added
+
+- **execute**: Commit verification after Task execution — captures HEAD SHA before each Task spawn and compares after success; stories with no commit are marked as failed with cascade-skip instead of silently completing
+- **execute**: Parallel worktree commit verification — captures base SHA per project group before worktree creation, filters out no-commit stories before merge step
+
 ## [1.37.0] - 2026-04-06
 
 ### Added
