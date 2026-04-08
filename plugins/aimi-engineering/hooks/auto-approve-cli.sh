@@ -94,7 +94,8 @@ if echo "$COMMAND" | grep -qE '^\$AIMI_CLI\b|^\$\{AIMI_CLI\}'; then
     list-ready|mark-in-progress|mark-complete|mark-failed|mark-skipped|\
     count-pending|validate-deps|validate-stories|cascade-skip|reset-orphaned|\
     get-branch|get-state|clear-state|help|\
-    check-version|cleanup-versions)
+    check-version|cleanup-versions|\
+    list-archivable|archive-task)
       echo "$ALLOW"
       exit 0
       ;;

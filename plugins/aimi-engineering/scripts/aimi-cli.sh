@@ -1322,6 +1322,149 @@ cmd_validate_waves() {
   ' "$tasks_file"
 }
 
+# List task files where all stories have terminal status (completed or skipped)
+# Returns a JSON array of file paths
+cmd_list_archivable() {
+  local result="["
+  local first=true
+
+  for tasks_file in "$TASKS_DIR"/*-tasks.json; do
+    # Skip if glob didn't expand
+    [ -f "$tasks_file" ] || continue
+
+    # Check if ALL stories have terminal status (completed or skipped)
+    local non_terminal
+    non_terminal=$(jq '[.userStories[] | select(.status != "completed" and .status != "skipped")] | length' "$tasks_file" 2>/dev/null)
+
+    # Skip files that aren't valid JSON or have non-terminal stories
+    [ -z "$non_terminal" ] && continue
+    [ "$non_terminal" -ne 0 ] && continue
+
+    # Also skip files with zero stories (empty array)
+    local total
+    total=$(jq '.userStories | length' "$tasks_file" 2>/dev/null)
+    [ -z "$total" ] && continue
+    [ "$total" -eq 0 ] && continue
+
+    local resolved
+    resolved=$(resolve_path "$tasks_file")
+    if [ "$first" = true ]; then
+      first=false
+    else
+      result="$result,"
+    fi
+    result="$result$(printf '"%s"' "$resolved")"
+  done
+
+  result="$result]"
+  echo "$result"
+}
+
+# Archive a task file (and linked brainstorm) to .aimi/archive/
+# Usage: archive-task <path>
+cmd_archive_task() {
+  local task_path="$1"
+
+  if [ -z "$task_path" ]; then
+    echo "Usage: aimi-cli.sh archive-task <path>" >&2
+    exit 1
+  fi
+
+  # Resolve and validate path
+  if [ ! -f "$task_path" ]; then
+    echo "Error: Task file not found: $task_path" >&2
+    exit 1
+  fi
+
+  local resolved_task
+  resolved_task=$(resolve_path "$task_path")
+  validate_path_in_project "$resolved_task"
+
+  # Verify all stories are terminal
+  local non_terminal
+  non_terminal=$(jq '[.userStories[] | select(.status != "completed" and .status != "skipped")] | length' "$resolved_task" 2>/dev/null)
+  if [ -z "$non_terminal" ] || [ "$non_terminal" -ne 0 ]; then
+    echo "Error: Task file has non-terminal stories — cannot archive" >&2
+    exit 1
+  fi
+
+  # Create archive directory
+  local archive_dir="$AIMI_DIR/archive"
+  mkdir -p "$archive_dir"
+
+  # Helper: move a file to archive with collision handling
+  # Usage: _archive_move <source_path>
+  # Outputs the destination path
+  _archive_move() {
+    local src="$1"
+    local basename
+    basename=$(basename "$src")
+    local dest="$archive_dir/$basename"
+
+    if [ ! -e "$dest" ]; then
+      mv "$src" "$dest"
+      printf '%s' "$dest"
+      return
+    fi
+
+    # Handle collision: append -N suffix before extension
+    local name_no_ext ext
+    # Split on first dot for files like foo-tasks.json
+    name_no_ext="${basename%%.*}"
+    ext="${basename#"$name_no_ext"}"  # includes leading dot(s)
+
+    local n=2
+    while true; do
+      dest="$archive_dir/${name_no_ext}-${n}${ext}"
+      if [ ! -e "$dest" ]; then
+        mv "$src" "$dest"
+        printf '%s' "$dest"
+        return
+      fi
+      n=$((n + 1))
+    done
+  }
+
+  # Move the task file
+  local archived_task
+  archived_task=$(_archive_move "$resolved_task")
+
+  # Move companion .lock file if it exists
+  if [ -f "${resolved_task}.lock" ]; then
+    _archive_move "${resolved_task}.lock" > /dev/null
+  fi
+
+  # Move linked brainstorm if specified in metadata
+  local brainstorm_path archived_brainstorm=""
+  brainstorm_path=$(jq -r '.metadata.brainstormPath // empty' "$archived_task" 2>/dev/null)
+
+  if [ -n "$brainstorm_path" ]; then
+    # Resolve relative to project root
+    local resolved_brainstorm
+    if [ "${brainstorm_path#/}" = "$brainstorm_path" ]; then
+      # Relative path — resolve from project root
+      resolved_brainstorm="$PROJECT_ROOT/$brainstorm_path"
+    else
+      resolved_brainstorm="$brainstorm_path"
+    fi
+
+    # Validate brainstorm path stays within project root
+    if [ -e "$resolved_brainstorm" ]; then
+      validate_path_in_project "$resolved_brainstorm"
+      archived_brainstorm=$(_archive_move "$resolved_brainstorm")
+    fi
+  fi
+
+  # Output result as JSON
+  if [ -n "$archived_brainstorm" ]; then
+    jq -n --arg task "$archived_task" --arg brainstorm "$archived_brainstorm" \
+      '{archived: {task: $task, brainstorm: $brainstorm}}'
+  else
+    jq -n --arg task "$archived_task" \
+      '{archived: {task: $task, brainstorm: null}}'
+  fi
+}
+
 # Display help
 cmd_help() {
   cat << 'EOF'
@@ -1365,6 +1508,8 @@ COMMANDS:
                               --quiet  Suppress stderr warnings
                               --fix    Auto-update cli-path on stale detection (exits 0)
     cleanup-versions          Remove old cached plugin versions, keep latest only
+    list-archivable           List task files where all stories are completed/skipped (JSON array)
+    archive-task <path>       Move completed task file (and linked brainstorm) to .aimi/archive/
     help                      Show this help message
 
 ENVIRONMENT:
@@ -1462,6 +1607,8 @@ main() {
     clear-state)       cmd_clear_state ;;
     check-version)     shift; cmd_check_version "$@" ;;
     cleanup-versions)  cmd_cleanup_versions ;;
+    list-archivable)   cmd_list_archivable ;;
+    archive-task)      cmd_archive_task "${2:-}" ;;
     help|--help|-h)    cmd_help ;;
     *)
       echo "Unknown command: $1" >&2
