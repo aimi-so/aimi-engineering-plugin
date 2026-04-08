@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.42.0] - 2026-04-08
+
+### Changed
+
+- **execute**: Branch creation from `origin/[DEFAULT_BRANCH]` is now conditional — only when the current branch has been merged into the default branch; otherwise creates from current HEAD
+
 ## [1.41.0] - 2026-04-08
 
 ### Added

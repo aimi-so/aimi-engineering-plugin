@@ -199,7 +199,13 @@ git branch --list [branchName]
 ```
 
 - If exists: `git checkout [branchName]`
-- If not exists: `git checkout -b [branchName] origin/[DEFAULT_BRANCH]`
+- If not exists:
+  Check if the current branch has been merged into the default branch:
+  ```bash
+  git branch --merged origin/[DEFAULT_BRANCH] | grep -q "$(git branch --show-current)"
+  ```
+  - If current branch IS merged (or IS the default branch): `git checkout -b [branchName] origin/[DEFAULT_BRANCH]`
+  - If current branch is NOT merged: `git checkout -b [branchName]`
 
 Report:
 ```
@@ -220,7 +226,13 @@ If any story has a non-null `project` field:
    git branch --list [branchName]
    ```
    - If branch exists: `git checkout [branchName]`
-   - If not exists: `git checkout -b [branchName] origin/[DEFAULT_BRANCH]`
+   - If not exists:
+     Check if the current branch has been merged into the default branch:
+     ```bash
+     git branch --merged origin/[DEFAULT_BRANCH] | grep -q "$(git branch --show-current)"
+     ```
+     - If merged: `git checkout -b [branchName] origin/[DEFAULT_BRANCH]`
+     - If not merged: `git checkout -b [branchName]`
    - Then return to the original directory.
 
 Report for each project:
