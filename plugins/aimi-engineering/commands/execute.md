@@ -365,6 +365,12 @@ while true:
             project_path = AIMI_ROOT / full_story.project  (resolve to absolute path)
             project_guidelines = PROJECT_GUIDELINES_MAP[full_story.project] or PROJECT_GUIDELINES
 
+        # Capture HEAD SHA before Task spawn for commit verification
+        if project_path is not null:
+            head_before = git -C [project_path] rev-parse HEAD
+        else:
+            head_before = git rev-parse HEAD
+
         # Spawn a single foreground Task — same pattern as next.md
         # No worktree, worker operates in current directory (or PROJECT_PATH if set)
         # IMPORTANT: subagent_type MUST be "general-purpose" — story-executor is a skill, NOT an agent.
@@ -385,6 +391,20 @@ while true:
 
         # Handle result
         if Task succeeded:
+            # Verify a commit was actually created
+            if project_path is not null:
+                head_after = git -C [project_path] rev-parse HEAD
+            else:
+                head_after = git rev-parse HEAD
+
+            if head_after == head_before:
+                $AIMI_CLI mark-failed [story.id] "No commit detected after execution"
+                $AIMI_CLI cascade-skip [story.id]
+                Report: "[story.id] failed (no commit detected). Dependent stories cascade-skipped."
+                Report: "Wave [wave] complete."
+                wave += 1
+                continue
+
             $AIMI_CLI mark-complete [story.id]
 
             # Update verification.status if story has verification and executor reports success
@@ -448,6 +468,12 @@ while true:
             project_path = AIMI_ROOT / full_story.project
             project_guidelines = PROJECT_GUIDELINES_MAP[full_story.project] or PROJECT_GUIDELINES
 
+        # Capture HEAD SHA before Task spawn for commit verification
+        if project_path is not null:
+            head_before = git -C [project_path] rev-parse HEAD
+        else:
+            head_before = git rev-parse HEAD
+
         Task(
             subagent_type: "general-purpose",
             description: "Execute [full_story.id]: [full_story.title]",
@@ -464,6 +490,20 @@ while true:
         )
 
         if Task succeeded:
+            # Verify a commit was actually created
+            if project_path is not null:
+                head_after = git -C [project_path] rev-parse HEAD
+            else:
+                head_after = git rev-parse HEAD
+
+            if head_after == head_before:
+                $AIMI_CLI mark-failed [full_story.id] "No commit detected after execution"
+                $AIMI_CLI cascade-skip [full_story.id]
+                Report: "[full_story.id] failed (no commit detected). Dependent stories cascade-skipped."
+                Report: "Wave [wave] complete."
+                wave += 1
+                continue
+
             $AIMI_CLI mark-complete [full_story.id]
 
             # Update verification.status if story has verification and executor reports success
@@ -515,6 +555,14 @@ while true:
             project_roots[group_key] = CWD  (current working directory / git root)
         else:
             project_roots[group_key] = AIMI_ROOT / group_key  (resolve to absolute path)
+
+    # ========================================
+    # CAPTURE BASE SHA PER PROJECT GROUP (for commit verification)
+    # ========================================
+    base_sha = {}  # key: group_key, value: HEAD SHA before worktree creation
+    for group_key in project_groups:
+        project_root = project_roots[group_key]
+        base_sha[group_key] = git -C [project_root] rev-parse [branchName]
 
     # ========================================
     # CREATE WORKTREES PER PROJECT GROUP
@@ -576,6 +624,30 @@ while true:
             failed_stories.append(full_story)
 
     # --- Post-Wave Processing ---
+
+    # ========================================
+    # COMMIT VERIFICATION (parallel path)
+    # ========================================
+    # For each succeeded story, verify that a commit was actually created
+    # by comparing worktree HEAD against the base SHA captured before worktree creation.
+    no_commit_stories = []
+    verified_stories = []
+    for full_story in succeeded_stories:
+        wt = all_worktrees[full_story.id]
+        worktree_head = git -C [wt.worktree_path] rev-parse HEAD
+        if worktree_head == base_sha[wt.group_key]:
+            no_commit_stories.append(full_story)
+        else:
+            verified_stories.append(full_story)
+
+    # Move no-commit stories to failed
+    for full_story in no_commit_stories:
+        $AIMI_CLI mark-failed [full_story.id] "No commit detected after execution"
+        $AIMI_CLI cascade-skip [full_story.id]
+        Report: "[full_story.id] failed (no commit detected). Dependent stories cascade-skipped."
+
+    # Replace succeeded_stories with only verified ones (so merge-all skips no-commit stories)
+    succeeded_stories = verified_stories
 
     # Handle failures first
     for full_story in failed_stories:
