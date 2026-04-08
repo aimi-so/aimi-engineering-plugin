@@ -156,6 +156,29 @@ Story content validation failed:
 Review the stories for suspicious content and fix before execution.
 ```
 
+## Step 1.5: Branch Freshness Check
+
+Detect the default branch and fetch the latest from origin before branch setup.
+
+### Detect Default Branch
+
+```bash
+DEFAULT_BRANCH=$($AIMI_CLI detect-default-branch)
+```
+
+Store `DEFAULT_BRANCH` for use in branch creation and commit counting.
+
+### Fetch Origin
+
+```bash
+git fetch origin
+```
+
+If fetch fails (e.g., offline or no remote), warn but continue:
+```
+Warning: git fetch origin failed — continuing with local state. Branch may be stale.
+```
+
 ## Step 2: Branch Setup
 
 Get the branch name from the init-session output (already validated by CLI).
@@ -176,7 +199,7 @@ git branch --list [branchName]
 ```
 
 - If exists: `git checkout [branchName]`
-- If not exists: `git checkout -b [branchName]`
+- If not exists: `git checkout -b [branchName] origin/[DEFAULT_BRANCH]`
 
 Report:
 ```
@@ -197,7 +220,7 @@ If any story has a non-null `project` field:
    git branch --list [branchName]
    ```
    - If branch exists: `git checkout [branchName]`
-   - If not exists: `git checkout -b [branchName]`
+   - If not exists: `git checkout -b [branchName] origin/[DEFAULT_BRANCH]`
    - Then return to the original directory.
 
 Report for each project:
@@ -797,7 +820,7 @@ When execution ends (all stories complete, or deadlock detected):
 
 Count commits on this branch:
 ```bash
-git log --oneline main..HEAD | wc -l
+git log --oneline $DEFAULT_BRANCH..HEAD | wc -l
 ```
 
 Check for any remaining pending gates across all stories:
