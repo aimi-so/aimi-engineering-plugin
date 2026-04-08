@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.39.0] - 2026-04-07
+
+### Added
+
+- **story-executor**: Visual verification section in prompt template — conditional agent-browser flow for stories with `verification.strategy: visual` and `verification.url`, advisory only (failures do not block commits)
+
 ## [1.38.0] - 2026-04-07
 
 ### Added

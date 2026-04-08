@@ -123,6 +123,32 @@ Description: [STORY_DESCRIPTION]
 Strategy: [verification.strategy]
 Expected: [verification.expect — omit line if absent]
 
+## Visual Verification (if verification.strategy == visual AND verification.url present)
+
+Visual verification is **advisory** — failures do NOT block the story commit.
+
+1. **Check agent-browser availability:**
+   Run `command -v agent-browser`. If not found, note "visual verification skipped — agent-browser not installed" in your report and proceed to commit.
+
+2. **Open the page:**
+   `agent-browser open [verification.url]`
+
+3. **Take screenshot:**
+   `agent-browser screenshot /tmp/verify-[STORY_ID].png`
+
+4. **Evaluate screenshot against expected outcome:**
+   Use the Read tool to view `/tmp/verify-[STORY_ID].png`.
+   Compare what you see against `verification.expect` (natural language description).
+   Record whether the visual matches expectations (pass/fail + reasoning).
+
+5. **Cleanup:**
+   `agent-browser close`
+
+6. **Report result:**
+   - If visual check passes: note "visual verification passed" in your report.
+   - If visual check fails or errors: note "visual verification failed — [reason]" in your report so the caller can set `verification.status` to `failed`. Do NOT fail the story — proceed to commit.
+   - If agent-browser was not installed: note "visual verification skipped" so the caller can set `verification.status` to `skipped`.
+
 ## Previous Notes (if non-empty)
 
 [story.notes]
