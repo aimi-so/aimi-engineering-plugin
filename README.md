@@ -590,7 +590,7 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 ## Version History
 
-**Current Version:** 1.37.0
+**Current Version:** 1.40.0
 
 ### Recent Changes
 

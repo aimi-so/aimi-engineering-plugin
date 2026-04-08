@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.40.0] - 2026-04-08
+
+### Changed
+
+- **branding**: Updated author to "Aimi — Autonomous Code Companion" in plugin.json and marketplace.json
+
 ## [1.39.0] - 2026-04-07
 
 ### Added
