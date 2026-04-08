@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.41.0] - 2026-04-08
+
+### Added
+
+- **execute**: Archival prompt at entry point (Step 0.5) — checks for completed task files via `list-archivable` and offers to archive them before starting execution
+
 ## [1.40.0] - 2026-04-08
 
 ### Changed
