@@ -2,6 +2,7 @@
 name: aimi:plan
 description: Generate tasks.json directly from a feature description
 argument-hint: "[feature description]"
+allowed-tools: Read, Write, Edit, Bash(git:*), Bash(mkdir:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Task
 ---
 
 # Aimi Plan
@@ -11,6 +12,60 @@ Generate `.aimi/tasks/YYYY-MM-DD-[feature]-tasks.json` directly from a feature d
 ## Feature Description
 
 $ARGUMENTS
+
+## Step 0: Environment Setup
+
+### Resolve CLI Path
+
+Follow the 4-layer resolution strategy from `references/cli-path-resolution.md` to set `$AIMI_CLI`. Each layer is a separate Bash call:
+
+**Layer 0 — AIMI_PLUGIN_DIR override:**
+```bash
+if [ -n "$AIMI_PLUGIN_DIR" ] && [ "${AIMI_PLUGIN_DIR#/}" != "$AIMI_PLUGIN_DIR" ] && [ -d "$AIMI_PLUGIN_DIR" ] && [ -x "$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh" ]; then AIMI_CLI="$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh"; fi
+```
+
+**Layer 1 — Global cache:**
+```bash
+if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(cat ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path 2>/dev/null); fi
+```
+
+```bash
+if [ -n "$AIMI_CLI" ] && [ ! -x "$AIMI_CLI" ]; then AIMI_CLI=""; fi
+```
+
+**Layer 2 — Glob fallback (zsh-safe):**
+```bash
+if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1'); fi
+```
+
+```bash
+if [ -n "$AIMI_CLI" ]; then printf '%s\n' "$AIMI_CLI" > "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path.tmp" && mv "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path.tmp" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" && chmod 600 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path"; fi
+```
+
+**Layer 3 — Per-project fallback:**
+```bash
+if [ -z "$AIMI_CLI" ] && [ -f .aimi/cli-path ] && [ -x "$(cat .aimi/cli-path)" ]; then AIMI_CLI=$(cat .aimi/cli-path); fi
+```
+
+If `$AIMI_CLI` is still empty, report error and STOP.
+
+### Fetch Origin (Branch Freshness Check)
+
+Ensure local refs are current before determining the default branch:
+
+```bash
+git fetch origin 2>&1 || echo "WARNING: git fetch failed (offline?). Continuing with local refs."
+```
+
+If fetch fails, warn but continue planning with local refs.
+
+### Detect Default Branch
+
+```bash
+$AIMI_CLI detect-default-branch
+```
+
+Use the output as the default branch for `branchName` derivation in Phase 4.
 
 ## Phase 0: Idea Refinement
 
