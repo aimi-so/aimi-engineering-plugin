@@ -491,6 +491,19 @@ cmd_list_ready() {
       .userStories[] |
       select(.status == "pending") |
       . as $story |
+      # Gate filtering: exclude stories with pending decision gates
+      select(
+        (.gate.type != "decision") or (.gate.status != "pending")
+      ) |
+      # Gate filtering: exclude stories where any dependency has a pending action gate
+      select(
+        (($story.dependsOn // []) | length == 0) or
+        (($story.dependsOn // []) | all(. as $dep_id |
+          $root.userStories[] | select(.id == $dep_id) |
+          ((.gate.type != "action") or (.gate.status != "pending"))
+        ))
+      ) |
+      . as $story |
       (
         ($story.dependsOn // []) | length == 0
       ) or (
@@ -505,7 +518,7 @@ cmd_list_ready() {
   ' "$tasks_file")
 
   if [ "$brief" = true ]; then
-    echo "$result" | jq '[.[] | {id, title, priority, dependsOn, project}]'
+    echo "$result" | jq '[.[] | {id, title, priority, dependsOn, project, gate}]'
   else
     echo "$result"
   fi
@@ -1117,6 +1130,198 @@ cmd_cleanup_versions() {
     '{removed: $removed, kept: $kept}'
 }
 
+# Pass a gate on a story
+# Usage: gate-pass US-NNN [--option 'value']
+cmd_gate_pass() {
+  local story_id="$1"
+  shift || true
+  local option=""
+
+  if [ -z "$story_id" ]; then
+    echo "Usage: aimi-cli.sh gate-pass <story-id> [--option 'value']" >&2
+    exit 1
+  fi
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --option)
+        option="${2:-}"
+        if [ -z "$option" ]; then
+          echo '{"valid":false,"errors":["--option requires a value"]}'
+          exit 1
+        fi
+        shift 2
+        ;;
+      *)
+        echo "{\"valid\":false,\"errors\":[\"Unknown flag: $1\"]}"
+        exit 1
+        ;;
+    esac
+  done
+
+  validate_story_id "$story_id"
+
+  local tasks_file
+  tasks_file=$(get_tasks_file)
+  validate_story_exists "$story_id" "$tasks_file"
+
+  # Verify story has a gate field
+  local has_gate
+  has_gate=$(jq --arg id "$story_id" '[.userStories[] | select(.id == $id) | .gate] | length' "$tasks_file")
+  if [ "$has_gate" -eq 0 ] || [ "$(jq --arg id "$story_id" '.userStories[] | select(.id == $id) | .gate' "$tasks_file")" = "null" ]; then
+    echo '{"valid":false,"errors":["Story '"$story_id"' has no gate defined"]}'
+    exit 1
+  fi
+
+  local tmp_file
+  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  (
+    _lock "${tasks_file}.lock"
+    if [ -n "$option" ]; then
+      jq --arg id "$story_id" --arg option "$option" \
+        '(.userStories[] | select(.id == $id) | .gate) |= . + {status: "passed", selectedOption: $option}' \
+        "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+    else
+      jq --arg id "$story_id" \
+        '(.userStories[] | select(.id == $id) | .gate) |= . + {status: "passed"}' \
+        "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+    fi
+  ) 200>"${tasks_file}.lock"
+  rm -f "$tmp_file" 2>/dev/null
+
+  jq --arg id "$story_id" '.userStories[] | select(.id == $id) | {id, gate}' "$tasks_file"
+}
+
+# Fail a gate on a story
+cmd_gate_fail() {
+  local story_id="$1"
+
+  if [ -z "$story_id" ]; then
+    echo "Usage: aimi-cli.sh gate-fail <story-id>" >&2
+    exit 1
+  fi
+
+  validate_story_id "$story_id"
+
+  local tasks_file
+  tasks_file=$(get_tasks_file)
+  validate_story_exists "$story_id" "$tasks_file"
+
+  # Verify story has a gate field
+  local has_gate
+  has_gate=$(jq --arg id "$story_id" '[.userStories[] | select(.id == $id) | .gate] | length' "$tasks_file")
+  if [ "$has_gate" -eq 0 ] || [ "$(jq --arg id "$story_id" '.userStories[] | select(.id == $id) | .gate' "$tasks_file")" = "null" ]; then
+    echo '{"valid":false,"errors":["Story '"$story_id"' has no gate defined"]}'
+    exit 1
+  fi
+
+  local tmp_file
+  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  (
+    _lock "${tasks_file}.lock"
+    jq --arg id "$story_id" \
+      '(.userStories[] | select(.id == $id) | .gate) |= . + {status: "failed"}' \
+      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+  ) 200>"${tasks_file}.lock"
+  rm -f "$tmp_file" 2>/dev/null
+
+  jq --arg id "$story_id" '.userStories[] | select(.id == $id) | {id, gate}' "$tasks_file"
+}
+
+# Update a nested field on a story
+# Usage: update-field US-NNN field.path value
+# Supports dotted paths like "verification.status"
+cmd_update_field() {
+  local story_id="$1"
+  local field_path="$2"
+  local value="$3"
+
+  if [ -z "$story_id" ] || [ -z "$field_path" ] || [ -z "$value" ]; then
+    echo "Usage: aimi-cli.sh update-field <story-id> <field.path> <value>" >&2
+    exit 1
+  fi
+
+  validate_story_id "$story_id"
+
+  local tasks_file
+  tasks_file=$(get_tasks_file)
+  validate_story_exists "$story_id" "$tasks_file"
+
+  # Build jq path from dotted notation (e.g., "verification.status" -> .verification.status)
+  local jq_path
+  jq_path=$(printf '%s' "$field_path" | sed 's/\./\n/g' | while read -r part; do printf '.%s' "$part"; done)
+
+  local tmp_file
+  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  (
+    _lock "${tasks_file}.lock"
+    jq --arg id "$story_id" --arg val "$value" \
+      "(.userStories[] | select(.id == \$id) | ${jq_path}) = \$val" \
+      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+  ) 200>"${tasks_file}.lock"
+  rm -f "$tmp_file" 2>/dev/null
+
+  jq --arg id "$story_id" ".userStories[] | select(.id == \$id) | {id, ${field_path%%.*}}" "$tasks_file"
+}
+
+# Validate waves: compute waves from dependsOn, compare to stored wave, report mismatches
+cmd_validate_waves() {
+  local tasks_file
+  tasks_file=$(get_tasks_file)
+
+  jq '
+    . as $root |
+    ($root.userStories | map({(.id): (.dependsOn // [])}) | add // {}) as $deps |
+    ($root.userStories | map(.id)) as $all_ids |
+
+    # Compute waves iteratively
+    # Wave 0: stories with no dependencies
+    # Wave N: stories whose deps are all in waves < N
+    (
+      reduce range($all_ids | length) as $iteration (
+        {};
+        . as $assigned |
+        ($all_ids | map(select(. as $id | $assigned | has($id) | not))) as $remaining |
+        reduce $remaining[] as $id (
+          $assigned;
+          . as $current |
+          if (($deps[$id] // []) | length == 0) then
+            $current + {($id): 0}
+          elif (($deps[$id] // []) | all(. as $d | $current | has($d))) then
+            (($deps[$id] // []) | map($current[.]) | max + 1) as $wave |
+            $current + {($id): $wave}
+          else
+            $current
+          end
+        )
+      )
+    ) as $computed |
+
+    # Compare computed waves against stored wave fields
+    [
+      $root.userStories[] |
+      . as $story |
+      ($computed[$story.id] // null) as $computed_wave |
+      ($story.wave // null) as $stored_wave |
+      select(
+        ($computed_wave != null and $stored_wave != null and $computed_wave != $stored_wave) or
+        ($computed_wave != null and $stored_wave == null)
+      ) |
+      {
+        id: $story.id,
+        storedWave: $stored_wave,
+        computedWave: $computed_wave
+      }
+    ] as $mismatches |
+
+    if ($mismatches | length) == 0 then
+      {valid: true, errors: []}
+    else
+      {valid: false, errors: [$mismatches[] | "Wave mismatch: \(.id) stored=\(.storedWave) computed=\(.computedWave)"]}
+    end
+  ' "$tasks_file"
+}
+
 # Display help
 cmd_help() {
   cat << 'EOF'
@@ -1143,6 +1348,12 @@ COMMANDS:
     validate-deps             Validate dependency graph (no cycles, no missing refs)
     validate-stories          Validate story content (length, suspicious patterns)
     validate-ids              Validate all story IDs match US-NNN format
+    gate-pass <id> [--option 'value']
+                              Pass a gate on a story; optionally store selected option
+    gate-fail <id>            Fail a gate on a story
+    update-field <id> <field.path> <value>
+                              Update a nested field on a story (e.g., verification.status passed)
+    validate-waves            Compute waves from dependsOn, compare to stored wave, report mismatches
     cascade-skip <id>         Skip all stories depending on failed story
     reset-orphaned            Reset all in_progress stories to failed
     get-branch                Get branchName from metadata
@@ -1239,6 +1450,10 @@ main() {
     validate-deps)     cmd_validate_deps ;;
     validate-stories)  cmd_validate_stories ;;
     validate-ids)      cmd_validate_ids ;;
+    gate-pass)         shift; cmd_gate_pass "$@" ;;
+    gate-fail)         cmd_gate_fail "${2:-}" ;;
+    update-field)      cmd_update_field "${2:-}" "${3:-}" "${4:-}" ;;
+    validate-waves)    cmd_validate_waves ;;
     cascade-skip)      cmd_cascade_skip "${2:-}" ;;
     reset-orphaned)    cmd_reset_orphaned ;;
     get-branch)        cmd_get_branch ;;

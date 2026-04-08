@@ -121,6 +121,7 @@ The `AIMI_PLUGIN_DIR` environment variable points to the installed plugin direct
 | `/aimi:next` | Execute the next pending story | `/aimi:next` |
 | `/aimi:execute` | Run all stories autonomously (parallel for v3, sequential for v2.2) | `/aimi:execute` |
 | `/aimi:review` | Multi-agent code review with findings synthesis | `/aimi:review [PR or branch]` |
+| `/aimi:open-pr` | Open a pull request from the current task branch | `/aimi:open-pr [PR options]` |
 | `/aimi:swarm` | Execute multiple tasks.json files in parallel Docker sandboxes | `/aimi:swarm [--file path] [--max N]` |
 
 ### Command Details
@@ -589,7 +590,7 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 ## Version History
 
-**Current Version:** 1.34.0
+**Current Version:** 1.37.0
 
 ### Recent Changes
 
@@ -719,7 +720,7 @@ See [CHANGELOG.md](CHANGELOG.md) for complete version history.
 
 | Type | Count | Description |
 |------|-------|-------------|
-| Commands | 8 | Slash commands for workflow stages |
+| Commands | 9 | Slash commands for workflow stages |
 | Skills | 16 | 3 core, 6 development/style, 4 tooling/automation, 3 disabled/reference |
 | Agents | 28 | 4 research, 15 review, 3 design, 1 docs, 5 workflow |
 

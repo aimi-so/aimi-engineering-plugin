@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.39.0] - 2026-04-07
+
+### Added
+
+- **story-executor**: Visual verification section in prompt template — conditional agent-browser flow for stories with `verification.strategy: visual` and `verification.url`, advisory only (failures do not block commits)
+
+## [1.38.0] - 2026-04-07
+
+### Added
+
+- **execute**: Commit verification after Task execution — captures HEAD SHA before each Task spawn and compares after success; stories with no commit are marked as failed with cascade-skip instead of silently completing
+- **execute**: Parallel worktree commit verification — captures base SHA per project group before worktree creation, filters out no-commit stories before merge step
+
+## [1.37.0] - 2026-04-06
+
+### Added
+
+- **commands**: `/aimi:open-pr` command for opening pull requests from executed task branches with structured PR descriptions
+
+## [1.36.0] - 2026-04-02
+
+### Added
+
+- **schema**: `researchDepth` metadata field for controlling research thoroughness (quick, standard, deep)
+- **schema**: `wave` field on stories for explicit wave assignment and parallel execution grouping
+- **schema**: `implementation` object on stories with `files`, `approach`, and `verify` fields for structured implementation guidance
+- **schema**: `verification` object on stories with `strategy`, `status`, `url`, and `expect` fields for post-execution verification
+- **schema**: `gate` object on stories with `type`, `status`, `prompt`, and `options` fields for decision/action/verify gates
+- **aimi-cli**: `gate-pass` command to resolve a gate as passed
+- **aimi-cli**: `gate-fail` command to resolve a gate as failed
+- **aimi-cli**: `validate-waves` validator for checking wave assignment consistency and dependency ordering
+- **aimi-cli**: `update-field` command for updating nested story fields (e.g., `verification.status`)
+- **execute**: Gate handling in wave execution loop — decision gates block story start with log message, action gates log post-completion with dependent pause, verify gates log as non-blocking
+- **execute**: Gate-blocked story detection — differentiates gate-blocked from true deadlocks when no stories are ready
+- **execute**: Wave summary includes gate status counts (action/verify gates pending)
+- **execute**: Completion summary includes pending gate inventory with resolution instructions
+- **execute**: Executor updates `verification.status` to `passed` when story-executor reports verification success
+
+### Changed
+
+- **schema**: Schema version bumped from 3.1 to 3.2
+- **execute**: `list-ready` gate filtering — stories with pending gates excluded from ready list
+- **story-executor**: Prompt template now includes `implementation.files` (Key Files), `implementation.approach` (Approach), `implementation.verify` (Verification Command), and `verification.strategy`/`verification.expect` (Verification) sections when present in v3.2 story data
+- **story-executor**: Story format summary in SKILL.md updated with `implementation` and `verification` field descriptions
+- **story-executor**: execution-rules.md inline JSON example updated with `implementation` and `verification` objects
+
+## [1.35.0] - 2026-04-02
+
+### Added
+
+- **brainstorm**: Parallel best-practices research in Phase 1 — spawns aimi-best-practices-researcher alongside aimi-codebase-researcher
+- **brainstorm**: Decoupled specificity-skip logic — codebase and best-practices researchers assessed independently with distinct skip criteria
+- **brainstorm**: Research Consolidation step (1c) merges internal patterns and external best practices, surfaces conflicts as candidate Phase 2 questions
+- **brainstorm**: Graceful degradation for all 4 research permutations (both succeed, either fails/skipped, both fail)
+- **brainstorm**: Approach-in-questions integration — Phase 2 includes approach selection questions when research reveals multiple valid approaches, with tradeoff hints per option
+- **brainstorm**: Phase 3 Resolve Approach fallback — lightweight approach resolution only when not addressed in Phase 2, with skip conditions for already-resolved or single-obvious-approach cases
+- **brainstorm**: Progressive quality gates — Research Adequacy gate (Phase 1→2), Topic Coverage gate (Phase 2→3/4), and Pre-Save Checklist (Phase 4) with conversational nudges and user override support
+- **brainstorm**: Document template "Why This Approach" guidance updated for 3 resolution paths (Phase 2 questions, Phase 3 fallback, single obvious approach with justification)
+- **brainstorm**: Error handling table expanded with quality gate failure scenarios and research agent failure combinations
+
 ## [1.34.0] - 2026-03-31
 
 ### Added

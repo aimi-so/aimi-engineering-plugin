@@ -47,6 +47,8 @@ If either agent fails, proceed with available results.
 - **Strong local context** → skip external research
 - **Uncertainty** → run external research
 
+Compute `researchDepth` and store in metadata: `skip` (internal + strong patterns), `quick` (solid patterns, minor uncertainty), `standard` (default), `deep` (security, payments, new tech, high uncertainty).
+
 ## Phase 1.5b: External Research (Conditional, Parallel)
 
 Only if Phase 1.5 decides external research is needed:
@@ -88,10 +90,14 @@ Using consolidated research and spec-flow output:
 3. Assign IDs in `US-NNN` zero-padded format (`US-001`, `US-002`, ...) — never `US-1`, `story-1`, `S1`, or any other format
 4. Size check: each story must be completable in ONE agent iteration (one context window)
 5. Order by dependency: assign `dependsOn` arrays (explicit story IDs) and `priority` as tiebreaker
-6. Write descriptions in user story format: "As a [specific role], I want [feature] so that [benefit]" — role must name the actor, never just "user"
-7. Generate verifiable acceptance criteria (every story must have "Typecheck passes")
-8. Initialize every story with `status: "pending"` and appropriate `dependsOn` array
-9. Validate: no circular dependencies in `dependsOn`, no self-references, all referenced IDs exist, no vague criteria
+6. **Compute `wave` numbers** from `dependsOn` graph: roots = wave 1; non-roots = max(wave of deps) + 1; contiguous, no gaps
+7. **Populate `implementation` object** when research provides file paths and patterns: `files` (concrete paths), `approach` (actionable strategy), `verify` (executable check). Omit when research is insufficient.
+8. **Assign `verification` strategy** per story type: `api` (endpoints), `visual` (UI), `test` (backend logic). Set `status: "pending"`.
+9. **Detect and attach `gate` objects**: `verify` (OAuth/email/webhooks), `decision` (multiple viable approaches), `action` (external manual action). Most stories have no gate.
+10. Write descriptions in user story format: "As a [specific role], I want [feature] so that [benefit]" — role must name the actor, never just "user"
+11. Generate verifiable acceptance criteria (every story must have "Typecheck passes")
+12. Initialize every story with `status: "pending"` and appropriate `dependsOn` array
+13. Validate: no circular dependencies in `dependsOn`, no self-references, all referenced IDs exist, no vague criteria
 
 ### `dependsOn` Inference Rules
 
@@ -126,6 +132,7 @@ When the workspace has multiple git repos under one parent folder:
 - **createdAt**: Today's date (YYYY-MM-DD)
 - **planPath**: Always `null`
 - **brainstormPath**: Path to brainstorm if one was used, otherwise omit
+- **researchDepth**: Value computed in Phase 1.5 (`skip`, `quick`, `standard`, `deep`), or omit if not computed
 - **maxConcurrency**: Default `4`. Set to `1` for strictly sequential execution.
 
 ### Derive Filename
@@ -142,11 +149,11 @@ mkdir -p .aimi/tasks
 
 Write JSON using the Write tool. Validate JSON is well-formed before writing.
 
-### Schema v3 Structure
+### Schema v3.2 Structure
 
 ```json
 {
-  "schemaVersion": "3.1",
+  "schemaVersion": "3.2",
   "metadata": {
     "title": "string (required)",
     "type": "feat|ref|bug|chore (required)",
@@ -154,6 +161,7 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
     "createdAt": "YYYY-MM-DD (required)",
     "planPath": "null (always null for planner-generated)",
     "brainstormPath": "string (optional)",
+    "researchDepth": "skip|quick|standard|deep (optional, computed in Phase 1.5)",
     "maxConcurrency": "number (optional, default 4)"
   },
   "userStories": [
@@ -166,11 +174,31 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
       "status": "pending (required, always 'pending' for new stories)",
       "dependsOn": ["US-NNN (required, array of story IDs, empty [] for root stories)"],
       "notes": "string (optional, default '')",
-      "project": "string (optional, relative path for multi-repo, no '..' components)"
+      "project": "string (optional, relative path for multi-repo, no '..' components)",
+      "wave": "number (required, computed from dependsOn: roots=1, others=max(dep waves)+1)",
+      "implementation": {
+        "files": ["string[] (required, concrete file paths from research)"],
+        "approach": "string (required, actionable strategy referencing codebase patterns)",
+        "verify": "string (required, executable command or checkable assertion)"
+      },
+      "verification": {
+        "strategy": "test|visual|api (required)",
+        "status": "pending (required)",
+        "url": "string (optional, for api/visual strategies)",
+        "expect": "string (optional, expected result description)"
+      },
+      "gate": {
+        "type": "verify|decision|action (required)",
+        "status": "pending (required)",
+        "prompt": "string (required, human-readable description)",
+        "options": ["string[] (optional, for decision gates)"]
+      }
     }
   ]
 }
 ```
+
+**Notes:** `implementation`, `verification`, and `gate` are optional per story. `wave` is required on all stories.
 
 ### Checklist Before Writing
 
@@ -187,6 +215,14 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 - [ ] `planPath` is `null`
 - [ ] Every description follows "As a [specific role], I want [feature] so that [benefit]" format — role names the actor, never just "user"
 - [ ] Field lengths: title ≤ 200, description ≤ 500, criterion ≤ 600
+- [ ] `schemaVersion` is `"3.2"`
+- [ ] `researchDepth` (if set) is one of: `skip`, `quick`, `standard`, `deep`
+- [ ] Every story has a `wave` number (wave 1 for roots, computed from `dependsOn` for others)
+- [ ] Wave numbers are contiguous with no gaps
+- [ ] `implementation` (if present) has `files` (string[]), `approach` (string), `verify` (string) with concrete paths
+- [ ] `verification` (if present) has `strategy` (`test`, `visual`, or `api`) and `status` (`"pending"`)
+- [ ] `gate` (if present) has `type` (`verify`, `decision`, or `action`), `status` (`"pending"`), and `prompt`
+- [ ] Gates only attached when heuristics clearly match
 
 ## Phase 4.5: Post-Generation Validation
 
@@ -226,7 +262,9 @@ Tasks generated successfully!
 Tasks: .aimi/tasks/[tasks-filename].json
 
 Stories: [X] total
-Schema version: 3.0
+Schema version: 3.2
+Waves: [N] total
+[If gates found]: Gates: [N] (verify: [X], decision: [Y], action: [Z])
 [If brainstorm used]: Context: .aimi/brainstorms/[brainstorm-file]
 [If gaps found]: Gaps identified: [N] (captured as criteria/notes)
 [If 10+ stories]: Warning: [N] stories generated. Consider splitting into smaller feature sets.

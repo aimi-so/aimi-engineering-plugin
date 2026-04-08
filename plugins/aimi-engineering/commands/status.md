@@ -64,7 +64,7 @@ $AIMI_CLI status
 This returns JSON with status counts and story list.
 
 > The CLI status output mirrors the tasks.json structure with added aggregate counts.
-> Key fields: `schemaVersion`, `title`, `branch`, `maxConcurrency`, status counts (`pending`,`in_progress`,`completed`,`failed`,`skipped`,`total`), `userStories[]{id,title,status,dependsOn,priority,notes}`
+> Key fields: `schemaVersion`, `title`, `branch`, `maxConcurrency`, `researchDepth`, status counts (`pending`,`in_progress`,`completed`,`failed`,`skipped`,`total`), `userStories[]{id,title,status,dependsOn,priority,notes,wave,implementation,verification,gate}`
 
 If no tasks file found, the script exits with error. Report:
 ```
@@ -81,8 +81,9 @@ Display execution waves and dependency information.
 ## Task Status: [title]
 
 **Branch:** [branchName]
-**Schema:** v3.0
+**Schema:** v3.2
 **Max Concurrency:** [maxConcurrency]
+**Research Depth:** [researchDepth or "auto"]
 ```
 
 ### Progress Summary
@@ -112,31 +113,35 @@ Group stories into waves using topological level assignment:
 3. For remaining stories, wave = max(wave(dep) for dep in dependsOn) + 1
 4. If a dependency's wave is not yet assigned, process dependencies first (topological order)
 
+Use the `wave` field from the story if present; otherwise compute the wave using the algorithm above.
+
 Display each wave:
 
 ```
 ### Execution Waves
 
 **Wave 1** (independent - no dependencies)
-| ID | Title | Status |
-|----|-------|--------|
-| US-001 | Story title | completed |
-| US-002 | Story title | pending |
+| ID | Title | Status | Gate | Verification |
+|----|-------|--------|------|--------------|
+| US-001 | Story title | completed | decision:passed | — |
+| US-002 | Story title | pending | — | — |
 
 **Wave 2** (depends on Wave 1)
-| ID | Title | Status | Blocked By |
-|----|-------|--------|------------|
-| US-003 | Story title | pending | US-001 |
+| ID | Title | Status | Gate | Verification | Blocked By |
+|----|-------|--------|------|--------------|------------|
+| US-003 | Story title | pending | action:pending | api:pending | US-001 |
 
 **Wave 3** (depends on Wave 2)
-| ID | Title | Status | Blocked By |
-|----|-------|--------|------------|
-| US-005 | Story title | pending | US-003, US-004 |
+| ID | Title | Status | Gate | Verification | Blocked By |
+|----|-------|--------|------|--------------|------------|
+| US-005 | Story title | pending | verify:pending | test:passed | US-003, US-004 |
 ```
 
 **Notes on wave display:**
 - Wave 1 table omits "Blocked By" column (there are no dependencies)
 - Wave 2+ tables include "Blocked By" column showing the story's `dependsOn` list
+- **Gate column:** Shows `type:status` from the story's `gate` object (e.g., `decision:pending`, `action:passed`). Show `—` if story has no gate.
+- **Verification column:** Shows `strategy:status` from the story's `verification` object (e.g., `api:pending`, `test:passed`). Show `—` if story has no verification.
 - Status uses the status values: pending, in_progress, completed, failed, skipped
 - If a story has notes (especially failures), show on the next line: `Note: [notes text]`
 

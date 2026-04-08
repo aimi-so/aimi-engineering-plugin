@@ -27,7 +27,7 @@ Execute ONE story from the tasks file:
 ## Story Format
 
 > Each story is one atomic unit of work completable in a single agent iteration.
-> Key fields: `id(US-NNN)`, `title(<=200)`, `description(<=500)`, `acceptanceCriteria(each<=600)`, `priority`, `status`, `dependsOn([])`, `notes`, `project(optional, relative path for multi-repo)`
+> Key fields: `id(US-NNN)`, `title(<=200)`, `description(<=500)`, `acceptanceCriteria(each<=600)`, `priority`, `status`, `dependsOn([])`, `notes`, `project(optional, relative path for multi-repo)`, `implementation{files[], approach, verify}(optional)`, `verification{strategy, status, url?, expect?}(optional)`
 
 ---
 
@@ -106,6 +106,49 @@ Description: [STORY_DESCRIPTION]
 
 [ACCEPTANCE_CRITERIA_BULLETED]
 
+## Key Files (if implementation.files present)
+
+[implementation.files — bulleted list of file paths the story is expected to touch]
+
+## Approach (if implementation.approach present)
+
+[implementation.approach — brief description of the implementation approach]
+
+## Verification Command (if implementation.verify present)
+
+[implementation.verify — command or instruction to verify the implementation]
+
+## Verification (if verification.strategy present)
+
+Strategy: [verification.strategy]
+Expected: [verification.expect — omit line if absent]
+
+## Visual Verification (if verification.strategy == visual AND verification.url present)
+
+Visual verification is **advisory** — failures do NOT block the story commit.
+
+1. **Check agent-browser availability:**
+   Run `command -v agent-browser`. If not found, note "visual verification skipped — agent-browser not installed" in your report and proceed to commit.
+
+2. **Open the page:**
+   `agent-browser open [verification.url]`
+
+3. **Take screenshot:**
+   `agent-browser screenshot /tmp/verify-[STORY_ID].png`
+
+4. **Evaluate screenshot against expected outcome:**
+   Use the Read tool to view `/tmp/verify-[STORY_ID].png`.
+   Compare what you see against `verification.expect` (natural language description).
+   Record whether the visual matches expectations (pass/fail + reasoning).
+
+5. **Cleanup:**
+   `agent-browser close`
+
+6. **Report result:**
+   - If visual check passes: note "visual verification passed" in your report.
+   - If visual check fails or errors: note "visual verification failed — [reason]" in your report so the caller can set `verification.status` to `failed`. Do NOT fail the story — proceed to commit.
+   - If agent-browser was not installed: note "visual verification skipped" so the caller can set `verification.status` to `skipped`.
+
 ## Previous Notes (if non-empty)
 
 [story.notes]
@@ -130,7 +173,18 @@ All file operations MUST stay within the project boundary: PROJECT_PATH when set
 2. Implement the story requirements
 3. Verify ALL acceptance criteria are met
 4. Run typecheck: npx tsc --noEmit
-5. If all checks pass, commit with: "feat(scope): Story title"
+5. If all checks pass, commit:
+   a. Stage only story-related files: `git add [changed files]` (never use `-A` or `.` — avoid staging unrelated files)
+   b. Commit with conventional format: `git commit -m "type(scope): Story title"`
+      Commit types: **feat** | fix | refactor | docs | test | chore
+   c. Verify the commit landed: `git log -1 --oneline`
+
+   **FAIL FAST — Commit failure:**
+   If `git commit` exits non-zero OR `git log -1 --oneline` does not show the expected commit:
+   - Do NOT retry or attempt to fix
+   - Report failure immediately with the error output
+   - The caller will handle recovery
+
 6. If WORKTREE_PATH is set: do NOT update tasks file — return result report instead
    If no WORKTREE_PATH: do NOT update tasks file directly — the caller (next.md/execute.md) handles status updates via the CLI
 
@@ -166,5 +220,6 @@ Before completing a story:
 - [ ] All file operations stayed within project root (no parent directory access)
 - [ ] All acceptance criteria verified
 - [ ] Typecheck passes (`npx tsc --noEmit`)
-- [ ] Changes committed with proper format
+- [ ] Changes committed with proper format (one commit per story, never skip hooks)
+- [ ] Commit verified via `git log -1 --oneline`
 - [ ] Result report returned to caller (do NOT update tasks file directly — caller handles via CLI)

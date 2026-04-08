@@ -123,6 +123,23 @@ Based on signals from Phase 0 and findings from Phase 1:
 
 **Announce the decision:** Brief explanation, then continue.
 
+### Compute `researchDepth`
+
+Based on the signals gathered in Phase 0 and Phase 1, compute a `researchDepth` value and store it in metadata:
+
+| Value | When to Assign |
+|-------|---------------|
+| `skip` | Feature is purely internal (refactoring, internal tooling) AND codebase has strong existing patterns AND CLAUDE.md has specific guidance |
+| `quick` | Codebase has solid patterns, minor uncertainty only, no high-risk signals |
+| `standard` | Default when no strong signal pushes toward skip or deep; moderate uncertainty or partial codebase coverage |
+| `deep` | Security, payments, external APIs, new technology, user exploring options, high uncertainty |
+
+**Rules:**
+- If Phase 1.5 decides to skip external research entirely, set `researchDepth` to `skip` or `quick`
+- If Phase 1.5 decides external research is needed, set `researchDepth` to `standard` or `deep`
+- Store `researchDepth` in `metadata` for inclusion in Phase 4 output
+- When `researchDepth` is `null` or omitted, the planner decides automatically (backwards compatible)
+
 ---
 
 ## Phase 1.5b: External Research (Conditional)
@@ -209,7 +226,11 @@ Using the consolidated research and spec-flow output:
 5. Assign priority numbers by dependency order
 6. Generate verifiable acceptance criteria per story
 7. **Assign `project` field** (multi-repo only)
-8. Run validation checklist
+8. **Compute `wave` numbers** from the `dependsOn` graph (see below)
+9. **Populate `implementation` object** when research provides sufficient context (see below)
+10. **Assign `verification` strategy** based on story type (see below)
+11. **Detect and attach `gate` objects** using heuristics (see below)
+12. Run validation checklist
 
 ### Project Assignment Rules
 
@@ -233,6 +254,57 @@ US-003 → changes frontend/src/pages/Home.tsx  → project: "frontend"
 US-004 → changes only CWD files               → project: omitted
 ```
 
+### Wave Computation
+
+After computing `dependsOn` for all stories, derive wave numbers:
+
+1. Stories with `dependsOn: []` are **wave 1** (root stories)
+2. For each remaining story: `wave = max(wave(dep) for dep in dependsOn) + 1`
+3. Resolve in topological order if a dependency's wave is not yet assigned
+4. Wave numbers must be contiguous (1, 2, 3, ...) with no gaps
+5. Stories in the same wave have no mutual dependencies and can run in parallel
+
+### Implementation Object
+
+When codebase research (Phase 1/1.5b) identified concrete file paths and patterns, populate the `implementation` object on each story:
+
+- **`files`**: List specific file paths from the codebase researcher's output that this story will touch. Use actual discovered paths, not placeholders. If research did not identify files, omit the entire `implementation` object.
+- **`approach`**: Summarize the implementation strategy in 1-3 sentences, referencing specific codebase patterns (e.g., "Follow the existing server action pattern in `actions/tasks.ts`").
+- **`verify`**: Map acceptance criteria to a concrete verification command or instruction (e.g., `"npm test -- --grep auth"`).
+
+**Omit `implementation`** when research did not produce enough context for concrete file paths or actionable approach guidance.
+
+### Verification Strategy Assignment
+
+Assign a `verification` object to each story based on its type/layer:
+
+| Story Type | Strategy | When to Use |
+|------------|----------|-------------|
+| API endpoint stories | `api` | REST endpoints, GraphQL resolvers, any HTTP interface |
+| UI component stories | `visual` | Layout changes, styling, animations, responsive behavior |
+| Backend logic stories | `test` | Server actions, utility functions, business rules |
+| Type-only stories | omit verification | Schema changes, type definitions with no runtime behavior |
+
+Set `verification.status` to `"pending"`. Optionally include `url` (for `api`/`visual`) and `expect` (expected result description).
+
+### Gate Detection
+
+Attach a `gate` object only when heuristics clearly match. Most stories have no gate.
+
+| Gate Type | Trigger Heuristics |
+|-----------|-------------------|
+| `verify` | Story involves OAuth, email delivery, webhooks, third-party API integration, or external services requiring manual confirmation |
+| `decision` | Multiple viable implementation approaches exist with significant downstream impact; planner cannot determine the best path without human input |
+| `action` | Story requires an external manual action the agent cannot perform (DNS configuration, app store submission, manual server provisioning) |
+
+**Rules:**
+1. If acceptance criteria reference OAuth flows, email sending, webhook endpoints, payment processing, or SMS delivery → `verify` gate
+2. If codebase research surfaces multiple architecturally distinct approaches and the story implies a choice → `decision` gate (skip if one approach is clearly superior)
+3. If completing the story requires a human action outside the codebase → `action` gate
+4. When in doubt, omit the gate
+
+Set `gate.status` to `"pending"` and provide a descriptive `gate.prompt`. For `decision` gates, include `gate.options`.
+
 ---
 
 ## Phase 4: Write tasks.json
@@ -245,6 +317,7 @@ US-004 → changes only CWD files               → project: omitted
 - **createdAt**: Today's date (YYYY-MM-DD)
 - **planPath**: Always `null`
 - **brainstormPath**: Path to brainstorm if one was used, otherwise omit
+- **researchDepth**: Value computed in Phase 1.5 (`skip`, `quick`, `standard`, `deep`), or omit if not computed
 - **Story IDs**: Must use `US-NNN` zero-padded format (`US-001`, `US-002`, ...) — never `US-1`, `story-1`, `S1`, or any other format
 
 ### Derive Filename
@@ -272,8 +345,10 @@ Tasks generated successfully!
 
 Tasks: .aimi/tasks/[filename].json
 Stories: [N] total
-Schema: 3.0
+Schema: 3.2
 [If brainstorm used]: Context: .aimi/brainstorms/[brainstorm-file]
 [If gaps found]: Gaps identified: [N] (captured as criteria/notes)
 [If 10+ stories]: Warning: [N] stories generated. Consider splitting for parallel work.
+Waves: [N] total
+[If gates found]: Gates: [N] (verify: [X], decision: [Y], action: [Z])
 ```

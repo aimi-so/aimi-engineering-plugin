@@ -282,13 +282,49 @@ while true:
     pending = $AIMI_CLI count-pending
     if pending == 0: break
 
-    # Get ready stories (brief mode — returns {id, title, priority, dependsOn, project} only)
+    # Get ready stories (brief mode — returns {id, title, priority, dependsOn, project, gate} only)
+    # NOTE: The CLI's list-ready already filters out:
+    #   - Stories with pending decision gates (blocked before start)
+    #   - Stories whose dependencies have pending action gates (blocked until gate resolved)
     ready_stories = $AIMI_CLI list-ready --brief
     if ready_stories is empty:
         if pending > 0:
-            Report: "Deadlock detected: [pending] stories pending but none are ready."
-            Report: "This may indicate circular dependencies or all remaining stories depend on failed/skipped stories."
-            Break loop (proceed to completion)
+            # ========================================
+            # GATE-BLOCKED STORY DETECTION
+            # ========================================
+            # Before reporting deadlock, check if stories are blocked by gates.
+            # Use $AIMI_CLI status to get all stories and identify gate-blocked ones.
+            all_stories = $AIMI_CLI status
+            decision_blocked = []  # stories with pending decision gates
+            action_blocked = []    # stories whose dependencies have pending action gates
+
+            for story in all_stories.userStories:
+                if story.status == "pending":
+                    # Check for pending decision gates on this story
+                    if story.gate and story.gate.type == "decision" and story.gate.status == "pending":
+                        decision_blocked.append(story)
+                    # Check for pending action gates on dependencies
+                    else if story.dependsOn:
+                        for dep_id in story.dependsOn:
+                            dep = find story with id == dep_id in all_stories.userStories
+                            if dep.gate and dep.gate.type == "action" and dep.gate.status == "pending":
+                                action_blocked.append(story)
+                                break
+
+            if len(decision_blocked) > 0 or len(action_blocked) > 0:
+                Report: "No stories ready — blocked by gates:"
+                for story in decision_blocked:
+                    Report: "  Waiting for decision on [story.id]: [story.gate.prompt]"
+                for story in action_blocked:
+                    Report: "  [story.id] paused — dependency has pending action gate"
+                Report: ""
+                Report: "Use /aimi:status to see gate details. Resolve gates with:"
+                Report: "  $AIMI_CLI gate-pass <story-id> [--option 'value']"
+                Break loop (proceed to completion)
+            else:
+                Report: "Deadlock detected: [pending] stories pending but none are ready."
+                Report: "This may indicate circular dependencies or all remaining stories depend on failed/skipped stories."
+                Break loop (proceed to completion)
         else:
             break
 
@@ -329,6 +365,12 @@ while true:
             project_path = AIMI_ROOT / full_story.project  (resolve to absolute path)
             project_guidelines = PROJECT_GUIDELINES_MAP[full_story.project] or PROJECT_GUIDELINES
 
+        # Capture HEAD SHA before Task spawn for commit verification
+        if project_path is not null:
+            head_before = git -C [project_path] rev-parse HEAD
+        else:
+            head_before = git rev-parse HEAD
+
         # Spawn a single foreground Task — same pattern as next.md
         # No worktree, worker operates in current directory (or PROJECT_PATH if set)
         # IMPORTANT: subagent_type MUST be "general-purpose" — story-executor is a skill, NOT an agent.
@@ -349,8 +391,40 @@ while true:
 
         # Handle result
         if Task succeeded:
+            # Verify a commit was actually created
+            if project_path is not null:
+                head_after = git -C [project_path] rev-parse HEAD
+            else:
+                head_after = git rev-parse HEAD
+
+            if head_after == head_before:
+                $AIMI_CLI mark-failed [story.id] "No commit detected after execution"
+                $AIMI_CLI cascade-skip [story.id]
+                Report: "[story.id] failed (no commit detected). Dependent stories cascade-skipped."
+                Report: "Wave [wave] complete."
+                wave += 1
+                continue
+
             $AIMI_CLI mark-complete [story.id]
+
+            # Update verification.status if story has verification and executor reports success
+            if full_story.verification and full_story.verification.status == "pending":
+                # Story-executor verified acceptance criteria — mark verification as passed
+                $AIMI_CLI update-field [story.id] verification.status passed
+
             Report: "[story.id] completed."
+
+            # ========================================
+            # POST-COMPLETION GATE LOGGING
+            # ========================================
+            # Re-fetch story to get gate info (gate field was in brief data)
+            if full_story.gate:
+                if full_story.gate.type == "action" and full_story.gate.status == "pending":
+                    Report: "Action required for [story.id]: [full_story.gate.prompt]"
+                    Report: "  Dependents will wait until gate is resolved."
+                if full_story.gate.type == "verify" and full_story.gate.status == "pending":
+                    Report: "Verification pending for [story.id]: [full_story.gate.prompt]"
+                    Report: "  Dependents proceed immediately (non-blocking)."
         else:
             $AIMI_CLI mark-failed [story.id] "Failed during wave [wave]"
             $AIMI_CLI cascade-skip [story.id]
@@ -394,6 +468,12 @@ while true:
             project_path = AIMI_ROOT / full_story.project
             project_guidelines = PROJECT_GUIDELINES_MAP[full_story.project] or PROJECT_GUIDELINES
 
+        # Capture HEAD SHA before Task spawn for commit verification
+        if project_path is not null:
+            head_before = git -C [project_path] rev-parse HEAD
+        else:
+            head_before = git rev-parse HEAD
+
         Task(
             subagent_type: "general-purpose",
             description: "Execute [full_story.id]: [full_story.title]",
@@ -410,8 +490,36 @@ while true:
         )
 
         if Task succeeded:
+            # Verify a commit was actually created
+            if project_path is not null:
+                head_after = git -C [project_path] rev-parse HEAD
+            else:
+                head_after = git rev-parse HEAD
+
+            if head_after == head_before:
+                $AIMI_CLI mark-failed [full_story.id] "No commit detected after execution"
+                $AIMI_CLI cascade-skip [full_story.id]
+                Report: "[full_story.id] failed (no commit detected). Dependent stories cascade-skipped."
+                Report: "Wave [wave] complete."
+                wave += 1
+                continue
+
             $AIMI_CLI mark-complete [full_story.id]
+
+            # Update verification.status if story has verification and executor reports success
+            if full_story.verification and full_story.verification.status == "pending":
+                $AIMI_CLI update-field [full_story.id] verification.status passed
+
             Report: "[full_story.id] completed."
+
+            # Post-completion gate logging
+            if full_story.gate:
+                if full_story.gate.type == "action" and full_story.gate.status == "pending":
+                    Report: "Action required for [full_story.id]: [full_story.gate.prompt]"
+                    Report: "  Dependents will wait until gate is resolved."
+                if full_story.gate.type == "verify" and full_story.gate.status == "pending":
+                    Report: "Verification pending for [full_story.id]: [full_story.gate.prompt]"
+                    Report: "  Dependents proceed immediately (non-blocking)."
         else:
             $AIMI_CLI mark-failed [full_story.id] "Failed during wave [wave]"
             $AIMI_CLI cascade-skip [full_story.id]
@@ -447,6 +555,14 @@ while true:
             project_roots[group_key] = CWD  (current working directory / git root)
         else:
             project_roots[group_key] = AIMI_ROOT / group_key  (resolve to absolute path)
+
+    # ========================================
+    # CAPTURE BASE SHA PER PROJECT GROUP (for commit verification)
+    # ========================================
+    base_sha = {}  # key: group_key, value: HEAD SHA before worktree creation
+    for group_key in project_groups:
+        project_root = project_roots[group_key]
+        base_sha[group_key] = git -C [project_root] rev-parse [branchName]
 
     # ========================================
     # CREATE WORKTREES PER PROJECT GROUP
@@ -509,6 +625,30 @@ while true:
 
     # --- Post-Wave Processing ---
 
+    # ========================================
+    # COMMIT VERIFICATION (parallel path)
+    # ========================================
+    # For each succeeded story, verify that a commit was actually created
+    # by comparing worktree HEAD against the base SHA captured before worktree creation.
+    no_commit_stories = []
+    verified_stories = []
+    for full_story in succeeded_stories:
+        wt = all_worktrees[full_story.id]
+        worktree_head = git -C [wt.worktree_path] rev-parse HEAD
+        if worktree_head == base_sha[wt.group_key]:
+            no_commit_stories.append(full_story)
+        else:
+            verified_stories.append(full_story)
+
+    # Move no-commit stories to failed
+    for full_story in no_commit_stories:
+        $AIMI_CLI mark-failed [full_story.id] "No commit detected after execution"
+        $AIMI_CLI cascade-skip [full_story.id]
+        Report: "[full_story.id] failed (no commit detected). Dependent stories cascade-skipped."
+
+    # Replace succeeded_stories with only verified ones (so merge-all skips no-commit stories)
+    succeeded_stories = verified_stories
+
     # Handle failures first
     for full_story in failed_stories:
         $AIMI_CLI mark-failed [full_story.id] "Failed during parallel wave [wave]"
@@ -554,14 +694,37 @@ while true:
             # Merges succeeded for this project group — mark stories complete
             for full_story in stories:
                 $AIMI_CLI mark-complete [full_story.id]
+
+                # Update verification.status if story has verification and executor reports success
+                if full_story.verification and full_story.verification.status == "pending":
+                    $AIMI_CLI update-field [full_story.id] verification.status passed
+
                 Report: "[full_story.id] merged successfully."
+
+                # Post-completion gate logging
+                if full_story.gate:
+                    if full_story.gate.type == "action" and full_story.gate.status == "pending":
+                        Report: "Action required for [full_story.id]: [full_story.gate.prompt]"
+                        Report: "  Dependents will wait until gate is resolved."
+                    if full_story.gate.type == "verify" and full_story.gate.status == "pending":
+                        Report: "Verification pending for [full_story.id]: [full_story.gate.prompt]"
+                        Report: "  Dependents proceed immediately (non-blocking)."
 
     # Remove all worktrees from this wave (per project group)
     for full_story_id, wt in all_worktrees:
         cd [project_roots[wt.group_key]]
         $WORKTREE_MGR remove [wt.worktree_name]
 
-    Report: "Wave [wave] complete: [len(succeeded_stories)] succeeded, [len(failed_stories)] failed"
+    # Count gate statuses for wave summary
+    action_gates = [s for s in succeeded_stories if s.gate and s.gate.type == "action" and s.gate.status == "pending"]
+    verify_gates = [s for s in succeeded_stories if s.gate and s.gate.type == "verify" and s.gate.status == "pending"]
+
+    wave_summary = "Wave [wave] complete: [len(succeeded_stories)] succeeded, [len(failed_stories)] failed"
+    if len(action_gates) > 0:
+        wave_summary += ", [len(action_gates)] action gate(s) pending"
+    if len(verify_gates) > 0:
+        wave_summary += ", [len(verify_gates)] verify gate(s) pending"
+    Report: wave_summary
     wave += 1
 ```
 
@@ -595,6 +758,16 @@ Count commits on this branch:
 git log --oneline main..HEAD | wc -l
 ```
 
+Check for any remaining pending gates across all stories:
+```bash
+$AIMI_CLI status
+```
+
+Parse gate summary from status output:
+- `pending_action_gates`: count of stories with gate.type == "action" and gate.status == "pending"
+- `pending_verify_gates`: count of stories with gate.type == "verify" and gate.status == "pending"
+- `pending_decision_gates`: count of stories with gate.type == "decision" and gate.status == "pending"
+
 ```
 ## Execution Complete
 
@@ -603,7 +776,28 @@ All stories completed successfully!
 Branch: [branchName]
 Waves: [total_waves]
 Commits: [count]
+```
 
+If any pending gates exist, append:
+```
+### Pending Gates
+
+[If pending_action_gates > 0:]
+Action gates ([pending_action_gates]):
+  For each: "  - [story.id]: [story.gate.prompt]"
+
+[If pending_verify_gates > 0:]
+Verify gates ([pending_verify_gates]):
+  For each: "  - [story.id]: [story.gate.prompt]"
+
+[If pending_decision_gates > 0:]
+Decision gates ([pending_decision_gates]):
+  For each: "  - [story.id]: [story.gate.prompt]"
+
+Resolve gates with: $AIMI_CLI gate-pass <story-id> [--option 'value']
+```
+
+```
 ### Next Steps
 
 - Review commits: `git log --oneline -[count]`
