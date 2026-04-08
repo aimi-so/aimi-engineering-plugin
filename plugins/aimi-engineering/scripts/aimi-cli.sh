@@ -981,9 +981,42 @@ cmd_get_state() {
     }'
 }
 
+# Detect the repository's default branch
+# Primary: git remote show origin (requires network)
+# Fallback: git symbolic-ref refs/remotes/origin/HEAD (offline)
+# Caches result in .aimi/default-branch for session reuse
+cmd_detect_default_branch() {
+  # Return cached value if available
+  local cached
+  cached=$(read_state "default-branch")
+  if [ -n "$cached" ]; then
+    echo "$cached"
+    return 0
+  fi
+
+  local branch=""
+
+  # Primary: parse HEAD branch from remote
+  branch=$(git remote show origin 2>/dev/null | sed -n 's/.*HEAD branch: //p')
+
+  # Fallback: symbolic-ref (works offline)
+  if [ -z "$branch" ]; then
+    branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||')
+  fi
+
+  if [ -z "$branch" ]; then
+    echo "Error: Could not detect default branch" >&2
+    exit 1
+  fi
+
+  # Cache for session reuse
+  write_state "default-branch" "$branch"
+  echo "$branch"
+}
+
 # Clear all state files (preserves tasks directory)
 cmd_clear_state() {
-  rm -f "$AIMI_DIR/current-tasks" "$AIMI_DIR/current-branch" "$AIMI_DIR/current-story" "$AIMI_DIR/last-result" "$AIMI_DIR/cli-path"
+  rm -f "$AIMI_DIR/current-tasks" "$AIMI_DIR/current-branch" "$AIMI_DIR/current-story" "$AIMI_DIR/last-result" "$AIMI_DIR/cli-path" "$AIMI_DIR/default-branch"
   rm -f "$AIMI_DIR"/.state.lock "$AIMI_DIR"/*.lock 2>/dev/null
   rmdir "$AIMI_DIR"/*.lock.d 2>/dev/null || true
   echo "State cleared."
@@ -1359,6 +1392,7 @@ COMMANDS:
     get-branch                Get branchName from metadata
     get-story <id>            Get full story object by ID (read-only)
     get-state                 Get all state files as JSON
+    detect-default-branch     Detect and cache the repository's default branch
     clear-state               Clear all state files
     check-version [--quiet] [--fix]
                               Check if stored CLI version matches latest installed
@@ -1377,6 +1411,7 @@ STATE FILES (.aimi/):
     current-branch            Current working branch name
     current-story             ID of story being executed
     last-result               Result of last execution (success/failed/skipped)
+    default-branch            Cached default branch name (e.g., main, master)
 
 ENVIRONMENT:
     CLAUDE_CONFIG_DIR  Override Claude config directory (default: ~/.claude)
@@ -1459,6 +1494,7 @@ main() {
     get-branch)        cmd_get_branch ;;
     get-story)         cmd_get_story "${2:-}" ;;
     get-state)         cmd_get_state ;;
+    detect-default-branch) cmd_detect_default_branch ;;
     clear-state)       cmd_clear_state ;;
     check-version)     shift; cmd_check_version "$@" ;;
     cleanup-versions)  cmd_cleanup_versions ;;
