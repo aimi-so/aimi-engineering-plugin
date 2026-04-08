@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.40.1] - 2026-04-08
+
+### Fixed
+
+- **review**: Replace hardcoded 'main' in git diff commands with dynamic default branch detection using `git symbolic-ref`, falling back to 'main' if detection fails
+
 ## [1.40.0] - 2026-04-08
 
 ### Changed
