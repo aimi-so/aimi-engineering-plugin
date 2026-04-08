@@ -1,9 +1,9 @@
 {
   "name": "aimi-engineering",
-  "version": "1.39.0",
+  "version": "1.40.0",
   "description": "Autonomous task execution with standalone aimi-native agents. Direct tasks.json generation, research-driven planning, multi-agent review, iterative execution.",
   "author": {
-    "name": "Aimi"
+    "name": "Aimi — Autonomous Code Companion"
   },
   "homepage": "https://github.com/aimi-so/aimi-engineering-plugin",
   "repository": "https://github.com/aimi-so/aimi-engineering-plugin",
