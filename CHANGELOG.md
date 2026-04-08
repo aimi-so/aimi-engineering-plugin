@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.41.0] - 2026-04-08
+
+### Added
+
+- **execute**: Branch freshness check (Step 1.5) — fetches origin and detects default branch via `$AIMI_CLI detect-default-branch` before branch setup
+
+### Changed
+
+- **execute**: New branches now created from `origin/[DEFAULT_BRANCH]` instead of current HEAD, ensuring fresh base
+- **execute**: Commit counting in Step 5 uses dynamically detected default branch instead of hardcoded `main`
+
 ## [1.40.0] - 2026-04-08
 
 ### Changed
