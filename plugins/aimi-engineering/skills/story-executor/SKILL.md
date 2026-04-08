@@ -147,7 +147,18 @@ All file operations MUST stay within the project boundary: PROJECT_PATH when set
 2. Implement the story requirements
 3. Verify ALL acceptance criteria are met
 4. Run typecheck: npx tsc --noEmit
-5. If all checks pass, commit with: "feat(scope): Story title"
+5. If all checks pass, commit:
+   a. Stage only story-related files: `git add [changed files]` (never use `-A` or `.` — avoid staging unrelated files)
+   b. Commit with conventional format: `git commit -m "type(scope): Story title"`
+      Commit types: **feat** | fix | refactor | docs | test | chore
+   c. Verify the commit landed: `git log -1 --oneline`
+
+   **FAIL FAST — Commit failure:**
+   If `git commit` exits non-zero OR `git log -1 --oneline` does not show the expected commit:
+   - Do NOT retry or attempt to fix
+   - Report failure immediately with the error output
+   - The caller will handle recovery
+
 6. If WORKTREE_PATH is set: do NOT update tasks file — return result report instead
    If no WORKTREE_PATH: do NOT update tasks file directly — the caller (next.md/execute.md) handles status updates via the CLI
 
@@ -183,5 +194,6 @@ Before completing a story:
 - [ ] All file operations stayed within project root (no parent directory access)
 - [ ] All acceptance criteria verified
 - [ ] Typecheck passes (`npx tsc --noEmit`)
-- [ ] Changes committed with proper format
+- [ ] Changes committed with proper format (one commit per story, never skip hooks)
+- [ ] Commit verified via `git log -1 --oneline`
 - [ ] Result report returned to caller (do NOT update tasks file directly — caller handles via CLI)
