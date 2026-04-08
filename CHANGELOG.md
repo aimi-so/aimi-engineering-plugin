@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **cli**: `detect-default-branch` subcommand — dynamically detects repository default branch with `git remote show origin` primary and `git symbolic-ref` fallback, cached in `.aimi/default-branch`
+- **cli**: `list-archivable` subcommand — returns JSON array of task files where all stories are completed or skipped
+- **cli**: `archive-task` subcommand — moves completed task file + linked brainstorm to `.aimi/archive/` with collision handling
 - **execute**: Archival prompt at entry point (Step 0.5) — checks for completed task files via `list-archivable` and offers to archive them before starting execution
 - **execute**: Branch freshness check (Step 1.5) — fetches origin and detects default branch via `$AIMI_CLI detect-default-branch` before branch setup
 - **plan**: Branch freshness check — fetches origin before Phase 0 to ensure local refs are current, with offline warning fallback
@@ -21,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **execute**: New branches now created from `origin/[DEFAULT_BRANCH]` instead of current HEAD, ensuring fresh base
 - **execute**: Commit counting in Step 5 uses dynamically detected default branch instead of hardcoded `main`
+- **cli**: `clear-state` now also removes `default-branch` cache file
 
 ## [1.40.0] - 2026-04-08
 
