@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **execute**: Branch freshness check (Step 1.5) — fetches origin and detects default branch via `$AIMI_CLI detect-default-branch` before branch setup
 - **plan**: Branch freshness check — fetches origin before Phase 0 to ensure local refs are current, with offline warning fallback
 - **plan**: CLI path resolution using 4-layer strategy and `detect-default-branch` for dynamic default branch detection
+- **review**: Dynamic default branch detection using `git symbolic-ref`, replacing hardcoded `main`
 
 ### Changed
 
