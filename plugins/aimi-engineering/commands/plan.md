@@ -332,6 +332,8 @@ Next steps:
 4. **Run `/aimi:execute`** - Begin autonomous execution
 ```
 
+**IMPORTANT:** Output the "Next steps" block EXACTLY as shown above — use `/aimi:` prefix (e.g., `/aimi:deepen`), NOT the fully-qualified plugin name (e.g., `/aimi-engineering:deepen`). Copy the block verbatim.
+
 ## Error Handling
 
 | Phase | Failure | Action |
