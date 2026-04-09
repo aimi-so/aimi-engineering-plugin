@@ -1014,6 +1014,101 @@ cmd_detect_default_branch() {
   echo "$branch"
 }
 
+# Setup branch: deterministic branch creation/checkout logic
+# Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch>
+cmd_setup_branch() {
+  local branch_name="" default_branch=""
+
+  # Parse arguments (positional + flags)
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --default-branch)
+        shift
+        default_branch="${1:-}"
+        ;;
+      -*)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch>" >&2
+        exit 1
+        ;;
+      *)
+        if [ -z "$branch_name" ]; then
+          branch_name="$1"
+        else
+          echo "Error: Unexpected argument: $1" >&2
+          echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch>" >&2
+          exit 1
+        fi
+        ;;
+    esac
+    shift
+  done
+
+  # Validate required arguments
+  if [ -z "$branch_name" ] || [ -z "$default_branch" ]; then
+    echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch>" >&2
+    exit 1
+  fi
+
+  # Validate branch name (security)
+  if ! [[ "$branch_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: Invalid branch name: $branch_name" >&2
+    exit 1
+  fi
+
+  # Validate default branch name (security)
+  if ! [[ "$default_branch" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: Invalid default branch name: $default_branch" >&2
+    exit 1
+  fi
+
+  # Get current branch (empty string means detached HEAD)
+  local current_branch
+  current_branch=$(git branch --show-current 2>/dev/null || echo "")
+
+  # Case 1: Already on target branch
+  if [ "$current_branch" = "$branch_name" ]; then
+    printf '{"branch":"%s","action":"already-on-branch"}\n' "$branch_name"
+    return 0
+  fi
+
+  # Case 2: Target branch exists locally
+  if git branch --list "$branch_name" | grep -q "$branch_name"; then
+    git checkout "$branch_name" >/dev/null 2>&1
+    printf '{"branch":"%s","action":"checked-out-local"}\n' "$branch_name"
+    return 0
+  fi
+
+  # Case 3: Target branch exists on remote only
+  if git ls-remote --heads origin "$branch_name" 2>/dev/null | grep -q "$branch_name"; then
+    git checkout -b "$branch_name" "origin/$branch_name" >/dev/null 2>&1
+    printf '{"branch":"%s","action":"checked-out-remote"}\n' "$branch_name"
+    return 0
+  fi
+
+  # Case 4/5: Branch is new — decide base
+  # Detached HEAD is treated as 'not merged'
+  if [ -z "$current_branch" ]; then
+    # Detached HEAD — create from current HEAD
+    git checkout -b "$branch_name" >/dev/null 2>&1
+    printf '{"branch":"%s","action":"created-from-current"}\n' "$branch_name"
+    return 0
+  fi
+
+  # Check if current branch is the default branch OR is merged into default
+  if [ "$current_branch" = "$default_branch" ] || \
+     git branch --merged "origin/$default_branch" 2>/dev/null | grep -q "^[* ] *${current_branch}$"; then
+    git checkout -b "$branch_name" "origin/$default_branch" >/dev/null 2>&1
+    printf '{"branch":"%s","action":"created-from-default"}\n' "$branch_name"
+    return 0
+  fi
+
+  # Current branch is NOT merged into default — create from HEAD
+  git checkout -b "$branch_name" >/dev/null 2>&1
+  printf '{"branch":"%s","action":"created-from-current"}\n' "$branch_name"
+  return 0
+}
+
 # Clear all state files (preserves tasks directory)
 cmd_clear_state() {
   rm -f "$AIMI_DIR/current-tasks" "$AIMI_DIR/current-branch" "$AIMI_DIR/current-story" "$AIMI_DIR/last-result" "$AIMI_DIR/cli-path" "$AIMI_DIR/default-branch"
@@ -1536,6 +1631,8 @@ COMMANDS:
     get-story <id>            Get full story object by ID (read-only)
     get-state                 Get all state files as JSON
     detect-default-branch     Detect and cache the repository's default branch
+    setup-branch <name> --default-branch <branch>
+                              Create or checkout branch with deterministic logic
     clear-state               Clear all state files
     check-version [--quiet] [--fix]
                               Check if stored CLI version matches latest installed
@@ -1640,6 +1737,7 @@ main() {
     get-story)         cmd_get_story "${2:-}" ;;
     get-state)         cmd_get_state ;;
     detect-default-branch) cmd_detect_default_branch ;;
+    setup-branch)      shift; cmd_setup_branch "$@" ;;
     clear-state)       cmd_clear_state ;;
     check-version)     shift; cmd_check_version "$@" ;;
     cleanup-versions)  cmd_cleanup_versions ;;

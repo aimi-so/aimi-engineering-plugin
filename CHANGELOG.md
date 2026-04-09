@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.43.0] - 2026-04-09
+
+### Added
+
+- **cli**: `setup-branch` subcommand — deterministic branch creation/checkout with JSON output, supports local/remote/new branch detection with merge-status-aware base selection
+- **hooks**: `setup-branch` added to auto-approve whitelist in `auto-approve-cli.sh`
+
 ## [1.42.0] - 2026-04-08
 
 ### Changed
