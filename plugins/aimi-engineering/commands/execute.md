@@ -183,34 +183,20 @@ Warning: git fetch origin failed — continuing with local state. Branch may be 
 
 Get the branch name from the init-session output (already validated by CLI).
 
-### Check Current Branch
+### Main Repo Branch Setup
 
 ```bash
-current_branch=$(git branch --show-current)
+BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $DEFAULT_BRANCH)
 ```
 
-### If already on correct branch:
-Proceed to Step 3.
+If the command fails (non-zero exit), report the error and STOP.
 
-### If on different branch:
-Check if target branch exists:
-```bash
-git branch --list [branchName]
+Extract the action from the JSON output and report:
+```
+Branch setup: [action]
 ```
 
-- If exists: `git checkout [branchName]`
-- If not exists:
-  Check if the current branch has been merged into the default branch:
-  ```bash
-  git branch --merged origin/[DEFAULT_BRANCH] | grep -q "$(git branch --show-current)"
-  ```
-  - If current branch IS merged (or IS the default branch): `git checkout -b [branchName] origin/[DEFAULT_BRANCH]`
-  - If current branch is NOT merged: `git checkout -b [branchName]`
-
-Report:
-```
-Switched to branch: [branchName]
-```
+Where `[action]` is the `action` field from the JSON response (e.g., `already-on-branch`, `checked-out-local`, `checked-out-remote`, `created-from-default`, `created-from-current`).
 
 ### Per-Project Branch Setup
 
@@ -223,22 +209,13 @@ If any story has a non-null `project` field:
 3. For each unique project path:
    ```bash
    cd [resolved_project_path]
-   git branch --list [branchName]
+   PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $DEFAULT_BRANCH)
+   cd [original_directory]
    ```
-   - If branch exists: `git checkout [branchName]`
-   - If not exists:
-     Check if the current branch has been merged into the default branch:
-     ```bash
-     git branch --merged origin/[DEFAULT_BRANCH] | grep -q "$(git branch --show-current)"
-     ```
-     - If merged: `git checkout -b [branchName] origin/[DEFAULT_BRANCH]`
-     - If not merged: `git checkout -b [branchName]`
-   - Then return to the original directory.
-
-Report for each project:
-```
-Branch [branchName] set up in project: [project_path]
-```
+   Extract the action from the JSON output and report:
+   ```
+   Branch [branchName] set up in project: [project_path] (action: [action])
+   ```
 
 If no stories have a `project` field, skip this step (backwards compatible).
 
