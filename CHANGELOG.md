@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.43.1] - 2026-04-09
+
+### Fixed
+
+- **cli**: Improved `setup-branch` comment clarity — distinguish "on default branch" vs "merged into default" cases
+
+### Changed
+
+- **test**: Added test for merged-but-not-on-default branch scenario in `setup-branch`, updated test descriptions for accuracy
+
 ## [1.43.0] - 2026-04-09
 
 ### Added

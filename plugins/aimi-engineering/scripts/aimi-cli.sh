@@ -1095,7 +1095,7 @@ cmd_setup_branch() {
     return 0
   fi
 
-  # Check if current branch is the default branch OR is merged into default
+  # Check if current branch IS the default branch OR is fully merged into default
   if [ "$current_branch" = "$default_branch" ] || \
      git branch --merged "origin/$default_branch" 2>/dev/null | grep -q "^[* ] *${current_branch}$"; then
     git checkout -b "$branch_name" "origin/$default_branch" >/dev/null 2>&1
@@ -1103,7 +1103,7 @@ cmd_setup_branch() {
     return 0
   fi
 
-  # Current branch is NOT merged into default — create from HEAD
+  # Current branch has unmerged work — create from current HEAD (stacking intent)
   git checkout -b "$branch_name" >/dev/null 2>&1
   printf '{"branch":"%s","action":"created-from-current"}\n' "$branch_name"
   return 0

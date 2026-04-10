@@ -2576,10 +2576,10 @@ test_setup_branch() {
   popd >/dev/null
   teardown_git_fixture
 
-  # --- Subtest: new branch from default (current branch merged into default) ---
+  # --- Subtest: new branch from default (current branch IS default) ---
   setup_git_fixture
   pushd "$GIT_FIXTURE_LOCAL" >/dev/null
-  # Start on main (which is trivially merged into itself)
+  # Start on main (the default branch itself)
   git checkout main >/dev/null 2>&1
 
   stderr_file=$(mktemp)
@@ -2589,8 +2589,29 @@ test_setup_branch() {
   local base_commit default_commit
   base_commit=$(git rev-parse feat/brand-new 2>/dev/null)
   default_commit=$(git rev-parse origin/main 2>/dev/null)
-  assert_eq "created-from-default" "$action" "setup-branch: new from default (merged) — action"
-  assert_eq "$default_commit" "$base_commit" "setup-branch: new from default (merged) — base is origin/main"
+  assert_eq "created-from-default" "$action" "setup-branch: new from default (on default branch) — action"
+  assert_eq "$default_commit" "$base_commit" "setup-branch: new from default (on default branch) — base is origin/main"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: new branch from default (current branch merged into default but not ON default) ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  # Create a branch from main (so it's "merged" into main), stay on it
+  git checkout main >/dev/null 2>&1
+  git checkout -b feat/merged-branch >/dev/null 2>&1
+  # This branch is fully merged into main — new branches should come from origin/main
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" setup-branch feat/fresh-work --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  action=$(echo "$stdout" | jq -r '.action')
+  local fresh_commit
+  fresh_commit=$(git rev-parse feat/fresh-work 2>/dev/null)
+  default_commit=$(git rev-parse origin/main 2>/dev/null)
+  assert_eq "created-from-default" "$action" "setup-branch: merged branch creates from default — action"
+  assert_eq "$default_commit" "$fresh_commit" "setup-branch: merged branch creates from default — base is origin/main"
   rm -f "$stderr_file"
 
   popd >/dev/null
