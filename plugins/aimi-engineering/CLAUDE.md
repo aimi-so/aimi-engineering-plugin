@@ -55,7 +55,7 @@ aimi-engineering-plugin/
 
 ## Command Conventions
 
-- Use `aimi:` prefix for all commands
+- Use `aimi:` prefix for all commands — always show `/aimi:plan`, `/aimi:execute`, etc. in output, NEVER the fully-qualified `/aimi-engineering:plan` form
 - Use `disable-model-invocation: true` for side-effect commands
 - Wrapper commands should pass `$ARGUMENTS` to wrapped commands
 - Document allowed-tools in frontmatter with specific Bash prefixes

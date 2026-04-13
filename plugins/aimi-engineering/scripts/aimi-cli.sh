@@ -981,9 +981,137 @@ cmd_get_state() {
     }'
 }
 
+# Detect the repository's default branch
+# Primary: git remote show origin (requires network)
+# Fallback: git symbolic-ref refs/remotes/origin/HEAD (offline)
+# Caches result in .aimi/default-branch for session reuse
+cmd_detect_default_branch() {
+  # Return cached value if available
+  local cached
+  cached=$(read_state "default-branch")
+  if [ -n "$cached" ]; then
+    echo "$cached"
+    return 0
+  fi
+
+  local branch=""
+
+  # Primary: parse HEAD branch from remote
+  branch=$(git remote show origin 2>/dev/null | sed -n 's/.*HEAD branch: //p')
+
+  # Fallback: symbolic-ref (works offline)
+  if [ -z "$branch" ]; then
+    branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||')
+  fi
+
+  if [ -z "$branch" ]; then
+    echo "Error: Could not detect default branch" >&2
+    exit 1
+  fi
+
+  # Cache for session reuse
+  write_state "default-branch" "$branch"
+  echo "$branch"
+}
+
+# Setup branch: deterministic branch creation/checkout logic
+# Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch>
+cmd_setup_branch() {
+  local branch_name="" default_branch=""
+
+  # Parse arguments (positional + flags)
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --default-branch)
+        shift
+        default_branch="${1:-}"
+        ;;
+      -*)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch>" >&2
+        exit 1
+        ;;
+      *)
+        if [ -z "$branch_name" ]; then
+          branch_name="$1"
+        else
+          echo "Error: Unexpected argument: $1" >&2
+          echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch>" >&2
+          exit 1
+        fi
+        ;;
+    esac
+    shift
+  done
+
+  # Validate required arguments
+  if [ -z "$branch_name" ] || [ -z "$default_branch" ]; then
+    echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch>" >&2
+    exit 1
+  fi
+
+  # Validate branch name (security)
+  if ! [[ "$branch_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: Invalid branch name: $branch_name" >&2
+    exit 1
+  fi
+
+  # Validate default branch name (security)
+  if ! [[ "$default_branch" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: Invalid default branch name: $default_branch" >&2
+    exit 1
+  fi
+
+  # Get current branch (empty string means detached HEAD)
+  local current_branch
+  current_branch=$(git branch --show-current 2>/dev/null || echo "")
+
+  # Case 1: Already on target branch
+  if [ "$current_branch" = "$branch_name" ]; then
+    printf '{"branch":"%s","action":"already-on-branch"}\n' "$branch_name"
+    return 0
+  fi
+
+  # Case 2: Target branch exists locally
+  if git branch --list "$branch_name" | grep -q "$branch_name"; then
+    git checkout "$branch_name" >/dev/null 2>&1
+    printf '{"branch":"%s","action":"checked-out-local"}\n' "$branch_name"
+    return 0
+  fi
+
+  # Case 3: Target branch exists on remote only
+  if git ls-remote --heads origin "$branch_name" 2>/dev/null | grep -q "$branch_name"; then
+    git checkout -b "$branch_name" "origin/$branch_name" >/dev/null 2>&1
+    printf '{"branch":"%s","action":"checked-out-remote"}\n' "$branch_name"
+    return 0
+  fi
+
+  # Case 4/5: Branch is new — decide base
+  # Detached HEAD is treated as 'not merged'
+  if [ -z "$current_branch" ]; then
+    # Detached HEAD — create from current HEAD
+    git checkout -b "$branch_name" >/dev/null 2>&1
+    printf '{"branch":"%s","action":"created-from-current"}\n' "$branch_name"
+    return 0
+  fi
+
+  # Check if current branch IS the default branch OR is fully merged into default
+  if [ "$current_branch" = "$default_branch" ] || \
+     git branch --merged "origin/$default_branch" 2>/dev/null | grep -q "^[* ] *${current_branch}$"; then
+    git checkout -b "$branch_name" "origin/$default_branch" >/dev/null 2>&1
+    printf '{"branch":"%s","action":"created-from-default"}\n' "$branch_name"
+    return 0
+  fi
+
+  # Current branch has unmerged work — create from current HEAD (stacking intent)
+  git checkout -b "$branch_name" >/dev/null 2>&1
+  printf '{"branch":"%s","action":"created-from-current"}\n' "$branch_name"
+  return 0
+}
+
 # Clear all state files (preserves tasks directory)
 cmd_clear_state() {
-  rm -f "$AIMI_DIR/current-tasks" "$AIMI_DIR/current-branch" "$AIMI_DIR/current-story" "$AIMI_DIR/last-result" "$AIMI_DIR/cli-path"
+  rm -f "$AIMI_DIR/current-tasks" "$AIMI_DIR/current-branch" "$AIMI_DIR/current-story" "$AIMI_DIR/last-result" "$AIMI_DIR/cli-path" "$AIMI_DIR/default-branch"
   rm -f "$AIMI_DIR"/.state.lock "$AIMI_DIR"/*.lock 2>/dev/null
   rmdir "$AIMI_DIR"/*.lock.d 2>/dev/null || true
   echo "State cleared."
@@ -1322,6 +1450,149 @@ cmd_validate_waves() {
   ' "$tasks_file"
 }
 
+# List task files where all stories have terminal status (completed or skipped)
+# Returns a JSON array of file paths
+cmd_list_archivable() {
+  local result="["
+  local first=true
+
+  for tasks_file in "$TASKS_DIR"/*-tasks.json; do
+    # Skip if glob didn't expand
+    [ -f "$tasks_file" ] || continue
+
+    # Check if ALL stories have terminal status (completed or skipped)
+    local non_terminal
+    non_terminal=$(jq '[.userStories[] | select(.status != "completed" and .status != "skipped")] | length' "$tasks_file" 2>/dev/null)
+
+    # Skip files that aren't valid JSON or have non-terminal stories
+    [ -z "$non_terminal" ] && continue
+    [ "$non_terminal" -ne 0 ] && continue
+
+    # Also skip files with zero stories (empty array)
+    local total
+    total=$(jq '.userStories | length' "$tasks_file" 2>/dev/null)
+    [ -z "$total" ] && continue
+    [ "$total" -eq 0 ] && continue
+
+    local resolved
+    resolved=$(resolve_path "$tasks_file")
+    if [ "$first" = true ]; then
+      first=false
+    else
+      result="$result,"
+    fi
+    result="$result$(printf '"%s"' "$resolved")"
+  done
+
+  result="$result]"
+  echo "$result"
+}
+
+# Archive a task file (and linked brainstorm) to .aimi/archive/
+# Usage: archive-task <path>
+cmd_archive_task() {
+  local task_path="$1"
+
+  if [ -z "$task_path" ]; then
+    echo "Usage: aimi-cli.sh archive-task <path>" >&2
+    exit 1
+  fi
+
+  # Resolve and validate path
+  if [ ! -f "$task_path" ]; then
+    echo "Error: Task file not found: $task_path" >&2
+    exit 1
+  fi
+
+  local resolved_task
+  resolved_task=$(resolve_path "$task_path")
+  validate_path_in_project "$resolved_task"
+
+  # Verify all stories are terminal
+  local non_terminal
+  non_terminal=$(jq '[.userStories[] | select(.status != "completed" and .status != "skipped")] | length' "$resolved_task" 2>/dev/null)
+  if [ -z "$non_terminal" ] || [ "$non_terminal" -ne 0 ]; then
+    echo "Error: Task file has non-terminal stories — cannot archive" >&2
+    exit 1
+  fi
+
+  # Create archive directory
+  local archive_dir="$AIMI_DIR/archive"
+  mkdir -p "$archive_dir"
+
+  # Helper: move a file to archive with collision handling
+  # Usage: _archive_move <source_path>
+  # Outputs the destination path
+  _archive_move() {
+    local src="$1"
+    local basename
+    basename=$(basename "$src")
+    local dest="$archive_dir/$basename"
+
+    if [ ! -e "$dest" ]; then
+      mv "$src" "$dest"
+      printf '%s' "$dest"
+      return
+    fi
+
+    # Handle collision: append -N suffix before extension
+    local name_no_ext ext
+    # Split on first dot for files like foo-tasks.json
+    name_no_ext="${basename%%.*}"
+    ext="${basename#"$name_no_ext"}"  # includes leading dot(s)
+
+    local n=2
+    while true; do
+      dest="$archive_dir/${name_no_ext}-${n}${ext}"
+      if [ ! -e "$dest" ]; then
+        mv "$src" "$dest"
+        printf '%s' "$dest"
+        return
+      fi
+      n=$((n + 1))
+    done
+  }
+
+  # Move the task file
+  local archived_task
+  archived_task=$(_archive_move "$resolved_task")
+
+  # Move companion .lock file if it exists
+  if [ -f "${resolved_task}.lock" ]; then
+    _archive_move "${resolved_task}.lock" > /dev/null
+  fi
+
+  # Move linked brainstorm if specified in metadata
+  local brainstorm_path archived_brainstorm=""
+  brainstorm_path=$(jq -r '.metadata.brainstormPath // empty' "$archived_task" 2>/dev/null)
+
+  if [ -n "$brainstorm_path" ]; then
+    # Resolve relative to project root
+    local resolved_brainstorm
+    if [ "${brainstorm_path#/}" = "$brainstorm_path" ]; then
+      # Relative path — resolve from project root
+      resolved_brainstorm="$PROJECT_ROOT/$brainstorm_path"
+    else
+      resolved_brainstorm="$brainstorm_path"
+    fi
+
+    # Validate brainstorm path stays within project root
+    if [ -e "$resolved_brainstorm" ]; then
+      validate_path_in_project "$resolved_brainstorm"
+      archived_brainstorm=$(_archive_move "$resolved_brainstorm")
+    fi
+  fi
+
+  # Output result as JSON
+  if [ -n "$archived_brainstorm" ]; then
+    jq -n --arg task "$archived_task" --arg brainstorm "$archived_brainstorm" \
+      '{archived: {task: $task, brainstorm: $brainstorm}}'
+  else
+    jq -n --arg task "$archived_task" \
+      '{archived: {task: $task, brainstorm: null}}'
+  fi
+}
+
 # Display help
 cmd_help() {
   cat << 'EOF'
@@ -1359,12 +1630,17 @@ COMMANDS:
     get-branch                Get branchName from metadata
     get-story <id>            Get full story object by ID (read-only)
     get-state                 Get all state files as JSON
+    detect-default-branch     Detect and cache the repository's default branch
+    setup-branch <name> --default-branch <branch>
+                              Create or checkout branch with deterministic logic
     clear-state               Clear all state files
     check-version [--quiet] [--fix]
                               Check if stored CLI version matches latest installed
                               --quiet  Suppress stderr warnings
                               --fix    Auto-update cli-path on stale detection (exits 0)
     cleanup-versions          Remove old cached plugin versions, keep latest only
+    list-archivable           List task files where all stories are completed/skipped (JSON array)
+    archive-task <path>       Move completed task file (and linked brainstorm) to .aimi/archive/
     help                      Show this help message
 
 ENVIRONMENT:
@@ -1377,6 +1653,7 @@ STATE FILES (.aimi/):
     current-branch            Current working branch name
     current-story             ID of story being executed
     last-result               Result of last execution (success/failed/skipped)
+    default-branch            Cached default branch name (e.g., main, master)
 
 ENVIRONMENT:
     CLAUDE_CONFIG_DIR  Override Claude config directory (default: ~/.claude)
@@ -1459,9 +1736,13 @@ main() {
     get-branch)        cmd_get_branch ;;
     get-story)         cmd_get_story "${2:-}" ;;
     get-state)         cmd_get_state ;;
+    detect-default-branch) cmd_detect_default_branch ;;
+    setup-branch)      shift; cmd_setup_branch "$@" ;;
     clear-state)       cmd_clear_state ;;
     check-version)     shift; cmd_check_version "$@" ;;
     cleanup-versions)  cmd_cleanup_versions ;;
+    list-archivable)   cmd_list_archivable ;;
+    archive-task)      cmd_archive_task "${2:-}" ;;
     help|--help|-h)    cmd_help ;;
     *)
       echo "Unknown command: $1" >&2

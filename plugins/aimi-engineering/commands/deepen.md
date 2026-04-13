@@ -117,6 +117,8 @@ Next steps:
 3. **Run `/aimi:execute`** - Begin autonomous execution
 ```
 
+**IMPORTANT:** Output the "Next steps" block EXACTLY as shown above — use `/aimi:` prefix (e.g., `/aimi:review`), NOT the fully-qualified plugin name (e.g., `/aimi-engineering:review`). Copy the block verbatim.
+
 ## Error Handling
 
 If research agents fail:

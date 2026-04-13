@@ -342,6 +342,8 @@ Next steps:
 4. **Done for now** - Return later
 ```
 
+**IMPORTANT:** Output the "Next steps" block EXACTLY as shown above — use `/aimi:` prefix (e.g., `/aimi:plan`), NOT the fully-qualified plugin name (e.g., `/aimi-engineering:plan`). Copy the block verbatim.
+
 **If user selects "Continue brainstorming":** Return to Phase 2 with the existing document as context. Generate targeted follow-up questions about areas not yet explored.
 
 **If user selects "Done for now":** End the session. Display:

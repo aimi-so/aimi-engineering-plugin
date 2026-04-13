@@ -2450,6 +2450,221 @@ PRESERVEOF
 }
 
 # ============================================================================
+# Git Fixture Helpers (for setup-branch tests)
+# ============================================================================
+
+# Creates a bare remote repo, a local clone with an initial commit,
+# a merged branch, and an unmerged branch. Sets globals:
+#   GIT_FIXTURE_REMOTE  - path to bare remote repo
+#   GIT_FIXTURE_LOCAL   - path to local clone
+setup_git_fixture() {
+  GIT_FIXTURE_REMOTE=$(mktemp -d)
+  GIT_FIXTURE_LOCAL=$(mktemp -d)
+
+  # Create bare remote repo
+  git init --bare "$GIT_FIXTURE_REMOTE" >/dev/null 2>&1
+
+  # Clone locally
+  git clone "$GIT_FIXTURE_REMOTE" "$GIT_FIXTURE_LOCAL" >/dev/null 2>&1
+
+  # Create initial commit on main
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout -b main >/dev/null 2>&1
+  echo "init" > README.md
+  git add README.md
+  git commit -m "Initial commit" >/dev/null 2>&1
+  git push -u origin main >/dev/null 2>&1
+
+  # Create a branch that is merged into main
+  git checkout -b feat/merged-branch >/dev/null 2>&1
+  echo "merged" > merged.txt
+  git add merged.txt
+  git commit -m "Merged branch commit" >/dev/null 2>&1
+  git push origin feat/merged-branch >/dev/null 2>&1
+  git checkout main >/dev/null 2>&1
+  git merge feat/merged-branch >/dev/null 2>&1
+  git push origin main >/dev/null 2>&1
+  git branch -d feat/merged-branch >/dev/null 2>&1
+
+  # Create an unmerged branch with commits ahead of main
+  git checkout -b feat/unmerged-branch >/dev/null 2>&1
+  echo "unmerged" > unmerged.txt
+  git add unmerged.txt
+  git commit -m "Unmerged branch commit" >/dev/null 2>&1
+  git push origin feat/unmerged-branch >/dev/null 2>&1
+
+  # Go back to main
+  git checkout main >/dev/null 2>&1
+
+  # Create .aimi/ directory so find_aimi_root succeeds
+  mkdir -p .aimi/tasks
+
+  popd >/dev/null
+}
+
+# Removes temporary directories created by setup_git_fixture
+teardown_git_fixture() {
+  rm -rf "$GIT_FIXTURE_REMOTE" "$GIT_FIXTURE_LOCAL"
+  unset GIT_FIXTURE_REMOTE
+  unset GIT_FIXTURE_LOCAL
+}
+
+# ============================================================================
+# Setup Branch Tests
+# ============================================================================
+
+test_setup_branch() {
+  echo ""
+  echo "=== Testing setup-branch command ==="
+
+  local stdout stderr_file exit_code action current_branch
+
+  # --- Subtest: already on target branch ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout main >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" setup-branch main --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  action=$(echo "$stdout" | jq -r '.action')
+  assert_eq "already-on-branch" "$action" "setup-branch: already on target branch — action"
+  assert_exit_code "0" "$exit_code" "setup-branch: already on target branch — exit code"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: target branch exists locally ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout main >/dev/null 2>&1
+  # Create a local branch
+  git checkout -b feat/local-only >/dev/null 2>&1
+  echo "local" > local.txt && git add local.txt && git commit -m "local" >/dev/null 2>&1
+  git checkout main >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" setup-branch feat/local-only --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  action=$(echo "$stdout" | jq -r '.action')
+  current_branch=$(git branch --show-current)
+  assert_eq "checked-out-local" "$action" "setup-branch: local branch exists — action"
+  assert_eq "feat/local-only" "$current_branch" "setup-branch: local branch exists — current branch"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: target branch exists on remote only ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout main >/dev/null 2>&1
+  # feat/unmerged-branch exists on remote; delete local copy if present
+  git branch -D feat/unmerged-branch >/dev/null 2>&1 || true
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" setup-branch feat/unmerged-branch --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  action=$(echo "$stdout" | jq -r '.action')
+  current_branch=$(git branch --show-current)
+  # Verify the local branch tracks the remote
+  local tracking
+  tracking=$(git config --get branch.feat/unmerged-branch.remote 2>/dev/null || echo "")
+  assert_eq "checked-out-remote" "$action" "setup-branch: remote only — action"
+  assert_eq "feat/unmerged-branch" "$current_branch" "setup-branch: remote only — current branch"
+  assert_eq "origin" "$tracking" "setup-branch: remote only — tracks remote"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: new branch from default (current branch IS default) ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  # Start on main (the default branch itself)
+  git checkout main >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" setup-branch feat/brand-new --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  action=$(echo "$stdout" | jq -r '.action')
+  # Verify the branch base is origin/main
+  local base_commit default_commit
+  base_commit=$(git rev-parse feat/brand-new 2>/dev/null)
+  default_commit=$(git rev-parse origin/main 2>/dev/null)
+  assert_eq "created-from-default" "$action" "setup-branch: new from default (on default branch) — action"
+  assert_eq "$default_commit" "$base_commit" "setup-branch: new from default (on default branch) — base is origin/main"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: new branch from default (current branch merged into default but not ON default) ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  # Create a branch from main (so it's "merged" into main), stay on it
+  git checkout main >/dev/null 2>&1
+  git checkout -b feat/merged-branch >/dev/null 2>&1
+  # This branch is fully merged into main — new branches should come from origin/main
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" setup-branch feat/fresh-work --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  action=$(echo "$stdout" | jq -r '.action')
+  local fresh_commit
+  fresh_commit=$(git rev-parse feat/fresh-work 2>/dev/null)
+  default_commit=$(git rev-parse origin/main 2>/dev/null)
+  assert_eq "created-from-default" "$action" "setup-branch: merged branch creates from default — action"
+  assert_eq "$default_commit" "$fresh_commit" "setup-branch: merged branch creates from default — base is origin/main"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: new branch from HEAD (current branch not merged) ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  # Start on the unmerged branch
+  git checkout feat/unmerged-branch >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  local head_before
+  head_before=$(git rev-parse HEAD)
+  stdout=$("$CLI" setup-branch feat/from-head --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  action=$(echo "$stdout" | jq -r '.action')
+  assert_eq "created-from-current" "$action" "setup-branch: new from HEAD (unmerged) — action"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: invalid branch name ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" setup-branch '../bad' --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  local stderr_output
+  stderr_output=$(cat "$stderr_file")
+  assert_exit_code "1" "$exit_code" "setup-branch: invalid branch name — exit code"
+  assert_stderr_contains "Invalid branch name" "$stderr_output" "setup-branch: invalid branch name — stderr message"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: missing --default-branch flag ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" setup-branch feat/some-branch 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_output=$(cat "$stderr_file")
+  assert_exit_code "1" "$exit_code" "setup-branch: missing --default-branch — exit code"
+  assert_stderr_contains "Usage:" "$stderr_output" "setup-branch: missing --default-branch — stderr message"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -2590,6 +2805,11 @@ main() {
   test_status_full_default
   test_status_counts_only
   test_next_story_returns_full_object
+
+  # Setup-branch tests — uses own git fixture (independent of TEST_DIR)
+  echo ""
+  echo "--- Setup Branch Tests ---"
+  test_setup_branch
 
   cleanup
 

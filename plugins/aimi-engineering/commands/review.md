@@ -12,12 +12,25 @@ Perform code reviews using parallel aimi-native review agents with findings synt
 
 <review_target> #$ARGUMENTS </review_target>
 
+### Detect Default Branch
+
+Before any diff commands, detect the repository's default branch:
+
+```bash
+DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||')
+if [ -z "$DEFAULT_BRANCH" ]; then
+  DEFAULT_BRANCH="main"
+fi
+```
+
+Use `$DEFAULT_BRANCH` in all subsequent git diff commands instead of a hardcoded branch name.
+
 ### Detect Target Type
 
 1. **PR number** (numeric): Fetch PR with `gh pr view $ARGUMENTS --json title,body,files,headRefName,baseRefName`
 2. **GitHub URL**: Extract PR number, then fetch as above
-3. **Branch name**: Compare against main/master with `git diff main...$ARGUMENTS --name-only`
-4. **Empty** (no arguments): Review current branch against main/master
+3. **Branch name**: Compare against default branch with `git diff $DEFAULT_BRANCH...$ARGUMENTS --name-only`
+4. **Empty** (no arguments): Review current branch against default branch
 
 ### Setup
 
@@ -25,7 +38,7 @@ Perform code reviews using parallel aimi-native review agents with findings synt
 # Get changed files
 gh pr view [number] --json files --jq '.files[].path'
 # OR for branch comparison:
-git diff main...HEAD --name-only
+git diff $DEFAULT_BRANCH...HEAD --name-only
 ```
 
 Read the changed files to understand the PR content. Collect the diff for agent context.

@@ -60,6 +60,48 @@ $AIMI_CLI check-version --quiet --fix
 
 Use `$AIMI_CLI` for all subsequent script calls.
 
+## Step 0.5: Archival Check
+
+Before starting a new session, check whether any completed task files should be archived to prevent accidental re-execution of finished work.
+
+```bash
+$AIMI_CLI list-archivable
+```
+
+This returns a JSON array of file paths, e.g.:
+```json
+["/home/user/project/.aimi/tasks/2026-03-15-auth-feature-tasks.json"]
+```
+
+**If the array is empty (`[]`):** Proceed silently to Step 1.
+
+**If archivable tasks exist:** Display the list and ask the user whether to archive them:
+
+```
+Found [N] completed task file(s) that can be archived:
+
+  - [filename1]
+  - [filename2]
+
+Archive these completed tasks before starting? (yes/no)
+```
+
+- **If user confirms (yes):** For each archivable file path, run:
+  ```bash
+  $AIMI_CLI archive-task [file_path]
+  ```
+  After all files are archived, reset state files:
+  ```bash
+  $AIMI_CLI clear-state
+  ```
+  Report:
+  ```
+  Archived [N] task file(s). State cleared.
+  ```
+  Proceed to Step 1.
+
+- **If user declines (no):** Proceed to Step 1 without archiving.
+
 ## Step 1: Initialize Session
 
 **CRITICAL:** Use the CLI script to initialize session and get metadata. Do NOT interpret jq queries directly.
@@ -114,32 +156,47 @@ Story content validation failed:
 Review the stories for suspicious content and fix before execution.
 ```
 
+## Step 1.5: Branch Freshness Check
+
+Detect the default branch and fetch the latest from origin before branch setup.
+
+### Detect Default Branch
+
+```bash
+DEFAULT_BRANCH=$($AIMI_CLI detect-default-branch)
+```
+
+Store `DEFAULT_BRANCH` for use in branch creation and commit counting.
+
+### Fetch Origin
+
+```bash
+git fetch origin
+```
+
+If fetch fails (e.g., offline or no remote), warn but continue:
+```
+Warning: git fetch origin failed — continuing with local state. Branch may be stale.
+```
+
 ## Step 2: Branch Setup
 
 Get the branch name from the init-session output (already validated by CLI).
 
-### Check Current Branch
+### Main Repo Branch Setup
 
 ```bash
-current_branch=$(git branch --show-current)
+BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $DEFAULT_BRANCH)
 ```
 
-### If already on correct branch:
-Proceed to Step 3.
+If the command fails (non-zero exit), report the error and STOP.
 
-### If on different branch:
-Check if target branch exists:
-```bash
-git branch --list [branchName]
+Extract the action from the JSON output and report:
+```
+Branch setup: [action]
 ```
 
-- If exists: `git checkout [branchName]`
-- If not exists: `git checkout -b [branchName]`
-
-Report:
-```
-Switched to branch: [branchName]
-```
+Where `[action]` is the `action` field from the JSON response (e.g., `already-on-branch`, `checked-out-local`, `checked-out-remote`, `created-from-default`, `created-from-current`).
 
 ### Per-Project Branch Setup
 
@@ -152,16 +209,13 @@ If any story has a non-null `project` field:
 3. For each unique project path:
    ```bash
    cd [resolved_project_path]
-   git branch --list [branchName]
+   PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $DEFAULT_BRANCH)
+   cd [original_directory]
    ```
-   - If branch exists: `git checkout [branchName]`
-   - If not exists: `git checkout -b [branchName]`
-   - Then return to the original directory.
-
-Report for each project:
-```
-Branch [branchName] set up in project: [project_path]
-```
+   Extract the action from the JSON output and report:
+   ```
+   Branch [branchName] set up in project: [project_path] (action: [action])
+   ```
 
 If no stories have a `project` field, skip this step (backwards compatible).
 
@@ -755,7 +809,7 @@ When execution ends (all stories complete, or deadlock detected):
 
 Count commits on this branch:
 ```bash
-git log --oneline main..HEAD | wc -l
+git log --oneline $DEFAULT_BRANCH..HEAD | wc -l
 ```
 
 Check for any remaining pending gates across all stories:
