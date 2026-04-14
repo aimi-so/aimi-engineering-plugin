@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.51.0] - 2026-04-14
+
+### Fixed
+
+- **execute**: Visual verification for worktree stories now runs post-merge instead of inside isolated worktrees where dev server cannot see changes
+
 ## [1.50.0] - 2026-04-14
 
 ### Added

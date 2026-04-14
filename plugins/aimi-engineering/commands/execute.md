@@ -865,7 +865,9 @@ while true:
                 - WORKTREE_PATH = wt.worktree_path
                 - PROJECT_PATH = project_path (only include if non-null)
                 - PROJECT_GUIDELINES = project_guidelines
-                - HEADED_MODE = true (only include if VISUAL_FOLLOW is true AND full_story.verification.strategy == "visual")
+                - HEADED_MODE = (do NOT include for worktree stories — visual verification runs post-merge, not inside the worktree)
+                - Omit the "## Visual Verification" section entirely for worktree stories
+                  (the dev server cannot see worktree changes; verification runs after merge-all instead)
                 - STORY_ID = full_story.id
                 - STORY_TITLE = full_story.title
                 - STORY_DESCRIPTION = full_story.description
@@ -958,8 +960,43 @@ while true:
             for full_story in stories:
                 $AIMI_CLI mark-complete [full_story.id]
 
-                # Update verification.status if story has verification and executor reports success
-                if full_story.verification and full_story.verification.status == "pending":
+                # --- Post-merge visual verification for visual stories ---
+                if full_story.verification and full_story.verification.strategy == "visual" and full_story.verification.status == "pending":
+                    if VISUAL_FOLLOW == true:
+                        # Reuse the existing headed session (managed by execute.md)
+                        agent-browser --session visual-follow open [full_story.verification.url]
+                        agent-browser --session visual-follow screenshot /tmp/verify-[full_story.id].png
+                        # Read screenshot and compare against full_story.verification.expect
+                        Read /tmp/verify-[full_story.id].png
+                        Compare visual output against full_story.verification.expect
+
+                        if visual matches expectations:
+                            $AIMI_CLI update-field [full_story.id] verification.status passed
+                            Report: "[full_story.id] visual verification passed."
+                        else:
+                            $AIMI_CLI update-field [full_story.id] verification.status failed
+                            Report: "[full_story.id] visual verification failed — [reason]. (advisory, not blocking)"
+                    else:
+                        # No visual-follow session — headless verification
+                        has_browser = command -v agent-browser
+                        if has_browser:
+                            agent-browser open [full_story.verification.url]
+                            agent-browser screenshot /tmp/verify-[full_story.id].png
+                            Read /tmp/verify-[full_story.id].png
+                            Compare visual output against full_story.verification.expect
+
+                            if visual matches expectations:
+                                $AIMI_CLI update-field [full_story.id] verification.status passed
+                            else:
+                                $AIMI_CLI update-field [full_story.id] verification.status failed
+                                Report: "[full_story.id] visual verification failed — [reason]. (advisory)"
+                            agent-browser close
+                        else:
+                            $AIMI_CLI update-field [full_story.id] verification.status skipped
+                            Report: "[full_story.id] visual verification skipped — agent-browser not installed."
+
+                # Non-visual stories: keep existing behavior
+                elif full_story.verification and full_story.verification.status == "pending":
                     $AIMI_CLI update-field [full_story.id] verification.status passed
 
                 Report: "[full_story.id] merged successfully."
