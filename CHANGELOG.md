@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.44.0] - 2026-04-14
+
+### Added
+
+- **execute**: Visual-follow session prompt (Step 0.7) — detects frontend stories with `verification.strategy == "visual"`, prompts user to follow implementation in a headed browser, manages `agent-browser` session lifecycle around the wave loop
+
 ## [1.43.1] - 2026-04-09
 
 ### Fixed

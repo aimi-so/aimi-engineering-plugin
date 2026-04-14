@@ -102,6 +102,28 @@ Archive these completed tasks before starting? (yes/no)
 
 - **If user declines (no):** Proceed to Step 1 without archiving.
 
+## Step 0.7: Visual Follow Prompt
+
+Check the tasks file directly for any stories with a visual verification strategy. Since `$AIMI_CLI status` omits the `verification` field, read the file with jq:
+
+```bash
+TASKS_PATH="$($AIMI_CLI init-session 2>/dev/null | jq -r '.tasks // empty')"
+VISUAL_STORIES=$(jq '[.userStories[] | select(.verification.strategy == "visual")] | length' "$AIMI_ROOT/$TASKS_PATH" 2>/dev/null)
+```
+
+- **If `VISUAL_STORIES` is 0 or empty:** Set `VISUAL_FOLLOW=false`. Proceed to Step 1.
+
+- **If `VISUAL_STORIES` > 0:** Prompt the user:
+
+```
+Frontend stories detected. Follow implementation visually in a headed browser? (yes/no)
+```
+
+  - **If user says yes:** Set `VISUAL_FOLLOW=true`.
+  - **If user says no:** Set `VISUAL_FOLLOW=false`.
+
+Proceed to Step 1.
+
 ## Step 1: Initialize Session
 
 **CRITICAL:** Use the CLI script to initialize session and get metadata. Do NOT interpret jq queries directly.
@@ -325,6 +347,29 @@ When stories target different projects (via the `project` field), each project m
 - For stories without a `project` field, use the default `PROJECT_GUIDELINES` (loaded from the current repo root).
 - For stories with a `project` field, look up `PROJECT_GUIDELINES_MAP[story.project]` and pass it as `PROJECT_GUIDELINES` in the worker prompt.
 - If no stories have `project` fields, skip this map and use default `PROJECT_GUIDELINES` (backwards compatible).
+
+### Open Visual Follow Session
+
+If `VISUAL_FOLLOW=true`, open a persistent headed browser session before entering the wave loop.
+
+First, check that `agent-browser` is available:
+
+```bash
+command -v agent-browser
+```
+
+- **If `agent-browser` is not found:** Warn the user and fall back to headless mode:
+  ```
+  ⚠ agent-browser not installed. Falling back to headless mode — visual follow disabled.
+  ```
+  Set `VISUAL_FOLLOW=false`.
+
+- **If `agent-browser` is available:** Get the verification URL from the first visual story:
+
+  ```bash
+  VISUAL_URL=$(jq -r '[.userStories[] | select(.verification.strategy == "visual")][0].verification.url' "$AIMI_ROOT/$TASKS_PATH")
+  agent-browser --headed --session visual-follow open "$VISUAL_URL"
+  ```
 
 ## Step 4: Wave Execution Loop
 
@@ -799,6 +844,14 @@ for each unique project_root (including CWD for DEFAULT group):
 $WORKTREE_MGR list
 # For each worktree matching "[branchName]-US-*":
 $WORKTREE_MGR remove [worktree_name]
+```
+
+### Close Visual Follow Session
+
+If `VISUAL_FOLLOW=true`, close the persistent browser session after the wave loop ends:
+
+```bash
+agent-browser --session visual-follow close
 ```
 
 ## Step 5: Completion
