@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.50.0] - 2026-04-14
+
+### Added
+
+- **brainstorm**: Inject design topic categories (Aesthetic Direction, Differentiation) into Phase 2 when UI features detected — conditional topic list, two new Adaptive Rounds signals, dynamic exit condition (7 standard or 9 with UI), example design questions with tone options from frontend-design skill
+
 ## [1.49.0] - 2026-04-14
 
 ### Fixed

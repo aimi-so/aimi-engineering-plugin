@@ -136,7 +136,7 @@ Using the user's feature description and consolidated research findings (from St
 
 - Questions are informed by research findings when available (contextual options)
 - Fall back to generic topic-based questions when research is empty
-- Cover topic categories: Purpose, Users, Constraints, Success, Edge Cases, Existing Patterns, Approach
+- Cover topic categories: Purpose, Users, Constraints, Success, Edge Cases, Existing Patterns, Approach (and when UI features detected: Aesthetic Direction, Differentiation)
 - 3-4 options per question (not more)
 - Question text under 20 words
 - Option text under 15 words
@@ -153,6 +153,30 @@ When consolidated research (Step 1c) reveals **multiple valid approaches**, incl
 - **Do NOT generate an approach question when:**
   - Research context is insufficient (both agents failed/skipped or returned no approach-relevant findings) — rely on Phase 3 fallback instead
   - Research reveals a clearly superior single approach — skip the question and let Phase 3 handle it (or skip entirely)
+
+#### Design Questions (When UI Features Detected in Phase 1.7)
+
+When UI features were detected in Phase 1.7, include design-category questions in the batch alongside standard topic questions. These follow the same format rules.
+
+**Example Aesthetic Direction question:**
+
+```
+N. What visual tone fits this interface best?
+   A. Brutally minimal — clean, sparse, essential
+   B. Retro-futuristic — nostalgic yet forward
+   C. Luxury/refined — elegant, premium feel
+   D. Other: [please specify]
+```
+
+**Example Differentiation question:**
+
+```
+N. What should make this interface memorable?
+   A. Distinctive animation or motion
+   B. Bold typography choices
+   C. Unique layout composition
+   D. Other: [please specify]
+```
 
 ### Present Questions
 
@@ -201,8 +225,10 @@ After each response, assess which topic categories remain unaddressed:
 | Edge Cases | Error states/boundaries discussed |
 | Existing Patterns | Codebase context available (from research or user) |
 | Approach | At least one approach preference expressed by user via selection or free-form response |
+| Aesthetic Direction | User expresses an aesthetic preference, tone, or visual direction |
+| Differentiation | User identifies a memorable or distinguishing visual aspect |
 
-- **If all 7 key topics covered** OR **user says "proceed"/"let's move on"** → advance to Phase 3
+- **If all key topics covered (7 standard, or 9 when UI features detected)** OR **user says "proceed"/"let's move on"** → advance to Phase 3
 - **If topics remain uncovered** AND **under 4 rounds** → generate follow-up batch targeting uncovered topics
 - **If 4 rounds completed** → advance to Phase 3 regardless
 
