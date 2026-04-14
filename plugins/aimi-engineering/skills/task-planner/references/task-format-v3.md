@@ -23,7 +23,9 @@ Example: `.aimi/tasks/2026-02-27-dep-graph-tasks.json`
     "planPath": "string | null (optional)",
     "brainstormPath": "string (optional)",
     "researchDepth": "skip|quick|standard|deep (optional, default null)",
-    "maxConcurrency": 4
+    "maxConcurrency": 4,
+    "frontendOnly": "boolean (optional, default absent/false)",
+    "backendSpec": "object (optional, see backendSpec sub-fields)"
   },
   "userStories": [Story]
 }
@@ -53,6 +55,41 @@ Example: `.aimi/tasks/2026-02-27-dep-graph-tasks.json`
 | `brainstormPath` | string | No | — | Path to brainstorm document if one was used as context. |
 | `researchDepth` | string | No | `null` | Research depth hint for the planner. One of: `skip`, `quick`, `standard`, `deep`. When `null`, the planner decides automatically. |
 | `maxConcurrency` | number | No | `4` | Maximum number of stories that can execute in parallel. Applies only to stories whose dependencies are all satisfied. |
+| `frontendOnly` | boolean | No | — | Signals that this plan is a frontend-only prototype where all backend interactions are mocked. When `true`, stories should use stubbed/mocked data instead of real API calls. |
+| `backendSpec` | object | No | — | Backend specification metadata for PR generation. Contains sub-fields describing the eventual backend contract. See [backendSpec Object](#backendspec-object). |
+
+### backendSpec Object
+
+Optional object attached to `metadata` that describes the backend contract for frontend-only prototypes. Used by downstream tools to generate backend PRs.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `endpoints` | array | No | Array of endpoint objects, each with `method` (string, e.g. `"GET"`, `"POST"`), `path` (string, e.g. `"/api/tasks"`), and `description` (string). |
+| `dataModels` | array | No | Array of data model objects, each with `name` (string), `fields` (string[] or object[]), and `relationships` (string[]). |
+| `businessRules` | string[] | No | Array of business rule descriptions that the backend must enforce. |
+| `businessContext` | string | No | High-level description of the business domain and purpose for the backend implementation. |
+
+Example:
+```json
+{
+  "endpoints": [
+    { "method": "GET", "path": "/api/projects", "description": "List all projects for the authenticated user" },
+    { "method": "POST", "path": "/api/projects", "description": "Create a new project" }
+  ],
+  "dataModels": [
+    {
+      "name": "Project",
+      "fields": ["id: uuid", "name: string", "ownerId: uuid", "createdAt: timestamp"],
+      "relationships": ["belongsTo User", "hasMany Task"]
+    }
+  ],
+  "businessRules": [
+    "Users can only see their own projects",
+    "Project names must be unique per user"
+  ],
+  "businessContext": "Project management SaaS where users organize work into projects containing tasks."
+}
+```
 
 ### Story Fields
 
@@ -483,6 +520,99 @@ In this example, US-001 targets `packages/shared`, while US-002 and US-003 targe
 
 ---
 
+## Frontend-Only Prototype Example
+
+When `frontendOnly` is `true`, the plan describes a UI prototype where all backend interactions are mocked. The `backendSpec` captures the eventual backend contract so that a follow-up PR can implement the real API.
+
+```json
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Project dashboard live preview",
+    "type": "feat",
+    "branchName": "feat/project-dashboard-preview",
+    "createdAt": "2026-04-14",
+    "planPath": null,
+    "researchDepth": "quick",
+    "maxConcurrency": 2,
+    "frontendOnly": true,
+    "backendSpec": {
+      "endpoints": [
+        { "method": "GET", "path": "/api/projects", "description": "List all projects for the authenticated user" },
+        { "method": "GET", "path": "/api/projects/:id", "description": "Get project details by ID" },
+        { "method": "POST", "path": "/api/projects", "description": "Create a new project" },
+        { "method": "PATCH", "path": "/api/projects/:id", "description": "Update project fields" }
+      ],
+      "dataModels": [
+        {
+          "name": "Project",
+          "fields": ["id: uuid", "name: string", "description: text", "status: enum(active,archived)", "ownerId: uuid", "createdAt: timestamp"],
+          "relationships": ["belongsTo User", "hasMany Task"]
+        },
+        {
+          "name": "Task",
+          "fields": ["id: uuid", "title: string", "projectId: uuid", "status: enum(pending,done)", "createdAt: timestamp"],
+          "relationships": ["belongsTo Project"]
+        }
+      ],
+      "businessRules": [
+        "Users can only access their own projects",
+        "Archived projects are read-only",
+        "Project names must be unique per user"
+      ],
+      "businessContext": "Project management tool where users organize work into projects and track tasks within them."
+    }
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Create mock data layer for projects",
+      "description": "As a frontend developer, I want a mock data service for projects so that I can build UI components without a real backend.",
+      "acceptanceCriteria": [
+        "Mock service returns realistic project data matching the backendSpec data models",
+        "CRUD operations update in-memory state",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "wave": 1,
+      "implementation": {
+        "files": ["src/mocks/projects.ts", "src/types/project.ts"],
+        "approach": "Create typed mock data and an in-memory service matching backendSpec endpoints",
+        "verify": "npx tsc --noEmit"
+      },
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Build project list page with mocked data",
+      "description": "As an end user, I want to see a list of my projects so that I can navigate to any project.",
+      "acceptanceCriteria": [
+        "Project list page renders with mock data",
+        "Each project card shows name, status, and task count",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "status": "pending",
+      "dependsOn": ["US-001"],
+      "wave": 2,
+      "verification": {
+        "strategy": "visual",
+        "status": "pending",
+        "url": "http://localhost:3000/projects",
+        "expect": "Project cards visible with mock data"
+      },
+      "notes": ""
+    }
+  ]
+}
+```
+
+In this example, `frontendOnly: true` tells the executor that all stories use mocked data. The `backendSpec` object documents the endpoints, data models, business rules, and business context so that a subsequent backend implementation PR can reference the exact contract the frontend expects.
+
+---
+
 ## Validation Rules
 
 ### Required Fields Check
@@ -509,6 +639,8 @@ Before processing, validate:
 18. Each story's `verification` (if present) must be an object with required `strategy` (one of: `test`, `visual`, `api`) and `status` (one of: `pending`, `passed`, `failed`); optional fields: `url` (string), `expect` (string)
 19. Each story's `gate` (if present) must be an object with required `type` (one of: `verify`, `decision`, `action`), `status` (one of: `pending`, `passed`, `failed`), and `prompt` (string); optional field: `options` (string[])
 20. Gate blocking rules: `decision` gates must have `status: "passed"` before the story can start; `action` gates must have `status: "passed"` before dependent stories can start; `verify` gates are non-blocking
+21. `metadata.frontendOnly` (if present) must be a boolean
+22. `metadata.backendSpec` (if present) must be an object with optional fields: `endpoints` (array of objects with `method`, `path`, `description`), `dataModels` (array of objects with `name`, `fields`, `relationships`), `businessRules` (string[]), `businessContext` (string)
 
 ### Validation Error Format
 
