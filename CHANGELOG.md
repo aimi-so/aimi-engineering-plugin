@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.46.0] - 2026-04-14
+
+### Added
+
+- **planner**: Split task file generation — full-stack scope produces separate `*-frontend-tasks.json` and `*-backend-tasks.json` with independent branch names, dependency graphs, and wave numbers
+- **planner**: `backendSpec` metadata generation — frontend-only scope synthesizes `endpoints`, `dataModels`, `businessRules`, and `businessContext` from story analysis
+- **planner**: Per-file Phase 4.5 validation using `init-session --file` for independent validation of each split file
+
 ## [1.45.0] - 2026-04-14
 
 ### Added

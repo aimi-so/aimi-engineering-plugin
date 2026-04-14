@@ -194,23 +194,42 @@ When the workspace has multiple git repos under one parent folder:
 
 ## Phase 4: Write tasks.json
 
-### Derive Metadata
+Branch on `implementationScope` from Phase 0:
+
+### When `implementationScope` is `"full-stack"`:
+
+1. **Partition stories by layer**: UI stories → frontend file; schema + backend + aggregation stories → backend file
+2. **Assign unique IDs across both files**: frontend gets `US-001` to `US-N`, backend gets `US-(N+1)` to `US-M` — no ID collisions
+3. **Rebuild `dependsOn` independently per file**: remove all cross-file references; within each file, only reference IDs that exist in that file
+4. **Recompute `wave` numbers per file**: roots (`dependsOn: []`) are wave 1 within each file, independently
+5. **Derive separate `branchName` per file**: `type/[feature]-frontend` and `type/[feature]-backend`
+6. Write frontend file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
+7. Write backend file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`
+
+### When `implementationScope` is `"frontend-only"`:
+
+1. Set `metadata.frontendOnly: true`
+2. **Generate `metadata.backendSpec`** by analyzing story descriptions and acceptance criteria:
+   - `endpoints`: array of `{ method, path, description }` — API contracts implied by UI interactions
+   - `dataModels`: array of `{ name, fields }` — data structures implied by forms and displays
+   - `businessRules`: array of strings — validation rules and business logic from acceptance criteria
+   - `businessContext`: string — summary of the backend capability the frontend assumes
+3. Write single file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
+
+### When `implementationScope` is unset (legacy):
+
+Write single file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
+
+### Derive Metadata (all modes)
 
 - **title**: `<type>: <Descriptive Name>`
 - **type**: `feat`, `ref`, `bug`, or `chore`
-- **branchName**: Kebab-case, prefixed with type — e.g., `feat/add-user-auth`
+- **branchName**: Kebab-case, prefixed with type. For split files: `type/[feature]-frontend` and `type/[feature]-backend`
 - **createdAt**: Today's date (YYYY-MM-DD)
 - **planPath**: Always `null`
 - **brainstormPath**: Path to brainstorm if one was used, otherwise omit
 - **researchDepth**: Value computed in Phase 1.5 (`skip`, `quick`, `standard`, `deep`), or omit if not computed
 - **maxConcurrency**: Default `4`. Set to `1` for strictly sequential execution.
-- **frontendOnly / backendSpec**: If `implementationScope` was set in Phase 0, include `"frontendOnly": true` when `"frontend-only"`, or `"backendSpec": true` when `"full-stack"`.
-
-### Derive Filename
-
-```
-.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json
-```
 
 ### Write File
 
@@ -233,7 +252,14 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
     "planPath": "null (always null for planner-generated)",
     "brainstormPath": "string (optional)",
     "researchDepth": "skip|quick|standard|deep (optional, computed in Phase 1.5)",
-    "maxConcurrency": "number (optional, default 4)"
+    "maxConcurrency": "number (optional, default 4)",
+    "frontendOnly": "boolean (optional, true when frontend-only scope)",
+    "backendSpec": {
+      "endpoints": [{"method": "string", "path": "string", "description": "string"}],
+      "dataModels": [{"name": "string", "fields": ["string"]}],
+      "businessRules": ["string"],
+      "businessContext": "string"
+    }
   },
   "userStories": [
     {
@@ -295,25 +321,40 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 - [ ] `gate` (if present) has `type` (`verify`, `decision`, or `action`), `status` (`"pending"`), and `prompt`
 - [ ] Gates only attached when heuristics clearly match
 
+### Split-File Checks (when `implementationScope` is set)
+- [ ] Full-stack: two files generated (`*-frontend-tasks.json` and `*-backend-tasks.json`)
+- [ ] Full-stack: each file has its own `branchName` (`type/[feature]-frontend`, `type/[feature]-backend`)
+- [ ] Full-stack: story IDs are unique across both files (no ID collisions)
+- [ ] Full-stack: no cross-file `dependsOn` references — each file's graph is self-contained
+- [ ] Full-stack: wave numbers computed independently per file (roots = wave 1 within each file)
+- [ ] Frontend-only: single `*-frontend-tasks.json` with `metadata.frontendOnly: true`
+- [ ] Frontend-only: `metadata.backendSpec` contains `endpoints`, `dataModels`, `businessRules`, `businessContext`
+- [ ] Phase 4.5 validation runs on each file independently using `$AIMI_CLI init-session --file <path>`
+
 ## Phase 4.5: Post-Generation Validation
 
-After writing the tasks.json file, validate the generated output using the CLI:
+After writing the tasks.json file(s), validate each generated output independently.
 
-### Validate Story IDs
+**For split files (full-stack):** run validation on each file separately using `init-session --file`:
 
 ```bash
+$AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
 $AIMI_CLI validate-ids
-```
-
-### Validate Dependency Graph
-
-```bash
 $AIMI_CLI validate-deps
+$AIMI_CLI validate-stories
+
+$AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json
+$AIMI_CLI validate-ids
+$AIMI_CLI validate-deps
+$AIMI_CLI validate-stories
 ```
 
-### Validate Story Content
+**For single file (frontend-only or legacy):**
 
 ```bash
+$AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
+$AIMI_CLI validate-ids
+$AIMI_CLI validate-deps
 $AIMI_CLI validate-stories
 ```
 
@@ -321,9 +362,9 @@ $AIMI_CLI validate-stories
 1. Read the error output to identify the issues
 2. Fix the offending story IDs, `dependsOn` references, or dependency cycles
 3. Re-write the tasks.json file using the Write tool
-4. Re-run both validations until they pass
+4. Re-run all validations until they pass
 
-Do **not** proceed to the report step until both validations succeed.
+Do **not** proceed to the report step until all validations succeed.
 
 ## Step 5: Aimi-Branded Report
 

@@ -18,9 +18,12 @@ Take a feature description through research, spec analysis, and story decomposit
 
 ## Output Format
 
-**Filename:** `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
+**Filename convention:**
+- Full-stack: `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json` and `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`
+- Frontend-only: `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
+- Legacy (no scope): `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 
-> Key fields: `schemaVersion` ("3.2"), `metadata{title,type,branchName,createdAt,planPath(null),researchDepth(optional),maxConcurrency(4),frontendOnly(optional),backendSpec(optional)}`, `userStories[]{id(US-NNN),title(≤200),description(≤500),acceptanceCriteria(each≤600),priority,status("pending"),dependsOn([]),notes,project(optional),wave(computed),implementation(optional),verification(optional),gate(optional)}`
+> Key fields: `schemaVersion` ("3.2"), `metadata{title,type,branchName,createdAt,planPath(null),researchDepth(optional),maxConcurrency(4),frontendOnly(optional),backendSpec(optional:{endpoints[{method,path,description}],dataModels[{name,fields}],businessRules[string],businessContext(string)})}`, `userStories[]{id(US-NNN),title(≤200),description(≤500),acceptanceCriteria(each≤600),priority,status("pending"),dependsOn([]),notes,project(optional),wave(computed),implementation(optional),verification(optional),gate(optional)}`
 
 **Notes:** `planPath` is always `null` (this skill generates tasks.json directly). All stories initialize with `status: "pending"`. `dependsOn` is a string array of story IDs. `maxConcurrency` defaults to `4`.
 
@@ -160,21 +163,61 @@ Incorporate identified gaps as acceptance criteria or story notes.
 
 ### Phase 4: Write tasks.json
 
+Branch on `implementationScope` from Phase 0:
+
+#### When `implementationScope` is `"full-stack"`:
+
+1. **Partition stories by layer**: UI stories → frontend file; schema + backend + aggregation stories → backend file
+2. **Assign unique IDs across both files**: frontend gets `US-001` to `US-N`, backend gets `US-(N+1)` to `US-M` — no ID collisions
+3. **Rebuild `dependsOn` independently per file**: remove all cross-file references; within each file, only reference IDs that exist in that file
+4. **Recompute `wave` numbers per file**: roots (`dependsOn: []`) are wave 1 within each file, independently
+5. **Derive separate `branchName` per file**: `type/[feature]-frontend` and `type/[feature]-backend` (e.g., `feat/add-user-auth-frontend`, `feat/add-user-auth-backend`)
+6. Derive shared metadata: title, type, createdAt, `schemaVersion: "3.2"`, `planPath: null`, `brainstormPath`, `researchDepth`, `maxConcurrency`
+7. For each story: set `status: "pending"`, include `dependsOn`, `wave`, and optional `implementation`, `verification`, `gate` objects
+8. Write frontend file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
+9. Write backend file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`
+
+#### When `implementationScope` is `"frontend-only"`:
+
+1. Set `metadata.frontendOnly: true`
+2. **Generate `metadata.backendSpec`** by analyzing story descriptions and acceptance criteria:
+   - `endpoints`: array of `{ method, path, description }` objects — API contracts implied by UI interactions
+   - `dataModels`: array of `{ name, fields }` objects — data structures implied by forms and displays
+   - `businessRules`: array of strings — validation rules and business logic encoded in acceptance criteria
+   - `businessContext`: string — summary of the backend capability the frontend assumes
+3. Write single file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
+4. Derive metadata: title, type, branchName (kebab-case, `-frontend` suffix), createdAt, `schemaVersion: "3.2"`, `planPath: null`, `brainstormPath`, `researchDepth`, `maxConcurrency`
+5. For each story: set `status: "pending"`, include `dependsOn`, `wave`, and optional `implementation`, `verification`, `gate` objects
+
+#### When `implementationScope` is unset (legacy):
+
 1. Derive metadata: title, type, branchName (kebab-case), createdAt (today)
-2. Set `schemaVersion: "3.2"`
-3. Set `planPath: null`
-4. Set `brainstormPath` if a brainstorm was used
-5. Set `researchDepth` from Phase 1.5 (if computed)
-6. Set `maxConcurrency` (optional — default `4`; set to `1` for fully sequential execution)
-7. If `implementationScope` was set in Phase 0, include it in metadata: `"frontendOnly": true` when `"frontend-only"`, or `"backendSpec": true` when `"full-stack"`
-8. For each story: set `status: "pending"`, include `dependsOn` array, `wave` number, and optional `implementation`, `verification`, `gate` objects from Phase 3
-8. Write to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
+2. Set `schemaVersion: "3.2"`, `planPath: null`, `brainstormPath`, `researchDepth`, `maxConcurrency`
+3. For each story: set `status: "pending"`, include `dependsOn`, `wave`, and optional `implementation`, `verification`, `gate` objects
+4. Write to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 
 ### Phase 4.5: Post-Generation Validation
 
-After writing the tasks.json file, validate the generated output:
+After writing the tasks.json file(s), validate each generated output independently.
+
+**For split files (full-stack):** run validation on each file separately, using `init-session --file` to target each file:
 
 ```bash
+$AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
+$AIMI_CLI validate-ids
+$AIMI_CLI validate-deps
+$AIMI_CLI validate-stories
+
+$AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json
+$AIMI_CLI validate-ids
+$AIMI_CLI validate-deps
+$AIMI_CLI validate-stories
+```
+
+**For single file (frontend-only or legacy):**
+
+```bash
+$AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
 $AIMI_CLI validate-ids
 $AIMI_CLI validate-deps
 $AIMI_CLI validate-stories
@@ -236,3 +279,13 @@ Do **not** proceed to the report step until all validations succeed.
 - [ ] `verification` (if present) has `strategy` (`test`, `visual`, or `api`) and `status` (`"pending"`)
 - [ ] `gate` (if present) has `type` (`verify`, `decision`, or `action`), `status` (`"pending"`), and `prompt`
 - [ ] Gates only attached when heuristics clearly match; most stories have no gate
+
+### Split-File Validations (when `implementationScope` is set)
+- [ ] Full-stack: two files generated (`*-frontend-tasks.json` and `*-backend-tasks.json`)
+- [ ] Full-stack: each file has its own `branchName` (`type/[feature]-frontend`, `type/[feature]-backend`)
+- [ ] Full-stack: story IDs are unique across both files (no ID collisions)
+- [ ] Full-stack: no cross-file `dependsOn` references — each file's graph is self-contained
+- [ ] Full-stack: wave numbers computed independently per file (roots = wave 1 within each file)
+- [ ] Frontend-only: single `*-frontend-tasks.json` with `metadata.frontendOnly: true`
+- [ ] Frontend-only: `metadata.backendSpec` contains `endpoints`, `dataModels`, `businessRules`, `businessContext`
+- [ ] Phase 4.5 validation runs on each file independently using `$AIMI_CLI init-session --file <path>`
