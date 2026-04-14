@@ -98,7 +98,10 @@ Continue execution (do not stop).
 $AIMI_CLI metadata
 ```
 
-This returns JSON with task metadata. Extract `metadata.title` — it is already in `type(scope): subject` format and will be used as the PR title.
+This returns JSON with task metadata. Extract:
+- `metadata.title` — already in `type(scope): subject` format, used as the PR title
+- `metadata.frontendOnly` — boolean flag indicating a frontend-only prototype
+- `metadata.backendSpec` — object containing backend implementation details (endpoints, data models, business rules, business context)
 
 If no tasks file found, the script exits with error. Report:
 ```
@@ -178,6 +181,40 @@ git log --oneline "$BASE_BRANCH"..HEAD
 - **Stories Completed**: List of completed story IDs and titles from the status output (format: `- US-XXX: Story title`)
 - **Changes**: From the `git log --oneline` output between base and HEAD (format each commit as a bullet)
 - **Testing**: Story verification information from the status output (strategies used, pass/fail status)
+- **Backend Implementation Spec** (conditional): Only included when `frontendOnly` is `true` AND `backendSpec` is not null. Rendered deterministically from the `backendSpec` metadata object (no LLM generation). Contains four subsections:
+
+  #### `### Endpoints`
+  A markdown table with columns: Method | Path | Description. Each row corresponds to an entry in `backendSpec.endpoints[]`.
+
+  ```
+  | Method | Path | Description |
+  |--------|------|-------------|
+  | POST | /api/example | Creates a new example |
+  ```
+
+  #### `### Data Models`
+  A markdown table with columns: Name | Fields | Relationships. Each row corresponds to an entry in `backendSpec.dataModels[]`.
+
+  ```
+  | Name | Fields | Relationships |
+  |------|--------|---------------|
+  | Example | id, name, createdAt | belongs_to User |
+  ```
+
+  #### `### Business Rules`
+  A bulleted list. Each item corresponds to an entry in `backendSpec.businessRules[]`.
+
+  ```
+  - Rule one
+  - Rule two
+  ```
+
+  #### `### Business Context`
+  A single paragraph rendered from `backendSpec.businessContext`.
+
+  ```
+  Context paragraph here.
+  ```
 
 ## Step 5: Push Branch and Create PR
 
@@ -216,9 +253,37 @@ gh pr create --title "$PR_TITLE" --base "$BASE_BRANCH" --body "$(cat <<'EOF'
 ## Testing
 
 - <verification info per story>
+
+<if frontendOnly is true AND backendSpec is not null, append the following section>
+
+## Backend Implementation Spec
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| <method> | <path> | <description> |
+
+### Data Models
+
+| Name | Fields | Relationships |
+|------|--------|---------------|
+| <name> | <fields> | <relationships> |
+
+### Business Rules
+
+- <rule from backendSpec.businessRules[]>
+
+### Business Context
+
+<backendSpec.businessContext paragraph>
+
+</if>
 EOF
 )"
 ```
+
+**Important**: The Backend Implementation Spec section is rendered entirely from the `backendSpec` metadata object. No LLM generation is used — all content comes from deterministic template rendering of the structured data. When `frontendOnly` is `false` or absent, or when `backendSpec` is null, the section is omitted entirely and the PR body ends after the Testing section.
 
 ### 5c. Report success
 
