@@ -332,6 +332,13 @@ topic: <topic-slug>
 - [Decision 1]: [Rationale]
 - [Decision 2]: [Rationale]
 
+When UI features were detected in Phase 1.7, include this section:
+
+## Design Decisions
+- Aesthetic direction: [chosen tone from Phase 2 responses]
+- Reference points: [products/styles the user referenced]
+- Key visual element: [what makes it memorable, from Differentiation responses]
+
 ## Open Questions
 - [Any unresolved questions]
 
@@ -359,6 +366,7 @@ Before writing the document, verify **all** of the following criteria. If any cr
 - [ ] Directory `.aimi/brainstorms/` exists
 - [ ] No filename collision (append counter if needed)
 - [ ] YAGNI applied — no unnecessary complexity
+- [ ] Design Decisions section present with Aesthetic Direction and Differentiation entries (when UI features detected in Phase 1.7) — advisory/non-blocking
 
 **On failure:** Use a conversational nudge for each unmet criterion:
 > "Before I save the document, I noticed [specific gap]. For example: 'we only explored one approach without noting why alternatives weren't considered.' Want to address that, or should I save as-is?"
