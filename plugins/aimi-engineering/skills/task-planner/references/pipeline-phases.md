@@ -325,11 +325,39 @@ Set `gate.status` to `"pending"` and provide a descriptive `gate.prompt`. For `d
 
 ## Phase 4: Write tasks.json
 
-### Derive Metadata
+Branch on `implementationScope` from Phase 0:
+
+### When `implementationScope` is `"full-stack"`:
+
+1. **Partition stories by layer**: UI stories → frontend file; schema + backend + aggregation stories → backend file
+2. **Assign unique IDs across both files**: frontend gets `US-001` to `US-N`, backend gets `US-(N+1)` to `US-M` — no ID collisions
+3. **Rebuild `dependsOn` independently per file**: remove all cross-file references; within each file, only reference IDs that exist in that file
+4. **Recompute `wave` numbers per file**: roots (`dependsOn: []`) are wave 1 within each file, independently
+5. **Derive separate `branchName` per file**: `type/[feature]-frontend` and `type/[feature]-backend` (e.g., `feat/add-user-auth-frontend`, `feat/add-user-auth-backend`)
+6. Derive shared metadata: title, type, createdAt, `schemaVersion: "3.2"`, `planPath: null`, `brainstormPath`, `researchDepth`, `maxConcurrency`
+7. Write frontend file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
+8. Write backend file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`
+
+### When `implementationScope` is `"frontend-only"`:
+
+1. Set `metadata.frontendOnly: true`
+2. **Generate `metadata.backendSpec`** by analyzing story descriptions and acceptance criteria:
+   - `endpoints`: array of `{ method, path, description }` — API contracts implied by UI interactions
+   - `dataModels`: array of `{ name, fields }` — data structures implied by forms and displays
+   - `businessRules`: array of strings — validation rules and business logic from acceptance criteria
+   - `businessContext`: string — summary of the backend capability the frontend assumes
+3. Derive branchName with `-frontend` suffix: `type/[feature]-frontend`
+4. Write single file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
+
+### When `implementationScope` is unset (legacy):
+
+Standard single-file output to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
+
+### Derive Metadata (all modes)
 
 - **title**: Conventional format — `<type>: <Descriptive Name>`
 - **type**: `feat`, `ref`, `bug`, or `chore`
-- **branchName**: Kebab-case, prefixed with type — e.g., `feat/add-user-auth`
+- **branchName**: Kebab-case, prefixed with type. For split files: `type/[feature]-frontend` and `type/[feature]-backend`
 - **createdAt**: Today's date (YYYY-MM-DD)
 - **planPath**: Always `null`
 - **brainstormPath**: Path to brainstorm if one was used, otherwise omit
@@ -338,11 +366,11 @@ Set `gate.status` to `"pending"` and provide a descriptive `gate.prompt`. For `d
 
 ### Derive Filename
 
-```
-.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json
-```
+- Full-stack: `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json` and `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`
+- Frontend-only: `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
+- Legacy (no scope): `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 
-Strip type prefix, kebab-case the descriptive name, add date prefix and `-tasks.json` suffix.
+Strip type prefix, kebab-case the descriptive name, add date prefix and appropriate suffix.
 
 ### Write File
 
@@ -350,7 +378,42 @@ Strip type prefix, kebab-case the descriptive name, add date prefix and `-tasks.
 mkdir -p .aimi/tasks
 ```
 
-Use the Write tool to save the JSON file. Validate JSON is well-formed before writing.
+Use the Write tool to save the JSON file(s). Validate JSON is well-formed before writing.
+
+### Phase 4.5: Post-Generation Validation
+
+After writing the tasks.json file(s), validate each generated output independently.
+
+**For split files (full-stack):** run validation on each file separately using `init-session --file`:
+
+```bash
+$AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
+$AIMI_CLI validate-ids
+$AIMI_CLI validate-deps
+$AIMI_CLI validate-stories
+
+$AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json
+$AIMI_CLI validate-ids
+$AIMI_CLI validate-deps
+$AIMI_CLI validate-stories
+```
+
+**For single file (frontend-only or legacy):**
+
+```bash
+$AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
+$AIMI_CLI validate-ids
+$AIMI_CLI validate-deps
+$AIMI_CLI validate-stories
+```
+
+**If any validation fails (non-zero exit):**
+1. Read the error output to identify the issues
+2. Fix the offending story IDs, `dependsOn` references, dependency cycles, or `project` fields
+3. Re-write the tasks.json file using the Write tool
+4. Re-run all validations until they pass
+
+Do **not** proceed to the report step until all validations succeed.
 
 ### Output Report
 
@@ -359,12 +422,13 @@ After writing, report:
 ```
 Tasks generated successfully!
 
-Tasks: .aimi/tasks/[filename].json
-Stories: [N] total
+Tasks: .aimi/tasks/[filename(s)].json
+Stories: [N] total ([X] frontend, [Y] backend — if split)
 Schema: 3.2
 [If brainstorm used]: Context: .aimi/brainstorms/[brainstorm-file]
 [If gaps found]: Gaps identified: [N] (captured as criteria/notes)
 [If 10+ stories]: Warning: [N] stories generated. Consider splitting for parallel work.
 Waves: [N] total
 [If gates found]: Gates: [N] (verify: [X], decision: [Y], action: [Z])
+[If frontend-only]: Backend spec: [N] endpoints, [M] data models, [P] business rules
 ```
