@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.48.0] - 2026-04-14
+
+### Added
+
+- **open-pr**: GitHub issue creation with backend spec for frontend-only PRs — after PR creation, attempts `gh issue create` with Backend Implementation Spec body, links issue to PR via `gh pr edit`, graceful degradation on failure (warning only, PR unaffected)
+
 ## [1.47.0] - 2026-04-14
 
 ### Added

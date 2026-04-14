@@ -285,7 +285,62 @@ EOF
 
 **Important**: The Backend Implementation Spec section is rendered entirely from the `backendSpec` metadata object. No LLM generation is used — all content comes from deterministic template rendering of the structured data. When `frontendOnly` is `false` or absent, or when `backendSpec` is null, the section is omitted entirely and the PR body ends after the Testing section.
 
-### 5c. Report success
+### 5c. Create backend issue and link to PR (conditional)
+
+This step only runs when `frontendOnly` is `true` AND `backendSpec` is not null. If either condition is false, skip to Step 5d.
+
+Build the issue body reusing the same Backend Implementation Spec template from Step 4b. The issue body contains the four subsections (Endpoints, Data Models, Business Rules, Business Context) rendered identically to the PR body section.
+
+**Attempt to create the GitHub issue:**
+
+```bash
+if ISSUE_URL=$(gh issue create --title "Backend: $METADATA_TITLE" --body "$(cat <<'EOF'
+## Backend Implementation Spec
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| <method> | <path> | <description> |
+
+### Data Models
+
+| Name | Fields | Relationships |
+|------|--------|---------------|
+| <name> | <fields> | <relationships> |
+
+### Business Rules
+
+- <rule from backendSpec.businessRules[]>
+
+### Business Context
+
+<backendSpec.businessContext paragraph>
+EOF
+)" 2>/dev/null); then
+  ISSUE_NUMBER=$(echo "$ISSUE_URL" | grep -oE '[0-9]+$')
+  gh pr edit "$PR_URL" --body "$(cat <<EOF
+$PR_BODY
+
+---
+Related issue: #$ISSUE_NUMBER
+EOF
+)"
+  echo "Backend issue created: $ISSUE_URL (linked to PR)"
+else
+  echo "Warning: Could not create backend issue (permissions denied, issues disabled, or rate limit). The backend spec is still available in the PR body."
+fi
+```
+
+Where `$METADATA_TITLE` is `metadata.title` from Step 2a, `$PR_URL` is the PR URL returned from Step 5b, and `$PR_BODY` is the original PR body from Step 4b.
+
+**Important**: The `gh issue create` call is wrapped in an `if/then/else` block for graceful degradation. If the command fails (non-zero exit: permissions denied, issues disabled, rate limit), a warning is logged but PR creation is NOT affected — the backend spec still lives in the PR body (guaranteed by Step 5b). The `2>/dev/null` suppresses stderr from the failed command.
+
+**On success**: The issue URL is captured, the issue number is extracted via `grep -oE '[0-9]+$'`, and `gh pr edit` appends a "Related issue: #N" link to the PR body.
+
+**On failure**: A warning message is displayed and execution continues to Step 5d.
+
+### 5d. Report success
 
 Display the PR URL to the user:
 
