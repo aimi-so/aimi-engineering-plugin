@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **cli**: `find-tasks-all` subcommand — returns newline-separated list of all *-tasks.json files sorted by modification time for multi-file discovery
 - **cli**: `--file <path>` flag for `init-session` — allows specifying a tasks file directly instead of auto-detecting the most recent one, with existence and pattern validation
+- **story-executor**: Headed mode context and visual-follow session reuse — adds `[HEADED_MODE]` placeholder, conditional visual verification branches for headed (session reuse, no close) vs headless (executor-owned lifecycle) modes
 
 ## [1.44.0] - 2026-04-14
 

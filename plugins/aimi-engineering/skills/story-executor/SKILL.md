@@ -96,6 +96,19 @@ If neither is provided:
 - Work in current directory (standard sequential behavior)
 - Report result — the caller (next.md/execute.md) handles status updates via the CLI
 
+## Headed Mode Context
+
+[HEADED_MODE]   ← optional, true when visual-follow is active
+
+If HEADED_MODE is true:
+- A headed browser session named `visual-follow` is already running (opened by execute.md)
+- Use `--session visual-follow` for all agent-browser commands (do NOT pass --headed; the session inherits it)
+- The session lifecycle is managed by execute.md — do NOT close it
+- Navigate to verification.url at story start (step 0) for live preview
+
+If HEADED_MODE is false or absent:
+- Standard headless mode — executor owns the full browser lifecycle (open → use → close)
+
 ## Your Story
 
 ID: [STORY_ID]
@@ -126,6 +139,35 @@ Expected: [verification.expect — omit line if absent]
 ## Visual Verification (if verification.strategy == visual AND verification.url present)
 
 Visual verification is **advisory** — failures do NOT block the story commit.
+
+### When HEADED_MODE is true (visual-follow session active)
+
+0. **Navigate to verification URL at story start (before implementation):**
+   `agent-browser --session visual-follow open [verification.url]`
+   This gives the user a live preview in the headed browser while implementation proceeds.
+
+1. **Check agent-browser availability:**
+   Run `command -v agent-browser`. If not found, note "visual verification skipped — agent-browser not installed" in your report and proceed to commit.
+
+2. **Navigate to verification URL:**
+   `agent-browser --session visual-follow open [verification.url]`
+
+3. **Take screenshot:**
+   `agent-browser --session visual-follow screenshot /tmp/verify-[STORY_ID].png`
+
+4. **Evaluate screenshot against expected outcome:**
+   Use the Read tool to view `/tmp/verify-[STORY_ID].png`.
+   Compare what you see against `verification.expect` (natural language description).
+   Record whether the visual matches expectations (pass/fail + reasoning).
+
+5. **Cleanup — SKIP:** Session lifecycle is managed by execute.md. Do NOT run `agent-browser close`.
+
+6. **Report result:**
+   - If visual check passes: note "visual verification passed" in your report.
+   - If visual check fails or errors: note "visual verification failed — [reason]" in your report so the caller can set `verification.status` to `failed`. Do NOT fail the story — proceed to commit.
+   - If agent-browser was not installed: note "visual verification skipped" so the caller can set `verification.status` to `skipped`.
+
+### When HEADED_MODE is false or absent (headless mode — executor owns lifecycle)
 
 1. **Check agent-browser availability:**
    Run `command -v agent-browser`. If not found, note "visual verification skipped — agent-browser not installed" in your report and proceed to commit.
