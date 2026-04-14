@@ -11,46 +11,9 @@ Execute the next pending story using a Task-spawned agent.
 
 ## Step 0: Resolve CLI Path
 
-Resolve `$AIMI_CLI` path using the four-layer strategy below. Each command is a separate Bash call (no compound operators).
+Read `references/cli-path-resolution.md` and follow the **Resolve CLI Path** and **Version Check** sections to set `$AIMI_CLI`. Each layer is a separate Bash call.
 
-**Layer 0 — AIMI_PLUGIN_DIR (env var override):**
-```bash
-if [ -n "$AIMI_PLUGIN_DIR" ] && [ "${AIMI_PLUGIN_DIR#/}" != "$AIMI_PLUGIN_DIR" ] && [ -d "$AIMI_PLUGIN_DIR" ] && [ -x "$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh" ]; then AIMI_CLI="$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh"; fi
-```
-
-**Layer 1 — Global cache (fast path):**
-```bash
-if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(cat ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path 2>/dev/null); fi
-```
-
-**Layer 1 validation:**
-```bash
-if [ -n "$AIMI_CLI" ] && [ ! -x "$AIMI_CLI" ]; then AIMI_CLI=""; fi
-```
-
-**Layer 2 — Glob fallback (zsh-safe, only if Layer 1 failed):**
-```bash
-if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1'); fi
-```
-
-**Layer 2 cache update:**
-```bash
-if [ -n "$AIMI_CLI" ]; then printf '%s\n' "$AIMI_CLI" > "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path.tmp" && mv "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path.tmp" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" && chmod 600 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path"; fi
-```
-
-**Layer 3 — Per-project fallback (last resort):**
-```bash
-if [ -z "$AIMI_CLI" ] && [ -f .aimi/cli-path ] && [ -x "$(cat .aimi/cli-path)" ]; then AIMI_CLI=$(cat .aimi/cli-path); fi
-```
-
-If empty, report error and STOP:
-- If `$AIMI_PLUGIN_DIR` is set: "aimi-cli.sh not found. Check AIMI_PLUGIN_DIR path: $AIMI_PLUGIN_DIR"
-- Otherwise: "aimi-cli.sh not found. Reinstall plugin: `/plugin install aimi-engineering`"
-
-**Version check:**
-```bash
-$AIMI_CLI check-version --quiet --fix
-```
+If resolution fails, report error and STOP.
 
 Use `$AIMI_CLI` for all subsequent script calls.
 

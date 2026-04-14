@@ -17,46 +17,9 @@ Single-story waves run inline (no worktree overhead). Multi-story waves spawn N 
 
 ## Step 0: Resolve CLI Path
 
-Resolve `$AIMI_CLI` path using the four-layer strategy below. Each command is a separate Bash call (no compound operators).
+Read `references/cli-path-resolution.md` and follow the **Resolve CLI Path** and **Version Check** sections to set `$AIMI_CLI`. Each layer is a separate Bash call.
 
-**Layer 0 — AIMI_PLUGIN_DIR (env var override):**
-```bash
-if [ -n "$AIMI_PLUGIN_DIR" ] && [ "${AIMI_PLUGIN_DIR#/}" != "$AIMI_PLUGIN_DIR" ] && [ -d "$AIMI_PLUGIN_DIR" ] && [ -x "$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh" ]; then AIMI_CLI="$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh"; fi
-```
-
-**Layer 1 — Global cache (fast path):**
-```bash
-if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(cat ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path 2>/dev/null); fi
-```
-
-**Layer 1 validation:**
-```bash
-if [ -n "$AIMI_CLI" ] && [ ! -x "$AIMI_CLI" ]; then AIMI_CLI=""; fi
-```
-
-**Layer 2 — Glob fallback (zsh-safe, only if Layer 1 failed):**
-```bash
-if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1'); fi
-```
-
-**Layer 2 cache update:**
-```bash
-if [ -n "$AIMI_CLI" ]; then printf '%s\n' "$AIMI_CLI" > "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path.tmp" && mv "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path.tmp" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" && chmod 600 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path"; fi
-```
-
-**Layer 3 — Per-project fallback (last resort):**
-```bash
-if [ -z "$AIMI_CLI" ] && [ -f .aimi/cli-path ] && [ -x "$(cat .aimi/cli-path)" ]; then AIMI_CLI=$(cat .aimi/cli-path); fi
-```
-
-If empty, report error and STOP:
-- If `$AIMI_PLUGIN_DIR` is set: "aimi-cli.sh not found. Check AIMI_PLUGIN_DIR path: $AIMI_PLUGIN_DIR"
-- Otherwise: "aimi-cli.sh not found. Reinstall plugin: `/plugin install aimi-engineering`"
-
-**Version check:**
-```bash
-$AIMI_CLI check-version --quiet --fix
-```
+If resolution fails, report error and STOP.
 
 Use `$AIMI_CLI` for all subsequent script calls.
 
@@ -421,41 +384,9 @@ Beginning wave execution loop...
 
 ## Step 3.1: Resolve Worktree Manager
 
-Resolve `$WORKTREE_MGR` path using the same four-layer strategy. Each command is a separate Bash call (no compound operators).
+Read `references/cli-path-resolution.md` and follow the **Resolve Worktree Manager Path** section to set `$WORKTREE_MGR`.
 
-**Layer 0 — AIMI_PLUGIN_DIR (env var override):**
-```bash
-if [ -n "$AIMI_PLUGIN_DIR" ] && [ "${AIMI_PLUGIN_DIR#/}" != "$AIMI_PLUGIN_DIR" ] && [ -d "$AIMI_PLUGIN_DIR" ] && [ -x "$AIMI_PLUGIN_DIR/skills/git-worktree/scripts/worktree-manager.sh" ]; then WORKTREE_MGR="$AIMI_PLUGIN_DIR/skills/git-worktree/scripts/worktree-manager.sh"; fi
-```
-
-**Layer 1 — Global cache (fast path):**
-```bash
-if [ -z "$WORKTREE_MGR" ]; then WORKTREE_MGR=$(cat ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path 2>/dev/null); fi
-```
-
-**Layer 1 validation:**
-```bash
-if [ -n "$WORKTREE_MGR" ] && [ ! -x "$WORKTREE_MGR" ]; then WORKTREE_MGR=""; fi
-```
-
-**Layer 2 — Glob fallback (zsh-safe, only if Layer 1 failed):**
-```bash
-if [ -z "$WORKTREE_MGR" ]; then WORKTREE_MGR=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/skills/git-worktree/scripts/worktree-manager.sh 2>/dev/null | tail -1'); fi
-```
-
-**Layer 2 cache update:**
-```bash
-if [ -n "$WORKTREE_MGR" ]; then printf '%s\n' "$WORKTREE_MGR" > "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path.tmp" && mv "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path.tmp" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" && chmod 600 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path"; fi
-```
-
-**Layer 3 — Per-project fallback (last resort):**
-```bash
-if [ -z "$WORKTREE_MGR" ] && [ -f .aimi/cli-path ]; then WORKTREE_MGR=$(dirname "$(cat .aimi/cli-path)")/worktree-manager.sh; if [ ! -x "$WORKTREE_MGR" ]; then WORKTREE_MGR=""; fi; fi
-```
-
-If empty, report error and STOP:
-- If `$AIMI_PLUGIN_DIR` is set: "worktree-manager.sh not found. Check AIMI_PLUGIN_DIR path: $AIMI_PLUGIN_DIR"
-- Otherwise: "worktree-manager.sh not found. Reinstall plugin: `/plugin install aimi-engineering`"
+If resolution fails, report error and STOP.
 
 ## Step 3.2: Read Concurrency Setting
 
