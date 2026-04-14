@@ -99,7 +99,7 @@ Learnings are stored in project files (not separate progress log):
    - Small files (<2KB) are inlined in prompt
    - Larger files are referenced for agent to read
 
-3. **Compact prompts** - First story gets the full template; subsequent stories get a condensed version with one-line summaries of static sections (guidelines, conventions, verification)
+3. **Compact prompts** - First story in a session gets the full template (SKILL.md "Prompt Template"); subsequent stories get the condensed variant (SKILL.md "Compact Template") where static sections (`<project_guidelines>`, `<execution_flow>`, `<tools>`, `<on_failure>`, `<project_root_boundary>`) are condensed to one-line summaries — NOT omitted, since each agent has fresh context. Story-specific and context-varying sections remain in full
    - ~60% token reduction
 
 4. **Fresh context per story** - Each Task agent starts with clean context

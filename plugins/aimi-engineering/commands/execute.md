@@ -464,6 +464,7 @@ If any of these conditions fail (no `brainstormPath` in metadata, file not found
 
 ```
 wave = 1
+is_first_story_in_session = true
 
 while true:
     # Check remaining work
@@ -562,10 +563,16 @@ while true:
         # Spawn a single foreground Task — same pattern as next.md
         # No worktree, worker operates in current directory (or PROJECT_PATH if set)
         # IMPORTANT: subagent_type MUST be "general-purpose" — story-executor is a skill, NOT an agent.
+        #
+        # Template selection: use full template (SKILL.md "Prompt Template") for the first story
+        # in the session, compact template (SKILL.md "Compact Template") for subsequent stories.
+        # Both templates are defined in story-executor/SKILL.md.
+        template = full_template if is_first_story_in_session else compact_template
+
         Task(
             subagent_type: "general-purpose",
             description: "Execute [full_story.id]: [full_story.title]",
-            prompt: [story-executor SKILL.md prompt template with:
+            prompt: [story-executor SKILL.md [template] with:
                 - PROJECT_GUIDELINES = project_guidelines
                 - PROJECT_PATH = project_path (only include if non-null)
                 - HEADED_MODE = true (only include if VISUAL_FOLLOW is true AND full_story.verification.strategy == "visual")
@@ -578,6 +585,8 @@ while true:
                 - No WORKTREE_PATH (sequential — worker operates in current directory or PROJECT_PATH)
             ]
         )
+
+        is_first_story_in_session = false
 
         # Handle result
         if Task succeeded:
@@ -664,10 +673,13 @@ while true:
         else:
             head_before = git rev-parse HEAD
 
+        # Template selection: full for first story, compact for subsequent
+        template = full_template if is_first_story_in_session else compact_template
+
         Task(
             subagent_type: "general-purpose",
             description: "Execute [full_story.id]: [full_story.title]",
-            prompt: [story-executor SKILL.md prompt template with:
+            prompt: [story-executor SKILL.md [template] with:
                 - PROJECT_GUIDELINES = project_guidelines
                 - PROJECT_PATH = project_path (only include if non-null)
                 - HEADED_MODE = true (only include if VISUAL_FOLLOW is true AND full_story.verification.strategy == "visual")
@@ -680,6 +692,8 @@ while true:
                 - No WORKTREE_PATH (single remaining story — no worktree overhead)
             ]
         )
+
+        is_first_story_in_session = false
 
         if Task succeeded:
             # Verify a commit was actually created
@@ -783,16 +797,23 @@ while true:
     # all results before the agent's turn ends.
     #
     # IMPORTANT: subagent_type MUST be "general-purpose" — story-executor is a skill, NOT an agent.
+    #
+    # Template selection: full for first story in session, compact for subsequent.
+    # In a multi-story wave, the first story uses full_template only if is_first_story_in_session
+    # is true; all others in the wave use compact_template.
     # In one tool-call turn, emit N Task calls (across ALL project groups):
+    story_index = 0
     for full_story in full_stories:
         wt = all_worktrees[full_story.id]
         project_path = project_roots[wt.group_key] if wt.group_key != "DEFAULT" else null
         project_guidelines = PROJECT_GUIDELINES_MAP[wt.group_key] if wt.group_key != "DEFAULT" else PROJECT_GUIDELINES
 
+        template = full_template if (is_first_story_in_session and story_index == 0) else compact_template
+
         Task(
             subagent_type: "general-purpose",
             description: "Execute [full_story.id]: [full_story.title]",
-            prompt: [story-executor SKILL.md prompt template with:
+            prompt: [story-executor SKILL.md [template] with:
                 - WORKTREE_PATH = wt.worktree_path
                 - PROJECT_PATH = project_path (only include if non-null)
                 - PROJECT_GUIDELINES = project_guidelines
@@ -808,6 +829,9 @@ while true:
                 - Do NOT modify the tasks.json file — report result (success/failure + details)
             ]
         )
+        story_index += 1
+
+    is_first_story_in_session = false
 
     # All Tasks return in the same turn. Collect results.
     failed_stories = []
