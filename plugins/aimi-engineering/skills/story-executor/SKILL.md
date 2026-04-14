@@ -195,6 +195,10 @@ Visual verification is **advisory** — failures do NOT block the story commit.
 
 [story.notes]
 
+## Design Context (if DESIGN_CONTEXT is non-empty)
+
+[DESIGN_CONTEXT]
+
 ## Tools
 
 Use built-in tools directly: Read, Write, Edit, Bash, Grep, Glob.
