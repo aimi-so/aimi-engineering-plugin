@@ -198,6 +198,149 @@ test_find_tasks() {
   assert_contains "9999-99-99-test-tasks.json" "$output" "find-tasks returns correct file"
 }
 
+test_find_tasks_all() {
+  echo ""
+  echo "=== Testing find-tasks-all command ==="
+
+  # Create a second tasks file (older modification time)
+  local second_file="$TASKS_DIR/9999-99-98-extra-tasks.json"
+  cat > "$second_file" << 'EOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Extra feature",
+    "type": "feat",
+    "branchName": "feat/extra-feature",
+    "createdAt": "2026-02-26",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": []
+}
+EOF
+
+  # Touch primary file to ensure it's most recent
+  touch "$TASKS_FILE"
+
+  local output
+  output=$("$CLI" find-tasks-all)
+
+  # Should contain both files
+  assert_contains "9999-99-99-test-tasks.json" "$output" "find-tasks-all includes primary file"
+  assert_contains "9999-99-98-extra-tasks.json" "$output" "find-tasks-all includes second file"
+
+  # Should be multiple lines (at least 2)
+  local line_count
+  line_count=$(echo "$output" | wc -l)
+  if [ "$line_count" -ge 2 ]; then
+    echo -e "${GREEN}✓${NC} find-tasks-all returns multiple lines ($line_count)"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} find-tasks-all returns multiple lines"
+    echo "  Got $line_count line(s)"
+    ((TESTS_FAILED++))
+  fi
+
+  # First line should be the most recent file (9999-99-99)
+  local first_line
+  first_line=$(echo "$output" | head -1)
+  assert_contains "9999-99-99-test-tasks.json" "$first_line" "find-tasks-all: most recent file is first"
+
+  # All paths should be absolute
+  local all_absolute=true
+  while IFS= read -r line; do
+    if [[ "$line" != /* ]]; then
+      all_absolute=false
+      break
+    fi
+  done <<< "$output"
+  if [ "$all_absolute" = true ]; then
+    echo -e "${GREEN}✓${NC} find-tasks-all returns absolute paths"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} find-tasks-all returns absolute paths"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -f "$second_file"
+}
+
+test_init_session_file_flag() {
+  echo ""
+  echo "=== Testing init-session --file flag ==="
+
+  "$CLI" clear-state > /dev/null
+
+  # Create an alternate tasks file
+  local alt_file="$TASKS_DIR/9999-99-98-alt-tasks.json"
+  cat > "$alt_file" << 'EOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Alt feature",
+    "type": "feat",
+    "branchName": "feat/alt-feature",
+    "createdAt": "2026-02-26",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Alt story",
+      "description": "Alt story description",
+      "acceptanceCriteria": ["Typecheck passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": ""
+    }
+  ]
+}
+EOF
+
+  # Use --file to specify the alt file
+  local output
+  output=$("$CLI" init-session --file "$alt_file")
+
+  assert_contains "feat/alt-feature" "$output" "init-session --file uses specified file's branch"
+  assert_contains '"pending": 1' "$output" "init-session --file counts pending from specified file"
+
+  # Check state file points to the alt file
+  local state_tasks
+  state_tasks=$(cat "$AIMI_DIR/current-tasks" 2>/dev/null)
+  assert_contains "9999-99-98-alt-tasks.json" "$state_tasks" "init-session --file: current-tasks points to alt file"
+
+  rm -f "$alt_file"
+}
+
+test_init_session_file_flag_validation() {
+  echo ""
+  echo "=== Testing init-session --file flag validation ==="
+
+  "$CLI" clear-state > /dev/null
+
+  # Test 1: Non-existent file should fail
+  local output exit_code
+  output=$("$CLI" init-session --file "/tmp/nonexistent-tasks.json" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "init-session --file: non-existent file exits 1"
+  assert_contains "File not found" "$output" "init-session --file: non-existent file shows error"
+
+  # Test 2: File not matching *-tasks.json pattern should fail
+  local bad_file
+  bad_file=$(mktemp /tmp/not-a-tasks-XXXX.json)
+  echo '{}' > "$bad_file"
+  output=$("$CLI" init-session --file "$bad_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "init-session --file: wrong pattern exits 1"
+  assert_contains "does not match" "$output" "init-session --file: wrong pattern shows error"
+  rm -f "$bad_file"
+
+  # Test 3: Unknown flag should fail
+  output=$("$CLI" init-session --unknown 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "init-session --unknown: unknown flag exits 1"
+  assert_contains "Unknown flag" "$output" "init-session --unknown: shows error"
+}
+
 test_metadata() {
   echo ""
   echo "=== Testing metadata command ==="
@@ -2805,6 +2948,14 @@ main() {
   test_status_full_default
   test_status_counts_only
   test_next_story_returns_full_object
+
+  # Multi-file discovery tests
+  echo ""
+  echo "--- Multi-File Discovery Tests ---"
+  reset_fixture
+  test_find_tasks_all
+  test_init_session_file_flag
+  test_init_session_file_flag_validation
 
   # Setup-branch tests — uses own git fixture (independent of TEST_DIR)
   echo ""

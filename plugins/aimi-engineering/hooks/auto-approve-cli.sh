@@ -90,7 +90,7 @@ if echo "$COMMAND" | grep -qE '^\$AIMI_CLI\b|^\$\{AIMI_CLI\}'; then
 
   # Whitelist of allowed CLI subcommands
   case "$SUBCMD" in
-    init-session|find-tasks|status|metadata|next-story|current-story|\
+    init-session|find-tasks|find-tasks-all|status|metadata|next-story|current-story|\
     list-ready|mark-in-progress|mark-complete|mark-failed|mark-skipped|\
     count-pending|validate-deps|validate-stories|cascade-skip|reset-orphaned|\
     get-branch|get-state|detect-default-branch|clear-state|help|\

@@ -386,11 +386,66 @@ cmd_find_tasks() {
   resolve_path "$tasks_file"
 }
 
+# Find all tasks files sorted by modification time (most recent first)
+cmd_find_tasks_all() {
+  local files
+  files=$(ls -t "$TASKS_DIR"/*-tasks.json 2>/dev/null)
+
+  if [ -z "$files" ]; then
+    echo "No tasks files found in $TASKS_DIR/" >&2
+    exit 1
+  fi
+
+  # Output each file as an absolute path, newline-separated
+  while IFS= read -r f; do
+    resolve_path "$f"
+  done <<< "$files"
+}
+
 # Initialize execution session
+# Usage: aimi-cli.sh init-session [--file <path>]
 cmd_init_session() {
   local tasks_file branch pending
+  local file_flag=""
 
-  tasks_file=$(cmd_find_tasks)
+  # Parse optional --file flag
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --file)
+        shift
+        file_flag="${1:-}"
+        ;;
+      -*)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh init-session [--file <path>]" >&2
+        exit 1
+        ;;
+      *)
+        echo "Error: Unexpected argument: $1" >&2
+        echo "Usage: aimi-cli.sh init-session [--file <path>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$file_flag" ]; then
+    # Validate the --file path exists
+    if [ ! -f "$file_flag" ]; then
+      echo "Error: File not found: $file_flag" >&2
+      exit 1
+    fi
+    # Validate it matches *-tasks.json pattern
+    local basename
+    basename=$(basename "$file_flag")
+    if ! [[ "$basename" == *-tasks.json ]]; then
+      echo "Error: File does not match *-tasks.json pattern: $file_flag" >&2
+      exit 1
+    fi
+    tasks_file=$(resolve_path "$file_flag")
+  else
+    tasks_file=$(cmd_find_tasks)
+  fi
   write_state "current-tasks" "$tasks_file"
 
   # Self-resolve: persist this CLI's absolute path for future sessions
@@ -1712,8 +1767,9 @@ main() {
   check_jq
 
   case "${1:-help}" in
-    init-session)      cmd_init_session ;;
+    init-session)      shift; cmd_init_session "$@" ;;
     find-tasks)        cmd_find_tasks ;;
+    find-tasks-all)    cmd_find_tasks_all ;;
     status)            shift; cmd_status "$@" ;;
     metadata)          cmd_metadata ;;
     next-story)        cmd_next_story ;;
