@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.52.0] - 2026-04-14
+
+### Added
+
+- **agents**: AGENTS.md with context-adaptive compression rules for spawned agent output
+
+### Changed
+
+- **cli**: Deduplicated CLI path resolution to eliminate redundant path computations
+- **story-executor**: XML tags in story executor prompts for structured content boundaries
+- **story-executor**: Compact prompt pattern — subsequent stories use condensed static sections (~60% token reduction)
+- **git-worktree**: Progressive disclosure — worktree skill surfaces details on demand instead of upfront
+- **task-planner**: Progressive disclosure — planner skill surfaces details on demand instead of upfront
+
 ## [1.51.0] - 2026-04-14
 
 ### Fixed
