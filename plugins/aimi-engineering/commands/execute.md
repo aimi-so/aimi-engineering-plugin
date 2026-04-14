@@ -124,6 +124,142 @@ Frontend stories detected. Follow implementation visually in a headed browser? (
 
 Proceed to Step 1.
 
+## Step 0.9: Multi-File Auto-Detection
+
+Discover all task files and check for paired frontend/backend splits:
+
+```bash
+ALL_TASKS=$($AIMI_CLI find-tasks-all)
+```
+
+If `find-tasks-all` returns no files or fails, skip this step (Step 1 will handle the error via `init-session`).
+
+Count the number of task files:
+```bash
+TASK_COUNT=$(echo "$ALL_TASKS" | wc -l)
+```
+
+### Paired Split Detection
+
+If exactly **two** files are found, check whether they form a paired frontend+backend split:
+
+1. Extract the basenames and check for matching `*-frontend-tasks.json` and `*-backend-tasks.json` patterns:
+   - Both files must share the same date+feature prefix (e.g., `2026-04-10-live-preview`)
+   - One must end with `-frontend-tasks.json`, the other with `-backend-tasks.json`
+
+```
+Example match:
+  .aimi/tasks/2026-04-10-live-preview-frontend-tasks.json
+  .aimi/tasks/2026-04-10-live-preview-backend-tasks.json
+
+  Shared prefix: "2026-04-10-live-preview"
+  → Paired split detected
+```
+
+2. If the two files match the paired pattern:
+   - Extract `metadata.branchName` from each file using jq:
+     ```bash
+     FRONTEND_BRANCH=$(jq -r '.metadata.branchName' <frontend-file>)
+     BACKEND_BRANCH=$(jq -r '.metadata.branchName' <backend-file>)
+     ```
+   - Verify both branches are different (they target separate branches — no conflicts)
+
+### Parallel Execution for Paired Files
+
+When a paired split is detected, spawn **two foreground Tasks in a single tool-call turn**. Each Task runs the full execute.md flow (Steps 1–5) scoped to its own file:
+
+```
+Report:
+"Paired frontend+backend task files detected:"
+"  Frontend: [frontend-file] (branch: [FRONTEND_BRANCH])"
+"  Backend:  [backend-file] (branch: [BACKEND_BRANCH])"
+""
+"Spawning parallel execution flows..."
+```
+
+Create worktrees for isolation:
+```bash
+$WORKTREE_MGR create [FRONTEND_BRANCH] --from $DEFAULT_BRANCH
+$WORKTREE_MGR create [BACKEND_BRANCH] --from $DEFAULT_BRANCH
+```
+
+In a **single tool-call turn**, emit two foreground Tasks:
+
+```
+Task(
+    subagent_type: "general-purpose",
+    description: "Execute frontend tasks: [frontend-file]",
+    prompt: [Full execute.md flow (Steps 1–5) with:
+        - WORKTREE_PATH = [frontend worktree path]
+        - $AIMI_CLI init-session --file [frontend-file]
+        - All subsequent steps (reset-orphaned, validate, wave loop, completion)
+        - Scoped to the frontend tasks file only
+        - PROJECT_GUIDELINES = PROJECT_GUIDELINES
+    ]
+)
+
+Task(
+    subagent_type: "general-purpose",
+    description: "Execute backend tasks: [backend-file]",
+    prompt: [Full execute.md flow (Steps 1–5) with:
+        - WORKTREE_PATH = [backend worktree path]
+        - $AIMI_CLI init-session --file [backend-file]
+        - All subsequent steps (reset-orphaned, validate, wave loop, completion)
+        - Scoped to the backend tasks file only
+        - PROJECT_GUIDELINES = PROJECT_GUIDELINES
+    ]
+)
+```
+
+Each parallel Task receives the full execute.md flow:
+- **init-session** with `--file <path>` targeting its specific file
+- **reset-orphaned** to recover any stuck stories in that file
+- **validate-stories** for content validation
+- **wave loop** (Step 4) executing all stories from its file
+- Each flow commits to its own branch (`metadata.branchName` from its file) — no branch conflicts
+
+After both Tasks return, collect results and proceed to **Step 5 (Aggregated Completion)**.
+
+### Single-File Fallback
+
+If only **one** file is found, or the two files do **not** match the paired frontend/backend pattern, proceed with the standard single-file execution flow (Step 1 onward) unchanged. The `init-session` call in Step 1 will auto-detect the most recent file.
+
+### Aggregated Completion (Paired Mode)
+
+When both parallel Tasks complete, skip the normal Step 5 and report aggregated results:
+
+```
+## Execution Complete (Paired Mode)
+
+Frontend file: [frontend-file]
+  Branch: [FRONTEND_BRANCH]
+  Stories completed: [count from frontend Task result]
+  Commits: git log --oneline $DEFAULT_BRANCH..[FRONTEND_BRANCH] | wc -l
+
+Backend file: [backend-file]
+  Branch: [BACKEND_BRANCH]
+  Stories completed: [count from backend Task result]
+  Commits: git log --oneline $DEFAULT_BRANCH..[BACKEND_BRANCH] | wc -l
+
+Total stories: [frontend_count + backend_count]
+Total commits: [frontend_commits + backend_commits]
+
+### Next Steps
+
+- Review frontend commits: git log --oneline $DEFAULT_BRANCH..[FRONTEND_BRANCH]
+- Review backend commits: git log --oneline $DEFAULT_BRANCH..[BACKEND_BRANCH]
+- Run /aimi:review for code review
+- Create PRs when ready: gh pr create
+```
+
+Clean up worktrees after reporting:
+```bash
+$WORKTREE_MGR remove [FRONTEND_BRANCH]
+$WORKTREE_MGR remove [BACKEND_BRANCH]
+```
+
+STOP execution (aggregated report replaces normal Step 5).
+
 ## Step 1: Initialize Session
 
 **CRITICAL:** Use the CLI script to initialize session and get metadata. Do NOT interpret jq queries directly.

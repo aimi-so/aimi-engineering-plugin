@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.47.0] - 2026-04-14
+
+### Added
+
+- **execute**: Multi-file auto-detection (Step 0.9) — uses `find-tasks-all` to discover all task files, auto-detects paired `*-frontend-tasks.json` and `*-backend-tasks.json` with matching date+feature prefix, spawns two parallel foreground Tasks with worktree isolation and `init-session --file`, aggregated completion report showing per-file results
+
 ## [1.46.0] - 2026-04-14
 
 ### Added
