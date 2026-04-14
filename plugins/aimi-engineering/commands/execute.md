@@ -988,13 +988,11 @@ $WORKTREE_MGR list
 $WORKTREE_MGR remove [worktree_name]
 ```
 
-### Close Visual Follow Session
+### Visual Follow Session — Keep Open
 
-If `VISUAL_FOLLOW=true`, close the persistent browser session after the wave loop ends:
+If `VISUAL_FOLLOW=true`, do NOT close the browser session after execution ends. The headed browser stays open so the user can inspect the final state of the UI. The user can close it manually when done.
 
-```bash
-agent-browser --session visual-follow close
-```
+Report: `"Visual follow session still open — close manually when done: agent-browser --session visual-follow close"`
 
 ## Step 5: Completion
 
