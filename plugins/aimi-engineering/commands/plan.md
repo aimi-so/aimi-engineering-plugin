@@ -79,6 +79,21 @@ ls -t .aimi/brainstorms/*.md 2>/dev/null | head -10
 - **If multiple match:** Ask user which to use.
 - **If none found:** Ask refinement questions via AskUserQuestion until the idea is clear.
 
+### Implementation Scope Detection
+
+After the brainstorm check, determine the implementation scope:
+
+1. **Auto-detect default from brainstorm context** (if a brainstorm was found):
+   - If brainstorm text contains signals like `frontend-only`, `mocked data`, or `prototype` → default to option 1
+   - If brainstorm text contains signals like `backend`, `API`, `schema`, or `full-stack` → default to option 2
+
+2. **Ask the user** via AskUserQuestion:
+   > What type of implementation? (1) frontend prototype with mocked data (2) full-stack implementation (frontend + backend)
+
+   Present the auto-detected default if one was determined.
+
+3. **Store the result** as `implementationScope: "frontend-only" | "full-stack"` for use in Phase 4 metadata.
+
 ## Phase 1: Local Research (Parallel)
 
 Run these agents **in parallel** using the Task tool:
@@ -189,6 +204,7 @@ When the workspace has multiple git repos under one parent folder:
 - **brainstormPath**: Path to brainstorm if one was used, otherwise omit
 - **researchDepth**: Value computed in Phase 1.5 (`skip`, `quick`, `standard`, `deep`), or omit if not computed
 - **maxConcurrency**: Default `4`. Set to `1` for strictly sequential execution.
+- **frontendOnly / backendSpec**: If `implementationScope` was set in Phase 0, include `"frontendOnly": true` when `"frontend-only"`, or `"backendSpec": true` when `"full-stack"`.
 
 ### Derive Filename
 

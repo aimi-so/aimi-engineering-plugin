@@ -30,6 +30,21 @@
    - Prefer multiple choice when natural options exist
    - Continue until idea is clear OR user says "proceed"
 
+### Implementation Scope Detection
+
+After the brainstorm check, determine the implementation scope:
+
+1. **Auto-detect default from brainstorm context** (if a brainstorm was found):
+   - If brainstorm text contains signals like `frontend-only`, `mocked data`, or `prototype` → default to option 1
+   - If brainstorm text contains signals like `backend`, `API`, `schema`, or `full-stack` → default to option 2
+
+2. **Ask the user** via AskUserQuestion:
+   > What type of implementation? (1) frontend prototype with mocked data (2) full-stack implementation (frontend + backend)
+
+   Present the auto-detected default if one was determined.
+
+3. **Store the result** as `implementationScope: "frontend-only" | "full-stack"` for use in Phase 4 metadata.
+
 ### Pipeline Mode (Non-Interactive)
 
 If running in a `disable-model-invocation` context or automated pipeline:
@@ -43,6 +58,7 @@ During refinement, note for Phase 1.5:
 - **User familiarity**: Do they know the codebase patterns?
 - **Topic risk**: Security, payments, external APIs warrant more caution
 - **Uncertainty level**: Is the approach clear or open-ended?
+- **Implementation scope**: Frontend prototype or full-stack?
 
 ---
 

@@ -43,6 +43,21 @@ Execute these phases in order.
 
 Check `.aimi/brainstorms/` for a matching brainstorm (semantic match, within 14 days). If found, use as context and skip questions. If multiple match, ask user. If none, ask refinement questions via AskUserQuestion until the idea is clear.
 
+#### Implementation Scope Detection
+
+After the brainstorm check, determine the implementation scope:
+
+1. **Auto-detect default from brainstorm context** (if a brainstorm was found):
+   - If brainstorm text contains signals like `frontend-only`, `mocked data`, or `prototype` → default to option 1
+   - If brainstorm text contains signals like `backend`, `API`, `schema`, or `full-stack` → default to option 2
+
+2. **Ask the user** via AskUserQuestion:
+   > What type of implementation? (1) frontend prototype with mocked data (2) full-stack implementation (frontend + backend)
+
+   Present the auto-detected default if one was determined.
+
+3. **Store the result** as `implementationScope: "frontend-only" | "full-stack"` for use in Phase 4 metadata.
+
 ### Phase 1: Local Research (Parallel)
 
 **Auto-scan for git repos:** Before launching research agents, scan immediate child directories for `.git/` directories to discover sub-projects:
@@ -151,7 +166,8 @@ Incorporate identified gaps as acceptance criteria or story notes.
 4. Set `brainstormPath` if a brainstorm was used
 5. Set `researchDepth` from Phase 1.5 (if computed)
 6. Set `maxConcurrency` (optional — default `4`; set to `1` for fully sequential execution)
-7. For each story: set `status: "pending"`, include `dependsOn` array, `wave` number, and optional `implementation`, `verification`, `gate` objects from Phase 3
+7. If `implementationScope` was set in Phase 0, include it in metadata: `"frontendOnly": true` when `"frontend-only"`, or `"backendSpec": true` when `"full-stack"`
+8. For each story: set `status: "pending"`, include `dependsOn` array, `wave` number, and optional `implementation`, `verification`, `gate` objects from Phase 3
 8. Write to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 
 ### Phase 4.5: Post-Generation Validation
