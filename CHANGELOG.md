@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **brainstorm**: Inject design topic categories (Aesthetic Direction, Differentiation) into Phase 2 when UI features detected — conditional topic list, two new Adaptive Rounds signals, dynamic exit condition (7 standard or 9 with UI), example design questions with tone options from frontend-design skill
+- **brainstorm**: Design-thinking integration for visual features — auto-detect UI keywords in feature descriptions, inject Aesthetic Direction and Differentiation topic categories into Phase 2, conditional Design Decisions section in brainstorm document template, design context passed to story executors
+- **planner**: Auto-skip implementation scope question for non-app features (plugin changes, refactors, CLI tools, docs) — uses keyword detection with conflicting-signals precedence
 
 ## [1.49.0] - 2026-04-14
 
