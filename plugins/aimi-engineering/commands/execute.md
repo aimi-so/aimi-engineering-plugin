@@ -479,6 +479,7 @@ while true:
             prompt: [story-executor SKILL.md prompt template with:
                 - PROJECT_GUIDELINES = project_guidelines
                 - PROJECT_PATH = project_path (only include if non-null)
+                - HEADED_MODE = true (only include if VISUAL_FOLLOW is true AND full_story.verification.strategy == "visual")
                 - STORY_ID = full_story.id
                 - STORY_TITLE = full_story.title
                 - STORY_DESCRIPTION = full_story.description
@@ -579,6 +580,7 @@ while true:
             prompt: [story-executor SKILL.md prompt template with:
                 - PROJECT_GUIDELINES = project_guidelines
                 - PROJECT_PATH = project_path (only include if non-null)
+                - HEADED_MODE = true (only include if VISUAL_FOLLOW is true AND full_story.verification.strategy == "visual")
                 - STORY_ID = full_story.id
                 - STORY_TITLE = full_story.title
                 - STORY_DESCRIPTION = full_story.description
@@ -703,6 +705,7 @@ while true:
                 - WORKTREE_PATH = wt.worktree_path
                 - PROJECT_PATH = project_path (only include if non-null)
                 - PROJECT_GUIDELINES = project_guidelines
+                - HEADED_MODE = true (only include if VISUAL_FOLLOW is true AND full_story.verification.strategy == "visual")
                 - STORY_ID = full_story.id
                 - STORY_TITLE = full_story.title
                 - STORY_DESCRIPTION = full_story.description
