@@ -303,6 +303,13 @@ Assign a `verification` object to each story based on its type/layer:
 
 Set `verification.status` to `"pending"`. Optionally include `url` (for `api`/`visual`) and `expect` (expected result description).
 
+**IMPORTANT: `verification` MUST be an object — never a bare string like `"passed"` or `"pending"`.** The executor's visual-follow detection depends on `verification.strategy` being accessible as an object property.
+
+Required object format examples:
+- visual: `{"strategy": "visual", "status": "pending", "url": "http://localhost:3000/page", "expect": "Dashboard with charts visible"}`
+- api: `{"strategy": "api", "status": "pending", "url": "http://localhost:3000/api/endpoint", "expect": "200 with JSON array"}`
+- test: `{"strategy": "test", "status": "pending", "expect": "All unit tests pass"}`
+
 ### Gate Detection
 
 Attach a `gate` object only when heuristics clearly match. Most stories have no gate.
@@ -345,7 +352,12 @@ Branch on `implementationScope` from Phase 0:
    - `endpoints`: array of `{ method, path, description }` — API contracts implied by UI interactions
    - `dataModels`: array of `{ name, fields }` — data structures implied by forms and displays
    - `businessRules`: array of strings — validation rules and business logic from acceptance criteria
-   - `businessContext`: string — summary of the backend capability the frontend assumes
+   - `businessContext`: object with structured business context:
+     - `summary`: high-level overview of the business domain and purpose
+     - `userRoles`: extract persona names from story descriptions ("As a [role]" patterns)
+     - `constraints`: identify non-functional requirements from acceptance criteria (scalability, compliance, performance SLAs)
+     - `assumptions`: document integration assumptions, data patterns, auth model, API style
+     - `successCriteria`: derive measurable success criteria from acceptance criteria across all stories
 3. Derive branchName with `-frontend` suffix: `type/[feature]-frontend`
 4. Write single file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
 

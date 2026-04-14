@@ -282,6 +282,13 @@ Each story receives a `verification` field that tells the executor how to confir
 | `api` | Hit endpoint and check response | API routes, REST endpoints, GraphQL resolvers — any story that exposes an HTTP interface |
 | `typecheck` | Run `tsc --noEmit` | Schema changes, type definitions, refactors that only affect types — stories with no runtime behavior to test |
 
+**IMPORTANT: `verification` MUST be an object — never a bare string like `"passed"` or `"pending"`.** The executor's visual-follow detection depends on `verification.strategy` being accessible as an object property.
+
+Required object format examples:
+- visual: `{"strategy": "visual", "status": "pending", "url": "http://localhost:3000/page", "expect": "Dashboard with charts visible"}`
+- api: `{"strategy": "api", "status": "pending", "url": "http://localhost:3000/api/endpoint", "expect": "200 with JSON array"}`
+- test: `{"strategy": "test", "status": "pending", "expect": "All unit tests pass"}`
+
 ### Fallback Logic
 
 1. If the story touches an API endpoint → `api`

@@ -210,11 +210,26 @@ git log --oneline "$BASE_BRANCH"..HEAD
   ```
 
   #### `### Business Context`
-  A single paragraph rendered from `backendSpec.businessContext`.
+  Render `backendSpec.businessContext` as structured sub-sections. If `businessContext` is a plain string (legacy format), render as a single paragraph.
+
+  When `businessContext` is an object:
 
   ```
-  Context paragraph here.
+  <businessContext.summary paragraph>
+
+  **User Roles:** <comma-separated list from businessContext.userRoles[]>
+
+  **Constraints:**
+  - <item from businessContext.constraints[]>
+
+  **Assumptions:**
+  - <item from businessContext.assumptions[]>
+
+  **Success Criteria:**
+  - <item from businessContext.successCriteria[]>
   ```
+
+  Omit any sub-section whose array is empty or absent.
 
 ## Step 5: Push Branch and Create PR
 
@@ -276,14 +291,28 @@ gh pr create --title "$PR_TITLE" --base "$BASE_BRANCH" --body "$(cat <<'EOF'
 
 ### Business Context
 
-<backendSpec.businessContext paragraph>
+<backendSpec.businessContext.summary paragraph>
+
+**User Roles:** <comma-separated from businessContext.userRoles[]>
+
+**Constraints:**
+- <item from businessContext.constraints[]>
+
+**Assumptions:**
+- <item from businessContext.assumptions[]>
+
+**Success Criteria:**
+- <item from businessContext.successCriteria[]>
+
+<omit any sub-section whose array is empty or absent>
+<if businessContext is a plain string (legacy), render as a single paragraph instead>
 
 </if>
 EOF
 )"
 ```
 
-**Important**: The Backend Implementation Spec section is rendered entirely from the `backendSpec` metadata object. No LLM generation is used — all content comes from deterministic template rendering of the structured data. When `frontendOnly` is `false` or absent, or when `backendSpec` is null, the section is omitted entirely and the PR body ends after the Testing section.
+**Important**: The Backend Implementation Spec section is rendered entirely from the `backendSpec` metadata object. No LLM generation is used — all content comes from deterministic template rendering of the structured data. When `frontendOnly` is `false` or absent, or when `backendSpec` is null, the section is omitted entirely and the PR body ends after the Testing section. If `businessContext` is a plain string (legacy format), render it as a single paragraph for backwards compatibility.
 
 ### 5c. Create backend issue and link to PR (conditional)
 
@@ -315,7 +344,21 @@ if ISSUE_URL=$(gh issue create --title "Backend: $METADATA_TITLE" --body "$(cat 
 
 ### Business Context
 
-<backendSpec.businessContext paragraph>
+<backendSpec.businessContext.summary paragraph>
+
+**User Roles:** <comma-separated from businessContext.userRoles[]>
+
+**Constraints:**
+- <item from businessContext.constraints[]>
+
+**Assumptions:**
+- <item from businessContext.assumptions[]>
+
+**Success Criteria:**
+- <item from businessContext.successCriteria[]>
+
+<omit any sub-section whose array is empty or absent>
+<if businessContext is a plain string (legacy), render as a single paragraph instead>
 EOF
 )" 2>/dev/null); then
   ISSUE_NUMBER=$(echo "$ISSUE_URL" | grep -oE '[0-9]+$')

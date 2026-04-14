@@ -147,6 +147,13 @@ Incorporate identified gaps as acceptance criteria or story notes.
    - UI component stories → `strategy: "visual"` (with `url` and `expect`)
    - Backend logic stories → `strategy: "test"` (with `expect`)
    - Set `verification.status` to `"pending"`
+
+   **IMPORTANT: `verification` MUST be an object — never a bare string like `"passed"` or `"pending"`.**
+
+   Required object format examples:
+   - visual: `{"strategy": "visual", "status": "pending", "url": "http://localhost:3000/page", "expect": "Dashboard with charts visible"}`
+   - api: `{"strategy": "api", "status": "pending", "url": "http://localhost:3000/api/endpoint", "expect": "200 with JSON array"}`
+   - test: `{"strategy": "test", "status": "pending", "expect": "All unit tests pass"}`
 10. **Detect and attach `gate` objects** using heuristics:
     - `verify` gate: OAuth, email, webhooks, payment, external service integration
     - `decision` gate: multiple viable approaches with significant downstream impact
@@ -184,7 +191,12 @@ Branch on `implementationScope` from Phase 0:
    - `endpoints`: array of `{ method, path, description }` objects — API contracts implied by UI interactions
    - `dataModels`: array of `{ name, fields }` objects — data structures implied by forms and displays
    - `businessRules`: array of strings — validation rules and business logic encoded in acceptance criteria
-   - `businessContext`: string — summary of the backend capability the frontend assumes
+   - `businessContext`: object with structured business context:
+     - `summary`: high-level overview of the business domain and purpose
+     - `userRoles`: extract persona names from story descriptions ("As a [role]" patterns)
+     - `constraints`: identify non-functional requirements from acceptance criteria (scalability, compliance, performance SLAs)
+     - `assumptions`: document integration assumptions, data patterns, auth model, API style
+     - `successCriteria`: derive measurable success criteria from acceptance criteria across all stories
 3. Write single file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
 4. Derive metadata: title, type, branchName (kebab-case, `-frontend` suffix), createdAt, `schemaVersion: "3.2"`, `planPath: null`, `brainstormPath`, `researchDepth`, `maxConcurrency`
 5. For each story: set `status: "pending"`, include `dependsOn`, `wave`, and optional `implementation`, `verification`, `gate` objects

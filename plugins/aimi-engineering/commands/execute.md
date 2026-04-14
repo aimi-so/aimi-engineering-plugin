@@ -108,8 +108,11 @@ Check the tasks file directly for any stories with a visual verification strateg
 
 ```bash
 TASKS_PATH="$($AIMI_CLI init-session 2>/dev/null | jq -r '.tasks // empty')"
-VISUAL_STORIES=$(jq '[.userStories[] | select(.verification.strategy == "visual")] | length' "$AIMI_ROOT/$TASKS_PATH" 2>/dev/null)
+VISUAL_STORIES=$(jq '[.userStories[] | select(.verification | type == "object" and .strategy == "visual")] | length' "$AIMI_ROOT/$TASKS_PATH" 2>/dev/null)
+MALFORMED_VERIF=$(jq '[.userStories[] | select(.verification != null and (.verification | type != "object"))] | length' "$AIMI_ROOT/$TASKS_PATH" 2>/dev/null)
 ```
+
+If `MALFORMED_VERIF` > 0, warn: `"Warning: [N] stories have malformed verification fields (expected object, got string). Re-run /aimi:plan to fix."`
 
 - **If `VISUAL_STORIES` is 0 or empty:** Set `VISUAL_FOLLOW=false`. Proceed to Step 1.
 
@@ -503,7 +506,7 @@ command -v agent-browser
 - **If `agent-browser` is available:** Get the verification URL from the first visual story:
 
   ```bash
-  VISUAL_URL=$(jq -r '[.userStories[] | select(.verification.strategy == "visual")][0].verification.url' "$AIMI_ROOT/$TASKS_PATH")
+  VISUAL_URL=$(jq -r '[.userStories[] | select(.verification | type == "object" and .strategy == "visual")][0].verification.url' "$AIMI_ROOT/$TASKS_PATH")
   agent-browser --headed --session visual-follow open "$VISUAL_URL"
   ```
 

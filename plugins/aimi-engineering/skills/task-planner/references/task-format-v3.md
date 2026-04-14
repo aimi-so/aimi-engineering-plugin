@@ -67,7 +67,17 @@ Optional object attached to `metadata` that describes the backend contract for f
 | `endpoints` | array | No | Array of endpoint objects, each with `method` (string, e.g. `"GET"`, `"POST"`), `path` (string, e.g. `"/api/tasks"`), and `description` (string). |
 | `dataModels` | array | No | Array of data model objects, each with `name` (string), `fields` (string[] or object[]), and `relationships` (string[]). |
 | `businessRules` | string[] | No | Array of business rule descriptions that the backend must enforce. |
-| `businessContext` | string | No | High-level description of the business domain and purpose for the backend implementation. |
+| `businessContext` | object | No | Structured business context for the backend implementation. See sub-fields below. |
+
+#### businessContext Object
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `summary` | string | Yes | High-level overview of the business domain and purpose for the backend implementation. |
+| `userRoles` | string[] | No | Persona/role names extracted from story descriptions (e.g., `"admin"`, `"customer"`). |
+| `constraints` | string[] | No | Non-functional requirements: scalability targets, compliance needs, performance SLAs. |
+| `assumptions` | string[] | No | Integration assumptions, data patterns, auth model, API style. |
+| `successCriteria` | string[] | No | Measurable success criteria derived from acceptance criteria. |
 
 Example:
 ```json
@@ -87,7 +97,13 @@ Example:
     "Users can only see their own projects",
     "Project names must be unique per user"
   ],
-  "businessContext": "Project management SaaS where users organize work into projects containing tasks."
+  "businessContext": {
+    "summary": "Project management SaaS where users organize work into projects containing tasks.",
+    "userRoles": ["project owner", "team member"],
+    "constraints": ["Must support multi-tenant isolation", "Project names unique per user"],
+    "assumptions": ["REST API consumed by React SPA", "Auth via session cookies"],
+    "successCriteria": ["All CRUD operations functional", "Response time < 200ms for list endpoints"]
+  }
 }
 ```
 
@@ -560,7 +576,13 @@ When `frontendOnly` is `true`, the plan describes a UI prototype where all backe
         "Archived projects are read-only",
         "Project names must be unique per user"
       ],
-      "businessContext": "Project management tool where users organize work into projects and track tasks within them."
+      "businessContext": {
+        "summary": "Project management tool where users organize work into projects and track tasks within them.",
+        "userRoles": ["project owner", "team member"],
+        "constraints": ["Must support multi-tenant isolation", "Archived projects are read-only"],
+        "assumptions": ["REST API consumed by React SPA", "Auth via session cookies", "In-memory mock service mimics real API contract"],
+        "successCriteria": ["All CRUD endpoints functional", "Project list page renders with mock data", "Response time < 200ms"]
+      }
     }
   },
   "userStories": [
@@ -640,7 +662,7 @@ Before processing, validate:
 19. Each story's `gate` (if present) must be an object with required `type` (one of: `verify`, `decision`, `action`), `status` (one of: `pending`, `passed`, `failed`), and `prompt` (string); optional field: `options` (string[])
 20. Gate blocking rules: `decision` gates must have `status: "passed"` before the story can start; `action` gates must have `status: "passed"` before dependent stories can start; `verify` gates are non-blocking
 21. `metadata.frontendOnly` (if present) must be a boolean
-22. `metadata.backendSpec` (if present) must be an object with optional fields: `endpoints` (array of objects with `method`, `path`, `description`), `dataModels` (array of objects with `name`, `fields`, `relationships`), `businessRules` (string[]), `businessContext` (string)
+22. `metadata.backendSpec` (if present) must be an object with optional fields: `endpoints` (array of objects with `method`, `path`, `description`), `dataModels` (array of objects with `name`, `fields`, `relationships`), `businessRules` (string[]), `businessContext` (object with required `summary` (string) and optional `userRoles` (string[]), `constraints` (string[]), `assumptions` (string[]), `successCriteria` (string[]))
 
 ### Validation Error Format
 

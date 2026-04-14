@@ -163,6 +163,10 @@ Using consolidated research and spec-flow output:
 6. **Compute `wave` numbers** from `dependsOn` graph: roots = wave 1; non-roots = max(wave of deps) + 1; contiguous, no gaps
 7. **Populate `implementation` object** when research provides file paths and patterns: `files` (concrete paths), `approach` (actionable strategy), `verify` (executable check). Omit when research is insufficient.
 8. **Assign `verification` strategy** per story type: `api` (endpoints), `visual` (UI), `test` (backend logic). Set `status: "pending"`.
+   **IMPORTANT: `verification` MUST be an object — never a bare string.** Examples:
+   - visual: `{"strategy": "visual", "status": "pending", "url": "http://localhost:3000/page", "expect": "Dashboard visible"}`
+   - api: `{"strategy": "api", "status": "pending", "url": "http://localhost:3000/api/endpoint", "expect": "200 with JSON"}`
+   - test: `{"strategy": "test", "status": "pending", "expect": "All tests pass"}`
 9. **Detect and attach `gate` objects**: `verify` (OAuth/email/webhooks), `decision` (multiple viable approaches), `action` (external manual action). Most stories have no gate.
 10. Write descriptions in user story format: "As a [specific role], I want [feature] so that [benefit]" — role must name the actor, never just "user"
 11. Generate verifiable acceptance criteria (every story must have "Typecheck passes")
@@ -213,7 +217,12 @@ Branch on `implementationScope` from Phase 0:
    - `endpoints`: array of `{ method, path, description }` — API contracts implied by UI interactions
    - `dataModels`: array of `{ name, fields }` — data structures implied by forms and displays
    - `businessRules`: array of strings — validation rules and business logic from acceptance criteria
-   - `businessContext`: string — summary of the backend capability the frontend assumes
+   - `businessContext`: object with structured business context:
+     - `summary`: high-level overview of the business domain and purpose
+     - `userRoles`: extract persona names from story descriptions ("As a [role]" patterns)
+     - `constraints`: identify non-functional requirements from acceptance criteria (scalability, compliance, performance SLAs)
+     - `assumptions`: document integration assumptions, data patterns, auth model, API style
+     - `successCriteria`: derive measurable success criteria from acceptance criteria across all stories
 3. Write single file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
 
 ### When `implementationScope` is unset (legacy):

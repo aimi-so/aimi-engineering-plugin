@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.49.0] - 2026-04-14
+
+### Fixed
+
+- **execute**: Visual-follow browser detection now type-guards `verification` field — prevents silent failure when verification is a string instead of object, warns about malformed fields
+- **planner**: Added explicit "verification MUST be an object" warnings with JSON examples to all planner instruction files (SKILL.md, plan.md, pipeline-phases.md, story-decomposition.md)
+
+### Changed
+
+- **schema**: `backendSpec.businessContext` expanded from string to structured object with `summary`, `userRoles[]`, `constraints[]`, `assumptions[]`, `successCriteria[]` sub-fields
+- **open-pr**: Backend Implementation Spec "Business Context" section now renders structured sub-sections (User Roles, Constraints, Assumptions, Success Criteria) with legacy string fallback
+- **planner**: Phase 4 businessContext generation guidance updated with explicit extraction instructions for each sub-field
+
 ## [1.48.0] - 2026-04-14
 
 ### Added
