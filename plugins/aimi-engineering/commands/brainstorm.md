@@ -111,6 +111,23 @@ Before generating questions, review the research output from Phase 1.
   Accept the user's response (additional context or confirmation to proceed) and continue to Phase 2.
 - **If research was skipped by specificity logic (Step 1a):** This gate is **advisory only** — the user already provided specific details that made research unnecessary. Proceed to Phase 2 without prompting.
 
+## Phase 1.7: UI Feature Detection
+
+Scan the feature description for visual/UI keywords using case-insensitive whole-word matching (regex word boundaries `\b`).
+
+**Keyword list:** page, modal, dashboard, form, component, layout, ui, design
+
+**Co-occurrence rule:** The keyword "design" alone does not trigger detection — it requires co-occurrence with at least one other keyword from the list. This prevents false positives from phrases like "system design" or "API design."
+
+| Bucket | Signals | Action |
+|--------|---------|--------|
+| **Detect** | Feature description contains at least one keyword (with "design" requiring co-occurrence) | Mark the feature as UI-relevant; Phase 2 includes design-thinking questions covering visual hierarchy, interaction patterns, responsive behavior, and accessibility |
+| **Skip** | No keywords match, or "design" appears alone without another keyword | Proceed unchanged — no design-category questions injected into Phase 2 |
+
+If the feature description contains UI keywords, Phase 2 generates additional questions targeting design categories (visual hierarchy, interaction patterns, responsive behavior, accessibility) alongside the standard topic categories. These design questions follow the same format rules: 3-4 options, under 20 words question text, under 15 words per option, "Other" escape hatch.
+
+When no keywords match, brainstorm proceeds unchanged — Phase 2 covers only the standard topic categories with no mention of design categories.
+
 ## Phase 2: Batched Questions
 
 Using the user's feature description and consolidated research findings (from Step 1c), generate **3-5 batched multiple-choice questions**. Include any conflict-based questions surfaced during consolidation.
