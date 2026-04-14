@@ -118,12 +118,12 @@ Gate: [gate.type] ([gate.status])
 
 Interpolate the following into the template:
 - `PROJECT_GUIDELINES` = guidelines loaded in Step 2
-- `PROJECT_PATH` = resolved project path from Step 1b (include `## Project Context` section only if set)
+- `PROJECT_PATH` = resolved project path from Step 1b (include <project_context> section only if set)
 - `STORY_ID` = story.id
 - `STORY_TITLE` = story.title
 - `STORY_DESCRIPTION` = story.description
 - `ACCEPTANCE_CRITERIA` = story.acceptanceCriteria (bulleted)
-- `story.notes` = story.notes (include PREVIOUS NOTES section only if non-empty)
+- `story.notes` = story.notes (include <previous_notes> section only if non-empty)
 - No WORKTREE_PATH (sequential mode — worker operates in current directory, or PROJECT_PATH if set)
 
 ```

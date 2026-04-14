@@ -573,8 +573,8 @@ while true:
                 - STORY_TITLE = full_story.title
                 - STORY_DESCRIPTION = full_story.description
                 - ACCEPTANCE_CRITERIA = full_story.acceptanceCriteria (bulleted)
-                - full_story.notes = full_story.notes (include PREVIOUS NOTES section only if non-empty)
-                - DESIGN_CONTEXT = design_context (include DESIGN CONTEXT section only if non-empty)
+                - full_story.notes = full_story.notes (include <previous_notes> section only if non-empty)
+                - DESIGN_CONTEXT = design_context (include <design_context> section only if non-empty)
                 - No WORKTREE_PATH (sequential — worker operates in current directory or PROJECT_PATH)
             ]
         )
@@ -675,8 +675,8 @@ while true:
                 - STORY_TITLE = full_story.title
                 - STORY_DESCRIPTION = full_story.description
                 - ACCEPTANCE_CRITERIA = full_story.acceptanceCriteria (bulleted)
-                - full_story.notes = full_story.notes (include PREVIOUS NOTES section only if non-empty)
-                - DESIGN_CONTEXT = design_context (include DESIGN CONTEXT section only if non-empty)
+                - full_story.notes = full_story.notes (include <previous_notes> section only if non-empty)
+                - DESIGN_CONTEXT = design_context (include <design_context> section only if non-empty)
                 - No WORKTREE_PATH (single remaining story — no worktree overhead)
             ]
         )
@@ -797,14 +797,14 @@ while true:
                 - PROJECT_PATH = project_path (only include if non-null)
                 - PROJECT_GUIDELINES = project_guidelines
                 - HEADED_MODE = (do NOT include for worktree stories — visual verification runs post-merge, not inside the worktree)
-                - Omit the "## Visual Verification" section entirely for worktree stories
+                - Omit the <visual_verification> section entirely for worktree stories
                   (the dev server cannot see worktree changes; verification runs after merge-all instead)
                 - STORY_ID = full_story.id
                 - STORY_TITLE = full_story.title
                 - STORY_DESCRIPTION = full_story.description
                 - ACCEPTANCE_CRITERIA = full_story.acceptanceCriteria (bulleted)
-                - full_story.notes = full_story.notes (include PREVIOUS NOTES section only if non-empty)
-                - DESIGN_CONTEXT = design_context (include DESIGN CONTEXT section only if non-empty)
+                - full_story.notes = full_story.notes (include <previous_notes> section only if non-empty)
+                - DESIGN_CONTEXT = design_context (include <design_context> section only if non-empty)
                 - Do NOT modify the tasks.json file — report result (success/failure + details)
             ]
         )
