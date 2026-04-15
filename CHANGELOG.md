@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.55.0] - 2026-04-15
+
+### Fixed
+
+- **cli**: Add `--project` flag to `setup-branch` and `detect-default-branch` commands for multi-repo layouts where AIMI root is not a git repository
+- **cli**: Add git-repo guard to both commands with clear error message instead of cryptic `fatal: not a git repository`
+- **execute**: Detect multi-repo layout (AIMI root is not a git repo) and skip main repo branch setup, handling branch creation per-project instead
+- **planner**: Defer default branch detection to per-project when AIMI root is not a git repo
+
+### Added
+
+- **tests**: Add `--project` flag and non-git-repo error tests for `setup-branch`
+
 ## [1.54.0] - 2026-04-14
 
 ### Fixed

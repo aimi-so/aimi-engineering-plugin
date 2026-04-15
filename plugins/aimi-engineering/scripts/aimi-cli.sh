@@ -1041,6 +1041,34 @@ cmd_get_state() {
 # Fallback: git symbolic-ref refs/remotes/origin/HEAD (offline)
 # Caches result in .aimi/default-branch for session reuse
 cmd_detect_default_branch() {
+  local project_dir=""
+
+  # Parse --project flag
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project)
+        shift
+        project_dir="${1:-}"
+        ;;
+    esac
+    shift
+  done
+
+  # cd into project dir if specified (supports multi-repo layouts where AIMI root is not a git repo)
+  if [ -n "$project_dir" ]; then
+    if [ ! -d "$project_dir" ]; then
+      echo "Error: Project directory does not exist: $project_dir" >&2
+      exit 1
+    fi
+    cd "$project_dir"
+  fi
+
+  # Guard: must be inside a git repository
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
+    exit 1
+  fi
+
   # Return cached value if available
   local cached
   cached=$(read_state "default-branch")
@@ -1070,9 +1098,9 @@ cmd_detect_default_branch() {
 }
 
 # Setup branch: deterministic branch creation/checkout logic
-# Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch>
+# Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--project <path>]
 cmd_setup_branch() {
-  local branch_name="" default_branch=""
+  local branch_name="" default_branch="" project_dir=""
 
   # Parse arguments (positional + flags)
   while [ $# -gt 0 ]; do
@@ -1081,9 +1109,13 @@ cmd_setup_branch() {
         shift
         default_branch="${1:-}"
         ;;
+      --project)
+        shift
+        project_dir="${1:-}"
+        ;;
       -*)
         echo "Error: Unknown flag: $1" >&2
-        echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch>" >&2
+        echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--project <path>]" >&2
         exit 1
         ;;
       *)
@@ -1091,7 +1123,7 @@ cmd_setup_branch() {
           branch_name="$1"
         else
           echo "Error: Unexpected argument: $1" >&2
-          echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch>" >&2
+          echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--project <path>]" >&2
           exit 1
         fi
         ;;
@@ -1101,7 +1133,22 @@ cmd_setup_branch() {
 
   # Validate required arguments
   if [ -z "$branch_name" ] || [ -z "$default_branch" ]; then
-    echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch>" >&2
+    echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--project <path>]" >&2
+    exit 1
+  fi
+
+  # cd into project dir if specified (supports multi-repo layouts where AIMI root is not a git repo)
+  if [ -n "$project_dir" ]; then
+    if [ ! -d "$project_dir" ]; then
+      echo "Error: Project directory does not exist: $project_dir" >&2
+      exit 1
+    fi
+    cd "$project_dir"
+  fi
+
+  # Guard: must be inside a git repository
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
     exit 1
   fi
 
@@ -1685,8 +1732,9 @@ COMMANDS:
     get-branch                Get branchName from metadata
     get-story <id>            Get full story object by ID (read-only)
     get-state                 Get all state files as JSON
-    detect-default-branch     Detect and cache the repository's default branch
-    setup-branch <name> --default-branch <branch>
+    detect-default-branch [--project <path>]
+                              Detect and cache the repository's default branch
+    setup-branch <name> --default-branch <branch> [--project <path>]
                               Create or checkout branch with deterministic logic
     clear-state               Clear all state files
     check-version [--quiet] [--fix]
@@ -1792,7 +1840,7 @@ main() {
     get-branch)        cmd_get_branch ;;
     get-story)         cmd_get_story "${2:-}" ;;
     get-state)         cmd_get_state ;;
-    detect-default-branch) cmd_detect_default_branch ;;
+    detect-default-branch) shift; cmd_detect_default_branch "$@" ;;
     setup-branch)      shift; cmd_setup_branch "$@" ;;
     clear-state)       cmd_clear_state ;;
     check-version)     shift; cmd_check_version "$@" ;;

@@ -284,16 +284,30 @@ Review the stories for suspicious content and fix before execution.
 
 Detect the default branch and fetch the latest from origin before branch setup.
 
+### Detect Git Repo Layout
+
+Check if AIMI_ROOT (directory containing `.aimi/`) is itself a git repository:
+
+```bash
+git -C [AIMI_ROOT] rev-parse --git-dir >/dev/null 2>&1
+```
+
+Store the result as `AIMI_ROOT_IS_GIT_REPO` (true/false). When false, this is a **multi-repo layout** where Claude Code runs from a parent folder containing multiple git repos as subfolders.
+
 ### Detect Default Branch
 
+If `AIMI_ROOT_IS_GIT_REPO` is true:
 ```bash
 DEFAULT_BRANCH=$($AIMI_CLI detect-default-branch)
 ```
+
+If `AIMI_ROOT_IS_GIT_REPO` is false, skip — default branch detection happens per-project in the branch setup step below.
 
 Store `DEFAULT_BRANCH` for use in branch creation and commit counting.
 
 ### Fetch Origin
 
+If `AIMI_ROOT_IS_GIT_REPO` is true:
 ```bash
 git fetch origin
 ```
@@ -303,11 +317,15 @@ If fetch fails (e.g., offline or no remote), warn but continue:
 Warning: git fetch origin failed — continuing with local state. Branch may be stale.
 ```
 
+If `AIMI_ROOT_IS_GIT_REPO` is false, skip — fetch happens per-project below.
+
 ## Step 2: Branch Setup
 
 Get the branch name from the init-session output (already validated by CLI).
 
 ### Main Repo Branch Setup
+
+**Skip this step if `AIMI_ROOT_IS_GIT_REPO` is false** — branch setup is handled entirely per-project.
 
 ```bash
 BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $DEFAULT_BRANCH)
@@ -324,24 +342,24 @@ Where `[action]` is the `action` field from the JSON response (e.g., `already-on
 
 ### Per-Project Branch Setup
 
-After setting up the branch in the current repo, check if any stories have a `project` field by running `$AIMI_CLI list-ready --brief` and inspecting the results.
+After setting up the branch in the main repo (or skipping if multi-repo layout), check if any stories have a `project` field by running `$AIMI_CLI list-ready --brief` and inspecting the results.
 
-If any story has a non-null `project` field:
+If any story has a non-null `project` field, **or** if `AIMI_ROOT_IS_GIT_REPO` is false (multi-repo layout requires all stories to have project paths):
 
 1. Collect unique project paths from ALL pending stories (not just ready ones — use `$AIMI_CLI status` and filter stories with a `project` field).
 2. Resolve each project path to an absolute path: `AIMI_ROOT / story.project` where AIMI_ROOT is the directory containing `.aimi/`.
-3. For each unique project path:
+3. For each unique project path, detect its default branch and set up the branch:
    ```bash
-   cd [resolved_project_path]
-   PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $DEFAULT_BRANCH)
-   cd [original_directory]
+   PROJECT_DEFAULT=$($AIMI_CLI detect-default-branch --project [resolved_project_path])
+   git -C [resolved_project_path] fetch origin 2>/dev/null || true
+   PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $PROJECT_DEFAULT --project [resolved_project_path])
    ```
    Extract the action from the JSON output and report:
    ```
    Branch [branchName] set up in project: [project_path] (action: [action])
    ```
 
-If no stories have a `project` field, skip this step (backwards compatible).
+If no stories have a `project` field and `AIMI_ROOT_IS_GIT_REPO` is true, skip this step (backwards compatible).
 
 ## Step 3: Check for Pending Stories
 

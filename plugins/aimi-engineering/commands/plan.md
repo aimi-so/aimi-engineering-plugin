@@ -21,23 +21,28 @@ Read `references/cli-path-resolution.md` and follow the **Resolve CLI Path** and
 
 If resolution fails, report error and STOP.
 
-### Fetch Origin (Branch Freshness Check)
+### Detect Git Repo Layout
 
-Ensure local refs are current before determining the default branch:
+Check if the current directory (AIMI root) is itself a git repository:
+
+```bash
+git rev-parse --git-dir >/dev/null 2>&1
+```
+
+Store the result as `AIMI_ROOT_IS_GIT_REPO` (true/false). When false, this is a **multi-repo layout** — default branch detection is deferred to Phase 4 after the git repo auto-scan discovers project paths.
+
+### Fetch Origin & Detect Default Branch
+
+**If `AIMI_ROOT_IS_GIT_REPO` is true:**
 
 ```bash
 git fetch origin 2>&1 || echo "WARNING: git fetch failed (offline?). Continuing with local refs."
-```
-
-If fetch fails, warn but continue planning with local refs.
-
-### Detect Default Branch
-
-```bash
 $AIMI_CLI detect-default-branch
 ```
 
 Use the output as the default branch for `branchName` derivation in Phase 4.
+
+**If `AIMI_ROOT_IS_GIT_REPO` is false:** Skip. Default branch detection happens per-project in Phase 4 using `$AIMI_CLI detect-default-branch --project [path]`.
 
 ## Phase 0: Idea Refinement
 

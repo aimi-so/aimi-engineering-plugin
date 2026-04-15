@@ -2805,6 +2805,36 @@ test_setup_branch() {
 
   popd >/dev/null
   teardown_git_fixture
+
+  # --- Test: --project flag ---
+  echo ""
+  echo "--- setup-branch --project flag ---"
+
+  setup_git_fixture
+  # Run from the non-git TEST_DIR, pointing --project at the fixture
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" setup-branch feat/project-flag --default-branch main --project "$GIT_FIXTURE_LOCAL" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  action=$(echo "$stdout" | jq -r '.action')
+  assert_exit_code "0" "$exit_code" "setup-branch: --project flag — exit code"
+  assert_eq "created-from-default" "$action" "setup-branch: --project flag — action"
+  rm -f "$stderr_file"
+  teardown_git_fixture
+
+  # --- Test: not a git repo error ---
+  echo ""
+  echo "--- setup-branch not-a-git-repo error ---"
+
+  local non_git_dir
+  non_git_dir=$(mktemp -d)
+  mkdir -p "$non_git_dir/.aimi"
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" setup-branch feat/test --default-branch main --project "$non_git_dir" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_output=$(cat "$stderr_file")
+  assert_exit_code "1" "$exit_code" "setup-branch: not a git repo — exit code"
+  assert_stderr_contains "Not a git repository" "$stderr_output" "setup-branch: not a git repo — stderr message"
+  rm -f "$stderr_file"
+  rm -rf "$non_git_dir"
 }
 
 # ============================================================================
