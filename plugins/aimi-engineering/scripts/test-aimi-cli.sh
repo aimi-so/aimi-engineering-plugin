@@ -836,6 +836,30 @@ test_stale_state_warning() {
 }
 
 # ============================================================================
+# Version Command Test
+# ============================================================================
+
+test_version() {
+  echo ""
+  echo "=== Testing version command ==="
+
+  local output exit_code
+  output=$("$CLI" version 2>/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "version: exits 0"
+  # Should match semver pattern
+  if [[ "$output" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo -e "${GREEN}✓${NC} version: outputs semver format ($output)"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} version: outputs semver format"
+    echo "  Expected: semver (e.g., 1.56.0)"
+    echo "  Actual: $output"
+    ((TESTS_FAILED++))
+  fi
+}
+
+# ============================================================================
 # Version Staleness Tests
 # ============================================================================
 
@@ -2898,6 +2922,10 @@ main() {
   test_reset_orphaned_empty
   test_reset_orphaned_with_orphans
   test_stale_state_warning
+
+  echo ""
+  echo "--- Version Command Test ---"
+  test_version
 
   # Version staleness tests — run with fresh state
   # Unset AIMI_PLUGIN_DIR to test non-converter code paths (e.g., when set by OpenCode)

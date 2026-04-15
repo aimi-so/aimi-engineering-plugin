@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.57.0] - 2026-04-15
+
+### Added
+
+- **cli**: Add `version` subcommand that prints the plugin version from plugin.json
+- **tests**: Add version command test validating semver output
+
 ## [1.56.0] - 2026-04-15
 
 ### Fixed

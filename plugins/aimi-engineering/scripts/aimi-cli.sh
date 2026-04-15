@@ -1219,6 +1219,18 @@ cmd_clear_state() {
   echo "State cleared."
 }
 
+# Print the plugin version from plugin.json
+cmd_version() {
+  local script_path plugin_json
+  script_path="${BASH_SOURCE[0]:-$0}"
+  plugin_json="$(cd "$(dirname "$script_path")/.." && pwd)/.claude-plugin/plugin.json"
+  if [ ! -f "$plugin_json" ]; then
+    echo "Error: plugin.json not found" >&2
+    exit 1
+  fi
+  jq -r '.version' "$plugin_json"
+}
+
 # Check CLI version staleness
 # Compares stored cli-path against the glob-resolved latest path
 # Flags: --quiet (suppress stderr), --fix (auto-fix stale detection)
@@ -1737,6 +1749,7 @@ COMMANDS:
     setup-branch <name> --default-branch <branch> [--project <path>]
                               Create or checkout branch with deterministic logic
     clear-state               Clear all state files
+    version                   Print the plugin version
     check-version [--quiet] [--fix]
                               Check if stored CLI version matches latest installed
                               --quiet  Suppress stderr warnings
@@ -1809,6 +1822,7 @@ main() {
   # Skip auto-discovery for help command (works without .aimi/ present)
   case "${1:-help}" in
     help|--help|-h) cmd_help; return ;;
+    version) cmd_version; return ;;
   esac
 
   find_aimi_root
@@ -1843,6 +1857,7 @@ main() {
     detect-default-branch) shift; cmd_detect_default_branch "$@" ;;
     setup-branch)      shift; cmd_setup_branch "$@" ;;
     clear-state)       cmd_clear_state ;;
+    version)           cmd_version ;;
     check-version)     shift; cmd_check_version "$@" ;;
     cleanup-versions)  cmd_cleanup_versions ;;
     list-archivable)   cmd_list_archivable ;;
