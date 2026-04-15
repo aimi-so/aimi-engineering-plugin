@@ -63,6 +63,13 @@ After the brainstorm check, determine the implementation scope:
 
 ### Phase 1: Local Research (Parallel)
 
+**Prepare research directory:**
+```bash
+mkdir -p .aimi/research
+```
+
+**Derive topic slug** from the feature description: lowercase, replace spaces/special chars with hyphens, remove consecutive hyphens, truncate to 50 chars, remove trailing hyphens. Store as `topicSlug`.
+
 **Auto-scan for git repos:** Before launching research agents, scan immediate child directories for `.git/` directories to discover sub-projects:
 ```bash
 for dir in */; do
@@ -76,10 +83,14 @@ Run these agents **in parallel**:
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
-  prompt: "[feature description + brainstorm context + discovered repos]"
+  prompt: "[feature description + brainstorm context + discovered repos]
+           topicSlug: [topicSlug]
+           Write findings to .aimi/research/[topicSlug]-codebase.md"
 
 Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
-  prompt: "[feature description]"
+  prompt: "[feature description]
+           topicSlug: [topicSlug]
+           Write findings to .aimi/research/[topicSlug]-learnings.md"
 ```
 
 ### Phase 1.5: Research Decision
@@ -96,19 +107,31 @@ Only if Phase 1.5 decides external research is needed:
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
-  prompt: "[feature description]"
+  prompt: "[feature description]
+           researchDepth: [computed researchDepth from Phase 1.5]
+           topicSlug: [topicSlug]
+           Write findings to .aimi/research/[topicSlug]-best-practices.md"
 
 Task subagent_type="aimi-engineering:research:aimi-framework-docs-researcher"
-  prompt: "[feature description]"
+  prompt: "[feature description]
+           researchDepth: [computed researchDepth from Phase 1.5]
+           topicSlug: [topicSlug]
+           Write findings to .aimi/research/[topicSlug]-framework-docs.md"
 ```
 
 ### Phase 1.6: Research Consolidation
 
-Merge findings from all research agents:
-- Relevant file paths and codebase patterns
-- Institutional learnings from `.aimi/solutions/`
-- External best practices (if researched)
-- CLAUDE.md conventions
+Consume researcher agent **summary returns** (brief outputs from Task calls) -- do NOT re-read `.aimi/research/` files unless a summary is insufficient for a planning decision.
+
+> **Fallback:** If a summary lacks detail for a specific planning decision, read the corresponding `.aimi/research/[topicSlug]-*.md` file on demand.
+
+Merge findings into a structured consolidation with these sections:
+
+1. **Key Patterns** -- Architectural patterns, conventions, and recurring structures found in the codebase
+2. **Conflicts** -- Contradictions between sources (e.g., CLAUDE.md says X but codebase does Y), unresolved trade-offs
+3. **File References** -- Concrete file paths relevant to the feature, grouped by concern (schema, backend, UI, config)
+4. **Learnings** -- Institutional knowledge from `.aimi/solutions/`: gotchas, past mistakes, proven approaches
+5. **External Insights** -- Best practices and framework guidance from external research (empty if Phase 1.5b was skipped)
 
 ### Phase 2: Spec Analysis
 

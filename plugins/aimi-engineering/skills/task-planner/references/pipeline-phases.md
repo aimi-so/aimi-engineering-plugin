@@ -64,6 +64,23 @@ During refinement, note for Phase 1.5:
 
 ## Phase 1: Local Research (Always Runs)
 
+### Prepare Research Directory
+
+```bash
+mkdir -p .aimi/research
+```
+
+### Derive Topic Slug
+
+From the feature description, derive a topic slug for research filename derivation:
+1. Convert to lowercase
+2. Replace spaces and special characters with hyphens
+3. Remove consecutive hyphens
+4. Truncate to 50 characters
+5. Remove trailing hyphens
+
+Store as `topicSlug` for use in researcher agent prompts.
+
 ### Auto-Scan for Git Repos
 
 Before launching research agents, scan immediate child directories of the `.aimi/` parent folder for git repositories:
@@ -91,8 +108,10 @@ Run two agents **in parallel** using the Task tool:
 ```
 Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
   prompt: "Analyze the codebase for patterns relevant to: [feature description].
+           topicSlug: [topicSlug]
            Look for: existing patterns, CLAUDE.md guidance, similar features,
-           technology familiarity, file structure conventions."
+           technology familiarity, file structure conventions.
+           Write findings to .aimi/research/[topicSlug]-codebase.md"
 ```
 
 **What to extract:** File paths, naming conventions, architectural patterns, relevant existing code.
@@ -102,7 +121,9 @@ Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
 ```
 Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
   prompt: "Search .aimi/solutions/ for learnings relevant to: [feature description].
-           Look for: gotchas, patterns, past solutions, lessons learned."
+           topicSlug: [topicSlug]
+           Look for: gotchas, patterns, past solutions, lessons learned.
+           Write findings to .aimi/research/[topicSlug]-learnings.md"
 ```
 
 **What to extract:** Known pitfalls, proven patterns, institutional knowledge.
@@ -169,7 +190,10 @@ Run two agents **in parallel**:
 ```
 Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
   prompt: "Research current best practices for: [feature description].
-           Focus on: industry standards, common patterns, security considerations."
+           researchDepth: [computed researchDepth from Phase 1.5]
+           topicSlug: [topicSlug]
+           Focus on: industry standards, common patterns, security considerations.
+           Write findings to .aimi/research/[topicSlug]-best-practices.md"
 ```
 
 ### Agent 4: aimi-framework-docs-researcher
@@ -177,7 +201,10 @@ Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
 ```
 Task subagent_type="aimi-engineering:research:aimi-framework-docs-researcher"
   prompt: "Research framework documentation for: [feature description].
-           Focus on: official docs, API references, version-specific features."
+           researchDepth: [computed researchDepth from Phase 1.5]
+           topicSlug: [topicSlug]
+           Focus on: official docs, API references, version-specific features.
+           Write findings to .aimi/research/[topicSlug]-framework-docs.md"
 ```
 
 ### If agents fail
@@ -190,13 +217,17 @@ If external research fails (network issues, agent errors):
 
 ## Phase 1.6: Research Consolidation
 
-Merge all findings into a structured summary:
+Consume researcher agent **summary returns** (the brief outputs from Task calls) — do NOT re-read the full `.aimi/research/` files unless a summary is insufficient for a planning decision.
 
-1. **Codebase patterns**: Relevant file paths, naming conventions, architectural decisions
-2. **Institutional learnings**: Gotchas, proven patterns from `.aimi/solutions/`
-3. **External best practices**: Industry standards, security patterns (if researched)
-4. **Framework documentation**: API references, version constraints (if researched)
-5. **CLAUDE.md conventions**: Project-specific rules and preferences
+> **Fallback:** If a researcher summary lacks detail needed for a specific planning decision, the orchestrator may read the corresponding `.aimi/research/[topicSlug]-*.md` file on demand.
+
+Merge all findings into a structured consolidation with these sections:
+
+1. **Key Patterns** — Architectural patterns, conventions, and recurring structures found in the codebase
+2. **Conflicts** — Contradictions between sources (e.g., CLAUDE.md says X but codebase does Y), unresolved trade-offs
+3. **File References** — Concrete file paths relevant to the feature, grouped by concern (schema, backend, UI, config)
+4. **Learnings** — Institutional knowledge from `.aimi/solutions/`: gotchas, past mistakes, proven approaches
+5. **External Insights** — Best practices and framework guidance from external research (empty if Phase 1.5b was skipped)
 
 This consolidated context feeds into Phase 2 and Phase 3.
 
