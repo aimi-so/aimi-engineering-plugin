@@ -2862,6 +2862,194 @@ test_setup_branch() {
 }
 
 # ============================================================================
+# Archive Task Tests
+# ============================================================================
+
+test_archive_task_with_research_paths() {
+  echo ""
+  echo "=== Testing archive-task: deletes research files and reports count ==="
+
+  local stdout exit_code research_cleaned
+
+  # Create a dedicated temp dir for this test (needs its own .aimi/)
+  local arch_dir
+  arch_dir=$(mktemp -d)
+  mkdir -p "$arch_dir/.aimi/tasks" "$arch_dir/.aimi/research"
+
+  # Create two research files
+  local r1="$arch_dir/.aimi/research/research-us001.md"
+  local r2="$arch_dir/.aimi/research/research-us002.md"
+  printf 'research 1' > "$r1"
+  printf 'research 2' > "$r2"
+
+  # Create a task file with all stories completed and researchPaths
+  local task_file="$arch_dir/.aimi/tasks/2026-01-01-test-archive-tasks.json"
+  cat > "$task_file" << 'TASKEOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Archive test",
+    "type": "feat",
+    "branchName": "feat/archive-test",
+    "createdAt": "2026-01-01",
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 1,
+    "researchPaths": [
+      ".aimi/research/research-us001.md",
+      ".aimi/research/research-us002.md"
+    ]
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Done story",
+      "description": "Completed",
+      "acceptanceCriteria": ["Done"],
+      "priority": 1,
+      "status": "completed",
+      "dependsOn": [],
+      "notes": ""
+    }
+  ]
+}
+TASKEOF
+
+  pushd "$arch_dir" >/dev/null
+  stdout=$("$CLI" archive-task "$task_file" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "archive-task with researchPaths: exit code"
+
+  research_cleaned=$(printf '%s' "$stdout" | jq -r '.archived.researchCleaned')
+  assert_eq "2" "$research_cleaned" "archive-task with researchPaths: researchCleaned count"
+
+  # Research files must be gone
+  local r1_exists="no" r2_exists="no"
+  [ -e "$r1" ] && r1_exists="yes"
+  [ -e "$r2" ] && r2_exists="yes"
+  assert_eq "no" "$r1_exists" "archive-task with researchPaths: research file 1 deleted"
+  assert_eq "no" "$r2_exists" "archive-task with researchPaths: research file 2 deleted"
+
+  rm -rf "$arch_dir"
+}
+
+test_archive_task_without_research_paths() {
+  echo ""
+  echo "=== Testing archive-task: no researchPaths produces researchCleaned 0 ==="
+
+  local stdout exit_code research_cleaned
+
+  local arch_dir
+  arch_dir=$(mktemp -d)
+  mkdir -p "$arch_dir/.aimi/tasks"
+
+  local task_file="$arch_dir/.aimi/tasks/2026-01-02-test-archive-tasks.json"
+  cat > "$task_file" << 'TASKEOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Archive test no research",
+    "type": "feat",
+    "branchName": "feat/archive-no-research",
+    "createdAt": "2026-01-02",
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 1
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Done story",
+      "description": "Completed",
+      "acceptanceCriteria": ["Done"],
+      "priority": 1,
+      "status": "completed",
+      "dependsOn": [],
+      "notes": ""
+    }
+  ]
+}
+TASKEOF
+
+  pushd "$arch_dir" >/dev/null
+  stdout=$("$CLI" archive-task "$task_file" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "archive-task without researchPaths: exit code"
+
+  research_cleaned=$(printf '%s' "$stdout" | jq -r '.archived.researchCleaned')
+  assert_eq "0" "$research_cleaned" "archive-task without researchPaths: researchCleaned is 0"
+
+  rm -rf "$arch_dir"
+}
+
+test_archive_task_missing_research_files() {
+  echo ""
+  echo "=== Testing archive-task: missing research files skipped silently ==="
+
+  local stdout exit_code research_cleaned
+
+  local arch_dir
+  arch_dir=$(mktemp -d)
+  mkdir -p "$arch_dir/.aimi/tasks" "$arch_dir/.aimi/research"
+
+  # Create only one of the two research files referenced
+  local r1="$arch_dir/.aimi/research/research-exists.md"
+  printf 'exists' > "$r1"
+  # research-missing.md intentionally NOT created
+
+  local task_file="$arch_dir/.aimi/tasks/2026-01-03-test-archive-tasks.json"
+  cat > "$task_file" << 'TASKEOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Archive test missing research",
+    "type": "feat",
+    "branchName": "feat/archive-missing-research",
+    "createdAt": "2026-01-03",
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 1,
+    "researchPaths": [
+      ".aimi/research/research-exists.md",
+      ".aimi/research/research-missing.md"
+    ]
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Done story",
+      "description": "Completed",
+      "acceptanceCriteria": ["Done"],
+      "priority": 1,
+      "status": "completed",
+      "dependsOn": [],
+      "notes": ""
+    }
+  ]
+}
+TASKEOF
+
+  pushd "$arch_dir" >/dev/null
+  stdout=$("$CLI" archive-task "$task_file" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "archive-task missing research files: exit code"
+
+  # Only the existing file is counted
+  research_cleaned=$(printf '%s' "$stdout" | jq -r '.archived.researchCleaned')
+  assert_eq "1" "$research_cleaned" "archive-task missing research files: researchCleaned counts only existing"
+
+  # The existing file must be gone
+  local r1_exists="no"
+  [ -e "$r1" ] && r1_exists="yes"
+  assert_eq "no" "$r1_exists" "archive-task missing research files: existing file deleted"
+
+  rm -rf "$arch_dir"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -3031,6 +3219,13 @@ main() {
   echo ""
   echo "--- Setup Branch Tests ---"
   test_setup_branch
+
+  # Archive-task tests — each creates its own isolated temp dir
+  echo ""
+  echo "--- Archive Task Tests ---"
+  test_archive_task_with_research_paths
+  test_archive_task_without_research_paths
+  test_archive_task_missing_research_files
 
   cleanup
 

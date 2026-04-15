@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.58.2] - 2026-04-15
+
+### Added
+
+- **cli**: `archive-task` now deletes research files listed in `metadata.researchPaths` — reads each path, resolves relative paths from `PROJECT_ROOT`, validates with `validate_path_in_project`, checks existence, and deletes with `rm -f`; missing files are silently skipped
+- **cli**: JSON output of `archive-task` now always includes `researchCleaned` integer field (0 when no research files were present or none existed)
+- **tests**: Three new tests for archive-task research cleanup: with researchPaths, without researchPaths (researchCleaned 0), and with missing research files (silent skip)
+
 ## [1.58.1] - 2026-04-15
 
 ### Added

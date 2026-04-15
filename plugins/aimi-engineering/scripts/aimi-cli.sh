@@ -1697,14 +1697,29 @@ cmd_archive_task() {
     fi
   fi
 
+  # Delete linked research files (ephemeral — rm -f, not archived)
+  local research_cleaned=0
+  while IFS= read -r rpath; do
+    [ -z "$rpath" ] && continue
+    local resolved_research
+    if [ "${rpath#/}" = "$rpath" ]; then
+      # Relative path — resolve from project root
+      resolved_research="$PROJECT_ROOT/$rpath"
+    else
+      resolved_research="$rpath"
+    fi
+    validate_path_in_project "$resolved_research"
+    if [ -e "$resolved_research" ]; then
+      rm -f "$resolved_research"
+      research_cleaned=$((research_cleaned + 1))
+    fi
+  done < <(jq -r '.metadata.researchPaths[]? // empty' "$archived_task" 2>/dev/null)
+
   # Output result as JSON
-  if [ -n "$archived_brainstorm" ]; then
-    jq -n --arg task "$archived_task" --arg brainstorm "$archived_brainstorm" \
-      '{archived: {task: $task, brainstorm: $brainstorm}}'
-  else
-    jq -n --arg task "$archived_task" \
-      '{archived: {task: $task, brainstorm: null}}'
-  fi
+  jq -n --arg task "$archived_task" \
+    --arg brainstorm "${archived_brainstorm:-}" \
+    --argjson researchCleaned "$research_cleaned" \
+    '{archived: {task: $task, brainstorm: (if $brainstorm == "" then null else $brainstorm end), researchCleaned: $researchCleaned}}'
 }
 
 # Display help
