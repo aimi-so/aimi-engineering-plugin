@@ -70,6 +70,12 @@ mkdir -p .aimi/research
 
 **Derive topic slug** from the feature description: lowercase, replace spaces/special chars with hyphens, remove consecutive hyphens, truncate to 50 chars, remove trailing hyphens. Store as `topicSlug`.
 
+**Generate run discriminator:** Generate a single timestamp for this run (prevents same-day re-runs from overwriting prior research files):
+```bash
+RUN_TS=$(date +%H%M%S)
+```
+Store `RUN_TS` and use it in all research agent prompts for this run.
+
 **Auto-scan for git repos:** Before launching research agents, scan immediate child directories for `.git/` directories to discover sub-projects:
 ```bash
 for dir in */; do
@@ -85,12 +91,12 @@ Run these agents **in parallel**:
 Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
   prompt: "[feature description + brainstorm context + discovered repos]
            topicSlug: [topicSlug]
-           Write findings to .aimi/research/[topicSlug]-codebase.md"
+           outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-codebase.md"
 
 Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
   prompt: "[feature description]
            topicSlug: [topicSlug]
-           Write findings to .aimi/research/[topicSlug]-learnings.md"
+           outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-learnings.md"
 ```
 
 ### Phase 1.5: Research Decision
@@ -110,20 +116,20 @@ Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
   prompt: "[feature description]
            researchDepth: [computed researchDepth from Phase 1.5]
            topicSlug: [topicSlug]
-           Write findings to .aimi/research/[topicSlug]-best-practices.md"
+           outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-best-practices.md"
 
 Task subagent_type="aimi-engineering:research:aimi-framework-docs-researcher"
   prompt: "[feature description]
            researchDepth: [computed researchDepth from Phase 1.5]
            topicSlug: [topicSlug]
-           Write findings to .aimi/research/[topicSlug]-framework-docs.md"
+           outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-framework-docs.md"
 ```
 
 ### Phase 1.6: Research Consolidation
 
 Consume researcher agent **summary returns** (brief outputs from Task calls) -- do NOT re-read `.aimi/research/` files unless a summary is insufficient for a planning decision.
 
-> **Fallback:** If a summary lacks detail for a specific planning decision, read the corresponding `.aimi/research/[topicSlug]-*.md` file on demand.
+> **Fallback:** If a summary lacks detail for a specific planning decision, read the corresponding `.aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-*.md` file on demand.
 
 Merge findings into a structured consolidation with these sections:
 

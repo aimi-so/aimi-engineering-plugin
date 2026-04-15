@@ -103,26 +103,30 @@ Only after checking skills AND verifying API availability, gather additional inf
 
 Before returning results to the caller, persist full findings to a research file.
 
-1. **Derive topic slug** from the research topic/prompt:
+1. **Caller-specified path takes precedence:** If the caller's prompt includes an explicit `outputPath` (e.g., `outputPath: .aimi/research/2026-04-15-my-feature-143022-best-practices.md`), write to that exact path and skip slug/timestamp derivation below.
+
+2. **Derive topic slug** (when no caller `outputPath` is provided):
    - Convert to lowercase
    - Replace spaces and special characters with hyphens
    - Remove consecutive hyphens
    - Truncate to 50 characters
    - Remove trailing hyphens
 
-2. **Create research directory:**
+3. **Create research directory:**
    ```bash
    mkdir -p .aimi/research
    ```
 
-3. **Write full findings** via the Write tool to:
-   `.aimi/research/YYYY-MM-DD-<topic-slug>-best-practices-researcher.md`
+4. **Write full findings** via the Write tool to:
+   `.aimi/research/YYYY-MM-DD-<topic-slug>-<HHmmss>-best-practices.md`
+
+   where `YYYY-MM-DD` is today's date and `HHmmss` is the current wall-clock time (run `date +%H%M%S` once at write time when no caller path was provided).
 
    Include frontmatter:
    ```markdown
    ---
    date: YYYY-MM-DD
-   agent: best-practices-researcher
+   agent: best-practices
    topic: <topic-slug>
    depth: <researchDepth tier or "standard" if not specified>
    ---
@@ -130,7 +134,7 @@ Before returning results to the caller, persist full findings to a research file
 
    The body contains the complete research output (no word limit in the file).
 
-4. **Return a structured summary** to the caller, capped by `researchDepth`:
+5. **Return a structured summary** to the caller, capped by `researchDepth`:
 
    | researchDepth | Cap |
    |---------------|-----|
@@ -143,9 +147,9 @@ Before returning results to the caller, persist full findings to a research file
 
    The returned summary must include:
    - Key findings (condensed)
-   - `**Research file:** .aimi/research/<filename>.md`
+   - `**Research file:** .aimi/research/<filename>.md` (the exact path written)
 
-5. **Safety escape:** Security findings, compliance issues, or conflicts with other researchers auto-expand beyond caps — user safety overrides brevity.
+6. **Safety escape:** Security findings, compliance issues, or conflicts with other researchers auto-expand beyond caps — user safety overrides brevity.
 
 ## Special Cases
 

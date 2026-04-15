@@ -81,6 +81,16 @@ From the feature description, derive a topic slug for research filename derivati
 
 Store as `topicSlug` for use in researcher agent prompts.
 
+### Generate Run Discriminator
+
+Generate a single timestamp for this run to prevent same-day re-runs from overwriting prior research files:
+
+```bash
+RUN_TS=$(date +%H%M%S)
+```
+
+Store `RUN_TS` and use it in **all** research agent prompts for this run.
+
 ### Auto-Scan for Git Repos
 
 Before launching research agents, scan immediate child directories of the `.aimi/` parent folder for git repositories:
@@ -111,7 +121,7 @@ Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
            topicSlug: [topicSlug]
            Look for: existing patterns, CLAUDE.md guidance, similar features,
            technology familiarity, file structure conventions.
-           Write findings to .aimi/research/[topicSlug]-codebase.md"
+           outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-codebase.md"
 ```
 
 **What to extract:** File paths, naming conventions, architectural patterns, relevant existing code.
@@ -123,7 +133,7 @@ Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
   prompt: "Search .aimi/solutions/ for learnings relevant to: [feature description].
            topicSlug: [topicSlug]
            Look for: gotchas, patterns, past solutions, lessons learned.
-           Write findings to .aimi/research/[topicSlug]-learnings.md"
+           outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-learnings.md"
 ```
 
 **What to extract:** Known pitfalls, proven patterns, institutional knowledge.
@@ -193,7 +203,7 @@ Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
            researchDepth: [computed researchDepth from Phase 1.5]
            topicSlug: [topicSlug]
            Focus on: industry standards, common patterns, security considerations.
-           Write findings to .aimi/research/[topicSlug]-best-practices.md"
+           outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-best-practices.md"
 ```
 
 ### Agent 4: aimi-framework-docs-researcher
@@ -204,7 +214,7 @@ Task subagent_type="aimi-engineering:research:aimi-framework-docs-researcher"
            researchDepth: [computed researchDepth from Phase 1.5]
            topicSlug: [topicSlug]
            Focus on: official docs, API references, version-specific features.
-           Write findings to .aimi/research/[topicSlug]-framework-docs.md"
+           outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-framework-docs.md"
 ```
 
 ### If agents fail
@@ -219,7 +229,7 @@ If external research fails (network issues, agent errors):
 
 Consume researcher agent **summary returns** (the brief outputs from Task calls) — do NOT re-read the full `.aimi/research/` files unless a summary is insufficient for a planning decision.
 
-> **Fallback:** If a researcher summary lacks detail needed for a specific planning decision, the orchestrator may read the corresponding `.aimi/research/[topicSlug]-*.md` file on demand.
+> **Fallback:** If a researcher summary lacks detail needed for a specific planning decision, the orchestrator may read the corresponding `.aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-*.md` file on demand.
 
 Merge all findings into a structured consolidation with these sections:
 

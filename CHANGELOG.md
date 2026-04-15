@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.58.0] - 2026-04-15
+
+### Changed
+
+- **research**: Unify research file naming with run discriminator — all four research agents (codebase, learnings, best-practices, framework-docs) now use `YYYY-MM-DD-<topicSlug>-<HHmmss>-<short-name>.md` pattern
+- **planner**: Generate `RUN_TS=$(date +%H%M%S)` once in plan.md Phase 1 and pass it to all agent `outputPath` parameters so same-day re-runs produce separate files
+- **brainstorm**: Phase 1b now generates `RUN_TS` and specifies explicit `outputPath` for each research agent instead of relying on agent Output Contract defaults
+- **task-planner**: SKILL.md and pipeline-phases.md agent prompts updated to use `outputPath` with the new `YYYY-MM-DD-[topicSlug]-[RUN_TS]-<short-name>.md` pattern
+- **research agents**: Output Contract updated to document that caller-specified `outputPath` takes precedence over agent-derived slug/timestamp; short names in frontmatter updated to `codebase`, `learnings`, `best-practices`, `framework-docs`
+
 ## [1.57.0] - 2026-04-15
 
 ### Added

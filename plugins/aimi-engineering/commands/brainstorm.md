@@ -72,6 +72,16 @@ From the feature description, derive a topic slug (needed for research output pa
 4. Truncate to 50 characters
 5. Remove trailing hyphens
 
+#### Generate Run Discriminator
+
+Generate a single timestamp for this brainstorm run to prevent same-day re-runs from overwriting prior research files:
+
+```bash
+RUN_TS=$(date +%H%M%S)
+```
+
+Store `RUN_TS` and use it in **all** research agent prompts for this run.
+
 #### Create Research Directory
 
 ```bash
@@ -88,14 +98,16 @@ Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
            Look for: similar features, established patterns, CLAUDE.md guidance,
            relevant file paths, technology choices.
            researchDepth=standard
-           topicSlug=<topic-slug>"
+           topicSlug=<topic-slug>
+           outputPath: .aimi/research/YYYY-MM-DD-<topic-slug>-[RUN_TS]-codebase.md"
 
 Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
   prompt: "Research current best practices for: [feature description].
            Look for: industry standards, community conventions, recommended
            patterns, common pitfalls, and authoritative guidance.
            researchDepth=standard
-           topicSlug=<topic-slug>"
+           topicSlug=<topic-slug>
+           outputPath: .aimi/research/YYYY-MM-DD-<topic-slug>-[RUN_TS]-best-practices.md"
 ```
 
 Only spawn the agents that were not skipped in Step 1a.
