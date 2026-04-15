@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.54.0] - 2026-04-14
+
+### Fixed
+
+- **planner**: Add missing auto-scan for git repos step in plan.md Phase 1, syncing with SKILL.md
+- **planner**: Promote `project` field assignment to explicit numbered step 6 in Phase 3, preventing model from skipping multi-repo project assignment
+
 ## [1.53.0] - 2026-04-14
 
 ### Changed

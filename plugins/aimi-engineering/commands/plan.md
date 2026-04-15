@@ -88,6 +88,22 @@ From the feature description, derive a topic slug for research filename derivati
 
 Store as `topicSlug` for use in researcher agent prompts.
 
+### Auto-Scan for Git Repos
+
+Before launching research agents, scan immediate child directories for `.git/` directories to discover sub-projects:
+
+```bash
+for dir in */; do
+  case "$dir" in .worktrees/|node_modules/|.aimi/|vendor/) continue;; esac
+  [ -d "$dir/.git" ] && echo "$dir"
+done
+```
+
+List discovered repos with their relative paths from the `.aimi/` parent.
+
+- If **zero** or **one** repo is found, no multi-repo handling is needed
+- If **multiple** repos are found, pass the list to research agents and use it in Phase 3 for `project` assignment
+
 ### Run Research Agents
 
 Run these agents **in parallel** using the Task tool:
@@ -170,18 +186,23 @@ Using consolidated research and spec-flow output:
 3. Assign IDs in `US-NNN` zero-padded format (`US-001`, `US-002`, ...) — never `US-1`, `story-1`, `S1`, or any other format
 4. Size check: each story must be completable in ONE agent iteration (one context window)
 5. Order by dependency: assign `dependsOn` arrays (explicit story IDs) and `priority` as tiebreaker
-6. **Compute `wave` numbers** from `dependsOn` graph: roots = wave 1; non-roots = max(wave of deps) + 1; contiguous, no gaps
-7. **Populate `implementation` object** when research provides file paths and patterns: `files` (concrete paths), `approach` (actionable strategy), `verify` (executable check). Omit when research is insufficient.
-8. **Assign `verification` strategy** per story type: `api` (endpoints), `visual` (UI), `test` (backend logic). Set `status: "pending"`.
+6. **Assign `project` field** when multiple repos were discovered in Phase 1:
+   - Set `project` to the repo's relative path (e.g., `backend`, `services/api`)
+   - Omit `project` when only one repo exists or the story targets the CWD repo
+   - Path format: no leading `./`, no `..` components, must match `^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$`
+   - Cross-repo dependencies in `dependsOn` are valid
+7. **Compute `wave` numbers** from `dependsOn` graph: roots = wave 1; non-roots = max(wave of deps) + 1; contiguous, no gaps
+8. **Populate `implementation` object** when research provides file paths and patterns: `files` (concrete paths), `approach` (actionable strategy), `verify` (executable check). Omit when research is insufficient.
+9. **Assign `verification` strategy** per story type: `api` (endpoints), `visual` (UI), `test` (backend logic). Set `status: "pending"`.
    **IMPORTANT: `verification` MUST be an object — never a bare string.** Examples:
    - visual: `{"strategy": "visual", "status": "pending", "url": "http://localhost:3000/page", "expect": "Dashboard visible"}`
    - api: `{"strategy": "api", "status": "pending", "url": "http://localhost:3000/api/endpoint", "expect": "200 with JSON"}`
    - test: `{"strategy": "test", "status": "pending", "expect": "All tests pass"}`
-9. **Detect and attach `gate` objects**: `verify` (OAuth/email/webhooks), `decision` (multiple viable approaches), `action` (external manual action). Most stories have no gate.
-10. Write descriptions in user story format: "As a [specific role], I want [feature] so that [benefit]" — role must name the actor, never just "user"
-11. Generate verifiable acceptance criteria (every story must have "Typecheck passes")
-12. Initialize every story with `status: "pending"` and appropriate `dependsOn` array
-13. Validate: no circular dependencies in `dependsOn`, no self-references, all referenced IDs exist, no vague criteria
+10. **Detect and attach `gate` objects**: `verify` (OAuth/email/webhooks), `decision` (multiple viable approaches), `action` (external manual action). Most stories have no gate.
+11. Write descriptions in user story format: "As a [specific role], I want [feature] so that [benefit]" — role must name the actor, never just "user"
+12. Generate verifiable acceptance criteria (every story must have "Typecheck passes")
+13. Initialize every story with `status: "pending"` and appropriate `dependsOn` array
+14. Validate: no circular dependencies in `dependsOn`, no self-references, all referenced IDs exist, no vague criteria
 
 ### `dependsOn` Inference Rules
 
@@ -189,13 +210,6 @@ Using consolidated research and spec-flow output:
 - **Same layer, shared concern** (FK referencing another story's table, component extending another) → add dependency
 - **Cross-layer**: backend depends on schema stories it reads/writes; UI depends on backend it calls; aggregation depends on what it consumes
 - **Skip layers when appropriate**: UI reading directly from a new table depends on the schema story, not a non-existent backend story
-
-### Multi-Repo Project Assignment
-
-When the workspace has multiple git repos under one parent folder:
-- Set `project` to relative path from `.aimi/` parent (e.g., `backend`, `services/api`)
-- Omit `project` when only one repo exists or all stories target the same repo
-- Cross-repo dependencies in `dependsOn` are valid
 
 ### Type Values
 
