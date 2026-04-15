@@ -2900,6 +2900,9 @@ main() {
   test_stale_state_warning
 
   # Version staleness tests — run with fresh state
+  # Unset AIMI_PLUGIN_DIR to test non-converter code paths (e.g., when set by OpenCode)
+  local _saved_plugin_dir="${AIMI_PLUGIN_DIR:-}"
+  unset AIMI_PLUGIN_DIR 2>/dev/null || true
   echo ""
   echo "--- Version Staleness Tests ---"
   test_check_version
@@ -2908,6 +2911,9 @@ main() {
   test_check_version_quiet_fix
   test_check_version_backward_compat
   test_cleanup_versions
+  if [ -n "$_saved_plugin_dir" ]; then
+    export AIMI_PLUGIN_DIR="$_saved_plugin_dir"
+  fi
 
   # CLAUDE_CONFIG_DIR tests
   echo ""
@@ -2933,6 +2939,9 @@ main() {
   test_auto_discovery_not_found
 
   # Global cache tests — run with isolated CLAUDE_CONFIG_DIR
+  # Unset AIMI_PLUGIN_DIR to test non-converter code paths
+  _saved_plugin_dir="${AIMI_PLUGIN_DIR:-}"
+  unset AIMI_PLUGIN_DIR 2>/dev/null || true
   echo ""
   echo "--- Global Cache Tests ---"
   test_write_global_cli_cache
@@ -2944,6 +2953,9 @@ main() {
   test_read_global_worktree_cache_tampered
   test_init_session_writes_global_cache
   test_check_version_fix_updates_global_cache
+  if [ -n "$_saved_plugin_dir" ]; then
+    export AIMI_PLUGIN_DIR="$_saved_plugin_dir"
+  fi
 
   # Project field validation tests — run with fresh state
   echo ""

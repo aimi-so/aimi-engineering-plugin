@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.56.0] - 2026-04-15
+
+### Fixed
+
+- **tests**: Unset `AIMI_PLUGIN_DIR` before version staleness and global cache tests to prevent compound-plugin converter from short-circuiting test assertions
+
 ## [1.55.0] - 2026-04-15
 
 ### Fixed
