@@ -61,7 +61,24 @@ Do not mention skip decisions to the user — just proceed seamlessly.
 
 **When only best-practices researcher is skipped:** Phase 2 questions are informed by codebase patterns plus the concrete details the user provided.
 
-### Step 1b: Run Research (Parallel)
+### Step 1b: Preparation and Research (Parallel)
+
+#### Derive Topic Slug
+
+From the feature description, derive a topic slug (needed for research output paths):
+1. Convert to lowercase
+2. Replace spaces and special characters with hyphens
+3. Remove consecutive hyphens
+4. Truncate to 50 characters
+5. Remove trailing hyphens
+
+#### Create Research Directory
+
+```bash
+mkdir -p .aimi/research
+```
+
+#### Run Research Agents
 
 Spawn the selected research agents **in parallel** using the Task tool:
 
@@ -69,12 +86,16 @@ Spawn the selected research agents **in parallel** using the Task tool:
 Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
   prompt: "Understand existing patterns related to: [feature description].
            Look for: similar features, established patterns, CLAUDE.md guidance,
-           relevant file paths, technology choices."
+           relevant file paths, technology choices.
+           researchDepth=standard
+           topicSlug=<topic-slug>"
 
 Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
   prompt: "Research current best practices for: [feature description].
            Look for: industry standards, community conventions, recommended
-           patterns, common pitfalls, and authoritative guidance."
+           patterns, common pitfalls, and authoritative guidance.
+           researchDepth=standard
+           topicSlug=<topic-slug>"
 ```
 
 Only spawn the agents that were not skipped in Step 1a.
@@ -88,16 +109,25 @@ Apply this sanitization identically to both agent prompts.
 
 ### Step 1c: Research Consolidation
 
-Merge the results from whichever agents completed successfully. Handle all four permutations:
+Merge the results from whichever agents completed successfully into a structured summary. Handle all four permutations:
 
 | Codebase Result | Best-Practices Result | Action |
 |-----------------|----------------------|--------|
-| **Success** | **Success** | Merge both; surface conflicts between internal patterns and external best practices as candidate questions for Phase 2 |
-| **Success** | **Failed/Skipped** | Use codebase findings only; Phase 2 questions informed by internal patterns |
-| **Failed/Skipped** | **Success** | Use best-practices findings only; Phase 2 questions informed by external guidance |
+| **Success** | **Success** | Merge both into structured summary; surface conflicts between internal patterns and external best practices as candidate questions for Phase 2 |
+| **Success** | **Failed/Skipped** | Use codebase findings only; populate Key Patterns and File References sections |
+| **Failed/Skipped** | **Success** | Use best-practices findings only; populate Key Patterns and External Insights sections |
 | **Failed/Skipped** | **Failed/Skipped** | Proceed with no research context; Phase 2 falls back to generic topic-based questions (existing behavior) |
 
-**Conflict surfacing:** When both agents succeed, compare their findings. If internal codebase patterns diverge from external best practices (e.g., the codebase uses pattern A but best practices recommend pattern B), capture each conflict as a candidate question for Phase 2. Present these as explicit choices: "The codebase currently uses [X], but industry best practices recommend [Y]. Which approach should we follow?"
+#### Structured Consolidation Schema
+
+Organize the merged findings into these sections:
+
+1. **Key Patterns**: Relevant codebase patterns, naming conventions, architectural decisions, and best-practice patterns discovered by either agent
+2. **Conflicts**: When both agents succeed, compare their findings. If internal codebase patterns diverge from external best practices (e.g., the codebase uses pattern A but best practices recommend pattern B), capture each conflict as a candidate question for Phase 2. Present these as explicit choices: "The codebase currently uses [X], but industry best practices recommend [Y]. Which approach should we follow?"
+3. **File References**: Specific file paths, modules, and code locations relevant to the feature (from codebase researcher)
+4. **External Insights**: Industry standards, community conventions, recommended patterns, common pitfalls (from best-practices researcher)
+
+This structured summary feeds into Phase 2 question generation and Phase 4 design document capture.
 
 ### Quality Gate: Research Adequacy
 
