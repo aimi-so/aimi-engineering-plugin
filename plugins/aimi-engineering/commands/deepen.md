@@ -36,6 +36,22 @@ STOP.
 
 **CRITICAL:** Never modify or split completed stories (`status == "completed"`). Only enrich pending stories.
 
+## Step 2b: Read Research Depth
+
+Read `researchDepth` from the tasks file metadata:
+
+```bash
+jq -r '.metadata.researchDepth // "standard"' <tasks-file-path>
+```
+
+Store as `$RESEARCH_DEPTH`. This inherits the depth setting from planning without re-specifying it.
+
+## Step 2c: Prepare Research Directory
+
+```bash
+mkdir -p .aimi/research
+```
+
 ## Step 3: Research Per Story (Parallel)
 
 For each pending story, spawn a research agent **in parallel**:
@@ -46,14 +62,23 @@ Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
            Title: [story.title]
            Description: [story.description]
            Acceptance Criteria: [story.acceptanceCriteria]
+           Research Depth: $RESEARCH_DEPTH
 
            Look for: relevant files, existing patterns, potential conflicts,
-           edge cases, and anything that would help an agent implement this."
+           edge cases, and anything that would help an agent implement this.
+
+           Write your full research output to:
+           .aimi/research/YYYY-MM-DD-[story.id]-codebase.md
+           (e.g., 2026-04-14-US-001-codebase.md)
+
+           Use today's date and the story ID to form the filename."
 ```
 
 Collect all results.
 
 ## Step 4: Enrich Stories
+
+For each pending story, **Read** the full research file at `.aimi/research/YYYY-MM-DD-[story.id]-codebase.md` using the Read tool. Use both the returned agent summary and the full file content for richer enrichment.
 
 For each pending story, using the research results:
 
