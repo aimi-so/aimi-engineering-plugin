@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.59.0] - 2026-04-15
+
+### Changed
+
+- **agents (aimi-lint, aimi-learnings-researcher):** Remove hardcoded model: haiku; both agents now inherit model from calling context
+
 ## [1.58.2] - 2026-04-15
 
 ### Added
