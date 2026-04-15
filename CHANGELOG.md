@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.58.1] - 2026-04-15
+
+### Added
+
+- **schema**: Add `researchPaths` (string[]) metadata field to task-format-v3.md — tracks research files generated during planning so archive-task can clean them up; omitted when `researchDepth` is `skip` or no files written
+- **planner**: Phase 4 Derive Metadata now includes `researchPaths` bullet instructing the orchestrator to collect paths from Phase 1 and Phase 1.5b research agents
+- **docs**: CLAUDE.md key fields summary updated with `researchPaths[](optional)` after `maxConcurrency`
+
 ## [1.58.0] - 2026-04-15
 
 ### Changed

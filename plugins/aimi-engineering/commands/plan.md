@@ -277,6 +277,7 @@ Write single file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 - **planPath**: Always `null`
 - **brainstormPath**: Path to brainstorm if one was used, otherwise omit
 - **researchDepth**: Value computed in Phase 1.5 (`skip`, `quick`, `standard`, `deep`), or omit if not computed
+- **researchPaths**: Collect all `.aimi/research/` file paths written by Phase 1 agents (codebase, learnings) and Phase 1.5b agents (best-practices, framework-docs). Omit entirely when `researchDepth` is `skip` or no research files were written.
 - **maxConcurrency**: Default `4`. Set to `1` for strictly sequential execution.
 
 ### Write File
