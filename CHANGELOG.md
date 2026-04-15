@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.53.0] - 2026-04-14
+
+### Changed
+
+- **brainstorm**: Structured consolidation schema in Phase 1.6 with adaptive return caps tied to researchDepth
+- **deepen**: Research agents write findings to `.aimi/research/` files instead of returning bulk text inline
+- **deepen**: Adaptive return caps tied to researchDepth — lower depths produce shorter agent output
+- **planner**: Default researchDepth inherited through planning pipeline
+- **review**: Protected artifacts updated for `.aimi/research/` output path
+
 ## [1.52.0] - 2026-04-14
 
 ### Added
