@@ -50,6 +50,7 @@ These paths must never be flagged for deletion or removal by any review agent:
 - `.aimi/solutions/*.md` — Solution documents
 - `.aimi/tasks/*.json` — Task files
 - `.aimi/brainstorms/*.md` — Brainstorm documents
+- `.aimi/research/*.md` — Research output files
 
 ## Step 2: Run Default Review Agents (Parallel)
 
