@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.59.1] - 2026-04-15
+
+### Fixed
+
+- **cli**: Context-aware CLI path resolution — Layer 0 (`AIMI_PLUGIN_DIR`) is now skipped when running inside Claude Code (`CLAUDECODE=1`), ensuring the Claude Code cache directory is always used instead of the stale OpenCode install path
+- **cli**: `check-version --fix` and `cleanup-versions` no longer bail early with "managed by converter" when inside Claude Code, enabling self-heal after plugin updates
+- **cli**: `read_global_cli_cache` and `read_global_worktree_cache` reject OpenCode-style cached paths when inside Claude Code, preventing split-brain version resolution
+
 ## [1.59.0] - 2026-04-15
 
 ### Changed

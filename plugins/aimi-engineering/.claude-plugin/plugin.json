@@ -1,6 +1,6 @@
 {
   "name": "aimi-engineering",
-  "version": "1.59.0",
+  "version": "1.59.1",
   "description": "Autonomous task execution with standalone aimi-native agents. Direct tasks.json generation, research-driven planning, multi-agent review, iterative execution.",
   "author": {
     "name": "Aimi — Autonomous Code Companion"
@@ -19,6 +19,10 @@
     "context7": {
       "type": "http",
       "url": "https://mcp.context7.com/mcp"
+    },
+    "penpot": {
+      "type": "http",
+      "url": "http://localhost:4401/mcp"
     }
   }
 }

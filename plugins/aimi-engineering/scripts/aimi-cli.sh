@@ -225,6 +225,11 @@ _validate_plugin_dir() {
   printf '%s\n' "${AIMI_PLUGIN_DIR%/}"
 }
 
+# Detect if running inside Claude Code (CLAUDECODE=1 is set by Claude Code in every session)
+_is_claude_code_host() {
+  [ "${CLAUDECODE:-}" = "1" ]
+}
+
 # Return the global cache file path for aimi-cli.sh
 _global_cache_path() {
   local config_dir
@@ -269,7 +274,7 @@ read_global_cli_cache() {
   plugin_dir=$(_validate_plugin_dir)
   case "$cached_path" in
     "${plugin_dir}"/scripts/aimi-cli.sh)
-      if [ -n "$plugin_dir" ]; then
+      if [ -n "$plugin_dir" ] && ! _is_claude_code_host; then
         printf '%s\n' "$cached_path"
       fi
       ;;
@@ -309,7 +314,7 @@ read_global_worktree_cache() {
   plugin_dir=$(_validate_plugin_dir)
   case "$cached_path" in
     "${plugin_dir}"/skills/git-worktree/scripts/worktree-manager.sh)
-      if [ -n "$plugin_dir" ]; then
+      if [ -n "$plugin_dir" ] && ! _is_claude_code_host; then
         printf '%s\n' "$cached_path"
       fi
       ;;
@@ -1249,10 +1254,10 @@ cmd_check_version() {
   local config_dir
   config_dir=$(_claude_config_dir)
 
-  # When AIMI_PLUGIN_DIR is set, the converter manages the lifecycle — skip glob
+  # When AIMI_PLUGIN_DIR is set and NOT inside Claude Code, the converter manages the lifecycle
   local plugin_dir
   plugin_dir=$(_validate_plugin_dir)
-  if [ -n "$plugin_dir" ]; then
+  if [ -n "$plugin_dir" ] && ! _is_claude_code_host; then
     printf '{"status":"ok","path":"%s/scripts/aimi-cli.sh","message":"managed by compound-plugin converter"}\n' "$plugin_dir"
     return 0
   fi
@@ -1314,10 +1319,10 @@ cmd_check_version() {
 # Scans <config_dir>/plugins/cache/*/aimi-engineering/*/ for version dirs
 # Outputs JSON {"removed":<count>,"kept":"<version>"} to stdout
 cmd_cleanup_versions() {
-  # When AIMI_PLUGIN_DIR is set, the converter manages the lifecycle — skip cleanup
+  # When AIMI_PLUGIN_DIR is set and NOT inside Claude Code, the converter manages the lifecycle
   local plugin_dir
   plugin_dir=$(_validate_plugin_dir)
-  if [ -n "$plugin_dir" ]; then
+  if [ -n "$plugin_dir" ] && ! _is_claude_code_host; then
     printf '{"removed":0,"skipped":true,"message":"converter manages lifecycle"}\n'
     return 0
   fi

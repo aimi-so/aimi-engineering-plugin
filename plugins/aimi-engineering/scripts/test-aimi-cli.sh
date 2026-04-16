@@ -1588,6 +1588,9 @@ teardown_global_cache_env() {
 setup_aimi_plugin_dir_env() {
   PLUGIN_DIR_TMPDIR=$(mktemp -d)
   export AIMI_PLUGIN_DIR="$PLUGIN_DIR_TMPDIR/aimi-engineering"
+  # Simulate non-Claude-Code host (OpenCode) by unsetting CLAUDECODE
+  _SAVED_CLAUDECODE="${CLAUDECODE:-}"
+  unset CLAUDECODE
   mkdir -p "$AIMI_PLUGIN_DIR/scripts"
   mkdir -p "$AIMI_PLUGIN_DIR/skills/git-worktree/scripts"
 
@@ -1604,6 +1607,11 @@ teardown_aimi_plugin_dir_env() {
   rm -rf "$PLUGIN_DIR_TMPDIR"
   unset AIMI_PLUGIN_DIR
   unset PLUGIN_DIR_TMPDIR
+  # Restore CLAUDECODE if it was set before
+  if [ -n "$_SAVED_CLAUDECODE" ]; then
+    export CLAUDECODE="$_SAVED_CLAUDECODE"
+  fi
+  unset _SAVED_CLAUDECODE
 }
 
 # Source the global cache functions from aimi-cli.sh for direct testing.
@@ -1611,6 +1619,7 @@ teardown_aimi_plugin_dir_env() {
 source_cache_functions() {
   eval "$(sed -n '/^_claude_config_dir()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_validate_plugin_dir()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_is_claude_code_host()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_global_cache_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_global_worktree_cache_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^write_global_cli_cache()/,/^}/p' "$CLI")"
@@ -2238,6 +2247,71 @@ test_read_global_cli_cache_rejects_arbitrary() {
   assert_eq "" "$result" \
     "read_global_cli_cache: rejects arbitrary path with AIMI_PLUGIN_DIR set"
 
+  teardown_global_cache_env
+  teardown_aimi_plugin_dir_env
+}
+
+test_claude_code_host_ignores_plugin_dir_check_version() {
+  echo ""
+  echo "=== Testing check-version ignores AIMI_PLUGIN_DIR inside Claude Code ==="
+
+  setup_aimi_plugin_dir_env
+  # Override: simulate Claude Code host
+  export CLAUDECODE=1
+
+  local output
+  output=$("$CLI" check-version 2>/dev/null)
+
+  # Should NOT return "managed by compound-plugin converter"
+  local has_converter
+  has_converter=$(echo "$output" | grep -c 'compound-plugin converter' || true)
+  assert_eq "0" "$has_converter" \
+    "check-version: skips converter shortcut inside Claude Code"
+
+  unset CLAUDECODE
+  teardown_aimi_plugin_dir_env
+}
+
+test_claude_code_host_ignores_plugin_dir_cleanup() {
+  echo ""
+  echo "=== Testing cleanup-versions ignores AIMI_PLUGIN_DIR inside Claude Code ==="
+
+  setup_aimi_plugin_dir_env
+  # Override: simulate Claude Code host
+  export CLAUDECODE=1
+
+  local output
+  output=$("$CLI" cleanup-versions 2>/dev/null)
+
+  # Should NOT return skipped:true
+  local has_skipped
+  has_skipped=$(echo "$output" | grep -c '"skipped":true' || true)
+  assert_eq "0" "$has_skipped" \
+    "cleanup-versions: skips converter shortcut inside Claude Code"
+
+  unset CLAUDECODE
+  teardown_aimi_plugin_dir_env
+}
+
+test_claude_code_host_rejects_plugin_dir_cached_path() {
+  echo ""
+  echo "=== Testing read_global_cli_cache rejects AIMI_PLUGIN_DIR path inside Claude Code ==="
+
+  setup_aimi_plugin_dir_env
+  setup_global_cache_env
+  # Override: simulate Claude Code host
+  export CLAUDECODE=1
+  source_cache_functions
+
+  write_global_cli_cache "$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh"
+
+  local result
+  result=$(read_global_cli_cache 2>/dev/null)
+
+  assert_eq "" "$result" \
+    "read_global_cli_cache: rejects AIMI_PLUGIN_DIR path inside Claude Code"
+
+  unset CLAUDECODE
   teardown_global_cache_env
   teardown_aimi_plugin_dir_env
 }
@@ -3147,6 +3221,12 @@ main() {
   test_check_version_plugin_dir
   test_cleanup_versions_plugin_dir
   test_read_global_cli_cache_rejects_arbitrary
+
+  echo ""
+  echo "--- Claude Code Host Detection Tests ---"
+  test_claude_code_host_ignores_plugin_dir_check_version
+  test_claude_code_host_ignores_plugin_dir_cleanup
+  test_claude_code_host_rejects_plugin_dir_cached_path
 
   # Auto-discovery tests
   echo ""
