@@ -374,11 +374,7 @@ This list is consumed when writing the brainstorm document in Phase 4.
 
 **Non-visual categories** (Purpose, Users, Constraints, Success, Edge Cases, Existing Patterns, Approach) remain text-only — Steps 1–4 above do NOT execute for them.
 
-When the brainstorm completes normally (Phase 5), close the browser session if it was opened:
-
-```bash
-agent-browser --session brainstorm-<topic-slug> close
-```
+When the brainstorm completes normally, the browser session is closed and the variant scratch file is pruned in Phase 5 Cleanup (see below).
 
 ### Present Questions
 
@@ -624,6 +620,42 @@ Next steps:
 Brainstorm saved. To resume later: `/aimi:brainstorm [topic]`
 To start planning: `/aimi:plan`
 ```
+
+### Cleanup
+
+Execute this sub-step **only** after Phase 5 completes successfully (brainstorm document written and user has acknowledged the handoff). Skip entirely on abnormal termination: agent crash, user abort before reaching Phase 5, or any Pre-Save Checklist failure that was not overridden.
+
+**Step 1 — Close agent-browser session**
+
+If a browser session was opened during Phase 2 visual variant rendering, close it now (before deleting the scratch file so no open tab references a deleted path):
+
+```bash
+agent-browser --session brainstorm-<topic-slug> close
+```
+
+If `agent-browser` was unavailable or no visual questions were rendered, skip this step silently.
+
+**Step 2 — Prune the variant scratch file**
+
+The scratch file (`.aimi/brainstorms/prototypes/<topic-slug>-variants.html`) is a multi-variant working file created during visual exploration. Once brainstorm completes cleanly, prune it so only the chosen per-question standalone artifacts (US-006 output) remain under `.aimi/brainstorms/prototypes/`.
+
+Guard: only prune if at least one chosen-variant standalone file was successfully written (i.e., `prototype_entries` in working memory is non-empty). This ensures the scratch file is never the last surviving artifact.
+
+```bash
+rm -f .aimi/brainstorms/prototypes/<topic-slug>-variants.html
+```
+
+If the scratch file does not exist (e.g., no visual questions were rendered), this is a no-op — do not warn.
+
+**Preservation guarantee:** All chosen-variant standalone files (e.g., `<topic-slug>-a-brutally-minimal.html`) are never touched by this step. They are preserved regardless of pruning outcome.
+
+**Skip conditions (do NOT prune):**
+
+- Abnormal termination (crash, user abort before Phase 5, unresolved checklist failure)
+- `prototype_entries` is empty (no standalone variants were written — scratch file may be the only artifact)
+- Scratch file was never created (no visual questions rendered)
+
+Note: The browser session close that previously appeared inline in Phase 2 ("When the brainstorm completes normally (Phase 5)") is now handled exclusively here in Phase 5 Cleanup. Do not close the session earlier.
 
 ## Error Handling
 
