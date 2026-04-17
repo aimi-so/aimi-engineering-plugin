@@ -67,6 +67,12 @@ You are executing a single story from the tasks file.
 
 </project_guidelines>
 
+<output_rules>
+
+Apply output compression rules from `AGENTS.md` (spawned-agent status updates: fragments over sentences, drop filler, preserve safety escapes).
+
+</output_rules>
+
 <project_context>
 
 [PROJECT_PATH]   ← optional, resolved absolute path to the target project
@@ -285,7 +291,7 @@ If you cannot complete the story:
 
 ## Compact Template
 
-> Condensed variant for subsequent stories in a wave session. Each Task agent gets fresh context (no memory carryover), so static sections are condensed to one-line summaries — NOT omitted. Story-specific and context-varying sections remain in full. Saves ~60% tokens compared to the full template.
+> Condensed variant for subsequent stories in a wave session. Each Task agent gets fresh context (no memory carryover), so static sections are condensed to one-line summaries — NOT omitted. Story-specific and context-varying sections remain in full. Reduces prompt size by collapsing static sections; actual savings vary with story content and have not been benchmarked.
 
 When spawning a Task agent for subsequent stories (after the first story in a session):
 
@@ -293,7 +299,7 @@ When spawning a Task agent for subsequent stories (after the first story in a se
 You are executing a single story from the tasks file.
 
 <project_guidelines>
-Follow project guidelines from CLAUDE.md/AGENTS.md.
+Follow project guidelines from CLAUDE.md/AGENTS.md. Apply output compression rules from AGENTS.md.
 </project_guidelines>
 
 <project_context>
