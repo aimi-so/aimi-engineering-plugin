@@ -278,6 +278,45 @@ command -v agent-browser
 
 Present the Aesthetic Direction or Differentiation question to the user as normal (numbered item with lettered options, "Other" escape hatch). The rendered HTML gives the user a live visual preview alongside the text question.
 
+**Step 6 — Variant Selection**
+
+After the browser session is open and variants are visible, call **AskUserQuestion** with one option per authored variant, labeled in the format `A — <short name>`, `B — <short name>`, etc. (one letter per variant), plus a final option: `None — show again / revise`.
+
+Example invocation (3 variants authored):
+
+```
+AskUserQuestion:
+  question: "Which variant best fits your vision?"
+  options:
+    - "A — Brutally minimal"
+    - "B — Retro-futuristic"
+    - "C — Luxury/refined"
+    - "None — show again / revise"
+```
+
+**Handling the `None — show again / revise` branch:**
+
+If the user selects `None — show again / revise`:
+1. Use **AskUserQuestion** to ask the user to describe what they want changed or refined.
+2. Author a replacement variant set and append it as a new `<section data-question="...">` block in the existing HTML file — do **not** discard or truncate prior sections.
+3. Reload the browser session (Step 4 reload path).
+4. Re-present the AskUserQuestion options for the new variant set.
+
+**Handling a free-form (non-option) reply:**
+
+If the user's response does not match any offered option (i.e., it is a free-form reply), treat it as additional context about their preferences and re-call **AskUserQuestion** with the same options. Never silently pick a variant based on a free-form reply.
+
+**Storing the chosen variant label:**
+
+Once the user selects a lettered option, normalize the chosen label to a slug for use by downstream steps (US-006 persistence):
+
+1. Extract the letter prefix and short name (e.g., `A — Brutally minimal`).
+2. Lowercase the short name, replace spaces and special characters with hyphens, collapse consecutive hyphens, remove leading/trailing hyphens.
+3. Prepend the letter prefix, e.g., `a-brutally-minimal`.
+4. Validate the result matches `^[a-z0-9][a-z0-9-]*$`. If it does not, fall back to the bare letter (e.g., `a`).
+
+Store the normalized slug in the agent's working memory as `chosen_variant_slug` for use when US-006 persistence writes the brainstorm document.
+
 **Non-visual categories** (Purpose, Users, Constraints, Success, Edge Cases, Existing Patterns, Approach) remain text-only — Steps 1–4 above do NOT execute for them.
 
 When the brainstorm completes normally (Phase 5), close the browser session if it was opened:
