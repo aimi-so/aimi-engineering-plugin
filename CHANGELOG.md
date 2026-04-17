@@ -7,11 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.60.4] - 2026-04-17
+## [1.61.0] - 2026-04-17
 
 ### Added
 
-- **docs (brainstorm):** Token extraction algorithm documented in `commands/references/visual-variants.md`. Defines a 6-source precedence list (tailwind.config, theme.{ts,js,tsx,jsx}, CSS custom properties, _variables.scss, MUI createTheme, Chakra extendTheme), per-family independent resolution, Tailwind CDN defaults fallback with in-document warning, and best-effort error handling (parse errors silently skip the source, never abort brainstorm).
+- **reference (visual-variants.md):** New `commands/references/visual-variants.md` — Alpine.js switcher skeleton with topic-slug sanitization and HTML-escape rules, Tailwind CDN offline behavior, 2–4 variants-per-question constraint, and append semantics for multi-question sessions.
+- **reference (visual-variants.md — Token Extraction):** 6-source precedence list for design-token resolution: `tailwind.config.{js,ts}` → `theme.{ts,js,tsx,jsx}` → CSS custom properties → `_variables.scss` → MUI `createTheme` → Chakra `extendTheme`. Per-family independent resolution, Tailwind CDN defaults fallback with in-document warning, parse errors silently skip the source and never abort brainstorm.
+- **reference (visual-variants.md — Browser Session Lifecycle):** Lazy open, reuse-with-reload, close-on-completion; missing-skill fallback degrades to text-only; mid-session crash triggers one retry then text-only degrade.
+- **command (aimi:brainstorm — Phase 2):** Visual Variant Rendering phase: generates Alpine.js prototype HTML per visual question, opens agent-browser session, reloads for each subsequent variant question. Variant Selection sub-step uses `AskUserQuestion` multi-select. Variant Persistence records `selectedVariants` map in brainstorm frontmatter. Non-visual categories remain text-only throughout.
+- **command (aimi:brainstorm — Phase 5):** Cleanup step prunes the scratch prototype file after clean session completion; standalone variant files are preserved.
+- **command (aimi:plan — Phase 0):** Prototype Context sub-step — parses brainstorm `prototype:` frontmatter key and `## Prototype` section; 50 KB size guard; missing-file warning (non-fatal); injects `<prototype_html>` block into both the researcher and decomposition prompts so implementation agents inherit the visual intent.
+- **install.sh:** Audit confirms `references/` glob picks up `visual-variants.md` automatically; dry-run branch now enumerates reference files individually for auditability.
 
 ## [1.60.3] - 2026-04-16
 
