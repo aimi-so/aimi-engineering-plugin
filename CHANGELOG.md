@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.60.1] - 2026-04-16
+
+### Changed
+
+- **command (aimi:open-pr):** Document that the command does not read `CLAUDE.md`/`AGENTS.md` and point users to `.github/pull_request_template.md` for project-specific PR structure (honored automatically by `gh pr create`). No behavior change.
+
+## [1.60.0] - 2026-04-16
+
+### Changed
+
+- **command (aimi:open-pr):** PR title and body are now derived from git commits and the diff against the base branch instead of `tasks.json`. Title comes from the first commit subject on the branch (fallback: current branch name). Body replaces the former `Problem`/`Solution`/`Stories Completed`/`Testing` sections with `Summary` (aggregated commit bodies), `Changes` (commit subjects as bullets), and `Files Changed` (git diff --stat). `tasks.json` is only read inside the conditional `Backend Implementation Spec` block (requires `metadata.frontendOnly` AND `metadata.backendSpec`); when no tasks file is present or metadata lookup fails, that block is silently skipped and PR creation still succeeds.
+
 ## [1.59.1] - 2026-04-15
 
 ### Fixed
@@ -1037,11 +1049,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - jq query modifications
   - Path/filename errors
 
-## [2.0.0] - 2026-02-17
+## [1.1.0] - 2026-02-17
 
 ### Changed
 
-- **BREAKING:** Restored v2.0 schema with task-specific fields
+- Restored v2.0 tasks.json schema with task-specific fields
   - Re-added `taskType`, `steps`, `relevantFiles`, `qualityChecks` to story schema
   - `schemaVersion` changed from "3.0" to "2.0"
   - Improved agent execution with domain-specific guidance
