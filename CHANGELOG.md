@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.60.2] - 2026-04-16
+
+### Removed
+
+- **plugin manifest:** Remove local-only `penpot` MCP server entry from `mcpServers` (pointed at `http://localhost:4401/mcp`, not suitable for distribution).
+
 ## [1.60.1] - 2026-04-16
 
 ### Changed
