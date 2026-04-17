@@ -49,6 +49,8 @@ Every user-supplied string (option label, question text, description, any free-f
 
 No raw user content may appear unescaped inside any HTML attribute, text node, or Alpine.js expression.
 
+**Alpine.js `x-data` / string-literal contexts:** if a future extension embeds user-supplied strings inside an `x-data` JavaScript expression or any other JavaScript string literal, HTML-escaping alone is insufficient — JavaScript-escape (`\\` → `\\\\`, `'` → `\\'`, `"` → `\\"`, newline → `\\n`) **before** HTML-escaping. The current switcher keeps all user-supplied strings in HTML text nodes and attributes only; variants that add inline JS must apply both escape passes.
+
 ## Switcher Skeleton
 
 Each variant file uses this skeleton. The switcher bar is always rendered at the top of `<body>` and must not depend on Tailwind for its functional structure — only class names are Tailwind; the switcher works unstyled if the CDN is unreachable.
@@ -133,9 +135,65 @@ Each variant file uses this skeleton. The switcher bar is always rendered at the
 - The switcher `x-data` state is shared across all sections; all sections respond to the same `active` variable so changing the variant letter switches all questions simultaneously.
 - The `data-question` attribute value MUST be the HTML-escaped question string.
 
+## Structural Guidance
+
+Variants exist to show the user *directions* for the feature they described, rendered as they would feel inside the target project. Tokens carry color, font, and spacing; **structural guidance** covers the HTML shape the variant should use so the mockup looks like it belongs in the target app — not a generic Tailwind demo page.
+
+### Step 1 — Infer the dominant UI pattern
+
+From the feature description and the specific question being answered, classify the dominant UI pattern into one of the canonical shapes below. When unsure, pick the shape that most closely matches the nouns in the feature description ("a login page" → form, "a settings dashboard" → layout-with-sidebar).
+
+| Canonical shape     | Use when the feature involves…                                  | Dominant elements                              |
+|---------------------|-----------------------------------------------------------------|------------------------------------------------|
+| `form`              | user input, auth, filing, submit-style interactions             | `<form>`, labels, inputs, primary submit button |
+| `card`              | listing items, previewing records, dashboard tiles              | `<article>` per item, heading, body, actions   |
+| `nav`               | top/side navigation, menus, routing between views               | `<nav>`, logo area, links, active state        |
+| `hero`              | landing, marketing, empty-state, onboarding first screen        | large heading, supporting copy, primary CTA    |
+| `modal`             | focused task, confirmation, inline editing overlays             | centered panel, backdrop, close affordance     |
+| `table`             | tabular/row data, admin views, reports                          | `<table>`, column headers, rows, row actions   |
+| `layout-with-sidebar` | settings/dashboard shells with persistent nav + main content | sidebar, main content area, optional header    |
+
+A single variant MAY combine shapes (e.g., a `layout-with-sidebar` containing a `table`). Do not invent shapes outside this list — extend the file if a new canonical shape is repeatedly needed.
+
+### Step 2 — Express each variant using the canonical shape
+
+Each `<div data-variant="X">` block uses the HTML shape selected in Step 1. Keep the structure consistent across variants so the user compares **direction**, not **layout**:
+
+- Same canonical shape across all variants in the same question.
+- Same primary-action label text across variants (e.g., all variants' submit button reads "Sign in", not "Sign in" / "Log in" / "Continue").
+- Same content density (rough count of items, fields, links) across variants.
+
+What varies between A/B/C/D is the *direction*: typography weight and rhythm, color-weighted vs. monochrome, density (airy vs. compact), radius (sharp vs. soft), shadow depth, accent placement — everything the tokens surface.
+
+### Step 3 — Emit tokens as CSS custom properties on `:root`
+
+Resolved tokens (Token Extraction, below) are emitted once at the top of the authored HTML as CSS custom properties on `:root`, and variants reference them via Tailwind arbitrary-value syntax (e.g., `bg-[var(--color-primary)]`, `rounded-[var(--radius-md)]`). Dark-mode tokens go on `.dark :root` (when strategy is `class`) or inside a `@media (prefers-color-scheme: dark)` block (when strategy is `media`).
+
+```html
+<style>
+  :root {
+    --color-primary: #0066ff;
+    --color-background: #ffffff;
+    --font-sans: 'Inter', system-ui, sans-serif;
+    --radius-md: 0.5rem;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+  }
+  .dark :root {
+    --color-background: #0b0b0b;
+    --color-primary: #4d8bff;
+  }
+</style>
+```
+
+This makes tokens both visible to the user (one block to scan) and trivially translatable at implementation time — the target project's native CSS stack swaps the literal values back in.
+
+### Step 4 — Component-shell scan (optional)
+
+If `references/visual-variants.md` is being read from a brainstorm that already performed a component-shell scan (see `brainstorm.md` Phase 2 "Component Shell Scan"), use the extracted structural patterns (wrapper tags, spacing idioms, primary-action class recipes) as additional structural constraints alongside the canonical shape. Component-shell findings *narrow* structural choices; they do not replace the canonical shape selection.
+
 ## Token Extraction
 
-The brainstorm agent attempts to extract design tokens (colors, fonts, radii, spacing) from the target project before generating variant HTML. Extraction is **best-effort**: parse errors on any source are silently swallowed and that source is skipped — extraction failures never abort the brainstorm.
+The brainstorm agent attempts to extract design tokens (colors, fonts, radii, spacing, shadows, transitions, screens, dark-mode) from the target project before generating variant HTML. Extraction is **best-effort**: parse errors on any source are silently swallowed and that source is skipped — extraction failures never abort the brainstorm.
 
 ### Probe Order (fixed precedence)
 
@@ -157,18 +215,22 @@ For each token family, the agent probes sources in this order and stops at the *
 
 Token families resolve independently:
 
-| Family   | Extracted from keys / patterns                                      |
-|----------|---------------------------------------------------------------------|
-| colors   | `colors`, `palette`, `--color-*`, `$color-*`, `--primary`, etc.    |
-| fonts    | `fontFamily`, `typography.fontFamily`, `fonts`, `--font-*`          |
-| radii    | `borderRadius`, `shape.borderRadius`, `radii`, `--radius-*`         |
-| spacing  | `spacing`, `space`, `--spacing-*`, `--space-*`                      |
+| Family      | Extracted from keys / patterns                                                       |
+|-------------|--------------------------------------------------------------------------------------|
+| colors      | `colors`, `palette`, `--color-*`, `$color-*`, `--primary`, `--background`, etc.      |
+| fonts       | `fontFamily`, `typography.fontFamily`, `fonts`, `--font-*`                           |
+| radii       | `borderRadius`, `shape.borderRadius`, `radii`, `--radius-*`                          |
+| spacing     | `spacing`, `space`, `--spacing-*`, `--space-*`                                       |
+| shadows     | `boxShadow`, `shadows`, `--shadow-*`, `$shadow-*`                                    |
+| transitions | `transitionDuration`, `transitionTimingFunction`, `transitions`, `--transition-*`, `--ease-*`, `--duration-*` |
+| screens     | `screens`, `breakpoints`, `--breakpoint-*`, `@media` width declarations              |
+| dark-mode   | `darkMode` config flag, `@media (prefers-color-scheme: dark)` blocks, `.dark` class CSS variables (paired with color tokens via `--color-*` under `.dark` selector) |
 
 Once a family is resolved from a source, that source wins for that family. The agent does not merge partial results across sources for the same family.
 
 ### Fallback Behavior
 
-If no source yields tokens for a given family after exhausting all six sources, the agent uses **generic Tailwind Play CDN defaults** for that family (the built-in Tailwind color palette, `font-sans`/`font-mono`, standard radius scale, standard spacing scale).
+If no source yields tokens for a given family after exhausting all six sources, the agent uses **generic Tailwind Play CDN defaults** for that family (the built-in Tailwind color palette, `font-sans`/`font-mono`, standard radius scale, standard spacing scale, standard shadow scale, standard transition durations/easings, standard breakpoints; no dark-mode theming).
 
 When fallback is used, the brainstorm document MUST include a warning line immediately after the variant header, formatted as:
 
@@ -176,7 +238,37 @@ When fallback is used, the brainstorm document MUST include a warning line immed
 ⚠ Token extraction: [family] tokens not found — using Tailwind CDN defaults.
 ```
 
-One warning line per family that fell back. If all four families fall back, emit four warning lines.
+One warning line per family that fell back.
+
+### Token Sidecar JSON
+
+After extraction, write a machine-readable sidecar alongside the HTML variants file:
+
+```
+.aimi/brainstorms/prototypes/<topic-slug>-tokens.json
+```
+
+Shape:
+
+```json
+{
+  "colors": { "primary": "#0066ff", "background": "#fff", "...": "..." },
+  "fonts": { "sans": "Inter, system-ui, sans-serif", "mono": "..." },
+  "radii": { "sm": "0.25rem", "md": "0.5rem", "...": "..." },
+  "spacing": { "1": "0.25rem", "...": "..." },
+  "shadows": { "sm": "0 1px 2px rgba(0,0,0,0.05)", "...": "..." },
+  "transitions": { "default": "150ms ease-in-out", "...": "..." },
+  "screens": { "sm": "640px", "md": "768px", "...": "..." },
+  "darkMode": { "strategy": "class|media|none", "colors": { "background": "#0b0b0b", "...": "..." } },
+  "sources": { "colors": "tailwind.config.ts", "fonts": "theme.ts", "...": "..." },
+  "fallbacks": ["shadows", "transitions"]
+}
+```
+
+- Include only families that were actually resolved or fell back; omit a family entirely if it was neither resolved nor required by the variant.
+- `sources[family]` names the file that won for that family (relative path from project root). Omit the key for families that fell back.
+- `fallbacks[]` lists every family that fell back to Tailwind defaults.
+- `/aimi:plan` reads this sidecar to thread token context into implementation stories. `/aimi:review` reads it to verify generated mockups match the target project's tokens.
 
 ### Error Handling
 

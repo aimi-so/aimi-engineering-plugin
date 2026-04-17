@@ -43,6 +43,17 @@ git diff $DEFAULT_BRANCH...HEAD --name-only
 
 Read the changed files to understand the PR content. Collect the diff for agent context.
 
+### Prototype Design Context (optional)
+
+If the PR's branch has a matching brainstorm document under `.aimi/brainstorms/` (semantic match on feature name, within 30 days) **or** the current branch name appears in a tasks file with a `metadata.brainstormPath`, parse the brainstorm for prototype references and load them as design context for reviewers:
+
+1. Parse frontmatter for a `prototype:` key (path string or YAML list).
+2. Scan the brainstorm body for a `## Prototype` heading and extract `.html` paths.
+3. Read the sibling `.aimi/brainstorms/prototypes/<topic-slug>-tokens.json` if present.
+4. Pass the prototype HTML content and tokens JSON to the architecture, simplicity, and language-specific reviewers as a `<design_reference>` block. Reviewers compare the implementation's visual/structural fidelity against the chosen variant and the target-project tokens.
+
+If no matching brainstorm is found, skip this step silently — it is additive context, never a precondition.
+
 ### Protected Artifacts
 
 These paths must never be flagged for deletion or removal by any review agent:

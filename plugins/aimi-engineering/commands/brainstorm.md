@@ -224,20 +224,33 @@ N. What should make this interface memorable?
 
 > Full authoring contract — HTML skeleton, slug sanitization, HTML-escaping rules, token extraction, switcher wiring, and browser session lifecycle — lives in `commands/references/visual-variants.md`. This sub-step is the integration point; do not re-implement any detail here.
 
-When the agent reaches an **Aesthetic Direction** or **Differentiation** question (and only those two categories), execute the following steps **before** presenting the question to the user:
+When the agent reaches an **Aesthetic Direction** or **Differentiation** question (and only those two categories), execute the following steps **before** presenting the question to the user. All slug sanitization, HTML-escaping, and token extraction rules are defined in `references/visual-variants.md`; this sub-step is the call sequence only.
+
+**Step 0 — Component-shell scan (best-effort)**
+
+Sample 2–3 representative component files from the target project to extract the structural idioms variants should mimic. Scan is optional; skip silently on any failure.
+
+1. Look under `src/components/`, `app/components/`, `components/`, or `src/app/` (first directory that exists) for `.tsx`, `.jsx`, `.vue`, or `.svelte` files.
+2. Select up to 3 files: prefer one matching a form-like name (`Form.*`, `Input.*`, `Login.*`), one matching a layout-like name (`Layout.*`, `Sidebar.*`, `Page.*`), and one matching a card-like name (`Card.*`, `Item.*`, `List.*`). Fall back to any 1–3 components if the name hints fail.
+3. Read each file as plain text (do not execute or import). Extract:
+   - The outermost wrapper element (tag + top-level classes/structure idioms).
+   - Class recipes that recur across components (e.g., `rounded-xl shadow-sm border` combinations, spacing scales like `p-6 gap-4`).
+   - Primary-action class recipes (styles applied to `<button type="submit">` or elements named like `PrimaryButton`).
+4. Store findings as `component_shell_notes` in working memory. These are passed as structural constraints into Step 3 below (see `references/visual-variants.md` → Structural Guidance → Step 4).
+
+Any read error, missing directory, or inability to parse cleanly → skip silently; no warning. Component-shell guidance is additive, never a precondition.
 
 **Step 1 — Validate topic slug**
 
-Use the slug derived in Phase 1 Step 1b. Apply the full sanitization algorithm from `references/visual-variants.md` (Topic-Slug Sanitization section). Then validate:
-
-- Must match `^[a-z0-9][a-z0-9-]*$`
-- Must not contain `..`, start with `/`, or contain `/` at any position
+Use the slug derived in Phase 1 Step 1b and apply the Topic-Slug Sanitization algorithm from `references/visual-variants.md`. **Order matters:** run the sanitization algorithm first (lowercase → replace whitespace → strip non-alphanumeric → collapse dashes → trim), then validate the result against `^[a-z0-9][a-z0-9-]*$` and the traversal checks (`..`, leading `/`, any `/`).
 
 If the slug fails validation: log a warning ("Visual path skipped — invalid topic slug: `<raw>`"), skip Steps 2–5 for this question, and fall back to text-only (present the question normally without any HTML output).
 
 **Step 2 — Token extraction (best-effort)**
 
-Probe project sources in the fixed precedence order defined in `references/visual-variants.md` (Token Extraction section). Extract colors, fonts, radii, and spacing. Any probe failure is silently skipped. Use Tailwind CDN defaults for any family that yields no tokens, and emit the required warning line per family that fell back.
+Probe project sources in the fixed precedence order defined in `references/visual-variants.md` (Token Extraction section). Extract colors, fonts, radii, spacing, shadows, transitions, screens, and dark-mode tokens. Any probe failure is silently skipped. Use Tailwind CDN defaults for any family that yields no tokens, and emit the required warning line per family that fell back.
+
+Write the token sidecar JSON to `.aimi/brainstorms/prototypes/<topic-slug>-tokens.json` (shape and rules in `references/visual-variants.md` → Token Sidecar JSON).
 
 **Step 3 — Author variant HTML**
 
@@ -247,32 +260,35 @@ Create the prototype directory:
 mkdir -p .aimi/brainstorms/prototypes
 ```
 
-For the **first** visual question, write the full file using the Switcher Skeleton from `references/visual-variants.md`. For **subsequent** visual questions, **append** a new `<section data-question="...">` block to the existing file — do not truncate.
+For the **first** visual question, write the full file using the Switcher Skeleton from `references/visual-variants.md`, emitting resolved tokens as CSS custom properties on `:root` per the Structural Guidance section. For **subsequent** visual questions, **append** a new `<section data-question="...">` block to the existing file — do not truncate.
+
+Follow the Structural Guidance section of `references/visual-variants.md`: infer the dominant UI pattern, pick a canonical shape (form/card/nav/hero/modal/table/layout-with-sidebar), and author every variant in that shape. Apply `component_shell_notes` from Step 0 as additional structural constraints.
 
 Author **2–4 variants** per question based on the design axes available (default 2 for binary contrast; add 3–4 only when additional directions genuinely add value).
 
-All user-supplied text (question text, option labels, description, any free-form input) MUST be HTML-escaped before interpolation. Apply the escaping table from `references/visual-variants.md` (HTML-Escaping section) in order: `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`, `"` → `&quot;`, `'` → `&#39;`.
+HTML-escape every user-supplied string before interpolation per `references/visual-variants.md` (HTML-Escaping section). Do not duplicate the escaping table here.
 
 Output path: `.aimi/brainstorms/prototypes/<topic-slug>-variants.html`
 
 **Step 4 — Open or reload browser session**
 
-Check whether `agent-browser` is available:
+Check whether `agent-browser` is available and whether a display is reachable:
 
 ```bash
 command -v agent-browser
 ```
 
-- **Unavailable:** Skip all browser calls. Log exactly one warning line to the brainstorm document: `agent-browser unavailable — variants at .aimi/brainstorms/prototypes/<topic-slug>-variants.html`. Continue text-only for all visual questions.
-- **First visual question:** Open a headed session:
+- **`agent-browser` not installed, or `DISPLAY` unset and not running under a known GUI host (macOS/Windows), or `CI=true`:** Skip all browser calls. Log exactly one warning line to the brainstorm document: `agent-browser unavailable — variants at .aimi/brainstorms/prototypes/<topic-slug>-variants.html`. Continue text-only for all visual questions.
+- **First visual question (session open, idempotent):** If a session named `brainstorm-<topic-slug>` already exists, reload it; otherwise open a new headed session:
   ```bash
   agent-browser --headed --session brainstorm-<topic-slug> open file://$(pwd)/.aimi/brainstorms/prototypes/<topic-slug>-variants.html
   ```
+  Re-runs of the brainstorm for the same topic reuse the existing session instead of erroring on a duplicate session name.
 - **Subsequent visual questions:** Reuse the same session name and reload:
   ```bash
   agent-browser --session brainstorm-<topic-slug> reload
   ```
-- **Mid-session crash (reload fails):** Retry once with suffix `-2`; if that also fails, degrade to text-only for all remaining visual questions and log: `agent-browser session lost — variants at .aimi/brainstorms/prototypes/<topic-slug>-variants.html`.
+- **Session call fails (reload returns non-zero):** Degrade to text-only for all remaining visual questions and log: `agent-browser session lost — variants at .aimi/brainstorms/prototypes/<topic-slug>-variants.html`. Do not retry with alternate session names — the HTML file is always on disk and is the authoritative artifact.
 
 **Step 5 — Present the question**
 
@@ -280,42 +296,36 @@ Present the Aesthetic Direction or Differentiation question to the user as norma
 
 **Step 6 — Variant Selection**
 
-After the browser session is open and variants are visible, call **AskUserQuestion** with one option per authored variant, labeled in the format `A — <short name>`, `B — <short name>`, etc. (one letter per variant), plus a final option: `None — show again / revise`.
+After the browser session is open and variants are visible, ask the user which variant best fits their vision. Use **AskUserQuestion** with one option per authored variant, labeled in the format `A — <short name>`, `B — <short name>`, etc. (one letter per variant), plus a final option `None — show again / revise`. The question text is: `Which variant best fits your vision?`
 
-Example invocation (3 variants authored):
+For 3 authored variants named "Brutally minimal", "Retro-futuristic", "Luxury/refined", the offered options are: `A — Brutally minimal`, `B — Retro-futuristic`, `C — Luxury/refined`, `None — show again / revise`.
 
-```
-AskUserQuestion:
-  question: "Which variant best fits your vision?"
-  options:
-    - "A — Brutally minimal"
-    - "B — Retro-futuristic"
-    - "C — Luxury/refined"
-    - "None — show again / revise"
-```
+**Agent-mode fallback (non-interactive):**
+
+If **AskUserQuestion** is unavailable (running under a host that does not support it) or the session is explicitly non-interactive (`AIMI_AGENT_MODE=true` or equivalent), auto-select Variant A deterministically. Log one line to the brainstorm document: `agent-mode: AskUserQuestion unavailable — auto-selected variant A`. Skip the `None — show again / revise` branch entirely in this mode.
 
 **Handling the `None — show again / revise` branch:**
 
 If the user selects `None — show again / revise`:
-1. Use **AskUserQuestion** to ask the user to describe what they want changed or refined.
+1. Use **AskUserQuestion** a second time to ask the user to describe what they want changed or refined. Question text: `What would you like changed or refined about the variants?`
 2. Author a replacement variant set and append it as a new `<section data-question="...">` block in the existing HTML file — do **not** discard or truncate prior sections.
 3. Reload the browser session (Step 4 reload path).
-4. Re-present the AskUserQuestion options for the new variant set.
+4. Re-offer the lettered variant options for the new variant set via **AskUserQuestion**.
 
 **Handling a free-form (non-option) reply:**
 
-If the user's response does not match any offered option (i.e., it is a free-form reply), treat it as additional context about their preferences and re-call **AskUserQuestion** with the same options. Never silently pick a variant based on a free-form reply.
+If the user's response does not match any offered option (i.e., it is a free-form reply), treat it as additional context about their preferences and re-offer the same lettered options via **AskUserQuestion**. Never silently pick a variant based on a free-form reply.
 
 **Storing the chosen variant label:**
 
-Once the user selects a lettered option, normalize the chosen label to a slug for use by downstream steps (US-006 persistence):
+Once the user selects a lettered option (or the agent-mode fallback picks Variant A), normalize the chosen label to a slug for persistence and for the Phase 5 Cleanup guard.
 
 1. Extract the letter prefix and short name (e.g., `A — Brutally minimal`).
-2. Lowercase the short name, replace spaces and special characters with hyphens, collapse consecutive hyphens, remove leading/trailing hyphens.
+2. Apply the same sanitization algorithm used for topic slugs in `references/visual-variants.md` (Topic-Slug Sanitization): lowercase → replace whitespace with `-` → strip non-`[a-z0-9-]` → collapse consecutive `-` → trim.
 3. Prepend the letter prefix, e.g., `a-brutally-minimal`.
 4. Validate the result matches `^[a-z0-9][a-z0-9-]*$`. If it does not, fall back to the bare letter (e.g., `a`).
 
-Store the normalized slug in the agent's working memory as `chosen_variant_slug` for use when US-006 persistence writes the brainstorm document.
+Store the normalized slug in the agent's working memory as `chosen_variant_slug`. Phase 5 Cleanup's scratch-file removal uses the **topic-slug** (not the variant slug) when composing the `rm -f` path — the scratch filename is `<topic-slug>-variants.html` and was validated at Step 1.
 
 **Step 7 — Variant Persistence**
 

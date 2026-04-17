@@ -62,17 +62,18 @@ After reading the brainstorm (if one was found), parse it for referenced prototy
 
 1. **Parse frontmatter** — look for a `prototype:` key; its value is a path string or a YAML list of path strings.
 2. **Parse `## Prototype` section** — scan the brainstorm body for a `## Prototype` heading; extract any file paths that appear in that section (lines starting with `-` or table cells containing `.html`).
-3. **Deduplicate** the collected paths and assign sequential labels starting at `A`.
-4. **For each path** (resolve relative to the brainstorm file's directory):
+3. **Also parse sidecar tokens JSON** — if the brainstorm directory contains `.aimi/brainstorms/prototypes/<topic-slug>-tokens.json`, read it and stash as `prototypeTokens` (JSON object) for threading alongside HTML blocks.
+4. **Deduplicate** the collected paths and assign sequential labels starting at `A`.
+5. **For each path** (resolve relative to the brainstorm file's directory):
    - If the file is **missing from disk**: log warning line `prototype <path> missing — brainstorm references stale artifact` and skip.
-   - If the file **exists but exceeds 50 KB**: log warning line `prototype <path> exceeds 50KB — dropped from context` and skip.
-   - Otherwise: read the file verbatim and wrap it as:
+   - Otherwise: read the file verbatim and sanitize: replace any literal `</prototype_html` or `<prototype_html` sequences in the file contents with their HTML-entity forms (`&lt;/prototype_html` and `&lt;prototype_html`) so a malicious or unlucky variant cannot break out of the wrapper tag. Then wrap as:
      ```
      <prototype_html label="<letter>" path="<relative-path>">
-     …file contents…
+     …sanitized file contents…
      </prototype_html>
      ```
-5. Collect all successfully loaded blocks into a variable `prototypeBlocks` (empty string if none loaded). This variable is threaded into Phase 1 and Phase 3 prompts below.
+6. **Aggregate size cap:** after loading, measure the total byte size of all wrapped blocks. If the total exceeds **200 KB**, drop blocks in reverse label order (Z → A) until the aggregate fits under the cap. Log one warning line per dropped block: `prototype <path> dropped — aggregate prototype context exceeded 200KB`.
+7. Collect all successfully loaded blocks into a variable `prototypeBlocks` (empty string if none loaded). This variable, together with `prototypeTokens`, is threaded into Phase 1 and Phase 3 prompts below.
 
 ### Implementation Scope Detection
 
