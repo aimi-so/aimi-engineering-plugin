@@ -183,3 +183,62 @@ One warning line per family that fell back. If all four families fall back, emit
 - Any file read error, syntax ambiguity, or pattern mismatch on a source → skip that source for the affected family, continue to the next source. Do not emit an error or warning for skipped sources — only warn when all sources are exhausted and fallback is used.
 - Never abort the brainstorm due to token extraction failure.
 - Never attempt to execute or import source files — read them as plain text and apply grep-level pattern matching only.
+
+## Browser Session Lifecycle
+
+Visual questions (Aesthetic Direction, Differentiation) open an `agent-browser` session to render variant HTML in a live browser window. The session is advisory — its absence or failure never blocks the brainstorm.
+
+### Opening (lazy)
+
+The session is opened on the **first** Aesthetic Direction or Differentiation question, not at brainstorm start. Open with:
+
+```bash
+agent-browser --headed --session brainstorm-<topic-slug> open file://$(pwd)/.aimi/brainstorms/prototypes/<topic-slug>-variants.html
+```
+
+`<topic-slug>` is the sanitized topic slug (same value used for the file path). The `--headed` flag opens a visible browser window so the user can observe variants as they are appended.
+
+### Reusing (subsequent visual questions)
+
+Pass the **same `--session` name** on every subsequent visual question — do not open a new session. After each variant section is appended to the HTML file, reload the page so the new section is visible:
+
+```bash
+agent-browser --session brainstorm-<topic-slug> reload
+```
+
+The existing Alpine.js switcher state is preserved across reloads; all variant sections remain in the DOM.
+
+### Closing (normal completion)
+
+When the brainstorm completes normally (all questions answered, summary written), close the session:
+
+```bash
+agent-browser --session brainstorm-<topic-slug> close
+```
+
+Do not close the session mid-brainstorm (e.g., between questions). Only close on completion or confirmed user exit.
+
+### Fallback: `agent-browser` skill unavailable
+
+If `agent-browser` is not installed or the skill is missing (`command -v agent-browser` fails), skip all open/reload/close calls. Still write the HTML file to disk normally. Log exactly one warning line to the brainstorm document:
+
+```
+agent-browser unavailable — variants at .aimi/brainstorms/prototypes/<topic-slug>-variants.html
+```
+
+Continue the brainstorm in text-only mode — all variant content is still written to the HTML file; the user opens it manually.
+
+### Fallback: mid-session crash (browser dies after successful open)
+
+If the session opened successfully but a later `reload` or other call fails (non-zero exit, connection error):
+
+1. **Retry once** with a fresh session name by appending `-2` suffix:
+   ```bash
+   agent-browser --headed --session brainstorm-<topic-slug>-2 open file://$(pwd)/.aimi/brainstorms/prototypes/<topic-slug>-variants.html
+   ```
+2. If the retry also fails, **degrade to text-only** for all remaining visual questions — stop attempting any further `agent-browser` calls for this brainstorm session. Log the file path once at the point of degradation:
+   ```
+   agent-browser session lost — variants at .aimi/brainstorms/prototypes/<topic-slug>-variants.html
+   ```
+
+HTML files are always written to disk regardless of browser session state; degradation affects only the live preview, not the artifact.
