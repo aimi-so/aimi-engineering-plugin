@@ -317,6 +317,61 @@ Once the user selects a lettered option, normalize the chosen label to a slug fo
 
 Store the normalized slug in the agent's working memory as `chosen_variant_slug` for use when US-006 persistence writes the brainstorm document.
 
+**Step 7 — Variant Persistence**
+
+After storing `chosen_variant_slug`, persist the chosen variant as a standalone HTML artifact. Execute for each visual question after the user selects a variant.
+
+**7a — Sanitize and validate the variant label:**
+
+Use the `chosen_variant_slug` stored in working memory. Validate it matches `^[a-z0-9][a-z0-9-]*$`.
+
+- If the label **fails validation**: log a warning to the brainstorm document (`Variant persistence skipped — invalid label: <raw>`), skip Steps 7b–7d for this question, and leave the scratch file (`.aimi/brainstorms/prototypes/<topic-slug>-variants.html`) as the canonical artifact.
+- If the label **passes**: continue to Step 7b.
+
+**7b — Resolve a unique output path:**
+
+Construct the candidate path:
+```
+.aimi/brainstorms/prototypes/<topic-slug>-<chosen_variant_slug>.html
+```
+
+Check whether the file exists:
+```bash
+ls .aimi/brainstorms/prototypes/<topic-slug>-<chosen_variant_slug>.html 2>/dev/null
+```
+
+If it exists (re-run of same topic + same label), append a numeric suffix and retry: `-2`, `-3`, … until a path that does not exist is found.
+
+**7c — Extract and write the standalone file:**
+
+From the existing scratch file (`.aimi/brainstorms/prototypes/<topic-slug>-variants.html`), extract the HTML `<section data-variant="...">` block that corresponds to the chosen variant. Wrap it in a self-contained HTML page with Tailwind CDN inline (no switcher UI, no other variants):
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title><topic-slug> — <chosen_variant_slug></title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+  <!-- chosen variant section content only -->
+</body>
+</html>
+```
+
+Write this file to the resolved unique path from Step 7b.
+
+**7d — Record in working memory:**
+
+Append an entry to a `prototype_entries` list in working memory:
+```
+{ path: "<resolved path>", question_category: "<Aesthetic Direction | Differentiation>" }
+```
+
+This list is consumed when writing the brainstorm document in Phase 4.
+
 **Non-visual categories** (Purpose, Users, Constraints, Success, Edge Cases, Existing Patterns, Approach) remain text-only — Steps 1–4 above do NOT execute for them.
 
 When the brainstorm completes normally (Phase 5), close the browser session if it was opened:
@@ -462,6 +517,11 @@ Use the design document template:
 ---
 date: YYYY-MM-DD
 topic: <topic-slug>
+prototype:
+  - path: .aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html
+    question_category: Aesthetic Direction
+  - path: .aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html
+    question_category: Differentiation
 ---
 
 # <Topic Title>
@@ -485,6 +545,21 @@ When UI features were detected in Phase 1.7, include this section:
 - Aesthetic direction: [chosen tone from Phase 2 responses]
 - Reference points: [products/styles the user referenced]
 - Key visual element: [what makes it memorable, from Differentiation responses]
+
+When one or more variant prototype files were saved (Step 7 — Variant Persistence), include this section:
+
+## Prototype
+
+Standalone prototype files saved during visual variant exploration:
+
+| File | Question Category |
+|------|------------------|
+| `.aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html` | Aesthetic Direction |
+| `.aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html` | Differentiation |
+
+Each file is a self-contained HTML page with Tailwind CDN inline. Open directly in a browser for a design reference without the variant switcher.
+
+If no variant prototypes were saved (e.g., no UI feature detected, variant label validation failed, or all visual questions were skipped), omit both the `prototype:` frontmatter key and the `## Prototype` section entirely.
 
 ## Open Questions
 - [Any unresolved questions]
