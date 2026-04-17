@@ -81,11 +81,11 @@ All task execution files go in `.aimi/tasks/`:
 Learnings are stored in project files (not separate progress log):
 
 - `CLAUDE.md` (root) - Project-wide patterns and conventions
-- `AGENTS.md` (per-directory) - Module-specific patterns and gotchas
+- `AGENTS.md` (plugin-level) - Single source of truth for spawned agent output compression rules; portable across tools (Claude Code, OpenCode). Per-directory AGENTS.md files in skills/ extend these base rules with domain-specific patterns
 
 ## Tasks File Schema
 
-> Key fields: `schemaVersion` ("3.2"), `metadata{title,type,branchName,researchDepth,maxConcurrency}`, `userStories[]{id(US-NNN),title,description,acceptanceCriteria,status,dependsOn,project,wave,implementation{files,approach,verify},verification{strategy,status,url,expect},gate{type,status,prompt,options}}`
+> Key fields: `schemaVersion` ("3.2"), `metadata{title,type,branchName,researchDepth,maxConcurrency,researchPaths[](optional),frontendOnly(optional),backendSpec(optional:{endpoints[],dataModels[],businessRules[],businessContext{summary,userRoles[],constraints[],assumptions[],successCriteria[]}})}`, `userStories[]{id(US-NNN),title,description,acceptanceCriteria,status,dependsOn,project,wave,implementation{files,approach,verify},verification{strategy,status,url,expect},gate{type,status,prompt,options}}`
 > The `project` field is optional on stories — when present, it specifies the relative path from AIMI_ROOT to the target git repository for multi-repo execution.
 
 
@@ -99,13 +99,16 @@ Learnings are stored in project files (not separate progress log):
    - Small files (<2KB) are inlined in prompt
    - Larger files are referenced for agent to read
 
-3. **Compact prompts** - Use compressed prompt format for subsequent stories
-   - Full prompt for first story, compact for rest
+3. **Compact prompts** - First story in a session gets the full template (SKILL.md "Prompt Template"); subsequent stories get the condensed variant (SKILL.md "Compact Template") where static sections (`<project_guidelines>`, `<execution_flow>`, `<tools>`, `<on_failure>`, `<project_root_boundary>`) are condensed to one-line summaries — NOT omitted, since each agent has fresh context. Story-specific and context-varying sections remain in full
    - ~60% token reduction
 
 4. **Fresh context per story** - Each Task agent starts with clean context
    - No memory carryover between stories
    - Learnings persist via CLAUDE.md/AGENTS.md files
+
+5. **Spawned agent output behavior** - See `AGENTS.md` for output compression, safety escapes, and context-adaptive verbosity rules
+   - AGENTS.md defines the rules; this file references them (no duplication)
+   - AGENTS.md is portable across tools (Claude Code, OpenCode) and is the single source of truth for spawned agent behavior
 
 ## Dependencies
 

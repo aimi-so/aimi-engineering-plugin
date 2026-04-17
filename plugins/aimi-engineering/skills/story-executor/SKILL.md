@@ -61,11 +61,13 @@ When spawning a Task agent to execute a story:
 ```
 You are executing a single story from the tasks file.
 
-## PROJECT GUIDELINES (READ FIRST)
+<project_guidelines>
 
 [CLAUDE.md content or default rules]
 
-## Project Context
+</project_guidelines>
+
+<project_context>
 
 [PROJECT_PATH]   ← optional, resolved absolute path to the target project
 
@@ -74,7 +76,9 @@ If PROJECT_PATH is provided:
 - Load CLAUDE.md from PROJECT_PATH root
 - All file operations stay within PROJECT_PATH
 
-## Worktree Context
+</project_context>
+
+<worktree_context>
 
 [WORKTREE_PATH]  ← optional, provided by execute.md parallel mode
 
@@ -96,36 +100,96 @@ If neither is provided:
 - Work in current directory (standard sequential behavior)
 - Report result — the caller (next.md/execute.md) handles status updates via the CLI
 
-## Your Story
+</worktree_context>
+
+<headed_mode_context>
+
+[HEADED_MODE]   ← optional, true when visual-follow is active
+
+If HEADED_MODE is true:
+- A headed browser session named `visual-follow` is already running (opened by execute.md)
+- Use `--session visual-follow` for all agent-browser commands (do NOT pass --headed; the session inherits it)
+- The session lifecycle is managed by execute.md — do NOT close it
+- Navigate to verification.url at story start (step 0) for live preview
+
+If HEADED_MODE is false or absent:
+- Standard headless mode — executor owns the full browser lifecycle (open → use → close)
+
+</headed_mode_context>
+
+<your_story>
 
 ID: [STORY_ID]
 Title: [STORY_TITLE]
 Description: [STORY_DESCRIPTION]
 
-## Acceptance Criteria
+</your_story>
+
+<acceptance_criteria>
 
 [ACCEPTANCE_CRITERIA_BULLETED]
 
-## Key Files (if implementation.files present)
+</acceptance_criteria>
+
+<key_files>
 
 [implementation.files — bulleted list of file paths the story is expected to touch]
 
-## Approach (if implementation.approach present)
+</key_files>
+
+<approach>
 
 [implementation.approach — brief description of the implementation approach]
 
-## Verification Command (if implementation.verify present)
+</approach>
+
+<verification_command>
 
 [implementation.verify — command or instruction to verify the implementation]
 
-## Verification (if verification.strategy present)
+</verification_command>
+
+<verification>
 
 Strategy: [verification.strategy]
 Expected: [verification.expect — omit line if absent]
 
-## Visual Verification (if verification.strategy == visual AND verification.url present)
+</verification>
+
+<visual_verification>
 
 Visual verification is **advisory** — failures do NOT block the story commit.
+
+<headed_mode_visual>
+
+0. **Navigate to verification URL at story start (before implementation):**
+   `agent-browser --session visual-follow open [verification.url]`
+   This gives the user a live preview in the headed browser while implementation proceeds.
+
+1. **Check agent-browser availability:**
+   Run `command -v agent-browser`. If not found, note "visual verification skipped — agent-browser not installed" in your report and proceed to commit.
+
+2. **Navigate to verification URL:**
+   `agent-browser --session visual-follow open [verification.url]`
+
+3. **Take screenshot:**
+   `agent-browser --session visual-follow screenshot /tmp/verify-[STORY_ID].png`
+
+4. **Evaluate screenshot against expected outcome:**
+   Use the Read tool to view `/tmp/verify-[STORY_ID].png`.
+   Compare what you see against `verification.expect` (natural language description).
+   Record whether the visual matches expectations (pass/fail + reasoning).
+
+5. **Cleanup — SKIP:** Session lifecycle is managed by execute.md. Do NOT run `agent-browser close`.
+
+6. **Report result:**
+   - If visual check passes: note "visual verification passed" in your report.
+   - If visual check fails or errors: note "visual verification failed — [reason]" in your report so the caller can set `verification.status` to `failed`. Do NOT fail the story — proceed to commit.
+   - If agent-browser was not installed: note "visual verification skipped" so the caller can set `verification.status` to `skipped`.
+
+</headed_mode_visual>
+
+<headless_mode_visual>
 
 1. **Check agent-browser availability:**
    Run `command -v agent-browser`. If not found, note "visual verification skipped — agent-browser not installed" in your report and proceed to commit.
@@ -149,16 +213,30 @@ Visual verification is **advisory** — failures do NOT block the story commit.
    - If visual check fails or errors: note "visual verification failed — [reason]" in your report so the caller can set `verification.status` to `failed`. Do NOT fail the story — proceed to commit.
    - If agent-browser was not installed: note "visual verification skipped" so the caller can set `verification.status` to `skipped`.
 
-## Previous Notes (if non-empty)
+</headless_mode_visual>
+
+</visual_verification>
+
+<previous_notes>
 
 [story.notes]
 
-## Tools
+</previous_notes>
+
+<design_context>
+
+[DESIGN_CONTEXT]
+
+</design_context>
+
+<tools>
 
 Use built-in tools directly: Read, Write, Edit, Bash, Grep, Glob.
 Do NOT invoke these via the Skill tool — "write" is a Write tool, not a skill.
 
-## Project Root Boundary (CRITICAL)
+</tools>
+
+<project_root_boundary>
 
 All file operations MUST stay within the project boundary: PROJECT_PATH when set, otherwise the git repository root.
 - Do NOT read or modify files outside the project boundary
@@ -166,7 +244,9 @@ All file operations MUST stay within the project boundary: PROJECT_PATH when set
 - Never use ../ traversal to escape the project boundary
 - If a task requires accessing external files, report failure instead
 
-## Execution Flow
+</project_root_boundary>
+
+<execution_flow>
 
 0. If PROJECT_PATH is set, cd to PROJECT_PATH; if WORKTREE_PATH is also set, cd to WORKTREE_PATH instead (takes precedence)
 1. Read CLAUDE.md for project conventions (from PROJECT_PATH root when set)
@@ -188,13 +268,211 @@ All file operations MUST stay within the project boundary: PROJECT_PATH when set
 6. If WORKTREE_PATH is set: do NOT update tasks file — return result report instead
    If no WORKTREE_PATH: do NOT update tasks file directly — the caller (next.md/execute.md) handles status updates via the CLI
 
-## On Failure
+</execution_flow>
+
+<on_failure>
 
 If you cannot complete the story:
 
 1. Do NOT update the tasks file (the caller handles status via CLI)
 2. Return with clear failure report including error details
 3. The caller will mark the story as failed and handle dependent stories
+
+</on_failure>
+```
+
+---
+
+## Compact Template
+
+> Condensed variant for subsequent stories in a wave session. Each Task agent gets fresh context (no memory carryover), so static sections are condensed to one-line summaries — NOT omitted. Story-specific and context-varying sections remain in full. Saves ~60% tokens compared to the full template.
+
+When spawning a Task agent for subsequent stories (after the first story in a session):
+
+```
+You are executing a single story from the tasks file.
+
+<project_guidelines>
+Follow project guidelines from CLAUDE.md/AGENTS.md.
+</project_guidelines>
+
+<project_context>
+
+[PROJECT_PATH]   ← optional, resolved absolute path to the target project
+
+If PROJECT_PATH is provided:
+- cd to PROJECT_PATH before any work
+- Load CLAUDE.md from PROJECT_PATH root
+- All file operations stay within PROJECT_PATH
+
+</project_context>
+
+<worktree_context>
+
+[WORKTREE_PATH]  ← optional, provided by execute.md parallel mode
+
+If both PROJECT_PATH and WORKTREE_PATH are provided:
+- cd to WORKTREE_PATH (worktree takes precedence; it is inside the project repo)
+- All file operations happen within the worktree
+- Commit to the worktree's branch (already checked out)
+- Do NOT modify the tasks.json file (leader handles this)
+- Report result (success/failure + details) — the leader processes your report
+
+If only WORKTREE_PATH is provided:
+- cd to WORKTREE_PATH before any work
+- All file operations happen within the worktree
+- Commit to the worktree's branch (already checked out)
+- Do NOT modify the tasks.json file (leader handles this)
+- Report result (success/failure + details) — the leader processes your report
+
+If neither is provided:
+- Work in current directory (standard sequential behavior)
+- Report result — the caller (next.md/execute.md) handles status updates via the CLI
+
+</worktree_context>
+
+<headed_mode_context>
+
+[HEADED_MODE]   ← optional, true when visual-follow is active
+
+If HEADED_MODE is true:
+- A headed browser session named `visual-follow` is already running (opened by execute.md)
+- Use `--session visual-follow` for all agent-browser commands (do NOT pass --headed; the session inherits it)
+- The session lifecycle is managed by execute.md — do NOT close it
+- Navigate to verification.url at story start (step 0) for live preview
+
+If HEADED_MODE is false or absent:
+- Standard headless mode — executor owns the full browser lifecycle (open → use → close)
+
+</headed_mode_context>
+
+<your_story>
+
+ID: [STORY_ID]
+Title: [STORY_TITLE]
+Description: [STORY_DESCRIPTION]
+
+</your_story>
+
+<acceptance_criteria>
+
+[ACCEPTANCE_CRITERIA_BULLETED]
+
+</acceptance_criteria>
+
+<key_files>
+
+[implementation.files — bulleted list of file paths the story is expected to touch]
+
+</key_files>
+
+<approach>
+
+[implementation.approach — brief description of the implementation approach]
+
+</approach>
+
+<verification_command>
+
+[implementation.verify — command or instruction to verify the implementation]
+
+</verification_command>
+
+<verification>
+
+Strategy: [verification.strategy]
+Expected: [verification.expect — omit line if absent]
+
+</verification>
+
+<visual_verification>
+
+Visual verification is **advisory** — failures do NOT block the story commit.
+
+<headed_mode_visual>
+
+0. **Navigate to verification URL at story start (before implementation):**
+   `agent-browser --session visual-follow open [verification.url]`
+   This gives the user a live preview in the headed browser while implementation proceeds.
+
+1. **Check agent-browser availability:**
+   Run `command -v agent-browser`. If not found, note "visual verification skipped — agent-browser not installed" in your report and proceed to commit.
+
+2. **Navigate to verification URL:**
+   `agent-browser --session visual-follow open [verification.url]`
+
+3. **Take screenshot:**
+   `agent-browser --session visual-follow screenshot /tmp/verify-[STORY_ID].png`
+
+4. **Evaluate screenshot against expected outcome:**
+   Use the Read tool to view `/tmp/verify-[STORY_ID].png`.
+   Compare what you see against `verification.expect` (natural language description).
+   Record whether the visual matches expectations (pass/fail + reasoning).
+
+5. **Cleanup — SKIP:** Session lifecycle is managed by execute.md. Do NOT run `agent-browser close`.
+
+6. **Report result:**
+   - If visual check passes: note "visual verification passed" in your report.
+   - If visual check fails or errors: note "visual verification failed — [reason]" in your report so the caller can set `verification.status` to `failed`. Do NOT fail the story — proceed to commit.
+   - If agent-browser was not installed: note "visual verification skipped" so the caller can set `verification.status` to `skipped`.
+
+</headed_mode_visual>
+
+<headless_mode_visual>
+
+1. **Check agent-browser availability:**
+   Run `command -v agent-browser`. If not found, note "visual verification skipped — agent-browser not installed" in your report and proceed to commit.
+
+2. **Open the page:**
+   `agent-browser open [verification.url]`
+
+3. **Take screenshot:**
+   `agent-browser screenshot /tmp/verify-[STORY_ID].png`
+
+4. **Evaluate screenshot against expected outcome:**
+   Use the Read tool to view `/tmp/verify-[STORY_ID].png`.
+   Compare what you see against `verification.expect` (natural language description).
+   Record whether the visual matches expectations (pass/fail + reasoning).
+
+5. **Cleanup:**
+   `agent-browser close`
+
+6. **Report result:**
+   - If visual check passes: note "visual verification passed" in your report.
+   - If visual check fails or errors: note "visual verification failed — [reason]" in your report so the caller can set `verification.status` to `failed`. Do NOT fail the story — proceed to commit.
+   - If agent-browser was not installed: note "visual verification skipped" so the caller can set `verification.status` to `skipped`.
+
+</headless_mode_visual>
+
+</visual_verification>
+
+<previous_notes>
+
+[story.notes]
+
+</previous_notes>
+
+<design_context>
+
+[DESIGN_CONTEXT]
+
+</design_context>
+
+<tools>
+Use standard tools: Read, Write, Edit, Bash, Grep, Glob. Do NOT invoke these via the Skill tool.
+</tools>
+
+<project_root_boundary>
+CRITICAL: Stay within project root. Never read/write outside project boundary. Worktree paths (.worktrees/) are allowed. Never use ../ traversal to escape. If external access is needed, report failure.
+</project_root_boundary>
+
+<execution_flow>
+Follow standard execution flow: read criteria → implement → test → commit. Stage only story-related files (never `-A` or `.`). Commit format: `git commit -m "type(scope): Story title"`. Verify with `git log -1 --oneline`. On commit failure: report immediately, do not retry. Do NOT update tasks file — caller handles status.
+</execution_flow>
+
+<on_failure>
+On failure: do NOT update the tasks file. Return clear failure report with error details. The caller handles status and dependent stories.
+</on_failure>
 ```
 
 ---

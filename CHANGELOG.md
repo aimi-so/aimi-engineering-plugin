@@ -7,6 +7,182 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.60.2] - 2026-04-16
+
+### Removed
+
+- **plugin manifest:** Remove local-only `penpot` MCP server entry from `mcpServers` (pointed at `http://localhost:4401/mcp`, not suitable for distribution).
+
+## [1.60.1] - 2026-04-16
+
+### Changed
+
+- **command (aimi:open-pr):** Document that the command does not read `CLAUDE.md`/`AGENTS.md` and point users to `.github/pull_request_template.md` for project-specific PR structure (honored automatically by `gh pr create`). No behavior change.
+
+## [1.60.0] - 2026-04-16
+
+### Changed
+
+- **command (aimi:open-pr):** PR title and body are now derived from git commits and the diff against the base branch instead of `tasks.json`. Title comes from the first commit subject on the branch (fallback: current branch name). Body replaces the former `Problem`/`Solution`/`Stories Completed`/`Testing` sections with `Summary` (aggregated commit bodies), `Changes` (commit subjects as bullets), and `Files Changed` (git diff --stat). `tasks.json` is only read inside the conditional `Backend Implementation Spec` block (requires `metadata.frontendOnly` AND `metadata.backendSpec`); when no tasks file is present or metadata lookup fails, that block is silently skipped and PR creation still succeeds.
+
+## [1.59.1] - 2026-04-15
+
+### Fixed
+
+- **cli**: Context-aware CLI path resolution — Layer 0 (`AIMI_PLUGIN_DIR`) is now skipped when running inside Claude Code (`CLAUDECODE=1`), ensuring the Claude Code cache directory is always used instead of the stale OpenCode install path
+- **cli**: `check-version --fix` and `cleanup-versions` no longer bail early with "managed by converter" when inside Claude Code, enabling self-heal after plugin updates
+- **cli**: `read_global_cli_cache` and `read_global_worktree_cache` reject OpenCode-style cached paths when inside Claude Code, preventing split-brain version resolution
+
+## [1.59.0] - 2026-04-15
+
+### Changed
+
+- **agents (aimi-lint, aimi-learnings-researcher):** Remove hardcoded model: haiku; both agents now inherit model from calling context
+
+## [1.58.2] - 2026-04-15
+
+### Added
+
+- **cli**: `archive-task` now deletes research files listed in `metadata.researchPaths` — reads each path, resolves relative paths from `PROJECT_ROOT`, validates with `validate_path_in_project`, checks existence, and deletes with `rm -f`; missing files are silently skipped
+- **cli**: JSON output of `archive-task` now always includes `researchCleaned` integer field (0 when no research files were present or none existed)
+- **tests**: Three new tests for archive-task research cleanup: with researchPaths, without researchPaths (researchCleaned 0), and with missing research files (silent skip)
+
+## [1.58.1] - 2026-04-15
+
+### Added
+
+- **schema**: Add `researchPaths` (string[]) metadata field to task-format-v3.md — tracks research files generated during planning so archive-task can clean them up; omitted when `researchDepth` is `skip` or no files written
+- **planner**: Phase 4 Derive Metadata now includes `researchPaths` bullet instructing the orchestrator to collect paths from Phase 1 and Phase 1.5b research agents
+- **docs**: CLAUDE.md key fields summary updated with `researchPaths[](optional)` after `maxConcurrency`
+
+## [1.58.0] - 2026-04-15
+
+### Changed
+
+- **research**: Unify research file naming with run discriminator — all four research agents (codebase, learnings, best-practices, framework-docs) now use `YYYY-MM-DD-<topicSlug>-<HHmmss>-<short-name>.md` pattern
+- **planner**: Generate `RUN_TS=$(date +%H%M%S)` once in plan.md Phase 1 and pass it to all agent `outputPath` parameters so same-day re-runs produce separate files
+- **brainstorm**: Phase 1b now generates `RUN_TS` and specifies explicit `outputPath` for each research agent instead of relying on agent Output Contract defaults
+- **task-planner**: SKILL.md and pipeline-phases.md agent prompts updated to use `outputPath` with the new `YYYY-MM-DD-[topicSlug]-[RUN_TS]-<short-name>.md` pattern
+- **research agents**: Output Contract updated to document that caller-specified `outputPath` takes precedence over agent-derived slug/timestamp; short names in frontmatter updated to `codebase`, `learnings`, `best-practices`, `framework-docs`
+
+## [1.57.0] - 2026-04-15
+
+### Added
+
+- **cli**: Add `version` subcommand that prints the plugin version from plugin.json
+- **tests**: Add version command test validating semver output
+
+## [1.56.0] - 2026-04-15
+
+### Fixed
+
+- **tests**: Unset `AIMI_PLUGIN_DIR` before version staleness and global cache tests to prevent compound-plugin converter from short-circuiting test assertions
+
+## [1.55.0] - 2026-04-15
+
+### Fixed
+
+- **cli**: Add `--project` flag to `setup-branch` and `detect-default-branch` commands for multi-repo layouts where AIMI root is not a git repository
+- **cli**: Add git-repo guard to both commands with clear error message instead of cryptic `fatal: not a git repository`
+- **execute**: Detect multi-repo layout (AIMI root is not a git repo) and skip main repo branch setup, handling branch creation per-project instead
+- **planner**: Defer default branch detection to per-project when AIMI root is not a git repo
+
+### Added
+
+- **tests**: Add `--project` flag and non-git-repo error tests for `setup-branch`
+
+## [1.54.0] - 2026-04-14
+
+### Fixed
+
+- **planner**: Add missing auto-scan for git repos step in plan.md Phase 1, syncing with SKILL.md
+- **planner**: Promote `project` field assignment to explicit numbered step 6 in Phase 3, preventing model from skipping multi-repo project assignment
+
+## [1.53.0] - 2026-04-14
+
+### Changed
+
+- **brainstorm**: Structured consolidation schema in Phase 1.6 with adaptive return caps tied to researchDepth
+- **deepen**: Research agents write findings to `.aimi/research/` files instead of returning bulk text inline
+- **deepen**: Adaptive return caps tied to researchDepth — lower depths produce shorter agent output
+- **planner**: Default researchDepth inherited through planning pipeline
+- **review**: Protected artifacts updated for `.aimi/research/` output path
+
+## [1.52.0] - 2026-04-14
+
+### Added
+
+- **agents**: AGENTS.md with context-adaptive compression rules for spawned agent output
+
+### Changed
+
+- **cli**: Deduplicated CLI path resolution to eliminate redundant path computations
+- **story-executor**: XML tags in story executor prompts for structured content boundaries
+- **story-executor**: Compact prompt pattern — subsequent stories use condensed static sections (~60% token reduction)
+- **git-worktree**: Progressive disclosure — worktree skill surfaces details on demand instead of upfront
+- **task-planner**: Progressive disclosure — planner skill surfaces details on demand instead of upfront
+
+## [1.51.0] - 2026-04-14
+
+### Fixed
+
+- **execute**: Visual verification for worktree stories now runs post-merge instead of inside isolated worktrees where dev server cannot see changes
+
+## [1.50.0] - 2026-04-14
+
+### Added
+
+- **brainstorm**: Design-thinking integration for visual features — auto-detect UI keywords in feature descriptions, inject Aesthetic Direction and Differentiation topic categories into Phase 2, conditional Design Decisions section in brainstorm document template, design context passed to story executors
+- **planner**: Auto-skip implementation scope question for non-app features (plugin changes, refactors, CLI tools, docs) — uses keyword detection with conflicting-signals precedence
+
+## [1.49.0] - 2026-04-14
+
+### Fixed
+
+- **execute**: Visual-follow browser detection now type-guards `verification` field — prevents silent failure when verification is a string instead of object, warns about malformed fields
+- **planner**: Added explicit "verification MUST be an object" warnings with JSON examples to all planner instruction files (SKILL.md, plan.md, pipeline-phases.md, story-decomposition.md)
+
+### Changed
+
+- **schema**: `backendSpec.businessContext` expanded from string to structured object with `summary`, `userRoles[]`, `constraints[]`, `assumptions[]`, `successCriteria[]` sub-fields
+- **open-pr**: Backend Implementation Spec "Business Context" section now renders structured sub-sections (User Roles, Constraints, Assumptions, Success Criteria) with legacy string fallback
+- **planner**: Phase 4 businessContext generation guidance updated with explicit extraction instructions for each sub-field
+
+## [1.48.0] - 2026-04-14
+
+### Added
+
+- **open-pr**: GitHub issue creation with backend spec for frontend-only PRs — after PR creation, attempts `gh issue create` with Backend Implementation Spec body, links issue to PR via `gh pr edit`, graceful degradation on failure (warning only, PR unaffected)
+
+## [1.47.0] - 2026-04-14
+
+### Added
+
+- **execute**: Multi-file auto-detection (Step 0.9) — uses `find-tasks-all` to discover all task files, auto-detects paired `*-frontend-tasks.json` and `*-backend-tasks.json` with matching date+feature prefix, spawns two parallel foreground Tasks with worktree isolation and `init-session --file`, aggregated completion report showing per-file results
+- **open-pr**: Backend Implementation Spec section in PR body for frontend-only prototypes — when `frontendOnly` is true and `backendSpec` exists, appends Endpoints, Data Models, Business Rules, and Business Context subsections after Testing (deterministic rendering, no LLM generation)
+
+## [1.46.0] - 2026-04-14
+
+### Added
+
+- **planner**: Split task file generation — full-stack scope produces separate `*-frontend-tasks.json` and `*-backend-tasks.json` with independent branch names, dependency graphs, and wave numbers
+- **planner**: `backendSpec` metadata generation — frontend-only scope synthesizes `endpoints`, `dataModels`, `businessRules`, and `businessContext` from story analysis
+- **planner**: Per-file Phase 4.5 validation using `init-session --file` for independent validation of each split file
+
+## [1.45.0] - 2026-04-14
+
+### Added
+
+- **cli**: `find-tasks-all` subcommand — returns newline-separated list of all *-tasks.json files sorted by modification time for multi-file discovery
+- **cli**: `--file <path>` flag for `init-session` — allows specifying a tasks file directly instead of auto-detecting the most recent one, with existence and pattern validation
+- **story-executor**: Headed mode context and visual-follow session reuse — adds `[HEADED_MODE]` placeholder, conditional visual verification branches for headed (session reuse, no close) vs headless (executor-owned lifecycle) modes
+
+## [1.44.0] - 2026-04-14
+
+### Added
+
+- **execute**: Visual-follow session prompt (Step 0.7) — detects frontend stories with `verification.strategy == "visual"`, prompts user to follow implementation in a headed browser, manages `agent-browser` session lifecycle around the wave loop
+
 ## [1.43.1] - 2026-04-09
 
 ### Fixed
@@ -879,11 +1055,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - jq query modifications
   - Path/filename errors
 
-## [2.0.0] - 2026-02-17
+## [1.1.0] - 2026-02-17
 
 ### Changed
 
-- **BREAKING:** Restored v2.0 schema with task-specific fields
+- Restored v2.0 tasks.json schema with task-specific fields
   - Re-added `taskType`, `steps`, `relevantFiles`, `qualityChecks` to story schema
   - `schemaVersion` changed from "3.0" to "2.0"
   - Improved agent execution with domain-specific guidance

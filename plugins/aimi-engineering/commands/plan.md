@@ -17,55 +17,32 @@ $ARGUMENTS
 
 ### Resolve CLI Path
 
-Follow the 4-layer resolution strategy from `references/cli-path-resolution.md` to set `$AIMI_CLI`. Each layer is a separate Bash call:
+Read `references/cli-path-resolution.md` and follow the **Resolve CLI Path** and **Version Check** sections to set `$AIMI_CLI`. Each layer is a separate Bash call.
 
-**Layer 0 — AIMI_PLUGIN_DIR override:**
-```bash
-if [ -n "$AIMI_PLUGIN_DIR" ] && [ "${AIMI_PLUGIN_DIR#/}" != "$AIMI_PLUGIN_DIR" ] && [ -d "$AIMI_PLUGIN_DIR" ] && [ -x "$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh" ]; then AIMI_CLI="$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh"; fi
-```
+If resolution fails, report error and STOP.
 
-**Layer 1 — Global cache:**
-```bash
-if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(cat ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path 2>/dev/null); fi
-```
+### Detect Git Repo Layout
+
+Check if the current directory (AIMI root) is itself a git repository:
 
 ```bash
-if [ -n "$AIMI_CLI" ] && [ ! -x "$AIMI_CLI" ]; then AIMI_CLI=""; fi
+git rev-parse --git-dir >/dev/null 2>&1
 ```
 
-**Layer 2 — Glob fallback (zsh-safe):**
-```bash
-if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1'); fi
-```
+Store the result as `AIMI_ROOT_IS_GIT_REPO` (true/false). When false, this is a **multi-repo layout** — default branch detection is deferred to Phase 4 after the git repo auto-scan discovers project paths.
 
-```bash
-if [ -n "$AIMI_CLI" ]; then printf '%s\n' "$AIMI_CLI" > "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path.tmp" && mv "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path.tmp" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" && chmod 600 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path"; fi
-```
+### Fetch Origin & Detect Default Branch
 
-**Layer 3 — Per-project fallback:**
-```bash
-if [ -z "$AIMI_CLI" ] && [ -f .aimi/cli-path ] && [ -x "$(cat .aimi/cli-path)" ]; then AIMI_CLI=$(cat .aimi/cli-path); fi
-```
-
-If `$AIMI_CLI` is still empty, report error and STOP.
-
-### Fetch Origin (Branch Freshness Check)
-
-Ensure local refs are current before determining the default branch:
+**If `AIMI_ROOT_IS_GIT_REPO` is true:**
 
 ```bash
 git fetch origin 2>&1 || echo "WARNING: git fetch failed (offline?). Continuing with local refs."
-```
-
-If fetch fails, warn but continue planning with local refs.
-
-### Detect Default Branch
-
-```bash
 $AIMI_CLI detect-default-branch
 ```
 
 Use the output as the default branch for `branchName` derivation in Phase 4.
+
+**If `AIMI_ROOT_IS_GIT_REPO` is false:** Skip. Default branch detection happens per-project in Phase 4 using `$AIMI_CLI detect-default-branch --project [path]`.
 
 ## Phase 0: Idea Refinement
 
@@ -79,19 +56,86 @@ ls -t .aimi/brainstorms/*.md 2>/dev/null | head -10
 - **If multiple match:** Ask user which to use.
 - **If none found:** Ask refinement questions via AskUserQuestion until the idea is clear.
 
+### Implementation Scope Detection
+
+After the brainstorm check, determine the implementation scope:
+
+- **Non-app feature detected** (feature description contains keywords: `refactor`, `rename`, `migrate`, `CLI`, `command-line`, `plugin`, `skill`, `command`, `documentation`, `docs`, `changelog`, `readme` AND does NOT contain app-related signals: `page`, `dashboard`, `form`, `modal`, `UI`, `frontend`, `backend`, `API`) → skip scope question, leave `implementationScope` unset, proceed to Phase 1
+- **Conflicting signals** (both non-app keywords and app-related signals present) → do NOT skip, ask the question below
+
+1. **Auto-detect default from brainstorm context** (if a brainstorm was found):
+   - If brainstorm text contains signals like `frontend-only`, `mocked data`, or `prototype` → default to option 1
+   - If brainstorm text contains signals like `backend`, `API`, `schema`, or `full-stack` → default to option 2
+
+2. **Ask the user** via AskUserQuestion:
+   > What type of implementation? (1) frontend prototype with mocked data (2) full-stack implementation (frontend + backend)
+
+   Present the auto-detected default if one was determined.
+
+3. **Store the result** as `implementationScope: "frontend-only" | "full-stack"` for use in Phase 4 metadata.
+
 ## Phase 1: Local Research (Parallel)
+
+### Prepare Research Directory
+
+```bash
+mkdir -p .aimi/research
+```
+
+### Derive Topic Slug
+
+From the feature description, derive a topic slug for research filename derivation:
+1. Convert to lowercase
+2. Replace spaces and special characters with hyphens
+3. Remove consecutive hyphens
+4. Truncate to 50 characters
+5. Remove trailing hyphens
+
+Store as `topicSlug` for use in researcher agent prompts.
+
+### Generate Run Discriminator
+
+Generate a single timestamp for this run to prevent same-day re-runs from overwriting prior research files:
+
+```bash
+RUN_TS=$(date +%H%M%S)
+```
+
+Store `RUN_TS` and use it in **all** research agent prompts for this run.
+
+### Auto-Scan for Git Repos
+
+Before launching research agents, scan immediate child directories for `.git/` directories to discover sub-projects:
+
+```bash
+for dir in */; do
+  case "$dir" in .worktrees/|node_modules/|.aimi/|vendor/) continue;; esac
+  [ -d "$dir/.git" ] && echo "$dir"
+done
+```
+
+List discovered repos with their relative paths from the `.aimi/` parent.
+
+- If **zero** or **one** repo is found, no multi-repo handling is needed
+- If **multiple** repos are found, pass the list to research agents and use it in Phase 3 for `project` assignment
+
+### Run Research Agents
 
 Run these agents **in parallel** using the Task tool:
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
   prompt: "Analyze the codebase for patterns relevant to: [feature description].
+           topicSlug: [topicSlug]
            Look for: existing patterns, CLAUDE.md guidance, similar features,
-           technology familiarity, file structure conventions."
+           technology familiarity, file structure conventions.
+           outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-codebase.md"
 
 Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
   prompt: "Search .aimi/solutions/ for learnings relevant to: [feature description].
-           Look for: gotchas, patterns, past solutions, lessons learned."
+           topicSlug: [topicSlug]
+           Look for: gotchas, patterns, past solutions, lessons learned.
+           outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-learnings.md"
 ```
 
 If either agent fails, proceed with available results.
@@ -110,19 +154,31 @@ Only if Phase 1.5 decides external research is needed:
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
-  prompt: "Research current best practices for: [feature description]."
+  prompt: "Research current best practices for: [feature description].
+           researchDepth: [computed researchDepth from Phase 1.5]
+           topicSlug: [topicSlug]
+           outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-best-practices.md"
 
 Task subagent_type="aimi-engineering:research:aimi-framework-docs-researcher"
-  prompt: "Research framework documentation for: [feature description]."
+  prompt: "Research framework documentation for: [feature description].
+           researchDepth: [computed researchDepth from Phase 1.5]
+           topicSlug: [topicSlug]
+           outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-framework-docs.md"
 ```
 
 ## Phase 1.6: Research Consolidation
 
-Merge all findings:
-- Relevant file paths and codebase patterns
-- Institutional learnings from `.aimi/solutions/`
-- External best practices (if researched)
-- CLAUDE.md conventions
+Consume researcher agent **summary returns** (the brief outputs from Task calls) — do NOT re-read the full `.aimi/research/` files unless a summary is insufficient for a planning decision.
+
+> **Fallback:** If a researcher summary lacks detail needed for a specific planning decision, the orchestrator may read the corresponding `.aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-*.md` file on demand.
+
+Merge all findings into a structured consolidation with these sections:
+
+1. **Key Patterns** — Architectural patterns, conventions, and recurring structures found in the codebase
+2. **Conflicts** — Contradictions between sources (e.g., CLAUDE.md says X but codebase does Y), unresolved trade-offs
+3. **File References** — Concrete file paths relevant to the feature, grouped by concern (schema, backend, UI, config)
+4. **Learnings** — Institutional knowledge from `.aimi/solutions/`: gotchas, past mistakes, proven approaches
+5. **External Insights** — Best practices and framework guidance from external research (empty if Phase 1.5b was skipped)
 
 ## Phase 2: Spec Analysis
 
@@ -145,14 +201,23 @@ Using consolidated research and spec-flow output:
 3. Assign IDs in `US-NNN` zero-padded format (`US-001`, `US-002`, ...) — never `US-1`, `story-1`, `S1`, or any other format
 4. Size check: each story must be completable in ONE agent iteration (one context window)
 5. Order by dependency: assign `dependsOn` arrays (explicit story IDs) and `priority` as tiebreaker
-6. **Compute `wave` numbers** from `dependsOn` graph: roots = wave 1; non-roots = max(wave of deps) + 1; contiguous, no gaps
-7. **Populate `implementation` object** when research provides file paths and patterns: `files` (concrete paths), `approach` (actionable strategy), `verify` (executable check). Omit when research is insufficient.
-8. **Assign `verification` strategy** per story type: `api` (endpoints), `visual` (UI), `test` (backend logic). Set `status: "pending"`.
-9. **Detect and attach `gate` objects**: `verify` (OAuth/email/webhooks), `decision` (multiple viable approaches), `action` (external manual action). Most stories have no gate.
-10. Write descriptions in user story format: "As a [specific role], I want [feature] so that [benefit]" — role must name the actor, never just "user"
-11. Generate verifiable acceptance criteria (every story must have "Typecheck passes")
-12. Initialize every story with `status: "pending"` and appropriate `dependsOn` array
-13. Validate: no circular dependencies in `dependsOn`, no self-references, all referenced IDs exist, no vague criteria
+6. **Assign `project` field** when multiple repos were discovered in Phase 1:
+   - Set `project` to the repo's relative path (e.g., `backend`, `services/api`)
+   - Omit `project` when only one repo exists or the story targets the CWD repo
+   - Path format: no leading `./`, no `..` components, must match `^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$`
+   - Cross-repo dependencies in `dependsOn` are valid
+7. **Compute `wave` numbers** from `dependsOn` graph: roots = wave 1; non-roots = max(wave of deps) + 1; contiguous, no gaps
+8. **Populate `implementation` object** when research provides file paths and patterns: `files` (concrete paths), `approach` (actionable strategy), `verify` (executable check). Omit when research is insufficient.
+9. **Assign `verification` strategy** per story type: `api` (endpoints), `visual` (UI), `test` (backend logic). Set `status: "pending"`.
+   **IMPORTANT: `verification` MUST be an object — never a bare string.** Examples:
+   - visual: `{"strategy": "visual", "status": "pending", "url": "http://localhost:3000/page", "expect": "Dashboard visible"}`
+   - api: `{"strategy": "api", "status": "pending", "url": "http://localhost:3000/api/endpoint", "expect": "200 with JSON"}`
+   - test: `{"strategy": "test", "status": "pending", "expect": "All tests pass"}`
+10. **Detect and attach `gate` objects**: `verify` (OAuth/email/webhooks), `decision` (multiple viable approaches), `action` (external manual action). Most stories have no gate.
+11. Write descriptions in user story format: "As a [specific role], I want [feature] so that [benefit]" — role must name the actor, never just "user"
+12. Generate verifiable acceptance criteria (every story must have "Typecheck passes")
+13. Initialize every story with `status: "pending"` and appropriate `dependsOn` array
+14. Validate: no circular dependencies in `dependsOn`, no self-references, all referenced IDs exist, no vague criteria
 
 ### `dependsOn` Inference Rules
 
@@ -160,13 +225,6 @@ Using consolidated research and spec-flow output:
 - **Same layer, shared concern** (FK referencing another story's table, component extending another) → add dependency
 - **Cross-layer**: backend depends on schema stories it reads/writes; UI depends on backend it calls; aggregation depends on what it consumes
 - **Skip layers when appropriate**: UI reading directly from a new table depends on the schema story, not a non-existent backend story
-
-### Multi-Repo Project Assignment
-
-When the workspace has multiple git repos under one parent folder:
-- Set `project` to relative path from `.aimi/` parent (e.g., `backend`, `services/api`)
-- Omit `project` when only one repo exists or all stories target the same repo
-- Cross-repo dependencies in `dependsOn` are valid
 
 ### Type Values
 
@@ -179,22 +237,48 @@ When the workspace has multiple git repos under one parent folder:
 
 ## Phase 4: Write tasks.json
 
-### Derive Metadata
+Branch on `implementationScope` from Phase 0:
+
+### When `implementationScope` is `"full-stack"`:
+
+1. **Partition stories by layer**: UI stories → frontend file; schema + backend + aggregation stories → backend file
+2. **Assign unique IDs across both files**: frontend gets `US-001` to `US-N`, backend gets `US-(N+1)` to `US-M` — no ID collisions
+3. **Rebuild `dependsOn` independently per file**: remove all cross-file references; within each file, only reference IDs that exist in that file
+4. **Recompute `wave` numbers per file**: roots (`dependsOn: []`) are wave 1 within each file, independently
+5. **Derive separate `branchName` per file**: `type/[feature]-frontend` and `type/[feature]-backend`
+6. Write frontend file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
+7. Write backend file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`
+
+### When `implementationScope` is `"frontend-only"`:
+
+1. Set `metadata.frontendOnly: true`
+2. **Generate `metadata.backendSpec`** by analyzing story descriptions and acceptance criteria:
+   - `endpoints`: array of `{ method, path, description }` — API contracts implied by UI interactions
+   - `dataModels`: array of `{ name, fields }` — data structures implied by forms and displays
+   - `businessRules`: array of strings — validation rules and business logic from acceptance criteria
+   - `businessContext`: object with structured business context:
+     - `summary`: high-level overview of the business domain and purpose
+     - `userRoles`: extract persona names from story descriptions ("As a [role]" patterns)
+     - `constraints`: identify non-functional requirements from acceptance criteria (scalability, compliance, performance SLAs)
+     - `assumptions`: document integration assumptions, data patterns, auth model, API style
+     - `successCriteria`: derive measurable success criteria from acceptance criteria across all stories
+3. Write single file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
+
+### When `implementationScope` is unset (legacy):
+
+Write single file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
+
+### Derive Metadata (all modes)
 
 - **title**: `<type>: <Descriptive Name>`
 - **type**: `feat`, `ref`, `bug`, or `chore`
-- **branchName**: Kebab-case, prefixed with type — e.g., `feat/add-user-auth`
+- **branchName**: Kebab-case, prefixed with type. For split files: `type/[feature]-frontend` and `type/[feature]-backend`
 - **createdAt**: Today's date (YYYY-MM-DD)
 - **planPath**: Always `null`
 - **brainstormPath**: Path to brainstorm if one was used, otherwise omit
 - **researchDepth**: Value computed in Phase 1.5 (`skip`, `quick`, `standard`, `deep`), or omit if not computed
+- **researchPaths**: Collect all `.aimi/research/` file paths written by Phase 1 agents (codebase, learnings) and Phase 1.5b agents (best-practices, framework-docs). Omit entirely when `researchDepth` is `skip` or no research files were written.
 - **maxConcurrency**: Default `4`. Set to `1` for strictly sequential execution.
-
-### Derive Filename
-
-```
-.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json
-```
 
 ### Write File
 
@@ -217,7 +301,14 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
     "planPath": "null (always null for planner-generated)",
     "brainstormPath": "string (optional)",
     "researchDepth": "skip|quick|standard|deep (optional, computed in Phase 1.5)",
-    "maxConcurrency": "number (optional, default 4)"
+    "maxConcurrency": "number (optional, default 4)",
+    "frontendOnly": "boolean (optional, true when frontend-only scope)",
+    "backendSpec": {
+      "endpoints": [{"method": "string", "path": "string", "description": "string"}],
+      "dataModels": [{"name": "string", "fields": ["string"]}],
+      "businessRules": ["string"],
+      "businessContext": "string"
+    }
   },
   "userStories": [
     {
@@ -279,25 +370,40 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 - [ ] `gate` (if present) has `type` (`verify`, `decision`, or `action`), `status` (`"pending"`), and `prompt`
 - [ ] Gates only attached when heuristics clearly match
 
+### Split-File Checks (when `implementationScope` is set)
+- [ ] Full-stack: two files generated (`*-frontend-tasks.json` and `*-backend-tasks.json`)
+- [ ] Full-stack: each file has its own `branchName` (`type/[feature]-frontend`, `type/[feature]-backend`)
+- [ ] Full-stack: story IDs are unique across both files (no ID collisions)
+- [ ] Full-stack: no cross-file `dependsOn` references — each file's graph is self-contained
+- [ ] Full-stack: wave numbers computed independently per file (roots = wave 1 within each file)
+- [ ] Frontend-only: single `*-frontend-tasks.json` with `metadata.frontendOnly: true`
+- [ ] Frontend-only: `metadata.backendSpec` contains `endpoints`, `dataModels`, `businessRules`, `businessContext`
+- [ ] Phase 4.5 validation runs on each file independently using `$AIMI_CLI init-session --file <path>`
+
 ## Phase 4.5: Post-Generation Validation
 
-After writing the tasks.json file, validate the generated output using the CLI:
+After writing the tasks.json file(s), validate each generated output independently.
 
-### Validate Story IDs
+**For split files (full-stack):** run validation on each file separately using `init-session --file`:
 
 ```bash
+$AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
 $AIMI_CLI validate-ids
-```
-
-### Validate Dependency Graph
-
-```bash
 $AIMI_CLI validate-deps
+$AIMI_CLI validate-stories
+
+$AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json
+$AIMI_CLI validate-ids
+$AIMI_CLI validate-deps
+$AIMI_CLI validate-stories
 ```
 
-### Validate Story Content
+**For single file (frontend-only or legacy):**
 
 ```bash
+$AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
+$AIMI_CLI validate-ids
+$AIMI_CLI validate-deps
 $AIMI_CLI validate-stories
 ```
 
@@ -305,9 +411,9 @@ $AIMI_CLI validate-stories
 1. Read the error output to identify the issues
 2. Fix the offending story IDs, `dependsOn` references, or dependency cycles
 3. Re-write the tasks.json file using the Write tool
-4. Re-run both validations until they pass
+4. Re-run all validations until they pass
 
-Do **not** proceed to the report step until both validations succeed.
+Do **not** proceed to the report step until all validations succeed.
 
 ## Step 5: Aimi-Branded Report
 

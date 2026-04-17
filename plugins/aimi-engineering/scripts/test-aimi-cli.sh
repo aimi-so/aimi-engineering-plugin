@@ -198,6 +198,149 @@ test_find_tasks() {
   assert_contains "9999-99-99-test-tasks.json" "$output" "find-tasks returns correct file"
 }
 
+test_find_tasks_all() {
+  echo ""
+  echo "=== Testing find-tasks-all command ==="
+
+  # Create a second tasks file (older modification time)
+  local second_file="$TASKS_DIR/9999-99-98-extra-tasks.json"
+  cat > "$second_file" << 'EOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Extra feature",
+    "type": "feat",
+    "branchName": "feat/extra-feature",
+    "createdAt": "2026-02-26",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": []
+}
+EOF
+
+  # Touch primary file to ensure it's most recent
+  touch "$TASKS_FILE"
+
+  local output
+  output=$("$CLI" find-tasks-all)
+
+  # Should contain both files
+  assert_contains "9999-99-99-test-tasks.json" "$output" "find-tasks-all includes primary file"
+  assert_contains "9999-99-98-extra-tasks.json" "$output" "find-tasks-all includes second file"
+
+  # Should be multiple lines (at least 2)
+  local line_count
+  line_count=$(echo "$output" | wc -l)
+  if [ "$line_count" -ge 2 ]; then
+    echo -e "${GREEN}✓${NC} find-tasks-all returns multiple lines ($line_count)"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} find-tasks-all returns multiple lines"
+    echo "  Got $line_count line(s)"
+    ((TESTS_FAILED++))
+  fi
+
+  # First line should be the most recent file (9999-99-99)
+  local first_line
+  first_line=$(echo "$output" | head -1)
+  assert_contains "9999-99-99-test-tasks.json" "$first_line" "find-tasks-all: most recent file is first"
+
+  # All paths should be absolute
+  local all_absolute=true
+  while IFS= read -r line; do
+    if [[ "$line" != /* ]]; then
+      all_absolute=false
+      break
+    fi
+  done <<< "$output"
+  if [ "$all_absolute" = true ]; then
+    echo -e "${GREEN}✓${NC} find-tasks-all returns absolute paths"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} find-tasks-all returns absolute paths"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -f "$second_file"
+}
+
+test_init_session_file_flag() {
+  echo ""
+  echo "=== Testing init-session --file flag ==="
+
+  "$CLI" clear-state > /dev/null
+
+  # Create an alternate tasks file
+  local alt_file="$TASKS_DIR/9999-99-98-alt-tasks.json"
+  cat > "$alt_file" << 'EOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Alt feature",
+    "type": "feat",
+    "branchName": "feat/alt-feature",
+    "createdAt": "2026-02-26",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Alt story",
+      "description": "Alt story description",
+      "acceptanceCriteria": ["Typecheck passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": ""
+    }
+  ]
+}
+EOF
+
+  # Use --file to specify the alt file
+  local output
+  output=$("$CLI" init-session --file "$alt_file")
+
+  assert_contains "feat/alt-feature" "$output" "init-session --file uses specified file's branch"
+  assert_contains '"pending": 1' "$output" "init-session --file counts pending from specified file"
+
+  # Check state file points to the alt file
+  local state_tasks
+  state_tasks=$(cat "$AIMI_DIR/current-tasks" 2>/dev/null)
+  assert_contains "9999-99-98-alt-tasks.json" "$state_tasks" "init-session --file: current-tasks points to alt file"
+
+  rm -f "$alt_file"
+}
+
+test_init_session_file_flag_validation() {
+  echo ""
+  echo "=== Testing init-session --file flag validation ==="
+
+  "$CLI" clear-state > /dev/null
+
+  # Test 1: Non-existent file should fail
+  local output exit_code
+  output=$("$CLI" init-session --file "/tmp/nonexistent-tasks.json" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "init-session --file: non-existent file exits 1"
+  assert_contains "File not found" "$output" "init-session --file: non-existent file shows error"
+
+  # Test 2: File not matching *-tasks.json pattern should fail
+  local bad_file
+  bad_file=$(mktemp /tmp/not-a-tasks-XXXX.json)
+  echo '{}' > "$bad_file"
+  output=$("$CLI" init-session --file "$bad_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "init-session --file: wrong pattern exits 1"
+  assert_contains "does not match" "$output" "init-session --file: wrong pattern shows error"
+  rm -f "$bad_file"
+
+  # Test 3: Unknown flag should fail
+  output=$("$CLI" init-session --unknown 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "init-session --unknown: unknown flag exits 1"
+  assert_contains "Unknown flag" "$output" "init-session --unknown: shows error"
+}
+
 test_metadata() {
   echo ""
   echo "=== Testing metadata command ==="
@@ -690,6 +833,30 @@ test_stale_state_warning() {
   stderr_output=$("$CLI" status 2>&1 >/dev/null) || true
 
   assert_stderr_contains "no longer exists" "$stderr_output" "stale state produces warning on stderr"
+}
+
+# ============================================================================
+# Version Command Test
+# ============================================================================
+
+test_version() {
+  echo ""
+  echo "=== Testing version command ==="
+
+  local output exit_code
+  output=$("$CLI" version 2>/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "version: exits 0"
+  # Should match semver pattern
+  if [[ "$output" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo -e "${GREEN}✓${NC} version: outputs semver format ($output)"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} version: outputs semver format"
+    echo "  Expected: semver (e.g., 1.56.0)"
+    echo "  Actual: $output"
+    ((TESTS_FAILED++))
+  fi
 }
 
 # ============================================================================
@@ -1421,6 +1588,9 @@ teardown_global_cache_env() {
 setup_aimi_plugin_dir_env() {
   PLUGIN_DIR_TMPDIR=$(mktemp -d)
   export AIMI_PLUGIN_DIR="$PLUGIN_DIR_TMPDIR/aimi-engineering"
+  # Simulate non-Claude-Code host (OpenCode) by unsetting CLAUDECODE
+  _SAVED_CLAUDECODE="${CLAUDECODE:-}"
+  unset CLAUDECODE
   mkdir -p "$AIMI_PLUGIN_DIR/scripts"
   mkdir -p "$AIMI_PLUGIN_DIR/skills/git-worktree/scripts"
 
@@ -1437,6 +1607,11 @@ teardown_aimi_plugin_dir_env() {
   rm -rf "$PLUGIN_DIR_TMPDIR"
   unset AIMI_PLUGIN_DIR
   unset PLUGIN_DIR_TMPDIR
+  # Restore CLAUDECODE if it was set before
+  if [ -n "$_SAVED_CLAUDECODE" ]; then
+    export CLAUDECODE="$_SAVED_CLAUDECODE"
+  fi
+  unset _SAVED_CLAUDECODE
 }
 
 # Source the global cache functions from aimi-cli.sh for direct testing.
@@ -1444,6 +1619,7 @@ teardown_aimi_plugin_dir_env() {
 source_cache_functions() {
   eval "$(sed -n '/^_claude_config_dir()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_validate_plugin_dir()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_is_claude_code_host()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_global_cache_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_global_worktree_cache_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^write_global_cli_cache()/,/^}/p' "$CLI")"
@@ -2075,6 +2251,71 @@ test_read_global_cli_cache_rejects_arbitrary() {
   teardown_aimi_plugin_dir_env
 }
 
+test_claude_code_host_ignores_plugin_dir_check_version() {
+  echo ""
+  echo "=== Testing check-version ignores AIMI_PLUGIN_DIR inside Claude Code ==="
+
+  setup_aimi_plugin_dir_env
+  # Override: simulate Claude Code host
+  export CLAUDECODE=1
+
+  local output
+  output=$("$CLI" check-version 2>/dev/null)
+
+  # Should NOT return "managed by compound-plugin converter"
+  local has_converter
+  has_converter=$(echo "$output" | grep -c 'compound-plugin converter' || true)
+  assert_eq "0" "$has_converter" \
+    "check-version: skips converter shortcut inside Claude Code"
+
+  unset CLAUDECODE
+  teardown_aimi_plugin_dir_env
+}
+
+test_claude_code_host_ignores_plugin_dir_cleanup() {
+  echo ""
+  echo "=== Testing cleanup-versions ignores AIMI_PLUGIN_DIR inside Claude Code ==="
+
+  setup_aimi_plugin_dir_env
+  # Override: simulate Claude Code host
+  export CLAUDECODE=1
+
+  local output
+  output=$("$CLI" cleanup-versions 2>/dev/null)
+
+  # Should NOT return skipped:true
+  local has_skipped
+  has_skipped=$(echo "$output" | grep -c '"skipped":true' || true)
+  assert_eq "0" "$has_skipped" \
+    "cleanup-versions: skips converter shortcut inside Claude Code"
+
+  unset CLAUDECODE
+  teardown_aimi_plugin_dir_env
+}
+
+test_claude_code_host_rejects_plugin_dir_cached_path() {
+  echo ""
+  echo "=== Testing read_global_cli_cache rejects AIMI_PLUGIN_DIR path inside Claude Code ==="
+
+  setup_aimi_plugin_dir_env
+  setup_global_cache_env
+  # Override: simulate Claude Code host
+  export CLAUDECODE=1
+  source_cache_functions
+
+  write_global_cli_cache "$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh"
+
+  local result
+  result=$(read_global_cli_cache 2>/dev/null)
+
+  assert_eq "" "$result" \
+    "read_global_cli_cache: rejects AIMI_PLUGIN_DIR path inside Claude Code"
+
+  unset CLAUDECODE
+  teardown_global_cache_env
+  teardown_aimi_plugin_dir_env
+}
+
 # ============================================================================
 # V3.2 Schema Tests — Gates, Waves & Field Preservation
 # ============================================================================
@@ -2662,6 +2903,224 @@ test_setup_branch() {
 
   popd >/dev/null
   teardown_git_fixture
+
+  # --- Test: --project flag ---
+  echo ""
+  echo "--- setup-branch --project flag ---"
+
+  setup_git_fixture
+  # Run from the non-git TEST_DIR, pointing --project at the fixture
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" setup-branch feat/project-flag --default-branch main --project "$GIT_FIXTURE_LOCAL" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  action=$(echo "$stdout" | jq -r '.action')
+  assert_exit_code "0" "$exit_code" "setup-branch: --project flag — exit code"
+  assert_eq "created-from-default" "$action" "setup-branch: --project flag — action"
+  rm -f "$stderr_file"
+  teardown_git_fixture
+
+  # --- Test: not a git repo error ---
+  echo ""
+  echo "--- setup-branch not-a-git-repo error ---"
+
+  local non_git_dir
+  non_git_dir=$(mktemp -d)
+  mkdir -p "$non_git_dir/.aimi"
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" setup-branch feat/test --default-branch main --project "$non_git_dir" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_output=$(cat "$stderr_file")
+  assert_exit_code "1" "$exit_code" "setup-branch: not a git repo — exit code"
+  assert_stderr_contains "Not a git repository" "$stderr_output" "setup-branch: not a git repo — stderr message"
+  rm -f "$stderr_file"
+  rm -rf "$non_git_dir"
+}
+
+# ============================================================================
+# Archive Task Tests
+# ============================================================================
+
+test_archive_task_with_research_paths() {
+  echo ""
+  echo "=== Testing archive-task: deletes research files and reports count ==="
+
+  local stdout exit_code research_cleaned
+
+  # Create a dedicated temp dir for this test (needs its own .aimi/)
+  local arch_dir
+  arch_dir=$(mktemp -d)
+  mkdir -p "$arch_dir/.aimi/tasks" "$arch_dir/.aimi/research"
+
+  # Create two research files
+  local r1="$arch_dir/.aimi/research/research-us001.md"
+  local r2="$arch_dir/.aimi/research/research-us002.md"
+  printf 'research 1' > "$r1"
+  printf 'research 2' > "$r2"
+
+  # Create a task file with all stories completed and researchPaths
+  local task_file="$arch_dir/.aimi/tasks/2026-01-01-test-archive-tasks.json"
+  cat > "$task_file" << 'TASKEOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Archive test",
+    "type": "feat",
+    "branchName": "feat/archive-test",
+    "createdAt": "2026-01-01",
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 1,
+    "researchPaths": [
+      ".aimi/research/research-us001.md",
+      ".aimi/research/research-us002.md"
+    ]
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Done story",
+      "description": "Completed",
+      "acceptanceCriteria": ["Done"],
+      "priority": 1,
+      "status": "completed",
+      "dependsOn": [],
+      "notes": ""
+    }
+  ]
+}
+TASKEOF
+
+  pushd "$arch_dir" >/dev/null
+  stdout=$("$CLI" archive-task "$task_file" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "archive-task with researchPaths: exit code"
+
+  research_cleaned=$(printf '%s' "$stdout" | jq -r '.archived.researchCleaned')
+  assert_eq "2" "$research_cleaned" "archive-task with researchPaths: researchCleaned count"
+
+  # Research files must be gone
+  local r1_exists="no" r2_exists="no"
+  [ -e "$r1" ] && r1_exists="yes"
+  [ -e "$r2" ] && r2_exists="yes"
+  assert_eq "no" "$r1_exists" "archive-task with researchPaths: research file 1 deleted"
+  assert_eq "no" "$r2_exists" "archive-task with researchPaths: research file 2 deleted"
+
+  rm -rf "$arch_dir"
+}
+
+test_archive_task_without_research_paths() {
+  echo ""
+  echo "=== Testing archive-task: no researchPaths produces researchCleaned 0 ==="
+
+  local stdout exit_code research_cleaned
+
+  local arch_dir
+  arch_dir=$(mktemp -d)
+  mkdir -p "$arch_dir/.aimi/tasks"
+
+  local task_file="$arch_dir/.aimi/tasks/2026-01-02-test-archive-tasks.json"
+  cat > "$task_file" << 'TASKEOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Archive test no research",
+    "type": "feat",
+    "branchName": "feat/archive-no-research",
+    "createdAt": "2026-01-02",
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 1
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Done story",
+      "description": "Completed",
+      "acceptanceCriteria": ["Done"],
+      "priority": 1,
+      "status": "completed",
+      "dependsOn": [],
+      "notes": ""
+    }
+  ]
+}
+TASKEOF
+
+  pushd "$arch_dir" >/dev/null
+  stdout=$("$CLI" archive-task "$task_file" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "archive-task without researchPaths: exit code"
+
+  research_cleaned=$(printf '%s' "$stdout" | jq -r '.archived.researchCleaned')
+  assert_eq "0" "$research_cleaned" "archive-task without researchPaths: researchCleaned is 0"
+
+  rm -rf "$arch_dir"
+}
+
+test_archive_task_missing_research_files() {
+  echo ""
+  echo "=== Testing archive-task: missing research files skipped silently ==="
+
+  local stdout exit_code research_cleaned
+
+  local arch_dir
+  arch_dir=$(mktemp -d)
+  mkdir -p "$arch_dir/.aimi/tasks" "$arch_dir/.aimi/research"
+
+  # Create only one of the two research files referenced
+  local r1="$arch_dir/.aimi/research/research-exists.md"
+  printf 'exists' > "$r1"
+  # research-missing.md intentionally NOT created
+
+  local task_file="$arch_dir/.aimi/tasks/2026-01-03-test-archive-tasks.json"
+  cat > "$task_file" << 'TASKEOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Archive test missing research",
+    "type": "feat",
+    "branchName": "feat/archive-missing-research",
+    "createdAt": "2026-01-03",
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 1,
+    "researchPaths": [
+      ".aimi/research/research-exists.md",
+      ".aimi/research/research-missing.md"
+    ]
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Done story",
+      "description": "Completed",
+      "acceptanceCriteria": ["Done"],
+      "priority": 1,
+      "status": "completed",
+      "dependsOn": [],
+      "notes": ""
+    }
+  ]
+}
+TASKEOF
+
+  pushd "$arch_dir" >/dev/null
+  stdout=$("$CLI" archive-task "$task_file" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "archive-task missing research files: exit code"
+
+  # Only the existing file is counted
+  research_cleaned=$(printf '%s' "$stdout" | jq -r '.archived.researchCleaned')
+  assert_eq "1" "$research_cleaned" "archive-task missing research files: researchCleaned counts only existing"
+
+  # The existing file must be gone
+  local r1_exists="no"
+  [ -e "$r1" ] && r1_exists="yes"
+  assert_eq "no" "$r1_exists" "archive-task missing research files: existing file deleted"
+
+  rm -rf "$arch_dir"
 }
 
 # ============================================================================
@@ -2726,7 +3185,14 @@ main() {
   test_reset_orphaned_with_orphans
   test_stale_state_warning
 
+  echo ""
+  echo "--- Version Command Test ---"
+  test_version
+
   # Version staleness tests — run with fresh state
+  # Unset AIMI_PLUGIN_DIR to test non-converter code paths (e.g., when set by OpenCode)
+  local _saved_plugin_dir="${AIMI_PLUGIN_DIR:-}"
+  unset AIMI_PLUGIN_DIR 2>/dev/null || true
   echo ""
   echo "--- Version Staleness Tests ---"
   test_check_version
@@ -2735,6 +3201,9 @@ main() {
   test_check_version_quiet_fix
   test_check_version_backward_compat
   test_cleanup_versions
+  if [ -n "$_saved_plugin_dir" ]; then
+    export AIMI_PLUGIN_DIR="$_saved_plugin_dir"
+  fi
 
   # CLAUDE_CONFIG_DIR tests
   echo ""
@@ -2753,6 +3222,12 @@ main() {
   test_cleanup_versions_plugin_dir
   test_read_global_cli_cache_rejects_arbitrary
 
+  echo ""
+  echo "--- Claude Code Host Detection Tests ---"
+  test_claude_code_host_ignores_plugin_dir_check_version
+  test_claude_code_host_ignores_plugin_dir_cleanup
+  test_claude_code_host_rejects_plugin_dir_cached_path
+
   # Auto-discovery tests
   echo ""
   echo "--- Auto-Discovery Tests ---"
@@ -2760,6 +3235,9 @@ main() {
   test_auto_discovery_not_found
 
   # Global cache tests — run with isolated CLAUDE_CONFIG_DIR
+  # Unset AIMI_PLUGIN_DIR to test non-converter code paths
+  _saved_plugin_dir="${AIMI_PLUGIN_DIR:-}"
+  unset AIMI_PLUGIN_DIR 2>/dev/null || true
   echo ""
   echo "--- Global Cache Tests ---"
   test_write_global_cli_cache
@@ -2771,6 +3249,9 @@ main() {
   test_read_global_worktree_cache_tampered
   test_init_session_writes_global_cache
   test_check_version_fix_updates_global_cache
+  if [ -n "$_saved_plugin_dir" ]; then
+    export AIMI_PLUGIN_DIR="$_saved_plugin_dir"
+  fi
 
   # Project field validation tests — run with fresh state
   echo ""
@@ -2806,10 +3287,25 @@ main() {
   test_status_counts_only
   test_next_story_returns_full_object
 
+  # Multi-file discovery tests
+  echo ""
+  echo "--- Multi-File Discovery Tests ---"
+  reset_fixture
+  test_find_tasks_all
+  test_init_session_file_flag
+  test_init_session_file_flag_validation
+
   # Setup-branch tests — uses own git fixture (independent of TEST_DIR)
   echo ""
   echo "--- Setup Branch Tests ---"
   test_setup_branch
+
+  # Archive-task tests — each creates its own isolated temp dir
+  echo ""
+  echo "--- Archive Task Tests ---"
+  test_archive_task_with_research_paths
+  test_archive_task_without_research_paths
+  test_archive_task_missing_research_files
 
   cleanup
 

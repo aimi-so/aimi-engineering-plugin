@@ -1,56 +1,29 @@
 ---
 name: aimi:open-pr
-description: Open a pull request with auto-populated title and description from tasks
+description: Open a pull request with title and description derived from git commits and diff
 disable-model-invocation: true
 allowed-tools: Bash(gh:*), Bash(git:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*)
 ---
 
 # Aimi Open PR
 
-Automatically detect the parent branch, build PR title and description from tasks.json, and create a pull request via `gh pr create`.
+Automatically detect the parent branch, build the PR title and description from git commits and the diff against the base branch, and create a pull request via `gh pr create`.
+
+## Project Conventions
+
+This command does not read the working project's `CLAUDE.md` or `AGENTS.md`. PR title and body are derived purely from git commits and the diff against the base branch (see Steps 2–4).
+
+For project-specific PR structure (e.g., required Test Plan section, issue-link footer, checklists), use GitHub's standard mechanism:
+
+- **`.github/pull_request_template.md`** — `gh pr create` honors this file automatically. Any template content is prepended to the body we build in Step 4b.
+
+Commit-message conventions (Conventional Commits, etc.) are preserved automatically because Step 4a derives the PR title from the first commit subject.
 
 ## Step 0: Resolve CLI Path
 
-Resolve `$AIMI_CLI` path using the four-layer strategy below. Each command is a separate Bash call (no compound operators).
+Read `references/cli-path-resolution.md` and follow the **Resolve CLI Path** and **Version Check** sections to set `$AIMI_CLI`. Each layer is a separate Bash call.
 
-**Layer 0 — AIMI_PLUGIN_DIR (env var override):**
-```bash
-if [ -n "$AIMI_PLUGIN_DIR" ] && [ "${AIMI_PLUGIN_DIR#/}" != "$AIMI_PLUGIN_DIR" ] && [ -d "$AIMI_PLUGIN_DIR" ] && [ -x "$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh" ]; then AIMI_CLI="$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh"; fi
-```
-
-**Layer 1 — Global cache (fast path):**
-```bash
-if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(cat ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path 2>/dev/null); fi
-```
-
-**Layer 1 validation:**
-```bash
-if [ -n "$AIMI_CLI" ] && [ ! -x "$AIMI_CLI" ]; then AIMI_CLI=""; fi
-```
-
-**Layer 2 — Glob fallback (zsh-safe, only if Layer 1 failed):**
-```bash
-if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1'); fi
-```
-
-**Layer 2 cache update:**
-```bash
-if [ -n "$AIMI_CLI" ]; then printf '%s\n' "$AIMI_CLI" > "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path.tmp" && mv "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path.tmp" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" && chmod 600 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path"; fi
-```
-
-**Layer 3 — Per-project fallback (last resort):**
-```bash
-if [ -z "$AIMI_CLI" ] && [ -f .aimi/cli-path ] && [ -x "$(cat .aimi/cli-path)" ]; then AIMI_CLI=$(cat .aimi/cli-path); fi
-```
-
-If empty, report error and STOP:
-- If `$AIMI_PLUGIN_DIR` is set: "aimi-cli.sh not found. Check AIMI_PLUGIN_DIR path: $AIMI_PLUGIN_DIR"
-- Otherwise: "aimi-cli.sh not found. Reinstall plugin: `/plugin install aimi-engineering`"
-
-**Version check:**
-```bash
-$AIMI_CLI check-version --quiet --fix
-```
+If resolution fails, report error and STOP.
 
 Use `$AIMI_CLI` for all subsequent script calls.
 
@@ -90,35 +63,11 @@ Warning: You have uncommitted changes. Consider committing before opening a PR.
 
 Continue execution (do not stop).
 
-## Step 2: Read Metadata and Status via CLI
+## Step 2: Read Git Commits and Diff
 
-### 2a. Get metadata
+Build the PR from git state directly — commits and diff against the base branch — instead of relying on tasks.json.
 
-```bash
-$AIMI_CLI metadata
-```
-
-This returns JSON with task metadata. Extract `metadata.title` — it is already in `type(scope): subject` format and will be used as the PR title.
-
-If no tasks file found, the script exits with error. Report:
-```
-No tasks file found. Run /aimi:plan to create a task list.
-```
-and STOP.
-
-### 2b. Get status
-
-```bash
-$AIMI_CLI status
-```
-
-This returns JSON with status counts and story list. Extract completed stories (status = "completed") for the PR description.
-
-## Step 3: Detect Parent Branch
-
-Detect the base branch for the PR by finding the first decorated ancestor commit.
-
-### 3a. Get current branch name
+### 2a. Get current branch
 
 ```bash
 git rev-parse --abbrev-ref HEAD
@@ -126,7 +75,7 @@ git rev-parse --abbrev-ref HEAD
 
 Store as `$CURRENT_BRANCH`.
 
-### 3b. Find parent branch via decorated ancestor
+### 2b. Detect parent branch via decorated ancestor
 
 ```bash
 git log --pretty=format:'%D' --first-parent | grep -v '^$' | grep -v "HEAD" | grep -v "$CURRENT_BRANCH" | head -1
@@ -134,9 +83,9 @@ git log --pretty=format:'%D' --first-parent | grep -v '^$' | grep -v "HEAD" | gr
 
 Parse the output to extract a branch name. The output may contain multiple refs separated by commas (e.g., `origin/main, main`). Extract the first local branch name (without `origin/` prefix). If the output contains `origin/branch-name`, strip the `origin/` prefix.
 
-### 3c. Fallback to default branch
+### 2c. Fallback to default branch
 
-If no parent branch was detected in 3b, use the repository's default branch:
+If no parent branch was detected in 2b, use the repository's default branch:
 
 ```bash
 gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name'
@@ -144,46 +93,132 @@ gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name'
 
 Store the result as `$BASE_BRANCH`.
 
-### 3d. Validate branch name
+### 2d. Validate base branch name
 
 The detected `$BASE_BRANCH` must match the pattern `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$`.
 
-Validate:
 ```bash
 echo "$BASE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'
 ```
 
 If validation fails, report: "Invalid parent branch name detected: $BASE_BRANCH" and STOP.
 
+### 2e. Capture full commit log
+
+Capture every non-merge commit on the branch with hash, subject, and body separated by ASCII unit separators (`%x1f`), one commit per record terminated by an ASCII record separator (`%x1e`). This lets the renderer split records cleanly even when commit bodies contain newlines:
+
+```bash
+COMMIT_LOG=$(git log "$BASE_BRANCH"..HEAD --pretty=format:'%H%x1f%s%x1f%b%x1e' --no-merges)
+```
+
+Store as `$COMMIT_LOG`.
+
+### 2f. Capture diff summary and file list
+
+```bash
+DIFF_STAT=$(git diff --stat "$BASE_BRANCH"..HEAD)
+FILES_CHANGED=$(git diff --name-only "$BASE_BRANCH"..HEAD)
+```
+
+Store as `$DIFF_STAT` and `$FILES_CHANGED`.
+
 ## Step 4: Build PR Title and Description
 
 ### 4a. PR Title
 
-Use `metadata.title` directly from Step 2a output. This is already in the correct `type(scope): subject` format.
+Derive the PR title from the first commit subject on the branch (preserving conventional-commit form). When the branch has zero commits ahead of base, fall back to `$CURRENT_BRANCH`:
+
+```bash
+PR_TITLE=$(git log "$BASE_BRANCH"..HEAD --reverse --pretty=format:'%s' --no-merges | head -1)
+if [ -z "$PR_TITLE" ]; then
+  PR_TITLE="$CURRENT_BRANCH"
+fi
+```
+
+Store as `$PR_TITLE`.
 
 ### 4b. PR Description
 
-Build the description following the default PR template.
+Build the description from git state with three core sections:
 
-**Get commit log between base and HEAD:**
+- **Summary**: Aggregated commit bodies from `$COMMIT_LOG`. Split records by the ASCII record separator (`%x1e`), then split each record's fields by the unit separator (`%x1f`) into `hash`, `subject`, `body`. Concatenate the non-empty `body` fields into a single prose block. If every commit body is empty, concatenate the commit subjects instead.
+- **Changes**: Each commit subject (the second field from every record) rendered as a bullet, one per line.
+- **Files Changed**: The `$DIFF_STAT` output rendered inside a fenced code block.
+
+### 4c. Backend Implementation Spec (conditional)
+
+Only include this section when ALL of the following are true:
+
+1. A tasks file exists for the current session (`$AIMI_CLI metadata` exits 0), AND
+2. `metadata.frontendOnly` is `true`, AND
+3. `metadata.backendSpec` is not null.
+
+Resolve the metadata guardedly. Any failure (no tasks file, CLI error, missing fields) silently omits this section and PR creation continues:
 
 ```bash
-git log --oneline "$BASE_BRANCH"..HEAD
+$AIMI_CLI metadata 2>/dev/null || true
 ```
 
-**Assemble the PR body with these sections:**
+Capture the JSON output (if any). Parse it directly from the result:
 
-- **Problem**: Derived from the metadata title (what this feature/change addresses)
-- **Solution**: From the metadata title and story summary (high-level approach)
-- **Stories Completed**: List of completed story IDs and titles from the status output (format: `- US-XXX: Story title`)
-- **Changes**: From the `git log --oneline` output between base and HEAD (format each commit as a bullet)
-- **Testing**: Story verification information from the status output (strategies used, pass/fail status)
+- If the CLI exits non-zero or emits no output, set `INCLUDE_BACKEND_SPEC=0` and skip this section entirely.
+- Otherwise read `metadata.frontendOnly`, `metadata.backendSpec`, and `metadata.title` from the JSON.
+- Set `INCLUDE_BACKEND_SPEC=1` only when `frontendOnly` is exactly `true` AND `backendSpec` is a non-null object.
+- Store `metadata.title` as `$METADATA_TITLE` for use in Step 5c.
+
+When `$INCLUDE_BACKEND_SPEC=1`, render the spec deterministically from `metadata.backendSpec` (no LLM generation). Contains four subsections:
+
+  #### `### Endpoints`
+  A markdown table with columns: Method | Path | Description. Each row corresponds to an entry in `backendSpec.endpoints[]`.
+
+  ```
+  | Method | Path | Description |
+  |--------|------|-------------|
+  | POST | /api/example | Creates a new example |
+  ```
+
+  #### `### Data Models`
+  A markdown table with columns: Name | Fields | Relationships. Each row corresponds to an entry in `backendSpec.dataModels[]`.
+
+  ```
+  | Name | Fields | Relationships |
+  |------|--------|---------------|
+  | Example | id, name, createdAt | belongs_to User |
+  ```
+
+  #### `### Business Rules`
+  A bulleted list. Each item corresponds to an entry in `backendSpec.businessRules[]`.
+
+  ```
+  - Rule one
+  - Rule two
+  ```
+
+  #### `### Business Context`
+  Render `backendSpec.businessContext` as structured sub-sections. If `businessContext` is a plain string (legacy format), render as a single paragraph.
+
+  When `businessContext` is an object:
+
+  ```
+  <businessContext.summary paragraph>
+
+  **User Roles:** <comma-separated list from businessContext.userRoles[]>
+
+  **Constraints:**
+  - <item from businessContext.constraints[]>
+
+  **Assumptions:**
+  - <item from businessContext.assumptions[]>
+
+  **Success Criteria:**
+  - <item from businessContext.successCriteria[]>
+  ```
+
+  Omit any sub-section whose array is empty or absent.
 
 ## Step 5: Push Branch and Create PR
 
 ### 5a. Push branch to origin
-
-Check if the branch needs pushing (not yet pushed or has unpushed commits):
 
 ```bash
 git push -u origin "$CURRENT_BRANCH"
@@ -191,36 +226,142 @@ git push -u origin "$CURRENT_BRANCH"
 
 ### 5b. Create the PR
 
-Use HEREDOC for the body to handle multi-line content safely:
+Use HEREDOC for the body to handle multi-line content safely. The Summary/Changes/Files Changed sections always appear. The Backend Implementation Spec section is appended only when `$INCLUDE_BACKEND_SPEC=1`:
 
 ```bash
 gh pr create --title "$PR_TITLE" --base "$BASE_BRANCH" --body "$(cat <<'EOF'
-## Problem
+## Summary
 
-<problem description from metadata title>
-
-## Solution
-
-<solution summary from stories>
-
-## Stories Completed
-
-- US-001: Story title
-- US-002: Story title
+<aggregated commit bodies from $COMMIT_LOG (fallback to concatenated subjects if all bodies empty)>
 
 ## Changes
 
-- <commit message 1>
-- <commit message 2>
+- <commit subject 1>
+- <commit subject 2>
 
-## Testing
+## Files Changed
 
-- <verification info per story>
+```
+<$DIFF_STAT output>
+```
+
+<if $INCLUDE_BACKEND_SPEC=1, append the following section>
+
+## Backend Implementation Spec
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| <method> | <path> | <description> |
+
+### Data Models
+
+| Name | Fields | Relationships |
+|------|--------|---------------|
+| <name> | <fields> | <relationships> |
+
+### Business Rules
+
+- <rule from backendSpec.businessRules[]>
+
+### Business Context
+
+<backendSpec.businessContext.summary paragraph>
+
+**User Roles:** <comma-separated from businessContext.userRoles[]>
+
+**Constraints:**
+- <item from businessContext.constraints[]>
+
+**Assumptions:**
+- <item from businessContext.assumptions[]>
+
+**Success Criteria:**
+- <item from businessContext.successCriteria[]>
+
+<omit any sub-section whose array is empty or absent>
+<if businessContext is a plain string (legacy), render as a single paragraph instead>
+
+</if>
 EOF
 )"
 ```
 
-### 5c. Report success
+**Important**: The Backend Implementation Spec section is rendered entirely from the `backendSpec` metadata object. No LLM generation is used — all content comes from deterministic template rendering of the structured data. When `$INCLUDE_BACKEND_SPEC=0` (no tasks file, `frontendOnly` is false, or `backendSpec` is null), the section is omitted entirely and the PR body ends after the Files Changed section. If `businessContext` is a plain string (legacy format), render it as a single paragraph for backwards compatibility.
+
+### 5c. Create backend issue and link to PR (conditional)
+
+This step only runs when `$INCLUDE_BACKEND_SPEC=1` (from Step 4c). If false, skip to Step 5d.
+
+Build the issue body reusing the same Backend Implementation Spec template from Step 4c. The issue body contains the four subsections (Endpoints, Data Models, Business Rules, Business Context) rendered identically to the PR body section.
+
+**Attempt to create the GitHub issue:**
+
+```bash
+if [ "$INCLUDE_BACKEND_SPEC" = "1" ]; then
+  if ISSUE_URL=$(gh issue create --title "Backend: $METADATA_TITLE" --body "$(cat <<'EOF'
+## Backend Implementation Spec
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| <method> | <path> | <description> |
+
+### Data Models
+
+| Name | Fields | Relationships |
+|------|--------|---------------|
+| <name> | <fields> | <relationships> |
+
+### Business Rules
+
+- <rule from backendSpec.businessRules[]>
+
+### Business Context
+
+<backendSpec.businessContext.summary paragraph>
+
+**User Roles:** <comma-separated from businessContext.userRoles[]>
+
+**Constraints:**
+- <item from businessContext.constraints[]>
+
+**Assumptions:**
+- <item from businessContext.assumptions[]>
+
+**Success Criteria:**
+- <item from businessContext.successCriteria[]>
+
+<omit any sub-section whose array is empty or absent>
+<if businessContext is a plain string (legacy), render as a single paragraph instead>
+EOF
+)" 2>/dev/null); then
+    ISSUE_NUMBER=$(echo "$ISSUE_URL" | grep -oE '[0-9]+$')
+    gh pr edit "$PR_URL" --body "$(cat <<EOF
+$PR_BODY
+
+---
+Related issue: #$ISSUE_NUMBER
+EOF
+)"
+    echo "Backend issue created: $ISSUE_URL (linked to PR)"
+  else
+    echo "Warning: Could not create backend issue (permissions denied, issues disabled, or rate limit). The backend spec is still available in the PR body."
+  fi
+fi
+```
+
+Where `$METADATA_TITLE` is `metadata.title` from Step 4c, `$PR_URL` is the PR URL returned from Step 5b, and `$PR_BODY` is the original PR body from Step 5b.
+
+**Important**: The `gh issue create` call is wrapped in an `if/then/else` block for graceful degradation. If the command fails (non-zero exit: permissions denied, issues disabled, rate limit), a warning is logged but PR creation is NOT affected — the backend spec still lives in the PR body (guaranteed by Step 5b). The `2>/dev/null` suppresses stderr from the failed command.
+
+**On success**: The issue URL is captured, the issue number is extracted via `grep -oE '[0-9]+$'`, and `gh pr edit` appends a "Related issue: #N" link to the PR body.
+
+**On failure**: A warning message is displayed and execution continues to Step 5d.
+
+### 5d. Report success
 
 Display the PR URL to the user:
 

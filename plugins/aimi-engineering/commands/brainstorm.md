@@ -61,7 +61,34 @@ Do not mention skip decisions to the user — just proceed seamlessly.
 
 **When only best-practices researcher is skipped:** Phase 2 questions are informed by codebase patterns plus the concrete details the user provided.
 
-### Step 1b: Run Research (Parallel)
+### Step 1b: Preparation and Research (Parallel)
+
+#### Derive Topic Slug
+
+From the feature description, derive a topic slug (needed for research output paths):
+1. Convert to lowercase
+2. Replace spaces and special characters with hyphens
+3. Remove consecutive hyphens
+4. Truncate to 50 characters
+5. Remove trailing hyphens
+
+#### Generate Run Discriminator
+
+Generate a single timestamp for this brainstorm run to prevent same-day re-runs from overwriting prior research files:
+
+```bash
+RUN_TS=$(date +%H%M%S)
+```
+
+Store `RUN_TS` and use it in **all** research agent prompts for this run.
+
+#### Create Research Directory
+
+```bash
+mkdir -p .aimi/research
+```
+
+#### Run Research Agents
 
 Spawn the selected research agents **in parallel** using the Task tool:
 
@@ -69,12 +96,18 @@ Spawn the selected research agents **in parallel** using the Task tool:
 Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
   prompt: "Understand existing patterns related to: [feature description].
            Look for: similar features, established patterns, CLAUDE.md guidance,
-           relevant file paths, technology choices."
+           relevant file paths, technology choices.
+           researchDepth=standard
+           topicSlug=<topic-slug>
+           outputPath: .aimi/research/YYYY-MM-DD-<topic-slug>-[RUN_TS]-codebase.md"
 
 Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
   prompt: "Research current best practices for: [feature description].
            Look for: industry standards, community conventions, recommended
-           patterns, common pitfalls, and authoritative guidance."
+           patterns, common pitfalls, and authoritative guidance.
+           researchDepth=standard
+           topicSlug=<topic-slug>
+           outputPath: .aimi/research/YYYY-MM-DD-<topic-slug>-[RUN_TS]-best-practices.md"
 ```
 
 Only spawn the agents that were not skipped in Step 1a.
@@ -88,16 +121,25 @@ Apply this sanitization identically to both agent prompts.
 
 ### Step 1c: Research Consolidation
 
-Merge the results from whichever agents completed successfully. Handle all four permutations:
+Merge the results from whichever agents completed successfully into a structured summary. Handle all four permutations:
 
 | Codebase Result | Best-Practices Result | Action |
 |-----------------|----------------------|--------|
-| **Success** | **Success** | Merge both; surface conflicts between internal patterns and external best practices as candidate questions for Phase 2 |
-| **Success** | **Failed/Skipped** | Use codebase findings only; Phase 2 questions informed by internal patterns |
-| **Failed/Skipped** | **Success** | Use best-practices findings only; Phase 2 questions informed by external guidance |
+| **Success** | **Success** | Merge both into structured summary; surface conflicts between internal patterns and external best practices as candidate questions for Phase 2 |
+| **Success** | **Failed/Skipped** | Use codebase findings only; populate Key Patterns and File References sections |
+| **Failed/Skipped** | **Success** | Use best-practices findings only; populate Key Patterns and External Insights sections |
 | **Failed/Skipped** | **Failed/Skipped** | Proceed with no research context; Phase 2 falls back to generic topic-based questions (existing behavior) |
 
-**Conflict surfacing:** When both agents succeed, compare their findings. If internal codebase patterns diverge from external best practices (e.g., the codebase uses pattern A but best practices recommend pattern B), capture each conflict as a candidate question for Phase 2. Present these as explicit choices: "The codebase currently uses [X], but industry best practices recommend [Y]. Which approach should we follow?"
+#### Structured Consolidation Schema
+
+Organize the merged findings into these sections:
+
+1. **Key Patterns**: Relevant codebase patterns, naming conventions, architectural decisions, and best-practice patterns discovered by either agent
+2. **Conflicts**: When both agents succeed, compare their findings. If internal codebase patterns diverge from external best practices (e.g., the codebase uses pattern A but best practices recommend pattern B), capture each conflict as a candidate question for Phase 2. Present these as explicit choices: "The codebase currently uses [X], but industry best practices recommend [Y]. Which approach should we follow?"
+3. **File References**: Specific file paths, modules, and code locations relevant to the feature (from codebase researcher)
+4. **External Insights**: Industry standards, community conventions, recommended patterns, common pitfalls (from best-practices researcher)
+
+This structured summary feeds into Phase 2 question generation and Phase 4 design document capture.
 
 ### Quality Gate: Research Adequacy
 
@@ -111,6 +153,23 @@ Before generating questions, review the research output from Phase 1.
   Accept the user's response (additional context or confirmation to proceed) and continue to Phase 2.
 - **If research was skipped by specificity logic (Step 1a):** This gate is **advisory only** — the user already provided specific details that made research unnecessary. Proceed to Phase 2 without prompting.
 
+## Phase 1.7: UI Feature Detection
+
+Scan the feature description for visual/UI keywords using case-insensitive whole-word matching (regex word boundaries `\b`).
+
+**Keyword list:** page, modal, dashboard, form, component, layout, ui, design
+
+**Co-occurrence rule:** The keyword "design" alone does not trigger detection — it requires co-occurrence with at least one other keyword from the list. This prevents false positives from phrases like "system design" or "API design."
+
+| Bucket | Signals | Action |
+|--------|---------|--------|
+| **Detect** | Feature description contains at least one keyword (with "design" requiring co-occurrence) | Mark the feature as UI-relevant; Phase 2 includes design-thinking questions covering visual hierarchy, interaction patterns, responsive behavior, and accessibility |
+| **Skip** | No keywords match, or "design" appears alone without another keyword | Proceed unchanged — no design-category questions injected into Phase 2 |
+
+If the feature description contains UI keywords, Phase 2 generates additional questions targeting design categories (visual hierarchy, interaction patterns, responsive behavior, accessibility) alongside the standard topic categories. These design questions follow the same format rules: 3-4 options, under 20 words question text, under 15 words per option, "Other" escape hatch.
+
+When no keywords match, brainstorm proceeds unchanged — Phase 2 covers only the standard topic categories with no mention of design categories.
+
 ## Phase 2: Batched Questions
 
 Using the user's feature description and consolidated research findings (from Step 1c), generate **3-5 batched multiple-choice questions**. Include any conflict-based questions surfaced during consolidation.
@@ -119,7 +178,7 @@ Using the user's feature description and consolidated research findings (from St
 
 - Questions are informed by research findings when available (contextual options)
 - Fall back to generic topic-based questions when research is empty
-- Cover topic categories: Purpose, Users, Constraints, Success, Edge Cases, Existing Patterns, Approach
+- Cover topic categories: Purpose, Users, Constraints, Success, Edge Cases, Existing Patterns, Approach (and when UI features detected: Aesthetic Direction, Differentiation)
 - 3-4 options per question (not more)
 - Question text under 20 words
 - Option text under 15 words
@@ -136,6 +195,30 @@ When consolidated research (Step 1c) reveals **multiple valid approaches**, incl
 - **Do NOT generate an approach question when:**
   - Research context is insufficient (both agents failed/skipped or returned no approach-relevant findings) — rely on Phase 3 fallback instead
   - Research reveals a clearly superior single approach — skip the question and let Phase 3 handle it (or skip entirely)
+
+#### Design Questions (When UI Features Detected in Phase 1.7)
+
+When UI features were detected in Phase 1.7, include design-category questions in the batch alongside standard topic questions. These follow the same format rules.
+
+**Example Aesthetic Direction question:**
+
+```
+N. What visual tone fits this interface best?
+   A. Brutally minimal — clean, sparse, essential
+   B. Retro-futuristic — nostalgic yet forward
+   C. Luxury/refined — elegant, premium feel
+   D. Other: [please specify]
+```
+
+**Example Differentiation question:**
+
+```
+N. What should make this interface memorable?
+   A. Distinctive animation or motion
+   B. Bold typography choices
+   C. Unique layout composition
+   D. Other: [please specify]
+```
 
 ### Present Questions
 
@@ -184,8 +267,10 @@ After each response, assess which topic categories remain unaddressed:
 | Edge Cases | Error states/boundaries discussed |
 | Existing Patterns | Codebase context available (from research or user) |
 | Approach | At least one approach preference expressed by user via selection or free-form response |
+| Aesthetic Direction | User expresses an aesthetic preference, tone, or visual direction |
+| Differentiation | User identifies a memorable or distinguishing visual aspect |
 
-- **If all 7 key topics covered** OR **user says "proceed"/"let's move on"** → advance to Phase 3
+- **If all key topics covered (7 standard, or 9 when UI features detected)** OR **user says "proceed"/"let's move on"** → advance to Phase 3
 - **If topics remain uncovered** AND **under 4 rounds** → generate follow-up batch targeting uncovered topics
 - **If 4 rounds completed** → advance to Phase 3 regardless
 
@@ -289,6 +374,13 @@ topic: <topic-slug>
 - [Decision 1]: [Rationale]
 - [Decision 2]: [Rationale]
 
+When UI features were detected in Phase 1.7, include this section:
+
+## Design Decisions
+- Aesthetic direction: [chosen tone from Phase 2 responses]
+- Reference points: [products/styles the user referenced]
+- Key visual element: [what makes it memorable, from Differentiation responses]
+
 ## Open Questions
 - [Any unresolved questions]
 
@@ -316,6 +408,7 @@ Before writing the document, verify **all** of the following criteria. If any cr
 - [ ] Directory `.aimi/brainstorms/` exists
 - [ ] No filename collision (append counter if needed)
 - [ ] YAGNI applied — no unnecessary complexity
+- [ ] Design Decisions section present with Aesthetic Direction and Differentiation entries (when UI features detected in Phase 1.7) — advisory/non-blocking
 
 **On failure:** Use a conversational nudge for each unmet criterion:
 > "Before I save the document, I noticed [specific gap]. For example: 'we only explored one approach without noting why alternatives weren't considered.' Want to address that, or should I save as-is?"

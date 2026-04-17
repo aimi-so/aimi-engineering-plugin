@@ -225,6 +225,11 @@ _validate_plugin_dir() {
   printf '%s\n' "${AIMI_PLUGIN_DIR%/}"
 }
 
+# Detect if running inside Claude Code (CLAUDECODE=1 is set by Claude Code in every session)
+_is_claude_code_host() {
+  [ "${CLAUDECODE:-}" = "1" ]
+}
+
 # Return the global cache file path for aimi-cli.sh
 _global_cache_path() {
   local config_dir
@@ -269,7 +274,7 @@ read_global_cli_cache() {
   plugin_dir=$(_validate_plugin_dir)
   case "$cached_path" in
     "${plugin_dir}"/scripts/aimi-cli.sh)
-      if [ -n "$plugin_dir" ]; then
+      if [ -n "$plugin_dir" ] && ! _is_claude_code_host; then
         printf '%s\n' "$cached_path"
       fi
       ;;
@@ -309,7 +314,7 @@ read_global_worktree_cache() {
   plugin_dir=$(_validate_plugin_dir)
   case "$cached_path" in
     "${plugin_dir}"/skills/git-worktree/scripts/worktree-manager.sh)
-      if [ -n "$plugin_dir" ]; then
+      if [ -n "$plugin_dir" ] && ! _is_claude_code_host; then
         printf '%s\n' "$cached_path"
       fi
       ;;
@@ -386,11 +391,66 @@ cmd_find_tasks() {
   resolve_path "$tasks_file"
 }
 
+# Find all tasks files sorted by modification time (most recent first)
+cmd_find_tasks_all() {
+  local files
+  files=$(ls -t "$TASKS_DIR"/*-tasks.json 2>/dev/null)
+
+  if [ -z "$files" ]; then
+    echo "No tasks files found in $TASKS_DIR/" >&2
+    exit 1
+  fi
+
+  # Output each file as an absolute path, newline-separated
+  while IFS= read -r f; do
+    resolve_path "$f"
+  done <<< "$files"
+}
+
 # Initialize execution session
+# Usage: aimi-cli.sh init-session [--file <path>]
 cmd_init_session() {
   local tasks_file branch pending
+  local file_flag=""
 
-  tasks_file=$(cmd_find_tasks)
+  # Parse optional --file flag
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --file)
+        shift
+        file_flag="${1:-}"
+        ;;
+      -*)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh init-session [--file <path>]" >&2
+        exit 1
+        ;;
+      *)
+        echo "Error: Unexpected argument: $1" >&2
+        echo "Usage: aimi-cli.sh init-session [--file <path>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$file_flag" ]; then
+    # Validate the --file path exists
+    if [ ! -f "$file_flag" ]; then
+      echo "Error: File not found: $file_flag" >&2
+      exit 1
+    fi
+    # Validate it matches *-tasks.json pattern
+    local basename
+    basename=$(basename "$file_flag")
+    if ! [[ "$basename" == *-tasks.json ]]; then
+      echo "Error: File does not match *-tasks.json pattern: $file_flag" >&2
+      exit 1
+    fi
+    tasks_file=$(resolve_path "$file_flag")
+  else
+    tasks_file=$(cmd_find_tasks)
+  fi
   write_state "current-tasks" "$tasks_file"
 
   # Self-resolve: persist this CLI's absolute path for future sessions
@@ -986,6 +1046,34 @@ cmd_get_state() {
 # Fallback: git symbolic-ref refs/remotes/origin/HEAD (offline)
 # Caches result in .aimi/default-branch for session reuse
 cmd_detect_default_branch() {
+  local project_dir=""
+
+  # Parse --project flag
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project)
+        shift
+        project_dir="${1:-}"
+        ;;
+    esac
+    shift
+  done
+
+  # cd into project dir if specified (supports multi-repo layouts where AIMI root is not a git repo)
+  if [ -n "$project_dir" ]; then
+    if [ ! -d "$project_dir" ]; then
+      echo "Error: Project directory does not exist: $project_dir" >&2
+      exit 1
+    fi
+    cd "$project_dir"
+  fi
+
+  # Guard: must be inside a git repository
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
+    exit 1
+  fi
+
   # Return cached value if available
   local cached
   cached=$(read_state "default-branch")
@@ -1015,9 +1103,9 @@ cmd_detect_default_branch() {
 }
 
 # Setup branch: deterministic branch creation/checkout logic
-# Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch>
+# Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--project <path>]
 cmd_setup_branch() {
-  local branch_name="" default_branch=""
+  local branch_name="" default_branch="" project_dir=""
 
   # Parse arguments (positional + flags)
   while [ $# -gt 0 ]; do
@@ -1026,9 +1114,13 @@ cmd_setup_branch() {
         shift
         default_branch="${1:-}"
         ;;
+      --project)
+        shift
+        project_dir="${1:-}"
+        ;;
       -*)
         echo "Error: Unknown flag: $1" >&2
-        echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch>" >&2
+        echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--project <path>]" >&2
         exit 1
         ;;
       *)
@@ -1036,7 +1128,7 @@ cmd_setup_branch() {
           branch_name="$1"
         else
           echo "Error: Unexpected argument: $1" >&2
-          echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch>" >&2
+          echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--project <path>]" >&2
           exit 1
         fi
         ;;
@@ -1046,7 +1138,22 @@ cmd_setup_branch() {
 
   # Validate required arguments
   if [ -z "$branch_name" ] || [ -z "$default_branch" ]; then
-    echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch>" >&2
+    echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--project <path>]" >&2
+    exit 1
+  fi
+
+  # cd into project dir if specified (supports multi-repo layouts where AIMI root is not a git repo)
+  if [ -n "$project_dir" ]; then
+    if [ ! -d "$project_dir" ]; then
+      echo "Error: Project directory does not exist: $project_dir" >&2
+      exit 1
+    fi
+    cd "$project_dir"
+  fi
+
+  # Guard: must be inside a git repository
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
     exit 1
   fi
 
@@ -1117,6 +1224,18 @@ cmd_clear_state() {
   echo "State cleared."
 }
 
+# Print the plugin version from plugin.json
+cmd_version() {
+  local script_path plugin_json
+  script_path="${BASH_SOURCE[0]:-$0}"
+  plugin_json="$(cd "$(dirname "$script_path")/.." && pwd)/.claude-plugin/plugin.json"
+  if [ ! -f "$plugin_json" ]; then
+    echo "Error: plugin.json not found" >&2
+    exit 1
+  fi
+  jq -r '.version' "$plugin_json"
+}
+
 # Check CLI version staleness
 # Compares stored cli-path against the glob-resolved latest path
 # Flags: --quiet (suppress stderr), --fix (auto-fix stale detection)
@@ -1135,10 +1254,10 @@ cmd_check_version() {
   local config_dir
   config_dir=$(_claude_config_dir)
 
-  # When AIMI_PLUGIN_DIR is set, the converter manages the lifecycle — skip glob
+  # When AIMI_PLUGIN_DIR is set and NOT inside Claude Code, the converter manages the lifecycle
   local plugin_dir
   plugin_dir=$(_validate_plugin_dir)
-  if [ -n "$plugin_dir" ]; then
+  if [ -n "$plugin_dir" ] && ! _is_claude_code_host; then
     printf '{"status":"ok","path":"%s/scripts/aimi-cli.sh","message":"managed by compound-plugin converter"}\n' "$plugin_dir"
     return 0
   fi
@@ -1200,10 +1319,10 @@ cmd_check_version() {
 # Scans <config_dir>/plugins/cache/*/aimi-engineering/*/ for version dirs
 # Outputs JSON {"removed":<count>,"kept":"<version>"} to stdout
 cmd_cleanup_versions() {
-  # When AIMI_PLUGIN_DIR is set, the converter manages the lifecycle — skip cleanup
+  # When AIMI_PLUGIN_DIR is set and NOT inside Claude Code, the converter manages the lifecycle
   local plugin_dir
   plugin_dir=$(_validate_plugin_dir)
-  if [ -n "$plugin_dir" ]; then
+  if [ -n "$plugin_dir" ] && ! _is_claude_code_host; then
     printf '{"removed":0,"skipped":true,"message":"converter manages lifecycle"}\n'
     return 0
   fi
@@ -1583,14 +1702,29 @@ cmd_archive_task() {
     fi
   fi
 
+  # Delete linked research files (ephemeral — rm -f, not archived)
+  local research_cleaned=0
+  while IFS= read -r rpath; do
+    [ -z "$rpath" ] && continue
+    local resolved_research
+    if [ "${rpath#/}" = "$rpath" ]; then
+      # Relative path — resolve from project root
+      resolved_research="$PROJECT_ROOT/$rpath"
+    else
+      resolved_research="$rpath"
+    fi
+    validate_path_in_project "$resolved_research"
+    if [ -e "$resolved_research" ]; then
+      rm -f "$resolved_research"
+      research_cleaned=$((research_cleaned + 1))
+    fi
+  done < <(jq -r '.metadata.researchPaths[]? // empty' "$archived_task" 2>/dev/null)
+
   # Output result as JSON
-  if [ -n "$archived_brainstorm" ]; then
-    jq -n --arg task "$archived_task" --arg brainstorm "$archived_brainstorm" \
-      '{archived: {task: $task, brainstorm: $brainstorm}}'
-  else
-    jq -n --arg task "$archived_task" \
-      '{archived: {task: $task, brainstorm: null}}'
-  fi
+  jq -n --arg task "$archived_task" \
+    --arg brainstorm "${archived_brainstorm:-}" \
+    --argjson researchCleaned "$research_cleaned" \
+    '{archived: {task: $task, brainstorm: (if $brainstorm == "" then null else $brainstorm end), researchCleaned: $researchCleaned}}'
 }
 
 # Display help
@@ -1630,10 +1764,12 @@ COMMANDS:
     get-branch                Get branchName from metadata
     get-story <id>            Get full story object by ID (read-only)
     get-state                 Get all state files as JSON
-    detect-default-branch     Detect and cache the repository's default branch
-    setup-branch <name> --default-branch <branch>
+    detect-default-branch [--project <path>]
+                              Detect and cache the repository's default branch
+    setup-branch <name> --default-branch <branch> [--project <path>]
                               Create or checkout branch with deterministic logic
     clear-state               Clear all state files
+    version                   Print the plugin version
     check-version [--quiet] [--fix]
                               Check if stored CLI version matches latest installed
                               --quiet  Suppress stderr warnings
@@ -1706,14 +1842,16 @@ main() {
   # Skip auto-discovery for help command (works without .aimi/ present)
   case "${1:-help}" in
     help|--help|-h) cmd_help; return ;;
+    version) cmd_version; return ;;
   esac
 
   find_aimi_root
   check_jq
 
   case "${1:-help}" in
-    init-session)      cmd_init_session ;;
+    init-session)      shift; cmd_init_session "$@" ;;
     find-tasks)        cmd_find_tasks ;;
+    find-tasks-all)    cmd_find_tasks_all ;;
     status)            shift; cmd_status "$@" ;;
     metadata)          cmd_metadata ;;
     next-story)        cmd_next_story ;;
@@ -1736,9 +1874,10 @@ main() {
     get-branch)        cmd_get_branch ;;
     get-story)         cmd_get_story "${2:-}" ;;
     get-state)         cmd_get_state ;;
-    detect-default-branch) cmd_detect_default_branch ;;
+    detect-default-branch) shift; cmd_detect_default_branch "$@" ;;
     setup-branch)      shift; cmd_setup_branch "$@" ;;
     clear-state)       cmd_clear_state ;;
+    version)           cmd_version ;;
     check-version)     shift; cmd_check_version "$@" ;;
     cleanup-versions)  cmd_cleanup_versions ;;
     list-archivable)   cmd_list_archivable ;;
