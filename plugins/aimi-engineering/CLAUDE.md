@@ -93,14 +93,14 @@ Learnings are stored in project files (not separate progress log):
 
 1. **Inline story data** - Pass story content directly in Task prompts
    - Don't tell agents to re-read the tasks file
-   - Reduces file I/O by ~33%
+   - Avoids a per-story file read; actual token impact not benchmarked
 
 2. **Use CLAUDE.md/AGENTS.md** - Project conventions inline or referenced
    - Small files (<2KB) are inlined in prompt
    - Larger files are referenced for agent to read
 
 3. **Compact prompts** - First story in a session gets the full template (SKILL.md "Prompt Template"); subsequent stories get the condensed variant (SKILL.md "Compact Template") where static sections (`<project_guidelines>`, `<execution_flow>`, `<tools>`, `<on_failure>`, `<project_root_boundary>`) are condensed to one-line summaries — NOT omitted, since each agent has fresh context. Story-specific and context-varying sections remain in full
-   - ~60% token reduction
+   - Reduces prompt size by collapsing static sections; actual savings depend on story content and have not been benchmarked
 
 4. **Fresh context per story** - Each Task agent starts with clean context
    - No memory carryover between stories

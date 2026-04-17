@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.60.3] - 2026-04-16
+
+### Changed
+
+- **skill (story-executor):** Worker prompt template (both full and compact variants) now explicitly instructs the spawned agent to apply output compression rules from `AGENTS.md`. Previously the rules were only loaded passively through project guidelines; the new `<output_rules>` section in the full template and the appended sentence in the compact template ensure the directive reaches the agent even when `AGENTS.md` is missing or in edge-case multi-repo scenarios.
+- **docs (plugin CLAUDE.md):** Hedge unverified token-reduction claims (~33% inline-story savings, ~60% compact-template savings) — replaced with qualitative descriptions noting the savings have not been benchmarked. Applies to both `plugins/aimi-engineering/CLAUDE.md` Performance Guidelines and the Compact Template blockquote in `skills/story-executor/SKILL.md`.
+
 ## [1.60.2] - 2026-04-16
 
 ### Removed
