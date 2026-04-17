@@ -310,6 +310,15 @@ install_plugin_source() {
 
   if [ "$DRY_RUN" -eq 1 ]; then
     log "[dry-run] Would copy plugin source to $plugin_dst"
+    # Enumerate commands/references/ so callers can verify individual files are
+    # included (e.g. visual-variants.md).  The actual install uses cp -R so every
+    # file here is picked up automatically — this listing is for auditability only.
+    if [ -d "$src/commands/references" ]; then
+      for ref_file in "$src/commands/references/"*.md; do
+        [ -f "$ref_file" ] || continue
+        log "[dry-run]   + commands/references/$(basename "$ref_file")"
+      done
+    fi
     return 0
   fi
 
