@@ -220,6 +220,72 @@ N. What should make this interface memorable?
    D. Other: [please specify]
 ```
 
+#### Visual Variant Rendering (Aesthetic Direction and Differentiation only)
+
+> Full authoring contract — HTML skeleton, slug sanitization, HTML-escaping rules, token extraction, switcher wiring, and browser session lifecycle — lives in `commands/references/visual-variants.md`. This sub-step is the integration point; do not re-implement any detail here.
+
+When the agent reaches an **Aesthetic Direction** or **Differentiation** question (and only those two categories), execute the following steps **before** presenting the question to the user:
+
+**Step 1 — Validate topic slug**
+
+Use the slug derived in Phase 1 Step 1b. Apply the full sanitization algorithm from `references/visual-variants.md` (Topic-Slug Sanitization section). Then validate:
+
+- Must match `^[a-z0-9][a-z0-9-]*$`
+- Must not contain `..`, start with `/`, or contain `/` at any position
+
+If the slug fails validation: log a warning ("Visual path skipped — invalid topic slug: `<raw>`"), skip Steps 2–5 for this question, and fall back to text-only (present the question normally without any HTML output).
+
+**Step 2 — Token extraction (best-effort)**
+
+Probe project sources in the fixed precedence order defined in `references/visual-variants.md` (Token Extraction section). Extract colors, fonts, radii, and spacing. Any probe failure is silently skipped. Use Tailwind CDN defaults for any family that yields no tokens, and emit the required warning line per family that fell back.
+
+**Step 3 — Author variant HTML**
+
+Create the prototype directory:
+
+```bash
+mkdir -p .aimi/brainstorms/prototypes
+```
+
+For the **first** visual question, write the full file using the Switcher Skeleton from `references/visual-variants.md`. For **subsequent** visual questions, **append** a new `<section data-question="...">` block to the existing file — do not truncate.
+
+Author **2–4 variants** per question based on the design axes available (default 2 for binary contrast; add 3–4 only when additional directions genuinely add value).
+
+All user-supplied text (question text, option labels, description, any free-form input) MUST be HTML-escaped before interpolation. Apply the escaping table from `references/visual-variants.md` (HTML-Escaping section) in order: `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`, `"` → `&quot;`, `'` → `&#39;`.
+
+Output path: `.aimi/brainstorms/prototypes/<topic-slug>-variants.html`
+
+**Step 4 — Open or reload browser session**
+
+Check whether `agent-browser` is available:
+
+```bash
+command -v agent-browser
+```
+
+- **Unavailable:** Skip all browser calls. Log exactly one warning line to the brainstorm document: `agent-browser unavailable — variants at .aimi/brainstorms/prototypes/<topic-slug>-variants.html`. Continue text-only for all visual questions.
+- **First visual question:** Open a headed session:
+  ```bash
+  agent-browser --headed --session brainstorm-<topic-slug> open file://$(pwd)/.aimi/brainstorms/prototypes/<topic-slug>-variants.html
+  ```
+- **Subsequent visual questions:** Reuse the same session name and reload:
+  ```bash
+  agent-browser --session brainstorm-<topic-slug> reload
+  ```
+- **Mid-session crash (reload fails):** Retry once with suffix `-2`; if that also fails, degrade to text-only for all remaining visual questions and log: `agent-browser session lost — variants at .aimi/brainstorms/prototypes/<topic-slug>-variants.html`.
+
+**Step 5 — Present the question**
+
+Present the Aesthetic Direction or Differentiation question to the user as normal (numbered item with lettered options, "Other" escape hatch). The rendered HTML gives the user a live visual preview alongside the text question.
+
+**Non-visual categories** (Purpose, Users, Constraints, Success, Edge Cases, Existing Patterns, Approach) remain text-only — Steps 1–4 above do NOT execute for them.
+
+When the brainstorm completes normally (Phase 5), close the browser session if it was opened:
+
+```bash
+agent-browser --session brainstorm-<topic-slug> close
+```
+
 ### Present Questions
 
 Format questions as numbered items with lettered options:
