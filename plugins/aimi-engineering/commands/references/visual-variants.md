@@ -132,3 +132,54 @@ Each variant file uses this skeleton. The switcher bar is always rendered at the
 - **Append** each subsequent question's `<section>` block to the existing file — do NOT overwrite or truncate the file.
 - The switcher `x-data` state is shared across all sections; all sections respond to the same `active` variable so changing the variant letter switches all questions simultaneously.
 - The `data-question` attribute value MUST be the HTML-escaped question string.
+
+## Token Extraction
+
+The brainstorm agent attempts to extract design tokens (colors, fonts, radii, spacing) from the target project before generating variant HTML. Extraction is **best-effort**: parse errors on any source are silently swallowed and that source is skipped — extraction failures never abort the brainstorm.
+
+### Probe Order (fixed precedence)
+
+For each token family, the agent probes sources in this order and stops at the **first source that yields non-empty tokens** for that family. Different families may resolve from different sources (e.g., colors from `tailwind.config`, fonts from `theme.ts`).
+
+1. **`tailwind.config.{js,ts,mjs,cjs}`** — Read the file and extract values under `theme.extend` (preferred) or `theme` keys: `colors`, `fontFamily`, `borderRadius`, `spacing`. Pattern: look for object literals following those key names. If the file imports or requires another module for its config, skip and continue to the next source.
+
+2. **`theme.{ts,js,tsx,jsx}`** — Read the file and look for exported objects or constants named `theme`, `colors`, `typography`, `radii`, `space`, or `spacing`. Extract values from matching keys. Works for hand-rolled design-system theme files.
+
+3. **CSS custom properties in global stylesheets** — Probe these filenames in the project root and `src/` directory (check both): `app.css`, `global.css`, `index.css`, `styles.css`. Scan for lines matching `--[a-z][a-z0-9-]*:\s*[^;]+;`. Classify tokens by name prefix: `--color-*` → colors; `--font-*` → fonts; `--radius-*` → radii; `--spacing-*` or `--space-*` → spacing. Also accept bare `--primary`, `--secondary`, `--background`, `--foreground` as color tokens.
+
+4. **`_variables.scss`** — Probe `src/`, `styles/`, and project root. Extract SCSS variable declarations matching `\$[a-z][a-z0-9-]*:\s*[^;]+;`. Apply the same name-based classification as CSS custom properties (substitute `$color-` for `--color-`, etc.).
+
+5. **MUI `createTheme` calls** — Search for files importing from `@mui/material` or `@mui/system` that call `createTheme(`. Read those files and extract the argument object's `palette` (→ colors), `typography` (→ fonts), `shape.borderRadius` (→ radii), and `spacing` (→ spacing) fields.
+
+6. **Chakra `extendTheme` calls** — Search for files importing `extendTheme` from `@chakra-ui/react` or `@chakra-ui/system`. Read those files and extract `colors`, `fonts`, `radii`, and `space` keys from the argument object.
+
+### Per-Family Resolution
+
+Token families resolve independently:
+
+| Family   | Extracted from keys / patterns                                      |
+|----------|---------------------------------------------------------------------|
+| colors   | `colors`, `palette`, `--color-*`, `$color-*`, `--primary`, etc.    |
+| fonts    | `fontFamily`, `typography.fontFamily`, `fonts`, `--font-*`          |
+| radii    | `borderRadius`, `shape.borderRadius`, `radii`, `--radius-*`         |
+| spacing  | `spacing`, `space`, `--spacing-*`, `--space-*`                      |
+
+Once a family is resolved from a source, that source wins for that family. The agent does not merge partial results across sources for the same family.
+
+### Fallback Behavior
+
+If no source yields tokens for a given family after exhausting all six sources, the agent uses **generic Tailwind Play CDN defaults** for that family (the built-in Tailwind color palette, `font-sans`/`font-mono`, standard radius scale, standard spacing scale).
+
+When fallback is used, the brainstorm document MUST include a warning line immediately after the variant header, formatted as:
+
+```
+⚠ Token extraction: [family] tokens not found — using Tailwind CDN defaults.
+```
+
+One warning line per family that fell back. If all four families fall back, emit four warning lines.
+
+### Error Handling
+
+- Any file read error, syntax ambiguity, or pattern mismatch on a source → skip that source for the affected family, continue to the next source. Do not emit an error or warning for skipped sources — only warn when all sources are exhausted and fallback is used.
+- Never abort the brainstorm due to token extraction failure.
+- Never attempt to execute or import source files — read them as plain text and apply grep-level pattern matching only.

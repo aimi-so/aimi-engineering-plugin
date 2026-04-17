@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.60.4] - 2026-04-17
+
+### Added
+
+- **docs (brainstorm):** Token extraction algorithm documented in `commands/references/visual-variants.md`. Defines a 6-source precedence list (tailwind.config, theme.{ts,js,tsx,jsx}, CSS custom properties, _variables.scss, MUI createTheme, Chakra extendTheme), per-family independent resolution, Tailwind CDN defaults fallback with in-document warning, and best-effort error handling (parse errors silently skip the source, never abort brainstorm).
+
 ## [1.60.3] - 2026-04-16
 
 ### Changed
