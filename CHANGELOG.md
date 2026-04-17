@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.61.1] - 2026-04-17
+
+### Changed
+
+- **command (aimi:deepen):** Research file naming standardized to the `brainstorm` and `plan` canonical shape `.aimi/research/YYYY-MM-DD-<topic-slug>-<RUN_TS>-<story.id>-codebase.md`. Deepen now derives `TOPIC_SLUG` from `metadata.branchName` (stripping the `type/` prefix), generates a single `RUN_TS` via `date +%H%M%S` and reuses it across every parallel researcher, and passes the path via a structured `outputPath:` field so researcher agents write to the exact canonical location (the researcher Output Contract honors caller-supplied `outputPath:`). Same-run grouping now matches brainstorm/plan.
+
+### Fixed
+
+- **command (aimi:deepen):** Step 4.5 appends every written research path to `metadata.researchPaths[]` (deduplicated). Previously deepen's research files leaked — `$AIMI_CLI archive-task` reads `researchPaths[]` to clean up, but deepen never wrote into the array, so its files persisted across archive cycles.
+
 ## [1.61.0] - 2026-04-17
 
 ### Added
