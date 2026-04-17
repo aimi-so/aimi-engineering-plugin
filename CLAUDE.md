@@ -1,0 +1,78 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Repository Purpose
+
+This repo **builds** the aimi-engineering plugin — it is not a plugin consumer. It ships two distribution targets from a single source tree:
+
+- **Claude Code** via `claude /plugin install aimi-engineering` (reads `plugins/aimi-engineering/` directly)
+- **OpenCode** via `./install.sh --to opencode` (translates the plugin into OpenCode's structure and installs to `~/.config/opencode/`)
+
+The nested **`plugins/aimi-engineering/CLAUDE.md`** is the source of truth for plugin-internal conventions (versioning, command/skill authoring, schema requirements). Read it when editing anything under `plugins/aimi-engineering/`.
+
+## Dual-Host Architecture
+
+A single source tree serves both hosts. Anything touching CLI path resolution, environment variables, or install mechanics must account for both:
+
+- **`CLAUDECODE=1`** — set by Claude Code in every session. Absent in OpenCode. This is the runtime discriminator used by `aimi-cli.sh` and `commands/references/cli-path-resolution.md` to decide between Claude Code's cache (`~/.claude/plugins/cache/`) and OpenCode's install (`$AIMI_PLUGIN_DIR`).
+- **`AIMI_PLUGIN_DIR`** — set by `install.sh` in shell profiles. Only honored when `CLAUDECODE` is unset. Inside Claude Code, Layer 0 resolution skips this entirely so the Claude Code cache always wins.
+- **`install.sh`** — performs heavy translation: rewrites command bodies (Task tool mappings, CLI path glob → `OPENCODE_CONFIG_DIR`), handles missing OpenCode features (`disable-model-invocation`, `AskUserQuestion`, custom `subagent_type`), copies/flattens skills and agents. Before changing command syntax or CLI behavior, check whether `install.sh` needs a matching translation.
+
+## Commit Conventions
+
+**Never add Claude (or any AI assistant) as a co-author on commits.** Do not append `Co-Authored-By: Claude ...` or similar trailers. Commits are authored by the human running the tool.
+
+## Key Commands
+
+### Testing
+
+The only test suite is the CLI test suite:
+
+```bash
+bash plugins/aimi-engineering/scripts/test-aimi-cli.sh
+```
+
+There is no build step, no lint step, no package manager — everything is Bash. Run this suite after any change to `plugins/aimi-engineering/scripts/aimi-cli.sh` or files it sources.
+
+### OpenCode install verification
+
+```bash
+./install.sh --to opencode --dry-run   # preview translation output
+./install.sh --to opencode             # perform install
+./install.sh --uninstall --from opencode
+```
+
+### Version bump workflow
+
+Every plugin change requires synchronized bumps in three files (per `plugins/aimi-engineering/CLAUDE.md`):
+
+1. `plugins/aimi-engineering/.claude-plugin/plugin.json` — `"version"`
+2. `.claude-plugin/marketplace.json` — the plugin entry's `"version"`
+3. `CHANGELOG.md` — new entry under the version heading (Keep a Changelog format)
+
+## CLI Path Resolution (Critical)
+
+`aimi-cli.sh` is the only executable consumed by commands. All commands resolve it through a four-layer strategy documented in `plugins/aimi-engineering/commands/references/cli-path-resolution.md`:
+
+- Layer 0: `$AIMI_PLUGIN_DIR` (skipped inside Claude Code)
+- Layer 1: `~/.claude/aimi-engineering-cli-path` global cache
+- Layer 2: glob under `~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh`
+- Layer 3: per-project `.aimi/cli-path`
+
+After resolution, commands call `$AIMI_CLI check-version --quiet --fix` for self-heal. The fix path is gated by `_is_claude_code_host()` — it short-circuits to "managed by converter" only when running under OpenCode.
+
+When editing resolution logic, mirror changes in:
+- `plugins/aimi-engineering/commands/references/cli-path-resolution.md` (command-facing docs)
+- `plugins/aimi-engineering/scripts/aimi-cli.sh` (`read_global_cli_cache`, `read_global_worktree_cache`, `cmd_check_version`, `cmd_cleanup_versions`)
+- `plugins/aimi-engineering/scripts/test-aimi-cli.sh` (`source_cache_functions` must eval every helper used by the code under test)
+
+## Where Things Live
+
+- `plugins/aimi-engineering/` — the plugin source; installed verbatim by Claude Code
+- `plugins/aimi-engineering/CLAUDE.md` — plugin development rules (versioning, security, schema, conventions)
+- `plugins/aimi-engineering/AGENTS.md` — portable single source of truth for spawned-agent output compression rules (consumed by both Claude Code and OpenCode)
+- `plugins/aimi-engineering/scripts/aimi-cli.sh` — all jq/state operations (task file management, story lifecycle, version checks). Prevents model hallucination of bash by centralizing deterministic operations.
+- `.claude-plugin/marketplace.json` — marketplace manifest for Claude Code discovery
+- `install.sh` — OpenCode translator/installer
+- `CHANGELOG.md` — user-facing change log (Keep a Changelog format)
