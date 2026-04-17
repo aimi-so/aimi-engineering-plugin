@@ -56,6 +56,24 @@ ls -t .aimi/brainstorms/*.md 2>/dev/null | head -10
 - **If multiple match:** Ask user which to use.
 - **If none found:** Ask refinement questions via AskUserQuestion until the idea is clear.
 
+### Prototype Context
+
+After reading the brainstorm (if one was found), parse it for referenced prototype HTML files and load them into context:
+
+1. **Parse frontmatter** — look for a `prototype:` key; its value is a path string or a YAML list of path strings.
+2. **Parse `## Prototype` section** — scan the brainstorm body for a `## Prototype` heading; extract any file paths that appear in that section (lines starting with `-` or table cells containing `.html`).
+3. **Deduplicate** the collected paths and assign sequential labels starting at `A`.
+4. **For each path** (resolve relative to the brainstorm file's directory):
+   - If the file is **missing from disk**: log warning line `prototype <path> missing — brainstorm references stale artifact` and skip.
+   - If the file **exists but exceeds 50 KB**: log warning line `prototype <path> exceeds 50KB — dropped from context` and skip.
+   - Otherwise: read the file verbatim and wrap it as:
+     ```
+     <prototype_html label="<letter>" path="<relative-path>">
+     …file contents…
+     </prototype_html>
+     ```
+5. Collect all successfully loaded blocks into a variable `prototypeBlocks` (empty string if none loaded). This variable is threaded into Phase 1 and Phase 3 prompts below.
+
 ### Implementation Scope Detection
 
 After the brainstorm check, determine the implementation scope:
@@ -129,13 +147,19 @@ Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
            topicSlug: [topicSlug]
            Look for: existing patterns, CLAUDE.md guidance, similar features,
            technology familiarity, file structure conventions.
-           outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-codebase.md"
+           outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-codebase.md
+           [If prototypeBlocks is non-empty]:
+           Prototype designs chosen for this feature (use as implementation reference):
+           [prototypeBlocks]"
 
 Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
   prompt: "Search .aimi/solutions/ for learnings relevant to: [feature description].
            topicSlug: [topicSlug]
            Look for: gotchas, patterns, past solutions, lessons learned.
-           outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-learnings.md"
+           outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-learnings.md
+           [If prototypeBlocks is non-empty]:
+           Prototype designs chosen for this feature (use as implementation reference):
+           [prototypeBlocks]"
 ```
 
 If either agent fails, proceed with available results.
@@ -194,7 +218,15 @@ Incorporate gaps as acceptance criteria or story notes.
 
 ## Phase 3: Story Decomposition
 
-Using consolidated research and spec-flow output:
+Using consolidated research and spec-flow output (and `prototypeBlocks` from Phase 0 Prototype Context if non-empty):
+
+**If `prototypeBlocks` is non-empty**, prepend the following block to this phase's working context before decomposing stories:
+
+```
+Prototype designs chosen for this feature — implementation stories MUST reference these
+directly when describing UI acceptance criteria, component structure, and visual behaviour:
+[prototypeBlocks]
+```
 
 1. Extract all requirements (explicit + spec-flow identified)
 2. Group by layer (schema → backend → UI → aggregation)
