@@ -235,6 +235,14 @@ Visual verification is **advisory** — failures do NOT block the story commit.
 
 </design_context>
 
+<prototype_context>
+
+Prototype HTML variants and optional tokens JSON loaded from `metadata.prototypePaths[]`. Each `.html` file is wrapped in `<prototype_html label="X" path="...">` tags (labels A, B, C…); each `.json` sidecar is wrapped in `<prototype_tokens path="...">` tags. Reference these variants when implementing UI stories — prefer the labelled variant that best matches the story's design intent. Omit this section when empty.
+
+[PROTOTYPE_CONTEXT]
+
+</prototype_context>
+
 <tools>
 
 Use built-in tools directly: Read, Write, Edit, Bash, Grep, Glob.
@@ -463,6 +471,12 @@ Visual verification is **advisory** — failures do NOT block the story commit.
 [DESIGN_CONTEXT]
 
 </design_context>
+
+<prototype_context>
+Prototype HTML variants and optional tokens JSON from `metadata.prototypePaths[]`. `.html` files wrapped as `<prototype_html label="X" path="...">`, `.json` sidecars as `<prototype_tokens path="...">`. Use the best-matching variant for UI implementation. Omit when empty.
+
+[PROTOTYPE_CONTEXT]
+</prototype_context>
 
 <tools>
 Use standard tools: Read, Write, Edit, Bash, Grep, Glob. Do NOT invoke these via the Skill tool.
