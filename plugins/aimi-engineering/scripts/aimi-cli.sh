@@ -1720,11 +1720,30 @@ cmd_archive_task() {
     fi
   done < <(jq -r '.metadata.researchPaths[]? // empty' "$archived_task" 2>/dev/null)
 
+  # Delete linked prototype files (ephemeral — rm -f, not archived)
+  local prototype_cleaned=0
+  while IFS= read -r ppath; do
+    [ -z "$ppath" ] && continue
+    local resolved_prototype
+    if [ "${ppath#/}" = "$ppath" ]; then
+      # Relative path — resolve from project root
+      resolved_prototype="$PROJECT_ROOT/$ppath"
+    else
+      resolved_prototype="$ppath"
+    fi
+    validate_path_in_project "$resolved_prototype"
+    if [ -e "$resolved_prototype" ]; then
+      rm -f "$resolved_prototype"
+      prototype_cleaned=$((prototype_cleaned + 1))
+    fi
+  done < <(jq -r '.metadata.prototypePaths[]? // empty' "$archived_task" 2>/dev/null)
+
   # Output result as JSON
   jq -n --arg task "$archived_task" \
     --arg brainstorm "${archived_brainstorm:-}" \
     --argjson researchCleaned "$research_cleaned" \
-    '{archived: {task: $task, brainstorm: (if $brainstorm == "" then null else $brainstorm end), researchCleaned: $researchCleaned}}'
+    --argjson prototypeCleaned "$prototype_cleaned" \
+    '{archived: {task: $task, brainstorm: (if $brainstorm == "" then null else $brainstorm end), researchCleaned: $researchCleaned, prototypeCleaned: $prototypeCleaned}}'
 }
 
 # Display help
