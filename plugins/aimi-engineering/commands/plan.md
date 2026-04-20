@@ -66,6 +66,7 @@ After reading the brainstorm (if one was found), parse it for referenced prototy
 4. **Deduplicate** the collected paths and assign sequential labels starting at `A`.
 5. **For each path** (resolve relative to the brainstorm file's directory):
    - If the file is **missing from disk**: log warning line `prototype <path> missing — brainstorm references stale artifact` and skip.
+   - **Validate path is within project root**: resolve the absolute path (accounting for `../` traversal and symlink targets) and verify it starts with `AIMI_ROOT`. If it does not, log warning line `prototype <path> rejected — path outside project root` and skip — do not abort plan for a bad path.
    - Otherwise: read the file verbatim and sanitize: replace any literal `</prototype_html` or `<prototype_html` sequences in the file contents with their HTML-entity forms (`&lt;/prototype_html` and `&lt;prototype_html`) so a malicious or unlucky variant cannot break out of the wrapper tag. Then wrap as:
      ```
      <prototype_html label="<letter>" path="<relative-path>">
@@ -73,7 +74,7 @@ After reading the brainstorm (if one was found), parse it for referenced prototy
      </prototype_html>
      ```
 6. **Aggregate size cap:** after loading, measure the total byte size of all wrapped blocks. If the total exceeds **200 KB**, drop blocks in reverse label order (Z → A) until the aggregate fits under the cap. Log one warning line per dropped block: `prototype <path> dropped — aggregate prototype context exceeded 200KB`.
-7. Collect all successfully loaded blocks into a variable `prototypeBlocks` (empty string if none loaded). This variable, together with `prototypeTokens`, is threaded into Phase 1 and Phase 3 prompts below.
+7. Collect all successfully loaded blocks into a variable `prototypeBlocks` (empty string if none loaded). This variable, together with `prototypeTokens`, is threaded into Phase 1 and Phase 3 prompts below. Also collect the resolved absolute paths of every successfully loaded prototype HTML file (those not dropped by the size cap and not missing on disk) into a variable `resolvedPrototypePaths` (empty list if none); append the tokens-sidecar JSON path (`.aimi/brainstorms/prototypes/<topic-slug>-tokens.json`) to `resolvedPrototypePaths` when `prototypeTokens` loaded successfully.
 
 ### Implementation Scope Detection
 
@@ -282,6 +283,8 @@ Branch on `implementationScope` from Phase 0:
 6. Write frontend file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
 7. Write backend file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`
 
+Write the same `prototypePaths` array to both frontend and backend metadata (symmetric with `researchPaths` precedent).
+
 ### When `implementationScope` is `"frontend-only"`:
 
 1. Set `metadata.frontendOnly: true`
@@ -311,6 +314,7 @@ Write single file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 - **brainstormPath**: Path to brainstorm if one was used, otherwise omit
 - **researchDepth**: Value computed in Phase 1.5 (`skip`, `quick`, `standard`, `deep`), or omit if not computed
 - **researchPaths**: Collect all `.aimi/research/` file paths written by Phase 1 agents (codebase, learnings) and Phase 1.5b agents (best-practices, framework-docs). Omit entirely when `researchDepth` is `skip` or no research files were written.
+- **prototypePaths**: Convert each path in `resolvedPrototypePaths` to a path relative to `AIMI_ROOT` (no leading `./`, no `..` components). Deduplicate with `| unique`. Emit as `metadata.prototypePaths` array. Omit the key entirely when the array is empty.
 - **maxConcurrency**: Default `4`. Set to `1` for strictly sequential execution.
 
 ### Write File
@@ -334,6 +338,8 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
     "planPath": "null (always null for planner-generated)",
     "brainstormPath": "string (optional)",
     "researchDepth": "skip|quick|standard|deep (optional, computed in Phase 1.5)",
+    "researchPaths": "string[] (optional, relative paths to research files written by Phase 1 and Phase 1.5b agents)",
+    "prototypePaths": "string[] (optional, relative paths to prototype HTML files and tokens sidecar JSON registered by Phase 0 Prototype Context)",
     "maxConcurrency": "number (optional, default 4)",
     "frontendOnly": "boolean (optional, true when frontend-only scope)",
     "backendSpec": {
@@ -396,6 +402,7 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 - [ ] Field lengths: title ≤ 200, description ≤ 500, criterion ≤ 600
 - [ ] `schemaVersion` is `"3.2"`
 - [ ] `researchDepth` (if set) is one of: `skip`, `quick`, `standard`, `deep`
+- [ ] `prototypePaths` (if set) contains only paths that exist on disk and were successfully loaded into `prototypeBlocks`
 - [ ] Every story has a `wave` number (wave 1 for roots, computed from `dependsOn` for others)
 - [ ] Wave numbers are contiguous with no gaps
 - [ ] `implementation` (if present) has `files` (string[]), `approach` (string), `verify` (string) with concrete paths
@@ -460,6 +467,7 @@ Schema version: 3.2
 Waves: [N] total
 [If gates found]: Gates: [N] (verify: [X], decision: [Y], action: [Z])
 [If brainstorm used]: Context: .aimi/brainstorms/[brainstorm-file]
+[If prototypePaths non-empty]: Prototypes: [N] variant file(s) registered
 [If gaps found]: Gaps identified: [N] (captured as criteria/notes)
 [If 10+ stories]: Warning: [N] stories generated. Consider splitting into smaller feature sets.
 [If parallel stories detected]: Parallel groups: [N] stories can run concurrently (max concurrency: [maxConcurrency])
