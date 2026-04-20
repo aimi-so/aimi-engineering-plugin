@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.63.0] - 2026-04-20
+
+### Added
+
+- **cli (aimi-cli.sh):** New `detect-interactivity` subcommand that resolves the active interactivity mode from environment: prints `agent` when `AIMI_AGENT_MODE=true`, `CI=true`, or stdin is not a TTY; prints `picker` otherwise. Exempt from `find_aimi_root()` since it reads only env vars — usable by commands before any `.aimi/` state exists. Documented in `cmd_help` usage.
+- **reference (interactivity.md):** New `commands/references/interactivity.md` defines the two-mode contract (`picker`, `agent`), the picker option-format rules (lettered labels, escape hatch on last option, 2–6 options cap), the agent auto-pick log-line format (`agent-mode: <site-id> auto-<action>`), and a 3-step checklist for adding new question sites. Single source of truth for all commands that ask the user questions.
+- **command (aimi:brainstorm):** New Step 0 (Resolve CLI Path) + Step 0.5 (Resolve Interactivity Mode) preamble sets `INTERACTIVE_MODE` once per invocation via `$AIMI_CLI detect-interactivity`. Phase 2 main batch questions now branch on `INTERACTIVE_MODE`: `picker` emits one `AskUserQuestion` call per question with lettered options + `Other` free-form escape (replaces the former single prose block with shorthand parser); `agent` auto-selects option A and logs one line per question. Agent-mode fallback notes added to the remaining 3 picker sites (Phase 0 plan-redirect auto-proceeds to `/aimi:plan`; Phase 3 approach auto-picks option A; Phase 4 open questions defer to a `Deferred Questions` section). Combined with the existing visual-variant fallback (L335) and the new Phase 2 branch, all 7 user-facing question sites now have deterministic agent-mode behavior.
+
+### Changed
+
+- **installer (install.sh):** AskUserQuestion translation no longer degrades to prose-in-chat. OpenCode ships a native `question` tool ([docs/tools](https://opencode.ai/docs/tools/)) with header + lettered options + custom-text input; the translator now maps `Use **AskUserQuestion**` → `Use the **question** tool`, `Use AskUserQuestion` → `Use the question tool`, `via AskUserQuestion` → `via the question tool`, and the bare `AskUserQuestion` fallback → `the question tool`. OpenCode users get the same picker UX as Claude Code users across every command that uses the pattern (brainstorm, swarm, plan, task-planner). Permission-gated by `"question"` in `opencode.json` (default: `"ask"`).
+
+### Fixed
+
+- **command (aimi:brainstorm):** Shorthand answer parser (`"1A, 2C, 3B"`) removed from Phase 2 — it was a workaround for the missing picker on the main batch and no longer applies when every question is a picker call. Pre-existing visual-variant fallback log line changed from `agent-mode: AskUserQuestion unavailable` to `agent-mode: picker unavailable` so it stays grammatical after OpenCode translation.
+
+### Tests
+
+- **test-aimi-cli.sh:** Three new tests covering `detect-interactivity`: `test_detect_interactivity_agent_mode_env` (AIMI_AGENT_MODE=true overrides), `test_detect_interactivity_ci_env` (CI=true triggers agent mode), `test_detect_interactivity_non_tty` (no TTY on stdin triggers agent mode). Baseline raised from 283/0 to 286/0.
+
 ## [1.62.0] - 2026-04-20
 
 ### Added

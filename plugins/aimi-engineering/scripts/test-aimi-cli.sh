@@ -3384,6 +3384,37 @@ TASKEOF
   rm -rf "$arch_dir"
 }
 
+test_detect_interactivity_agent_mode_env() {
+  echo ""
+  echo "=== Testing detect-interactivity with AIMI_AGENT_MODE=true ==="
+
+  local output
+  output=$(AIMI_AGENT_MODE=true CI= "$CLI" detect-interactivity </dev/null)
+
+  assert_eq "agent" "$output" "detect-interactivity returns 'agent' when AIMI_AGENT_MODE=true"
+}
+
+test_detect_interactivity_ci_env() {
+  echo ""
+  echo "=== Testing detect-interactivity with CI=true ==="
+
+  local output
+  output=$(AIMI_AGENT_MODE= CI=true "$CLI" detect-interactivity </dev/null)
+
+  assert_eq "agent" "$output" "detect-interactivity returns 'agent' when CI=true"
+}
+
+test_detect_interactivity_non_tty() {
+  echo ""
+  echo "=== Testing detect-interactivity with non-TTY stdin ==="
+
+  # Redirecting stdin from /dev/null makes it not a TTY; no override env vars needed.
+  local output
+  output=$(AIMI_AGENT_MODE= CI= "$CLI" detect-interactivity </dev/null)
+
+  assert_eq "agent" "$output" "detect-interactivity returns 'agent' when stdin is not a TTY"
+}
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -3571,6 +3602,13 @@ main() {
   test_archive_task_without_prototype_paths
   test_archive_task_missing_prototype_files
   test_archive_task_both_research_and_prototype_paths
+
+  # Interactivity mode detection tests
+  echo ""
+  echo "--- Interactivity Mode Detection Tests ---"
+  test_detect_interactivity_agent_mode_env
+  test_detect_interactivity_ci_env
+  test_detect_interactivity_non_tty
 
   cleanup
 

@@ -16,6 +16,36 @@ Clarify **WHAT** to build through collaborative dialogue before planning **HOW**
 
 Do not proceed until you have a feature description from the user.
 
+## Step 0: Resolve CLI Path
+
+Read `references/cli-path-resolution.md` and follow the **Resolve CLI Path**
+section to set `$AIMI_CLI`. Each layer is a separate Bash call.
+
+If resolution fails, fall back to the legacy prose-only path for questions —
+do not abort the brainstorm. Log: `warning: aimi-cli.sh unresolved — forcing
+INTERACTIVE_MODE=picker`.
+
+## Step 0.5: Resolve Interactivity Mode
+
+Before any question is presented, resolve which mode applies:
+
+```bash
+INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
+```
+
+The result is one of:
+
+- `picker` — interactive user. All question sites below use **AskUserQuestion**
+  (Claude Code) or the native `question` tool (OpenCode, wired by the
+  translator). One question per tool call, lettered options.
+- `agent` — `AIMI_AGENT_MODE=true`, `CI=true`, or non-TTY. At every question
+  site, auto-pick the first non-escape option and log one line into the
+  brainstorm document's working memory. Never block, never prompt.
+
+See `references/interactivity.md` for the full contract. Every question site
+below includes an agent-mode fallback note describing its specific auto-pick
+behavior.
+
 ## Phase 0: Assess Requirements Clarity
 
 Evaluate whether brainstorming is needed based on the feature description.
@@ -28,6 +58,8 @@ Evaluate whether brainstorming is needed based on the feature description.
 
 **If requirements are already clear:**
 Use **AskUserQuestion** to suggest: "Your requirements seem detailed enough to proceed directly to planning. Should I run `/aimi:plan` instead, or would you like to explore the idea further?"
+
+*Agent-mode fallback: if `INTERACTIVE_MODE=agent`, auto-proceed to `/aimi:plan` (the non-disruptive default). Log: `agent-mode: phase-0-plan-redirect auto-proceeded to plan`.*
 
 **If unclear or vague:** proceed to Phase 1.
 
@@ -302,7 +334,7 @@ For 3 authored variants named "Brutally minimal", "Retro-futuristic", "Luxury/re
 
 **Agent-mode fallback (non-interactive):**
 
-If **AskUserQuestion** is unavailable (running under a host that does not support it) or the session is explicitly non-interactive (`AIMI_AGENT_MODE=true` or equivalent), auto-select Variant A deterministically. Log one line to the brainstorm document: `agent-mode: AskUserQuestion unavailable — auto-selected variant A`. Skip the `None — show again / revise` branch entirely in this mode.
+If the picker tool is unavailable (running under a host that does not support it) or the session is explicitly non-interactive (`AIMI_AGENT_MODE=true` or equivalent), auto-select Variant A deterministically. Log one line to the brainstorm document: `agent-mode: picker unavailable — auto-selected variant A`. Skip the `None — show again / revise` branch entirely in this mode.
 
 **Handling the `None — show again / revise` branch:**
 
@@ -388,37 +420,33 @@ When the brainstorm completes normally, the browser session is closed and the va
 
 ### Present Questions
 
-Format questions as numbered items with lettered options:
+Branch on `INTERACTIVE_MODE` (resolved in Step 0.5):
+
+**If `INTERACTIVE_MODE=picker`:**
+
+Emit **one picker call per question**. Use **AskUserQuestion** (translator
+rewrites to OpenCode's native `question` tool). Each call includes the
+question header + up to 4 lettered options + a final `Other` option that
+accepts free-form text.
 
 ```
-Based on the research findings and your description, I have a few questions:
-
-1. [Question informed by research or topic category]
-   A. [Option]
-   B. [Option]
-   C. [Option]
-   D. Other: [please specify]
-
-2. [Question]
-   A. [Option]
-   ...
-
-You can answer with shorthand like "1A, 2C, 3B" or respond in your own words.
+Picker call:
+  header: "[Question informed by research or topic category]"
+  options:
+    A — [Option]
+    B — [Option]
+    C — [Option]
+    Other — [free-form]
 ```
 
-### Response Parsing
+Do not render the questions as a single prose block. Do not ask the user to
+reply with `"1A, 2C, 3B"` shorthand — pickers return the selection directly.
+If a question only has two viable options, still emit it as its own picker
+call; never combine questions into one picker.
 
-Accept all response formats gracefully:
-
-| Format | Example | Action |
-|--------|---------|--------|
-| Shorthand | "1A, 2C, 3B" | Parse directly |
-| No numbers | "A, C, B" | Map to questions in order |
-| Free-form | "I prefer option A for the first one" | Parse intent |
-| Partial | "1A, 2C" (skipped 3) | Accept partial, ask about skipped if critical |
-| Mixed | "1A but for question 3 none fit — I want X" | Parse shorthand + free-form |
-
-Never re-ask a question just because the format was unexpected. Parse the intent and continue.
+**Agent-mode fallback:** if `INTERACTIVE_MODE=agent`, auto-select option A for
+every question. For each question, log one line to the brainstorm document's
+working memory: `agent-mode: Q<n> auto-selected option A`. Never block.
 
 ### Adaptive Rounds
 
@@ -484,6 +512,8 @@ Lead with a recommendation and explain why. Apply YAGNI — prefer simpler solut
 Keep output sections concise (200-300 words max). After presenting approaches or key decisions, pause to validate: "Does this match what you had in mind? Any adjustments before we continue?"
 
 Use **AskUserQuestion** to ask which approach the user prefers.
+
+*Agent-mode fallback: if `INTERACTIVE_MODE=agent`, auto-select the first approach recommended by the preceding analysis (option A). Log: `agent-mode: phase-3-approach auto-selected option A`.*
 
 ## Phase 4: Capture the Design
 
@@ -581,6 +611,8 @@ If no variant prototypes were saved (e.g., no UI feature detected, variant label
 1. Ask the user about each open question using AskUserQuestion
 2. Move resolved questions to a "Resolved Questions" section
 3. Only proceed when Open Questions is empty or user explicitly defers them
+
+*Agent-mode fallback: if `INTERACTIVE_MODE=agent`, move every open question to a "Deferred Questions" section (one line per question) instead of asking. Log: `agent-mode: phase-4-open-questions deferred <N> questions`.*
 
 ### Pre-Save Checklist (Blocking with Override)
 
