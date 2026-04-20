@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.62.0] - 2026-04-20
+
+### Added
+
+- **schema (tasks.json):** New optional `metadata.prototypePaths[]` field — a deduplicated array of relative paths to prototype HTML variants and the `<topic-slug>-tokens.json` sidecar. Schema version stays at `3.2` (additive optional field, follows the `researchPaths[]` precedent).
+- **command (aimi:plan):** Phase 0 Prototype Context now collects successfully loaded prototype paths (non-dropped after the 200 KB aggregate cap, non-missing on disk) into `resolvedPrototypePaths`; Phase 4 Derive Metadata persists them as `metadata.prototypePaths[]`. Full-stack split writes the same array to both frontend and backend tasks.json files. The Aimi-branded report surfaces `Prototypes: [N] variant file(s) registered` when non-empty.
+- **command (aimi:execute):** New Step 3.5 Load Prototype Context reads `metadata.prototypePaths[]` and builds `PROTOTYPE_CONTEXT` — `.html` files wrap as `<prototype_html label="X" path="...">` blocks with tag-breakout escape, `.json` sidecars wrap as `<prototype_tokens>` blocks. Re-applies the 200 KB aggregate cap at execute time; skips missing files with a warning line. `PROTOTYPE_CONTEXT` is injected into all three worker-prompt assembly sites (single-story wave, multi-story parallel wave, paired-split sub-Tasks) immediately after `DESIGN_CONTEXT`, omitted when empty. Start report surfaces `Prototype context: [N] variant(s) loaded` when variants are present.
+- **skill (story-executor):** Prompt Template and Compact Template both define a `<prototype_context>` XML section (after `<design_context>`) so spawned workers know how to consume prototype variants when threaded.
+- **cli (aimi-cli.sh — archive-task):** Cleans `metadata.prototypePaths[]` files alongside `researchPaths[]` using an identical loop (relative-path resolution from PROJECT_ROOT, `validate_path_in_project` gate, `[ -e ]` missing-file tolerance, `rm -f`). Output JSON gains a `prototypeCleaned` counter field on the existing single `jq -n` call.
+- **tests (test-aimi-cli.sh):** Four new archive-task tests covering prototype cleanup: `test_archive_task_with_prototype_paths`, `test_archive_task_without_prototype_paths`, `test_archive_task_missing_prototype_files`, and `test_archive_task_both_research_and_prototype_paths`.
+
+### Security
+
+- **command (aimi:plan):** Phase 0 Prototype Context now validates that each resolved absolute path stays within AIMI_ROOT before reading — paths escaping via `../` or symlink targets are rejected with `prototype <path> rejected — path outside project root` and skipped (plan does not abort for a bad path). Prevents a malicious brainstorm with a `prototype: ../../etc/passwd` frontmatter key from injecting arbitrary file contents into the planning context.
+
 ## [1.61.1] - 2026-04-17
 
 ### Changed
