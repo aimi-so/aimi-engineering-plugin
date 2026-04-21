@@ -320,7 +320,11 @@ command -v agent-browser
   ```bash
   agent-browser --session brainstorm-<topic-slug> reload
   ```
-- **Session call fails (reload returns non-zero):** Degrade to text-only for all remaining visual questions and log: `agent-browser session lost — variants at .aimi/brainstorms/prototypes/<topic-slug>-variants.html`. Do not retry with alternate session names — the HTML file is always on disk and is the authoritative artifact.
+- **Session call fails (reload returns non-zero):** Retry once with a fresh session name by appending `-2` suffix:
+  ```bash
+  agent-browser --headed --session brainstorm-<topic-slug>-2 open file://$(pwd)/.aimi/brainstorms/prototypes/<topic-slug>-variants.html
+  ```
+  If the retry also fails, degrade to text-only for all remaining visual questions — stop attempting any further `agent-browser` calls for this brainstorm session. Log the file path once at the point of degradation: `agent-browser session lost — variants at .aimi/brainstorms/prototypes/<topic-slug>-variants.html`. (See `references/visual-variants.md` "Fallback: mid-session crash" section for the canonical description of this two-step flow.)
 
 **Step 5 — Present the question**
 
