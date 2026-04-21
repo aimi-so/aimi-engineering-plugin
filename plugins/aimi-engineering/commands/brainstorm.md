@@ -55,6 +55,21 @@ behavior.
 
 Diagnostic lines are prefixed with `[brainstorm-debug]` so they are trivially greppable and visually distinct from normal output. They are emitted **to chat only** — never written to the brainstorm document or research files.
 
+## Override Keywords
+
+Certain literal phrases typed in the topic or in a reply trigger one-shot rendering overrides regardless of how the agent classified the question category.
+
+| Phrase | Match rule | Scope | Effect |
+|--------|-----------|-------|--------|
+| `show variants` | Case-insensitive substring match anywhere in the topic text or the user's latest reply | Next question only — flag clears after that one question is rendered | Force-treats the next question as **Aesthetic Direction** for visual variant rendering, even when the category was classified as Functional or Scope. On activation emit exactly: `Visual override active — rendering variants for next question` |
+
+**How it works at runtime:**
+
+1. After each user reply (and when first reading the topic), check whether the text contains `show variants` (case-insensitive).
+2. If matched, set an in-memory flag `visualOverridePending = true` and emit `Visual override active — rendering variants for next question` **once** to chat.
+3. When the agent reaches the next question, if `visualOverridePending = true`: treat that question as Aesthetic Direction for the purposes of visual variant rendering (Phase 2 category gate bypass), then immediately clear the flag (`visualOverridePending = false`). The override does **not** persist to subsequent questions.
+4. If the flag is not set, proceed with normal category classification — no change to existing behavior.
+
 ## Phase 0: Assess Requirements Clarity
 
 Evaluate whether brainstorming is needed based on the feature description.
@@ -267,7 +282,9 @@ N. What should make this interface memorable?
 
 > Full authoring contract — HTML skeleton, slug sanitization, HTML-escaping rules, token extraction, switcher wiring, and browser session lifecycle — lives in `commands/references/visual-variants.md`. This sub-step is the integration point; do not re-implement any detail here.
 
-When the agent reaches an **Aesthetic Direction** or **Differentiation** question (and only those two categories), execute the following steps **before** presenting the question to the user. If `AIMI_BRAINSTORM_DEBUG=1`: emit `[brainstorm-debug] category: <category-name> — visual rendering path triggered` to chat (or `[brainstorm-debug] category: <category-name> — visual rendering skipped` when the question does not fall into either category). All slug sanitization, HTML-escaping, and token extraction rules are defined in `references/visual-variants.md`; this sub-step is the call sequence only.
+**`show variants` override check (runs before category classification):** Before evaluating whether a question is Aesthetic Direction or Differentiation, check whether `visualOverridePending = true` (set when the user's topic or latest reply contained `show variants` — see "Override Keywords" section above). If the flag is set, treat this question as **Aesthetic Direction** for the purpose of visual rendering, then clear the flag (`visualOverridePending = false`). This bypass applies only to the single next question; all subsequent questions revert to normal category classification.
+
+When the agent reaches an **Aesthetic Direction** or **Differentiation** question (and only those two categories, or when the `show variants` override is active), execute the following steps **before** presenting the question to the user. If `AIMI_BRAINSTORM_DEBUG=1`: emit `[brainstorm-debug] category: <category-name> — visual rendering path triggered` to chat (or `[brainstorm-debug] category: <category-name> — visual rendering skipped` when the question does not fall into either category). All slug sanitization, HTML-escaping, and token extraction rules are defined in `references/visual-variants.md`; this sub-step is the call sequence only.
 
 **Step 0b — Pre-flight browser availability (run once per brainstorm session)**
 
