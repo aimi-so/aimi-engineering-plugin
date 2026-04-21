@@ -258,6 +258,33 @@ N. What should make this interface memorable?
 
 When the agent reaches an **Aesthetic Direction** or **Differentiation** question (and only those two categories), execute the following steps **before** presenting the question to the user. All slug sanitization, HTML-escaping, and token extraction rules are defined in `references/visual-variants.md`; this sub-step is the call sequence only.
 
+**Step 0b — Pre-flight browser availability (run once per brainstorm session)**
+
+Before processing the very first Aesthetic Direction or Differentiation question, run this check **exactly once**. On all subsequent visual questions, skip directly to Step 0 — the cached result is already in working memory.
+
+1. **Predict visual questions.** Based on the brainstorm topic and the question-category plan assembled in Phase 2, determine whether any Aesthetic Direction or Differentiation questions are expected. If none are predicted, skip this entire step — emit nothing to chat, set `browserAvailable = false`, `browserSkipReason = "no visual questions"`, and proceed. This prevents false alarms on non-visual brainstorms.
+
+2. **If visual questions are expected, run the availability check:**
+
+   ```bash
+   command -v agent-browser
+   ```
+
+   Apply the same heuristic used in Step 4:
+   - `agent-browser` not found → reason: `agent-browser not installed`
+   - `DISPLAY` unset **and** not running under a known GUI host (macOS / Windows) → reason: `DISPLAY unset`
+   - `CI=true` is set → reason: `CI mode`
+
+3. **Emit exactly one line to chat** (not to the brainstorm document):
+   - On success: `Visual preview: ready`
+   - On failure: `Visual preview: disabled (<reason>)` where `<reason>` is the short cause from step 2 (e.g., `Visual preview: disabled (agent-browser not installed)`)
+
+4. **Cache the outcome in working memory:**
+   - `browserAvailable` (bool): `true` if the check passed, `false` otherwise.
+   - `browserSkipReason` (string): empty string on success; the short cause string on failure.
+
+   Step 4 and all subsequent visual-question handling must read `browserAvailable` from working memory — do **not** re-run `command -v agent-browser` or re-evaluate the DISPLAY / CI heuristic on later questions.
+
 **Step 0 — Component-shell scan (best-effort)**
 
 Sample 2–3 representative component files from the target project to extract the structural idioms variants should mimic. Scan is optional; skip silently on any failure.
@@ -304,13 +331,9 @@ Output path: `.aimi/brainstorms/prototypes/<topic-slug>-variants.html`
 
 **Step 4 — Open or reload browser session**
 
-Check whether `agent-browser` is available and whether a display is reachable:
+Consult the `browserAvailable` flag set by Step 0b (pre-flight check). Do **not** re-run `command -v agent-browser` or re-evaluate the DISPLAY / CI heuristic here — that check ran once at session start.
 
-```bash
-command -v agent-browser
-```
-
-- **`agent-browser` not installed, or `DISPLAY` unset and not running under a known GUI host (macOS/Windows), or `CI=true`:** Skip all browser calls. Log exactly one warning line to the brainstorm document: `agent-browser unavailable — variants at .aimi/brainstorms/prototypes/<topic-slug>-variants.html`. Continue text-only for all visual questions.
+- **`browserAvailable` is `false`** (any reason captured in `browserSkipReason`): Skip all browser calls. Log exactly one warning line to the brainstorm document: `agent-browser unavailable — variants at .aimi/brainstorms/prototypes/<topic-slug>-variants.html`. Continue text-only for all visual questions.
 - **First visual question (session open, idempotent):** If a session named `brainstorm-<topic-slug>` already exists, reload it; otherwise open a new headed session:
   ```bash
   agent-browser --headed --session brainstorm-<topic-slug> open file://$(pwd)/.aimi/brainstorms/prototypes/<topic-slug>-variants.html
