@@ -46,6 +46,15 @@ See `references/interactivity.md` for the full contract. Every question site
 below includes an agent-mode fallback note describing its specific auto-pick
 behavior.
 
+## Environment Variables
+
+| Variable | Value | Effect |
+|----------|-------|--------|
+| `AIMI_AGENT_MODE` | `true` | Non-interactive fallback — auto-selects Variant A at every picker site, never blocks. Detected by `aimi-cli detect-interactivity` and reflected in `INTERACTIVE_MODE=agent`. |
+| `AIMI_BRAINSTORM_DEBUG` | `1` | Opt-in diagnostic output. When set, the agent emits a `[brainstorm-debug] <context>: <value>` line to chat at each decision point: topic-slug derivation, per-question category classification, browser-attempt result, and variant-selection picker result. Unset (or any value other than `1`) produces no diagnostic output. |
+
+Diagnostic lines are prefixed with `[brainstorm-debug]` so they are trivially greppable and visually distinct from normal output. They are emitted **to chat only** — never written to the brainstorm document or research files.
+
 ## Phase 0: Assess Requirements Clarity
 
 Evaluate whether brainstorming is needed based on the feature description.
@@ -103,6 +112,8 @@ From the feature description, derive a topic slug (needed for research output pa
 3. Remove consecutive hyphens
 4. Truncate to 50 characters
 5. Remove trailing hyphens
+
+If `AIMI_BRAINSTORM_DEBUG=1`: emit `[brainstorm-debug] topic-slug: <derived-slug>` to chat.
 
 #### Generate Run Discriminator
 
@@ -256,7 +267,7 @@ N. What should make this interface memorable?
 
 > Full authoring contract — HTML skeleton, slug sanitization, HTML-escaping rules, token extraction, switcher wiring, and browser session lifecycle — lives in `commands/references/visual-variants.md`. This sub-step is the integration point; do not re-implement any detail here.
 
-When the agent reaches an **Aesthetic Direction** or **Differentiation** question (and only those two categories), execute the following steps **before** presenting the question to the user. All slug sanitization, HTML-escaping, and token extraction rules are defined in `references/visual-variants.md`; this sub-step is the call sequence only.
+When the agent reaches an **Aesthetic Direction** or **Differentiation** question (and only those two categories), execute the following steps **before** presenting the question to the user. If `AIMI_BRAINSTORM_DEBUG=1`: emit `[brainstorm-debug] category: <category-name> — visual rendering path triggered` to chat (or `[brainstorm-debug] category: <category-name> — visual rendering skipped` when the question does not fall into either category). All slug sanitization, HTML-escaping, and token extraction rules are defined in `references/visual-variants.md`; this sub-step is the call sequence only.
 
 **Step 0b — Pre-flight browser availability (run once per brainstorm session)**
 
@@ -349,6 +360,8 @@ Consult the `browserAvailable` flag set by Step 0b (pre-flight check). Do **not*
   ```
   If the retry also fails, degrade to text-only for all remaining visual questions — stop attempting any further `agent-browser` calls for this brainstorm session. Log the file path once at the point of degradation: `agent-browser session lost — variants at .aimi/brainstorms/prototypes/<topic-slug>-variants.html`. (See `references/visual-variants.md` "Fallback: mid-session crash" section for the canonical description of this two-step flow.)
 
+If `AIMI_BRAINSTORM_DEBUG=1`: emit `[brainstorm-debug] browser-attempt: <outcome>` to chat, where `<outcome>` is one of `skipped (browserAvailable=false, reason: <browserSkipReason>)`, `opened new session brainstorm-<topic-slug>`, `reloaded session brainstorm-<topic-slug>`, `retried with session brainstorm-<topic-slug>-2`, or `degraded to text-only after retry failure`.
+
 **Step 5 — Present the question**
 
 Present the Aesthetic Direction or Differentiation question to the user as normal (numbered item with lettered options, "Other" escape hatch). The rendered HTML gives the user a live visual preview alongside the text question.
@@ -362,6 +375,8 @@ For 3 authored variants named "Brutally minimal", "Retro-futuristic", "Luxury/re
 **Agent-mode fallback (non-interactive):**
 
 If the picker tool is unavailable (running under a host that does not support it) or the session is explicitly non-interactive (`AIMI_AGENT_MODE=true` or equivalent), auto-select Variant A deterministically. Log one line to the brainstorm document: `agent-mode: picker unavailable — auto-selected variant A`. Skip the `None — show again / revise` branch entirely in this mode.
+
+If `AIMI_BRAINSTORM_DEBUG=1`: emit `[brainstorm-debug] variant-choice: <chosen-option>` to chat immediately after AskUserQuestion returns (or after the agent-mode auto-pick), where `<chosen-option>` is the full option string the user selected (e.g., `A — Brutally minimal`) or `agent-mode: auto-selected variant A`.
 
 **Handling the `None — show again / revise` branch:**
 
