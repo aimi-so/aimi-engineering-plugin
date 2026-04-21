@@ -310,6 +310,9 @@ Before processing the very first Aesthetic Direction or Differentiation question
 4. **Cache the outcome in working memory:**
    - `browserAvailable` (bool): `true` if the check passed, `false` otherwise.
    - `browserSkipReason` (string): empty string on success; the short cause string on failure.
+   - `echoedBrowserUnavailable` (bool): `false` — guards the once-per-session chat echo for the "agent-browser unavailable" event.
+   - `echoedSessionLost` (bool): `false` — guards the once-per-session chat echo for the "agent-browser session lost" event.
+   - `echoedPickerUnavailable` (bool): `false` — guards the once-per-session chat echo for the "picker unavailable — auto-selected variant A" event.
 
    Step 4 and all subsequent visual-question handling must read `browserAvailable` from working memory — do **not** re-run `command -v agent-browser` or re-evaluate the DISPLAY / CI heuristic on later questions.
 
@@ -361,7 +364,7 @@ Output path: `.aimi/brainstorms/prototypes/<topic-slug>-variants.html`
 
 Consult the `browserAvailable` flag set by Step 0b (pre-flight check). Do **not** re-run `command -v agent-browser` or re-evaluate the DISPLAY / CI heuristic here — that check ran once at session start.
 
-- **`browserAvailable` is `false`** (any reason captured in `browserSkipReason`): Skip all browser calls. Log exactly one warning line to the brainstorm document: `agent-browser unavailable — variants at .aimi/brainstorms/prototypes/<topic-slug>-variants.html`. Continue text-only for all visual questions.
+- **`browserAvailable` is `false`** (any reason captured in `browserSkipReason`): Skip all browser calls. Log exactly one warning line to the brainstorm document: `agent-browser unavailable — variants at .aimi/brainstorms/prototypes/<topic-slug>-variants.html`. The same line is also echoed to chat once per session (guarded by `echoedBrowserUnavailable`): if `echoedBrowserUnavailable` is `false`, emit `agent-browser unavailable — variants at .aimi/brainstorms/prototypes/<topic-slug>-variants.html` to chat and set `echoedBrowserUnavailable = true`; subsequent occurrences of this event within the same session are silent. Continue text-only for all visual questions.
 - **First visual question (session open, idempotent):** If a session named `brainstorm-<topic-slug>` already exists, reload it; otherwise open a new headed session:
   ```bash
   agent-browser --headed --session brainstorm-<topic-slug> open file://$(pwd)/.aimi/brainstorms/prototypes/<topic-slug>-variants.html
@@ -375,7 +378,7 @@ Consult the `browserAvailable` flag set by Step 0b (pre-flight check). Do **not*
   ```bash
   agent-browser --headed --session brainstorm-<topic-slug>-2 open file://$(pwd)/.aimi/brainstorms/prototypes/<topic-slug>-variants.html
   ```
-  If the retry also fails, degrade to text-only for all remaining visual questions — stop attempting any further `agent-browser` calls for this brainstorm session. Log the file path once at the point of degradation: `agent-browser session lost — variants at .aimi/brainstorms/prototypes/<topic-slug>-variants.html`. (See `references/visual-variants.md` "Fallback: mid-session crash" section for the canonical description of this two-step flow.)
+  If the retry also fails, degrade to text-only for all remaining visual questions — stop attempting any further `agent-browser` calls for this brainstorm session. Log the file path once at the point of degradation: `agent-browser session lost — variants at .aimi/brainstorms/prototypes/<topic-slug>-variants.html`. The same line is also echoed to chat once per session (guarded by `echoedSessionLost`): if `echoedSessionLost` is `false`, emit `agent-browser session lost — variants at .aimi/brainstorms/prototypes/<topic-slug>-variants.html` to chat and set `echoedSessionLost = true`; subsequent occurrences of this event within the same session are silent. (See `references/visual-variants.md` "Fallback: mid-session crash" section for the canonical description of this two-step flow.)
 
 If `AIMI_BRAINSTORM_DEBUG=1`: emit `[brainstorm-debug] browser-attempt: <outcome>` to chat, where `<outcome>` is one of `skipped (browserAvailable=false, reason: <browserSkipReason>)`, `opened new session brainstorm-<topic-slug>`, `reloaded session brainstorm-<topic-slug>`, `retried with session brainstorm-<topic-slug>-2`, or `degraded to text-only after retry failure`.
 
@@ -391,7 +394,7 @@ For 3 authored variants named "Brutally minimal", "Retro-futuristic", "Luxury/re
 
 **Agent-mode fallback (non-interactive):**
 
-If the picker tool is unavailable (running under a host that does not support it) or the session is explicitly non-interactive (`AIMI_AGENT_MODE=true` or equivalent), auto-select Variant A deterministically. Log one line to the brainstorm document: `agent-mode: picker unavailable — auto-selected variant A`. Skip the `None — show again / revise` branch entirely in this mode.
+If the picker tool is unavailable (running under a host that does not support it) or the session is explicitly non-interactive (`AIMI_AGENT_MODE=true` or equivalent), auto-select Variant A deterministically. Log one line to the brainstorm document: `agent-mode: picker unavailable — auto-selected variant A`. The same line is also echoed to chat once per session (guarded by `echoedPickerUnavailable`): if `echoedPickerUnavailable` is `false`, emit `agent-mode: picker unavailable — auto-selected variant A` to chat and set `echoedPickerUnavailable = true`; subsequent occurrences of this event within the same session are silent. Skip the `None — show again / revise` branch entirely in this mode.
 
 If `AIMI_BRAINSTORM_DEBUG=1`: emit `[brainstorm-debug] variant-choice: <chosen-option>` to chat immediately after AskUserQuestion returns (or after the agent-mode auto-pick), where `<chosen-option>` is the full option string the user selected (e.g., `A — Brutally minimal`) or `agent-mode: auto-selected variant A`.
 
