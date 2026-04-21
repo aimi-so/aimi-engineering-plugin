@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.64.0] - 2026-04-21
+
+### Added
+
+- **command (aimi:brainstorm — US-002):** Pre-flight browser availability check with chat output. Before the first visual question, `/aimi:brainstorm` runs `command -v agent-browser` plus a `DISPLAY`/`CI` heuristic once and echoes `Visual preview: ready` or `Visual preview: disabled (<reason>)` to chat. Result is cached in working memory so subsequent visual questions do not re-check.
+- **command (aimi:brainstorm — US-004):** `AIMI_BRAINSTORM_DEBUG=1` environment variable support. When set, emits `[brainstorm-debug] <context>: <value>` diagnostic lines to chat at four decision points (topic slug, category classification, browser attempt, variant choice). A new "Environment Variables" section in `brainstorm.md` documents the flag alongside `AIMI_AGENT_MODE`.
+- **command (aimi:brainstorm — US-005):** `show variants` override keyword. Typing the phrase in a brainstorm topic or reply forces the next question to render HTML variants regardless of its category classification. Echoes `Visual override active — rendering variants for next question` to chat once per trigger.
+- **command (aimi:brainstorm — US-003):** Chat-surfacing for browser skip/degradation events. `agent-browser unavailable`, `agent-browser session lost`, and `agent-mode: picker unavailable — auto-selected variant A` are now echoed to chat once per session (guarded by `echoedBrowserUnavailable`, `echoedSessionLost`, `echoedPickerUnavailable` flags), in addition to being logged to the brainstorm document.
+
+### Changed
+
+- **command (aimi:brainstorm — US-001):** Step 4 retry logic improved. A failed session reload now retries once with a `-2` session-name suffix before degrading to text-only, matching the canonical flow in `references/visual-variants.md` "Fallback: mid-session crash" section. Previously degraded on first failure.
+
 ## [1.63.0] - 2026-04-20
 
 ### Added
