@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.67.0] - 2026-04-22
+
+### Added
+
+- **tasks schema (US-001):** New optional `skills[]` field on user story objects. The validator accepts an array of skill-name strings (e.g. `["dhh-rails-style", "frontend-design"]`); stories without `skills[]` are valid and behave identically to pre-1.67. Stories can now declare skills they need (e.g. dhh-rails-style, frontend-design) — the executor injects SKILL.md contents into the worker prompt, keeping the base template lean while giving each story targeted conventions.
+- **command (aimi:execute — US-002):** Executor skill injection. When a story carries a non-empty `skills[]` array, `/aimi:execute` resolves each named skill's `SKILL.md` from the plugin's `skills/` directory and injects its contents into the Task agent prompt ahead of the story body. Skills that cannot be resolved are logged as warnings and skipped; execution continues.
+
+### Changed
+
+- **command (aimi:plan — US-003):** `plan.md` heuristic auto-populates `skills[]` from file patterns detected in the story's `implementation.files` list. Rails/Ruby paths → `dhh-rails-style`; React/Next.js/CSS/Tailwind paths → `frontend-design`. The field is omitted when no patterns match, preserving backwards compatibility.
+
 ## [1.66.0] - 2026-04-22
 
 ### Added
