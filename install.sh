@@ -203,6 +203,11 @@ translate_command_body() {
   body="${body//via AskUserQuestion/via the question tool}"
   body="${body//AskUserQuestion/the question tool}"
 
+  # --- REQUIRED_SKILLS / SKILLS_BASE_DIR: no rewrite needed ---
+  # SKILLS_BASE_DIR resolution in execute.md already branches on CLAUDECODE vs AIMI_PLUGIN_DIR,
+  # and AIMI_PLUGIN_DIR is set by this installer for OpenCode. The <required_skills> section
+  # is injected verbatim into Task prompts — no OpenCode-specific translation required.
+
   # --- Agent invocation preamble (only for commands referencing named agents) ---
   case "$body" in
     *'subagent_type="aimi-engineering:'*)

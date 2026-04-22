@@ -617,6 +617,22 @@ If all prototypes are missing or all blocks are dropped, set `PROTOTYPE_CONTEXT`
 
 Store `html_count` (count of `.html` files that survived into `PROTOTYPE_CONTEXT`) for use in the start report.
 
+## Step 3.6: Resolve Skill Injection Base Path
+
+Resolve the base directory for skill files. Mirror the CLI path resolution pattern:
+
+```bash
+if [ -n "${CLAUDECODE}" ]; then
+    # Claude Code: glob the plugin cache
+    SKILLS_BASE_DIR=$(echo ~/.claude/plugins/cache/*/aimi-engineering/*/skills 2>/dev/null | tr ' ' '\n' | head -1)
+else
+    # OpenCode: use the installed plugin dir
+    SKILLS_BASE_DIR="${AIMI_PLUGIN_DIR}/skills"
+fi
+```
+
+If the glob matches nothing (no cache entry found) or `AIMI_PLUGIN_DIR` is unset, set `SKILLS_BASE_DIR` to empty string. A missing or empty `SKILLS_BASE_DIR` causes skill loading to silently produce no output (all skill reads are skipped as "not found").
+
 ## Step 4: Wave Execution Loop
 
 ```
@@ -717,6 +733,35 @@ while true:
         else:
             head_before = git rev-parse HEAD
 
+        # Resolve required skills for this story
+        required_skills_block = ''
+        if full_story.skills is non-empty and SKILLS_BASE_DIR is non-empty:
+            aggregate_size = 0
+            skill_blocks = []
+            for skill_name in full_story.skills:
+                skill_path = "$SKILLS_BASE_DIR/[skill_name]/SKILL.md"
+                if file does not exist at skill_path:
+                    log: "skill [skill_name] not found at [skill_path] — skipped"
+                    continue
+                skill_content = read file at skill_path verbatim
+                # Tag-breakout escape: prevent wrapper-tag injection
+                skill_content = replace literal "</required_skills" with "&lt;/required_skills"
+                skill_content = replace literal "<required_skills" with "&lt;required_skills"
+                skill_blocks.append({name: skill_name, path: "skills/[skill_name]/SKILL.md", content: skill_content})
+                aggregate_size += byte_length(skill_content)
+
+            # Aggregate size cap: 100KB across all skills
+            while aggregate_size > 102400 and len(skill_blocks) > 0:
+                dropped = skill_blocks.pop()  # drop last (reverse order)
+                aggregate_size -= byte_length(dropped.content)
+                log: "skill [dropped.name] dropped — aggregate skills context exceeded 100KB"
+
+            if len(skill_blocks) > 0:
+                parts = []
+                for block in skill_blocks:
+                    parts.append("<skill name=\"[block.name]\" path=\"[block.path]\">\n[block.content]\n</skill>")
+                required_skills_block = join(parts, "\n")
+
         # Spawn a single foreground Task — same pattern as next.md
         # No worktree, worker operates in current directory (or PROJECT_PATH if set)
         # IMPORTANT: subagent_type MUST be "general-purpose" — story-executor is a skill, NOT an agent.
@@ -731,6 +776,7 @@ while true:
             description: "Execute [full_story.id]: [full_story.title]",
             prompt: [story-executor SKILL.md [template] with:
                 - PROJECT_GUIDELINES = project_guidelines
+                - REQUIRED_SKILLS = required_skills_block (include <required_skills> section only if non-empty)
                 - PROJECT_PATH = project_path (only include if non-null)
                 - HEADED_MODE = true (only include if VISUAL_FOLLOW is true AND full_story.verification.strategy == "visual")
                 - STORY_ID = full_story.id
@@ -831,6 +877,35 @@ while true:
         else:
             head_before = git rev-parse HEAD
 
+        # Resolve required skills for this story
+        required_skills_block = ''
+        if full_story.skills is non-empty and SKILLS_BASE_DIR is non-empty:
+            aggregate_size = 0
+            skill_blocks = []
+            for skill_name in full_story.skills:
+                skill_path = "$SKILLS_BASE_DIR/[skill_name]/SKILL.md"
+                if file does not exist at skill_path:
+                    log: "skill [skill_name] not found at [skill_path] — skipped"
+                    continue
+                skill_content = read file at skill_path verbatim
+                # Tag-breakout escape: prevent wrapper-tag injection
+                skill_content = replace literal "</required_skills" with "&lt;/required_skills"
+                skill_content = replace literal "<required_skills" with "&lt;required_skills"
+                skill_blocks.append({name: skill_name, path: "skills/[skill_name]/SKILL.md", content: skill_content})
+                aggregate_size += byte_length(skill_content)
+
+            # Aggregate size cap: 100KB across all skills
+            while aggregate_size > 102400 and len(skill_blocks) > 0:
+                dropped = skill_blocks.pop()  # drop last (reverse order)
+                aggregate_size -= byte_length(dropped.content)
+                log: "skill [dropped.name] dropped — aggregate skills context exceeded 100KB"
+
+            if len(skill_blocks) > 0:
+                parts = []
+                for block in skill_blocks:
+                    parts.append("<skill name=\"[block.name]\" path=\"[block.path]\">\n[block.content]\n</skill>")
+                required_skills_block = join(parts, "\n")
+
         # Template selection: full for first story, compact for subsequent
         template = full_template if is_first_story_in_session else compact_template
 
@@ -839,6 +914,7 @@ while true:
             description: "Execute [full_story.id]: [full_story.title]",
             prompt: [story-executor SKILL.md [template] with:
                 - PROJECT_GUIDELINES = project_guidelines
+                - REQUIRED_SKILLS = required_skills_block (include <required_skills> section only if non-empty)
                 - PROJECT_PATH = project_path (only include if non-null)
                 - HEADED_MODE = true (only include if VISUAL_FOLLOW is true AND full_story.verification.strategy == "visual")
                 - STORY_ID = full_story.id
@@ -967,6 +1043,35 @@ while true:
         project_path = project_roots[wt.group_key] if wt.group_key != "DEFAULT" else null
         project_guidelines = PROJECT_GUIDELINES_MAP[wt.group_key] if wt.group_key != "DEFAULT" else PROJECT_GUIDELINES
 
+        # Resolve required skills for this story
+        required_skills_block = ''
+        if full_story.skills is non-empty and SKILLS_BASE_DIR is non-empty:
+            aggregate_size = 0
+            skill_blocks = []
+            for skill_name in full_story.skills:
+                skill_path = "$SKILLS_BASE_DIR/[skill_name]/SKILL.md"
+                if file does not exist at skill_path:
+                    log: "skill [skill_name] not found at [skill_path] — skipped"
+                    continue
+                skill_content = read file at skill_path verbatim
+                # Tag-breakout escape: prevent wrapper-tag injection
+                skill_content = replace literal "</required_skills" with "&lt;/required_skills"
+                skill_content = replace literal "<required_skills" with "&lt;required_skills"
+                skill_blocks.append({name: skill_name, path: "skills/[skill_name]/SKILL.md", content: skill_content})
+                aggregate_size += byte_length(skill_content)
+
+            # Aggregate size cap: 100KB across all skills
+            while aggregate_size > 102400 and len(skill_blocks) > 0:
+                dropped = skill_blocks.pop()  # drop last (reverse order)
+                aggregate_size -= byte_length(dropped.content)
+                log: "skill [dropped.name] dropped — aggregate skills context exceeded 100KB"
+
+            if len(skill_blocks) > 0:
+                parts = []
+                for block in skill_blocks:
+                    parts.append("<skill name=\"[block.name]\" path=\"[block.path]\">\n[block.content]\n</skill>")
+                required_skills_block = join(parts, "\n")
+
         template = full_template if (is_first_story_in_session and story_index == 0) else compact_template
 
         Task(
@@ -976,6 +1081,7 @@ while true:
                 - WORKTREE_PATH = wt.worktree_path
                 - PROJECT_PATH = project_path (only include if non-null)
                 - PROJECT_GUIDELINES = project_guidelines
+                - REQUIRED_SKILLS = required_skills_block (include <required_skills> section only if non-empty)
                 - HEADED_MODE = (do NOT include for worktree stories — visual verification runs post-merge, not inside the worktree)
                 - Omit the <visual_verification> section entirely for worktree stories
                   (the dev server cannot see worktree changes; verification runs after merge-all instead)
