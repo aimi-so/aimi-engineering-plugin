@@ -875,6 +875,17 @@ cmd_validate_stories() {
            elif ($s.project | test("[\\$`;|&]")) then ["\($s.id): project contains shell metacharacters"]
            elif ($s.project | test("^[a-zA-Z0-9_.][a-zA-Z0-9_./@-]*$") | not) then ["\($s.id): project contains invalid characters"]
            else [] end)
+         else [] end) +
+        (if ($s.skills != null) then
+          (if ($s.skills | type) != "array" then ["\($s.id): skills must be an array"]
+           else
+             (if ($s.skills | length) > 10 then ["\($s.id): skills array exceeds 10 entries"] else [] end) +
+             [$s.skills[] | select(test("^[a-zA-Z0-9][a-zA-Z0-9_-]*$") | not) | "\($s.id): skills[" + (. | tostring) + "] contains invalid characters"] +
+             [$s.skills[] | select(test("\\.\\.") or test("/") or test("[\\$`;|&]")) | "\($s.id): skills[" + (. | tostring) + "] must not contain path components"] +
+             (if ($s.skills | unique | length) != ($s.skills | length) then
+               [$s.skills | group_by(.) | .[] | select(length > 1) | .[0] | "\($s.id): skills contains duplicate entry \(.)"]
+             else [] end)
+           end)
          else [] end)
       ) | .[]
     ] |

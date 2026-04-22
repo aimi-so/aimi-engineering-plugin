@@ -2067,6 +2067,234 @@ test_validate_stories_with_absolute_project() {
   _teardown_project_fixture
 }
 
+test_validate_stories_skills_field() {
+  echo ""
+  echo "=== Testing validate-stories with skills[] field ==="
+
+  # (a) absent .skills validates clean
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+  _setup_project_fixture '{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Skills test",
+    "type": "feat",
+    "branchName": "feat/skills-test",
+    "createdAt": "2026-04-22",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "No skills field",
+      "description": "Story without skills",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": ""
+    }
+  ]
+}'
+  local output exit_code
+  output=$("$CLI" validate-stories) && exit_code=0 || exit_code=$?
+  assert_contains '"valid": true' "$output" "validate-stories skills: absent skills validates clean"
+  assert_exit_code "0" "$exit_code" "validate-stories skills: exits 0 for absent skills"
+  _teardown_project_fixture
+
+  # (b) empty array validates clean
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+  _setup_project_fixture '{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Skills test",
+    "type": "feat",
+    "branchName": "feat/skills-test",
+    "createdAt": "2026-04-22",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Empty skills",
+      "description": "Story with empty skills array",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "skills": []
+    }
+  ]
+}'
+  output=$("$CLI" validate-stories) && exit_code=0 || exit_code=$?
+  assert_contains '"valid": true' "$output" "validate-stories skills: empty array validates clean"
+  assert_exit_code "0" "$exit_code" "validate-stories skills: exits 0 for empty skills array"
+  _teardown_project_fixture
+
+  # (c) valid array ['dhh-rails-style','frontend-design'] validates clean
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+  _setup_project_fixture '{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Skills test",
+    "type": "feat",
+    "branchName": "feat/skills-test",
+    "createdAt": "2026-04-22",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Valid skills",
+      "description": "Story with valid skills",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "skills": ["dhh-rails-style", "frontend-design"]
+    }
+  ]
+}'
+  output=$("$CLI" validate-stories) && exit_code=0 || exit_code=$?
+  assert_contains '"valid": true' "$output" "validate-stories skills: valid array validates clean"
+  assert_exit_code "0" "$exit_code" "validate-stories skills: exits 0 for valid skills array"
+  _teardown_project_fixture
+
+  # (d) non-array rejected
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+  _setup_project_fixture '{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Skills test",
+    "type": "feat",
+    "branchName": "feat/skills-test",
+    "createdAt": "2026-04-22",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Non-array skills",
+      "description": "Story with non-array skills",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "skills": "dhh-rails-style"
+    }
+  ]
+}'
+  output=$("$CLI" validate-stories) && exit_code=0 || exit_code=$?
+  assert_contains '"valid": false' "$output" "validate-stories skills: non-array skills fails validation"
+  assert_contains "skills must be an array" "$output" "validate-stories skills: error mentions skills must be an array"
+  _teardown_project_fixture
+
+  # (e) invalid regex char '../evil' rejected
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+  _setup_project_fixture '{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Skills test",
+    "type": "feat",
+    "branchName": "feat/skills-test",
+    "createdAt": "2026-04-22",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Invalid skill name",
+      "description": "Story with invalid skill name",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "skills": ["../evil"]
+    }
+  ]
+}'
+  output=$("$CLI" validate-stories) && exit_code=0 || exit_code=$?
+  assert_contains '"valid": false' "$output" "validate-stories skills: traversal skill name fails validation"
+  _teardown_project_fixture
+
+  # (f) 11-entry array rejected
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+  _setup_project_fixture '{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Skills test",
+    "type": "feat",
+    "branchName": "feat/skills-test",
+    "createdAt": "2026-04-22",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Too many skills",
+      "description": "Story with 11 skills",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "skills": ["skill-01","skill-02","skill-03","skill-04","skill-05","skill-06","skill-07","skill-08","skill-09","skill-10","skill-11"]
+    }
+  ]
+}'
+  output=$("$CLI" validate-stories) && exit_code=0 || exit_code=$?
+  assert_contains '"valid": false' "$output" "validate-stories skills: 11-entry array fails validation"
+  assert_contains "skills array exceeds 10 entries" "$output" "validate-stories skills: error mentions exceeds 10 entries"
+  _teardown_project_fixture
+
+  # (g) duplicates rejected
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+  _setup_project_fixture '{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Skills test",
+    "type": "feat",
+    "branchName": "feat/skills-test",
+    "createdAt": "2026-04-22",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Duplicate skills",
+      "description": "Story with duplicate skill entries",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "skills": ["dhh-rails-style", "frontend-design", "dhh-rails-style"]
+    }
+  ]
+}'
+  output=$("$CLI" validate-stories) && exit_code=0 || exit_code=$?
+  assert_contains '"valid": false' "$output" "validate-stories skills: duplicates fail validation"
+  assert_contains "skills contains duplicate entry" "$output" "validate-stories skills: error mentions duplicate entry"
+  _teardown_project_fixture
+}
+
 test_list_ready_brief_includes_project() {
   echo ""
   echo "=== Testing list-ready --brief includes project in output ==="
@@ -3845,6 +4073,7 @@ main() {
   test_validate_stories_with_valid_project
   test_validate_stories_with_traversal_project
   test_validate_stories_with_absolute_project
+  test_validate_stories_skills_field
   test_list_ready_brief_includes_project
 
   # V3.2 schema tests — gates, waves & field preservation
