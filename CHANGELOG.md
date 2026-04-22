@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.66.0] - 2026-04-22
+
+### Added
+
+- **cli (aimi-cli.sh):** New `--base <branch>` flag on the `setup-branch` subcommand. Callers can now specify an explicit base branch (e.g., `aimi-cli.sh setup-branch --base main`) instead of relying solely on automatic default-branch detection. When omitted, behavior is identical to pre-1.66: the default branch is detected via `detect-default-branch`. Enables `/aimi:execute` to thread the user's chosen base branch all the way down to the worktree creation call.
+
+### Changed
+
+- **command (aimi:execute):** Interactive base-branch selection at Step 1.6. When the current branch has unmerged work, `/aimi:execute` now asks whether to stack on the current branch or start fresh from the default branch. Previously auto-stacked. In agent mode (`AIMI_AGENT_MODE=true`, `CI=true`, or no TTY) the pre-1.66 automatic stacking behavior is preserved — no prompt is emitted and the current branch is used as-is.
+
 ## [1.65.0] - 2026-04-22
 
 ### Added
