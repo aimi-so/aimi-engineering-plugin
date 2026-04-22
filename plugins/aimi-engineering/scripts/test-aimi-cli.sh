@@ -3123,6 +3123,298 @@ TASKEOF
   rm -rf "$arch_dir"
 }
 
+test_archive_task_with_prototype_paths() {
+  echo ""
+  echo "=== Testing archive-task: deletes prototype files and reports count ==="
+
+  local stdout exit_code prototype_cleaned
+
+  local arch_dir
+  arch_dir=$(mktemp -d)
+  mkdir -p "$arch_dir/.aimi/tasks" "$arch_dir/.aimi/brainstorms/prototypes"
+
+  # Create two prototype files
+  local p1="$arch_dir/.aimi/brainstorms/prototypes/prototype-us001.html"
+  local p2="$arch_dir/.aimi/brainstorms/prototypes/prototype-us002.html"
+  printf '<html>prototype 1</html>' > "$p1"
+  printf '<html>prototype 2</html>' > "$p2"
+
+  local task_file="$arch_dir/.aimi/tasks/2026-01-04-test-archive-tasks.json"
+  cat > "$task_file" << 'TASKEOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Archive test prototypes",
+    "type": "feat",
+    "branchName": "feat/archive-prototype-test",
+    "createdAt": "2026-01-04",
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 1,
+    "prototypePaths": [
+      ".aimi/brainstorms/prototypes/prototype-us001.html",
+      ".aimi/brainstorms/prototypes/prototype-us002.html"
+    ]
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Done story",
+      "description": "Completed",
+      "acceptanceCriteria": ["Done"],
+      "priority": 1,
+      "status": "completed",
+      "dependsOn": [],
+      "notes": ""
+    }
+  ]
+}
+TASKEOF
+
+  pushd "$arch_dir" >/dev/null
+  stdout=$("$CLI" archive-task "$task_file" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "archive-task with prototypePaths: exit code"
+
+  prototype_cleaned=$(printf '%s' "$stdout" | jq -r '.archived.prototypeCleaned')
+  assert_eq "2" "$prototype_cleaned" "archive-task with prototypePaths: prototypeCleaned count"
+
+  # Prototype files must be gone
+  local p1_exists="no" p2_exists="no"
+  [ -e "$p1" ] && p1_exists="yes"
+  [ -e "$p2" ] && p2_exists="yes"
+  assert_eq "no" "$p1_exists" "archive-task with prototypePaths: prototype file 1 deleted"
+  assert_eq "no" "$p2_exists" "archive-task with prototypePaths: prototype file 2 deleted"
+
+  rm -rf "$arch_dir"
+}
+
+test_archive_task_without_prototype_paths() {
+  echo ""
+  echo "=== Testing archive-task: no prototypePaths produces prototypeCleaned 0 ==="
+
+  local stdout exit_code prototype_cleaned
+
+  local arch_dir
+  arch_dir=$(mktemp -d)
+  mkdir -p "$arch_dir/.aimi/tasks"
+
+  local task_file="$arch_dir/.aimi/tasks/2026-01-05-test-archive-tasks.json"
+  cat > "$task_file" << 'TASKEOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Archive test no prototypes",
+    "type": "feat",
+    "branchName": "feat/archive-no-prototype",
+    "createdAt": "2026-01-05",
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 1
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Done story",
+      "description": "Completed",
+      "acceptanceCriteria": ["Done"],
+      "priority": 1,
+      "status": "completed",
+      "dependsOn": [],
+      "notes": ""
+    }
+  ]
+}
+TASKEOF
+
+  pushd "$arch_dir" >/dev/null
+  stdout=$("$CLI" archive-task "$task_file" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "archive-task without prototypePaths: exit code"
+
+  prototype_cleaned=$(printf '%s' "$stdout" | jq -r '.archived.prototypeCleaned')
+  assert_eq "0" "$prototype_cleaned" "archive-task without prototypePaths: prototypeCleaned is 0"
+
+  rm -rf "$arch_dir"
+}
+
+test_archive_task_missing_prototype_files() {
+  echo ""
+  echo "=== Testing archive-task: missing prototype files skipped silently ==="
+
+  local stdout exit_code prototype_cleaned
+
+  local arch_dir
+  arch_dir=$(mktemp -d)
+  mkdir -p "$arch_dir/.aimi/tasks" "$arch_dir/.aimi/brainstorms/prototypes"
+
+  # Create only one of the two prototype files referenced
+  local p1="$arch_dir/.aimi/brainstorms/prototypes/prototype-exists.html"
+  printf '<html>exists</html>' > "$p1"
+  # prototype-missing.html intentionally NOT created
+
+  local task_file="$arch_dir/.aimi/tasks/2026-01-06-test-archive-tasks.json"
+  cat > "$task_file" << 'TASKEOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Archive test missing prototypes",
+    "type": "feat",
+    "branchName": "feat/archive-missing-prototype",
+    "createdAt": "2026-01-06",
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 1,
+    "prototypePaths": [
+      ".aimi/brainstorms/prototypes/prototype-exists.html",
+      ".aimi/brainstorms/prototypes/prototype-missing.html"
+    ]
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Done story",
+      "description": "Completed",
+      "acceptanceCriteria": ["Done"],
+      "priority": 1,
+      "status": "completed",
+      "dependsOn": [],
+      "notes": ""
+    }
+  ]
+}
+TASKEOF
+
+  pushd "$arch_dir" >/dev/null
+  stdout=$("$CLI" archive-task "$task_file" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "archive-task missing prototype files: exit code"
+
+  # Only the existing file is counted
+  prototype_cleaned=$(printf '%s' "$stdout" | jq -r '.archived.prototypeCleaned')
+  assert_eq "1" "$prototype_cleaned" "archive-task missing prototype files: prototypeCleaned counts only existing"
+
+  # The existing file must be gone
+  local p1_exists="no"
+  [ -e "$p1" ] && p1_exists="yes"
+  assert_eq "no" "$p1_exists" "archive-task missing prototype files: existing file deleted"
+
+  rm -rf "$arch_dir"
+}
+
+test_archive_task_both_research_and_prototype_paths() {
+  echo ""
+  echo "=== Testing archive-task: both researchPaths and prototypePaths cleaned correctly ==="
+
+  local stdout exit_code research_cleaned prototype_cleaned
+
+  local arch_dir
+  arch_dir=$(mktemp -d)
+  mkdir -p "$arch_dir/.aimi/tasks" "$arch_dir/.aimi/research" "$arch_dir/.aimi/brainstorms/prototypes"
+
+  # Create research files
+  local r1="$arch_dir/.aimi/research/research-combined.md"
+  printf 'research combined' > "$r1"
+
+  # Create prototype files
+  local p1="$arch_dir/.aimi/brainstorms/prototypes/prototype-combined.html"
+  local p2="$arch_dir/.aimi/brainstorms/prototypes/tokens-combined.json"
+  printf '<html>prototype combined</html>' > "$p1"
+  printf '{"tokens": true}' > "$p2"
+
+  local task_file="$arch_dir/.aimi/tasks/2026-01-07-test-archive-tasks.json"
+  cat > "$task_file" << 'TASKEOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Archive test both paths",
+    "type": "feat",
+    "branchName": "feat/archive-both-paths",
+    "createdAt": "2026-01-07",
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 1,
+    "researchPaths": [
+      ".aimi/research/research-combined.md"
+    ],
+    "prototypePaths": [
+      ".aimi/brainstorms/prototypes/prototype-combined.html",
+      ".aimi/brainstorms/prototypes/tokens-combined.json"
+    ]
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Done story",
+      "description": "Completed",
+      "acceptanceCriteria": ["Done"],
+      "priority": 1,
+      "status": "completed",
+      "dependsOn": [],
+      "notes": ""
+    }
+  ]
+}
+TASKEOF
+
+  pushd "$arch_dir" >/dev/null
+  stdout=$("$CLI" archive-task "$task_file" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "archive-task both paths: exit code"
+
+  research_cleaned=$(printf '%s' "$stdout" | jq -r '.archived.researchCleaned')
+  assert_eq "1" "$research_cleaned" "archive-task both paths: researchCleaned count"
+
+  prototype_cleaned=$(printf '%s' "$stdout" | jq -r '.archived.prototypeCleaned')
+  assert_eq "2" "$prototype_cleaned" "archive-task both paths: prototypeCleaned count"
+
+  # All files must be gone
+  local r1_exists="no" p1_exists="no" p2_exists="no"
+  [ -e "$r1" ] && r1_exists="yes"
+  [ -e "$p1" ] && p1_exists="yes"
+  [ -e "$p2" ] && p2_exists="yes"
+  assert_eq "no" "$r1_exists" "archive-task both paths: research file deleted"
+  assert_eq "no" "$p1_exists" "archive-task both paths: prototype file 1 deleted"
+  assert_eq "no" "$p2_exists" "archive-task both paths: prototype file 2 deleted"
+
+  rm -rf "$arch_dir"
+}
+
+test_detect_interactivity_agent_mode_env() {
+  echo ""
+  echo "=== Testing detect-interactivity with AIMI_AGENT_MODE=true ==="
+
+  local output
+  output=$(AIMI_AGENT_MODE=true CI= "$CLI" detect-interactivity </dev/null)
+
+  assert_eq "agent" "$output" "detect-interactivity returns 'agent' when AIMI_AGENT_MODE=true"
+}
+
+test_detect_interactivity_ci_env() {
+  echo ""
+  echo "=== Testing detect-interactivity with CI=true ==="
+
+  local output
+  output=$(AIMI_AGENT_MODE= CI=true "$CLI" detect-interactivity </dev/null)
+
+  assert_eq "agent" "$output" "detect-interactivity returns 'agent' when CI=true"
+}
+
+test_detect_interactivity_non_tty() {
+  echo ""
+  echo "=== Testing detect-interactivity with non-TTY stdin ==="
+
+  # Redirecting stdin from /dev/null makes it not a TTY; no override env vars needed.
+  local output
+  output=$(AIMI_AGENT_MODE= CI= "$CLI" detect-interactivity </dev/null)
+
+  assert_eq "agent" "$output" "detect-interactivity returns 'agent' when stdin is not a TTY"
+}
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -3306,6 +3598,17 @@ main() {
   test_archive_task_with_research_paths
   test_archive_task_without_research_paths
   test_archive_task_missing_research_files
+  test_archive_task_with_prototype_paths
+  test_archive_task_without_prototype_paths
+  test_archive_task_missing_prototype_files
+  test_archive_task_both_research_and_prototype_paths
+
+  # Interactivity mode detection tests
+  echo ""
+  echo "--- Interactivity Mode Detection Tests ---"
+  test_detect_interactivity_agent_mode_env
+  test_detect_interactivity_ci_env
+  test_detect_interactivity_non_tty
 
   cleanup
 

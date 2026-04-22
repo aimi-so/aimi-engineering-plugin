@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.64.0] - 2026-04-21
+
+### Added
+
+- **command (aimi:brainstorm — US-002):** Pre-flight browser availability check with chat output. Before the first visual question, `/aimi:brainstorm` runs `command -v agent-browser` plus a `DISPLAY`/`CI` heuristic once and echoes `Visual preview: ready` or `Visual preview: disabled (<reason>)` to chat. Result is cached in working memory so subsequent visual questions do not re-check.
+- **command (aimi:brainstorm — US-004):** `AIMI_BRAINSTORM_DEBUG=1` environment variable support. When set, emits `[brainstorm-debug] <context>: <value>` diagnostic lines to chat at four decision points (topic slug, category classification, browser attempt, variant choice). A new "Environment Variables" section in `brainstorm.md` documents the flag alongside `AIMI_AGENT_MODE`.
+- **command (aimi:brainstorm — US-005):** `show variants` override keyword. Typing the phrase in a brainstorm topic or reply forces the next question to render HTML variants regardless of its category classification. Echoes `Visual override active — rendering variants for next question` to chat once per trigger.
+- **command (aimi:brainstorm — US-003):** Chat-surfacing for browser skip/degradation events. `agent-browser unavailable`, `agent-browser session lost`, and `agent-mode: picker unavailable — auto-selected variant A` are now echoed to chat once per session (guarded by `echoedBrowserUnavailable`, `echoedSessionLost`, `echoedPickerUnavailable` flags), in addition to being logged to the brainstorm document.
+
+### Changed
+
+- **command (aimi:brainstorm — US-001):** Step 4 retry logic improved. A failed session reload now retries once with a `-2` session-name suffix before degrading to text-only, matching the canonical flow in `references/visual-variants.md` "Fallback: mid-session crash" section. Previously degraded on first failure.
+
+## [1.63.0] - 2026-04-20
+
+### Added
+
+- **cli (aimi-cli.sh):** New `detect-interactivity` subcommand that resolves the active interactivity mode from environment: prints `agent` when `AIMI_AGENT_MODE=true`, `CI=true`, or stdin is not a TTY; prints `picker` otherwise. Exempt from `find_aimi_root()` since it reads only env vars — usable by commands before any `.aimi/` state exists. Documented in `cmd_help` usage.
+- **reference (interactivity.md):** New `commands/references/interactivity.md` defines the two-mode contract (`picker`, `agent`), the picker option-format rules (lettered labels, escape hatch on last option, 2–6 options cap), the agent auto-pick log-line format (`agent-mode: <site-id> auto-<action>`), and a 3-step checklist for adding new question sites. Single source of truth for all commands that ask the user questions.
+- **command (aimi:brainstorm):** New Step 0 (Resolve CLI Path) + Step 0.5 (Resolve Interactivity Mode) preamble sets `INTERACTIVE_MODE` once per invocation via `$AIMI_CLI detect-interactivity`. Phase 2 main batch questions now branch on `INTERACTIVE_MODE`: `picker` emits one `AskUserQuestion` call per question with lettered options + `Other` free-form escape (replaces the former single prose block with shorthand parser); `agent` auto-selects option A and logs one line per question. Agent-mode fallback notes added to the remaining 3 picker sites (Phase 0 plan-redirect auto-proceeds to `/aimi:plan`; Phase 3 approach auto-picks option A; Phase 4 open questions defer to a `Deferred Questions` section). Combined with the existing visual-variant fallback (L335) and the new Phase 2 branch, all 7 user-facing question sites now have deterministic agent-mode behavior.
+
+### Changed
+
+- **installer (install.sh):** AskUserQuestion translation no longer degrades to prose-in-chat. OpenCode ships a native `question` tool ([docs/tools](https://opencode.ai/docs/tools/)) with header + lettered options + custom-text input; the translator now maps `Use **AskUserQuestion**` → `Use the **question** tool`, `Use AskUserQuestion` → `Use the question tool`, `via AskUserQuestion` → `via the question tool`, and the bare `AskUserQuestion` fallback → `the question tool`. OpenCode users get the same picker UX as Claude Code users across every command that uses the pattern (brainstorm, swarm, plan, task-planner). Permission-gated by `"question"` in `opencode.json` (default: `"ask"`).
+
+### Fixed
+
+- **command (aimi:brainstorm):** Shorthand answer parser (`"1A, 2C, 3B"`) removed from Phase 2 — it was a workaround for the missing picker on the main batch and no longer applies when every question is a picker call. Pre-existing visual-variant fallback log line changed from `agent-mode: AskUserQuestion unavailable` to `agent-mode: picker unavailable` so it stays grammatical after OpenCode translation.
+
+### Tests
+
+- **test-aimi-cli.sh:** Three new tests covering `detect-interactivity`: `test_detect_interactivity_agent_mode_env` (AIMI_AGENT_MODE=true overrides), `test_detect_interactivity_ci_env` (CI=true triggers agent mode), `test_detect_interactivity_non_tty` (no TTY on stdin triggers agent mode). Baseline raised from 283/0 to 286/0.
+
+## [1.62.0] - 2026-04-20
+
+### Added
+
+- **schema (tasks.json):** New optional `metadata.prototypePaths[]` field — a deduplicated array of relative paths to prototype HTML variants and the `<topic-slug>-tokens.json` sidecar. Schema version stays at `3.2` (additive optional field, follows the `researchPaths[]` precedent).
+- **command (aimi:plan):** Phase 0 Prototype Context now collects successfully loaded prototype paths (non-dropped after the 200 KB aggregate cap, non-missing on disk) into `resolvedPrototypePaths`; Phase 4 Derive Metadata persists them as `metadata.prototypePaths[]`. Full-stack split writes the same array to both frontend and backend tasks.json files. The Aimi-branded report surfaces `Prototypes: [N] variant file(s) registered` when non-empty.
+- **command (aimi:execute):** New Step 3.5 Load Prototype Context reads `metadata.prototypePaths[]` and builds `PROTOTYPE_CONTEXT` — `.html` files wrap as `<prototype_html label="X" path="...">` blocks with tag-breakout escape, `.json` sidecars wrap as `<prototype_tokens>` blocks. Re-applies the 200 KB aggregate cap at execute time; skips missing files with a warning line. `PROTOTYPE_CONTEXT` is injected into all three worker-prompt assembly sites (single-story wave, multi-story parallel wave, paired-split sub-Tasks) immediately after `DESIGN_CONTEXT`, omitted when empty. Start report surfaces `Prototype context: [N] variant(s) loaded` when variants are present.
+- **skill (story-executor):** Prompt Template and Compact Template both define a `<prototype_context>` XML section (after `<design_context>`) so spawned workers know how to consume prototype variants when threaded.
+- **cli (aimi-cli.sh — archive-task):** Cleans `metadata.prototypePaths[]` files alongside `researchPaths[]` using an identical loop (relative-path resolution from PROJECT_ROOT, `validate_path_in_project` gate, `[ -e ]` missing-file tolerance, `rm -f`). Output JSON gains a `prototypeCleaned` counter field on the existing single `jq -n` call.
+- **tests (test-aimi-cli.sh):** Four new archive-task tests covering prototype cleanup: `test_archive_task_with_prototype_paths`, `test_archive_task_without_prototype_paths`, `test_archive_task_missing_prototype_files`, and `test_archive_task_both_research_and_prototype_paths`.
+
+### Security
+
+- **command (aimi:plan):** Phase 0 Prototype Context now validates that each resolved absolute path stays within AIMI_ROOT before reading — paths escaping via `../` or symlink targets are rejected with `prototype <path> rejected — path outside project root` and skipped (plan does not abort for a bad path). Prevents a malicious brainstorm with a `prototype: ../../etc/passwd` frontmatter key from injecting arbitrary file contents into the planning context.
+
+## [1.61.1] - 2026-04-17
+
+### Changed
+
+- **command (aimi:deepen):** Research file naming standardized to the `brainstorm` and `plan` canonical shape `.aimi/research/YYYY-MM-DD-<topic-slug>-<RUN_TS>-<story.id>-codebase.md`. Deepen now derives `TOPIC_SLUG` from `metadata.branchName` (stripping the `type/` prefix), generates a single `RUN_TS` via `date +%H%M%S` and reuses it across every parallel researcher, and passes the path via a structured `outputPath:` field so researcher agents write to the exact canonical location (the researcher Output Contract honors caller-supplied `outputPath:`). Same-run grouping now matches brainstorm/plan.
+
+### Fixed
+
+- **command (aimi:deepen):** Step 4.5 appends every written research path to `metadata.researchPaths[]` (deduplicated). Previously deepen's research files leaked — `$AIMI_CLI archive-task` reads `researchPaths[]` to clean up, but deepen never wrote into the array, so its files persisted across archive cycles.
+
+## [1.61.0] - 2026-04-17
+
+### Added
+
+- **reference (visual-variants.md):** New `commands/references/visual-variants.md` — Alpine.js switcher skeleton with topic-slug sanitization and HTML-escape rules (including JS-context escaping note for future `x-data` embeddings), Tailwind CDN offline behavior, 2–4 variants-per-question constraint, and append semantics for multi-question sessions.
+- **reference (visual-variants.md — Token Extraction):** 6-source precedence list for design-token resolution: `tailwind.config.{js,ts}` → `theme.{ts,js,tsx,jsx}` → CSS custom properties → `_variables.scss` → MUI `createTheme` → Chakra `extendTheme`. **Eight token families** covered: colors, fonts, radii, spacing, shadows, transitions, screens (breakpoints), and dark-mode. Per-family independent resolution, Tailwind CDN defaults fallback with in-document warning, parse errors silently skip the source and never abort brainstorm.
+- **reference (visual-variants.md — Token Sidecar JSON):** Extraction writes a machine-readable `<topic-slug>-tokens.json` alongside the HTML variants file, recording resolved values, per-family source attribution, and fallback list. Consumed by `/aimi:plan` (implementation context) and `/aimi:review` (fidelity checks).
+- **reference (visual-variants.md — Structural Guidance):** Canonical-shape taxonomy (form/card/nav/hero/modal/table/layout-with-sidebar). Variants in the same question share shape, density, and primary-action copy; direction varies via typography, color, radius, shadow, and density. Tokens emitted as CSS custom properties on `:root` (plus `.dark :root` for dark-mode strategy `class`) and referenced via Tailwind arbitrary-value syntax.
+- **reference (visual-variants.md — Browser Session Lifecycle):** Lazy open, reuse-with-reload (idempotent on re-runs), close-on-completion; missing-skill / missing-display / CI fallback degrades to text-only.
+- **command (aimi:brainstorm — Phase 2):** Visual Variant Rendering phase with optional Component-Shell Scan (samples 2–3 representative component files to surface wrapper-tag and class-recipe idioms for Structural Guidance). Variant Selection sub-step offers `AskUserQuestion` options; **agent-mode fallback** auto-selects Variant A when `AskUserQuestion` is unavailable (non-interactive hosts). Variant Persistence stores `chosen_variant_slug` and records `selectedVariants` in brainstorm frontmatter. Non-visual categories remain text-only throughout.
+- **command (aimi:brainstorm — Phase 5):** Cleanup step prunes the scratch prototype file after clean session completion; standalone variant files and the tokens sidecar are preserved.
+- **command (aimi:plan — Phase 0):** Prototype Context sub-step — parses brainstorm `prototype:` frontmatter and `## Prototype` section; loads the `<topic-slug>-tokens.json` sidecar; sanitizes embedded `</prototype_html>` sequences before wrapping; **200 KB aggregate cap** across all loaded blocks (drops in reverse label order with warning); injects `<prototype_html>` block and tokens JSON into researcher and decomposition prompts so implementation agents inherit the visual intent.
+- **command (aimi:review):** Prototype Design Context sub-step — when a PR's branch has a matching brainstorm, loads the prototype HTML and tokens JSON and threads them into architecture, simplicity, and language-specific reviewers so fidelity against the chosen variant and target-project tokens can be verified.
+
+### Changed
+
+- **install.sh:** `install_plugin_source` dry-run branch simplified — removed the per-file enumeration of `commands/references/` (cosmetic only; `cp -R` already copies the directory).
+
 ## [1.60.3] - 2026-04-16
 
 ### Changed

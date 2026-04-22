@@ -1102,6 +1102,20 @@ cmd_detect_default_branch() {
   echo "$branch"
 }
 
+# Resolve which interactivity mode applies to the current shell.
+# Prints exactly one of: picker, agent
+#   agent  - AIMI_AGENT_MODE=true, CI=true, or stdin is not a TTY
+#   picker - interactive session; command body should invoke the host's
+#            question picker (AskUserQuestion in Claude Code, the `question`
+#            tool in OpenCode after install.sh translation)
+cmd_detect_interactivity() {
+  if [ "${AIMI_AGENT_MODE:-}" = "true" ] || [ "${CI:-}" = "true" ] || [ ! -t 0 ]; then
+    echo "agent"
+  else
+    echo "picker"
+  fi
+}
+
 # Setup branch: deterministic branch creation/checkout logic
 # Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--project <path>]
 cmd_setup_branch() {
@@ -1720,11 +1734,30 @@ cmd_archive_task() {
     fi
   done < <(jq -r '.metadata.researchPaths[]? // empty' "$archived_task" 2>/dev/null)
 
+  # Delete linked prototype files (ephemeral — rm -f, not archived)
+  local prototype_cleaned=0
+  while IFS= read -r ppath; do
+    [ -z "$ppath" ] && continue
+    local resolved_prototype
+    if [ "${ppath#/}" = "$ppath" ]; then
+      # Relative path — resolve from project root
+      resolved_prototype="$PROJECT_ROOT/$ppath"
+    else
+      resolved_prototype="$ppath"
+    fi
+    validate_path_in_project "$resolved_prototype"
+    if [ -e "$resolved_prototype" ]; then
+      rm -f "$resolved_prototype"
+      prototype_cleaned=$((prototype_cleaned + 1))
+    fi
+  done < <(jq -r '.metadata.prototypePaths[]? // empty' "$archived_task" 2>/dev/null)
+
   # Output result as JSON
   jq -n --arg task "$archived_task" \
     --arg brainstorm "${archived_brainstorm:-}" \
     --argjson researchCleaned "$research_cleaned" \
-    '{archived: {task: $task, brainstorm: (if $brainstorm == "" then null else $brainstorm end), researchCleaned: $researchCleaned}}'
+    --argjson prototypeCleaned "$prototype_cleaned" \
+    '{archived: {task: $task, brainstorm: (if $brainstorm == "" then null else $brainstorm end), researchCleaned: $researchCleaned, prototypeCleaned: $prototypeCleaned}}'
 }
 
 # Display help
@@ -1766,6 +1799,9 @@ COMMANDS:
     get-state                 Get all state files as JSON
     detect-default-branch [--project <path>]
                               Detect and cache the repository's default branch
+    detect-interactivity      Print resolved interactivity mode (picker|agent)
+                              Reads AIMI_AGENT_MODE, CI, and TTY status; used by
+                              commands to branch picker vs. auto-pick-first behavior
     setup-branch <name> --default-branch <branch> [--project <path>]
                               Create or checkout branch with deterministic logic
     clear-state               Clear all state files
@@ -1839,10 +1875,11 @@ EOF
 # ============================================================================
 
 main() {
-  # Skip auto-discovery for help command (works without .aimi/ present)
+  # Skip auto-discovery for commands that don't touch .aimi/
   case "${1:-help}" in
     help|--help|-h) cmd_help; return ;;
     version) cmd_version; return ;;
+    detect-interactivity) cmd_detect_interactivity; return ;;
   esac
 
   find_aimi_root

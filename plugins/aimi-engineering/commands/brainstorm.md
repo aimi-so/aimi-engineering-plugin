@@ -16,6 +16,60 @@ Clarify **WHAT** to build through collaborative dialogue before planning **HOW**
 
 Do not proceed until you have a feature description from the user.
 
+## Step 0: Resolve CLI Path
+
+Read `references/cli-path-resolution.md` and follow the **Resolve CLI Path**
+section to set `$AIMI_CLI`. Each layer is a separate Bash call.
+
+If resolution fails, fall back to the legacy prose-only path for questions —
+do not abort the brainstorm. Log: `warning: aimi-cli.sh unresolved — forcing
+INTERACTIVE_MODE=picker`.
+
+## Step 0.5: Resolve Interactivity Mode
+
+Before any question is presented, resolve which mode applies:
+
+```bash
+INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
+```
+
+The result is one of:
+
+- `picker` — interactive user. All question sites below use **AskUserQuestion**
+  (Claude Code) or the native `question` tool (OpenCode, wired by the
+  translator). One question per tool call, lettered options.
+- `agent` — `AIMI_AGENT_MODE=true`, `CI=true`, or non-TTY. At every question
+  site, auto-pick the first non-escape option and log one line into the
+  brainstorm document's working memory. Never block, never prompt.
+
+See `references/interactivity.md` for the full contract. Every question site
+below includes an agent-mode fallback note describing its specific auto-pick
+behavior.
+
+## Environment Variables
+
+| Variable | Value | Effect |
+|----------|-------|--------|
+| `AIMI_AGENT_MODE` | `true` | Non-interactive fallback — auto-selects Variant A at every picker site, never blocks. Detected by `aimi-cli detect-interactivity` and reflected in `INTERACTIVE_MODE=agent`. |
+| `AIMI_BRAINSTORM_DEBUG` | `1` | Opt-in diagnostic output. When set, the agent emits a `[brainstorm-debug] <context>: <value>` line to chat at each decision point: topic-slug derivation, per-question category classification, browser-attempt result, and variant-selection picker result. Unset (or any value other than `1`) produces no diagnostic output. |
+
+Diagnostic lines are prefixed with `[brainstorm-debug]` so they are trivially greppable and visually distinct from normal output. They are emitted **to chat only** — never written to the brainstorm document or research files.
+
+## Override Keywords
+
+Certain literal phrases typed in the topic or in a reply trigger one-shot rendering overrides regardless of how the agent classified the question category.
+
+| Phrase | Match rule | Scope | Effect |
+|--------|-----------|-------|--------|
+| `show variants` | Case-insensitive substring match anywhere in the topic text or the user's latest reply | Next question only — flag clears after that one question is rendered | Force-treats the next question as **Aesthetic Direction** for visual variant rendering, even when the category was classified as Functional or Scope. On activation emit exactly: `Visual override active — rendering variants for next question` |
+
+**How it works at runtime:**
+
+1. After each user reply (and when first reading the topic), check whether the text contains `show variants` (case-insensitive).
+2. If matched, set an in-memory flag `visualOverridePending = true` and emit `Visual override active — rendering variants for next question` **once** to chat.
+3. When the agent reaches the next question, if `visualOverridePending = true`: treat that question as Aesthetic Direction for the purposes of visual variant rendering (Phase 2 category gate bypass), then immediately clear the flag (`visualOverridePending = false`). The override does **not** persist to subsequent questions.
+4. If the flag is not set, proceed with normal category classification — no change to existing behavior.
+
 ## Phase 0: Assess Requirements Clarity
 
 Evaluate whether brainstorming is needed based on the feature description.
@@ -28,6 +82,8 @@ Evaluate whether brainstorming is needed based on the feature description.
 
 **If requirements are already clear:**
 Use **AskUserQuestion** to suggest: "Your requirements seem detailed enough to proceed directly to planning. Should I run `/aimi:plan` instead, or would you like to explore the idea further?"
+
+*Agent-mode fallback: if `INTERACTIVE_MODE=agent`, auto-proceed to `/aimi:plan` (the non-disruptive default). Log: `agent-mode: phase-0-plan-redirect auto-proceeded to plan`.*
 
 **If unclear or vague:** proceed to Phase 1.
 
@@ -71,6 +127,8 @@ From the feature description, derive a topic slug (needed for research output pa
 3. Remove consecutive hyphens
 4. Truncate to 50 characters
 5. Remove trailing hyphens
+
+If `AIMI_BRAINSTORM_DEBUG=1`: emit `[brainstorm-debug] topic-slug: <derived-slug>` to chat.
 
 #### Generate Run Discriminator
 
@@ -220,39 +278,237 @@ N. What should make this interface memorable?
    D. Other: [please specify]
 ```
 
+#### Visual Variant Rendering (Aesthetic Direction and Differentiation only)
+
+> Full authoring contract — HTML skeleton, slug sanitization, HTML-escaping rules, token extraction, switcher wiring, and browser session lifecycle — lives in `commands/references/visual-variants.md`. This sub-step is the integration point; do not re-implement any detail here.
+
+**`show variants` override check (runs before category classification):** Before evaluating whether a question is Aesthetic Direction or Differentiation, check whether `visualOverridePending = true` (set when the user's topic or latest reply contained `show variants` — see "Override Keywords" section above). If the flag is set, treat this question as **Aesthetic Direction** for the purpose of visual rendering, then clear the flag (`visualOverridePending = false`). This bypass applies only to the single next question; all subsequent questions revert to normal category classification.
+
+When the agent reaches an **Aesthetic Direction** or **Differentiation** question (and only those two categories, or when the `show variants` override is active), execute the following steps **before** presenting the question to the user. If `AIMI_BRAINSTORM_DEBUG=1`: emit `[brainstorm-debug] category: <category-name> — visual rendering path triggered` to chat (or `[brainstorm-debug] category: <category-name> — visual rendering skipped` when the question does not fall into either category). All slug sanitization, HTML-escaping, and token extraction rules are defined in `references/visual-variants.md`; this sub-step is the call sequence only.
+
+**Step 0b — Pre-flight browser availability (run once per brainstorm session)**
+
+Before processing the very first Aesthetic Direction or Differentiation question, run this check **exactly once**. On all subsequent visual questions, skip directly to Step 0 — the cached result is already in working memory.
+
+1. **Predict visual questions.** Based on the brainstorm topic and the question-category plan assembled in Phase 2, determine whether any Aesthetic Direction or Differentiation questions are expected. If none are predicted, skip this entire step — emit nothing to chat, set `browserAvailable = false`, `browserSkipReason = "no visual questions"`, and proceed. This prevents false alarms on non-visual brainstorms.
+
+2. **If visual questions are expected, run the availability check:**
+
+   ```bash
+   command -v agent-browser
+   ```
+
+   Apply the same heuristic used in Step 4:
+   - `agent-browser` not found → reason: `agent-browser not installed`
+   - `DISPLAY` unset **and** not running under a known GUI host (macOS / Windows) → reason: `DISPLAY unset`
+   - `CI=true` is set → reason: `CI mode`
+
+3. **Emit exactly one line to chat** (not to the brainstorm document):
+   - On success: `Visual preview: ready`
+   - On failure: `Visual preview: disabled (<reason>)` where `<reason>` is the short cause from step 2 (e.g., `Visual preview: disabled (agent-browser not installed)`)
+
+4. **Cache the outcome in working memory:**
+   - `browserAvailable` (bool): `true` if the check passed, `false` otherwise.
+   - `browserSkipReason` (string): empty string on success; the short cause string on failure.
+   - `echoedBrowserUnavailable` (bool): `false` — guards the once-per-session chat echo for the "agent-browser unavailable" event.
+   - `echoedSessionLost` (bool): `false` — guards the once-per-session chat echo for the "agent-browser session lost" event.
+   - `echoedPickerUnavailable` (bool): `false` — guards the once-per-session chat echo for the "picker unavailable — auto-selected variant A" event.
+
+   Step 4 and all subsequent visual-question handling must read `browserAvailable` from working memory — do **not** re-run `command -v agent-browser` or re-evaluate the DISPLAY / CI heuristic on later questions.
+
+**Step 0 — Component-shell scan (best-effort)**
+
+Sample 2–3 representative component files from the target project to extract the structural idioms variants should mimic. Scan is optional; skip silently on any failure.
+
+1. Look under `src/components/`, `app/components/`, `components/`, or `src/app/` (first directory that exists) for `.tsx`, `.jsx`, `.vue`, or `.svelte` files.
+2. Select up to 3 files: prefer one matching a form-like name (`Form.*`, `Input.*`, `Login.*`), one matching a layout-like name (`Layout.*`, `Sidebar.*`, `Page.*`), and one matching a card-like name (`Card.*`, `Item.*`, `List.*`). Fall back to any 1–3 components if the name hints fail.
+3. Read each file as plain text (do not execute or import). Extract:
+   - The outermost wrapper element (tag + top-level classes/structure idioms).
+   - Class recipes that recur across components (e.g., `rounded-xl shadow-sm border` combinations, spacing scales like `p-6 gap-4`).
+   - Primary-action class recipes (styles applied to `<button type="submit">` or elements named like `PrimaryButton`).
+4. Store findings as `component_shell_notes` in working memory. These are passed as structural constraints into Step 3 below (see `references/visual-variants.md` → Structural Guidance → Step 4).
+
+Any read error, missing directory, or inability to parse cleanly → skip silently; no warning. Component-shell guidance is additive, never a precondition.
+
+**Step 1 — Validate topic slug**
+
+Use the slug derived in Phase 1 Step 1b and apply the Topic-Slug Sanitization algorithm from `references/visual-variants.md`. **Order matters:** run the sanitization algorithm first (lowercase → replace whitespace → strip non-alphanumeric → collapse dashes → trim), then validate the result against `^[a-z0-9][a-z0-9-]*$` and the traversal checks (`..`, leading `/`, any `/`).
+
+If the slug fails validation: log a warning ("Visual path skipped — invalid topic slug: `<raw>`"), skip Steps 2–5 for this question, and fall back to text-only (present the question normally without any HTML output).
+
+**Step 2 — Token extraction (best-effort)**
+
+Probe project sources in the fixed precedence order defined in `references/visual-variants.md` (Token Extraction section). Extract colors, fonts, radii, spacing, shadows, transitions, screens, and dark-mode tokens. Any probe failure is silently skipped. Use Tailwind CDN defaults for any family that yields no tokens, and emit the required warning line per family that fell back.
+
+Write the token sidecar JSON to `.aimi/brainstorms/prototypes/<topic-slug>-tokens.json` (shape and rules in `references/visual-variants.md` → Token Sidecar JSON).
+
+**Step 3 — Author variant HTML**
+
+Create the prototype directory:
+
+```bash
+mkdir -p .aimi/brainstorms/prototypes
+```
+
+For the **first** visual question, write the full file using the Switcher Skeleton from `references/visual-variants.md`, emitting resolved tokens as CSS custom properties on `:root` per the Structural Guidance section. For **subsequent** visual questions, **append** a new `<section data-question="...">` block to the existing file — do not truncate.
+
+Follow the Structural Guidance section of `references/visual-variants.md`: infer the dominant UI pattern, pick a canonical shape (form/card/nav/hero/modal/table/layout-with-sidebar), and author every variant in that shape. Apply `component_shell_notes` from Step 0 as additional structural constraints.
+
+Author **2–4 variants** per question based on the design axes available (default 2 for binary contrast; add 3–4 only when additional directions genuinely add value).
+
+HTML-escape every user-supplied string before interpolation per `references/visual-variants.md` (HTML-Escaping section). Do not duplicate the escaping table here.
+
+Output path: `.aimi/brainstorms/prototypes/<topic-slug>-variants.html`
+
+**Step 4 — Open or reload browser session**
+
+Consult the `browserAvailable` flag set by Step 0b (pre-flight check). Do **not** re-run `command -v agent-browser` or re-evaluate the DISPLAY / CI heuristic here — that check ran once at session start.
+
+- **`browserAvailable` is `false`** (any reason captured in `browserSkipReason`): Skip all browser calls. Log exactly one warning line to the brainstorm document: `agent-browser unavailable — variants at .aimi/brainstorms/prototypes/<topic-slug>-variants.html`. The same line is also echoed to chat once per session (guarded by `echoedBrowserUnavailable`): if `echoedBrowserUnavailable` is `false`, emit `agent-browser unavailable — variants at .aimi/brainstorms/prototypes/<topic-slug>-variants.html` to chat and set `echoedBrowserUnavailable = true`; subsequent occurrences of this event within the same session are silent. Continue text-only for all visual questions.
+- **First visual question (session open, idempotent):** If a session named `brainstorm-<topic-slug>` already exists, reload it; otherwise open a new headed session:
+  ```bash
+  agent-browser --headed --session brainstorm-<topic-slug> open file://$(pwd)/.aimi/brainstorms/prototypes/<topic-slug>-variants.html
+  ```
+  Re-runs of the brainstorm for the same topic reuse the existing session instead of erroring on a duplicate session name.
+- **Subsequent visual questions:** Reuse the same session name and reload:
+  ```bash
+  agent-browser --session brainstorm-<topic-slug> reload
+  ```
+- **Session call fails (reload returns non-zero):** Retry once with a fresh session name by appending `-2` suffix:
+  ```bash
+  agent-browser --headed --session brainstorm-<topic-slug>-2 open file://$(pwd)/.aimi/brainstorms/prototypes/<topic-slug>-variants.html
+  ```
+  If the retry also fails, degrade to text-only for all remaining visual questions — stop attempting any further `agent-browser` calls for this brainstorm session. Log the file path once at the point of degradation: `agent-browser session lost — variants at .aimi/brainstorms/prototypes/<topic-slug>-variants.html`. The same line is also echoed to chat once per session (guarded by `echoedSessionLost`): if `echoedSessionLost` is `false`, emit `agent-browser session lost — variants at .aimi/brainstorms/prototypes/<topic-slug>-variants.html` to chat and set `echoedSessionLost = true`; subsequent occurrences of this event within the same session are silent. (See `references/visual-variants.md` "Fallback: mid-session crash" section for the canonical description of this two-step flow.)
+
+If `AIMI_BRAINSTORM_DEBUG=1`: emit `[brainstorm-debug] browser-attempt: <outcome>` to chat, where `<outcome>` is one of `skipped (browserAvailable=false, reason: <browserSkipReason>)`, `opened new session brainstorm-<topic-slug>`, `reloaded session brainstorm-<topic-slug>`, `retried with session brainstorm-<topic-slug>-2`, or `degraded to text-only after retry failure`.
+
+**Step 5 — Present the question**
+
+Present the Aesthetic Direction or Differentiation question to the user as normal (numbered item with lettered options, "Other" escape hatch). The rendered HTML gives the user a live visual preview alongside the text question.
+
+**Step 6 — Variant Selection**
+
+After the browser session is open and variants are visible, ask the user which variant best fits their vision. Use **AskUserQuestion** with one option per authored variant, labeled in the format `A — <short name>`, `B — <short name>`, etc. (one letter per variant), plus a final option `None — show again / revise`. The question text is: `Which variant best fits your vision?`
+
+For 3 authored variants named "Brutally minimal", "Retro-futuristic", "Luxury/refined", the offered options are: `A — Brutally minimal`, `B — Retro-futuristic`, `C — Luxury/refined`, `None — show again / revise`.
+
+**Agent-mode fallback (non-interactive):**
+
+If the picker tool is unavailable (running under a host that does not support it) or the session is explicitly non-interactive (`AIMI_AGENT_MODE=true` or equivalent), auto-select Variant A deterministically. Log one line to the brainstorm document: `agent-mode: picker unavailable — auto-selected variant A`. The same line is also echoed to chat once per session (guarded by `echoedPickerUnavailable`): if `echoedPickerUnavailable` is `false`, emit `agent-mode: picker unavailable — auto-selected variant A` to chat and set `echoedPickerUnavailable = true`; subsequent occurrences of this event within the same session are silent. Skip the `None — show again / revise` branch entirely in this mode.
+
+If `AIMI_BRAINSTORM_DEBUG=1`: emit `[brainstorm-debug] variant-choice: <chosen-option>` to chat immediately after AskUserQuestion returns (or after the agent-mode auto-pick), where `<chosen-option>` is the full option string the user selected (e.g., `A — Brutally minimal`) or `agent-mode: auto-selected variant A`.
+
+**Handling the `None — show again / revise` branch:**
+
+If the user selects `None — show again / revise`:
+1. Use **AskUserQuestion** a second time to ask the user to describe what they want changed or refined. Question text: `What would you like changed or refined about the variants?`
+2. Author a replacement variant set and append it as a new `<section data-question="...">` block in the existing HTML file — do **not** discard or truncate prior sections.
+3. Reload the browser session (Step 4 reload path).
+4. Re-offer the lettered variant options for the new variant set via **AskUserQuestion**.
+
+**Handling a free-form (non-option) reply:**
+
+If the user's response does not match any offered option (i.e., it is a free-form reply), treat it as additional context about their preferences and re-offer the same lettered options via **AskUserQuestion**. Never silently pick a variant based on a free-form reply.
+
+**Storing the chosen variant label:**
+
+Once the user selects a lettered option (or the agent-mode fallback picks Variant A), normalize the chosen label to a slug for persistence and for the Phase 5 Cleanup guard.
+
+1. Extract the letter prefix and short name (e.g., `A — Brutally minimal`).
+2. Apply the same sanitization algorithm used for topic slugs in `references/visual-variants.md` (Topic-Slug Sanitization): lowercase → replace whitespace with `-` → strip non-`[a-z0-9-]` → collapse consecutive `-` → trim.
+3. Prepend the letter prefix, e.g., `a-brutally-minimal`.
+4. Validate the result matches `^[a-z0-9][a-z0-9-]*$`. If it does not, fall back to the bare letter (e.g., `a`).
+
+Store the normalized slug in the agent's working memory as `chosen_variant_slug`. Phase 5 Cleanup's scratch-file removal uses the **topic-slug** (not the variant slug) when composing the `rm -f` path — the scratch filename is `<topic-slug>-variants.html` and was validated at Step 1.
+
+**Step 7 — Variant Persistence**
+
+After storing `chosen_variant_slug`, persist the chosen variant as a standalone HTML artifact. Execute for each visual question after the user selects a variant.
+
+**7a — Sanitize and validate the variant label:**
+
+Use the `chosen_variant_slug` stored in working memory. Validate it matches `^[a-z0-9][a-z0-9-]*$`.
+
+- If the label **fails validation**: log a warning to the brainstorm document (`Variant persistence skipped — invalid label: <raw>`), skip Steps 7b–7d for this question, and leave the scratch file (`.aimi/brainstorms/prototypes/<topic-slug>-variants.html`) as the canonical artifact.
+- If the label **passes**: continue to Step 7b.
+
+**7b — Resolve a unique output path:**
+
+Construct the candidate path:
+```
+.aimi/brainstorms/prototypes/<topic-slug>-<chosen_variant_slug>.html
+```
+
+Check whether the file exists:
+```bash
+ls .aimi/brainstorms/prototypes/<topic-slug>-<chosen_variant_slug>.html 2>/dev/null
+```
+
+If it exists (re-run of same topic + same label), append a numeric suffix and retry: `-2`, `-3`, … until a path that does not exist is found.
+
+**7c — Extract and write the standalone file:**
+
+From the existing scratch file (`.aimi/brainstorms/prototypes/<topic-slug>-variants.html`), extract the HTML `<section data-variant="...">` block that corresponds to the chosen variant. Wrap it in a self-contained HTML page with Tailwind CDN inline (no switcher UI, no other variants):
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title><topic-slug> — <chosen_variant_slug></title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+  <!-- chosen variant section content only -->
+</body>
+</html>
+```
+
+Write this file to the resolved unique path from Step 7b.
+
+**7d — Record in working memory:**
+
+Append an entry to a `prototype_entries` list in working memory:
+```
+{ path: "<resolved path>", question_category: "<Aesthetic Direction | Differentiation>" }
+```
+
+This list is consumed when writing the brainstorm document in Phase 4.
+
+**Non-visual categories** (Purpose, Users, Constraints, Success, Edge Cases, Existing Patterns, Approach) remain text-only — Steps 1–4 above do NOT execute for them.
+
+When the brainstorm completes normally, the browser session is closed and the variant scratch file is pruned in Phase 5 Cleanup (see below).
+
 ### Present Questions
 
-Format questions as numbered items with lettered options:
+Branch on `INTERACTIVE_MODE` (resolved in Step 0.5):
+
+**If `INTERACTIVE_MODE=picker`:**
+
+Emit **one picker call per question**. Use **AskUserQuestion** (translator
+rewrites to OpenCode's native `question` tool). Each call includes the
+question header + up to 4 lettered options + a final `Other` option that
+accepts free-form text.
 
 ```
-Based on the research findings and your description, I have a few questions:
-
-1. [Question informed by research or topic category]
-   A. [Option]
-   B. [Option]
-   C. [Option]
-   D. Other: [please specify]
-
-2. [Question]
-   A. [Option]
-   ...
-
-You can answer with shorthand like "1A, 2C, 3B" or respond in your own words.
+Picker call:
+  header: "[Question informed by research or topic category]"
+  options:
+    A — [Option]
+    B — [Option]
+    C — [Option]
+    Other — [free-form]
 ```
 
-### Response Parsing
+Do not render the questions as a single prose block. Do not ask the user to
+reply with `"1A, 2C, 3B"` shorthand — pickers return the selection directly.
+If a question only has two viable options, still emit it as its own picker
+call; never combine questions into one picker.
 
-Accept all response formats gracefully:
-
-| Format | Example | Action |
-|--------|---------|--------|
-| Shorthand | "1A, 2C, 3B" | Parse directly |
-| No numbers | "A, C, B" | Map to questions in order |
-| Free-form | "I prefer option A for the first one" | Parse intent |
-| Partial | "1A, 2C" (skipped 3) | Accept partial, ask about skipped if critical |
-| Mixed | "1A but for question 3 none fit — I want X" | Parse shorthand + free-form |
-
-Never re-ask a question just because the format was unexpected. Parse the intent and continue.
+**Agent-mode fallback:** if `INTERACTIVE_MODE=agent`, auto-select option A for
+every question. For each question, log one line to the brainstorm document's
+working memory: `agent-mode: Q<n> auto-selected option A`. Never block.
 
 ### Adaptive Rounds
 
@@ -319,6 +575,8 @@ Keep output sections concise (200-300 words max). After presenting approaches or
 
 Use **AskUserQuestion** to ask which approach the user prefers.
 
+*Agent-mode fallback: if `INTERACTIVE_MODE=agent`, auto-select the first approach recommended by the preceding analysis (option A). Log: `agent-mode: phase-3-approach auto-selected option A`.*
+
 ## Phase 4: Capture the Design
 
 ### Derive Filename
@@ -357,6 +615,11 @@ Use the design document template:
 ---
 date: YYYY-MM-DD
 topic: <topic-slug>
+prototype:
+  - path: .aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html
+    question_category: Aesthetic Direction
+  - path: .aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html
+    question_category: Differentiation
 ---
 
 # <Topic Title>
@@ -381,6 +644,21 @@ When UI features were detected in Phase 1.7, include this section:
 - Reference points: [products/styles the user referenced]
 - Key visual element: [what makes it memorable, from Differentiation responses]
 
+When one or more variant prototype files were saved (Step 7 — Variant Persistence), include this section:
+
+## Prototype
+
+Standalone prototype files saved during visual variant exploration:
+
+| File | Question Category |
+|------|------------------|
+| `.aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html` | Aesthetic Direction |
+| `.aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html` | Differentiation |
+
+Each file is a self-contained HTML page with Tailwind CDN inline. Open directly in a browser for a design reference without the variant switcher.
+
+If no variant prototypes were saved (e.g., no UI feature detected, variant label validation failed, or all visual questions were skipped), omit both the `prototype:` frontmatter key and the `## Prototype` section entirely.
+
 ## Open Questions
 - [Any unresolved questions]
 
@@ -395,6 +673,8 @@ When UI features were detected in Phase 1.7, include this section:
 1. Ask the user about each open question using AskUserQuestion
 2. Move resolved questions to a "Resolved Questions" section
 3. Only proceed when Open Questions is empty or user explicitly defers them
+
+*Agent-mode fallback: if `INTERACTIVE_MODE=agent`, move every open question to a "Deferred Questions" section (one line per question) instead of asking. Log: `agent-mode: phase-4-open-questions deferred <N> questions`.*
 
 ### Pre-Save Checklist (Blocking with Override)
 
@@ -444,6 +724,42 @@ Next steps:
 Brainstorm saved. To resume later: `/aimi:brainstorm [topic]`
 To start planning: `/aimi:plan`
 ```
+
+### Cleanup
+
+Execute this sub-step **only** after Phase 5 completes successfully (brainstorm document written and user has acknowledged the handoff). Skip entirely on abnormal termination: agent crash, user abort before reaching Phase 5, or any Pre-Save Checklist failure that was not overridden.
+
+**Step 1 — Close agent-browser session**
+
+If a browser session was opened during Phase 2 visual variant rendering, close it now (before deleting the scratch file so no open tab references a deleted path):
+
+```bash
+agent-browser --session brainstorm-<topic-slug> close
+```
+
+If `agent-browser` was unavailable or no visual questions were rendered, skip this step silently.
+
+**Step 2 — Prune the variant scratch file**
+
+The scratch file (`.aimi/brainstorms/prototypes/<topic-slug>-variants.html`) is a multi-variant working file created during visual exploration. Once brainstorm completes cleanly, prune it so only the chosen per-question standalone artifacts (US-006 output) remain under `.aimi/brainstorms/prototypes/`.
+
+Guard: only prune if at least one chosen-variant standalone file was successfully written (i.e., `prototype_entries` in working memory is non-empty). This ensures the scratch file is never the last surviving artifact.
+
+```bash
+rm -f .aimi/brainstorms/prototypes/<topic-slug>-variants.html
+```
+
+If the scratch file does not exist (e.g., no visual questions were rendered), this is a no-op — do not warn.
+
+**Preservation guarantee:** All chosen-variant standalone files (e.g., `<topic-slug>-a-brutally-minimal.html`) are never touched by this step. They are preserved regardless of pruning outcome.
+
+**Skip conditions (do NOT prune):**
+
+- Abnormal termination (crash, user abort before Phase 5, unresolved checklist failure)
+- `prototype_entries` is empty (no standalone variants were written — scratch file may be the only artifact)
+- Scratch file was never created (no visual questions rendered)
+
+Note: The browser session close that previously appeared inline in Phase 2 ("When the brainstorm completes normally (Phase 5)") is now handled exclusively here in Phase 5 Cleanup. Do not close the session earlier.
 
 ## Error Handling
 

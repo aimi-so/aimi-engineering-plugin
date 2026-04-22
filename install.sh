@@ -193,12 +193,15 @@ translate_command_body() {
   body="${body//\/plugin install aimi-engineering/.\/install.sh --to opencode}"
 
   # --- AskUserQuestion rewriting (applies to all commands) ---
-  # Replace various AskUserQuestion references with natural conversation note
-  # Order matters: match longer/more-specific patterns first
-  body="${body//Use \*\*AskUserQuestion\*\*/Ask the user by outputting your question directly in the conversation}"
-  body="${body//Use AskUserQuestion/Ask the user by outputting your question directly in the conversation}"
-  body="${body//via AskUserQuestion/by outputting your question directly in the conversation}"
-  body="${body//AskUserQuestion/ask the user by outputting your question directly in the conversation}"
+  # OpenCode ships a native `question` tool (https://opencode.ai/docs/tools/)
+  # with header + lettered options + custom-text input. Map Claude Code's
+  # AskUserQuestion to it so picker UX works on both hosts with one source body.
+  # Permission is gated by "question" in opencode.json (default: "ask").
+  # Order matters: match longer/more-specific patterns first.
+  body="${body//Use \*\*AskUserQuestion\*\*/Use the **question** tool}"
+  body="${body//Use AskUserQuestion/Use the question tool}"
+  body="${body//via AskUserQuestion/via the question tool}"
+  body="${body//AskUserQuestion/the question tool}"
 
   # --- Agent invocation preamble (only for commands referencing named agents) ---
   case "$body" in

@@ -52,9 +52,26 @@ Store as `$RESEARCH_DEPTH`. This inherits the depth setting from planning withou
 mkdir -p .aimi/research
 ```
 
+## Step 2d: Derive Shared Discriminators
+
+Compute the filename discriminators once per invocation and reuse them for every parallel researcher. This mirrors `brainstorm.md` and `plan.md` so files written by all three commands share one canonical shape:
+
+```
+.aimi/research/YYYY-MM-DD-<topic-slug>-<RUN_TS>-<kind>.md
+```
+
+```bash
+RUN_TS=$(date +%H%M%S)
+TOPIC_SLUG=$(jq -r '.metadata.branchName' <tasks-file-path> | sed 's|^[a-z]*/||')
+```
+
+Validate `TOPIC_SLUG` against `^[a-z0-9][a-z0-9-]*$`. If it fails validation (empty, missing, or contains unexpected characters), fall back to the static slug `deepen` — never abort the command for a bad slug.
+
+Store both values for use in Step 3.
+
 ## Step 3: Research Per Story (Parallel)
 
-For each pending story, spawn a research agent **in parallel**:
+For each pending story, spawn a research agent **in parallel**. Pass the `outputPath:` as a structured field so the researcher writes to the exact canonical path (agents honor caller-supplied `outputPath:` per their Output Contract):
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
@@ -67,18 +84,14 @@ Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
            Look for: relevant files, existing patterns, potential conflicts,
            edge cases, and anything that would help an agent implement this.
 
-           Write your full research output to:
-           .aimi/research/YYYY-MM-DD-[story.id]-codebase.md
-           (e.g., 2026-04-14-US-001-codebase.md)
-
-           Use today's date and the story ID to form the filename."
+           outputPath: .aimi/research/YYYY-MM-DD-[TOPIC_SLUG]-[RUN_TS]-[story.id]-codebase.md"
 ```
 
-Collect all results.
+Every parallel agent in a single deepen invocation shares the same `YYYY-MM-DD-<TOPIC_SLUG>-<RUN_TS>-` prefix; the story ID is the per-agent discriminator. Collect all results.
 
 ## Step 4: Enrich Stories
 
-For each pending story, **Read** the full research file at `.aimi/research/YYYY-MM-DD-[story.id]-codebase.md` using the Read tool. Use both the returned agent summary and the full file content for richer enrichment.
+For each pending story, **Read** the full research file at `.aimi/research/YYYY-MM-DD-<TOPIC_SLUG>-<RUN_TS>-[story.id]-codebase.md` using the Read tool. Use both the returned agent summary and the full file content for richer enrichment.
 
 For each pending story, using the research results:
 
@@ -111,11 +124,20 @@ Populate the `notes` field with useful context:
 - Patterns to follow
 - Gotchas or warnings
 
+## Step 4.5: Append `researchPaths` to Metadata
+
+Collect the paths of every research file that was successfully written in Step 3 (one per pending story, using the `YYYY-MM-DD-<TOPIC_SLUG>-<RUN_TS>-<story.id>-codebase.md` pattern). Append them to `metadata.researchPaths[]` in the tasks.json so `$AIMI_CLI archive-task` can clean them up when the tasks file is archived.
+
+- If `metadata.researchPaths` is absent, create it as a new array.
+- If present, append the new paths to the existing array.
+- Deduplicate the final array (no repeated entries — useful when deepen is re-run on the same tasks file).
+- Skip any story whose research file write failed — do not record paths that do not exist on disk.
+
 ## Step 5: Write Updated Tasks File
 
 Write the enriched tasks.json back to the **same file path**. Preserve:
 - `schemaVersion` (unchanged)
-- `metadata` (unchanged)
+- `metadata` (unchanged except `researchPaths` — appended by Step 4.5)
 - Completed stories (unchanged — `status: "completed"`)
 - Skipped stories (unchanged — `status: "skipped"`)
 

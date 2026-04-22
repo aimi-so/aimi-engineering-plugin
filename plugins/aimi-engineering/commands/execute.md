@@ -183,6 +183,7 @@ Each parallel Task receives the full execute.md flow:
 - **validate-stories** for content validation
 - **wave loop** (Step 4) executing all stories from its file
 - Each flow commits to its own branch (`metadata.branchName` from its file) — no branch conflicts
+- Step 3.5 runs inside each spawned Task, reading that file's own `prototypePaths` to build its `PROTOTYPE_CONTEXT` independently
 
 After both Tasks return, collect results and proceed to **Step 5 (Aggregated Completion)**.
 
@@ -396,6 +397,7 @@ Starting autonomous execution...
 Branch: [branchName]
 Schema: v3.0
 Pending: [pending] stories
+[If html_count > 0]: Prototype context: [html_count] variant(s) loaded
 
 Beginning wave execution loop...
 ```
@@ -477,6 +479,62 @@ If `BRAINSTORM_PATH` is non-empty and the file exists at `$AIMI_ROOT/$BRAINSTORM
 3. Store the sanitized content as `DESIGN_CONTEXT`
 
 If any of these conditions fail (no `brainstormPath` in metadata, file not found, no `## Design Decisions` section, or extracted content is empty after sanitization), set `DESIGN_CONTEXT` to empty string. No error — this is optional context.
+
+## Step 3.5: Load Prototype Context
+
+Read `prototypePaths` from tasks metadata and build `PROTOTYPE_CONTEXT` for worker prompts:
+
+```bash
+PROTOTYPE_PATHS=$(jq -r '.metadata.prototypePaths // [] | .[]' "$AIMI_ROOT/$TASKS_PATH")
+```
+
+If `PROTOTYPE_PATHS` is empty (field absent, null, or empty array), set `PROTOTYPE_CONTEXT` to empty string and continue — no error.
+
+Otherwise, process each path in order, assigning sequential labels starting at `A`:
+
+```
+label = 'A'
+blocks = []
+html_count = 0
+
+for path in PROTOTYPE_PATHS:
+    abs_path = "$AIMI_ROOT/$path"
+    if file does not exist at abs_path:
+        log: "prototype [path] missing at execute time — skipped"
+        continue
+
+    case "${path##*.}" in
+        html)
+            content = read file at abs_path verbatim
+            # Tag-breakout escape: prevent wrapper-tag injection
+            content = replace literal "</prototype_html" with "&lt;/prototype_html"
+            content = replace literal "<prototype_html" with "&lt;prototype_html"
+            block = "<prototype_html label=\"[label]\" path=\"[path]\">\n[content]\n</prototype_html>"
+            html_count += 1
+        ;;
+        json)
+            content = read file at abs_path verbatim
+            block = "<prototype_tokens path=\"[path]\">\n[content]\n</prototype_tokens>"
+        ;;
+        *)
+            log: "prototype [path] missing at execute time — skipped"
+            continue
+        ;;
+    esac
+
+    blocks.append(block)
+    label = next letter after label
+```
+
+**Aggregate size cap (200 KB):** after all blocks are loaded, measure the total byte size. If the total exceeds 200 KB, drop blocks in reverse label order (Z → A) until the aggregate fits under the cap. Log one warning line per dropped block:
+
+```
+prototype [path] dropped — aggregate prototype context exceeded 200KB
+```
+
+If all prototypes are missing or all blocks are dropped, set `PROTOTYPE_CONTEXT` to empty string. Otherwise join all remaining blocks and store as `PROTOTYPE_CONTEXT`.
+
+Store `html_count` (count of `.html` files that survived into `PROTOTYPE_CONTEXT`) for use in the start report.
 
 ## Step 4: Wave Execution Loop
 
@@ -600,6 +658,7 @@ while true:
                 - ACCEPTANCE_CRITERIA = full_story.acceptanceCriteria (bulleted)
                 - full_story.notes = full_story.notes (include <previous_notes> section only if non-empty)
                 - DESIGN_CONTEXT = design_context (include <design_context> section only if non-empty)
+                - PROTOTYPE_CONTEXT = prototype_context (include <prototype_context> section only if non-empty)
                 - No WORKTREE_PATH (sequential — worker operates in current directory or PROJECT_PATH)
             ]
         )
@@ -707,6 +766,7 @@ while true:
                 - ACCEPTANCE_CRITERIA = full_story.acceptanceCriteria (bulleted)
                 - full_story.notes = full_story.notes (include <previous_notes> section only if non-empty)
                 - DESIGN_CONTEXT = design_context (include <design_context> section only if non-empty)
+                - PROTOTYPE_CONTEXT = prototype_context (include <prototype_context> section only if non-empty)
                 - No WORKTREE_PATH (single remaining story — no worktree overhead)
             ]
         )
@@ -844,6 +904,7 @@ while true:
                 - ACCEPTANCE_CRITERIA = full_story.acceptanceCriteria (bulleted)
                 - full_story.notes = full_story.notes (include <previous_notes> section only if non-empty)
                 - DESIGN_CONTEXT = design_context (include <design_context> section only if non-empty)
+                - PROTOTYPE_CONTEXT = prototype_context (include <prototype_context> section only if non-empty)
                 - Do NOT modify the tasks.json file — report result (success/failure + details)
             ]
         )
