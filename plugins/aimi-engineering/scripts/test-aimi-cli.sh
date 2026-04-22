@@ -3126,6 +3126,96 @@ test_setup_branch() {
   assert_stderr_contains "Not a git repository" "$stderr_output" "setup-branch: not a git repo — stderr message"
   rm -f "$stderr_file"
   rm -rf "$non_git_dir"
+
+  # ============================================================================
+  # --base override flag tests
+  # ============================================================================
+
+  # --- Subtest (a): --base main creates from main even when current branch has unmerged work ---
+  echo ""
+  echo "--- setup-branch --base override: creates from base even with unmerged work ---"
+
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  # Start on unmerged branch (has commits ahead of main)
+  git checkout feat/unmerged-branch >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" setup-branch feat/based-on-main --default-branch main --base main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  action=$(echo "$stdout" | jq -r '.action')
+  local base_field based_commit main_commit
+  base_field=$(echo "$stdout" | jq -r '.base')
+  based_commit=$(git rev-parse feat/based-on-main 2>/dev/null)
+  main_commit=$(git rev-parse origin/main 2>/dev/null)
+  assert_exit_code "0" "$exit_code" "setup-branch --base main: exit code"
+  assert_eq "created-from-base" "$action" "setup-branch --base main (unmerged current): action"
+  assert_eq "main" "$base_field" "setup-branch --base main: base field in JSON"
+  assert_eq "$main_commit" "$based_commit" "setup-branch --base main: new branch tip equals origin/main"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest (b): --base <current_unmerged_branch> stacks on it and action is created-from-base ---
+  echo ""
+  echo "--- setup-branch --base override: stacks on current unmerged branch ---"
+
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  # Start on main, use --base to explicitly stack on the unmerged branch
+  git checkout main >/dev/null 2>&1
+  local unmerged_tip
+  unmerged_tip=$(git rev-parse origin/feat/unmerged-branch 2>/dev/null)
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" setup-branch feat/stacked --default-branch main --base feat/unmerged-branch 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  action=$(echo "$stdout" | jq -r '.action')
+  base_field=$(echo "$stdout" | jq -r '.base')
+  local stacked_commit
+  stacked_commit=$(git rev-parse feat/stacked 2>/dev/null)
+  assert_exit_code "0" "$exit_code" "setup-branch --base unmerged: exit code"
+  assert_eq "created-from-base" "$action" "setup-branch --base unmerged: action"
+  assert_eq "feat/unmerged-branch" "$base_field" "setup-branch --base unmerged: base field in JSON"
+  assert_eq "$unmerged_tip" "$stacked_commit" "setup-branch --base unmerged: new branch tip equals origin/feat/unmerged-branch"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest (c): invalid --base value rejected with exit 1 ---
+  echo ""
+  echo "--- setup-branch --base override: invalid base branch name rejected ---"
+
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" setup-branch feat/new --default-branch main --base '../bad' 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_output=$(cat "$stderr_file")
+  assert_exit_code "1" "$exit_code" "setup-branch --base invalid: exit code"
+  assert_stderr_contains "Invalid base branch name" "$stderr_output" "setup-branch --base invalid: stderr message"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest (d): --base is ignored when already on target branch ---
+  echo ""
+  echo "--- setup-branch --base override: ignored when already on target branch ---"
+
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout main >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" setup-branch main --default-branch main --base feat/unmerged-branch 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  action=$(echo "$stdout" | jq -r '.action')
+  assert_exit_code "0" "$exit_code" "setup-branch --base ignored (already on target): exit code"
+  assert_eq "already-on-branch" "$action" "setup-branch --base ignored (already on target): action is already-on-branch"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
 }
 
 # ============================================================================

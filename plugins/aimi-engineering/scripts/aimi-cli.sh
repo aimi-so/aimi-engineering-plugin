@@ -1117,9 +1117,9 @@ cmd_detect_interactivity() {
 }
 
 # Setup branch: deterministic branch creation/checkout logic
-# Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--project <path>]
+# Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--base <baseBranch>] [--project <path>]
 cmd_setup_branch() {
-  local branch_name="" default_branch="" project_dir=""
+  local branch_name="" default_branch="" project_dir="" base_override=""
 
   # Parse arguments (positional + flags)
   while [ $# -gt 0 ]; do
@@ -1128,13 +1128,17 @@ cmd_setup_branch() {
         shift
         default_branch="${1:-}"
         ;;
+      --base)
+        shift
+        base_override="${1:-}"
+        ;;
       --project)
         shift
         project_dir="${1:-}"
         ;;
       -*)
         echo "Error: Unknown flag: $1" >&2
-        echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--project <path>]" >&2
+        echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--base <baseBranch>] [--project <path>]" >&2
         exit 1
         ;;
       *)
@@ -1142,7 +1146,7 @@ cmd_setup_branch() {
           branch_name="$1"
         else
           echo "Error: Unexpected argument: $1" >&2
-          echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--project <path>]" >&2
+          echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--base <baseBranch>] [--project <path>]" >&2
           exit 1
         fi
         ;;
@@ -1152,7 +1156,7 @@ cmd_setup_branch() {
 
   # Validate required arguments
   if [ -z "$branch_name" ] || [ -z "$default_branch" ]; then
-    echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--project <path>]" >&2
+    echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--base <baseBranch>] [--project <path>]" >&2
     exit 1
   fi
 
@@ -1183,6 +1187,12 @@ cmd_setup_branch() {
     exit 1
   fi
 
+  # Validate base override branch name (security)
+  if [ -n "$base_override" ] && ! [[ "$base_override" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: Invalid base branch name: $base_override" >&2
+    exit 1
+  fi
+
   # Get current branch (empty string means detached HEAD)
   local current_branch
   current_branch=$(git branch --show-current 2>/dev/null || echo "")
@@ -1204,6 +1214,22 @@ cmd_setup_branch() {
   if git ls-remote --heads origin "$branch_name" 2>/dev/null | grep -q "$branch_name"; then
     git checkout -b "$branch_name" "origin/$branch_name" >/dev/null 2>&1
     printf '{"branch":"%s","action":"checked-out-remote"}\n' "$branch_name"
+    return 0
+  fi
+
+  # Case --base override: Branch is new and caller provided an explicit base
+  if [ -n "$base_override" ]; then
+    local resolved_base
+    if git ls-remote --heads origin "$base_override" 2>/dev/null | grep -q "$base_override"; then
+      resolved_base="origin/$base_override"
+    elif git branch --list "$base_override" | grep -q "$base_override"; then
+      resolved_base="$base_override"
+    else
+      echo "Error: Base branch does not exist: $base_override" >&2
+      exit 1
+    fi
+    git checkout -b "$branch_name" "$resolved_base" >/dev/null 2>&1
+    printf '{"branch":"%s","action":"created-from-base","base":"%s"}\n' "$branch_name" "$base_override"
     return 0
   fi
 
