@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.65.0] - 2026-04-22
+
+### Added
+
+- **command (aimi:init):** New `/aimi:init` slash command that primes the global CLI path cache (`~/.claude/aimi-engineering-cli-path`) on demand. After priming, subsequent `/aimi:*` commands skip the Layer 2 glob in `references/cli-path-resolution.md` until the cache goes stale. Users can re-run it anytime to repair a broken cache.
+- **cli (aimi-cli.sh):** New `prime-cache` subcommand that actively populates the global CLI path cache with a structured JSON contract `{status, path, host, version, message}`. Under Claude Code it globs `~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh`, validates the resolved path against the same pattern used by `read_global_cli_cache`, and writes atomically. Under OpenCode it writes `$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh` after verifying the script is executable — diverging from `cmd_check_version`'s short-circuit because the whole point of `prime-cache` is to populate the cache, not defer to the converter. Status values: `ok`, `already_current`, `not_found`, `error`. Exempt from `find_aimi_root()` so it runs from any directory, including fresh installs with no `.aimi/`.
+
+### Changed
+
+- **installer (install.sh):** `install.sh --to opencode` now primes the global CLI path cache post-install by invoking `aimi-cli.sh prime-cache` after the shell-profile env var is set. This writes `~/.claude/aimi-engineering-cli-path` at install time so the first `/aimi:*` command after install skips the Layer 2 glob entirely. Failure is non-fatal — the installer warns and continues. `./install.sh --uninstall --from opencode` now removes the global cache file via `rm -f` (best-effort; dry-run logs `Would remove ...` only when the file exists).
+
+### Notes
+
+- The global cache file `~/.claude/aimi-engineering-cli-path` is now written at install time (OpenCode via `install.sh`) or on demand (Claude Code via `/aimi:init`). Layer 2 glob-and-cache-update logic in `references/cli-path-resolution.md` remains as a rescue fallback when the cache is missing or stale — no change to the 4-layer resolution contract.
+
 ## [1.64.0] - 2026-04-21
 
 ### Added
