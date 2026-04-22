@@ -320,6 +320,79 @@ Warning: git fetch origin failed — continuing with local state. Branch may be 
 
 If `AIMI_ROOT_IS_GIT_REPO` is false, skip — fetch happens per-project below.
 
+## Step 1.6: Branch Base Selection
+
+Before creating the task branch, when the current branch has unmerged work relative to the default branch, ask whether to stack on it or start fresh from the default branch. This prevents silently inheriting unrelated work or losing intentional stacking.
+
+`BASE_BRANCH` starts unset. It is set only when the user explicitly chooses a base; Step 2 threads it via `--base` only when set.
+
+### Early-Skip Guard (Multi-Repo)
+
+If `AIMI_ROOT_IS_GIT_REPO` is false, skip this step entirely and leave `BASE_BRANCH` unset.
+<!-- multi-repo prompt-per-repo is out of scope for this step; per-project setup-branch heuristic handles base selection automatically -->
+
+### Resolve Interactivity Mode
+
+```bash
+INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
+```
+
+### Compute Gating Conditions
+
+Check whether a prompt is needed. Compute all four conditions:
+
+```bash
+TARGET_EXISTS_LOCAL=$(git branch --list [branchName])
+TARGET_EXISTS_REMOTE=$(git ls-remote --heads origin [branchName])
+CURRENT_BRANCH=$(git branch --show-current)
+CURRENT_IS_MERGED=$(git branch --merged "origin/$DEFAULT_BRANCH" | grep -Fx "  $CURRENT_BRANCH" || git branch --merged "origin/$DEFAULT_BRANCH" | grep -Fx "* $CURRENT_BRANCH")
+```
+
+A prompt is needed when **all four** of the following are true:
+
+- `TARGET_EXISTS_LOCAL` is empty (branch does not exist locally)
+- `TARGET_EXISTS_REMOTE` is empty (branch does not exist on remote)
+- `CURRENT_BRANCH` != `DEFAULT_BRANCH` (not already on the default branch)
+- `CURRENT_IS_MERGED` is empty (current branch has commits not yet merged into `origin/$DEFAULT_BRANCH`)
+
+### Picker Prompt (when prompt is needed AND INTERACTIVE_MODE=picker)
+
+Use **AskUserQuestion** with the following options:
+
+```
+Which branch should be used as the base for [branchName]?
+
+A — Stack on current branch ([current_branch])
+B — Use default branch ([DEFAULT_BRANCH])
+Other — Specify a base branch
+```
+
+**Option A:** `BASE_BRANCH=$CURRENT_BRANCH`
+
+**Option B:** `BASE_BRANCH=$DEFAULT_BRANCH`
+
+**Option Other:** Collect the free-form branch name the user typed. Validate it against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$`. If it does not match, report:
+
+```
+Invalid branch name. Must match ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$
+```
+
+and STOP. If valid, store `BASE_BRANCH=<user-input>`.
+
+### Agent-Mode Fallback (when prompt is needed AND INTERACTIVE_MODE=agent)
+
+Leave `BASE_BRANCH` unset (preserves the existing CLI heuristic which stacks on the current branch, matching the previous automatic behavior). Log:
+
+```
+agent-mode: step-1.6 branch-base auto-preserve
+```
+
+*Agent-mode fallback: if `INTERACTIVE_MODE=agent`, leave BASE_BRANCH unset and log `agent-mode: step-1.6 branch-base auto-preserve`.*
+
+### When Prompt Is Not Needed
+
+If any of the four gating conditions is false, skip silently — do NOT log an agent-mode line. Leave `BASE_BRANCH` unset.
+
 ## Step 2: Branch Setup
 
 Get the branch name from the init-session output (already validated by CLI).
@@ -329,7 +402,11 @@ Get the branch name from the init-session output (already validated by CLI).
 **Skip this step if `AIMI_ROOT_IS_GIT_REPO` is false** — branch setup is handled entirely per-project.
 
 ```bash
-BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $DEFAULT_BRANCH)
+if [ -n "$BASE_BRANCH" ]; then
+  BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $DEFAULT_BRANCH --base $BASE_BRANCH)
+else
+  BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $DEFAULT_BRANCH)
+fi
 ```
 
 If the command fails (non-zero exit), report the error and STOP.
@@ -339,7 +416,7 @@ Extract the action from the JSON output and report:
 Branch setup: [action]
 ```
 
-Where `[action]` is the `action` field from the JSON response (e.g., `already-on-branch`, `checked-out-local`, `checked-out-remote`, `created-from-default`, `created-from-current`).
+Where `[action]` is the `action` field from the JSON response (e.g., `already-on-branch`, `checked-out-local`, `checked-out-remote`, `created-from-default`, `created-from-current`, `created-from-base`).
 
 ### Per-Project Branch Setup
 
@@ -353,7 +430,11 @@ If any story has a non-null `project` field, **or** if `AIMI_ROOT_IS_GIT_REPO` i
    ```bash
    PROJECT_DEFAULT=$($AIMI_CLI detect-default-branch --project [resolved_project_path])
    git -C [resolved_project_path] fetch origin 2>/dev/null || true
-   PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $PROJECT_DEFAULT --project [resolved_project_path])
+   if [ -n "$BASE_BRANCH" ]; then
+     PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $PROJECT_DEFAULT --project [resolved_project_path] --base $BASE_BRANCH)
+   else
+     PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $PROJECT_DEFAULT --project [resolved_project_path])
+   fi
    ```
    Extract the action from the JSON output and report:
    ```
