@@ -247,6 +247,29 @@ directly when describing UI acceptance criteria, component structure, and visual
    - visual: `{"strategy": "visual", "status": "pending", "url": "http://localhost:3000/page", "expect": "Dashboard visible"}`
    - api: `{"strategy": "api", "status": "pending", "url": "http://localhost:3000/api/endpoint", "expect": "200 with JSON"}`
    - test: `{"strategy": "test", "status": "pending", "expect": "All tests pass"}`
+9.5. **Populate `skills[]` from file patterns** — inspect `implementation.files` for each story and attach matching skill names. Skip entirely when `implementation.files` is absent or empty (no files = no signal; leave `skills` unset).
+
+   Mapping table (Extend this table when adding new skills):
+
+   ```
+   File pattern                                     → Skill name
+   ────────────────────────────────────────────────────────────────
+   *.rb, *_spec.rb                                  → dhh-rails-style
+   app/javascript/**,  *.tsx (non-test), *.jsx      → react-best-practices
+   *tailwind*, *.css, *design-token*                → frontend-design
+   *.rake, db/migrate/**                            → dhh-rails-style
+   .aimi/solutions/*.md  (authoring story)          → every-style-editor
+   ```
+
+   Rules:
+   - Match each path in `implementation.files` against the patterns above
+   - Collect all matched skill names; deduplicate (insertion order, first match wins)
+   - Cap at 10 entries; if more than 10 match, keep the 10 highest-priority matches (order in table = priority)
+   - Produce **no** `skills` field when the deduplicated list is empty (do not emit `"skills": []`)
+   - Skill names must satisfy `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`
+
+   **Plugin-self-build default** — when the current repo is the `aimi-engineering-plugin` itself (detected by top-level `CLAUDE.md` containing the phrase `This repo builds the aimi-engineering plugin`), override inference for stories whose `implementation.files` touch `plugins/aimi-engineering/skills/` or `plugins/aimi-engineering/commands/` and set `skills: ["create-agent-skills"]` regardless of extension matches. This ensures plugin-authoring stories always pull the authoring skill.
+
 10. **Detect and attach `gate` objects**: `verify` (OAuth/email/webhooks), `decision` (multiple viable approaches), `action` (external manual action). Most stories have no gate.
 11. Write descriptions in user story format: "As a [specific role], I want [feature] so that [benefit]" — role must name the actor, never just "user"
 12. Generate verifiable acceptance criteria (every story must have "Typecheck passes")
@@ -377,13 +400,14 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
         "status": "pending (required)",
         "prompt": "string (required, human-readable description)",
         "options": ["string[] (optional, for decision gates)"]
-      }
+      },
+      "skills": "string[] (optional, array of bare skill names matching ^[a-zA-Z0-9][a-zA-Z0-9_-]*$, max 10 entries; omit field entirely when empty)"
     }
   ]
 }
 ```
 
-**Notes:** `implementation`, `verification`, and `gate` are optional per story. `wave` is required on all stories.
+**Notes:** `implementation`, `verification`, `gate`, and `skills` are optional per story. `wave` is required on all stories.
 
 ### Checklist Before Writing
 
@@ -449,9 +473,11 @@ $AIMI_CLI validate-stories
 
 **If any validation fails (non-zero exit):**
 1. Read the error output to identify the issues
-2. Fix the offending story IDs, `dependsOn` references, or dependency cycles
+2. Fix the offending story IDs, `dependsOn` references, dependency cycles, or malformed `skills[]` entries
 3. Re-write the tasks.json file using the Write tool
 4. Re-run all validations until they pass
+
+**Note:** `validate-stories` (US-001) catches malformed `skills[]` — entries that fail the `^[a-zA-Z0-9][a-zA-Z0-9_-]*$` regex, lists exceeding 10 entries, or an explicitly empty `skills: []` array (field must be omitted when no skills apply).
 
 Do **not** proceed to the report step until all validations succeed.
 
