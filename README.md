@@ -569,6 +569,24 @@ Invalid characters (spaces, semicolons, quotes) trigger validation errors.
 
 **Fix:** Review the tasks file manually, remove suspicious content, regenerate with `/aimi:plan`.
 
+### Inspecting an agent-browser headed session
+
+**Cause:** You want to attach Chrome DevTools to the Chromium that `agent-browser` launches in `--headed` mode (e.g., during `/aimi:execute` Visual Follow) to inspect the DOM, set breakpoints, or watch network traffic.
+
+**Fix:** Launch the session with the Chrome remote-debugging port exposed, then attach via `chrome://inspect`:
+
+1. Start the agent-browser session with remote debugging enabled:
+   ```bash
+   agent-browser --headed --session visual-follow \
+     --chrome-flag="--remote-debugging-port=9222" \
+     open https://example.com
+   ```
+2. In any local Chrome window, open `chrome://inspect/#devices`.
+3. Click **Configure...** under "Discover network targets" and add `localhost:9222`.
+4. The agent-browser tab appears under "Remote Target". Click **inspect** to attach DevTools.
+
+The port (`9222`) is arbitrary — pick any free port and match it in step 3. If your installed `agent-browser` does not forward `--chrome-flag`, check `agent-browser --help` for the equivalent flag name on your version (e.g., `--chromium-arg`, `--chrome-args`).
+
 ## Version History
 
 **Current Version:** 1.40.0
