@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.68.2] - 2026-04-27
+
+### Removed
+
+- **docs (README):** Dropped the `## Version History` section and its TOC entry. CHANGELOG.md is now the single source of truth for version history; the README links to it from a one-line pointer at the end of Troubleshooting.
+
 ## [1.68.1] - 2026-04-27
 
 ### Added
