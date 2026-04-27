@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.67.1] - 2026-04-27
+
+### Changed
+
+- **docs (AGENTS.md):** Extended AGENTS.md output compression with caveman-derived rules (Guzik 2026 benchmark; expected 10-20% reduction on spawned-agent summary returns). New blocks: article-elision (drop a/an/the in bullet leads), sentence-pattern compression (convert passive constructions to active telegraphic form), short-synonyms substitution table, and scope-guard (suppresses rules when user requests verbose output or full prose).
+
 ## [1.67.0] - 2026-04-22
 
 ### Added
