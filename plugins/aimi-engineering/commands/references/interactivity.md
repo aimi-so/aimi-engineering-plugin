@@ -1,6 +1,6 @@
 # Interactivity Modes
 
-Commands that ask the user questions (`brainstorm`, `plan`, `swarm`, etc.) run
+Commands that ask the user questions (`brainstorm`, `plan`, etc.) run
 in one of two modes, resolved once per invocation and stored as
 `INTERACTIVE_MODE`.
 

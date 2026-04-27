@@ -553,12 +553,6 @@ install_permissions() {
     log "[dry-run]   bash: git * -> allow"
     log "[dry-run]   bash: $aimi_cli -> allow"
     log "[dry-run]   bash: $worktree_mgr -> allow"
-    log "[dry-run]   bash: docker version * -> allow"
-    log "[dry-run]   bash: docker run --rm --name aimi-swarm-* -> allow"
-    log "[dry-run]   bash: docker container ls * -> allow"
-    log "[dry-run]   bash: docker container prune * -> allow"
-    log "[dry-run]   bash: docker ps * -> allow"
-    log "[dry-run]   bash: docker rm -f aimi-* -> allow"
     log "[dry-run]   bash: jq * -> allow"
     log "[dry-run]   bash: ls * -> allow"
     log "[dry-run]   bash: test * -> allow"
@@ -577,12 +571,6 @@ install_permissions() {
       "git *": "allow",
       "$aimi_cli": "allow",
       "$worktree_mgr": "allow",
-      "docker version *": "allow",
-      "docker run --rm --name aimi-swarm-*": "allow",
-      "docker container ls *": "allow",
-      "docker container prune *": "allow",
-      "docker ps *": "allow",
-      "docker rm -f aimi-*": "allow",
       "jq *": "allow",
       "ls *": "allow",
       "test *": "allow",
