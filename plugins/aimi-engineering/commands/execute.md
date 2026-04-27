@@ -320,6 +320,79 @@ Warning: git fetch origin failed — continuing with local state. Branch may be 
 
 If `AIMI_ROOT_IS_GIT_REPO` is false, skip — fetch happens per-project below.
 
+## Step 1.6: Branch Base Selection
+
+Before creating the task branch, when the current branch has unmerged work relative to the default branch, ask whether to stack on it or start fresh from the default branch. This prevents silently inheriting unrelated work or losing intentional stacking.
+
+`BASE_BRANCH` starts unset. It is set only when the user explicitly chooses a base; Step 2 threads it via `--base` only when set.
+
+### Early-Skip Guard (Multi-Repo)
+
+If `AIMI_ROOT_IS_GIT_REPO` is false, skip this step entirely and leave `BASE_BRANCH` unset.
+<!-- multi-repo prompt-per-repo is out of scope for this step; per-project setup-branch heuristic handles base selection automatically -->
+
+### Resolve Interactivity Mode
+
+```bash
+INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
+```
+
+### Compute Gating Conditions
+
+Check whether a prompt is needed. Compute all four conditions:
+
+```bash
+TARGET_EXISTS_LOCAL=$(git branch --list [branchName])
+TARGET_EXISTS_REMOTE=$(git ls-remote --heads origin [branchName])
+CURRENT_BRANCH=$(git branch --show-current)
+CURRENT_IS_MERGED=$(git branch --merged "origin/$DEFAULT_BRANCH" | grep -Fx "  $CURRENT_BRANCH" || git branch --merged "origin/$DEFAULT_BRANCH" | grep -Fx "* $CURRENT_BRANCH")
+```
+
+A prompt is needed when **all four** of the following are true:
+
+- `TARGET_EXISTS_LOCAL` is empty (branch does not exist locally)
+- `TARGET_EXISTS_REMOTE` is empty (branch does not exist on remote)
+- `CURRENT_BRANCH` != `DEFAULT_BRANCH` (not already on the default branch)
+- `CURRENT_IS_MERGED` is empty (current branch has commits not yet merged into `origin/$DEFAULT_BRANCH`)
+
+### Picker Prompt (when prompt is needed AND INTERACTIVE_MODE=picker)
+
+Use **AskUserQuestion** with the following options:
+
+```
+Which branch should be used as the base for [branchName]?
+
+A — Stack on current branch ([current_branch])
+B — Use default branch ([DEFAULT_BRANCH])
+Other — Specify a base branch
+```
+
+**Option A:** `BASE_BRANCH=$CURRENT_BRANCH`
+
+**Option B:** `BASE_BRANCH=$DEFAULT_BRANCH`
+
+**Option Other:** Collect the free-form branch name the user typed. Validate it against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$`. If it does not match, report:
+
+```
+Invalid branch name. Must match ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$
+```
+
+and STOP. If valid, store `BASE_BRANCH=<user-input>`.
+
+### Agent-Mode Fallback (when prompt is needed AND INTERACTIVE_MODE=agent)
+
+Leave `BASE_BRANCH` unset (preserves the existing CLI heuristic which stacks on the current branch, matching the previous automatic behavior). Log:
+
+```
+agent-mode: step-1.6 branch-base auto-preserve
+```
+
+*Agent-mode fallback: if `INTERACTIVE_MODE=agent`, leave BASE_BRANCH unset and log `agent-mode: step-1.6 branch-base auto-preserve`.*
+
+### When Prompt Is Not Needed
+
+If any of the four gating conditions is false, skip silently — do NOT log an agent-mode line. Leave `BASE_BRANCH` unset.
+
 ## Step 2: Branch Setup
 
 Get the branch name from the init-session output (already validated by CLI).
@@ -329,7 +402,11 @@ Get the branch name from the init-session output (already validated by CLI).
 **Skip this step if `AIMI_ROOT_IS_GIT_REPO` is false** — branch setup is handled entirely per-project.
 
 ```bash
-BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $DEFAULT_BRANCH)
+if [ -n "$BASE_BRANCH" ]; then
+  BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $DEFAULT_BRANCH --base $BASE_BRANCH)
+else
+  BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $DEFAULT_BRANCH)
+fi
 ```
 
 If the command fails (non-zero exit), report the error and STOP.
@@ -339,7 +416,7 @@ Extract the action from the JSON output and report:
 Branch setup: [action]
 ```
 
-Where `[action]` is the `action` field from the JSON response (e.g., `already-on-branch`, `checked-out-local`, `checked-out-remote`, `created-from-default`, `created-from-current`).
+Where `[action]` is the `action` field from the JSON response (e.g., `already-on-branch`, `checked-out-local`, `checked-out-remote`, `created-from-default`, `created-from-current`, `created-from-base`).
 
 ### Per-Project Branch Setup
 
@@ -353,7 +430,11 @@ If any story has a non-null `project` field, **or** if `AIMI_ROOT_IS_GIT_REPO` i
    ```bash
    PROJECT_DEFAULT=$($AIMI_CLI detect-default-branch --project [resolved_project_path])
    git -C [resolved_project_path] fetch origin 2>/dev/null || true
-   PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $PROJECT_DEFAULT --project [resolved_project_path])
+   if [ -n "$BASE_BRANCH" ]; then
+     PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $PROJECT_DEFAULT --project [resolved_project_path] --base $BASE_BRANCH)
+   else
+     PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $PROJECT_DEFAULT --project [resolved_project_path])
+   fi
    ```
    Extract the action from the JSON output and report:
    ```
@@ -536,6 +617,22 @@ If all prototypes are missing or all blocks are dropped, set `PROTOTYPE_CONTEXT`
 
 Store `html_count` (count of `.html` files that survived into `PROTOTYPE_CONTEXT`) for use in the start report.
 
+## Step 3.6: Resolve Skill Injection Base Path
+
+Resolve the base directory for skill files. Mirror the CLI path resolution pattern:
+
+```bash
+if [ -n "${CLAUDECODE}" ]; then
+    # Claude Code: glob the plugin cache
+    SKILLS_BASE_DIR=$(echo ~/.claude/plugins/cache/*/aimi-engineering/*/skills 2>/dev/null | tr ' ' '\n' | head -1)
+else
+    # OpenCode: use the installed plugin dir
+    SKILLS_BASE_DIR="${AIMI_PLUGIN_DIR}/skills"
+fi
+```
+
+If the glob matches nothing (no cache entry found) or `AIMI_PLUGIN_DIR` is unset, set `SKILLS_BASE_DIR` to empty string. A missing or empty `SKILLS_BASE_DIR` causes skill loading to silently produce no output (all skill reads are skipped as "not found").
+
 ## Step 4: Wave Execution Loop
 
 ```
@@ -636,6 +733,35 @@ while true:
         else:
             head_before = git rev-parse HEAD
 
+        # Resolve required skills for this story
+        required_skills_block = ''
+        if full_story.skills is non-empty and SKILLS_BASE_DIR is non-empty:
+            aggregate_size = 0
+            skill_blocks = []
+            for skill_name in full_story.skills:
+                skill_path = "$SKILLS_BASE_DIR/[skill_name]/SKILL.md"
+                if file does not exist at skill_path:
+                    log: "skill [skill_name] not found at [skill_path] — skipped"
+                    continue
+                skill_content = read file at skill_path verbatim
+                # Tag-breakout escape: prevent wrapper-tag injection
+                skill_content = replace literal "</required_skills" with "&lt;/required_skills"
+                skill_content = replace literal "<required_skills" with "&lt;required_skills"
+                skill_blocks.append({name: skill_name, path: "skills/[skill_name]/SKILL.md", content: skill_content})
+                aggregate_size += byte_length(skill_content)
+
+            # Aggregate size cap: 100KB across all skills
+            while aggregate_size > 102400 and len(skill_blocks) > 0:
+                dropped = skill_blocks.pop()  # drop last (reverse order)
+                aggregate_size -= byte_length(dropped.content)
+                log: "skill [dropped.name] dropped — aggregate skills context exceeded 100KB"
+
+            if len(skill_blocks) > 0:
+                parts = []
+                for block in skill_blocks:
+                    parts.append("<skill name=\"[block.name]\" path=\"[block.path]\">\n[block.content]\n</skill>")
+                required_skills_block = join(parts, "\n")
+
         # Spawn a single foreground Task — same pattern as next.md
         # No worktree, worker operates in current directory (or PROJECT_PATH if set)
         # IMPORTANT: subagent_type MUST be "general-purpose" — story-executor is a skill, NOT an agent.
@@ -650,6 +776,7 @@ while true:
             description: "Execute [full_story.id]: [full_story.title]",
             prompt: [story-executor SKILL.md [template] with:
                 - PROJECT_GUIDELINES = project_guidelines
+                - REQUIRED_SKILLS = required_skills_block (include <required_skills> section only if non-empty)
                 - PROJECT_PATH = project_path (only include if non-null)
                 - HEADED_MODE = true (only include if VISUAL_FOLLOW is true AND full_story.verification.strategy == "visual")
                 - STORY_ID = full_story.id
@@ -750,6 +877,35 @@ while true:
         else:
             head_before = git rev-parse HEAD
 
+        # Resolve required skills for this story
+        required_skills_block = ''
+        if full_story.skills is non-empty and SKILLS_BASE_DIR is non-empty:
+            aggregate_size = 0
+            skill_blocks = []
+            for skill_name in full_story.skills:
+                skill_path = "$SKILLS_BASE_DIR/[skill_name]/SKILL.md"
+                if file does not exist at skill_path:
+                    log: "skill [skill_name] not found at [skill_path] — skipped"
+                    continue
+                skill_content = read file at skill_path verbatim
+                # Tag-breakout escape: prevent wrapper-tag injection
+                skill_content = replace literal "</required_skills" with "&lt;/required_skills"
+                skill_content = replace literal "<required_skills" with "&lt;required_skills"
+                skill_blocks.append({name: skill_name, path: "skills/[skill_name]/SKILL.md", content: skill_content})
+                aggregate_size += byte_length(skill_content)
+
+            # Aggregate size cap: 100KB across all skills
+            while aggregate_size > 102400 and len(skill_blocks) > 0:
+                dropped = skill_blocks.pop()  # drop last (reverse order)
+                aggregate_size -= byte_length(dropped.content)
+                log: "skill [dropped.name] dropped — aggregate skills context exceeded 100KB"
+
+            if len(skill_blocks) > 0:
+                parts = []
+                for block in skill_blocks:
+                    parts.append("<skill name=\"[block.name]\" path=\"[block.path]\">\n[block.content]\n</skill>")
+                required_skills_block = join(parts, "\n")
+
         # Template selection: full for first story, compact for subsequent
         template = full_template if is_first_story_in_session else compact_template
 
@@ -758,6 +914,7 @@ while true:
             description: "Execute [full_story.id]: [full_story.title]",
             prompt: [story-executor SKILL.md [template] with:
                 - PROJECT_GUIDELINES = project_guidelines
+                - REQUIRED_SKILLS = required_skills_block (include <required_skills> section only if non-empty)
                 - PROJECT_PATH = project_path (only include if non-null)
                 - HEADED_MODE = true (only include if VISUAL_FOLLOW is true AND full_story.verification.strategy == "visual")
                 - STORY_ID = full_story.id
@@ -886,6 +1043,35 @@ while true:
         project_path = project_roots[wt.group_key] if wt.group_key != "DEFAULT" else null
         project_guidelines = PROJECT_GUIDELINES_MAP[wt.group_key] if wt.group_key != "DEFAULT" else PROJECT_GUIDELINES
 
+        # Resolve required skills for this story
+        required_skills_block = ''
+        if full_story.skills is non-empty and SKILLS_BASE_DIR is non-empty:
+            aggregate_size = 0
+            skill_blocks = []
+            for skill_name in full_story.skills:
+                skill_path = "$SKILLS_BASE_DIR/[skill_name]/SKILL.md"
+                if file does not exist at skill_path:
+                    log: "skill [skill_name] not found at [skill_path] — skipped"
+                    continue
+                skill_content = read file at skill_path verbatim
+                # Tag-breakout escape: prevent wrapper-tag injection
+                skill_content = replace literal "</required_skills" with "&lt;/required_skills"
+                skill_content = replace literal "<required_skills" with "&lt;required_skills"
+                skill_blocks.append({name: skill_name, path: "skills/[skill_name]/SKILL.md", content: skill_content})
+                aggregate_size += byte_length(skill_content)
+
+            # Aggregate size cap: 100KB across all skills
+            while aggregate_size > 102400 and len(skill_blocks) > 0:
+                dropped = skill_blocks.pop()  # drop last (reverse order)
+                aggregate_size -= byte_length(dropped.content)
+                log: "skill [dropped.name] dropped — aggregate skills context exceeded 100KB"
+
+            if len(skill_blocks) > 0:
+                parts = []
+                for block in skill_blocks:
+                    parts.append("<skill name=\"[block.name]\" path=\"[block.path]\">\n[block.content]\n</skill>")
+                required_skills_block = join(parts, "\n")
+
         template = full_template if (is_first_story_in_session and story_index == 0) else compact_template
 
         Task(
@@ -895,6 +1081,7 @@ while true:
                 - WORKTREE_PATH = wt.worktree_path
                 - PROJECT_PATH = project_path (only include if non-null)
                 - PROJECT_GUIDELINES = project_guidelines
+                - REQUIRED_SKILLS = required_skills_block (include <required_skills> section only if non-empty)
                 - HEADED_MODE = (do NOT include for worktree stories — visual verification runs post-merge, not inside the worktree)
                 - Omit the <visual_verification> section entirely for worktree stories
                   (the dev server cannot see worktree changes; verification runs after merge-all instead)

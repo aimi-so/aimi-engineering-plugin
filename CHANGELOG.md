@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.67.0] - 2026-04-22
+
+### Added
+
+- **tasks schema (US-001):** New optional `skills[]` field on user story objects. The validator accepts an array of skill-name strings (e.g. `["dhh-rails-style", "frontend-design"]`); stories without `skills[]` are valid and behave identically to pre-1.67. Stories can now declare skills they need (e.g. dhh-rails-style, frontend-design) — the executor injects SKILL.md contents into the worker prompt, keeping the base template lean while giving each story targeted conventions.
+- **command (aimi:execute — US-002):** Executor skill injection. When a story carries a non-empty `skills[]` array, `/aimi:execute` resolves each named skill's `SKILL.md` from the plugin's `skills/` directory and injects its contents into the Task agent prompt ahead of the story body. Skills that cannot be resolved are logged as warnings and skipped; execution continues.
+
+### Changed
+
+- **command (aimi:plan — US-003):** `plan.md` heuristic auto-populates `skills[]` from file patterns detected in the story's `implementation.files` list. Rails/Ruby paths → `dhh-rails-style`; React/Next.js/CSS/Tailwind paths → `frontend-design`. The field is omitted when no patterns match, preserving backwards compatibility.
+
+## [1.66.0] - 2026-04-22
+
+### Added
+
+- **cli (aimi-cli.sh):** New `--base <branch>` flag on the `setup-branch` subcommand. Callers can now specify an explicit base branch (e.g., `aimi-cli.sh setup-branch --base main`) instead of relying solely on automatic default-branch detection. When omitted, behavior is identical to pre-1.66: the default branch is detected via `detect-default-branch`. Enables `/aimi:execute` to thread the user's chosen base branch all the way down to the worktree creation call.
+
+### Changed
+
+- **command (aimi:execute):** Interactive base-branch selection at Step 1.6. When the current branch has unmerged work, `/aimi:execute` now asks whether to stack on the current branch or start fresh from the default branch. Previously auto-stacked. In agent mode (`AIMI_AGENT_MODE=true`, `CI=true`, or no TTY) the pre-1.66 automatic stacking behavior is preserved — no prompt is emitted and the current branch is used as-is.
+
+## [1.65.0] - 2026-04-22
+
+### Added
+
+- **command (aimi:init):** New `/aimi:init` slash command that primes the global CLI path cache (`~/.claude/aimi-engineering-cli-path`) on demand. After priming, subsequent `/aimi:*` commands skip the Layer 2 glob in `references/cli-path-resolution.md` until the cache goes stale. Users can re-run it anytime to repair a broken cache.
+- **cli (aimi-cli.sh):** New `prime-cache` subcommand that actively populates the global CLI path cache with a structured JSON contract `{status, path, host, version, message}`. Under Claude Code it globs `~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh`, validates the resolved path against the same pattern used by `read_global_cli_cache`, and writes atomically. Under OpenCode it writes `$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh` after verifying the script is executable — diverging from `cmd_check_version`'s short-circuit because the whole point of `prime-cache` is to populate the cache, not defer to the converter. Status values: `ok`, `already_current`, `not_found`, `error`. Exempt from `find_aimi_root()` so it runs from any directory, including fresh installs with no `.aimi/`.
+
+### Changed
+
+- **installer (install.sh):** `install.sh --to opencode` now primes the global CLI path cache post-install by invoking `aimi-cli.sh prime-cache` after the shell-profile env var is set. This writes `~/.claude/aimi-engineering-cli-path` at install time so the first `/aimi:*` command after install skips the Layer 2 glob entirely. Failure is non-fatal — the installer warns and continues. `./install.sh --uninstall --from opencode` now removes the global cache file via `rm -f` (best-effort; dry-run logs `Would remove ...` only when the file exists).
+
+### Notes
+
+- The global cache file `~/.claude/aimi-engineering-cli-path` is now written at install time (OpenCode via `install.sh`) or on demand (Claude Code via `/aimi:init`). Layer 2 glob-and-cache-update logic in `references/cli-path-resolution.md` remains as a rescue fallback when the cache is missing or stale — no change to the 4-layer resolution contract.
+
 ## [1.64.0] - 2026-04-21
 
 ### Added

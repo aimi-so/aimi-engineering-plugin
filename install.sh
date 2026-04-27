@@ -203,6 +203,11 @@ translate_command_body() {
   body="${body//via AskUserQuestion/via the question tool}"
   body="${body//AskUserQuestion/the question tool}"
 
+  # --- REQUIRED_SKILLS / SKILLS_BASE_DIR: no rewrite needed ---
+  # SKILLS_BASE_DIR resolution in execute.md already branches on CLAUDECODE vs AIMI_PLUGIN_DIR,
+  # and AIMI_PLUGIN_DIR is set by this installer for OpenCode. The <required_skills> section
+  # is injected verbatim into Task prompts — no OpenCode-specific translation required.
+
   # --- Agent invocation preamble (only for commands referencing named agents) ---
   case "$body" in
     *'subagent_type="aimi-engineering:'*)
@@ -701,6 +706,31 @@ install_opencode() {
   local plugin_dir="$target_dir/plugins/$PLUGIN_NAME"
   set_env_var "$plugin_dir"
 
+  # Prime CLI path cache so the first /aimi:* command skips Layer 2 glob cost
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] Would prime cache: $plugin_dir/scripts/aimi-cli.sh"
+  else
+    chmod +x "$target_dir/plugins/$PLUGIN_NAME/scripts/aimi-cli.sh"
+    local prime_out
+    prime_out=$("$target_dir/plugins/$PLUGIN_NAME/scripts/aimi-cli.sh" prime-cache 2>&1) || {
+      warn "Cache priming failed (non-fatal): $prime_out"
+      prime_out=""
+    }
+    if [ -n "$prime_out" ]; then
+      # Check for JSON status=error
+      case "$prime_out" in
+        *'"status":"error"'*|*'"status": "error"'*)
+          warn "Cache priming reported error (non-fatal): $prime_out"
+          ;;
+        *)
+          log "Primed CLI path cache"
+          ;;
+      esac
+    else
+      log "Primed CLI path cache"
+    fi
+  fi
+
   echo
   ok "Installation complete!"
   echo
@@ -732,6 +762,8 @@ uninstall_opencode() {
     log "[dry-run] Would remove context7 from $target_dir/opencode.json"
     log "[dry-run] Would remove permissions from $target_dir/opencode.json"
     log "[dry-run] Would remove AIMI_PLUGIN_DIR from shell profiles"
+    local cache_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path"
+    [ -f "$cache_file" ] && log "[dry-run] Would remove $cache_file"
     return 0
   fi
 
@@ -840,6 +872,13 @@ with open('$config_file', 'w') as f:
     fi
   done
   ok "Removed AIMI_PLUGIN_DIR from shell profiles"
+
+  # Remove global CLI path cache (best-effort)
+  local cache_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path"
+  if [ -f "$cache_file" ]; then
+    rm -f "$cache_file"
+    log "Removed CLI path cache $cache_file"
+  fi
 
   echo
   ok "Uninstall complete!"

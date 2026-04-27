@@ -67,6 +67,14 @@ You are executing a single story from the tasks file.
 
 </project_guidelines>
 
+<required_skills>
+
+Apply these skill conventions in addition to project guidelines. (Section omitted when no skills are declared for this story.)
+
+[REQUIRED_SKILLS]
+
+</required_skills>
+
 <output_rules>
 
 Apply output compression rules from `AGENTS.md` (spawned-agent status updates: fragments over sentences, drop filler, preserve safety escapes).
@@ -309,6 +317,12 @@ You are executing a single story from the tasks file.
 <project_guidelines>
 Follow project guidelines from CLAUDE.md/AGENTS.md. Apply output compression rules from AGENTS.md.
 </project_guidelines>
+
+<required_skills>
+Apply these skill conventions in addition to project guidelines. (Section omitted when no skills are declared for this story.)
+
+[REQUIRED_SKILLS]
+</required_skills>
 
 <project_context>
 

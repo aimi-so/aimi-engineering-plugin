@@ -875,6 +875,17 @@ cmd_validate_stories() {
            elif ($s.project | test("[\\$`;|&]")) then ["\($s.id): project contains shell metacharacters"]
            elif ($s.project | test("^[a-zA-Z0-9_.][a-zA-Z0-9_./@-]*$") | not) then ["\($s.id): project contains invalid characters"]
            else [] end)
+         else [] end) +
+        (if ($s.skills != null) then
+          (if ($s.skills | type) != "array" then ["\($s.id): skills must be an array"]
+           else
+             (if ($s.skills | length) > 10 then ["\($s.id): skills array exceeds 10 entries"] else [] end) +
+             [$s.skills[] | select(test("^[a-zA-Z0-9][a-zA-Z0-9_-]*$") | not) | "\($s.id): skills[" + (. | tostring) + "] contains invalid characters"] +
+             [$s.skills[] | select(test("\\.\\.") or test("/") or test("[\\$`;|&]")) | "\($s.id): skills[" + (. | tostring) + "] must not contain path components"] +
+             (if ($s.skills | unique | length) != ($s.skills | length) then
+               [$s.skills | group_by(.) | .[] | select(length > 1) | .[0] | "\($s.id): skills contains duplicate entry \(.)"]
+             else [] end)
+           end)
          else [] end)
       ) | .[]
     ] |
@@ -1117,9 +1128,9 @@ cmd_detect_interactivity() {
 }
 
 # Setup branch: deterministic branch creation/checkout logic
-# Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--project <path>]
+# Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--base <baseBranch>] [--project <path>]
 cmd_setup_branch() {
-  local branch_name="" default_branch="" project_dir=""
+  local branch_name="" default_branch="" project_dir="" base_override=""
 
   # Parse arguments (positional + flags)
   while [ $# -gt 0 ]; do
@@ -1128,13 +1139,17 @@ cmd_setup_branch() {
         shift
         default_branch="${1:-}"
         ;;
+      --base)
+        shift
+        base_override="${1:-}"
+        ;;
       --project)
         shift
         project_dir="${1:-}"
         ;;
       -*)
         echo "Error: Unknown flag: $1" >&2
-        echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--project <path>]" >&2
+        echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--base <baseBranch>] [--project <path>]" >&2
         exit 1
         ;;
       *)
@@ -1142,7 +1157,7 @@ cmd_setup_branch() {
           branch_name="$1"
         else
           echo "Error: Unexpected argument: $1" >&2
-          echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--project <path>]" >&2
+          echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--base <baseBranch>] [--project <path>]" >&2
           exit 1
         fi
         ;;
@@ -1152,7 +1167,7 @@ cmd_setup_branch() {
 
   # Validate required arguments
   if [ -z "$branch_name" ] || [ -z "$default_branch" ]; then
-    echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--project <path>]" >&2
+    echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--base <baseBranch>] [--project <path>]" >&2
     exit 1
   fi
 
@@ -1183,6 +1198,12 @@ cmd_setup_branch() {
     exit 1
   fi
 
+  # Validate base override branch name (security)
+  if [ -n "$base_override" ] && ! [[ "$base_override" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: Invalid base branch name: $base_override" >&2
+    exit 1
+  fi
+
   # Get current branch (empty string means detached HEAD)
   local current_branch
   current_branch=$(git branch --show-current 2>/dev/null || echo "")
@@ -1204,6 +1225,22 @@ cmd_setup_branch() {
   if git ls-remote --heads origin "$branch_name" 2>/dev/null | grep -q "$branch_name"; then
     git checkout -b "$branch_name" "origin/$branch_name" >/dev/null 2>&1
     printf '{"branch":"%s","action":"checked-out-remote"}\n' "$branch_name"
+    return 0
+  fi
+
+  # Case --base override: Branch is new and caller provided an explicit base
+  if [ -n "$base_override" ]; then
+    local resolved_base
+    if git ls-remote --heads origin "$base_override" 2>/dev/null | grep -q "$base_override"; then
+      resolved_base="origin/$base_override"
+    elif git branch --list "$base_override" | grep -q "$base_override"; then
+      resolved_base="$base_override"
+    else
+      echo "Error: Base branch does not exist: $base_override" >&2
+      exit 1
+    fi
+    git checkout -b "$branch_name" "$resolved_base" >/dev/null 2>&1
+    printf '{"branch":"%s","action":"created-from-base","base":"%s"}\n' "$branch_name" "$base_override"
     return 0
   fi
 
@@ -1389,6 +1426,109 @@ cmd_cleanup_versions() {
 
   jq -n --argjson removed "$removed" --arg kept "$latest_version" \
     '{removed: $removed, kept: $kept}'
+}
+
+# Prime the global CLI path cache explicitly.
+# Used by install hooks and slash commands to populate the cache without relying
+# on the lazy-resolution layers.
+#
+# JSON output: {status, path, host, version, message}
+#   status: 'ok' | 'already_current' | 'not_found' | 'error'
+#   path:   absolute path written (or null)
+#   host:   'claude_code' | 'opencode'
+#   version: semver extracted from path (or null)
+#   message: optional human-readable string
+#
+# Exit codes: 0 for ok/already_current/not_found, 1 for error
+cmd_prime_cache() {
+  local host_label
+  local resolved_path=""
+  local plugin_dir
+  plugin_dir=$(_validate_plugin_dir)
+
+  # Determine host
+  if _is_claude_code_host; then
+    host_label="claude_code"
+  elif [ -n "$plugin_dir" ]; then
+    host_label="opencode"
+  else
+    # Neither CLAUDECODE=1 nor AIMI_PLUGIN_DIR set — try Claude Code glob anyway
+    host_label="claude_code"
+  fi
+
+  # ---- Resolve path ----
+  if [ "$host_label" = "opencode" ]; then
+    # OpenCode branch: AIMI_PLUGIN_DIR is set and CLAUDECODE is unset
+    local candidate="$plugin_dir/scripts/aimi-cli.sh"
+    if [ ! -x "$candidate" ]; then
+      jq -n --arg msg "AIMI_PLUGIN_DIR/scripts/aimi-cli.sh is not executable: $candidate" \
+        '{status:"error",path:null,host:"opencode",version:null,message:$msg}'
+      return 1
+    fi
+    # Validate: must be exactly $plugin_dir/scripts/aimi-cli.sh (no traversal)
+    if [ "$candidate" != "$plugin_dir/scripts/aimi-cli.sh" ]; then
+      jq -n --arg msg "Path rejected: does not match expected OpenCode pattern" \
+        '{status:"error",path:null,host:"opencode",version:null,message:$msg}'
+      return 1
+    fi
+    resolved_path="$candidate"
+  else
+    # Claude Code branch: glob for latest installed path
+    local config_dir
+    config_dir=$(_claude_config_dir)
+    resolved_path=$(bash -c "ls \"$config_dir\"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1")
+
+    if [ -z "$resolved_path" ]; then
+      if [ -z "${AIMI_PLUGIN_DIR:-}" ]; then
+        jq -n '{status:"not_found",path:null,host:"claude_code",version:null,message:"Plugin not installed. Run /plugin install aimi-engineering first."}'
+        return 0
+      fi
+    fi
+
+    # Validate path matches expected pattern
+    case "$resolved_path" in
+      */plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh)
+        : # valid
+        ;;
+      *)
+        jq -n --arg path "$resolved_path" \
+          '{status:"error",path:null,host:"claude_code",version:null,message:"Resolved path rejected: does not match expected cache pattern"}'
+        return 1
+        ;;
+    esac
+
+    # Verify executable
+    if [ ! -x "$resolved_path" ]; then
+      jq -n --arg path "$resolved_path" \
+        '{status:"error",path:null,host:"claude_code",version:null,message:"Resolved path is not executable"}'
+      return 1
+    fi
+  fi
+
+  # ---- Already-current check ----
+  local existing_cache
+  existing_cache=$(read_global_cli_cache)
+  if [ -n "$existing_cache" ] && [ "$existing_cache" = "$resolved_path" ]; then
+    local ver
+    ver=$(_extract_version_from_path "$resolved_path")
+    jq -n --arg path "$resolved_path" --arg host "$host_label" --arg ver "$ver" \
+      '{status:"already_current",path:$path,host:$host,version:$ver,message:"Cache already points to this path"}'
+    return 0
+  fi
+
+  # ---- Write cache ----
+  local write_error
+  if ! write_error=$(write_global_cli_cache "$resolved_path" 2>&1); then
+    jq -n --arg host "$host_label" --arg msg "write_global_cli_cache failed: $write_error" \
+      '{status:"error",path:null,host:$host,version:null,message:$msg}'
+    return 1
+  fi
+
+  local ver
+  ver=$(_extract_version_from_path "$resolved_path")
+  jq -n --arg path "$resolved_path" --arg host "$host_label" --arg ver "$ver" \
+    '{status:"ok",path:$path,host:$host,version:$ver,message:"Cache primed successfully"}'
+  return 0
 }
 
 # Pass a gate on a story
@@ -1880,6 +2020,7 @@ main() {
     help|--help|-h) cmd_help; return ;;
     version) cmd_version; return ;;
     detect-interactivity) cmd_detect_interactivity; return ;;
+    prime-cache) cmd_prime_cache; return ;;
   esac
 
   find_aimi_root
@@ -1917,6 +2058,7 @@ main() {
     version)           cmd_version ;;
     check-version)     shift; cmd_check_version "$@" ;;
     cleanup-versions)  cmd_cleanup_versions ;;
+    prime-cache)       cmd_prime_cache ;;
     list-archivable)   cmd_list_archivable ;;
     archive-task)      cmd_archive_task "${2:-}" ;;
     help|--help|-h)    cmd_help ;;
