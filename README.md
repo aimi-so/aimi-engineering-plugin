@@ -122,7 +122,6 @@ The `AIMI_PLUGIN_DIR` environment variable points to the installed plugin direct
 | `/aimi:execute` | Run all stories autonomously (parallel for v3, sequential for v2.2) | `/aimi:execute` |
 | `/aimi:review` | Multi-agent code review with findings synthesis | `/aimi:review [PR or branch]` |
 | `/aimi:open-pr` | Open a pull request from the current task branch | `/aimi:open-pr [PR options]` |
-| `/aimi:swarm` | Execute multiple tasks.json files in parallel Docker sandboxes | `/aimi:swarm [--file path] [--max N]` |
 
 ### Command Details
 
@@ -190,7 +189,7 @@ Orchestrates autonomous execution of all pending stories. Automatically detects 
 1. Validates branch name and dependency graph (DAG validation)
 2. Creates/checkouts feature branch
 3. Builds execution waves from dependency graph
-4. Executes each wave: independent stories run in parallel via Team/swarm workers
+4. Executes each wave: independent stories run in parallel via worktree workers
 5. Each worker operates in its own worktree; leader merges results after each wave
 6. Cascade-skips dependent stories on failure
 7. Reports completion with wave progress and commit count
@@ -212,26 +211,9 @@ Multi-agent code review using aimi-native review agents. Runs parallel agents (a
 /aimi:review feat/auth # Review specific branch
 ```
 
-#### `/aimi:swarm`
-
-Executes multiple tasks.json files in parallel using Team orchestration, git worktrees, and simplified Docker containers. Each task file gets its own worktree and a Team worker that runs Claude Code inside a `docker run --rm` container with the worktree volume-mounted.
-
-```bash
-/aimi:swarm                            # Discover and select task files
-/aimi:swarm --file .aimi/tasks/f.json  # Execute a single task file
-/aimi:swarm --all                      # Execute all discovered task files
-/aimi:swarm --files a.json,b.json      # Execute specific files
-/aimi:swarm status                     # View task file progress
-/aimi:swarm cleanup                    # Remove worktrees and containers
-```
-
-Requirements:
-- Docker installed and running
-- `ANTHROPIC_API_KEY` set in environment
-
 ## Skills
 
-16 skills providing domain expertise and reusable workflows.
+15 skills providing domain expertise and reusable workflows.
 
 ### Core (Internal)
 
@@ -267,7 +249,6 @@ Used internally by commands — not user-invocable.
 
 | Skill | Description |
 |-------|-------------|
-| `orchestrating-swarms` | Reference guide for multi-agent swarm orchestration patterns |
 | `file-todos` | File-based todo tracking system |
 | `resolve-pr-parallel` | Resolve PR comments using parallel processing |
 

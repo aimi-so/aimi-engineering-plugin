@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.68.0] - 2026-04-27
+
+### Removed
+
+- **command (`/aimi:swarm`):** Deleted `/aimi:swarm` and its `plugins/aimi-engineering/commands/swarm.md` body. Parallel execution is now handled exclusively by `/aimi:execute` via git worktrees (no Docker dependency).
+- **skill (`orchestrating-swarms`):** Deleted the entire `plugins/aimi-engineering/skills/orchestrating-swarms/` directory (7 files). The skill was only referenced by `/aimi:swarm` and was already labeled "Disabled (Reference Only)" in the README.
+- **hook patterns:** Removed Docker auto-approve patterns (13–18) from `plugins/aimi-engineering/hooks/auto-approve-cli.sh` — they exclusively approved `aimi-swarm-*` and `aimi-*` container commands.
+- **OpenCode install:** `install.sh` no longer grants Docker permissions in `opencode.json` (the swarm-only Docker allow rules are removed from `install_permissions`).
+
+### Migration
+
+Users running `/aimi:swarm <args>` should switch to `/aimi:execute`, which now provides the same parallel-wave execution via worktrees without needing Docker or `ANTHROPIC_API_KEY` in environment.
+
 ## [1.67.1] - 2026-04-27
 
 ### Changed
