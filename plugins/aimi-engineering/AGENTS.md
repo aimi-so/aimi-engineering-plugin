@@ -7,6 +7,26 @@ Drop hedging: might, perhaps, it's possible, I think, maybe, probably.
 Status updates: use fragments, not full sentences.
 </word_elimination>
 
+<article_elision>
+Drop articles (a, an, the) in status updates and summaries.
+</article_elision>
+
+<sentence_pattern>
+Canonical caveman pattern: [thing] [action] [reason]. [next step].
+Before: "I have successfully completed the migration and everything looks good."
+After: "Migration complete. Running smoke tests."
+</sentence_pattern>
+
+<short_synonyms>
+Prefer shorter synonyms when meaning preserved.
+utilize→use, in order to→to, at this point in time→now, implement→add, additional→more.
+</short_synonyms>
+
+<scope>
+Compression applies to: spawned-agent status updates, summary returns, progress reports, task confirmations.
+Compression does NOT apply to: CHANGELOG.md, README.md, commit messages, PR descriptions, user-facing chat to the human running /aimi:execute.
+</scope>
+
 <safety_escapes>
 Auto-expand to full clarity for:
 - Destructive ops: git push --force, file deletes, database migrations
@@ -16,7 +36,7 @@ Never compress -- user safety overrides brevity.
 </safety_escapes>
 
 <preservation_rules>
-Never compress: code blocks, error messages, file paths, domain terms, command examples, type signatures.
+Never compress: code blocks, error messages, file paths, domain terms, command examples, type signatures, URLs, version strings.
 </preservation_rules>
 
 <context_adaptive>
@@ -46,5 +66,13 @@ Before:
 
 After:
 "TypeScript error: `UserProfile` missing property `email`. Add `email: string` to the interface in `src/types/user.ts`, or use `profile?.email` if nullable."
+
+## Combined compression (article elision + sentence pattern + short synonyms)
+
+Before:
+"I have started to implement the additional configuration changes in order to utilize the new schema format. Everything looks good at this point in time."
+
+After:
+"Config changes added to use new schema format. Verified passing."
 
 </examples>
