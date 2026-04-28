@@ -2,7 +2,7 @@
 name: aimi:init
 description: Prime the global CLI path cache so all /aimi:* commands resolve instantly without the Layer 2 glob
 disable-model-invocation: true
-allowed-tools: Read(references/cli-path-resolution.md), Bash(cat:*), Bash(bash:*), Bash(printf:*), Bash(mv:*), Bash(chmod:*), Bash($AIMI_CLI:*)
+allowed-tools: Read, Bash(cat:*), Bash(bash:*), Bash(printf:*), Bash(mv:*), Bash(chmod:*), Bash($AIMI_CLI:*)
 ---
 
 # Aimi Init
@@ -11,7 +11,7 @@ Prime (or repair) the global CLI path cache so subsequent `/aimi:*` commands ski
 
 ## Step 0: Resolve CLI Path
 
-Read `references/cli-path-resolution.md` and follow the **Resolve CLI Path** and **Version Check** sections to set `$AIMI_CLI`. Each layer is a separate Bash call.
+Read `${CLAUDE_PLUGIN_ROOT}/commands/references/cli-path-resolution.md` and follow the **Resolve CLI Path** and **Version Check** sections to set `$AIMI_CLI`. Each layer is a separate Bash call.
 
 If resolution fails, report error and STOP.
 

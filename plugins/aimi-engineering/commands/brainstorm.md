@@ -18,7 +18,7 @@ Do not proceed until you have a feature description from the user.
 
 ## Step 0: Resolve CLI Path
 
-Read `references/cli-path-resolution.md` and follow the **Resolve CLI Path**
+Read `${CLAUDE_PLUGIN_ROOT}/commands/references/cli-path-resolution.md` and follow the **Resolve CLI Path**
 section to set `$AIMI_CLI`. Each layer is a separate Bash call.
 
 If resolution fails, fall back to the legacy prose-only path for questions —

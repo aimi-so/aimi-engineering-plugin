@@ -10,7 +10,7 @@ Display the current execution progress using the CLI script.
 
 ## Step 0: Resolve CLI Path
 
-Read `references/cli-path-resolution.md` and follow the **Resolve CLI Path** and **Version Check** sections to set `$AIMI_CLI`. Each layer is a separate Bash call.
+Read `${CLAUDE_PLUGIN_ROOT}/commands/references/cli-path-resolution.md` and follow the **Resolve CLI Path** and **Version Check** sections to set `$AIMI_CLI`. Each layer is a separate Bash call.
 
 If resolution fails, report error and STOP.
 
