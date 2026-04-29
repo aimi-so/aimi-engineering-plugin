@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.69.0] - 2026-04-29
+
+### Changed
+
+- execute: every story now runs in its own git worktree — single-story waves no longer skip worktree creation; the N=1 fast-path was deleted so the multi-story flow handles all wave sizes uniformly
+- Default metadata.maxConcurrency raised from 4 to 5; selection within a wave remains deterministic (tasks.json file order via $AIMI_CLI list-ready)
+
 ## [1.68.3] - 2026-04-28
 
 ### Fixed
