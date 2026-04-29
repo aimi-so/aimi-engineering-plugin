@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.71.0] - 2026-04-29
+
+### Added
+
+- **`vary ui` override keyword (US-005):** Typing `vary ui` in a brainstorm visual question opts into UI-token variation for the next variant axis selection, activating color, typography, radii, and surface axes even when project tokens are present.
+
+### Changed
+
+- **brainstorm visual variants (US-005):** When project design tokens are present, variant axes now default to UX-branch axes (layout, hierarchy, flow) instead of UI-branch axes. UI-branch axes (color, typography, radii, surface) activate only on full token-extraction fallback or explicit `vary ui` override. This preserves prior behavior for projects without tokens while improving consistency for token-backed design systems.
+
 ## [1.70.0] - 2026-04-29
 
 ### Added
