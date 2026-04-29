@@ -592,7 +592,7 @@ For the full version history, see [CHANGELOG.md](CHANGELOG.md).
 
 | Type | Count | Description |
 |------|-------|-------------|
-| Commands | 9 | Slash commands for workflow stages |
+| Commands | 14 | Slash commands for workflow stages |
 | Skills | 16 | 3 core, 6 development/style, 4 tooling/automation, 3 disabled/reference |
 | Agents | 28 | 4 research, 15 review, 3 design, 1 docs, 5 workflow |
 

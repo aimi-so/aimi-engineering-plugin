@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.70.0] - 2026-04-29
+
+### Added
+
+- **design references (US-001–US-009):** 12 new reference documents ported from Anthropic Impeccable v3.0.5 into `skills/frontend-design/references/`: `brand.md`, `product.md`, `color-and-contrast.md`, `typography.md`, `spatial-design.md`, `motion-design.md`, `responsive-design.md`, `ux-writing.md`, `interaction-design.md`, `cognitive-load.md`, `heuristics-scoring.md`, `personas.md`.
+- **design references index:** `skills/frontend-design/references/index.md` — registry mapping each reference slug to its file and canonical trigger phrase for use by brainstorm lazy-load hooks.
+- **commands (`/aimi:design:shape`, `/aimi:design:craft`, `/aimi:design:critique`, `/aimi:design:audit`, `/aimi:design:polish`):** 5 new design slash commands under `commands/design/` covering idea shaping, component crafting, design critique, accessibility/heuristics audit, and visual polish workflows.
+- **brainstorm lazy-load hooks:** `loaded_design_refs[]` working memory array plus 4 hook points in `skills/frontend-design/SKILL.md` enabling on-demand reference loading during brainstorm sessions without pre-loading all 12 documents.
+
+### Changed
+
+- **skill (`frontend-design` SKILL.md):** Full rewrite — 42 lines expanded to ~161 lines. Integrates shared design laws (Gestalt, Fitts, Hick, aesthetic-usability effect), absolute bans list, and AI-slop detection test. Now references the 12 ported design documents via the lazy-load hook system.
+
+### Security
+
+- Design reference content ported under Apache-2.0 license from Anthropic Impeccable v3.0.5. License attribution preserved in reference file headers.
+
 ## [1.69.1] - 2026-04-29
 
 ### Fixed
