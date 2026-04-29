@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Design reference content ported under Apache-2.0 license from Anthropic Impeccable v3.0.5. License attribution preserved in reference file headers.
 
+### Notes
+
+- US-012: CLI test suite (325 tests), YAML frontmatter smoke checks (SKILL.md + 5 commands/design/*.md), and references/ token budget (1657/3000 lines) all verified prior to release. Fixed invalid YAML frontmatter in `commands/design/craft.md` and `commands/design/shape.md` (unquoted `description` values containing `: ` sequences).
+
 ## [1.69.1] - 2026-04-29
 
 ### Fixed

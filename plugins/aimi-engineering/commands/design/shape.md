@@ -1,6 +1,6 @@
 ---
 name: aimi:design:shape
-description: Shape the UX and UI for a feature before any code is written. Produces a confirmed design brief. Use when starting a new UI surface, planning a feature's visual direction, or preparing context for /aimi:design:craft. Trigger phrases: design brief, shape this feature, ux planning, ui planning, design before coding.
+description: "Shape the UX and UI for a feature before any code is written. Produces a confirmed design brief. Use when starting a new UI surface, planning a feature's visual direction, or preparing context for /aimi:design:craft. Trigger phrases: design brief, shape this feature, ux planning, ui planning, design before coding."
 argument-hint: "[feature description]"
 allowed-tools: Read, Write, Edit, Bash(mkdir:*)
 disable-model-invocation: true

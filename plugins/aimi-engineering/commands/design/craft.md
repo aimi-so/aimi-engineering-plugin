@@ -1,6 +1,6 @@
 ---
 name: aimi:design:craft
-description: Build a feature with high-quality UX and UI through a structured process: shape the design, land the visual direction, build real production code, then inspect and improve in-browser until the result meets a high-end studio bar. Use when you have a confirmed design brief and are ready to implement, or when the user wants the full discovery-then-build flow in one step. Trigger phrases: build the design, craft the UI, implement the design brief, build this feature with good design.
+description: "Build a feature with high-quality UX and UI through a structured process: shape the design, land the visual direction, build real production code, then inspect and improve in-browser until the result meets a high-end studio bar. Use when you have a confirmed design brief and are ready to implement, or when the user wants the full discovery-then-build flow in one step. Trigger phrases: build the design, craft the UI, implement the design brief, build this feature with good design."
 argument-hint: "[feature description or confirmed brief]"
 allowed-tools: Read, Write, Edit, Bash(mkdir:*), Bash(tsc:*), Bash(npx tsc:*)
 disable-model-invocation: true
