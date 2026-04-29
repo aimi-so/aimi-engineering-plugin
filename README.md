@@ -361,7 +361,7 @@ All execution state lives in `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
     "branchName": "feat/user-auth",
     "createdAt": "2026-02-16",
     "planPath": ".aimi/plans/2026-02-16-user-auth-plan.md",
-    "maxConcurrency": 4
+    "maxConcurrency": 5
   },
   "userStories": [
     {
@@ -402,7 +402,7 @@ All execution state lives in `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
 | `createdAt` | string | Creation date (YYYY-MM-DD) |
 | `planPath` | string | Path to source plan file |
 | `brainstormPath` | string | (optional) Path to brainstorm file |
-| `maxConcurrency` | number | (v3) Max parallel workers (default 4) |
+| `maxConcurrency` | number | (v3) Max parallel workers (default 5) |
 
 #### Story Fields (v3)
 

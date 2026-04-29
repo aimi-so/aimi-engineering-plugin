@@ -497,7 +497,7 @@ Read the tasks file metadata to get maxConcurrency:
 $AIMI_CLI init-session
 ```
 
-Parse `maxConcurrency` from metadata. If not set, default to `4`.
+Parse `maxConcurrency` from metadata. If not set, default to `5`.
 
 Store as `MAX_CONCURRENCY`.
 
