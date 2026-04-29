@@ -18,6 +18,14 @@ Guide the user through structured brainstorming: understand the idea via researc
 
 ---
 
+## Working Memory
+
+| Variable | Type | Purpose |
+|---|---|---|
+| `loaded_design_refs[]` | string array | Tracks frontend-design reference files already read this session. Prevents re-loading the same file and enforces the 3-file-per-round cap. Reset per brainstorm session. |
+
+---
+
 ## Hybrid Question Flow
 
 The brainstorm uses a two-phase question approach:
@@ -26,6 +34,19 @@ The brainstorm uses a two-phase question approach:
 2. **Claude generates batched questions** — 3-5 contextual multiple-choice questions informed by codebase research
 
 This combines the speed of Ralph-style shorthand ("1A, 2C, 3B") with context-aware questions that reference actual codebase patterns.
+
+### Phase 1.7 — Design Reference Bootstrap (UI topics only)
+
+When the user's initial description contains any UI keyword (typography, font, color, palette, contrast, spacing, layout, motion, animation, responsive, mobile, copy, hierarchy, affordance, feedback, form, input, critique, score), trigger the design reference bootstrap **once** before generating the first question batch:
+
+1. Read `${CLAUDE_PLUGIN_ROOT}/skills/frontend-design/references/index.md` and store its keyword-to-file table.
+2. Run the **brand-vs-product classifier** on the topic:
+   - Matches *landing, marketing, brand site, campaign, hero, portfolio, long-form* → register = `brand.md`
+   - Matches *dashboard, admin, app, tool, settings, in-app form, table, list, console, panel* → register = `product.md`
+   - No match → default to `product.md`
+3. Read the resolved register file (`brand.md` or `product.md`) from `${CLAUDE_PLUGIN_ROOT}/skills/frontend-design/references/` and append its path to `loaded_design_refs[]`.
+
+Skip this step entirely for non-UI brainstorms.
 
 ---
 
@@ -76,6 +97,29 @@ Accept all response formats gracefully:
 | Mixed | "1A but for question 3 none fit — I want X" | Parse shorthand + free-form |
 
 Never re-ask a question just because the format was unexpected. Parse the intent and continue.
+
+### Phase 2 — Design Reference Lazy-Load on Free-Form Replies
+
+After parsing each free-form reply (including "Other: [specify]" answers and any open-ended response), run this keyword scan **before** generating the next question batch or narrative:
+
+1. Scan the reply text against the keyword-to-file table from `index.md` (loaded in Phase 1.7 or on demand).
+2. Collect all matching reference file paths that are **not** already in `loaded_design_refs[]`.
+3. Load at most **3 new files** this round: Read each matched file from `${CLAUDE_PLUGIN_ROOT}/skills/frontend-design/references/` and append to `loaded_design_refs[]`.
+4. Incorporate the guidance from freshly loaded files into the next question batch or narrative context.
+
+**Vague-intent fallback:** When the reply is too vague to match specific keywords, rely on the already-loaded register file (`brand.md` or `product.md`). Only ask one `AskUserQuestion` clarifier when the register file does not address the reply's apparent intent.
+
+**Skip scan** when `loaded_design_refs[]` already contains 3+ files and the reply contains no new keyword matches.
+
+---
+
+### Phase 2 Step 6 — Revision-Request Keyword Scan (None / Show-Again Branch)
+
+When the user selects **None — show again / revise** (or equivalent dissatisfaction signal) before a variant set is authored:
+
+1. Apply the same keyword scan from Phase 2 to the revision request text.
+2. Lazy-load any matched files not in `loaded_design_refs[]` (cap: 3 new files total across both Phase 2 and this step in the same round).
+3. Use guidance from all loaded reference files when authoring the replacement variants.
 
 ---
 
@@ -169,12 +213,28 @@ topic: <kebab-case-topic>
 - [Decision 1]: [Rationale]
 - [Decision 2]: [Rationale]
 
+## Design Decisions
+<!-- Phase 4 hook: enumerate each design reference loaded during this brainstorm -->
+<!-- Format: "**<filename>** — <one-sentence guidance hint drawn from the file>" -->
+<!-- Omit this section entirely when loaded_design_refs[] is empty -->
+
 ## Open Questions
 - [Any unresolved questions]
 
 ## Next Steps
 > Run `/aimi:plan` to generate implementation tasks
 ```
+
+### Phase 4 — Loaded References in Design Decisions
+
+When writing the brainstorm document, populate the **Design Decisions** section with one entry per file in `loaded_design_refs[]`:
+
+```
+- **typography.md** — Prefer a two-weight type scale (regular + semibold) to maintain hierarchy without visual noise.
+- **product.md** — Optimise for data-density; users scan tables more than they read prose.
+```
+
+Use a one-sentence hint that captures the most actionable guidance from each file for the current topic. Omit the section when `loaded_design_refs[]` is empty.
 
 ---
 
