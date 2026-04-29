@@ -62,13 +62,22 @@ Certain literal phrases typed in the topic or in a reply trigger one-shot render
 | Phrase | Match rule | Scope | Effect |
 |--------|-----------|-------|--------|
 | `show variants` | Case-insensitive substring match anywhere in the topic text or the user's latest reply | Next question only — flag clears after that one question is rendered | Force-treats the next question as **Aesthetic Direction** for visual variant rendering, even when the category was classified as Functional or Scope. On activation emit exactly: `Visual override active — rendering variants for next question` |
+| `vary ui` | Case-insensitive substring match anywhere in the topic text or the user's latest reply | Next visual question only — flag clears after that one visual question is rendered | Forces the UI-variation branch on the next Aesthetic Direction or Differentiation question. Non-visual questions do not consume the flag. On activation emit exactly: `UI variation override active — next visual question will vary tokens` |
 
-**How it works at runtime:**
+**How `show variants` works at runtime:**
 
 1. After each user reply (and when first reading the topic), check whether the text contains `show variants` (case-insensitive).
 2. If matched, set an in-memory flag `visualOverridePending = true` and emit `Visual override active — rendering variants for next question` **once** to chat.
 3. When the agent reaches the next question, if `visualOverridePending = true`: treat that question as Aesthetic Direction for the purposes of visual variant rendering (Phase 2 category gate bypass), then immediately clear the flag (`visualOverridePending = false`). The override does **not** persist to subsequent questions.
 4. If the flag is not set, proceed with normal category classification — no change to existing behavior.
+
+**How `vary ui` works at runtime:**
+
+1. After each user reply (and when first reading the topic), check whether the text contains `vary ui` (case-insensitive).
+2. If matched, set an in-memory flag `varyUIPending = true` and emit `UI variation override active — next visual question will vary tokens` **once** to chat. This confirmation fires exactly once per match.
+3. When the agent reaches the next question, if `varyUIPending = true`: evaluate whether the question is an Aesthetic Direction or Differentiation question (a visual question). If it is a visual question, select the UI-variation branch within that question (varying UI tokens such as colors, typography, spacing, and radii across variants), then immediately clear the flag (`varyUIPending = false`). If the question is not a visual question (Purpose, Users, Constraints, Success, Edge Cases, Existing Patterns, Approach), skip it without consuming the flag — `varyUIPending` remains `true` until the next visual question is reached.
+4. If the flag is not set, proceed with normal variant authoring — no change to existing behavior.
+5. **Co-occurrence with `show variants`:** When both `show variants` and `vary ui` match in the same reply or topic text, both flags are set independently. `show variants` forces the next question to be treated as Aesthetic Direction (phase category gate bypass); `vary ui` selects the UI-variation branch within that question. Both flags clear after that single question is consumed — `visualOverridePending = false` and `varyUIPending = false`. The net effect: the next question becomes an Aesthetic Direction question rendered with UI-token variation.
 
 ## Phase 0: Assess Requirements Clarity
 
