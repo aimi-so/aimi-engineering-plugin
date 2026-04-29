@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.69.1] - 2026-04-29
+
+### Fixed
+
+- **installer (install.sh — US-010):** `install_commands()` now translates subdirectory commands (e.g., `commands/design/*.md`) in addition to top-level `commands/*.md`. Previously only flat files were processed; `commands/design/{shape,craft,critique,audit,polish}.md` were silently dropped during OpenCode install. Subdirectory commands are flattened to `aimi/design-<name>.md` using colon-to-hyphen normalisation of the `name:` frontmatter field. The `references/` subdirectory is skipped (it holds shared reference docs, not commands). Dry-run mode now lists all translated commands, including subdirectory ones.
+
 ## [1.69.0] - 2026-04-29
 
 ### Changed
