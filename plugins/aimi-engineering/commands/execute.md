@@ -17,7 +17,7 @@ Single-story waves run inline (no worktree overhead). Multi-story waves spawn N 
 
 ## Step 0: Resolve CLI Path
 
-Read `references/cli-path-resolution.md` and follow the **Resolve CLI Path** and **Version Check** sections to set `$AIMI_CLI`. Each layer is a separate Bash call.
+Read `${CLAUDE_PLUGIN_ROOT}/commands/references/cli-path-resolution.md` and follow the **Resolve CLI Path** and **Version Check** sections to set `$AIMI_CLI`. Each layer is a separate Bash call.
 
 If resolution fails, report error and STOP.
 
@@ -485,7 +485,7 @@ Beginning wave execution loop...
 
 ## Step 3.1: Resolve Worktree Manager
 
-Read `references/cli-path-resolution.md` and follow the **Resolve Worktree Manager Path** section to set `$WORKTREE_MGR`.
+Read `${CLAUDE_PLUGIN_ROOT}/commands/references/cli-path-resolution.md` and follow the **Resolve Worktree Manager Path** section to set `$WORKTREE_MGR`.
 
 If resolution fails, report error and STOP.
 

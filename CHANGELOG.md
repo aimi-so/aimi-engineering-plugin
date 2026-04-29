@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.68.3] - 2026-04-28
+
+### Fixed
+
+- **commands (CLI path resolution):** Replaced the CWD-relative `Read \`references/cli-path-resolution.md\`` loader with the absolute `Read \`${CLAUDE_PLUGIN_ROOT}/commands/references/cli-path-resolution.md\`` form across the seven commands that resolve `$AIMI_CLI` (init, brainstorm, plan, execute — both CLI and Worktree Manager reads — next, open-pr, status). The relative form failed when commands ran from a project CWD outside the plugin tree, causing the agent to glob the project for `cli-path-resolution.md`.
+- **command (`/aimi:init`):** Widened `allowed-tools` from the scoped `Read(references/cli-path-resolution.md)` to bare `Read`, matching the pattern used by the other six commands. The scoped form prevented the new absolute-path read from being authorized.
+- **install (OpenCode):** `install.sh translate_command_body()` now rewrites `${CLAUDE_PLUGIN_ROOT}` to `${AIMI_PLUGIN_DIR}` so translated commands resolve under OpenCode's plugin layout (where `CLAUDE_PLUGIN_ROOT` is undefined). Mirrors the existing `CLAUDE_CONFIG_DIR` rewrite.
+
 ## [1.68.2] - 2026-04-27
 
 ### Removed

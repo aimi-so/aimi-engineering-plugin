@@ -188,6 +188,11 @@ translate_command_body() {
   # Replace Claude config dir references with OpenCode config dir
   body="${body//\$\{CLAUDE_CONFIG_DIR:-\$HOME\/.claude\}/\$\{OPENCODE_CONFIG_DIR:-\$HOME\/.config\/opencode\}}"
 
+  # Replace plugin root variable with the OpenCode-side AIMI_PLUGIN_DIR
+  # (CLAUDE_PLUGIN_ROOT is injected by Claude Code only; AIMI_PLUGIN_DIR is
+  # exported by this installer for OpenCode.)
+  body="${body//\$\{CLAUDE_PLUGIN_ROOT\}/\$\{AIMI_PLUGIN_DIR\}}"
+
   # --- Error message rewriting (applies to all commands) ---
   # Replace plugin install instructions with OpenCode installer
   body="${body//\/plugin install aimi-engineering/.\/install.sh --to opencode}"
