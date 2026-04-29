@@ -338,7 +338,7 @@ Write single file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 - **researchDepth**: Value computed in Phase 1.5 (`skip`, `quick`, `standard`, `deep`), or omit if not computed
 - **researchPaths**: Collect all `.aimi/research/` file paths written by Phase 1 agents (codebase, learnings) and Phase 1.5b agents (best-practices, framework-docs). Omit entirely when `researchDepth` is `skip` or no research files were written.
 - **prototypePaths**: Convert each path in `resolvedPrototypePaths` to a path relative to `AIMI_ROOT` (no leading `./`, no `..` components). Deduplicate with `| unique`. Emit as `metadata.prototypePaths` array. Omit the key entirely when the array is empty.
-- **maxConcurrency**: Default `4`. Set to `1` for strictly sequential execution.
+- **maxConcurrency**: Default `5`. Set to `1` for strictly sequential execution.
 
 ### Write File
 
@@ -363,7 +363,7 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
     "researchDepth": "skip|quick|standard|deep (optional, computed in Phase 1.5)",
     "researchPaths": "string[] (optional, relative paths to research files written by Phase 1 and Phase 1.5b agents)",
     "prototypePaths": "string[] (optional, relative paths to prototype HTML files and tokens sidecar JSON registered by Phase 0 Prototype Context)",
-    "maxConcurrency": "number (optional, default 4)",
+    "maxConcurrency": "number (optional, default 5)",
     "frontendOnly": "boolean (optional, true when frontend-only scope)",
     "backendSpec": {
       "endpoints": [{"method": "string", "path": "string", "description": "string"}],
