@@ -361,7 +361,7 @@ All execution state lives in `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
     "branchName": "feat/user-auth",
     "createdAt": "2026-02-16",
     "planPath": ".aimi/plans/2026-02-16-user-auth-plan.md",
-    "maxConcurrency": 4
+    "maxConcurrency": 5
   },
   "userStories": [
     {
@@ -402,7 +402,7 @@ All execution state lives in `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
 | `createdAt` | string | Creation date (YYYY-MM-DD) |
 | `planPath` | string | Path to source plan file |
 | `brainstormPath` | string | (optional) Path to brainstorm file |
-| `maxConcurrency` | number | (v3) Max parallel workers (default 4) |
+| `maxConcurrency` | number | (v3) Max parallel workers (default 5) |
 
 #### Story Fields (v3)
 
@@ -592,7 +592,7 @@ For the full version history, see [CHANGELOG.md](CHANGELOG.md).
 
 | Type | Count | Description |
 |------|-------|-------------|
-| Commands | 9 | Slash commands for workflow stages |
+| Commands | 14 | Slash commands for workflow stages |
 | Skills | 16 | 3 core, 6 development/style, 4 tooling/automation, 3 disabled/reference |
 | Agents | 28 | 4 research, 15 review, 3 design, 1 docs, 5 workflow |
 

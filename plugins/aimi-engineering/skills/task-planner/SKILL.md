@@ -23,9 +23,9 @@ Take a feature description through research, spec analysis, and story decomposit
 - Frontend-only: `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
 - Legacy (no scope): `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 
-> Key fields: `schemaVersion` ("3.2"), `metadata{title,type,branchName,createdAt,planPath(null),researchDepth(optional),maxConcurrency(4),frontendOnly(optional),backendSpec(optional:{endpoints[{method,path,description}],dataModels[{name,fields}],businessRules[string],businessContext(string)})}`, `userStories[]{id(US-NNN),title(≤200),description(≤500),acceptanceCriteria(each≤600),priority,status("pending"),dependsOn([]),notes,project(optional),wave(computed),implementation(optional),verification(optional),gate(optional)}`
+> Key fields: `schemaVersion` ("3.2"), `metadata{title,type,branchName,createdAt,planPath(null),researchDepth(optional),maxConcurrency(5),frontendOnly(optional),backendSpec(optional:{endpoints[{method,path,description}],dataModels[{name,fields}],businessRules[string],businessContext(string)})}`, `userStories[]{id(US-NNN),title(≤200),description(≤500),acceptanceCriteria(each≤600),priority,status("pending"),dependsOn([]),notes,project(optional),wave(computed),implementation(optional),verification(optional),gate(optional)}`
 
-**Notes:** `planPath` is always `null` (this skill generates tasks.json directly). All stories initialize with `status: "pending"`. `dependsOn` is a string array of story IDs. `maxConcurrency` defaults to `4`.
+**Notes:** `planPath` is always `null` (this skill generates tasks.json directly). All stories initialize with `status: "pending"`. `dependsOn` is a string array of story IDs. `maxConcurrency` defaults to `5`.
 
 ### Type Values
 

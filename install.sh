@@ -352,11 +352,49 @@ install_commands() {
 
   if [ "$DRY_RUN" -eq 1 ]; then
     log "[dry-run] Would install commands to $cmd_dir"
+    # Top-level commands
+    for src_file in "$src/commands/"*.md; do
+      [ -f "$src_file" ] || continue
+      local basename
+      basename=$(basename "$src_file")
+      local cmd_name
+      cmd_name=$(sed -n 's/^name:[[:space:]]*aimi:\(.*\)/\1/p' "$src_file" | head -1)
+      if [ -z "$cmd_name" ]; then
+        cmd_name="${basename%.md}"
+      fi
+      # Flatten colons to hyphens for OpenCode flat command layout
+      local dst_name
+      dst_name="${cmd_name//:/-}.md"
+      log "[dry-run]   Would translate command: aimi/$dst_name"
+    done
+    # Subdirectory commands (e.g., commands/design/*.md), skip references/
+    for src_subdir in "$src/commands/"/*/; do
+      [ -d "$src_subdir" ] || continue
+      local subdir_name
+      subdir_name=$(basename "$src_subdir")
+      [ "$subdir_name" = "references" ] && continue
+      for src_file in "$src_subdir"*.md; do
+        [ -f "$src_file" ] || continue
+        local basename
+        basename=$(basename "$src_file")
+        local cmd_name
+        cmd_name=$(sed -n 's/^name:[[:space:]]*aimi:\(.*\)/\1/p' "$src_file" | head -1)
+        if [ -z "$cmd_name" ]; then
+          cmd_name="${subdir_name}-${basename%.md}"
+        else
+          # Flatten colons to hyphens (e.g., "design:shape" -> "design-shape")
+          cmd_name="${cmd_name//:/-}"
+        fi
+        local dst_name="${cmd_name}.md"
+        log "[dry-run]   Would translate command: aimi/$dst_name"
+      done
+    done
     return 0
   fi
 
   mkdir -p "$cmd_dir"
 
+  # Install top-level commands
   for src_file in "$src/commands/"*.md; do
     [ -f "$src_file" ] || continue
     local basename
@@ -370,11 +408,42 @@ install_commands() {
       cmd_name="${basename%.md}"
     fi
 
-    local dst_name="${cmd_name}.md"
+    # Flatten colons to hyphens for OpenCode flat command layout
+    local dst_name
+    dst_name="${cmd_name//:/-}.md"
 
     translate_command "$src_file" "$cmd_dir/$dst_name"
     count=$((count + 1))
     [ "$VERBOSE" -eq 1 ] && log "  Command: aimi/$dst_name"
+  done
+
+  # Install subdirectory commands (e.g., commands/design/*.md), skip references/
+  for src_subdir in "$src/commands/"/*/; do
+    [ -d "$src_subdir" ] || continue
+    local subdir_name
+    subdir_name=$(basename "$src_subdir")
+    [ "$subdir_name" = "references" ] && continue
+    for src_file in "$src_subdir"*.md; do
+      [ -f "$src_file" ] || continue
+      local basename
+      basename=$(basename "$src_file")
+
+      # Derive command name from frontmatter "name:" field
+      local cmd_name
+      cmd_name=$(sed -n 's/^name:[[:space:]]*aimi:\(.*\)/\1/p' "$src_file" | head -1)
+      if [ -z "$cmd_name" ]; then
+        cmd_name="${subdir_name}-${basename%.md}"
+      else
+        # Flatten colons to hyphens (e.g., "design:shape" -> "design-shape")
+        cmd_name="${cmd_name//:/-}"
+      fi
+
+      local dst_name="${cmd_name}.md"
+
+      translate_command "$src_file" "$cmd_dir/$dst_name"
+      count=$((count + 1))
+      [ "$VERBOSE" -eq 1 ] && log "  Command: aimi/$dst_name"
+    done
   done
 
   ok "Installed $count commands to $cmd_dir"

@@ -157,13 +157,19 @@ A single variant MAY combine shapes (e.g., a `layout-with-sidebar` containing a 
 
 ### Step 2 — Express each variant using the canonical shape
 
-Each `<div data-variant="X">` block uses the HTML shape selected in Step 1. Keep the structure consistent across variants so the user compares **direction**, not **layout**:
+Each `<div data-variant="X">` block uses the HTML shape selected in Step 1. Keep the structure consistent across variants so the user compares **direction**, not **layout**.
+
+**Invariants — hold constant across all variants regardless of branch:**
 
 - Same canonical shape across all variants in the same question.
 - Same primary-action label text across variants (e.g., all variants' submit button reads "Sign in", not "Sign in" / "Log in" / "Continue").
 - Same content density (rough count of items, fields, links) across variants.
 
-What varies between A/B/C/D is the *direction*: typography weight and rhythm, color-weighted vs. monochrome, density (airy vs. compact), radius (sharp vs. soft), shadow depth, accent placement — everything the tokens surface.
+**What varies between A/B/C/D depends on the active branch** (see `brainstorm.md` Phase 2 Step 2.5 — Branch Decision for the selection rule):
+
+- **When UX branch is active (default):** vary layout structure inside the canonical shape, primary-action placement within the form or container, content arrangement (e.g., single-column vs. two-column, label above vs. inline), and progressive-disclosure pattern (e.g., collapsed vs. expanded secondary fields). Token values are identical across UX variants — the CSS custom properties on `:root` do not change between A/B/C/D.
+
+- **When UI branch is active** (activates only when token extraction falls back fully with no extractable design tokens, or when the user supplies the `vary ui` override): vary typography weight and rhythm, color-weighted vs. monochrome palette, density (airy vs. compact spacing), border-radius (sharp vs. soft), shadow depth, and accent placement. Layout structure inside the canonical shape remains fixed.
 
 ### Step 3 — Emit tokens as CSS custom properties on `:root`
 

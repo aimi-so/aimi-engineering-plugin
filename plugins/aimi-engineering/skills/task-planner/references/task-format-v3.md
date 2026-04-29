@@ -24,7 +24,7 @@ Example: `.aimi/tasks/2026-02-27-dep-graph-tasks.json`
     "brainstormPath": "string (optional)",
     "researchDepth": "skip|quick|standard|deep (optional, default null)",
     "researchPaths": ["string (optional)"],
-    "maxConcurrency": 4,
+    "maxConcurrency": 5,
     "frontendOnly": "boolean (optional, default absent/false)",
     "backendSpec": "object (optional, see backendSpec sub-fields)"
   },
@@ -56,7 +56,7 @@ Example: `.aimi/tasks/2026-02-27-dep-graph-tasks.json`
 | `brainstormPath` | string | No | — | Path to brainstorm document if one was used as context. |
 | `researchDepth` | string | No | `null` | Research depth hint for the planner. One of: `skip`, `quick`, `standard`, `deep`. When `null`, the planner decides automatically. |
 | `researchPaths` | string[] | No | — | Paths to research files generated during planning. Collected from Phase 1 and Phase 1.5b research agents. Omitted when `researchDepth` is `skip` or no research files were written. |
-| `maxConcurrency` | number | No | `4` | Maximum number of stories that can execute in parallel. Applies only to stories whose dependencies are all satisfied. |
+| `maxConcurrency` | number | No | `5` | Maximum number of stories that can execute in parallel. Applies only to stories whose dependencies are all satisfied. |
 | `frontendOnly` | boolean | No | — | Signals that this plan is a frontend-only prototype where all backend interactions are mocked. When `true`, stories should use stubbed/mocked data instead of real API calls. |
 | `backendSpec` | object | No | — | Backend specification metadata for PR generation. Contains sub-fields describing the eventual backend contract. See [backendSpec Object](#backendspec-object). |
 
@@ -466,7 +466,9 @@ The executor picks up to `maxConcurrency` ready stories, ordered by `priority`, 
 }
 ```
 
-In this example, US-002 and US-003 can run in parallel (both depend only on US-001, both wave 2), capped at `maxConcurrency: 2`. US-004 (wave 3) waits for both to complete. US-001 has a `decision` gate that blocks execution until approved. US-003 has an `action` gate that blocks its dependents (US-004) until the manual verification passes. US-004 has a `verify` gate that is non-blocking.
+In this example, US-002 and US-003 can run in parallel (both depend only on US-001, both wave 2), capped at `maxConcurrency: 2`. The fourth story (wave 3) waits for both to complete.
+
+US-001 has a `decision` gate that blocks execution until approved. US-003 has an `action` gate that blocks its dependents (US-004) until the manual verification passes. US-004 has a `verify` gate that is non-blocking.
 
 ---
 

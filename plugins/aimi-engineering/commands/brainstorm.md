@@ -62,13 +62,22 @@ Certain literal phrases typed in the topic or in a reply trigger one-shot render
 | Phrase | Match rule | Scope | Effect |
 |--------|-----------|-------|--------|
 | `show variants` | Case-insensitive substring match anywhere in the topic text or the user's latest reply | Next question only — flag clears after that one question is rendered | Force-treats the next question as **Aesthetic Direction** for visual variant rendering, even when the category was classified as Functional or Scope. On activation emit exactly: `Visual override active — rendering variants for next question` |
+| `vary ui` | Case-insensitive substring match anywhere in the topic text or the user's latest reply | Next visual question only — flag clears after that one visual question is rendered | Forces the UI-variation branch on the next Aesthetic Direction or Differentiation question. Non-visual questions do not consume the flag. On activation emit exactly: `UI variation override active — next visual question will vary tokens` |
 
-**How it works at runtime:**
+**How `show variants` works at runtime:**
 
 1. After each user reply (and when first reading the topic), check whether the text contains `show variants` (case-insensitive).
 2. If matched, set an in-memory flag `visualOverridePending = true` and emit `Visual override active — rendering variants for next question` **once** to chat.
 3. When the agent reaches the next question, if `visualOverridePending = true`: treat that question as Aesthetic Direction for the purposes of visual variant rendering (Phase 2 category gate bypass), then immediately clear the flag (`visualOverridePending = false`). The override does **not** persist to subsequent questions.
 4. If the flag is not set, proceed with normal category classification — no change to existing behavior.
+
+**How `vary ui` works at runtime:**
+
+1. After each user reply (and when first reading the topic), check whether the text contains `vary ui` (case-insensitive).
+2. If matched, set an in-memory flag `varyUIPending = true` and emit `UI variation override active — next visual question will vary tokens` **once** to chat. This confirmation fires exactly once per match.
+3. When the agent reaches the next question, if `varyUIPending = true`: evaluate whether the question is an Aesthetic Direction or Differentiation question (a visual question). If it is a visual question, select the UI-variation branch within that question (varying UI tokens such as colors, typography, spacing, and radii across variants), then immediately clear the flag (`varyUIPending = false`). If the question is not a visual question (Purpose, Users, Constraints, Success, Edge Cases, Existing Patterns, Approach), skip it without consuming the flag — `varyUIPending` remains `true` until the next visual question is reached.
+4. If the flag is not set, proceed with normal variant authoring — no change to existing behavior.
+5. **Co-occurrence with `show variants`:** When both `show variants` and `vary ui` match in the same reply or topic text, both flags are set independently. `show variants` forces the next question to be treated as Aesthetic Direction (phase category gate bypass); `vary ui` selects the UI-variation branch within that question. Both flags clear after that single question is consumed — `visualOverridePending = false` and `varyUIPending = false`. The net effect: the next question becomes an Aesthetic Direction question rendered with UI-token variation.
 
 ## Phase 0: Assess Requirements Clarity
 
@@ -342,6 +351,25 @@ Probe project sources in the fixed precedence order defined in `references/visua
 
 Write the token sidecar JSON to `.aimi/brainstorms/prototypes/<topic-slug>-tokens.json` (shape and rules in `references/visual-variants.md` → Token Sidecar JSON).
 
+**Step 2.5 — Variant branch decision**
+
+Immediately after the token sidecar JSON is written (read-after-write is synchronous), read `.aimi/brainstorms/prototypes/<topic-slug>-tokens.json` from disk and compute the branch.
+
+1. **Compute `tokensFallbackAll`:** Inspect the `fallbacks` array in the sidecar JSON. Set `tokensFallbackAll = true` if and only if all three of `"colors"`, `"fonts"`, and `"radii"` appear in that array; otherwise `tokensFallbackAll = false`.
+
+2. **Assign `variantBranch` and record reason:**
+   - If `varyUIPending` is `true` (flag was set by a prior interaction): set `variantBranch = "ui-variation"`, record `variantBranchReason = "vary-ui-override"`, then **clear `varyUIPending` (set it to `false`)** — this is a one-shot consumption; the flag must not trigger again for subsequent questions in the same session.
+   - Else if `tokensFallbackAll` is `true`: set `variantBranch = "ui-variation"`, record `variantBranchReason = "auto-fallback"`.
+   - Otherwise: set `variantBranch = "ux-only"`, record `variantBranchReason = "default"`.
+
+3. **Store in working memory:** `variantBranch` and `variantBranchReason` are retained for use in Step 3 and Step 6 below.
+
+4. **Debug emission:** If `AIMI_BRAINSTORM_DEBUG=1`, emit the following line to chat (not to the brainstorm document):
+   ```
+   [brainstorm-debug] variant-branch: <ux-only|ui-variation> (reason: <auto-fallback|vary-ui-override|default>)
+   ```
+   Replace the angle-bracket placeholders with the actual values of `variantBranch` and `variantBranchReason`.
+
 **Step 3 — Author variant HTML**
 
 Create the prototype directory:
@@ -353,6 +381,10 @@ mkdir -p .aimi/brainstorms/prototypes
 For the **first** visual question, write the full file using the Switcher Skeleton from `references/visual-variants.md`, emitting resolved tokens as CSS custom properties on `:root` per the Structural Guidance section. For **subsequent** visual questions, **append** a new `<section data-question="...">` block to the existing file — do not truncate.
 
 Follow the Structural Guidance section of `references/visual-variants.md`: infer the dominant UI pattern, pick a canonical shape (form/card/nav/hero/modal/table/layout-with-sidebar), and author every variant in that shape. Apply `component_shell_notes` from Step 0 as additional structural constraints.
+
+**Apply the design axes determined by `variantBranch` (set in Step 2.5):**
+- **`variantBranch == "ux-only"`:** Apply the UX-branch axes from Step 2 of `references/visual-variants.md` — vary layout, information hierarchy, interaction flow, and content structure. Do not change brand color, typography family, or border-radius between variants; those tokens remain constant across all variants in this question.
+- **`variantBranch == "ui-variation"`:** Apply the UI-branch axes from Step 2 of `references/visual-variants.md` — vary color palette, typography pairing, border-radius, surface treatment, and visual weight in addition to layout. Resolved token CSS custom properties may differ across variants in this question.
 
 Author **2–4 variants** per question based on the design axes available (default 2 for binary contrast; add 3–4 only when additional directions genuinely add value).
 
@@ -402,7 +434,7 @@ If `AIMI_BRAINSTORM_DEBUG=1`: emit `[brainstorm-debug] variant-choice: <chosen-o
 
 If the user selects `None — show again / revise`:
 1. Use **AskUserQuestion** a second time to ask the user to describe what they want changed or refined. Question text: `What would you like changed or refined about the variants?`
-2. Author a replacement variant set and append it as a new `<section data-question="...">` block in the existing HTML file — do **not** discard or truncate prior sections.
+2. Author a replacement variant set and append it as a new `<section data-question="...">` block in the existing HTML file — do **not** discard or truncate prior sections. Use the `variantBranch` value recorded in working memory at Step 2.5 to govern the design axes for the replacement set (UX-branch or UI-branch per the Step 3 rules above). Do **not** re-evaluate `varyUIPending` here — that flag was already consumed (one-shot) at Step 2.5 and must not be re-applied.
 3. Reload the browser session (Step 4 reload path).
 4. Re-offer the lettered variant options for the new variant set via **AskUserQuestion**.
 
@@ -471,10 +503,10 @@ Write this file to the resolved unique path from Step 7b.
 
 Append an entry to a `prototype_entries` list in working memory:
 ```
-{ path: "<resolved path>", question_category: "<Aesthetic Direction | Differentiation>" }
+{ path: "<resolved path>", question_category: "<Aesthetic Direction | Differentiation>", branch: "<ux-only | ui-variation>" }
 ```
 
-This list is consumed when writing the brainstorm document in Phase 4.
+The `branch` value is taken directly from the `variantBranch` recorded at Step 2.5 (`"ux-only"` or `"ui-variation"`). This list is consumed when writing the brainstorm document in Phase 4.
 
 **Non-visual categories** (Purpose, Users, Constraints, Success, Edge Cases, Existing Patterns, Approach) remain text-only — Steps 1–4 above do NOT execute for them.
 
@@ -618,8 +650,10 @@ topic: <topic-slug>
 prototype:
   - path: .aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html
     question_category: Aesthetic Direction
+    branch: ux-only
   - path: .aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html
     question_category: Differentiation
+    branch: ui-variation
 ---
 
 # <Topic Title>
@@ -650,10 +684,10 @@ When one or more variant prototype files were saved (Step 7 — Variant Persiste
 
 Standalone prototype files saved during visual variant exploration:
 
-| File | Question Category |
-|------|------------------|
-| `.aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html` | Aesthetic Direction |
-| `.aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html` | Differentiation |
+| File | Question Category | Branch |
+|------|------------------|--------|
+| `.aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html` | Aesthetic Direction | ux-only |
+| `.aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html` | Differentiation | ui-variation |
 
 Each file is a self-contained HTML page with Tailwind CDN inline. Open directly in a browser for a design reference without the variant switcher.
 
