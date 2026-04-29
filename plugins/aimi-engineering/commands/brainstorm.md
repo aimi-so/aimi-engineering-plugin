@@ -503,10 +503,10 @@ Write this file to the resolved unique path from Step 7b.
 
 Append an entry to a `prototype_entries` list in working memory:
 ```
-{ path: "<resolved path>", question_category: "<Aesthetic Direction | Differentiation>" }
+{ path: "<resolved path>", question_category: "<Aesthetic Direction | Differentiation>", branch: "<ux-only | ui-variation>" }
 ```
 
-This list is consumed when writing the brainstorm document in Phase 4.
+The `branch` value is taken directly from the `variantBranch` recorded at Step 2.5 (`"ux-only"` or `"ui-variation"`). This list is consumed when writing the brainstorm document in Phase 4.
 
 **Non-visual categories** (Purpose, Users, Constraints, Success, Edge Cases, Existing Patterns, Approach) remain text-only — Steps 1–4 above do NOT execute for them.
 
@@ -650,8 +650,10 @@ topic: <topic-slug>
 prototype:
   - path: .aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html
     question_category: Aesthetic Direction
+    branch: ux-only
   - path: .aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html
     question_category: Differentiation
+    branch: ui-variation
 ---
 
 # <Topic Title>
@@ -682,10 +684,10 @@ When one or more variant prototype files were saved (Step 7 — Variant Persiste
 
 Standalone prototype files saved during visual variant exploration:
 
-| File | Question Category |
-|------|------------------|
-| `.aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html` | Aesthetic Direction |
-| `.aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html` | Differentiation |
+| File | Question Category | Branch |
+|------|------------------|--------|
+| `.aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html` | Aesthetic Direction | ux-only |
+| `.aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html` | Differentiation | ui-variation |
 
 Each file is a self-contained HTML page with Tailwind CDN inline. Open directly in a browser for a design reference without the variant switcher.
 
