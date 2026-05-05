@@ -114,6 +114,8 @@ Certain literal phrases typed in the topic or in a reply trigger one-shot render
 4. If the flag is not set, proceed with normal variant authoring — no change to existing behavior.
 5. **Co-occurrence with `show variants`:** When both `show variants` and `vary ui` match in the same reply or topic text, both flags are set independently. `show variants` forces the next question to be treated as Aesthetic Direction (phase category gate bypass); `vary ui` selects the UI-variation branch within that question. Both flags clear after that single question is consumed — `visualOverridePending = false` and `varyUIPending = false`. The net effect: the next question becomes an Aesthetic Direction question rendered with UI-token variation.
 
+**Precedence over bundle early-exit (Step 0a):** When `bundleDetected=true`, Step 0a would normally short-circuit variant authoring and reuse the bundle's HTML. However, `show variants` and `vary ui` override flags take **explicit precedence** over Step 0a. If either `visualOverridePending = true` or `varyUIPending = true` when the agent enters the Visual Variant Rendering sub-step, Step 0a is bypassed entirely and the normal Steps 0–7 flow runs. This allows users to re-explore visual variants even after a bundle was detected.
+
 ## Phase 0: Assess Requirements Clarity
 
 Evaluate whether brainstorming is needed based on the feature description.
@@ -342,6 +344,27 @@ N. What should make this interface memorable?
 **`show variants` override check (runs before category classification):** Before evaluating whether a question is Aesthetic Direction or Differentiation, check whether `visualOverridePending = true` (set when the user's topic or latest reply contained `show variants` — see "Override Keywords" section above). If the flag is set, treat this question as **Aesthetic Direction** for the purpose of visual rendering, then clear the flag (`visualOverridePending = false`). This bypass applies only to the single next question; all subsequent questions revert to normal category classification.
 
 When the agent reaches an **Aesthetic Direction** or **Differentiation** question (and only those two categories, or when the `show variants` override is active), execute the following steps **before** presenting the question to the user. If `AIMI_BRAINSTORM_DEBUG=1`: emit `[brainstorm-debug] category: <category-name> — visual rendering path triggered` to chat (or `[brainstorm-debug] category: <category-name> — visual rendering skipped` when the question does not fall into either category). All slug sanitization, HTML-escaping, and token extraction rules are defined in `references/visual-variants.md`; this sub-step is the call sequence only.
+
+**Step 0a — Bundle early-exit check**
+
+Before any other step in Visual Variant Rendering, check override flags and bundle state:
+
+1. **Override check (takes precedence):** If `visualOverridePending = true` OR `varyUIPending = true`, skip this entire Step 0a and proceed to Step 0b — the normal Steps 0–7 flow runs regardless of bundle state (see Override Keywords section for the precedence rule).
+
+2. **Bundle early-exit:** If `bundleDetected=true` (and neither override flag is set):
+
+   a. **Select the bundle HTML:** Among `.html` files in the bundle's `project/` directory (within `bundlePath`), prefer files whose basename contains `standalone` (case-insensitive); if none match, use the first non-standalone `.html` file alphabetically.
+
+   b. **Wrap as prototype entry:** Store one entry in `prototype_entries` working memory:
+      ```
+      { path: "<selected html path>", question_category: "Aesthetic Direction", branch: "bundle" }
+      ```
+
+   c. **Agent-mode log (emitted at most once per session):** Log one line to the brainstorm document's working memory: `agent-mode: bundle-detected — skipped variant authoring, using bundle HTML <path>`. The same line is also echoed to chat once per session (guarded by `echoedBundleEarlyExit`): if `echoedBundleEarlyExit` is `false`, emit `agent-mode: bundle-detected — skipped variant authoring, using bundle HTML <path>` to chat and set `echoedBundleEarlyExit = true`; subsequent visual questions in the same session are silent. Initialize `echoedBundleEarlyExit = false` when Step 0b initializes working memory.
+
+   d. **Return from Visual Variant Rendering:** Skip Steps 0b through 7 entirely for this question. Proceed directly to presenting the (text-only) question.
+
+3. **When `bundleDetected=false`:** Step 0a is a no-op — proceed to Step 0b as normal.
 
 **Step 0b — Pre-flight browser availability (run once per brainstorm session)**
 
@@ -724,7 +747,7 @@ prototype:
 When UI features were detected in Phase 1.7, include this section:
 
 ## Design Decisions
-- Aesthetic direction: [chosen tone from Phase 2 responses]
+- Aesthetic direction: [when `bundleDetected=true`: fill verbatim from the bundle's chosen variant label as used in the bundle's chat transcripts (e.g., `B · Denso`) — no AskUserQuestion call; when `bundleDetected=false`: fill from chosen tone selected during Phase 2 responses]
 - Reference points: [products/styles the user referenced]
 - Key visual element: [what makes it memorable, from Differentiation responses]
 
