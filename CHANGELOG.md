@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.72.0] - 2026-05-05
+
+### Added
+
+- **`detect-design-bundle` CLI subcommand (US-001):** New `aimi-cli.sh` subcommand that detects whether a project contains a BusinessSpec and/or DesignSpec file, emitting structured JSON output consumed by brainstorm, plan, and story-executor workflows.
+- **test-aimi-cli.sh bundle detection tests (US-002):** Test coverage for `detect-design-bundle` — presence, absence, and partial-match cases added to the CLI test suite.
+- **`aimi-design-bundle-researcher` agent (US-003):** New 16-section structured passthrough agent that reads BusinessSpec and DesignSpec files and emits a compressed research summary for downstream brainstorm and plan consumers.
+- **brainstorm bundle-aware research consolidation (US-004):** Brainstorm now invokes `aimi-design-bundle-researcher` when a bundle is detected, merging spec insights into the question-selection and variant-axis stages before surfacing them to the user.
+- **bundle-aware token probe in visual-variants.md (US-005):** `visual-variants.md` reference now includes a token probe step that reads `metadata.designTokens` when a design bundle is present, feeding spec-extracted tokens into the variant axis decision tree.
+- **brainstorm short-circuits visual variants when bundle present (US-006):** When a DesignSpec is detected, brainstorm skips the token-extraction fallback path and uses spec-defined tokens directly, preventing redundant extraction work.
+- **spec-aware brainstorm document (US-007):** Brainstorm output document gains Personas, View Modes, Layout, and Specs sections populated from bundle research when a BusinessSpec or DesignSpec is present.
+- **plan ingests bundle into tasks.json `metadata.designBundle` (US-008):** `/aimi:plan` populates `metadata.designBundle` and `metadata.designTokens` fields in the generated `tasks.json` when a design bundle is detected at planning time.
+- **story-executor design-bundle fidelity guidance (US-009):** Story-executor reads `metadata.designBundle` and `metadata.designTokens` from `tasks.json` and surfaces spec-aware read order with rule-ID citation in its implementation guidance.
+- **`/aimi:deepen` spec cross-reference (US-011):** `/aimi:deepen` now cross-references BusinessSpec and DesignSpec when enriching story acceptance criteria, citing spec rule IDs in the enriched output.
+
 ## [1.71.0] - 2026-04-29
 
 ### Added
