@@ -46,6 +46,41 @@ See `references/interactivity.md` for the full contract. Every question site
 below includes an agent-mode fallback note describing its specific auto-pick
 behavior.
 
+## Step 0.6: Detect Claude Design Bundle
+
+Extract an optional `--bundle <path>` flag from `$ARGUMENTS` (do not modify
+existing feature-description handling — this extraction is local to this step
+only):
+
+```bash
+BUNDLE_ARG=""
+# Extract --bundle <path> from $ARGUMENTS if present
+case "$ARGUMENTS" in
+  *--bundle*)
+    BUNDLE_ARG=$(echo "$ARGUMENTS" | sed -n 's/.*--bundle[[:space:]]\+\([^[:space:]]*\).*/\1/p')
+    ;;
+esac
+```
+
+Run detection (failure is silent and non-blocking):
+
+```bash
+if [ -n "$BUNDLE_ARG" ]; then
+  BUNDLE_RESULT=$($AIMI_CLI detect-design-bundle --bundle "$BUNDLE_ARG" 2>/dev/null) || BUNDLE_RESULT=""
+else
+  BUNDLE_RESULT=$($AIMI_CLI detect-design-bundle 2>/dev/null) || BUNDLE_RESULT=""
+fi
+```
+
+Derive working-memory values from the result:
+
+- `bundleDetected` — `true` if `BUNDLE_RESULT` is non-empty and contains `"detected":true`; otherwise `false`.
+- `bundlePayload` — the full JSON string from `BUNDLE_RESULT` when `bundleDetected=true`; empty string otherwise.
+- `bundlePath` — the `path` field extracted from `bundlePayload` when `bundleDetected=true`; the value of `BUNDLE_ARG` if set and detection succeeded; empty string otherwise.
+
+When `bundleDetected=false`, all downstream phases degrade gracefully — no
+error, no warning, no change to existing behavior.
+
 ## Environment Variables
 
 | Variable | Value | Effect |
@@ -175,7 +210,18 @@ Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
            researchDepth=standard
            topicSlug=<topic-slug>
            outputPath: .aimi/research/YYYY-MM-DD-<topic-slug>-[RUN_TS]-best-practices.md"
+
+Task subagent_type="aimi-engineering:research:aimi-design-bundle-researcher"
+  prompt: "Analyse the Claude Design bundle to extract design intent and chat
+           context relevant to: [feature description].
+           bundlePath=<bundlePath>
+           topicSlug=<topic-slug>
+           RUN_TS=[RUN_TS]
+           outputPath: .aimi/research/YYYY-MM-DD-<topic-slug>-[RUN_TS]-design-bundle.md"
 ```
+
+Spawn the design-bundle researcher **only when `bundleDetected=true`**. When
+`bundleDetected=false`, omit this Task call entirely — no error, no log entry.
 
 Only spawn the agents that were not skipped in Step 1a.
 
@@ -205,6 +251,7 @@ Organize the merged findings into these sections:
 2. **Conflicts**: When both agents succeed, compare their findings. If internal codebase patterns diverge from external best practices (e.g., the codebase uses pattern A but best practices recommend pattern B), capture each conflict as a candidate question for Phase 2. Present these as explicit choices: "The codebase currently uses [X], but industry best practices recommend [Y]. Which approach should we follow?"
 3. **File References**: Specific file paths, modules, and code locations relevant to the feature (from codebase researcher)
 4. **External Insights**: Industry standards, community conventions, recommended patterns, common pitfalls (from best-practices researcher)
+5. **Design Intent** _(populated only when `bundleDetected=true` and the design-bundle researcher succeeded)_: Chat-transcript themes, stated design rationale, visual preferences, and UX intent extracted from the Claude Design bundle. Store the list of addressed topic categories from the bundle as `bundleAddressedTopics` in working memory — this list is consumed by the Phase 2 topic-coverage gate. When the design-bundle researcher failed or was skipped, omit this section entirely; do not write a placeholder.
 
 This structured summary feeds into Phase 2 question generation and Phase 4 design document capture.
 
@@ -251,6 +298,7 @@ Using the user's feature description and consolidated research findings (from St
 - Option text under 15 words
 - Every question includes an "Other: [please specify]" escape hatch
 - When research returns findings, make option A the "follow existing pattern" choice and reference specific patterns found by the research agent in the question text
+- **Design Intent coverage gate:** When `bundleDetected=true` and Step 1c populated `bundleAddressedTopics`, treat every category present in that list as already addressed. Do not generate questions for those categories — the bundle's chat transcript has already surfaced the user's intent. Use the Design Intent section from Step 1c as a distinct context block when authoring questions for any remaining categories.
 
 #### Approach Questions
 
@@ -570,7 +618,9 @@ Before advancing to Phase 3, check whether the **minimum topic categories** have
 
 Review the user's answers across all rounds. A category counts as addressed if the user provided any relevant information — even brief or partial.
 
-- **If all three are addressed:** Proceed to Phase 3 (or skip it per its own rules).
+**Bundle pre-fill:** When `bundleDetected=true` and `bundleAddressedTopics` is populated (set in Step 1c), any required category present in `bundleAddressedTopics` is considered addressed before this gate evaluates user answers. Apply this pre-fill silently — do not warn the user that a category was covered by the bundle.
+
+- **If all three are addressed (via user answers, bundle pre-fill, or both):** Proceed to Phase 3 (or skip it per its own rules).
 - **If any are missing:** Issue a **one-time** conversational warning listing the gaps:
   > "Before we continue, I notice we haven't covered [list uncovered categories, e.g., 'who the target users are' or 'how we'd measure success']. Want to explore those, or should we proceed?"
   - If the user provides answers, incorporate them and proceed.
