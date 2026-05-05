@@ -400,6 +400,8 @@ Before processing the very first Aesthetic Direction or Differentiation question
 
 Sample 2–3 representative component files from the target project to extract the structural idioms variants should mimic. Scan is optional; skip silently on any failure.
 
+**DesignSpec § 1 preference:** When `bundleDetected=true` and the design-bundle researcher returned a non-null `designSpec` path, read the component-shell structural idioms from `DesignSpec § 1` first (design-token and component-skeleton section). Use those definitions as `component_shell_notes` directly — do not scan project component files for this step. Fall back to the file-scan below only if `DesignSpec § 1` is absent or unreadable.
+
 1. Look under `src/components/`, `app/components/`, `components/`, or `src/app/` (first directory that exists) for `.tsx`, `.jsx`, `.vue`, or `.svelte` files.
 2. Select up to 3 files: prefer one matching a form-like name (`Form.*`, `Input.*`, `Login.*`), one matching a layout-like name (`Layout.*`, `Sidebar.*`, `Page.*`), and one matching a card-like name (`Card.*`, `Item.*`, `List.*`). Fall back to any 1–3 components if the name hints fail.
 3. Read each file as plain text (do not execute or import). Extract:
@@ -418,7 +420,9 @@ If the slug fails validation: log a warning ("Visual path skipped — invalid to
 
 **Step 2 — Token extraction (best-effort)**
 
-Probe project sources in the fixed precedence order defined in `references/visual-variants.md` (Token Extraction section). Extract colors, fonts, radii, spacing, shadows, transitions, screens, and dark-mode tokens. Any probe failure is silently skipped. Use Tailwind CDN defaults for any family that yields no tokens, and emit the required warning line per family that fell back.
+**DesignSpec § 1 preference:** When `bundleDetected=true` and the design-bundle researcher returned a non-null `designSpec` path, extract colors, fonts, radii, spacing, shadows, transitions, screens, and dark-mode tokens exclusively from `DesignSpec § 1` (design tokens section). Write the token sidecar JSON with `"fallbacks": []` — tokens sourced from DesignSpec are explicitly authoritative; no family falls back to Tailwind CDN defaults. Skip the project-source probe order below for this case.
+
+When `designSpec` is null or unavailable, probe project sources in the fixed precedence order defined in `references/visual-variants.md` (Token Extraction section). Extract colors, fonts, radii, spacing, shadows, transitions, screens, and dark-mode tokens. Any probe failure is silently skipped. Use Tailwind CDN defaults for any family that yields no tokens, and emit the required warning line per family that fell back.
 
 Write the token sidecar JSON to `.aimi/brainstorms/prototypes/<topic-slug>-tokens.json` (shape and rules in `references/visual-variants.md` → Token Sidecar JSON).
 
@@ -643,6 +647,18 @@ Review the user's answers across all rounds. A category counts as addressed if t
 
 **Bundle pre-fill:** When `bundleDetected=true` and `bundleAddressedTopics` is populated (set in Step 1c), any required category present in `bundleAddressedTopics` is considered addressed before this gate evaluates user answers. Apply this pre-fill silently — do not warn the user that a category was covered by the bundle.
 
+**BusinessSpec auto-pass:** When `bundleDetected=true` and the design-bundle researcher returned a non-null `businessSpec` path, the following required categories are auto-passed **before** this gate evaluates user answers or bundle pre-fill:
+
+| Category | Source section |
+|----------|---------------|
+| Purpose | `BusinessSpec § 1` |
+| Users | `BusinessSpec § 7` |
+| Success | `BusinessSpec § 9` |
+
+For each auto-passed category, log: `agent-mode: topic-coverage <category> auto-passed (source: businessSpec § <n>)` (e.g., `agent-mode: topic-coverage Purpose auto-passed (source: businessSpec § 1)`). These log lines are written to the brainstorm document's working memory and never shown to the user.
+
+**Aesthetic Direction and Differentiation skips:** When `bundleDetected=true` and the design-bundle researcher returned a non-null `designSpec` path, skip generating questions in the **Aesthetic Direction** and **Differentiation** categories entirely — `DesignSpec § 1` (design tokens), `§ 4` (reference maps), and `§ 5` (accessibility) constitute an authoritative statement of visual intent. For each skipped category, log: `agent-mode: phase-2 <category> skipped (source: designSpec present)` (e.g., `agent-mode: phase-2 Aesthetic Direction skipped (source: designSpec present)`). These log lines are written to the brainstorm document's working memory. Do not mention the skip to the user.
+
 - **If all three are addressed (via user answers, bundle pre-fill, or both):** Proceed to Phase 3 (or skip it per its own rules).
 - **If any are missing:** Issue a **one-time** conversational warning listing the gaps:
   > "Before we continue, I notice we haven't covered [list uncovered categories, e.g., 'who the target users are' or 'how we'd measure success']. Want to explore those, or should we proceed?"
@@ -727,6 +743,14 @@ prototype:
   - path: .aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html
     question_category: Differentiation
     branch: ui-variation
+designBundle:
+  root: <bundlePath>
+  readme: <path to bundle README or index file>
+  chats:
+    - <path to chat transcript 1>
+    - <path to chat transcript 2>
+  businessSpec: <path to BusinessSpec file, or null>
+  designSpec: <path to DesignSpec file, or null>
 ---
 
 # <Topic Title>
@@ -751,6 +775,40 @@ When UI features were detected in Phase 1.7, include this section:
 - Reference points: [products/styles the user referenced]
 - Key visual element: [what makes it memorable, from Differentiation responses]
 
+When `bundleDetected=true` and the design-bundle researcher returned non-empty values for the corresponding payload keys, append the following optional subsections after the three bullets above. Omit any subsection whose source data is empty or null — do not emit placeholders:
+
+### Personas
+(Render only when the bundle researcher returned a non-empty personas list — sourced from `BusinessSpec § 7` when present, otherwise from chat transcripts.)
+- <Persona name> — <role> — view permissions: <permissions>
+- …
+
+### View Modes
+(Render only when the bundle researcher returned a non-empty view-modes list.)
+- <Toggle state label> — default: <yes|no>
+- …
+
+### Layout Variation Chosen
+(Render only when the bundle researcher returned a non-empty chosen-variant value.)
+<Variant label selected at claude.ai/design> — <one-line rationale>
+
+When `bundleDetected=true` and at least one of `businessSpec` or `designSpec` is non-null, include the following section between Design Decisions and Prototype:
+
+## Specs
+
+Navigation index of spec files included in the design bundle. Top-level section headings are parsed inline using the pattern `^## <n>. <title>$` (numbered h2 headings).
+
+(Render one subsection per non-null spec file.)
+
+**BusinessSpec** — `<businessSpec path>`
+- § 1 — <heading text parsed from file>
+- § 2 — <heading text>
+- …
+
+**DesignSpec** — `<designSpec path>`
+- § 1 — <heading text parsed from file>
+- § 2 — <heading text>
+- …
+
 When one or more variant prototype files were saved (Step 7 — Variant Persistence), include this section:
 
 ## Prototype
@@ -765,6 +823,15 @@ Standalone prototype files saved during visual variant exploration:
 Each file is a self-contained HTML page with Tailwind CDN inline. Open directly in a browser for a design reference without the variant switcher.
 
 If no variant prototypes were saved (e.g., no UI feature detected, variant label validation failed, or all visual questions were skipped), omit both the `prototype:` frontmatter key and the `## Prototype` section entirely.
+
+**designBundle frontmatter rules:**
+- Emit the `designBundle:` key only when `bundleDetected=true`.
+- `root` — value of `bundlePath`.
+- `readme` — path to the bundle's README or primary index file as returned by the design-bundle researcher; `null` if absent.
+- `chats` — YAML sequence of chat transcript paths returned by the researcher; empty sequence `[]` if none.
+- `businessSpec` — path string when the researcher found a BusinessSpec file; `null` otherwise. Always emit (with `null`) so consumers can branch deterministically.
+- `designSpec` — path string when the researcher found a DesignSpec file; `null` otherwise. Always emit (with `null`) so consumers can branch deterministically.
+- When `bundleDetected=false`, omit the entire `designBundle:` key.
 
 ## Open Questions
 - [Any unresolved questions]
@@ -796,6 +863,10 @@ Before writing the document, verify **all** of the following criteria. If any cr
 - [ ] No filename collision (append counter if needed)
 - [ ] YAGNI applied — no unnecessary complexity
 - [ ] Design Decisions section present with Aesthetic Direction and Differentiation entries (when UI features detected in Phase 1.7) — advisory/non-blocking
+- [ ] `### Personas` subsection present under Design Decisions (when bundle researcher returned non-empty personas) — advisory/non-blocking
+- [ ] `### View Modes` subsection present under Design Decisions (when bundle researcher returned non-empty view-modes) — advisory/non-blocking
+- [ ] `### Layout Variation Chosen` subsection present under Design Decisions (when bundle researcher returned a chosen variant) — advisory/non-blocking
+- [ ] `## Specs` section present with section-heading index for each non-null spec (when `businessSpec` or `designSpec` is non-null) — advisory/non-blocking
 
 **On failure:** Use a conversational nudge for each unmet criterion:
 > "Before I save the document, I noticed [specific gap]. For example: 'we only explored one approach without noting why alternatives weren't considered.' Want to address that, or should I save as-is?"
