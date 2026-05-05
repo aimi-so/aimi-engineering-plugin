@@ -76,6 +76,45 @@ After reading the brainstorm (if one was found), parse it for referenced prototy
 6. **Aggregate size cap:** after loading, measure the total byte size of all wrapped blocks. If the total exceeds **200 KB**, drop blocks in reverse label order (Z → A) until the aggregate fits under the cap. Log one warning line per dropped block: `prototype <path> dropped — aggregate prototype context exceeded 200KB`.
 7. Collect all successfully loaded blocks into a variable `prototypeBlocks` (empty string if none loaded). This variable, together with `prototypeTokens`, is threaded into Phase 1 and Phase 3 prompts below. Also collect the resolved absolute paths of every successfully loaded prototype HTML file (those not dropped by the size cap and not missing on disk) into a variable `resolvedPrototypePaths` (empty list if none); append the tokens-sidecar JSON path (`.aimi/brainstorms/prototypes/<topic-slug>-tokens.json`) to `resolvedPrototypePaths` when `prototypeTokens` loaded successfully.
 
+### Design Bundle Detection
+
+Extract an optional `--bundle <path>` flag from `$ARGUMENTS` (e.g. `--bundle .aimi/brainstorms/design-bundles/my-bundle`). Store as `BUNDLE_OVERRIDE` (empty string when absent).
+
+Run bundle detection unconditionally:
+
+```bash
+BUNDLE_META=$($AIMI_CLI detect-design-bundle 2>/dev/null) || BUNDLE_META=""
+```
+
+If `BUNDLE_OVERRIDE` is non-empty, pass it as the override flag:
+
+```bash
+BUNDLE_META=$($AIMI_CLI detect-design-bundle --bundle "$BUNDLE_OVERRIDE" 2>/dev/null) || BUNDLE_META=""
+```
+
+Store the JSON output as `designBundleMeta`. When `BUNDLE_META` is empty or the command fails, set `designBundleMeta` to `null` and continue.
+
+When `designBundleMeta` is non-null:
+- Extract the `prototypePaths` array from the bundle metadata (may be empty).
+- For each path: resolve absolute path, validate it starts with `AIMI_ROOT`, skip with warning if not. Merge into `resolvedPrototypePaths`, deduplicating by absolute path against paths already collected from the brainstorm frontmatter.
+- Stash the full bundle object as `designBundleMeta` for Phase 4 metadata derivation.
+
+### Phase 0.7: Spec Ingestion
+
+When `designBundleMeta` is non-null:
+- Extract `businessSpec` path from `designBundleMeta` (may be `null`). Store as `businessSpecPath`.
+- Extract `designSpec` path from `designBundleMeta` (may be `null`). Store as `designSpecPath`.
+
+When `businessSpecPath` is non-null and the file exists on disk (within `AIMI_ROOT`):
+- Read the file verbatim; enforce a **per-file cap of 200 KB** (truncate with a warning if exceeded).
+- Store contents as `businessSpecContent`.
+
+When `designSpecPath` is non-null and the file exists on disk (within `AIMI_ROOT`):
+- Read the file verbatim; enforce the same **200 KB** per-file cap.
+- Store contents as `designSpecContent`.
+
+When either spec file is missing from disk, log a warning and set the corresponding content variable to `null`; continue — do not abort plan.
+
 ### Implementation Scope Detection
 
 After the brainstorm check, determine the implementation scope:
@@ -275,6 +314,13 @@ directly when describing UI acceptance criteria, component structure, and visual
 12. Generate verifiable acceptance criteria (every story must have "Typecheck passes")
 13. Initialize every story with `status: "pending"` and appropriate `dependsOn` array
 14. Validate: no circular dependencies in `dependsOn`, no self-references, all referenced IDs exist, no vague criteria
+15. **Spec-driven screen decomposition** (when `businessSpecContent` is non-null): drive decomposition from `BusinessSpec § 2` (Screens/Pages) — create **one story per screen** listed. Do not infer screens from the feature description when the spec is present.
+16. **Spec-driven entity/endpoint/persona decomposition** (when `businessSpecContent` is non-null):
+    - One story per entity in `BusinessSpec § 4` (Data Models) when the entity is non-trivial (has fields beyond a primary key or references another entity).
+    - One story per endpoint group in `BusinessSpec § 5.1` (REST endpoints) and `§ 5.3` (WebSocket / real-time) when those sections are present.
+    - One story per persona/permission tier in `BusinessSpec § 7` (User Roles & Permissions) when permission boundaries differ across tiers.
+17. **Spec-driven acceptance criteria seeding** (when `businessSpecContent` is non-null): seed each story's `acceptanceCriteria` verbatim from the matching entries in `BusinessSpec § 9` (Critérios de aceite). Preserve rule IDs (`RN-01`, `RN-02`, …) exactly as written in the spec. Do **not** paraphrase, reformat, or summarize seeded criteria.
+18. **Spec-driven component stories** (when `designSpecContent` is non-null): create one story per entry in `DesignSpec § 2.2` (NOVOS components). Each component story must include as an acceptance criterion the prop type signature verbatim from the spec (e.g., `type PlantaCardProps satisfies the prop signature in DesignSpec § 2.2 L70-73`).
 
 ### `dependsOn` Inference Rules
 
@@ -306,21 +352,29 @@ Branch on `implementationScope` from Phase 0:
 6. Write frontend file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
 7. Write backend file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`
 
-Write the same `prototypePaths` array to both frontend and backend metadata (symmetric with `researchPaths` precedent).
+Write the same `prototypePaths`, `designBundle`, and `designTokens` arrays/objects to both frontend and backend metadata (symmetric with `researchPaths` precedent).
 
 ### When `implementationScope` is `"frontend-only"`:
 
 1. Set `metadata.frontendOnly: true`
-2. **Generate `metadata.backendSpec`** by analyzing story descriptions and acceptance criteria:
-   - `endpoints`: array of `{ method, path, description }` — API contracts implied by UI interactions
-   - `dataModels`: array of `{ name, fields }` — data structures implied by forms and displays
-   - `businessRules`: array of strings — validation rules and business logic from acceptance criteria
-   - `businessContext`: object with structured business context:
-     - `summary`: high-level overview of the business domain and purpose
-     - `userRoles`: extract persona names from story descriptions ("As a [role]" patterns)
-     - `constraints`: identify non-functional requirements from acceptance criteria (scalability, compliance, performance SLAs)
-     - `assumptions`: document integration assumptions, data patterns, auth model, API style
-     - `successCriteria`: derive measurable success criteria from acceptance criteria across all stories
+2. **Generate `metadata.backendSpec`**:
+   - **When `businessSpecPath` is non-null** (spec-driven path — takes precedence over inference):
+     - `endpoints`: populate from `BusinessSpec § 5` (endpoints/API contracts)
+     - `dataModels`: populate from `BusinessSpec § 4` (data models / entities)
+     - `businessRules`: populate from `BusinessSpec § 3` (business rules)
+     - `businessContext.userRoles`: populate from `BusinessSpec § 7` (user roles / personas)
+     - `businessContext.successCriteria`: populate from `BusinessSpec § 9` (acceptance criteria)
+     - `businessContext.summary`, `businessContext.constraints`, `businessContext.assumptions`: derive from spec context as normal
+   - **When `businessSpecPath` is null** (inference fallback — current behavior):
+     - `endpoints`: array of `{ method, path, description }` — API contracts implied by UI interactions
+     - `dataModels`: array of `{ name, fields }` — data structures implied by forms and displays
+     - `businessRules`: array of strings — validation rules and business logic from acceptance criteria
+     - `businessContext`: object with structured business context:
+       - `summary`: high-level overview of the business domain and purpose
+       - `userRoles`: extract persona names from story descriptions ("As a [role]" patterns)
+       - `constraints`: identify non-functional requirements from acceptance criteria (scalability, compliance, performance SLAs)
+       - `assumptions`: document integration assumptions, data patterns, auth model, API style
+       - `successCriteria`: derive measurable success criteria from acceptance criteria across all stories
 3. Write single file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
 
 ### When `implementationScope` is unset (legacy):
@@ -338,6 +392,8 @@ Write single file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 - **researchDepth**: Value computed in Phase 1.5 (`skip`, `quick`, `standard`, `deep`), or omit if not computed
 - **researchPaths**: Collect all `.aimi/research/` file paths written by Phase 1 agents (codebase, learnings) and Phase 1.5b agents (best-practices, framework-docs). Omit entirely when `researchDepth` is `skip` or no research files were written.
 - **prototypePaths**: Convert each path in `resolvedPrototypePaths` to a path relative to `AIMI_ROOT` (no leading `./`, no `..` components). Deduplicate with `| unique`. Emit as `metadata.prototypePaths` array. Omit the key entirely when the array is empty.
+- **designBundle**: When `designBundleMeta` is non-null, emit as `metadata.designBundle` with the following shape: `{ root: string, readme: string, chats: string[], businessSpec: string|null, designSpec: string|null }`. All paths relative to `AIMI_ROOT`. Omit the key entirely when no bundle was detected. When the bundle was detected, always emit both `businessSpec` and `designSpec` keys — use `null` for whichever spec file is absent.
+- **designTokens**: When `designSpecContent` is non-null and `DesignSpec § 1` contains a token map, parse it and emit as `metadata.designTokens` — a flat object whose top-level keys are the token categories enumerated in `DesignSpec § 1` (e.g., `color`, `typography`, `spacing`, `radii`, `shadow`, `transition`). Values are written verbatim from the spec without normalization. Omit the key entirely when `designSpecContent` is null or `§ 1` contains no token map.
 - **maxConcurrency**: Default `5`. Set to `1` for strictly sequential execution.
 
 ### Write File
@@ -363,13 +419,27 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
     "researchDepth": "skip|quick|standard|deep (optional, computed in Phase 1.5)",
     "researchPaths": "string[] (optional, relative paths to research files written by Phase 1 and Phase 1.5b agents)",
     "prototypePaths": "string[] (optional, relative paths to prototype HTML files and tokens sidecar JSON registered by Phase 0 Prototype Context)",
+    "designBundle": {
+      "root": "string (relative path to bundle root dir)",
+      "readme": "string (relative path to bundle README)",
+      "chats": ["string (relative paths to chat export files)"],
+      "businessSpec": "string|null (relative path to BusinessSpec.md, or null when absent)",
+      "designSpec": "string|null (relative path to DesignSpec.md, or null when absent)"
+    },
+    "designTokens": "object (optional, flat token map parsed from DesignSpec § 1; keys are token categories e.g. color, typography, spacing, radii, shadow, transition; values verbatim from spec)",
     "maxConcurrency": "number (optional, default 5)",
     "frontendOnly": "boolean (optional, true when frontend-only scope)",
     "backendSpec": {
       "endpoints": [{"method": "string", "path": "string", "description": "string"}],
       "dataModels": [{"name": "string", "fields": ["string"]}],
       "businessRules": ["string"],
-      "businessContext": "string"
+      "businessContext": {
+        "summary": "string",
+        "userRoles": ["string"],
+        "constraints": ["string"],
+        "assumptions": ["string"],
+        "successCriteria": ["string"]
+      }
     }
   },
   "userStories": [
@@ -427,6 +497,9 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 - [ ] `schemaVersion` is `"3.2"`
 - [ ] `researchDepth` (if set) is one of: `skip`, `quick`, `standard`, `deep`
 - [ ] `prototypePaths` (if set) contains only paths that exist on disk and were successfully loaded into `prototypeBlocks`
+- [ ] `metadata.designBundle` (if set) — all paths (`root`, `readme`, `chats[]`, `businessSpec`, `designSpec`) that are non-null exist on disk under `AIMI_ROOT`
+- [ ] `metadata.designTokens` (if set) is a flat object whose top-level keys match the token categories enumerated in `DesignSpec § 1`
+- [ ] When `businessSpecContent` is non-null, every story whose title matches a screen name in `BusinessSpec § 2` cites at least one rule ID from `§ 3` (e.g., `RN-01`) or one criterion ID from `§ 9` in its `acceptanceCriteria`
 - [ ] Every story has a `wave` number (wave 1 for roots, computed from `dependsOn` for others)
 - [ ] Wave numbers are contiguous with no gaps
 - [ ] `implementation` (if present) has `files` (string[]), `approach` (string), `verify` (string) with concrete paths
@@ -442,6 +515,7 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 - [ ] Full-stack: wave numbers computed independently per file (roots = wave 1 within each file)
 - [ ] Frontend-only: single `*-frontend-tasks.json` with `metadata.frontendOnly: true`
 - [ ] Frontend-only: `metadata.backendSpec` contains `endpoints`, `dataModels`, `businessRules`, `businessContext`
+- [ ] Full-stack: `metadata.designBundle` (if set) and `metadata.designTokens` (if set) are written to both frontend and backend files
 - [ ] Phase 4.5 validation runs on each file independently using `$AIMI_CLI init-session --file <path>`
 
 ## Phase 4.5: Post-Generation Validation
