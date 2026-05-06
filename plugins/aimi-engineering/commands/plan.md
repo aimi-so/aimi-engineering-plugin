@@ -329,6 +329,20 @@ directly when describing UI acceptance criteria, component structure, and visual
 
     The decomposition LLM authors citations; they are never auto-injected. Violations surface at the post-decomposition checklist stage.
 
+20. **Mock-sync AC injection for schema-extending stories**: after all stories are drafted, scan each story's `implementation.files` array against the following globs:
+    - `**/schemas/**/*.{ts,js,py,rb}`
+    - `**/types/**/*.{ts,js}`
+    - `**/zod/**/*.{ts,js}`
+    - `*.schema.ts`
+    - `*.types.ts`
+
+    When any file in a story's `implementation.files` matches one or more of these globs:
+    - **Idempotency guard first**: skip injection if the story's `acceptanceCriteria` already contains any entry matching `/[Mm]ock.*updated|mock.*sync/i` — prevents double-injection on deepen or re-plan flows.
+    - **Mocks directory present** (project contains at least one `**/mocks/**` path): append the following AC to the story: `Update mock data in matching **/mocks/** path to populate new fields (or document why mocks are intentionally unchanged).`
+    - **No mocks directory**: append the following AC instead: `Verify no mock data files require updates`.
+
+    Multi-story independence: when multiple stories independently match the schema-file glob, each receives its own mock-sync AC — do not consolidate or deduplicate across stories.
+
 ### `dependsOn` Inference Rules
 
 - **Same layer, independent concerns** (different tables, different pages, different routes) → no dependency between them (`dependsOn: []`)
