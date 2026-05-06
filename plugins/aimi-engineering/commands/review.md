@@ -129,6 +129,45 @@ For Rails projects, also consider running:
 - `aimi-engineering:review:aimi-dhh-rails-reviewer` for Rails convention checks
 - `aimi-engineering:review:aimi-julik-frontend-races-reviewer` for Stimulus/JS race conditions
 
+### Design Fidelity Agent (Conditional)
+
+Automatically invoke the design-implementation reviewer when the tasks file signals a visual story with prototype references.
+
+**Trigger gate** — both conditions must be true:
+
+1. `jq -r '.metadata.prototypePaths // empty' $TASKS_FILE` returns a non-empty value
+2. `jq -r '[.userStories[] | select(.verification.strategy == "visual")] | length' $TASKS_FILE` returns a value greater than 0
+
+If either condition fails (e.g., pre-1.73.0 tasks files that lack `metadata.prototypePaths`, or no story uses `verification.strategy: "visual"`), skip this section entirely — no agent is spawned.
+
+**agent-browser availability check** — before spawning any Task, verify the browser tool is installed:
+
+```
+command -v agent-browser
+```
+
+If the command returns non-zero, log the following warning and skip all invocations in this section:
+
+```
+Design fidelity review skipped: agent-browser not installed
+```
+
+**Per-visual-story invocation** — when the gate passes and `agent-browser` is available, spawn one Task per visual story (stories where `verification.strategy == "visual"`):
+
+- `prototype_path`: use `story.implementation.prototypeAnchor` if present; otherwise use the first prototype path cited in the story's acceptance criteria; otherwise fall back to the first entry of `metadata.prototypePaths`.
+- `live_url`: use `story.verification.url` when present; omit the field otherwise.
+
+```
+Task subagent_type="aimi-engineering:design:aimi-design-implementation-reviewer"
+  prompt: "Compare the implementation against the design prototype and report visual fidelity drift.
+           Story ID: [story.id]
+           Story title: [story.title]
+           prototype_path: [resolved prototype_path — see derivation rule above]
+           live_url: [story.verification.url or omit if absent]"
+```
+
+Findings from this agent are emitted at the same severity levels (P1/P2/P3) as all other review agents.
+
 ## Step 4: Findings Synthesis
 
 ### Consolidate Results
@@ -191,7 +230,8 @@ For each finding: Small (< 30 min), Medium (30 min - 2 hours), Large (> 2 hours)
 - aimi-performance-oracle
 - aimi-agent-native-reviewer
 - aimi-learnings-researcher
-- [conditional agents if run]
+- Design Fidelity (conditional)
+- [other conditional agents if run]
 
 ### Next Steps
 
