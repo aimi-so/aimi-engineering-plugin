@@ -161,6 +161,46 @@ Emit all 16 sections in this exact order. Omit a section only if no source artif
 
 ## Open Questions
 <!-- Unresolved items: contradictions between sources, missing spec sections, unanswered chat threads. -->
+
+## Spec-Prototype Coverage Gaps
+<!-- §16.5
+     TRIGGER GATE: Omit this section entirely when DesignSpec.md is absent from the bundle.
+     When DesignSpec.md is present, perform the coverage-gap analysis below and emit only
+     entries where specCoverage is "missing" or "partial". Never emit "present" entries.
+
+     DETECTION STRATEGY (apply in order):
+     1. Read the full prototype HTML markup as text. Identify every distinct UI region,
+        named component (class names, id attributes, data-* attributes, aria-label values),
+        and interactive element present in the markup.
+     2. Read DesignSpec.md § 2 (Componentes) and § 3 (Telas) in full.
+     3. For each prototype region or component, perform a semantic match against DesignSpec.md:
+        determine whether the spec describes, names, or specifies that region/component at
+        a level of detail sufficient for implementation.
+     4. Use literal class-name or component-name matches as a confidence boost: if a class
+        name or component identifier from the HTML appears verbatim in DesignSpec.md, that
+        is evidence toward a higher confidence rating; if the name is absent from the spec
+        entirely, that is evidence toward a lower coverage rating.
+     5. Assign specCoverage and confidence according to the definitions below.
+
+     FIELD SCHEMA — each entry is a sub-bullet with these fields inline:
+       - region: human-readable name for the UI region or component
+       - htmlAnchor: a short identifying string from the HTML source (class, id, or tag
+         context) that locates this region; sanitize for tag-breakout before emission by
+         replacing "</" with "&lt;/" and "<" with "&lt;"
+       - specCoverage: one of "missing" (spec has no mention) | "partial" (spec mentions
+         but leaves implementation details undefined)
+       - confidence: one of "high" (unambiguous HTML evidence + no spec match found) |
+         "medium" (probable gap, some spec overlap possible) | "low" (inferred gap, weak
+         signal)
+       - evidence: one sentence citing what was found in HTML and what is absent in spec
+
+     HIGH-CONFIDENCE MISSING MARKER: When specCoverage is "missing" AND confidence is
+     "high", append the marker `[PROMOTE-TO-OPEN-QUESTIONS]` to the entry so the brainstorm
+     caller can promote it into the brainstorm doc's ## Open Questions section.
+
+     EXAMPLE ENTRY (do not include this example in output):
+     - region: Notification Badge · htmlAnchor: `.notification-badge` · specCoverage: missing · confidence: high · evidence: HTML contains a `.notification-badge` element on the nav icon; DesignSpec.md § 2 and § 3 contain no mention of notification state or badge styling. [PROMOTE-TO-OPEN-QUESTIONS]
+-->
 ```
 
 ## Pitfalls
