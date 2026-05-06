@@ -48,16 +48,16 @@ behavior.
 
 ## Step 0.6: Detect Claude Design Bundle
 
-Extract an optional `--bundle <path>` flag from `$ARGUMENTS` (do not modify
+Extract an optional `--root <path>` flag from `$ARGUMENTS` (do not modify
 existing feature-description handling — this extraction is local to this step
 only):
 
 ```bash
 BUNDLE_ARG=""
-# Extract --bundle <path> from $ARGUMENTS if present
+# Extract --root <path> from $ARGUMENTS if present
 case "$ARGUMENTS" in
-  *--bundle*)
-    BUNDLE_ARG=$(echo "$ARGUMENTS" | sed -n 's/.*--bundle[[:space:]]\+\([^[:space:]]*\).*/\1/p')
+  *--root*)
+    BUNDLE_ARG=$(echo "$ARGUMENTS" | sed -n 's/.*--root[[:space:]]\+\([^[:space:]]*\).*/\1/p')
     ;;
 esac
 ```
@@ -66,7 +66,7 @@ Run detection (failure is silent and non-blocking):
 
 ```bash
 if [ -n "$BUNDLE_ARG" ]; then
-  BUNDLE_RESULT=$($AIMI_CLI detect-design-bundle --bundle "$BUNDLE_ARG" 2>/dev/null) || BUNDLE_RESULT=""
+  BUNDLE_RESULT=$($AIMI_CLI detect-design-bundle --root "$BUNDLE_ARG" 2>/dev/null) || BUNDLE_RESULT=""
 else
   BUNDLE_RESULT=$($AIMI_CLI detect-design-bundle 2>/dev/null) || BUNDLE_RESULT=""
 fi

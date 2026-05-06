@@ -78,7 +78,7 @@ After reading the brainstorm (if one was found), parse it for referenced prototy
 
 ### Design Bundle Detection
 
-Extract an optional `--bundle <path>` flag from `$ARGUMENTS` (e.g. `--bundle .aimi/brainstorms/design-bundles/my-bundle`). Store as `BUNDLE_OVERRIDE` (empty string when absent).
+Extract an optional `--root <path>` flag from `$ARGUMENTS` (e.g. `--root .aimi/brainstorms/design-bundles/my-bundle`). Store as `BUNDLE_OVERRIDE` (empty string when absent).
 
 Run bundle detection unconditionally:
 
@@ -89,14 +89,14 @@ BUNDLE_META=$($AIMI_CLI detect-design-bundle 2>/dev/null) || BUNDLE_META=""
 If `BUNDLE_OVERRIDE` is non-empty, pass it as the override flag:
 
 ```bash
-BUNDLE_META=$($AIMI_CLI detect-design-bundle --bundle "$BUNDLE_OVERRIDE" 2>/dev/null) || BUNDLE_META=""
+BUNDLE_META=$($AIMI_CLI detect-design-bundle --root "$BUNDLE_OVERRIDE" 2>/dev/null) || BUNDLE_META=""
 ```
 
 Store the JSON output as `designBundleMeta`. When `BUNDLE_META` is empty or the command fails, set `designBundleMeta` to `null` and continue.
 
 When `designBundleMeta` is non-null:
-- Extract the `prototypePaths` array from the bundle metadata (may be empty).
-- For each path: resolve absolute path, validate it starts with `AIMI_ROOT`, skip with warning if not. Merge into `resolvedPrototypePaths`, deduplicating by absolute path against paths already collected from the brainstorm frontmatter.
+- Extract the `prototypes` array from the bundle metadata (may be empty).
+- For each path: resolve absolute path with `realpath`. Paths whose absolute resolution does not start with `AIMI_ROOT` are dropped with one-line warning `prototype <path> rejected — path outside project root` and excluded from `resolvedPrototypePaths`. For paths that pass validation, normalize to relative-to-`AIMI_ROOT` before merging. Deduplicate by relative path against paths already collected from the brainstorm frontmatter (insertion-order, first-occurrence wins).
 - Stash the full bundle object as `designBundleMeta` for Phase 4 metadata derivation.
 
 ### Phase 0.7: Spec Ingestion
