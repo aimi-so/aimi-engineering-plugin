@@ -571,6 +571,42 @@ PROTOTYPE_PATHS=$(jq -r '.metadata.prototypePaths // [] | .[]' "$AIMI_ROOT/$TASK
 
 If `PROTOTYPE_PATHS` is empty (field absent, null, or empty array), set `PROTOTYPE_CONTEXT` to empty string and continue — no error.
 
+**Prototype anchor pinning (prepend before iteration):** before iterating `PROTOTYPE_PATHS`, determine whether a single prototype file should be pinned to label A:
+
+```
+ANCHOR_PATH = ""
+
+# 1. Try implementation.prototypeAnchor from the active story
+anchor_candidate = jq -r '.userStories[] | select(.id == env.STORY_ID) | .implementation.prototypeAnchor // empty' "$AIMI_ROOT/$TASKS_PATH"
+
+if anchor_candidate is non-empty:
+    abs_anchor = realpath("$AIMI_ROOT/$anchor_candidate")   # resolve symlinks / ..
+    if abs_anchor starts with "$AIMI_ROOT/" and file exists at abs_anchor:
+        ANCHOR_PATH = anchor_candidate
+    else:
+        log: "prototype [anchor_candidate] rejected — path outside project root"
+
+# 2. Fallback: parse acceptanceCriteria[] for first F3 citation when anchor not set
+if ANCHOR_PATH is empty:
+    ac_strings = jq -r '.userStories[] | select(.id == env.STORY_ID) | .acceptanceCriteria[]' "$AIMI_ROOT/$TASKS_PATH"
+    for each ac in ac_strings:
+        match = first regex match of
+            \(prototype:\s*([^\s)§:]+)(?:\s*§[^)]*|\:[Ll]\d+-[Ll]\d*)?\)
+            against ac
+        if match found:
+            ac_candidate = captured group 1 (the path token)
+            abs_ac = realpath("$AIMI_ROOT/$ac_candidate")
+            if abs_ac starts with "$AIMI_ROOT/" and file exists at abs_ac:
+                ANCHOR_PATH = ac_candidate
+                break
+            else:
+                log: "prototype [ac_candidate] rejected — path outside project root"
+
+# 3. Prepend anchor to PROTOTYPE_PATHS so it receives label A
+if ANCHOR_PATH is non-empty:
+    PROTOTYPE_PATHS = [ANCHOR_PATH] + [p for p in PROTOTYPE_PATHS if p != ANCHOR_PATH]
+```
+
 Otherwise, process each path in order, assigning sequential labels starting at `A`:
 
 ```
@@ -612,6 +648,14 @@ for path in PROTOTYPE_PATHS:
 ```
 prototype [path] dropped — aggregate prototype context exceeded 200KB
 ```
+
+**Pinned-anchor-exceeds-cap exception:** when `ANCHOR_PATH` is non-empty and the anchor block (label A) is a candidate for dropping, do **not** drop it even if it alone exceeds 200 KB. Instead log:
+
+```
+prototype [ANCHOR_PATH] pinned but exceeds 200KB cap — implementation may drift; consider splitting the prototype
+```
+
+and retain the block. Continue dropping other blocks (Z → B) as normal until the remaining non-anchor blocks fit under the cap (the anchor's bytes are excluded from the cap accounting once it is retained under this exception).
 
 If all prototypes are missing or all blocks are dropped, set `PROTOTYPE_CONTEXT` to empty string. Otherwise join all remaining blocks and store as `PROTOTYPE_CONTEXT`.
 

@@ -343,6 +343,12 @@ directly when describing UI acceptance criteria, component structure, and visual
 
     Multi-story independence: when multiple stories independently match the schema-file glob, each receives its own mock-sync AC — do not consolidate or deduplicate across stories.
 
+21. **prototypeAnchor emission for single-prototype visual stories** (when `metadata.prototypePaths` is non-empty): after all stories are drafted, for each story whose `acceptanceCriteria` contains F3-syntax prototype citations — `(prototype: <path> §<heading>)` or `(prototype: <path>:L<start>-L<end>)` — count the distinct `<path>` values cited across all AC entries:
+    - **Exactly one distinct path**: set `story.implementation.prototypeAnchor` to that relative path (no leading `./`).
+    - **Zero or multiple distinct paths**: leave `prototypeAnchor` unset (field omitted).
+
+    The anchor is additive — it never overrides or removes other `implementation` fields. Stories without any F3 citation remain unchanged (backwards compatible).
+
 ### `dependsOn` Inference Rules
 
 - **Same layer, independent concerns** (different tables, different pages, different routes) → no dependency between them (`dependsOn: []`)
@@ -478,7 +484,8 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
       "implementation": {
         "files": ["string[] (required, concrete file paths from research)"],
         "approach": "string (required, actionable strategy referencing codebase patterns)",
-        "verify": "string (required, executable command or checkable assertion)"
+        "verify": "string (required, executable command or checkable assertion)",
+        "prototypeAnchor": "string (optional, relative path to the single prototype file most relevant to this story; set by Phase 3 when AC cites exactly one prototype via F3 syntax; absent when AC cites zero or multiple prototypes)"
       },
       "verification": {
         "strategy": "test|visual|api (required)",
