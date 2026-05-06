@@ -321,6 +321,13 @@ directly when describing UI acceptance criteria, component structure, and visual
     - One story per persona/permission tier in `BusinessSpec § 7` (User Roles & Permissions) when permission boundaries differ across tiers.
 17. **Spec-driven acceptance criteria seeding** (when `businessSpecContent` is non-null): seed each story's `acceptanceCriteria` verbatim from the matching entries in `BusinessSpec § 9` (Critérios de aceite). Preserve rule IDs (`RN-01`, `RN-02`, …) exactly as written in the spec. Do **not** paraphrase, reformat, or summarize seeded criteria.
 18. **Spec-driven component stories** (when `designSpecContent` is non-null): create one story per entry in `DesignSpec § 2.2` (NOVOS components). Each component story must include as an acceptance criterion the prop type signature verbatim from the spec (e.g., `type PlantaCardProps satisfies the prop signature in DesignSpec § 2.2 L70-73`).
+19. **Prototype-region citations for visual-layout AC** (when `metadata.prototypePaths` is non-empty AND a story's `verification.strategy == "visual"`): every visual-layout acceptance criterion must include a citation to the specific prototype region it describes. Use one of the two machine-parseable shapes — pick the first that applies:
+    - **Heading citation** (preferred): `(prototype: <relative-path> §<heading-text>)` — where `<heading-text>` is the text of the nearest preceding `<h1>`–`<h6>` element in the prototype HTML that covers the cited region (e.g., `(prototype: draives-monitor/project/Monitoramento.html §Visão Geral)`).
+    - **Line-range fallback**: when the cited region has no preceding heading element, use `(prototype: <relative-path>:L<start>-L<end>)` with the line numbers from the prototype HTML (e.g., `(prototype: draives-monitor/project/Monitoramento.html:L42-L67)`).
+
+    **No double-deriving**: when a prototype covers a layout region, AC must cite the prototype — not re-derive layout from `DesignSpec.md`. The prototype is canonical for visual layout; `DesignSpec.md` remains canonical for design tokens, component prop types, and interaction states. A story may hold both a prototype citation and a spec reference when they cover different concerns (e.g., layout from prototype, color tokens from spec).
+
+    The decomposition LLM authors citations; they are never auto-injected. Violations surface at the post-decomposition checklist stage.
 
 ### `dependsOn` Inference Rules
 
@@ -506,6 +513,7 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 - [ ] `verification` (if present) has `strategy` (`test`, `visual`, or `api`) and `status` (`"pending"`)
 - [ ] `gate` (if present) has `type` (`verify`, `decision`, or `action`), `status` (`"pending"`), and `prompt`
 - [ ] Gates only attached when heuristics clearly match
+- [ ] Every story with `verification.strategy == "visual"` and non-empty `metadata.prototypePaths` has at least one `(prototype: ...)` citation in its acceptance criteria (either `(prototype: <path> §<heading>)` or `(prototype: <path>:L<start>-L<end>)`)
 
 ### Split-File Checks (when `implementationScope` is set)
 - [ ] Full-stack: two files generated (`*-frontend-tasks.json` and `*-backend-tasks.json`)
