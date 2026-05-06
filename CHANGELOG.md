@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.73.1] - 2026-05-05
+
+### Fixed
+
+- **`aimi-cli (detect-design-bundle):`** `--root <path>` now also matches when `<path>` itself is a bundle directory, not only when it's a parent containing bundles. Previously returned `null` when callers pointed `--root` at the bundle itself.
+- **`aimi-cli (help):`** `<subcommand> --help` and `<subcommand> -h` now print the full help doc instead of returning "Unknown flag" and exit 1 from strict subcommand parsers (`init-session`, `detect-design-bundle`, `setup-branch`, `gate-pass`) or being misinterpreted as positional input by other subcommands.
+
 ## [1.73.0] - 2026-05-05
 
 ### Fixed

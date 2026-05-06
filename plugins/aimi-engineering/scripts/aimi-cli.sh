@@ -1156,35 +1156,49 @@ cmd_detect_design_bundle() {
   # Collect matching bundles: each entry is "<mtime> <abspath>"
   local found_paths=()
 
-  for subdir in "${scan_root}"/*/; do
-    [ -d "$subdir" ] || continue
-
-    local base
-    base=$(basename "$subdir")
-
-    # Skip noise directories
-    case "$base" in
-      .worktrees|node_modules|.aimi|vendor) continue ;;
-    esac
-
-    local readme="${subdir}README.md"
-    [ -f "$readme" ] || continue
-
-    # Fixed-string, case-sensitive marker check
-    grep -qF "$HANDOFF_MARKER" "$readme" || continue
-
-    # Get directory mtime (seconds since epoch) — stat is not POSIX-portable;
-    # use date-based approach via ls for mtime sorting, falling back to 0
-    local mtime
+  # Pre-check: scan_root may itself be a bundle directory. When its README has
+  # the handoff marker, treat it as a single bundle and skip the children scan.
+  local root_normalized="${scan_root%/}/"
+  local root_readme="${root_normalized}README.md"
+  if [ -f "$root_readme" ] && grep -qF "$HANDOFF_MARKER" "$root_readme"; then
+    local root_mtime
     if command -v stat >/dev/null 2>&1; then
-      # GNU stat (Linux) or BSD stat (macOS)
-      mtime=$(stat -c '%Y' "$subdir" 2>/dev/null || stat -f '%m' "$subdir" 2>/dev/null || echo 0)
+      root_mtime=$(stat -c '%Y' "$root_normalized" 2>/dev/null || stat -f '%m' "$root_normalized" 2>/dev/null || echo 0)
     else
-      mtime=0
+      root_mtime=0
     fi
+    found_paths+=("${root_mtime} ${root_normalized}")
+  else
+    for subdir in "${scan_root}"/*/; do
+      [ -d "$subdir" ] || continue
 
-    found_paths+=("${mtime} ${subdir}")
-  done
+      local base
+      base=$(basename "$subdir")
+
+      # Skip noise directories
+      case "$base" in
+        .worktrees|node_modules|.aimi|vendor) continue ;;
+      esac
+
+      local readme="${subdir}README.md"
+      [ -f "$readme" ] || continue
+
+      # Fixed-string, case-sensitive marker check
+      grep -qF "$HANDOFF_MARKER" "$readme" || continue
+
+      # Get directory mtime (seconds since epoch) — stat is not POSIX-portable;
+      # use date-based approach via ls for mtime sorting, falling back to 0
+      local mtime
+      if command -v stat >/dev/null 2>&1; then
+        # GNU stat (Linux) or BSD stat (macOS)
+        mtime=$(stat -c '%Y' "$subdir" 2>/dev/null || stat -f '%m' "$subdir" 2>/dev/null || echo 0)
+      else
+        mtime=0
+      fi
+
+      found_paths+=("${mtime} ${subdir}")
+    done
+  fi
 
   # No bundles found
   if [ ${#found_paths[@]} -eq 0 ]; then
@@ -2137,10 +2151,14 @@ COMMANDS:
     list-archivable           List task files where all stories are completed/skipped (JSON array)
     archive-task <path>       Move completed task file (and linked brainstorm) to .aimi/archive/
     detect-design-bundle [--root <path>] [--all] [--json]
-                              Scan depth-1 subdirs for a Claude Design handoff bundle.
-                              Returns JSON {path,readme,chats[],prototypes[],hasReact,
-                              hasTailwind,businessSpec,designSpec} or null.
-                              --root   Scan <path> instead of CWD
+                              Detect a Claude Design handoff bundle. --root may
+                              point at a bundle directory directly, or at a
+                              parent dir whose immediate children include bundle
+                              dirs (depth-1 scan in that case). Returns JSON
+                              {path,readme,chats[],prototypes[],hasReact,
+                              hasTailwind,businessSpec,designSpec} or null when
+                              no bundle found.
+                              --root   Scan <path> (bundle or parent) instead of CWD
                               --all    Return all matching bundles as JSON array
                               --json   Alias; output is always JSON
     help                      Show this help message
@@ -2212,6 +2230,16 @@ main() {
     detect-interactivity) cmd_detect_interactivity; return ;;
     prime-cache) cmd_prime_cache; return ;;
   esac
+
+  # Universal --help/-h: any subcommand with --help or -h anywhere in its args
+  # short-circuits to the top-level help doc. Runs before find_aimi_root so
+  # help works outside .aimi/ projects, and before any side-effect subcommand
+  # mutates state.
+  for arg in "$@"; do
+    case "$arg" in
+      --help|-h) cmd_help; return ;;
+    esac
+  done
 
   find_aimi_root
   check_jq

@@ -4079,6 +4079,84 @@ test_detect_design_bundle_newest_mtime_wins() {
   rm -rf "$tmp"
 }
 
+# (7a) --root points AT a bundle directory (not its parent) — bundle-as-root auto-detect
+test_detect_design_bundle_root_is_bundle() {
+  echo ""
+  echo "=== Testing detect-design-bundle: --root points at the bundle directory itself ==="
+
+  local tmp stdout exit_code
+  tmp=$(mktemp -d)
+  local bundle
+  bundle=$(_make_bundle "$tmp" "my-bundle")
+  printf '<html></html>' > "${bundle}/project/index.html"
+
+  stdout=$("$CLI" detect-design-bundle --root "$bundle" 2>/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "detect-design-bundle root-is-bundle: exit code"
+
+  local path protos
+  path=$(printf '%s' "$stdout" | jq -r '.path')
+  protos=$(printf '%s' "$stdout" | jq -r '.prototypes | length')
+  assert_eq "my-bundle" "$path"   "detect-design-bundle root-is-bundle: path field is bundle name"
+  assert_eq "1"         "$protos" "detect-design-bundle root-is-bundle: prototypes recursive walk works"
+
+  # Trailing slash variant must also work
+  stdout=$("$CLI" detect-design-bundle --root "${bundle}/" 2>/dev/null)
+  path=$(printf '%s' "$stdout" | jq -r '.path')
+  assert_eq "my-bundle" "$path" "detect-design-bundle root-is-bundle: trailing slash on --root works"
+
+  rm -rf "$tmp"
+}
+
+# (7b) <subcommand> --help routes to top-level help instead of "Unknown flag"
+test_help_flag_on_strict_subcommand() {
+  echo ""
+  echo "=== Testing universal --help: strict subcommand routes to help text ==="
+
+  local stdout exit_code
+  stdout=$("$CLI" detect-design-bundle --help 2>&1) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "detect-design-bundle --help: exit code is 0"
+
+  if printf '%s' "$stdout" | grep -q 'Unknown flag'; then
+    assert_eq "no Unknown flag" "Unknown flag present" "detect-design-bundle --help: must not return 'Unknown flag'"
+  else
+    assert_eq "ok" "ok" "detect-design-bundle --help: no 'Unknown flag' string"
+  fi
+
+  if printf '%s' "$stdout" | grep -q 'aimi-cli.sh - Deterministic'; then
+    assert_eq "ok" "ok" "detect-design-bundle --help: prints help doc header"
+  else
+    assert_eq "header present" "header missing" "detect-design-bundle --help: must include help doc header"
+  fi
+}
+
+# (7c) <side-effect-subcommand> --help short-circuits BEFORE state mutation
+test_help_flag_on_side_effect_subcommand() {
+  echo ""
+  echo "=== Testing universal --help: side-effect subcommand short-circuits before mutation ==="
+
+  # Capture current-story state before running mark-complete --help.
+  # If the help intercept does not short-circuit, mark-complete would either
+  # error trying to find a story called "--help" or mutate state.
+  local before_state after_state
+  before_state=$(cat "$TEST_DIR/.aimi/state/current-story" 2>/dev/null || echo "absent")
+
+  local stdout exit_code
+  stdout=$("$CLI" mark-complete --help 2>&1) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "mark-complete --help: exit code is 0 (short-circuited)"
+
+  if printf '%s' "$stdout" | grep -q 'aimi-cli.sh - Deterministic'; then
+    assert_eq "ok" "ok" "mark-complete --help: prints help doc"
+  else
+    assert_eq "help present" "help missing" "mark-complete --help: must print help doc"
+  fi
+
+  after_state=$(cat "$TEST_DIR/.aimi/state/current-story" 2>/dev/null || echo "absent")
+  assert_eq "$before_state" "$after_state" "mark-complete --help: state unchanged (no mutation)"
+}
+
 # (7) Partial bundle — chats/ missing, project/ missing (README marker still qualifies it)
 test_detect_design_bundle_partial_bundle() {
   echo ""
@@ -4326,6 +4404,9 @@ main() {
   test_detect_design_bundle_no_bundle
   test_detect_design_bundle_newest_mtime_wins
   test_detect_design_bundle_partial_bundle
+  test_detect_design_bundle_root_is_bundle
+  test_help_flag_on_strict_subcommand
+  test_help_flag_on_side_effect_subcommand
 
   cleanup
 
