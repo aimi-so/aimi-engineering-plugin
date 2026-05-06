@@ -257,6 +257,18 @@ Organize the merged findings into these sections:
 
 This structured summary feeds into Phase 2 question generation and Phase 4 design document capture.
 
+#### Collect researchPaths
+
+After merging findings, collect the output paths of every researcher that succeeded into a `researchPaths` working-memory list:
+
+1. For each researcher that completed successfully (codebase and/or best-practices), record the `outputPath` that was passed to that agent's prompt (e.g., `.aimi/research/YYYY-MM-DD-<topic-slug>-[RUN_TS]-codebase.md`).
+2. Paths are relative to AIMI_ROOT (no leading `./`, no `..` components).
+3. Deduplicate: if the same path appears more than once, keep only one entry.
+4. Validate each path exists on disk under AIMI_ROOT before adding it to the list. Drop any path that fails this check and emit one warning line per dropped entry: `warning: researchPaths entry not found on disk — dropping: <path>`.
+5. If all researchers were skipped or failed (the "Failed/Skipped + Failed/Skipped" row), the list remains empty.
+
+Store the final list in working memory as `researchPaths`. It is consumed when writing the brainstorm document in Phase 4.
+
 ### Quality Gate: Research Adequacy
 
 Before generating questions, review the research output from Phase 1.
@@ -736,6 +748,10 @@ Use the design document template:
 ---
 date: YYYY-MM-DD
 topic: <topic-slug>
+# researchPaths: emitted only when at least one researcher succeeded (non-empty list)
+researchPaths:
+  - .aimi/research/YYYY-MM-DD-<topic-slug>-<RUN_TS>-codebase.md
+  - .aimi/research/YYYY-MM-DD-<topic-slug>-<RUN_TS>-best-practices.md
 prototype:
   - path: .aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html
     question_category: Aesthetic Direction
@@ -852,6 +868,13 @@ If neither variant prototypes were saved nor bundle prototypes are available, om
 > Run `/aimi:plan` to generate implementation tasks
 ```
 
+### researchPaths frontmatter rules
+
+- **Emit only when non-empty:** Include the `researchPaths:` key in frontmatter only when the working-memory `researchPaths` list collected in Step 1c contains at least one entry. When the list is empty (all researchers were skipped or failed), omit the key entirely — do **not** emit `researchPaths: []`.
+- **Relative paths:** Each entry is a path relative to AIMI_ROOT. Use no leading `./` and no `..` components (e.g., `.aimi/research/2026-05-06-my-topic-143022-codebase.md`).
+- **Deduplicate:** If the same path was collected more than once, include it only once.
+- **Validate before emission:** Confirm each path exists on disk under AIMI_ROOT. Drop entries that fail this check with one warning line each: `warning: researchPaths entry not found on disk — dropping: <path>`. If validation drops all entries, omit the key entirely.
+
 ### Resolve Open Questions
 
 **Before proceeding to handoff**, check the Open Questions section. If there are unresolved questions:
@@ -880,6 +903,7 @@ Before writing the document, verify **all** of the following criteria. If any cr
 - [ ] `### Layout Variation Chosen` subsection present under Design Decisions (when bundle researcher returned a chosen variant) — advisory/non-blocking
 - [ ] `## Specs` section present with section-heading index for each non-null spec (when `businessSpec` or `designSpec` is non-null) — advisory/non-blocking
 - [ ] `## Prototypes` section present when merged prototype list is non-empty (variant-derived OR bundle-derived) — advisory/non-blocking
+- [ ] researchPaths emitted when any researcher succeeded — advisory/non-blocking
 
 **On failure:** Use a conversational nudge for each unmet criterion:
 > "Before I save the document, I noticed [specific gap]. For example: 'we only explored one approach without noting why alternatives weren't considered.' Want to address that, or should I save as-is?"
