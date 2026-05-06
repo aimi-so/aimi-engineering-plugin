@@ -115,6 +115,28 @@ When `designSpecPath` is non-null and the file exists on disk (within `AIMI_ROOT
 
 When either spec file is missing from disk, log a warning and set the corresponding content variable to `null`; continue — do not abort plan.
 
+### Reuse Brainstorm Research
+
+After reading the brainstorm (if one was found), parse its YAML frontmatter for a `researchPaths` key:
+
+1. **Parse `researchPaths`** from the brainstorm frontmatter — the value is a YAML list of path strings (relative to `AIMI_ROOT`). If the key is absent (legacy brainstorm), skip this entire sub-step and leave all reuse variables unset.
+2. **Validate each path**:
+   - Resolve the absolute path by joining `AIMI_ROOT` + the listed path.
+   - Verify the file exists on disk.
+   - Check mtime: the file must have been written within the last **14 days**. Files older than 14 days are treated as stale and excluded from reuse.
+3. **Classify valid paths by filename suffix**:
+   - Path ending with `-codebase.md` → assign as `reusedCodebasePath` (use the first valid match).
+   - Path ending with `-best-practices.md` → assign as `reusedBestPracticesPath` (use the first valid match).
+   - Path ending with `-framework-docs.md` → assign as `reusedFrameworkDocsPath` (use the first valid match; framework-docs reuse is informational only — Phase 1.5b still applies its normal heuristic gate).
+   - Paths with other suffixes (e.g., `-learnings.md`) → ignore (learnings research always re-runs).
+4. **Log findings** (one line per classification):
+   - Valid reuse: `Research reuse: [suffix type] → [path] (mtime OK)`
+   - Stale skip: `Research reuse: [path] skipped — older than 14 days`
+   - Missing skip: `Research reuse: [path] skipped — file not found`
+5. **Collect `reusedPaths`**: a list of all paths that were successfully classified (not skipped). This list is used in Phase 4 metadata and Phase 5 report.
+
+If no brainstorm was found, or the brainstorm has no `researchPaths` key, all reuse variables remain unset and behaviour is unchanged.
+
 ### Implementation Scope Detection
 
 After the brainstorm check, determine the implementation scope:
@@ -180,7 +202,9 @@ List discovered repos with their relative paths from the `.aimi/` parent.
 
 ### Run Research Agents
 
-Run these agents **in parallel** using the Task tool:
+Run these agents **in parallel** using the Task tool.
+
+**If `reusedCodebasePath` is unset** (no valid codebase research from brainstorm):
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
@@ -192,7 +216,13 @@ Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
            [If prototypeBlocks is non-empty]:
            Prototype designs chosen for this feature (use as implementation reference):
            [prototypeBlocks]"
+```
 
+**If `reusedCodebasePath` is set**: skip the codebase researcher Task entirely. The existing file at `reusedCodebasePath` will be read directly in Phase 1.6.
+
+**Always run** (brainstorm does not produce learnings research, so reuse never applies):
+
+```
 Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
   prompt: "Search .aimi/solutions/ for learnings relevant to: [feature description].
            topicSlug: [topicSlug]
@@ -203,7 +233,7 @@ Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
            [prototypeBlocks]"
 ```
 
-If either agent fails, proceed with available results.
+If any spawned agent fails, proceed with available results.
 
 ## Phase 1.5: Research Decision
 
@@ -215,7 +245,9 @@ Compute `researchDepth` and store in metadata: `skip` (internal + strong pattern
 
 ## Phase 1.5b: External Research (Conditional, Parallel)
 
-Only if Phase 1.5 decides external research is needed:
+Only if Phase 1.5 decides external research is needed, run the applicable agents in parallel:
+
+**If `reusedBestPracticesPath` is unset** (no valid best-practices research from brainstorm):
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
@@ -223,7 +255,13 @@ Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
            researchDepth: [computed researchDepth from Phase 1.5]
            topicSlug: [topicSlug]
            outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-best-practices.md"
+```
 
+**If `reusedBestPracticesPath` is set**: skip the best-practices researcher Task entirely. The existing file at `reusedBestPracticesPath` will be read directly in Phase 1.6.
+
+**Framework-docs** — always gated by the Phase 1.5 heuristic; brainstorm reuse does not bypass it:
+
+```
 Task subagent_type="aimi-engineering:research:aimi-framework-docs-researcher"
   prompt: "Research framework documentation for: [feature description].
            researchDepth: [computed researchDepth from Phase 1.5]
@@ -234,6 +272,11 @@ Task subagent_type="aimi-engineering:research:aimi-framework-docs-researcher"
 ## Phase 1.6: Research Consolidation
 
 Consume researcher agent **summary returns** (the brief outputs from Task calls) — do NOT re-read the full `.aimi/research/` files unless a summary is insufficient for a planning decision.
+
+**Reused research files** (when `reusedCodebasePath` or `reusedBestPracticesPath` is set): no Task summary is available for these. Instead, read each reused file directly:
+
+- If `reusedCodebasePath` is set: Read the file at `reusedCodebasePath` and treat its contents as the codebase research input for consolidation.
+- If `reusedBestPracticesPath` is set: Read the file at `reusedBestPracticesPath` and treat its contents as the best-practices input for the **External Insights** section.
 
 > **Fallback:** If a researcher summary lacks detail needed for a specific planning decision, the orchestrator may read the corresponding `.aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-*.md` file on demand.
 
@@ -434,7 +477,7 @@ Write single file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 - **planPath**: Always `null`
 - **brainstormPath**: Path to brainstorm if one was used, otherwise omit
 - **researchDepth**: Value computed in Phase 1.5 (`skip`, `quick`, `standard`, `deep`), or omit if not computed
-- **researchPaths**: Collect all `.aimi/research/` file paths written by Phase 1 agents (codebase, learnings) and Phase 1.5b agents (best-practices, framework-docs). Omit entirely when `researchDepth` is `skip` or no research files were written.
+- **researchPaths**: Collect all `.aimi/research/` file paths written by Phase 1 agents (codebase, learnings) and Phase 1.5b agents (best-practices, framework-docs), **plus** any paths in `reusedPaths` from Phase 0 Reuse Brainstorm Research (reused paths are included regardless of `researchDepth`). Deduplicate the combined list. Omit entirely when `researchDepth` is `skip` and `reusedPaths` is empty and no research files were written.
 - **prototypePaths**: Convert each path in `resolvedPrototypePaths` to a path relative to `AIMI_ROOT` (no leading `./`, no `..` components). Deduplicate with `| unique`. Emit as `metadata.prototypePaths` array. Omit the key entirely when the array is empty.
 - **designBundle**: When `designBundleMeta` is non-null, emit as `metadata.designBundle` with the following shape: `{ root: string, readme: string, chats: string[], businessSpec: string|null, designSpec: string|null }`. All paths relative to `AIMI_ROOT`. Omit the key entirely when no bundle was detected. When the bundle was detected, always emit both `businessSpec` and `designSpec` keys — use `null` for whichever spec file is absent.
 - **designTokens**: When `designSpecContent` is non-null and `DesignSpec § 1` contains a token map, parse it and emit as `metadata.designTokens` — a flat object whose top-level keys are the token categories enumerated in `DesignSpec § 1` (e.g., `color`, `typography`, `spacing`, `radii`, `shadow`, `transition`). Values are written verbatim from the spec without normalization. Omit the key entirely when `designSpecContent` is null or `§ 1` contains no token map.
@@ -613,6 +656,7 @@ Schema version: 3.2
 Waves: [N] total
 [If gates found]: Gates: [N] (verify: [X], decision: [Y], action: [Z])
 [If brainstorm used]: Context: .aimi/brainstorms/[brainstorm-file]
+[If reusedPaths non-empty]: Research reused: [N] file(s) from brainstorm
 [If prototypePaths non-empty]: Prototypes: [N] variant file(s) registered
 [If gaps found]: Gaps identified: [N] (captured as criteria/notes)
 [If 10+ stories]: Warning: [N] stories generated. Consider splitting into smaller feature sets.
