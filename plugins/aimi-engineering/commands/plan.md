@@ -61,7 +61,7 @@ ls -t .aimi/brainstorms/*.md 2>/dev/null | head -10
 After reading the brainstorm (if one was found), parse it for referenced prototype HTML files and load them into context:
 
 1. **Parse frontmatter** — look for a `prototype:` key; its value is a path string or a YAML list of path strings.
-2. **Parse `## Prototype` section** — scan the brainstorm body for a `## Prototype` heading; extract any file paths that appear in that section (lines starting with `-` or table cells containing `.html`).
+2. **Parse `## Prototypes` / `## Prototype` section** — scan the brainstorm body for a `## Prototypes` or `## Prototype` heading (accept either form); extract any file paths that appear in that section (lines starting with `-` or table cells containing `.html`).
 3. **Also parse sidecar tokens JSON** — if the brainstorm directory contains `.aimi/brainstorms/prototypes/<topic-slug>-tokens.json`, read it and stash as `prototypeTokens` (JSON object) for threading alongside HTML blocks.
 4. **Deduplicate** the collected paths and assign sequential labels starting at `A`.
 5. **For each path** (resolve relative to the brainstorm file's directory):

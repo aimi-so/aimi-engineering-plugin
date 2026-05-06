@@ -743,6 +743,9 @@ prototype:
   - path: .aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html
     question_category: Differentiation
     branch: ui-variation
+  - path: <bundle-prototype-path-sanitized>
+    question_category: Bundle
+    branch: bundle
 designBundle:
   root: <bundlePath>
   readme: <path to bundle README or index file>
@@ -791,7 +794,7 @@ When `bundleDetected=true` and the design-bundle researcher returned non-empty v
 (Render only when the bundle researcher returned a non-empty chosen-variant value.)
 <Variant label selected at claude.ai/design> — <one-line rationale>
 
-When `bundleDetected=true` and at least one of `businessSpec` or `designSpec` is non-null, include the following section between Design Decisions and Prototype:
+When `bundleDetected=true` and at least one of `businessSpec` or `designSpec` is non-null, include the following section between Design Decisions and Prototypes:
 
 ## Specs
 
@@ -809,20 +812,29 @@ Navigation index of spec files included in the design bundle. Top-level section 
 - § 2 — <heading text>
 - …
 
-When one or more variant prototype files were saved (Step 7 — Variant Persistence), include this section:
+When one or more variant prototype files were saved (Step 7 — Variant Persistence) OR when `bundleDetected=true` and `bundlePayload.prototypes[]` is non-empty, include this section:
 
-## Prototype
+## Prototypes
 
-Standalone prototype files saved during visual variant exploration:
+Standalone prototype files available as design reference:
 
-| File | Question Category | Branch |
-|------|------------------|--------|
-| `.aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html` | Aesthetic Direction | ux-only |
-| `.aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html` | Differentiation | ui-variation |
+| Path | Source | Question Category |
+|------|--------|------------------|
+| `.aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html` | variant | Aesthetic Direction |
+| `.aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html` | variant | Differentiation |
+| `<bundle-prototype-path>` | bundle | Bundle |
 
-Each file is a self-contained HTML page with Tailwind CDN inline. Open directly in a browser for a design reference without the variant switcher.
+Each variant file is a self-contained HTML page with Tailwind CDN inline. Open directly in a browser for a design reference without the variant switcher. Bundle prototype files are the HTML mockups from the Claude Design handoff bundle.
 
-If no variant prototypes were saved (e.g., no UI feature detected, variant label validation failed, or all visual questions were skipped), omit both the `prototype:` frontmatter key and the `## Prototype` section entirely.
+If neither variant prototypes were saved nor bundle prototypes are available, omit both the `prototype:` frontmatter key and the `## Prototypes` section entirely.
+
+**`prototype:` frontmatter rules:**
+- Emit the `prototype:` key only when the merged list (variant-derived + bundle-derived) is non-empty; omit otherwise.
+- Variant-derived entries use `question_category: <Aesthetic Direction | Differentiation>` and `branch: <ux-only | ui-variation>` (values from `prototype_entries` working memory set in Step 7).
+- Bundle-derived entries use `question_category: Bundle` and `branch: bundle`. Source: `bundlePayload.prototypes[]` when `bundleDetected=true` and the array is non-empty.
+- Merge into a single `prototype:` YAML list: variant entries first, then bundle entries. Deduplicate by path — first-occurrence wins when the same path would appear from both sources.
+- Path validation: for each bundle prototype path, resolve its absolute path and verify it starts with `AIMI_ROOT`. If it does not, log one warning line (`prototype <path> rejected — path outside project root`) and skip the entry; do not abort the document write.
+- Tag-breakout sanitization: before writing any path string to the frontmatter YAML, replace `</prototype` with `&lt;/prototype` and `<prototype` with `&lt;prototype`. This prevents malicious path values from breaking out of the tag context used by plan at parse time.
 
 **designBundle frontmatter rules:**
 - Emit the `designBundle:` key only when `bundleDetected=true`.
@@ -867,6 +879,7 @@ Before writing the document, verify **all** of the following criteria. If any cr
 - [ ] `### View Modes` subsection present under Design Decisions (when bundle researcher returned non-empty view-modes) — advisory/non-blocking
 - [ ] `### Layout Variation Chosen` subsection present under Design Decisions (when bundle researcher returned a chosen variant) — advisory/non-blocking
 - [ ] `## Specs` section present with section-heading index for each non-null spec (when `businessSpec` or `designSpec` is non-null) — advisory/non-blocking
+- [ ] `## Prototypes` section present when merged prototype list is non-empty (variant-derived OR bundle-derived) — advisory/non-blocking
 
 **On failure:** Use a conversational nudge for each unmet criterion:
 > "Before I save the document, I noticed [specific gap]. For example: 'we only explored one approach without noting why alternatives weren't considered.' Want to address that, or should I save as-is?"
