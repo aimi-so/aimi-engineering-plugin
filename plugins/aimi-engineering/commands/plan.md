@@ -349,6 +349,23 @@ directly when describing UI acceptance criteria, component structure, and visual
 
     The anchor is additive — it never overrides or removes other `implementation` fields. Stories without any F3 citation remain unchanged (backwards compatible).
 
+22. **Mock-sync AC routing to schema consumers** (F9): after rule 20 has injected mock-sync ACs, for each story that received a mock-sync AC in rule 20, execute the following routing pass before finalising stories:
+
+    **Step 1 — Extract field names**: from the schema-extending story's `title`, `description`, and `acceptanceCriteria` text, heuristically identify new property/field identifiers (camelCase or snake_case tokens that look like new schema field names — e.g., `prototypeAnchor`, `user_id`, `createdAt`).
+
+    **Step 2 — Scan other stories for literal field-name matches**: search all OTHER stories' `description` and `acceptanceCriteria` text for a literal match of any extracted field name (case-sensitive substring match). Collect every story that contains at least one match — these are **consumer stories**.
+
+    **Step 3 — CamelCase entity-name fuzzy fallback**: when step 2 yields zero consumer stories, derive the entity name from the schema-extending story's title (the CamelCase identifier — e.g., `UserProfile`, `DesignBundle`). Split CamelCase into individual word parts (e.g., `["User", "Profile"]`). Search all OTHER stories' `description` and `acceptanceCriteria` for each word part independently (case-insensitive). Any story matching at least one word part becomes a consumer story.
+
+    **Step 4 — Move or keep the mock-sync AC**:
+    - **At least one consumer identified**: copy the mock-sync AC onto each consumer story (deduplicate: skip if that consumer already has an AC matching `/[Mm]ock.*updated|mock.*sync/i`). Then **remove** the mock-sync AC from the schema-extending story (moved, not copied).
+    - **No consumer identified after both steps 2 and 3**: leave the mock-sync AC on the schema-extending story unchanged (preserves rule 20 / F5 baseline behaviour).
+
+    **Constraints**:
+    - Rule 22 never creates new stories — it only routes ACs between existing stories.
+    - Multi-story independence from rule 20 is preserved: each schema-extending story is routed independently.
+    - When multiple schema-extending stories exist, each is processed in order; a consumer story may accumulate mock-sync ACs from more than one schema story (each deduplication check is per-story).
+
 ### `dependsOn` Inference Rules
 
 - **Same layer, independent concerns** (different tables, different pages, different routes) → no dependency between them (`dependsOn: []`)
