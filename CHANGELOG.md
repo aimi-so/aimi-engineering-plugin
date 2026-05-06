@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.74.0] - 2026-05-06
+
+### Added
+
+- **`researchPaths` frontmatter in brainstorm output (US-001):** `/aimi:brainstorm` now records the absolute paths of every research file it produced (`*-codebase.md`, `*-best-practices.md`, etc.) in the brainstorm document's YAML frontmatter so downstream commands can reuse them.
+- **`paths` scope parameter on aimi-codebase-researcher (US-003):** The codebase researcher now accepts an optional `paths:` parameter that scopes its `Glob`/`Grep` searches to the listed directories or files instead of globbing the whole repo.
+- **Path-hint extraction in brainstorm and plan (US-004):** Both commands now extract path-like tokens from the feature description (`$ARGUMENTS`) and forward them to the codebase researcher as the `paths:` scope when present.
+
+### Changed
+
+- **`/aimi:plan` reuses brainstorm research (US-002):** When a matched brainstorm exposes `researchPaths` and the files exist on disk with mtime ≤14 days, plan skips spawning `aimi-codebase-researcher` and `aimi-best-practices-researcher` and reads the existing files instead. Phase 5 reports `Research reused: [N] file(s) from brainstorm` when reuse occurs. Legacy brainstorms without `researchPaths` are unaffected.
+- **Default `researchDepth` lowered from `standard` to `quick` (US-005):** Across `aimi-codebase-researcher`, `aimi-learnings-researcher`, `aimi-best-practices-researcher`, and `aimi-framework-docs-researcher`. Reduces default summary cap and shrinks per-research token cost when callers do not specify a depth.
+
 ## [1.73.1] - 2026-05-05
 
 ### Fixed
