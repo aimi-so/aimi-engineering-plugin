@@ -1113,6 +1113,203 @@ cmd_detect_default_branch() {
   echo "$branch"
 }
 
+# Detect a Claude Design handoff bundle under a given root (defaults to CWD).
+# Scans depth-1 subdirectories for a README.md containing the handoff marker.
+# Returns JSON object when found, "null" when not found.
+# With --all, returns a JSON array sorted newest-first (by directory mtime).
+cmd_detect_design_bundle() {
+  local root="" all=false json=false
+
+  # Parse flags
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --root) shift; root="${1:-}" ;;
+      --all)  all=true ;;
+      --json) json=true ;;
+      *) echo "Unknown flag: $1" >&2; exit 1 ;;
+    esac
+    shift
+  done
+
+  # Resolve scan root (default: CWD)
+  local scan_root
+  if [ -n "$root" ]; then
+    # For relative paths, validate they stay within project boundary (prevents ../.. traversal).
+    # Absolute paths are allowed as scan roots since this is a read-only operation.
+    case "$root" in
+      /*) : ;;  # Absolute path — skip boundary check (read-only scan)
+      *)  validate_path_in_project "$root" ;;
+    esac
+    scan_root="$root"
+  else
+    scan_root="$(pwd)"
+  fi
+
+  if [ ! -d "$scan_root" ]; then
+    echo "Error: Scan root does not exist: $scan_root" >&2
+    exit 1
+  fi
+
+  # The handoff marker (fixed string, case-sensitive)
+  local HANDOFF_MARKER='This is a **handoff bundle** from Claude Design (claude.ai/design).'
+
+  # Collect matching bundles: each entry is "<mtime> <abspath>"
+  local found_paths=()
+
+  # Pre-check: scan_root may itself be a bundle directory. When its README has
+  # the handoff marker, treat it as a single bundle and skip the children scan.
+  local root_normalized="${scan_root%/}/"
+  local root_readme="${root_normalized}README.md"
+  if [ -f "$root_readme" ] && grep -qF "$HANDOFF_MARKER" "$root_readme"; then
+    local root_mtime
+    if command -v stat >/dev/null 2>&1; then
+      root_mtime=$(stat -c '%Y' "$root_normalized" 2>/dev/null || stat -f '%m' "$root_normalized" 2>/dev/null || echo 0)
+    else
+      root_mtime=0
+    fi
+    found_paths+=("${root_mtime} ${root_normalized}")
+  else
+    for subdir in "${scan_root}"/*/; do
+      [ -d "$subdir" ] || continue
+
+      local base
+      base=$(basename "$subdir")
+
+      # Skip noise directories
+      case "$base" in
+        .worktrees|node_modules|.aimi|vendor) continue ;;
+      esac
+
+      local readme="${subdir}README.md"
+      [ -f "$readme" ] || continue
+
+      # Fixed-string, case-sensitive marker check
+      grep -qF "$HANDOFF_MARKER" "$readme" || continue
+
+      # Get directory mtime (seconds since epoch) — stat is not POSIX-portable;
+      # use date-based approach via ls for mtime sorting, falling back to 0
+      local mtime
+      if command -v stat >/dev/null 2>&1; then
+        # GNU stat (Linux) or BSD stat (macOS)
+        mtime=$(stat -c '%Y' "$subdir" 2>/dev/null || stat -f '%m' "$subdir" 2>/dev/null || echo 0)
+      else
+        mtime=0
+      fi
+
+      found_paths+=("${mtime} ${subdir}")
+    done
+  fi
+
+  # No bundles found
+  if [ ${#found_paths[@]} -eq 0 ]; then
+    echo "null"
+    return 0
+  fi
+
+  # Sort found_paths by mtime descending (newest first)
+  local sorted_paths
+  sorted_paths=$(printf '%s\n' "${found_paths[@]}" | sort -rn)
+
+  # Build JSON for a single bundle directory
+  _build_bundle_json() {
+    local subdir="$1"
+    local base
+    base=$(basename "$subdir")
+
+    local readme="${subdir}README.md"
+    local readme_rel="${base}/README.md"
+
+    # chats[]: <bundle>/chats/*.md
+    local chats_arr=()
+    for f in "${subdir}chats/"*.md; do
+      [ -f "$f" ] && chats_arr+=("${base}/chats/$(basename "$f")")
+    done
+    local chats_json
+    if [ ${#chats_arr[@]} -gt 0 ]; then
+      chats_json=$(printf '%s\n' "${chats_arr[@]}" | jq -R . | jq -s .)
+    else
+      chats_json="[]"
+    fi
+
+    # prototypes[]: <bundle>/project/**/*.html (recursive)
+    local protos_arr=()
+    if [ -d "${subdir}project" ]; then
+      while IFS= read -r f; do
+        [ -f "$f" ] && protos_arr+=("${base}/project/${f#${subdir}project/}")
+      done < <(find "${subdir}project" -name "*.html" -type f 2>/dev/null)
+    fi
+    local protos_json
+    if [ ${#protos_arr[@]} -gt 0 ]; then
+      protos_json=$(printf '%s\n' "${protos_arr[@]}" | jq -R . | jq -s .)
+    else
+      protos_json="[]"
+    fi
+
+    # hasReact / hasTailwind: grep heuristics over prototype HTML and adjacent CSS
+    local has_react=false has_tailwind=false
+    if [ ${#protos_arr[@]} -gt 0 ]; then
+      # Search the actual HTML files (absolute paths needed for grep)
+      local abs_protos=()
+      if [ -d "${subdir}project" ]; then
+        while IFS= read -r f; do
+          [ -f "$f" ] && abs_protos+=("$f")
+        done < <(find "${subdir}project" -name "*.html" -type f 2>/dev/null)
+      fi
+      if [ ${#abs_protos[@]} -gt 0 ]; then
+        if grep -qliF 'react' "${abs_protos[@]}" 2>/dev/null; then
+          has_react=true
+        fi
+        if grep -qliF 'tailwind' "${abs_protos[@]}" 2>/dev/null; then
+          has_tailwind=true
+        fi
+      fi
+    fi
+
+    # businessSpec / designSpec: direct filename match
+    local business_spec="" design_spec=""
+    [ -f "${subdir}project/BusinessSpec.md" ] && business_spec="${base}/project/BusinessSpec.md"
+    [ -f "${subdir}project/DesignSpec.md"   ] && design_spec="${base}/project/DesignSpec.md"
+
+    jq -n \
+      --arg   path         "$base" \
+      --arg   readme       "$readme_rel" \
+      --argjson chats       "$chats_json" \
+      --argjson prototypes  "$protos_json" \
+      --argjson hasReact    "$has_react" \
+      --argjson hasTailwind "$has_tailwind" \
+      --arg   businessSpec "$business_spec" \
+      --arg   designSpec   "$design_spec" \
+      '{
+        path:         $path,
+        readme:       $readme,
+        chats:        $chats,
+        prototypes:   $prototypes,
+        hasReact:     $hasReact,
+        hasTailwind:  $hasTailwind,
+        businessSpec: (if $businessSpec == "" then null else $businessSpec end),
+        designSpec:   (if $designSpec   == "" then null else $designSpec   end)
+      }'
+  }
+
+  if [ "$all" = true ]; then
+    # Return all bundles as a JSON array, sorted newest-first
+    local entries_json="[]"
+    while IFS= read -r entry; do
+      local subdir="${entry#* }"
+      local bundle_json
+      bundle_json=$(_build_bundle_json "$subdir")
+      entries_json=$(echo "$entries_json" | jq --argjson b "$bundle_json" '. + [$b]')
+    done <<< "$sorted_paths"
+    echo "$entries_json"
+  else
+    # Return only the newest bundle
+    local newest_entry
+    newest_entry=$(echo "$sorted_paths" | head -1)
+    local newest_subdir="${newest_entry#* }"
+    _build_bundle_json "$newest_subdir"
+  fi
+}
+
 # Resolve which interactivity mode applies to the current shell.
 # Prints exactly one of: picker, agent
 #   agent  - AIMI_AGENT_MODE=true, CI=true, or stdin is not a TTY
@@ -1953,6 +2150,17 @@ COMMANDS:
     cleanup-versions          Remove old cached plugin versions, keep latest only
     list-archivable           List task files where all stories are completed/skipped (JSON array)
     archive-task <path>       Move completed task file (and linked brainstorm) to .aimi/archive/
+    detect-design-bundle [--root <path>] [--all] [--json]
+                              Detect a Claude Design handoff bundle. --root may
+                              point at a bundle directory directly, or at a
+                              parent dir whose immediate children include bundle
+                              dirs (depth-1 scan in that case). Returns JSON
+                              {path,readme,chats[],prototypes[],hasReact,
+                              hasTailwind,businessSpec,designSpec} or null when
+                              no bundle found.
+                              --root   Scan <path> (bundle or parent) instead of CWD
+                              --all    Return all matching bundles as JSON array
+                              --json   Alias; output is always JSON
     help                      Show this help message
 
 ENVIRONMENT:
@@ -2023,6 +2231,16 @@ main() {
     prime-cache) cmd_prime_cache; return ;;
   esac
 
+  # Universal --help/-h: any subcommand with --help or -h anywhere in its args
+  # short-circuits to the top-level help doc. Runs before find_aimi_root so
+  # help works outside .aimi/ projects, and before any side-effect subcommand
+  # mutates state.
+  for arg in "$@"; do
+    case "$arg" in
+      --help|-h) cmd_help; return ;;
+    esac
+  done
+
   find_aimi_root
   check_jq
 
@@ -2061,6 +2279,7 @@ main() {
     prime-cache)       cmd_prime_cache ;;
     list-archivable)   cmd_list_archivable ;;
     archive-task)      cmd_archive_task "${2:-}" ;;
+    detect-design-bundle) shift; cmd_detect_design_bundle "$@" ;;
     help|--help|-h)    cmd_help ;;
     *)
       echo "Unknown command: $1" >&2

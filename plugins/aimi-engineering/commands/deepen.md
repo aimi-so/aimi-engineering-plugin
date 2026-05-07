@@ -124,6 +124,71 @@ Populate the `notes` field with useful context:
 - Patterns to follow
 - Gotchas or warnings
 
+### 4e: Spec Cross-Reference
+
+This phase activates only when `metadata.designBundle.businessSpec` or `metadata.designBundle.designSpec` is present in the loaded tasks.json. Read both fields once, before the per-story loop:
+
+```bash
+biz_spec=$(jq -r '.metadata.designBundle.businessSpec // empty' <tasks-file-path>)
+design_spec=$(jq -r '.metadata.designBundle.designSpec // empty' <tasks-file-path>)
+```
+
+If both are empty (no bundle, or bundle without specs), skip Step 4e entirely — no edits, no warnings.
+
+**Cross-reference is purely additive:** never remove existing acceptance criteria, never reorder the story array, never modify `dependsOn` or `wave`.
+
+#### BusinessSpec cross-reference (when `biz_spec` is non-empty)
+
+Read the BusinessSpec file at the path stored in `biz_spec`.
+
+Parse section headings using the patterns:
+- Top-level numbered sections: `^## (\d+)\.` (e.g., `## 2. Screens`, `## 3. Business Rules`, `## 9. Acceptance Criteria`)
+- Sub-numbered sections: `^### (\d+)\.(\d+)` (e.g., `### 9.1`, `### 3.1`)
+
+**Missing acceptance criteria (§ 9):**
+
+For each pending story whose title matches a screen name found in BusinessSpec § 2:
+1. Locate the corresponding acceptance criteria block in BusinessSpec § 9.
+2. For each criterion in that block, check whether it is already present in the story's `acceptanceCriteria` array by matching either:
+   - The rule-ID prefix (`RN-NN` form, e.g., `RN-01`, `RN-04`), or
+   - Verbatim criterion text (case-insensitive substring match).
+3. Add any criterion not already covered, verbatim with rule IDs preserved. Do not duplicate criteria already present.
+
+**Rule-ID annotation (§ 3):**
+
+For each pending story, scan all items in `acceptanceCriteria` for rule-ID patterns (`RN-\d+`) that appear in BusinessSpec § 3 (Business Rules). Collect the matched IDs (deduplicated, sorted). If any are found, append to the story's `notes` field:
+
+```
+Touches rules: RN-01, RN-04
+```
+
+Append to (do not overwrite) any existing `notes` content. If `notes` is absent, create it with this annotation. If no rule IDs are matched, leave `notes` unchanged.
+
+#### DesignSpec cross-reference (when `design_spec` is non-empty)
+
+Read the DesignSpec file at the path stored in `design_spec`.
+
+**Component-mapping conflict detection (§ 6):**
+
+Parse DesignSpec § 6 (Mapeamento para `@/components/ui`) — this section contains a table mapping component names to existing project component paths.
+
+For each pending story whose `implementation.files` references a component path:
+1. Check whether any referenced component is listed in the § 6 mapping table as one that already exists in the project.
+2. If the story would create a component that the spec maps to an existing project component, surface the conflict as an `Open Questions` entry appended to the story's `notes`:
+
+```
+**Open Questions:** Component `<ComponentName>` conflicts with existing project component mapped in DesignSpec § 6 (`<existing-path>`). Reuse the existing component or override the mapping.
+```
+
+Append to (do not overwrite) any existing `notes` content.
+
+**Prop-type signature enforcement (§ 2.2):**
+
+For each pending component-creation story whose title matches an entry in DesignSpec § 2.2:
+1. Locate the prop-type signature defined for that component in § 2.2.
+2. Check whether the verbatim signature is already cited in the story's `acceptanceCriteria`.
+3. If absent, add it as a new criterion verbatim. Do not modify criteria that already include the signature.
+
 ## Step 4.5: Append `researchPaths` to Metadata
 
 Collect the paths of every research file that was successfully written in Step 3 (one per pending story, using the `YYYY-MM-DD-<TOPIC_SLUG>-<RUN_TS>-<story.id>-codebase.md` pattern). Append them to `metadata.researchPaths[]` in the tasks.json so `$AIMI_CLI archive-task` can clean them up when the tasks file is archived.
@@ -143,7 +208,27 @@ Write the enriched tasks.json back to the **same file path**. Preserve:
 
 Only pending stories should have updated `acceptanceCriteria`, `notes`, and potentially be split.
 
+**Never modify, remove, or reorder `dependsOn` or `wave` on any story.**
+
 Validate the JSON is well-formed before writing.
+
+## Step 5.5: Post-Enrichment Validation
+
+After writing the enriched tasks.json, run validation:
+
+```bash
+$AIMI_CLI init-session --file <tasks-file-path>
+$AIMI_CLI validate-deps
+$AIMI_CLI validate-stories
+```
+
+**If any validation fails (non-zero exit):**
+1. Read the error output to identify the issues.
+2. Fix the offending stories, `dependsOn` references, dependency cycles, or malformed fields.
+3. Re-write the tasks.json using the Write tool.
+4. Re-run all validations until they pass.
+
+Do **not** proceed to the report step until all validations succeed.
 
 ## Step 6: Aimi-Branded Report
 

@@ -143,7 +143,7 @@ Before returning results to the caller, persist full findings to a research file
    | standard (default) | ~800 words |
    | deep | ~1500 words |
 
-   When `researchDepth` is not provided, default to **standard**.
+   When `researchDepth` is not provided, default to **quick**.
 
    The returned summary must include:
    - Key findings (condensed)

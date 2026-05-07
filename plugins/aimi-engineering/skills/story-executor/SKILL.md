@@ -52,6 +52,46 @@ The agent spawns fresh with no memory of previous work. If the story is too big,
 
 ---
 
+## Design Bundle Fidelity Guidance
+
+Fires only when the inlined story payload includes `metadata.designBundle`. The caller (execute.md) injects the `[DESIGN_BUNDLE_CONTEXT]` XML block; the executor does not test for `designBundle` itself.
+
+### Spec-aware read order
+
+Read and apply in this order — earlier entries are more authoritative:
+
+1. `designBundle.businessSpec` (if non-null) — authoritative requirements; all business rules and acceptance criteria here override assumptions.
+2. `designBundle.designSpec` (if non-null) — authoritative design; tokens, components, screens, and a11y rules defined here override prototype visuals.
+3. `designBundle.chats[]` — context only; use for intent and rationale, do NOT let chat content override specs.
+4. `prototypePaths[]` — pixel reference only; match the visual output, translate idiomatically to the project stack.
+5. Project's existing components per `DesignSpec § 6` mapping — reuse before creating.
+
+### Translate-not-copy rule
+
+Do NOT copy CDN React (`<script src="...react...cdn...">`), Babel-standalone (`<script src="...babel...">`), Alpine.js attributes (`x-data`, `x-show`, `@click`), or inline `<style>` blocks from prototype HTML into production code.
+Translate prototype DOM structure to the project's stack idiom (React/Vue/native) and use the project's design-token system — do NOT reproduce inline styles.
+
+### Match-visual-output rule
+
+Match the visual output of the prototype — colors, spacing, layout, typography — but do NOT mirror prototype internal structure when it conflicts with the project's component conventions.
+When `DesignSpec § 6` (Mapeamento para `@/components/ui`) maps a desired component to an existing project component, use the existing component and do not create a duplicate.
+
+### designTokens passthrough rule
+
+When `metadata.designTokens` is present, use those token values directly — do NOT re-parse `DesignSpec § 1` or extract values from prototype CSS.
+
+### Rule-ID citation rule
+
+When the implementation enforces or relies on a business rule from `BusinessSpec § 3`, cite the rule ID (e.g., `RN-04`) in the commit message and PR description.
+When the implementation satisfies a criterion from `BusinessSpec § 9`, cite the criterion ID in the same way.
+
+### Component-mapping rule
+
+Before creating a new component, check `metadata.designBundle.designSpec` (or `designBundle` if spec absent).
+If `DesignSpec § 6` maps the desired component to an existing project component, reuse the existing one — do NOT create a duplicate.
+
+---
+
 ## Prompt Template
 
 > This is the canonical worker prompt template. execute.md and next.md should reference this skill rather than duplicating the prompt inline.
@@ -245,11 +285,19 @@ Visual verification is **advisory** — failures do NOT block the story commit.
 
 <prototype_context>
 
-Prototype HTML variants and optional tokens JSON loaded from `metadata.prototypePaths[]`. Each `.html` file is wrapped in `<prototype_html label="X" path="...">` tags (labels A, B, C…); each `.json` sidecar is wrapped in `<prototype_tokens path="...">` tags. Reference these variants when implementing UI stories — prefer the labelled variant that best matches the story's design intent. Omit this section when empty.
+Prototype HTML variants and optional tokens JSON loaded from `metadata.prototypePaths[]`. Each `.html` file is wrapped in `<prototype_html label="X" path="...">` tags (labels A, B, C…); each `.json` sidecar is wrapped in `<prototype_tokens path="...">` tags. Reference these variants when implementing UI stories — prefer the labelled variant that best matches the story's design intent. When a story has a single clearly relevant prototype, label A is pinned to that prototype so it receives highest attention via load order. Omit this section when empty.
 
 [PROTOTYPE_CONTEXT]
 
 </prototype_context>
+
+<design_bundle_context>
+
+Design bundle fidelity guidance — spec-aware read order, translate-not-copy, match-visual-output, designTokens passthrough, component-mapping, and rule-ID citation rules (see `## Design Bundle Fidelity Guidance`). Omit when `metadata.designBundle` is absent.
+
+[DESIGN_BUNDLE_CONTEXT]
+
+</design_bundle_context>
 
 <tools>
 
@@ -487,10 +535,16 @@ Visual verification is **advisory** — failures do NOT block the story commit.
 </design_context>
 
 <prototype_context>
-Prototype HTML variants and optional tokens JSON from `metadata.prototypePaths[]`. `.html` files wrapped as `<prototype_html label="X" path="...">`, `.json` sidecars as `<prototype_tokens path="...">`. Use the best-matching variant for UI implementation. Omit when empty.
+Prototype HTML variants and optional tokens JSON from `metadata.prototypePaths[]`. `.html` files wrapped as `<prototype_html label="X" path="...">`, `.json` sidecars as `<prototype_tokens path="...">`. Use the best-matching variant for UI implementation. Label A is pinned to the story's most-relevant prototype when one is identified via `implementation.prototypeAnchor` or AC citation. Omit when empty.
 
 [PROTOTYPE_CONTEXT]
 </prototype_context>
+
+<design_bundle_context>
+Design bundle fidelity: spec-aware read order (businessSpec → designSpec → chats → prototypes → existing components), translate-not-copy (no CDN React/Babel/Alpine/inline styles), match-visual-output, designTokens passthrough, component-mapping, rule-ID citation. Omit when `metadata.designBundle` absent.
+
+[DESIGN_BUNDLE_CONTEXT]
+</design_bundle_context>
 
 <tools>
 Use standard tools: Read, Write, Edit, Bash, Grep, Glob. Do NOT invoke these via the Skill tool.

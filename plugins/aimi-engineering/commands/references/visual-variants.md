@@ -217,6 +217,10 @@ For each token family, the agent probes sources in this order and stops at the *
 
 6. **Chakra `extendTheme` calls** — Search for files importing `extendTheme` from `@chakra-ui/react` or `@chakra-ui/system`. Read those files and extract `colors`, `fonts`, `radii`, and `space` keys from the argument object.
 
+7. **`<bundle>/project/**/*.css`** *(only when `bundleDetected = true`)* — Glob all CSS files under the Claude Design bundle's `project/` subtree. Scan each file for `:root` blocks and extract custom property declarations matching `--[a-z][a-z0-9-]*:\s*[^;]+;` (same regex as Probe #3). Classify tokens by name prefix: `--color-*` → colors; `--font-*` → fonts; `--radius-*` → radii; `--spacing-*` or `--space-*` → spacing; `--shadow-*` → shadows; `--transition-*`, `--ease-*`, or `--duration-*` → transitions. When multiple CSS files match, later files in glob order win for conflicting property names.
+
+8. **Inline `<style>` blocks in `<bundle>/project/**/*.html`** *(only when `bundleDetected = true`)* — Glob all HTML files under the bundle's `project/` subtree. For each file, extract the text content of every `<style>` tag and scan for `:root` blocks containing custom property declarations matching the same regex (`--[a-z][a-z0-9-]*:\s*[^;]+;`). Apply the same prefix-based classification as Probe #7. Inline styles declared directly on the `:root` element via a `style="..."` attribute are also accepted. When multiple HTML files match, later files in glob order win for conflicting property names.
+
 ### Per-Family Resolution
 
 Token families resolve independently:
@@ -236,7 +240,7 @@ Once a family is resolved from a source, that source wins for that family. The a
 
 ### Fallback Behavior
 
-If no source yields tokens for a given family after exhausting all six sources, the agent uses **generic Tailwind Play CDN defaults** for that family (the built-in Tailwind color palette, `font-sans`/`font-mono`, standard radius scale, standard spacing scale, standard shadow scale, standard transition durations/easings, standard breakpoints; no dark-mode theming).
+If no source yields tokens for a given family after exhausting all probes (six sources when no bundle is present; eight when `bundleDetected = true`), the agent uses **generic Tailwind Play CDN defaults** for that family (the built-in Tailwind color palette, `font-sans`/`font-mono`, standard radius scale, standard spacing scale, standard shadow scale, standard transition durations/easings, standard breakpoints; no dark-mode theming).
 
 When fallback is used, the brainstorm document MUST include a warning line immediately after the variant header, formatted as:
 

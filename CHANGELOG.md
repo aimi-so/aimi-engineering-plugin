@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.74.0] - 2026-05-06
+
+### Added
+
+- **`researchPaths` frontmatter in brainstorm output (US-001):** `/aimi:brainstorm` now records the absolute paths of every research file it produced (`*-codebase.md`, `*-best-practices.md`, etc.) in the brainstorm document's YAML frontmatter so downstream commands can reuse them.
+- **`paths` scope parameter on aimi-codebase-researcher (US-003):** The codebase researcher now accepts an optional `paths:` parameter that scopes its `Glob`/`Grep` searches to the listed directories or files instead of globbing the whole repo.
+- **Path-hint extraction in brainstorm and plan (US-004):** Both commands now extract path-like tokens from the feature description (`$ARGUMENTS`) and forward them to the codebase researcher as the `paths:` scope when present.
+
+### Changed
+
+- **`/aimi:plan` reuses brainstorm research (US-002):** When a matched brainstorm exposes `researchPaths` and the files exist on disk with mtime ≤14 days, plan skips spawning `aimi-codebase-researcher` and `aimi-best-practices-researcher` and reads the existing files instead. Phase 5 reports `Research reused: [N] file(s) from brainstorm` when reuse occurs. Legacy brainstorms without `researchPaths` are unaffected.
+- **Default `researchDepth` lowered from `standard` to `quick` (US-005):** Across `aimi-codebase-researcher`, `aimi-learnings-researcher`, `aimi-best-practices-researcher`, and `aimi-framework-docs-researcher`. Reduces default summary cap and shrinks per-research token cost when callers do not specify a depth.
+
+## [1.73.1] - 2026-05-05
+
+### Fixed
+
+- **`aimi-cli (detect-design-bundle):`** `--root <path>` now also matches when `<path>` itself is a bundle directory, not only when it's a parent containing bundles. Previously returned `null` when callers pointed `--root` at the bundle itself.
+- **`aimi-cli (help):`** `<subcommand> --help` and `<subcommand> -h` now print the full help doc instead of returning "Unknown flag" and exit 1 from strict subcommand parsers (`init-session`, `detect-design-bundle`, `setup-branch`, `gate-pass`) or being misinterpreted as positional input by other subcommands.
+
+## [1.73.0] - 2026-05-05
+
+### Fixed
+
+- **`commands (US-001):`** Plan and brainstorm now read the `prototypes` key from design-bundle metadata and pass `--root` instead of the non-existent `--bundle` flag, so prototype HTML actually loads.
+- **`commands (US-008):`** Executor's PROTOTYPE_CONTEXT builder validates `prototypeAnchor` and AC-cited paths against AIMI_ROOT before loading, preventing path-traversal escapes.
+
+### Added
+
+- **`brainstorm (US-002):`** Brainstorm emits bundle-discovered prototype paths in the frontmatter `prototype:` key and a `## Prototypes` body section with Path/Source/Question Category columns; plan parses both.
+- **`plan (US-003):`** Phase 3 rule 19 requires every visual-layout AC to cite a prototype region using `(prototype: path §heading)` or line-range fallback `(prototype: path:Lstart-Lend)`. Plan canonicalizes prototype HTML for layout; spec for tokens, types, and states.
+- **`design-bundle-researcher (US-004):`** New §16.5 `Spec-Prototype Coverage Gaps` section surfaces regions present in prototype HTML but missing or partial in DesignSpec.md, with high-confidence-missing markers for Open Questions promotion.
+- **`plan (US-005):`** Phase 3 rule 20 auto-injects a mock-sync AC onto stories whose `implementation.files` match schema/types/zod path globs, with idempotency guard for re-plan and graceful degradation when no mocks/ directory exists.
+- **`design-reviewer (US-006):`** `aimi-design-implementation-reviewer` now accepts polymorphic prototype source (Figma URL, prototype HTML path, or screenshot) with advisory degradation when no source is provided.
+- **`review (US-007):`** `/aimi:review` automatically invokes the design-implementation-reviewer once per visual story when `metadata.prototypePaths` is non-empty, with graceful skip when `agent-browser` is not installed.
+- **`plan,execute,executor (US-008):`** Plan emits `implementation.prototypeAnchor` for visual stories citing a single prototype; executor pins that anchor as label A in PROTOTYPE_CONTEXT, falling back to AC-parse when the field is absent.
+- **`plan (US-009):`** Phase 3 rule 22 routes the rule-20 mock-sync AC onto consumer stories that mention the new field by name (with CamelCase entity-name fuzzy fallback), moving rather than copying when a consumer matches.
+
+## [1.72.0] - 2026-05-05
+
+### Added
+
+- **`detect-design-bundle` CLI subcommand (US-001):** New `aimi-cli.sh` subcommand that detects whether a project contains a BusinessSpec and/or DesignSpec file, emitting structured JSON output consumed by brainstorm, plan, and story-executor workflows.
+- **test-aimi-cli.sh bundle detection tests (US-002):** Test coverage for `detect-design-bundle` — presence, absence, and partial-match cases added to the CLI test suite.
+- **`aimi-design-bundle-researcher` agent (US-003):** New 16-section structured passthrough agent that reads BusinessSpec and DesignSpec files and emits a compressed research summary for downstream brainstorm and plan consumers.
+- **brainstorm bundle-aware research consolidation (US-004):** Brainstorm now invokes `aimi-design-bundle-researcher` when a bundle is detected, merging spec insights into the question-selection and variant-axis stages before surfacing them to the user.
+- **bundle-aware token probe in visual-variants.md (US-005):** `visual-variants.md` reference now includes a token probe step that reads `metadata.designTokens` when a design bundle is present, feeding spec-extracted tokens into the variant axis decision tree.
+- **brainstorm short-circuits visual variants when bundle present (US-006):** When a DesignSpec is detected, brainstorm skips the token-extraction fallback path and uses spec-defined tokens directly, preventing redundant extraction work.
+- **spec-aware brainstorm document (US-007):** Brainstorm output document gains Personas, View Modes, Layout, and Specs sections populated from bundle research when a BusinessSpec or DesignSpec is present.
+- **plan ingests bundle into tasks.json `metadata.designBundle` (US-008):** `/aimi:plan` populates `metadata.designBundle` and `metadata.designTokens` fields in the generated `tasks.json` when a design bundle is detected at planning time.
+- **story-executor design-bundle fidelity guidance (US-009):** Story-executor reads `metadata.designBundle` and `metadata.designTokens` from `tasks.json` and surfaces spec-aware read order with rule-ID citation in its implementation guidance.
+- **`/aimi:deepen` spec cross-reference (US-011):** `/aimi:deepen` now cross-references BusinessSpec and DesignSpec when enriching story acceptance criteria, citing spec rule IDs in the enriched output.
+
 ## [1.71.0] - 2026-04-29
 
 ### Added
