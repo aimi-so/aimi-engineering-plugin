@@ -134,7 +134,7 @@ Standalone brainstorm workflow with codebase research and Ralph-style batched mu
 
 #### `/aimi:plan`
 
-Generates `.aimi/tasks/YYYY-MM-DD-[feature]-tasks.json` directly from a feature description. Runs a full pipeline: brainstorm detection, parallel research (codebase + learnings), optional external research, spec-flow analysis, and story decomposition.
+Generates `.aimi/tasks/YYYY-MM-DD-[feature]-tasks.json` directly from a feature description. Runs a full pipeline: brainstorm detection, parallel research (codebase + learnings), optional external research, spec-flow analysis, and story decomposition. Stories are decomposed as vertical slices — each delivers user-visible value end-to-end across all layers rather than being split by horizontal layer boundaries.
 
 ```bash
 /aimi:plan Add user registration flow

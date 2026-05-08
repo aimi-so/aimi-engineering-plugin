@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.75.0] - 2026-05-08
+
+### Added
+
+- **Optional `tasks[]` free-form sub-step checklist on userStories (US-001):** Stories may now include a `tasks` array (max 20 items, each ≤600 chars) of free-form sub-step strings displayed to executors as a checklist. The field is optional and additive; existing tasks.json files are unaffected.
+- **Tasks-file schema bumped from 3.2 to 3.3 (US-002):** `schemaVersion` advances to `"3.3"`. The bump is additive — `validate-stories` accepts the new `tasks[]` field and enforces string elements.
+
+### Changed
+
+- **`/aimi:plan` now produces vertical-slice deliverables instead of layer-atomic stories (US-003):** Story decomposition targets end-to-end feature slices (each story delivers user-visible value across all layers) rather than horizontal layer boundaries. Decomposition guidance in `task-planner` updated accordingly.
+
 ## [1.74.0] - 2026-05-06
 
 ### Added

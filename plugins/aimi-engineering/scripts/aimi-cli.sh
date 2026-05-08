@@ -858,7 +858,8 @@ cmd_validate_stories() {
   local tasks_file
   tasks_file=$(get_tasks_file)
 
-  jq '
+  local result
+  result=$(jq '
     .userStories as $stories |
     [
       $stories[] |
@@ -902,7 +903,15 @@ cmd_validate_stories() {
     if length == 0 then {valid: true, errors: []}
     else {valid: false, errors: .}
     end
-  ' "$tasks_file"
+  ' "$tasks_file")
+  local jq_exit=$?
+  echo "$result"
+  [ $jq_exit -ne 0 ] && return $jq_exit
+  # Return exit 1 when validation found errors
+  if echo "$result" | jq -e '.valid == false' > /dev/null 2>&1; then
+    return 1
+  fi
+  return 0
 }
 
 # Validate all story IDs in the tasks file against the US-NNN format
