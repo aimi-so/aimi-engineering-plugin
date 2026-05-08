@@ -4,7 +4,10 @@ Apply before writing tasks.json.
 
 ## Sizing and Content
 - [ ] Each story completable in one agent iteration
-- [ ] Stories ordered by dependency (schema → backend → UI)
+- [ ] Each story is a vertical slice: bundles schema + backend + UI to deliver one user-observable capability (no horizontal layer-only stories)
+- [ ] Stories ordered by capability dependency (capabilities that unlock other capabilities come first)
+- [ ] Every story has at least one user-observable, end-to-end acceptance criterion listed first
+- [ ] No orphan UI: all UI components are wired to real backend actions (no storybook-only or dev-preview-route verification)
 - [ ] Every story has "Typecheck passes" as criterion
 - [ ] Acceptance criteria are verifiable (not vague)
 - [ ] branchName is valid (alphanumeric, hyphens, slashes)

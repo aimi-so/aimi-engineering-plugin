@@ -277,11 +277,11 @@ See `references/story-decomposition.md` for detailed rules.
 Using the consolidated research and spec-flow output:
 
 1. Extract all requirements (explicit + spec-flow identified)
-2. Group by layer (schema → backend → UI → aggregation)
+2. Group by user-facing capability (vertical slices — each story bundles schema + backend + UI for one complete outcome; no horizontal layer-only stories)
 3. Assign IDs in `US-NNN` zero-padded format (`US-001`, `US-002`, ...) — never `US-1`, `story-1`, `S1`, or any other format
 4. Apply sizing rules (one context window per story)
-5. Assign priority numbers by dependency order
-6. Generate verifiable acceptance criteria per story
+5. Assign priority numbers by capability dependency order (capabilities that unlock others come first)
+6. Generate verifiable acceptance criteria per story; list at least one user-observable, end-to-end outcome first
 7. **Assign `project` field** (multi-repo only)
 8. **Compute `wave` numbers** from the `dependsOn` graph (see below)
 9. **Populate `implementation` object** when research provides sufficient context (see below)

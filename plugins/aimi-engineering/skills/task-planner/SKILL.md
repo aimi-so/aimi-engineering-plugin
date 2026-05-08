@@ -151,9 +151,9 @@ Incorporate identified gaps as acceptance criteria or story notes.
 ### Phase 3: Story Decomposition
 
 1. Extract requirements from research + spec-flow output
-2. Group by layer (schema → backend → UI → aggregation)
+2. **Group by user-facing capability (vertical slices).** Each story bundles all layers (schema + backend + UI) needed to deliver one complete, user-observable outcome. Do NOT create horizontal layer-only stories. If a slice exceeds ~10 files or ~4 architectural layers, add to story notes: `Large slice ({n} files across {k} layers). Consider splitting if there's a natural seam, otherwise proceed.` Re-scope any orphan UI (component not wired to real backend) into the slice where that capability is introduced — do NOT use storybook-only or dev-preview-route verification as substitutes.
 3. Size check (one context window per story)
-4. Order by dependency (assign priority numbers)
+4. Order by capability dependency (capabilities that unlock others come first; assign priority numbers)
 5. **Generate `dependsOn` arrays**:
    - **Same layer, independent concerns** (different tables, different pages) → `dependsOn: []` between them
    - **Same layer, shared concern** (FK referencing another story's table) → add dependency
@@ -190,7 +190,7 @@ Incorporate identified gaps as acceptance criteria or story notes.
     - Most stories have no gate; only attach when heuristics clearly match
 11. Assign IDs in `US-NNN` zero-padded format (`US-001`, `US-002`, ...) — never `US-1`, `story-1`, `S1`, or any other format
 12. Write descriptions in user story format: "As a [specific role], I want [feature] so that [benefit]" — role must name the actor, never just "user"
-13. Generate verifiable acceptance criteria
+13. Generate verifiable acceptance criteria: every story must include at least one user-observable, end-to-end outcome listed **first**. Mixed mechanical + behavioral criteria are allowed but the user-observable item comes first.
 14. Validate dependency graph:
     - No circular dependencies (DAG check)
     - No self-references (no story lists its own ID)

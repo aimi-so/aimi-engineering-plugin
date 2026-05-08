@@ -337,10 +337,11 @@ directly when describing UI acceptance criteria, component structure, and visual
 ```
 
 1. Extract all requirements (explicit + spec-flow identified)
-2. Group by layer (schema → backend → UI → aggregation)
+2. **Group by user-facing capability (vertical slices).** Each story must bundle all layers needed to deliver one complete, user-observable outcome — schema + backend + UI together. Do NOT create horizontal layer-only stories (e.g., a story that only migrates a table without the backend or UI that exposes it). If a slice requires more than ~10 files or spans more than ~4 architectural layers, emit the comment `Large slice ({n} files across {k} layers). Consider splitting if there's a natural seam, otherwise proceed.` for human review — this is a soft flag, not a hard cap.
+2a. **Re-scope orphan UI**: any UI component (modal, panel, form) not yet wired to a real backend action must be integrated into the vertical slice that introduces that capability. Do NOT introduce dev-only preview routes or storybook-only verification as a substitute for a real integrated slice.
 3. Assign IDs in `US-NNN` zero-padded format (`US-001`, `US-002`, ...) — never `US-1`, `story-1`, `S1`, or any other format
 4. Size check: each story must be completable in ONE agent iteration (one context window)
-5. Order by dependency: assign `dependsOn` arrays (explicit story IDs) and `priority` as tiebreaker
+5. Order by capability dependency: assign `dependsOn` arrays (explicit story IDs) and `priority` as tiebreaker — capabilities that unlock other capabilities come first
 6. **Assign `project` field** when multiple repos were discovered in Phase 1:
    - Set `project` to the repo's relative path (e.g., `backend`, `services/api`)
    - Omit `project` when only one repo exists or the story targets the CWD repo
@@ -378,7 +379,7 @@ directly when describing UI acceptance criteria, component structure, and visual
 
 10. **Detect and attach `gate` objects**: `verify` (OAuth/email/webhooks), `decision` (multiple viable approaches), `action` (external manual action). Most stories have no gate.
 11. Write descriptions in user story format: "As a [specific role], I want [feature] so that [benefit]" — role must name the actor, never just "user"
-12. Generate verifiable acceptance criteria (every story must have "Typecheck passes")
+12. Generate verifiable acceptance criteria: every story must include at least one user-observable, end-to-end outcome listed **first** (e.g., "A logged-in user can submit the form and see the confirmation banner"). Mixed mechanical + behavioral criteria are allowed, but the user-observable item must come first. Every story must also have "Typecheck passes".
 13. Initialize every story with `status: "pending"` and appropriate `dependsOn` array
 14. Validate: no circular dependencies in `dependsOn`, no self-references, all referenced IDs exist, no vague criteria
 15. **Spec-driven screen decomposition** (when `businessSpecContent` is non-null): drive decomposition from `BusinessSpec § 2` (Screens/Pages) — create **one story per screen** listed. Do not infer screens from the feature description when the spec is present.
@@ -595,7 +596,7 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 
 - [ ] Every story `id` uses `US-NNN` zero-padded format (`US-001`, `US-002`, ...) — not `US-1`, `S1`, `TASK-1`, or any other format
 - [ ] Each story completable in one agent iteration
-- [ ] Stories ordered by dependency (schema → backend → UI)
+- [ ] Stories ordered by capability dependency (capabilities that unlock other capabilities come first; vertical slices, not horizontal layers)
 - [ ] Every story has "Typecheck passes" as criterion
 - [ ] Acceptance criteria are verifiable (not vague)
 - [ ] `dependsOn` arrays are valid: no circular dependencies, no self-references, all referenced IDs exist

@@ -6,20 +6,23 @@
 
 The agent spawns fresh per iteration with no memory of previous work. If a story is too big, the agent runs out of context before finishing.
 
-### Right-sized stories:
-- Add a database column and migration
-- Add a UI component to an existing page
-- Update a server action with new logic
-- Add a filter dropdown to a list
-- Create a new skill file with frontmatter and body
-- Update a command file with new flow
+### Right-sized stories (vertical slices — one complete capability per story):
+- "Add notification bell": schema migration + sendNotification action + bell icon + dropdown panel, all in one story
+- "Export orders to CSV": export endpoint + server action + download button wired to real endpoint
+- "Create a new skill file with frontmatter, body, and command integration"
+- "Add filter dropdown wired to real query and visible in the UI"
 
-### Too big (split these):
-- "Build the entire dashboard" → schema, queries, UI components, filters
-- "Add authentication" → schema, middleware, login UI, session handling
-- "Refactor the API" → one story per endpoint or pattern
+Each story bundles all layers (schema + backend + UI) needed to deliver one user-observable outcome. Do NOT create horizontal layer-only stories (e.g., a migration story with no backend or UI).
 
-**Rule of thumb:** If you cannot describe the change in 2-3 sentences, it is too big.
+### Too big (split these by capability, not by layer):
+- "Build the entire dashboard" → split into "Earnings summary widget", "Active tasks list", "Filters panel" — each as its own vertical slice
+- "Add authentication" → split into "Email/password login flow", "OAuth login flow", "Session persistence" — each as its own vertical slice
+- "Refactor the API" → one story per capability exposed, not per endpoint layer
+
+### Soft-size flag:
+If a single vertical slice requires more than ~10 files or spans more than ~4 architectural layers, add this comment to the story's notes: `Large slice ({n} files across {k} layers). Consider splitting if there's a natural seam, otherwise proceed.` This is a flag for human review — not a hard cap. When no natural seam exists, proceed as one story.
+
+**Rule of thumb:** If a story cannot be described as "a user can now do X end-to-end," it is either too big (split) or a horizontal layer slice (re-scope).
 
 ---
 
@@ -33,16 +36,27 @@ Do NOT ask the user for a detail level. Size stories based on detected complexit
 
 ---
 
-## Layer Ordering
+## Capability Ordering (Vertical Slices)
 
-Group requirements by layer and assign priorities in this order:
+Group requirements by **user-facing capability**, not by technical layer. Each story is a vertical slice that bundles all layers needed to deliver one complete outcome.
 
-| Priority Range | Layer | Examples |
-|---------------|-------|----------|
-| 1-N | Schema/database | Migrations, model changes, seed data |
-| N+1-M | Backend/services | Server actions, API routes, business logic |
-| M+1-P | UI components | Forms, lists, buttons, modals |
-| P+1-Q | Aggregation/dashboards | Summary views, reports, analytics |
+### Ordering rules
+
+| Priority Range | Grouping Principle | Examples |
+|---------------|-------------------|----------|
+| 1-N | **Foundation capabilities** — features that unlock everything else (auth, core data model) | Login flow, entity CRUD |
+| N+1-M | **Core product capabilities** — primary user-facing features | Notification bell + dropdown, export CSV |
+| M+1-P | **Derived / aggregation capabilities** — features that compose earlier capabilities | Dashboard summary, analytics panel |
+
+**Within each group**, order by inter-capability dependency: a capability that another capability depends on gets a lower priority number.
+
+### Orphan UI rule
+
+Any UI component (modal, panel, form) not yet wired to a real backend action MUST be integrated into the vertical slice that introduces that capability. Do NOT:
+- Create storybook-only verification as a substitute for a real integrated slice
+- Introduce dev-only preview routes to "show" the component without real data
+
+Instead, re-scope the orphan UI into the slice where the backend action is first introduced.
 
 Earlier stories must NOT depend on later stories.
 
@@ -382,19 +396,24 @@ As a [specific role], I want [feature] so that [benefit]
 
 ## Splitting Large Requirements
 
-If a single requirement is too big for one story, split it:
+If a single requirement is too big for one story, split it **by capability** (not by layer):
 
 **Original:**
 > "Add user notification system"
 
-**Split into:**
-1. US-001: Add notifications table to database
-2. US-002: Create notification service for sending
-3. US-003: Add notification bell icon to header
-4. US-004: Create notification dropdown panel
-5. US-005: Add mark-as-read functionality
+**Wrong — horizontal layer split (do NOT do this):**
+1. US-001: Add notifications table to database ← schema only, no user value
+2. US-002: Create notification service for sending ← backend only
+3. US-003: Add notification bell icon to header ← UI only
+4. US-004: Create notification dropdown panel ← UI only
+5. US-005: Add mark-as-read functionality ← UI only
 
-Each must be independently completable and verifiable.
+**Correct — vertical capability split:**
+1. US-001: In-app notification bell — schema migration + sendNotification action + bell icon + unread count badge, wired end-to-end so a user can see unread notifications in the header
+2. US-002: Notification dropdown panel — dropdown UI wired to real fetch action, displays message list with timestamps; user can open and read notifications
+3. US-003: Mark-as-read — mark-as-read server action + UI interaction (click to mark, visual state change); user can dismiss notifications
+
+Each story delivers one user-observable, end-to-end capability. The first acceptance criterion of each story describes what the user can now do.
 
 ---
 
@@ -415,9 +434,12 @@ Before finalizing stories, verify:
 
 ### Sizing and Content
 - [ ] Each story is completable in one iteration (small enough)
-- [ ] Stories are ordered by dependency (schema → backend → UI)
+- [ ] Each story is a vertical slice delivering one user-observable capability (not a horizontal layer-only story)
+- [ ] Stories are ordered by capability dependency (capabilities that unlock others come first)
+- [ ] Every story has at least one user-observable, end-to-end acceptance criterion listed first
 - [ ] Every story has "Typecheck passes" as criterion
 - [ ] UI stories have "Verify in browser" as criterion
+- [ ] No orphan UI components: all UI is wired to real backend actions within the same story or an explicit dependent story
 - [ ] Acceptance criteria are verifiable (not vague)
 - [ ] IDs are sequential, zero-padded to 3 digits, and match `^US-\d{3}$` (e.g., `US-001`, `US-002`). Reject: `US-1`, `story-1`, `S1`, `F1`
 - [ ] Field lengths within limits (title ≤ 200, description ≤ 500, criterion ≤ 600)
