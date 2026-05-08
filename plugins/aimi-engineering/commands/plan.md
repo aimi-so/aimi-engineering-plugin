@@ -516,11 +516,11 @@ mkdir -p .aimi/tasks
 
 Write JSON using the Write tool. Validate JSON is well-formed before writing.
 
-### Schema v3.2 Structure
+### Schema v3.3 Structure
 
 ```json
 {
-  "schemaVersion": "3.2",
+  "schemaVersion": "3.3",
   "metadata": {
     "title": "string (required)",
     "type": "feat|ref|bug|chore (required)",
@@ -584,13 +584,14 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
         "prompt": "string (required, human-readable description)",
         "options": ["string[] (optional, for decision gates)"]
       },
-      "skills": "string[] (optional, array of bare skill names matching ^[a-zA-Z0-9][a-zA-Z0-9_-]*$, max 10 entries; omit field entirely when empty)"
+      "skills": "string[] (optional, array of bare skill names matching ^[a-zA-Z0-9][a-zA-Z0-9_-]*$, max 10 entries; omit field entirely when empty)",
+      "tasks": "string[] (optional, max 20 entries, each ≤ 600 chars; omit when empty)"
     }
   ]
 }
 ```
 
-**Notes:** `implementation`, `verification`, `gate`, and `skills` are optional per story. `wave` is required on all stories.
+**Notes:** `implementation`, `verification`, `gate`, `skills`, and `tasks` are optional per story. `wave` is required on all stories.
 
 ### Checklist Before Writing
 
@@ -607,7 +608,7 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 - [ ] `planPath` is `null`
 - [ ] Every description follows "As a [specific role], I want [feature] so that [benefit]" format — role names the actor, never just "user"
 - [ ] Field lengths: title ≤ 200, description ≤ 500, criterion ≤ 600
-- [ ] `schemaVersion` is `"3.2"`
+- [ ] `schemaVersion` is `"3.3"`
 - [ ] `researchDepth` (if set) is one of: `skip`, `quick`, `standard`, `deep`
 - [ ] `prototypePaths` (if set) contains only paths that exist on disk and were successfully loaded into `prototypeBlocks`
 - [ ] `metadata.designBundle` (if set) — all paths (`root`, `readme`, `chats[]`, `businessSpec`, `designSpec`) that are non-null exist on disk under `AIMI_ROOT`
@@ -677,7 +678,7 @@ Tasks generated successfully!
 Tasks: .aimi/tasks/[tasks-filename].json
 
 Stories: [X] total
-Schema version: 3.2
+Schema version: 3.3
 Waves: [N] total
 [If gates found]: Gates: [N] (verify: [X], decision: [Y], action: [Z])
 [If brainstorm used]: Context: .aimi/brainstorms/[brainstorm-file]
