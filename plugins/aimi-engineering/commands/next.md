@@ -52,7 +52,7 @@ This returns the next pending story as JSON. Fields depend on schema version:
 }
 ```
 
-> The `implementation` and `gate` fields are optional in schema v3.2. Include them in the display only when present in the story JSON.
+> The `implementation` and `gate` fields are optional in schema v3.3. Include them in the display only when present in the story JSON.
 
 If result is `null`:
 ```

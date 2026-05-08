@@ -886,6 +886,16 @@ cmd_validate_stories() {
                [$s.skills | group_by(.) | .[] | select(length > 1) | .[0] | "\($s.id): skills contains duplicate entry \(.)"]
              else [] end)
            end)
+         else [] end) +
+        (if ($s.tasks != null) then
+          (if ($s.tasks | type) != "array" then ["\($s.id): tasks must be an array"]
+           elif ($s.tasks | length) == 0 then ["\($s.id): tasks must be omitted when empty"]
+           else
+             (if ($s.tasks | length) > 20 then ["\($s.id): tasks array exceeds 20 entries"] else [] end) +
+             [$s.tasks[] | select(type != "string") | "\($s.id): tasks[] element must be a string"] +
+             [$s.tasks[] | select(type == "string" and length > 600) | "\($s.id): tasks[] entry exceeds 600 chars"] +
+             [$s.tasks[] | select(type == "string" and test("ignore previous|system:|INSTRUCTIONS|```|\\$\\(|`"; "i")) | "\($s.id): tasks[] entry contains suspicious content"]
+           end)
          else [] end)
       ) | .[]
     ] |

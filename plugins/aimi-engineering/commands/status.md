@@ -44,7 +44,7 @@ Display execution waves and dependency information.
 ## Task Status: [title]
 
 **Branch:** [branchName]
-**Schema:** v3.2
+**Schema:** v3.3
 **Max Concurrency:** [maxConcurrency]
 **Research Depth:** [researchDepth or "auto"]
 ```
