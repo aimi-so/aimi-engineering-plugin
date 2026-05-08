@@ -185,6 +185,16 @@ Description: [STORY_DESCRIPTION]
 
 </acceptance_criteria>
 
+<tasks>
+
+Mechanical sub-steps (planner guidance only — not acceptance criteria; complete the deliverable as a whole)
+
+[TASKS_NUMBERED_LIST]
+
+</tasks>
+
+(Omit the <tasks> block above when story.tasks is absent or empty.)
+
 <key_files>
 
 [implementation.files — bulleted list of file paths the story is expected to touch]
@@ -435,6 +445,14 @@ Description: [STORY_DESCRIPTION]
 [ACCEPTANCE_CRITERIA_BULLETED]
 
 </acceptance_criteria>
+
+<tasks>
+Mechanical sub-steps (planner guidance only — not acceptance criteria; complete the deliverable as a whole)
+
+[TASKS_NUMBERED_LIST]
+</tasks>
+
+(Omit the <tasks> block above when story.tasks is absent or empty.)
 
 <key_files>
 
