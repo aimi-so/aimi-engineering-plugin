@@ -13,7 +13,7 @@ Apply before writing tasks.json.
 - [ ] branchName is valid (alphanumeric, hyphens, slashes)
 - [ ] `planPath` is `null`
 - [ ] Every description follows "As a [specific role], I want [feature] so that [benefit]" format — role names the actor, never just "user"
-- [ ] Field lengths: title ≤ 200, description ≤ 500, criterion ≤ 600
+- [ ] Field lengths: title ≤ 200, description ≤ 500, criterion ≤ 5000
 
 ## v3.3 Schema Validations
 - [ ] `schemaVersion` is `"3.3"`
@@ -28,7 +28,7 @@ Apply before writing tasks.json.
 - [ ] `project` (if present) is a relative path with no `..` components, matching `^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$`
 - [ ] `project` is omitted when only one repo exists or story targets CWD repo
 - [ ] Every story has a `tasks[]` array with 3–15 ordered mechanical sub-steps in verb-object phrasing; whenever a story's `implementation.files` lists a path that also appears in another story's `implementation.files`, there is at least one explicit integration task ("Wire [component] into [owning file]")
-- [ ] `tasks[]` (if present) is a non-empty string array, each entry ≤ 600 chars, max 20 entries; field is omitted when empty
+- [ ] `tasks[]` (if present) is a non-empty string array, each entry ≤ 5000 chars, max 50 entries; field is omitted when empty
 - [ ] `researchDepth` (if set) is one of: `skip`, `quick`, `standard`, `deep`
 - [ ] Every story has a `wave` number (wave 1 for roots, computed from `dependsOn` for others)
 - [ ] Wave numbers are contiguous with no gaps

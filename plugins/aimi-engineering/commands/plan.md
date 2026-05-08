@@ -381,7 +381,7 @@ directly when describing UI acceptance criteria, component structure, and visual
 
    Rules:
    - **3–15 entries per story** (soft target). Hard schema cap is 20.
-   - Each entry ≤ 600 chars; plain imperative verb-object phrasing (e.g., `"Add status column to migrations/001_add_status.sql"`, `"Import StatusBadge into TaskCard and pass status prop"`).
+   - Each entry ≤ 5000 chars; plain imperative verb-object phrasing (e.g., `"Add status column to migrations/001_add_status.sql"`, `"Import StatusBadge into TaskCard and pass status prop"`).
    - **Integration steps are mandatory**: whenever this story's `implementation.files` lists (or implies a registration into) a path that also appears in another story's `implementation.files`, the `tasks` array MUST include an explicit entry of the form `"Wire <component/handler/route> into <owning file>"`. Cross-story file wiring must never be implicit.
    - Order: creation/scaffolding first → integration wiring → local verification last.
    - Do not duplicate `acceptanceCriteria` text verbatim. AC are the observable gate (vertical); tasks are the recipe (horizontal, planner guidance only).
@@ -570,7 +570,7 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
       "id": "US-NNN (required, zero-padded, regex: ^US-[0-9]{3}[a-z]?$)",
       "title": "string (required, max 200 chars)",
       "description": "string (required, max 500 chars, user story format)",
-      "acceptanceCriteria": ["string[] (required, each max 600 chars, must include 'Typecheck passes')"],
+      "acceptanceCriteria": ["string[] (required, each max 5000 chars, must include 'Typecheck passes')"],
       "priority": "number (required, sequential integers, tiebreaker for same-depth stories)",
       "status": "pending (required, always 'pending' for new stories)",
       "dependsOn": ["US-NNN (required, array of story IDs, empty [] for root stories)"],
@@ -596,7 +596,7 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
         "options": ["string[] (optional, for decision gates)"]
       },
       "skills": "string[] (optional, array of bare skill names matching ^[a-zA-Z0-9][a-zA-Z0-9_-]*$, max 10 entries; omit field entirely when empty)",
-      "tasks": "string[] (optional, max 20 entries, each ≤ 600 chars; omit when empty)"
+      "tasks": "string[] (optional, max 50 entries, each ≤ 5000 chars; omit when empty)"
     }
   ]
 }
@@ -618,7 +618,7 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 - [ ] branchName is valid (alphanumeric, hyphens, slashes)
 - [ ] `planPath` is `null`
 - [ ] Every description follows "As a [specific role], I want [feature] so that [benefit]" format — role names the actor, never just "user"
-- [ ] Field lengths: title ≤ 200, description ≤ 500, criterion ≤ 600
+- [ ] Field lengths: title ≤ 200, description ≤ 500, criterion ≤ 5000
 - [ ] `schemaVersion` is `"3.3"`
 - [ ] `researchDepth` (if set) is one of: `skip`, `quick`, `standard`, `deep`
 - [ ] `prototypePaths` (if set) contains only paths that exist on disk and were successfully loaded into `prototypeBlocks`

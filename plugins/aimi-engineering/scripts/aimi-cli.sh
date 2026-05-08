@@ -867,7 +867,7 @@ cmd_validate_stories() {
       (
         (if ($s.title | length) > 200 then ["\($s.id): title exceeds 200 chars"] else [] end) +
         (if ($s.description | length) > 500 then ["\($s.id): description exceeds 500 chars"] else [] end) +
-        ([$s.acceptanceCriteria[] | select(length > 600)] | if length > 0 then ["\($s.id): acceptance criterion exceeds 600 chars"] else [] end) +
+        ([$s.acceptanceCriteria[] | select(length > 5000)] | if length > 0 then ["\($s.id): acceptance criterion exceeds 5000 chars"] else [] end) +
         (if ($s.title | test("ignore previous|system:|INSTRUCTIONS|```|\\$\\(|`"; "i")) then ["\($s.id): title contains suspicious content"] else [] end) +
         (if ($s.description | test("ignore previous|system:|INSTRUCTIONS|```|\\$\\(|`"; "i")) then ["\($s.id): description contains suspicious content"] else [] end) +
         (if ($s.project != null) then
@@ -892,9 +892,9 @@ cmd_validate_stories() {
           (if ($s.tasks | type) != "array" then ["\($s.id): tasks must be an array"]
            elif ($s.tasks | length) == 0 then ["\($s.id): tasks must be omitted when empty"]
            else
-             (if ($s.tasks | length) > 20 then ["\($s.id): tasks array exceeds 20 entries"] else [] end) +
+             (if ($s.tasks | length) > 50 then ["\($s.id): tasks array exceeds 50 entries"] else [] end) +
              [$s.tasks[] | select(type != "string") | "\($s.id): tasks[] element must be a string"] +
-             [$s.tasks[] | select(type == "string" and length > 600) | "\($s.id): tasks[] entry exceeds 600 chars"] +
+             [$s.tasks[] | select(type == "string" and length > 5000) | "\($s.id): tasks[] entry exceeds 5000 chars"] +
              [$s.tasks[] | select(type == "string" and test("ignore previous|system:|INSTRUCTIONS|```|\\$\\(|`"; "i")) | "\($s.id): tasks[] entry contains suspicious content"]
            end)
          else [] end)

@@ -118,7 +118,7 @@ Each story is ONE atomic unit of work completable in a single agent iteration.
 | `id` | string | Yes | — | Unique identifier. **Must follow `US-NNN` format** (e.g., `US-001`, `US-002`). Three zero-padded digits, optionally followed by a lowercase letter for sub-stories (e.g., `US-001a`). |
 | `title` | string | Yes | — | Short story title (max 200 chars) |
 | `description` | string | Yes | — | User story format: "As a [specific role], I want [feature] so that [benefit]" — role must name the actor (e.g., "store admin", "developer", "end user"), never just "user" (max 500 chars) |
-| `acceptanceCriteria` | string[] | Yes | — | Verifiable criteria (must include `"Typecheck passes"`, each max 600 chars) |
+| `acceptanceCriteria` | string[] | Yes | — | Verifiable criteria (must include `"Typecheck passes"`, each max 5000 chars) |
 | `priority` | number | Yes | — | Tiebreaker for stories at the same dependency depth. Lower = runs first among peers. |
 | `status` | string | Yes | `"pending"` | One of: `"pending"`, `"in_progress"`, `"completed"`, `"failed"`, `"skipped"` |
 | `dependsOn` | string[] | Yes | `[]` | Array of story IDs this story depends on (e.g., `["US-001", "US-002"]`) |
@@ -128,7 +128,7 @@ Each story is ONE atomic unit of work completable in a single agent iteration.
 | `implementation` | object | No | absent | Implementation hints for the executing agent. See [Implementation Object](#implementation-object). |
 | `verification` | object | No | absent | Post-execution verification instructions. See [Verification Object](#verification-object). |
 | `gate` | object | No | absent | Gate that must be satisfied before the story (or its dependents) can proceed. See [Gate Object](#gate-object). |
-| `tasks` | string[] | No | absent | Horizontal mechanical recipe for the executing agent — ordered verb-object sub-steps (e.g., `"Wire StatusBadge into TaskCard"`). Distinct from `acceptanceCriteria`: AC are observable outcomes (vertical, gate); tasks are the ordered recipe (horizontal, planner guidance only). Planner MUST include explicit `"Wire <X> into <Y>"` entries for any file shared with another story. 3–15 entries recommended, max 20, each ≤ 600 chars. Omit field (never emit `[]`) when fewer than 3 steps can be identified. See fixture lines 388-392. |
+| `tasks` | string[] | No | absent | Horizontal mechanical recipe for the executing agent — ordered verb-object sub-steps (e.g., `"Wire StatusBadge into TaskCard"`). Distinct from `acceptanceCriteria`: AC are observable outcomes (vertical, gate); tasks are the ordered recipe (horizontal, planner guidance only). Planner MUST include explicit `"Wire <X> into <Y>"` entries for any file shared with another story. 3–15 entries recommended, max 50, each ≤ 5000 chars. Omit field (never emit `[]`) when fewer than 3 steps can be identified. See fixture lines 388-392. |
 
 ### Implementation Object
 

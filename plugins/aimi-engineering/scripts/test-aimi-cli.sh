@@ -2463,7 +2463,7 @@ test_validate_stories_tasks_field() {
   "$CLI" clear-state > /dev/null
   "$CLI" init-session > /dev/null
   local long_entry
-  long_entry=$(python3 -c "print('x' * 601)")
+  long_entry=$(python3 -c "print('x' * 5001)")
   _setup_project_fixture "{
   \"schemaVersion\": \"3.2\",
   \"metadata\": {
@@ -2490,10 +2490,10 @@ test_validate_stories_tasks_field() {
 }"
   output=$("$CLI" validate-stories) && exit_code=0 || exit_code=$?
   assert_contains '"valid": false' "$output" "validate-stories tasks: oversize entry fails validation"
-  assert_contains "tasks[] entry exceeds 600 chars" "$output" "validate-stories tasks: error mentions exceeds 600 chars"
+  assert_contains "tasks[] entry exceeds 5000 chars" "$output" "validate-stories tasks: error mentions exceeds 5000 chars"
   _teardown_project_fixture
 
-  # (g) oversize array length (21 entries) rejected
+  # (g) oversize array length (51 entries) rejected
   "$CLI" clear-state > /dev/null
   "$CLI" init-session > /dev/null
   _setup_project_fixture '{
@@ -2510,19 +2510,19 @@ test_validate_stories_tasks_field() {
     {
       "id": "US-001",
       "title": "Too many tasks",
-      "description": "Story with 21 task entries",
+      "description": "Story with 51 task entries",
       "acceptanceCriteria": ["Passes"],
       "priority": 1,
       "status": "pending",
       "dependsOn": [],
       "notes": "",
-      "tasks": ["t01","t02","t03","t04","t05","t06","t07","t08","t09","t10","t11","t12","t13","t14","t15","t16","t17","t18","t19","t20","t21"]
+      "tasks": ["t01","t02","t03","t04","t05","t06","t07","t08","t09","t10","t11","t12","t13","t14","t15","t16","t17","t18","t19","t20","t21","t22","t23","t24","t25","t26","t27","t28","t29","t30","t31","t32","t33","t34","t35","t36","t37","t38","t39","t40","t41","t42","t43","t44","t45","t46","t47","t48","t49","t50","t51"]
     }
   ]
 }'
   output=$("$CLI" validate-stories) && exit_code=0 || exit_code=$?
-  assert_contains '"valid": false' "$output" "validate-stories tasks: 21-entry array fails validation"
-  assert_contains "tasks array exceeds 20 entries" "$output" "validate-stories tasks: error mentions exceeds 20 entries"
+  assert_contains '"valid": false' "$output" "validate-stories tasks: 51-entry array fails validation"
+  assert_contains "tasks array exceeds 50 entries" "$output" "validate-stories tasks: error mentions exceeds 50 entries"
   _teardown_project_fixture
 
   # (h) suspicious content rejected

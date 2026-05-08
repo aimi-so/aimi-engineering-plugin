@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.77.0] - 2026-05-08
+
+### Changed
+
+- **Per-entry character cap raised from 600 to 5000:** Applies to `acceptanceCriteria[]` and `tasks[]` entries. Loosens the previous limit that was forcing truncation of detailed criteria and recipe steps. `title` (200) and `description` (500) caps unchanged.
+- **`tasks[]` array length cap raised from 20 to 50:** Allows richer mechanical recipes for complex stories. Soft target of 3–15 entries remains as planner guidance.
+
 ## [1.76.0] - 2026-05-08
 
 ### Added
