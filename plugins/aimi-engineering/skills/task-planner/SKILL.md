@@ -183,6 +183,7 @@ Incorporate identified gaps as acceptance criteria or story notes.
    - visual: `{"strategy": "visual", "status": "pending", "url": "http://localhost:3000/page", "expect": "Dashboard with charts visible"}`
    - api: `{"strategy": "api", "status": "pending", "url": "http://localhost:3000/api/endpoint", "expect": "200 with JSON array"}`
    - test: `{"strategy": "test", "status": "pending", "expect": "All unit tests pass"}`
+9.5. **Populate `tasks[]` — horizontal mechanical breakdown**: for every story, generate a `tasks` array of 3–15 concrete mechanical sub-steps (each ≤ 600 chars, max 20, verb-object phrasing). MUST include explicit `"Wire <X> into <Y>"` entries for any file in `implementation.files` that is also listed in another story's `implementation.files` (parent shells, routers, index barrels, MSW handlers, `main.tsx`). Order: creation → integration wiring → local verification. Tasks are planner guidance, not acceptance criteria. Omit the field (do not emit `tasks: []`) when fewer than 3 meaningful steps exist. See `references/task-format-v3.md` for the canonical fixture.
 10. **Detect and attach `gate` objects** using heuristics:
     - `verify` gate: OAuth, email, webhooks, payment, external service integration
     - `decision` gate: multiple viable approaches with significant downstream impact

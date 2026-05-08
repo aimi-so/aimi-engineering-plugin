@@ -27,6 +27,7 @@ Apply before writing tasks.json.
 - [ ] `maxConcurrency` (if set) is a positive integer
 - [ ] `project` (if present) is a relative path with no `..` components, matching `^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$`
 - [ ] `project` is omitted when only one repo exists or story targets CWD repo
+- [ ] Every story has a `tasks[]` array with 3–15 ordered mechanical sub-steps in verb-object phrasing; whenever a story's `implementation.files` lists a path that also appears in another story's `implementation.files`, there is at least one explicit integration task ("Wire [component] into [owning file]")
 - [ ] `tasks[]` (if present) is a non-empty string array, each entry ≤ 600 chars, max 20 entries; field is omitted when empty
 - [ ] `researchDepth` (if set) is one of: `skip`, `quick`, `standard`, `deep`
 - [ ] Every story has a `wave` number (wave 1 for roots, computed from `dependsOn` for others)

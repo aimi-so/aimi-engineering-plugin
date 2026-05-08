@@ -377,6 +377,17 @@ directly when describing UI acceptance criteria, component structure, and visual
 
    **Plugin-self-build default** — when the current repo is the `aimi-engineering-plugin` itself (detected by top-level `CLAUDE.md` containing the phrase `This repo builds the aimi-engineering plugin`), override inference for stories whose `implementation.files` touch `plugins/aimi-engineering/skills/` or `plugins/aimi-engineering/commands/` and set `skills: ["create-agent-skills"]` regardless of extension matches. This ensures plugin-authoring stories always pull the authoring skill.
 
+9.6. **Populate `tasks[]` — horizontal mechanical breakdown** — for every story, generate a `tasks` array of concrete mechanical sub-steps the executing agent should carry out in order. The goal is to make implicit "Wire X into Y" integration steps explicit at planning time, so parallel-worktree executions cannot drop cross-story file wiring.
+
+   Rules:
+   - **3–15 entries per story** (soft target). Hard schema cap is 20.
+   - Each entry ≤ 600 chars; plain imperative verb-object phrasing (e.g., `"Add status column to migrations/001_add_status.sql"`, `"Import StatusBadge into TaskCard and pass status prop"`).
+   - **Integration steps are mandatory**: whenever this story's `implementation.files` lists (or implies a registration into) a path that also appears in another story's `implementation.files`, the `tasks` array MUST include an explicit entry of the form `"Wire <component/handler/route> into <owning file>"`. Cross-story file wiring must never be implicit.
+   - Order: creation/scaffolding first → integration wiring → local verification last.
+   - Do not duplicate `acceptanceCriteria` text verbatim. AC are the observable gate (vertical); tasks are the recipe (horizontal, planner guidance only).
+   - Forbidden content (matches validator at `aimi-cli.sh:891-898`): triple-backticks, `$(`, backticks, the strings `ignore previous`, `system:`, `INSTRUCTIONS`.
+   - **Omit the field entirely** (do not emit `"tasks": []`) only when fewer than 3 meaningful steps can be identified. Stories without `implementation.files` are not blocked from generating `tasks[]` — enumerate steps from the description.
+
 10. **Detect and attach `gate` objects**: `verify` (OAuth/email/webhooks), `decision` (multiple viable approaches), `action` (external manual action). Most stories have no gate.
 11. Write descriptions in user story format: "As a [specific role], I want [feature] so that [benefit]" — role must name the actor, never just "user"
 12. Generate verifiable acceptance criteria: every story must include at least one user-observable, end-to-end outcome listed **first** (e.g., "A logged-in user can submit the form and see the confirmation banner"). Mixed mechanical + behavioral criteria are allowed, but the user-observable item must come first. Every story must also have "Typecheck passes".

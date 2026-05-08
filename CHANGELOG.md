@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.76.0] - 2026-05-08
+
+### Added
+
+- **`/aimi:plan` now populates `tasks[]` on every user story (US-001):** Phase 3 Story Decomposition step 9.6 generates a horizontal mechanical breakdown of 3–15 concrete sub-steps per vertical story in verb-object phrasing. Integration steps (`"Wire <X> into <Y>"`) are mandatory whenever `implementation.files` lists a path shared with another story, closing the planning gap that caused orphaned tabs and missing routes in parallel-worktree executions.
+
 ## [1.75.0] - 2026-05-08
 
 ### Added
