@@ -1630,6 +1630,7 @@ source_cache_functions() {
   eval "$(sed -n '/^cmd_prime_cache()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^cmd_validate_tasks()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_validate_designspec_citation()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_validate_businessspec_field()/,/^}/p' "$CLI")"
 }
 
 test_write_global_cli_cache() {
@@ -3690,6 +3691,331 @@ TASKEOF
   echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
 }
 
+test_validate_tasks_backendspec_passing_case() {
+  echo ""
+  echo "=== Testing validate-tasks: backendSpec passing case (sources valid, fields present in BusinessSpec) ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-89-validate-tasks-bs-pass.json"
+  local spec_file="$TASKS_DIR/BusinessSpec-pass.md"
+
+  cat > "$spec_file" << 'SPECEOF'
+# BusinessSpec
+
+## 5 API Endpoints
+
+### 5.1 Benchmark Summary
+
+GET /benchmark-summary returns benchmark data.
+
+Fields: totalUsinas, receitaMediaPortfolio, benchmarkDate
+SPECEOF
+
+  cat > "$tasks_fixture" << 'TASKEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: backendSpec passing",
+    "type": "feat",
+    "branchName": "feat/bs-pass",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "frontendOnly": true,
+    "designBundle": {
+      "root": "bundles/bs-pass",
+      "readme": null,
+      "chats": [],
+      "businessSpec": "TASKS_DIR_PLACEHOLDER/BusinessSpec-pass.md",
+      "designSpec": null
+    },
+    "backendSpec": {
+      "endpoints": [
+        {
+          "method": "GET",
+          "path": "/benchmark-summary",
+          "description": "Returns benchmark summary data",
+          "source": "BusinessSpec § 5.1 L8",
+          "responseShape": {
+            "totalUsinas": { "type": "number", "source": "BusinessSpec § 5.1 L10" },
+            "receitaMediaPortfolio": { "type": "number", "source": "BusinessSpec § 5.1 L10" }
+          }
+        }
+      ],
+      "dataModels": [],
+      "businessRules": [],
+      "businessContext": {
+        "summary": "Benchmark dashboard",
+        "userRoles": [],
+        "constraints": [],
+        "assumptions": [],
+        "successCriteria": []
+      }
+    }
+  },
+  "userStories": []
+}
+TASKEOF
+
+  sed -i "s|TASKS_DIR_PLACEHOLDER|${TASKS_DIR}|g" "$tasks_fixture"
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": true' "$output" "validate-tasks backendspec passing: returns valid=true"
+  assert_contains '"errors": []' "$output" "validate-tasks backendspec passing: returns empty errors"
+  assert_exit_code "0" "$exit_code" "validate-tasks backendspec passing: exits 0"
+
+  rm -f "$tasks_fixture" "$spec_file"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_tasks_backendspec_missing_source() {
+  echo ""
+  echo "=== Testing validate-tasks: backendSpec missing source field → valid:false ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-88-validate-tasks-bs-missing-src.json"
+  local spec_file="$TASKS_DIR/BusinessSpec-missing-src.md"
+
+  cat > "$spec_file" << 'SPECEOF'
+# BusinessSpec
+
+## 5 API Endpoints
+
+GET /benchmark-summary returns totalUsinas and receitaMediaPortfolio.
+SPECEOF
+
+  cat > "$tasks_fixture" << 'TASKEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: backendSpec missing source",
+    "type": "feat",
+    "branchName": "feat/bs-missing-src",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "frontendOnly": true,
+    "designBundle": {
+      "root": "bundles/bs-missing-src",
+      "readme": null,
+      "chats": [],
+      "businessSpec": "TASKS_DIR_PLACEHOLDER/BusinessSpec-missing-src.md",
+      "designSpec": null
+    },
+    "backendSpec": {
+      "endpoints": [
+        {
+          "method": "GET",
+          "path": "/benchmark-summary",
+          "description": "Returns benchmark summary data",
+          "responseShape": {
+            "totalUsinas": { "type": "number" }
+          }
+        }
+      ],
+      "dataModels": [],
+      "businessRules": [],
+      "businessContext": {
+        "summary": "Benchmark dashboard",
+        "userRoles": [],
+        "constraints": [],
+        "assumptions": [],
+        "successCriteria": []
+      }
+    }
+  },
+  "userStories": []
+}
+TASKEOF
+
+  sed -i "s|TASKS_DIR_PLACEHOLDER|${TASKS_DIR}|g" "$tasks_fixture"
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": false' "$output" "validate-tasks backendspec missing source: returns valid=false"
+  assert_contains 'missing source field' "$output" "validate-tasks backendspec missing source: emits diagnostic"
+  assert_exit_code "1" "$exit_code" "validate-tasks backendspec missing source: exits 1"
+
+  rm -f "$tasks_fixture" "$spec_file"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_tasks_backendspec_invented_field() {
+  echo ""
+  echo "=== Testing validate-tasks: backendSpec invented field (not in cited subsection) → valid:false ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-87-validate-tasks-bs-invented.json"
+  local spec_file="$TASKS_DIR/BusinessSpec-invented.md"
+
+  cat > "$spec_file" << 'SPECEOF'
+# BusinessSpec
+
+## 5 API Endpoints
+
+### 5.1 Benchmark Summary
+
+GET /benchmark-summary returns benchmark data.
+
+Fields: totalUsinas, receitaMediaPortfolio
+SPECEOF
+
+  cat > "$tasks_fixture" << 'TASKEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: backendSpec invented field",
+    "type": "feat",
+    "branchName": "feat/bs-invented",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "frontendOnly": true,
+    "designBundle": {
+      "root": "bundles/bs-invented",
+      "readme": null,
+      "chats": [],
+      "businessSpec": "TASKS_DIR_PLACEHOLDER/BusinessSpec-invented.md",
+      "designSpec": null
+    },
+    "backendSpec": {
+      "endpoints": [
+        {
+          "method": "GET",
+          "path": "/benchmark-summary",
+          "description": "Returns benchmark summary data",
+          "source": "BusinessSpec § 5.1 L8",
+          "responseShape": {
+            "totalUsinas": { "type": "number", "source": "BusinessSpec § 5.1 L10" },
+            "inventedField": { "type": "string", "source": "BusinessSpec § 5.1 L10" }
+          }
+        }
+      ],
+      "dataModels": [],
+      "businessRules": [],
+      "businessContext": {
+        "summary": "Benchmark dashboard",
+        "userRoles": [],
+        "constraints": [],
+        "assumptions": [],
+        "successCriteria": []
+      }
+    }
+  },
+  "userStories": []
+}
+TASKEOF
+
+  sed -i "s|TASKS_DIR_PLACEHOLDER|${TASKS_DIR}|g" "$tasks_fixture"
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": false' "$output" "validate-tasks backendspec invented field: returns valid=false"
+  assert_contains 'inventedField' "$output" "validate-tasks backendspec invented field: names the missing field"
+  assert_exit_code "1" "$exit_code" "validate-tasks backendspec invented field: exits 1"
+
+  rm -f "$tasks_fixture" "$spec_file"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_tasks_backendspec_derived_escape_hatch() {
+  echo ""
+  echo "=== Testing validate-tasks: backendSpec derived: source → WARN on stderr, valid:true, exit 0 ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-86-validate-tasks-bs-derived.json"
+  local spec_file="$TASKS_DIR/BusinessSpec-derived.md"
+
+  cat > "$spec_file" << 'SPECEOF'
+# BusinessSpec
+
+## 5 API Endpoints
+
+GET /benchmark-summary returns totalUsinas and portfolioCount.
+SPECEOF
+
+  cat > "$tasks_fixture" << 'TASKEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: backendSpec derived escape hatch",
+    "type": "feat",
+    "branchName": "feat/bs-derived",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "frontendOnly": true,
+    "designBundle": {
+      "root": "bundles/bs-derived",
+      "readme": null,
+      "chats": [],
+      "businessSpec": "TASKS_DIR_PLACEHOLDER/BusinessSpec-derived.md",
+      "designSpec": null
+    },
+    "backendSpec": {
+      "endpoints": [
+        {
+          "method": "GET",
+          "path": "/benchmark-summary",
+          "description": "Returns computed benchmark summary",
+          "source": "derived: aggregated from § 5 totalUsinas + § 5 portfolioCount",
+          "responseShape": {
+            "totalUsinas": { "type": "number" }
+          }
+        }
+      ],
+      "dataModels": [],
+      "businessRules": [],
+      "businessContext": {
+        "summary": "Benchmark dashboard",
+        "userRoles": [],
+        "constraints": [],
+        "assumptions": [],
+        "successCriteria": []
+      }
+    }
+  },
+  "userStories": []
+}
+TASKEOF
+
+  sed -i "s|TASKS_DIR_PLACEHOLDER|${TASKS_DIR}|g" "$tasks_fixture"
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local stdout_output stderr_output exit_code
+  stdout_output=$("$CLI" validate-tasks 2>/tmp/bs-derived-stderr-$$.txt) && exit_code=0 || exit_code=$?
+  stderr_output=$(cat /tmp/bs-derived-stderr-$$.txt 2>/dev/null || true)
+  rm -f /tmp/bs-derived-stderr-$$.txt
+
+  assert_contains '"valid": true' "$stdout_output" "validate-tasks backendspec derived: stdout returns valid=true"
+  assert_contains '"errors": []' "$stdout_output" "validate-tasks backendspec derived: stdout returns empty errors"
+  assert_contains 'derived source' "$stderr_output" "validate-tasks backendspec derived: stderr emits WARN"
+  assert_contains 'manual review required' "$stderr_output" "validate-tasks backendspec derived: stderr WARN mentions manual review"
+  assert_exit_code "0" "$exit_code" "validate-tasks backendspec derived: exits 0"
+
+  rm -f "$tasks_fixture" "$spec_file"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
 test_mark_complete_preserves_new_fields() {
   echo ""
   echo "=== Testing mark-complete preserves gate, verification, implementation, and wave fields ==="
@@ -5366,6 +5692,10 @@ main() {
   test_validate_tasks_designspec_paraphrase_fails
   test_validate_tasks_designspec_unicode_normalize
   test_validate_tasks_designspec_subsection_boundary
+  test_validate_tasks_backendspec_passing_case
+  test_validate_tasks_backendspec_missing_source
+  test_validate_tasks_backendspec_invented_field
+  test_validate_tasks_backendspec_derived_escape_hatch
   test_mark_complete_preserves_new_fields
 
   # CLI output optimization tests — run with fresh fixture each time

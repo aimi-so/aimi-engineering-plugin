@@ -2375,6 +2375,103 @@ cmd_validate_tasks() {
     fi
   fi
 
+  # BusinessSpec scan: only when metadata.frontendOnly is true AND metadata.designBundle.businessSpec is non-null
+  local frontend_only
+  frontend_only=$(jq -r '.metadata.frontendOnly // false' "$tasks_file" 2>/dev/null)
+
+  local business_spec_rel
+  business_spec_rel=$(jq -r '.metadata.designBundle.businessSpec // empty' "$tasks_file" 2>/dev/null)
+
+  if [ "$frontend_only" = "true" ] && [ -n "$business_spec_rel" ]; then
+    # Resolve BusinessSpec path relative to PROJECT_ROOT
+    local business_spec_path
+    business_spec_path="${PROJECT_ROOT}/${business_spec_rel}"
+
+    if [ ! -f "$business_spec_path" ]; then
+      errors+=("${tasks_file}: BusinessSpec file not found: ${business_spec_rel}")
+    else
+      # Iterate every endpoints[] entry
+      local endpoint_count
+      endpoint_count=$(jq '.metadata.backendSpec.endpoints | if type == "array" then length else 0 end' "$tasks_file" 2>/dev/null)
+      endpoint_count="${endpoint_count:-0}"
+
+      local ep_index=0
+      while [ "$ep_index" -lt "$endpoint_count" ]; do
+        # Get source value for this endpoint
+        local ep_source
+        ep_source=$(jq -r --argjson idx "$ep_index" '.metadata.backendSpec.endpoints[$idx].source // empty' "$tasks_file" 2>/dev/null)
+
+        if [ -z "$ep_source" ]; then
+          errors+=("${tasks_file}: backendSpec.endpoints[${ep_index}]: missing source field")
+          ep_index=$((ep_index + 1))
+          continue
+        fi
+
+        # Check if source uses derived: prefix
+        if printf '%s' "$ep_source" | grep -q '^derived:'; then
+          # Warn to stderr, do not add to errors
+          printf '%s: backendSpec.endpoints[%s]: derived source — manual review required\n' \
+            "$tasks_file" "$ep_index" >&2
+          ep_index=$((ep_index + 1))
+          continue
+        fi
+
+        # Validate literal source format: "BusinessSpec § N[.N] L<line>"
+        if ! printf '%s' "$ep_source" | grep -qE '^BusinessSpec § [0-9]+(\.[0-9]+)? L[0-9]+$'; then
+          errors+=("${tasks_file}: backendSpec.endpoints[${ep_index}]: malformed source \"${ep_source}\" (expected 'BusinessSpec § N[.N] L<line>' or 'derived: ...')")
+          ep_index=$((ep_index + 1))
+          continue
+        fi
+
+        # Extract section from source
+        local ep_section
+        ep_section=$(printf '%s' "$ep_source" | grep -oE '§ [0-9]+(\.[0-9]+)?' | sed 's/§ //')
+
+        # Iterate every field in responseShape
+        local field_names
+        field_names=$(jq -r --argjson idx "$ep_index" \
+          '.metadata.backendSpec.endpoints[$idx].responseShape | if type == "object" then keys[] else empty end' \
+          "$tasks_file" 2>/dev/null)
+
+        while IFS= read -r field_name; do
+          [ -z "$field_name" ] && continue
+
+          # Get per-field source if it exists (responseShape field can be {type, source} or a scalar)
+          local field_source
+          field_source=$(jq -r --argjson idx "$ep_index" --arg fn "$field_name" \
+            '.metadata.backendSpec.endpoints[$idx].responseShape[$fn] | if type == "object" then .source // empty else empty end' \
+            "$tasks_file" 2>/dev/null)
+
+          # If field has its own source, validate it too
+          if [ -n "$field_source" ]; then
+            if printf '%s' "$field_source" | grep -q '^derived:'; then
+              printf '%s: backendSpec.endpoints[%s].responseShape.%s: derived source — manual review required\n' \
+                "$tasks_file" "$ep_index" "$field_name" >&2
+              continue
+            fi
+            if ! printf '%s' "$field_source" | grep -qE '^BusinessSpec § [0-9]+(\.[0-9]+)? L[0-9]+$'; then
+              errors+=("${tasks_file}: backendSpec.endpoints[${ep_index}].responseShape.${field_name}: malformed source \"${field_source}\"")
+              continue
+            fi
+            # Use the field-level section for subsection lookup
+            local field_section
+            field_section=$(printf '%s' "$field_source" | grep -oE '§ [0-9]+(\.[0-9]+)?' | sed 's/§ //')
+            if ! _validate_businessspec_field "$business_spec_path" "$field_name" "$field_section"; then
+              errors+=("${tasks_file}: backendSpec.endpoints[${ep_index}].responseShape.${field_name}: field name not found in BusinessSpec § ${field_section}")
+            fi
+          else
+            # No per-field source: check field name against the endpoint-level cited section
+            if ! _validate_businessspec_field "$business_spec_path" "$field_name" "$ep_section"; then
+              errors+=("${tasks_file}: backendSpec.endpoints[${ep_index}].responseShape.${field_name}: field name not found in BusinessSpec § ${ep_section}")
+            fi
+          fi
+        done <<< "$field_names"
+
+        ep_index=$((ep_index + 1))
+      done
+    fi
+  fi
+
   # Emit result JSON
   if [ ${#errors[@]} -eq 0 ]; then
     echo '{"valid": true, "errors": []}'
@@ -2476,6 +2573,59 @@ _validate_designspec_citation() {
 
   # Check if normalized literal is a substring of normalized body
   if printf '%s' "$normalized_body" | grep -qF "$normalized_literal"; then
+    return 0
+  fi
+  return 1
+}
+
+# Helper: validate that a field name appears as a literal substring in the cited BusinessSpec subsection.
+# Reuses the same subsection-boundary algorithm as _validate_designspec_citation.
+# Usage: _validate_businessspec_field <spec_file> <field_name> <section>
+# Returns 0 if found, 1 if not found.
+_validate_businessspec_field() {
+  local spec_file="$1"
+  local field_name="$2"
+  local section="$3"
+
+  # Extract subsection body from the spec file using the same awk strategy
+  local subsection_body
+  subsection_body=$(awk -v section="$section" '
+    BEGIN { in_section = 0; heading_level = 0 }
+    {
+      if (/^#+[[:space:]]/) {
+        level = 0
+        line_copy = $0
+        while (substr(line_copy, 1, 1) == "#") {
+          level++
+          line_copy = substr(line_copy, 2)
+        }
+        if (!in_section) {
+          heading_text = substr($0, level + 1)
+          gsub(/^[[:space:]]+/, "", heading_text)
+          if (heading_text ~ ("^(§[[:space:]]*)?" section "([[:space:]]|$)") || \
+              heading_text ~ ("§[[:space:]]*" section "([[:space:]]|$)")) {
+            in_section = 1
+            heading_level = level
+            next
+          }
+        } else {
+          if (level <= heading_level) {
+            exit
+          }
+        }
+      }
+      if (in_section) {
+        print $0
+      }
+    }
+  ' "$spec_file")
+
+  if [ -z "$subsection_body" ]; then
+    return 1
+  fi
+
+  # Check if field name appears as a literal substring in the subsection body
+  if printf '%s' "$subsection_body" | grep -qF "$field_name"; then
     return 0
   fi
   return 1

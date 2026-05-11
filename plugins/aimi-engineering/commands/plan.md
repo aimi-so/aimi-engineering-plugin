@@ -556,8 +556,10 @@ Write the same `prototypePaths`, `designBundle`, and `designTokens` arrays/objec
 1. Set `metadata.frontendOnly: true`
 2. **Generate `metadata.backendSpec`**:
    - **When `businessSpecPath` is non-null** (spec-driven path — takes precedence over inference):
-     - `endpoints`: populate from `BusinessSpec § 5` (endpoints/API contracts)
-     - `dataModels`: populate from `BusinessSpec § 4` (data models / entities)
+     - `endpoints`: populate from `BusinessSpec § 5` (endpoints/API contracts). Every entry MUST carry a `source` field matching `"BusinessSpec § N[.N] L<line>"` citing the exact line in § 5 that defines the endpoint. Every `responseShape` field MUST also carry a `source` field in the same format, citing the line that defines that field.
+       - **Do NOT invent fields**: if a `responseShape` field is required by an acceptance criterion but absent from `BusinessSpec § 5`, do NOT add it to `responseShape`. Instead, emit a `gate` of type `decision` on the story asking the user how to source the field, and leave the `responseShape` entry out until the gate resolves.
+       - Fields whose value is derived from multiple spec lines (aggregations, computed values) MUST use the `"derived: <explanation>"` prefix in their `source` value instead of a literal citation. The `derived:` prefix is accepted as a manual-review marker; it does not allow inventing fields.
+     - `dataModels`: populate from `BusinessSpec § 4` (data models / entities). Every entry MUST carry a `source` field matching `"BusinessSpec § N[.N] L<line>"` citing the line in § 4 that defines the model. Individual fields within `fields[]` that are derived MUST use `"derived: <explanation>"`.
      - `businessRules`: populate from `BusinessSpec § 3` (business rules)
      - `businessContext.userRoles`: populate from `BusinessSpec § 7` (user roles / personas)
      - `businessContext.successCriteria`: populate from `BusinessSpec § 9` (acceptance criteria)
@@ -627,8 +629,27 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
     "maxConcurrency": "number (optional, default 5)",
     "frontendOnly": "boolean (optional, true when frontend-only scope)",
     "backendSpec": {
-      "endpoints": [{"method": "string", "path": "string", "description": "string"}],
-      "dataModels": [{"name": "string", "fields": ["string"]}],
+      "endpoints": [
+        {
+          "method": "string",
+          "path": "string",
+          "description": "string",
+          "source": "BusinessSpec § N[.N] L<line> (required when businessSpecPath non-null; or 'derived: <explanation>' for computed endpoints)",
+          "responseShape": {
+            "<fieldName>": {
+              "type": "string",
+              "source": "BusinessSpec § N[.N] L<line> (required when businessSpecPath non-null; or 'derived: <explanation>')"
+            }
+          }
+        }
+      ],
+      "dataModels": [
+        {
+          "name": "string",
+          "fields": ["string"],
+          "source": "BusinessSpec § N[.N] L<line> (required when businessSpecPath non-null; or 'derived: <explanation>')"
+        }
+      ],
       "businessRules": ["string"],
       "businessContext": {
         "summary": "string",
