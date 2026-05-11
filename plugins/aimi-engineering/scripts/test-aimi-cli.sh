@@ -4451,6 +4451,349 @@ test_detect_design_bundle_partial_bundle() {
 }
 
 # ============================================================================
+# Bundle Prototype Generation Tests
+# ============================================================================
+
+# Helper: create a minimal bundle directory with spec files.
+# Usage: _make_proto_bundle <parent_dir> <bundle_name>
+# Prints the absolute bundle path.
+_make_proto_bundle() {
+  local parent="$1" name="$2"
+  local bundle="${parent}/${name}"
+  mkdir -p "${bundle}/project"
+  printf 'This is a **handoff bundle** from Claude Design (claude.ai/design).\n' \
+    > "${bundle}/README.md"
+  echo "$bundle"
+}
+
+# (1) Hash match: sidecar up-to-date => needs_generation false
+test_bundle_prototype_status_hash_match_no_regen() {
+  echo ""
+  echo "=== Bundle Prototype Status: hash match => no regen ==="
+
+  local tmp bundle stdout exit_code
+  tmp=$(mktemp -d)
+  bundle=$(_make_proto_bundle "$tmp" "proj-bundle")
+  printf '## 4. Views\n- Dashboard view\n- Settings view\n' \
+    > "${bundle}/project/DesignSpec.md"
+
+  # Run status once to get current hashes
+  local status_out
+  status_out=$("$CLI" bundle-prototype-status --bundle "$bundle" --topic "test-proj" 2>/dev/null) \
+    && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "bundle-prototype-status hash-match: initial status exits 0"
+
+  local sidecar_rel output_rel
+  sidecar_rel=$(printf '%s' "$status_out" | jq -r '.sidecar_path')
+  output_rel=$(printf '%s' "$status_out" | jq -r '.output_path')
+
+  # Compute hashes the same way as the CLI
+  local bh dh
+  bh=$(find "${bundle}" -type f | sort | xargs -I{} cat {} 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}' || \
+       find "${bundle}" -type f | sort | xargs -I{} cat {} 2>/dev/null | shasum -a 256 | awk '{print $1}')
+  dh=$(sha256sum "${bundle}/project/DesignSpec.md" 2>/dev/null | awk '{print $1}' || \
+       shasum -a 256 "${bundle}/project/DesignSpec.md" | awk '{print $1}')
+
+  # Write a sidecar with matching hashes
+  local sidecar_abs
+  sidecar_abs="${TEST_DIR}/${sidecar_rel}"
+  mkdir -p "$(dirname "$sidecar_abs")"
+  printf '{"generatedAt":"2026-01-01T00:00:00Z","bundleHash":"%s","designSpecHash":"%s","businessSpecHash":"","viewList":[],"sourceCommand":"brainstorm"}\n' \
+    "$bh" "$dh" > "$sidecar_abs"
+
+  # Now status should say needs_generation: false
+  stdout=$("$CLI" bundle-prototype-status --bundle "$bundle" --topic "test-proj" 2>/dev/null) \
+    && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "bundle-prototype-status hash-match: re-check exits 0"
+
+  local ng
+  ng=$(printf '%s' "$stdout" | jq -r '.needs_generation')
+  assert_eq "false" "$ng" "bundle-prototype-status hash-match: needs_generation is false"
+
+  rm -rf "$tmp" "${TEST_DIR}/${sidecar_rel%/*}"
+}
+
+# (2) Hash mismatch: bundle changed => needs_generation true
+test_bundle_prototype_status_hash_mismatch_regen() {
+  echo ""
+  echo "=== Bundle Prototype Status: hash mismatch => regen ==="
+
+  local tmp bundle stdout exit_code
+  tmp=$(mktemp -d)
+  bundle=$(_make_proto_bundle "$tmp" "proj-bundle2")
+  printf '## 4. Views\n- Home\n' > "${bundle}/project/DesignSpec.md"
+
+  # Get current status (sidecar absent)
+  local status_out
+  status_out=$("$CLI" bundle-prototype-status --bundle "$bundle" --topic "test-mismatch" 2>/dev/null) \
+    && exit_code=0 || exit_code=$?
+  local sidecar_rel
+  sidecar_rel=$(printf '%s' "$status_out" | jq -r '.sidecar_path')
+  local sidecar_abs="${TEST_DIR}/${sidecar_rel}"
+  mkdir -p "$(dirname "$sidecar_abs")"
+
+  # Write a sidecar with STALE hashes (all zeros)
+  printf '{"generatedAt":"2026-01-01T00:00:00Z","bundleHash":"0000","designSpecHash":"0000","businessSpecHash":"","viewList":[],"sourceCommand":"plan"}\n' \
+    > "$sidecar_abs"
+
+  stdout=$("$CLI" bundle-prototype-status --bundle "$bundle" --topic "test-mismatch" 2>/dev/null) \
+    && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "bundle-prototype-status hash-mismatch: exits 0"
+
+  local ng
+  ng=$(printf '%s' "$stdout" | jq -r '.needs_generation')
+  assert_eq "true" "$ng" "bundle-prototype-status hash-mismatch: needs_generation is true"
+
+  rm -rf "$tmp" "${TEST_DIR}/${sidecar_rel%/*}"
+}
+
+# (3) Missing sidecar => needs_generation true
+test_bundle_prototype_status_missing_sidecar_regen() {
+  echo ""
+  echo "=== Bundle Prototype Status: missing sidecar => regen ==="
+
+  local tmp bundle stdout exit_code
+  tmp=$(mktemp -d)
+  bundle=$(_make_proto_bundle "$tmp" "proj-bundle3")
+  printf '## 4. Views\n- Analytics\n' > "${bundle}/project/DesignSpec.md"
+
+  # Ensure no sidecar exists
+  local sidecar_path
+  sidecar_path="${TEST_DIR}/.aimi/brainstorms/prototypes/test-missing-bundle-sidecar.json"
+  rm -f "$sidecar_path"
+
+  stdout=$("$CLI" bundle-prototype-status --bundle "$bundle" --topic "test-missing" 2>/dev/null) \
+    && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "bundle-prototype-status missing-sidecar: exits 0"
+
+  local ng
+  ng=$(printf '%s' "$stdout" | jq -r '.needs_generation')
+  assert_eq "true" "$ng" "bundle-prototype-status missing-sidecar: needs_generation is true"
+
+  rm -rf "$tmp"
+}
+
+# (4) --force flag => needs_generation true even when hashes match
+test_bundle_prototype_status_force_regen() {
+  echo ""
+  echo "=== Bundle Prototype Status: --force => regen even if hashes match ==="
+
+  local tmp bundle stdout exit_code
+  tmp=$(mktemp -d)
+  bundle=$(_make_proto_bundle "$tmp" "proj-bundle4")
+  printf '## 4. Views\n- Reports\n' > "${bundle}/project/DesignSpec.md"
+
+  # Get current hashes to write a matching sidecar
+  local status_out sidecar_rel sidecar_abs
+  status_out=$("$CLI" bundle-prototype-status --bundle "$bundle" --topic "test-force" 2>/dev/null)
+  sidecar_rel=$(printf '%s' "$status_out" | jq -r '.sidecar_path')
+  sidecar_abs="${TEST_DIR}/${sidecar_rel}"
+  mkdir -p "$(dirname "$sidecar_abs")"
+
+  local bh dh
+  bh=$(find "${bundle}" -type f | sort | xargs -I{} cat {} 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}' || \
+       find "${bundle}" -type f | sort | xargs -I{} cat {} 2>/dev/null | shasum -a 256 | awk '{print $1}')
+  dh=$(sha256sum "${bundle}/project/DesignSpec.md" 2>/dev/null | awk '{print $1}' || \
+       shasum -a 256 "${bundle}/project/DesignSpec.md" | awk '{print $1}')
+  printf '{"generatedAt":"2026-01-01T00:00:00Z","bundleHash":"%s","designSpecHash":"%s","businessSpecHash":"","viewList":[],"sourceCommand":"brainstorm"}\n' \
+    "$bh" "$dh" > "$sidecar_abs"
+
+  # With --force, needs_generation must still be true
+  stdout=$("$CLI" bundle-prototype-status --bundle "$bundle" --topic "test-force" --force 2>/dev/null) \
+    && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "bundle-prototype-status --force: exits 0"
+
+  local ng
+  ng=$(printf '%s' "$stdout" | jq -r '.needs_generation')
+  assert_eq "true" "$ng" "bundle-prototype-status --force: needs_generation is true despite hash match"
+
+  rm -rf "$tmp" "${TEST_DIR}/${sidecar_rel%/*}"
+}
+
+# (5) DesignSpec § 4 present => view_source designSpec, view_list populated
+test_bundle_prototype_status_design_spec_section4() {
+  echo ""
+  echo "=== Bundle Prototype Status: DesignSpec § 4 present => view_source designSpec ==="
+
+  local tmp bundle stdout exit_code
+  tmp=$(mktemp -d)
+  bundle=$(_make_proto_bundle "$tmp" "proj-bundle5")
+  printf '## 1. Introduction\nsome intro\n## 4. Screens\n- Dashboard: main view\n- Profile: user info\n## 5. Other\nignored\n' \
+    > "${bundle}/project/DesignSpec.md"
+
+  stdout=$("$CLI" bundle-prototype-status --bundle "$bundle" --topic "test-design4" 2>/dev/null) \
+    && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "bundle-prototype-status designSpec §4: exits 0"
+
+  local vs vl_len vl_name0
+  vs=$(printf '%s' "$stdout" | jq -r '.view_source')
+  vl_len=$(printf '%s' "$stdout" | jq '.view_list | length')
+  vl_name0=$(printf '%s' "$stdout" | jq -r '.view_list[0].name')
+
+  assert_eq "designSpec" "$vs" "bundle-prototype-status designSpec §4: view_source is designSpec"
+  if [ "$vl_len" -ge 2 ]; then
+    echo -e "${GREEN}✓${NC} bundle-prototype-status designSpec §4: view_list has at least 2 items"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} bundle-prototype-status designSpec §4: view_list has at least 2 items"
+    echo "  Got: $vl_len"
+    ((TESTS_FAILED++))
+  fi
+  assert_eq "Dashboard" "$vl_name0" "bundle-prototype-status designSpec §4: first view name is Dashboard"
+
+  rm -rf "$tmp"
+}
+
+# (6) DesignSpec § 4 absent, BusinessSpec § 5 present => view_source businessSpec
+test_bundle_prototype_status_fallback_business_spec_section5() {
+  echo ""
+  echo "=== Bundle Prototype Status: § 4 absent, BusinessSpec § 5 present => businessSpec ==="
+
+  local tmp bundle stdout exit_code
+  tmp=$(mktemp -d)
+  bundle=$(_make_proto_bundle "$tmp" "proj-bundle6")
+  # DesignSpec has no § 4
+  printf '## 1. Overview\nno screens section\n## 2. Goals\ngoal\n' \
+    > "${bundle}/project/DesignSpec.md"
+  # BusinessSpec § 5 has views
+  printf '## 1. Summary\n## 5. User Flows\n- Onboarding: first run\n- Login: auth screen\n## 6. Other\n' \
+    > "${bundle}/project/BusinessSpec.md"
+
+  stdout=$("$CLI" bundle-prototype-status --bundle "$bundle" --topic "test-bs5" 2>/dev/null) \
+    && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "bundle-prototype-status businessSpec §5: exits 0"
+
+  local vs vl_len
+  vs=$(printf '%s' "$stdout" | jq -r '.view_source')
+  vl_len=$(printf '%s' "$stdout" | jq '.view_list | length')
+
+  assert_eq "businessSpec" "$vs" "bundle-prototype-status businessSpec §5: view_source is businessSpec"
+  if [ "$vl_len" -ge 2 ]; then
+    echo -e "${GREEN}✓${NC} bundle-prototype-status businessSpec §5: view_list has at least 2 items"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} bundle-prototype-status businessSpec §5: view_list has at least 2 items"
+    echo "  Got: $vl_len"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$tmp"
+}
+
+# (7) Both DesignSpec § 4 and BusinessSpec § 5/6 absent => view_source none, needs_generation false
+test_bundle_prototype_status_no_view_sources() {
+  echo ""
+  echo "=== Bundle Prototype Status: both view sources absent => view_source none ==="
+
+  local tmp bundle stdout exit_code
+  tmp=$(mktemp -d)
+  bundle=$(_make_proto_bundle "$tmp" "proj-bundle7")
+  # No spec files at all
+
+  stdout=$("$CLI" bundle-prototype-status --bundle "$bundle" --topic "test-none" 2>/dev/null) \
+    && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "bundle-prototype-status no-view-sources: exits 0"
+
+  local vs ng vl_len
+  vs=$(printf '%s' "$stdout" | jq -r '.view_source')
+  ng=$(printf '%s' "$stdout" | jq -r '.needs_generation')
+  vl_len=$(printf '%s' "$stdout" | jq '.view_list | length')
+
+  assert_eq "none" "$vs" "bundle-prototype-status no-view-sources: view_source is none"
+  assert_eq "false" "$ng" "bundle-prototype-status no-view-sources: needs_generation is false"
+  assert_eq "0" "$vl_len" "bundle-prototype-status no-view-sources: view_list is empty"
+
+  rm -rf "$tmp"
+}
+
+# (8) bundle-prototype-finalize writes sidecar with correct fields
+test_bundle_prototype_finalize_writes_sidecar() {
+  echo ""
+  echo "=== Bundle Prototype Finalize: writes sidecar with correct fields ==="
+
+  local stdout exit_code
+  local view_list='[{"name":"Home","source_section":"designSpec § 4"}]'
+  stdout=$("$CLI" bundle-prototype-finalize \
+    --topic "test-finalize" \
+    --bundle-hash "abc123" \
+    --design-spec-hash "def456" \
+    --business-spec-hash "" \
+    --view-list "$view_list" \
+    --source-command "brainstorm" 2>/dev/null) \
+    && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "bundle-prototype-finalize: exits 0"
+
+  # Check the written file exists
+  local sidecar_path="${TEST_DIR}/.aimi/brainstorms/prototypes/test-finalize-bundle-sidecar.json"
+  if [ -f "$sidecar_path" ]; then
+    echo -e "${GREEN}✓${NC} bundle-prototype-finalize: sidecar file written"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} bundle-prototype-finalize: sidecar file not written at $sidecar_path"
+    ((TESTS_FAILED++))
+  fi
+
+  # Validate JSON fields
+  local sc_bundle sc_design sc_source sc_vl_len
+  sc_bundle=$(jq -r '.bundleHash' "$sidecar_path" 2>/dev/null)
+  sc_design=$(jq -r '.designSpecHash' "$sidecar_path" 2>/dev/null)
+  sc_source=$(jq -r '.sourceCommand' "$sidecar_path" 2>/dev/null)
+  sc_vl_len=$(jq '.viewList | length' "$sidecar_path" 2>/dev/null)
+
+  assert_eq "abc123" "$sc_bundle" "bundle-prototype-finalize: bundleHash matches"
+  assert_eq "def456" "$sc_design" "bundle-prototype-finalize: designSpecHash matches"
+  assert_eq "brainstorm" "$sc_source" "bundle-prototype-finalize: sourceCommand is brainstorm"
+  assert_eq "1" "$sc_vl_len" "bundle-prototype-finalize: viewList has 1 entry"
+
+  rm -f "$sidecar_path"
+}
+
+# (9) bundle-prototype-finalize rejects invalid --source-command
+test_bundle_prototype_finalize_rejects_invalid_source_command() {
+  echo ""
+  echo "=== Bundle Prototype Finalize: rejects invalid --source-command ==="
+
+  local stdout stderr exit_code
+  stderr=$("$CLI" bundle-prototype-finalize \
+    --topic "test-bad-cmd" \
+    --bundle-hash "abc" \
+    --design-spec-hash "" \
+    --business-spec-hash "" \
+    --view-list "[]" \
+    --source-command "invalid-value" 2>&1 >/dev/null) \
+    && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "bundle-prototype-finalize invalid source-command: exits 1"
+  assert_stderr_contains "brainstorm" "$stderr" "bundle-prototype-finalize invalid source-command: error mentions brainstorm"
+}
+
+# (10) view_list items contain name and source_section keys
+test_bundle_prototype_status_view_list_item_shape() {
+  echo ""
+  echo "=== Bundle Prototype Status: view_list item shape has name and source_section ==="
+
+  local tmp bundle stdout exit_code
+  tmp=$(mktemp -d)
+  bundle=$(_make_proto_bundle "$tmp" "proj-bundle8")
+  printf '## 4. Screens\n- UserProfile: shows user info\n- Notifications: alerts panel\n' \
+    > "${bundle}/project/DesignSpec.md"
+
+  stdout=$("$CLI" bundle-prototype-status --bundle "$bundle" --topic "test-shape" 2>/dev/null) \
+    && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "bundle-prototype-status item-shape: exits 0"
+
+  local item0_name item0_src
+  item0_name=$(printf '%s' "$stdout" | jq -r '.view_list[0].name')
+  item0_src=$(printf '%s' "$stdout" | jq -r '.view_list[0].source_section')
+
+  assert_eq "UserProfile" "$item0_name" "bundle-prototype-status item-shape: first item has name field"
+  assert_eq "designSpec § 4" "$item0_src" "bundle-prototype-status item-shape: first item has source_section field"
+
+  rm -rf "$tmp"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -4671,6 +5014,20 @@ main() {
   test_detect_design_bundle_root_is_bundle
   test_help_flag_on_strict_subcommand
   test_help_flag_on_side_effect_subcommand
+
+  # Bundle Prototype Generation Tests
+  echo ""
+  echo "--- Bundle Prototype Generation Tests ---"
+  test_bundle_prototype_status_hash_match_no_regen
+  test_bundle_prototype_status_hash_mismatch_regen
+  test_bundle_prototype_status_missing_sidecar_regen
+  test_bundle_prototype_status_force_regen
+  test_bundle_prototype_status_design_spec_section4
+  test_bundle_prototype_status_fallback_business_spec_section5
+  test_bundle_prototype_status_no_view_sources
+  test_bundle_prototype_finalize_writes_sidecar
+  test_bundle_prototype_finalize_rejects_invalid_source_command
+  test_bundle_prototype_status_view_list_item_shape
 
   cleanup
 
