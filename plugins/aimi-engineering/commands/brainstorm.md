@@ -1019,7 +1019,21 @@ If neither variant prototypes were saved nor bundle prototypes are available (ne
 Before writing the document, verify **all** of the following criteria. If any criterion fails, pause and ask the user before saving — do not silently skip.
 
 - [ ] All critical topics addressed (Purpose, Users, Success at minimum)
-- [ ] Open Questions resolved or explicitly deferred
+- [ ] Open Questions resolved or explicitly deferred (see gate below)
+
+### Pre-Save Blocking Gate — Open Questions
+
+Before writing the brainstorm document, count entries under `## Open Questions` that lack one of:
+
+- a `[resolved: <choice>]` suffix
+- a `[deferred: <reason>]` suffix
+
+If count > 0: STOP. Loop AskUserQuestion until count == 0. Each answer appends `[resolved: <choice>]` (or `[deferred: <reason>]`) to the OQ line. Re-running save on a file whose OQ lines already carry `[resolved: ...]` or `[deferred: ...]` sentinels does not re-prompt — the sentinel suffix acts as the idempotency marker.
+
+**Bundle-source clarification:** Bundle-sourced OQs (lines that originated from `BusinessSpec § 11` or `DesignSpec § 8`) are NOT exempt — `bundleAddressedTopics` covers question categories from chat, not spec pendencies.
+
+**Agent-mode fallback:** When running in agent-mode, auto-mark every unresolved OQ as `[deferred: agent-mode auto-defer]` before save instead of blocking on AskUserQuestion.
+
 - [ ] At least 2 approaches compared in the "Why This Approach" section **OR** explicit justification that only one viable approach exists (e.g., "Single obvious approach: [reason]")
 - [ ] Document uses correct frontmatter (date, topic)
 - [ ] Next Steps references `/aimi:plan`
