@@ -2561,6 +2561,110 @@ test_validate_stories_tasks_field() {
   _teardown_project_fixture
 }
 
+test_validate_stories_gate_field() {
+  echo ""
+  echo "=== Testing validate-stories gate field validation ==="
+
+  # (a) plural 'gates' key is rejected
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+  _setup_project_fixture '{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Gate test",
+    "type": "feat",
+    "branchName": "feat/gate-test",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story with plural gates",
+      "description": "Uses wrong plural gates field",
+      "acceptanceCriteria": ["Rejects plural gates"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "gates": [{"type": "decision", "status": "pending", "prompt": "Approve?"}]
+    }
+  ]
+}'
+  local output exit_code
+  output=$("$CLI" validate-stories) && exit_code=0 || exit_code=$?
+  assert_contains '"valid": false' "$output" "validate-stories gate: plural 'gates' field fails validation"
+  assert_contains "gates field is invalid" "$output" "validate-stories gate: error mentions invalid gates field"
+  assert_exit_code "1" "$exit_code" "validate-stories gate: exits 1 for plural gates"
+  _teardown_project_fixture
+
+  # (b) singular gate missing required field 'type'
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+  _setup_project_fixture '{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Gate test",
+    "type": "feat",
+    "branchName": "feat/gate-test",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story with gate missing type",
+      "description": "Gate object is missing the type field",
+      "acceptanceCriteria": ["Rejects missing type"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "gate": {"status": "pending", "prompt": "Approve?"}
+    }
+  ]
+}'
+  output=$("$CLI" validate-stories) && exit_code=0 || exit_code=$?
+  assert_contains '"valid": false' "$output" "validate-stories gate: gate missing type fails validation"
+  assert_contains "missing required field type" "$output" "validate-stories gate: error mentions missing type field"
+  assert_exit_code "1" "$exit_code" "validate-stories gate: exits 1 for gate missing type"
+  _teardown_project_fixture
+
+  # (c) well-formed gate passes validation
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+  _setup_project_fixture '{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Gate test",
+    "type": "feat",
+    "branchName": "feat/gate-test",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story with valid gate",
+      "description": "Gate object has all required fields",
+      "acceptanceCriteria": ["Passes with valid gate"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "gate": {"type": "decision", "status": "pending", "prompt": "Approve release?"}
+    }
+  ]
+}'
+  output=$("$CLI" validate-stories) && exit_code=0 || exit_code=$?
+  assert_contains '"valid": true' "$output" "validate-stories gate: well-formed gate passes validation"
+  assert_exit_code "0" "$exit_code" "validate-stories gate: exits 0 for well-formed gate"
+  _teardown_project_fixture
+}
+
 test_list_ready_brief_includes_project() {
   echo ""
   echo "=== Testing list-ready --brief includes project in output ==="
@@ -5673,6 +5777,7 @@ main() {
   test_validate_stories_with_absolute_project
   test_validate_stories_skills_field
   test_validate_stories_tasks_field
+  test_validate_stories_gate_field
   test_list_ready_brief_includes_project
 
   # V3.2 schema tests — gates, waves & field preservation
