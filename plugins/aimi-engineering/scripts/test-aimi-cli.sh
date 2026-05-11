@@ -1628,6 +1628,7 @@ source_cache_functions() {
   eval "$(sed -n '/^write_global_worktree_cache()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^read_global_worktree_cache()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^cmd_prime_cache()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^cmd_validate_tasks()/,/^}/p' "$CLI")"
 }
 
 test_write_global_cli_cache() {
@@ -3282,6 +3283,102 @@ WAVEOF
   assert_contains "US-002" "$output" "validate-waves: identifies US-002 as mismatched"
 
   rm -f "$wave_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_tasks_skeleton_exits_zero() {
+  echo ""
+  echo "=== Testing validate-tasks skeleton: v3.3 tasks.json exits 0 with valid=true ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-95-validate-tasks-v33.json"
+  cat > "$tasks_fixture" << 'VALIDATETASKSEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Citation test",
+    "type": "feat",
+    "branchName": "feat/citation-test",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "A simple story",
+      "description": "No citations yet",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 0
+    }
+  ]
+}
+VALIDATETASKSEOF
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": true' "$output" "validate-tasks: v3.3 returns valid=true"
+  assert_contains '"errors": []' "$output" "validate-tasks: v3.3 returns empty errors array"
+  assert_exit_code "0" "$exit_code" "validate-tasks: v3.3 exits 0"
+
+  rm -f "$tasks_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_tasks_skips_pre_v33() {
+  echo ""
+  echo "=== Testing validate-tasks skeleton: v3.2 tasks.json emits skip-info and exits 0 ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-94-validate-tasks-v32.json"
+  cat > "$tasks_fixture" << 'VALIDATETASKSV32EOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Pre-citation test",
+    "type": "feat",
+    "branchName": "feat/pre-citation-test",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "A legacy story",
+      "description": "Pre-citation schema",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 0
+    }
+  ]
+}
+VALIDATETASKSV32EOF
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local stderr_output exit_code
+  stderr_output=$("$CLI" validate-tasks 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_contains "skipping citation validation (schemaVersion 3.2 pre-dates citation enforcement)" "$stderr_output" \
+    "validate-tasks: v3.2 emits skip-info to stderr"
+  assert_exit_code "0" "$exit_code" "validate-tasks: v3.2 exits 0"
+
+  rm -f "$tasks_fixture"
   echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
 }
 
@@ -4955,6 +5052,8 @@ main() {
   test_list_ready_verify_gate_non_blocking
   test_validate_waves_correct
   test_validate_waves_mismatch
+  test_validate_tasks_skeleton_exits_zero
+  test_validate_tasks_skips_pre_v33
   test_mark_complete_preserves_new_fields
 
   # CLI output optimization tests — run with fresh fixture each time

@@ -2294,6 +2294,27 @@ cmd_validate_waves() {
   ' "$tasks_file"
 }
 
+# Validate tasks file citation fields (skeleton: schemaVersion guard only)
+# For schemaVersion >= 3.3: emits {valid: true, errors: []} — no checks yet
+# For schemaVersion < 3.3: emits skip-info to stderr and exits 0
+cmd_validate_tasks() {
+  local tasks_file
+  tasks_file=$(get_tasks_file)
+
+  local schema_version
+  schema_version=$(jq -r '.metadata.schemaVersion // .schemaVersion // "0"' "$tasks_file" 2>/dev/null)
+
+  # Compare versions: below 3.3 → skip with info message
+  # Use sort -V to determine version ordering
+  if [ "$(printf '%s\n' "$schema_version" "3.3" | sort -V | head -n1)" != "3.3" ]; then
+    echo "skipping citation validation (schemaVersion ${schema_version} pre-dates citation enforcement)" >&2
+    return 0
+  fi
+
+  echo '{"valid": true, "errors": []}'
+  return 0
+}
+
 # List task files where all stories have terminal status (completed or skipped)
 # Returns a JSON array of file paths
 cmd_list_archivable() {
@@ -2503,6 +2524,7 @@ COMMANDS:
     update-field <id> <field.path> <value>
                               Update a nested field on a story (e.g., verification.status passed)
     validate-waves            Compute waves from dependsOn, compare to stored wave, report mismatches
+    validate-tasks            Validate tasks file citation fields (schemaVersion guard, no checks yet)
     cascade-skip <id>         Skip all stories depending on failed story
     reset-orphaned            Reset all in_progress stories to failed
     get-branch                Get branchName from metadata
@@ -2655,6 +2677,7 @@ main() {
     gate-fail)         cmd_gate_fail "${2:-}" ;;
     update-field)      cmd_update_field "${2:-}" "${3:-}" "${4:-}" ;;
     validate-waves)    cmd_validate_waves ;;
+    validate-tasks)    cmd_validate_tasks ;;
     cascade-skip)      cmd_cascade_skip "${2:-}" ;;
     reset-orphaned)    cmd_reset_orphaned ;;
     get-branch)        cmd_get_branch ;;
