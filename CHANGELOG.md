@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.78.0] - 2026-05-11
+
+### Added
+
+- **`aimi-bundle-prototype-author` agent (US-002):** New research-category agent (`plugins/aimi-engineering/agents/research/aimi-bundle-prototype-author.md`) that generates self-contained bundle prototype HTML files from a design bundle and brainstorm context. Reads BusinessSpec/DesignSpec, applies design tokens, and emits a fully styled interactive prototype.
+- **`bundle-prototype-status` CLI subcommand (US-003):** New `aimi-cli.sh` subcommand that reads `.aimi/brainstorms/prototypes/<topic-slug>-bundle-sidecar.json` and reports the current generation status (pending, in-progress, complete) for a given topic slug.
+- **`bundle-prototype-finalize` CLI subcommand (US-004):** New `aimi-cli.sh` subcommand that marks a bundle prototype sidecar as finalized and records the output HTML path, enabling downstream commands to locate the generated prototype.
+- **`/aimi:brainstorm` bundle prototype integration (US-001):** When a design bundle is detected and `prototypes[]` is empty in the tasks metadata, brainstorm automatically invokes `aimi-bundle-prototype-author` to generate bundle prototype HTML before surfacing questions to the user.
+- **`/aimi:plan` bundle prototype integration (US-001):** When a design bundle is detected and `prototypes[]` is empty, plan auto-generates bundle prototype HTML via `aimi-bundle-prototype-author` during the research phase, then passes the generated path as a prototype anchor for visual story decomposition.
+- **"render bundle" override keyword:** Both `/aimi:brainstorm` and `/aimi:plan` recognize a case-insensitive `render bundle` substring in the feature description as a one-shot override that forces bundle prototype generation even when `prototypes[]` is already populated.
+- **Sidecar idempotency at `.aimi/brainstorms/prototypes/<topic-slug>-bundle-sidecar.json`:** Bundle prototype generation is idempotent — if a sidecar file already exists at the canonical path for a given topic slug, the author agent skips re-generation and returns the existing output HTML path.
+
 ## [1.77.0] - 2026-05-08
 
 ### Changed
