@@ -470,9 +470,17 @@ directly when describing UI acceptance criteria, component structure, and visual
     - **Heading citation** (preferred): `(prototype: <relative-path> §<heading-text>)` — where `<heading-text>` is the text of the nearest preceding `<h1>`–`<h6>` element in the prototype HTML that covers the cited region (e.g., `(prototype: draives-monitor/project/Monitoramento.html §Visão Geral)`).
     - **Line-range fallback**: when the cited region has no preceding heading element, use `(prototype: <relative-path>:L<start>-L<end>)` with the line numbers from the prototype HTML (e.g., `(prototype: draives-monitor/project/Monitoramento.html:L42-L67)`).
 
-    **No double-deriving**: when a prototype covers a layout region, AC must cite the prototype — not re-derive layout from `DesignSpec.md`. The prototype is canonical for visual layout; `DesignSpec.md` remains canonical for design tokens, component prop types, and interaction states. A story may hold both a prototype citation and a spec reference when they cover different concerns (e.g., layout from prototype, color tokens from spec).
+    **No double-deriving** (spatial layout only): when a prototype covers a layout region, AC must cite the prototype — not re-derive spatial layout (positioning, sizing, stacking, alignment) from `DesignSpec.md`. The prototype is canonical for visual layout; `DesignSpec.md` remains canonical for design tokens, component prop types, and interaction states. A story may hold both a prototype citation and a spec reference when they cover different concerns (e.g., layout from prototype, color tokens from spec). Literal string content (labels, headings, copy) is always governed by Rule 19a regardless of which artifact covers the region.
 
     The decomposition LLM authors citations; they are never auto-injected. Violations surface at the post-decomposition checklist stage.
+
+19a. **Verbatim DesignSpec citations for visual ACs** (when `designSpecContent` is non-null AND `verification.strategy` is `visual` for a story): every visible-text element in the cited region MUST be extracted verbatim from the DesignSpec § N.N subsection — including page H1, subtitle, KPI/metric card labels, table column headers, filter/dropdown/button labels, footer/disclaimer text, and badge text. Do not paraphrase, translate, abbreviate, or reorder. Wrap each literal in double quotes and follow it with the anchor `(DesignSpec § N.N L<line>)`.
+
+    Example (correct):
+    - `"Benchmark do portfolio" (DesignSpec § 3.1 L42) MUST appear as the page H1.`
+
+    Example (wrong — paraphrase):
+    - `The page header shows the portfolio benchmark name.`
 
 20. **Mock-sync AC injection for schema-extending stories**: after all stories are drafted, scan each story's `implementation.files` array against the following globs:
     - `**/schemas/**/*.{ts,js,py,rb}`
@@ -698,6 +706,7 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 - [ ] `gate` (if present) has `type` (`verify`, `decision`, or `action`), `status` (`"pending"`), and `prompt`
 - [ ] Gates only attached when heuristics clearly match
 - [ ] Every story with `verification.strategy == "visual"` and non-empty `metadata.prototypePaths` has at least one `(prototype: ...)` citation in its acceptance criteria (either `(prototype: <path> §<heading>)` or `(prototype: <path>:L<start>-L<end>)`)
+- [ ] Rule 19a compliance (when `designSpecContent` is non-null): every visual story's `acceptanceCriteria` wraps each visible-text literal in double quotes followed by a `(DesignSpec § N.N L<line>)` anchor; no paraphrasing, translation, abbreviation, or reordering of the cited text
 
 ### Split-File Checks (when `implementationScope` is set)
 - [ ] Full-stack: two files generated (`*-frontend-tasks.json` and `*-backend-tasks.json`)

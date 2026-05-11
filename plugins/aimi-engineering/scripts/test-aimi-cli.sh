@@ -1629,6 +1629,7 @@ source_cache_functions() {
   eval "$(sed -n '/^read_global_worktree_cache()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^cmd_prime_cache()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^cmd_validate_tasks()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_validate_designspec_citation()/,/^}/p' "$CLI")"
 }
 
 test_write_global_cli_cache() {
@@ -3382,6 +3383,313 @@ VALIDATETASKSV32EOF
   echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
 }
 
+test_validate_tasks_designspec_passing_case() {
+  echo ""
+  echo "=== Testing validate-tasks: DesignSpec passing case (literal found in cited subsection) ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-93-validate-tasks-ds-pass.json"
+  local spec_file="$TASKS_DIR/DesignSpec-pass.md"
+
+  # Write a minimal DesignSpec with section 3.1
+  cat > "$spec_file" << 'SPECEOF'
+# DesignSpec
+
+## 3.1 Portfolio Overview
+
+The page title is Benchmark do portfolio and shows KPI cards.
+
+### Details
+
+Some extra content here.
+SPECEOF
+
+  cat > "$tasks_fixture" << 'TASKEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: DesignSpec passing",
+    "type": "feat",
+    "branchName": "feat/ds-pass",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "prototypePaths": ["proto/index.html"],
+    "designBundle": {
+      "root": "bundles/ds-pass",
+      "readme": null,
+      "chats": [],
+      "businessSpec": null,
+      "designSpec": "TASKS_DIR_PLACEHOLDER/DesignSpec-pass.md"
+    }
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Portfolio overview screen",
+      "description": "Visual story with spec citation",
+      "acceptanceCriteria": [
+        "\"Benchmark do portfolio\" (DesignSpec § 3.1 L6) MUST appear as the page H1."
+      ],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 1,
+      "verification": {
+        "strategy": "visual",
+        "status": "pending"
+      }
+    }
+  ]
+}
+TASKEOF
+
+  # Patch the placeholder with the actual tasks_dir path
+  sed -i "s|TASKS_DIR_PLACEHOLDER|${TASKS_DIR}|g" "$tasks_fixture"
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": true' "$output" "validate-tasks designspec passing: returns valid=true"
+  assert_contains '"errors": []' "$output" "validate-tasks designspec passing: returns empty errors"
+  assert_exit_code "0" "$exit_code" "validate-tasks designspec passing: exits 0"
+
+  rm -f "$tasks_fixture" "$spec_file"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_tasks_designspec_paraphrase_fails() {
+  echo ""
+  echo "=== Testing validate-tasks: DesignSpec paraphrase fails (literal not in subsection) ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-92-validate-tasks-ds-fail.json"
+  local spec_file="$TASKS_DIR/DesignSpec-fail.md"
+
+  # Write a minimal DesignSpec with section 3.1 that does NOT contain the paraphrased text
+  cat > "$spec_file" << 'SPECEOF'
+# DesignSpec
+
+## 3.1 Portfolio Overview
+
+The page title is Benchmark do portfolio and shows KPI cards.
+SPECEOF
+
+  cat > "$tasks_fixture" << 'TASKEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: DesignSpec paraphrase fails",
+    "type": "feat",
+    "branchName": "feat/ds-fail",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "prototypePaths": ["proto/index.html"],
+    "designBundle": {
+      "root": "bundles/ds-fail",
+      "readme": null,
+      "chats": [],
+      "businessSpec": null,
+      "designSpec": "TASKS_DIR_PLACEHOLDER/DesignSpec-fail.md"
+    }
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Portfolio overview screen",
+      "description": "Visual story with paraphrase (wrong)",
+      "acceptanceCriteria": [
+        "\"Portfolio benchmark overview\" (DesignSpec § 3.1 L5) MUST appear as the page H1."
+      ],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 1,
+      "verification": {
+        "strategy": "visual",
+        "status": "pending"
+      }
+    }
+  ]
+}
+TASKEOF
+
+  sed -i "s|TASKS_DIR_PLACEHOLDER|${TASKS_DIR}|g" "$tasks_fixture"
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": false' "$output" "validate-tasks designspec paraphrase: returns valid=false"
+  assert_contains 'missing DesignSpec citation' "$output" "validate-tasks designspec paraphrase: emits diagnostic"
+  assert_contains 'Portfolio benchmark overview' "$output" "validate-tasks designspec paraphrase: names the missing literal"
+  assert_exit_code "1" "$exit_code" "validate-tasks designspec paraphrase: exits 1"
+
+  rm -f "$tasks_fixture" "$spec_file"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_tasks_designspec_unicode_normalize() {
+  echo ""
+  echo "=== Testing validate-tasks: DesignSpec unicode normalization (curly quotes and em-dash) ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-91-validate-tasks-ds-unicode.json"
+  local spec_file="$TASKS_DIR/DesignSpec-unicode.md"
+
+  # Spec uses curly quotes and em-dash; AC uses straight quotes and hyphen
+  # After normalization both sides should match
+  printf '# DesignSpec\n\n## 2.1 Metrics\n\n' > "$spec_file"
+  # Write a line with curly double quotes and an em-dash using printf with octal/hex escapes
+  # UTF-8: left double quotation mark = E2 80 9C, right = E2 80 9D, em-dash = E2 80 94
+  printf 'The label \xe2\x80\x9cNet Return\xe2\x80\x9d shows portfolio\xe2\x80\x94performance metrics.\n' >> "$spec_file"
+
+  cat > "$tasks_fixture" << 'TASKEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: DesignSpec unicode normalize",
+    "type": "feat",
+    "branchName": "feat/ds-unicode",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "prototypePaths": ["proto/index.html"],
+    "designBundle": {
+      "root": "bundles/ds-unicode",
+      "readme": null,
+      "chats": [],
+      "businessSpec": null,
+      "designSpec": "TASKS_DIR_PLACEHOLDER/DesignSpec-unicode.md"
+    }
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Metrics card",
+      "description": "Visual story with unicode-normalized citation",
+      "acceptanceCriteria": [
+        "\"Net Return\" (DesignSpec § 2.1 L5) label MUST be visible."
+      ],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 1,
+      "verification": {
+        "strategy": "visual",
+        "status": "pending"
+      }
+    }
+  ]
+}
+TASKEOF
+
+  sed -i "s|TASKS_DIR_PLACEHOLDER|${TASKS_DIR}|g" "$tasks_fixture"
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": true' "$output" "validate-tasks unicode normalize: curly-quote spec matches straight-quote AC"
+  assert_exit_code "0" "$exit_code" "validate-tasks unicode normalize: exits 0"
+
+  rm -f "$tasks_fixture" "$spec_file"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_tasks_designspec_subsection_boundary() {
+  echo ""
+  echo "=== Testing validate-tasks: DesignSpec subsection boundary (literal in wrong subsection fails) ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-90-validate-tasks-ds-boundary.json"
+  local spec_file="$TASKS_DIR/DesignSpec-boundary.md"
+
+  # Spec has sections 3.1 and 3.2; the literal is ONLY in 3.2, AC cites 3.1
+  cat > "$spec_file" << 'SPECEOF'
+# DesignSpec
+
+## 3.1 Overview
+
+This section contains general overview content only.
+
+## 3.2 Metrics
+
+The KPI label is Total AUM shown on the dashboard.
+SPECEOF
+
+  cat > "$tasks_fixture" << 'TASKEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: DesignSpec subsection boundary",
+    "type": "feat",
+    "branchName": "feat/ds-boundary",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "prototypePaths": ["proto/index.html"],
+    "designBundle": {
+      "root": "bundles/ds-boundary",
+      "readme": null,
+      "chats": [],
+      "businessSpec": null,
+      "designSpec": "TASKS_DIR_PLACEHOLDER/DesignSpec-boundary.md"
+    }
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Dashboard metrics",
+      "description": "Visual story with wrong section citation",
+      "acceptanceCriteria": [
+        "\"Total AUM\" (DesignSpec § 3.1 L5) KPI label MUST be visible."
+      ],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 1,
+      "verification": {
+        "strategy": "visual",
+        "status": "pending"
+      }
+    }
+  ]
+}
+TASKEOF
+
+  sed -i "s|TASKS_DIR_PLACEHOLDER|${TASKS_DIR}|g" "$tasks_fixture"
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": false' "$output" "validate-tasks subsection boundary: literal in 3.2 but cited in 3.1 fails"
+  assert_contains 'missing DesignSpec citation' "$output" "validate-tasks subsection boundary: emits diagnostic"
+  assert_exit_code "1" "$exit_code" "validate-tasks subsection boundary: exits 1"
+
+  rm -f "$tasks_fixture" "$spec_file"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
 test_mark_complete_preserves_new_fields() {
   echo ""
   echo "=== Testing mark-complete preserves gate, verification, implementation, and wave fields ==="
@@ -5054,6 +5362,10 @@ main() {
   test_validate_waves_mismatch
   test_validate_tasks_skeleton_exits_zero
   test_validate_tasks_skips_pre_v33
+  test_validate_tasks_designspec_passing_case
+  test_validate_tasks_designspec_paraphrase_fails
+  test_validate_tasks_designspec_unicode_normalize
+  test_validate_tasks_designspec_subsection_boundary
   test_mark_complete_preserves_new_fields
 
   # CLI output optimization tests — run with fresh fixture each time

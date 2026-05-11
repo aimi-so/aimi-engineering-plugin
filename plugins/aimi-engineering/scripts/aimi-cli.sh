@@ -2294,9 +2294,10 @@ cmd_validate_waves() {
   ' "$tasks_file"
 }
 
-# Validate tasks file citation fields (skeleton: schemaVersion guard only)
-# For schemaVersion >= 3.3: emits {valid: true, errors: []} — no checks yet
+# Validate tasks file citation fields
+# For schemaVersion >= 3.3: validates DesignSpec verbatim citations for visual stories
 # For schemaVersion < 3.3: emits skip-info to stderr and exits 0
+# stdout: {valid, errors[]} JSON; exits non-zero when invalid
 cmd_validate_tasks() {
   local tasks_file
   tasks_file=$(get_tasks_file)
@@ -2311,8 +2312,173 @@ cmd_validate_tasks() {
     return 0
   fi
 
-  echo '{"valid": true, "errors": []}'
-  return 0
+  # Collect errors as a bash array
+  local errors=()
+
+  # DesignSpec scan: only when metadata.designBundle.designSpec is non-null
+  # AND metadata.prototypePaths is non-empty
+  local design_spec_rel
+  design_spec_rel=$(jq -r '.metadata.designBundle.designSpec // empty' "$tasks_file" 2>/dev/null)
+
+  local prototype_count
+  prototype_count=$(jq '.metadata.prototypePaths | if type == "array" then length else 0 end' "$tasks_file" 2>/dev/null)
+  prototype_count="${prototype_count:-0}"
+
+  if [ -n "$design_spec_rel" ] && [ "$prototype_count" -gt 0 ]; then
+    # Resolve DesignSpec path relative to PROJECT_ROOT
+    local design_spec_path
+    design_spec_path="${PROJECT_ROOT}/${design_spec_rel}"
+
+    if [ ! -f "$design_spec_path" ]; then
+      errors+=("${tasks_file}: DesignSpec file not found: ${design_spec_rel}")
+    else
+      # Extract visual stories: id + acceptanceCriteria entries as TSV lines
+      # Format: <story_id>\t<ac_index>\t<ac_text>
+      local visual_ac_data
+      visual_ac_data=$(jq -r '
+        .userStories[] |
+        select(.verification.strategy == "visual") |
+        . as $s |
+        .acceptanceCriteria | to_entries[] |
+        [$s.id, (.key | tostring), .value] | @tsv
+      ' "$tasks_file" 2>/dev/null)
+
+      if [ -n "$visual_ac_data" ]; then
+        # Process each AC entry
+        while IFS=$'\t' read -r story_id ac_index ac_text; do
+          [ -z "$story_id" ] && continue
+
+          # Extract all "literal" (DesignSpec § N.N L<line>) patterns from the AC
+          # Pattern: "some literal" (DesignSpec § N.N L<line>)
+          # Use grep to find all matches in the ac_text
+          local matches
+          matches=$(printf '%s' "$ac_text" | grep -oE '"[^"]+" \(DesignSpec § [0-9]+\.[0-9]+ L[0-9]+\)' 2>/dev/null || true)
+
+          [ -z "$matches" ] && continue
+
+          while IFS= read -r match; do
+            [ -z "$match" ] && continue
+
+            # Extract the literal string (between double quotes)
+            local literal section line_num
+            literal=$(printf '%s' "$match" | sed 's/^"\(.*\)" (DesignSpec § .*)$/\1/')
+            section=$(printf '%s' "$match" | grep -oE '§ [0-9]+\.[0-9]+' | sed 's/§ //')
+            line_num=$(printf '%s' "$match" | grep -oE 'L[0-9]+' | head -1 | sed 's/L//')
+
+            # Locate subsection in DesignSpec and check verbatim presence
+            if ! _validate_designspec_citation "$design_spec_path" "$literal" "$section"; then
+              errors+=("${tasks_file}: ${story_id} AC[${ac_index}]: missing DesignSpec citation for \"${literal}\" in section § ${section}")
+            fi
+          done <<< "$matches"
+        done <<< "$visual_ac_data"
+      fi
+    fi
+  fi
+
+  # Emit result JSON
+  if [ ${#errors[@]} -eq 0 ]; then
+    echo '{"valid": true, "errors": []}'
+    return 0
+  else
+    # Build JSON errors array
+    local errors_json
+    errors_json=$(printf '%s\n' "${errors[@]}" | jq -R . | jq -s .)
+    printf '{"valid": false, "errors": %s}\n' "$errors_json"
+    return 1
+  fi
+}
+
+# Helper: validate that a literal string appears verbatim in the cited DesignSpec subsection.
+# Subsection boundary: lines from "## N.N <heading>" (or "### N.N") to next heading of equal/higher level.
+# Normalizes Unicode quotes, em-dashes, non-breaking spaces, and HTML entities on both sides.
+# Usage: _validate_designspec_citation <spec_file> <literal> <section>
+# Returns 0 if found, 1 if not found.
+_validate_designspec_citation() {
+  local spec_file="$1"
+  local literal="$2"
+  local section="$3"
+
+  # Normalize a string: Unicode quotes → ASCII, em-dash → hyphen,
+  # non-breaking space → space, HTML entities to literal chars.
+  _normalize_text() {
+    local text="$1"
+    # Curly double quotes → straight double quote
+    text=$(printf '%s' "$text" | sed \
+      -e 's/\xe2\x80\x9c/"/g' \
+      -e 's/\xe2\x80\x9d/"/g' \
+      -e "s/\xe2\x80\x98/'/g" \
+      -e "s/\xe2\x80\x99/'/g" \
+      -e 's/\xe2\x80\x94/-/g' \
+      -e 's/\xc2\xa0/ /g' \
+      -e 's/&amp;/\&/g' \
+      -e 's/&nbsp;/ /g' \
+      -e 's/&lt;/</g' \
+      -e 's/&gt;/>/g' \
+      -e 's/&quot;/"/g')
+    printf '%s' "$text"
+  }
+
+  # Determine heading level for section N.N (always "##" — subsection level)
+  # Section like "3.1" is a sub-heading; we look for "## 3.1" or "### 3.1" etc.
+  # We scan for the section heading and collect lines until the next equal/higher heading.
+
+  local normalized_literal
+  normalized_literal=$(_normalize_text "$literal")
+
+  # Extract subsection body from the spec file
+  # Strategy: use awk to find the heading containing the section number,
+  # then collect lines until a heading of equal or higher level.
+  local subsection_body
+  subsection_body=$(awk -v section="$section" '
+    BEGIN { in_section = 0; heading_level = 0 }
+    {
+      # Detect markdown headings: count leading # characters
+      if (/^#+[[:space:]]/) {
+        level = 0
+        line_copy = $0
+        while (substr(line_copy, 1, 1) == "#") {
+          level++
+          line_copy = substr(line_copy, 2)
+        }
+        # Check if this heading contains the section number
+        if (!in_section) {
+          # Look for pattern like "§ N.N" or "N.N " at start of heading text
+          heading_text = substr($0, level + 1)
+          # Strip leading spaces
+          gsub(/^[[:space:]]+/, "", heading_text)
+          if (heading_text ~ ("^(§[[:space:]]*)?" section "([[:space:]]|$)") || \
+              heading_text ~ ("§[[:space:]]*" section "([[:space:]]|$)")) {
+            in_section = 1
+            heading_level = level
+            next
+          }
+        } else {
+          # We are in the section — stop at equal or higher level heading
+          if (level <= heading_level) {
+            exit
+          }
+        }
+      }
+      if (in_section) {
+        print $0
+      }
+    }
+  ' "$spec_file")
+
+  if [ -z "$subsection_body" ]; then
+    # Section not found in spec — treat as missing
+    return 1
+  fi
+
+  # Normalize the subsection body
+  local normalized_body
+  normalized_body=$(_normalize_text "$subsection_body")
+
+  # Check if normalized literal is a substring of normalized body
+  if printf '%s' "$normalized_body" | grep -qF "$normalized_literal"; then
+    return 0
+  fi
+  return 1
 }
 
 # List task files where all stories have terminal status (completed or skipped)
