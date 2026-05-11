@@ -2,6 +2,7 @@
 name: aimi:brainstorm
 description: Explore ideas through guided brainstorming with batched questions and codebase research
 argument-hint: "[feature description]"
+allowed-tools: Read, Glob, Grep, AskUserQuestion, Task, Write, Bash($AIMI_CLI:*)
 ---
 
 # Aimi Brainstorm
@@ -81,6 +82,89 @@ Derive working-memory values from the result:
 When `bundleDetected=false`, all downstream phases degrade gracefully — no
 error, no warning, no change to existing behavior.
 
+### Step 0.6 Post-Processing: Bundle Prototype Generation Gate
+
+**Check render bundle flag (at bundle-detection gate):** Immediately after deriving `bundleDetected`, check whether the topic text or any user reply so far contains `render bundle` (case-insensitive substring). If matched and not already emitted this session, set `renderBundlePending = true` and emit `render-bundle override active — regenerating prototype from specs` once to chat.
+
+**Generation condition:** When `bundleDetected=true` AND (the `prototypes[]` array in `bundlePayload` is empty OR `renderBundlePending = true`), run bundle prototype generation:
+
+1. **Check status:**
+   ```bash
+   STATUS_JSON=$($AIMI_CLI bundle-prototype-status \
+     --bundle "<bundlePath>" \
+     --topic "<topic-slug>" \
+     $([ "$renderBundlePending" = "true" ] && echo "--force"))
+   ```
+   Parse `STATUS_JSON` for:
+   - `needs_generation` (bool)
+   - `view_list` (array of `{name, source_section}`)
+   - `view_source` (`"designSpec"` | `"businessSpec"` | `"none"`)
+   - `output_path` (string)
+
+2. **When `view_source` is `"none"`:** Emit exactly:
+   `bundle prototype generation skipped — no view list in DesignSpec § 4 or BusinessSpec § 5/§ 6`
+   Then proceed without generation. Do not set `bundleGeneratedPrototypePath`. Skip the remaining sub-steps.
+
+3. **When `needs_generation` is `true`:** Create the output directory and spawn the author agent:
+   ```bash
+   mkdir -p .aimi/brainstorms/prototypes
+   ```
+   Parse additional fields from `STATUS_JSON`:
+   - `sidecar_path` — the sidecar JSON path returned by `bundle-prototype-status`
+   Extract from `bundlePayload`:
+   - `designSpec` → `designSpecPath` (may be null)
+   - `businessSpec` → `businessSpecPath` (may be null)
+   - `chats[]` → `chatPaths` (may be empty)
+
+   **Path guard:** Resolve `output_path` to an absolute path and verify it starts with `AIMI_ROOT`. If it does not, log one warning line (`bundle prototype generation skipped — output path outside project root: <output_path>`) and abort generation for this session without clearing `renderBundlePending`.
+
+   Spawn the bundle prototype author agent:
+   ```
+   Task subagent_type="aimi-engineering:research:aimi-bundle-prototype-author"
+     prompt: "Generate a prototype HTML for the design bundle.
+              bundlePath=<bundlePath>
+              viewList=<view_list as JSON array of name strings>
+              viewSource=<view_source>
+              designSpecPath=<designSpecPath or empty>
+              businessSpecPath=<businessSpecPath or empty>
+              chatPaths[]=<chatPaths as JSON array>
+              outputPath=<output_path>"
+   ```
+
+   After the agent completes, verify the file was written:
+   ```bash
+   ls "<output_path>" 2>/dev/null
+   ```
+   If the file is missing, log one warning line (`bundle prototype generation failed — agent did not write output: <output_path>`) and proceed without a generated prototype.
+
+4. **When generation succeeds** (file confirmed on disk):
+
+   a. **Finalize the sidecar:** Compute hashes and call:
+      ```bash
+      BUNDLE_HASH=$(sha256sum "<bundlePath>/README.md" 2>/dev/null | awk '{print $1}' || echo "")
+      DESIGN_HASH=$([ -n "<designSpecPath>" ] && sha256sum "<designSpecPath>" 2>/dev/null | awk '{print $1}' || echo "")
+      BUSINESS_HASH=$([ -n "<businessSpecPath>" ] && sha256sum "<businessSpecPath>" 2>/dev/null | awk '{print $1}' || echo "")
+      $AIMI_CLI bundle-prototype-finalize \
+        --topic "<topic-slug>" \
+        --bundle-hash "$BUNDLE_HASH" \
+        --design-spec-hash "$DESIGN_HASH" \
+        --business-spec-hash "$BUSINESS_HASH" \
+        --view-list '<view_list as JSON array>' \
+        --source-command brainstorm
+      ```
+
+   b. **Register the generated prototype:** Store `output_path` as `bundleGeneratedPrototypePath` in working memory. Append one entry to `prototype_entries`:
+      ```
+      { path: "<output_path>", question_category: "Bundle", branch: "bundle-generated" }
+      ```
+      This entry uses the same YAML key ordering as variant-derived entries (path, question_category, branch) so that plan.md Phase 0 can parse it uniformly.
+
+   c. **Clear the flag:** Set `renderBundlePending = false`.
+
+5. **When `needs_generation` is `false`** (and `renderBundlePending` was not `true`): Generation is not needed — the sidecar already records an up-to-date prototype. Use the `output_path` from `STATUS_JSON` as a reference for downstream phases if the file exists on disk. Do not append to `prototype_entries` here — the path will be picked up through `bundlePayload.prototypes[]` in Phase 4 as a normal bundle-derived entry.
+
+**Tag-breakout sanitization:** Before writing `bundleGeneratedPrototypePath` into any YAML frontmatter key (see Phase 4 `prototype:` frontmatter rules), replace `</prototype_html` with `&lt;/prototype_html` and `<prototype_html` with `&lt;prototype_html` in the path string. (In practice a file path will never contain these sequences, but the guard must be on the rail per security policy.)
+
 ## Environment Variables
 
 | Variable | Value | Effect |
@@ -98,6 +182,7 @@ Certain literal phrases typed in the topic or in a reply trigger one-shot render
 |--------|-----------|-------|--------|
 | `show variants` | Case-insensitive substring match anywhere in the topic text or the user's latest reply | Next question only — flag clears after that one question is rendered | Force-treats the next question as **Aesthetic Direction** for visual variant rendering, even when the category was classified as Functional or Scope. On activation emit exactly: `Visual override active — rendering variants for next question` |
 | `vary ui` | Case-insensitive substring match anywhere in the topic text or the user's latest reply | Next visual question only — flag clears after that one visual question is rendered | Forces the UI-variation branch on the next Aesthetic Direction or Differentiation question. Non-visual questions do not consume the flag. On activation emit exactly: `UI variation override active — next visual question will vary tokens` |
+| `render bundle` | Case-insensitive substring match anywhere in the topic text or the user's latest reply | One-shot per session — flag clears after a single prototype re-generation | Forces bundle prototype (re-)generation even when `prototypes[]` already contains a user-authored HTML. Checked at the bundle-detection gate (Step 0.6 post-processing) so it fires for non-visual brainstorms too. On activation emit exactly: `render-bundle override active — regenerating prototype from specs` |
 
 **How `show variants` works at runtime:**
 
@@ -114,7 +199,16 @@ Certain literal phrases typed in the topic or in a reply trigger one-shot render
 4. If the flag is not set, proceed with normal variant authoring — no change to existing behavior.
 5. **Co-occurrence with `show variants`:** When both `show variants` and `vary ui` match in the same reply or topic text, both flags are set independently. `show variants` forces the next question to be treated as Aesthetic Direction (phase category gate bypass); `vary ui` selects the UI-variation branch within that question. Both flags clear after that single question is consumed — `visualOverridePending = false` and `varyUIPending = false`. The net effect: the next question becomes an Aesthetic Direction question rendered with UI-token variation.
 
-**Precedence over bundle early-exit (Step 0a):** When `bundleDetected=true`, Step 0a would normally short-circuit variant authoring and reuse the bundle's HTML. However, `show variants` and `vary ui` override flags take **explicit precedence** over Step 0a. If either `visualOverridePending = true` or `varyUIPending = true` when the agent enters the Visual Variant Rendering sub-step, Step 0a is bypassed entirely and the normal Steps 0–7 flow runs. This allows users to re-explore visual variants even after a bundle was detected.
+**How `render bundle` works at runtime:**
+
+1. After each user reply (and when first reading the topic), check whether the text contains `render bundle` (case-insensitive).
+2. If matched, set an in-memory flag `renderBundlePending = true` and emit `render-bundle override active — regenerating prototype from specs` **once** to chat. This confirmation fires exactly once per match.
+3. The flag is checked at the **bundle-detection gate** (Step 0.6 post-processing, immediately after `bundleDetected` is derived) — not only inside Visual Variant Rendering. This ensures the override fires for non-visual brainstorms as well as visual ones.
+4. When `renderBundlePending = true` and `bundleDetected = true`, the bundle prototype generation sequence (described in Step 0.6 post-processing below) runs and re-generates the prototype even when `prototypes[]` already contains entries. After generation completes, immediately clear the flag (`renderBundlePending = false`). The override does **not** persist to subsequent re-entries.
+5. If the flag is not set, proceed with normal bundle-prototype generation logic — no change to existing behavior.
+6. **Co-occurrence with `show variants` and `vary ui`:** When `render bundle` matches in the same reply or topic text alongside `show variants` or `vary ui`, all three flags are set independently. Each flag is one-shot and clears after its own consumption event. `render bundle` clears after the bundle prototype generation; `show variants` clears after the next forced visual question; `vary ui` clears after the next visual question's branch decision. The three flags are independent — no flag prevents another from firing.
+
+**Precedence over bundle early-exit (Step 0a):** When `bundleDetected=true`, Step 0a would normally short-circuit variant authoring and reuse the bundle's HTML. However, `show variants` and `vary ui` override flags take **explicit precedence** over Step 0a. If either `visualOverridePending = true` or `varyUIPending = true` when the agent enters the Visual Variant Rendering sub-step, Step 0a is bypassed entirely and the normal Steps 0–7 flow runs. This allows users to re-explore visual variants even after a bundle was detected. The `render bundle` flag operates independently at Step 0.6 (bundle-detection gate), before Visual Variant Rendering, and does not affect Step 0a's override logic.
 
 ## Phase 0: Assess Requirements Clarity
 
@@ -389,12 +483,17 @@ Before any other step in Visual Variant Rendering, check override flags and bund
 
 2. **Bundle early-exit:** If `bundleDetected=true` (and neither override flag is set):
 
-   a. **Select the bundle HTML:** Among `.html` files in the bundle's `project/` directory (within `bundlePath`), prefer files whose basename contains `standalone` (case-insensitive); if none match, use the first non-standalone `.html` file alphabetically.
+   a. **Select the bundle HTML:** Check whether `bundleGeneratedPrototypePath` is set in working memory (populated by Step 0.6 Post-Processing when `prototypes[]` was empty at detection time and generation succeeded). If set, use `bundleGeneratedPrototypePath` as the selected HTML path and use `question_category: "Bundle"` with `branch: "bundle-generated"`. Otherwise, among `.html` files in the bundle's `project/` directory (within `bundlePath`), prefer files whose basename contains `standalone` (case-insensitive); if none match, use the first non-standalone `.html` file alphabetically (and use `question_category: "Aesthetic Direction"` with `branch: "bundle"`).
 
-   b. **Wrap as prototype entry:** Store one entry in `prototype_entries` working memory:
-      ```
-      { path: "<selected html path>", question_category: "Aesthetic Direction", branch: "bundle" }
-      ```
+   b. **Wrap as prototype entry:** Store one entry in `prototype_entries` working memory using the path and metadata resolved in sub-step (a):
+      - When sourced from `bundleGeneratedPrototypePath`:
+        ```
+        { path: "<bundleGeneratedPrototypePath>", question_category: "Bundle", branch: "bundle-generated" }
+        ```
+      - When sourced from the bundle's `project/` directory:
+        ```
+        { path: "<selected html path>", question_category: "Aesthetic Direction", branch: "bundle" }
+        ```
 
    c. **Agent-mode log (emitted at most once per session):** Log one line to the brainstorm document's working memory: `agent-mode: bundle-detected — skipped variant authoring, using bundle HTML <path>`. The same line is also echoed to chat once per session (guarded by `echoedBundleEarlyExit`): if `echoedBundleEarlyExit` is `false`, emit `agent-mode: bundle-detected — skipped variant authoring, using bundle HTML <path>` to chat and set `echoedBundleEarlyExit = true`; subsequent visual questions in the same session are silent. Initialize `echoedBundleEarlyExit = false` when Step 0b initializes working memory.
 
@@ -786,6 +885,9 @@ prototype:
   - path: <bundle-prototype-path-sanitized>
     question_category: Bundle
     branch: bundle
+  - path: .aimi/brainstorms/prototypes/<topic-slug>-bundle.html
+    question_category: Bundle
+    branch: bundle-generated
 designBundle:
   root: <bundlePath>
   readme: <path to bundle README or index file>
@@ -852,7 +954,7 @@ Navigation index of spec files included in the design bundle. Top-level section 
 - § 2 — <heading text>
 - …
 
-When one or more variant prototype files were saved (Step 7 — Variant Persistence) OR when `bundleDetected=true` and `bundlePayload.prototypes[]` is non-empty, include this section:
+When one or more variant prototype files were saved (Step 7 — Variant Persistence) OR when `bundleDetected=true` and (`bundlePayload.prototypes[]` is non-empty OR `bundleGeneratedPrototypePath` is set), include this section:
 
 ## Prototypes
 
@@ -863,18 +965,21 @@ Standalone prototype files available as design reference:
 | `.aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html` | variant | Aesthetic Direction |
 | `.aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html` | variant | Differentiation |
 | `<bundle-prototype-path>` | bundle | Bundle |
+| `.aimi/brainstorms/prototypes/<topic-slug>-bundle.html` | generated-bundle | Bundle |
 
-Each variant file is a self-contained HTML page with Tailwind CDN inline. Open directly in a browser for a design reference without the variant switcher. Bundle prototype files are the HTML mockups from the Claude Design handoff bundle.
+Each variant file is a self-contained HTML page with Tailwind CDN inline. Open directly in a browser for a design reference without the variant switcher. Bundle prototype files are the HTML mockups from the Claude Design handoff bundle. Generated-bundle files are synthesized from DesignSpec/BusinessSpec by the `aimi-bundle-prototype-author` agent when no user-authored HTML shipped in the bundle.
 
-If neither variant prototypes were saved nor bundle prototypes are available, omit both the `prototype:` frontmatter key and the `## Prototypes` section entirely.
+If neither variant prototypes were saved nor bundle prototypes are available (neither from `bundlePayload.prototypes[]` nor from generation), omit both the `prototype:` frontmatter key and the `## Prototypes` section entirely.
 
 **`prototype:` frontmatter rules:**
-- Emit the `prototype:` key only when the merged list (variant-derived + bundle-derived) is non-empty; omit otherwise.
+- Emit the `prototype:` key only when the merged list (variant-derived + bundle-derived + generated-bundle) is non-empty; omit otherwise.
 - Variant-derived entries use `question_category: <Aesthetic Direction | Differentiation>` and `branch: <ux-only | ui-variation>` (values from `prototype_entries` working memory set in Step 7).
-- Bundle-derived entries use `question_category: Bundle` and `branch: bundle`. Source: `bundlePayload.prototypes[]` when `bundleDetected=true` and the array is non-empty.
-- Merge into a single `prototype:` YAML list: variant entries first, then bundle entries. Deduplicate by path — first-occurrence wins when the same path would appear from both sources.
-- Path validation: for each bundle prototype path, resolve its absolute path and verify it starts with `AIMI_ROOT`. If it does not, log one warning line (`prototype <path> rejected — path outside project root`) and skip the entry; do not abort the document write.
-- Tag-breakout sanitization: before writing any path string to the frontmatter YAML, replace `</prototype` with `&lt;/prototype` and `<prototype` with `&lt;prototype`. This prevents malicious path values from breaking out of the tag context used by plan at parse time.
+- Bundle-derived entries (from `bundlePayload.prototypes[]`) use `question_category: Bundle` and `branch: bundle`. Source: `bundlePayload.prototypes[]` when `bundleDetected=true` and the array is non-empty.
+- Generated-bundle entries (from Step 0.6 Post-Processing generation) use `question_category: Bundle` and `branch: bundle-generated`. Source: `bundleGeneratedPrototypePath` when set. YAML key ordering: `path`, `question_category`, `branch` — use this exact order so plan.md Phase 0 can parse it uniformly.
+- Merge into a single `prototype:` YAML list: variant entries first, then bundle entries (from `bundlePayload.prototypes[]`), then generated-bundle entries (from `bundleGeneratedPrototypePath`). Deduplicate by path — first-occurrence wins when the same path would appear from multiple sources.
+- Path validation: for each bundle prototype path and each generated prototype path, resolve its absolute path and verify it starts with `AIMI_ROOT`. If it does not, log one warning line (`prototype <path> rejected — path outside project root`) and skip the entry; do not abort the document write.
+- Tag-breakout sanitization: before writing any path string to the frontmatter YAML, replace `</prototype_html` with `&lt;/prototype_html` and `<prototype_html` with `&lt;prototype_html`. This prevents malicious path values from breaking out of the tag context used by plan at parse time.
+- Also add a `Source: generated-bundle` row in the `## Prototypes` table for any entry sourced from `bundleGeneratedPrototypePath`.
 
 **designBundle frontmatter rules:**
 - Emit the `designBundle:` key only when `bundleDetected=true`.
@@ -926,7 +1031,8 @@ Before writing the document, verify **all** of the following criteria. If any cr
 - [ ] `### View Modes` subsection present under Design Decisions (when bundle researcher returned non-empty view-modes) — advisory/non-blocking
 - [ ] `### Layout Variation Chosen` subsection present under Design Decisions (when bundle researcher returned a chosen variant) — advisory/non-blocking
 - [ ] `## Specs` section present with section-heading index for each non-null spec (when `businessSpec` or `designSpec` is non-null) — advisory/non-blocking
-- [ ] `## Prototypes` section present when merged prototype list is non-empty (variant-derived OR bundle-derived) — advisory/non-blocking
+- [ ] `## Prototypes` section present when merged prototype list is non-empty (variant-derived OR bundle-derived OR generated-bundle) — advisory/non-blocking
+- [ ] Generated-bundle entry in `prototype:` frontmatter uses key ordering `path`, `question_category`, `branch` and `branch: bundle-generated` (when `bundleGeneratedPrototypePath` is set) — advisory/non-blocking
 - [ ] researchPaths emitted when any researcher succeeded — advisory/non-blocking
 
 **On failure:** Use a conversational nudge for each unmet criterion:
@@ -990,7 +1096,7 @@ rm -f .aimi/brainstorms/prototypes/<topic-slug>-variants.html
 
 If the scratch file does not exist (e.g., no visual questions were rendered), this is a no-op — do not warn.
 
-**Preservation guarantee:** All chosen-variant standalone files (e.g., `<topic-slug>-a-brutally-minimal.html`) are never touched by this step. They are preserved regardless of pruning outcome.
+**Preservation guarantee:** All chosen-variant standalone files (e.g., `<topic-slug>-a-brutally-minimal.html`) and all bundle-generated prototype files (e.g., `<topic-slug>-bundle.html`) are never touched by this step. They are preserved regardless of pruning outcome.
 
 **Skip conditions (do NOT prune):**
 
