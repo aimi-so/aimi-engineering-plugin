@@ -898,6 +898,10 @@ cmd_validate_stories() {
              [$s.tasks[] | select(type == "string" and length > 5000) | "\($s.id): tasks[] entry exceeds 5000 chars"] +
              [$s.tasks[] | select(type == "string" and test("ignore previous|system:|INSTRUCTIONS|```|\\$\\(|`"; "i")) | "\($s.id): tasks[] entry contains suspicious content"]
            end)
+         else [] end) +
+        (if has("gates") then ["\($s.id): gate: 'gates' field is invalid; use singular 'gate' (see plan.md L687-692)"] else [] end) +
+        (if ($s.gate != null) then
+          (["type","status","prompt"] | map(. as $k | if ($s.gate | has($k) | not) then ["\($s.id): gate: missing required field \($k)"] else [] end) | add // [])
          else [] end)
       ) | .[]
     ] |
