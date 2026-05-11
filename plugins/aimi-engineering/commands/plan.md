@@ -721,11 +721,13 @@ $AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tas
 $AIMI_CLI validate-ids
 $AIMI_CLI validate-deps
 $AIMI_CLI validate-stories
+$AIMI_CLI validate-tasks
 
 $AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json
 $AIMI_CLI validate-ids
 $AIMI_CLI validate-deps
 $AIMI_CLI validate-stories
+$AIMI_CLI validate-tasks
 ```
 
 **For single file (frontend-only or legacy):**
@@ -735,6 +737,7 @@ $AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tas
 $AIMI_CLI validate-ids
 $AIMI_CLI validate-deps
 $AIMI_CLI validate-stories
+$AIMI_CLI validate-tasks
 ```
 
 **If any validation fails (non-zero exit):**
