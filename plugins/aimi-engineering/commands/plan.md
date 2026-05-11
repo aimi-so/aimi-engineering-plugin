@@ -789,7 +789,7 @@ $AIMI_CLI validate-tasks
 3. Re-write the tasks.json file using the Write tool
 4. Re-run all validations until they pass
 
-**Note:** `validate-stories` (US-001) catches malformed `skills[]` — entries that fail the `^[a-zA-Z0-9][a-zA-Z0-9_-]*$` regex, lists exceeding 10 entries, or an explicitly empty `skills: []` array (field must be omitted when no skills apply).
+**Note:** `validate-stories` (US-001) catches malformed `skills[]` — entries that fail the `^[a-zA-Z0-9][a-zA-Z0-9_-]*$` regex, lists exceeding 10 entries, or an explicitly empty `skills: []` array (field must be omitted when no skills apply). It also enforces the **gate schema** (US-003): the plural `gates` field is rejected outright (use singular `gate`, see L687-692 above), and any singular `gate` object must carry all three required keys — `type`, `status`, and `prompt`.
 
 Do **not** proceed to the report step until all validations succeed.
 

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.80.0] - 2026-05-11
+
+### Added
+
+- **Pre-Save Blocking Gate for Open Questions in `/aimi:brainstorm` (US-001):** The Pre-Save Checklist at `plugins/aimi-engineering/commands/brainstorm.md` is strengthened with a `### Pre-Save Blocking Gate — Open Questions` block that counts entries under `## Open Questions` lacking a `[resolved: <choice>]` or `[deferred: <reason>]` sentinel suffix, loops `AskUserQuestion` until every OQ carries one, and writes the sentinel back to the OQ line as the idempotency marker. Bundle-sourced OQs (lines originating from `BusinessSpec § 11` or `DesignSpec § 8`) are NOT exempt — `bundleAddressedTopics` covers chat-question categories, not spec pendencies. Agent-mode fallback auto-marks every unresolved OQ as `[deferred: agent-mode auto-defer]` before save.
+- **Defensive Phase 0.5 Open Questions Resolution Gate in `/aimi:plan` (US-002):** New `### Phase 0.5: Open Questions Resolution Gate` section inserted between Phase 0 and Phase 1 of `plugins/aimi-engineering/commands/plan.md`. Parses the brainstorm `## Open Questions` section; for each line without a `[resolved: ...]` or `[deferred: ...]` sentinel, calls `AskUserQuestion`, appends the sentinel via `Edit`, records the choice in working memory `oqDecisions: { <oqId>: <choice> }` for use in Phase 4 `metadata.decisions[]`, and blocks Phase 1 until every OQ is sentinelled. Agent-mode fallback: auto-defer (do not block). Catches stale brainstorms that bypassed the upstream save-gate.
+- **`validate-stories` gate-schema enforcement in `aimi-cli.sh` (US-003):** `cmd_validate_stories` now rejects the plural `gates` field with `<id>: gate: 'gates' field is invalid; use singular 'gate' (see plan.md L687-692)` and validates the singular `gate` object shape by requiring `type`, `status`, and `prompt` keys (emits `<id>: gate: missing required field <name>` per missing key). Errors flow through the existing `{valid, errors[]}` output channel — no `ERROR:` prefix, no exit-per-error. Three new fixtures registered in `test-aimi-cli.sh` (`test_validate_stories_gate_field`): plural `gates` (fail), singular `gate` missing `type` (fail), well-formed singular `gate` (pass).
+
+### Changed
+
+- **`/aimi:plan` Phase 4.5 validator note extended (US-004):** The existing note around `validate-stories (US-001) catches malformed skills[]` is extended to also document the new gate-schema enforcement — both `gates` plural rejection and singular `gate` shape validation.
+
 ## [1.79.0] - 2026-05-11
 
 ### Added
