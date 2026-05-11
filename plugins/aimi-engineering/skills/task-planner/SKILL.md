@@ -23,7 +23,7 @@ Take a feature description through research, spec analysis, and story decomposit
 - Frontend-only: `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
 - Legacy (no scope): `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 
-> Key fields: `schemaVersion` ("3.2"), `metadata{title,type,branchName,createdAt,planPath(null),researchDepth(optional),maxConcurrency(5),frontendOnly(optional),backendSpec(optional:{endpoints[{method,path,description}],dataModels[{name,fields}],businessRules[string],businessContext(string)})}`, `userStories[]{id(US-NNN),title(≤200),description(≤500),acceptanceCriteria(each≤600),priority,status("pending"),dependsOn([]),notes,project(optional),wave(computed),implementation(optional),verification(optional),gate(optional)}`
+> Key fields: `schemaVersion` ("3.3"), `metadata{title,type,branchName,createdAt,planPath(null),researchDepth(optional),maxConcurrency(5),frontendOnly(optional),backendSpec(optional:{endpoints[{method,path,description}],dataModels[{name,fields}],businessRules[string],businessContext(string)})}`, `userStories[]{id(US-NNN),title(≤200),description(≤500),acceptanceCriteria(each≤5000),priority,status("pending"),dependsOn([]),notes,project(optional),wave(computed),tasks[](optional,max50,each≤5000chars),implementation(optional),verification(optional),gate(optional)}`
 
 **Notes:** `planPath` is always `null` (this skill generates tasks.json directly). All stories initialize with `status: "pending"`. `dependsOn` is a string array of story IDs. `maxConcurrency` defaults to `5`.
 
@@ -151,9 +151,9 @@ Incorporate identified gaps as acceptance criteria or story notes.
 ### Phase 3: Story Decomposition
 
 1. Extract requirements from research + spec-flow output
-2. Group by layer (schema → backend → UI → aggregation)
+2. **Group by user-facing capability (vertical slices).** Each story bundles all layers (schema + backend + UI) needed to deliver one complete, user-observable outcome. Do NOT create horizontal layer-only stories. If a slice exceeds ~10 files or ~4 architectural layers, add to story notes: `Large slice ({n} files across {k} layers). Consider splitting if there's a natural seam, otherwise proceed.` Re-scope any orphan UI (component not wired to real backend) into the slice where that capability is introduced — do NOT use storybook-only or dev-preview-route verification as substitutes.
 3. Size check (one context window per story)
-4. Order by dependency (assign priority numbers)
+4. Order by capability dependency (capabilities that unlock others come first; assign priority numbers)
 5. **Generate `dependsOn` arrays**:
    - **Same layer, independent concerns** (different tables, different pages) → `dependsOn: []` between them
    - **Same layer, shared concern** (FK referencing another story's table) → add dependency
@@ -183,6 +183,7 @@ Incorporate identified gaps as acceptance criteria or story notes.
    - visual: `{"strategy": "visual", "status": "pending", "url": "http://localhost:3000/page", "expect": "Dashboard with charts visible"}`
    - api: `{"strategy": "api", "status": "pending", "url": "http://localhost:3000/api/endpoint", "expect": "200 with JSON array"}`
    - test: `{"strategy": "test", "status": "pending", "expect": "All unit tests pass"}`
+9.5. **Populate `tasks[]` — horizontal mechanical breakdown**: for every story, generate a `tasks` array of 3–15 concrete mechanical sub-steps (each ≤ 5000 chars, max 50, verb-object phrasing). MUST include explicit `"Wire <X> into <Y>"` entries for any file in `implementation.files` that is also listed in another story's `implementation.files` (parent shells, routers, index barrels, MSW handlers, `main.tsx`). Order: creation → integration wiring → local verification. Tasks are planner guidance, not acceptance criteria. Omit the field (do not emit `tasks: []`) when fewer than 3 meaningful steps exist. See `references/task-format-v3.md` for the canonical fixture.
 10. **Detect and attach `gate` objects** using heuristics:
     - `verify` gate: OAuth, email, webhooks, payment, external service integration
     - `decision` gate: multiple viable approaches with significant downstream impact
@@ -190,7 +191,7 @@ Incorporate identified gaps as acceptance criteria or story notes.
     - Most stories have no gate; only attach when heuristics clearly match
 11. Assign IDs in `US-NNN` zero-padded format (`US-001`, `US-002`, ...) — never `US-1`, `story-1`, `S1`, or any other format
 12. Write descriptions in user story format: "As a [specific role], I want [feature] so that [benefit]" — role must name the actor, never just "user"
-13. Generate verifiable acceptance criteria
+13. Generate verifiable acceptance criteria: every story must include at least one user-observable, end-to-end outcome listed **first**. Mixed mechanical + behavioral criteria are allowed but the user-observable item comes first.
 14. Validate dependency graph:
     - No circular dependencies (DAG check)
     - No self-references (no story lists its own ID)
@@ -208,7 +209,7 @@ Branch on `implementationScope` from Phase 0:
 3. **Rebuild `dependsOn` independently per file**: remove all cross-file references; within each file, only reference IDs that exist in that file
 4. **Recompute `wave` numbers per file**: roots (`dependsOn: []`) are wave 1 within each file, independently
 5. **Derive separate `branchName` per file**: `type/[feature]-frontend` and `type/[feature]-backend` (e.g., `feat/add-user-auth-frontend`, `feat/add-user-auth-backend`)
-6. Derive shared metadata: title, type, createdAt, `schemaVersion: "3.2"`, `planPath: null`, `brainstormPath`, `researchDepth`, `maxConcurrency`
+6. Derive shared metadata: title, type, createdAt, `schemaVersion: "3.3"`, `planPath: null`, `brainstormPath`, `researchDepth`, `maxConcurrency`
 7. For each story: set `status: "pending"`, include `dependsOn`, `wave`, and optional `implementation`, `verification`, `gate` objects
 8. Write frontend file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
 9. Write backend file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`
@@ -227,13 +228,13 @@ Branch on `implementationScope` from Phase 0:
      - `assumptions`: document integration assumptions, data patterns, auth model, API style
      - `successCriteria`: derive measurable success criteria from acceptance criteria across all stories
 3. Write single file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
-4. Derive metadata: title, type, branchName (kebab-case, `-frontend` suffix), createdAt, `schemaVersion: "3.2"`, `planPath: null`, `brainstormPath`, `researchDepth`, `maxConcurrency`
+4. Derive metadata: title, type, branchName (kebab-case, `-frontend` suffix), createdAt, `schemaVersion: "3.3"`, `planPath: null`, `brainstormPath`, `researchDepth`, `maxConcurrency`
 5. For each story: set `status: "pending"`, include `dependsOn`, `wave`, and optional `implementation`, `verification`, `gate` objects
 
 #### When `implementationScope` is unset (legacy):
 
 1. Derive metadata: title, type, branchName (kebab-case), createdAt (today)
-2. Set `schemaVersion: "3.2"`, `planPath: null`, `brainstormPath`, `researchDepth`, `maxConcurrency`
+2. Set `schemaVersion: "3.3"`, `planPath: null`, `brainstormPath`, `researchDepth`, `maxConcurrency`
 3. For each story: set `status: "pending"`, include `dependsOn`, `wave`, and optional `implementation`, `verification`, `gate` objects
 4. Write to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 

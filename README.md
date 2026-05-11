@@ -134,7 +134,7 @@ Standalone brainstorm workflow with codebase research and Ralph-style batched mu
 
 #### `/aimi:plan`
 
-Generates `.aimi/tasks/YYYY-MM-DD-[feature]-tasks.json` directly from a feature description. Runs a full pipeline: brainstorm detection, parallel research (codebase + learnings), optional external research, spec-flow analysis, and story decomposition.
+Generates `.aimi/tasks/YYYY-MM-DD-[feature]-tasks.json` directly from a feature description. Runs a full pipeline: brainstorm detection, parallel research (codebase + learnings), optional external research, spec-flow analysis, and story decomposition. Stories are decomposed as vertical slices — each delivers user-visible value end-to-end across all layers rather than being split by horizontal layer boundaries.
 
 ```bash
 /aimi:plan Add user registration flow
@@ -253,9 +253,9 @@ Used internally by commands — not user-invocable.
 
 ## Agents
 
-28 aimi-native agents organized into 5 categories.
+29 aimi-native agents organized into 5 categories.
 
-### Research (4)
+### Research (5)
 
 | Agent | Description |
 |-------|-------------|
@@ -263,6 +263,7 @@ Used internally by commands — not user-invocable.
 | `aimi-learnings-researcher` | Search `.aimi/solutions/` for past solutions |
 | `aimi-best-practices-researcher` | External best practices and community conventions |
 | `aimi-framework-docs-researcher` | Framework documentation and version-specific guidance |
+| `aimi-bundle-prototype-author` | Generate self-contained bundle prototype HTML from design bundle context |
 
 ### Review (15)
 
@@ -594,7 +595,7 @@ For the full version history, see [CHANGELOG.md](CHANGELOG.md).
 |------|-------|-------------|
 | Commands | 14 | Slash commands for workflow stages |
 | Skills | 16 | 3 core, 6 development/style, 4 tooling/automation, 3 disabled/reference |
-| Agents | 28 | 4 research, 15 review, 3 design, 1 docs, 5 workflow |
+| Agents | 29 | 5 research, 15 review, 3 design, 1 docs, 5 workflow |
 
 ## License
 

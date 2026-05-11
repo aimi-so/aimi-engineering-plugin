@@ -94,6 +94,72 @@ BUNDLE_META=$($AIMI_CLI detect-design-bundle --root "$BUNDLE_OVERRIDE" 2>/dev/nu
 
 Store the JSON output as `designBundleMeta`. When `BUNDLE_META` is empty or the command fails, set `designBundleMeta` to `null` and continue.
 
+### Bundle Prototype Auto-Generation
+
+**Render-bundle override detection:** Scan `$ARGUMENTS` for the case-insensitive substring `render bundle`. If matched:
+- Set `renderBundlePending = true`.
+- Emit exactly one chat line: `render-bundle override active — regenerating prototype from specs`
+
+When `designBundleMeta` is non-null AND (`bundlePayload.prototypes[]` is empty OR `renderBundlePending = true`):
+
+1. **Check generation status:**
+
+```bash
+STATUS_JSON=$($AIMI_CLI bundle-prototype-status \
+  --bundle "<bundlePath>" \
+  --topic "<topicSlug>" \
+  [--force when renderBundlePending=true])
+```
+
+   Extract from the returned JSON:
+   - `needs_generation` (bool)
+   - `view_list` (array of `{name, source_section}`)
+   - `view_source` (`'designSpec'` | `'businessSpec'` | `'none'`)
+   - `output_path` (string — path where agent must write the HTML)
+   - `sidecar_path` (string — path of the sidecar JSON)
+
+2. **When `view_source` is `'none'`:** emit exactly one log line:
+
+   ```
+   bundle prototype generation skipped — no view list in DesignSpec § 4 or BusinessSpec § 5/§ 6
+   ```
+
+   Proceed to the prototypes[] merge below without generation.
+
+3. **When `needs_generation` is `false` (sidecar matches, `view_source` is not `'none'`):** skip generation entirely. The sidecar at `.aimi/brainstorms/prototypes/<topicSlug>-bundle-sidecar.json` already matches all current hashes — reuse the existing file at `output_path`. Push `output_path` into `resolvedPrototypePaths` and proceed.
+
+4. **When `needs_generation` is `true`:** ensure the output directory exists, then spawn the author agent:
+
+```bash
+mkdir -p "$(dirname "<output_path>")"
+```
+
+```
+Task subagent_type="aimi-engineering:research:aimi-bundle-prototype-author"
+  prompt: "Generate a self-contained HTML prototype for the bundle.
+           bundlePath: <bundlePath>
+           viewList: <view_list extracted names as JSON array>
+           viewSource: viewList
+           designSpecPath: <designSpecPath or empty string when null>
+           businessSpecPath: <businessSpecPath or empty string when null>
+           chatPaths[]: <designBundleMeta.chats[] as JSON array>
+           outputPath: <output_path>"
+```
+
+   After the agent writes `outputPath`, write the sidecar atomically:
+
+```bash
+$AIMI_CLI bundle-prototype-finalize \
+  --topic "<topicSlug>" \
+  --bundle-hash "<bundleHash>" \
+  --design-spec-hash "<designSpecHash>" \
+  --business-spec-hash "<businessSpecHash>" \
+  --view-list "<view_list as JSON string>" \
+  --source-command plan
+```
+
+   Push `output_path` into `resolvedPrototypePaths`.
+
 When `designBundleMeta` is non-null:
 - Extract the `prototypes` array from the bundle metadata (may be empty).
 - For each path: resolve absolute path with `realpath`. Paths whose absolute resolution does not start with `AIMI_ROOT` are dropped with one-line warning `prototype <path> rejected — path outside project root` and excluded from `resolvedPrototypePaths`. For paths that pass validation, normalize to relative-to-`AIMI_ROOT` before merging. Deduplicate by relative path against paths already collected from the brainstorm frontmatter (insertion-order, first-occurrence wins).
@@ -337,10 +403,11 @@ directly when describing UI acceptance criteria, component structure, and visual
 ```
 
 1. Extract all requirements (explicit + spec-flow identified)
-2. Group by layer (schema → backend → UI → aggregation)
+2. **Group by user-facing capability (vertical slices).** Each story must bundle all layers needed to deliver one complete, user-observable outcome — schema + backend + UI together. Do NOT create horizontal layer-only stories (e.g., a story that only migrates a table without the backend or UI that exposes it). If a slice requires more than ~10 files or spans more than ~4 architectural layers, emit the comment `Large slice ({n} files across {k} layers). Consider splitting if there's a natural seam, otherwise proceed.` for human review — this is a soft flag, not a hard cap.
+2a. **Re-scope orphan UI**: any UI component (modal, panel, form) not yet wired to a real backend action must be integrated into the vertical slice that introduces that capability. Do NOT introduce dev-only preview routes or storybook-only verification as a substitute for a real integrated slice.
 3. Assign IDs in `US-NNN` zero-padded format (`US-001`, `US-002`, ...) — never `US-1`, `story-1`, `S1`, or any other format
 4. Size check: each story must be completable in ONE agent iteration (one context window)
-5. Order by dependency: assign `dependsOn` arrays (explicit story IDs) and `priority` as tiebreaker
+5. Order by capability dependency: assign `dependsOn` arrays (explicit story IDs) and `priority` as tiebreaker — capabilities that unlock other capabilities come first
 6. **Assign `project` field** when multiple repos were discovered in Phase 1:
    - Set `project` to the repo's relative path (e.g., `backend`, `services/api`)
    - Omit `project` when only one repo exists or the story targets the CWD repo
@@ -376,9 +443,20 @@ directly when describing UI acceptance criteria, component structure, and visual
 
    **Plugin-self-build default** — when the current repo is the `aimi-engineering-plugin` itself (detected by top-level `CLAUDE.md` containing the phrase `This repo builds the aimi-engineering plugin`), override inference for stories whose `implementation.files` touch `plugins/aimi-engineering/skills/` or `plugins/aimi-engineering/commands/` and set `skills: ["create-agent-skills"]` regardless of extension matches. This ensures plugin-authoring stories always pull the authoring skill.
 
+9.6. **Populate `tasks[]` — horizontal mechanical breakdown** — for every story, generate a `tasks` array of concrete mechanical sub-steps the executing agent should carry out in order. The goal is to make implicit "Wire X into Y" integration steps explicit at planning time, so parallel-worktree executions cannot drop cross-story file wiring.
+
+   Rules:
+   - **3–15 entries per story** (soft target). Hard schema cap is 20.
+   - Each entry ≤ 5000 chars; plain imperative verb-object phrasing (e.g., `"Add status column to migrations/001_add_status.sql"`, `"Import StatusBadge into TaskCard and pass status prop"`).
+   - **Integration steps are mandatory**: whenever this story's `implementation.files` lists (or implies a registration into) a path that also appears in another story's `implementation.files`, the `tasks` array MUST include an explicit entry of the form `"Wire <component/handler/route> into <owning file>"`. Cross-story file wiring must never be implicit.
+   - Order: creation/scaffolding first → integration wiring → local verification last.
+   - Do not duplicate `acceptanceCriteria` text verbatim. AC are the observable gate (vertical); tasks are the recipe (horizontal, planner guidance only).
+   - Forbidden content (matches validator at `aimi-cli.sh:891-898`): triple-backticks, `$(`, backticks, the strings `ignore previous`, `system:`, `INSTRUCTIONS`.
+   - **Omit the field entirely** (do not emit `"tasks": []`) only when fewer than 3 meaningful steps can be identified. Stories without `implementation.files` are not blocked from generating `tasks[]` — enumerate steps from the description.
+
 10. **Detect and attach `gate` objects**: `verify` (OAuth/email/webhooks), `decision` (multiple viable approaches), `action` (external manual action). Most stories have no gate.
 11. Write descriptions in user story format: "As a [specific role], I want [feature] so that [benefit]" — role must name the actor, never just "user"
-12. Generate verifiable acceptance criteria (every story must have "Typecheck passes")
+12. Generate verifiable acceptance criteria: every story must include at least one user-observable, end-to-end outcome listed **first** (e.g., "A logged-in user can submit the form and see the confirmation banner"). Mixed mechanical + behavioral criteria are allowed, but the user-observable item must come first. Every story must also have "Typecheck passes".
 13. Initialize every story with `status: "pending"` and appropriate `dependsOn` array
 14. Validate: no circular dependencies in `dependsOn`, no self-references, all referenced IDs exist, no vague criteria
 15. **Spec-driven screen decomposition** (when `businessSpecContent` is non-null): drive decomposition from `BusinessSpec § 2` (Screens/Pages) — create **one story per screen** listed. Do not infer screens from the feature description when the spec is present.
@@ -515,11 +593,11 @@ mkdir -p .aimi/tasks
 
 Write JSON using the Write tool. Validate JSON is well-formed before writing.
 
-### Schema v3.2 Structure
+### Schema v3.3 Structure
 
 ```json
 {
-  "schemaVersion": "3.2",
+  "schemaVersion": "3.3",
   "metadata": {
     "title": "string (required)",
     "type": "feat|ref|bug|chore (required)",
@@ -558,7 +636,7 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
       "id": "US-NNN (required, zero-padded, regex: ^US-[0-9]{3}[a-z]?$)",
       "title": "string (required, max 200 chars)",
       "description": "string (required, max 500 chars, user story format)",
-      "acceptanceCriteria": ["string[] (required, each max 600 chars, must include 'Typecheck passes')"],
+      "acceptanceCriteria": ["string[] (required, each max 5000 chars, must include 'Typecheck passes')"],
       "priority": "number (required, sequential integers, tiebreaker for same-depth stories)",
       "status": "pending (required, always 'pending' for new stories)",
       "dependsOn": ["US-NNN (required, array of story IDs, empty [] for root stories)"],
@@ -583,19 +661,20 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
         "prompt": "string (required, human-readable description)",
         "options": ["string[] (optional, for decision gates)"]
       },
-      "skills": "string[] (optional, array of bare skill names matching ^[a-zA-Z0-9][a-zA-Z0-9_-]*$, max 10 entries; omit field entirely when empty)"
+      "skills": "string[] (optional, array of bare skill names matching ^[a-zA-Z0-9][a-zA-Z0-9_-]*$, max 10 entries; omit field entirely when empty)",
+      "tasks": "string[] (optional, max 50 entries, each ≤ 5000 chars; omit when empty)"
     }
   ]
 }
 ```
 
-**Notes:** `implementation`, `verification`, `gate`, and `skills` are optional per story. `wave` is required on all stories.
+**Notes:** `implementation`, `verification`, `gate`, `skills`, and `tasks` are optional per story. `wave` is required on all stories.
 
 ### Checklist Before Writing
 
 - [ ] Every story `id` uses `US-NNN` zero-padded format (`US-001`, `US-002`, ...) — not `US-1`, `S1`, `TASK-1`, or any other format
 - [ ] Each story completable in one agent iteration
-- [ ] Stories ordered by dependency (schema → backend → UI)
+- [ ] Stories ordered by capability dependency (capabilities that unlock other capabilities come first; vertical slices, not horizontal layers)
 - [ ] Every story has "Typecheck passes" as criterion
 - [ ] Acceptance criteria are verifiable (not vague)
 - [ ] `dependsOn` arrays are valid: no circular dependencies, no self-references, all referenced IDs exist
@@ -605,8 +684,8 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 - [ ] branchName is valid (alphanumeric, hyphens, slashes)
 - [ ] `planPath` is `null`
 - [ ] Every description follows "As a [specific role], I want [feature] so that [benefit]" format — role names the actor, never just "user"
-- [ ] Field lengths: title ≤ 200, description ≤ 500, criterion ≤ 600
-- [ ] `schemaVersion` is `"3.2"`
+- [ ] Field lengths: title ≤ 200, description ≤ 500, criterion ≤ 5000
+- [ ] `schemaVersion` is `"3.3"`
 - [ ] `researchDepth` (if set) is one of: `skip`, `quick`, `standard`, `deep`
 - [ ] `prototypePaths` (if set) contains only paths that exist on disk and were successfully loaded into `prototypeBlocks`
 - [ ] `metadata.designBundle` (if set) — all paths (`root`, `readme`, `chats[]`, `businessSpec`, `designSpec`) that are non-null exist on disk under `AIMI_ROOT`
@@ -676,7 +755,7 @@ Tasks generated successfully!
 Tasks: .aimi/tasks/[tasks-filename].json
 
 Stories: [X] total
-Schema version: 3.2
+Schema version: 3.3
 Waves: [N] total
 [If gates found]: Gates: [N] (verify: [X], decision: [Y], action: [Z])
 [If brainstorm used]: Context: .aimi/brainstorms/[brainstorm-file]

@@ -52,7 +52,7 @@ This returns the next pending story as JSON. Fields depend on schema version:
 }
 ```
 
-> The `implementation` and `gate` fields are optional in schema v3.2. Include them in the display only when present in the story JSON.
+> The `implementation` and `gate` fields are optional in schema v3.3. Include them in the display only when present in the story JSON.
 
 If result is `null`:
 ```
@@ -112,6 +112,15 @@ Gate: [gate.type] ([gate.status])
 - [gate.prompt]
 ```
 
+If the story has a `tasks` field that is a non-empty array, also display:
+
+```
+Tasks:
+1. [task 1]
+2. [task 2]
+...
+```
+
 ## Step 4: Build Worker Prompt
 
 **CRITICAL:** Construct the worker prompt following the canonical template in `story-executor/SKILL.md`.
@@ -123,6 +132,7 @@ Interpolate the following into the template:
 - `STORY_TITLE` = story.title
 - `STORY_DESCRIPTION` = story.description
 - `ACCEPTANCE_CRITERIA` = story.acceptanceCriteria (bulleted)
+- `story.tasks` = story.tasks (include <tasks> block only if story.tasks is a non-empty array; place after <acceptance_criteria> and before <notes>)
 - `story.notes` = story.notes (include <previous_notes> section only if non-empty)
 - No WORKTREE_PATH (sequential mode — worker operates in current directory, or PROJECT_PATH if set)
 

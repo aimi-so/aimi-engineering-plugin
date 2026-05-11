@@ -27,7 +27,7 @@ Execute ONE story from the tasks file:
 ## Story Format
 
 > Each story is one atomic unit of work completable in a single agent iteration.
-> Key fields: `id(US-NNN)`, `title(<=200)`, `description(<=500)`, `acceptanceCriteria(each<=600)`, `priority`, `status`, `dependsOn([])`, `notes`, `project(optional, relative path for multi-repo)`, `implementation{files[], approach, verify}(optional)`, `verification{strategy, status, url?, expect?}(optional)`
+> Key fields: `id(US-NNN)`, `title(<=200)`, `description(<=500)`, `acceptanceCriteria(each<=5000)`, `priority`, `status`, `dependsOn([])`, `notes`, `project(optional, relative path for multi-repo)`, `implementation{files[], approach, verify}(optional)`, `verification{strategy, status, url?, expect?}(optional)`
 
 ---
 
@@ -184,6 +184,16 @@ Description: [STORY_DESCRIPTION]
 [ACCEPTANCE_CRITERIA_BULLETED]
 
 </acceptance_criteria>
+
+<tasks>
+
+Mechanical sub-steps (planner guidance only — not acceptance criteria; complete the deliverable as a whole)
+
+[TASKS_NUMBERED_LIST]
+
+</tasks>
+
+(Omit the <tasks> block above when story.tasks is absent or empty.)
 
 <key_files>
 
@@ -435,6 +445,14 @@ Description: [STORY_DESCRIPTION]
 [ACCEPTANCE_CRITERIA_BULLETED]
 
 </acceptance_criteria>
+
+<tasks>
+Mechanical sub-steps (planner guidance only — not acceptance criteria; complete the deliverable as a whole)
+
+[TASKS_NUMBERED_LIST]
+</tasks>
+
+(Omit the <tasks> block above when story.tasks is absent or empty.)
 
 <key_files>
 

@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.78.0] - 2026-05-11
+
+### Added
+
+- **`aimi-bundle-prototype-author` agent (US-002):** New research-category agent (`plugins/aimi-engineering/agents/research/aimi-bundle-prototype-author.md`) that generates self-contained bundle prototype HTML files from a design bundle and brainstorm context. Reads BusinessSpec/DesignSpec, applies design tokens, and emits a fully styled interactive prototype.
+- **`bundle-prototype-status` CLI subcommand (US-003):** New `aimi-cli.sh` subcommand that reads `.aimi/brainstorms/prototypes/<topic-slug>-bundle-sidecar.json` and reports the current generation status (pending, in-progress, complete) for a given topic slug.
+- **`bundle-prototype-finalize` CLI subcommand (US-004):** New `aimi-cli.sh` subcommand that marks a bundle prototype sidecar as finalized and records the output HTML path, enabling downstream commands to locate the generated prototype.
+- **`/aimi:brainstorm` bundle prototype integration (US-001):** When a design bundle is detected and `prototypes[]` is empty in the tasks metadata, brainstorm automatically invokes `aimi-bundle-prototype-author` to generate bundle prototype HTML before surfacing questions to the user.
+- **`/aimi:plan` bundle prototype integration (US-001):** When a design bundle is detected and `prototypes[]` is empty, plan auto-generates bundle prototype HTML via `aimi-bundle-prototype-author` during the research phase, then passes the generated path as a prototype anchor for visual story decomposition.
+- **"render bundle" override keyword:** Both `/aimi:brainstorm` and `/aimi:plan` recognize a case-insensitive `render bundle` substring in the feature description as a one-shot override that forces bundle prototype generation even when `prototypes[]` is already populated.
+- **Sidecar idempotency at `.aimi/brainstorms/prototypes/<topic-slug>-bundle-sidecar.json`:** Bundle prototype generation is idempotent — if a sidecar file already exists at the canonical path for a given topic slug, the author agent skips re-generation and returns the existing output HTML path.
+
+## [1.77.0] - 2026-05-08
+
+### Changed
+
+- **Per-entry character cap raised from 600 to 5000:** Applies to `acceptanceCriteria[]` and `tasks[]` entries. Loosens the previous limit that was forcing truncation of detailed criteria and recipe steps. `title` (200) and `description` (500) caps unchanged.
+- **`tasks[]` array length cap raised from 20 to 50:** Allows richer mechanical recipes for complex stories. Soft target of 3–15 entries remains as planner guidance.
+
+## [1.76.0] - 2026-05-08
+
+### Added
+
+- **`/aimi:plan` now populates `tasks[]` on every user story (US-001):** Phase 3 Story Decomposition step 9.6 generates a horizontal mechanical breakdown of 3–15 concrete sub-steps per vertical story in verb-object phrasing. Integration steps (`"Wire <X> into <Y>"`) are mandatory whenever `implementation.files` lists a path shared with another story, closing the planning gap that caused orphaned tabs and missing routes in parallel-worktree executions.
+
+## [1.75.0] - 2026-05-08
+
+### Added
+
+- **Optional `tasks[]` free-form sub-step checklist on userStories (US-001):** Stories may now include a `tasks` array (max 20 items, each ≤600 chars) of free-form sub-step strings displayed to executors as a checklist. The field is optional and additive; existing tasks.json files are unaffected.
+- **Tasks-file schema bumped from 3.2 to 3.3 (US-002):** `schemaVersion` advances to `"3.3"`. The bump is additive — `validate-stories` accepts the new `tasks[]` field and enforces string elements.
+
+### Changed
+
+- **`/aimi:plan` now produces vertical-slice deliverables instead of layer-atomic stories (US-003):** Story decomposition targets end-to-end feature slices (each story delivers user-visible value across all layers) rather than horizontal layer boundaries. Decomposition guidance in `task-planner` updated accordingly.
+
 ## [1.74.0] - 2026-05-06
 
 ### Added

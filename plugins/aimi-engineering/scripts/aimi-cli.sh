@@ -17,6 +17,7 @@ TASKS_DIR="$AIMI_DIR/tasks"
 # Detect platform capabilities once at startup
 _HAS_FLOCK=$(command -v flock &>/dev/null && echo 1 || echo 0)
 _HAS_REALPATH=$(command -v realpath &>/dev/null && echo 1 || echo 0)
+_HAS_SHA256SUM=$(command -v sha256sum &>/dev/null && echo 1 || echo 0)
 
 # Resolve a path to its absolute form (POSIX-compatible)
 resolve_path() {
@@ -858,7 +859,8 @@ cmd_validate_stories() {
   local tasks_file
   tasks_file=$(get_tasks_file)
 
-  jq '
+  local result
+  result=$(jq '
     .userStories as $stories |
     [
       $stories[] |
@@ -866,7 +868,7 @@ cmd_validate_stories() {
       (
         (if ($s.title | length) > 200 then ["\($s.id): title exceeds 200 chars"] else [] end) +
         (if ($s.description | length) > 500 then ["\($s.id): description exceeds 500 chars"] else [] end) +
-        ([$s.acceptanceCriteria[] | select(length > 600)] | if length > 0 then ["\($s.id): acceptance criterion exceeds 600 chars"] else [] end) +
+        ([$s.acceptanceCriteria[] | select(length > 5000)] | if length > 0 then ["\($s.id): acceptance criterion exceeds 5000 chars"] else [] end) +
         (if ($s.title | test("ignore previous|system:|INSTRUCTIONS|```|\\$\\(|`"; "i")) then ["\($s.id): title contains suspicious content"] else [] end) +
         (if ($s.description | test("ignore previous|system:|INSTRUCTIONS|```|\\$\\(|`"; "i")) then ["\($s.id): description contains suspicious content"] else [] end) +
         (if ($s.project != null) then
@@ -886,13 +888,31 @@ cmd_validate_stories() {
                [$s.skills | group_by(.) | .[] | select(length > 1) | .[0] | "\($s.id): skills contains duplicate entry \(.)"]
              else [] end)
            end)
+         else [] end) +
+        (if ($s.tasks != null) then
+          (if ($s.tasks | type) != "array" then ["\($s.id): tasks must be an array"]
+           elif ($s.tasks | length) == 0 then ["\($s.id): tasks must be omitted when empty"]
+           else
+             (if ($s.tasks | length) > 50 then ["\($s.id): tasks array exceeds 50 entries"] else [] end) +
+             [$s.tasks[] | select(type != "string") | "\($s.id): tasks[] element must be a string"] +
+             [$s.tasks[] | select(type == "string" and length > 5000) | "\($s.id): tasks[] entry exceeds 5000 chars"] +
+             [$s.tasks[] | select(type == "string" and test("ignore previous|system:|INSTRUCTIONS|```|\\$\\(|`"; "i")) | "\($s.id): tasks[] entry contains suspicious content"]
+           end)
          else [] end)
       ) | .[]
     ] |
     if length == 0 then {valid: true, errors: []}
     else {valid: false, errors: .}
     end
-  ' "$tasks_file"
+  ' "$tasks_file")
+  local jq_exit=$?
+  echo "$result"
+  [ $jq_exit -ne 0 ] && return $jq_exit
+  # Return exit 1 when validation found errors
+  if echo "$result" | jq -e '.valid == false' > /dev/null 2>&1; then
+    return 1
+  fi
+  return 0
 }
 
 # Validate all story IDs in the tasks file against the US-NNN format
@@ -1308,6 +1328,360 @@ cmd_detect_design_bundle() {
     local newest_subdir="${newest_entry#* }"
     _build_bundle_json "$newest_subdir"
   fi
+}
+
+# ============================================================================
+# Bundle Prototype Helpers
+# ============================================================================
+
+# Compute a SHA-256 hex digest for a single file.
+# Uses sha256sum (Linux) or shasum -a 256 (macOS), honoring _HAS_SHA256SUM.
+# Usage: _hash_file <path>
+# Prints: 64-char hex string
+_hash_file() {
+  local path="$1"
+  if [ "$_HAS_SHA256SUM" -eq 1 ]; then
+    sha256sum "$path" | awk '{print $1}'
+  else
+    shasum -a 256 "$path" | awk '{print $1}'
+  fi
+}
+
+# Compute a deterministic composite SHA-256 over an ordered list of file paths.
+# Sorts the paths before concatenating so the hash is stable across runs.
+# Usage: _compute_composite_hash <file1> [<file2> ...]
+# Prints: 64-char hex string
+_compute_composite_hash() {
+  local sorted_paths
+  sorted_paths=$(printf "%s\n" "$@" | sort)
+  if [ "$_HAS_SHA256SUM" -eq 1 ]; then
+    while IFS= read -r p; do cat "$p"; done <<< "$sorted_paths" | sha256sum | awk '{print $1}'
+  else
+    while IFS= read -r p; do cat "$p"; done <<< "$sorted_paths" | shasum -a 256 | awk '{print $1}'
+  fi
+}
+
+# Compute a deterministic SHA-256 over all regular files in a directory tree.
+# Files are sorted by path before concatenation for determinism.
+# Usage: _hash_dir <dir>
+# Prints: 64-char hex string, or empty string if dir is empty/missing
+_hash_dir() {
+  local dir="$1"
+  if [ ! -d "$dir" ]; then
+    printf ""
+    return 0
+  fi
+  local file_list
+  file_list=$(find "$dir" -type f | sort)
+  if [ -z "$file_list" ]; then
+    printf ""
+    return 0
+  fi
+  if [ "$_HAS_SHA256SUM" -eq 1 ]; then
+    while IFS= read -r p; do cat "$p"; done <<< "$file_list" | sha256sum | awk '{print $1}'
+  else
+    while IFS= read -r p; do cat "$p"; done <<< "$file_list" | shasum -a 256 | awk '{print $1}'
+  fi
+}
+
+# Extract lines from a markdown file under a given top-level section heading.
+# Matches /^## <N>\./ as the section start, reads until the next /^## [0-9]+\./ or EOF.
+# Usage: _extract_markdown_section <file> <section_number>
+# Prints: section body lines (stripped of the heading itself)
+_extract_markdown_section() {
+  local file="$1"
+  local num="$2"
+  awk -v n="$num" '
+    /^## [0-9]+\./ {
+      if (in_section) { exit }
+      if ($0 ~ "^## " n "\\.") { in_section=1; next }
+    }
+    in_section { print }
+  ' "$file"
+}
+
+# Parse bullet items from a markdown blob and return a JSON array.
+# Each bullet (^- , ^* , or ^N. at the top level) is treated as one view entry.
+# The view name is the first phrase up to the first colon, dash, or newline.
+# Usage: _extract_view_list <markdown_text> <source_section>
+# Prints: JSON array of {name, source_section} objects
+_extract_view_list() {
+  local text="$1"
+  local source_section="$2"
+  local json_array="[]"
+  local name
+  while IFS= read -r line; do
+    # Match bullet: leading - , * , or digit followed by .
+    case "$line" in
+      [-*]\ *|[0-9]*.\ *)
+        # Strip bullet prefix
+        name="${line#[-*] }"
+        name="${name#[0-9]*. }"
+        # Trim to first colon or em-dash or plain dash
+        name="${name%%:*}"
+        name="${name%% -*}"
+        name="${name%% —*}"
+        # Trim leading/trailing whitespace via awk
+        name=$(printf "%s" "$name" | awk '{$1=$1; print}')
+        if [ -n "$name" ]; then
+          json_array=$(printf "%s" "$json_array" | jq --arg n "$name" --arg s "$source_section" \
+            '. + [{"name": $n, "source_section": $s}]')
+        fi
+        ;;
+    esac
+  done <<< "$text"
+  printf "%s" "$json_array"
+}
+
+# Check bundle prototype generation status.
+# Usage: aimi-cli.sh bundle-prototype-status --bundle <path> --topic <slug> [--force]
+# Returns JSON with keys: needs_generation, view_list, view_source, output_path, sidecar_path
+cmd_bundle_prototype_status() {
+  local bundle_path="" topic_slug="" force=false
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --bundle) shift; bundle_path="${1:-}" ;;
+      --topic)  shift; topic_slug="${1:-}" ;;
+      --force)  force=true ;;
+      *) printf "Error: Unknown flag: %s\n" "$1" >&2; exit 1 ;;
+    esac
+    shift
+  done
+
+  if [ -z "$bundle_path" ]; then
+    printf "Error: --bundle <path> is required\n" >&2; exit 1
+  fi
+  if [ -z "$topic_slug" ]; then
+    printf "Error: --topic <slug> is required\n" >&2; exit 1
+  fi
+
+  # Bundle is a read-only input — allow absolute paths outside the project
+  # (same pattern as cmd_detect_design_bundle --root).
+  # Only the output paths (sidecar, html) must be within the project.
+  if [ ! -d "$bundle_path" ]; then
+    printf "Error: Bundle path does not exist or is not a directory: %s\n" "$bundle_path" >&2
+    exit 1
+  fi
+
+  # Locate spec files inside the bundle (prefer bundle/project/ subdir)
+  local design_spec_path="" business_spec_path=""
+  if [ -f "${bundle_path}/project/DesignSpec.md" ]; then
+    design_spec_path="${bundle_path}/project/DesignSpec.md"
+  elif [ -f "${bundle_path}/DesignSpec.md" ]; then
+    design_spec_path="${bundle_path}/DesignSpec.md"
+  fi
+  if [ -f "${bundle_path}/project/BusinessSpec.md" ]; then
+    business_spec_path="${bundle_path}/project/BusinessSpec.md"
+  elif [ -f "${bundle_path}/BusinessSpec.md" ]; then
+    business_spec_path="${bundle_path}/BusinessSpec.md"
+  fi
+
+  # Derive output and sidecar paths — relative to the project root for portability.
+  # AIMI_DIR is absolute after find_aimi_root(); strip PROJECT_ROOT prefix to get relative form.
+  local aimi_rel="${AIMI_DIR#$PROJECT_ROOT/}"
+  local prototypes_dir="${aimi_rel}/brainstorms/prototypes"
+  local output_path="${prototypes_dir}/${topic_slug}-bundle.html"
+  local sidecar_path="${prototypes_dir}/${topic_slug}-bundle-sidecar.json"
+
+  # Validate output paths stay within the project
+  validate_path_in_project "${PROJECT_ROOT}/${output_path}"
+  validate_path_in_project "${PROJECT_ROOT}/${sidecar_path}"
+
+  # Compute current hashes
+  local bundle_hash design_spec_hash business_spec_hash
+  bundle_hash=$(_hash_dir "$bundle_path")
+  if [ -n "$design_spec_path" ]; then
+    design_spec_hash=$(_hash_file "$design_spec_path")
+  else
+    design_spec_hash=""
+  fi
+  if [ -n "$business_spec_path" ]; then
+    business_spec_hash=$(_hash_file "$business_spec_path")
+  else
+    business_spec_hash=""
+  fi
+
+  # Extract view list: prefer DesignSpec § 4, fallback to BusinessSpec § 5 then § 6
+  local view_list_json="[]"
+  local view_source="none"
+
+  if [ -n "$design_spec_path" ]; then
+    local ds4
+    ds4=$(_extract_markdown_section "$design_spec_path" "4")
+    if [ -n "$ds4" ]; then
+      local parsed
+      parsed=$(_extract_view_list "$ds4" "designSpec § 4")
+      local count
+      count=$(printf "%s" "$parsed" | jq 'length')
+      if [ "$count" -gt 0 ]; then
+        view_list_json="$parsed"
+        view_source="designSpec"
+      fi
+    fi
+  fi
+
+  if [ "$view_source" = "none" ] && [ -n "$business_spec_path" ]; then
+    local bs5
+    bs5=$(_extract_markdown_section "$business_spec_path" "5")
+    if [ -n "$bs5" ]; then
+      local parsed5
+      parsed5=$(_extract_view_list "$bs5" "businessSpec § 5")
+      local count5
+      count5=$(printf "%s" "$parsed5" | jq 'length')
+      if [ "$count5" -gt 0 ]; then
+        view_list_json="$parsed5"
+        view_source="businessSpec"
+      fi
+    fi
+
+    if [ "$view_source" = "none" ]; then
+      local bs6
+      bs6=$(_extract_markdown_section "$business_spec_path" "6")
+      if [ -n "$bs6" ]; then
+        local parsed6
+        parsed6=$(_extract_view_list "$bs6" "businessSpec § 6")
+        local count6
+        count6=$(printf "%s" "$parsed6" | jq 'length')
+        if [ "$count6" -gt 0 ]; then
+          view_list_json="$parsed6"
+          view_source="businessSpec"
+        fi
+      fi
+    fi
+  fi
+
+  # Determine needs_generation
+  local needs_generation=false
+
+  # If both specs are absent, view_source is none — no generation possible
+  if [ "$view_source" = "none" ] && [ -z "$design_spec_path" ] && [ -z "$business_spec_path" ]; then
+    needs_generation=false
+  elif [ "$force" = "true" ]; then
+    needs_generation=true
+  elif [ ! -f "${PROJECT_ROOT}/${sidecar_path}" ]; then
+    needs_generation=true
+  else
+    # Compare hashes from sidecar
+    local sidecar_content
+    sidecar_content=$(cat "${PROJECT_ROOT}/${sidecar_path}" 2>/dev/null || printf "{}")
+    local sc_bundle sc_design sc_business
+    sc_bundle=$(printf "%s" "$sidecar_content" | jq -r '.bundleHash // ""')
+    sc_design=$(printf "%s" "$sidecar_content" | jq -r '.designSpecHash // ""')
+    sc_business=$(printf "%s" "$sidecar_content" | jq -r '.businessSpecHash // ""')
+    if [ "$sc_bundle" != "$bundle_hash" ] || \
+       [ "$sc_design" != "$design_spec_hash" ] || \
+       [ "$sc_business" != "$business_spec_hash" ]; then
+      needs_generation=true
+    fi
+  fi
+
+  jq -n \
+    --argjson needs_generation "$needs_generation" \
+    --argjson view_list "$view_list_json" \
+    --arg view_source "$view_source" \
+    --arg output_path "$output_path" \
+    --arg sidecar_path "$sidecar_path" \
+    '{
+      needs_generation: $needs_generation,
+      view_list: $view_list,
+      view_source: $view_source,
+      output_path: $output_path,
+      sidecar_path: $sidecar_path
+    }'
+}
+
+# Write the bundle-prototype sidecar atomically.
+# Usage: aimi-cli.sh bundle-prototype-finalize \
+#          --topic <slug> \
+#          --bundle-hash <hex> \
+#          --design-spec-hash <hex> \
+#          --business-spec-hash <hex> \
+#          --view-list <json-array> \
+#          --source-command <brainstorm|plan>
+cmd_bundle_prototype_finalize() {
+  local topic_slug="" bundle_hash="" design_spec_hash="" business_spec_hash=""
+  local view_list_json="" source_command=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --topic)              shift; topic_slug="${1:-}" ;;
+      --bundle-hash)        shift; bundle_hash="${1:-}" ;;
+      --design-spec-hash)   shift; design_spec_hash="${1:-}" ;;
+      --business-spec-hash) shift; business_spec_hash="${1:-}" ;;
+      --view-list)          shift; view_list_json="${1:-}" ;;
+      --source-command)     shift; source_command="${1:-}" ;;
+      *) printf "Error: Unknown flag: %s\n" "$1" >&2; exit 1 ;;
+    esac
+    shift
+  done
+
+  # Validate required args
+  if [ -z "$topic_slug" ]; then
+    printf "Error: --topic <slug> is required\n" >&2; exit 1
+  fi
+  if [ -z "$source_command" ]; then
+    printf "Error: --source-command <brainstorm|plan> is required\n" >&2; exit 1
+  fi
+  # Validate source-command value
+  if [ "$source_command" != "brainstorm" ] && [ "$source_command" != "plan" ]; then
+    printf "Error: --source-command must be exactly 'brainstorm' or 'plan', got: %s\n" "$source_command" >&2
+    exit 1
+  fi
+
+  # Validate view-list is valid JSON array
+  if [ -z "$view_list_json" ]; then
+    view_list_json="[]"
+  fi
+  if ! printf "%s" "$view_list_json" | jq -e '. | arrays' >/dev/null 2>&1; then
+    printf "Error: --view-list must be a valid JSON array\n" >&2; exit 1
+  fi
+
+  # Compute sidecar path — AIMI_DIR is absolute after find_aimi_root()
+  local aimi_rel="${AIMI_DIR#$PROJECT_ROOT/}"
+  local prototypes_dir="${aimi_rel}/brainstorms/prototypes"
+  local sidecar_path="${PROJECT_ROOT}/${prototypes_dir}/${topic_slug}-bundle-sidecar.json"
+
+  # Validate path stays within project
+  validate_path_in_project "$sidecar_path"
+
+  # Ensure directory exists
+  mkdir -p "$(dirname "$sidecar_path")"
+
+  # Compute generatedAt timestamp
+  local generated_at
+  generated_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%SZ')
+
+  # Build sidecar JSON
+  local sidecar_json
+  sidecar_json=$(jq -n \
+    --arg generatedAt "$generated_at" \
+    --arg bundleHash "$bundle_hash" \
+    --arg designSpecHash "$design_spec_hash" \
+    --arg businessSpecHash "$business_spec_hash" \
+    --argjson viewList "$view_list_json" \
+    --arg sourceCommand "$source_command" \
+    '{
+      generatedAt: $generatedAt,
+      bundleHash: $bundleHash,
+      designSpecHash: $designSpecHash,
+      businessSpecHash: $businessSpecHash,
+      viewList: $viewList,
+      sourceCommand: $sourceCommand
+    }')
+
+  # Write atomically: write to tmp then mv
+  local tmp_sidecar
+  tmp_sidecar=$(mktemp "${sidecar_path}.XXXXXX")
+  printf "%s\n" "$sidecar_json" > "$tmp_sidecar"
+  chmod 600 "$tmp_sidecar"
+  mv "$tmp_sidecar" "$sidecar_path"
+
+  # Output confirmation JSON
+  jq -n \
+    --arg sidecar_path "$sidecar_path" \
+    --arg generatedAt "$generated_at" \
+    '{ written: $sidecar_path, generatedAt: $generatedAt }'
 }
 
 # Resolve which interactivity mode applies to the current shell.
@@ -2161,6 +2535,22 @@ COMMANDS:
                               --root   Scan <path> (bundle or parent) instead of CWD
                               --all    Return all matching bundles as JSON array
                               --json   Alias; output is always JSON
+    bundle-prototype-status --bundle <path> --topic <slug> [--force]
+                              Check whether a bundle prototype needs (re-)generation.
+                              Returns JSON with keys: needs_generation (bool),
+                              view_list (array of {name,source_section}),
+                              view_source ('designSpec'|'businessSpec'|'none'),
+                              output_path, sidecar_path.
+                              view_list is extracted from DesignSpec § 4 first,
+                              falling back to BusinessSpec § 5 then § 6.
+                              --force  Always set needs_generation to true
+    bundle-prototype-finalize --topic <slug> --bundle-hash <hex>
+                              --design-spec-hash <hex> --business-spec-hash <hex>
+                              --view-list <json> --source-command <brainstorm|plan>
+                              Write the bundle-prototype sidecar atomically.
+                              Sidecar path: .aimi/brainstorms/prototypes/<slug>-bundle-sidecar.json
+                              chmod 600 applied; writes are atomic (tmp + mv).
+                              --source-command must be exactly 'brainstorm' or 'plan'.
     help                      Show this help message
 
 ENVIRONMENT:
@@ -2280,6 +2670,8 @@ main() {
     list-archivable)   cmd_list_archivable ;;
     archive-task)      cmd_archive_task "${2:-}" ;;
     detect-design-bundle) shift; cmd_detect_design_bundle "$@" ;;
+    bundle-prototype-status)   shift; cmd_bundle_prototype_status "$@" ;;
+    bundle-prototype-finalize) shift; cmd_bundle_prototype_finalize "$@" ;;
     help|--help|-h)    cmd_help ;;
     *)
       echo "Unknown command: $1" >&2
