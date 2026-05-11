@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.79.0] - 2026-05-11
+
+### Added
+
+- **`validate-tasks` subcommand in `aimi-cli.sh` (US-006, gap-analysis case 6):** New CLI subcommand that mechanically enforces citation contracts in a tasks.json file before execution. Reads `acceptanceCriteria[]` entries flagged as visual and verifies each contains at least one verbatim DesignSpec citation anchored as `"<literal>" (DesignSpec § N.N L<line>)`. Exits non-zero with a structured error report on first violation, preventing story execution from proceeding with uncited visual ACs.
+- **Rule 19a in `/aimi:plan` Phase 3 (US-001, US-002, US-003, gap-analysis cases 1, 2, 3):** Verbatim DesignSpec citation requirement for visual acceptance criteria. Any AC that describes a visual element (layout, copy, label, badge, header, footer, column header, KPI label, button text, subtitle) must embed the exact literal string from the DesignSpec section followed by a citation anchor in the form `"<literal>" (DesignSpec § N.N L<line>)`. Applies to H1 text, subtitles, KPI labels, column headers, button labels, footer text, and badge copy. Planner must resolve the section number and line number from the attached DesignSpec before emitting the story.
+- **`source` field requirement on `backendSpec.endpoints[]` and `responseShape` (US-007, gap-analysis case 7):** Every entry in `backendSpec.endpoints[]` must carry a `source` field citing the spec document and section that mandates the endpoint (e.g., `"source": "BusinessSpec § 3.2"`). Every `responseShape` field in frontend-only plans must likewise declare its provenance. A `derived:` escape hatch is available for legitimately computed shapes whose structure is not directly specified in any spec document (e.g., `"source": "derived: aggregated from /users and /roles responses"`).
+- Gap-analysis cases 4, 5, 8 are deferred to v1.80.
+
 ## [1.78.0] - 2026-05-11
 
 ### Added
