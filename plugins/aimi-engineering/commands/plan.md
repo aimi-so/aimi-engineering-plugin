@@ -221,6 +221,19 @@ After the brainstorm check, determine the implementation scope:
 
 3. **Store the result** as `implementationScope: "frontend-only" | "full-stack"` for use in Phase 4 metadata.
 
+### Phase 0.5: Open Questions Resolution Gate
+
+After Phase 0 produces (or reuses) a brainstorm, parse its `## Open Questions` section.
+
+For each line that does NOT carry a `[resolved: ...]` or `[deferred: ...]` suffix:
+- Call AskUserQuestion with the OQ as the question text.
+- Append `[resolved: <choice>]` to the OQ line in the brainstorm file (via Edit), so subsequent re-runs skip it.
+- Record the resolution in working memory `oqDecisions: { <oqId>: <choice> }` for use in Phase 4 when authoring `metadata.decisions[]`.
+
+Block Phase 1 until every OQ has a `[resolved: ...]` or `[deferred: ...]` suffix.
+
+Agent-mode fallback: auto-defer (do not block).
+
 ## Phase 1: Local Research (Parallel)
 
 ### Prepare Research Directory
