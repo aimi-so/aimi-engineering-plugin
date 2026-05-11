@@ -94,6 +94,72 @@ BUNDLE_META=$($AIMI_CLI detect-design-bundle --root "$BUNDLE_OVERRIDE" 2>/dev/nu
 
 Store the JSON output as `designBundleMeta`. When `BUNDLE_META` is empty or the command fails, set `designBundleMeta` to `null` and continue.
 
+### Bundle Prototype Auto-Generation
+
+**Render-bundle override detection:** Scan `$ARGUMENTS` for the case-insensitive substring `render bundle`. If matched:
+- Set `renderBundlePending = true`.
+- Emit exactly one chat line: `render-bundle override active — regenerating prototype from specs`
+
+When `designBundleMeta` is non-null AND (`bundlePayload.prototypes[]` is empty OR `renderBundlePending = true`):
+
+1. **Check generation status:**
+
+```bash
+STATUS_JSON=$($AIMI_CLI bundle-prototype-status \
+  --bundle "<bundlePath>" \
+  --topic "<topicSlug>" \
+  [--force when renderBundlePending=true])
+```
+
+   Extract from the returned JSON:
+   - `needs_generation` (bool)
+   - `view_list` (array of `{name, source_section}`)
+   - `view_source` (`'designSpec'` | `'businessSpec'` | `'none'`)
+   - `output_path` (string — path where agent must write the HTML)
+   - `sidecar_path` (string — path of the sidecar JSON)
+
+2. **When `view_source` is `'none'`:** emit exactly one log line:
+
+   ```
+   bundle prototype generation skipped — no view list in DesignSpec § 4 or BusinessSpec § 5/§ 6
+   ```
+
+   Proceed to the prototypes[] merge below without generation.
+
+3. **When `needs_generation` is `false` (sidecar matches, `view_source` is not `'none'`):** skip generation entirely. The sidecar at `.aimi/brainstorms/prototypes/<topicSlug>-bundle-sidecar.json` already matches all current hashes — reuse the existing file at `output_path`. Push `output_path` into `resolvedPrototypePaths` and proceed.
+
+4. **When `needs_generation` is `true`:** ensure the output directory exists, then spawn the author agent:
+
+```bash
+mkdir -p "$(dirname "<output_path>")"
+```
+
+```
+Task subagent_type="aimi-engineering:research:aimi-bundle-prototype-author"
+  prompt: "Generate a self-contained HTML prototype for the bundle.
+           bundlePath: <bundlePath>
+           viewList: <view_list extracted names as JSON array>
+           viewSource: viewList
+           designSpecPath: <designSpecPath or empty string when null>
+           businessSpecPath: <businessSpecPath or empty string when null>
+           chatPaths[]: <designBundleMeta.chats[] as JSON array>
+           outputPath: <output_path>"
+```
+
+   After the agent writes `outputPath`, write the sidecar atomically:
+
+```bash
+$AIMI_CLI bundle-prototype-finalize \
+  --topic "<topicSlug>" \
+  --bundle-hash "<bundleHash>" \
+  --design-spec-hash "<designSpecHash>" \
+  --business-spec-hash "<businessSpecHash>" \
+  --view-list "<view_list as JSON string>" \
+  --source-command plan
+```
+
+   Push `output_path` into `resolvedPrototypePaths`.
+
 When `designBundleMeta` is non-null:
 - Extract the `prototypes` array from the bundle metadata (may be empty).
 - For each path: resolve absolute path with `realpath`. Paths whose absolute resolution does not start with `AIMI_ROOT` are dropped with one-line warning `prototype <path> rejected — path outside project root` and excluded from `resolvedPrototypePaths`. For paths that pass validation, normalize to relative-to-`AIMI_ROOT` before merging. Deduplicate by relative path against paths already collected from the brainstorm frontmatter (insertion-order, first-occurrence wins).
