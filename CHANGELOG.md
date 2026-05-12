@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.84.0] - 2026-05-12
+
+### Added
+- `normalize-verification` CLI subcommand: rewrites bare-string verification fields into the object form `{strategy, status, url, expect}` with atomic tmp+mv write.
+- Visual Source-of-Truth Protocol (V1/V2/V3) in story-executor SKILL.md: pre-implementation enumeration rail for visual stories, gated on `verification.strategy == "visual"` or non-empty PROTOTYPE_CONTEXT.
+- Per-element PASS/DIVERGES/KNOWN-GAP table requirement in the Reference-Artifact Parity Pass (visual stories only).
+- `KNOWN-GAP:` trailer persistence: execute.md captures trailers from worker commits into `.aimi/known-gaps/YYYY-MM-DD-<storyId>.md` and aggregates them in the Step 5 final report under `## Known Gaps`.
+- Auto-spawned `aimi-design-implementation-reviewer` after each visual story merges; review output captured in the Step 5 final report under `## Design Review`.
+
+### Changed
+- `validate-stories` now rejects any story whose `verification` is a bare string (must be an object with a `strategy` key).
+- `/aimi:plan` Phase 4.5 invokes `normalize-verification` before validators, auto-migrating planner-emitted string verifications in place.
+- `/aimi:execute` Step 0.7 now aborts (non-zero exit) on malformed verifications instead of warning and continuing; abort message lists offending story IDs and points at `normalize-verification` for remediation.
+- Gap-trailer token renamed from `KNOWN GAP:` (with space) to `KNOWN-GAP:` (hyphenated) in story-executor SKILL.md and the verdict-table label, enabling clean `grep -E '^KNOWN-GAP:'` parsing.
+
 ## [1.83.0] - 2026-05-12
 
 ### Added
