@@ -92,6 +92,33 @@ If `DesignSpec § 6` maps the desired component to an existing project component
 
 ---
 
+## Visual Source-of-Truth Protocol
+
+Applies when `story.verification.strategy == "visual"` OR `PROTOTYPE_CONTEXT` (the `prototype_context` block) is non-empty. Skip entirely for non-visual stories.
+
+### V1 — Enumerate Visible Elements
+
+Before writing any implementation code, list every visible element in the prototype as a numbered enumeration. Cover:
+- Layout regions (header, body, footer; sidebar; modal/overlay)
+- Every distinct text label and its typography role (heading, subheading, body, caption)
+- Every interactive control (buttons, inputs, toggles, tabs)
+- Every icon, glyph, or decorative element
+- Distinct spacing or typography zones that differ from the surrounding region
+
+Numbered list format: `1. <element> — <distinguishing detail>`. Do NOT proceed to V2 until V1 is complete.
+
+### V2 — Map Elements to Acceptance Criteria
+
+For each numbered V1 element, identify the matching acceptance criterion (or assert "no AC match"). Use a paired list or two-column table:
+- `V1.1 → AC #2 — "header shows org name"`
+- `V1.5 → no AC match (candidate KNOWN-GAP)`
+
+### V3 — Escalate Prototype-Only Elements
+
+Any V1 element flagged "no AC match" in V2 is a KNOWN-GAP candidate. Add it to the implementation queue ONLY if it is a trivial visual detail (icon, spacing token). For non-trivial gaps, emit a `KNOWN-GAP:` trailer line in the commit body (one per element) with brief rationale. NEVER silently drop a prototype-visible element.
+
+---
+
 ## Reference-Artifact Parity Pass (BLOCKING when triggered)
 
 **Trigger:** Fire this pass when any of the following is true for the story being executed:
@@ -356,7 +383,8 @@ All file operations MUST stay within the project boundary: PROJECT_PATH when set
 1. Read CLAUDE.md for project conventions (from PROJECT_PATH root when set)
 2. Implement the story requirements
 3. Verify ALL acceptance criteria are met
-3.5. Run Reference-Artifact Parity Pass (see full procedure in the named section above) if the story declares any reference artifact or any AC line contains a prototype/spec citation or `verification.strategy` implies a reference. Block commit until every element has a verdict; on unreadable reference, log `Parity pass skipped — reference not readable: <path>` as a commit trailer and proceed.
+3.5. If `verification.strategy == "visual"` OR `PROTOTYPE_CONTEXT` is non-empty: run the Visual Source-of-Truth Protocol (V1/V2/V3 enumeration → mapping → escalation) BEFORE writing code, then proceed to the Reference-Artifact Parity Pass.
+3.6. Run Reference-Artifact Parity Pass (see full procedure in the named section above) if the story declares any reference artifact or any AC line contains a prototype/spec citation or `verification.strategy` implies a reference. Block commit until every element has a verdict; on unreadable reference, log `Parity pass skipped — reference not readable: <path>` as a commit trailer and proceed.
 4. Run typecheck: npx tsc --noEmit
 5. If all checks pass, commit:
    a. Stage only story-related files: `git add [changed files]` (never use `-A` or `.` — avoid staging unrelated files)
@@ -598,7 +626,7 @@ CRITICAL: Stay within project root. Never read/write outside project boundary. W
 </project_root_boundary>
 
 <execution_flow>
-Follow standard execution flow: read criteria → implement → test → commit. Stage only story-related files (never `-A` or `.`). Commit format: `git commit -m "type(scope): Story title"`. Verify with `git log -1 --oneline`. On commit failure: report immediately, do not retry. Do NOT update tasks file — caller handles status. When a reference artifact is declared, run the Reference-Artifact Parity Pass before committing (see full named section above).
+Follow standard execution flow: read criteria → implement → test → commit. If `verification.strategy == "visual"` OR `PROTOTYPE_CONTEXT` is non-empty, run the Visual Source-of-Truth Protocol (V1/V2/V3) before writing code. Stage only story-related files (never `-A` or `.`). Commit format: `git commit -m "type(scope): Story title"`. Verify with `git log -1 --oneline`. On commit failure: report immediately, do not retry. Do NOT update tasks file — caller handles status. When a reference artifact is declared, run the Reference-Artifact Parity Pass before committing (see full named section above).
 </execution_flow>
 
 <on_failure>
