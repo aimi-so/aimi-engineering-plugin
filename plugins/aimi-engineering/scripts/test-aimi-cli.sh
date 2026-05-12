@@ -1628,6 +1628,9 @@ source_cache_functions() {
   eval "$(sed -n '/^write_global_worktree_cache()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^read_global_worktree_cache()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^cmd_prime_cache()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^cmd_validate_tasks()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_validate_designspec_citation()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_validate_businessspec_field()/,/^}/p' "$CLI")"
 }
 
 test_write_global_cli_cache() {
@@ -2558,6 +2561,110 @@ test_validate_stories_tasks_field() {
   _teardown_project_fixture
 }
 
+test_validate_stories_gate_field() {
+  echo ""
+  echo "=== Testing validate-stories gate field validation ==="
+
+  # (a) plural 'gates' key is rejected
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+  _setup_project_fixture '{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Gate test",
+    "type": "feat",
+    "branchName": "feat/gate-test",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story with plural gates",
+      "description": "Uses wrong plural gates field",
+      "acceptanceCriteria": ["Rejects plural gates"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "gates": [{"type": "decision", "status": "pending", "prompt": "Approve?"}]
+    }
+  ]
+}'
+  local output exit_code
+  output=$("$CLI" validate-stories) && exit_code=0 || exit_code=$?
+  assert_contains '"valid": false' "$output" "validate-stories gate: plural 'gates' field fails validation"
+  assert_contains "gates field is invalid" "$output" "validate-stories gate: error mentions invalid gates field"
+  assert_exit_code "1" "$exit_code" "validate-stories gate: exits 1 for plural gates"
+  _teardown_project_fixture
+
+  # (b) singular gate missing required field 'type'
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+  _setup_project_fixture '{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Gate test",
+    "type": "feat",
+    "branchName": "feat/gate-test",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story with gate missing type",
+      "description": "Gate object is missing the type field",
+      "acceptanceCriteria": ["Rejects missing type"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "gate": {"status": "pending", "prompt": "Approve?"}
+    }
+  ]
+}'
+  output=$("$CLI" validate-stories) && exit_code=0 || exit_code=$?
+  assert_contains '"valid": false' "$output" "validate-stories gate: gate missing type fails validation"
+  assert_contains "missing required field type" "$output" "validate-stories gate: error mentions missing type field"
+  assert_exit_code "1" "$exit_code" "validate-stories gate: exits 1 for gate missing type"
+  _teardown_project_fixture
+
+  # (c) well-formed gate passes validation
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+  _setup_project_fixture '{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Gate test",
+    "type": "feat",
+    "branchName": "feat/gate-test",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story with valid gate",
+      "description": "Gate object has all required fields",
+      "acceptanceCriteria": ["Passes with valid gate"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "gate": {"type": "decision", "status": "pending", "prompt": "Approve release?"}
+    }
+  ]
+}'
+  output=$("$CLI" validate-stories) && exit_code=0 || exit_code=$?
+  assert_contains '"valid": true' "$output" "validate-stories gate: well-formed gate passes validation"
+  assert_exit_code "0" "$exit_code" "validate-stories gate: exits 0 for well-formed gate"
+  _teardown_project_fixture
+}
+
 test_list_ready_brief_includes_project() {
   echo ""
   echo "=== Testing list-ready --brief includes project in output ==="
@@ -3282,6 +3389,734 @@ WAVEOF
   assert_contains "US-002" "$output" "validate-waves: identifies US-002 as mismatched"
 
   rm -f "$wave_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_tasks_skeleton_exits_zero() {
+  echo ""
+  echo "=== Testing validate-tasks skeleton: v3.3 tasks.json exits 0 with valid=true ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-95-validate-tasks-v33.json"
+  cat > "$tasks_fixture" << 'VALIDATETASKSEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Citation test",
+    "type": "feat",
+    "branchName": "feat/citation-test",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "A simple story",
+      "description": "No citations yet",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 0
+    }
+  ]
+}
+VALIDATETASKSEOF
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": true' "$output" "validate-tasks: v3.3 returns valid=true"
+  assert_contains '"errors": []' "$output" "validate-tasks: v3.3 returns empty errors array"
+  assert_exit_code "0" "$exit_code" "validate-tasks: v3.3 exits 0"
+
+  rm -f "$tasks_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_tasks_skips_pre_v33() {
+  echo ""
+  echo "=== Testing validate-tasks skeleton: v3.2 tasks.json emits skip-info and exits 0 ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-94-validate-tasks-v32.json"
+  cat > "$tasks_fixture" << 'VALIDATETASKSV32EOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "feat: Pre-citation test",
+    "type": "feat",
+    "branchName": "feat/pre-citation-test",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "A legacy story",
+      "description": "Pre-citation schema",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 0
+    }
+  ]
+}
+VALIDATETASKSV32EOF
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local stderr_output exit_code
+  stderr_output=$("$CLI" validate-tasks 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_contains "skipping citation validation (schemaVersion 3.2 pre-dates citation enforcement)" "$stderr_output" \
+    "validate-tasks: v3.2 emits skip-info to stderr"
+  assert_exit_code "0" "$exit_code" "validate-tasks: v3.2 exits 0"
+
+  rm -f "$tasks_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_tasks_designspec_passing_case() {
+  echo ""
+  echo "=== Testing validate-tasks: DesignSpec passing case (literal found in cited subsection) ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-93-validate-tasks-ds-pass.json"
+  local spec_file="$TASKS_DIR/DesignSpec-pass.md"
+
+  # Write a minimal DesignSpec with section 3.1
+  cat > "$spec_file" << 'SPECEOF'
+# DesignSpec
+
+## 3.1 Portfolio Overview
+
+The page title is Benchmark do portfolio and shows KPI cards.
+
+### Details
+
+Some extra content here.
+SPECEOF
+
+  cat > "$tasks_fixture" << 'TASKEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: DesignSpec passing",
+    "type": "feat",
+    "branchName": "feat/ds-pass",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "prototypePaths": ["proto/index.html"],
+    "designBundle": {
+      "root": "bundles/ds-pass",
+      "readme": null,
+      "chats": [],
+      "businessSpec": null,
+      "designSpec": "TASKS_DIR_PLACEHOLDER/DesignSpec-pass.md"
+    }
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Portfolio overview screen",
+      "description": "Visual story with spec citation",
+      "acceptanceCriteria": [
+        "\"Benchmark do portfolio\" (DesignSpec § 3.1 L6) MUST appear as the page H1."
+      ],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 1,
+      "verification": {
+        "strategy": "visual",
+        "status": "pending"
+      }
+    }
+  ]
+}
+TASKEOF
+
+  # Patch the placeholder with the actual tasks_dir path
+  sed -i "s|TASKS_DIR_PLACEHOLDER|${TASKS_DIR}|g" "$tasks_fixture"
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": true' "$output" "validate-tasks designspec passing: returns valid=true"
+  assert_contains '"errors": []' "$output" "validate-tasks designspec passing: returns empty errors"
+  assert_exit_code "0" "$exit_code" "validate-tasks designspec passing: exits 0"
+
+  rm -f "$tasks_fixture" "$spec_file"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_tasks_designspec_paraphrase_fails() {
+  echo ""
+  echo "=== Testing validate-tasks: DesignSpec paraphrase fails (literal not in subsection) ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-92-validate-tasks-ds-fail.json"
+  local spec_file="$TASKS_DIR/DesignSpec-fail.md"
+
+  # Write a minimal DesignSpec with section 3.1 that does NOT contain the paraphrased text
+  cat > "$spec_file" << 'SPECEOF'
+# DesignSpec
+
+## 3.1 Portfolio Overview
+
+The page title is Benchmark do portfolio and shows KPI cards.
+SPECEOF
+
+  cat > "$tasks_fixture" << 'TASKEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: DesignSpec paraphrase fails",
+    "type": "feat",
+    "branchName": "feat/ds-fail",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "prototypePaths": ["proto/index.html"],
+    "designBundle": {
+      "root": "bundles/ds-fail",
+      "readme": null,
+      "chats": [],
+      "businessSpec": null,
+      "designSpec": "TASKS_DIR_PLACEHOLDER/DesignSpec-fail.md"
+    }
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Portfolio overview screen",
+      "description": "Visual story with paraphrase (wrong)",
+      "acceptanceCriteria": [
+        "\"Portfolio benchmark overview\" (DesignSpec § 3.1 L5) MUST appear as the page H1."
+      ],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 1,
+      "verification": {
+        "strategy": "visual",
+        "status": "pending"
+      }
+    }
+  ]
+}
+TASKEOF
+
+  sed -i "s|TASKS_DIR_PLACEHOLDER|${TASKS_DIR}|g" "$tasks_fixture"
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": false' "$output" "validate-tasks designspec paraphrase: returns valid=false"
+  assert_contains 'missing DesignSpec citation' "$output" "validate-tasks designspec paraphrase: emits diagnostic"
+  assert_contains 'Portfolio benchmark overview' "$output" "validate-tasks designspec paraphrase: names the missing literal"
+  assert_exit_code "1" "$exit_code" "validate-tasks designspec paraphrase: exits 1"
+
+  rm -f "$tasks_fixture" "$spec_file"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_tasks_designspec_unicode_normalize() {
+  echo ""
+  echo "=== Testing validate-tasks: DesignSpec unicode normalization (curly quotes and em-dash) ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-91-validate-tasks-ds-unicode.json"
+  local spec_file="$TASKS_DIR/DesignSpec-unicode.md"
+
+  # Spec uses curly quotes and em-dash; AC uses straight quotes and hyphen
+  # After normalization both sides should match
+  printf '# DesignSpec\n\n## 2.1 Metrics\n\n' > "$spec_file"
+  # Write a line with curly double quotes and an em-dash using printf with octal/hex escapes
+  # UTF-8: left double quotation mark = E2 80 9C, right = E2 80 9D, em-dash = E2 80 94
+  printf 'The label \xe2\x80\x9cNet Return\xe2\x80\x9d shows portfolio\xe2\x80\x94performance metrics.\n' >> "$spec_file"
+
+  cat > "$tasks_fixture" << 'TASKEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: DesignSpec unicode normalize",
+    "type": "feat",
+    "branchName": "feat/ds-unicode",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "prototypePaths": ["proto/index.html"],
+    "designBundle": {
+      "root": "bundles/ds-unicode",
+      "readme": null,
+      "chats": [],
+      "businessSpec": null,
+      "designSpec": "TASKS_DIR_PLACEHOLDER/DesignSpec-unicode.md"
+    }
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Metrics card",
+      "description": "Visual story with unicode-normalized citation",
+      "acceptanceCriteria": [
+        "\"Net Return\" (DesignSpec § 2.1 L5) label MUST be visible."
+      ],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 1,
+      "verification": {
+        "strategy": "visual",
+        "status": "pending"
+      }
+    }
+  ]
+}
+TASKEOF
+
+  sed -i "s|TASKS_DIR_PLACEHOLDER|${TASKS_DIR}|g" "$tasks_fixture"
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": true' "$output" "validate-tasks unicode normalize: curly-quote spec matches straight-quote AC"
+  assert_exit_code "0" "$exit_code" "validate-tasks unicode normalize: exits 0"
+
+  rm -f "$tasks_fixture" "$spec_file"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_tasks_designspec_subsection_boundary() {
+  echo ""
+  echo "=== Testing validate-tasks: DesignSpec subsection boundary (literal in wrong subsection fails) ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-90-validate-tasks-ds-boundary.json"
+  local spec_file="$TASKS_DIR/DesignSpec-boundary.md"
+
+  # Spec has sections 3.1 and 3.2; the literal is ONLY in 3.2, AC cites 3.1
+  cat > "$spec_file" << 'SPECEOF'
+# DesignSpec
+
+## 3.1 Overview
+
+This section contains general overview content only.
+
+## 3.2 Metrics
+
+The KPI label is Total AUM shown on the dashboard.
+SPECEOF
+
+  cat > "$tasks_fixture" << 'TASKEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: DesignSpec subsection boundary",
+    "type": "feat",
+    "branchName": "feat/ds-boundary",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "prototypePaths": ["proto/index.html"],
+    "designBundle": {
+      "root": "bundles/ds-boundary",
+      "readme": null,
+      "chats": [],
+      "businessSpec": null,
+      "designSpec": "TASKS_DIR_PLACEHOLDER/DesignSpec-boundary.md"
+    }
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Dashboard metrics",
+      "description": "Visual story with wrong section citation",
+      "acceptanceCriteria": [
+        "\"Total AUM\" (DesignSpec § 3.1 L5) KPI label MUST be visible."
+      ],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 1,
+      "verification": {
+        "strategy": "visual",
+        "status": "pending"
+      }
+    }
+  ]
+}
+TASKEOF
+
+  sed -i "s|TASKS_DIR_PLACEHOLDER|${TASKS_DIR}|g" "$tasks_fixture"
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": false' "$output" "validate-tasks subsection boundary: literal in 3.2 but cited in 3.1 fails"
+  assert_contains 'missing DesignSpec citation' "$output" "validate-tasks subsection boundary: emits diagnostic"
+  assert_exit_code "1" "$exit_code" "validate-tasks subsection boundary: exits 1"
+
+  rm -f "$tasks_fixture" "$spec_file"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_tasks_backendspec_passing_case() {
+  echo ""
+  echo "=== Testing validate-tasks: backendSpec passing case (sources valid, fields present in BusinessSpec) ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-89-validate-tasks-bs-pass.json"
+  local spec_file="$TASKS_DIR/BusinessSpec-pass.md"
+
+  cat > "$spec_file" << 'SPECEOF'
+# BusinessSpec
+
+## 5 API Endpoints
+
+### 5.1 Benchmark Summary
+
+GET /benchmark-summary returns benchmark data.
+
+Fields: totalUsinas, receitaMediaPortfolio, benchmarkDate
+SPECEOF
+
+  cat > "$tasks_fixture" << 'TASKEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: backendSpec passing",
+    "type": "feat",
+    "branchName": "feat/bs-pass",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "frontendOnly": true,
+    "designBundle": {
+      "root": "bundles/bs-pass",
+      "readme": null,
+      "chats": [],
+      "businessSpec": "TASKS_DIR_PLACEHOLDER/BusinessSpec-pass.md",
+      "designSpec": null
+    },
+    "backendSpec": {
+      "endpoints": [
+        {
+          "method": "GET",
+          "path": "/benchmark-summary",
+          "description": "Returns benchmark summary data",
+          "source": "BusinessSpec § 5.1 L8",
+          "responseShape": {
+            "totalUsinas": { "type": "number", "source": "BusinessSpec § 5.1 L10" },
+            "receitaMediaPortfolio": { "type": "number", "source": "BusinessSpec § 5.1 L10" }
+          }
+        }
+      ],
+      "dataModels": [],
+      "businessRules": [],
+      "businessContext": {
+        "summary": "Benchmark dashboard",
+        "userRoles": [],
+        "constraints": [],
+        "assumptions": [],
+        "successCriteria": []
+      }
+    }
+  },
+  "userStories": []
+}
+TASKEOF
+
+  sed -i "s|TASKS_DIR_PLACEHOLDER|${TASKS_DIR}|g" "$tasks_fixture"
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": true' "$output" "validate-tasks backendspec passing: returns valid=true"
+  assert_contains '"errors": []' "$output" "validate-tasks backendspec passing: returns empty errors"
+  assert_exit_code "0" "$exit_code" "validate-tasks backendspec passing: exits 0"
+
+  rm -f "$tasks_fixture" "$spec_file"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_tasks_backendspec_missing_source() {
+  echo ""
+  echo "=== Testing validate-tasks: backendSpec missing source field → valid:false ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-88-validate-tasks-bs-missing-src.json"
+  local spec_file="$TASKS_DIR/BusinessSpec-missing-src.md"
+
+  cat > "$spec_file" << 'SPECEOF'
+# BusinessSpec
+
+## 5 API Endpoints
+
+GET /benchmark-summary returns totalUsinas and receitaMediaPortfolio.
+SPECEOF
+
+  cat > "$tasks_fixture" << 'TASKEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: backendSpec missing source",
+    "type": "feat",
+    "branchName": "feat/bs-missing-src",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "frontendOnly": true,
+    "designBundle": {
+      "root": "bundles/bs-missing-src",
+      "readme": null,
+      "chats": [],
+      "businessSpec": "TASKS_DIR_PLACEHOLDER/BusinessSpec-missing-src.md",
+      "designSpec": null
+    },
+    "backendSpec": {
+      "endpoints": [
+        {
+          "method": "GET",
+          "path": "/benchmark-summary",
+          "description": "Returns benchmark summary data",
+          "responseShape": {
+            "totalUsinas": { "type": "number" }
+          }
+        }
+      ],
+      "dataModels": [],
+      "businessRules": [],
+      "businessContext": {
+        "summary": "Benchmark dashboard",
+        "userRoles": [],
+        "constraints": [],
+        "assumptions": [],
+        "successCriteria": []
+      }
+    }
+  },
+  "userStories": []
+}
+TASKEOF
+
+  sed -i "s|TASKS_DIR_PLACEHOLDER|${TASKS_DIR}|g" "$tasks_fixture"
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": false' "$output" "validate-tasks backendspec missing source: returns valid=false"
+  assert_contains 'missing source field' "$output" "validate-tasks backendspec missing source: emits diagnostic"
+  assert_exit_code "1" "$exit_code" "validate-tasks backendspec missing source: exits 1"
+
+  rm -f "$tasks_fixture" "$spec_file"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_tasks_backendspec_invented_field() {
+  echo ""
+  echo "=== Testing validate-tasks: backendSpec invented field (not in cited subsection) → valid:false ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-87-validate-tasks-bs-invented.json"
+  local spec_file="$TASKS_DIR/BusinessSpec-invented.md"
+
+  cat > "$spec_file" << 'SPECEOF'
+# BusinessSpec
+
+## 5 API Endpoints
+
+### 5.1 Benchmark Summary
+
+GET /benchmark-summary returns benchmark data.
+
+Fields: totalUsinas, receitaMediaPortfolio
+SPECEOF
+
+  cat > "$tasks_fixture" << 'TASKEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: backendSpec invented field",
+    "type": "feat",
+    "branchName": "feat/bs-invented",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "frontendOnly": true,
+    "designBundle": {
+      "root": "bundles/bs-invented",
+      "readme": null,
+      "chats": [],
+      "businessSpec": "TASKS_DIR_PLACEHOLDER/BusinessSpec-invented.md",
+      "designSpec": null
+    },
+    "backendSpec": {
+      "endpoints": [
+        {
+          "method": "GET",
+          "path": "/benchmark-summary",
+          "description": "Returns benchmark summary data",
+          "source": "BusinessSpec § 5.1 L8",
+          "responseShape": {
+            "totalUsinas": { "type": "number", "source": "BusinessSpec § 5.1 L10" },
+            "inventedField": { "type": "string", "source": "BusinessSpec § 5.1 L10" }
+          }
+        }
+      ],
+      "dataModels": [],
+      "businessRules": [],
+      "businessContext": {
+        "summary": "Benchmark dashboard",
+        "userRoles": [],
+        "constraints": [],
+        "assumptions": [],
+        "successCriteria": []
+      }
+    }
+  },
+  "userStories": []
+}
+TASKEOF
+
+  sed -i "s|TASKS_DIR_PLACEHOLDER|${TASKS_DIR}|g" "$tasks_fixture"
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": false' "$output" "validate-tasks backendspec invented field: returns valid=false"
+  assert_contains 'inventedField' "$output" "validate-tasks backendspec invented field: names the missing field"
+  assert_exit_code "1" "$exit_code" "validate-tasks backendspec invented field: exits 1"
+
+  rm -f "$tasks_fixture" "$spec_file"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_tasks_backendspec_derived_escape_hatch() {
+  echo ""
+  echo "=== Testing validate-tasks: backendSpec derived: source → WARN on stderr, valid:true, exit 0 ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-86-validate-tasks-bs-derived.json"
+  local spec_file="$TASKS_DIR/BusinessSpec-derived.md"
+
+  cat > "$spec_file" << 'SPECEOF'
+# BusinessSpec
+
+## 5 API Endpoints
+
+GET /benchmark-summary returns totalUsinas and portfolioCount.
+SPECEOF
+
+  cat > "$tasks_fixture" << 'TASKEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: backendSpec derived escape hatch",
+    "type": "feat",
+    "branchName": "feat/bs-derived",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "frontendOnly": true,
+    "designBundle": {
+      "root": "bundles/bs-derived",
+      "readme": null,
+      "chats": [],
+      "businessSpec": "TASKS_DIR_PLACEHOLDER/BusinessSpec-derived.md",
+      "designSpec": null
+    },
+    "backendSpec": {
+      "endpoints": [
+        {
+          "method": "GET",
+          "path": "/benchmark-summary",
+          "description": "Returns computed benchmark summary",
+          "source": "derived: aggregated from § 5 totalUsinas + § 5 portfolioCount",
+          "responseShape": {
+            "totalUsinas": { "type": "number" }
+          }
+        }
+      ],
+      "dataModels": [],
+      "businessRules": [],
+      "businessContext": {
+        "summary": "Benchmark dashboard",
+        "userRoles": [],
+        "constraints": [],
+        "assumptions": [],
+        "successCriteria": []
+      }
+    }
+  },
+  "userStories": []
+}
+TASKEOF
+
+  sed -i "s|TASKS_DIR_PLACEHOLDER|${TASKS_DIR}|g" "$tasks_fixture"
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local stdout_output stderr_output exit_code
+  stdout_output=$("$CLI" validate-tasks 2>/tmp/bs-derived-stderr-$$.txt) && exit_code=0 || exit_code=$?
+  stderr_output=$(cat /tmp/bs-derived-stderr-$$.txt 2>/dev/null || true)
+  rm -f /tmp/bs-derived-stderr-$$.txt
+
+  assert_contains '"valid": true' "$stdout_output" "validate-tasks backendspec derived: stdout returns valid=true"
+  assert_contains '"errors": []' "$stdout_output" "validate-tasks backendspec derived: stdout returns empty errors"
+  assert_contains 'derived source' "$stderr_output" "validate-tasks backendspec derived: stderr emits WARN"
+  assert_contains 'manual review required' "$stderr_output" "validate-tasks backendspec derived: stderr WARN mentions manual review"
+  assert_exit_code "0" "$exit_code" "validate-tasks backendspec derived: exits 0"
+
+  rm -f "$tasks_fixture" "$spec_file"
   echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
 }
 
@@ -4942,6 +5777,7 @@ main() {
   test_validate_stories_with_absolute_project
   test_validate_stories_skills_field
   test_validate_stories_tasks_field
+  test_validate_stories_gate_field
   test_list_ready_brief_includes_project
 
   # V3.2 schema tests — gates, waves & field preservation
@@ -4955,6 +5791,16 @@ main() {
   test_list_ready_verify_gate_non_blocking
   test_validate_waves_correct
   test_validate_waves_mismatch
+  test_validate_tasks_skeleton_exits_zero
+  test_validate_tasks_skips_pre_v33
+  test_validate_tasks_designspec_passing_case
+  test_validate_tasks_designspec_paraphrase_fails
+  test_validate_tasks_designspec_unicode_normalize
+  test_validate_tasks_designspec_subsection_boundary
+  test_validate_tasks_backendspec_passing_case
+  test_validate_tasks_backendspec_missing_source
+  test_validate_tasks_backendspec_invented_field
+  test_validate_tasks_backendspec_derived_escape_hatch
   test_mark_complete_preserves_new_fields
 
   # CLI output optimization tests — run with fresh fixture each time

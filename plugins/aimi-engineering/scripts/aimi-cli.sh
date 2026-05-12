@@ -898,6 +898,10 @@ cmd_validate_stories() {
              [$s.tasks[] | select(type == "string" and length > 5000) | "\($s.id): tasks[] entry exceeds 5000 chars"] +
              [$s.tasks[] | select(type == "string" and test("ignore previous|system:|INSTRUCTIONS|```|\\$\\(|`"; "i")) | "\($s.id): tasks[] entry contains suspicious content"]
            end)
+         else [] end) +
+        (if has("gates") then ["\($s.id): gate: 'gates' field is invalid; use singular 'gate' (see plan.md L687-692)"] else [] end) +
+        (if ($s.gate != null) then
+          (["type","status","prompt"] | map(. as $k | if ($s.gate | has($k) | not) then ["\($s.id): gate: missing required field \($k)"] else [] end) | add // [])
          else [] end)
       ) | .[]
     ] |
@@ -2294,6 +2298,343 @@ cmd_validate_waves() {
   ' "$tasks_file"
 }
 
+# Validate tasks file citation fields
+# For schemaVersion >= 3.3: validates DesignSpec verbatim citations for visual stories
+# For schemaVersion < 3.3: emits skip-info to stderr and exits 0
+# stdout: {valid, errors[]} JSON; exits non-zero when invalid
+cmd_validate_tasks() {
+  local tasks_file
+  tasks_file=$(get_tasks_file)
+
+  local schema_version
+  schema_version=$(jq -r '.metadata.schemaVersion // .schemaVersion // "0"' "$tasks_file" 2>/dev/null)
+
+  # Compare versions: below 3.3 → skip with info message
+  # Use sort -V to determine version ordering
+  if [ "$(printf '%s\n' "$schema_version" "3.3" | sort -V | head -n1)" != "3.3" ]; then
+    echo "skipping citation validation (schemaVersion ${schema_version} pre-dates citation enforcement)" >&2
+    return 0
+  fi
+
+  # Collect errors as a bash array
+  local errors=()
+
+  # DesignSpec scan: only when metadata.designBundle.designSpec is non-null
+  # AND metadata.prototypePaths is non-empty
+  local design_spec_rel
+  design_spec_rel=$(jq -r '.metadata.designBundle.designSpec // empty' "$tasks_file" 2>/dev/null)
+
+  local prototype_count
+  prototype_count=$(jq '.metadata.prototypePaths | if type == "array" then length else 0 end' "$tasks_file" 2>/dev/null)
+  prototype_count="${prototype_count:-0}"
+
+  if [ -n "$design_spec_rel" ] && [ "$prototype_count" -gt 0 ]; then
+    # Resolve DesignSpec path relative to PROJECT_ROOT
+    local design_spec_path
+    design_spec_path="${PROJECT_ROOT}/${design_spec_rel}"
+
+    if [ ! -f "$design_spec_path" ]; then
+      errors+=("${tasks_file}: DesignSpec file not found: ${design_spec_rel}")
+    else
+      # Extract visual stories: id + acceptanceCriteria entries as TSV lines
+      # Format: <story_id>\t<ac_index>\t<ac_text>
+      local visual_ac_data
+      visual_ac_data=$(jq -r '
+        .userStories[] |
+        select(.verification.strategy == "visual") |
+        . as $s |
+        .acceptanceCriteria | to_entries[] |
+        [$s.id, (.key | tostring), .value] | @tsv
+      ' "$tasks_file" 2>/dev/null)
+
+      if [ -n "$visual_ac_data" ]; then
+        # Process each AC entry
+        while IFS=$'\t' read -r story_id ac_index ac_text; do
+          [ -z "$story_id" ] && continue
+
+          # Extract all "literal" (DesignSpec § N.N L<line>) patterns from the AC
+          # Pattern: "some literal" (DesignSpec § N.N L<line>)
+          # Use grep to find all matches in the ac_text
+          local matches
+          matches=$(printf '%s' "$ac_text" | grep -oE '"[^"]+" \(DesignSpec § [0-9]+\.[0-9]+ L[0-9]+\)' 2>/dev/null || true)
+
+          [ -z "$matches" ] && continue
+
+          while IFS= read -r match; do
+            [ -z "$match" ] && continue
+
+            # Extract the literal string (between double quotes)
+            local literal section line_num
+            literal=$(printf '%s' "$match" | sed 's/^"\(.*\)" (DesignSpec § .*)$/\1/')
+            section=$(printf '%s' "$match" | grep -oE '§ [0-9]+\.[0-9]+' | sed 's/§ //')
+            line_num=$(printf '%s' "$match" | grep -oE 'L[0-9]+' | head -1 | sed 's/L//')
+
+            # Locate subsection in DesignSpec and check verbatim presence
+            if ! _validate_designspec_citation "$design_spec_path" "$literal" "$section"; then
+              errors+=("${tasks_file}: ${story_id} AC[${ac_index}]: missing DesignSpec citation for \"${literal}\" in section § ${section}")
+            fi
+          done <<< "$matches"
+        done <<< "$visual_ac_data"
+      fi
+    fi
+  fi
+
+  # BusinessSpec scan: only when metadata.frontendOnly is true AND metadata.designBundle.businessSpec is non-null
+  local frontend_only
+  frontend_only=$(jq -r '.metadata.frontendOnly // false' "$tasks_file" 2>/dev/null)
+
+  local business_spec_rel
+  business_spec_rel=$(jq -r '.metadata.designBundle.businessSpec // empty' "$tasks_file" 2>/dev/null)
+
+  if [ "$frontend_only" = "true" ] && [ -n "$business_spec_rel" ]; then
+    # Resolve BusinessSpec path relative to PROJECT_ROOT
+    local business_spec_path
+    business_spec_path="${PROJECT_ROOT}/${business_spec_rel}"
+
+    if [ ! -f "$business_spec_path" ]; then
+      errors+=("${tasks_file}: BusinessSpec file not found: ${business_spec_rel}")
+    else
+      # Iterate every endpoints[] entry
+      local endpoint_count
+      endpoint_count=$(jq '.metadata.backendSpec.endpoints | if type == "array" then length else 0 end' "$tasks_file" 2>/dev/null)
+      endpoint_count="${endpoint_count:-0}"
+
+      local ep_index=0
+      while [ "$ep_index" -lt "$endpoint_count" ]; do
+        # Get source value for this endpoint
+        local ep_source
+        ep_source=$(jq -r --argjson idx "$ep_index" '.metadata.backendSpec.endpoints[$idx].source // empty' "$tasks_file" 2>/dev/null)
+
+        if [ -z "$ep_source" ]; then
+          errors+=("${tasks_file}: backendSpec.endpoints[${ep_index}]: missing source field")
+          ep_index=$((ep_index + 1))
+          continue
+        fi
+
+        # Check if source uses derived: prefix
+        if printf '%s' "$ep_source" | grep -q '^derived:'; then
+          # Warn to stderr, do not add to errors
+          printf '%s: backendSpec.endpoints[%s]: derived source — manual review required\n' \
+            "$tasks_file" "$ep_index" >&2
+          ep_index=$((ep_index + 1))
+          continue
+        fi
+
+        # Validate literal source format: "BusinessSpec § N[.N] L<line>"
+        if ! printf '%s' "$ep_source" | grep -qE '^BusinessSpec § [0-9]+(\.[0-9]+)? L[0-9]+$'; then
+          errors+=("${tasks_file}: backendSpec.endpoints[${ep_index}]: malformed source \"${ep_source}\" (expected 'BusinessSpec § N[.N] L<line>' or 'derived: ...')")
+          ep_index=$((ep_index + 1))
+          continue
+        fi
+
+        # Extract section from source
+        local ep_section
+        ep_section=$(printf '%s' "$ep_source" | grep -oE '§ [0-9]+(\.[0-9]+)?' | sed 's/§ //')
+
+        # Iterate every field in responseShape
+        local field_names
+        field_names=$(jq -r --argjson idx "$ep_index" \
+          '.metadata.backendSpec.endpoints[$idx].responseShape | if type == "object" then keys[] else empty end' \
+          "$tasks_file" 2>/dev/null)
+
+        while IFS= read -r field_name; do
+          [ -z "$field_name" ] && continue
+
+          # Get per-field source if it exists (responseShape field can be {type, source} or a scalar)
+          local field_source
+          field_source=$(jq -r --argjson idx "$ep_index" --arg fn "$field_name" \
+            '.metadata.backendSpec.endpoints[$idx].responseShape[$fn] | if type == "object" then .source // empty else empty end' \
+            "$tasks_file" 2>/dev/null)
+
+          # If field has its own source, validate it too
+          if [ -n "$field_source" ]; then
+            if printf '%s' "$field_source" | grep -q '^derived:'; then
+              printf '%s: backendSpec.endpoints[%s].responseShape.%s: derived source — manual review required\n' \
+                "$tasks_file" "$ep_index" "$field_name" >&2
+              continue
+            fi
+            if ! printf '%s' "$field_source" | grep -qE '^BusinessSpec § [0-9]+(\.[0-9]+)? L[0-9]+$'; then
+              errors+=("${tasks_file}: backendSpec.endpoints[${ep_index}].responseShape.${field_name}: malformed source \"${field_source}\"")
+              continue
+            fi
+            # Use the field-level section for subsection lookup
+            local field_section
+            field_section=$(printf '%s' "$field_source" | grep -oE '§ [0-9]+(\.[0-9]+)?' | sed 's/§ //')
+            if ! _validate_businessspec_field "$business_spec_path" "$field_name" "$field_section"; then
+              errors+=("${tasks_file}: backendSpec.endpoints[${ep_index}].responseShape.${field_name}: field name not found in BusinessSpec § ${field_section}")
+            fi
+          else
+            # No per-field source: check field name against the endpoint-level cited section
+            if ! _validate_businessspec_field "$business_spec_path" "$field_name" "$ep_section"; then
+              errors+=("${tasks_file}: backendSpec.endpoints[${ep_index}].responseShape.${field_name}: field name not found in BusinessSpec § ${ep_section}")
+            fi
+          fi
+        done <<< "$field_names"
+
+        ep_index=$((ep_index + 1))
+      done
+    fi
+  fi
+
+  # Emit result JSON
+  if [ ${#errors[@]} -eq 0 ]; then
+    echo '{"valid": true, "errors": []}'
+    return 0
+  else
+    # Build JSON errors array
+    local errors_json
+    errors_json=$(printf '%s\n' "${errors[@]}" | jq -R . | jq -s .)
+    printf '{"valid": false, "errors": %s}\n' "$errors_json"
+    return 1
+  fi
+}
+
+# Helper: validate that a literal string appears verbatim in the cited DesignSpec subsection.
+# Subsection boundary: lines from "## N.N <heading>" (or "### N.N") to next heading of equal/higher level.
+# Normalizes Unicode quotes, em-dashes, non-breaking spaces, and HTML entities on both sides.
+# Usage: _validate_designspec_citation <spec_file> <literal> <section>
+# Returns 0 if found, 1 if not found.
+_validate_designspec_citation() {
+  local spec_file="$1"
+  local literal="$2"
+  local section="$3"
+
+  # Normalize a string: Unicode quotes → ASCII, em-dash → hyphen,
+  # non-breaking space → space, HTML entities to literal chars.
+  _normalize_text() {
+    local text="$1"
+    # Curly double quotes → straight double quote
+    text=$(printf '%s' "$text" | sed \
+      -e 's/\xe2\x80\x9c/"/g' \
+      -e 's/\xe2\x80\x9d/"/g' \
+      -e "s/\xe2\x80\x98/'/g" \
+      -e "s/\xe2\x80\x99/'/g" \
+      -e 's/\xe2\x80\x94/-/g' \
+      -e 's/\xc2\xa0/ /g' \
+      -e 's/&amp;/\&/g' \
+      -e 's/&nbsp;/ /g' \
+      -e 's/&lt;/</g' \
+      -e 's/&gt;/>/g' \
+      -e 's/&quot;/"/g')
+    printf '%s' "$text"
+  }
+
+  # Determine heading level for section N.N (always "##" — subsection level)
+  # Section like "3.1" is a sub-heading; we look for "## 3.1" or "### 3.1" etc.
+  # We scan for the section heading and collect lines until the next equal/higher heading.
+
+  local normalized_literal
+  normalized_literal=$(_normalize_text "$literal")
+
+  # Extract subsection body from the spec file
+  # Strategy: use awk to find the heading containing the section number,
+  # then collect lines until a heading of equal or higher level.
+  local subsection_body
+  subsection_body=$(awk -v section="$section" '
+    BEGIN { in_section = 0; heading_level = 0 }
+    {
+      # Detect markdown headings: count leading # characters
+      if (/^#+[[:space:]]/) {
+        level = 0
+        line_copy = $0
+        while (substr(line_copy, 1, 1) == "#") {
+          level++
+          line_copy = substr(line_copy, 2)
+        }
+        # Check if this heading contains the section number
+        if (!in_section) {
+          # Look for pattern like "§ N.N" or "N.N " at start of heading text
+          heading_text = substr($0, level + 1)
+          # Strip leading spaces
+          gsub(/^[[:space:]]+/, "", heading_text)
+          if (heading_text ~ ("^(§[[:space:]]*)?" section "([[:space:]]|$)") || \
+              heading_text ~ ("§[[:space:]]*" section "([[:space:]]|$)")) {
+            in_section = 1
+            heading_level = level
+            next
+          }
+        } else {
+          # We are in the section — stop at equal or higher level heading
+          if (level <= heading_level) {
+            exit
+          }
+        }
+      }
+      if (in_section) {
+        print $0
+      }
+    }
+  ' "$spec_file")
+
+  if [ -z "$subsection_body" ]; then
+    # Section not found in spec — treat as missing
+    return 1
+  fi
+
+  # Normalize the subsection body
+  local normalized_body
+  normalized_body=$(_normalize_text "$subsection_body")
+
+  # Check if normalized literal is a substring of normalized body
+  if printf '%s' "$normalized_body" | grep -qF "$normalized_literal"; then
+    return 0
+  fi
+  return 1
+}
+
+# Helper: validate that a field name appears as a literal substring in the cited BusinessSpec subsection.
+# Reuses the same subsection-boundary algorithm as _validate_designspec_citation.
+# Usage: _validate_businessspec_field <spec_file> <field_name> <section>
+# Returns 0 if found, 1 if not found.
+_validate_businessspec_field() {
+  local spec_file="$1"
+  local field_name="$2"
+  local section="$3"
+
+  # Extract subsection body from the spec file using the same awk strategy
+  local subsection_body
+  subsection_body=$(awk -v section="$section" '
+    BEGIN { in_section = 0; heading_level = 0 }
+    {
+      if (/^#+[[:space:]]/) {
+        level = 0
+        line_copy = $0
+        while (substr(line_copy, 1, 1) == "#") {
+          level++
+          line_copy = substr(line_copy, 2)
+        }
+        if (!in_section) {
+          heading_text = substr($0, level + 1)
+          gsub(/^[[:space:]]+/, "", heading_text)
+          if (heading_text ~ ("^(§[[:space:]]*)?" section "([[:space:]]|$)") || \
+              heading_text ~ ("§[[:space:]]*" section "([[:space:]]|$)")) {
+            in_section = 1
+            heading_level = level
+            next
+          }
+        } else {
+          if (level <= heading_level) {
+            exit
+          }
+        }
+      }
+      if (in_section) {
+        print $0
+      }
+    }
+  ' "$spec_file")
+
+  if [ -z "$subsection_body" ]; then
+    return 1
+  fi
+
+  # Check if field name appears as a literal substring in the subsection body
+  if printf '%s' "$subsection_body" | grep -qF "$field_name"; then
+    return 0
+  fi
+  return 1
+}
+
 # List task files where all stories have terminal status (completed or skipped)
 # Returns a JSON array of file paths
 cmd_list_archivable() {
@@ -2503,6 +2844,7 @@ COMMANDS:
     update-field <id> <field.path> <value>
                               Update a nested field on a story (e.g., verification.status passed)
     validate-waves            Compute waves from dependsOn, compare to stored wave, report mismatches
+    validate-tasks            Validate tasks file citation fields (schemaVersion guard, no checks yet)
     cascade-skip <id>         Skip all stories depending on failed story
     reset-orphaned            Reset all in_progress stories to failed
     get-branch                Get branchName from metadata
@@ -2655,6 +2997,7 @@ main() {
     gate-fail)         cmd_gate_fail "${2:-}" ;;
     update-field)      cmd_update_field "${2:-}" "${3:-}" "${4:-}" ;;
     validate-waves)    cmd_validate_waves ;;
+    validate-tasks)    cmd_validate_tasks ;;
     cascade-skip)      cmd_cascade_skip "${2:-}" ;;
     reset-orphaned)    cmd_reset_orphaned ;;
     get-branch)        cmd_get_branch ;;

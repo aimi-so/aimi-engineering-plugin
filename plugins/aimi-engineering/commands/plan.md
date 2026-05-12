@@ -221,6 +221,19 @@ After the brainstorm check, determine the implementation scope:
 
 3. **Store the result** as `implementationScope: "frontend-only" | "full-stack"` for use in Phase 4 metadata.
 
+### Phase 0.5: Open Questions Resolution Gate
+
+After Phase 0 produces (or reuses) a brainstorm, parse its `## Open Questions` section.
+
+For each line that does NOT carry a `[resolved: ...]` or `[deferred: ...]` suffix:
+- Call AskUserQuestion with the OQ as the question text.
+- Append `[resolved: <choice>]` to the OQ line in the brainstorm file (via Edit), so subsequent re-runs skip it.
+- Record the resolution in working memory `oqDecisions: { <oqId>: <choice> }` for use in Phase 4 when authoring `metadata.decisions[]`.
+
+Block Phase 1 until every OQ has a `[resolved: ...]` or `[deferred: ...]` suffix.
+
+Agent-mode fallback: auto-defer (do not block).
+
 ## Phase 1: Local Research (Parallel)
 
 ### Prepare Research Directory
@@ -470,9 +483,17 @@ directly when describing UI acceptance criteria, component structure, and visual
     - **Heading citation** (preferred): `(prototype: <relative-path> §<heading-text>)` — where `<heading-text>` is the text of the nearest preceding `<h1>`–`<h6>` element in the prototype HTML that covers the cited region (e.g., `(prototype: draives-monitor/project/Monitoramento.html §Visão Geral)`).
     - **Line-range fallback**: when the cited region has no preceding heading element, use `(prototype: <relative-path>:L<start>-L<end>)` with the line numbers from the prototype HTML (e.g., `(prototype: draives-monitor/project/Monitoramento.html:L42-L67)`).
 
-    **No double-deriving**: when a prototype covers a layout region, AC must cite the prototype — not re-derive layout from `DesignSpec.md`. The prototype is canonical for visual layout; `DesignSpec.md` remains canonical for design tokens, component prop types, and interaction states. A story may hold both a prototype citation and a spec reference when they cover different concerns (e.g., layout from prototype, color tokens from spec).
+    **No double-deriving** (spatial layout only): when a prototype covers a layout region, AC must cite the prototype — not re-derive spatial layout (positioning, sizing, stacking, alignment) from `DesignSpec.md`. The prototype is canonical for visual layout; `DesignSpec.md` remains canonical for design tokens, component prop types, and interaction states. A story may hold both a prototype citation and a spec reference when they cover different concerns (e.g., layout from prototype, color tokens from spec). Literal string content (labels, headings, copy) is always governed by Rule 19a regardless of which artifact covers the region.
 
     The decomposition LLM authors citations; they are never auto-injected. Violations surface at the post-decomposition checklist stage.
+
+19a. **Verbatim DesignSpec citations for visual ACs** (when `designSpecContent` is non-null AND `verification.strategy` is `visual` for a story): every visible-text element in the cited region MUST be extracted verbatim from the DesignSpec § N.N subsection — including page H1, subtitle, KPI/metric card labels, table column headers, filter/dropdown/button labels, footer/disclaimer text, and badge text. Do not paraphrase, translate, abbreviate, or reorder. Wrap each literal in double quotes and follow it with the anchor `(DesignSpec § N.N L<line>)`.
+
+    Example (correct):
+    - `"Benchmark do portfolio" (DesignSpec § 3.1 L42) MUST appear as the page H1.`
+
+    Example (wrong — paraphrase):
+    - `The page header shows the portfolio benchmark name.`
 
 20. **Mock-sync AC injection for schema-extending stories**: after all stories are drafted, scan each story's `implementation.files` array against the following globs:
     - `**/schemas/**/*.{ts,js,py,rb}`
@@ -548,8 +569,10 @@ Write the same `prototypePaths`, `designBundle`, and `designTokens` arrays/objec
 1. Set `metadata.frontendOnly: true`
 2. **Generate `metadata.backendSpec`**:
    - **When `businessSpecPath` is non-null** (spec-driven path — takes precedence over inference):
-     - `endpoints`: populate from `BusinessSpec § 5` (endpoints/API contracts)
-     - `dataModels`: populate from `BusinessSpec § 4` (data models / entities)
+     - `endpoints`: populate from `BusinessSpec § 5` (endpoints/API contracts). Every entry MUST carry a `source` field matching `"BusinessSpec § N[.N] L<line>"` citing the exact line in § 5 that defines the endpoint. Every `responseShape` field MUST also carry a `source` field in the same format, citing the line that defines that field.
+       - **Do NOT invent fields**: if a `responseShape` field is required by an acceptance criterion but absent from `BusinessSpec § 5`, do NOT add it to `responseShape`. Instead, emit a `gate` of type `decision` on the story asking the user how to source the field, and leave the `responseShape` entry out until the gate resolves.
+       - Fields whose value is derived from multiple spec lines (aggregations, computed values) MUST use the `"derived: <explanation>"` prefix in their `source` value instead of a literal citation. The `derived:` prefix is accepted as a manual-review marker; it does not allow inventing fields.
+     - `dataModels`: populate from `BusinessSpec § 4` (data models / entities). Every entry MUST carry a `source` field matching `"BusinessSpec § N[.N] L<line>"` citing the line in § 4 that defines the model. Individual fields within `fields[]` that are derived MUST use `"derived: <explanation>"`.
      - `businessRules`: populate from `BusinessSpec § 3` (business rules)
      - `businessContext.userRoles`: populate from `BusinessSpec § 7` (user roles / personas)
      - `businessContext.successCriteria`: populate from `BusinessSpec § 9` (acceptance criteria)
@@ -619,8 +642,27 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
     "maxConcurrency": "number (optional, default 5)",
     "frontendOnly": "boolean (optional, true when frontend-only scope)",
     "backendSpec": {
-      "endpoints": [{"method": "string", "path": "string", "description": "string"}],
-      "dataModels": [{"name": "string", "fields": ["string"]}],
+      "endpoints": [
+        {
+          "method": "string",
+          "path": "string",
+          "description": "string",
+          "source": "BusinessSpec § N[.N] L<line> (required when businessSpecPath non-null; or 'derived: <explanation>' for computed endpoints)",
+          "responseShape": {
+            "<fieldName>": {
+              "type": "string",
+              "source": "BusinessSpec § N[.N] L<line> (required when businessSpecPath non-null; or 'derived: <explanation>')"
+            }
+          }
+        }
+      ],
+      "dataModels": [
+        {
+          "name": "string",
+          "fields": ["string"],
+          "source": "BusinessSpec § N[.N] L<line> (required when businessSpecPath non-null; or 'derived: <explanation>')"
+        }
+      ],
       "businessRules": ["string"],
       "businessContext": {
         "summary": "string",
@@ -698,6 +740,7 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 - [ ] `gate` (if present) has `type` (`verify`, `decision`, or `action`), `status` (`"pending"`), and `prompt`
 - [ ] Gates only attached when heuristics clearly match
 - [ ] Every story with `verification.strategy == "visual"` and non-empty `metadata.prototypePaths` has at least one `(prototype: ...)` citation in its acceptance criteria (either `(prototype: <path> §<heading>)` or `(prototype: <path>:L<start>-L<end>)`)
+- [ ] Rule 19a compliance (when `designSpecContent` is non-null): every visual story's `acceptanceCriteria` wraps each visible-text literal in double quotes followed by a `(DesignSpec § N.N L<line>)` anchor; no paraphrasing, translation, abbreviation, or reordering of the cited text
 
 ### Split-File Checks (when `implementationScope` is set)
 - [ ] Full-stack: two files generated (`*-frontend-tasks.json` and `*-backend-tasks.json`)
@@ -721,11 +764,13 @@ $AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tas
 $AIMI_CLI validate-ids
 $AIMI_CLI validate-deps
 $AIMI_CLI validate-stories
+$AIMI_CLI validate-tasks
 
 $AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json
 $AIMI_CLI validate-ids
 $AIMI_CLI validate-deps
 $AIMI_CLI validate-stories
+$AIMI_CLI validate-tasks
 ```
 
 **For single file (frontend-only or legacy):**
@@ -735,6 +780,7 @@ $AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tas
 $AIMI_CLI validate-ids
 $AIMI_CLI validate-deps
 $AIMI_CLI validate-stories
+$AIMI_CLI validate-tasks
 ```
 
 **If any validation fails (non-zero exit):**
@@ -743,7 +789,7 @@ $AIMI_CLI validate-stories
 3. Re-write the tasks.json file using the Write tool
 4. Re-run all validations until they pass
 
-**Note:** `validate-stories` (US-001) catches malformed `skills[]` — entries that fail the `^[a-zA-Z0-9][a-zA-Z0-9_-]*$` regex, lists exceeding 10 entries, or an explicitly empty `skills: []` array (field must be omitted when no skills apply).
+**Note:** `validate-stories` (US-001) catches malformed `skills[]` — entries that fail the `^[a-zA-Z0-9][a-zA-Z0-9_-]*$` regex, lists exceeding 10 entries, or an explicitly empty `skills: []` array (field must be omitted when no skills apply). It also enforces the **gate schema** (US-003): the plural `gates` field is rejected outright (use singular `gate`, see L687-692 above), and any singular `gate` object must carry all three required keys — `type`, `status`, and `prompt`.
 
 Do **not** proceed to the report step until all validations succeed.
 
