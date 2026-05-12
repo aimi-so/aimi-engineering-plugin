@@ -223,16 +223,42 @@ After the brainstorm check, determine the implementation scope:
 
 ### Phase 0.5: Open Questions Resolution Gate
 
-After Phase 0 produces (or reuses) a brainstorm, parse its `## Open Questions` section.
+Collect open questions from two sources:
 
-For each line that does NOT carry a `[resolved: ...]` or `[deferred: ...]` suffix:
-- Call AskUserQuestion with the OQ as the question text.
-- Append `[resolved: <choice>]` to the OQ line in the brainstorm file (via Edit), so subsequent re-runs skip it.
-- Record the resolution in working memory `oqDecisions: { <oqId>: <choice> }` for use in Phase 4 when authoring `metadata.decisions[]`.
+1. **Brainstorm-sourced OQs.** When a brainstorm doc was loaded in Phase 0,
+   parse its `## Open Questions` section. Each line without a
+   `[resolved: ...]` or `[deferred: ...]` suffix becomes an OQ entry with
+   `source: brainstorm` and `anchor: <brainstorm path>:L<line>`.
 
-Block Phase 1 until every OQ has a `[resolved: ...]` or `[deferred: ...]` suffix.
+2. **Spec-marker OQs.** When `businessSpecContent` or `designSpecContent`
+   is non-null, scan each file line-by-line for markers matching the
+   regex (case-insensitive):
+       \[(a confirmar|TBD|to confirm|to be confirmed|to be defined)[^\]]*\]
+   For each match, create an OQ entry with:
+       - text: the full line containing the marker (trimmed)
+       - source: businessSpec | designSpec
+       - anchor: <spec path>:L<line>
+   Markers inside fenced code blocks (between triple backticks) are skipped.
 
-Agent-mode fallback: auto-defer (do not block).
+Merge both lists into `openQuestions[]`. For each entry without a resolution:
+- Call AskUserQuestion with the OQ text. Include `source` and `anchor` in
+  the question header (e.g., `OQ · businessSpec L26`) so the user knows
+  exactly what they are deciding on.
+- Record the resolution in working memory `oqDecisions[]` keyed by anchor.
+- For brainstorm-sourced OQs, also append `[resolved: <choice>]` to the
+  line in the brainstorm file via Edit. Spec-marker OQs are NOT written
+  back to the spec files (specs are source-of-truth artifacts owned by
+  product/design, not editable plan state) — they are recorded only in
+  `oqDecisions[]` and surfaced later in `metadata.decisions[]`.
+
+Block Phase 1 until every entry has a resolution or `[deferred: ...]`.
+
+Agent-mode fallback: auto-defer all entries (do not block).
+
+**Aggregate cap:** if more than 20 marker-style OQs are detected, sort by
+source (businessSpec before designSpec) then by line number, present the
+first 20, and emit a single warning line listing the remaining anchors so
+the user is aware they were skipped from interactive resolution.
 
 ## Phase 1: Local Research (Parallel)
 
@@ -713,6 +739,14 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
       "designSpec": "string|null (relative path to DesignSpec.md, or null when absent)"
     },
     "designTokens": "object (optional, flat token map parsed from DesignSpec § 1; keys are token categories e.g. color, typography, spacing, radii, shadow, transition; values verbatim from spec)",
+    "decisions": [
+      {
+        "anchor": "string (unique key, one of: <brainstorm-path>:L<line> | businessSpec:L<line> | designSpec:L<line>)",
+        "source": "string (<brainstorm-path>:L<line> for brainstorm-sourced OQs | businessSpec:L<line> | designSpec:L<line>)",
+        "text": "string (the OQ text or the trimmed line containing the marker)",
+        "resolution": "string (the user's choice, or '[deferred]')"
+      }
+    ],
     "maxConcurrency": "number (optional, default 5)",
     "frontendOnly": "boolean (optional, true when frontend-only scope)",
     "backendSpec": {
@@ -785,6 +819,8 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 ```
 
 **Notes:** `implementation`, `verification`, `gate`, `skills`, and `tasks` are optional per story. `wave` is required on all stories.
+
+**`metadata.decisions[].source` field:** each entry records where the Open Question originated. Three valid forms: `<brainstorm-path>:L<line>` (an OQ line from the brainstorm doc), `businessSpec:L<line>` (a marker-style OQ scanned from `businessSpecContent`), or `designSpec:L<line>` (a marker-style OQ scanned from `designSpecContent`). Consumers can branch on the prefix to distinguish decisions that originated from a collaborative brainstorm versus inline spec markers.
 
 ### Anti-Citation-Bias Reminder
 
