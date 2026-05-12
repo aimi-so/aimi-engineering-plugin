@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.83.0] - 2026-05-12
+
+### Added
+- `/aimi:plan` Phase 0.5 now scans BusinessSpec/DesignSpec content for marker-style Open Questions (`[a confirmar]`, `[TBD]`, `[to confirm]`, `[to be confirmed]`, `[to be defined]`) and surfaces each via AskUserQuestion with source+anchor. Spec-marker resolutions are recorded in working-memory `oqDecisions[]` only; spec files are never written back to. Aggregate cap of 20 entries.
+- `/aimi:plan` Phase 1 now spawns `aimi-design-bundle-researcher` when invoked directly against a Claude Design handoff bundle (no prior brainstorm). Restores parity with the brainstorm-to-plan flow; resulting Open Questions merge into the Phase 0.5 list before continuing to Phase 1.5.
+
+### Fixed
+- `aimi-cli detect-design-bundle` now uses case-insensitive `find -iname` for spec file discovery, so bundles with camelCase filenames (`businessSpec.md`, `designSpec.md`) are detected correctly. Returned paths preserve actual on-disk casing.
+
+### Changed
+- Schema v3.3 documentation in `plan.md` now includes a `responseShape contract (frontend-only mode)` block explaining the flat-key constraint and why dotted keys like `portfolio.totalUsinas` are rejected by `validate-tasks`.
+
 ## [1.82.0] - 2026-05-12
 
 ### Added
