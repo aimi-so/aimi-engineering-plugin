@@ -1289,10 +1289,14 @@ cmd_detect_design_bundle() {
       fi
     fi
 
-    # businessSpec / designSpec: direct filename match
+    # businessSpec / designSpec: case-insensitive discovery
+    # (Claude Design exports occasionally produce camelCase filenames.)
     local business_spec="" design_spec=""
-    [ -f "${subdir}project/BusinessSpec.md" ] && business_spec="${base}/project/BusinessSpec.md"
-    [ -f "${subdir}project/DesignSpec.md"   ] && design_spec="${base}/project/DesignSpec.md"
+    local business_spec_file design_spec_file
+    business_spec_file=$(find "${subdir}project" -maxdepth 1 -iname "businessspec.md" -print -quit 2>/dev/null || true)
+    design_spec_file=$(find   "${subdir}project" -maxdepth 1 -iname "designspec.md"   -print -quit 2>/dev/null || true)
+    [ -n "$business_spec_file" ] && business_spec="${base}/project/$(basename "$business_spec_file")"
+    [ -n "$design_spec_file"   ] && design_spec="${base}/project/$(basename "$design_spec_file")"
 
     jq -n \
       --arg   path         "$base" \
@@ -1469,16 +1473,22 @@ cmd_bundle_prototype_status() {
   fi
 
   # Locate spec files inside the bundle (prefer bundle/project/ subdir)
+  # Uses case-insensitive discovery so camelCase filenames are detected.
   local design_spec_path="" business_spec_path=""
-  if [ -f "${bundle_path}/project/DesignSpec.md" ]; then
-    design_spec_path="${bundle_path}/project/DesignSpec.md"
-  elif [ -f "${bundle_path}/DesignSpec.md" ]; then
-    design_spec_path="${bundle_path}/DesignSpec.md"
+  local _ds_proj _ds_root _bs_proj _bs_root
+  _ds_proj=$(find "${bundle_path}/project" -maxdepth 1 -iname "designspec.md"   -print -quit 2>/dev/null || true)
+  _ds_root=$(find "${bundle_path}"         -maxdepth 1 -iname "designspec.md"   -print -quit 2>/dev/null || true)
+  _bs_proj=$(find "${bundle_path}/project" -maxdepth 1 -iname "businessspec.md" -print -quit 2>/dev/null || true)
+  _bs_root=$(find "${bundle_path}"         -maxdepth 1 -iname "businessspec.md" -print -quit 2>/dev/null || true)
+  if [ -n "$_ds_proj" ]; then
+    design_spec_path="$_ds_proj"
+  elif [ -n "$_ds_root" ]; then
+    design_spec_path="$_ds_root"
   fi
-  if [ -f "${bundle_path}/project/BusinessSpec.md" ]; then
-    business_spec_path="${bundle_path}/project/BusinessSpec.md"
-  elif [ -f "${bundle_path}/BusinessSpec.md" ]; then
-    business_spec_path="${bundle_path}/BusinessSpec.md"
+  if [ -n "$_bs_proj" ]; then
+    business_spec_path="$_bs_proj"
+  elif [ -n "$_bs_root" ]; then
+    business_spec_path="$_bs_root"
   fi
 
   # Derive output and sidecar paths — relative to the project root for portability.
