@@ -902,6 +902,9 @@ cmd_validate_stories() {
         (if has("gates") then ["\($s.id): gate: 'gates' field is invalid; use singular 'gate' (see plan.md L687-692)"] else [] end) +
         (if ($s.gate != null) then
           (["type","status","prompt"] | map(. as $k | if ($s.gate | has($k) | not) then ["\($s.id): gate: missing required field \($k)"] else [] end) | add // [])
+         else [] end) +
+        (if ($s.verification != null and ($s.verification | type) == "string") then
+          ["\($s.id): verification must be an object {strategy, status, url, expect}; found bare string — run normalize-verification to fix"]
          else [] end)
       ) | .[]
     ] |
@@ -917,6 +920,55 @@ cmd_validate_stories() {
     return 1
   fi
   return 0
+}
+
+# Normalize verification fields: rewrite any bare-string verification into object form
+cmd_normalize_verification() {
+  local tasks_file="$1"
+
+  if [ -z "$tasks_file" ]; then
+    echo "Usage: aimi-cli.sh normalize-verification <tasks-file-path>" >&2
+    exit 1
+  fi
+
+  if [ ! -f "$tasks_file" ]; then
+    echo "Error: tasks file not found: $tasks_file" >&2
+    exit 1
+  fi
+
+  if [ ! -r "$tasks_file" ]; then
+    echo "Error: tasks file not readable: $tasks_file" >&2
+    exit 1
+  fi
+
+  # Validate input is valid JSON
+  if ! jq empty "$tasks_file" 2>/dev/null; then
+    echo "Error: invalid JSON in tasks file: $tasks_file" >&2
+    exit 1
+  fi
+
+  local tmp_file
+  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  (
+    _lock "${tasks_file}.lock"
+    jq '
+      .userStories |= map(
+        if (.verification != null and (.verification | type) == "string") then
+          .verification = {strategy: .verification, status: "pending", url: null, expect: null}
+        else
+          .
+        end
+      )
+    ' "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+  ) 200>"${tasks_file}.lock"
+  local exit_code=$?
+  rm -f "$tmp_file" 2>/dev/null
+  [ $exit_code -ne 0 ] && exit $exit_code
+
+  # Report how many stories were normalized
+  local normalized_count
+  normalized_count=$(jq '[.userStories[] | select(.verification != null and (.verification | type) == "object")] | length' "$tasks_file")
+  jq -n --argjson count "$normalized_count" '{normalized: $count}'
 }
 
 # Validate all story IDs in the tasks file against the US-NNN format
@@ -2847,6 +2899,11 @@ COMMANDS:
     count-pending             Count pending stories
     validate-deps             Validate dependency graph (no cycles, no missing refs)
     validate-stories          Validate story content (length, suspicious patterns)
+    normalize-verification <file>
+                              Rewrite any story whose verification is a bare string S
+                              into {strategy: S, status: "pending", url: null, expect: null}.
+                              Already-object verifications are left unchanged.
+                              Writes atomically (tmp + mv). Exits 0 on success.
     validate-ids              Validate all story IDs match US-NNN format
     gate-pass <id> [--option 'value']
                               Pass a gate on a story; optionally store selected option
@@ -3000,9 +3057,10 @@ main() {
     mark-failed)       cmd_mark_failed "${2:-}" "${3:-}" ;;
     mark-skipped)      cmd_mark_skipped "${2:-}" ;;
     count-pending)     cmd_count_pending ;;
-    validate-deps)     cmd_validate_deps ;;
-    validate-stories)  cmd_validate_stories ;;
-    validate-ids)      cmd_validate_ids ;;
+    validate-deps)            cmd_validate_deps ;;
+    validate-stories)         cmd_validate_stories ;;
+    normalize-verification)   cmd_normalize_verification "${2:-}" ;;
+    validate-ids)             cmd_validate_ids ;;
     gate-pass)         shift; cmd_gate_pass "$@" ;;
     gate-fail)         cmd_gate_fail "${2:-}" ;;
     update-field)      cmd_update_field "${2:-}" "${3:-}" "${4:-}" ;;

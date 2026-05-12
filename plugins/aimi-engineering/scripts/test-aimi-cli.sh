@@ -2665,6 +2665,208 @@ test_validate_stories_gate_field() {
   _teardown_project_fixture
 }
 
+test_normalize_verification_string_input() {
+  echo ""
+  echo "=== Testing normalize-verification: string verification is rewritten to object ==="
+
+  local fixture_file
+  fixture_file=$(mktemp /tmp/test-normalize-verification-XXXXXX.json)
+  cat > "$fixture_file" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Normalize test",
+    "type": "feat",
+    "branchName": "feat/normalize-test",
+    "createdAt": "2026-05-12",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story with string verification",
+      "description": "Has bare-string verification field",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "verification": "test"
+    }
+  ]
+}
+EOF
+
+  local exit_code
+  "$CLI" normalize-verification "$fixture_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "normalize-verification: exits 0 on success"
+
+  local strategy status url expect type
+  strategy=$(jq -r '.userStories[0].verification.strategy' "$fixture_file")
+  status=$(jq -r '.userStories[0].verification.status' "$fixture_file")
+  url=$(jq -r '.userStories[0].verification.url' "$fixture_file")
+  expect=$(jq -r '.userStories[0].verification.expect' "$fixture_file")
+  type=$(jq -r '.userStories[0].verification | type' "$fixture_file")
+
+  assert_eq "test" "$strategy" "normalize-verification: strategy set to original string value"
+  assert_eq "pending" "$status" "normalize-verification: status set to pending"
+  assert_eq "null" "$url" "normalize-verification: url set to null"
+  assert_eq "null" "$expect" "normalize-verification: expect set to null"
+  assert_eq "object" "$type" "normalize-verification: verification is now an object"
+
+  rm -f "$fixture_file"
+}
+
+test_normalize_verification_object_input_unchanged() {
+  echo ""
+  echo "=== Testing normalize-verification: object verification is left unchanged ==="
+
+  local fixture_file
+  fixture_file=$(mktemp /tmp/test-normalize-verification-XXXXXX.json)
+  cat > "$fixture_file" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Normalize test",
+    "type": "feat",
+    "branchName": "feat/normalize-test",
+    "createdAt": "2026-05-12",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story with object verification",
+      "description": "Has well-formed object verification",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "verification": {"strategy": "visual", "status": "passed", "url": "http://example.com", "expect": "looks right"}
+    }
+  ]
+}
+EOF
+
+  local exit_code
+  "$CLI" normalize-verification "$fixture_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "normalize-verification object: exits 0 on success"
+
+  local strategy status url expect
+  strategy=$(jq -r '.userStories[0].verification.strategy' "$fixture_file")
+  status=$(jq -r '.userStories[0].verification.status' "$fixture_file")
+  url=$(jq -r '.userStories[0].verification.url' "$fixture_file")
+  expect=$(jq -r '.userStories[0].verification.expect' "$fixture_file")
+
+  assert_eq "visual" "$strategy" "normalize-verification object: strategy preserved"
+  assert_eq "passed" "$status" "normalize-verification object: status preserved"
+  assert_eq "http://example.com" "$url" "normalize-verification object: url preserved"
+  assert_eq "looks right" "$expect" "normalize-verification object: expect preserved"
+
+  rm -f "$fixture_file"
+}
+
+test_validate_stories_rejects_string_verification() {
+  echo ""
+  echo "=== Testing validate-stories rejects bare-string verification ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  _setup_project_fixture '{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Verification string test",
+    "type": "feat",
+    "branchName": "feat/verification-string-test",
+    "createdAt": "2026-05-12",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story with string verification",
+      "description": "Has bare-string verification field",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "verification": "test"
+    }
+  ]
+}'
+
+  local output exit_code
+  output=$("$CLI" validate-stories) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": false' "$output" "validate-stories: string verification fails validation"
+  assert_contains "verification must be an object" "$output" "validate-stories: error mentions verification must be object"
+  assert_exit_code "1" "$exit_code" "validate-stories: exits 1 for string verification"
+
+  _teardown_project_fixture
+}
+
+test_validate_stories_accepts_object_verification() {
+  echo ""
+  echo "=== Testing validate-stories accepts well-formed object verification ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  _setup_project_fixture '{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Verification object test",
+    "type": "feat",
+    "branchName": "feat/verification-object-test",
+    "createdAt": "2026-05-12",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story with object verification",
+      "description": "Has well-formed object verification",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "verification": {"strategy": "test", "status": "pending", "url": null, "expect": null}
+    },
+    {
+      "id": "US-002",
+      "title": "Story with api verification",
+      "description": "Has api strategy verification",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 2,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "verification": {"strategy": "api", "status": "passed", "url": "http://example.com", "expect": "200 OK"}
+    }
+  ]
+}'
+
+  local output exit_code
+  output=$("$CLI" validate-stories) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": true' "$output" "validate-stories: object verification passes validation"
+  assert_exit_code "0" "$exit_code" "validate-stories: exits 0 for object verification"
+
+  local error_count
+  error_count=$(echo "$output" | jq '.errors | length')
+  assert_eq "0" "$error_count" "validate-stories: zero errors for well-formed object verification"
+
+  _teardown_project_fixture
+}
+
 test_list_ready_brief_includes_project() {
   echo ""
   echo "=== Testing list-ready --brief includes project in output ==="
@@ -5819,6 +6021,14 @@ main() {
   test_validate_stories_tasks_field
   test_validate_stories_gate_field
   test_list_ready_brief_includes_project
+
+  # normalize-verification and string-verification rejection tests
+  echo ""
+  echo "--- normalize-verification Tests ---"
+  test_normalize_verification_string_input
+  test_normalize_verification_object_input_unchanged
+  test_validate_stories_rejects_string_verification
+  test_validate_stories_accepts_object_verification
 
   # V3.2 schema tests — gates, waves & field preservation
   echo ""
