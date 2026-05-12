@@ -698,6 +698,7 @@ If the glob matches nothing (no cache entry found) or `AIMI_PLUGIN_DIR` is unset
 ```
 wave = 1
 is_first_story_in_session = true
+DESIGN_REVIEW_BUFFERS = {}  # key: story_id, value: {title, output}; populated by post-merge design reviewer
 
 while true:
     # Check remaining work
@@ -1049,6 +1050,43 @@ while true:
 
                 Report: "[full_story.id] merged successfully."
 
+                # --- Design Review (visual stories only) ---
+                if full_story.verification and full_story.verification.strategy == "visual" and PROTOTYPE_CONTEXT is non-empty:
+                    # 1. Resolve prototype path: prefer prototypeAnchor, fall back to metadata.prototypePaths[0]
+                    REVIEW_PROTOTYPE_PATH = full_story.implementation.prototypeAnchor
+                    if REVIEW_PROTOTYPE_PATH is empty:
+                        REVIEW_PROTOTYPE_PATH = metadata.prototypePaths[0] (if the array is non-empty)
+
+                    if REVIEW_PROTOTYPE_PATH is empty:
+                        Report: "Design review skipped for [full_story.id] — no prototype available."
+                    else:
+                        # 2. Collect changed files from the worker's commit
+                        ```bash
+                        DESIGN_REVIEW_CHANGED_FILES=$(git -C "[all_worktrees[full_story.id].worktree_path]" show --name-only --pretty=format: HEAD | grep -v '^$')
+                        ```
+
+                        # 3. Spawn the reviewer in foreground (capture output)
+                        DESIGN_REVIEW_OUTPUT = Task(
+                            subagent_type: "aimi-engineering:design:aimi-design-implementation-reviewer",
+                            description: "Design review: [full_story.id]",
+                            prompt: "Review the implementation of [full_story.id] ([full_story.title]).
+
+Prototype: [REVIEW_PROTOTYPE_PATH]
+Changed files:
+[DESIGN_REVIEW_CHANGED_FILES]
+Worktree: [all_worktrees[full_story.id].worktree_path]
+
+Read the prototype file at the path above. Compare each visual element of the prototype against the changed files listed. Report PASS / DIVERGES / KNOWN-GAP verdicts with a brief diagnosis per element.
+
+Output your full structured review under the heading '## Design Implementation Review'."
+                        )
+
+                        # 4. Store per-story buffer for Step 5 aggregation
+                        DESIGN_REVIEW_BUFFERS[full_story.id] = {
+                            title: full_story.title,
+                            output: DESIGN_REVIEW_OUTPUT
+                        }
+
                 # Post-completion gate logging
                 if full_story.gate:
                     if full_story.gate.type == "action" and full_story.gate.status == "pending":
@@ -1146,6 +1184,19 @@ if [ -d .aimi/known-gaps ] && [ -n "$(ls .aimi/known-gaps/ 2>/dev/null)" ]; then
   done
 fi
 ```
+
+If `DESIGN_REVIEW_BUFFERS` is non-empty, append:
+```
+## Design Review
+
+For each entry in DESIGN_REVIEW_BUFFERS (keyed by story id, insertion order):
+
+### [story_id]: [entry.title]
+
+[entry.output]
+```
+
+If `DESIGN_REVIEW_BUFFERS` is empty, omit the `## Design Review` section entirely.
 
 If any pending gates exist, append:
 ```
