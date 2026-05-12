@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.85.0] - 2026-05-12
+
+### Changed
+- Subagent spawn prompts now use pointer-only context handoff: each spawned agent receives only the story ID in a `task_pointer` block and fetches its full context via `$AIMI_CLI get-story-context $STORY_ID` as its first action, keeping the orchestrator's working memory slim across waves and eliminating inlined story bodies and prototype HTML from spawn prompts.
+- New `get-story-context` CLI subcommand added to `aimi-cli.sh`: given a story ID, emits the full story JSON (including acceptance criteria, implementation block, verification, and gate fields) so subagents can self-bootstrap without relying on orchestrator-inlined payloads.
+
 ## [1.84.0] - 2026-05-12
 
 ### Added
