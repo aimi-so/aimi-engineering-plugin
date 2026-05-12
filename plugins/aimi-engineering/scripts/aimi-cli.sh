@@ -636,6 +636,24 @@ cmd_get_story() {
   jq --arg id "$story_id" '.userStories[] | select(.id == $id)' "$tasks_file"
 }
 
+# Get story context (story slice + metadata) by ID — for subagent self-brief
+cmd_get_story_context() {
+  local story_id="$1"
+  local tasks_file
+
+  if [ -z "$story_id" ]; then
+    echo "Usage: aimi-cli.sh get-story-context <story-id>" >&2
+    exit 1
+  fi
+
+  validate_story_id "$story_id"
+
+  tasks_file=$(get_tasks_file)
+  validate_story_exists "$story_id" "$tasks_file"
+
+  jq --arg id "$story_id" '{story: (.userStories[] | select(.id == $id)), metadata: .metadata}' "$tasks_file"
+}
+
 # Mark a story as in-progress
 cmd_mark_in_progress() {
   local story_id="$1"
@@ -2916,6 +2934,7 @@ COMMANDS:
     reset-orphaned            Reset all in_progress stories to failed
     get-branch                Get branchName from metadata
     get-story <id>            Get full story object by ID (read-only)
+    get-story-context <id>    Get story slice + metadata block as JSON (for subagent self-brief)
     get-state                 Get all state files as JSON
     detect-default-branch [--project <path>]
                               Detect and cache the repository's default branch
@@ -3006,6 +3025,9 @@ EXAMPLES:
     # Fetch a specific story by ID
     $AIMI_CLI get-story US-003
 
+    # Fetch story slice + metadata block (for subagent self-brief)
+    $AIMI_CLI get-story-context US-003
+
     # Cascade skip after failure
     $AIMI_CLI cascade-skip US-003
 
@@ -3070,6 +3092,7 @@ main() {
     reset-orphaned)    cmd_reset_orphaned ;;
     get-branch)        cmd_get_branch ;;
     get-story)         cmd_get_story "${2:-}" ;;
+    get-story-context) cmd_get_story_context "${2:-}" ;;
     get-state)         cmd_get_state ;;
     detect-default-branch) shift; cmd_detect_default_branch "$@" ;;
     setup-branch)      shift; cmd_setup_branch "$@" ;;

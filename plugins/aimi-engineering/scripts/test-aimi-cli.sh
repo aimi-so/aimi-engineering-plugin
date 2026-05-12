@@ -770,6 +770,47 @@ test_story_id_not_found() {
   assert_stderr_contains "not found" "$stderr_output" "mark-in-progress US-999 shows not found error"
 }
 
+test_get_story_context() {
+  echo ""
+  echo "=== Testing get-story-context command ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  # (1) Valid ID returns object with both 'story' and 'metadata' keys
+  local output exit_code
+  output=$("$CLI" get-story-context US-001 2>&1)
+  exit_code=$?
+  assert_exit_code "0" "$exit_code" "get-story-context US-001 exits 0"
+
+  local has_story has_metadata
+  has_story=$(echo "$output" | jq 'has("story")')
+  has_metadata=$(echo "$output" | jq 'has("metadata")')
+  assert_eq "true" "$has_story" "get-story-context result has 'story' key"
+  assert_eq "true" "$has_metadata" "get-story-context result has 'metadata' key"
+
+  # Story slice contains the correct ID
+  local story_id
+  story_id=$(echo "$output" | jq -r '.story.id')
+  assert_eq "US-001" "$story_id" "get-story-context story.id matches requested ID"
+
+  # Metadata is verbatim from the tasks file
+  local branch_name
+  branch_name=$(echo "$output" | jq -r '.metadata.branchName')
+  assert_eq "feat/test-feature" "$branch_name" "get-story-context metadata.branchName matches tasks file"
+
+  # (2) Invalid-format ID exits non-zero and writes to stderr
+  local stderr_output
+  stderr_output=$("$CLI" get-story-context INVALID 2>&1) || exit_code=$?
+  assert_exit_code "1" "${exit_code:-0}" "get-story-context INVALID exits non-zero"
+  assert_stderr_contains "Invalid story ID format" "$stderr_output" "get-story-context INVALID writes error to stderr"
+
+  # (3) Not-found ID exits non-zero with same error shape as get-story
+  stderr_output=$("$CLI" get-story-context US-999 2>&1) || exit_code=$?
+  assert_exit_code "1" "${exit_code:-0}" "get-story-context US-999 exits non-zero"
+  assert_stderr_contains "not found" "$stderr_output" "get-story-context US-999 shows not found error"
+}
+
 test_reset_orphaned_empty() {
   echo ""
   echo "=== Testing reset-orphaned with no orphans ==="
@@ -5928,6 +5969,7 @@ main() {
   test_cli_path
   test_status_uses_user_stories_key
   test_story_id_not_found
+  test_get_story_context
   test_reset_orphaned_empty
   test_reset_orphaned_with_orphans
   test_stale_state_warning
