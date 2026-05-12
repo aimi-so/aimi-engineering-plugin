@@ -2,7 +2,7 @@
 name: aimi:execute
 description: Execute all pending stories autonomously with wave-based parallelism
 disable-model-invocation: true
-allowed-tools: Read, Write, Edit, Bash(git:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Bash(WORKTREE_MGR=*), Bash($WORKTREE_MGR:*), Task
+allowed-tools: Read, Write, Edit, Bash(git:*), Bash(mkdir:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Bash(WORKTREE_MGR=*), Bash($WORKTREE_MGR:*), Task
 ---
 
 # Aimi Execute
@@ -995,6 +995,17 @@ while true:
 
             # Merges succeeded for this project group — mark stories complete
             for full_story in stories:
+                # --- Extract KNOWN-GAP trailers from worker commit ---
+                ```bash
+                mkdir -p .aimi/known-gaps
+                WORKER_GAPS=$(git -C "[all_worktrees[full_story.id].worktree_path]" log -1 --format=%B | grep -E '^KNOWN-GAP:' || true)
+                if [ -n "$WORKER_GAPS" ]; then
+                  GAP_DATE=$(date +%Y-%m-%d)
+                  GAP_FILE=".aimi/known-gaps/${GAP_DATE}-[full_story.id].md"
+                  printf '%s\n' "$WORKER_GAPS" > "$GAP_FILE"
+                fi
+                ```
+
                 $AIMI_CLI mark-complete [full_story.id]
 
                 # --- Post-merge visual verification for visual stories ---
@@ -1119,6 +1130,21 @@ All stories completed successfully!
 Branch: [branchName]
 Waves: [total_waves]
 Commits: [count]
+```
+
+Aggregate known-gap files from this run:
+```bash
+if [ -d .aimi/known-gaps ] && [ -n "$(ls .aimi/known-gaps/ 2>/dev/null)" ]; then
+  echo ""
+  echo "## Known Gaps"
+  for gap_file in .aimi/known-gaps/*.md; do
+    [ -f "$gap_file" ] || continue
+    story_id=$(basename "$gap_file" .md | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}-//')
+    echo ""
+    echo "### $story_id"
+    cat "$gap_file"
+  done
+fi
 ```
 
 If any pending gates exist, append:

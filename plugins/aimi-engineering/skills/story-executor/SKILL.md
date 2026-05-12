@@ -133,7 +133,7 @@ Any V1 element flagged "no AC match" in V2 is a KNOWN-GAP candidate. Add it to t
 3. **Cross-check against implementation** — for each enumerated element, determine whether the implementation addresses it.
 4. **Verdict per element:**
    - `Implemented` — the element is handled by the implementation
-   - `KNOWN GAP: <element> — <reason>` — the element is not handled; append one line per gap to the commit message body
+   - `KNOWN-GAP: <element> — <reason>` — the element is not handled; append one line per gap to the commit message body
 
 Silent drops are NOT acceptable — every enumerated element must receive an explicit verdict before the commit is written.
 
