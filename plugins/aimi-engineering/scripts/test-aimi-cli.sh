@@ -5206,7 +5206,47 @@ test_detect_design_bundle_root_is_bundle() {
   rm -rf "$tmp"
 }
 
-# (7b) <subcommand> --help routes to top-level help instead of "Unknown flag"
+# (7b-extra) Mixed-case spec filenames are detected case-insensitively
+test_detect_design_bundle_mixed_case_specs() {
+  echo ""
+  echo "=== Testing detect-design-bundle: mixed-case spec filenames detected case-insensitively ==="
+
+  local tmp stdout exit_code
+  tmp=$(mktemp -d)
+  local bundle
+  bundle=$(_make_bundle "$tmp" "draives-monitor")
+  printf 'business content' > "${bundle}/project/businessSpec.md"
+  printf 'design content'   > "${bundle}/project/DesignSpec.md"
+
+  stdout=$("$CLI" detect-design-bundle --root "$tmp" 2>/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "detect-design-bundle mixed-case: exit code"
+
+  local bs ds
+  bs=$(printf '%s' "$stdout" | jq -r '.businessSpec')
+  ds=$(printf '%s' "$stdout" | jq -r '.designSpec')
+
+  # Both paths must be non-null
+  if [ "$bs" = "null" ] || [ -z "$bs" ]; then
+    assert_eq "non-null businessSpec" "null" "detect-design-bundle mixed-case: businessSpec must not be null"
+  else
+    assert_eq "ok" "ok" "detect-design-bundle mixed-case: businessSpec is non-null"
+  fi
+
+  if [ "$ds" = "null" ] || [ -z "$ds" ]; then
+    assert_eq "non-null designSpec" "null" "detect-design-bundle mixed-case: designSpec must not be null"
+  else
+    assert_eq "ok" "ok" "detect-design-bundle mixed-case: designSpec is non-null"
+  fi
+
+  # On-disk casing must be preserved in returned paths
+  assert_eq "draives-monitor/project/businessSpec.md" "$bs" "detect-design-bundle mixed-case: businessSpec preserves camelCase on-disk casing"
+  assert_eq "draives-monitor/project/DesignSpec.md"   "$ds" "detect-design-bundle mixed-case: designSpec preserves PascalCase on-disk casing"
+
+  rm -rf "$tmp"
+}
+
+# (7c) <subcommand> --help routes to top-level help instead of "Unknown flag"
 test_help_flag_on_strict_subcommand() {
   echo ""
   echo "=== Testing universal --help: strict subcommand routes to help text ==="
@@ -5858,6 +5898,7 @@ main() {
   test_detect_design_bundle_newest_mtime_wins
   test_detect_design_bundle_partial_bundle
   test_detect_design_bundle_root_is_bundle
+  test_detect_design_bundle_mixed_case_specs
   test_help_flag_on_strict_subcommand
   test_help_flag_on_side_effect_subcommand
 
