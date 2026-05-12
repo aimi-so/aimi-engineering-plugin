@@ -932,6 +932,25 @@ Specific obligations:
 
 After writing the tasks.json file(s), validate each generated output independently.
 
+**Step 1 — Normalize verifications (run before any validator):**
+
+For each generated tasks file, run `normalize-verification` first. This auto-migrates any string-typed `verification` values emitted by the planner into the required object shape, preventing `validate-stories` from rejecting them.
+
+```bash
+TASKS_PATH=".aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json"
+$AIMI_CLI normalize-verification "$TASKS_PATH"
+NORMALIZE_EXIT=$?
+if [ $NORMALIZE_EXIT -ne 0 ]; then
+  echo "ERROR: normalize-verification failed (exit $NORMALIZE_EXIT)."
+  echo "Inspect $TASKS_PATH for malformed verification fields and fix them before re-running."
+  # Halt — do not proceed to validate-ids/deps/stories/tasks
+fi
+```
+
+If `normalize-verification` exits non-zero, **stop here** — do not run any further validators. Fix the tasks file and retry Phase 4.5 from the top.
+
+**Step 2 — Run validators (after normalize-verification succeeds):**
+
 **For split files (full-stack):** run validation on each file separately using `init-session --file`:
 
 ```bash
