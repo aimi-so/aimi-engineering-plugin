@@ -141,6 +141,16 @@ Silent drops are NOT acceptable — every enumerated element must receive an exp
 
 Agent-mode fallback: if the reference artifact is not readable from disk or network, log `Parity pass skipped — reference not readable: <path>` as a commit trailer and proceed without blocking.
 
+### Per-Element Verdict Table (required for visual stories)
+
+When `verification.strategy == "visual"`, append the following table to the commit body, with one row per V1-enumerated element:
+
+| Element | Verdict | Notes |
+| --- | --- | --- |
+| <element from V1> | PASS \| DIVERGES \| KNOWN-GAP | <brief detail> |
+
+Verdict values: `PASS` (implementation matches prototype), `DIVERGES` (implementation differs and that difference is intentional or unavoidable — explain in Notes), `KNOWN-GAP` (implementation does not cover this element — pair with a `KNOWN-GAP:` trailer line). The table is required only for visual stories; omit entirely for non-visual stories.
+
 ---
 
 ## Prompt Template
