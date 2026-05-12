@@ -171,6 +171,25 @@ Structure your findings as:
 - Next steps for deeper investigation
 ```
 
+## Contracts
+
+For every primitive, module, library, or endpoint that the to-be-planned feature will consume, quote the contract **verbatim** into the research file body (not the capped summary) with a `file:line` citation.
+
+"Contract" means:
+- **Typed languages** — function/method signatures including parameter types and return types
+- **REST / RPC** — full request shape (method, path, headers, body), response shape (status codes, body), and error shapes
+- **CLI tools** — complete flag list, argument types, exit codes, and relevant output sections
+- **Database** — table schema including column types, indexes, constraints, and defaults
+- **SDK / library public API** — exported functions, classes, and their documented parameters
+
+Write one fenced block per consumed contract. If a contract is absent from the codebase (e.g., it lives only in a README or external docs), mark it:
+
+```
+Source: README.md:N (no code definition found)
+```
+
+Never invent or infer contract shapes. If the shape cannot be confirmed from on-disk sources, state it is unresolved.
+
 **Quality Assurance:**
 
 - Verify findings by checking multiple sources

@@ -92,6 +92,30 @@ If `DesignSpec § 6` maps the desired component to an existing project component
 
 ---
 
+## Reference-Artifact Parity Pass (BLOCKING when triggered)
+
+**Trigger:** Fire this pass when any of the following is true for the story being executed:
+- The story JSON declares any reference artifact field (`prototypeAnchor`, `specSection`, `referenceCommand`, `referenceFixture`, `migrationDiff`, `referenceUrl`, or equivalent)
+- Any `acceptanceCriteria` line contains a prototype or spec citation (e.g., a file path, URL, or section identifier)
+- `verification.strategy` implies a reference artifact (`visual`, `api`, `cli`, `migration`, or `sdk`)
+
+**Procedure:**
+
+1. **Load reference** — read the artifact at the cited path or URL into working context.
+2. **Enumerate addressable elements** in the cited region (all text nodes, attributes, fields, flags, columns, rows, etc. visible in that region).
+3. **Cross-check against implementation** — for each enumerated element, determine whether the implementation addresses it.
+4. **Verdict per element:**
+   - `Implemented` — the element is handled by the implementation
+   - `KNOWN GAP: <element> — <reason>` — the element is not handled; append one line per gap to the commit message body
+
+Silent drops are NOT acceptable — every enumerated element must receive an explicit verdict before the commit is written.
+
+**Block commit until every element has a verdict.**
+
+Agent-mode fallback: if the reference artifact is not readable from disk or network, log `Parity pass skipped — reference not readable: <path>` as a commit trailer and proceed without blocking.
+
+---
+
 ## Prompt Template
 
 > This is the canonical worker prompt template. execute.md and next.md should reference this skill rather than duplicating the prompt inline.
@@ -332,6 +356,7 @@ All file operations MUST stay within the project boundary: PROJECT_PATH when set
 1. Read CLAUDE.md for project conventions (from PROJECT_PATH root when set)
 2. Implement the story requirements
 3. Verify ALL acceptance criteria are met
+3.5. Run Reference-Artifact Parity Pass (see full procedure in the named section above) if the story declares any reference artifact or any AC line contains a prototype/spec citation or `verification.strategy` implies a reference. Block commit until every element has a verdict; on unreadable reference, log `Parity pass skipped — reference not readable: <path>` as a commit trailer and proceed.
 4. Run typecheck: npx tsc --noEmit
 5. If all checks pass, commit:
    a. Stage only story-related files: `git add [changed files]` (never use `-A` or `.` — avoid staging unrelated files)
@@ -573,7 +598,7 @@ CRITICAL: Stay within project root. Never read/write outside project boundary. W
 </project_root_boundary>
 
 <execution_flow>
-Follow standard execution flow: read criteria → implement → test → commit. Stage only story-related files (never `-A` or `.`). Commit format: `git commit -m "type(scope): Story title"`. Verify with `git log -1 --oneline`. On commit failure: report immediately, do not retry. Do NOT update tasks file — caller handles status.
+Follow standard execution flow: read criteria → implement → test → commit. Stage only story-related files (never `-A` or `.`). Commit format: `git commit -m "type(scope): Story title"`. Verify with `git log -1 --oneline`. On commit failure: report immediately, do not retry. Do NOT update tasks file — caller handles status. When a reference artifact is declared, run the Reference-Artifact Parity Pass before committing (see full named section above).
 </execution_flow>
 
 <on_failure>

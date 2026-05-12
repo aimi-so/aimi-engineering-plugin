@@ -245,7 +245,7 @@ This consolidated context feeds into Phase 2 and Phase 3.
 
 ## Phase 1.7: Research File Ingestion
 
-**Trigger:** `researchDepth` is `standard` or `deep` only. No-op for `quick`, `skip`, or unset — Phase 1.6 → Phase 2 flow is preserved bit-for-bit.
+**Trigger:** `researchDepth` is `quick`, `standard`, or `deep`. No-op for `skip` or unset — Phase 1.6 → Phase 2 flow is preserved bit-for-bit.
 
 Read every path in `metadata.researchPaths`, deduped against `reusedCodebasePath` and `reusedBestPracticesPath` (already loaded by Phase 1.6). Missing files are silently skipped; no per-file or aggregate size cap is applied. Each loaded file is wrapped as:
 
@@ -385,6 +385,29 @@ Attach a `gate` object only when heuristics clearly match. Most stories have no 
 
 Set `gate.status` to `"pending"` and provide a descriptive `gate.prompt`. For `decision` gates, include `gate.options`.
 
+### Phase 3.1: Reference Element Inventory (BLOCKING when triggered)
+
+**Trigger:** Fires when any story in the current decomposition declares a reference artifact — any field from: `prototypeAnchor`, `specSection`, `referenceCommand`, `referenceFixture`, `migrationDiff`, `referenceUrl`, or any other field whose value is a path, URL, or identifier pointing to an external artifact that acceptance criteria will cite.
+
+For each story that triggers this phase, open the cited artifact and enumerate every addressable element in the cited region. Element vocabulary depends on artifact kind:
+
+- **HTML / UI prototypes** → text nodes, attribute values, slot composition, interactive state variants
+- **OpenAPI / JSON Schema** → endpoints, request/response fields, status codes, error shapes
+- **CLI man pages** → flags, arguments, exit codes, output sections
+- **SQL / migration diffs** → columns, indexes, constraints, defaults, trigger behavior
+- **Business rules tables** → per-row pre-conditions and post-conditions
+
+Record findings in a table:
+
+| Element | Locator | Verdict | AC anchor |
+|---------|---------|---------|-----------|
+
+Every row MUST be marked either `encoded` (an AC line in this story directly addresses it) or `excluded` (the element is out of scope — written reason required) before the story JSON is emitted.
+
+**Block Phase 4 until every row in every inventory table is verdicted.**
+
+Agent-mode fallback: auto-mark any unverdicted row as `deferred` with reason "agent-mode: interactive verdict skipped" appended to the row, emit a chat warning listing the deferred elements, and proceed without blocking.
+
 ---
 
 ## Phase 4: Write tasks.json
@@ -432,6 +455,23 @@ Standard single-file output to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json
 - **brainstormPath**: Path to brainstorm if one was used, otherwise omit
 - **researchDepth**: Value computed in Phase 1.5 (`skip`, `quick`, `standard`, `deep`), or omit if not computed
 - **Story IDs**: Must use `US-NNN` zero-padded format (`US-001`, `US-002`, ...) — never `US-1`, `story-1`, `S1`, or any other format
+
+### Phase 4.1: Coverage Self-Check (BLOCKING)
+
+For each story whose Phase 3.1 inventory contains at least one row, compute:
+
+- `proto_elements` = total number of rows in that story's inventory table
+- `ac_anchors` = number of AC lines that cite a literal value, locator, or identifier drawn from the cited reference region
+
+If `ac_anchors < floor(proto_elements * 0.6)`, return to Phase 3.1 for that story and either:
+- Add AC lines to bring `ac_anchors` up to the threshold, OR
+- Upgrade under-justified rows to `excluded` with a written reason, reducing `proto_elements`
+
+Repeat until the ratio is satisfied for every affected story.
+
+**Block Write File until every story with an inventory satisfies the coverage ratio.**
+
+Agent-mode fallback: compute the deficit (`floor(proto_elements * 0.6) - ac_anchors`) per story, emit the deficit report as a structured warning in chat output, and proceed to Write File without blocking.
 
 ### Derive Filename
 

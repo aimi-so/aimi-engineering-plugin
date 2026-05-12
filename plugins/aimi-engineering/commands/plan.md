@@ -393,7 +393,7 @@ Merge all findings into a structured consolidation with these sections:
 
 ## Phase 1.7: Research File Ingestion
 
-**Trigger:** Only when `researchDepth` is `standard` or `deep`. For `quick`, `skip`, or unset, this phase is a no-op — proceed directly to Phase 2 with no change to Phase 1.6 output.
+**Trigger:** Only when `researchDepth` is `quick`, `standard`, or `deep`. For `skip` or unset, this phase is a no-op — proceed directly to Phase 2 with no change to Phase 1.6 output.
 
 **Purpose:** Read the full on-disk content of every research file listed in `metadata.researchPaths` so that Phase 3 acceptance-criteria authoring can draw on complete detail rather than the capped summary returns from Phase 1.6.
 
@@ -566,6 +566,29 @@ Full research file contents — use these to author precise, detail-grounded acc
     - Multi-story independence from rule 20 is preserved: each schema-extending story is routed independently.
     - When multiple schema-extending stories exist, each is processed in order; a consumer story may accumulate mock-sync ACs from more than one schema story (each deduplication check is per-story).
 
+### Phase 3.1: Reference Element Inventory (BLOCKING when triggered)
+
+**Trigger:** Fires when any story in the current decomposition declares a reference artifact — any field from: `prototypeAnchor`, `specSection`, `referenceCommand`, `referenceFixture`, `migrationDiff`, `referenceUrl`, or any other field whose value is a path, URL, or identifier pointing to an external artifact that acceptance criteria will cite.
+
+For each story that triggers this phase, open the cited artifact and enumerate every addressable element in the cited region. Element vocabulary depends on artifact kind:
+
+- **HTML / UI prototypes** → text nodes, attribute values, slot composition, interactive state variants
+- **OpenAPI / JSON Schema** → endpoints, request/response fields, status codes, error shapes
+- **CLI man pages** → flags, arguments, exit codes, output sections
+- **SQL / migration diffs** → columns, indexes, constraints, defaults, trigger behavior
+- **Business rules tables** → per-row pre-conditions and post-conditions
+
+Record findings in a table:
+
+| Element | Locator | Verdict | AC anchor |
+|---------|---------|---------|-----------|
+
+Every row MUST be marked either `encoded` (an AC line in this story directly addresses it) or `excluded` (the element is out of scope — written reason required) before the story JSON is emitted. Rows that are neither encoded nor excluded are incomplete and block emission.
+
+**Block Phase 4 until every row in every inventory table is verdicted.**
+
+Agent-mode fallback: auto-mark any unverdicted row as `deferred` with reason "agent-mode: interactive verdict skipped" appended to the row, emit a chat warning listing the deferred elements, and proceed without blocking.
+
 ### `dependsOn` Inference Rules
 
 - **Same layer, independent concerns** (different tables, different pages, different routes) → no dependency between them (`dependsOn: []`)
@@ -641,6 +664,23 @@ Write single file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 - **designBundle**: When `designBundleMeta` is non-null, emit as `metadata.designBundle` with the following shape: `{ root: string, readme: string, chats: string[], businessSpec: string|null, designSpec: string|null }`. All paths relative to `AIMI_ROOT`. Omit the key entirely when no bundle was detected. When the bundle was detected, always emit both `businessSpec` and `designSpec` keys — use `null` for whichever spec file is absent.
 - **designTokens**: When `designSpecContent` is non-null and `DesignSpec § 1` contains a token map, parse it and emit as `metadata.designTokens` — a flat object whose top-level keys are the token categories enumerated in `DesignSpec § 1` (e.g., `color`, `typography`, `spacing`, `radii`, `shadow`, `transition`). Values are written verbatim from the spec without normalization. Omit the key entirely when `designSpecContent` is null or `§ 1` contains no token map.
 - **maxConcurrency**: Default `5`. Set to `1` for strictly sequential execution.
+
+### Phase 4.1: Coverage Self-Check (BLOCKING)
+
+For each story whose Phase 3.1 inventory contains at least one row, compute:
+
+- `proto_elements` = total number of rows in that story's inventory table
+- `ac_anchors` = number of AC lines that cite a literal value, locator, or identifier drawn from the cited reference region (a citation is any AC phrase that would fail if the referenced element changed)
+
+If `ac_anchors < floor(proto_elements * 0.6)`, return to Phase 3.1 for that story and either:
+- Add AC lines to bring `ac_anchors` up to the threshold, OR
+- Upgrade under-justified rows to `excluded` with a written reason, reducing `proto_elements`
+
+Repeat until the ratio is satisfied for every affected story.
+
+**Block Write File until every story with an inventory satisfies the coverage ratio.**
+
+Agent-mode fallback: compute the deficit (`floor(proto_elements * 0.6) - ac_anchors`) per story, emit the deficit report as a structured warning in chat output, and proceed to Write File without blocking.
 
 ### Write File
 
@@ -745,6 +785,17 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 ```
 
 **Notes:** `implementation`, `verification`, `gate`, `skills`, and `tasks` are optional per story. `wave` is required on all stories.
+
+### Anti-Citation-Bias Reminder
+
+The validator (Phase 4.5) only enforces citation **format** — it does NOT enforce completeness, compositional fidelity, or behavioral coverage. Never let the validator's citation-format surface shape what you choose to encode.
+
+Specific obligations:
+
+- **Compositional obligations** (e.g., "form must contain fields X, Y, and Z") MAY live in a single AC line by chaining citations — one compact line is fine as long as every required element is named.
+- **Behavioral obligations** (idempotency, ordering, timeout, retry, failure modes) MUST be encoded even when the spec describes them in prose without a quotable literal — paraphrase the behavior and cite the section heading.
+- **Edge cases** enumerated in the spec MUST each map to at least one AC line. An edge case that appears in the spec but has no corresponding AC is a coverage gap, not a citation-format issue.
+- When in doubt, encode more not less. Excess AC lines are far cheaper than missing coverage discovered at review time.
 
 ### Checklist Before Writing
 
