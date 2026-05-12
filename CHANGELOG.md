@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.81.0] - 2026-05-12
+
+### Added
+
+- **Plan command: Phase 1.7 Research File Ingestion (US-001):** New `## Phase 1.7: Research File Ingestion` section inserted between Phase 1.6 and Phase 2 in `plugins/aimi-engineering/commands/plan.md`. When `researchDepth` is `standard` or `deep`, reads the full on-disk content of every path in `metadata.researchPaths`, deduped against `reusedCodebasePath` and `reusedBestPracticesPath` (already loaded by Phase 1.6). Missing files are silently skipped; no per-file or aggregate size cap is applied. Each loaded file is wrapped as `<research_file path="...">` with light HTML-entity escape on literal wrapper-tag sequences (analogous to the `prototype_html` escape pattern). Collected blocks are stored in `researchFileBlocks` and threaded into Phase 3 alongside `prototypeBlocks` so acceptance-criteria authoring draws on complete on-disk research detail rather than capped summary returns. `quick`, `skip`, and unset tiers preserve previous summary-only behavior bit-for-bit. Mirrored into `plugins/aimi-engineering/skills/task-planner/references/pipeline-phases.md`.
+
 ## [1.80.0] - 2026-05-11
 
 ### Added

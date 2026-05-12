@@ -391,6 +391,33 @@ Merge all findings into a structured consolidation with these sections:
 4. **Learnings** — Institutional knowledge from `.aimi/solutions/`: gotchas, past mistakes, proven approaches
 5. **External Insights** — Best practices and framework guidance from external research (empty if Phase 1.5b was skipped)
 
+## Phase 1.7: Research File Ingestion
+
+**Trigger:** Only when `researchDepth` is `standard` or `deep`. For `quick`, `skip`, or unset, this phase is a no-op — proceed directly to Phase 2 with no change to Phase 1.6 output.
+
+**Purpose:** Read the full on-disk content of every research file listed in `metadata.researchPaths` so that Phase 3 acceptance-criteria authoring can draw on complete detail rather than the capped summary returns from Phase 1.6.
+
+**File collection:**
+
+1. Start with every path in `metadata.researchPaths`.
+2. Deduplicate against `reusedCodebasePath` and `reusedBestPracticesPath` (the files Phase 1.6 already reads at the reused-research step above) — any path that matches either of those is already in context; skip it.
+3. For each remaining path: attempt to read the file. If the file is missing from disk, **silently skip** it — emit no warning, do not abort.
+4. Apply **no per-file size cap and no aggregate cap** — ingest the full file contents.
+
+**Wrapper format:**
+
+Each successfully read file is wrapped as:
+
+```
+<research_file path="<relative-path-from-project-root>">
+…sanitized file contents…
+</research_file>
+```
+
+Light sanitization: replace any literal `</research_file` sequence in the file contents with `&lt;/research_file`, and any literal `<research_file` sequence with `&lt;research_file`. This prevents a file from breaking out of its wrapper tag (analogous to the `prototype_html` escape at the Prototype Context section above).
+
+Collect all successfully wrapped blocks into a variable `researchFileBlocks` (empty string if no files were read). This variable is threaded into Phase 3 below.
+
 ## Phase 2: Spec Analysis
 
 ```
@@ -405,7 +432,7 @@ Incorporate gaps as acceptance criteria or story notes.
 
 ## Phase 3: Story Decomposition
 
-Using consolidated research and spec-flow output (and `prototypeBlocks` from Phase 0 Prototype Context if non-empty):
+Using consolidated research and spec-flow output (and `prototypeBlocks` from Phase 0 Prototype Context if non-empty, and `researchFileBlocks` from Phase 1.7 if non-empty):
 
 **If `prototypeBlocks` is non-empty**, prepend the following block to this phase's working context before decomposing stories:
 
@@ -413,6 +440,13 @@ Using consolidated research and spec-flow output (and `prototypeBlocks` from Pha
 Prototype designs chosen for this feature — implementation stories MUST reference these
 directly when describing UI acceptance criteria, component structure, and visual behaviour:
 [prototypeBlocks]
+```
+
+**If `researchFileBlocks` is non-empty**, prepend the following block to this phase's working context (after prototypeBlocks if present) before decomposing stories:
+
+```
+Full research file contents — use these to author precise, detail-grounded acceptance criteria:
+[researchFileBlocks]
 ```
 
 1. Extract all requirements (explicit + spec-flow identified)

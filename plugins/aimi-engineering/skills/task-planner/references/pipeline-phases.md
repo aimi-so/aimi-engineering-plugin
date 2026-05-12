@@ -243,6 +243,22 @@ This consolidated context feeds into Phase 2 and Phase 3.
 
 ---
 
+## Phase 1.7: Research File Ingestion
+
+**Trigger:** `researchDepth` is `standard` or `deep` only. No-op for `quick`, `skip`, or unset — Phase 1.6 → Phase 2 flow is preserved bit-for-bit.
+
+Read every path in `metadata.researchPaths`, deduped against `reusedCodebasePath` and `reusedBestPracticesPath` (already loaded by Phase 1.6). Missing files are silently skipped; no per-file or aggregate size cap is applied. Each loaded file is wrapped as:
+
+```
+<research_file path="<relative-path>">…sanitized contents…</research_file>
+```
+
+Light sanitization: literal `</research_file` → `&lt;/research_file`; literal `<research_file` → `&lt;research_file`.
+
+Collect all wrapped blocks into `researchFileBlocks` (empty string if none). Thread into Phase 3 alongside `prototypeBlocks`.
+
+---
+
 ## Phase 2: Spec Analysis
 
 Run the spec-flow-analyzer agent:
