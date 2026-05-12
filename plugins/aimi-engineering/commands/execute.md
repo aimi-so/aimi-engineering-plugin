@@ -75,7 +75,23 @@ VISUAL_STORIES=$(jq '[.userStories[] | select(.verification | type == "object" a
 MALFORMED_VERIF=$(jq '[.userStories[] | select(.verification != null and (.verification | type != "object"))] | length' "$AIMI_ROOT/$TASKS_PATH" 2>/dev/null)
 ```
 
-If `MALFORMED_VERIF` > 0, warn: `"Warning: [N] stories have malformed verification fields (expected object, got string). Re-run /aimi:plan to fix."`
+If `MALFORMED_VERIF` > 0, collect the affected story IDs and abort:
+
+```bash
+MALFORMED_IDS=$(jq -r '[.userStories[] | select(.verification != null and (.verification | type != "object")) | .id] | join(", ")' "$AIMI_ROOT/$TASKS_PATH" 2>/dev/null)
+```
+
+Report the error and STOP:
+```
+Malformed verification fields detected — aborting.
+
+Affected stories: [MALFORMED_IDS]
+
+Verification must be an object, not a bare string. Run:
+  $AIMI_CLI normalize-verification <tasks-path>
+to fix the file, then re-run /aimi:execute.
+```
+STOP execution.
 
 - **If `VISUAL_STORIES` is 0 or empty:** Set `VISUAL_FOLLOW=false`. Proceed to Step 1.
 
