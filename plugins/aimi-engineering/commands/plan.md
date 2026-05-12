@@ -839,6 +839,39 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
 }
 ```
 
+### responseShape contract (frontend-only mode)
+
+The `metadata.backendSpec.endpoints[].responseShape` field follows a strict flat-key contract because `validate-tasks` uses fixed-string substring matching against the cited BusinessSpec subsection text.
+
+- **Top-level keys MUST be literal tokens** present in the cited BusinessSpec subsection. The validator does not parse dotted paths — it looks for the key as a single substring.
+- **Dotted notation is rejected.** A key like `portfolio.totalUsinas` is treated as one opaque literal; if the substring `portfolio.totalUsinas` does not appear verbatim in the subsection, validation fails.
+- **Nested structure goes inside the `type` field** as a TypeScript-style type string (e.g., `"{ totalUsinas: number; totalKWp: number }"`).
+- **Value shape**: each top-level entry is `{ type: string, source: string }`. `source` must be either `BusinessSpec § N[.N] L<line>` (citation) or `derived: <rationale>` (computed from other fields).
+
+**Example (accepted):**
+
+```json
+"responseShape": {
+  "portfolio": {
+    "type": "{ totalUsinas: number; totalKWp: number }",
+    "source": "BusinessSpec § 5.3 L145"
+  }
+}
+```
+
+**Example (rejected by validate-tasks):**
+
+```json
+"responseShape": {
+  "portfolio.totalUsinas": {
+    "type": "number",
+    "source": "BusinessSpec § 5.3 L145"
+  }
+}
+```
+
+The validator treats `portfolio.totalUsinas` as a single token and cannot find that exact substring in § 5.3 — the substring matcher fails.
+
 **Notes:** `implementation`, `verification`, `gate`, `skills`, and `tasks` are optional per story. `wave` is required on all stories.
 
 **`metadata.decisions[].source` field:** each entry records where the Open Question originated. Three valid forms: `<brainstorm-path>:L<line>` (an OQ line from the brainstorm doc), `businessSpec:L<line>` (a marker-style OQ scanned from `businessSpecContent`), or `designSpec:L<line>` (a marker-style OQ scanned from `designSpecContent`). Consumers can branch on the prefix to distinguish decisions that originated from a collaborative brainstorm versus inline spec markers.
