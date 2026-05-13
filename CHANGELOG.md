@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.86.0] - 2026-05-13
+
+### Added
+- Phase 1.8 (Post-Research Open Questions Gate) in /aimi:plan — surfaces every researcher's `## Open Questions` and `[PROMOTE-TO-OPEN-QUESTIONS]` entries via AskUserQuestion before story decomposition; auto-defers under AIMI_AGENT_MODE.
+- Phase 2.5 (Spec-Flow Gap Gate) in /aimi:plan — surfaces the spec-flow analyzer's `### Missing Elements & Gaps` and `### Critical Questions Requiring Clarification` entries before story decomposition; auto-defers under AIMI_AGENT_MODE.
+
+### Changed
+- metadata.decisions[].source schema extended with three new forms: `researchFile:<basename>:OQ<n>`, `specFlow:CriticalQ<n>`, `specFlow:Gap<n>`.
+
 ## [1.85.0] - 2026-05-12
 
 ### Changed
