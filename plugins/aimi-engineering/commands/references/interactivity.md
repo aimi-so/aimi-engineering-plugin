@@ -11,10 +11,17 @@ exactly one of: `picker`, `agent`.
 
 Precedence (first match wins):
 
-1. `AIMI_AGENT_MODE=true` → `agent`
+1. `AIMI_AGENT_MODE=true` → `agent` (explicit opt-out always wins)
 2. `CI=true` → `agent`
-3. stdin is not a TTY → `agent`
-4. Otherwise → `picker`
+3. `CLAUDECODE=1` → `picker` (Claude Code provides `AskUserQuestion`)
+4. `OPENCODE_CONFIG_DIR` is set → `picker` (OpenCode provides the `question` tool)
+5. stdin is a TTY → `picker`
+6. Otherwise → `agent`
+
+Steps 3 and 4 deliberately ignore TTY state. Both hosts run command bash bodies
+in a subshell without a controlling terminal, but a host-level picker is fully
+available — relying on `[ -t 0 ]` alone would misclassify every Claude Code and
+OpenCode invocation as non-interactive.
 
 Do not re-implement this logic inline. Use the CLI so the rule stays in one
 place and is covered by `test-aimi-cli.sh`.

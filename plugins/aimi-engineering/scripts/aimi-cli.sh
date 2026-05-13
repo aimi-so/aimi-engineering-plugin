@@ -1770,15 +1770,34 @@ cmd_bundle_prototype_finalize() {
 
 # Resolve which interactivity mode applies to the current shell.
 # Prints exactly one of: picker, agent
-#   agent  - AIMI_AGENT_MODE=true, CI=true, or stdin is not a TTY
-#   picker - interactive session; command body should invoke the host's
-#            question picker (AskUserQuestion in Claude Code, the `question`
-#            tool in OpenCode after install.sh translation)
+#   agent  - AIMI_AGENT_MODE=true or CI=true (explicit overrides), OR no host
+#            picker is available and stdin is not a TTY
+#   picker - explicit host picker is available (Claude Code or OpenCode), OR
+#            stdin is a TTY in a plain terminal
+#
+# Precedence (first match wins):
+#   1. AIMI_AGENT_MODE=true → agent  (explicit opt-out always wins)
+#   2. CI=true              → agent
+#   3. CLAUDECODE=1         → picker (AskUserQuestion is available)
+#   4. OPENCODE_CONFIG_DIR  → picker (OpenCode `question` tool is available)
+#   5. stdin is a TTY       → picker
+#   6. otherwise            → agent
+#
+# Hosts 3 and 4 deliberately ignore TTY state: their Bash tools run without a
+# controlling terminal, but a host-level picker is fully available.
 cmd_detect_interactivity() {
-  if [ "${AIMI_AGENT_MODE:-}" = "true" ] || [ "${CI:-}" = "true" ] || [ ! -t 0 ]; then
+  if [ "${AIMI_AGENT_MODE:-}" = "true" ] || [ "${CI:-}" = "true" ]; then
     echo "agent"
-  else
+    return
+  fi
+  if [ "${CLAUDECODE:-}" = "1" ] || [ -n "${OPENCODE_CONFIG_DIR:-}" ]; then
     echo "picker"
+    return
+  fi
+  if [ -t 0 ]; then
+    echo "picker"
+  else
+    echo "agent"
   fi
 }
 

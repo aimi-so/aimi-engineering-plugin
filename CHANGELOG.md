@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.86.1] - 2026-05-13
+
+### Fixed
+- `detect-interactivity` no longer returns `agent` inside Claude Code or OpenCode when stdin is not a TTY. Both hosts run command bash bodies in non-TTY subshells, so the previous `[ ! -t 0 ]` check misclassified every interactive session as agent mode — causing Phase 0.5 / Phase 1.8 / Phase 2.5 OQ gates in `/aimi:plan` to silently auto-defer every open question instead of prompting the user. The check now treats `CLAUDECODE=1` and a set `OPENCODE_CONFIG_DIR` as picker-available regardless of TTY state. `AIMI_AGENT_MODE=true` and `CI=true` still force agent mode as before.
+
 ## [1.86.0] - 2026-05-13
 
 ### Added

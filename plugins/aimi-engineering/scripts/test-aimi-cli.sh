@@ -5241,9 +5241,19 @@ test_detect_interactivity_agent_mode_env() {
   echo "=== Testing detect-interactivity with AIMI_AGENT_MODE=true ==="
 
   local output
-  output=$(AIMI_AGENT_MODE=true CI= "$CLI" detect-interactivity </dev/null)
+  output=$(AIMI_AGENT_MODE=true CI= CLAUDECODE= OPENCODE_CONFIG_DIR= "$CLI" detect-interactivity </dev/null)
 
   assert_eq "agent" "$output" "detect-interactivity returns 'agent' when AIMI_AGENT_MODE=true"
+}
+
+test_detect_interactivity_agent_mode_overrides_host() {
+  echo ""
+  echo "=== Testing detect-interactivity: AIMI_AGENT_MODE=true overrides CLAUDECODE=1 ==="
+
+  local output
+  output=$(AIMI_AGENT_MODE=true CI= CLAUDECODE=1 OPENCODE_CONFIG_DIR= "$CLI" detect-interactivity </dev/null)
+
+  assert_eq "agent" "$output" "detect-interactivity returns 'agent' when AIMI_AGENT_MODE=true even with CLAUDECODE=1"
 }
 
 test_detect_interactivity_ci_env() {
@@ -5251,20 +5261,41 @@ test_detect_interactivity_ci_env() {
   echo "=== Testing detect-interactivity with CI=true ==="
 
   local output
-  output=$(AIMI_AGENT_MODE= CI=true "$CLI" detect-interactivity </dev/null)
+  output=$(AIMI_AGENT_MODE= CI=true CLAUDECODE= OPENCODE_CONFIG_DIR= "$CLI" detect-interactivity </dev/null)
 
   assert_eq "agent" "$output" "detect-interactivity returns 'agent' when CI=true"
 }
 
 test_detect_interactivity_non_tty() {
   echo ""
-  echo "=== Testing detect-interactivity with non-TTY stdin ==="
+  echo "=== Testing detect-interactivity with non-TTY stdin and no host indicators ==="
 
-  # Redirecting stdin from /dev/null makes it not a TTY; no override env vars needed.
+  # Clear all host indicators to test the bare-shell fallback. Redirecting stdin
+  # from /dev/null makes it not a TTY.
   local output
-  output=$(AIMI_AGENT_MODE= CI= "$CLI" detect-interactivity </dev/null)
+  output=$(AIMI_AGENT_MODE= CI= CLAUDECODE= OPENCODE_CONFIG_DIR= "$CLI" detect-interactivity </dev/null)
 
-  assert_eq "agent" "$output" "detect-interactivity returns 'agent' when stdin is not a TTY"
+  assert_eq "agent" "$output" "detect-interactivity returns 'agent' when stdin is not a TTY and no host picker is available"
+}
+
+test_detect_interactivity_claudecode_host() {
+  echo ""
+  echo "=== Testing detect-interactivity: CLAUDECODE=1 forces picker despite non-TTY stdin ==="
+
+  local output
+  output=$(AIMI_AGENT_MODE= CI= CLAUDECODE=1 OPENCODE_CONFIG_DIR= "$CLI" detect-interactivity </dev/null)
+
+  assert_eq "picker" "$output" "detect-interactivity returns 'picker' when CLAUDECODE=1 (AskUserQuestion available) regardless of TTY state"
+}
+
+test_detect_interactivity_opencode_host() {
+  echo ""
+  echo "=== Testing detect-interactivity: OPENCODE_CONFIG_DIR forces picker despite non-TTY stdin ==="
+
+  local output
+  output=$(AIMI_AGENT_MODE= CI= CLAUDECODE= OPENCODE_CONFIG_DIR=/tmp/opencode-test "$CLI" detect-interactivity </dev/null)
+
+  assert_eq "picker" "$output" "detect-interactivity returns 'picker' when OPENCODE_CONFIG_DIR is set (OpenCode question tool available) regardless of TTY state"
 }
 
 # ============================================================================
@@ -6136,8 +6167,11 @@ main() {
   echo ""
   echo "--- Interactivity Mode Detection Tests ---"
   test_detect_interactivity_agent_mode_env
+  test_detect_interactivity_agent_mode_overrides_host
   test_detect_interactivity_ci_env
   test_detect_interactivity_non_tty
+  test_detect_interactivity_claudecode_host
+  test_detect_interactivity_opencode_host
 
   # Design bundle detection tests
   echo ""
