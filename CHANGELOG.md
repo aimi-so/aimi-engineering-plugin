@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.86.7] - 2026-05-13
+
+### Changed
+- Trimmed the Pre-Save Checklist in `brainstorm.md` Phase 4 by removing the eight items marked `(advisory/non-blocking)` that restate rules already enforced in the document body (Design Decisions section presence, Personas/View Modes/Layout Variation subsections, Specs and Prototypes section presence, generated-bundle YAML key ordering, researchPaths emission). Added a one-line preamble directing readers to the body rules as the source of truth. The Pre-Save Blocking Gate — Open Questions section (with `[resolved: ...]` / `[deferred: ...]` sentinels, bundle-source clarification, and agent-mode auto-defer fallback) is preserved verbatim. Behavior unchanged.
+
 ## [1.86.6] - 2026-05-13
 
 ### Changed

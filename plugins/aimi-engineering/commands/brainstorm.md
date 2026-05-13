@@ -993,6 +993,8 @@ If neither variant prototypes were saved nor bundle prototypes are available (ne
 
 ### Pre-Save Checklist (Blocking with Override)
 
+Body rules above are the source of truth. The checklist below surfaces only blocking gates and net-new constraints not already enforced by the body.
+
 Before writing the document, verify **all** of the following criteria. If any criterion fails, pause and ask the user before saving — do not silently skip.
 
 - [ ] All critical topics addressed (Purpose, Users, Success at minimum)
@@ -1017,14 +1019,6 @@ If count > 0: STOP. Loop AskUserQuestion until count == 0. Each answer appends `
 - [ ] Directory `.aimi/brainstorms/` exists
 - [ ] No filename collision (append counter if needed)
 - [ ] YAGNI applied — no unnecessary complexity
-- [ ] Design Decisions section present with Aesthetic Direction and Differentiation entries (when UI features detected in Phase 1.7) — advisory/non-blocking
-- [ ] `### Personas` subsection present under Design Decisions (when bundle researcher returned non-empty personas) — advisory/non-blocking
-- [ ] `### View Modes` subsection present under Design Decisions (when bundle researcher returned non-empty view-modes) — advisory/non-blocking
-- [ ] `### Layout Variation Chosen` subsection present under Design Decisions (when bundle researcher returned a chosen variant) — advisory/non-blocking
-- [ ] `## Specs` section present with section-heading index for each non-null spec (when `businessSpec` or `designSpec` is non-null) — advisory/non-blocking
-- [ ] `## Prototypes` section present when merged prototype list is non-empty (variant-derived OR bundle-derived OR generated-bundle) — advisory/non-blocking
-- [ ] Generated-bundle entry in `prototype:` frontmatter uses key ordering `path`, `question_category`, `branch` and `branch: bundle-generated` (when `bundleGeneratedPrototypePath` is set) — advisory/non-blocking
-- [ ] researchPaths emitted when any researcher succeeded — advisory/non-blocking
 
 **On failure:** Use a conversational nudge for each unmet criterion:
 > "Before I save the document, I noticed [specific gap]. For example: 'we only explored one approach without noting why alternatives weren't considered.' Want to address that, or should I save as-is?"
