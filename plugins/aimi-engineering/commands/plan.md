@@ -44,6 +44,14 @@ Use the output as the default branch for `branchName` derivation in Phase 4.
 
 **If `AIMI_ROOT_IS_GIT_REPO` is false:** Skip. Default branch detection happens per-project in Phase 4 using `$AIMI_CLI detect-default-branch --project [path]`.
 
+### Detect Interactivity
+
+```bash
+INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
+```
+
+Store `INTERACTIVE_MODE` for use by Phase 0.5, Phase 1.8, and Phase 2.5 to decide whether to present AskUserQuestion prompts or auto-defer open questions.
+
 ## Phase 0: Idea Refinement
 
 Check `.aimi/brainstorms/` for a matching brainstorm (semantic match on topic, within 14 days):
@@ -465,6 +473,41 @@ Light sanitization: replace any literal `</research_file` sequence in the file c
 
 Collect all successfully wrapped blocks into a variable `researchFileBlocks` (empty string if no files were read). This variable is threaded into Phase 3 below.
 
+## Phase 1.8: Post-Research Open Questions Gate
+
+Collect open questions surfaced by the research agents before spec analysis begins.
+
+**Source set — scan each researcher file that was written or reused this run:**
+
+1. **Researcher `## Open Questions` sections.** For each research file path in `metadata.researchPaths` (plus `reusedCodebasePath` and `reusedBestPracticesPath` when set), read the file and locate its `## Open Questions` section. Each list entry in that section — lines starting with `-` or `*` — that does not already carry a `[resolved: ...]` or `[deferred: ...]` suffix becomes an OQ entry with:
+   - `source: researchFile`
+   - `anchor: <basename>:OQ<n>` where `<basename>` is the filename without path and `<n>` is the 1-based index of the entry within that file's `## Open Questions` list.
+2. **`[PROMOTE-TO-OPEN-QUESTIONS]` tags.** Scan every researcher file for lines containing the literal tag `[PROMOTE-TO-OPEN-QUESTIONS]`. Each such line (regardless of which section it lives in) that is not already in the collected list becomes an OQ entry with the same `anchor` format: `<basename>:OQ<n>`.
+
+Merge all collected entries into the shared `openQuestions[]` accumulator first established by Phase 0.5.
+
+**Dedup by anchor:** before adding any entry, check `oqDecisions[]` for an existing entry with the same anchor. If a matching entry exists and already carries a resolution, skip the entry — do not re-ask.
+
+**Sanitize OQ text** before passing to AskUserQuestion: strip newlines, remove any `$(` sequences, remove backtick characters, and truncate to 500 characters (same sanitization regime applied to Path Hints earlier in this pipeline).
+
+**20-OQ aggregate cap with priority sort:** if the combined count of new (unresolved, post-dedup) OQs from this phase exceeds 20, sort by researcher priority — codebase researcher OQs first, then best-practices, then learnings, then design-bundle — and present only the first 20. Emit a single warning line listing the anchors of any entries that were dropped by the cap.
+
+**For each new entry in `openQuestions[]`** without a resolution:
+- Call AskUserQuestion with the OQ text. Include `source` and `anchor` in the question header (e.g., `OQ · researchFile 2026-05-13-codebase.md:OQ3`) so the user knows exactly what they are deciding on.
+- Record the resolution in working memory `oqDecisions[]` keyed by anchor, using the form `researchFile:<basename>:OQ<n>` as the `source` field.
+
+**Do NOT write sentinels back to the researcher `.md` files** — researcher files are read-only artifacts from this gate's perspective. Only `oqDecisions[]` is mutated.
+
+Block Phase 2 until every new entry carries a resolution or `[deferred: ...]`.
+
+**Agent-mode fallback:** when `INTERACTIVE_MODE=agent`, auto-defer all entries with reason `agent-mode auto-defer` — do not block. Emit exactly one log line:
+
+```
+agent-mode: phase-1.8-oq-gate deferred <N> questions
+```
+
+where `<N>` is the count of questions deferred this phase.
+
 ## Phase 2: Spec Analysis
 
 ```
@@ -476,6 +519,45 @@ Task subagent_type="aimi-engineering:workflow:aimi-spec-flow-analyzer"
 ```
 
 Incorporate gaps as acceptance criteria or story notes.
+
+## Phase 2.5: Spec-Flow Gap Gate
+
+Collect open questions surfaced by the spec-flow analyzer before story decomposition begins.
+
+**Source set — the spec-flow analyzer output from Phase 2:**
+
+1. **`### Missing Elements & Gaps` section.** Locate this heading in the spec-flow analyzer's output. Each list entry (lines starting with `-` or `*`) becomes an OQ entry with:
+   - `source: specFlow`
+   - `anchor: specFlow:Gap<n>` where `<n>` is the 1-based index of the entry within the section.
+2. **`### Critical Questions Requiring Clarification` section.** Locate this heading in the spec-flow analyzer's output. Each list entry becomes an OQ entry with:
+   - `source: specFlow`
+   - `anchor: specFlow:CriticalQ<n>` where `<n>` is the 1-based index of the entry within the section.
+
+Note: the spec-flow analyzer does **not** emit a `## Open Questions` heading — do not look for one. Only the two sections named above are valid sources for this gate.
+
+Merge all collected entries into the shared `openQuestions[]` accumulator.
+
+**Dedup by anchor:** before adding any entry, check `oqDecisions[]` for an existing entry with the same anchor. If a matching entry exists and already carries a resolution, skip it.
+
+**Sanitize OQ text** before passing to AskUserQuestion: strip newlines, remove any `$(` sequences, remove backtick characters, and truncate to 500 characters (same sanitization regime applied to Path Hints earlier in this pipeline).
+
+**20-OQ aggregate cap with priority sort:** if the combined count of new (unresolved, post-dedup) OQs from this phase exceeds 20, sort by severity — `Critical` entries first, then `Important`, then `Nice-to-have` (using the severity labels the spec-flow analyzer annotates in its output) — and present only the first 20. Emit a single warning line listing the anchors of any entries dropped by the cap.
+
+**For each new entry in `openQuestions[]`** without a resolution:
+- Call AskUserQuestion with the OQ text. Include `source` and `anchor` in the question header (e.g., `OQ · specFlow Gap3` or `OQ · specFlow CriticalQ1`) so the user knows exactly what they are deciding on.
+- Record the resolution in working memory `oqDecisions[]` keyed by anchor, using `specFlow:CriticalQ<n>` or `specFlow:Gap<n>` as the `source` field.
+
+**Do NOT write sentinels back to the spec-flow analyzer output** — that output is a read-only artifact from this gate's perspective. Only `oqDecisions[]` is mutated.
+
+Block Phase 3 until every new entry carries a resolution or `[deferred: ...]`.
+
+**Agent-mode fallback:** when `INTERACTIVE_MODE=agent`, auto-defer all entries with reason `agent-mode auto-defer` — do not block. Emit exactly one log line:
+
+```
+agent-mode: phase-2.5-oq-gate deferred <N> questions
+```
+
+where `<N>` is the count of questions deferred this phase.
 
 ## Phase 3: Story Decomposition
 
@@ -710,6 +792,7 @@ Write single file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 - **prototypePaths**: Convert each path in `resolvedPrototypePaths` to a path relative to `AIMI_ROOT` (no leading `./`, no `..` components). Deduplicate with `| unique`. Emit as `metadata.prototypePaths` array. Omit the key entirely when the array is empty.
 - **designBundle**: When `designBundleMeta` is non-null, emit as `metadata.designBundle` with the following shape: `{ root: string, readme: string, chats: string[], businessSpec: string|null, designSpec: string|null }`. All paths relative to `AIMI_ROOT`. Omit the key entirely when no bundle was detected. When the bundle was detected, always emit both `businessSpec` and `designSpec` keys — use `null` for whichever spec file is absent.
 - **designTokens**: When `designSpecContent` is non-null and `DesignSpec § 1` contains a token map, parse it and emit as `metadata.designTokens` — a flat object whose top-level keys are the token categories enumerated in `DesignSpec § 1` (e.g., `color`, `typography`, `spacing`, `radii`, `shadow`, `transition`). Values are written verbatim from the spec without normalization. Omit the key entirely when `designSpecContent` is null or `§ 1` contains no token map.
+- **decisions**: Emit one entry per item in the fully accumulated `oqDecisions[]` working memory — this includes every OQ resolved or deferred by Phase 0.5, Phase 1.8, AND Phase 2.5. Do not scope this derivation to Phase 0.5 entries only. Each entry carries `anchor`, `source`, `text`, and `resolution` from the corresponding `oqDecisions[]` record. Omit the `decisions` key entirely when `oqDecisions[]` is empty.
 - **maxConcurrency**: Default `5`. Set to `1` for strictly sequential execution.
 
 ### Phase 4.1: Coverage Self-Check (BLOCKING)
@@ -762,8 +845,8 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
     "designTokens": "object (optional, flat token map parsed from DesignSpec § 1; keys are token categories e.g. color, typography, spacing, radii, shadow, transition; values verbatim from spec)",
     "decisions": [
       {
-        "anchor": "string (unique key, one of: <brainstorm-path>:L<line> | businessSpec:L<line> | designSpec:L<line>)",
-        "source": "string (<brainstorm-path>:L<line> for brainstorm-sourced OQs | businessSpec:L<line> | designSpec:L<line>)",
+        "anchor": "string (unique key, one of: <brainstorm-path>:L<line> | businessSpec:L<line> | designSpec:L<line> | researchFile:<basename>:OQ<n> | specFlow:CriticalQ<n> | specFlow:Gap<n>)",
+        "source": "string (<brainstorm-path>:L<line> for brainstorm-sourced OQs | businessSpec:L<line> | designSpec:L<line> | researchFile:<basename>:OQ<n> for Phase 1.8 researcher OQs | specFlow:CriticalQ<n> for Phase 2.5 critical questions | specFlow:Gap<n> for Phase 2.5 gap entries)",
         "text": "string (the OQ text or the trimmed line containing the marker)",
         "resolution": "string (the user's choice, or '[deferred]')"
       }
@@ -874,7 +957,7 @@ The validator treats `portfolio.totalUsinas` as a single token and cannot find t
 
 **Notes:** `implementation`, `verification`, `gate`, `skills`, and `tasks` are optional per story. `wave` is required on all stories.
 
-**`metadata.decisions[].source` field:** each entry records where the Open Question originated. Three valid forms: `<brainstorm-path>:L<line>` (an OQ line from the brainstorm doc), `businessSpec:L<line>` (a marker-style OQ scanned from `businessSpecContent`), or `designSpec:L<line>` (a marker-style OQ scanned from `designSpecContent`). Consumers can branch on the prefix to distinguish decisions that originated from a collaborative brainstorm versus inline spec markers.
+**`metadata.decisions[].source` field:** each entry records where the Open Question originated. Six valid forms: `<brainstorm-path>:L<line>` (an OQ line from the brainstorm doc), `businessSpec:L<line>` (a marker-style OQ scanned from `businessSpecContent`), `designSpec:L<line>` (a marker-style OQ scanned from `designSpecContent`), `researchFile:<basename>:OQ<n>` (an OQ entry from a researcher file's `## Open Questions` section or a `[PROMOTE-TO-OPEN-QUESTIONS]` tag, resolved at Phase 1.8), `specFlow:CriticalQ<n>` (an entry from the spec-flow analyzer's `### Critical Questions Requiring Clarification` section, resolved at Phase 2.5), or `specFlow:Gap<n>` (an entry from the spec-flow analyzer's `### Missing Elements & Gaps` section, resolved at Phase 2.5). Consumers can branch on the prefix to distinguish decisions by origin: brainstorm, inline spec markers, post-research researcher OQs, or spec-flow gaps.
 
 ### Anti-Citation-Bias Reminder
 
@@ -1021,6 +1104,10 @@ Next steps:
 | Phase 0 | No feature description | Ask user for input |
 | Phase 1 | Research agent fails | Proceed with available results |
 | Phase 1.5b | External research fails | Proceed without external context |
+| Phase 1.8 | No researcher files have `## Open Questions` sections | Skip gate, proceed to Phase 2 |
+| Phase 1.8 | Researcher file missing from disk | Skip that file silently, continue with remaining files |
+| Phase 2.5 | Spec-flow output has no `### Missing Elements & Gaps` or `### Critical Questions Requiring Clarification` sections | Skip gate, proceed to Phase 3 |
+| Phase 2.5 | User defers all spec-flow OQs in agent-mode | Auto-defer all, emit log line, proceed |
 | Phase 2 | Spec-flow finds critical gaps | Add gaps as story notes, flag in report |
 | Phase 3 | Zero stories produced | Report error, ask user to refine scope |
 | Phase 3 | 10+ stories produced | Proceed with warning in report |
