@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.86.7] - 2026-05-13
+
+### Changed
+- Trimmed the Pre-Save Checklist in `brainstorm.md` Phase 4 by removing the eight items marked `(advisory/non-blocking)` that restate rules already enforced in the document body (Design Decisions section presence, Personas/View Modes/Layout Variation subsections, Specs and Prototypes section presence, generated-bundle YAML key ordering, researchPaths emission). Added a one-line preamble directing readers to the body rules as the source of truth. The Pre-Save Blocking Gate — Open Questions section (with `[resolved: ...]` / `[deferred: ...]` sentinels, bundle-source clarification, and agent-mode auto-defer fallback) is preserved verbatim. Behavior unchanged.
+
+## [1.86.6] - 2026-05-13
+
+### Changed
+- Consolidated the `AIMI_ROOT_IS_GIT_REPO` branching rule, the per-story project-grouping pattern (absolute-path resolution, path-validation regex, no-leading-./, no-.. rules), and the per-project cleanup rule into one "Multi-Repo Handling" section at the top of `execute.md` (placed between Step 0 and Step 0.5). Each call site now carries a one-line pointer to the section while keeping the decision pseudocode inline — no per-run Read cost. The wave-loop group_key/project_roots/base_sha/all_worktrees pseudocode, setup-branch invocations, PROJECT_GUIDELINES_MAP build, merge-per-project logic, and cleanup iteration are all preserved verbatim.
+
+## [1.86.5] - 2026-05-13
+
+### Changed
+- Folded the four near-identical inline "check flag → emit once → set true" blocks for `echoedBundleEarlyExit`, `echoedBrowserUnavailable`, `echoedSessionLost`, and `echoedPickerUnavailable` in `brainstorm.md` into one "Once-per-session echo helper" rule documented near Step 0b. Each call site now invokes the helper with its flag name and message. Flag names, message texts, working-memory initialization, and surrounding contextual prose are preserved verbatim.
+
+## [1.86.4] - 2026-05-13
+
+### Changed
+- Consolidated the visual-follow lifecycle (detection, session-open, reuse-within-wave, keep-open-on-completion) from the four scattered sites in `execute.md` (Step 0.7, Step 3.3, Step 4 wave loop, Post-Loop) into one "Visual Follow Lifecycle" section placed before Step 0.7. Each call site now points at the consolidated section. Behavior preserved verbatim — MALFORMED_VERIF abort, per-story screenshot+compare logic, session name `visual-follow`, and the "Visual follow session still open" completion message all remain inline at their original sites.
+
+## [1.86.3] - 2026-05-13
+
+### Changed
+- Collapsed the three near-identical "How `<flag>` works at runtime" subsections in `brainstorm.md` Override Keywords section (`show variants`, `vary ui`, `render bundle`) into one parameterized rule table (columns: trigger phrase, flag name, activation log line, scope/clear condition, precedence over Step 0a) and a single co-occurrence statement covering all pairwise and triple-overlap semantics. The user-facing summary table is preserved verbatim. Behavior unchanged — every flag name, log line, scope, clear condition, and precedence-over-Step-0a rule is identical.
+
+## [1.86.2] - 2026-05-13
+
+### Changed
+- Extracted input-sanitization rules and topic-slug derivation algorithm from `brainstorm.md` and `execute.md` into `commands/references/sanitization.md` and `commands/references/topic-slug.md`. Both commands now cite the new reference files instead of restating the rules inline, eliminating the stale line-number citation in `execute.md` Step 3.4. Behavior is preserved verbatim — pure prose deduplication.
+
 ## [1.86.1] - 2026-05-13
 
 ### Fixed
