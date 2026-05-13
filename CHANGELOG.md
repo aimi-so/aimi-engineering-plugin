@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.86.6] - 2026-05-13
+
+### Changed
+- Consolidated the `AIMI_ROOT_IS_GIT_REPO` branching rule, the per-story project-grouping pattern (absolute-path resolution, path-validation regex, no-leading-./, no-.. rules), and the per-project cleanup rule into one "Multi-Repo Handling" section at the top of `execute.md` (placed between Step 0 and Step 0.5). Each call site now carries a one-line pointer to the section while keeping the decision pseudocode inline — no per-run Read cost. The wave-loop group_key/project_roots/base_sha/all_worktrees pseudocode, setup-branch invocations, PROJECT_GUIDELINES_MAP build, merge-per-project logic, and cleanup iteration are all preserved verbatim.
+
 ## [1.86.5] - 2026-05-13
 
 ### Changed

@@ -23,6 +23,43 @@ If resolution fails, report error and STOP.
 
 Use `$AIMI_CLI` for all subsequent script calls.
 
+## Multi-Repo Handling
+
+This section is the single source of truth for multi-repo layout detection and per-project story routing. All call sites below reference it by name.
+
+### AIMI_ROOT_IS_GIT_REPO Branching Rule
+
+Set in Step 1.5 by running `git -C [AIMI_ROOT] rev-parse --git-dir`. When **true**, AIMI_ROOT is itself a git repository — all inline logic (default-branch detection, fetch, branch setup, worktree creation) runs directly against AIMI_ROOT. When **false**, this is a **multi-repo layout**: Claude Code runs from a parent folder containing multiple git repos as subfolders. In this layout:
+
+- Default-branch detection and `git fetch origin` are skipped at the AIMI_ROOT level and happen per-project instead.
+- Step 1.6 (Branch Base Selection) is skipped entirely; `BASE_BRANCH` is left unset.
+- Step 2 "Main Repo Branch Setup" is skipped entirely; all branch setup is handled per-project.
+- All stories must carry a `project` field (the per-project path).
+
+### Per-Story Project-Grouping Pattern
+
+Stories are grouped by their `project` field:
+
+- Stories with a non-null `project` field are routed to `AIMI_ROOT / story.project` (resolved to an absolute path).
+- Stories without a `project` field (null/absent) form the DEFAULT group, routed to the current working directory (CWD).
+
+**Path validation rules:** `project` field values must match `^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$`. No leading `./` and no `..` path components are allowed.
+
+Each project group operates independently: its own default-branch detection, `git fetch origin`, branch setup, worktree creation, merge, and cleanup all run against that project's git root.
+
+### Per-Project Cleanup Rule
+
+After each wave (and in Post-Loop safety cleanup), for each unique `project_root` (including CWD for the DEFAULT group):
+
+```bash
+cd [project_root]
+$WORKTREE_MGR list
+# For each worktree matching "[branchName]-US-*":
+$WORKTREE_MGR remove [worktree_name]
+```
+
+---
+
 ## Step 0.5: Archival Check
 
 Before starting a new session, check whether any completed task files should be archived to prevent accidental re-execution of finished work.
@@ -345,32 +382,26 @@ Check if AIMI_ROOT (directory containing `.aimi/`) is itself a git repository:
 git -C [AIMI_ROOT] rev-parse --git-dir >/dev/null 2>&1
 ```
 
-Store the result as `AIMI_ROOT_IS_GIT_REPO` (true/false). When false, this is a **multi-repo layout** where Claude Code runs from a parent folder containing multiple git repos as subfolders.
+Store exit code as `AIMI_ROOT_IS_GIT_REPO` (true if exit 0, false otherwise). See the **Multi-Repo Handling** section above for the full contract.
 
-### Detect Default Branch
+### Default Branch and Origin Fetch
 
-If `AIMI_ROOT_IS_GIT_REPO` is true:
+When the flag is true, run both of the following. When false, skip both — per-project detection and fetch happen in the branch setup step (see Multi-Repo Handling above).
+
+Detect the default branch:
 ```bash
 DEFAULT_BRANCH=$($AIMI_CLI detect-default-branch)
 ```
-
-If `AIMI_ROOT_IS_GIT_REPO` is false, skip — default branch detection happens per-project in the branch setup step below.
-
 Store `DEFAULT_BRANCH` for use in branch creation and commit counting.
 
-### Fetch Origin
-
-If `AIMI_ROOT_IS_GIT_REPO` is true:
+Fetch from origin:
 ```bash
 git fetch origin
 ```
-
 If fetch fails (e.g., offline or no remote), warn but continue:
 ```
 Warning: git fetch origin failed — continuing with local state. Branch may be stale.
 ```
-
-If `AIMI_ROOT_IS_GIT_REPO` is false, skip — fetch happens per-project below.
 
 ## Step 1.6: Branch Base Selection
 
@@ -380,8 +411,7 @@ Before creating the task branch, when the current branch has unmerged work relat
 
 ### Early-Skip Guard (Multi-Repo)
 
-If `AIMI_ROOT_IS_GIT_REPO` is false, skip this step entirely and leave `BASE_BRANCH` unset.
-<!-- multi-repo prompt-per-repo is out of scope for this step; per-project setup-branch heuristic handles base selection automatically -->
+If `AIMI_ROOT_IS_GIT_REPO` is false, skip this step entirely and leave `BASE_BRANCH` unset. See Multi-Repo Handling above.
 
 ### Resolve Interactivity Mode
 
@@ -451,7 +481,7 @@ Get the branch name from the init-session output (already validated by CLI).
 
 ### Main Repo Branch Setup
 
-**Skip this step if `AIMI_ROOT_IS_GIT_REPO` is false** — branch setup is handled entirely per-project.
+**Skip this step if `AIMI_ROOT_IS_GIT_REPO` is false** — see Multi-Repo Handling above.
 
 ```bash
 if [ -n "$BASE_BRANCH" ]; then
@@ -474,7 +504,7 @@ Where `[action]` is the `action` field from the JSON response (e.g., `already-on
 
 After setting up the branch in the main repo (or skipping if multi-repo layout), check if any stories have a `project` field by running `$AIMI_CLI list-ready --brief` and inspecting the results.
 
-If any story has a non-null `project` field, **or** if `AIMI_ROOT_IS_GIT_REPO` is false (multi-repo layout requires all stories to have project paths):
+Run the following sub-steps when any story has a non-null `project` field, or when in multi-repo layout (see Multi-Repo Handling above for the gate condition). Skip this step when no stories have a `project` field and AIMI_ROOT is a git repo (backwards compatible).
 
 1. Collect unique project paths from ALL pending stories (not just ready ones — use `$AIMI_CLI status` and filter stories with a `project` field).
 2. Resolve each project path to an absolute path: `AIMI_ROOT / story.project` where AIMI_ROOT is the directory containing `.aimi/`.
@@ -492,8 +522,6 @@ If any story has a non-null `project` field, **or** if `AIMI_ROOT_IS_GIT_REPO` i
    ```
    Branch [branchName] set up in project: [project_path] (action: [action])
    ```
-
-If no stories have a `project` field and `AIMI_ROOT_IS_GIT_REPO` is true, skip this step (backwards compatible).
 
 ## Step 3: Check for Pending Stories
 
@@ -707,12 +735,8 @@ while true:
     # Proceed with worktree parallelism
 
     # ========================================
-    # GROUP STORIES BY PROJECT
+    # GROUP STORIES BY PROJECT — see Multi-Repo Handling section
     # ========================================
-    # Group full_stories by their `project` field.
-    # Stories without a `project` field (null/absent) go into the DEFAULT group.
-    # DEFAULT group uses the current repo (no cd needed).
-    # Each project group has its own git root for worktree operations.
 
     project_groups = {}  # key: project_path (or "DEFAULT"), value: list of full_story
     for full_story in full_stories:
@@ -1033,7 +1057,7 @@ After the wave loop ends (all stories processed or deadlock):
 
 ```
 # Remove any remaining worktrees (safety cleanup)
-# When stories have project fields, clean up per project root:
+# Per-project cleanup rule — see Multi-Repo Handling section.
 for each unique project_root (including CWD for DEFAULT group):
     cd [project_root]
     $WORKTREE_MGR list
