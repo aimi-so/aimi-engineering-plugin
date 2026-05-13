@@ -92,6 +92,67 @@ If `DesignSpec § 6` maps the desired component to an existing project component
 
 ---
 
+## Visual Source-of-Truth Protocol
+
+Applies when `story.verification.strategy == "visual"` OR `metadata.prototypePaths` is non-empty OR `story.implementation.prototypeAnchor` is set. Skip entirely for non-visual stories.
+
+### V1 — Enumerate Visible Elements
+
+Before writing any implementation code, list every visible element in the prototype as a numbered enumeration. Cover:
+- Layout regions (header, body, footer; sidebar; modal/overlay)
+- Every distinct text label and its typography role (heading, subheading, body, caption)
+- Every interactive control (buttons, inputs, toggles, tabs)
+- Every icon, glyph, or decorative element
+- Distinct spacing or typography zones that differ from the surrounding region
+
+Numbered list format: `1. <element> — <distinguishing detail>`. Do NOT proceed to V2 until V1 is complete.
+
+### V2 — Map Elements to Acceptance Criteria
+
+For each numbered V1 element, identify the matching acceptance criterion (or assert "no AC match"). Use a paired list or two-column table:
+- `V1.1 → AC #2 — "header shows org name"`
+- `V1.5 → no AC match (candidate KNOWN-GAP)`
+
+### V3 — Escalate Prototype-Only Elements
+
+Any V1 element flagged "no AC match" in V2 is a KNOWN-GAP candidate. Add it to the implementation queue ONLY if it is a trivial visual detail (icon, spacing token). For non-trivial gaps, emit a `KNOWN-GAP:` trailer line in the commit body (one per element) with brief rationale. NEVER silently drop a prototype-visible element.
+
+---
+
+## Reference-Artifact Parity Pass (BLOCKING when triggered)
+
+**Trigger:** Fire this pass when any of the following is true for the story being executed:
+- The story JSON declares any reference artifact field (`prototypeAnchor`, `specSection`, `referenceCommand`, `referenceFixture`, `migrationDiff`, `referenceUrl`, or equivalent)
+- Any `acceptanceCriteria` line contains a prototype or spec citation (e.g., a file path, URL, or section identifier)
+- `verification.strategy` implies a reference artifact (`visual`, `api`, `cli`, `migration`, or `sdk`)
+
+**Procedure:**
+
+1. **Load reference** — read the artifact at the cited path or URL into working context.
+2. **Enumerate addressable elements** in the cited region (all text nodes, attributes, fields, flags, columns, rows, etc. visible in that region).
+3. **Cross-check against implementation** — for each enumerated element, determine whether the implementation addresses it.
+4. **Verdict per element:**
+   - `Implemented` — the element is handled by the implementation
+   - `KNOWN-GAP: <element> — <reason>` — the element is not handled; append one line per gap to the commit message body
+
+Silent drops are NOT acceptable — every enumerated element must receive an explicit verdict before the commit is written.
+
+**Block commit until every element has a verdict.**
+
+Agent-mode fallback: if the reference artifact is not readable from disk or network, log `Parity pass skipped — reference not readable: <path>` as a commit trailer and proceed without blocking.
+
+### Per-Element Verdict Table (required for visual stories)
+
+When `verification.strategy == "visual"`, append the following table to the commit body, with one row per V1-enumerated element:
+
+| Element | Verdict | Notes |
+| --- | --- | --- |
+| <element from V1> | PASS \| DIVERGES \| KNOWN-GAP | <brief detail> |
+
+Verdict values: `PASS` (implementation matches prototype), `DIVERGES` (implementation differs and that difference is intentional or unavoidable — explain in Notes), `KNOWN-GAP` (implementation does not cover this element — pair with a `KNOWN-GAP:` trailer line). The table is required only for visual stories; omit entirely for non-visual stories.
+
+---
+
 ## Prompt Template
 
 > This is the canonical worker prompt template. execute.md and next.md should reference this skill rather than duplicating the prompt inline.
@@ -171,54 +232,21 @@ If HEADED_MODE is false or absent:
 
 </headed_mode_context>
 
-<your_story>
+<task_pointer>
 
-ID: [STORY_ID]
-Title: [STORY_TITLE]
-Description: [STORY_DESCRIPTION]
+STORY_ID: [STORY_ID]
 
-</your_story>
+Your first action is to fetch full story context:
+```bash
+$AIMI_CLI get-story-context [STORY_ID]
+```
+Parse the returned JSON for two top-level fields:
+- `story` — contains `id`, `title`, `description`, `acceptanceCriteria`, `notes`, `tasks`, `implementation`, `verification`, `gate`
+- `metadata` — contains `prototypePaths`, `prototypeAnchor`, `branchName`, and other session metadata
 
-<acceptance_criteria>
+Use `story` and `metadata` for all subsequent steps. If the command fails, report failure immediately and stop.
 
-[ACCEPTANCE_CRITERIA_BULLETED]
-
-</acceptance_criteria>
-
-<tasks>
-
-Mechanical sub-steps (planner guidance only — not acceptance criteria; complete the deliverable as a whole)
-
-[TASKS_NUMBERED_LIST]
-
-</tasks>
-
-(Omit the <tasks> block above when story.tasks is absent or empty.)
-
-<key_files>
-
-[implementation.files — bulleted list of file paths the story is expected to touch]
-
-</key_files>
-
-<approach>
-
-[implementation.approach — brief description of the implementation approach]
-
-</approach>
-
-<verification_command>
-
-[implementation.verify — command or instruction to verify the implementation]
-
-</verification_command>
-
-<verification>
-
-Strategy: [verification.strategy]
-Expected: [verification.expect — omit line if absent]
-
-</verification>
+</task_pointer>
 
 <visual_verification>
 
@@ -295,9 +323,12 @@ Visual verification is **advisory** — failures do NOT block the story commit.
 
 <prototype_context>
 
-Prototype HTML variants and optional tokens JSON loaded from `metadata.prototypePaths[]`. Each `.html` file is wrapped in `<prototype_html label="X" path="...">` tags (labels A, B, C…); each `.json` sidecar is wrapped in `<prototype_tokens path="...">` tags. Reference these variants when implementing UI stories — prefer the labelled variant that best matches the story's design intent. When a story has a single clearly relevant prototype, label A is pinned to that prototype so it receives highest attention via load order. Omit this section when empty.
+When `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, read each prototype file yourself using the Read tool.
 
-[PROTOTYPE_CONTEXT]
+- For each path in `metadata.prototypePaths[]` (and `story.implementation.prototypeAnchor` if set), resolve the absolute path as `$AIMI_ROOT/<path>` and read it.
+- If a prototype file does not exist at the resolved path, log: `prototype <path> missing — skipped` and continue.
+- `.html` files are pixel-reference prototypes; `.json` files are design-token sidecars.
+- Read all available prototypes before writing any implementation code.
 
 </prototype_context>
 
@@ -328,10 +359,19 @@ All file operations MUST stay within the project boundary: PROJECT_PATH when set
 
 <execution_flow>
 
-0. If PROJECT_PATH is set, cd to PROJECT_PATH; if WORKTREE_PATH is also set, cd to WORKTREE_PATH instead (takes precedence)
+0a. **Bootstrap (FIRST ACTION):** Run `$AIMI_CLI get-story-context $STORY_ID` and parse the returned JSON. Extract:
+    - `story` — full story object (`id`, `title`, `description`, `acceptanceCriteria`, `notes`, `tasks`, `implementation`, `verification`, `gate`)
+    - `metadata` — session metadata (`prototypePaths`, `prototypeAnchor`, `branchName`, etc.)
+    If this command fails, report failure immediately and stop.
+0b. If `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, read each prototype file with the Read tool:
+    - Resolve path as `$AIMI_ROOT/<path>` for each entry in `metadata.prototypePaths[]` and for `story.implementation.prototypeAnchor` when set
+    - If a file does not exist at the resolved path, log: `prototype <path> missing — skipped` and continue
+0c. If PROJECT_PATH is set, cd to PROJECT_PATH; if WORKTREE_PATH is also set, cd to WORKTREE_PATH instead (takes precedence)
 1. Read CLAUDE.md for project conventions (from PROJECT_PATH root when set)
 2. Implement the story requirements
 3. Verify ALL acceptance criteria are met
+3.5. If `story.verification.strategy == "visual"` OR `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set: run the Visual Source-of-Truth Protocol (V1/V2/V3 enumeration → mapping → escalation) BEFORE writing code, then proceed to the Reference-Artifact Parity Pass.
+3.6. Run Reference-Artifact Parity Pass (see full procedure in the named section above) if the story declares any reference artifact or any AC line contains a prototype/spec citation or `verification.strategy` implies a reference. Block commit until every element has a verdict; on unreadable reference, log `Parity pass skipped — reference not readable: <path>` as a commit trailer and proceed.
 4. Run typecheck: npx tsc --noEmit
 5. If all checks pass, commit:
    a. Stage only story-related files: `git add [changed files]` (never use `-A` or `.` — avoid staging unrelated files)
@@ -432,131 +472,21 @@ If HEADED_MODE is false or absent:
 
 </headed_mode_context>
 
-<your_story>
+<task_pointer>
+STORY_ID: [STORY_ID]
 
-ID: [STORY_ID]
-Title: [STORY_TITLE]
-Description: [STORY_DESCRIPTION]
+First action: run `$AIMI_CLI get-story-context [STORY_ID]` and parse `{story, metadata}` from the returned JSON. If it fails, report failure and stop.
+</task_pointer>
 
-</your_story>
-
-<acceptance_criteria>
-
-[ACCEPTANCE_CRITERIA_BULLETED]
-
-</acceptance_criteria>
-
-<tasks>
-Mechanical sub-steps (planner guidance only — not acceptance criteria; complete the deliverable as a whole)
-
-[TASKS_NUMBERED_LIST]
-</tasks>
-
-(Omit the <tasks> block above when story.tasks is absent or empty.)
-
-<key_files>
-
-[implementation.files — bulleted list of file paths the story is expected to touch]
-
-</key_files>
-
-<approach>
-
-[implementation.approach — brief description of the implementation approach]
-
-</approach>
-
-<verification_command>
-
-[implementation.verify — command or instruction to verify the implementation]
-
-</verification_command>
-
-<verification>
-
-Strategy: [verification.strategy]
-Expected: [verification.expect — omit line if absent]
-
-</verification>
-
-<visual_verification>
-
-Visual verification is **advisory** — failures do NOT block the story commit.
-
-<headed_mode_visual>
-
-0. **Navigate to verification URL at story start (before implementation):**
-   `agent-browser --session visual-follow open [verification.url]`
-   This gives the user a live preview in the headed browser while implementation proceeds.
-
-1. **Check agent-browser availability:**
-   Run `command -v agent-browser`. If not found, note "visual verification skipped — agent-browser not installed" in your report and proceed to commit.
-
-2. **Navigate to verification URL:**
-   `agent-browser --session visual-follow open [verification.url]`
-
-3. **Take screenshot:**
-   `agent-browser --session visual-follow screenshot /tmp/verify-[STORY_ID].png`
-
-4. **Evaluate screenshot against expected outcome:**
-   Use the Read tool to view `/tmp/verify-[STORY_ID].png`.
-   Compare what you see against `verification.expect` (natural language description).
-   Record whether the visual matches expectations (pass/fail + reasoning).
-
-5. **Cleanup — SKIP:** Session lifecycle is managed by execute.md. Do NOT run `agent-browser close`.
-
-6. **Report result:**
-   - If visual check passes: note "visual verification passed" in your report.
-   - If visual check fails or errors: note "visual verification failed — [reason]" in your report so the caller can set `verification.status` to `failed`. Do NOT fail the story — proceed to commit.
-   - If agent-browser was not installed: note "visual verification skipped" so the caller can set `verification.status` to `skipped`.
-
-</headed_mode_visual>
-
-<headless_mode_visual>
-
-1. **Check agent-browser availability:**
-   Run `command -v agent-browser`. If not found, note "visual verification skipped — agent-browser not installed" in your report and proceed to commit.
-
-2. **Open the page:**
-   `agent-browser open [verification.url]`
-
-3. **Take screenshot:**
-   `agent-browser screenshot /tmp/verify-[STORY_ID].png`
-
-4. **Evaluate screenshot against expected outcome:**
-   Use the Read tool to view `/tmp/verify-[STORY_ID].png`.
-   Compare what you see against `verification.expect` (natural language description).
-   Record whether the visual matches expectations (pass/fail + reasoning).
-
-5. **Cleanup:**
-   `agent-browser close`
-
-6. **Report result:**
-   - If visual check passes: note "visual verification passed" in your report.
-   - If visual check fails or errors: note "visual verification failed — [reason]" in your report so the caller can set `verification.status` to `failed`. Do NOT fail the story — proceed to commit.
-   - If agent-browser was not installed: note "visual verification skipped" so the caller can set `verification.status` to `skipped`.
-
-</headless_mode_visual>
-
-</visual_verification>
-
-<previous_notes>
-
-[story.notes]
-
-</previous_notes>
+<prototype_context>
+When `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, read each prototype file with the Read tool (resolve as `$AIMI_ROOT/<path>`). Log `prototype <path> missing — skipped` for any missing file and continue. Read all available prototypes before writing implementation code.
+</prototype_context>
 
 <design_context>
 
 [DESIGN_CONTEXT]
 
 </design_context>
-
-<prototype_context>
-Prototype HTML variants and optional tokens JSON from `metadata.prototypePaths[]`. `.html` files wrapped as `<prototype_html label="X" path="...">`, `.json` sidecars as `<prototype_tokens path="...">`. Use the best-matching variant for UI implementation. Label A is pinned to the story's most-relevant prototype when one is identified via `implementation.prototypeAnchor` or AC citation. Omit when empty.
-
-[PROTOTYPE_CONTEXT]
-</prototype_context>
 
 <design_bundle_context>
 Design bundle fidelity: spec-aware read order (businessSpec → designSpec → chats → prototypes → existing components), translate-not-copy (no CDN React/Babel/Alpine/inline styles), match-visual-output, designTokens passthrough, component-mapping, rule-ID citation. Omit when `metadata.designBundle` absent.
@@ -573,7 +503,7 @@ CRITICAL: Stay within project root. Never read/write outside project boundary. W
 </project_root_boundary>
 
 <execution_flow>
-Follow standard execution flow: read criteria → implement → test → commit. Stage only story-related files (never `-A` or `.`). Commit format: `git commit -m "type(scope): Story title"`. Verify with `git log -1 --oneline`. On commit failure: report immediately, do not retry. Do NOT update tasks file — caller handles status.
+Bootstrap: run `$AIMI_CLI get-story-context $STORY_ID`, parse `{story, metadata}`. Read prototype files from `metadata.prototypePaths[]` and `story.implementation.prototypeAnchor` via Read tool (log missing, skip). Then follow standard execution flow: read criteria → implement → test → commit. If `story.verification.strategy == "visual"` OR `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, run the Visual Source-of-Truth Protocol (V1/V2/V3) before writing code. Stage only story-related files (never `-A` or `.`). Commit format: `git commit -m "type(scope): Story title"`. Verify with `git log -1 --oneline`. On commit failure: report immediately, do not retry. Do NOT update tasks file — caller handles status. When a reference artifact is declared, run the Reference-Artifact Parity Pass before committing (see full named section above).
 </execution_flow>
 
 <on_failure>

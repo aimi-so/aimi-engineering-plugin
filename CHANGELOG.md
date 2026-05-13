@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.86.1] - 2026-05-13
+
+### Fixed
+- `detect-interactivity` no longer returns `agent` inside Claude Code or OpenCode when stdin is not a TTY. Both hosts run command bash bodies in non-TTY subshells, so the previous `[ ! -t 0 ]` check misclassified every interactive session as agent mode — causing Phase 0.5 / Phase 1.8 / Phase 2.5 OQ gates in `/aimi:plan` to silently auto-defer every open question instead of prompting the user. The check now treats `CLAUDECODE=1` and a set `OPENCODE_CONFIG_DIR` as picker-available regardless of TTY state. `AIMI_AGENT_MODE=true` and `CI=true` still force agent mode as before.
+
+## [1.86.0] - 2026-05-13
+
+### Added
+- Phase 1.8 (Post-Research Open Questions Gate) in /aimi:plan — surfaces every researcher's `## Open Questions` and `[PROMOTE-TO-OPEN-QUESTIONS]` entries via AskUserQuestion before story decomposition; auto-defers under AIMI_AGENT_MODE.
+- Phase 2.5 (Spec-Flow Gap Gate) in /aimi:plan — surfaces the spec-flow analyzer's `### Missing Elements & Gaps` and `### Critical Questions Requiring Clarification` entries before story decomposition; auto-defers under AIMI_AGENT_MODE.
+
+### Changed
+- metadata.decisions[].source schema extended with three new forms: `researchFile:<basename>:OQ<n>`, `specFlow:CriticalQ<n>`, `specFlow:Gap<n>`.
+
+## [1.85.0] - 2026-05-12
+
+### Changed
+- Subagent spawn prompts now use pointer-only context handoff: each spawned agent receives only the story ID in a `task_pointer` block and fetches its full context via `$AIMI_CLI get-story-context $STORY_ID` as its first action, keeping the orchestrator's working memory slim across waves and eliminating inlined story bodies and prototype HTML from spawn prompts.
+- New `get-story-context` CLI subcommand added to `aimi-cli.sh`: given a story ID, emits the full story JSON (including acceptance criteria, implementation block, verification, and gate fields) so subagents can self-bootstrap without relying on orchestrator-inlined payloads.
+
+## [1.84.0] - 2026-05-12
+
+### Added
+- `normalize-verification` CLI subcommand: rewrites bare-string verification fields into the object form `{strategy, status, url, expect}` with atomic tmp+mv write.
+- Visual Source-of-Truth Protocol (V1/V2/V3) in story-executor SKILL.md: pre-implementation enumeration rail for visual stories, gated on `verification.strategy == "visual"` or non-empty PROTOTYPE_CONTEXT.
+- Per-element PASS/DIVERGES/KNOWN-GAP table requirement in the Reference-Artifact Parity Pass (visual stories only).
+- `KNOWN-GAP:` trailer persistence: execute.md captures trailers from worker commits into `.aimi/known-gaps/YYYY-MM-DD-<storyId>.md` and aggregates them in the Step 5 final report under `## Known Gaps`.
+- Auto-spawned `aimi-design-implementation-reviewer` after each visual story merges; review output captured in the Step 5 final report under `## Design Review`.
+
+### Changed
+- `validate-stories` now rejects any story whose `verification` is a bare string (must be an object with a `strategy` key).
+- `/aimi:plan` Phase 4.5 invokes `normalize-verification` before validators, auto-migrating planner-emitted string verifications in place.
+- `/aimi:execute` Step 0.7 now aborts (non-zero exit) on malformed verifications instead of warning and continuing; abort message lists offending story IDs and points at `normalize-verification` for remediation.
+- Gap-trailer token renamed from `KNOWN GAP:` (with space) to `KNOWN-GAP:` (hyphenated) in story-executor SKILL.md and the verdict-table label, enabling clean `grep -E '^KNOWN-GAP:'` parsing.
+
+## [1.83.0] - 2026-05-12
+
+### Added
+- `/aimi:plan` Phase 0.5 now scans BusinessSpec/DesignSpec content for marker-style Open Questions (`[a confirmar]`, `[TBD]`, `[to confirm]`, `[to be confirmed]`, `[to be defined]`) and surfaces each via AskUserQuestion with source+anchor. Spec-marker resolutions are recorded in working-memory `oqDecisions[]` only; spec files are never written back to. Aggregate cap of 20 entries.
+- `/aimi:plan` Phase 1 now spawns `aimi-design-bundle-researcher` when invoked directly against a Claude Design handoff bundle (no prior brainstorm). Restores parity with the brainstorm-to-plan flow; resulting Open Questions merge into the Phase 0.5 list before continuing to Phase 1.5.
+
+### Fixed
+- `aimi-cli detect-design-bundle` now uses case-insensitive `find -iname` for spec file discovery, so bundles with camelCase filenames (`businessSpec.md`, `designSpec.md`) are detected correctly. Returned paths preserve actual on-disk casing.
+
+### Changed
+- Schema v3.3 documentation in `plan.md` now includes a `responseShape contract (frontend-only mode)` block explaining the flat-key constraint and why dotted keys like `portfolio.totalUsinas` are rejected by `validate-tasks`.
+
+## [1.82.0] - 2026-05-12
+
+### Added
+
+- **Plan command: Phase 3.1 Reference Element Inventory (BLOCKING when triggered):** New `### Phase 3.1: Reference Element Inventory (BLOCKING when triggered)` block inserted into `plugins/aimi-engineering/commands/plan.md` (Phase 3 section, before `dependsOn` Inference Rules). When any story declares a reference artifact (`prototypeAnchor`, `specSection`, `referenceCommand`, `referenceFixture`, `migrationDiff`, `referenceUrl`, etc.), opens the artifact and enumerates every addressable element in the cited region using kind-specific vocabulary (HTML/UI, OpenAPI/JSON Schema, CLI man page, SQL/migration diff, business rules table). Records findings as an `Element | Locator | Verdict | AC anchor` table; every row must be marked `encoded` or `excluded` with a written reason before story JSON is emitted. Block Phase 4 until all rows are verdicted; agent-mode fallback auto-marks unverdicted rows as `deferred`. Mirrored into `plugins/aimi-engineering/skills/task-planner/references/pipeline-phases.md`.
+- **Plan command: Phase 4.1 Coverage Self-Check (BLOCKING):** New `### Phase 4.1: Coverage Self-Check (BLOCKING)` block inserted into `plugins/aimi-engineering/commands/plan.md` (Phase 4 Derive Metadata section, before Write File). For each story with a Phase 3.1 inventory, computes `ac_anchors / proto_elements` ratio; if `ac_anchors < floor(proto_elements * 0.6)`, returns to Phase 3.1 to add AC lines or upgrade rows to `excluded`. Blocks Write File until the ratio is satisfied for every affected story; agent-mode fallback emits a structured deficit warning and proceeds. Mirrored into `plugins/aimi-engineering/skills/task-planner/references/pipeline-phases.md`.
+- **Plan command: Anti-Citation-Bias Reminder:** New `### Anti-Citation-Bias Reminder` block inserted into `plugins/aimi-engineering/commands/plan.md` (after Schema v3.3 Structure, before Checklist Before Writing). Clarifies that the validator only enforces citation format — not completeness, compositional fidelity, or behavioral coverage. Explicitly requires encoding of behavioral obligations and edge cases even without quotable literals, and recommends chaining citations for compositional obligations. Not labeled BLOCKING (worldview reminder, not a gate).
+- **Researcher agents: `## Contracts` quoting requirement:** New `## Contracts` section inserted into both `plugins/aimi-engineering/agents/research/aimi-codebase-researcher.md` and `plugins/aimi-engineering/agents/research/aimi-framework-docs-researcher.md`. Requires verbatim quoting of every consumed contract (typed signatures, REST/RPC shapes, CLI flag lists, DB schema, SDK public APIs) into the research file body with `file:line` citation — one fenced block per contract, no invention or inference of shapes.
+- **Story executor: Reference-Artifact Parity Pass (BLOCKING when triggered):** New `## Reference-Artifact Parity Pass (BLOCKING when triggered)` named section inserted into `plugins/aimi-engineering/skills/story-executor/SKILL.md` (before Prompt Template). Fires when a story declares any reference artifact or any AC line contains a prototype/spec citation or `verification.strategy` implies a reference. Procedure: load reference → enumerate addressable elements in cited region → cross-check against implementation → per-element verdict (`Implemented` or `KNOWN GAP: <element> — <reason>` appended to commit body). Silent drops are not acceptable. Blocks commit until every element has a verdict; agent-mode fallback logs `Parity pass skipped — reference not readable: <path>` and proceeds. Also added as step 3.5 in the canonical prompt template `<execution_flow>` and as a one-sentence extension to the compact template `<execution_flow>`.
+
+### Changed
+
+- **Plan command: Phase 1.7 Research File Ingestion trigger extended to `quick` tier:** The `## Phase 1.7: Research File Ingestion` trigger in `plugins/aimi-engineering/commands/plan.md` now fires for `researchDepth` `quick`, `standard`, or `deep` (previously `standard` or `deep` only). The no-op case shrinks to `skip` or unset. Mirrored in `plugins/aimi-engineering/skills/task-planner/references/pipeline-phases.md`.
+
+## [1.81.0] - 2026-05-12
+
+### Added
+
+- **Plan command: Phase 1.7 Research File Ingestion (US-001):** New `## Phase 1.7: Research File Ingestion` section inserted between Phase 1.6 and Phase 2 in `plugins/aimi-engineering/commands/plan.md`. When `researchDepth` is `standard` or `deep`, reads the full on-disk content of every path in `metadata.researchPaths`, deduped against `reusedCodebasePath` and `reusedBestPracticesPath` (already loaded by Phase 1.6). Missing files are silently skipped; no per-file or aggregate size cap is applied. Each loaded file is wrapped as `<research_file path="...">` with light HTML-entity escape on literal wrapper-tag sequences (analogous to the `prototype_html` escape pattern). Collected blocks are stored in `researchFileBlocks` and threaded into Phase 3 alongside `prototypeBlocks` so acceptance-criteria authoring draws on complete on-disk research detail rather than capped summary returns. `quick`, `skip`, and unset tiers preserve previous summary-only behavior bit-for-bit. Mirrored into `plugins/aimi-engineering/skills/task-planner/references/pipeline-phases.md`.
+
 ## [1.80.0] - 2026-05-11
 
 ### Added

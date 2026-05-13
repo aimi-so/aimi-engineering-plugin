@@ -149,4 +149,23 @@ Structure your findings as:
 6. **Common Issues**: Known problems and their solutions
 7. **References**: Links to documentation, GitHub issues, and source files
 
+## Contracts
+
+For every primitive, module, library, or endpoint that the to-be-planned feature will consume, quote the contract **verbatim** into the research file body (not the capped summary) with a `file:line` citation.
+
+"Contract" means:
+- **Typed languages** — function/method signatures including parameter types and return types
+- **REST / RPC** — full request shape (method, path, headers, body), response shape (status codes, body), and error shapes
+- **CLI tools** — complete flag list, argument types, exit codes, and relevant output sections
+- **Database** — table schema including column types, indexes, constraints, and defaults
+- **SDK / library public API** — exported functions, classes, and their documented parameters
+
+Write one fenced block per consumed contract. If a contract is absent from the codebase (e.g., it lives only in a README or external docs), mark it:
+
+```
+Source: README.md:N (no code definition found)
+```
+
+Never invent or infer contract shapes. If the shape cannot be confirmed from on-disk sources, state it is unresolved.
+
 Remember: You are the bridge between complex documentation and practical implementation. Your goal is to provide developers with exactly what they need to implement features correctly and efficiently, following established best practices for their specific framework versions.

@@ -636,6 +636,24 @@ cmd_get_story() {
   jq --arg id "$story_id" '.userStories[] | select(.id == $id)' "$tasks_file"
 }
 
+# Get story context (story slice + metadata) by ID — for subagent self-brief
+cmd_get_story_context() {
+  local story_id="$1"
+  local tasks_file
+
+  if [ -z "$story_id" ]; then
+    echo "Usage: aimi-cli.sh get-story-context <story-id>" >&2
+    exit 1
+  fi
+
+  validate_story_id "$story_id"
+
+  tasks_file=$(get_tasks_file)
+  validate_story_exists "$story_id" "$tasks_file"
+
+  jq --arg id "$story_id" '{story: (.userStories[] | select(.id == $id)), metadata: .metadata}' "$tasks_file"
+}
+
 # Mark a story as in-progress
 cmd_mark_in_progress() {
   local story_id="$1"
@@ -902,6 +920,9 @@ cmd_validate_stories() {
         (if has("gates") then ["\($s.id): gate: 'gates' field is invalid; use singular 'gate' (see plan.md L687-692)"] else [] end) +
         (if ($s.gate != null) then
           (["type","status","prompt"] | map(. as $k | if ($s.gate | has($k) | not) then ["\($s.id): gate: missing required field \($k)"] else [] end) | add // [])
+         else [] end) +
+        (if ($s.verification != null and ($s.verification | type) == "string") then
+          ["\($s.id): verification must be an object {strategy, status, url, expect}; found bare string — run normalize-verification to fix"]
          else [] end)
       ) | .[]
     ] |
@@ -917,6 +938,55 @@ cmd_validate_stories() {
     return 1
   fi
   return 0
+}
+
+# Normalize verification fields: rewrite any bare-string verification into object form
+cmd_normalize_verification() {
+  local tasks_file="$1"
+
+  if [ -z "$tasks_file" ]; then
+    echo "Usage: aimi-cli.sh normalize-verification <tasks-file-path>" >&2
+    exit 1
+  fi
+
+  if [ ! -f "$tasks_file" ]; then
+    echo "Error: tasks file not found: $tasks_file" >&2
+    exit 1
+  fi
+
+  if [ ! -r "$tasks_file" ]; then
+    echo "Error: tasks file not readable: $tasks_file" >&2
+    exit 1
+  fi
+
+  # Validate input is valid JSON
+  if ! jq empty "$tasks_file" 2>/dev/null; then
+    echo "Error: invalid JSON in tasks file: $tasks_file" >&2
+    exit 1
+  fi
+
+  local tmp_file
+  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  (
+    _lock "${tasks_file}.lock"
+    jq '
+      .userStories |= map(
+        if (.verification != null and (.verification | type) == "string") then
+          .verification = {strategy: .verification, status: "pending", url: null, expect: null}
+        else
+          .
+        end
+      )
+    ' "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+  ) 200>"${tasks_file}.lock"
+  local exit_code=$?
+  rm -f "$tmp_file" 2>/dev/null
+  [ $exit_code -ne 0 ] && exit $exit_code
+
+  # Report how many stories were normalized
+  local normalized_count
+  normalized_count=$(jq '[.userStories[] | select(.verification != null and (.verification | type) == "object")] | length' "$tasks_file")
+  jq -n --argjson count "$normalized_count" '{normalized: $count}'
 }
 
 # Validate all story IDs in the tasks file against the US-NNN format
@@ -1289,10 +1359,14 @@ cmd_detect_design_bundle() {
       fi
     fi
 
-    # businessSpec / designSpec: direct filename match
+    # businessSpec / designSpec: case-insensitive discovery
+    # (Claude Design exports occasionally produce camelCase filenames.)
     local business_spec="" design_spec=""
-    [ -f "${subdir}project/BusinessSpec.md" ] && business_spec="${base}/project/BusinessSpec.md"
-    [ -f "${subdir}project/DesignSpec.md"   ] && design_spec="${base}/project/DesignSpec.md"
+    local business_spec_file design_spec_file
+    business_spec_file=$(find "${subdir}project" -maxdepth 1 -iname "businessspec.md" -print -quit 2>/dev/null || true)
+    design_spec_file=$(find   "${subdir}project" -maxdepth 1 -iname "designspec.md"   -print -quit 2>/dev/null || true)
+    [ -n "$business_spec_file" ] && business_spec="${base}/project/$(basename "$business_spec_file")"
+    [ -n "$design_spec_file"   ] && design_spec="${base}/project/$(basename "$design_spec_file")"
 
     jq -n \
       --arg   path         "$base" \
@@ -1469,16 +1543,22 @@ cmd_bundle_prototype_status() {
   fi
 
   # Locate spec files inside the bundle (prefer bundle/project/ subdir)
+  # Uses case-insensitive discovery so camelCase filenames are detected.
   local design_spec_path="" business_spec_path=""
-  if [ -f "${bundle_path}/project/DesignSpec.md" ]; then
-    design_spec_path="${bundle_path}/project/DesignSpec.md"
-  elif [ -f "${bundle_path}/DesignSpec.md" ]; then
-    design_spec_path="${bundle_path}/DesignSpec.md"
+  local _ds_proj _ds_root _bs_proj _bs_root
+  _ds_proj=$(find "${bundle_path}/project" -maxdepth 1 -iname "designspec.md"   -print -quit 2>/dev/null || true)
+  _ds_root=$(find "${bundle_path}"         -maxdepth 1 -iname "designspec.md"   -print -quit 2>/dev/null || true)
+  _bs_proj=$(find "${bundle_path}/project" -maxdepth 1 -iname "businessspec.md" -print -quit 2>/dev/null || true)
+  _bs_root=$(find "${bundle_path}"         -maxdepth 1 -iname "businessspec.md" -print -quit 2>/dev/null || true)
+  if [ -n "$_ds_proj" ]; then
+    design_spec_path="$_ds_proj"
+  elif [ -n "$_ds_root" ]; then
+    design_spec_path="$_ds_root"
   fi
-  if [ -f "${bundle_path}/project/BusinessSpec.md" ]; then
-    business_spec_path="${bundle_path}/project/BusinessSpec.md"
-  elif [ -f "${bundle_path}/BusinessSpec.md" ]; then
-    business_spec_path="${bundle_path}/BusinessSpec.md"
+  if [ -n "$_bs_proj" ]; then
+    business_spec_path="$_bs_proj"
+  elif [ -n "$_bs_root" ]; then
+    business_spec_path="$_bs_root"
   fi
 
   # Derive output and sidecar paths — relative to the project root for portability.
@@ -1690,15 +1770,34 @@ cmd_bundle_prototype_finalize() {
 
 # Resolve which interactivity mode applies to the current shell.
 # Prints exactly one of: picker, agent
-#   agent  - AIMI_AGENT_MODE=true, CI=true, or stdin is not a TTY
-#   picker - interactive session; command body should invoke the host's
-#            question picker (AskUserQuestion in Claude Code, the `question`
-#            tool in OpenCode after install.sh translation)
+#   agent  - AIMI_AGENT_MODE=true or CI=true (explicit overrides), OR no host
+#            picker is available and stdin is not a TTY
+#   picker - explicit host picker is available (Claude Code or OpenCode), OR
+#            stdin is a TTY in a plain terminal
+#
+# Precedence (first match wins):
+#   1. AIMI_AGENT_MODE=true → agent  (explicit opt-out always wins)
+#   2. CI=true              → agent
+#   3. CLAUDECODE=1         → picker (AskUserQuestion is available)
+#   4. OPENCODE_CONFIG_DIR  → picker (OpenCode `question` tool is available)
+#   5. stdin is a TTY       → picker
+#   6. otherwise            → agent
+#
+# Hosts 3 and 4 deliberately ignore TTY state: their Bash tools run without a
+# controlling terminal, but a host-level picker is fully available.
 cmd_detect_interactivity() {
-  if [ "${AIMI_AGENT_MODE:-}" = "true" ] || [ "${CI:-}" = "true" ] || [ ! -t 0 ]; then
+  if [ "${AIMI_AGENT_MODE:-}" = "true" ] || [ "${CI:-}" = "true" ]; then
     echo "agent"
-  else
+    return
+  fi
+  if [ "${CLAUDECODE:-}" = "1" ] || [ -n "${OPENCODE_CONFIG_DIR:-}" ]; then
     echo "picker"
+    return
+  fi
+  if [ -t 0 ]; then
+    echo "picker"
+  else
+    echo "agent"
   fi
 }
 
@@ -2837,6 +2936,11 @@ COMMANDS:
     count-pending             Count pending stories
     validate-deps             Validate dependency graph (no cycles, no missing refs)
     validate-stories          Validate story content (length, suspicious patterns)
+    normalize-verification <file>
+                              Rewrite any story whose verification is a bare string S
+                              into {strategy: S, status: "pending", url: null, expect: null}.
+                              Already-object verifications are left unchanged.
+                              Writes atomically (tmp + mv). Exits 0 on success.
     validate-ids              Validate all story IDs match US-NNN format
     gate-pass <id> [--option 'value']
                               Pass a gate on a story; optionally store selected option
@@ -2849,6 +2953,7 @@ COMMANDS:
     reset-orphaned            Reset all in_progress stories to failed
     get-branch                Get branchName from metadata
     get-story <id>            Get full story object by ID (read-only)
+    get-story-context <id>    Get story slice + metadata block as JSON (for subagent self-brief)
     get-state                 Get all state files as JSON
     detect-default-branch [--project <path>]
                               Detect and cache the repository's default branch
@@ -2939,6 +3044,9 @@ EXAMPLES:
     # Fetch a specific story by ID
     $AIMI_CLI get-story US-003
 
+    # Fetch story slice + metadata block (for subagent self-brief)
+    $AIMI_CLI get-story-context US-003
+
     # Cascade skip after failure
     $AIMI_CLI cascade-skip US-003
 
@@ -2990,9 +3098,10 @@ main() {
     mark-failed)       cmd_mark_failed "${2:-}" "${3:-}" ;;
     mark-skipped)      cmd_mark_skipped "${2:-}" ;;
     count-pending)     cmd_count_pending ;;
-    validate-deps)     cmd_validate_deps ;;
-    validate-stories)  cmd_validate_stories ;;
-    validate-ids)      cmd_validate_ids ;;
+    validate-deps)            cmd_validate_deps ;;
+    validate-stories)         cmd_validate_stories ;;
+    normalize-verification)   cmd_normalize_verification "${2:-}" ;;
+    validate-ids)             cmd_validate_ids ;;
     gate-pass)         shift; cmd_gate_pass "$@" ;;
     gate-fail)         cmd_gate_fail "${2:-}" ;;
     update-field)      cmd_update_field "${2:-}" "${3:-}" "${4:-}" ;;
@@ -3002,6 +3111,7 @@ main() {
     reset-orphaned)    cmd_reset_orphaned ;;
     get-branch)        cmd_get_branch ;;
     get-story)         cmd_get_story "${2:-}" ;;
+    get-story-context) cmd_get_story_context "${2:-}" ;;
     get-state)         cmd_get_state ;;
     detect-default-branch) shift; cmd_detect_default_branch "$@" ;;
     setup-branch)      shift; cmd_setup_branch "$@" ;;

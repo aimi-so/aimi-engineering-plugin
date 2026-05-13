@@ -770,6 +770,47 @@ test_story_id_not_found() {
   assert_stderr_contains "not found" "$stderr_output" "mark-in-progress US-999 shows not found error"
 }
 
+test_get_story_context() {
+  echo ""
+  echo "=== Testing get-story-context command ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  # (1) Valid ID returns object with both 'story' and 'metadata' keys
+  local output exit_code
+  output=$("$CLI" get-story-context US-001 2>&1)
+  exit_code=$?
+  assert_exit_code "0" "$exit_code" "get-story-context US-001 exits 0"
+
+  local has_story has_metadata
+  has_story=$(echo "$output" | jq 'has("story")')
+  has_metadata=$(echo "$output" | jq 'has("metadata")')
+  assert_eq "true" "$has_story" "get-story-context result has 'story' key"
+  assert_eq "true" "$has_metadata" "get-story-context result has 'metadata' key"
+
+  # Story slice contains the correct ID
+  local story_id
+  story_id=$(echo "$output" | jq -r '.story.id')
+  assert_eq "US-001" "$story_id" "get-story-context story.id matches requested ID"
+
+  # Metadata is verbatim from the tasks file
+  local branch_name
+  branch_name=$(echo "$output" | jq -r '.metadata.branchName')
+  assert_eq "feat/test-feature" "$branch_name" "get-story-context metadata.branchName matches tasks file"
+
+  # (2) Invalid-format ID exits non-zero and writes to stderr
+  local stderr_output
+  stderr_output=$("$CLI" get-story-context INVALID 2>&1) || exit_code=$?
+  assert_exit_code "1" "${exit_code:-0}" "get-story-context INVALID exits non-zero"
+  assert_stderr_contains "Invalid story ID format" "$stderr_output" "get-story-context INVALID writes error to stderr"
+
+  # (3) Not-found ID exits non-zero with same error shape as get-story
+  stderr_output=$("$CLI" get-story-context US-999 2>&1) || exit_code=$?
+  assert_exit_code "1" "${exit_code:-0}" "get-story-context US-999 exits non-zero"
+  assert_stderr_contains "not found" "$stderr_output" "get-story-context US-999 shows not found error"
+}
+
 test_reset_orphaned_empty() {
   echo ""
   echo "=== Testing reset-orphaned with no orphans ==="
@@ -2662,6 +2703,208 @@ test_validate_stories_gate_field() {
   output=$("$CLI" validate-stories) && exit_code=0 || exit_code=$?
   assert_contains '"valid": true' "$output" "validate-stories gate: well-formed gate passes validation"
   assert_exit_code "0" "$exit_code" "validate-stories gate: exits 0 for well-formed gate"
+  _teardown_project_fixture
+}
+
+test_normalize_verification_string_input() {
+  echo ""
+  echo "=== Testing normalize-verification: string verification is rewritten to object ==="
+
+  local fixture_file
+  fixture_file=$(mktemp /tmp/test-normalize-verification-XXXXXX.json)
+  cat > "$fixture_file" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Normalize test",
+    "type": "feat",
+    "branchName": "feat/normalize-test",
+    "createdAt": "2026-05-12",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story with string verification",
+      "description": "Has bare-string verification field",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "verification": "test"
+    }
+  ]
+}
+EOF
+
+  local exit_code
+  "$CLI" normalize-verification "$fixture_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "normalize-verification: exits 0 on success"
+
+  local strategy status url expect type
+  strategy=$(jq -r '.userStories[0].verification.strategy' "$fixture_file")
+  status=$(jq -r '.userStories[0].verification.status' "$fixture_file")
+  url=$(jq -r '.userStories[0].verification.url' "$fixture_file")
+  expect=$(jq -r '.userStories[0].verification.expect' "$fixture_file")
+  type=$(jq -r '.userStories[0].verification | type' "$fixture_file")
+
+  assert_eq "test" "$strategy" "normalize-verification: strategy set to original string value"
+  assert_eq "pending" "$status" "normalize-verification: status set to pending"
+  assert_eq "null" "$url" "normalize-verification: url set to null"
+  assert_eq "null" "$expect" "normalize-verification: expect set to null"
+  assert_eq "object" "$type" "normalize-verification: verification is now an object"
+
+  rm -f "$fixture_file"
+}
+
+test_normalize_verification_object_input_unchanged() {
+  echo ""
+  echo "=== Testing normalize-verification: object verification is left unchanged ==="
+
+  local fixture_file
+  fixture_file=$(mktemp /tmp/test-normalize-verification-XXXXXX.json)
+  cat > "$fixture_file" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Normalize test",
+    "type": "feat",
+    "branchName": "feat/normalize-test",
+    "createdAt": "2026-05-12",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story with object verification",
+      "description": "Has well-formed object verification",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "verification": {"strategy": "visual", "status": "passed", "url": "http://example.com", "expect": "looks right"}
+    }
+  ]
+}
+EOF
+
+  local exit_code
+  "$CLI" normalize-verification "$fixture_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "normalize-verification object: exits 0 on success"
+
+  local strategy status url expect
+  strategy=$(jq -r '.userStories[0].verification.strategy' "$fixture_file")
+  status=$(jq -r '.userStories[0].verification.status' "$fixture_file")
+  url=$(jq -r '.userStories[0].verification.url' "$fixture_file")
+  expect=$(jq -r '.userStories[0].verification.expect' "$fixture_file")
+
+  assert_eq "visual" "$strategy" "normalize-verification object: strategy preserved"
+  assert_eq "passed" "$status" "normalize-verification object: status preserved"
+  assert_eq "http://example.com" "$url" "normalize-verification object: url preserved"
+  assert_eq "looks right" "$expect" "normalize-verification object: expect preserved"
+
+  rm -f "$fixture_file"
+}
+
+test_validate_stories_rejects_string_verification() {
+  echo ""
+  echo "=== Testing validate-stories rejects bare-string verification ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  _setup_project_fixture '{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Verification string test",
+    "type": "feat",
+    "branchName": "feat/verification-string-test",
+    "createdAt": "2026-05-12",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story with string verification",
+      "description": "Has bare-string verification field",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "verification": "test"
+    }
+  ]
+}'
+
+  local output exit_code
+  output=$("$CLI" validate-stories) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": false' "$output" "validate-stories: string verification fails validation"
+  assert_contains "verification must be an object" "$output" "validate-stories: error mentions verification must be object"
+  assert_exit_code "1" "$exit_code" "validate-stories: exits 1 for string verification"
+
+  _teardown_project_fixture
+}
+
+test_validate_stories_accepts_object_verification() {
+  echo ""
+  echo "=== Testing validate-stories accepts well-formed object verification ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  _setup_project_fixture '{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Verification object test",
+    "type": "feat",
+    "branchName": "feat/verification-object-test",
+    "createdAt": "2026-05-12",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story with object verification",
+      "description": "Has well-formed object verification",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "verification": {"strategy": "test", "status": "pending", "url": null, "expect": null}
+    },
+    {
+      "id": "US-002",
+      "title": "Story with api verification",
+      "description": "Has api strategy verification",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 2,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "verification": {"strategy": "api", "status": "passed", "url": "http://example.com", "expect": "200 OK"}
+    }
+  ]
+}'
+
+  local output exit_code
+  output=$("$CLI" validate-stories) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": true' "$output" "validate-stories: object verification passes validation"
+  assert_exit_code "0" "$exit_code" "validate-stories: exits 0 for object verification"
+
+  local error_count
+  error_count=$(echo "$output" | jq '.errors | length')
+  assert_eq "0" "$error_count" "validate-stories: zero errors for well-formed object verification"
+
   _teardown_project_fixture
 }
 
@@ -4998,9 +5241,19 @@ test_detect_interactivity_agent_mode_env() {
   echo "=== Testing detect-interactivity with AIMI_AGENT_MODE=true ==="
 
   local output
-  output=$(AIMI_AGENT_MODE=true CI= "$CLI" detect-interactivity </dev/null)
+  output=$(AIMI_AGENT_MODE=true CI= CLAUDECODE= OPENCODE_CONFIG_DIR= "$CLI" detect-interactivity </dev/null)
 
   assert_eq "agent" "$output" "detect-interactivity returns 'agent' when AIMI_AGENT_MODE=true"
+}
+
+test_detect_interactivity_agent_mode_overrides_host() {
+  echo ""
+  echo "=== Testing detect-interactivity: AIMI_AGENT_MODE=true overrides CLAUDECODE=1 ==="
+
+  local output
+  output=$(AIMI_AGENT_MODE=true CI= CLAUDECODE=1 OPENCODE_CONFIG_DIR= "$CLI" detect-interactivity </dev/null)
+
+  assert_eq "agent" "$output" "detect-interactivity returns 'agent' when AIMI_AGENT_MODE=true even with CLAUDECODE=1"
 }
 
 test_detect_interactivity_ci_env() {
@@ -5008,20 +5261,41 @@ test_detect_interactivity_ci_env() {
   echo "=== Testing detect-interactivity with CI=true ==="
 
   local output
-  output=$(AIMI_AGENT_MODE= CI=true "$CLI" detect-interactivity </dev/null)
+  output=$(AIMI_AGENT_MODE= CI=true CLAUDECODE= OPENCODE_CONFIG_DIR= "$CLI" detect-interactivity </dev/null)
 
   assert_eq "agent" "$output" "detect-interactivity returns 'agent' when CI=true"
 }
 
 test_detect_interactivity_non_tty() {
   echo ""
-  echo "=== Testing detect-interactivity with non-TTY stdin ==="
+  echo "=== Testing detect-interactivity with non-TTY stdin and no host indicators ==="
 
-  # Redirecting stdin from /dev/null makes it not a TTY; no override env vars needed.
+  # Clear all host indicators to test the bare-shell fallback. Redirecting stdin
+  # from /dev/null makes it not a TTY.
   local output
-  output=$(AIMI_AGENT_MODE= CI= "$CLI" detect-interactivity </dev/null)
+  output=$(AIMI_AGENT_MODE= CI= CLAUDECODE= OPENCODE_CONFIG_DIR= "$CLI" detect-interactivity </dev/null)
 
-  assert_eq "agent" "$output" "detect-interactivity returns 'agent' when stdin is not a TTY"
+  assert_eq "agent" "$output" "detect-interactivity returns 'agent' when stdin is not a TTY and no host picker is available"
+}
+
+test_detect_interactivity_claudecode_host() {
+  echo ""
+  echo "=== Testing detect-interactivity: CLAUDECODE=1 forces picker despite non-TTY stdin ==="
+
+  local output
+  output=$(AIMI_AGENT_MODE= CI= CLAUDECODE=1 OPENCODE_CONFIG_DIR= "$CLI" detect-interactivity </dev/null)
+
+  assert_eq "picker" "$output" "detect-interactivity returns 'picker' when CLAUDECODE=1 (AskUserQuestion available) regardless of TTY state"
+}
+
+test_detect_interactivity_opencode_host() {
+  echo ""
+  echo "=== Testing detect-interactivity: OPENCODE_CONFIG_DIR forces picker despite non-TTY stdin ==="
+
+  local output
+  output=$(AIMI_AGENT_MODE= CI= CLAUDECODE= OPENCODE_CONFIG_DIR=/tmp/opencode-test "$CLI" detect-interactivity </dev/null)
+
+  assert_eq "picker" "$output" "detect-interactivity returns 'picker' when OPENCODE_CONFIG_DIR is set (OpenCode question tool available) regardless of TTY state"
 }
 
 # ============================================================================
@@ -5206,7 +5480,47 @@ test_detect_design_bundle_root_is_bundle() {
   rm -rf "$tmp"
 }
 
-# (7b) <subcommand> --help routes to top-level help instead of "Unknown flag"
+# (7b-extra) Mixed-case spec filenames are detected case-insensitively
+test_detect_design_bundle_mixed_case_specs() {
+  echo ""
+  echo "=== Testing detect-design-bundle: mixed-case spec filenames detected case-insensitively ==="
+
+  local tmp stdout exit_code
+  tmp=$(mktemp -d)
+  local bundle
+  bundle=$(_make_bundle "$tmp" "draives-monitor")
+  printf 'business content' > "${bundle}/project/businessSpec.md"
+  printf 'design content'   > "${bundle}/project/DesignSpec.md"
+
+  stdout=$("$CLI" detect-design-bundle --root "$tmp" 2>/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "detect-design-bundle mixed-case: exit code"
+
+  local bs ds
+  bs=$(printf '%s' "$stdout" | jq -r '.businessSpec')
+  ds=$(printf '%s' "$stdout" | jq -r '.designSpec')
+
+  # Both paths must be non-null
+  if [ "$bs" = "null" ] || [ -z "$bs" ]; then
+    assert_eq "non-null businessSpec" "null" "detect-design-bundle mixed-case: businessSpec must not be null"
+  else
+    assert_eq "ok" "ok" "detect-design-bundle mixed-case: businessSpec is non-null"
+  fi
+
+  if [ "$ds" = "null" ] || [ -z "$ds" ]; then
+    assert_eq "non-null designSpec" "null" "detect-design-bundle mixed-case: designSpec must not be null"
+  else
+    assert_eq "ok" "ok" "detect-design-bundle mixed-case: designSpec is non-null"
+  fi
+
+  # On-disk casing must be preserved in returned paths
+  assert_eq "draives-monitor/project/businessSpec.md" "$bs" "detect-design-bundle mixed-case: businessSpec preserves camelCase on-disk casing"
+  assert_eq "draives-monitor/project/DesignSpec.md"   "$ds" "detect-design-bundle mixed-case: designSpec preserves PascalCase on-disk casing"
+
+  rm -rf "$tmp"
+}
+
+# (7c) <subcommand> --help routes to top-level help instead of "Unknown flag"
 test_help_flag_on_strict_subcommand() {
   echo ""
   echo "=== Testing universal --help: strict subcommand routes to help text ==="
@@ -5686,6 +6000,7 @@ main() {
   test_cli_path
   test_status_uses_user_stories_key
   test_story_id_not_found
+  test_get_story_context
   test_reset_orphaned_empty
   test_reset_orphaned_with_orphans
   test_stale_state_warning
@@ -5780,6 +6095,14 @@ main() {
   test_validate_stories_gate_field
   test_list_ready_brief_includes_project
 
+  # normalize-verification and string-verification rejection tests
+  echo ""
+  echo "--- normalize-verification Tests ---"
+  test_normalize_verification_string_input
+  test_normalize_verification_object_input_unchanged
+  test_validate_stories_rejects_string_verification
+  test_validate_stories_accepts_object_verification
+
   # V3.2 schema tests — gates, waves & field preservation
   echo ""
   echo "--- V3.2 Schema Tests ---"
@@ -5844,8 +6167,11 @@ main() {
   echo ""
   echo "--- Interactivity Mode Detection Tests ---"
   test_detect_interactivity_agent_mode_env
+  test_detect_interactivity_agent_mode_overrides_host
   test_detect_interactivity_ci_env
   test_detect_interactivity_non_tty
+  test_detect_interactivity_claudecode_host
+  test_detect_interactivity_opencode_host
 
   # Design bundle detection tests
   echo ""
@@ -5858,6 +6184,7 @@ main() {
   test_detect_design_bundle_newest_mtime_wins
   test_detect_design_bundle_partial_bundle
   test_detect_design_bundle_root_is_bundle
+  test_detect_design_bundle_mixed_case_specs
   test_help_flag_on_strict_subcommand
   test_help_flag_on_side_effect_subcommand
 

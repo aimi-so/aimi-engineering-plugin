@@ -91,9 +91,9 @@ Learnings are stored in project files (not separate progress log):
 
 ## Performance Guidelines
 
-1. **Inline story data** - Pass story content directly in Task prompts
-   - Don't tell agents to re-read the tasks file
-   - Avoids a per-story file read; actual token impact not benchmarked
+1. **Pointer-only handoff** - Spawn prompts carry only the story id in a `task_pointer` block; each subagent fetches its own full context via `$AIMI_CLI get-story-context $STORY_ID` as its first action
+   - Keeps the orchestrator's working memory slim across waves — no inlined story body, no inlined prototype HTML in the spawn prompt
+   - Prototype files are read by the subagent itself using the Read tool when `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set
 
 2. **Use CLAUDE.md/AGENTS.md** - Project conventions inline or referenced
    - Small files (<2KB) are inlined in prompt

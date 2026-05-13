@@ -2,16 +2,16 @@
 name: aimi:execute
 description: Execute all pending stories autonomously with wave-based parallelism
 disable-model-invocation: true
-allowed-tools: Read, Write, Edit, Bash(git:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Bash(WORKTREE_MGR=*), Bash($WORKTREE_MGR:*), Task
+allowed-tools: Read, Write, Edit, Bash(git:*), Bash(mkdir:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Bash(WORKTREE_MGR=*), Bash($WORKTREE_MGR:*), Task
 ---
 
 # Aimi Execute
 
 Execute all pending stories autonomously using wave-based fan-out.
 
-Each wave uses two-phase story loading to conserve context:
-- **Phase 1 (wave selection):** `list-ready --brief` returns lightweight story stubs `{id, title, priority, dependsOn, project}` for scheduling decisions.
-- **Phase 2 (prompt construction):** `get-story <id>` fetches full story data `{description, acceptanceCriteria, notes}` only for selected stories, after they are claimed with `mark-in-progress`.
+Each wave uses pointer-only handoff to keep the orchestrator's working memory slim:
+- **Wave selection:** `list-ready --brief` returns lightweight story stubs `{id, title, priority, dependsOn, project}` for scheduling decisions.
+- **Spawn prompt:** carries only a `task_pointer` section with the story id — no inlined story body, no inlined prototype context. Each subagent fetches its own full context via `$AIMI_CLI get-story-context $STORY_ID` as its first action.
 
 Every story runs in its own git worktree spawned as a fresh-context Task subagent. Within a wave, stories execute in parallel up to metadata.maxConcurrency; selection order follows $AIMI_CLI list-ready output (tasks.json file order, deterministic).
 
@@ -75,7 +75,23 @@ VISUAL_STORIES=$(jq '[.userStories[] | select(.verification | type == "object" a
 MALFORMED_VERIF=$(jq '[.userStories[] | select(.verification != null and (.verification | type != "object"))] | length' "$AIMI_ROOT/$TASKS_PATH" 2>/dev/null)
 ```
 
-If `MALFORMED_VERIF` > 0, warn: `"Warning: [N] stories have malformed verification fields (expected object, got string). Re-run /aimi:plan to fix."`
+If `MALFORMED_VERIF` > 0, collect the affected story IDs and abort:
+
+```bash
+MALFORMED_IDS=$(jq -r '[.userStories[] | select(.verification != null and (.verification | type != "object")) | .id] | join(", ")' "$AIMI_ROOT/$TASKS_PATH" 2>/dev/null)
+```
+
+Report the error and STOP:
+```
+Malformed verification fields detected — aborting.
+
+Affected stories: [MALFORMED_IDS]
+
+Verification must be an object, not a bare string. Run:
+  $AIMI_CLI normalize-verification <tasks-path>
+to fix the file, then re-run /aimi:execute.
+```
+STOP execution.
 
 - **If `VISUAL_STORIES` is 0 or empty:** Set `VISUAL_FOLLOW=false`. Proceed to Step 1.
 
@@ -183,7 +199,7 @@ Each parallel Task receives the full execute.md flow:
 - **validate-stories** for content validation
 - **wave loop** (Step 4) executing all stories from its file
 - Each flow commits to its own branch (`metadata.branchName` from its file) — no branch conflicts
-- Step 3.5 runs inside each spawned Task, reading that file's own `prototypePaths` to build its `PROTOTYPE_CONTEXT` independently
+- Prototype files are read by each subagent independently via `$AIMI_CLI get-story-context` (pointer-only handoff)
 
 After both Tasks return, collect results and proceed to **Step 5 (Aggregated Completion)**.
 
@@ -478,7 +494,6 @@ Starting autonomous execution...
 Branch: [branchName]
 Schema: v3.0
 Pending: [pending] stories
-[If html_count > 0]: Prototype context: [html_count] variant(s) loaded
 
 Beginning wave execution loop...
 ```
@@ -561,106 +576,6 @@ If `BRAINSTORM_PATH` is non-empty and the file exists at `$AIMI_ROOT/$BRAINSTORM
 
 If any of these conditions fail (no `brainstormPath` in metadata, file not found, no `## Design Decisions` section, or extracted content is empty after sanitization), set `DESIGN_CONTEXT` to empty string. No error — this is optional context.
 
-## Step 3.5: Load Prototype Context
-
-Read `prototypePaths` from tasks metadata and build `PROTOTYPE_CONTEXT` for worker prompts:
-
-```bash
-PROTOTYPE_PATHS=$(jq -r '.metadata.prototypePaths // [] | .[]' "$AIMI_ROOT/$TASKS_PATH")
-```
-
-If `PROTOTYPE_PATHS` is empty (field absent, null, or empty array), set `PROTOTYPE_CONTEXT` to empty string and continue — no error.
-
-**Prototype anchor pinning (prepend before iteration):** before iterating `PROTOTYPE_PATHS`, determine whether a single prototype file should be pinned to label A:
-
-```
-ANCHOR_PATH = ""
-
-# 1. Try implementation.prototypeAnchor from the active story
-anchor_candidate = jq -r '.userStories[] | select(.id == env.STORY_ID) | .implementation.prototypeAnchor // empty' "$AIMI_ROOT/$TASKS_PATH"
-
-if anchor_candidate is non-empty:
-    abs_anchor = realpath("$AIMI_ROOT/$anchor_candidate")   # resolve symlinks / ..
-    if abs_anchor starts with "$AIMI_ROOT/" and file exists at abs_anchor:
-        ANCHOR_PATH = anchor_candidate
-    else:
-        log: "prototype [anchor_candidate] rejected — path outside project root"
-
-# 2. Fallback: parse acceptanceCriteria[] for first F3 citation when anchor not set
-if ANCHOR_PATH is empty:
-    ac_strings = jq -r '.userStories[] | select(.id == env.STORY_ID) | .acceptanceCriteria[]' "$AIMI_ROOT/$TASKS_PATH"
-    for each ac in ac_strings:
-        match = first regex match of
-            \(prototype:\s*([^\s)§:]+)(?:\s*§[^)]*|\:[Ll]\d+-[Ll]\d*)?\)
-            against ac
-        if match found:
-            ac_candidate = captured group 1 (the path token)
-            abs_ac = realpath("$AIMI_ROOT/$ac_candidate")
-            if abs_ac starts with "$AIMI_ROOT/" and file exists at abs_ac:
-                ANCHOR_PATH = ac_candidate
-                break
-            else:
-                log: "prototype [ac_candidate] rejected — path outside project root"
-
-# 3. Prepend anchor to PROTOTYPE_PATHS so it receives label A
-if ANCHOR_PATH is non-empty:
-    PROTOTYPE_PATHS = [ANCHOR_PATH] + [p for p in PROTOTYPE_PATHS if p != ANCHOR_PATH]
-```
-
-Otherwise, process each path in order, assigning sequential labels starting at `A`:
-
-```
-label = 'A'
-blocks = []
-html_count = 0
-
-for path in PROTOTYPE_PATHS:
-    abs_path = "$AIMI_ROOT/$path"
-    if file does not exist at abs_path:
-        log: "prototype [path] missing at execute time — skipped"
-        continue
-
-    case "${path##*.}" in
-        html)
-            content = read file at abs_path verbatim
-            # Tag-breakout escape: prevent wrapper-tag injection
-            content = replace literal "</prototype_html" with "&lt;/prototype_html"
-            content = replace literal "<prototype_html" with "&lt;prototype_html"
-            block = "<prototype_html label=\"[label]\" path=\"[path]\">\n[content]\n</prototype_html>"
-            html_count += 1
-        ;;
-        json)
-            content = read file at abs_path verbatim
-            block = "<prototype_tokens path=\"[path]\">\n[content]\n</prototype_tokens>"
-        ;;
-        *)
-            log: "prototype [path] missing at execute time — skipped"
-            continue
-        ;;
-    esac
-
-    blocks.append(block)
-    label = next letter after label
-```
-
-**Aggregate size cap (200 KB):** after all blocks are loaded, measure the total byte size. If the total exceeds 200 KB, drop blocks in reverse label order (Z → A) until the aggregate fits under the cap. Log one warning line per dropped block:
-
-```
-prototype [path] dropped — aggregate prototype context exceeded 200KB
-```
-
-**Pinned-anchor-exceeds-cap exception:** when `ANCHOR_PATH` is non-empty and the anchor block (label A) is a candidate for dropping, do **not** drop it even if it alone exceeds 200 KB. Instead log:
-
-```
-prototype [ANCHOR_PATH] pinned but exceeds 200KB cap — implementation may drift; consider splitting the prototype
-```
-
-and retain the block. Continue dropping other blocks (Z → B) as normal until the remaining non-anchor blocks fit under the cap (the anchor's bytes are excluded from the cap accounting once it is retained under this exception).
-
-If all prototypes are missing or all blocks are dropped, set `PROTOTYPE_CONTEXT` to empty string. Otherwise join all remaining blocks and store as `PROTOTYPE_CONTEXT`.
-
-Store `html_count` (count of `.html` files that survived into `PROTOTYPE_CONTEXT`) for use in the start report.
-
 ## Step 3.6: Resolve Skill Injection Base Path
 
 Resolve the base directory for skill files. Mirror the CLI path resolution pattern:
@@ -682,6 +597,7 @@ If the glob matches nothing (no cache entry found) or `AIMI_PLUGIN_DIR` is unset
 ```
 wave = 1
 is_first_story_in_session = true
+DESIGN_REVIEW_BUFFERS = {}  # key: story_id, value: {title, output}; populated by post-merge design reviewer
 
 while true:
     # Check remaining work
@@ -751,24 +667,8 @@ while true:
     # WORKTREE WAVE (parallel with worktrees)
     # ========================================
 
-    # Fetch full story data for all selected stories (claim-then-fetch)
-    full_stories = []
-    fetch_failed = []
-    for story in selected_stories:
-        full_story = $AIMI_CLI get-story [story.id]
-        if get-story failed:
-            fetch_failed.append(story)
-            $AIMI_CLI mark-failed [story.id] "get-story failed"
-            $AIMI_CLI cascade-skip [story.id]
-            Report: "[story.id] failed (could not fetch story data). Dependent stories cascade-skipped."
-        else:
-            full_stories.append(full_story)
-
-    # If all fetches failed, skip worktree creation entirely
-    if len(full_stories) == 0:
-        Report: "Wave [wave] complete: 0 succeeded, [len(fetch_failed)] failed (all get-story calls failed)"
-        wave += 1
-        continue
+    # All selected stories proceed — story data is fetched by each subagent via get-story-context
+    full_stories = selected_stories
 
     # Proceed with worktree parallelism
 
@@ -885,13 +785,8 @@ while true:
                 - HEADED_MODE = (do NOT include for worktree stories — visual verification runs post-merge, not inside the worktree)
                 - Omit the <visual_verification> section entirely for worktree stories
                   (the dev server cannot see worktree changes; verification runs after merge-all instead)
-                - STORY_ID = full_story.id
-                - STORY_TITLE = full_story.title
-                - STORY_DESCRIPTION = full_story.description
-                - ACCEPTANCE_CRITERIA = full_story.acceptanceCriteria (bulleted)
-                - full_story.notes = full_story.notes (include <previous_notes> section only if non-empty)
+                - STORY_ID = full_story.id  ← only the id; no description, no criteria, no prototype HTML
                 - DESIGN_CONTEXT = design_context (include <design_context> section only if non-empty)
-                - PROTOTYPE_CONTEXT = prototype_context (include <prototype_context> section only if non-empty)
                 - Do NOT modify the tasks.json file — report result (success/failure + details)
             ]
         )
@@ -979,6 +874,17 @@ while true:
 
             # Merges succeeded for this project group — mark stories complete
             for full_story in stories:
+                # --- Extract KNOWN-GAP trailers from worker commit ---
+                ```bash
+                mkdir -p .aimi/known-gaps
+                WORKER_GAPS=$(git -C "[all_worktrees[full_story.id].worktree_path]" log -1 --format=%B | grep -E '^KNOWN-GAP:' || true)
+                if [ -n "$WORKER_GAPS" ]; then
+                  GAP_DATE=$(date +%Y-%m-%d)
+                  GAP_FILE=".aimi/known-gaps/${GAP_DATE}-[full_story.id].md"
+                  printf '%s\n' "$WORKER_GAPS" > "$GAP_FILE"
+                fi
+                ```
+
                 $AIMI_CLI mark-complete [full_story.id]
 
                 # --- Post-merge visual verification for visual stories ---
@@ -1021,6 +927,43 @@ while true:
                     $AIMI_CLI update-field [full_story.id] verification.status passed
 
                 Report: "[full_story.id] merged successfully."
+
+                # --- Design Review (visual stories only) ---
+                if full_story.verification and full_story.verification.strategy == "visual" and (metadata.prototypePaths is non-empty or full_story.implementation.prototypeAnchor is non-empty):
+                    # 1. Resolve prototype path: prefer prototypeAnchor, fall back to metadata.prototypePaths[0]
+                    REVIEW_PROTOTYPE_PATH = full_story.implementation.prototypeAnchor
+                    if REVIEW_PROTOTYPE_PATH is empty:
+                        REVIEW_PROTOTYPE_PATH = metadata.prototypePaths[0] (if the array is non-empty)
+
+                    if REVIEW_PROTOTYPE_PATH is empty:
+                        Report: "Design review skipped for [full_story.id] — no prototype available."
+                    else:
+                        # 2. Collect changed files from the worker's commit
+                        ```bash
+                        DESIGN_REVIEW_CHANGED_FILES=$(git -C "[all_worktrees[full_story.id].worktree_path]" show --name-only --pretty=format: HEAD | grep -v '^$')
+                        ```
+
+                        # 3. Spawn the reviewer in foreground (capture output)
+                        DESIGN_REVIEW_OUTPUT = Task(
+                            subagent_type: "aimi-engineering:design:aimi-design-implementation-reviewer",
+                            description: "Design review: [full_story.id]",
+                            prompt: "Review the implementation of [full_story.id] ([full_story.title]).
+
+Prototype: [REVIEW_PROTOTYPE_PATH]
+Changed files:
+[DESIGN_REVIEW_CHANGED_FILES]
+Worktree: [all_worktrees[full_story.id].worktree_path]
+
+Read the prototype file at the path above. Compare each visual element of the prototype against the changed files listed. Report PASS / DIVERGES / KNOWN-GAP verdicts with a brief diagnosis per element.
+
+Output your full structured review under the heading '## Design Implementation Review'."
+                        )
+
+                        # 4. Store per-story buffer for Step 5 aggregation
+                        DESIGN_REVIEW_BUFFERS[full_story.id] = {
+                            title: full_story.title,
+                            output: DESIGN_REVIEW_OUTPUT
+                        }
 
                 # Post-completion gate logging
                 if full_story.gate:
@@ -1104,6 +1047,34 @@ Branch: [branchName]
 Waves: [total_waves]
 Commits: [count]
 ```
+
+Aggregate known-gap files from this run:
+```bash
+if [ -d .aimi/known-gaps ] && [ -n "$(ls .aimi/known-gaps/ 2>/dev/null)" ]; then
+  echo ""
+  echo "## Known Gaps"
+  for gap_file in .aimi/known-gaps/*.md; do
+    [ -f "$gap_file" ] || continue
+    story_id=$(basename "$gap_file" .md | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}-//')
+    echo ""
+    echo "### $story_id"
+    cat "$gap_file"
+  done
+fi
+```
+
+If `DESIGN_REVIEW_BUFFERS` is non-empty, append:
+```
+## Design Review
+
+For each entry in DESIGN_REVIEW_BUFFERS (keyed by story id, insertion order):
+
+### [story_id]: [entry.title]
+
+[entry.output]
+```
+
+If `DESIGN_REVIEW_BUFFERS` is empty, omit the `## Design Review` section entirely.
 
 If any pending gates exist, append:
 ```
