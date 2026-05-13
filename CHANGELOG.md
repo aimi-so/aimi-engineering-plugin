@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.86.3] - 2026-05-13
+
+### Changed
+- Collapsed the three near-identical "How `<flag>` works at runtime" subsections in `brainstorm.md` Override Keywords section (`show variants`, `vary ui`, `render bundle`) into one parameterized rule table (columns: trigger phrase, flag name, activation log line, scope/clear condition, precedence over Step 0a) and a single co-occurrence statement covering all pairwise and triple-overlap semantics. The user-facing summary table is preserved verbatim. Behavior unchanged — every flag name, log line, scope, clear condition, and precedence-over-Step-0a rule is identical.
+
 ## [1.86.2] - 2026-05-13
 
 ### Changed
