@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.86.5] - 2026-05-13
+
+### Changed
+- Folded the four near-identical inline "check flag → emit once → set true" blocks for `echoedBundleEarlyExit`, `echoedBrowserUnavailable`, `echoedSessionLost`, and `echoedPickerUnavailable` in `brainstorm.md` into one "Once-per-session echo helper" rule documented near Step 0b. Each call site now invokes the helper with its flag name and message. Flag names, message texts, working-memory initialization, and surrounding contextual prose are preserved verbatim.
+
 ## [1.86.4] - 2026-05-13
 
 ### Changed
