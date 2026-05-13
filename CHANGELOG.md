@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.86.4] - 2026-05-13
+
+### Changed
+- Consolidated the visual-follow lifecycle (detection, session-open, reuse-within-wave, keep-open-on-completion) from the four scattered sites in `execute.md` (Step 0.7, Step 3.3, Step 4 wave loop, Post-Loop) into one "Visual Follow Lifecycle" section placed before Step 0.7. Each call site now points at the consolidated section. Behavior preserved verbatim — MALFORMED_VERIF abort, per-story screenshot+compare logic, session name `visual-follow`, and the "Visual follow session still open" completion message all remain inline at their original sites.
+
 ## [1.86.3] - 2026-05-13
 
 ### Changed

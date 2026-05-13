@@ -65,6 +65,40 @@ Archive these completed tasks before starting? (yes/no)
 
 - **If user declines (no):** Proceed to Step 1 without archiving.
 
+## Visual Follow Lifecycle
+
+The visual-follow feature spans four phases of the execute flow. This section documents the full lifecycle; each call site below references it by name.
+
+### Phase 1 — Detection (Step 0.7)
+
+The tasks file is scanned for stories with `verification.strategy == "visual"`. If any are found, the user is prompted once whether to follow visually. The result is stored in `VISUAL_FOLLOW=true|false` and held for the rest of the session.
+
+### Phase 2 — Session Open (Step 3.3)
+
+When `VISUAL_FOLLOW=true`, a persistent headed browser session named `visual-follow` is opened before the wave loop begins:
+
+```bash
+agent-browser --headed --session visual-follow open "$VISUAL_URL"
+```
+
+**Availability check:** Before opening, `command -v agent-browser` is run. If `agent-browser` is not installed, the user is warned and `VISUAL_FOLLOW` is downgraded to `false` (headless fallback takes over in Phase 3):
+
+```
+⚠ agent-browser not installed. Falling back to headless mode — visual follow disabled.
+```
+
+The session is opened exactly once. It is never closed mid-run.
+
+### Phase 3 — Reuse Within Wave (Step 4 per-story)
+
+After each story merges, visual stories are verified. When `VISUAL_FOLLOW=true`, the existing `visual-follow` session is reused (`agent-browser --session visual-follow open/screenshot`). When `VISUAL_FOLLOW=false`, a fresh headless `agent-browser` session is opened, screenshot taken, and closed per story. If `agent-browser` is absent in either case, `verification.status` is set to `skipped`.
+
+### Phase 4 — Keep Open on Completion (Post-Loop)
+
+When `VISUAL_FOLLOW=true`, the `visual-follow` session is intentionally left open after execution ends so the user can inspect the final UI state. The user must close it manually.
+
+---
+
 ## Step 0.7: Visual Follow Prompt
 
 Check the tasks file directly for any stories with a visual verification strategy. Since `$AIMI_CLI status` omits the `verification` field, read the file with jq:
@@ -103,6 +137,8 @@ Frontend stories detected. Follow implementation visually in a headed browser? (
 
   - **If user says yes:** Set `VISUAL_FOLLOW=true`.
   - **If user says no:** Set `VISUAL_FOLLOW=false`.
+
+See the Visual Follow Lifecycle section above for the full lifecycle contract.
 
 Proceed to Step 1.
 
@@ -536,9 +572,9 @@ When stories target different projects (via the `project` field), each project m
 
 ### Open Visual Follow Session
 
-If `VISUAL_FOLLOW=true`, open a persistent headed browser session before entering the wave loop.
+See the Visual Follow Lifecycle section for context (Phase 2 — Session Open).
 
-First, check that `agent-browser` is available:
+If `VISUAL_FOLLOW=true`, open a persistent headed browser session before entering the wave loop:
 
 ```bash
 command -v agent-browser
@@ -886,6 +922,7 @@ while true:
                 $AIMI_CLI mark-complete [full_story.id]
 
                 # --- Post-merge visual verification for visual stories ---
+                # Session lifecycle: see Visual Follow Lifecycle section.
                 if full_story.verification and full_story.verification.strategy == "visual" and full_story.verification.status == "pending":
                     if VISUAL_FOLLOW == true:
                         # Reuse the existing headed session (managed by execute.md)
@@ -1011,7 +1048,9 @@ $WORKTREE_MGR remove [worktree_name]
 
 ### Visual Follow Session — Keep Open
 
-If `VISUAL_FOLLOW=true`, do NOT close the browser session after execution ends. The headed browser stays open so the user can inspect the final state of the UI. The user can close it manually when done.
+See the Visual Follow Lifecycle section (Phase 4 — Keep Open on Completion).
+
+If `VISUAL_FOLLOW=true`, do NOT close the `visual-follow` session.
 
 Report: `"Visual follow session still open — close manually when done: agent-browser --session visual-follow close"`
 
