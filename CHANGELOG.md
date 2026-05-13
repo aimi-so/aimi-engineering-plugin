@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.86.2] - 2026-05-13
+
+### Changed
+- Extracted input-sanitization rules and topic-slug derivation algorithm from `brainstorm.md` and `execute.md` into `commands/references/sanitization.md` and `commands/references/topic-slug.md`. Both commands now cite the new reference files instead of restating the rules inline, eliminating the stale line-number citation in `execute.md` Step 3.4. Behavior is preserved verbatim — pure prose deduplication.
+
 ## [1.86.1] - 2026-05-13
 
 ### Fixed
