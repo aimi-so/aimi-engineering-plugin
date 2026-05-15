@@ -26,11 +26,15 @@ If resolution fails, fall back to the legacy prose-only path for questions —
 do not abort the brainstorm. Log: `warning: aimi-cli.sh unresolved — forcing
 INTERACTIVE_MODE=picker`.
 
+**Each Bash tool call is an isolated shell — `$AIMI_CLI` does not persist.** Re-read the cache at the top of every subsequent Bash call that needs `$AIMI_CLI`. See the **Per-Call Resolution** section of `commands/references/cli-path-resolution.md` for the one-liner and shell guard to prepend.
+
 ## Step 0.5: Resolve Interactivity Mode
 
 Before any question is presented, resolve which mode applies:
 
 ```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
 ```
 
@@ -66,6 +70,8 @@ esac
 Run detection (failure is silent and non-blocking):
 
 ```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 if [ -n "$BUNDLE_ARG" ]; then
   BUNDLE_RESULT=$($AIMI_CLI detect-design-bundle --root "$BUNDLE_ARG" 2>/dev/null) || BUNDLE_RESULT=""
 else
@@ -90,6 +96,8 @@ error, no warning, no change to existing behavior.
 
 1. **Check status:**
    ```bash
+   AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+   : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
    STATUS_JSON=$($AIMI_CLI bundle-prototype-status \
      --bundle "<bundlePath>" \
      --topic "<topic-slug>" \
@@ -141,6 +149,8 @@ error, no warning, no change to existing behavior.
 
    a. **Finalize the sidecar:** Compute hashes and call:
       ```bash
+      AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+      : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
       BUNDLE_HASH=$(sha256sum "<bundlePath>/README.md" 2>/dev/null | awk '{print $1}' || echo "")
       DESIGN_HASH=$([ -n "<designSpecPath>" ] && sha256sum "<designSpecPath>" 2>/dev/null | awk '{print $1}' || echo "")
       BUSINESS_HASH=$([ -n "<businessSpecPath>" ] && sha256sum "<businessSpecPath>" 2>/dev/null | awk '{print $1}' || echo "")
