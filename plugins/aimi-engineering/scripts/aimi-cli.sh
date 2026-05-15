@@ -231,18 +231,47 @@ _is_claude_code_host() {
   [ "${CLAUDECODE:-}" = "1" ]
 }
 
-# Return the global cache file path for aimi-cli.sh
-_global_cache_path() {
+# Resolve the Aimi config directory (XDG-compliant, host-agnostic).
+# Honors AIMI_CONFIG_DIR env var; falls back to ${XDG_CONFIG_HOME:-$HOME/.config}/aimi.
+# When AIMI_CONFIG_DIR is set, validates it is an absolute path.
+# Always returns the path with any trailing slash stripped.
+_aimi_config_dir() {
+  local dir="${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}"
+  # Validate absolute path when explicitly set
+  if [ -n "${AIMI_CONFIG_DIR:-}" ] && [ "${dir#/}" = "$dir" ]; then
+    echo "Error: AIMI_CONFIG_DIR must be an absolute path, got: $dir" >&2
+    exit 1
+  fi
+  # Strip trailing slash
+  printf '%s\n' "${dir%/}"
+}
+
+# Return the legacy global cache file path for aimi-cli.sh (read-fallback only)
+_global_cache_path_legacy() {
   local config_dir
   config_dir=$(_claude_config_dir)
   printf '%s\n' "$config_dir/aimi-engineering-cli-path"
 }
 
-# Return the global cache file path for worktree-manager.sh
-_global_worktree_cache_path() {
+# Return the legacy global cache file path for worktree-manager.sh (read-fallback only)
+_global_worktree_cache_path_legacy() {
   local config_dir
   config_dir=$(_claude_config_dir)
   printf '%s\n' "$config_dir/aimi-engineering-worktree-path"
+}
+
+# Return the global cache file path for aimi-cli.sh (new XDG location)
+_global_cache_path() {
+  local aimi_dir
+  aimi_dir=$(_aimi_config_dir)
+  printf '%s\n' "$aimi_dir/cli-path"
+}
+
+# Return the global cache file path for worktree-manager.sh (new XDG location)
+_global_worktree_cache_path() {
+  local aimi_dir
+  aimi_dir=$(_aimi_config_dir)
+  printf '%s\n' "$aimi_dir/worktree-path"
 }
 
 # Atomically write the CLI path to the global cache file
@@ -251,6 +280,12 @@ write_global_cli_cache() {
   local path="$1"
   local cache_file
   cache_file=$(_global_cache_path)
+  local cache_dir
+  cache_dir=$(dirname "$cache_file")
+  if ! mkdir -p "$cache_dir" 2>/dev/null; then
+    echo "Error: write_global_cli_cache: cannot create directory: $cache_dir" >&2
+    return 1
+  fi
   local tmp_file
   tmp_file=$(mktemp "${cache_file}.XXXXXX")
   printf '%s\n' "$path" > "$tmp_file"
@@ -258,19 +293,10 @@ write_global_cli_cache() {
   mv "$tmp_file" "$cache_file"
 }
 
-# Read and validate the cached CLI path from the global cache file
-# Returns the cached path if valid, empty string otherwise
-read_global_cli_cache() {
-  local cache_file
-  cache_file=$(_global_cache_path)
-  if [ ! -f "$cache_file" ] || [ ! -r "$cache_file" ]; then
-    return 0
-  fi
-  local cached_path
-  cached_path=$(cat "$cache_file" 2>/dev/null) || return 0
-  # Validate path matches expected pattern
-  # Expected: */plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh
-  # Or: $AIMI_PLUGIN_DIR/scripts/aimi-cli.sh (compound-plugin converter)
+# _validate_cached_cli_path: run a path through the whitelist case statement
+# Returns the path unchanged if valid, empty string if rejected
+_validate_cached_cli_path() {
+  local cached_path="$1"
   local plugin_dir
   plugin_dir=$(_validate_plugin_dir)
   case "$cached_path" in
@@ -285,12 +311,41 @@ read_global_cli_cache() {
   esac
 }
 
+# Read and validate the cached CLI path from the global cache file
+# Tries new XDG path first, falls back to legacy path if new is absent.
+# Returns the cached path if valid, empty string otherwise.
+read_global_cli_cache() {
+  local cache_file
+  cache_file=$(_global_cache_path)
+  if [ -f "$cache_file" ] && [ -r "$cache_file" ]; then
+    local cached_path
+    cached_path=$(cat "$cache_file" 2>/dev/null) || return 0
+    _validate_cached_cli_path "$cached_path"
+    return 0
+  fi
+  # Fall back to legacy path
+  local legacy_file
+  legacy_file=$(_global_cache_path_legacy)
+  if [ ! -f "$legacy_file" ] || [ ! -r "$legacy_file" ]; then
+    return 0
+  fi
+  local cached_path
+  cached_path=$(cat "$legacy_file" 2>/dev/null) || return 0
+  _validate_cached_cli_path "$cached_path"
+}
+
 # Atomically write the worktree manager path to the global cache file
 # Usage: write_global_worktree_cache "/path/to/worktree-manager.sh"
 write_global_worktree_cache() {
   local path="$1"
   local cache_file
   cache_file=$(_global_worktree_cache_path)
+  local cache_dir
+  cache_dir=$(dirname "$cache_file")
+  if ! mkdir -p "$cache_dir" 2>/dev/null; then
+    echo "Error: write_global_worktree_cache: cannot create directory: $cache_dir" >&2
+    return 1
+  fi
   local tmp_file
   tmp_file=$(mktemp "${cache_file}.XXXXXX")
   printf '%s\n' "$path" > "$tmp_file"
@@ -298,19 +353,10 @@ write_global_worktree_cache() {
   mv "$tmp_file" "$cache_file"
 }
 
-# Read and validate the cached worktree manager path from the global cache file
-# Returns the cached path if valid, empty string otherwise
-read_global_worktree_cache() {
-  local cache_file
-  cache_file=$(_global_worktree_cache_path)
-  if [ ! -f "$cache_file" ] || [ ! -r "$cache_file" ]; then
-    return 0
-  fi
-  local cached_path
-  cached_path=$(cat "$cache_file" 2>/dev/null) || return 0
-  # Validate path matches expected pattern
-  # Expected: */plugins/cache/*/aimi-engineering/*/skills/git-worktree/scripts/worktree-manager.sh
-  # Or: $AIMI_PLUGIN_DIR/skills/git-worktree/scripts/worktree-manager.sh (compound-plugin converter)
+# _validate_cached_worktree_path: run a worktree path through the whitelist case statement
+# Returns the path unchanged if valid, empty string if rejected
+_validate_cached_worktree_path() {
+  local cached_path="$1"
   local plugin_dir
   plugin_dir=$(_validate_plugin_dir)
   case "$cached_path" in
@@ -323,6 +369,29 @@ read_global_worktree_cache() {
       printf '%s\n' "$cached_path"
       ;;
   esac
+}
+
+# Read and validate the cached worktree manager path from the global cache file
+# Tries new XDG path first, falls back to legacy path if new is absent.
+# Returns the cached path if valid, empty string otherwise.
+read_global_worktree_cache() {
+  local cache_file
+  cache_file=$(_global_worktree_cache_path)
+  if [ -f "$cache_file" ] && [ -r "$cache_file" ]; then
+    local cached_path
+    cached_path=$(cat "$cache_file" 2>/dev/null) || return 0
+    _validate_cached_worktree_path "$cached_path"
+    return 0
+  fi
+  # Fall back to legacy path
+  local legacy_file
+  legacy_file=$(_global_worktree_cache_path_legacy)
+  if [ ! -f "$legacy_file" ] || [ ! -r "$legacy_file" ]; then
+    return 0
+  fi
+  local cached_path
+  cached_path=$(cat "$legacy_file" 2>/dev/null) || return 0
+  _validate_cached_worktree_path "$cached_path"
 }
 
 # Validate story ID format (US-NNN or US-NNNa)
