@@ -28,6 +28,19 @@ ESCAPED_CONFIG_DIR=$(printf '%s' "$RESOLVED_CONFIG_DIR" | sed 's/[.[\*^$()+?{|\\
 #   ~\/.claude  |  \$\{CLAUDE_CONFIG_DIR:-\$HOME\/\.claude\}  |  /resolved/path
 CONFIG_DIR_RE="(~/\\.claude|\\\$\\{CLAUDE_CONFIG_DIR:-\\\$HOME/\\.claude\\}|${ESCAPED_CONFIG_DIR})"
 
+# --- Resolve XDG aimi config directory for new cache path matching ---
+# Commands may reference the aimi config dir as:
+#   1. ~/.config/aimi                                        (tilde shorthand)
+#   2. ${XDG_CONFIG_HOME:-$HOME/.config}/aimi                (parameterized XDG form)
+#   3. ${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}  (AIMI_CONFIG_DIR form)
+#   4. /resolved/absolute/path/aimi                          (resolved absolute path)
+RESOLVED_AIMI_DIR="${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}"
+RESOLVED_AIMI_DIR="${RESOLVED_AIMI_DIR%/}"
+ESCAPED_AIMI_DIR=$(printf '%s' "$RESOLVED_AIMI_DIR" | sed 's/[.[\*^$()+?{|\\]/\\&/g; s/\//\\\//g')
+# Build the aimi dir regex alternation:
+#   ~/\.config\/aimi  |  \$\{XDG_CONFIG_HOME:-\$HOME\/\.config\}\/aimi  |  \$\{AIMI_CONFIG_DIR:-...\}  |  /resolved/path
+AIMI_DIR_RE="(~/\\.config/aimi|\\\$\\{XDG_CONFIG_HOME:-\\\$HOME/\\.config\\}/aimi|\\\$\\{AIMI_CONFIG_DIR:-\\\$\\{XDG_CONFIG_HOME:-\\\$HOME/\\.config\\}/aimi\\}|${ESCAPED_AIMI_DIR})"
+
 # --- Helper: Reject shell metacharacters ---
 # Returns 0 (true) if dangerous metacharacters are found after the variable reference.
 has_metacharacters() {
@@ -69,8 +82,13 @@ if echo "$COMMAND" | grep -qE '^AIMI_CLI='; then
     echo "$ALLOW"
     exit 0
   fi
-  # Cache read: AIMI_CLI=$(cat <config>/aimi-engineering-cli-path 2>/dev/null)
+  # Cache read: AIMI_CLI=$(cat <config>/aimi-engineering-cli-path 2>/dev/null)  [legacy]
   if echo "$COMMAND" | grep -qE "^AIMI_CLI=\\$\\(cat ${CONFIG_DIR_RE}/aimi-engineering-cli-path 2>/dev/null\\)\$"; then
+    echo "$ALLOW"
+    exit 0
+  fi
+  # Cache read: AIMI_CLI=$(cat <aimi-dir>/cli-path 2>/dev/null)  [new XDG]
+  if echo "$COMMAND" | grep -qE "^AIMI_CLI=\\$\\(cat ${AIMI_DIR_RE}/cli-path 2>/dev/null\\)\$"; then
     echo "$ALLOW"
     exit 0
   fi
@@ -116,8 +134,13 @@ if echo "$COMMAND" | grep -qE '^WORKTREE_MGR='; then
     echo "$ALLOW"
     exit 0
   fi
-  # Cache read: WORKTREE_MGR=$(cat <config>/aimi-engineering-worktree-path 2>/dev/null)
+  # Cache read: WORKTREE_MGR=$(cat <config>/aimi-engineering-worktree-path 2>/dev/null)  [legacy]
   if echo "$COMMAND" | grep -qE "^WORKTREE_MGR=\\$\\(cat ${CONFIG_DIR_RE}/aimi-engineering-worktree-path 2>/dev/null\\)\$"; then
+    echo "$ALLOW"
+    exit 0
+  fi
+  # Cache read: WORKTREE_MGR=$(cat <aimi-dir>/worktree-path 2>/dev/null)  [new XDG]
+  if echo "$COMMAND" | grep -qE "^WORKTREE_MGR=\\$\\(cat ${AIMI_DIR_RE}/worktree-path 2>/dev/null\\)\$"; then
     echo "$ALLOW"
     exit 0
   fi
@@ -176,16 +199,37 @@ if echo "$COMMAND" | grep -qE "^if \\[ -z \"\\\$WORKTREE_MGR\" \\]; then WORKTRE
   exit 0
 fi
 
-# --- Pattern 9: AIMI_CLI Layer 2 cache write ---
+# --- Pattern 9: AIMI_CLI Layer 2 cache write [legacy] ---
 # Approves: if [ -n "$AIMI_CLI" ]; then printf '%s\n' "$AIMI_CLI" > "<config>/aimi-engineering-cli-path.tmp" && mv "<config>/aimi-engineering-cli-path.tmp" "<config>/aimi-engineering-cli-path" && chmod 600 "<config>/aimi-engineering-cli-path"; fi
 if echo "$COMMAND" | grep -qE "^if \\[ -n \"\\\$AIMI_CLI\" \\]; then printf '%s\\\\n' \"\\\$AIMI_CLI\" > \"${CONFIG_DIR_RE}/aimi-engineering-cli-path\\.tmp\" && mv \"${CONFIG_DIR_RE}/aimi-engineering-cli-path\\.tmp\" \"${CONFIG_DIR_RE}/aimi-engineering-cli-path\" && chmod 600 \"${CONFIG_DIR_RE}/aimi-engineering-cli-path\"; fi\$"; then
   echo "$ALLOW"
   exit 0
 fi
 
-# --- Pattern 10: WORKTREE_MGR Layer 2 cache write ---
+# --- Pattern 10: WORKTREE_MGR Layer 2 cache write [legacy] ---
 # Approves: if [ -n "$WORKTREE_MGR" ]; then printf '%s\n' "$WORKTREE_MGR" > "<config>/aimi-engineering-worktree-path.tmp" && mv "<config>/aimi-engineering-worktree-path.tmp" "<config>/aimi-engineering-worktree-path" && chmod 600 "<config>/aimi-engineering-worktree-path"; fi
 if echo "$COMMAND" | grep -qE "^if \\[ -n \"\\\$WORKTREE_MGR\" \\]; then printf '%s\\\\n' \"\\\$WORKTREE_MGR\" > \"${CONFIG_DIR_RE}/aimi-engineering-worktree-path\\.tmp\" && mv \"${CONFIG_DIR_RE}/aimi-engineering-worktree-path\\.tmp\" \"${CONFIG_DIR_RE}/aimi-engineering-worktree-path\" && chmod 600 \"${CONFIG_DIR_RE}/aimi-engineering-worktree-path\"; fi\$"; then
+  echo "$ALLOW"
+  exit 0
+fi
+
+# --- Pattern 9x: AIMI_CLI Layer 2 cache write [new XDG] ---
+# Approves: if [ -n "$AIMI_CLI" ]; then printf '%s\n' "$AIMI_CLI" > "<aimi-dir>/cli-path.tmp" && mv "<aimi-dir>/cli-path.tmp" "<aimi-dir>/cli-path" && chmod 600 "<aimi-dir>/cli-path"; fi
+if echo "$COMMAND" | grep -qE "^if \\[ -n \"\\\$AIMI_CLI\" \\]; then printf '%s\\\\n' \"\\\$AIMI_CLI\" > \"${AIMI_DIR_RE}/cli-path\\.tmp\" && mv \"${AIMI_DIR_RE}/cli-path\\.tmp\" \"${AIMI_DIR_RE}/cli-path\" && chmod 600 \"${AIMI_DIR_RE}/cli-path\"; fi\$"; then
+  echo "$ALLOW"
+  exit 0
+fi
+
+# --- Pattern 10x: WORKTREE_MGR Layer 2 cache write [new XDG] ---
+# Approves: if [ -n "$WORKTREE_MGR" ]; then printf '%s\n' "$WORKTREE_MGR" > "<aimi-dir>/worktree-path.tmp" && mv "<aimi-dir>/worktree-path.tmp" "<aimi-dir>/worktree-path" && chmod 600 "<aimi-dir>/worktree-path"; fi
+if echo "$COMMAND" | grep -qE "^if \\[ -n \"\\\$WORKTREE_MGR\" \\]; then printf '%s\\\\n' \"\\\$WORKTREE_MGR\" > \"${AIMI_DIR_RE}/worktree-path\\.tmp\" && mv \"${AIMI_DIR_RE}/worktree-path\\.tmp\" \"${AIMI_DIR_RE}/worktree-path\" && chmod 600 \"${AIMI_DIR_RE}/worktree-path\"; fi\$"; then
+  echo "$ALLOW"
+  exit 0
+fi
+
+# --- Pattern 10y: mkdir -p for new XDG aimi config dir ---
+# Approves: mkdir -p <aimi-dir>
+if echo "$COMMAND" | grep -qE "^mkdir -p \"?${AIMI_DIR_RE}\"?\$"; then
   echo "$ALLOW"
   exit 0
 fi
