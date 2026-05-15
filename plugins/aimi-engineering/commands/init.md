@@ -30,7 +30,7 @@ STATUS=$(printf '%s' "$PRIME_JSON" | jq -r '.status')
 PATH_VAL=$(printf '%s' "$PRIME_JSON" | jq -r '.path // "null"')
 VERSION=$(printf '%s' "$PRIME_JSON" | jq -r '.version // "null"')
 MESSAGE=$(printf '%s' "$PRIME_JSON" | jq -r '.message // ""')
-CACHE_FILE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path"
+CACHE_FILE="${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path"
 ```
 
 Display the result based on `$STATUS`:
