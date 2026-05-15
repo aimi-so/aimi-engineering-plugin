@@ -56,7 +56,7 @@ Every plugin change requires synchronized bumps in three files (per `plugins/aim
 `aimi-cli.sh` is the only executable consumed by commands. All commands resolve it through a four-layer strategy documented in `plugins/aimi-engineering/commands/references/cli-path-resolution.md`:
 
 - Layer 0: `$AIMI_PLUGIN_DIR` (skipped inside Claude Code)
-- Layer 1: `~/.claude/aimi-engineering-cli-path` global cache
+- Layer 1: `~/.config/aimi/cli-path` global cache (new XDG path; `$AIMI_CONFIG_DIR/cli-path` when that var is set; legacy `~/.claude/aimi-engineering-cli-path` read as fallback)
 - Layer 2: glob under `~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh`
 - Layer 3: per-project `.aimi/cli-path`
 

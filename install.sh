@@ -824,8 +824,10 @@ uninstall_opencode() {
     log "[dry-run] Would remove context7 from $target_dir/opencode.json"
     log "[dry-run] Would remove permissions from $target_dir/opencode.json"
     log "[dry-run] Would remove AIMI_PLUGIN_DIR from shell profiles"
-    local cache_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path"
-    [ -f "$cache_file" ] && log "[dry-run] Would remove $cache_file"
+    local new_cache_file="${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path"
+    local legacy_cache_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path"
+    [ -f "$new_cache_file" ]    && log "[dry-run] Would remove $new_cache_file"
+    [ -f "$legacy_cache_file" ] && log "[dry-run] Would remove $legacy_cache_file"
     return 0
   fi
 
@@ -935,11 +937,16 @@ with open('$config_file', 'w') as f:
   done
   ok "Removed AIMI_PLUGIN_DIR from shell profiles"
 
-  # Remove global CLI path cache (best-effort)
-  local cache_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path"
-  if [ -f "$cache_file" ]; then
-    rm -f "$cache_file"
-    log "Removed CLI path cache $cache_file"
+  # Remove global CLI path cache (best-effort; remove both new XDG and legacy paths)
+  local new_cache_file="${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path"
+  local legacy_cache_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path"
+  if [ -f "$new_cache_file" ]; then
+    rm -f "$new_cache_file"
+    log "Removed CLI path cache $new_cache_file"
+  fi
+  if [ -f "$legacy_cache_file" ]; then
+    rm -f "$legacy_cache_file"
+    log "Removed legacy CLI path cache $legacy_cache_file"
   fi
 
   echo
