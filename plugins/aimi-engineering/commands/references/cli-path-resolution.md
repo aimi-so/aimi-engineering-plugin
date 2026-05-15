@@ -16,8 +16,10 @@ Layer 0 first checks that `CLAUDECODE` is unset — when running inside Claude C
 
 ### Layer 1: Global cache (fast path)
 
+Try the new XDG path first; fall back to the legacy path during the migration window.
+
 ```bash
-if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(cat ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path 2>/dev/null); fi
+if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null); fi
 ```
 
 ### Layer 1 validation: verify cached path exists and is executable
@@ -36,8 +38,10 @@ if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.c
 
 ### Layer 2 cache update: save for next time
 
+Writes to the new XDG path. `mkdir -p` ensures the directory exists before the atomic write.
+
 ```bash
-if [ -n "$AIMI_CLI" ]; then printf '%s\n' "$AIMI_CLI" > "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path.tmp" && mv "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path.tmp" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" && chmod 600 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path"; fi
+if [ -n "$AIMI_CLI" ]; then _aimi_cfg="${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}"; mkdir -p "$_aimi_cfg" && printf '%s\n' "$AIMI_CLI" > "$_aimi_cfg/cli-path.tmp" && mv "$_aimi_cfg/cli-path.tmp" "$_aimi_cfg/cli-path" && chmod 600 "$_aimi_cfg/cli-path"; fi
 ```
 
 ### Layer 3: Per-project fallback (last resort)
@@ -64,8 +68,10 @@ Layer 0 first checks that `CLAUDECODE` is unset — when running inside Claude C
 
 ### Layer 1: Global cache (fast path)
 
+Try the new XDG path first; fall back to the legacy path during the migration window.
+
 ```bash
-if [ -z "$WORKTREE_MGR" ]; then WORKTREE_MGR=$(cat ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path 2>/dev/null); fi
+if [ -z "$WORKTREE_MGR" ]; then WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null); fi
 ```
 
 ### Layer 1 validation: verify cached path exists and is executable
@@ -84,8 +90,10 @@ if [ -z "$WORKTREE_MGR" ]; then WORKTREE_MGR=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-
 
 ### Layer 2 cache update: save for next time
 
+Writes to the new XDG path. `mkdir -p` ensures the directory exists before the atomic write.
+
 ```bash
-if [ -n "$WORKTREE_MGR" ]; then printf '%s\n' "$WORKTREE_MGR" > "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path.tmp" && mv "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path.tmp" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" && chmod 600 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path"; fi
+if [ -n "$WORKTREE_MGR" ]; then _aimi_cfg="${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}"; mkdir -p "$_aimi_cfg" && printf '%s\n' "$WORKTREE_MGR" > "$_aimi_cfg/worktree-path.tmp" && mv "$_aimi_cfg/worktree-path.tmp" "$_aimi_cfg/worktree-path" && chmod 600 "$_aimi_cfg/worktree-path"; fi
 ```
 
 ### Layer 3: Per-project fallback (last resort)
@@ -108,7 +116,37 @@ $AIMI_CLI check-version --quiet --fix
 
 If `check-version` exits 0, no action is needed — proceed normally. The `--quiet` flag suppresses informational output and `--fix` auto-updates a stale cli-path. This does NOT call `cleanup-versions` (cleanup is manual-only).
 
-**Use `$AIMI_CLI` for ALL subsequent script calls in this command.**
+**`$AIMI_CLI` does not persist across Bash tool calls.** Re-read the cache at the top of every subsequent call — see [Per-Call Resolution](#per-call-resolution) below.
+
+## Per-Call Resolution
+
+**Precondition:** this pattern assumes Step 0 (the full Layer 0–3 resolution above) has already run in a prior Bash call and written the cache to the new XDG path. Without that primer, the one-liner below returns empty.
+
+Each Bash tool call is an **isolated shell** — variables set in one call do not exist in the next. Re-read both `$AIMI_CLI` and `$WORKTREE_MGR` from the cache file at the top of every Bash call that needs them.
+
+### $AIMI_CLI one-liner
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+```
+
+The `||` fallback covers the migration window: if only the legacy file exists, it is used. The `: "${VAR:?…}"` guard turns a silent empty into a loud failure that exits the Bash call immediately with a clear message.
+
+### $WORKTREE_MGR one-liner
+
+```bash
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+```
+
+### Failure Signature
+
+Symptom: the Bash call prints `command not found: <subcommand>` with no path prefix before the subcommand name.
+
+Cause: `$AIMI_CLI` (or `$WORKTREE_MGR`) expanded to empty in this Bash call. The shell tried to run the subcommand name as a standalone binary and failed.
+
+Fix: add the per-call re-read one-liner at the top of the failing Bash call. If the re-read itself returns empty, Step 0 has not yet run in this session — run the full Layer 0–3 resolution first.
 
 ## CWD Auto-Discovery
 
