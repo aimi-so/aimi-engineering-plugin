@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.87.0] - 2026-05-15
+
+### Added
+- XDG-compliant cache location at `~/.config/aimi/cli-path` and `~/.config/aimi/worktree-path` for storing the resolved CLI and worktree paths. The location can be overridden via the new `AIMI_CONFIG_DIR` environment variable (e.g., `AIMI_CONFIG_DIR=/custom/path`), which governs cache file placement only — Layer 2 plugin discovery continues to use `CLAUDE_CONFIG_DIR`.
+- New `_aimi_config_dir()` helper in `aimi-cli.sh` encapsulates the `AIMI_CONFIG_DIR`-or-XDG-default resolution, making all cache read/write call sites consistent.
+- "Per-Call Resolution" section in `commands/references/cli-path-resolution.md` documenting the shell-isolation hazard and the required per-call `cat` re-read pattern with explicit precondition (Step 0 full resolution must have run first to prime the new path).
+
+### Changed
+- `plan.md`, `execute.md`, `brainstorm.md`, `skills/story-executor/SKILL.md`, and `skills/task-planner/SKILL.md` migrated to per-call CLI re-read: each Bash call that needs `$AIMI_CLI` now resolves it inline via `cat ~/.config/aimi/cli-path` rather than relying on a shell variable from a prior call.
+- `auto-approve-cli.sh` hook updated to recognize the new XDG paths (`~/.config/aimi/cli-path`, `~/.config/aimi/worktree-path`) alongside the legacy `~/.claude/aimi-engineering-{cli,worktree}-path` paths, so CLI cache reads and writes do not trigger unexpected permission prompts during the migration window.
+- Hard-coded legacy `~/.claude/aimi-engineering-cli-path` references in `commands/init.md`, `CLAUDE.md`, `install.sh`, and `settings.local.json` updated to reflect the new XDG location.
+
+### Fixed
+- Shell-isolation hazard where `$AIMI_CLI` resolved correctly in one Bash call but expanded to empty in every subsequent call (each Claude Code Bash invocation runs in an isolated subshell), causing silent "command not found: `<subcommand>`" failures throughout plan, execute, and brainstorm workflows.
+
+### Compatibility
+- Legacy `~/.claude/aimi-engineering-cli-path` and `~/.claude/aimi-engineering-worktree-path` files remain supported via a read-both fallback: `aimi-cli.sh` tries the new XDG location first and falls back to the legacy path if the new file is absent. **No user action is required.** The legacy read-both fallback is planned for removal in the next MAJOR version bump.
+
 ## [1.86.7] - 2026-05-13
 
 ### Changed
