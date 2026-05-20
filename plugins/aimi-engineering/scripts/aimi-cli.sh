@@ -2392,8 +2392,14 @@ cmd_update_field() {
   validate_story_exists "$story_id" "$tasks_file"
 
   # Build jq path from dotted notation (e.g., "verification.status" -> .verification.status)
-  local jq_path
-  jq_path=$(printf '%s' "$field_path" | sed 's/\./\n/g' | while read -r part; do printf '.%s' "$part"; done)
+  # IFS-split on a herestring is trailing-newline-safe; avoids read returning non-zero
+  # on the final unterminated segment when piping through sed, which dropped the leaf.
+  local jq_path _parts _p
+  IFS=. read -ra _parts <<< "$field_path"
+  jq_path=''
+  for _p in "${_parts[@]}"; do
+    jq_path+=".$_p"
+  done
 
   local tmp_file
   tmp_file=$(mktemp "${tasks_file}.XXXXXX")
