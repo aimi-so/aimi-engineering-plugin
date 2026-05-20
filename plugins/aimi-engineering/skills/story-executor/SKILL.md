@@ -236,8 +236,14 @@ If HEADED_MODE is false or absent:
 
 STORY_ID: [STORY_ID]
 
-Your first action is to fetch full story context:
+Your first action is to resolve the CLI path, then fetch full story context.
+
+**Step 0 — Resolve CLI Path** (see [cli-path-resolution.md](../commands/references/cli-path-resolution.md) for full Layer 0–3 strategy).
+Each Bash call is an isolated shell — `$AIMI_CLI` is never inherited. Re-read from cache at the top of every Bash call that needs it:
+
 ```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 $AIMI_CLI get-story-context [STORY_ID]
 ```
 Parse the returned JSON for two top-level fields:
@@ -359,7 +365,7 @@ All file operations MUST stay within the project boundary: PROJECT_PATH when set
 
 <execution_flow>
 
-0a. **Bootstrap (FIRST ACTION):** Run `$AIMI_CLI get-story-context $STORY_ID` and parse the returned JSON. Extract:
+0a. **Bootstrap (FIRST ACTION):** Re-read `$AIMI_CLI` from cache (per-call re-read — see `<task_pointer>` Step 0 above), then run `$AIMI_CLI get-story-context $STORY_ID` and parse the returned JSON. Extract:
     - `story` — full story object (`id`, `title`, `description`, `acceptanceCriteria`, `notes`, `tasks`, `implementation`, `verification`, `gate`)
     - `metadata` — session metadata (`prototypePaths`, `prototypeAnchor`, `branchName`, etc.)
     If this command fails, report failure immediately and stop.
@@ -475,7 +481,15 @@ If HEADED_MODE is false or absent:
 <task_pointer>
 STORY_ID: [STORY_ID]
 
-First action: run `$AIMI_CLI get-story-context [STORY_ID]` and parse `{story, metadata}` from the returned JSON. If it fails, report failure and stop.
+First action — re-read `$AIMI_CLI` from cache, then fetch story context:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI get-story-context [STORY_ID]
+```
+
+Parse `{story, metadata}` from the returned JSON. If the command fails, report failure and stop.
 </task_pointer>
 
 <prototype_context>
@@ -503,7 +517,7 @@ CRITICAL: Stay within project root. Never read/write outside project boundary. W
 </project_root_boundary>
 
 <execution_flow>
-Bootstrap: run `$AIMI_CLI get-story-context $STORY_ID`, parse `{story, metadata}`. Read prototype files from `metadata.prototypePaths[]` and `story.implementation.prototypeAnchor` via Read tool (log missing, skip). Then follow standard execution flow: read criteria → implement → test → commit. If `story.verification.strategy == "visual"` OR `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, run the Visual Source-of-Truth Protocol (V1/V2/V3) before writing code. Stage only story-related files (never `-A` or `.`). Commit format: `git commit -m "type(scope): Story title"`. Verify with `git log -1 --oneline`. On commit failure: report immediately, do not retry. Do NOT update tasks file — caller handles status. When a reference artifact is declared, run the Reference-Artifact Parity Pass before committing (see full named section above).
+Bootstrap: re-read `$AIMI_CLI` from cache (per-call re-read one-liner — see `<task_pointer>` above), run `$AIMI_CLI get-story-context $STORY_ID`, parse `{story, metadata}`. Read prototype files from `metadata.prototypePaths[]` and `story.implementation.prototypeAnchor` via Read tool (log missing, skip). Then follow standard execution flow: read criteria → implement → test → commit. If `story.verification.strategy == "visual"` OR `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, run the Visual Source-of-Truth Protocol (V1/V2/V3) before writing code. Stage only story-related files (never `-A` or `.`). Commit format: `git commit -m "type(scope): Story title"`. Verify with `git log -1 --oneline`. On commit failure: report immediately, do not retry. Do NOT update tasks file — caller handles status. When a reference artifact is declared, run the Reference-Artifact Parity Pass before committing (see full named section above).
 </execution_flow>
 
 <on_failure>

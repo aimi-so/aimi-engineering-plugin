@@ -21,6 +21,8 @@ Read `${CLAUDE_PLUGIN_ROOT}/commands/references/cli-path-resolution.md` and foll
 
 If resolution fails, report error and STOP.
 
+**Each Bash tool call is an isolated shell — `$AIMI_CLI` does not persist.** Re-read the cache at the top of every subsequent Bash call that needs `$AIMI_CLI`. See the **Per-Call Resolution** section of `commands/references/cli-path-resolution.md` for the one-liner and shell guard to prepend.
+
 ### Detect Git Repo Layout
 
 Check if the current directory (AIMI root) is itself a git repository:
@@ -36,6 +38,8 @@ Store the result as `AIMI_ROOT_IS_GIT_REPO` (true/false). When false, this is a 
 **If `AIMI_ROOT_IS_GIT_REPO` is true:**
 
 ```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 git fetch origin 2>&1 || echo "WARNING: git fetch failed (offline?). Continuing with local refs."
 $AIMI_CLI detect-default-branch
 ```
@@ -47,6 +51,8 @@ Use the output as the default branch for `branchName` derivation in Phase 4.
 ### Detect Interactivity
 
 ```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
 ```
 
@@ -91,12 +97,16 @@ Extract an optional `--root <path>` flag from `$ARGUMENTS` (e.g. `--root .aimi/b
 Run bundle detection unconditionally:
 
 ```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 BUNDLE_META=$($AIMI_CLI detect-design-bundle 2>/dev/null) || BUNDLE_META=""
 ```
 
 If `BUNDLE_OVERRIDE` is non-empty, pass it as the override flag:
 
 ```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 BUNDLE_META=$($AIMI_CLI detect-design-bundle --root "$BUNDLE_OVERRIDE" 2>/dev/null) || BUNDLE_META=""
 ```
 
@@ -113,6 +123,8 @@ When `designBundleMeta` is non-null AND (`bundlePayload.prototypes[]` is empty O
 1. **Check generation status:**
 
 ```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 STATUS_JSON=$($AIMI_CLI bundle-prototype-status \
   --bundle "<bundlePath>" \
   --topic "<topicSlug>" \
@@ -157,6 +169,8 @@ Task subagent_type="aimi-engineering:research:aimi-bundle-prototype-author"
    After the agent writes `outputPath`, write the sidecar atomically:
 
 ```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 $AIMI_CLI bundle-prototype-finalize \
   --topic "<topicSlug>" \
   --bundle-hash "<bundleHash>" \
@@ -1020,6 +1034,8 @@ After writing the tasks.json file(s), validate each generated output independent
 For each generated tasks file, run `normalize-verification` first. This auto-migrates any string-typed `verification` values emitted by the planner into the required object shape, preventing `validate-stories` from rejecting them.
 
 ```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 TASKS_PATH=".aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json"
 $AIMI_CLI normalize-verification "$TASKS_PATH"
 NORMALIZE_EXIT=$?
@@ -1037,6 +1053,8 @@ If `normalize-verification` exits non-zero, **stop here** — do not run any fur
 **For split files (full-stack):** run validation on each file separately using `init-session --file`:
 
 ```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 $AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
 $AIMI_CLI validate-ids
 $AIMI_CLI validate-deps
@@ -1053,6 +1071,8 @@ $AIMI_CLI validate-tasks
 **For single file (frontend-only or legacy):**
 
 ```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 $AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
 $AIMI_CLI validate-ids
 $AIMI_CLI validate-deps

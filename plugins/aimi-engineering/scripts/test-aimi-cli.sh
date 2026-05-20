@@ -1588,13 +1588,15 @@ test_next_story_returns_full_object() {
 # behavior, manually source aimi-cli.sh in a zsh shell and verify
 # _global_cache_path and read_global_cli_cache return correct results.
 
-# Helper: set up an isolated CLAUDE_CONFIG_DIR with a mock plugin cache
+# Helper: set up an isolated CLAUDE_CONFIG_DIR and AIMI_CONFIG_DIR with a mock plugin cache
 # structure so the CLI's glob-based resolution finds a fake aimi-cli.sh.
-# Sets CLAUDE_CONFIG_DIR, MOCK_CLI_PATH, and MOCK_WORKTREE_PATH globals.
+# Sets CLAUDE_CONFIG_DIR, AIMI_CONFIG_DIR, MOCK_CLI_PATH, and MOCK_WORKTREE_PATH globals.
 setup_global_cache_env() {
   GLOBAL_CACHE_TMPDIR=$(mktemp -d)
   export CLAUDE_CONFIG_DIR="$GLOBAL_CACHE_TMPDIR/claude-config"
+  export AIMI_CONFIG_DIR="$GLOBAL_CACHE_TMPDIR/aimi-config"
   mkdir -p "$CLAUDE_CONFIG_DIR"
+  mkdir -p "$AIMI_CONFIG_DIR"
 
   # Build a mock plugin cache directory structure:
   #   <config>/plugins/cache/marketplace-hash/aimi-engineering/1.99.0/scripts/aimi-cli.sh
@@ -1618,6 +1620,7 @@ setup_global_cache_env() {
 teardown_global_cache_env() {
   rm -rf "$GLOBAL_CACHE_TMPDIR"
   unset CLAUDE_CONFIG_DIR
+  unset AIMI_CONFIG_DIR
   unset GLOBAL_CACHE_TMPDIR
   unset MOCK_CLI_PATH
   unset MOCK_WORKTREE_PATH
@@ -1659,11 +1662,16 @@ teardown_aimi_plugin_dir_env() {
 # We extract the needed functions using sed so we can call them directly.
 source_cache_functions() {
   eval "$(sed -n '/^_claude_config_dir()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_aimi_config_dir()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_validate_plugin_dir()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_is_claude_code_host()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_global_cache_path_legacy()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_global_worktree_cache_path_legacy()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_global_cache_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_global_worktree_cache_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_extract_version_from_path()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_validate_cached_cli_path()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_validate_cached_worktree_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^write_global_cli_cache()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^read_global_cli_cache()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^write_global_worktree_cache()/,/^}/p' "$CLI")"
@@ -1942,6 +1950,279 @@ test_check_version_fix_updates_global_cache() {
   assert_eq "$latest_glob_path" "$cached_content" "check-version --fix: global cache updated to latest path"
 
   teardown_global_cache_env
+}
+
+# ============================================================================
+# _aimi_config_dir Tests
+# ============================================================================
+
+test_aimi_config_dir_default() {
+  echo ""
+  echo "=== Testing _aimi_config_dir: unset falls back to XDG default ==="
+
+  source_cache_functions
+
+  local result
+  result=$(unset AIMI_CONFIG_DIR; unset XDG_CONFIG_HOME; _aimi_config_dir)
+
+  assert_eq "$HOME/.config/aimi" "$result" "_aimi_config_dir: unset AIMI_CONFIG_DIR falls back to \$HOME/.config/aimi"
+}
+
+test_aimi_config_dir_xdg_override() {
+  echo ""
+  echo "=== Testing _aimi_config_dir: XDG_CONFIG_HOME override ==="
+
+  source_cache_functions
+
+  local result
+  result=$(unset AIMI_CONFIG_DIR; XDG_CONFIG_HOME="/tmp/custom-xdg" _aimi_config_dir)
+
+  assert_eq "/tmp/custom-xdg/aimi" "$result" "_aimi_config_dir: XDG_CONFIG_HOME override used"
+}
+
+test_aimi_config_dir_custom_absolute() {
+  echo ""
+  echo "=== Testing _aimi_config_dir: AIMI_CONFIG_DIR custom absolute path ==="
+
+  source_cache_functions
+
+  local result
+  result=$(AIMI_CONFIG_DIR="/tmp/custom-aimi" _aimi_config_dir)
+  assert_eq "/tmp/custom-aimi" "$result" "_aimi_config_dir: custom absolute path resolves correctly"
+
+  result=$(AIMI_CONFIG_DIR="/tmp/custom-aimi/" _aimi_config_dir)
+  assert_eq "/tmp/custom-aimi" "$result" "_aimi_config_dir: trailing slash is stripped from custom path"
+}
+
+test_aimi_config_dir_relative_path_error() {
+  echo ""
+  echo "=== Testing _aimi_config_dir: relative path produces validation error ==="
+
+  source_cache_functions
+
+  local stderr_output exit_code
+  stderr_output=$(AIMI_CONFIG_DIR="relative/path" _aimi_config_dir 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_contains "must be an absolute path" "$stderr_output" "_aimi_config_dir: relative path produces error message"
+  assert_exit_code "1" "$exit_code" "_aimi_config_dir: relative path exits with code 1"
+}
+
+# ============================================================================
+# XDG Cache Location Tests (new path + read-both fallback)
+# ============================================================================
+
+# Helper: set up an isolated AIMI_CONFIG_DIR (new) alongside CLAUDE_CONFIG_DIR (legacy)
+# Sets AIMI_CONFIG_TMPDIR, LEGACY_CONFIG_TMPDIR globals.
+# Also sets MOCK_CLI_PATH and MOCK_WORKTREE_PATH to paths valid under the new structure.
+setup_xdg_cache_env() {
+  AIMI_CONFIG_TMPDIR=$(mktemp -d)
+  LEGACY_CONFIG_TMPDIR=$(mktemp -d)
+
+  export AIMI_CONFIG_DIR="$AIMI_CONFIG_TMPDIR/aimi"
+  export CLAUDE_CONFIG_DIR="$LEGACY_CONFIG_TMPDIR/claude-config"
+
+  mkdir -p "$CLAUDE_CONFIG_DIR"
+  # Do NOT pre-create AIMI_CONFIG_DIR — write_global_cli_cache must mkdir -p it
+
+  # Build a mock plugin cache so the whitelist pattern matches
+  local mock_scripts_dir="$CLAUDE_CONFIG_DIR/plugins/cache/abc123/aimi-engineering/1.99.0/scripts"
+  local mock_worktree_dir="$CLAUDE_CONFIG_DIR/plugins/cache/abc123/aimi-engineering/1.99.0/skills/git-worktree/scripts"
+  mkdir -p "$mock_scripts_dir"
+  mkdir -p "$mock_worktree_dir"
+
+  echo '#!/usr/bin/env bash' > "$mock_scripts_dir/aimi-cli.sh"
+  chmod +x "$mock_scripts_dir/aimi-cli.sh"
+  MOCK_CLI_PATH="$mock_scripts_dir/aimi-cli.sh"
+
+  echo '#!/usr/bin/env bash' > "$mock_worktree_dir/worktree-manager.sh"
+  chmod +x "$mock_worktree_dir/worktree-manager.sh"
+  MOCK_WORKTREE_PATH="$mock_worktree_dir/worktree-manager.sh"
+}
+
+teardown_xdg_cache_env() {
+  rm -rf "$AIMI_CONFIG_TMPDIR" "$LEGACY_CONFIG_TMPDIR"
+  unset AIMI_CONFIG_DIR CLAUDE_CONFIG_DIR
+  unset AIMI_CONFIG_TMPDIR LEGACY_CONFIG_TMPDIR
+  unset MOCK_CLI_PATH MOCK_WORKTREE_PATH
+}
+
+test_write_creates_xdg_dir() {
+  echo ""
+  echo "=== Testing write_global_cli_cache mkdir -p creates destination dir when missing ==="
+
+  setup_xdg_cache_env
+  source_cache_functions
+
+  # AIMI_CONFIG_DIR is set but the directory does not exist yet
+  local aimi_dir
+  aimi_dir=$(_aimi_config_dir)
+
+  if [ -d "$aimi_dir" ]; then
+    echo -e "${RED}✗${NC} write_global_cli_cache mkdir: pre-condition failed — dir already exists"
+    ((TESTS_FAILED++))
+    teardown_xdg_cache_env
+    return
+  fi
+
+  write_global_cli_cache "$MOCK_CLI_PATH"
+
+  if [ -d "$aimi_dir" ]; then
+    echo -e "${GREEN}✓${NC} write_global_cli_cache mkdir: destination dir created"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} write_global_cli_cache mkdir: destination dir NOT created"
+    ((TESTS_FAILED++))
+  fi
+
+  teardown_xdg_cache_env
+}
+
+test_write_goes_to_new_path_not_legacy() {
+  echo ""
+  echo "=== Testing write_global_cli_cache writes to new XDG path only (not legacy) ==="
+
+  setup_xdg_cache_env
+  source_cache_functions
+
+  write_global_cli_cache "$MOCK_CLI_PATH"
+
+  local new_cache
+  new_cache=$(_global_cache_path)
+  local legacy_cache
+  legacy_cache=$(_global_cache_path_legacy)
+
+  if [ -f "$new_cache" ]; then
+    echo -e "${GREEN}✓${NC} write_global_cli_cache: new XDG cache file exists"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} write_global_cli_cache: new XDG cache file missing"
+    ((TESTS_FAILED++))
+  fi
+
+  if [ ! -f "$legacy_cache" ]; then
+    echo -e "${GREEN}✓${NC} write_global_cli_cache: legacy cache file NOT written"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} write_global_cli_cache: legacy cache file was written (should not be)"
+    ((TESTS_FAILED++))
+  fi
+
+  teardown_xdg_cache_env
+}
+
+test_read_fallback_to_legacy_when_new_absent() {
+  echo ""
+  echo "=== Testing read_global_cli_cache falls back to legacy when new path is absent ==="
+
+  setup_xdg_cache_env
+  source_cache_functions
+
+  # Write a valid path directly to the legacy file (simulating pre-upgrade state)
+  local legacy_cache
+  legacy_cache=$(_global_cache_path_legacy)
+  mkdir -p "$(dirname "$legacy_cache")"
+  printf '%s\n' "$MOCK_CLI_PATH" > "$legacy_cache"
+
+  # Ensure the new XDG file does NOT exist
+  local new_cache
+  new_cache=$(_global_cache_path)
+  rm -f "$new_cache"
+
+  local result
+  result=$(read_global_cli_cache)
+
+  assert_eq "$MOCK_CLI_PATH" "$result" "read_global_cli_cache: falls back to legacy path when new is absent"
+
+  teardown_xdg_cache_env
+}
+
+test_read_prefers_new_over_legacy() {
+  echo ""
+  echo "=== Testing read_global_cli_cache prefers new XDG path over legacy ==="
+
+  setup_xdg_cache_env
+  source_cache_functions
+
+  # Write a different path to legacy
+  local legacy_cache
+  legacy_cache=$(_global_cache_path_legacy)
+  mkdir -p "$(dirname "$legacy_cache")"
+  # Use a second distinct mock path (same pattern, different version)
+  local mock_scripts2="$CLAUDE_CONFIG_DIR/plugins/cache/abc123/aimi-engineering/2.00.0/scripts"
+  mkdir -p "$mock_scripts2"
+  echo '#!/usr/bin/env bash' > "$mock_scripts2/aimi-cli.sh"
+  chmod +x "$mock_scripts2/aimi-cli.sh"
+  printf '%s\n' "$mock_scripts2/aimi-cli.sh" > "$legacy_cache"
+
+  # Write the 1.99.0 path to the new XDG cache
+  write_global_cli_cache "$MOCK_CLI_PATH"
+
+  local result
+  result=$(read_global_cli_cache)
+
+  assert_eq "$MOCK_CLI_PATH" "$result" "read_global_cli_cache: new XDG path takes precedence over legacy"
+
+  teardown_xdg_cache_env
+}
+
+test_worktree_write_creates_xdg_dir() {
+  echo ""
+  echo "=== Testing write_global_worktree_cache mkdir -p creates destination dir when missing ==="
+
+  setup_xdg_cache_env
+  source_cache_functions
+
+  local aimi_dir
+  aimi_dir=$(_aimi_config_dir)
+  rm -rf "$aimi_dir"  # ensure it doesn't exist
+
+  write_global_worktree_cache "$MOCK_WORKTREE_PATH"
+
+  if [ -d "$aimi_dir" ]; then
+    echo -e "${GREEN}✓${NC} write_global_worktree_cache mkdir: destination dir created"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} write_global_worktree_cache mkdir: destination dir NOT created"
+    ((TESTS_FAILED++))
+  fi
+
+  local new_cache
+  new_cache=$(_global_worktree_cache_path)
+  if [ -f "$new_cache" ]; then
+    echo -e "${GREEN}✓${NC} write_global_worktree_cache: new XDG cache file exists"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} write_global_worktree_cache: new XDG cache file missing"
+    ((TESTS_FAILED++))
+  fi
+
+  teardown_xdg_cache_env
+}
+
+test_worktree_read_fallback_to_legacy() {
+  echo ""
+  echo "=== Testing read_global_worktree_cache falls back to legacy when new path is absent ==="
+
+  setup_xdg_cache_env
+  source_cache_functions
+
+  # Write a valid path directly to the legacy file
+  local legacy_cache
+  legacy_cache=$(_global_worktree_cache_path_legacy)
+  mkdir -p "$(dirname "$legacy_cache")"
+  printf '%s\n' "$MOCK_WORKTREE_PATH" > "$legacy_cache"
+
+  # Ensure the new XDG file does NOT exist
+  local new_cache
+  new_cache=$(_global_worktree_cache_path)
+  rm -f "$new_cache"
+
+  local result
+  result=$(read_global_worktree_cache)
+
+  assert_eq "$MOCK_WORKTREE_PATH" "$result" "read_global_worktree_cache: falls back to legacy path when new is absent"
+
+  teardown_xdg_cache_env
 }
 
 # ============================================================================
@@ -3257,9 +3538,11 @@ test_prime_cache_not_found() {
   echo "=== Testing prime-cache: not_found when no plugin installed and AIMI_PLUGIN_DIR unset ==="
 
   # Use an empty tmp dir as CLAUDE_CONFIG_DIR (no plugin cache)
-  local empty_tmp
+  local empty_tmp aimi_tmp
   empty_tmp=$(mktemp -d)
+  aimi_tmp=$(mktemp -d)
   export CLAUDE_CONFIG_DIR="$empty_tmp"
+  export AIMI_CONFIG_DIR="$aimi_tmp"
   export CLAUDECODE=1
   unset AIMI_PLUGIN_DIR 2>/dev/null || true
   source_cache_functions
@@ -3275,7 +3558,8 @@ test_prime_cache_not_found() {
 
   unset CLAUDECODE
   unset CLAUDE_CONFIG_DIR
-  rm -rf "$empty_tmp"
+  unset AIMI_CONFIG_DIR
+  rm -rf "$empty_tmp" "$aimi_tmp"
 }
 
 # (e) Rejects a path outside the expected pattern (malicious path)
@@ -3294,9 +3578,11 @@ test_prime_cache_rejects_bad_path() {
   chmod +x "$bad_tmp/plugins/cache/abc/aimi-engineering/1.0.0/scripts/aimi-cli.sh"
 
   # Create a separate config dir where the cache file would live
-  local cfg_tmp
+  local cfg_tmp aimi_tmp
   cfg_tmp=$(mktemp -d)
+  aimi_tmp=$(mktemp -d)
   export CLAUDE_CONFIG_DIR="$cfg_tmp"
+  export AIMI_CONFIG_DIR="$aimi_tmp"
   export CLAUDECODE=1
   unset AIMI_PLUGIN_DIR 2>/dev/null || true
   source_cache_functions
@@ -3318,7 +3604,8 @@ test_prime_cache_rejects_bad_path() {
 
   unset CLAUDECODE
   unset CLAUDE_CONFIG_DIR
-  rm -rf "$bad_tmp" "$cfg_tmp"
+  unset AIMI_CONFIG_DIR
+  rm -rf "$bad_tmp" "$cfg_tmp" "$aimi_tmp"
 }
 
 # (f) Unwritable cache dir exits 1 with status=error
@@ -3331,8 +3618,9 @@ test_prime_cache_unwritable_cache_dir() {
   export CLAUDECODE=1
   unset AIMI_PLUGIN_DIR 2>/dev/null || true
 
-  # Make the config dir unwritable
-  chmod 0500 "$CLAUDE_CONFIG_DIR"
+  # Make the AIMI_CONFIG_DIR unwritable so mkdir -p fails when write_global_cli_cache
+  # tries to create the parent directory for the new XDG cache file
+  chmod 0500 "$AIMI_CONFIG_DIR"
 
   local output
   output=$(cmd_prime_cache 2>/dev/null)
@@ -3344,7 +3632,7 @@ test_prime_cache_unwritable_cache_dir() {
   assert_eq "error" "$status" "prime-cache (unwritable): status=error"
 
   # Restore so teardown can clean up
-  chmod 0700 "$CLAUDE_CONFIG_DIR"
+  chmod 0700 "$AIMI_CONFIG_DIR"
 
   unset CLAUDECODE
   teardown_global_cache_env
@@ -6032,6 +6320,14 @@ main() {
   test_claude_config_dir_custom_absolute
   test_claude_config_dir_relative_path_error
 
+  # _aimi_config_dir tests
+  echo ""
+  echo "--- AIMI_CONFIG_DIR Tests ---"
+  test_aimi_config_dir_default
+  test_aimi_config_dir_xdg_override
+  test_aimi_config_dir_custom_absolute
+  test_aimi_config_dir_relative_path_error
+
   # AIMI_PLUGIN_DIR tests
   echo ""
   echo "--- AIMI_PLUGIN_DIR Tests ---"
@@ -6069,6 +6365,16 @@ main() {
   test_read_global_worktree_cache_tampered
   test_init_session_writes_global_cache
   test_check_version_fix_updates_global_cache
+
+  # XDG cache location tests — new path + read-both fallback
+  echo ""
+  echo "--- XDG Cache Location Tests ---"
+  test_write_creates_xdg_dir
+  test_write_goes_to_new_path_not_legacy
+  test_read_fallback_to_legacy_when_new_absent
+  test_read_prefers_new_over_legacy
+  test_worktree_write_creates_xdg_dir
+  test_worktree_read_fallback_to_legacy
 
   # prime-cache tests
   echo ""
