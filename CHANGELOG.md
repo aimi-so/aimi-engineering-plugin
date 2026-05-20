@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.87.1] - 2026-05-20
+
+### Fixed
+- `cmd_update_field` was dropping the final segment of a dotted path (e.g., `verification.status` built `.verification` instead of `.verification.status`) because `printf '%s' | sed | while read -r` skips the loop body for the last unterminated segment. Replaced the pipe chain with an `IFS=. read -ra` herestring split that is trailing-newline-safe, so `update-field US-NNN verification.status passed` now patches only the leaf field and preserves all sibling fields on the parent object.
+
 ## [1.87.0] - 2026-05-15
 
 ### Added

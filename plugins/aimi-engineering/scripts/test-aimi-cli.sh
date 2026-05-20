@@ -6230,6 +6230,42 @@ test_bundle_prototype_status_view_list_item_shape() {
   rm -rf "$tmp"
 }
 
+test_update_field_nested_path() {
+  echo ""
+  echo "=== Testing update-field: dotted path patches only the leaf field ==="
+
+  reset_fixture
+
+  # Inject a populated verification object onto US-001
+  local veri_fixture
+  veri_fixture=$(jq '.userStories |= map(if .id == "US-001" then . + {"verification": {"strategy": "test", "status": "pending", "url": "http://example.com", "expect": "all green"}} else . end)' "$TASKS_FILE")
+  printf '%s\n' "$veri_fixture" > "$TASKS_FILE"
+
+  # Snapshot sibling fields before the call
+  local pre_strategy pre_url pre_expect
+  pre_strategy=$(jq -r '.userStories[] | select(.id == "US-001") | .verification.strategy' "$TASKS_FILE")
+  pre_url=$(jq -r '.userStories[] | select(.id == "US-001") | .verification.url' "$TASKS_FILE")
+  pre_expect=$(jq -r '.userStories[] | select(.id == "US-001") | .verification.expect' "$TASKS_FILE")
+
+  # Run the update against the dotted path
+  "$CLI" update-field US-001 verification.status passed > /dev/null
+
+  # Assert the leaf changed
+  local post_status
+  post_status=$(jq -r '.userStories[] | select(.id == "US-001") | .verification.status' "$TASKS_FILE")
+  assert_eq "passed" "$post_status" "update-field nested: verification.status updated to passed"
+
+  # Assert siblings were preserved (not clobbered)
+  local post_strategy post_url post_expect
+  post_strategy=$(jq -r '.userStories[] | select(.id == "US-001") | .verification.strategy' "$TASKS_FILE")
+  post_url=$(jq -r '.userStories[] | select(.id == "US-001") | .verification.url' "$TASKS_FILE")
+  post_expect=$(jq -r '.userStories[] | select(.id == "US-001") | .verification.expect' "$TASKS_FILE")
+
+  assert_eq "$pre_strategy" "$post_strategy" "update-field nested: verification.strategy sibling preserved"
+  assert_eq "$pre_url" "$post_url" "update-field nested: verification.url sibling preserved"
+  assert_eq "$pre_expect" "$post_expect" "update-field nested: verification.expect sibling preserved"
+}
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -6431,6 +6467,7 @@ main() {
   test_validate_tasks_backendspec_invented_field
   test_validate_tasks_backendspec_derived_escape_hatch
   test_mark_complete_preserves_new_fields
+  test_update_field_nested_path
 
   # CLI output optimization tests — run with fresh fixture each time
   echo ""
