@@ -121,6 +121,7 @@ The `AIMI_PLUGIN_DIR` environment variable points to the installed plugin direct
 | `/aimi:execute` | Run all stories autonomously (parallel for v3, sequential for v2.2) | `/aimi:execute` |
 | `/aimi:review` | Multi-agent code review with findings synthesis | `/aimi:review [PR or branch]` |
 | `/aimi:open-pr` | Open a pull request from the current task branch | `/aimi:open-pr [PR options]` |
+| `/aimi:validate-bug` | Reproduce and validate a bug report via the bug-reproduction-validator agent | `/aimi:validate-bug [bug description]` |
 
 ### Command Details
 
@@ -253,9 +254,9 @@ Used internally by commands — not user-invocable.
 
 ## Agents
 
-29 aimi-native agents organized into 5 categories.
+25 aimi-native agents organized into 4 categories.
 
-### Research (5)
+### Research (6)
 
 | Agent | Description |
 |-------|-------------|
@@ -264,6 +265,7 @@ Used internally by commands — not user-invocable.
 | `aimi-best-practices-researcher` | External best practices and community conventions |
 | `aimi-framework-docs-researcher` | Framework documentation and version-specific guidance |
 | `aimi-bundle-prototype-author` | Generate self-contained bundle prototype HTML from design bundle context |
+| `aimi-design-bundle-researcher` | Structured passthrough reader for BusinessSpec and DesignSpec bundles |
 
 ### Review (15)
 
@@ -285,28 +287,18 @@ Used internally by commands — not user-invocable.
 | `aimi-kieran-python-reviewer` | Pythonic patterns, type safety, maintainability |
 | `aimi-julik-frontend-races-reviewer` | JavaScript race conditions and DOM lifecycle |
 
-### Design (3)
+### Design (2)
 
 | Agent | Description |
 |-------|-------------|
 | `aimi-design-implementation-reviewer` | Compare live UI against Figma designs |
 | `aimi-design-iterator` | Iterative UI refinement through screenshot-analyze-improve cycles |
-| `aimi-figma-design-sync` | Detect and fix visual differences vs Figma |
 
-### Docs (1)
-
-| Agent | Description |
-|-------|-------------|
-| `aimi-ankane-readme-writer` | Create/update READMEs in Ankane-style for Ruby gems |
-
-### Workflow (5)
+### Workflow (2)
 
 | Agent | Description |
 |-------|-------------|
-| `aimi-bug-reproduction-validator` | Systematically reproduce and validate bug reports |
-| `aimi-every-style-editor` | Review text for Every editorial style compliance |
-| `aimi-lint` | Run linting and code quality checks on Ruby/ERB |
-| `aimi-pr-comment-resolver` | Address PR review comments with code changes |
+| `aimi-bug-reproduction-validator` | Systematically reproduce and validate bug reports across all languages and frameworks |
 | `aimi-spec-flow-analyzer` | Analyze specs for user flow completeness and gaps |
 
 ## Workflow
@@ -593,9 +585,9 @@ For the full version history, see [CHANGELOG.md](CHANGELOG.md).
 
 | Type | Count | Description |
 |------|-------|-------------|
-| Commands | 14 | Slash commands for workflow stages |
+| Commands | 15 | Slash commands for workflow stages |
 | Skills | 16 | 3 core, 6 development/style, 4 tooling/automation, 3 disabled/reference |
-| Agents | 29 | 5 research, 15 review, 3 design, 1 docs, 5 workflow |
+| Agents | 25 | 6 research, 15 review, 2 design, 2 workflow |
 
 ## License
 
