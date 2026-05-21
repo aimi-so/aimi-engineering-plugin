@@ -1,22 +1,70 @@
 ---
 name: aimi:design:polish
 description: Final-pass polish for frontend interfaces — catches the small details that separate good work from great work. Use after a feature is functionally complete and you want to align it to the design system, fix visual inconsistencies, and bring everything to a consistent quality level.
-argument-hint: "[target: file, component path, or feature area]"
-allowed-tools: Read, Write, Edit, Bash(find:*), Bash(ls:*), Task
+argument-hint: "[target: file, component path, or feature area] [--non-interactive]"
+allowed-tools: Read, Write, Edit, Bash(find:*), Bash(ls:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Task
 disable-model-invocation: false
 ---
-
-> **Soft context**: Ask the user for the quality bar (MVP vs flagship) if not clear from context.
 
 # Aimi Design Polish
 
 Perform a meticulous final pass to catch all the small details that separate good work from great work. The difference between shipped and polished.
 
+## Step 0: Environment Setup
+
+### Resolve CLI Path
+
+Read `${CLAUDE_PLUGIN_ROOT}/commands/references/cli-path-resolution.md` and follow the **Resolve CLI Path** and **Version Check** sections to set `$AIMI_CLI`. Each layer is a separate Bash call.
+
+If resolution fails, fall back to a default of `INTERACTIVE_MODE=picker` and log: `warning: aimi-cli.sh unresolved — forcing INTERACTIVE_MODE=picker`.
+
+**Each Bash tool call is an isolated shell — `$AIMI_CLI` does not persist.** Re-read the cache at the top of every subsequent Bash call that needs `$AIMI_CLI`. See the **Per-Call Resolution** section of `commands/references/cli-path-resolution.md` for the one-liner and shell guard to prepend.
+
+### Extract --non-interactive Flag
+
+Before using `$ARGUMENTS` as a polish target, check whether the user passed `--non-interactive`:
+
+```bash
+NON_INTERACTIVE_FLAG=""
+case "$ARGUMENTS" in
+  *--non-interactive*)
+    NON_INTERACTIVE_FLAG="--non-interactive"
+    ;;
+esac
+```
+
+Strip the token from `$ARGUMENTS` so it is not treated as a target path:
+
+```bash
+POLISH_TARGET=$(echo "$ARGUMENTS" | sed 's/--non-interactive//g' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
+```
+
+Use `$POLISH_TARGET` wherever `$ARGUMENTS` would have been used as the polish target for the rest of this command.
+
+### Detect Interactivity
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity $NON_INTERACTIVE_FLAG)
+```
+
+- `picker` — interactive user. Present questions using **AskUserQuestion** (one per tool call).
+- `agent` — `--non-interactive`, `AIMI_AGENT_MODE=true`, or `CI=true`. At every question site, auto-pick the documented default and log one line. Never block, never prompt.
+
+See `references/interactivity.md` for the full contract.
+
+> **Soft context**: Ask the user for the quality bar (MVP vs flagship) if not clear from context.
+>
+> *Agent-mode fallback: if `INTERACTIVE_MODE=agent`, infer the quality bar from surrounding code context (commit messages, design-system tier, existing component polish level) and proceed without asking. Log: `agent-mode: quality-bar auto-inferred from codebase context`.*
+
 ## Target
 
-$ARGUMENTS
+$POLISH_TARGET
 
 If no target is specified, ask the user what to polish before proceeding.
+
+*Agent-mode fallback: if `INTERACTIVE_MODE=agent` and `$POLISH_TARGET` is empty, abort with: `agent-mode: no polish target specified and --non-interactive set — provide a target path or feature area`. If `$POLISH_TARGET` is non-empty, proceed with it as-is without asking for confirmation. Log: `agent-mode: target auto-accepted: $POLISH_TARGET`.*
 
 **CRITICAL**: Polish is the last step, not the first. Don't polish work that's not functionally complete.
 
