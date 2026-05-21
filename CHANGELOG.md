@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.88.0] - 2026-05-21
+
+### Removed
+
+- `aimi-every-style-editor` agent — out-of-scope / orphaned; no active command consumer.
+- `aimi-ankane-readme-writer` agent — out-of-scope / orphaned; no active command consumer.
+- `aimi-lint` agent — out-of-scope / orphaned; no active command consumer.
+- `aimi-pr-comment-resolver` agent — out-of-scope / orphaned; no active command consumer.
+- `aimi-figma-design-sync` agent — out-of-scope / orphaned; no active command consumer.
+
+### Added
+
+- `/aimi:validate-bug` command (`commands/validate-bug.md`): reproduces and validates bug reports by delegating to the `aimi-bug-reproduction-validator` agent. Accepts a free-form bug description, runs a structured reproduction workflow, and reports whether the bug is confirmed, cannot be reproduced, or is a user error.
+
+### Changed
+
+- `aimi-bug-reproduction-validator` agent generalized: Rails-specific bias removed from its Investigation Techniques section so the agent operates effectively across all languages and frameworks.
+- `/aimi:design:polish` now optionally delegates to `aimi-design-iterator` for a multi-cycle visual iteration pass (screenshot → analyze → improve loop) in addition to the existing inline polish workflow.
+
 ## [1.87.1] - 2026-05-20
 
 ### Fixed
