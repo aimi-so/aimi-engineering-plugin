@@ -1,7 +1,7 @@
 ---
 name: aimi:brainstorm
 description: Explore ideas through guided brainstorming with batched questions and codebase research
-argument-hint: "[feature description]"
+argument-hint: "[feature description] [--non-interactive]"
 allowed-tools: Read, Glob, Grep, AskUserQuestion, Task, Write, Bash($AIMI_CLI:*)
 ---
 
@@ -13,7 +13,9 @@ Clarify **WHAT** to build through collaborative dialogue before planning **HOW**
 
 <feature_description> $ARGUMENTS </feature_description>
 
-**If the feature description above is empty, ask the user:** "What would you like to explore? Describe the feature, problem, or improvement you're thinking about."
+> Note: the `--non-interactive` token (if present in `$ARGUMENTS`) is stripped from the feature description in Step 0.5 before any prompt or research uses it.
+
+**If the feature description above is empty (after stripping `--non-interactive`), ask the user:** "What would you like to explore? Describe the feature, problem, or improvement you're thinking about."
 
 Do not proceed until you have a feature description from the user.
 
@@ -30,22 +32,43 @@ INTERACTIVE_MODE=picker`.
 
 ## Step 0.5: Resolve Interactivity Mode
 
-Before any question is presented, resolve which mode applies:
+Before any question is presented, resolve which mode applies.
+
+**Scan `$ARGUMENTS` for the `--non-interactive` token** (whitespace-delimited,
+case-sensitive). When present:
+
+1. Strip it from the working copy of the feature description so it is not
+   treated as part of the feature being brainstormed.
+2. Forward it to the `detect-interactivity` call so agent mode is explicitly
+   engaged.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
+# Detect --non-interactive token (whitespace-delimited, case-sensitive)
+case " $ARGUMENTS " in
+  *" --non-interactive "*) NON_INTERACTIVE_FLAG="--non-interactive" ;;
+  *)                        NON_INTERACTIVE_FLAG="" ;;
+esac
+# Strip the token from the feature description before any downstream use
+FEATURE_DESCRIPTION=$(echo "$ARGUMENTS" | sed 's/\(^\| \)--non-interactive\( \|$\)/ /g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+# Resolve mode; picker is the default
+INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity $NON_INTERACTIVE_FLAG)
 ```
+
+Use `$FEATURE_DESCRIPTION` (not `$ARGUMENTS`) in all subsequent phases where
+the feature description is consumed (research prompts, topic-slug derivation,
+path-hint extraction, etc.).
 
 The result is one of:
 
-- `picker` — interactive user. All question sites below use **AskUserQuestion**
+- `picker` — **default**. All question sites below use **AskUserQuestion**
   (Claude Code) or the native `question` tool (OpenCode, wired by the
   translator). One question per tool call, lettered options.
-- `agent` — `AIMI_AGENT_MODE=true`, `CI=true`, or non-TTY. At every question
-  site, auto-pick the first non-escape option and log one line into the
-  brainstorm document's working memory. Never block, never prompt.
+- `agent` — reached only via **explicit opt-out**: `--non-interactive` flag,
+  `AIMI_AGENT_MODE=true`, or `CI=true`. At every question site, auto-pick the
+  first non-escape option and log one line into the brainstorm document's
+  working memory. Never block, never prompt.
 
 See `references/interactivity.md` for the full contract. Every question site
 below includes an agent-mode fallback note describing its specific auto-pick
@@ -179,7 +202,7 @@ error, no warning, no change to existing behavior.
 
 | Variable | Value | Effect |
 |----------|-------|--------|
-| `AIMI_AGENT_MODE` | `true` | Non-interactive fallback — auto-selects Variant A at every picker site, never blocks. Detected by `aimi-cli detect-interactivity` and reflected in `INTERACTIVE_MODE=agent`. |
+| `AIMI_AGENT_MODE` | `true` | Non-interactive fallback — auto-selects Variant A at every picker site, never blocks. Detected by `aimi-cli detect-interactivity` and reflected in `INTERACTIVE_MODE=agent`. Prefer passing `--non-interactive` to the command directly; this env var is a secondary escape hatch for automation where flag injection is not possible. |
 | `AIMI_BRAINSTORM_DEBUG` | `1` | Opt-in diagnostic output. When set, the agent emits a `[brainstorm-debug] <context>: <value>` line to chat at each decision point: topic-slug derivation, per-question category classification, browser-attempt result, and variant-selection picker result. Unset (or any value other than `1`) produces no diagnostic output. |
 
 Diagnostic lines are prefixed with `[brainstorm-debug]` so they are trivially greppable and visually distinct from normal output. They are emitted **to chat only** — never written to the brainstorm document or research files.
