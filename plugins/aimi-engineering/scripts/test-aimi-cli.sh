@@ -5558,12 +5558,35 @@ test_detect_interactivity_non_tty() {
   echo ""
   echo "=== Testing detect-interactivity with non-TTY stdin and no host indicators ==="
 
-  # Clear all host indicators to test the bare-shell fallback. Redirecting stdin
-  # from /dev/null makes it not a TTY.
+  # No host indicators, non-TTY stdin. With the TTY fallback removed, the
+  # function should now return picker (safe default).
   local output
   output=$(AIMI_AGENT_MODE= CI= CLAUDECODE= OPENCODE_CONFIG_DIR= "$CLI" detect-interactivity </dev/null)
 
-  assert_eq "agent" "$output" "detect-interactivity returns 'agent' when stdin is not a TTY and no host picker is available"
+  assert_eq "picker" "$output" "detect-interactivity returns 'picker' when stdin is not a TTY and no host indicators are set (picker-by-default)"
+}
+
+test_detect_interactivity_non_interactive_flag() {
+  echo ""
+  echo "=== Testing detect-interactivity --non-interactive flag ==="
+
+  local output
+  output=$(AIMI_AGENT_MODE= CI= CLAUDECODE= OPENCODE_CONFIG_DIR= "$CLI" detect-interactivity --non-interactive </dev/null)
+
+  assert_eq "agent" "$output" "detect-interactivity returns 'agent' when --non-interactive flag is passed"
+}
+
+test_detect_interactivity_opencode_shell_sim() {
+  echo ""
+  echo "=== Testing detect-interactivity: OpenCode shell simulation (no host env vars, non-TTY) ==="
+
+  # Reproduces the exact OpenCode bash-tool condition: no CLAUDECODE, no
+  # OPENCODE_CONFIG_DIR, no CI, no AIMI_AGENT_MODE, stdin is not a TTY.
+  # Previously the bare-TTY fallback returned agent here; now it must return picker.
+  local output
+  output=$(AIMI_AGENT_MODE= CI= CLAUDECODE= OPENCODE_CONFIG_DIR= "$CLI" detect-interactivity </dev/null)
+
+  assert_eq "picker" "$output" "detect-interactivity returns 'picker' in OpenCode shell simulation (no host env vars, non-TTY stdin)"
 }
 
 test_detect_interactivity_claudecode_host() {
@@ -6515,6 +6538,8 @@ main() {
   test_detect_interactivity_non_tty
   test_detect_interactivity_claudecode_host
   test_detect_interactivity_opencode_host
+  test_detect_interactivity_non_interactive_flag
+  test_detect_interactivity_opencode_shell_sim
 
   # Design bundle detection tests
   echo ""

@@ -1,7 +1,7 @@
 ---
 name: aimi:plan
 description: Generate tasks.json directly from a feature description
-argument-hint: "[feature description]"
+argument-hint: "[feature description] [--non-interactive]"
 allowed-tools: Read, Write, Edit, Bash(git:*), Bash(mkdir:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Task
 ---
 
@@ -9,9 +9,11 @@ allowed-tools: Read, Write, Edit, Bash(git:*), Bash(mkdir:*), Bash(AIMI_CLI=*), 
 
 Generate `.aimi/tasks/YYYY-MM-DD-[feature]-tasks.json` directly from a feature description. Full pipeline: research, spec analysis, story decomposition, JSON output. No intermediate markdown plan.
 
+By default, `/aimi:plan` runs in interactive mode — Open Question gates (Phase 0.5, Phase 1.8, Phase 2.5) present `AskUserQuestion` prompts. Pass `--non-interactive` to skip all prompts and auto-defer every Open Question (agent/CI mode).
+
 ## Feature Description
 
-$ARGUMENTS
+The planning input is `$ARGUMENTS` with the `--non-interactive` token removed (see Step 0 below).
 
 ## Step 0: Environment Setup
 
@@ -50,13 +52,32 @@ Use the output as the default branch for `branchName` derivation in Phase 4.
 
 ### Detect Interactivity
 
+Interactive (picker) mode is the default. Pass `--non-interactive` to `/aimi:plan` to explicitly opt out of all Open Question prompts and auto-defer them instead (agent/CI mode).
+
+Before calling the CLI, scan `$ARGUMENTS` for the whitespace-delimited token `--non-interactive` (case-sensitive, exact match). When present:
+- Strip it from the feature description text — store the cleaned version as `FEATURE_DESCRIPTION` for use in all downstream steps (topic slug derivation, research agent prompts, `metadata.title`). The raw `$ARGUMENTS` string is NOT used after this point.
+- Forward the flag to the CLI call.
+
+When absent, `FEATURE_DESCRIPTION` equals `$ARGUMENTS` unchanged.
+
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
+# Extract --non-interactive flag and strip it from the feature description
+case " $ARGUMENTS " in
+  *" --non-interactive "*)
+    NON_INTERACTIVE_FLAG="--non-interactive"
+    FEATURE_DESCRIPTION=$(echo "$ARGUMENTS" | sed 's/[[:space:]]*--non-interactive[[:space:]]*/  /g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    ;;
+  *)
+    NON_INTERACTIVE_FLAG=""
+    FEATURE_DESCRIPTION="$ARGUMENTS"
+    ;;
+esac
+INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity $NON_INTERACTIVE_FLAG)
 ```
 
-Store `INTERACTIVE_MODE` for use by Phase 0.5, Phase 1.8, and Phase 2.5 to decide whether to present AskUserQuestion prompts or auto-defer open questions.
+Store `INTERACTIVE_MODE` for use by Phase 0.5, Phase 1.8, and Phase 2.5 to decide whether to present AskUserQuestion prompts or auto-defer open questions. Use `FEATURE_DESCRIPTION` (not `$ARGUMENTS`) everywhere a feature description string is needed from this point forward.
 
 ## Phase 0: Idea Refinement
 

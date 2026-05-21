@@ -1844,30 +1844,29 @@ cmd_bundle_prototype_finalize() {
 #   picker - explicit host picker is available (Claude Code or OpenCode), OR
 #            stdin is a TTY in a plain terminal
 #
-# Precedence (first match wins):
-#   1. AIMI_AGENT_MODE=true → agent  (explicit opt-out always wins)
-#   2. CI=true              → agent
-#   3. CLAUDECODE=1         → picker (AskUserQuestion is available)
-#   4. OPENCODE_CONFIG_DIR  → picker (OpenCode `question` tool is available)
-#   5. stdin is a TTY       → picker
-#   6. otherwise            → agent
+# Precedence (first match wins — explicit opt-out only):
+#   1. --non-interactive flag → agent
+#   2. AIMI_AGENT_MODE=true  → agent
+#   3. CI=true               → agent
+#   4. otherwise             → picker
 #
-# Hosts 3 and 4 deliberately ignore TTY state: their Bash tools run without a
-# controlling terminal, but a host-level picker is fully available.
+# The old TTY-test branch ([ -t 0 ]) and the CLAUDECODE/OPENCODE_CONFIG_DIR
+# host-check block are removed. A non-TTY shell is NOT a signal for agent mode;
+# picker is the safe default so commands always surface Open Questions unless
+# explicitly told not to.
 cmd_detect_interactivity() {
-  if [ "${AIMI_AGENT_MODE:-}" = "true" ] || [ "${CI:-}" = "true" ]; then
+  local non_interactive=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --non-interactive) non_interactive=1 ;;
+    esac
+    shift
+  done
+  if [ "$non_interactive" = "1" ] || [ "${AIMI_AGENT_MODE:-}" = "true" ] || [ "${CI:-}" = "true" ]; then
     echo "agent"
     return
   fi
-  if [ "${CLAUDECODE:-}" = "1" ] || [ -n "${OPENCODE_CONFIG_DIR:-}" ]; then
-    echo "picker"
-    return
-  fi
-  if [ -t 0 ]; then
-    echo "picker"
-  else
-    echo "agent"
-  fi
+  echo "picker"
 }
 
 # Setup branch: deterministic branch creation/checkout logic
@@ -3032,9 +3031,10 @@ COMMANDS:
     get-state                 Get all state files as JSON
     detect-default-branch [--project <path>]
                               Detect and cache the repository's default branch
-    detect-interactivity      Print resolved interactivity mode (picker|agent)
-                              Reads AIMI_AGENT_MODE, CI, and TTY status; used by
-                              commands to branch picker vs. auto-pick-first behavior
+    detect-interactivity [--non-interactive]
+                              Print resolved interactivity mode (picker|agent)
+                              Returns picker by default; returns agent only when
+                              --non-interactive is passed, AIMI_AGENT_MODE=true, or CI=true
     setup-branch <name> --default-branch <branch> [--project <path>]
                               Create or checkout branch with deterministic logic
     clear-state               Clear all state files
@@ -3142,7 +3142,7 @@ main() {
   case "${1:-help}" in
     help|--help|-h) cmd_help; return ;;
     version) cmd_version; return ;;
-    detect-interactivity) cmd_detect_interactivity; return ;;
+    detect-interactivity) shift; cmd_detect_interactivity "$@"; return ;;
     prime-cache) cmd_prime_cache; return ;;
   esac
 

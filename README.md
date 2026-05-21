@@ -113,8 +113,8 @@ The `AIMI_PLUGIN_DIR` environment variable points to the installed plugin direct
 
 | Command | Description | Usage |
 |---------|-------------|-------|
-| `/aimi:brainstorm` | Explore ideas through guided brainstorming | `/aimi:brainstorm [feature]` |
-| `/aimi:plan` | Generate tasks.json directly from feature description | `/aimi:plan [feature]` |
+| `/aimi:brainstorm` | Explore ideas through guided brainstorming | `/aimi:brainstorm [feature] [--non-interactive]` |
+| `/aimi:plan` | Generate tasks.json directly from feature description | `/aimi:plan [feature] [--non-interactive]` |
 | `/aimi:deepen` | Enrich tasks.json stories with research insights | `/aimi:deepen [tasks-path]` |
 | `/aimi:status` | Show current task execution progress | `/aimi:status` |
 | `/aimi:next` | Execute the next pending story | `/aimi:next` |
@@ -127,18 +127,20 @@ The `AIMI_PLUGIN_DIR` environment variable points to the installed plugin direct
 
 #### `/aimi:brainstorm`
 
-Standalone brainstorm workflow with codebase research and Ralph-style batched multiple-choice questions. Explores requirements and approaches interactively before committing to implementation.
+Standalone brainstorm workflow with codebase research and Ralph-style batched multiple-choice questions. Explores requirements and approaches interactively before committing to implementation. Pass `--non-interactive` to skip all prompts and auto-defer open questions (agent/CI mode).
 
 ```bash
 /aimi:brainstorm Add social login with Google and GitHub
+/aimi:brainstorm Add social login --non-interactive
 ```
 
 #### `/aimi:plan`
 
-Generates `.aimi/tasks/YYYY-MM-DD-[feature]-tasks.json` directly from a feature description. Runs a full pipeline: brainstorm detection, parallel research (codebase + learnings), optional external research, spec-flow analysis, and story decomposition. Stories are decomposed as vertical slices — each delivers user-visible value end-to-end across all layers rather than being split by horizontal layer boundaries.
+Generates `.aimi/tasks/YYYY-MM-DD-[feature]-tasks.json` directly from a feature description. Runs a full pipeline: brainstorm detection, parallel research (codebase + learnings), optional external research, spec-flow analysis, and story decomposition. Stories are decomposed as vertical slices — each delivers user-visible value end-to-end across all layers rather than being split by horizontal layer boundaries. Interactive by default — pass `--non-interactive` to skip all Open Question prompts and auto-defer them (agent/CI mode).
 
 ```bash
 /aimi:plan Add user registration flow
+/aimi:plan Add user registration flow --non-interactive
 ```
 
 Output:
@@ -213,7 +215,7 @@ Multi-agent code review using aimi-native review agents. Runs parallel agents (a
 
 ## Skills
 
-15 skills providing domain expertise and reusable workflows.
+17 skills providing domain expertise and reusable workflows.
 
 ### Core (Internal)
 
@@ -235,6 +237,8 @@ Used internally by commands — not user-invocable.
 | `frontend-design` | Create distinctive, production-grade frontend interfaces |
 | `every-style-editor` | Review and edit copy for Every's editorial style compliance |
 | `agent-native-architecture` | Build apps where agents are first-class citizens |
+| `react-best-practices` | React and Next.js performance optimization guidelines from Vercel Engineering |
+| `react-native-skills` | React Native and Expo best practices for performant mobile apps |
 
 ### Tooling & Automation
 
@@ -586,7 +590,7 @@ For the full version history, see [CHANGELOG.md](CHANGELOG.md).
 | Type | Count | Description |
 |------|-------|-------------|
 | Commands | 15 | Slash commands for workflow stages |
-| Skills | 16 | 3 core, 6 development/style, 4 tooling/automation, 3 disabled/reference |
+| Skills | 17 | 3 core, 8 development/style, 4 tooling/automation, 2 disabled/reference |
 | Agents | 25 | 6 research, 15 review, 2 design, 2 workflow |
 
 ## License
