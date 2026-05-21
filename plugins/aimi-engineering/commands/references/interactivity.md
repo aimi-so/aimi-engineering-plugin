@@ -9,22 +9,36 @@ in one of two modes, resolved once per invocation and stored as
 Call `$AIMI_CLI detect-interactivity` once at the top of the command. It prints
 exactly one of: `picker`, `agent`.
 
-Precedence (first match wins):
+**Picker is the default.** The function returns `agent` only when explicitly told
+to via one of the three agent-mode signals below (explicit opt-out only):
 
-1. `AIMI_AGENT_MODE=true` → `agent` (explicit opt-out always wins)
-2. `CI=true` → `agent`
-3. `CLAUDECODE=1` → `picker` (Claude Code provides `AskUserQuestion`)
-4. `OPENCODE_CONFIG_DIR` is set → `picker` (OpenCode provides the `question` tool)
-5. stdin is a TTY → `picker`
-6. Otherwise → `agent`
+| Signal | Result |
+|---|---|
+| `--non-interactive` flag passed to the CLI | `agent` |
+| `AIMI_AGENT_MODE=true` | `agent` |
+| `CI=true` | `agent` |
+| _(everything else)_ | `picker` |
 
-Steps 3 and 4 deliberately ignore TTY state. Both hosts run command bash bodies
-in a subshell without a controlling terminal, but a host-level picker is fully
-available — relying on `[ -t 0 ]` alone would misclassify every Claude Code and
-OpenCode invocation as non-interactive.
+The old `[ -t 0 ]` TTY-test branch is removed. A non-TTY shell (e.g. an OpenCode
+bash-tool invocation without `CLAUDECODE` or `OPENCODE_CONFIG_DIR` exported)
+is **not** a signal for agent mode — it correctly resolves to `picker` so Open
+Questions are presented rather than silently auto-deferred.
 
 Do not re-implement this logic inline. Use the CLI so the rule stays in one
 place and is covered by `test-aimi-cli.sh`.
+
+### `--non-interactive` flag
+
+Pass `--non-interactive` to `detect-interactivity` when a command explicitly
+opts out of interactive prompts (e.g. when the user passes `--non-interactive`
+to the command itself, or when the command is driven from automation):
+
+```bash
+INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity --non-interactive)
+```
+
+This is the preferred way to force agent mode from a command; it does not
+require callers to export environment variables.
 
 ## Picker Mode
 
@@ -56,8 +70,8 @@ either host. If a question needs multiple answers, emit multiple picker calls.
 
 ## Agent Mode
 
-Non-interactive context (`AIMI_AGENT_MODE=true`, `CI=true`, or no TTY). Never
-block, never prompt. At every question site:
+Explicit opt-out: `--non-interactive` flag, `AIMI_AGENT_MODE=true`, or `CI=true`.
+Never block, never prompt. At every question site:
 
 1. Auto-select the first non-escape option (option A).
 2. Log exactly one line into the command's output artifact (brainstorm
