@@ -2,7 +2,7 @@
 name: aimi:design:polish
 description: Final-pass polish for frontend interfaces — catches the small details that separate good work from great work. Use after a feature is functionally complete and you want to align it to the design system, fix visual inconsistencies, and bring everything to a consistent quality level.
 argument-hint: "[target: file, component path, or feature area]"
-allowed-tools: Read, Write, Edit, Bash(find:*), Bash(ls:*)
+allowed-tools: Read, Write, Edit, Bash(find:*), Bash(ls:*), Task
 disable-model-invocation: false
 ---
 
@@ -52,6 +52,31 @@ Understand the current state and goals before touching anything:
    - Information architecture and flow drift
 
 4. **Triage cosmetic vs functional**: Classify each issue as **cosmetic** (looks off, doesn't impede the user) or **functional** (breaks, blocks, or confuses the experience). When polish time is tight, functional issues ship first; cosmetic ones can land in a follow-up.
+
+## Visual Iteration Pass (Optional)
+
+> **Default path**: The manual polish checklist in Steps 3–6 is always the default. This section is an optional, additive pass that runs a screenshot-driven refinement loop *before* the manual checklist when a live preview is available. When the conditions below are not met, skip this section entirely and proceed directly to Step 3 — no error, no warning.
+
+**Trigger conditions** — all three must be true to activate this pass:
+
+1. The polish target renders in a browser (it is a UI component, page, or feature with visual output).
+2. A running preview URL is available (e.g. `http://localhost:3000`, a staging URL, or any URL the browser can reach right now).
+3. The `agent-browser` skill is available in the current session.
+
+**When all three conditions are met**, spawn the design iterator as a Task subagent:
+
+```
+Task subagent_type="aimi-engineering:design:aimi-design-iterator"
+
+Pass to the agent:
+- Design-system context discovered in Step 1: token names, spacing scale, component library, color palette, motion conventions, and any drift root-cause classifications identified.
+- Quality bar established in Step 2: MVP vs flagship, known issues to preserve, time constraint, and the prioritised list of polish areas identified (cosmetic vs functional triage).
+- The live preview URL.
+
+Let the iterator run its screenshot-driven loop. When it finishes, review its output before proceeding.
+```
+
+After the iterator completes, continue with Step 3 to apply any remaining manual polish not covered by the automated pass. The iterator is additive — it does not replace the systematic checklist.
 
 ## Step 3: Polish Systematically
 
