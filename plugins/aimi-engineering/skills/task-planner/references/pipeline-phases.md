@@ -47,7 +47,7 @@ After the brainstorm check, determine the implementation scope:
 
 ### Pipeline Mode (Non-Interactive)
 
-If running in a `disable-model-invocation` context or automated pipeline:
+When `INTERACTIVE_MODE=agent` (set by `/aimi:plan --non-interactive`, `AIMI_AGENT_MODE=true`, or `CI=true`):
 - Skip all AskUserQuestion calls
 - Use the feature description as-is
 - Auto-select the most recent matching brainstorm if available

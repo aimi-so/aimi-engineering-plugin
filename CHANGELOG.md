@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.89.0] - 2026-05-21
+
+### Added
+
+- `--non-interactive` flag for `/aimi:plan`, `/aimi:brainstorm`, and `/aimi:design:polish`. Pass `--non-interactive` to skip all interactive prompts and auto-defer every Open Question (agent/CI mode). Interactive (`picker`) mode is now the default for all three commands.
+
+### Changed
+
+- `/aimi:plan`, `/aimi:brainstorm`, and `/aimi:design:polish` default to **interactive mode** (`INTERACTIVE_MODE=picker`). Previously these commands could silently fall through to `agent` mode when running in a non-TTY shell (e.g. inside OpenCode's bash tool calls), suppressing all user-facing questions. The bare-TTY fallback in `detect-interactivity` has been removed so a hostless non-TTY shell no longer triggers agent mode.
+- `cmd_detect_interactivity` in `aimi-cli.sh` now returns `picker` as the default. Agent mode is reached only through explicit opt-out: `--non-interactive` flag, `AIMI_AGENT_MODE=true`, or `CI=true`.
+
+### Fixed
+
+- OpenCode agent-mode misclassification: `detect-interactivity` previously returned `agent` for OpenCode sessions because OpenCode runs bash tool calls in a non-TTY shell and does not export `OPENCODE_CONFIG_DIR` in that context, causing the TTY fallback (step 6) to fire. Removing the bare-TTY fallback ensures the command correctly defaults to `picker` on OpenCode.
+
 ## [1.88.0] - 2026-05-21
 
 ### Removed
