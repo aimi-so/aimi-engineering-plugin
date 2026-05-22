@@ -148,6 +148,50 @@ Cause: `$AIMI_CLI` (or `$WORKTREE_MGR`) expanded to empty in this Bash call. The
 
 Fix: add the per-call re-read one-liner at the top of the failing Bash call. If the re-read itself returns empty, Step 0 has not yet run in this session — run the full Layer 0–3 resolution first.
 
+## Resolve Agent Models
+
+After `$AIMI_CLI` is resolved and the version check passes, call `resolve-models` **once per command invocation** to obtain the category-to-model map. Re-read `$AIMI_CLI` from the cache before calling (each Bash tool call is an isolated shell):
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+AGENT_MODELS=$($AIMI_CLI resolve-models)
+```
+
+`resolve-models` always emits a single-line JSON object with exactly four keys:
+
+```json
+{"research":"<model-or-inherit>","review":"<model-or-inherit>","design":"<model-or-inherit>","workflow":"<model-or-inherit>"}
+```
+
+When no `models.json` is configured, every value is the literal string `"inherit"`.
+
+Store the JSON string as `AGENT_MODELS` (or as a working-memory map keyed by category) for the rest of the command invocation.
+
+### Applying the resolved model to a Task call
+
+At each `Task subagent_type="aimi-engineering:CATEGORY:NAME"` spawn site, extract the model for that agent's `CATEGORY` (one of `research`, `review`, `design`, `workflow`) from `AGENT_MODELS`:
+
+- **When the resolved value is a model string** (anything other than `"inherit"`): add a `model:` line to the Task call with that string as the value.
+- **When the resolved value is `"inherit"`**: omit the `model:` line entirely — current behavior is preserved.
+
+Example (model configured for the `research` category):
+
+```
+Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
+  model: claude-sonnet-4-5
+  prompt: "…"
+```
+
+Example (model is `"inherit"` — line omitted):
+
+```
+Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
+  prompt: "…"
+```
+
+When `AGENT_MODELS` could not be parsed or `$AIMI_CLI` was not resolved, treat every category as `"inherit"` and proceed — never abort a command because model resolution failed.
+
 ## CWD Auto-Discovery
 
 The CLI automatically discovers the project root by walking up the directory tree from CWD looking for `.aimi/`. This means:
