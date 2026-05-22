@@ -79,6 +79,18 @@ INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity $NON_INTERACTIVE_FLAG)
 
 Store `INTERACTIVE_MODE` for use by Phase 0.5, Phase 1.8, and Phase 2.5 to decide whether to present AskUserQuestion prompts or auto-defer open questions. Use `FEATURE_DESCRIPTION` (not `$ARGUMENTS`) everywhere a feature description string is needed from this point forward.
 
+### Resolve Agent Models
+
+Read `${CLAUDE_PLUGIN_ROOT}/commands/references/cli-path-resolution.md` — **Resolve Agent Models** section — and follow it to populate `AGENT_MODELS`. Re-read `$AIMI_CLI` from cache in the same Bash call:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+AGENT_MODELS=$($AIMI_CLI resolve-models)
+```
+
+Store `AGENT_MODELS` for use by every `Task subagent_type="aimi-engineering:CATEGORY:NAME"` call in this command. At each spawn site, extract the model for the agent's `CATEGORY` and apply it per the **Applying the resolved model to a Task call** rules in `cli-path-resolution.md`. When resolution fails, treat every category as `"inherit"` and continue.
+
 ## Phase 0: Idea Refinement
 
 Check `.aimi/brainstorms/` for a matching brainstorm (semantic match on topic, within 14 days):
@@ -177,6 +189,7 @@ mkdir -p "$(dirname "<output_path>")"
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-bundle-prototype-author"
+  [model: <AGENT_MODELS.research when not "inherit">]
   prompt: "Generate a self-contained HTML prototype for the bundle.
            bundlePath: <bundlePath>
            viewList: <view_list extracted names as JSON array>
@@ -379,6 +392,7 @@ Run these agents **in parallel** using the Task tool.
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
+  [model: <AGENT_MODELS.research when not "inherit">]
   prompt: "Analyze the codebase for patterns relevant to: [feature description].
            topicSlug: [topicSlug]
            [If pathHints is non-empty]: paths: [<comma-joined pathHints>]
@@ -396,6 +410,7 @@ Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
+  [model: <AGENT_MODELS.research when not "inherit">]
   prompt: "Search .aimi/solutions/ for learnings relevant to: [feature description].
            topicSlug: [topicSlug]
            Look for: gotchas, patterns, past solutions, lessons learned.
@@ -413,6 +428,7 @@ If any spawned agent fails, proceed with available results.
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-design-bundle-researcher"
+  [model: <AGENT_MODELS.research when not "inherit">]
   prompt: "Ingest the Claude Design handoff bundle and produce the
            16-section research doc, including § Open Questions with
            any spec-prototype coverage gaps marked
@@ -444,6 +460,7 @@ Only if Phase 1.5 decides external research is needed, run the applicable agents
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
+  [model: <AGENT_MODELS.research when not "inherit">]
   prompt: "Research current best practices for: [feature description].
            researchDepth: [computed researchDepth from Phase 1.5]
            topicSlug: [topicSlug]
@@ -456,6 +473,7 @@ Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-framework-docs-researcher"
+  [model: <AGENT_MODELS.research when not "inherit">]
   prompt: "Research framework documentation for: [feature description].
            researchDepth: [computed researchDepth from Phase 1.5]
            topicSlug: [topicSlug]
@@ -547,6 +565,7 @@ where `<N>` is the count of questions deferred this phase.
 
 ```
 Task subagent_type="aimi-engineering:workflow:aimi-spec-flow-analyzer"
+  [model: <AGENT_MODELS.workflow when not "inherit">]
   prompt: "Analyze this feature specification for flow completeness, gaps, and edge cases:
            Feature: [feature description]
            Context from research: [consolidated research summary]
