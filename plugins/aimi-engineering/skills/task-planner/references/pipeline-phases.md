@@ -109,6 +109,10 @@ done
 - If **zero** or **one** repo is found, no multi-repo handling is needed
 - If **multiple** repos are found, pass the list to research agents and use it in Phase 3 for project assignment
 
+### Resolve Agent Models
+
+Follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS`. Re-read `$AIMI_CLI` from cache in the same Bash call. When resolution fails, treat every category as `"inherit"` and continue.
+
 ### Research Agents
 
 Run two agents **in parallel** using the Task tool:
@@ -117,6 +121,7 @@ Run two agents **in parallel** using the Task tool:
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
+  [model: <AGENT_MODELS.research when not "inherit">]
   prompt: "Analyze the codebase for patterns relevant to: [feature description].
            topicSlug: [topicSlug]
            Look for: existing patterns, CLAUDE.md guidance, similar features,
@@ -130,6 +135,7 @@ Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
+  [model: <AGENT_MODELS.research when not "inherit">]
   prompt: "Search .aimi/solutions/ for learnings relevant to: [feature description].
            topicSlug: [topicSlug]
            Look for: gotchas, patterns, past solutions, lessons learned.
@@ -199,6 +205,7 @@ Run two agents **in parallel**:
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
+  [model: <AGENT_MODELS.research when not "inherit">]
   prompt: "Research current best practices for: [feature description].
            researchDepth: [computed researchDepth from Phase 1.5]
            topicSlug: [topicSlug]
@@ -210,6 +217,7 @@ Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-framework-docs-researcher"
+  [model: <AGENT_MODELS.research when not "inherit">]
   prompt: "Research framework documentation for: [feature description].
            researchDepth: [computed researchDepth from Phase 1.5]
            topicSlug: [topicSlug]
@@ -265,6 +273,7 @@ Run the spec-flow-analyzer agent:
 
 ```
 Task subagent_type="aimi-engineering:workflow:aimi-spec-flow-analyzer"
+  [model: <AGENT_MODELS.workflow when not "inherit">]
   prompt: "Analyze this feature specification for flow completeness, gaps, and edge cases:
 
            Feature: [feature description]
