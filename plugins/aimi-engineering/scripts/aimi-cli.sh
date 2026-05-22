@@ -292,6 +292,26 @@ read_aimi_models_config() {
   cat "$config_file" 2>/dev/null
 }
 
+# Atomically write JSON content to the models config file (chmod 0600, mktemp + mv).
+# Usage: write_aimi_models_config <json_content>
+# Mirrors write_global_cli_cache — interrupted runs never corrupt a pre-existing file.
+write_aimi_models_config() {
+  local json_content="$1"
+  local config_file
+  config_file=$(_aimi_models_config_path)
+  local config_dir
+  config_dir=$(dirname "$config_file")
+  if ! mkdir -p "$config_dir" 2>/dev/null; then
+    echo "Error: write_aimi_models_config: cannot create directory: $config_dir" >&2
+    return 1
+  fi
+  local tmp_file
+  tmp_file=$(mktemp "${config_file}.XXXXXX")
+  printf '%s\n' "$json_content" > "$tmp_file"
+  chmod 0600 "$tmp_file"
+  mv "$tmp_file" "$config_file"
+}
+
 # Atomically write the CLI path to the global cache file
 # Usage: write_global_cli_cache "/path/to/aimi-cli.sh"
 write_global_cli_cache() {
@@ -2041,6 +2061,132 @@ cmd_resolve_models() {
   printf '%s\n' "$_result"
 }
 
+# Detect available models on the current host and write ~/.config/aimi/models.json.
+# On Claude Code (CLAUDECODE=1): fixed set — opus, sonnet, haiku.
+# On OpenCode: reads `opencode models`; falls back to a built-in default Anthropic list
+#   with one warning when the opencode binary is absent.
+# Interactive (stdin is a TTY): prompts once per category for a tier assignment.
+# Non-interactive: writes a sensible default mapping without prompting.
+# Writes atomically via write_aimi_models_config (mktemp + chmod 0600 + mv).
+cmd_detect_models() {
+  check_jq
+
+  # ---- Available model sets per host ----------------------------------------
+  local _TIERS="fast balanced powerful"
+  local _CATEGORIES="research review design workflow"
+
+  local _available_models
+  local _oc_absent=0
+
+  if _is_claude_code_host; then
+    # Claude Code: fixed Anthropic model list (opus/sonnet/haiku)
+    _available_models="claude-haiku-4-5
+claude-sonnet-4-5
+claude-opus-4-5"
+  else
+    # OpenCode: query `opencode models`; fall back to built-in list if absent
+    if command -v opencode >/dev/null 2>&1; then
+      _available_models=$(opencode models 2>/dev/null) || _available_models=""
+    fi
+    if [ -z "${_available_models:-}" ]; then
+      _oc_absent=1
+      echo "Warning: detect-models: opencode binary not found or returned no models; using built-in Anthropic model list." >&2
+      _available_models="claude-haiku-4-5
+claude-sonnet-4-5
+claude-opus-4-5"
+    fi
+  fi
+
+  # ---- Build per-tier model defaults ----------------------------------------
+  # Fast → haiku, balanced → sonnet, powerful → opus (substring match)
+  local _fast_model _balanced_model _powerful_model
+
+  _fast_model=$(printf '%s\n' "$_available_models" | grep -i "haiku" | head -1)
+  [ -z "$_fast_model" ] && _fast_model=$(printf '%s\n' "$_available_models" | head -1)
+
+  _balanced_model=$(printf '%s\n' "$_available_models" | grep -i "sonnet" | head -1)
+  [ -z "$_balanced_model" ] && _balanced_model=$(printf '%s\n' "$_available_models" | sed -n '2p')
+  [ -z "$_balanced_model" ] && _balanced_model=$(printf '%s\n' "$_available_models" | head -1)
+
+  _powerful_model=$(printf '%s\n' "$_available_models" | grep -i "opus" | head -1)
+  [ -z "$_powerful_model" ] && _powerful_model=$(printf '%s\n' "$_available_models" | tail -1)
+
+  # ---- Per-category tier assignment -----------------------------------------
+  # Default mapping: research=balanced, review=powerful, design=balanced, workflow=fast
+  local _tier_research="balanced"
+  local _tier_review="powerful"
+  local _tier_design="balanced"
+  local _tier_workflow="fast"
+
+  if [ -t 0 ]; then
+    # stdin is a TTY — prompt once per category
+    local _prompt_tiers
+    _prompt_tiers=$(printf '%s\n' $_TIERS | tr '\n' '|' | sed 's/|$//')
+
+    _prompt_category() {
+      local cat="$1"
+      local default="$2"
+      local answer
+      printf 'Category %s — tier [%s] (default: %s): ' "$cat" "$_prompt_tiers" "$default" >&2
+      read -r answer </dev/tty
+      answer=$(printf '%s' "$answer" | tr -d '[:space:]')
+      case "$answer" in
+        fast|balanced|powerful) printf '%s' "$answer" ;;
+        *) printf '%s' "$default" ;;
+      esac
+    }
+
+    _tier_research=$(_prompt_category "research" "$_tier_research")
+    _tier_review=$(_prompt_category "review"   "$_tier_review")
+    _tier_design=$(_prompt_category "design"   "$_tier_design")
+    _tier_workflow=$(_prompt_category "workflow"  "$_tier_workflow")
+  fi
+
+  # ---- Determine host key for models table ----------------------------------
+  local _host_key
+  if _is_claude_code_host; then
+    _host_key="claudeCode"
+  else
+    _host_key="opencode"
+  fi
+
+  # ---- Assemble the models.json document ------------------------------------
+  local _models_json
+  _models_json=$(jq -n \
+    --arg fast     "$_fast_model" \
+    --arg balanced "$_balanced_model" \
+    --arg powerful "$_powerful_model" \
+    --arg host_key "$_host_key" \
+    --arg r_tier   "$_tier_research" \
+    --arg rv_tier  "$_tier_review" \
+    --arg d_tier   "$_tier_design" \
+    --arg w_tier   "$_tier_workflow" \
+    '{
+      schemaVersion: "1.0",
+      categories: {
+        research: $r_tier,
+        review:   $rv_tier,
+        design:   $d_tier,
+        workflow: $w_tier
+      },
+      models: {
+        ($host_key): {
+          fast:     $fast,
+          balanced: $balanced,
+          powerful: $powerful
+        }
+      }
+    }')
+
+  # ---- Atomic write ---------------------------------------------------------
+  write_aimi_models_config "$_models_json"
+
+  local _config_path
+  _config_path=$(_aimi_models_config_path)
+  printf 'detect-models: config written to %s\n' "$_config_path" >&2
+  printf '%s\n' "$_models_json"
+}
+
 # Setup branch: deterministic branch creation/checkout logic
 # Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--base <baseBranch>] [--project <path>]
 cmd_setup_branch() {
@@ -3212,6 +3358,14 @@ COMMANDS:
                               JSON object with keys research, review, design, workflow.
                               Unconfigured or fallback entries use the literal "inherit".
                               Warnings go to stderr; stdout is always valid JSON.
+    detect-models             Detect available models on the current host and write
+                              ~/.config/aimi/models.json.
+                              Claude Code: fixed set (opus, sonnet, haiku).
+                              OpenCode: reads `opencode models`; falls back to built-in
+                              Anthropic list with one warning when opencode is absent.
+                              Interactive (stdin TTY): prompts once per category for tier.
+                              Non-interactive: writes sensible default mapping.
+                              Emits the written JSON on stdout.
     setup-branch <name> --default-branch <branch> [--project <path>]
                               Create or checkout branch with deterministic logic
     clear-state               Clear all state files
@@ -3321,6 +3475,7 @@ main() {
     version) cmd_version; return ;;
     detect-interactivity) shift; cmd_detect_interactivity "$@"; return ;;
     resolve-models) shift; cmd_resolve_models "$@"; return ;;
+    detect-models) shift; cmd_detect_models "$@"; return ;;
     prime-cache) cmd_prime_cache; return ;;
   esac
 

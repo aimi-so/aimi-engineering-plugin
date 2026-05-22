@@ -1682,6 +1682,7 @@ source_cache_functions() {
   eval "$(sed -n '/^_validate_businessspec_field()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_aimi_models_config_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^read_aimi_models_config()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^write_aimi_models_config()/,/^}/p' "$CLI")"
 }
 
 test_write_global_cli_cache() {
@@ -5901,6 +5902,280 @@ test_resolve_models_stdout_always_valid_json() {
 }
 
 # ============================================================================
+# detect-models Tests
+# ============================================================================
+
+# Helper: write a valid full models.json for round-trip tests.
+_write_full_models_config() {
+  local dir="$1"
+  printf '{
+  "schemaVersion": "1.0",
+  "categories": {
+    "research":  "balanced",
+    "review":    "powerful",
+    "design":    "balanced",
+    "workflow":  "fast"
+  },
+  "models": {
+    "claudeCode": {
+      "fast":     "claude-haiku-4-5",
+      "balanced": "claude-sonnet-4-5",
+      "powerful": "claude-opus-4-5"
+    },
+    "opencode": {
+      "fast":     "claude-haiku-4-5",
+      "balanced": "claude-sonnet-4-5",
+      "powerful": "claude-opus-4-5"
+    }
+  }
+}\n' > "$dir/models.json"
+}
+
+test_detect_models_claudecode_generates_config() {
+  echo ""
+  echo "=== Testing detect-models on Claude Code host generates valid models.json ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Run detect-models as Claude Code host (non-interactive, stdin is not a TTY in tests)
+  local stdout
+  stdout=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" detect-models 2>/dev/null </dev/null)
+
+  # models.json must exist
+  if [ -f "$tmpdir/models.json" ]; then
+    echo -e "${GREEN}✓${NC} detect-models claudecode: models.json written"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models claudecode: models.json not found in $tmpdir"
+    ((TESTS_FAILED++))
+  fi
+
+  # stdout must be valid JSON
+  if printf '%s' "$stdout" | jq empty 2>/dev/null; then
+    echo -e "${GREEN}✓${NC} detect-models claudecode: stdout is valid JSON"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models claudecode: stdout is not valid JSON: $stdout"
+    ((TESTS_FAILED++))
+  fi
+
+  # schemaVersion must be present
+  local schema_ver
+  schema_ver=$(printf '%s' "$stdout" | jq -r '.schemaVersion // empty' 2>/dev/null)
+  assert_eq "1.0" "$schema_ver" "detect-models claudecode: schemaVersion is 1.0"
+
+  # categories map must have all four keys
+  local cat_keys
+  cat_keys=$(printf '%s' "$stdout" | jq -r '.categories | keys | sort | join(",")' 2>/dev/null)
+  assert_eq "design,research,review,workflow" "$cat_keys" "detect-models claudecode: categories has all four keys"
+
+  # models table must have claudeCode key
+  local has_cc
+  has_cc=$(printf '%s' "$stdout" | jq -r '.models | has("claudeCode") | tostring' 2>/dev/null)
+  assert_eq "true" "$has_cc" "detect-models claudecode: models table has claudeCode key"
+
+  # All three tiers must be present in the claudeCode table
+  local tier_keys
+  tier_keys=$(printf '%s' "$stdout" | jq -r '.models.claudeCode | keys | sort | join(",")' 2>/dev/null)
+  assert_eq "balanced,fast,powerful" "$tier_keys" "detect-models claudecode: claudeCode table has fast/balanced/powerful"
+
+  # Models must contain haiku/sonnet/opus (Claude Code fixed set)
+  local fast_model
+  fast_model=$(printf '%s' "$stdout" | jq -r '.models.claudeCode.fast // empty' 2>/dev/null)
+  if printf '%s' "$fast_model" | grep -qi "haiku"; then
+    echo -e "${GREEN}✓${NC} detect-models claudecode: fast tier model contains haiku"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models claudecode: fast tier model '$fast_model' does not contain haiku"
+    ((TESTS_FAILED++))
+  fi
+}
+
+test_detect_models_opencode_absent_fallback() {
+  echo ""
+  echo "=== Testing detect-models on OpenCode host with opencode binary absent — fallback with warning ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Run detect-models without CLAUDECODE, PATH stripped of opencode
+  local stdout stderr
+  stderr=$(PATH="/usr/bin:/bin" AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE= "$CLI" detect-models 2>&1 1>/dev/null </dev/null)
+  stdout=$(PATH="/usr/bin:/bin" AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE= "$CLI" detect-models 2>/dev/null </dev/null)
+
+  # models.json must be written
+  if [ -f "$tmpdir/models.json" ]; then
+    echo -e "${GREEN}✓${NC} detect-models opencode-absent: models.json written despite absent binary"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models opencode-absent: models.json not found in $tmpdir"
+    ((TESTS_FAILED++))
+  fi
+
+  # Exactly one warning must go to stderr
+  if printf '%s' "$stderr" | grep -q "Warning: detect-models: opencode binary not found"; then
+    echo -e "${GREEN}✓${NC} detect-models opencode-absent: one warning on stderr"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models opencode-absent: expected warning on stderr, got: $stderr"
+    ((TESTS_FAILED++))
+  fi
+
+  # stdout must still be valid JSON
+  if printf '%s' "$stdout" | jq empty 2>/dev/null; then
+    echo -e "${GREEN}✓${NC} detect-models opencode-absent: stdout is valid JSON"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models opencode-absent: stdout is not valid JSON: $stdout"
+    ((TESTS_FAILED++))
+  fi
+
+  # models table must have opencode key (not claudeCode) for OpenCode host
+  local has_oc
+  has_oc=$(printf '%s' "$stdout" | jq -r '.models | has("opencode") | tostring' 2>/dev/null)
+  assert_eq "true" "$has_oc" "detect-models opencode-absent: models table has opencode key"
+}
+
+test_detect_models_atomic_write_no_corruption() {
+  echo ""
+  echo "=== Testing detect-models atomic write: pre-existing valid config is never partially overwritten ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Write a known-good pre-existing models.json
+  _write_full_models_config "$tmpdir"
+  local original_content
+  original_content=$(cat "$tmpdir/models.json")
+
+  # Run detect-models normally — it should overwrite atomically
+  AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" detect-models 2>/dev/null </dev/null
+
+  # Result must still be valid JSON
+  local new_content
+  new_content=$(cat "$tmpdir/models.json" 2>/dev/null)
+  if printf '%s' "$new_content" | jq empty 2>/dev/null; then
+    echo -e "${GREEN}✓${NC} detect-models atomic-write: post-run models.json is valid JSON"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models atomic-write: post-run models.json is not valid JSON: $new_content"
+    ((TESTS_FAILED++))
+  fi
+
+  # No leftover temp file must exist (mktemp + mv atomicity guarantee)
+  local leftover_count
+  leftover_count=$(find "$tmpdir" -name 'models.json.*' | wc -l)
+  if [ "$leftover_count" -eq 0 ]; then
+    echo -e "${GREEN}✓${NC} detect-models atomic-write: no leftover temp files"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models atomic-write: found $leftover_count leftover temp files"
+    ((TESTS_FAILED++))
+  fi
+
+  # File must have permission 0600
+  local perms
+  perms=$(stat -c '%a' "$tmpdir/models.json" 2>/dev/null || stat -f '%Lp' "$tmpdir/models.json" 2>/dev/null)
+  assert_eq "600" "$perms" "detect-models atomic-write: models.json permission is 0600"
+}
+
+test_detect_models_roundtrip_with_resolve_models() {
+  echo ""
+  echo "=== Testing detect-models output round-trips correctly through resolve-models ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # detect-models writes the config
+  AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" detect-models 2>/dev/null </dev/null
+
+  # resolve-models must consume it without warnings
+  local resolve_stdout resolve_stderr
+  resolve_stderr=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>&1 1>/dev/null)
+  resolve_stdout=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
+
+  # stdout must be valid JSON
+  if printf '%s' "$resolve_stdout" | jq empty 2>/dev/null; then
+    echo -e "${GREEN}✓${NC} detect-models roundtrip: resolve-models produces valid JSON"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models roundtrip: resolve-models stdout is not valid JSON: $resolve_stdout"
+    ((TESTS_FAILED++))
+  fi
+
+  # No warnings on stderr from resolve-models
+  if [ -z "$resolve_stderr" ]; then
+    echo -e "${GREEN}✓${NC} detect-models roundtrip: resolve-models produced no warnings"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models roundtrip: resolve-models warnings: $resolve_stderr"
+    ((TESTS_FAILED++))
+  fi
+
+  # All four keys must be present in resolve-models output
+  local keys
+  keys=$(printf '%s' "$resolve_stdout" | jq -r 'keys | sort | join(",")' 2>/dev/null)
+  assert_eq "design,research,review,workflow" "$keys" "detect-models roundtrip: all four category keys present"
+}
+
+test_write_aimi_models_config() {
+  echo ""
+  echo "=== Testing write_aimi_models_config atomic write helper ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  source_cache_functions
+
+  local test_json='{"schemaVersion":"1.0","categories":{"research":"balanced"},"models":{}}'
+  AIMI_CONFIG_DIR="$tmpdir" write_aimi_models_config "$test_json"
+
+  local config_file="$tmpdir/models.json"
+
+  # File must exist
+  if [ -f "$config_file" ]; then
+    echo -e "${GREEN}✓${NC} write_aimi_models_config: file written"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} write_aimi_models_config: file not found at $config_file"
+    ((TESTS_FAILED++))
+  fi
+
+  # Content must match
+  local content
+  content=$(cat "$config_file" 2>/dev/null | tr -d '\n')
+  if printf '%s' "$content" | grep -q '"schemaVersion":"1.0"'; then
+    echo -e "${GREEN}✓${NC} write_aimi_models_config: content matches"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} write_aimi_models_config: content mismatch: $content"
+    ((TESTS_FAILED++))
+  fi
+
+  # Permission must be 0600
+  local perms
+  perms=$(stat -c '%a' "$config_file" 2>/dev/null || stat -f '%Lp' "$config_file" 2>/dev/null)
+  assert_eq "600" "$perms" "write_aimi_models_config: permission is 0600"
+
+  # No leftover temp files
+  local leftover
+  leftover=$(find "$tmpdir" -name 'models.json.*' | wc -l)
+  if [ "$leftover" -eq 0 ]; then
+    echo -e "${GREEN}✓${NC} write_aimi_models_config: no leftover temp files"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} write_aimi_models_config: $leftover leftover temp files"
+    ((TESTS_FAILED++))
+  fi
+}
+
+# ============================================================================
 # detect-design-bundle Tests
 # ============================================================================
 
@@ -6843,6 +7118,15 @@ main() {
   test_resolve_models_invalid_model_claudecode
   test_resolve_models_all_four_keys_always_present
   test_resolve_models_stdout_always_valid_json
+
+  # detect-models tests
+  echo ""
+  echo "--- detect-models Tests ---"
+  test_write_aimi_models_config
+  test_detect_models_claudecode_generates_config
+  test_detect_models_opencode_absent_fallback
+  test_detect_models_atomic_write_no_corruption
+  test_detect_models_roundtrip_with_resolve_models
 
   # Design bundle detection tests
   echo ""
