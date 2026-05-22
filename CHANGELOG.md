@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.90.0] - 2026-05-22
+
+### Added
+
+- `aimi-cli resolve-models` — reads `~/.config/aimi/models.json` and resolves the configured model id for each agent category (`research`, `review`, `design`, `workflow`). Always emits all four category keys; uses the sentinel `inherit` when no override is configured so commands can pass it through without special-casing.
+- `aimi-cli detect-models` — interactive generator for the host-aware `~/.config/aimi/models.json` config. When stdin is a TTY, prompts per category; otherwise writes a sensible default mapping. Falls back to a built-in Anthropic default list when the `opencode` binary is not on PATH.
+- `~/.config/aimi/models.json` host-aware config: a `categories` map (category name → logical tier) plus a per-host `models` table (`claudeCode` and `opencode`) resolving tiers to concrete model ids. Includes a `schemaVersion` field following the `tasks.json` precedent.
+- Per-spawn model selection wired into the planning/research and review/execution commands (`/aimi:plan`, `/aimi:brainstorm`, `/aimi:deepen`, `/aimi:review`, `/aimi:design:polish`, `/aimi:validate-bug`, `/aimi:execute`). On Claude Code, resolved model ids are passed via the native `Task` tool `model:` parameter; the sentinel `inherit` leaves the model at host default.
+- `tools/aimi-task.ts` — OpenCode custom tool (TypeScript, loaded by the Bun runtime) that spawns subagents with an explicit `model` parameter, giving OpenCode per-spawn model selection parity with Claude Code. `install.sh` copies the tool and its `tools/package.json` companion into the OpenCode config directory and registers it in `opencode.json`. The tool regex-validates the model id before any shell-out.
+
 ## [1.89.0] - 2026-05-21
 
 ### Added
