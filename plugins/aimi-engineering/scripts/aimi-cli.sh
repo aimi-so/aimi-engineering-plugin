@@ -295,6 +295,8 @@ read_aimi_models_config() {
 # Atomically write JSON content to the models config file (chmod 0600, mktemp + mv).
 # Usage: write_aimi_models_config <json_content>
 # Mirrors write_global_cli_cache — interrupted runs never corrupt a pre-existing file.
+# chmod is applied BEFORE writing content (create-then-restrict-then-write pattern).
+# Temp file is removed on mv failure so no stray files remain.
 write_aimi_models_config() {
   local json_content="$1"
   local config_file
@@ -307,9 +309,13 @@ write_aimi_models_config() {
   fi
   local tmp_file
   tmp_file=$(mktemp "${config_file}.XXXXXX")
-  printf '%s\n' "$json_content" > "$tmp_file"
   chmod 0600 "$tmp_file"
-  mv "$tmp_file" "$config_file"
+  printf '%s\n' "$json_content" > "$tmp_file"
+  if ! mv "$tmp_file" "$config_file"; then
+    rm -f "$tmp_file" 2>/dev/null
+    echo "Error: write_aimi_models_config: mv failed for $config_file" >&2
+    return 1
+  fi
 }
 
 # Atomically write the CLI path to the global cache file
@@ -1875,6 +1881,16 @@ cmd_bundle_prototype_finalize() {
     '{ written: $sidecar_path, generatedAt: $generatedAt }'
 }
 
+# Return the path to the OpenCode models validation cache file, keyed by mtime.
+# Usage: _oc_models_cache_path <mtime>
+# The cache stores the `opencode models` output for a specific models.json mtime.
+_oc_models_cache_path() {
+  local mtime="$1"
+  local aimi_dir
+  aimi_dir=$(_aimi_config_dir)
+  printf '%s\n' "$aimi_dir/models-oc-cache-${mtime}.txt"
+}
+
 # Resolve which interactivity mode applies to the current shell.
 # Prints exactly one of: picker, agent
 #   agent  - AIMI_AGENT_MODE=true or CI=true (explicit overrides), OR no host
@@ -1907,17 +1923,21 @@ cmd_detect_interactivity() {
   echo "picker"
 }
 
-# Resolve the configured model for each agent category.
+# Resolve which configured model for each agent category.
 # Reads ~/.config/aimi/models.json and maps each of the four categories
 # (research, review, design, workflow) to a concrete model ID.
 # Always emits a single-line compact JSON object with all four keys.
 # Unconfigured or fallback entries use the literal string "inherit".
 # All warnings go to stderr; stdout is always valid JSON.
+#
+# Performance notes:
+#   - The standalone jq-empty validation pass is omitted; the resolution jq
+#     error handler already catches malformed JSON.
+#   - Multi-pass INVALID tagging is merged into a single jq invocation per host.
+#   - OpenCode: `opencode models` output is cached by models.json mtime so
+#     repeated calls within the same models.json state skip the shell-out.
 cmd_resolve_models() {
   check_jq
-
-  # Constant set of valid model ID fragments for Claude Code host validation
-  local _CLAUDE_CODE_VALID_MODELS="opus sonnet haiku"
 
   local config_file
   config_file=$(_aimi_models_config_path)
@@ -1931,18 +1951,11 @@ cmd_resolve_models() {
     return 0
   fi
 
-  # Read and validate JSON
+  # Read config (use read_aimi_models_config for consistent access)
   local config_json
-  config_json=$(cat "$config_file" 2>/dev/null) || config_json=""
+  config_json=$(read_aimi_models_config) || config_json=""
   if [ -z "$config_json" ]; then
     echo "Warning: resolve-models: models config file is empty: $config_file" >&2
-    printf '%s\n' "$_fallback"
-    return 0
-  fi
-
-  # Test for malformed JSON
-  if ! printf '%s' "$config_json" | jq empty 2>/dev/null; then
-    echo "Warning: resolve-models: models config file is malformed JSON: $config_file" >&2
     printf '%s\n' "$_fallback"
     return 0
   fi
@@ -1957,6 +1970,7 @@ cmd_resolve_models() {
 
   # Resolve each category: .categories[cat] → tier, .models[host][tier] → model_id
   # Missing category or tier → inherit
+  # The error handler catches malformed JSON (no separate jq empty pass needed).
   local _result
   _result=$(printf '%s' "$config_json" | jq -r --arg host "$host" '
     def resolve_cat($cat):
@@ -1973,7 +1987,7 @@ cmd_resolve_models() {
       workflow: resolve_cat("workflow")
     } | @json
   ' 2>/dev/null) || {
-    echo "Warning: resolve-models: failed to parse models config: $config_file" >&2
+    echo "Warning: resolve-models: models config file is malformed JSON or failed to parse: $config_file" >&2
     printf '%s\n' "$_fallback"
     return 0
   }
@@ -1984,105 +1998,130 @@ cmd_resolve_models() {
     return 0
   fi
 
-  # Validate resolved model IDs per host, replacing invalid ones with inherit + warning
+  # Validate resolved model IDs per host in a single jq pass:
+  #   - invalid entries get value "INVALID\t<original>" (tab-delimited to handle = in model names)
+  #   - warnings emitted via tab-delimited IFS read loop
+  #   - validated result has INVALID entries replaced with "inherit"
   if _is_claude_code_host; then
-    # Claude Code: validate against constant set opus, sonnet, haiku (substring match)
-    _result=$(printf '%s' "$_result" | jq -r '
+    # Claude Code: exact-match against the set {opus, sonnet, haiku}.
+    # The Task tool only accepts these short aliases — no version suffixes.
+    local _tagged
+    _tagged=$(printf '%s' "$_result" | jq -r '
       to_entries | map(
         .key as $cat |
         .value as $model |
         if $model == "inherit" then {key: $cat, value: "inherit"}
-        else
-          # Accept if the model string contains opus, sonnet, or haiku
-          if ($model | test("opus|sonnet|haiku"; "i")) then {key: $cat, value: $model}
-          else {key: $cat, value: ("INVALID:" + $model)}
-          end
+        elif ($model == "opus" or $model == "sonnet" or $model == "haiku") then
+          {key: $cat, value: $model}
+        else {key: $cat, value: ("INVALID\t" + $model)}
         end
       ) | from_entries | @json
     ' 2>/dev/null)
 
-    # Emit warnings for invalid entries and replace with inherit
+    # Emit warnings and build clean result in one pass
     local _validated
-    _validated=$(printf '%s' "$_result" | jq -r '
+    _validated=$(printf '%s' "$_tagged" | jq -r '
       to_entries | map(
-        if (.value | startswith("INVALID:")) then {key: .key, value: "inherit"}
+        if (.value | startswith("INVALID\t")) then {key: .key, value: "inherit"}
         else .
         end
       ) | from_entries | @json
     ' 2>/dev/null)
 
-    # Print warnings for invalid entries
-    while IFS='=' read -r _cat _val; do
+    # Print warnings for invalid entries (tab delimiter avoids = truncation)
+    while IFS=$'\t' read -r _cat _val; do
       [ -n "$_cat" ] || continue
-      echo "Warning: resolve-models: model '$_val' is not valid for Claude Code host (category: $_cat), falling back to inherit" >&2
-    done < <(printf '%s' "$_result" | jq -r 'to_entries[] | select(.value | startswith("INVALID:")) | .key + "=" + (.value | ltrimstr("INVALID:"))' 2>/dev/null)
+      echo "Warning: resolve-models: model '$_val' is not valid for Claude Code host (must be exactly opus, sonnet, or haiku; category: $_cat), falling back to inherit" >&2
+    done < <(printf '%s' "$_tagged" | jq -r 'to_entries[] | select(.value | startswith("INVALID\t")) | .key + "\t" + (.value | ltrimstr("INVALID\t"))' 2>/dev/null)
 
     _result="$_validated"
   else
-    # OpenCode: validate against `opencode models` output; skip validation when binary absent
+    # OpenCode: validate against `opencode models` output; skip validation when binary absent.
+    # Cache the models list by models.json mtime to avoid shelling out on every call.
     if command -v opencode >/dev/null 2>&1; then
-      local _oc_models
-      _oc_models=$(opencode models 2>/dev/null) || _oc_models=""
+      local _config_mtime
+      _config_mtime=$(stat -c '%Y' "$config_file" 2>/dev/null || stat -f '%m' "$config_file" 2>/dev/null || echo "0")
+      local _oc_cache_file
+      _oc_cache_file=$(_oc_models_cache_path "$_config_mtime")
+
+      local _oc_models=""
+      if [ -f "$_oc_cache_file" ]; then
+        _oc_models=$(cat "$_oc_cache_file" 2>/dev/null) || _oc_models=""
+      fi
+
+      if [ -z "$_oc_models" ]; then
+        _oc_models=$(opencode models 2>/dev/null) || _oc_models=""
+        if [ -n "$_oc_models" ]; then
+          # Write to cache (best-effort; failure is non-fatal)
+          local _oc_aimi_dir
+          _oc_aimi_dir=$(_aimi_config_dir)
+          mkdir -p "$_oc_aimi_dir" 2>/dev/null || true
+          printf '%s\n' "$_oc_models" > "$_oc_cache_file" 2>/dev/null || true
+        fi
+      fi
+
       if [ -n "$_oc_models" ]; then
-        _result=$(printf '%s' "$_result" | jq -r --arg ocmodels "$_oc_models" '
+        # Single jq pass: tag invalid entries with INVALID\t prefix
+        local _oc_tagged
+        _oc_tagged=$(printf '%s' "$_result" | jq -r --arg ocmodels "$_oc_models" '
           ($ocmodels | split("\n") | map(select(. != "")) | map(ltrimstr(" ") | rtrimstr(" "))) as $valid_list |
           to_entries | map(
             .key as $cat |
             .value as $model |
             if $model == "inherit" then {key: $cat, value: "inherit"}
             elif ($valid_list | index($model)) != null then {key: $cat, value: $model}
-            else {key: $cat, value: ("INVALID:" + $model)}
+            else {key: $cat, value: ("INVALID\t" + $model)}
             end
           ) | from_entries | @json
         ' 2>/dev/null)
 
-        # Emit warnings for invalid entries and replace with inherit
         local _oc_validated
-        _oc_validated=$(printf '%s' "$_result" | jq -r '
+        _oc_validated=$(printf '%s' "$_oc_tagged" | jq -r '
           to_entries | map(
-            if (.value | startswith("INVALID:")) then {key: .key, value: "inherit"}
+            if (.value | startswith("INVALID\t")) then {key: .key, value: "inherit"}
             else .
             end
           ) | from_entries | @json
         ' 2>/dev/null)
 
-        while IFS='=' read -r _cat _val; do
+        while IFS=$'\t' read -r _cat _val; do
           [ -n "$_cat" ] || continue
           echo "Warning: resolve-models: model '$_val' is not valid for OpenCode host (category: $_cat), falling back to inherit" >&2
-        done < <(printf '%s' "$_result" | jq -r 'to_entries[] | select(.value | startswith("INVALID:")) | .key + "=" + (.value | ltrimstr("INVALID:"))' 2>/dev/null)
+        done < <(printf '%s' "$_oc_tagged" | jq -r 'to_entries[] | select(.value | startswith("INVALID\t")) | .key + "\t" + (.value | ltrimstr("INVALID\t"))' 2>/dev/null)
 
         _result="$_oc_validated"
       fi
       # If opencode models output is empty, skip validation and use configured values
     fi
-    # If opencode binary is absent, skip validation (fail-safe)
+    # If opencode binary is absent, skip validation (fail-safe: use configured value as-is)
   fi
 
   printf '%s\n' "$_result"
 }
 
 # Detect available models on the current host and write ~/.config/aimi/models.json.
-# On Claude Code (CLAUDECODE=1): fixed set — opus, sonnet, haiku.
+# On Claude Code (CLAUDECODE=1): fixed set — haiku, sonnet, opus (short aliases required by Task tool).
 # On OpenCode: reads `opencode models`; falls back to a built-in default Anthropic list
 #   with one warning when the opencode binary is absent.
 # Interactive (stdin is a TTY): prompts once per category for a tier assignment.
 # Non-interactive: writes a sensible default mapping without prompting.
 # Writes atomically via write_aimi_models_config (mktemp + chmod 0600 + mv).
+# NOTE: Only the current host's sub-table is written. Re-run on the other host to
+#       populate both claudeCode and opencode tables.
 cmd_detect_models() {
   check_jq
 
   # ---- Available model sets per host ----------------------------------------
   local _TIERS="fast balanced powerful"
-  local _CATEGORIES="research review design workflow"
 
   local _available_models
   local _oc_absent=0
 
   if _is_claude_code_host; then
-    # Claude Code: fixed Anthropic model list (opus/sonnet/haiku)
-    _available_models="claude-haiku-4-5
-claude-sonnet-4-5
-claude-opus-4-5"
+    # Claude Code: short aliases only — the Task tool only accepts haiku/sonnet/opus
+    _available_models="haiku
+sonnet
+opus"
   else
     # OpenCode: query `opencode models`; fall back to built-in list if absent
     if command -v opencode >/dev/null 2>&1; then
@@ -2091,9 +2130,9 @@ claude-opus-4-5"
     if [ -z "${_available_models:-}" ]; then
       _oc_absent=1
       echo "Warning: detect-models: opencode binary not found or returned no models; using built-in Anthropic model list." >&2
-      _available_models="claude-haiku-4-5
-claude-sonnet-4-5
-claude-opus-4-5"
+      _available_models="anthropic/claude-haiku-4-5
+anthropic/claude-sonnet-4-6
+anthropic/claude-opus-4-7"
     fi
   fi
 
@@ -2183,7 +2222,8 @@ claude-opus-4-5"
 
   local _config_path
   _config_path=$(_aimi_models_config_path)
-  printf 'detect-models: config written to %s\n' "$_config_path" >&2
+  printf 'detect-models: wrote %s table to %s\n' "$_host_key" "$_config_path" >&2
+  printf 'detect-models: re-run on the other host to populate both claudeCode and opencode tables\n' >&2
   printf '%s\n' "$_models_json"
 }
 
