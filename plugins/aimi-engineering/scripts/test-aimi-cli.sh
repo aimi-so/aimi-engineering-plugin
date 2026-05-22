@@ -1681,8 +1681,11 @@ source_cache_functions() {
   eval "$(sed -n '/^_validate_designspec_citation()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_validate_businessspec_field()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_aimi_models_config_path()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_aimi_models_prompt_marker_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^read_aimi_models_config()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^write_aimi_models_config()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^cmd_models_prompt_check()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^cmd_models_prompt_dismiss()/,/^}/p' "$CLI")"
 }
 
 test_write_global_cli_cache() {
@@ -6363,6 +6366,123 @@ test_write_aimi_models_config() {
 }
 
 # ============================================================================
+# models-prompt-check / models-prompt-dismiss Tests
+# ============================================================================
+
+test_models_prompt_check_returns_prompt() {
+  echo ""
+  echo "=== Testing models-prompt-check returns 'prompt' when neither file exists ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" "$CLI" models-prompt-check)
+
+  assert_eq "prompt" "$output" "models-prompt-check: returns 'prompt' when neither models.json nor marker exists"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_check_skip_when_models_json_exists() {
+  echo ""
+  echo "=== Testing models-prompt-check returns 'skip' when models.json exists ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  # Create models.json (content irrelevant — only existence matters)
+  printf '{"schemaVersion":"1.0"}\n' > "$tmpdir/models.json"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" "$CLI" models-prompt-check)
+
+  assert_eq "skip" "$output" "models-prompt-check: returns 'skip' when models.json exists"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_check_skip_when_marker_exists() {
+  echo ""
+  echo "=== Testing models-prompt-check returns 'skip' when marker exists (no models.json) ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  # Create marker only — no models.json
+  printf 'models-prompt-seen: 2026-01-01T00:00:00Z\n' > "$tmpdir/models-prompt-seen"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" "$CLI" models-prompt-check)
+
+  assert_eq "skip" "$output" "models-prompt-check: returns 'skip' when marker exists and models.json absent"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_dismiss_creates_marker_and_check_skips() {
+  echo ""
+  echo "=== Testing models-prompt-dismiss creates marker; subsequent check returns 'skip' ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  # Before dismiss: should prompt
+  local before
+  before=$(AIMI_CONFIG_DIR="$tmpdir" "$CLI" models-prompt-check)
+  assert_eq "prompt" "$before" "models-prompt-dismiss: check returns 'prompt' before dismiss"
+
+  # Dismiss
+  AIMI_CONFIG_DIR="$tmpdir" "$CLI" models-prompt-dismiss > /dev/null
+
+  # Marker file should exist
+  if [ -f "$tmpdir/models-prompt-seen" ]; then
+    echo -e "${GREEN}✓${NC} models-prompt-dismiss: marker file exists after dismiss"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} models-prompt-dismiss: marker file not found after dismiss"
+    ((TESTS_FAILED++))
+  fi
+
+  # Marker file should have 0600 permissions
+  local perms
+  perms=$(stat -c '%a' "$tmpdir/models-prompt-seen" 2>/dev/null || stat -f '%Lp' "$tmpdir/models-prompt-seen" 2>/dev/null)
+  assert_eq "600" "$perms" "models-prompt-dismiss: marker file has 0600 permissions"
+
+  # After dismiss: should skip
+  local after
+  after=$(AIMI_CONFIG_DIR="$tmpdir" "$CLI" models-prompt-check)
+  assert_eq "skip" "$after" "models-prompt-dismiss: check returns 'skip' after dismiss"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_dismiss_idempotent() {
+  echo ""
+  echo "=== Testing models-prompt-dismiss is idempotent (calling twice does not error) ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  # First call
+  local exit1
+  AIMI_CONFIG_DIR="$tmpdir" "$CLI" models-prompt-dismiss > /dev/null
+  exit1=$?
+  assert_eq "0" "$exit1" "models-prompt-dismiss idempotent: first call exits 0"
+
+  # Second call (marker already exists)
+  local exit2
+  AIMI_CONFIG_DIR="$tmpdir" "$CLI" models-prompt-dismiss > /dev/null
+  exit2=$?
+  assert_eq "0" "$exit2" "models-prompt-dismiss idempotent: second call exits 0"
+
+  # Check is still skip
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" "$CLI" models-prompt-check)
+  assert_eq "skip" "$output" "models-prompt-dismiss idempotent: check returns 'skip' after two dismisses"
+
+  rm -rf "$tmpdir"
+}
+
+# ============================================================================
 # detect-design-bundle Tests
 # ============================================================================
 
@@ -7317,6 +7437,15 @@ main() {
   test_detect_models_opencode_absent_fallback
   test_detect_models_atomic_write_no_corruption
   test_detect_models_roundtrip_with_resolve_models
+
+  # models-prompt-check / models-prompt-dismiss tests
+  echo ""
+  echo "--- models-prompt-check / models-prompt-dismiss Tests ---"
+  test_models_prompt_check_returns_prompt
+  test_models_prompt_check_skip_when_models_json_exists
+  test_models_prompt_check_skip_when_marker_exists
+  test_models_prompt_dismiss_creates_marker_and_check_skips
+  test_models_prompt_dismiss_idempotent
 
   # Design bundle detection tests
   echo ""

@@ -192,6 +192,25 @@ Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
 
 When `AGENT_MODELS` could not be parsed or `$AIMI_CLI` was not resolved, treat every category as `"inherit"` and proceed — never abort a command because model resolution failed.
 
+### First-run configuration prompt (interactive hosts only)
+
+After `AGENT_MODELS` is resolved, check once whether the user should be offered the one-time model-selection prompt:
+
+```bash
+_aimi_interactivity=$($AIMI_CLI detect-interactivity)
+_aimi_prompt_check=$($AIMI_CLI models-prompt-check)
+```
+
+**Only** when `detect-interactivity` returns `picker` AND `models-prompt-check` returns `prompt`, show the user exactly this question via `AskUserQuestion`:
+
+> Question: "Nenhuma configuração de modelo de subagente encontrada — os agentes herdam o modelo da thread principal. Quer configurar a seleção de modelo por categoria?"
+> Options: A — "Configurar agora" ; B — "Manter o padrão (inherit)"
+
+- If the user selects **A**: run `$AIMI_CLI detect-models` to generate the config interactively, then re-run `$AIMI_CLI resolve-models` to refresh `AGENT_MODELS`.
+- Regardless of the choice (A or B): always run `$AIMI_CLI models-prompt-dismiss` so the prompt is never shown again.
+
+When `detect-interactivity` is not `picker` (agent-mode / CI) OR `models-prompt-check` returns `skip`, do nothing — proceed silently with the already-resolved map. The prompt is shown at most once ever.
+
 ## CWD Auto-Discovery
 
 The CLI automatically discovers the project root by walking up the directory tree from CWD looking for `.aimi/`. This means:

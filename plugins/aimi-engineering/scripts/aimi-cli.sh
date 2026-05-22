@@ -281,6 +281,13 @@ _aimi_models_config_path() {
   printf '%s\n' "$aimi_dir/models.json"
 }
 
+# Return the path to the models first-run prompt marker file (XDG location)
+_aimi_models_prompt_marker_path() {
+  local aimi_dir
+  aimi_dir=$(_aimi_config_dir)
+  printf '%s\n' "$aimi_dir/models-prompt-seen"
+}
+
 # Read the models config JSON, returning empty string when the file is absent.
 # Does not validate contents — callers must handle malformed JSON.
 read_aimi_models_config() {
@@ -2227,6 +2234,49 @@ anthropic/claude-opus-4-7"
   printf '%s\n' "$_models_json"
 }
 
+# Check whether the first-run model-selection prompt should be shown.
+# Echoes exactly one token to stdout:
+#   skip   — models.json already exists OR the marker file already exists
+#   prompt — neither file exists (first run, not yet configured)
+# No jq needed — pure file-existence checks.
+cmd_models_prompt_check() {
+  local config_file marker_file
+  config_file=$(_aimi_models_config_path)
+  marker_file=$(_aimi_models_prompt_marker_path)
+
+  if [ -f "$config_file" ] || [ -f "$marker_file" ]; then
+    echo "skip"
+  else
+    echo "prompt"
+  fi
+}
+
+# Atomically create the models first-run prompt marker file.
+# Idempotent — safe to call when the marker already exists.
+# Content: current date or a short sentinel line.
+cmd_models_prompt_dismiss() {
+  local marker_file
+  marker_file=$(_aimi_models_prompt_marker_path)
+  local marker_dir
+  marker_dir=$(dirname "$marker_file")
+
+  if ! mkdir -p "$marker_dir" 2>/dev/null; then
+    echo "Error: models-prompt-dismiss: cannot create directory: $marker_dir" >&2
+    return 1
+  fi
+
+  local tmp_file
+  tmp_file=$(mktemp "${marker_file}.XXXXXX")
+  chmod 0600 "$tmp_file"
+  printf 'models-prompt-seen: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%SZ')" > "$tmp_file"
+  if ! mv "$tmp_file" "$marker_file"; then
+    rm -f "$tmp_file" 2>/dev/null
+    echo "Error: models-prompt-dismiss: mv failed for $marker_file" >&2
+    return 1
+  fi
+  echo "models-prompt-dismiss: marker written to $marker_file"
+}
+
 # Setup branch: deterministic branch creation/checkout logic
 # Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--base <baseBranch>] [--project <path>]
 cmd_setup_branch() {
@@ -3406,6 +3456,13 @@ COMMANDS:
                               Interactive (stdin TTY): prompts once per category for tier.
                               Non-interactive: writes sensible default mapping.
                               Emits the written JSON on stdout.
+    models-prompt-check       Check whether the one-time model-selection prompt should
+                              be shown. Echoes 'prompt' when neither models.json nor the
+                              marker file exists; echoes 'skip' otherwise.
+    models-prompt-dismiss     Atomically create the models first-run prompt marker file
+                              (~/.config/aimi/models-prompt-seen). Idempotent. Run after
+                              the user responds to the first-run prompt (regardless of
+                              their choice) so the prompt is never shown again.
     setup-branch <name> --default-branch <branch> [--project <path>]
                               Create or checkout branch with deterministic logic
     clear-state               Clear all state files
@@ -3516,6 +3573,8 @@ main() {
     detect-interactivity) shift; cmd_detect_interactivity "$@"; return ;;
     resolve-models) shift; cmd_resolve_models "$@"; return ;;
     detect-models) shift; cmd_detect_models "$@"; return ;;
+    models-prompt-check) cmd_models_prompt_check; return ;;
+    models-prompt-dismiss) cmd_models_prompt_dismiss; return ;;
     prime-cache) cmd_prime_cache; return ;;
   esac
 

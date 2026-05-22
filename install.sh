@@ -243,6 +243,25 @@ WORKFLOW_MODEL=$(printf '\''%s'\'' "$RESOLVED_MODELS" | jq -r '\''.workflow'\'')
 
 If `$AIMI_CLI` is not available or the call fails, set all four variables to the string `inherit`.
 
+#### First-run configuration prompt (interactive hosts only)
+
+After `AGENT_MODELS` is resolved, check once whether the one-time model-selection prompt should be shown:
+
+```bash
+_AIMI_INTERACTIVITY=$($AIMI_CLI detect-interactivity 2>/dev/null)
+_AIMI_PROMPT_CHECK=$($AIMI_CLI models-prompt-check 2>/dev/null)
+```
+
+Only when `_AIMI_INTERACTIVITY` is `picker` AND `_AIMI_PROMPT_CHECK` is `prompt`, ask the user via the question tool:
+
+> "Nenhuma configuração de modelo de subagente encontrada — os agentes herdam o modelo da thread principal. Quer configurar a seleção de modelo por categoria?"
+> Options: A — "Configurar agora" ; B — "Manter o padrão (inherit)"
+
+- If the user selects **A**: run `$AIMI_CLI detect-models` to generate the config interactively, then re-run `$AIMI_CLI resolve-models` to refresh the model variables.
+- Regardless of choice: always run `$AIMI_CLI models-prompt-dismiss` so the prompt is never shown again.
+
+When `_AIMI_INTERACTIVITY` is not `picker` (agent-mode / CI) OR `_AIMI_PROMPT_CHECK` is `skip`, do nothing — proceed silently.
+
 ### Step 1 — Spawn categorized agents via aimi-task
 
 When this command references agents via `Task subagent_type="aimi-engineering:CATEGORY:NAME"`, follow this pattern instead:
