@@ -274,6 +274,24 @@ _global_worktree_cache_path() {
   printf '%s\n' "$aimi_dir/worktree-path"
 }
 
+# Return the path to the models config file (XDG location)
+_aimi_models_config_path() {
+  local aimi_dir
+  aimi_dir=$(_aimi_config_dir)
+  printf '%s\n' "$aimi_dir/models.json"
+}
+
+# Read the models config JSON, returning empty string when the file is absent.
+# Does not validate contents — callers must handle malformed JSON.
+read_aimi_models_config() {
+  local config_file
+  config_file=$(_aimi_models_config_path)
+  if [ ! -f "$config_file" ]; then
+    return 0
+  fi
+  cat "$config_file" 2>/dev/null
+}
+
 # Atomically write the CLI path to the global cache file
 # Usage: write_global_cli_cache "/path/to/aimi-cli.sh"
 write_global_cli_cache() {
@@ -1869,6 +1887,160 @@ cmd_detect_interactivity() {
   echo "picker"
 }
 
+# Resolve the configured model for each agent category.
+# Reads ~/.config/aimi/models.json and maps each of the four categories
+# (research, review, design, workflow) to a concrete model ID.
+# Always emits a single-line compact JSON object with all four keys.
+# Unconfigured or fallback entries use the literal string "inherit".
+# All warnings go to stderr; stdout is always valid JSON.
+cmd_resolve_models() {
+  check_jq
+
+  # Constant set of valid model ID fragments for Claude Code host validation
+  local _CLAUDE_CODE_VALID_MODELS="opus sonnet haiku"
+
+  local config_file
+  config_file=$(_aimi_models_config_path)
+
+  # Fallback JSON — all four categories as inherit
+  local _fallback='{"research":"inherit","review":"inherit","design":"inherit","workflow":"inherit"}'
+
+  # No config file → silent fallback (preserves current behavior)
+  if [ ! -f "$config_file" ]; then
+    printf '%s\n' "$_fallback"
+    return 0
+  fi
+
+  # Read and validate JSON
+  local config_json
+  config_json=$(cat "$config_file" 2>/dev/null) || config_json=""
+  if [ -z "$config_json" ]; then
+    echo "Warning: resolve-models: models config file is empty: $config_file" >&2
+    printf '%s\n' "$_fallback"
+    return 0
+  fi
+
+  # Test for malformed JSON
+  if ! printf '%s' "$config_json" | jq empty 2>/dev/null; then
+    echo "Warning: resolve-models: models config file is malformed JSON: $config_file" >&2
+    printf '%s\n' "$_fallback"
+    return 0
+  fi
+
+  # Determine host key
+  local host
+  if _is_claude_code_host; then
+    host="claudeCode"
+  else
+    host="opencode"
+  fi
+
+  # Resolve each category: .categories[cat] → tier, .models[host][tier] → model_id
+  # Missing category or tier → inherit
+  local _result
+  _result=$(printf '%s' "$config_json" | jq -r --arg host "$host" '
+    def resolve_cat($cat):
+      ((.categories[$cat] // null) | if . == null or . == "" then null else . end) as $tier |
+      if $tier == null then "inherit"
+      else
+        ((.models[$host][$tier] // null) | if . == null or . == "" then null else . end) as $model |
+        if $model == null then "inherit" else $model end
+      end;
+    {
+      research: resolve_cat("research"),
+      review:   resolve_cat("review"),
+      design:   resolve_cat("design"),
+      workflow: resolve_cat("workflow")
+    } | @json
+  ' 2>/dev/null) || {
+    echo "Warning: resolve-models: failed to parse models config: $config_file" >&2
+    printf '%s\n' "$_fallback"
+    return 0
+  }
+
+  if [ -z "$_result" ]; then
+    echo "Warning: resolve-models: empty result from models config: $config_file" >&2
+    printf '%s\n' "$_fallback"
+    return 0
+  fi
+
+  # Validate resolved model IDs per host, replacing invalid ones with inherit + warning
+  if _is_claude_code_host; then
+    # Claude Code: validate against constant set opus, sonnet, haiku (substring match)
+    _result=$(printf '%s' "$_result" | jq -r '
+      to_entries | map(
+        .key as $cat |
+        .value as $model |
+        if $model == "inherit" then {key: $cat, value: "inherit"}
+        else
+          # Accept if the model string contains opus, sonnet, or haiku
+          if ($model | test("opus|sonnet|haiku"; "i")) then {key: $cat, value: $model}
+          else {key: $cat, value: ("INVALID:" + $model)}
+          end
+        end
+      ) | from_entries | @json
+    ' 2>/dev/null)
+
+    # Emit warnings for invalid entries and replace with inherit
+    local _validated
+    _validated=$(printf '%s' "$_result" | jq -r '
+      to_entries | map(
+        if (.value | startswith("INVALID:")) then {key: .key, value: "inherit"}
+        else .
+        end
+      ) | from_entries | @json
+    ' 2>/dev/null)
+
+    # Print warnings for invalid entries
+    while IFS='=' read -r _cat _val; do
+      [ -n "$_cat" ] || continue
+      echo "Warning: resolve-models: model '$_val' is not valid for Claude Code host (category: $_cat), falling back to inherit" >&2
+    done < <(printf '%s' "$_result" | jq -r 'to_entries[] | select(.value | startswith("INVALID:")) | .key + "=" + (.value | ltrimstr("INVALID:"))' 2>/dev/null)
+
+    _result="$_validated"
+  else
+    # OpenCode: validate against `opencode models` output; skip validation when binary absent
+    if command -v opencode >/dev/null 2>&1; then
+      local _oc_models
+      _oc_models=$(opencode models 2>/dev/null) || _oc_models=""
+      if [ -n "$_oc_models" ]; then
+        _result=$(printf '%s' "$_result" | jq -r --arg ocmodels "$_oc_models" '
+          ($ocmodels | split("\n") | map(select(. != "")) | map(ltrimstr(" ") | rtrimstr(" "))) as $valid_list |
+          to_entries | map(
+            .key as $cat |
+            .value as $model |
+            if $model == "inherit" then {key: $cat, value: "inherit"}
+            elif ($valid_list | index($model)) != null then {key: $cat, value: $model}
+            else {key: $cat, value: ("INVALID:" + $model)}
+            end
+          ) | from_entries | @json
+        ' 2>/dev/null)
+
+        # Emit warnings for invalid entries and replace with inherit
+        local _oc_validated
+        _oc_validated=$(printf '%s' "$_result" | jq -r '
+          to_entries | map(
+            if (.value | startswith("INVALID:")) then {key: .key, value: "inherit"}
+            else .
+            end
+          ) | from_entries | @json
+        ' 2>/dev/null)
+
+        while IFS='=' read -r _cat _val; do
+          [ -n "$_cat" ] || continue
+          echo "Warning: resolve-models: model '$_val' is not valid for OpenCode host (category: $_cat), falling back to inherit" >&2
+        done < <(printf '%s' "$_result" | jq -r 'to_entries[] | select(.value | startswith("INVALID:")) | .key + "=" + (.value | ltrimstr("INVALID:"))' 2>/dev/null)
+
+        _result="$_oc_validated"
+      fi
+      # If opencode models output is empty, skip validation and use configured values
+    fi
+    # If opencode binary is absent, skip validation (fail-safe)
+  fi
+
+  printf '%s\n' "$_result"
+}
+
 # Setup branch: deterministic branch creation/checkout logic
 # Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--base <baseBranch>] [--project <path>]
 cmd_setup_branch() {
@@ -3035,6 +3207,11 @@ COMMANDS:
                               Print resolved interactivity mode (picker|agent)
                               Returns picker by default; returns agent only when
                               --non-interactive is passed, AIMI_AGENT_MODE=true, or CI=true
+    resolve-models            Resolve configured model for each agent category.
+                              Reads ~/.config/aimi/models.json and emits a single-line
+                              JSON object with keys research, review, design, workflow.
+                              Unconfigured or fallback entries use the literal "inherit".
+                              Warnings go to stderr; stdout is always valid JSON.
     setup-branch <name> --default-branch <branch> [--project <path>]
                               Create or checkout branch with deterministic logic
     clear-state               Clear all state files
@@ -3143,6 +3320,7 @@ main() {
     help|--help|-h) cmd_help; return ;;
     version) cmd_version; return ;;
     detect-interactivity) shift; cmd_detect_interactivity "$@"; return ;;
+    resolve-models) shift; cmd_resolve_models "$@"; return ;;
     prime-cache) cmd_prime_cache; return ;;
   esac
 

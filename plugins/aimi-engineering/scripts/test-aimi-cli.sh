@@ -1680,6 +1680,8 @@ source_cache_functions() {
   eval "$(sed -n '/^cmd_validate_tasks()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_validate_designspec_citation()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_validate_businessspec_field()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_aimi_models_config_path()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^read_aimi_models_config()/,/^}/p' "$CLI")"
 }
 
 test_write_global_cli_cache() {
@@ -5610,6 +5612,295 @@ test_detect_interactivity_opencode_host() {
 }
 
 # ============================================================================
+# resolve-models Tests
+# ============================================================================
+
+# Helper: create an isolated temp dir with a custom AIMI_CONFIG_DIR for models tests.
+_setup_models_env() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  printf '%s\n' "$tmpdir"
+}
+
+test_resolve_models_no_config() {
+  echo ""
+  echo "=== Testing resolve-models with no config file ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
+
+  # Expect all four keys with inherit
+  local research review design workflow
+  research=$(printf '%s' "$output" | jq -r '.research' 2>/dev/null)
+  review=$(printf '%s' "$output" | jq -r '.review' 2>/dev/null)
+  design=$(printf '%s' "$output" | jq -r '.design' 2>/dev/null)
+  workflow=$(printf '%s' "$output" | jq -r '.workflow' 2>/dev/null)
+
+  assert_eq "inherit" "$research" "resolve-models no-config: research=inherit"
+  assert_eq "inherit" "$review"   "resolve-models no-config: review=inherit"
+  assert_eq "inherit" "$design"   "resolve-models no-config: design=inherit"
+  assert_eq "inherit" "$workflow" "resolve-models no-config: workflow=inherit"
+}
+
+test_resolve_models_malformed_config() {
+  echo ""
+  echo "=== Testing resolve-models with malformed JSON config ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  printf 'this is not json\n' > "$tmpdir/models.json"
+
+  local stdout stderr
+  stderr=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>&1 1>/dev/null)
+  stdout=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
+
+  # stderr must contain a warning
+  if printf '%s' "$stderr" | grep -qi "warning"; then
+    echo -e "${GREEN}✓${NC} resolve-models malformed-config: warning sent to stderr"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} resolve-models malformed-config: expected warning on stderr, got: $stderr"
+    ((TESTS_FAILED++))
+  fi
+
+  # stdout must be valid JSON with all four inherit keys
+  local research
+  research=$(printf '%s' "$stdout" | jq -r '.research' 2>/dev/null)
+  assert_eq "inherit" "$research" "resolve-models malformed-config: stdout is valid JSON with research=inherit"
+}
+
+test_resolve_models_partial_config() {
+  echo ""
+  echo "=== Testing resolve-models with partial config (missing categories) ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Only configure research; leave others absent
+  printf '%s\n' '{
+    "schemaVersion": "1.0",
+    "categories": {
+      "research": "balanced"
+    },
+    "models": {
+      "claudeCode": {
+        "balanced": "claude-sonnet-4-5"
+      },
+      "opencode": {
+        "balanced": "claude-sonnet-4-5"
+      }
+    }
+  }' > "$tmpdir/models.json"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
+
+  local research review design workflow
+  research=$(printf '%s' "$output" | jq -r '.research' 2>/dev/null)
+  review=$(printf '%s' "$output" | jq -r '.review' 2>/dev/null)
+  design=$(printf '%s' "$output" | jq -r '.design' 2>/dev/null)
+  workflow=$(printf '%s' "$output" | jq -r '.workflow' 2>/dev/null)
+
+  assert_eq "claude-sonnet-4-5" "$research" "resolve-models partial-config: configured category resolves correctly"
+  assert_eq "inherit" "$review"   "resolve-models partial-config: missing category=inherit"
+  assert_eq "inherit" "$design"   "resolve-models partial-config: missing category=inherit"
+  assert_eq "inherit" "$workflow" "resolve-models partial-config: missing category=inherit"
+}
+
+test_resolve_models_host_detection_claudecode() {
+  echo ""
+  echo "=== Testing resolve-models host detection: CLAUDECODE=1 uses claudeCode table ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  printf '%s\n' '{
+    "schemaVersion": "1.0",
+    "categories": {
+      "research": "balanced",
+      "review": "balanced",
+      "design": "balanced",
+      "workflow": "balanced"
+    },
+    "models": {
+      "claudeCode": {
+        "balanced": "claude-sonnet-4-6"
+      },
+      "opencode": {
+        "balanced": "opencode-model-xyz"
+      }
+    }
+  }' > "$tmpdir/models.json"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
+
+  local research
+  research=$(printf '%s' "$output" | jq -r '.research' 2>/dev/null)
+
+  assert_eq "claude-sonnet-4-6" "$research" "resolve-models host-detection: CLAUDECODE=1 reads claudeCode table"
+}
+
+test_resolve_models_host_detection_opencode() {
+  echo ""
+  echo "=== Testing resolve-models host detection: no CLAUDECODE uses opencode table ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Detect a valid OpenCode model to use in the config (or use inherit if none available)
+  local oc_model="inherit"
+  if command -v opencode >/dev/null 2>&1; then
+    local first_oc_model
+    first_oc_model=$(opencode models 2>/dev/null | head -1)
+    if [ -n "$first_oc_model" ]; then
+      oc_model="$first_oc_model"
+    fi
+  fi
+
+  printf '%s\n' "{
+    \"schemaVersion\": \"1.0\",
+    \"categories\": {
+      \"research\": \"balanced\",
+      \"review\": \"balanced\",
+      \"design\": \"balanced\",
+      \"workflow\": \"balanced\"
+    },
+    \"models\": {
+      \"claudeCode\": {
+        \"balanced\": \"claude-sonnet-4-6\"
+      },
+      \"opencode\": {
+        \"balanced\": \"$oc_model\"
+      }
+    }
+  }" > "$tmpdir/models.json"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE= "$CLI" resolve-models 2>/dev/null)
+
+  local research claudecode_research
+  research=$(printf '%s' "$output" | jq -r '.research' 2>/dev/null)
+  # Also verify Claude Code host returns the claudeCode model (different from opencode)
+  claudecode_research=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null | jq -r '.research' 2>/dev/null)
+
+  assert_eq "$oc_model" "$research" "resolve-models host-detection: no CLAUDECODE reads opencode table"
+
+  # When oc_model != "claude-sonnet-4-6", also verify the hosts return different values
+  if [ "$oc_model" != "inherit" ] && [ "$oc_model" != "claude-sonnet-4-6" ]; then
+    if [ "$research" != "$claudecode_research" ]; then
+      echo -e "${GREEN}✓${NC} resolve-models host-detection: CLAUDECODE=1 and no CLAUDECODE read different tables"
+      ((TESTS_PASSED++))
+    else
+      echo -e "${RED}✗${NC} resolve-models host-detection: expected different results per host (research=$research, claudecode=$claudecode_research)"
+      ((TESTS_FAILED++))
+    fi
+  fi
+}
+
+test_resolve_models_invalid_model_claudecode() {
+  echo ""
+  echo "=== Testing resolve-models: invalid model for Claude Code falls back to inherit ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  printf '%s\n' '{
+    "schemaVersion": "1.0",
+    "categories": {
+      "research": "fast",
+      "review": "balanced",
+      "design": "balanced",
+      "workflow": "balanced"
+    },
+    "models": {
+      "claudeCode": {
+        "fast": "totally-invalid-model-xyz",
+        "balanced": "claude-sonnet-4-6"
+      },
+      "opencode": {
+        "fast": "totally-invalid-model-xyz",
+        "balanced": "opencode-model-xyz"
+      }
+    }
+  }' > "$tmpdir/models.json"
+
+  local stdout stderr
+  stderr=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>&1 1>/dev/null)
+  stdout=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
+
+  # Invalid model should produce a warning on stderr
+  if printf '%s' "$stderr" | grep -qi "warning"; then
+    echo -e "${GREEN}✓${NC} resolve-models invalid-model-claudecode: warning sent to stderr"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} resolve-models invalid-model-claudecode: expected warning on stderr, got: $stderr"
+    ((TESTS_FAILED++))
+  fi
+
+  # Invalid category should fall back to inherit
+  local research
+  research=$(printf '%s' "$stdout" | jq -r '.research' 2>/dev/null)
+  assert_eq "inherit" "$research" "resolve-models invalid-model-claudecode: invalid model falls back to inherit"
+
+  # Valid category should still resolve
+  local review
+  review=$(printf '%s' "$stdout" | jq -r '.review' 2>/dev/null)
+  assert_eq "claude-sonnet-4-6" "$review" "resolve-models invalid-model-claudecode: valid model still resolves"
+}
+
+test_resolve_models_all_four_keys_always_present() {
+  echo ""
+  echo "=== Testing resolve-models: output always has all four keys ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Empty config dir — no models.json
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
+
+  local keys
+  keys=$(printf '%s' "$output" | jq -r 'keys | sort | join(",")' 2>/dev/null)
+
+  assert_eq "design,research,review,workflow" "$keys" "resolve-models: output always contains all four keys"
+}
+
+test_resolve_models_stdout_always_valid_json() {
+  echo ""
+  echo "=== Testing resolve-models: stdout is always valid JSON ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Write malformed JSON
+  printf 'not json at all\n' > "$tmpdir/models.json"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
+
+  if printf '%s' "$output" | jq empty 2>/dev/null; then
+    echo -e "${GREEN}✓${NC} resolve-models stdout-valid-json: malformed config still produces valid JSON stdout"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} resolve-models stdout-valid-json: stdout is not valid JSON: $output"
+    ((TESTS_FAILED++))
+  fi
+}
+
+# ============================================================================
 # detect-design-bundle Tests
 # ============================================================================
 
@@ -6540,6 +6831,18 @@ main() {
   test_detect_interactivity_opencode_host
   test_detect_interactivity_non_interactive_flag
   test_detect_interactivity_opencode_shell_sim
+
+  # resolve-models tests
+  echo ""
+  echo "--- resolve-models Tests ---"
+  test_resolve_models_no_config
+  test_resolve_models_malformed_config
+  test_resolve_models_partial_config
+  test_resolve_models_host_detection_claudecode
+  test_resolve_models_host_detection_opencode
+  test_resolve_models_invalid_model_claudecode
+  test_resolve_models_all_four_keys_always_present
+  test_resolve_models_stdout_always_valid_json
 
   # Design bundle detection tests
   echo ""
