@@ -3,10 +3,18 @@ import { $ } from "bun"
 
 /**
  * Safe model identifier pattern.
- * Allows letters, digits, dot, underscore, slash, and hyphen only.
+ * Allows letters, digits, dot, underscore, and hyphen only — with at most one
+ * provider slash separating two such segments. Forbids `..` and multiple slashes.
+ *
  * This is defense-in-depth — resolve-models is the primary security boundary.
  */
-const SAFE_MODEL_PATTERN = /^[a-zA-Z0-9._\/-]+$/
+const SAFE_MODEL_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]*(?:\/[a-zA-Z0-9][a-zA-Z0-9._-]*)?$/
+
+/**
+ * Valid bare agent name: starts with a letter or digit, followed by letters,
+ * digits, underscores, or hyphens. No colons, no slashes, no other characters.
+ */
+const SAFE_AGENT_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/
 
 /**
  * Derive the bare OpenCode agent name from an aimi-engineering subagent_type.
@@ -19,6 +27,9 @@ const SAFE_MODEL_PATTERN = /^[a-zA-Z0-9._\/-]+$/
  * The algorithm strips the leading "aimi-engineering:" prefix if present,
  * then strips any remaining single "CATEGORY:" prefix segment so the result
  * is always the bare agent name used by `opencode run --agent`.
+ *
+ * Throws if the derived name is empty, still contains a colon, or fails the
+ * safe-agent-name allowlist — preventing injection through malformed inputs.
  */
 function deriveAgentName(subagentType: string): string {
   let name = subagentType
@@ -35,22 +46,37 @@ function deriveAgentName(subagentType: string): string {
     name = name.slice(colonIdx + 1)
   }
 
+  // Validate the derived name against the allowlist
+  if (!name || name.includes(":") || !SAFE_AGENT_NAME_PATTERN.test(name)) {
+    throw new Error(
+      `Invalid subagent_type "${subagentType}": derived agent name "${name}" is empty, ` +
+        `contains extra colons, or fails the allowlist ^[a-zA-Z0-9][a-zA-Z0-9_-]*$.`
+    )
+  }
+
   return name
 }
 
 /**
  * Validate the model identifier against a safe charset.
- * Returns the model string if safe, or null if it should be omitted.
+ * Returns the model string if safe.
  *
  * An empty string or the sentinel value "inherit" causes the model flag
  * to be omitted so the spawned agent inherits the session model.
+ *
+ * A non-empty, non-"inherit" string that fails the regex is a config error
+ * and throws — silent drops could mask misconfiguration.
  */
 function validateModel(model: string | undefined): string | null {
   if (!model || model === "inherit") {
     return null
   }
   if (!SAFE_MODEL_PATTERN.test(model)) {
-    return null
+    throw new Error(
+      `Invalid model identifier "${model}": must match ` +
+        `^[a-zA-Z0-9][a-zA-Z0-9._-]*(?:\\/[a-zA-Z0-9][a-zA-Z0-9._-]*)?$ ` +
+        `(provider/model-id format, no ".." or multiple slashes).`
+    )
   }
   return model
 }
@@ -76,12 +102,8 @@ export default tool({
         "Model override in provider/model-id format, e.g. anthropic/claude-opus-4-5. " +
           'Omit or pass "inherit" to inherit the session model.'
       ),
-    description: tool.schema
-      .string()
-      .optional()
-      .describe("Optional human-readable description of this spawn (unused at runtime)"),
   },
-  async execute(args, context) {
+  async execute(args, context): Promise<string> {
     const agentName = deriveAgentName(args.subagent_type)
     const safeModel = validateModel(args.model)
 
@@ -96,7 +118,14 @@ export default tool({
     // Prompt is the positional argument — append last
     cmd.push(args.prompt)
 
-    const output = await $`${cmd}`.text()
-    return output
+    try {
+      const output = await $`${cmd}`.text()
+      return output
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      throw new Error(
+        `opencode run failed for agent "${agentName}": ${message}`
+      )
+    }
   },
 })
