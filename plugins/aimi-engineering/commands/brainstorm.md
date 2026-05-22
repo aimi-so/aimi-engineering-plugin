@@ -74,7 +74,11 @@ See `references/interactivity.md` for the full contract. Every question site
 below includes an agent-mode fallback note describing its specific auto-pick
 behavior.
 
-## Step 0.6: Detect Claude Design Bundle
+## Step 0.6: Resolve Agent Models
+
+Read and follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS`. When resolution fails, treat every category as `"inherit"` and continue.
+
+## Step 0.7: Detect Claude Design Bundle
 
 Extract an optional `--root <path>` flag from `$ARGUMENTS` (do not modify
 existing feature-description handling — this extraction is local to this step
@@ -111,7 +115,7 @@ Derive working-memory values from the result:
 When `bundleDetected=false`, all downstream phases degrade gracefully — no
 error, no warning, no change to existing behavior.
 
-### Step 0.6 Post-Processing: Bundle Prototype Generation Gate
+### Step 0.7 Post-Processing: Bundle Prototype Generation Gate
 
 **Check render bundle flag (at bundle-detection gate):** Immediately after deriving `bundleDetected`, check whether the topic text or any user reply so far contains `render bundle` (case-insensitive substring). If matched and not already emitted this session, set `renderBundlePending = true` and emit `render-bundle override active — regenerating prototype from specs` once to chat.
 
@@ -198,18 +202,6 @@ error, no warning, no change to existing behavior.
 5. **When `needs_generation` is `false`** (and `renderBundlePending` was not `true`): Generation is not needed — the sidecar already records an up-to-date prototype. Use the `output_path` from `STATUS_JSON` as a reference for downstream phases if the file exists on disk. Do not append to `prototype_entries` here — the path will be picked up through `bundlePayload.prototypes[]` in Phase 4 as a normal bundle-derived entry.
 
 **Tag-breakout sanitization:** Before writing `bundleGeneratedPrototypePath` into any YAML frontmatter key (see Phase 4 `prototype:` frontmatter rules), replace `</prototype_html` with `&lt;/prototype_html` and `<prototype_html` with `&lt;prototype_html` in the path string. (In practice a file path will never contain these sequences, but the guard must be on the rail per security policy.)
-
-## Step 0.7: Resolve Agent Models
-
-Read `${CLAUDE_PLUGIN_ROOT}/commands/references/cli-path-resolution.md` — **Resolve Agent Models** section — and follow it to populate `AGENT_MODELS`. Re-read `$AIMI_CLI` from cache in the same Bash call:
-
-```bash
-AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-AGENT_MODELS=$($AIMI_CLI resolve-models)
-```
-
-Store `AGENT_MODELS` for use by every `Task subagent_type="aimi-engineering:CATEGORY:NAME"` call in this command. At each spawn site, extract the model for the agent's `CATEGORY` and apply it per the **Applying the resolved model to a Task call** rules in `cli-path-resolution.md`. When resolution fails, treat every category as `"inherit"` and continue.
 
 ## Environment Variables
 
