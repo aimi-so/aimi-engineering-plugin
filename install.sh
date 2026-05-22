@@ -223,13 +223,42 @@ translate_command_body() {
       local preamble
       preamble='## OpenCode Agent Invocation
 
+### Step 0 — Resolve Agent Models
+
+Before spawning any agent, run once:
+
+```bash
+RESOLVED_MODELS=$($AIMI_CLI resolve-models 2>/dev/null)
+```
+
+Extract per-category model values (all four keys are always present; value is a model id or the sentinel "inherit"):
+
+```
+RESEARCH_MODEL=$(printf '\''%s'\'' "$RESOLVED_MODELS" | jq -r '\''.research'\'')
+REVIEW_MODEL=$(printf '\''%s'\'' "$RESOLVED_MODELS" | jq -r '\''.review'\'')
+DESIGN_MODEL=$(printf '\''%s'\'' "$RESOLVED_MODELS" | jq -r '\''.design'\'')
+WORKFLOW_MODEL=$(printf '\''%s'\'' "$RESOLVED_MODELS" | jq -r '\''.workflow'\'')
+```
+
+If `$AIMI_CLI` is not available or the call fails, set all four variables to the string `inherit`.
+
+### Step 1 — Spawn categorized agents via aimi-task
+
 When this command references agents via `Task subagent_type="aimi-engineering:CATEGORY:NAME"`, follow this pattern instead:
 
 1. Extract CATEGORY and NAME from the reference (e.g., `aimi-engineering:review:aimi-security-sentinel` -> category=review, name=aimi-security-sentinel)
-2. Read the agent definition file: `$AIMI_PLUGIN_DIR/agents/CATEGORY/NAME.md`
-3. Strip the YAML frontmatter (everything between the first two `---` lines)
-4. Use the remaining body as the agent'"'"'s system prompt
-5. Spawn: `Task(subagent_type="general", prompt="[agent system prompt]\n\n[original task prompt]")`
+2. Look up the model for CATEGORY: research->$RESEARCH_MODEL, review->$REVIEW_MODEL, design->$DESIGN_MODEL, workflow->$WORKFLOW_MODEL
+3. Spawn via the **aimi-task** tool:
+   ```
+   aimi-task(
+     subagent_type="aimi-engineering:CATEGORY:NAME",
+     model="[model from step 2, omit if inherit]",
+     prompt="[original task prompt]"
+   )
+   ```
+   Omit the `model` argument entirely when the resolved value is `inherit`.
+
+General-purpose spawns (`Task(subagent_type="general", ...)`) are left unchanged — do NOT route them through aimi-task.
 
 Run all agent Tasks in parallel as instructed by the command below.
 
@@ -552,6 +581,48 @@ install_skills() {
 }
 
 # ---------------------------------------------------------------------------
+# install_custom_tools — copy plugin tools/ to the OpenCode tools directory
+# ---------------------------------------------------------------------------
+install_custom_tools() {
+  local src="$1"
+  local target_dir="$2"
+  local tools_src="$src/tools"
+  local tools_dst="$target_dir/tools"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] Would install custom tools to $tools_dst"
+    if [ -d "$tools_src" ]; then
+      for f in "$tools_src"/*; do
+        [ -f "$f" ] || continue
+        local basename
+        basename=$(basename "$f")
+        log "[dry-run]   Would install tool: $basename"
+      done
+    fi
+    return 0
+  fi
+
+  if [ ! -d "$tools_src" ]; then
+    [ "$VERBOSE" -eq 1 ] && log "No tools/ directory found in plugin source, skipping"
+    return 0
+  fi
+
+  mkdir -p "$tools_dst"
+
+  local count=0
+  for f in "$tools_src"/*; do
+    [ -f "$f" ] || continue
+    local basename
+    basename=$(basename "$f")
+    cp "$f" "$tools_dst/$basename"
+    count=$((count + 1))
+    [ "$VERBOSE" -eq 1 ] && log "  Tool: $basename"
+  done
+
+  ok "Installed $count custom tools to $tools_dst"
+}
+
+# ---------------------------------------------------------------------------
 # install_mcp — add context7 to opencode.json
 # ---------------------------------------------------------------------------
 install_mcp() {
@@ -762,6 +833,7 @@ install_opencode() {
   install_commands "$src" "$target_dir"
   install_agents "$src" "$target_dir"
   install_skills "$src" "$target_dir"
+  install_custom_tools "$src" "$target_dir"
   install_mcp "$target_dir"
   install_permissions "$target_dir"
 
@@ -800,6 +872,7 @@ install_opencode() {
   log "Commands:      $target_dir/commands/aimi/*.md"
   log "Agents:        $target_dir/agents/aimi-*.md"
   log "Skills:        $target_dir/skills/aimi-*/"
+  log "Tools:         $target_dir/tools/aimi-task.ts"
   log "MCP:           $target_dir/opencode.json"
   echo
   log "Restart your shell or run:"
@@ -821,9 +894,12 @@ uninstall_opencode() {
     log "[dry-run] Would remove $target_dir/agents/aimi-*.md"
     log "[dry-run] Would remove $target_dir/skills/aimi-*/"
     log "[dry-run] Would remove $target_dir/plugins/$PLUGIN_NAME/"
+    log "[dry-run] Would remove $target_dir/tools/aimi-task.ts"
+    log "[dry-run] Would remove $target_dir/tools/package.json (aimi-task plugin dependency)"
     log "[dry-run] Would remove context7 from $target_dir/opencode.json"
     log "[dry-run] Would remove permissions from $target_dir/opencode.json"
     log "[dry-run] Would remove AIMI_PLUGIN_DIR from shell profiles"
+    log "[dry-run] NOTE: models.json user config is preserved (not removed)"
     local new_cache_file="${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path"
     local legacy_cache_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path"
     [ -f "$new_cache_file" ]    && log "[dry-run] Would remove $new_cache_file"
@@ -875,6 +951,23 @@ uninstall_opencode() {
     rm -rf "$target_dir/plugins/$PLUGIN_NAME"
     ok "Removed plugin source"
   fi
+
+  # Remove shipped aimi-task tool artifacts from the OpenCode tools directory.
+  # Only the files we installed (aimi-task.ts and package.json) are removed.
+  # The user config file models.json under the aimi config directory is NOT touched.
+  local tools_dir="$target_dir/tools"
+  local removed_tools=0
+  if [ -f "$tools_dir/aimi-task.ts" ]; then
+    rm -f "$tools_dir/aimi-task.ts"
+    removed_tools=$((removed_tools + 1))
+    [ "$VERBOSE" -eq 1 ] && log "Removed $tools_dir/aimi-task.ts"
+  fi
+  if [ -f "$tools_dir/package.json" ]; then
+    rm -f "$tools_dir/package.json"
+    removed_tools=$((removed_tools + 1))
+    [ "$VERBOSE" -eq 1 ] && log "Removed $tools_dir/package.json"
+  fi
+  [ "$removed_tools" -gt 0 ] && ok "Removed aimi-task tool artifacts from $tools_dir"
 
   # Remove MCP from opencode.json
   local config_file="$target_dir/opencode.json"
