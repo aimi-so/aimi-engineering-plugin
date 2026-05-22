@@ -228,6 +228,7 @@ translate_command_body() {
 Before spawning any agent, run once:
 
 ```bash
+AIMI_CLI="${AIMI_CLI:-${AIMI_PLUGIN_DIR}/scripts/aimi-cli.sh}"
 RESOLVED_MODELS=$($AIMI_CLI resolve-models 2>/dev/null)
 ```
 
@@ -589,14 +590,25 @@ install_custom_tools() {
   local tools_src="$src/tools"
   local tools_dst="$target_dir/tools"
 
+  # Explicit allowlist — only these two files are managed by this plugin.
+  # A glob over tools_src/* would risk copying unrelated files and could
+  # silently destroy a pre-existing package.json owned by the user.
+  local TOOL_ALLOWLIST="aimi-task.ts package.json"
+
   if [ "$DRY_RUN" -eq 1 ]; then
     log "[dry-run] Would install custom tools to $tools_dst"
     if [ -d "$tools_src" ]; then
-      for f in "$tools_src"/*; do
-        [ -f "$f" ] || continue
-        local basename
-        basename=$(basename "$f")
-        log "[dry-run]   Would install tool: $basename"
+      for basename in $TOOL_ALLOWLIST; do
+        [ -f "$tools_src/$basename" ] || continue
+        if [ "$basename" = "package.json" ] && [ -f "$tools_dst/package.json" ]; then
+          if ! cmp -s "$tools_src/package.json" "$tools_dst/package.json" 2>/dev/null; then
+            log "[dry-run]   Would WARN: $tools_dst/package.json exists and differs — would skip (not plugin-owned)"
+          else
+            log "[dry-run]   Would install tool: $basename (identical, safe to overwrite)"
+          fi
+        else
+          log "[dry-run]   Would install tool: $basename"
+        fi
       done
     fi
     return 0
@@ -610,10 +622,23 @@ install_custom_tools() {
   mkdir -p "$tools_dst"
 
   local count=0
-  for f in "$tools_src"/*; do
+  for basename in $TOOL_ALLOWLIST; do
+    local f="$tools_src/$basename"
     [ -f "$f" ] || continue
-    local basename
-    basename=$(basename "$f")
+
+    # Guard package.json: only write when destination is absent or identical to ours.
+    if [ "$basename" = "package.json" ] && [ -f "$tools_dst/package.json" ]; then
+      if cmp -s "$f" "$tools_dst/package.json" 2>/dev/null; then
+        # Identical — safe no-op (already installed)
+        [ "$VERBOSE" -eq 1 ] && log "  Tool: $basename (already up to date)"
+        count=$((count + 1))
+        continue
+      else
+        warn "Skipping $tools_dst/package.json — file exists and was not installed by this plugin. Add aimi-task dependencies manually or back it up and re-run."
+        continue
+      fi
+    fi
+
     cp "$f" "$tools_dst/$basename"
     count=$((count + 1))
     [ "$VERBOSE" -eq 1 ] && log "  Tool: $basename"
@@ -895,7 +920,7 @@ uninstall_opencode() {
     log "[dry-run] Would remove $target_dir/skills/aimi-*/"
     log "[dry-run] Would remove $target_dir/plugins/$PLUGIN_NAME/"
     log "[dry-run] Would remove $target_dir/tools/aimi-task.ts"
-    log "[dry-run] Would remove $target_dir/tools/package.json (aimi-task plugin dependency)"
+    log "[dry-run] Would remove $target_dir/tools/package.json (only if plugin-owned; skipped otherwise with warning)"
     log "[dry-run] Would remove context7 from $target_dir/opencode.json"
     log "[dry-run] Would remove permissions from $target_dir/opencode.json"
     log "[dry-run] Would remove AIMI_PLUGIN_DIR from shell profiles"
@@ -954,7 +979,11 @@ uninstall_opencode() {
 
   # Remove shipped aimi-task tool artifacts from the OpenCode tools directory.
   # Only the files we installed (aimi-task.ts and package.json) are removed.
+  # package.json is only removed when it matches the plugin-owned copy; if the
+  # user has modified it (or it belongs to another tool) we warn and leave it.
   # The user config file models.json under the aimi config directory is NOT touched.
+  local plugin_src
+  plugin_src=$(detect_plugin_source) 2>/dev/null || plugin_src=""
   local tools_dir="$target_dir/tools"
   local removed_tools=0
   if [ -f "$tools_dir/aimi-task.ts" ]; then
@@ -963,9 +992,15 @@ uninstall_opencode() {
     [ "$VERBOSE" -eq 1 ] && log "Removed $tools_dir/aimi-task.ts"
   fi
   if [ -f "$tools_dir/package.json" ]; then
-    rm -f "$tools_dir/package.json"
-    removed_tools=$((removed_tools + 1))
-    [ "$VERBOSE" -eq 1 ] && log "Removed $tools_dir/package.json"
+    local src_pkg=""
+    [ -n "$plugin_src" ] && src_pkg="$plugin_src/tools/package.json"
+    if [ -n "$src_pkg" ] && [ -f "$src_pkg" ] && cmp -s "$src_pkg" "$tools_dir/package.json" 2>/dev/null; then
+      rm -f "$tools_dir/package.json"
+      removed_tools=$((removed_tools + 1))
+      [ "$VERBOSE" -eq 1 ] && log "Removed $tools_dir/package.json"
+    else
+      warn "Skipping $tools_dir/package.json — not identical to plugin-owned copy; remove manually if no longer needed."
+    fi
   fi
   [ "$removed_tools" -gt 0 ] && ok "Removed aimi-task tool artifacts from $tools_dir"
 
