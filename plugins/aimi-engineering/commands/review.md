@@ -63,32 +63,50 @@ These paths must never be flagged for deletion or removal by any review agent:
 - `.aimi/brainstorms/*.md` — Brainstorm documents
 - `.aimi/research/*.md` — Research output files
 
+## Step 1.5: Resolve Agent Models
+
+Read `${CLAUDE_PLUGIN_ROOT}/commands/references/cli-path-resolution.md` — **Resolve Agent Models** section — and follow it to populate `AGENT_MODELS`. Re-read `$AIMI_CLI` from cache in the same Bash call:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+AGENT_MODELS=$($AIMI_CLI resolve-models)
+```
+
+Store `AGENT_MODELS` for use by every `Task subagent_type="aimi-engineering:CATEGORY:NAME"` call in this command. At each spawn site, extract the model for the agent's `CATEGORY` and apply it per the **Applying the resolved model to a Task call** rules in `cli-path-resolution.md`. When resolution fails, treat every category as `"inherit"` and continue.
+
 ## Step 2: Run Default Review Agents (Parallel)
 
 Run these agents **in parallel** using the Task tool:
 
 ```
 Task subagent_type="aimi-engineering:review:aimi-architecture-strategist"
+  [model: <AGENT_MODELS.review when not "inherit">]
   prompt: "Review this code for architectural compliance:
            [PR content / diff summary]"
 
 Task subagent_type="aimi-engineering:review:aimi-security-sentinel"
+  [model: <AGENT_MODELS.review when not "inherit">]
   prompt: "Perform security audit on this code:
            [PR content / diff summary]"
 
 Task subagent_type="aimi-engineering:review:aimi-code-simplicity-reviewer"
+  [model: <AGENT_MODELS.review when not "inherit">]
   prompt: "Review this code for simplicity and minimalism:
            [PR content / diff summary]"
 
 Task subagent_type="aimi-engineering:review:aimi-performance-oracle"
+  [model: <AGENT_MODELS.review when not "inherit">]
   prompt: "Analyze this code for performance issues:
            [PR content / diff summary]"
 
 Task subagent_type="aimi-engineering:review:aimi-agent-native-reviewer"
+  [model: <AGENT_MODELS.review when not "inherit">]
   prompt: "Verify new features are agent-accessible:
            [PR content / diff summary]"
 
 Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
+  [model: <AGENT_MODELS.research when not "inherit">]
   prompt: "Search .aimi/solutions/ for past issues related to this PR:
            [PR content / diff summary]"
 ```
@@ -103,14 +121,17 @@ Detection: Check if changed files include `db/migrate/*.rb`, `db/schema.rb`, mig
 
 ```
 Task subagent_type="aimi-engineering:review:aimi-schema-drift-detector"
+  [model: <AGENT_MODELS.review when not "inherit">]
   prompt: "Detect unrelated schema.rb changes:
            [PR content / diff summary]"
 
 Task subagent_type="aimi-engineering:review:aimi-data-migration-expert"
+  [model: <AGENT_MODELS.review when not "inherit">]
   prompt: "Validate ID mappings and migration safety:
            [PR content / diff summary]"
 
 Task subagent_type="aimi-engineering:review:aimi-deployment-verification-agent"
+  [model: <AGENT_MODELS.review when not "inherit">]
   prompt: "Create deployment checklist with verification queries:
            [PR content / diff summary]"
 ```
@@ -159,6 +180,7 @@ Design fidelity review skipped: agent-browser not installed
 
 ```
 Task subagent_type="aimi-engineering:design:aimi-design-implementation-reviewer"
+  [model: <AGENT_MODELS.design when not "inherit">]
   prompt: "Compare the implementation against the design prototype and report visual fidelity drift.
            Story ID: [story.id]
            Story title: [story.title]

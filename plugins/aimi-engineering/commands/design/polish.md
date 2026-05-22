@@ -54,6 +54,18 @@ INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity $NON_INTERACTIVE_FLAG)
 
 See `references/interactivity.md` for the full contract.
 
+### Resolve Agent Models
+
+Read `${CLAUDE_PLUGIN_ROOT}/commands/references/cli-path-resolution.md` — **Resolve Agent Models** section — and follow it to populate `AGENT_MODELS`. Re-read `$AIMI_CLI` from cache in the same Bash call:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+AGENT_MODELS=$($AIMI_CLI resolve-models)
+```
+
+Store `AGENT_MODELS` for use by every `Task subagent_type="aimi-engineering:CATEGORY:NAME"` call in this command. At each spawn site, extract the model for the agent's `CATEGORY` and apply it per the **Applying the resolved model to a Task call** rules in `cli-path-resolution.md`. When resolution fails, treat every category as `"inherit"` and continue.
+
 > **Soft context**: Ask the user for the quality bar (MVP vs flagship) if not clear from context.
 >
 > *Agent-mode fallback: if `INTERACTIVE_MODE=agent`, infer the quality bar from surrounding code context (commit messages, design-system tier, existing component polish level) and proceed without asking. Log: `agent-mode: quality-bar auto-inferred from codebase context`.*
@@ -115,6 +127,7 @@ Understand the current state and goals before touching anything:
 
 ```
 Task subagent_type="aimi-engineering:design:aimi-design-iterator"
+  [model: <AGENT_MODELS.design when not "inherit">]
 
 Pass to the agent:
 - Design-system context discovered in Step 1: token names, spacing scale, component library, color palette, motion conventions, and any drift root-cause classifications identified.
