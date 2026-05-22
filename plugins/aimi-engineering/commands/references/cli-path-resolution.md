@@ -206,7 +206,30 @@ _aimi_prompt_check=$($AIMI_CLI models-prompt-check)
 > Question: "Nenhuma configuração de modelo de subagente encontrada — os agentes herdam o modelo da thread principal. Quer configurar a seleção de modelo por categoria?"
 > Options: A — "Configurar agora" ; B — "Manter o padrão (inherit)"
 
-- If the user selects **A**: run `$AIMI_CLI detect-models` to generate the config interactively, then re-run `$AIMI_CLI resolve-models` to refresh `AGENT_MODELS`.
+**Option A — "Configurar agora":**
+
+The model SELECTION must happen at the LLM-orchestrator layer using the interactive picker (`AskUserQuestion`), NOT inside a bash subprocess. The bash layer's job is only to list available models and write the config from explicit choices.
+
+1. Run `$AIMI_CLI list-models` to get the host's available models as a JSON array:
+
+   ```bash
+   _aimi_available_models=$($AIMI_CLI list-models)
+   ```
+
+2. Use `AskUserQuestion` with **three questions in one call** — one per tier — letting the user pick a model for each. Each question's options are the models returned by `list-models` (plus the picker's automatic "Other" for free-form input):
+
+   - "Modelo para tarefas leves de pesquisa/leitura (tier fast)?" — default category mapping: `research`
+   - "Modelo para tarefas balanceadas (tier balanced)?" — default category mapping: `design`, `workflow`
+   - "Modelo para revisão/trabalho pesado (tier powerful)?" — default category mapping: `review`
+
+   Note: the first-run flow configures by tier with the default category mapping (research=fast, design=balanced, workflow=balanced, review=powerful). Fine-grained per-category control is available by hand-editing `~/.config/aimi/models.json` directly.
+
+3. Run `$AIMI_CLI detect-models --fast <chosen_fast> --balanced <chosen_balanced> --powerful <chosen_powerful>` with the user's picks to write the config.
+
+4. Re-run `$AIMI_CLI resolve-models` to refresh `AGENT_MODELS`.
+
+**Option B — "Manter o padrão (inherit)":** no action needed beyond dismissal.
+
 - Regardless of the choice (A or B): always run `$AIMI_CLI models-prompt-dismiss` so the prompt is never shown again.
 
 When `detect-interactivity` is not `picker` (agent-mode / CI) OR `models-prompt-check` returns `skip`, do nothing — proceed silently with the already-resolved map. The prompt is shown at most once ever.

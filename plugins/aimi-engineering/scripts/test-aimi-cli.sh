@@ -6483,6 +6483,194 @@ test_models_prompt_dismiss_idempotent() {
 }
 
 # ============================================================================
+# list-models Tests
+# ============================================================================
+
+test_list_models_claudecode_returns_three_aliases() {
+  echo ""
+  echo "=== Testing list-models on Claude Code host returns [opus,sonnet,haiku] ==="
+
+  local output
+  output=$(CLAUDECODE=1 "$CLI" list-models 2>/dev/null)
+
+  # Output must be a valid JSON array
+  if printf '%s' "$output" | jq -e 'type == "array"' > /dev/null 2>&1; then
+    echo -e "${GREEN}✓${NC} list-models claudecode: output is a JSON array"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} list-models claudecode: output is not a JSON array: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  # Must contain exactly 3 elements
+  local length
+  length=$(printf '%s' "$output" | jq 'length' 2>/dev/null)
+  assert_eq "3" "$length" "list-models claudecode: array has exactly 3 elements"
+
+  # Must contain opus, sonnet, haiku
+  local has_opus has_sonnet has_haiku
+  has_opus=$(printf '%s' "$output" | jq -r 'index("opus") != null | tostring' 2>/dev/null)
+  has_sonnet=$(printf '%s' "$output" | jq -r 'index("sonnet") != null | tostring' 2>/dev/null)
+  has_haiku=$(printf '%s' "$output" | jq -r 'index("haiku") != null | tostring' 2>/dev/null)
+  assert_eq "true" "$has_opus"   "list-models claudecode: array contains 'opus'"
+  assert_eq "true" "$has_sonnet" "list-models claudecode: array contains 'sonnet'"
+  assert_eq "true" "$has_haiku"  "list-models claudecode: array contains 'haiku'"
+}
+
+test_list_models_opencode_absent_fallback() {
+  echo ""
+  echo "=== Testing list-models on OpenCode host with opencode binary absent — fallback with warning ==="
+
+  local stdout stderr
+  stderr=$(PATH="/usr/bin:/bin" CLAUDECODE= "$CLI" list-models 2>&1 1>/dev/null)
+  stdout=$(PATH="/usr/bin:/bin" CLAUDECODE= "$CLI" list-models 2>/dev/null)
+
+  # stdout must be a valid JSON array
+  if printf '%s' "$stdout" | jq -e 'type == "array"' > /dev/null 2>&1; then
+    echo -e "${GREEN}✓${NC} list-models opencode-absent: output is a JSON array"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} list-models opencode-absent: output is not a JSON array: $stdout"
+    ((TESTS_FAILED++))
+  fi
+
+  # Must contain the 3 built-in fallback Anthropic models
+  local length
+  length=$(printf '%s' "$stdout" | jq 'length' 2>/dev/null)
+  assert_eq "3" "$length" "list-models opencode-absent: fallback array has 3 elements"
+
+  # Warning must be sent to stderr
+  if printf '%s' "$stderr" | grep -q "Warning: list-models"; then
+    echo -e "${GREEN}✓${NC} list-models opencode-absent: warning sent to stderr"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} list-models opencode-absent: expected warning on stderr, got: $stderr"
+    ((TESTS_FAILED++))
+  fi
+}
+
+# ============================================================================
+# detect-models tier-flag Tests
+# ============================================================================
+
+test_detect_models_tier_flags_claudecode() {
+  echo ""
+  echo "=== Testing detect-models --fast/--balanced/--powerful on Claude Code host ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  local stdout
+  stdout=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" detect-models \
+    --fast haiku --balanced sonnet --powerful opus 2>/dev/null)
+
+  # models.json must be written
+  if [ -f "$tmpdir/models.json" ]; then
+    echo -e "${GREEN}✓${NC} detect-models tier-flags claudecode: models.json written"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models tier-flags claudecode: models.json not found in $tmpdir"
+    ((TESTS_FAILED++))
+  fi
+
+  # stdout must be valid JSON
+  if printf '%s' "$stdout" | jq empty 2>/dev/null; then
+    echo -e "${GREEN}✓${NC} detect-models tier-flags claudecode: stdout is valid JSON"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models tier-flags claudecode: stdout is not valid JSON: $stdout"
+    ((TESTS_FAILED++))
+  fi
+
+  # models table must have claudeCode key with the supplied tiers
+  local fast_model balanced_model powerful_model
+  fast_model=$(printf '%s' "$stdout" | jq -r '.models.claudeCode.fast // empty' 2>/dev/null)
+  balanced_model=$(printf '%s' "$stdout" | jq -r '.models.claudeCode.balanced // empty' 2>/dev/null)
+  powerful_model=$(printf '%s' "$stdout" | jq -r '.models.claudeCode.powerful // empty' 2>/dev/null)
+  assert_eq "haiku"  "$fast_model"     "detect-models tier-flags claudecode: fast tier is haiku"
+  assert_eq "sonnet" "$balanced_model" "detect-models tier-flags claudecode: balanced tier is sonnet"
+  assert_eq "opus"   "$powerful_model" "detect-models tier-flags claudecode: powerful tier is opus"
+
+  # categories must use default mapping: research=fast, review=powerful, design=balanced, workflow=balanced
+  local r_tier rv_tier d_tier w_tier
+  r_tier=$(printf '%s' "$stdout"  | jq -r '.categories.research  // empty' 2>/dev/null)
+  rv_tier=$(printf '%s' "$stdout" | jq -r '.categories.review    // empty' 2>/dev/null)
+  d_tier=$(printf '%s' "$stdout"  | jq -r '.categories.design    // empty' 2>/dev/null)
+  w_tier=$(printf '%s' "$stdout"  | jq -r '.categories.workflow  // empty' 2>/dev/null)
+  assert_eq "fast"     "$r_tier"  "detect-models tier-flags claudecode: research=fast (default mapping)"
+  assert_eq "powerful" "$rv_tier" "detect-models tier-flags claudecode: review=powerful (default mapping)"
+  assert_eq "balanced" "$d_tier"  "detect-models tier-flags claudecode: design=balanced (default mapping)"
+  assert_eq "balanced" "$w_tier"  "detect-models tier-flags claudecode: workflow=balanced (default mapping)"
+
+  # schemaVersion must be present
+  local schema_ver
+  schema_ver=$(printf '%s' "$stdout" | jq -r '.schemaVersion // empty' 2>/dev/null)
+  assert_eq "1.0" "$schema_ver" "detect-models tier-flags claudecode: schemaVersion is 1.0"
+}
+
+test_detect_models_tier_flags_preserve_other_host() {
+  echo ""
+  echo "=== Testing detect-models --tier-flags preserves the other host's models sub-table ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Pre-populate with an opencode table
+  printf '%s\n' '{
+    "schemaVersion": "1.0",
+    "categories": {
+      "research": "balanced",
+      "review": "powerful",
+      "design": "balanced",
+      "workflow": "fast"
+    },
+    "models": {
+      "opencode": {
+        "fast": "anthropic/claude-haiku-4-5",
+        "balanced": "anthropic/claude-sonnet-4-6",
+        "powerful": "anthropic/claude-opus-4-7"
+      }
+    }
+  }' > "$tmpdir/models.json"
+
+  # Run detect-models with tier flags as Claude Code host
+  AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" detect-models \
+    --fast haiku --balanced sonnet --powerful opus 2>/dev/null
+
+  local result
+  result=$(cat "$tmpdir/models.json" 2>/dev/null)
+
+  # The opencode table must still be present with original values
+  local oc_fast oc_balanced oc_powerful
+  oc_fast=$(printf '%s' "$result" | jq -r '.models.opencode.fast // empty' 2>/dev/null)
+  oc_balanced=$(printf '%s' "$result" | jq -r '.models.opencode.balanced // empty' 2>/dev/null)
+  oc_powerful=$(printf '%s' "$result" | jq -r '.models.opencode.powerful // empty' 2>/dev/null)
+  assert_eq "anthropic/claude-haiku-4-5"  "$oc_fast"     "detect-models tier-flags preserve: opencode.fast preserved"
+  assert_eq "anthropic/claude-sonnet-4-6" "$oc_balanced"  "detect-models tier-flags preserve: opencode.balanced preserved"
+  assert_eq "anthropic/claude-opus-4-7"   "$oc_powerful"  "detect-models tier-flags preserve: opencode.powerful preserved"
+
+  # The claudeCode table must reflect the new values
+  local cc_fast cc_balanced cc_powerful
+  cc_fast=$(printf '%s' "$result" | jq -r '.models.claudeCode.fast // empty' 2>/dev/null)
+  cc_balanced=$(printf '%s' "$result" | jq -r '.models.claudeCode.balanced // empty' 2>/dev/null)
+  cc_powerful=$(printf '%s' "$result" | jq -r '.models.claudeCode.powerful // empty' 2>/dev/null)
+  assert_eq "haiku"  "$cc_fast"     "detect-models tier-flags preserve: claudeCode.fast written"
+  assert_eq "sonnet" "$cc_balanced" "detect-models tier-flags preserve: claudeCode.balanced written"
+  assert_eq "opus"   "$cc_powerful" "detect-models tier-flags preserve: claudeCode.powerful written"
+
+  # Overall result must be valid JSON
+  if printf '%s' "$result" | jq empty 2>/dev/null; then
+    echo -e "${GREEN}✓${NC} detect-models tier-flags preserve: merged models.json is valid JSON"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models tier-flags preserve: merged models.json is not valid JSON: $result"
+    ((TESTS_FAILED++))
+  fi
+}
+
+# ============================================================================
 # detect-design-bundle Tests
 # ============================================================================
 
@@ -7429,6 +7617,12 @@ main() {
   test_resolve_models_exact_aliases_accepted
   test_resolve_models_opencode_mtime_cache
 
+  # list-models tests
+  echo ""
+  echo "--- list-models Tests ---"
+  test_list_models_claudecode_returns_three_aliases
+  test_list_models_opencode_absent_fallback
+
   # detect-models tests
   echo ""
   echo "--- detect-models Tests ---"
@@ -7437,6 +7631,8 @@ main() {
   test_detect_models_opencode_absent_fallback
   test_detect_models_atomic_write_no_corruption
   test_detect_models_roundtrip_with_resolve_models
+  test_detect_models_tier_flags_claudecode
+  test_detect_models_tier_flags_preserve_other_host
 
   # models-prompt-check / models-prompt-dismiss tests
   echo ""

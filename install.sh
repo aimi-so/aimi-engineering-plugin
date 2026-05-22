@@ -257,7 +257,21 @@ Only when `_AIMI_INTERACTIVITY` is `picker` AND `_AIMI_PROMPT_CHECK` is `prompt`
 > "Nenhuma configuração de modelo de subagente encontrada — os agentes herdam o modelo da thread principal. Quer configurar a seleção de modelo por categoria?"
 > Options: A — "Configurar agora" ; B — "Manter o padrão (inherit)"
 
-- If the user selects **A**: run `$AIMI_CLI detect-models` to generate the config interactively, then re-run `$AIMI_CLI resolve-models` to refresh the model variables.
+**Option A — "Configurar agora":**
+
+The model SELECTION must happen at the LLM-orchestrator layer using the question tool, NOT inside a bash subprocess. The bash layer only lists available models and writes the config from explicit choices.
+
+1. Run `$AIMI_CLI list-models` to get the host'\''s available models as a JSON array.
+2. Use the question tool with **three questions in one call** — one per tier — letting the user pick a model for each. Each question'\''s options are the models returned by `list-models`:
+   - "Modelo para tarefas leves de pesquisa/leitura (tier fast)?" — default category mapping: `research`
+   - "Modelo para tarefas balanceadas (tier balanced)?" — default category mapping: `design`, `workflow`
+   - "Modelo para revisão/trabalho pesado (tier powerful)?" — default category mapping: `review`
+   Note: fine-grained per-category control is available by hand-editing `~/.config/aimi/models.json` directly.
+3. Run `$AIMI_CLI detect-models --fast <chosen_fast> --balanced <chosen_balanced> --powerful <chosen_powerful>` with the user'\''s picks to write the config.
+4. Re-run `$AIMI_CLI resolve-models` to refresh the model variables.
+
+**Option B — "Manter o padrão (inherit)":** no action needed beyond dismissal.
+
 - Regardless of choice: always run `$AIMI_CLI models-prompt-dismiss` so the prompt is never shown again.
 
 When `_AIMI_INTERACTIVITY` is not `picker` (agent-mode / CI) OR `_AIMI_PROMPT_CHECK` is `skip`, do nothing — proceed silently.

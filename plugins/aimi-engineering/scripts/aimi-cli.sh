@@ -2106,17 +2106,176 @@ cmd_resolve_models() {
   printf '%s\n' "$_result"
 }
 
+# List available models for the current host as a JSON array on stdout.
+# Claude Code host: fixed array ["opus","sonnet","haiku"].
+# OpenCode host: runs `opencode models` and parses its output into a JSON array.
+#   Falls back to the built-in default Anthropic list when the opencode binary is absent,
+#   printing one warning to stderr.
+# stdout is always a valid JSON array; warnings go to stderr.
+cmd_list_models() {
+  check_jq
+
+  local _models_list
+  if _is_claude_code_host; then
+    # Claude Code: short aliases only — the Task tool only accepts haiku/sonnet/opus
+    printf '["opus","sonnet","haiku"]\n'
+    return 0
+  fi
+
+  # OpenCode: query `opencode models`
+  _models_list=""
+  if command -v opencode >/dev/null 2>&1; then
+    _models_list=$(opencode models 2>/dev/null) || _models_list=""
+  fi
+
+  if [ -z "${_models_list:-}" ]; then
+    echo "Warning: list-models: opencode binary not found or returned no models; using built-in Anthropic model list." >&2
+    _models_list="anthropic/claude-haiku-4-5
+anthropic/claude-sonnet-4-6
+anthropic/claude-opus-4-7"
+  fi
+
+  # Convert newline-delimited list to a JSON array
+  printf '%s\n' "$_models_list" | jq -R . | jq -s .
+}
+
 # Detect available models on the current host and write ~/.config/aimi/models.json.
 # On Claude Code (CLAUDECODE=1): fixed set — haiku, sonnet, opus (short aliases required by Task tool).
 # On OpenCode: reads `opencode models`; falls back to a built-in default Anthropic list
 #   with one warning when the opencode binary is absent.
-# Interactive (stdin is a TTY): prompts once per category for a tier assignment.
-# Non-interactive: writes a sensible default mapping without prompting.
+#
+# Flag mode (non-interactive write): when ANY of --fast, --balanced, --powerful is provided,
+#   build and write models.json with the given tier-to-model assignments directly, skipping
+#   the TTY prompt. Preserves the other host's models sub-table when a pre-existing file exists.
+#   --fast <model>      Model id for the fast tier
+#   --balanced <model>  Model id for the balanced tier
+#   --powerful <model>  Model id for the powerful tier
+#
+# Interactive (stdin is a TTY, no tier flags): prompts once per category for a tier assignment.
+# Non-interactive (no tier flags, stdin is not TTY): writes a sensible default mapping without prompting.
 # Writes atomically via write_aimi_models_config (mktemp + chmod 0600 + mv).
 # NOTE: Only the current host's sub-table is written. Re-run on the other host to
 #       populate both claudeCode and opencode tables.
 cmd_detect_models() {
   check_jq
+
+  # ---- Parse tier flags ------------------------------------------------------
+  local _flag_fast="" _flag_balanced="" _flag_powerful=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --fast)
+        shift
+        _flag_fast="${1:-}"
+        ;;
+      --balanced)
+        shift
+        _flag_balanced="${1:-}"
+        ;;
+      --powerful)
+        shift
+        _flag_powerful="${1:-}"
+        ;;
+      -*)
+        echo "Error: detect-models: unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh detect-models [--fast <model>] [--balanced <model>] [--powerful <model>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  # ---- Determine host key for models table ----------------------------------
+  local _host_key
+  if _is_claude_code_host; then
+    _host_key="claudeCode"
+  else
+    _host_key="opencode"
+  fi
+
+  # ---- Flag mode: tier flags provided → non-interactive write ---------------
+  if [ -n "$_flag_fast" ] || [ -n "$_flag_balanced" ] || [ -n "$_flag_powerful" ]; then
+    # Require all three tiers when using flag mode
+    if [ -z "$_flag_fast" ] || [ -z "$_flag_balanced" ] || [ -z "$_flag_powerful" ]; then
+      echo "Error: detect-models: when using tier flags, all three must be provided: --fast, --balanced, --powerful" >&2
+      exit 1
+    fi
+
+    # Default category→tier mapping
+    local _tier_research="fast"
+    local _tier_review="powerful"
+    local _tier_design="balanced"
+    local _tier_workflow="balanced"
+
+    # Read existing config to preserve the other host's models sub-table
+    local _existing_json
+    _existing_json=$(read_aimi_models_config) || _existing_json=""
+
+    local _models_json
+    if [ -n "$_existing_json" ] && printf '%s' "$_existing_json" | jq empty 2>/dev/null; then
+      # Merge: preserve other host's table, replace current host's table
+      _models_json=$(printf '%s' "$_existing_json" | jq \
+        --arg host_key "$_host_key" \
+        --arg fast     "$_flag_fast" \
+        --arg balanced "$_flag_balanced" \
+        --arg powerful "$_flag_powerful" \
+        --arg r_tier   "$_tier_research" \
+        --arg rv_tier  "$_tier_review" \
+        --arg d_tier   "$_tier_design" \
+        --arg w_tier   "$_tier_workflow" \
+        '{
+          schemaVersion: "1.0",
+          categories: {
+            research: $r_tier,
+            review:   $rv_tier,
+            design:   $d_tier,
+            workflow: $w_tier
+          },
+          models: ((.models // {}) + {
+            ($host_key): {
+              fast:     $fast,
+              balanced: $balanced,
+              powerful: $powerful
+            }
+          })
+        }')
+    else
+      # No existing config or malformed — create fresh
+      _models_json=$(jq -n \
+        --arg fast     "$_flag_fast" \
+        --arg balanced "$_flag_balanced" \
+        --arg powerful "$_flag_powerful" \
+        --arg host_key "$_host_key" \
+        --arg r_tier   "$_tier_research" \
+        --arg rv_tier  "$_tier_review" \
+        --arg d_tier   "$_tier_design" \
+        --arg w_tier   "$_tier_workflow" \
+        '{
+          schemaVersion: "1.0",
+          categories: {
+            research: $r_tier,
+            review:   $rv_tier,
+            design:   $d_tier,
+            workflow: $w_tier
+          },
+          models: {
+            ($host_key): {
+              fast:     $fast,
+              balanced: $balanced,
+              powerful: $powerful
+            }
+          }
+        }')
+    fi
+
+    write_aimi_models_config "$_models_json"
+
+    local _config_path
+    _config_path=$(_aimi_models_config_path)
+    printf 'detect-models: wrote %s table to %s\n' "$_host_key" "$_config_path" >&2
+    printf 'detect-models: re-run on the other host to populate both claudeCode and opencode tables\n' >&2
+    printf '%s\n' "$_models_json"
+    return 0
+  fi
 
   # ---- Available model sets per host ----------------------------------------
   local _TIERS="fast balanced powerful"
@@ -2158,11 +2317,11 @@ anthropic/claude-opus-4-7"
   [ -z "$_powerful_model" ] && _powerful_model=$(printf '%s\n' "$_available_models" | tail -1)
 
   # ---- Per-category tier assignment -----------------------------------------
-  # Default mapping: research=balanced, review=powerful, design=balanced, workflow=fast
-  local _tier_research="balanced"
+  # Default mapping: research=fast, review=powerful, design=balanced, workflow=balanced
+  local _tier_research="fast"
   local _tier_review="powerful"
   local _tier_design="balanced"
-  local _tier_workflow="fast"
+  local _tier_workflow="balanced"
 
   if [ -t 0 ]; then
     # stdin is a TTY — prompt once per category
@@ -2186,14 +2345,6 @@ anthropic/claude-opus-4-7"
     _tier_review=$(_prompt_category "review"   "$_tier_review")
     _tier_design=$(_prompt_category "design"   "$_tier_design")
     _tier_workflow=$(_prompt_category "workflow"  "$_tier_workflow")
-  fi
-
-  # ---- Determine host key for models table ----------------------------------
-  local _host_key
-  if _is_claude_code_host; then
-    _host_key="claudeCode"
-  else
-    _host_key="opencode"
   fi
 
   # ---- Assemble the models.json document ------------------------------------
@@ -3443,18 +3594,30 @@ COMMANDS:
                               Print resolved interactivity mode (picker|agent)
                               Returns picker by default; returns agent only when
                               --non-interactive is passed, AIMI_AGENT_MODE=true, or CI=true
+    list-models               List available models for the current host as a JSON array.
+                              Claude Code: ["opus","sonnet","haiku"].
+                              OpenCode: reads `opencode models`; falls back to built-in
+                              Anthropic list with one warning when opencode is absent.
+                              stdout is always a valid JSON array; warnings go to stderr.
     resolve-models            Resolve configured model for each agent category.
                               Reads ~/.config/aimi/models.json and emits a single-line
                               JSON object with keys research, review, design, workflow.
                               Unconfigured or fallback entries use the literal "inherit".
                               Warnings go to stderr; stdout is always valid JSON.
-    detect-models             Detect available models on the current host and write
+    detect-models [--fast <model>] [--balanced <model>] [--powerful <model>]
+                              Detect available models on the current host and write
                               ~/.config/aimi/models.json.
                               Claude Code: fixed set (opus, sonnet, haiku).
                               OpenCode: reads `opencode models`; falls back to built-in
                               Anthropic list with one warning when opencode is absent.
-                              Interactive (stdin TTY): prompts once per category for tier.
-                              Non-interactive: writes sensible default mapping.
+                              Tier flags (--fast/--balanced/--powerful): non-interactive
+                              write mode — writes the given tier-to-model assignments
+                              with the default category mapping (research=fast,
+                              design+workflow=balanced, review=powerful). Preserves the
+                              other host's models sub-table when a file already exists.
+                              All three tier flags must be supplied together.
+                              Interactive (stdin TTY, no flags): prompts per category.
+                              Non-interactive (no flags, stdin not TTY): default mapping.
                               Emits the written JSON on stdout.
     models-prompt-check       Check whether the one-time model-selection prompt should
                               be shown. Echoes 'prompt' when neither models.json nor the
@@ -3571,6 +3734,7 @@ main() {
     help|--help|-h) cmd_help; return ;;
     version) cmd_version; return ;;
     detect-interactivity) shift; cmd_detect_interactivity "$@"; return ;;
+    list-models) cmd_list_models; return ;;
     resolve-models) shift; cmd_resolve_models "$@"; return ;;
     detect-models) shift; cmd_detect_models "$@"; return ;;
     models-prompt-check) cmd_models_prompt_check; return ;;
