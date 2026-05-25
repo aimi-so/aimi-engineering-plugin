@@ -5691,22 +5691,10 @@ test_resolve_models_partial_config() {
   tmpdir=$(_setup_models_env)
   trap "rm -rf '$tmpdir'" RETURN
 
-  # Only configure research; leave others absent
-  # Use "sonnet" (exact alias) for claudeCode — only haiku/sonnet/opus are valid on that host.
-  printf '%s\n' '{
-    "schemaVersion": "1.0",
-    "categories": {
-      "research": "balanced"
-    },
-    "models": {
-      "claudeCode": {
-        "balanced": "sonnet"
-      },
-      "opencode": {
-        "balanced": "anthropic/claude-sonnet-4-6"
-      }
-    }
-  }' > "$tmpdir/models.json"
+  # v2.0 schema: only configure research; leave others absent.
+  # Direct lookup: .categories.claudeCode.research = "sonnet"
+  printf '%s\n' '{"schemaVersion":"2.0","categories":{"claudeCode":{"research":"sonnet"}}}' \
+    > "$tmpdir/models.json"
 
   local output
   output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
@@ -5718,7 +5706,7 @@ test_resolve_models_partial_config() {
   workflow=$(printf '%s' "$output" | jq -r '.workflow' 2>/dev/null)
   executor=$(printf '%s' "$output" | jq -r '.executor' 2>/dev/null)
 
-  assert_eq "sonnet" "$research" "resolve-models partial-config: configured category resolves correctly"
+  assert_eq "sonnet"  "$research" "resolve-models partial-config: configured category resolves correctly"
   assert_eq "inherit" "$review"   "resolve-models partial-config: missing category=inherit"
   assert_eq "inherit" "$design"   "resolve-models partial-config: missing category=inherit"
   assert_eq "inherit" "$workflow" "resolve-models partial-config: missing category=inherit"
@@ -5733,21 +5721,24 @@ test_resolve_models_host_detection_claudecode() {
   tmpdir=$(_setup_models_env)
   trap "rm -rf '$tmpdir'" RETURN
 
-  # Use "sonnet" (exact alias) for claudeCode — only haiku/sonnet/opus are valid.
+  # v2.0 schema: claudeCode and opencode have separate categories sub-tables.
+  # Only claudeCode has research; opencode has a different value so we can confirm host selection.
   printf '%s\n' '{
-    "schemaVersion": "1.0",
+    "schemaVersion": "2.0",
     "categories": {
-      "research": "balanced",
-      "review": "balanced",
-      "design": "balanced",
-      "workflow": "balanced"
-    },
-    "models": {
       "claudeCode": {
-        "balanced": "sonnet"
+        "research": "sonnet",
+        "review":   "sonnet",
+        "design":   "sonnet",
+        "workflow":  "sonnet",
+        "executor":  "sonnet"
       },
       "opencode": {
-        "balanced": "opencode-model-xyz"
+        "research": "opencode-model-xyz",
+        "review":   "opencode-model-xyz",
+        "design":   "opencode-model-xyz",
+        "workflow":  "opencode-model-xyz",
+        "executor":  "opencode-model-xyz"
       }
     }
   }' > "$tmpdir/models.json"
@@ -5769,8 +5760,8 @@ test_resolve_models_host_detection_opencode() {
   tmpdir=$(_setup_models_env)
   trap "rm -rf '$tmpdir'" RETURN
 
-  # Detect a valid OpenCode model to use in the config (or use inherit if none available)
-  local oc_model="inherit"
+  # Detect a valid OpenCode model to use in the config (or use a known fallback)
+  local oc_model="anthropic/claude-sonnet-4-6"
   if command -v opencode >/dev/null 2>&1; then
     local first_oc_model
     first_oc_model=$(opencode models 2>/dev/null | head -1)
@@ -5779,21 +5770,23 @@ test_resolve_models_host_detection_opencode() {
     fi
   fi
 
-  # Use "sonnet" (exact alias) for claudeCode — only haiku/sonnet/opus are valid.
+  # v2.0 schema: opencode and claudeCode have separate categories sub-tables.
   printf '%s\n' "{
-    \"schemaVersion\": \"1.0\",
+    \"schemaVersion\": \"2.0\",
     \"categories\": {
-      \"research\": \"balanced\",
-      \"review\": \"balanced\",
-      \"design\": \"balanced\",
-      \"workflow\": \"balanced\"
-    },
-    \"models\": {
       \"claudeCode\": {
-        \"balanced\": \"sonnet\"
+        \"research\": \"sonnet\",
+        \"review\":   \"sonnet\",
+        \"design\":   \"sonnet\",
+        \"workflow\":  \"sonnet\",
+        \"executor\":  \"sonnet\"
       },
       \"opencode\": {
-        \"balanced\": \"$oc_model\"
+        \"research\": \"$oc_model\",
+        \"review\":   \"$oc_model\",
+        \"design\":   \"$oc_model\",
+        \"workflow\":  \"$oc_model\",
+        \"executor\":  \"$oc_model\"
       }
     }
   }" > "$tmpdir/models.json"
@@ -5809,7 +5802,7 @@ test_resolve_models_host_detection_opencode() {
   assert_eq "$oc_model" "$research" "resolve-models host-detection: no CLAUDECODE reads opencode table"
 
   # When oc_model != "sonnet", verify the hosts return different values
-  if [ "$oc_model" != "inherit" ] && [ "$oc_model" != "sonnet" ]; then
+  if [ "$oc_model" != "sonnet" ]; then
     if [ "$research" != "$claudecode_research" ]; then
       echo -e "${GREEN}✓${NC} resolve-models host-detection: CLAUDECODE=1 and no CLAUDECODE read different tables"
       ((TESTS_PASSED++))
@@ -5828,24 +5821,17 @@ test_resolve_models_invalid_model_claudecode() {
   tmpdir=$(_setup_models_env)
   trap "rm -rf '$tmpdir'" RETURN
 
-  # Use "sonnet" (exact alias) for claudeCode balanced — only haiku/sonnet/opus pass exact-match.
-  # "claude-haiku-4-5" (with version suffix) is also an invalid value under exact-match rules.
+  # v2.0 schema: direct category-to-model mapping.
+  # research has an invalid model; review has a valid exact alias "sonnet".
   printf '%s\n' '{
-    "schemaVersion": "1.0",
+    "schemaVersion": "2.0",
     "categories": {
-      "research": "fast",
-      "review": "balanced",
-      "design": "balanced",
-      "workflow": "balanced"
-    },
-    "models": {
       "claudeCode": {
-        "fast": "totally-invalid-model-xyz",
-        "balanced": "sonnet"
-      },
-      "opencode": {
-        "fast": "totally-invalid-model-xyz",
-        "balanced": "opencode-model-xyz"
+        "research":  "totally-invalid-model-xyz",
+        "review":    "sonnet",
+        "design":    "sonnet",
+        "workflow":  "sonnet",
+        "executor":  "sonnet"
       }
     }
   }' > "$tmpdir/models.json"
@@ -5923,21 +5909,18 @@ test_resolve_models_exact_match_validation() {
   tmpdir=$(_setup_models_env)
   trap "rm -rf '$tmpdir'" RETURN
 
-  # "claude-haiku-4-5" and "claude-sonnet-4-6" contain the keyword but are NOT
-  # exact aliases — they must be rejected under the new exact-match rule.
+  # v2.0 schema: direct category mapping.
+  # "claude-haiku-4-5" / "claude-sonnet-4-6" / "claude-opus-4-7" contain keywords but are NOT
+  # exact aliases — they must be rejected under the exact-match rule.
   printf '%s\n' '{
-    "schemaVersion": "1.0",
+    "schemaVersion": "2.0",
     "categories": {
-      "research": "fast",
-      "review": "balanced",
-      "design": "powerful",
-      "workflow": "fast"
-    },
-    "models": {
       "claudeCode": {
-        "fast":     "claude-haiku-4-5",
-        "balanced": "claude-sonnet-4-6",
-        "powerful": "claude-opus-4-7"
+        "research":  "claude-haiku-4-5",
+        "review":    "claude-sonnet-4-6",
+        "design":    "claude-opus-4-7",
+        "workflow":  "claude-haiku-4-5",
+        "executor":  "claude-sonnet-4-6"
       }
     }
   }' > "$tmpdir/models.json"
@@ -5946,19 +5929,21 @@ test_resolve_models_exact_match_validation() {
   stderr=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>&1 1>/dev/null)
   stdout=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
 
-  # All three should be rejected → inherit (no version suffix allowed)
-  local research review design workflow
+  # All five should be rejected → inherit (no version suffix allowed)
+  local research review design workflow executor
   research=$(printf '%s' "$stdout" | jq -r '.research' 2>/dev/null)
   review=$(printf '%s' "$stdout" | jq -r '.review' 2>/dev/null)
   design=$(printf '%s' "$stdout" | jq -r '.design' 2>/dev/null)
   workflow=$(printf '%s' "$stdout" | jq -r '.workflow' 2>/dev/null)
+  executor=$(printf '%s' "$stdout" | jq -r '.executor' 2>/dev/null)
 
   assert_eq "inherit" "$research" "resolve-models exact-match: claude-haiku-4-5 rejected → inherit (research)"
   assert_eq "inherit" "$review"   "resolve-models exact-match: claude-sonnet-4-6 rejected → inherit (review)"
   assert_eq "inherit" "$design"   "resolve-models exact-match: claude-opus-4-7 rejected → inherit (design)"
   assert_eq "inherit" "$workflow" "resolve-models exact-match: claude-haiku-4-5 rejected → inherit (workflow)"
+  assert_eq "inherit" "$executor" "resolve-models exact-match: claude-sonnet-4-6 rejected → inherit (executor)"
 
-  # Warnings must be emitted (one per invalid category)
+  # Warnings must be emitted (one per invalid category — at least 3)
   local warn_count
   warn_count=$(printf '%s' "$stderr" | grep -c -i "warning" 2>/dev/null || echo "0")
   if [ "$warn_count" -ge 3 ]; then
@@ -5978,19 +5963,16 @@ test_resolve_models_exact_aliases_accepted() {
   tmpdir=$(_setup_models_env)
   trap "rm -rf '$tmpdir'" RETURN
 
+  # v2.0 schema: direct category-to-model mapping using exact aliases.
   printf '%s\n' '{
-    "schemaVersion": "1.0",
+    "schemaVersion": "2.0",
     "categories": {
-      "research": "fast",
-      "review": "balanced",
-      "design": "powerful",
-      "workflow": "fast"
-    },
-    "models": {
       "claudeCode": {
-        "fast":     "haiku",
-        "balanced": "sonnet",
-        "powerful": "opus"
+        "research":  "haiku",
+        "review":    "sonnet",
+        "design":    "opus",
+        "workflow":  "haiku",
+        "executor":  "sonnet"
       }
     }
   }' > "$tmpdir/models.json"
@@ -5999,16 +5981,18 @@ test_resolve_models_exact_aliases_accepted() {
   stderr=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>&1 1>/dev/null)
   stdout=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
 
-  local research review design workflow
+  local research review design workflow executor
   research=$(printf '%s' "$stdout" | jq -r '.research' 2>/dev/null)
   review=$(printf '%s' "$stdout" | jq -r '.review' 2>/dev/null)
   design=$(printf '%s' "$stdout" | jq -r '.design' 2>/dev/null)
   workflow=$(printf '%s' "$stdout" | jq -r '.workflow' 2>/dev/null)
+  executor=$(printf '%s' "$stdout" | jq -r '.executor' 2>/dev/null)
 
-  assert_eq "haiku"  "$research" "resolve-models exact-match: haiku alias accepted (research/fast)"
-  assert_eq "sonnet" "$review"   "resolve-models exact-match: sonnet alias accepted (review/balanced)"
-  assert_eq "opus"   "$design"   "resolve-models exact-match: opus alias accepted (design/powerful)"
-  assert_eq "haiku"  "$workflow" "resolve-models exact-match: haiku alias accepted (workflow/fast)"
+  assert_eq "haiku"  "$research" "resolve-models exact-match: haiku alias accepted (research)"
+  assert_eq "sonnet" "$review"   "resolve-models exact-match: sonnet alias accepted (review)"
+  assert_eq "opus"   "$design"   "resolve-models exact-match: opus alias accepted (design)"
+  assert_eq "haiku"  "$workflow" "resolve-models exact-match: haiku alias accepted (workflow)"
+  assert_eq "sonnet" "$executor" "resolve-models exact-match: sonnet alias accepted (executor)"
 
   # No warnings should be emitted for valid models
   if [ -z "$stderr" ]; then
@@ -6018,6 +6002,55 @@ test_resolve_models_exact_aliases_accepted() {
     echo -e "${RED}✗${NC} resolve-models exact-match: unexpected warnings: $stderr"
     ((TESTS_FAILED++))
   fi
+}
+
+test_resolve_models_v1_rejected() {
+  echo ""
+  echo "=== Testing resolve-models: v1.0-shaped config is rejected with warning and all-inherit fallback ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Write a v1.0-shaped config (has top-level .models key and schemaVersion "1.0")
+  printf '%s\n' '{
+    "schemaVersion": "1.0",
+    "categories": {
+      "research": "fast"
+    },
+    "models": {
+      "claudeCode": {
+        "fast": "haiku"
+      }
+    }
+  }' > "$tmpdir/models.json"
+
+  local stdout stderr
+  stderr=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>&1 1>/dev/null)
+  stdout=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
+
+  # stderr must contain "schema 1.0" (case-sensitive)
+  if printf '%s' "$stderr" | grep -q "schema 1.0"; then
+    echo -e "${GREEN}✓${NC} resolve-models v1-rejected: stderr contains 'schema 1.0'"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} resolve-models v1-rejected: expected 'schema 1.0' in stderr, got: $stderr"
+    ((TESTS_FAILED++))
+  fi
+
+  # stdout must be the all-inherit JSON on all five keys
+  local research review design workflow executor
+  research=$(printf '%s' "$stdout" | jq -r '.research' 2>/dev/null)
+  review=$(printf '%s' "$stdout" | jq -r '.review' 2>/dev/null)
+  design=$(printf '%s' "$stdout" | jq -r '.design' 2>/dev/null)
+  workflow=$(printf '%s' "$stdout" | jq -r '.workflow' 2>/dev/null)
+  executor=$(printf '%s' "$stdout" | jq -r '.executor' 2>/dev/null)
+
+  assert_eq "inherit" "$research" "resolve-models v1-rejected: research=inherit"
+  assert_eq "inherit" "$review"   "resolve-models v1-rejected: review=inherit"
+  assert_eq "inherit" "$design"   "resolve-models v1-rejected: design=inherit"
+  assert_eq "inherit" "$workflow" "resolve-models v1-rejected: workflow=inherit"
+  assert_eq "inherit" "$executor" "resolve-models v1-rejected: executor=inherit"
 }
 
 test_resolve_models_opencode_mtime_cache() {
@@ -6047,18 +6080,16 @@ FAKE_OC
   sed -i "s|COUNTER_PLACEHOLDER|$counter_file|" "$fake_oc_dir/opencode"
   chmod +x "$fake_oc_dir/opencode"
 
-  # Write a models.json that references a valid OpenCode model
+  # Write a v2.0 models.json that references a valid OpenCode model
   printf '%s\n' '{
-    "schemaVersion": "1.0",
+    "schemaVersion": "2.0",
     "categories": {
-      "research": "balanced",
-      "review": "balanced",
-      "design": "balanced",
-      "workflow": "balanced"
-    },
-    "models": {
       "opencode": {
-        "balanced": "anthropic/claude-sonnet-4-6"
+        "research":  "anthropic/claude-sonnet-4-6",
+        "review":    "anthropic/claude-sonnet-4-6",
+        "design":    "anthropic/claude-sonnet-4-6",
+        "workflow":  "anthropic/claude-sonnet-4-6",
+        "executor":  "anthropic/claude-sonnet-4-6"
       }
     }
   }' > "$tmpdir/models.json"
@@ -6101,29 +6132,27 @@ FAKE_OC
 # detect-models Tests
 # ============================================================================
 
-# Helper: write a valid full models.json for round-trip tests.
-# claudeCode table uses short aliases (haiku/sonnet/opus) as required by the Task tool.
-# opencode table uses provider/model-id format.
+# Helper: write a valid full v2.0 models.json for round-trip tests.
+# claudeCode categories use short aliases (haiku/sonnet/opus) as required by the Task tool.
+# opencode categories use provider/model-id format.
 _write_full_models_config() {
   local dir="$1"
   printf '{
-  "schemaVersion": "1.0",
+  "schemaVersion": "2.0",
   "categories": {
-    "research":  "balanced",
-    "review":    "powerful",
-    "design":    "balanced",
-    "workflow":  "fast"
-  },
-  "models": {
     "claudeCode": {
-      "fast":     "haiku",
-      "balanced": "sonnet",
-      "powerful": "opus"
+      "research":  "sonnet",
+      "review":    "opus",
+      "design":    "sonnet",
+      "workflow":  "haiku",
+      "executor":  "haiku"
     },
     "opencode": {
-      "fast":     "anthropic/claude-haiku-4-5",
-      "balanced": "anthropic/claude-sonnet-4-6",
-      "powerful": "anthropic/claude-opus-4-7"
+      "research":  "anthropic/claude-sonnet-4-6",
+      "review":    "anthropic/claude-opus-4-7",
+      "design":    "anthropic/claude-sonnet-4-6",
+      "workflow":  "anthropic/claude-haiku-4-5",
+      "executor":  "anthropic/claude-haiku-4-5"
     }
   }
 }\n' > "$dir/models.json"
@@ -6159,34 +6188,42 @@ test_detect_models_claudecode_generates_config() {
     ((TESTS_FAILED++))
   fi
 
-  # schemaVersion must be present
+  # schemaVersion must be "2.0"
   local schema_ver
   schema_ver=$(printf '%s' "$stdout" | jq -r '.schemaVersion // empty' 2>/dev/null)
-  assert_eq "1.0" "$schema_ver" "detect-models claudecode: schemaVersion is 1.0"
+  assert_eq "2.0" "$schema_ver" "detect-models claudecode: schemaVersion is 2.0"
 
-  # categories map must have all five keys
+  # categories.claudeCode must have all five keys
   local cat_keys
-  cat_keys=$(printf '%s' "$stdout" | jq -r '.categories | keys | sort | join(",")' 2>/dev/null)
-  assert_eq "design,executor,research,review,workflow" "$cat_keys" "detect-models claudecode: categories has all five keys"
+  cat_keys=$(printf '%s' "$stdout" | jq -r '.categories.claudeCode | keys | sort | join(",")' 2>/dev/null)
+  assert_eq "design,executor,research,review,workflow" "$cat_keys" "detect-models claudecode: categories.claudeCode has all five keys"
 
-  # models table must have claudeCode key
-  local has_cc
-  has_cc=$(printf '%s' "$stdout" | jq -r '.models | has("claudeCode") | tostring' 2>/dev/null)
-  assert_eq "true" "$has_cc" "detect-models claudecode: models table has claudeCode key"
+  # categories.claudeCode must have claudeCode key (no top-level .models key in v2.0)
+  local has_cc_cats
+  has_cc_cats=$(printf '%s' "$stdout" | jq -r '(.categories | has("claudeCode")) | tostring' 2>/dev/null)
+  assert_eq "true" "$has_cc_cats" "detect-models claudecode: categories has claudeCode sub-table"
 
-  # All three tiers must be present in the claudeCode table
-  local tier_keys
-  tier_keys=$(printf '%s' "$stdout" | jq -r '.models.claudeCode | keys | sort | join(",")' 2>/dev/null)
-  assert_eq "balanced,fast,powerful" "$tier_keys" "detect-models claudecode: claudeCode table has fast/balanced/powerful"
+  # All five categories must be present with valid exact short aliases: haiku/sonnet/opus
+  local research_model review_model design_model workflow_model executor_model
+  research_model=$(printf '%s' "$stdout" | jq -r '.categories.claudeCode.research // empty' 2>/dev/null)
+  review_model=$(printf '%s' "$stdout" | jq -r '.categories.claudeCode.review // empty' 2>/dev/null)
+  design_model=$(printf '%s' "$stdout" | jq -r '.categories.claudeCode.design // empty' 2>/dev/null)
+  workflow_model=$(printf '%s' "$stdout" | jq -r '.categories.claudeCode.workflow // empty' 2>/dev/null)
+  executor_model=$(printf '%s' "$stdout" | jq -r '.categories.claudeCode.executor // empty' 2>/dev/null)
 
-  # Models must be exact short aliases: haiku/sonnet/opus (Claude Code Task tool requirement)
-  local fast_model balanced_model powerful_model
-  fast_model=$(printf '%s' "$stdout" | jq -r '.models.claudeCode.fast // empty' 2>/dev/null)
-  balanced_model=$(printf '%s' "$stdout" | jq -r '.models.claudeCode.balanced // empty' 2>/dev/null)
-  powerful_model=$(printf '%s' "$stdout" | jq -r '.models.claudeCode.powerful // empty' 2>/dev/null)
-  assert_eq "haiku"  "$fast_model"     "detect-models claudecode: fast tier model is exactly haiku"
-  assert_eq "sonnet" "$balanced_model" "detect-models claudecode: balanced tier model is exactly sonnet"
-  assert_eq "opus"   "$powerful_model" "detect-models claudecode: powerful tier model is exactly opus"
+  # Each must be one of the valid aliases (haiku/sonnet/opus)
+  local valid_aliases="haiku sonnet opus"
+  for _cat_name in research review design workflow executor; do
+    local _val
+    eval "_val=\$${_cat_name}_model"
+    if printf '%s' "$valid_aliases" | grep -qw "$_val"; then
+      echo -e "${GREEN}✓${NC} detect-models claudecode: ${_cat_name} is a valid alias (${_val})"
+      ((TESTS_PASSED++))
+    else
+      echo -e "${RED}✗${NC} detect-models claudecode: ${_cat_name} expected valid alias, got '${_val}'"
+      ((TESTS_FAILED++))
+    fi
+  done
 }
 
 test_detect_models_opencode_absent_fallback() {
@@ -6229,10 +6266,10 @@ test_detect_models_opencode_absent_fallback() {
     ((TESTS_FAILED++))
   fi
 
-  # models table must have opencode key (not claudeCode) for OpenCode host
+  # categories must have opencode key (not claudeCode) for OpenCode host — v2.0 schema
   local has_oc
-  has_oc=$(printf '%s' "$stdout" | jq -r '.models | has("opencode") | tostring' 2>/dev/null)
-  assert_eq "true" "$has_oc" "detect-models opencode-absent: models table has opencode key"
+  has_oc=$(printf '%s' "$stdout" | jq -r '(.categories | has("opencode")) | tostring' 2>/dev/null)
+  assert_eq "true" "$has_oc" "detect-models opencode-absent: categories has opencode sub-table"
 }
 
 test_detect_models_atomic_write_no_corruption() {
@@ -6561,7 +6598,7 @@ test_list_models_opencode_absent_fallback() {
 
 test_detect_models_tier_flags_claudecode() {
   echo ""
-  echo "=== Testing detect-models --fast/--balanced/--powerful on Claude Code host ==="
+  echo "=== Testing detect-models category flags (--research/--review/--design/--workflow/--executor) on Claude Code host ==="
 
   local tmpdir
   tmpdir=$(mktemp -d)
@@ -6569,7 +6606,7 @@ test_detect_models_tier_flags_claudecode() {
 
   local stdout
   stdout=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" detect-models \
-    --fast haiku --balanced sonnet --powerful opus 2>/dev/null)
+    --research haiku --review opus --design sonnet --workflow haiku --executor sonnet 2>/dev/null)
 
   # models.json must be written
   if [ -f "$tmpdir/models.json" ]; then
@@ -6589,82 +6626,58 @@ test_detect_models_tier_flags_claudecode() {
     ((TESTS_FAILED++))
   fi
 
-  # models table must have claudeCode key with the supplied tiers
-  local fast_model balanced_model powerful_model
-  fast_model=$(printf '%s' "$stdout" | jq -r '.models.claudeCode.fast // empty' 2>/dev/null)
-  balanced_model=$(printf '%s' "$stdout" | jq -r '.models.claudeCode.balanced // empty' 2>/dev/null)
-  powerful_model=$(printf '%s' "$stdout" | jq -r '.models.claudeCode.powerful // empty' 2>/dev/null)
-  assert_eq "haiku"  "$fast_model"     "detect-models tier-flags claudecode: fast tier is haiku"
-  assert_eq "sonnet" "$balanced_model" "detect-models tier-flags claudecode: balanced tier is sonnet"
-  assert_eq "opus"   "$powerful_model" "detect-models tier-flags claudecode: powerful tier is opus"
-
-  # categories must use default mapping: research=fast, review=powerful, design=balanced, workflow=balanced
-  local r_tier rv_tier d_tier w_tier
-  r_tier=$(printf '%s' "$stdout"  | jq -r '.categories.research  // empty' 2>/dev/null)
-  rv_tier=$(printf '%s' "$stdout" | jq -r '.categories.review    // empty' 2>/dev/null)
-  d_tier=$(printf '%s' "$stdout"  | jq -r '.categories.design    // empty' 2>/dev/null)
-  w_tier=$(printf '%s' "$stdout"  | jq -r '.categories.workflow  // empty' 2>/dev/null)
-  assert_eq "fast"     "$r_tier"  "detect-models tier-flags claudecode: research=fast (default mapping)"
-  assert_eq "powerful" "$rv_tier" "detect-models tier-flags claudecode: review=powerful (default mapping)"
-  assert_eq "balanced" "$d_tier"  "detect-models tier-flags claudecode: design=balanced (default mapping)"
-  assert_eq "balanced" "$w_tier"  "detect-models tier-flags claudecode: workflow=balanced (default mapping)"
-
-  # schemaVersion must be present
+  # schemaVersion must be "2.0"
   local schema_ver
   schema_ver=$(printf '%s' "$stdout" | jq -r '.schemaVersion // empty' 2>/dev/null)
-  assert_eq "1.0" "$schema_ver" "detect-models tier-flags claudecode: schemaVersion is 1.0"
+  assert_eq "2.0" "$schema_ver" "detect-models tier-flags claudecode: schemaVersion is 2.0"
+
+  # on-disk file must also contain schemaVersion 2.0
+  local disk_schema
+  disk_schema=$(jq -r '.schemaVersion // empty' "$tmpdir/models.json" 2>/dev/null)
+  assert_eq "2.0" "$disk_schema" "detect-models tier-flags claudecode: on-disk schemaVersion is 2.0"
+
+  # categories.claudeCode must have all five keys populated from the flag values
+  local research_val review_val design_val workflow_val executor_val
+  research_val=$(printf '%s' "$stdout" | jq -r '.categories.claudeCode.research // empty' 2>/dev/null)
+  review_val=$(printf '%s' "$stdout"   | jq -r '.categories.claudeCode.review   // empty' 2>/dev/null)
+  design_val=$(printf '%s' "$stdout"   | jq -r '.categories.claudeCode.design   // empty' 2>/dev/null)
+  workflow_val=$(printf '%s' "$stdout" | jq -r '.categories.claudeCode.workflow  // empty' 2>/dev/null)
+  executor_val=$(printf '%s' "$stdout" | jq -r '.categories.claudeCode.executor  // empty' 2>/dev/null)
+  assert_eq "haiku"  "$research_val"  "detect-models tier-flags claudecode: research=haiku"
+  assert_eq "opus"   "$review_val"    "detect-models tier-flags claudecode: review=opus"
+  assert_eq "sonnet" "$design_val"    "detect-models tier-flags claudecode: design=sonnet"
+  assert_eq "haiku"  "$workflow_val"  "detect-models tier-flags claudecode: workflow=haiku"
+  assert_eq "sonnet" "$executor_val"  "detect-models tier-flags claudecode: executor=sonnet"
 }
 
 test_detect_models_tier_flags_preserve_other_host() {
   echo ""
-  echo "=== Testing detect-models --tier-flags preserves the other host's models sub-table ==="
+  echo "=== Testing detect-models category flags preserve the other host's categories sub-table ==="
 
   local tmpdir
   tmpdir=$(mktemp -d)
   trap "rm -rf '$tmpdir'" RETURN
 
-  # Pre-populate with an opencode table
+  # Pre-populate with a v2.0 opencode categories block
   printf '%s\n' '{
-    "schemaVersion": "1.0",
+    "schemaVersion": "2.0",
     "categories": {
-      "research": "balanced",
-      "review": "powerful",
-      "design": "balanced",
-      "workflow": "fast"
-    },
-    "models": {
       "opencode": {
-        "fast": "anthropic/claude-haiku-4-5",
-        "balanced": "anthropic/claude-sonnet-4-6",
-        "powerful": "anthropic/claude-opus-4-7"
+        "research":  "anthropic/claude-sonnet-4-6",
+        "review":    "anthropic/claude-opus-4-7",
+        "design":    "anthropic/claude-sonnet-4-6",
+        "workflow":  "anthropic/claude-haiku-4-5",
+        "executor":  "anthropic/claude-haiku-4-5"
       }
     }
   }' > "$tmpdir/models.json"
 
-  # Run detect-models with tier flags as Claude Code host
+  # Run detect-models with category flags as Claude Code host
   AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" detect-models \
-    --fast haiku --balanced sonnet --powerful opus 2>/dev/null
+    --research haiku --review opus --design sonnet --workflow haiku --executor sonnet 2>/dev/null
 
   local result
   result=$(cat "$tmpdir/models.json" 2>/dev/null)
-
-  # The opencode table must still be present with original values
-  local oc_fast oc_balanced oc_powerful
-  oc_fast=$(printf '%s' "$result" | jq -r '.models.opencode.fast // empty' 2>/dev/null)
-  oc_balanced=$(printf '%s' "$result" | jq -r '.models.opencode.balanced // empty' 2>/dev/null)
-  oc_powerful=$(printf '%s' "$result" | jq -r '.models.opencode.powerful // empty' 2>/dev/null)
-  assert_eq "anthropic/claude-haiku-4-5"  "$oc_fast"     "detect-models tier-flags preserve: opencode.fast preserved"
-  assert_eq "anthropic/claude-sonnet-4-6" "$oc_balanced"  "detect-models tier-flags preserve: opencode.balanced preserved"
-  assert_eq "anthropic/claude-opus-4-7"   "$oc_powerful"  "detect-models tier-flags preserve: opencode.powerful preserved"
-
-  # The claudeCode table must reflect the new values
-  local cc_fast cc_balanced cc_powerful
-  cc_fast=$(printf '%s' "$result" | jq -r '.models.claudeCode.fast // empty' 2>/dev/null)
-  cc_balanced=$(printf '%s' "$result" | jq -r '.models.claudeCode.balanced // empty' 2>/dev/null)
-  cc_powerful=$(printf '%s' "$result" | jq -r '.models.claudeCode.powerful // empty' 2>/dev/null)
-  assert_eq "haiku"  "$cc_fast"     "detect-models tier-flags preserve: claudeCode.fast written"
-  assert_eq "sonnet" "$cc_balanced" "detect-models tier-flags preserve: claudeCode.balanced written"
-  assert_eq "opus"   "$cc_powerful" "detect-models tier-flags preserve: claudeCode.powerful written"
 
   # Overall result must be valid JSON
   if printf '%s' "$result" | jq empty 2>/dev/null; then
@@ -6672,6 +6685,104 @@ test_detect_models_tier_flags_preserve_other_host() {
     ((TESTS_PASSED++))
   else
     echo -e "${RED}✗${NC} detect-models tier-flags preserve: merged models.json is not valid JSON: $result"
+    ((TESTS_FAILED++))
+  fi
+
+  # schemaVersion must be "2.0"
+  local schema_ver
+  schema_ver=$(printf '%s' "$result" | jq -r '.schemaVersion // empty' 2>/dev/null)
+  assert_eq "2.0" "$schema_ver" "detect-models tier-flags preserve: schemaVersion is 2.0"
+
+  # The opencode categories block must still be present with original values
+  local oc_research oc_review oc_design oc_workflow oc_executor
+  oc_research=$(printf '%s' "$result" | jq -r '.categories.opencode.research // empty' 2>/dev/null)
+  oc_review=$(printf '%s' "$result"   | jq -r '.categories.opencode.review   // empty' 2>/dev/null)
+  oc_design=$(printf '%s' "$result"   | jq -r '.categories.opencode.design   // empty' 2>/dev/null)
+  oc_workflow=$(printf '%s' "$result" | jq -r '.categories.opencode.workflow  // empty' 2>/dev/null)
+  oc_executor=$(printf '%s' "$result" | jq -r '.categories.opencode.executor  // empty' 2>/dev/null)
+  assert_eq "anthropic/claude-sonnet-4-6" "$oc_research"  "detect-models tier-flags preserve: opencode.research preserved"
+  assert_eq "anthropic/claude-opus-4-7"   "$oc_review"    "detect-models tier-flags preserve: opencode.review preserved"
+  assert_eq "anthropic/claude-sonnet-4-6" "$oc_design"    "detect-models tier-flags preserve: opencode.design preserved"
+  assert_eq "anthropic/claude-haiku-4-5"  "$oc_workflow"  "detect-models tier-flags preserve: opencode.workflow preserved"
+  assert_eq "anthropic/claude-haiku-4-5"  "$oc_executor"  "detect-models tier-flags preserve: opencode.executor preserved"
+
+  # The claudeCode categories block must reflect the new flag values
+  local cc_research cc_review cc_design cc_workflow cc_executor
+  cc_research=$(printf '%s' "$result" | jq -r '.categories.claudeCode.research // empty' 2>/dev/null)
+  cc_review=$(printf '%s' "$result"   | jq -r '.categories.claudeCode.review   // empty' 2>/dev/null)
+  cc_design=$(printf '%s' "$result"   | jq -r '.categories.claudeCode.design   // empty' 2>/dev/null)
+  cc_workflow=$(printf '%s' "$result" | jq -r '.categories.claudeCode.workflow  // empty' 2>/dev/null)
+  cc_executor=$(printf '%s' "$result" | jq -r '.categories.claudeCode.executor  // empty' 2>/dev/null)
+  assert_eq "haiku"  "$cc_research"  "detect-models tier-flags preserve: claudeCode.research written"
+  assert_eq "opus"   "$cc_review"    "detect-models tier-flags preserve: claudeCode.review written"
+  assert_eq "sonnet" "$cc_design"    "detect-models tier-flags preserve: claudeCode.design written"
+  assert_eq "haiku"  "$cc_workflow"  "detect-models tier-flags preserve: claudeCode.workflow written"
+  assert_eq "sonnet" "$cc_executor"  "detect-models tier-flags preserve: claudeCode.executor written"
+}
+
+test_detect_models_preserves_other_host() {
+  echo ""
+  echo "=== Testing detect-models (OpenCode host) preserves existing claudeCode categories block ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Prime models.json with a complete v2.0 claudeCode block
+  local primed_cc_block='{"research":"haiku","review":"opus","design":"sonnet","workflow":"haiku","executor":"sonnet"}'
+  printf '%s\n' "{
+    \"schemaVersion\": \"2.0\",
+    \"categories\": {
+      \"claudeCode\": $primed_cc_block
+    }
+  }" > "$tmpdir/models.json"
+
+  # Capture the claudeCode block before the run (compact form for byte-identical comparison)
+  local before_cc
+  before_cc=$(jq -c '.categories.claudeCode' "$tmpdir/models.json" 2>/dev/null)
+
+  # Run detect-models on the OpenCode host (unset CLAUDECODE) with all five category flags
+  CLAUDECODE= AIMI_CONFIG_DIR="$tmpdir" "$CLI" detect-models \
+    --research "anthropic/claude-sonnet-4-6" \
+    --review   "anthropic/claude-opus-4-7" \
+    --design   "anthropic/claude-sonnet-4-6" \
+    --workflow  "anthropic/claude-haiku-4-5" \
+    --executor  "anthropic/claude-haiku-4-5" 2>/dev/null
+
+  local result
+  result=$(cat "$tmpdir/models.json" 2>/dev/null)
+
+  # The claudeCode block must be byte-identical to the primed value
+  local after_cc
+  after_cc=$(printf '%s' "$result" | jq -c '.categories.claudeCode' 2>/dev/null)
+
+  if [ "$before_cc" = "$after_cc" ]; then
+    echo -e "${GREEN}✓${NC} detect-models preserves-other-host: claudeCode block unchanged"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models preserves-other-host: claudeCode block changed (before=$before_cc, after=$after_cc)"
+    ((TESTS_FAILED++))
+  fi
+
+  # The new opencode block must reflect the flag values passed to the run
+  local oc_research oc_review oc_design oc_workflow oc_executor
+  oc_research=$(printf '%s' "$result" | jq -r '.categories.opencode.research // empty' 2>/dev/null)
+  oc_review=$(printf '%s' "$result"   | jq -r '.categories.opencode.review   // empty' 2>/dev/null)
+  oc_design=$(printf '%s' "$result"   | jq -r '.categories.opencode.design   // empty' 2>/dev/null)
+  oc_workflow=$(printf '%s' "$result" | jq -r '.categories.opencode.workflow  // empty' 2>/dev/null)
+  oc_executor=$(printf '%s' "$result" | jq -r '.categories.opencode.executor  // empty' 2>/dev/null)
+  assert_eq "anthropic/claude-sonnet-4-6" "$oc_research"  "detect-models preserves-other-host: opencode.research written"
+  assert_eq "anthropic/claude-opus-4-7"   "$oc_review"    "detect-models preserves-other-host: opencode.review written"
+  assert_eq "anthropic/claude-sonnet-4-6" "$oc_design"    "detect-models preserves-other-host: opencode.design written"
+  assert_eq "anthropic/claude-haiku-4-5"  "$oc_workflow"  "detect-models preserves-other-host: opencode.workflow written"
+  assert_eq "anthropic/claude-haiku-4-5"  "$oc_executor"  "detect-models preserves-other-host: opencode.executor written"
+
+  # Overall result must be valid JSON
+  if printf '%s' "$result" | jq empty 2>/dev/null; then
+    echo -e "${GREEN}✓${NC} detect-models preserves-other-host: merged models.json is valid JSON"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models preserves-other-host: merged models.json is not valid JSON: $result"
     ((TESTS_FAILED++))
   fi
 }
@@ -7621,6 +7732,7 @@ main() {
   test_resolve_models_stdout_always_valid_json
   test_resolve_models_exact_match_validation
   test_resolve_models_exact_aliases_accepted
+  test_resolve_models_v1_rejected
   test_resolve_models_opencode_mtime_cache
 
   # list-models tests
@@ -7639,6 +7751,7 @@ main() {
   test_detect_models_roundtrip_with_resolve_models
   test_detect_models_tier_flags_claudecode
   test_detect_models_tier_flags_preserve_other_host
+  test_detect_models_preserves_other_host
 
   # models-prompt-check / models-prompt-dismiss tests
   echo ""
