@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-05-25
+
+### Changed
+
+- `models.json` schema bumped 1.0 → 2.0: configuration now lives at `.categories.<host>.<category>` (categories: `research`, `review`, `design`, `workflow`, `executor`). The tier indirection layer (`fast` / `balanced` / `powerful`) is removed; the top-level `.models` key is gone. Each host sub-key maps category names directly to concrete model ids, eliminating the two-hop tier→model lookup.
+- `aimi-cli detect-models` flags renamed from the three-tier set (`--fast`, `--balanced`, `--powerful`) to five per-category flags (`--research`, `--review`, `--design`, `--workflow`, `--executor`). All five flags must be supplied together (all-or-nothing); partial flag sets are rejected. The first-run interactive picker now asks one question per category (five questions) instead of one question per tier (three questions).
+
+### Breaking
+
+- Existing v1.0 `~/.config/aimi/models.json` files are no longer read silently. `aimi-cli resolve-models` emits a stderr warning containing `schema 1.0` and falls back to all-`inherit` for every category until the config is regenerated.
+- **Action required after upgrading:** run `aimi-cli detect-models` (interactive) or `aimi-cli detect-models --research <id> --review <id> --design <id> --workflow <id> --executor <id>` (flag mode) to regenerate the config in the v2.0 shape.
+
 ## [1.91.0] - 2026-05-25
 
 ### Added
