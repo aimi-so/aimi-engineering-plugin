@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.93.0] - 2026-05-25
+
+### Added
+
+- `/aimi:setup-models` slash command for interactive (re)configuration of per-category model assignments at any time. Shows current values for the active host (claudeCode or opencode), then runs the same five-question picker used by the first-run prompt — with current values pre-selected as defaults so the common "tweak one category" workflow takes one keystroke per question. The picker question text is identical to the first-run prompt (Portuguese, per the existing localisation). Writes via `aimi-cli detect-models`, which validates each model id against the host's available-model list and preserves the other host's `categories.<host>` sub-table on merge.
+- `aimi-cli get-current-models` subcommand emitting current per-category model assignments for the active host as a JSON object with keys `research`, `review`, `design`, `workflow`, `executor`. Unset entries emit JSON null (not the literal `"inherit"` returned by `resolve-models`) so picker UIs can distinguish "not configured" from an explicit `"inherit"` override and pre-select sensible defaults. Schema v1.0 configs rejected identically to `resolve-models` (stderr warning, all-null on stdout).
+
+### Fixed
+
+- `aimi-cli models-prompt-check` now returns `prompt` whenever `~/.config/aimi/models.json` is missing, regardless of whether the `~/.config/aimi/models-prompt-seen` marker file exists. Previously the marker file suppressed the prompt even after the config was deleted, leaving the user silently stuck on all-inherit defaults with no way to re-trigger the prompt short of also deleting the marker. The marker is no longer read; `models-prompt-dismiss` still writes the marker for backward compatibility with callers in `install.sh` and `cli-path-resolution.md`, but the marker now has no effect on the check.
+
 ## [1.92.1] - 2026-05-25
 
 ### Fixed
