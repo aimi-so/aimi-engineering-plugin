@@ -6634,19 +6634,76 @@ test_models_prompt_check_prompt_when_v1_config() {
   rm -rf "$tmpdir"
 }
 
-test_models_prompt_check_prompt_when_only_marker_exists() {
+test_models_prompt_check_prompt_when_file_missing_even_with_per_host_marker() {
   echo ""
-  echo "=== Testing models-prompt-check returns 'prompt' when only marker exists (no models.json) ==="
+  echo "=== Testing models-prompt-check returns 'prompt' when models.json is missing, even with per-host marker ==="
 
   local tmpdir
   tmpdir=$(mktemp -d)
-  # Create marker only — no models.json. New behavior: missing config always re-prompts.
-  printf 'models-prompt-seen: 2026-01-01T00:00:00Z\n' > "$tmpdir/models-prompt-seen"
+  # Per-host marker present, no models.json. File-missing always wins.
+  printf 'models-prompt-seen: 2026-01-01T00:00:00Z\n' > "$tmpdir/models-prompt-seen-claudeCode"
 
   local output
-  output=$(AIMI_CONFIG_DIR="$tmpdir" "$CLI" models-prompt-check)
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
 
-  assert_eq "prompt" "$output" "models-prompt-check: returns 'prompt' when marker exists but models.json is missing"
+  assert_eq "prompt" "$output" "models-prompt-check: file-missing re-prompts even with per-host marker present"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_check_skip_when_per_host_marker_dismisses() {
+  echo ""
+  echo "=== Testing models-prompt-check returns 'skip' when host unconfigured but per-host marker present ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  # Config file present with only the OTHER host configured; current host (claudeCode)
+  # is unconfigured BUT has a dismissal marker — should skip.
+  printf '{"schemaVersion":"2.0","categories":{"opencode":{"research":"anthropic/claude-haiku-4-5"}}}\n' > "$tmpdir/models.json"
+  printf 'dismissed on 2026-01-01\n' > "$tmpdir/models-prompt-seen-claudeCode"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+
+  assert_eq "skip" "$output" "models-prompt-check: per-host marker suppresses prompt when host unconfigured + file present"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_check_per_host_marker_isolation() {
+  echo ""
+  echo "=== Testing models-prompt-check: other host's marker does NOT suppress prompt on this host ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  # Config file present, current host (claudeCode) unconfigured, but only OPENCODE
+  # marker is present — claudeCode prompt should still fire.
+  printf '{"schemaVersion":"2.0","categories":{"opencode":{"research":"x"}}}\n' > "$tmpdir/models.json"
+  printf 'dismissed on opencode\n' > "$tmpdir/models-prompt-seen-opencode"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+
+  assert_eq "prompt" "$output" "models-prompt-check: opencode marker does not silence claudeCode prompt"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_check_legacy_global_marker_ignored() {
+  echo ""
+  echo "=== Testing models-prompt-check: legacy global marker (no host suffix) is NOT honored ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  # Config file present, current host unconfigured, only the legacy global marker exists.
+  # New code ignores the legacy file — should prompt.
+  printf '{"schemaVersion":"2.0","categories":{"opencode":{"research":"x"}}}\n' > "$tmpdir/models.json"
+  printf 'legacy global marker from pre-1.93.2\n' > "$tmpdir/models-prompt-seen"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+
+  assert_eq "prompt" "$output" "models-prompt-check: legacy global marker is ignored (must migrate to per-host)"
 
   rm -rf "$tmpdir"
 }
@@ -6657,9 +6714,10 @@ test_models_prompt_check_skip_when_current_host_configured_with_marker() {
 
   local tmpdir
   tmpdir=$(mktemp -d)
-  # Both config (with current host configured) AND marker present.
+  # Both config (with current host configured) AND per-host marker present.
+  # The check short-circuits at "host configured" — marker is not consulted.
   printf '{"schemaVersion":"2.0","categories":{"claudeCode":{"research":"haiku","review":"opus","design":"sonnet","workflow":"sonnet","executor":"sonnet"}}}\n' > "$tmpdir/models.json"
-  printf 'models-prompt-seen: 2026-01-01T00:00:00Z\n' > "$tmpdir/models-prompt-seen"
+  printf 'models-prompt-seen: 2026-01-01T00:00:00Z\n' > "$tmpdir/models-prompt-seen-claudeCode"
 
   local output
   output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
@@ -6685,39 +6743,105 @@ test_models_prompt_check_prompt_when_categories_empty_object() {
   rm -rf "$tmpdir"
 }
 
-test_models_prompt_dismiss_creates_marker_with_correct_perms() {
+test_models_prompt_dismiss_creates_per_host_marker_claudecode() {
   echo ""
-  echo "=== Testing models-prompt-dismiss creates marker file with 0600 permissions ==="
+  echo "=== Testing models-prompt-dismiss writes per-host marker for claudeCode ==="
 
   local tmpdir
   tmpdir=$(mktemp -d)
 
   # Before dismiss: should prompt
   local before
-  before=$(AIMI_CONFIG_DIR="$tmpdir" "$CLI" models-prompt-check)
-  assert_eq "prompt" "$before" "models-prompt-dismiss: check returns 'prompt' before dismiss"
+  before=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+  assert_eq "prompt" "$before" "models-prompt-dismiss claudeCode: check returns 'prompt' before dismiss"
 
-  # Dismiss
-  AIMI_CONFIG_DIR="$tmpdir" "$CLI" models-prompt-dismiss > /dev/null
+  # Dismiss on claudeCode
+  AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-dismiss > /dev/null
 
-  # Marker file should exist
-  if [ -f "$tmpdir/models-prompt-seen" ]; then
-    echo -e "${GREEN}✓${NC} models-prompt-dismiss: marker file exists after dismiss"
+  # Per-host marker file should exist
+  if [ -f "$tmpdir/models-prompt-seen-claudeCode" ]; then
+    echo -e "${GREEN}✓${NC} models-prompt-dismiss claudeCode: per-host marker file exists at models-prompt-seen-claudeCode"
     ((TESTS_PASSED++))
   else
-    echo -e "${RED}✗${NC} models-prompt-dismiss: marker file not found after dismiss"
+    echo -e "${RED}✗${NC} models-prompt-dismiss claudeCode: per-host marker file not found"
     ((TESTS_FAILED++))
   fi
 
-  # Marker file should have 0600 permissions
+  # Per-host marker should have 0600 permissions
   local perms
-  perms=$(stat -c '%a' "$tmpdir/models-prompt-seen" 2>/dev/null || stat -f '%Lp' "$tmpdir/models-prompt-seen" 2>/dev/null)
-  assert_eq "600" "$perms" "models-prompt-dismiss: marker file has 0600 permissions"
+  perms=$(stat -c '%a' "$tmpdir/models-prompt-seen-claudeCode" 2>/dev/null || stat -f '%Lp' "$tmpdir/models-prompt-seen-claudeCode" 2>/dev/null)
+  assert_eq "600" "$perms" "models-prompt-dismiss claudeCode: per-host marker has 0600 permissions"
 
-  # After dismiss (models.json still missing): check still returns 'prompt' — marker no longer suppresses
+  # Opencode marker should NOT exist (per-host isolation)
+  if [ ! -f "$tmpdir/models-prompt-seen-opencode" ]; then
+    echo -e "${GREEN}✓${NC} models-prompt-dismiss claudeCode: opencode marker NOT created (per-host isolation)"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} models-prompt-dismiss claudeCode: opencode marker leaked"
+    ((TESTS_FAILED++))
+  fi
+
+  # After dismiss (models.json still missing): check still returns 'prompt' — file-missing wins over marker
   local after
-  after=$(AIMI_CONFIG_DIR="$tmpdir" "$CLI" models-prompt-check)
-  assert_eq "prompt" "$after" "models-prompt-dismiss: check still returns 'prompt' when models.json missing (marker no longer suppresses)"
+  after=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+  assert_eq "prompt" "$after" "models-prompt-dismiss claudeCode: check returns 'prompt' when models.json missing (marker does not override file-missing)"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_dismiss_creates_per_host_marker_opencode() {
+  echo ""
+  echo "=== Testing models-prompt-dismiss writes per-host marker for opencode ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  # Dismiss on opencode (no CLAUDECODE)
+  AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE= "$CLI" models-prompt-dismiss > /dev/null
+
+  # Per-host marker file should exist with opencode suffix
+  if [ -f "$tmpdir/models-prompt-seen-opencode" ]; then
+    echo -e "${GREEN}✓${NC} models-prompt-dismiss opencode: per-host marker file exists at models-prompt-seen-opencode"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} models-prompt-dismiss opencode: per-host marker file not found"
+    ((TESTS_FAILED++))
+  fi
+
+  # ClaudeCode marker should NOT exist
+  if [ ! -f "$tmpdir/models-prompt-seen-claudeCode" ]; then
+    echo -e "${GREEN}✓${NC} models-prompt-dismiss opencode: claudeCode marker NOT created"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} models-prompt-dismiss opencode: claudeCode marker leaked"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_dismiss_then_check_skips_when_file_present() {
+  echo ""
+  echo "=== Testing dismiss + file present + host unconfigured → check returns 'skip' (full UX flow) ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  # Simulate: user already configured opencode; opens Claude Code; picks "Manter o padrão";
+  # next session on same host should not re-prompt.
+  printf '{"schemaVersion":"2.0","categories":{"opencode":{"research":"x"}}}\n' > "$tmpdir/models.json"
+
+  # First check (no marker yet): prompt
+  local before
+  before=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+  assert_eq "prompt" "$before" "dismiss-flow: pre-dismiss check returns 'prompt' (host unconfigured, no marker)"
+
+  # User picks "Manter o padrão" → models-prompt-dismiss
+  AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-dismiss > /dev/null
+
+  # Subsequent check: skip (dismissal honored)
+  local after
+  after=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+  assert_eq "skip" "$after" "dismiss-flow: post-dismiss check returns 'skip' (per-host marker suppresses)"
 
   rm -rf "$tmpdir"
 }
@@ -6731,20 +6855,20 @@ test_models_prompt_dismiss_idempotent() {
 
   # First call
   local exit1
-  AIMI_CONFIG_DIR="$tmpdir" "$CLI" models-prompt-dismiss > /dev/null
+  AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-dismiss > /dev/null
   exit1=$?
   assert_eq "0" "$exit1" "models-prompt-dismiss idempotent: first call exits 0"
 
   # Second call (marker already exists)
   local exit2
-  AIMI_CONFIG_DIR="$tmpdir" "$CLI" models-prompt-dismiss > /dev/null
+  AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-dismiss > /dev/null
   exit2=$?
   assert_eq "0" "$exit2" "models-prompt-dismiss idempotent: second call exits 0"
 
-  # Check still returns 'prompt' (models.json still missing — marker no longer suppresses)
+  # Check still returns 'prompt' (models.json still missing — file-missing wins over marker)
   local output
-  output=$(AIMI_CONFIG_DIR="$tmpdir" "$CLI" models-prompt-check)
-  assert_eq "prompt" "$output" "models-prompt-dismiss idempotent: check still returns 'prompt' after two dismisses when models.json missing"
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+  assert_eq "prompt" "$output" "models-prompt-dismiss idempotent: check returns 'prompt' when models.json missing (marker does not override file-missing)"
 
   rm -rf "$tmpdir"
 }
@@ -7994,10 +8118,15 @@ main() {
   test_models_prompt_check_prompt_when_other_host_only_configured
   test_models_prompt_check_prompt_when_current_host_all_null
   test_models_prompt_check_prompt_when_v1_config
-  test_models_prompt_check_prompt_when_only_marker_exists
+  test_models_prompt_check_prompt_when_file_missing_even_with_per_host_marker
+  test_models_prompt_check_skip_when_per_host_marker_dismisses
+  test_models_prompt_check_per_host_marker_isolation
+  test_models_prompt_check_legacy_global_marker_ignored
   test_models_prompt_check_skip_when_current_host_configured_with_marker
   test_models_prompt_check_prompt_when_categories_empty_object
-  test_models_prompt_dismiss_creates_marker_with_correct_perms
+  test_models_prompt_dismiss_creates_per_host_marker_claudecode
+  test_models_prompt_dismiss_creates_per_host_marker_opencode
+  test_models_prompt_dismiss_then_check_skips_when_file_present
   test_models_prompt_dismiss_idempotent
 
   # Design bundle detection tests

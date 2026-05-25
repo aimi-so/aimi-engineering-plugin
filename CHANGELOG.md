@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.93.2] - 2026-05-25
+
+### Changed
+
+- First-run dismissal marker is now **per-host**. The marker file path is `~/.config/aimi/models-prompt-seen-claudeCode` or `~/.config/aimi/models-prompt-seen-opencode` depending on the active host. Picking "Manter o padrão (inherit)" on one host no longer silences the prompt on the other — each host's dismissal is independent. The legacy global marker at `~/.config/aimi/models-prompt-seen` is no longer read; existing users may see one extra prompt after upgrade (on each host where they had dismissed without configuring) and will not see it again after dismissing or configuring on that host.
+- `aimi-cli models-prompt-check` now honors the per-host marker as a tie-breaker: when the config file is present but the current host has no configured categories, `skip` is returned if the host's marker exists (explicit dismissal preserved), `prompt` otherwise. The file-missing branch still re-prompts regardless of any marker — the v1.93.0 behavior (deleting `models.json` always re-triggers the prompt) is preserved.
+- `aimi-cli models-prompt-dismiss` writes the per-host marker for the active host. Idempotent. Other host's marker is not touched.
+
 ## [1.93.1] - 2026-05-25
 
 ### Changed

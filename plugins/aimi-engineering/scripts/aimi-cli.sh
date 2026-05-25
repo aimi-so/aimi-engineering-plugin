@@ -281,11 +281,21 @@ _aimi_models_config_path() {
   printf '%s\n' "$aimi_dir/models.json"
 }
 
-# Return the path to the models first-run prompt marker file (XDG location)
+# Return the path to the models first-run prompt marker file for the active host.
+# The marker is per-host: `models-prompt-seen-claudeCode` or `models-prompt-seen-opencode`.
+# This lets a user dismiss the prompt independently on each host — picking
+# "Manter o padrão (inherit)" on Claude Code does not silence the prompt on OpenCode.
+# The legacy global `models-prompt-seen` file (no host suffix) is no longer read.
 _aimi_models_prompt_marker_path() {
+  local host
+  if _is_claude_code_host; then
+    host="claudeCode"
+  else
+    host="opencode"
+  fi
   local aimi_dir
   aimi_dir=$(_aimi_config_dir)
-  printf '%s\n' "$aimi_dir/models-prompt-seen"
+  printf '%s\n' "$aimi_dir/models-prompt-seen-$host"
 }
 
 # Read the models config JSON, returning empty string when the file is absent.
@@ -2529,6 +2539,17 @@ cmd_models_prompt_check() {
 
   if [ "$_has_config" = "true" ]; then
     echo "skip"
+    return 0
+  fi
+
+  # Host not configured but config file is present — honor the per-host
+  # dismissal marker if it exists. File-missing always re-prompts (above);
+  # this branch only matters when the user kept some config but explicitly
+  # opted out for this host.
+  local marker_file
+  marker_file=$(_aimi_models_prompt_marker_path)
+  if [ -f "$marker_file" ]; then
+    echo "skip"
   else
     echo "prompt"
   fi
@@ -3765,16 +3786,24 @@ COMMANDS:
                               design+workflow+executor=balanced/sonnet).
                               Emits the written JSON on stdout.
     models-prompt-check       Check whether the model-selection prompt should be shown.
-                              Echoes 'prompt' when the current host (claudeCode or
-                              opencode) has no configured categories — i.e., when
-                              get-current-models would return all-null for this host.
-                              Echoes 'skip' when at least one category for the current
-                              host has a non-null model id. The marker file is no longer
-                              read; v1.0 configs are treated as unconfigured.
-    models-prompt-dismiss     Atomically create the models first-run prompt marker file
-                              (~/.config/aimi/models-prompt-seen). Idempotent. Run after
-                              the user responds to the first-run prompt (regardless of
-                              their choice) so the prompt is never shown again.
+                              Per-host decision:
+                              - prompt when the config file is missing entirely (always
+                                re-trigger after deletion, regardless of any marker)
+                              - skip when the current host (claudeCode or opencode) has
+                                at least one non-null category
+                              - skip when the file is present, the current host is
+                                unconfigured, AND the per-host dismissal marker exists
+                                (~/.config/aimi/models-prompt-seen-<host>)
+                              - prompt otherwise (file present, host unconfigured, no
+                                marker) — including v1.0 configs and empty/malformed files
+    models-prompt-dismiss     Atomically create the per-host first-run prompt marker file
+                              (~/.config/aimi/models-prompt-seen-<host> where <host> is
+                              claudeCode or opencode based on CLAUDECODE). Idempotent.
+                              Run after the user responds to the prompt on this host
+                              (regardless of their choice) so the prompt is not re-shown
+                              when the host stays unconfigured. Re-deleting models.json
+                              still re-triggers the prompt — the marker only suppresses
+                              when the file exists but the host has no config.
     setup-branch <name> --default-branch <branch> [--project <path>]
                               Create or checkout branch with deterministic logic
     clear-state               Clear all state files
