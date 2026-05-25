@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.92.0] - 2026-05-25
+
+### Changed
+
+- `models.json` schema migrated from `1.0` to `2.0`. The two-level tier indirection (`categories.<cat> → tier`, `models.<host>.<tier> → modelId`) is replaced with direct one-level mapping (`categories.<host>.<cat> → modelId`). The top-level `.models` key is removed. Five categories are honored: `research`, `review`, `design`, `workflow`, `executor`.
+- `aimi-cli detect-models` flag set renamed: the three-tier flags `--fast` / `--balanced` / `--powerful` (all-or-nothing) are replaced with five per-category flags `--research` / `--review` / `--design` / `--workflow` / `--executor` (all five required when any is provided). The interactive picker (TTY and first-run prompt) now asks five per-category questions instead of three per-tier questions.
+- First-run prompt documentation in `commands/references/cli-path-resolution.md` and the mirrored block in `install.sh` updated to describe the five-question per-category flow.
+
+### Breaking
+
+- Existing v1.0 configs at `~/.config/aimi/models.json` are no longer honored. `aimi-cli resolve-models` detects v1.0 (presence of top-level `.models` key or `schemaVersion` other than `"2.0"`), emits a stderr warning containing `schema 1.0`, and falls back to all-inherit until the file is regenerated.
+- Action required after upgrade: re-run `aimi-cli detect-models` (interactive) or `aimi-cli detect-models --research <id> --review <id> --design <id> --workflow <id> --executor <id>` (flag mode) on each host (`claudeCode` and `opencode`) to write the v2.0 file. The writer preserves the other host's `categories.<host>` sub-table on merge.
+
 ## [1.91.0] - 2026-05-25
 
 ### Added
