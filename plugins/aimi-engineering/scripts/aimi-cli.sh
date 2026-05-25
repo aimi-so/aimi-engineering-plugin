@@ -1931,9 +1931,9 @@ cmd_detect_interactivity() {
 }
 
 # Resolve which configured model for each agent category.
-# Reads ~/.config/aimi/models.json and maps each of the four categories
-# (research, review, design, workflow) to a concrete model ID.
-# Always emits a single-line compact JSON object with all four keys.
+# Reads ~/.config/aimi/models.json and maps each of the five categories
+# (research, review, design, workflow, executor) to a concrete model ID.
+# Always emits a single-line compact JSON object with all five keys.
 # Unconfigured or fallback entries use the literal string "inherit".
 # All warnings go to stderr; stdout is always valid JSON.
 #
@@ -1949,8 +1949,8 @@ cmd_resolve_models() {
   local config_file
   config_file=$(_aimi_models_config_path)
 
-  # Fallback JSON — all four categories as inherit
-  local _fallback='{"research":"inherit","review":"inherit","design":"inherit","workflow":"inherit"}'
+  # Fallback JSON — all five categories as inherit
+  local _fallback='{"research":"inherit","review":"inherit","design":"inherit","workflow":"inherit","executor":"inherit"}'
 
   # No config file → silent fallback (preserves current behavior)
   if [ ! -f "$config_file" ]; then
@@ -1991,7 +1991,8 @@ cmd_resolve_models() {
       research: resolve_cat("research"),
       review:   resolve_cat("review"),
       design:   resolve_cat("design"),
-      workflow: resolve_cat("workflow")
+      workflow: resolve_cat("workflow"),
+      executor: resolve_cat("executor")
     } | @json
   ' 2>/dev/null) || {
     echo "Warning: resolve-models: models config file is malformed JSON or failed to parse: $config_file" >&2
@@ -2205,6 +2206,7 @@ cmd_detect_models() {
     local _tier_review="powerful"
     local _tier_design="balanced"
     local _tier_workflow="balanced"
+    local _tier_executor="balanced"
 
     # Read existing config to preserve the other host's models sub-table
     local _existing_json
@@ -2222,13 +2224,15 @@ cmd_detect_models() {
         --arg rv_tier  "$_tier_review" \
         --arg d_tier   "$_tier_design" \
         --arg w_tier   "$_tier_workflow" \
+        --arg e_tier   "$_tier_executor" \
         '{
           schemaVersion: "1.0",
           categories: {
             research: $r_tier,
             review:   $rv_tier,
             design:   $d_tier,
-            workflow: $w_tier
+            workflow: $w_tier,
+            executor: $e_tier
           },
           models: ((.models // {}) + {
             ($host_key): {
@@ -2249,13 +2253,15 @@ cmd_detect_models() {
         --arg rv_tier  "$_tier_review" \
         --arg d_tier   "$_tier_design" \
         --arg w_tier   "$_tier_workflow" \
+        --arg e_tier   "$_tier_executor" \
         '{
           schemaVersion: "1.0",
           categories: {
             research: $r_tier,
             review:   $rv_tier,
             design:   $d_tier,
-            workflow: $w_tier
+            workflow: $w_tier,
+            executor: $e_tier
           },
           models: {
             ($host_key): {
@@ -2317,11 +2323,13 @@ anthropic/claude-opus-4-7"
   [ -z "$_powerful_model" ] && _powerful_model=$(printf '%s\n' "$_available_models" | tail -1)
 
   # ---- Per-category tier assignment -----------------------------------------
-  # Default mapping: research=fast, review=powerful, design=balanced, workflow=balanced
+  # Default mapping: research=fast, review=powerful, design=balanced,
+  # workflow=balanced, executor=balanced
   local _tier_research="fast"
   local _tier_review="powerful"
   local _tier_design="balanced"
   local _tier_workflow="balanced"
+  local _tier_executor="balanced"
 
   if [ -t 0 ]; then
     # stdin is a TTY — prompt once per category
@@ -2345,6 +2353,7 @@ anthropic/claude-opus-4-7"
     _tier_review=$(_prompt_category "review"   "$_tier_review")
     _tier_design=$(_prompt_category "design"   "$_tier_design")
     _tier_workflow=$(_prompt_category "workflow"  "$_tier_workflow")
+    _tier_executor=$(_prompt_category "executor"  "$_tier_executor")
   fi
 
   # ---- Assemble the models.json document ------------------------------------
@@ -2358,13 +2367,15 @@ anthropic/claude-opus-4-7"
     --arg rv_tier  "$_tier_review" \
     --arg d_tier   "$_tier_design" \
     --arg w_tier   "$_tier_workflow" \
+    --arg e_tier   "$_tier_executor" \
     '{
       schemaVersion: "1.0",
       categories: {
         research: $r_tier,
         review:   $rv_tier,
         design:   $d_tier,
-        workflow: $w_tier
+        workflow: $w_tier,
+        executor: $e_tier
       },
       models: {
         ($host_key): {
@@ -3601,7 +3612,8 @@ COMMANDS:
                               stdout is always a valid JSON array; warnings go to stderr.
     resolve-models            Resolve configured model for each agent category.
                               Reads ~/.config/aimi/models.json and emits a single-line
-                              JSON object with keys research, review, design, workflow.
+                              JSON object with keys research, review, design, workflow,
+                              executor.
                               Unconfigured or fallback entries use the literal "inherit".
                               Warnings go to stderr; stdout is always valid JSON.
     detect-models [--fast <model>] [--balanced <model>] [--powerful <model>]
@@ -3613,7 +3625,7 @@ COMMANDS:
                               Tier flags (--fast/--balanced/--powerful): non-interactive
                               write mode — writes the given tier-to-model assignments
                               with the default category mapping (research=fast,
-                              design+workflow=balanced, review=powerful). Preserves the
+                              design+workflow+executor=balanced, review=powerful). Preserves the
                               other host's models sub-table when a file already exists.
                               All three tier flags must be supplied together.
                               Interactive (stdin TTY, no flags): prompts per category.

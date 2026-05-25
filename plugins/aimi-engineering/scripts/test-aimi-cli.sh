@@ -5637,17 +5637,19 @@ test_resolve_models_no_config() {
   local output
   output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
 
-  # Expect all four keys with inherit
-  local research review design workflow
+  # Expect all five keys with inherit
+  local research review design workflow executor
   research=$(printf '%s' "$output" | jq -r '.research' 2>/dev/null)
   review=$(printf '%s' "$output" | jq -r '.review' 2>/dev/null)
   design=$(printf '%s' "$output" | jq -r '.design' 2>/dev/null)
   workflow=$(printf '%s' "$output" | jq -r '.workflow' 2>/dev/null)
+  executor=$(printf '%s' "$output" | jq -r '.executor' 2>/dev/null)
 
   assert_eq "inherit" "$research" "resolve-models no-config: research=inherit"
   assert_eq "inherit" "$review"   "resolve-models no-config: review=inherit"
   assert_eq "inherit" "$design"   "resolve-models no-config: design=inherit"
   assert_eq "inherit" "$workflow" "resolve-models no-config: workflow=inherit"
+  assert_eq "inherit" "$executor" "resolve-models no-config: executor=inherit"
 }
 
 test_resolve_models_malformed_config() {
@@ -5673,10 +5675,12 @@ test_resolve_models_malformed_config() {
     ((TESTS_FAILED++))
   fi
 
-  # stdout must be valid JSON with all four inherit keys
-  local research
+  # stdout must be valid JSON with all five inherit keys
+  local research executor
   research=$(printf '%s' "$stdout" | jq -r '.research' 2>/dev/null)
+  executor=$(printf '%s' "$stdout" | jq -r '.executor' 2>/dev/null)
   assert_eq "inherit" "$research" "resolve-models malformed-config: stdout is valid JSON with research=inherit"
+  assert_eq "inherit" "$executor" "resolve-models malformed-config: stdout includes executor=inherit"
 }
 
 test_resolve_models_partial_config() {
@@ -5707,16 +5711,18 @@ test_resolve_models_partial_config() {
   local output
   output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
 
-  local research review design workflow
+  local research review design workflow executor
   research=$(printf '%s' "$output" | jq -r '.research' 2>/dev/null)
   review=$(printf '%s' "$output" | jq -r '.review' 2>/dev/null)
   design=$(printf '%s' "$output" | jq -r '.design' 2>/dev/null)
   workflow=$(printf '%s' "$output" | jq -r '.workflow' 2>/dev/null)
+  executor=$(printf '%s' "$output" | jq -r '.executor' 2>/dev/null)
 
   assert_eq "sonnet" "$research" "resolve-models partial-config: configured category resolves correctly"
   assert_eq "inherit" "$review"   "resolve-models partial-config: missing category=inherit"
   assert_eq "inherit" "$design"   "resolve-models partial-config: missing category=inherit"
   assert_eq "inherit" "$workflow" "resolve-models partial-config: missing category=inherit"
+  assert_eq "inherit" "$executor" "resolve-models partial-config: missing executor=inherit"
 }
 
 test_resolve_models_host_detection_claudecode() {
@@ -5868,9 +5874,9 @@ test_resolve_models_invalid_model_claudecode() {
   assert_eq "sonnet" "$review" "resolve-models invalid-model-claudecode: valid exact-alias model still resolves"
 }
 
-test_resolve_models_all_four_keys_always_present() {
+test_resolve_models_all_keys_always_present() {
   echo ""
-  echo "=== Testing resolve-models: output always has all four keys ==="
+  echo "=== Testing resolve-models: output always has all five keys ==="
 
   local tmpdir
   tmpdir=$(_setup_models_env)
@@ -5883,7 +5889,7 @@ test_resolve_models_all_four_keys_always_present() {
   local keys
   keys=$(printf '%s' "$output" | jq -r 'keys | sort | join(",")' 2>/dev/null)
 
-  assert_eq "design,research,review,workflow" "$keys" "resolve-models: output always contains all four keys"
+  assert_eq "design,executor,research,review,workflow" "$keys" "resolve-models: output always contains all five keys"
 }
 
 test_resolve_models_stdout_always_valid_json() {
@@ -6158,10 +6164,10 @@ test_detect_models_claudecode_generates_config() {
   schema_ver=$(printf '%s' "$stdout" | jq -r '.schemaVersion // empty' 2>/dev/null)
   assert_eq "1.0" "$schema_ver" "detect-models claudecode: schemaVersion is 1.0"
 
-  # categories map must have all four keys
+  # categories map must have all five keys
   local cat_keys
   cat_keys=$(printf '%s' "$stdout" | jq -r '.categories | keys | sort | join(",")' 2>/dev/null)
-  assert_eq "design,research,review,workflow" "$cat_keys" "detect-models claudecode: categories has all four keys"
+  assert_eq "design,executor,research,review,workflow" "$cat_keys" "detect-models claudecode: categories has all five keys"
 
   # models table must have claudeCode key
   local has_cc
@@ -6307,10 +6313,10 @@ test_detect_models_roundtrip_with_resolve_models() {
     ((TESTS_FAILED++))
   fi
 
-  # All four keys must be present in resolve-models output
+  # All five keys must be present in resolve-models output
   local keys
   keys=$(printf '%s' "$resolve_stdout" | jq -r 'keys | sort | join(",")' 2>/dev/null)
-  assert_eq "design,research,review,workflow" "$keys" "detect-models roundtrip: all four category keys present"
+  assert_eq "design,executor,research,review,workflow" "$keys" "detect-models roundtrip: all five category keys present"
 }
 
 test_write_aimi_models_config() {
@@ -7611,7 +7617,7 @@ main() {
   test_resolve_models_host_detection_claudecode
   test_resolve_models_host_detection_opencode
   test_resolve_models_invalid_model_claudecode
-  test_resolve_models_all_four_keys_always_present
+  test_resolve_models_all_keys_always_present
   test_resolve_models_stdout_always_valid_json
   test_resolve_models_exact_match_validation
   test_resolve_models_exact_aliases_accepted

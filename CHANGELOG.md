@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.90.0] - 2026-05-22
+## [1.91.0] - 2026-05-25
+
+### Added
+
+- New `executor` agent category for sub-orchestrator spawns. `/aimi:execute` now resolves an `EXECUTOR_MODEL` and annotates `model: <AGENT_MODELS.executor when not "inherit">` on the three `general-purpose` Task spawns (parallel frontend/backend sub-orchestrators and per-story executor). Default tier mapping is `executor=balanced`. Users can override per-tier via `~/.config/aimi/models.json` or via the first-run picker (the `balanced` tier already covered design/workflow; executor now also maps to it by default).
+- `resolve-models` output now includes the `executor` key alongside `research`, `review`, `design`, `workflow` (five keys total). Unconfigured executor entries fall back to the literal `"inherit"`.
+- OpenCode translation: `install.sh` extracts `EXECUTOR_MODEL` from `resolve-models` and routes `Task(subagent_type="general", model: ...)` spawns through `aimi-task` so the per-call model is honored on OpenCode too. Untyped general-purpose spawns (no `model:` annotation) remain native.
 
 ### Added
 

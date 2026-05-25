@@ -261,6 +261,7 @@ In a **single tool-call turn**, emit two foreground Tasks:
 ```
 Task(
     subagent_type: "general-purpose",
+    model: <AGENT_MODELS.executor when not "inherit">,
     description: "Execute frontend tasks: [frontend-file]",
     prompt: [Full execute.md flow (Steps 1–5) with:
         - WORKTREE_PATH = [frontend worktree path]
@@ -273,6 +274,7 @@ Task(
 
 Task(
     subagent_type: "general-purpose",
+    model: <AGENT_MODELS.executor when not "inherit">,
     description: "Execute backend tasks: [backend-file]",
     prompt: [Full execute.md flow (Steps 1–5) with:
         - WORKTREE_PATH = [backend worktree path]
@@ -876,6 +878,7 @@ while true:
 
         Task(
             subagent_type: "general-purpose",
+            model: <AGENT_MODELS.executor when not "inherit">,
             description: "Execute [full_story.id]: [full_story.title]",
             prompt: [story-executor SKILL.md [template] with:
                 - WORKTREE_PATH = wt.worktree_path

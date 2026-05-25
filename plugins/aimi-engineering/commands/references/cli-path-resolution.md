@@ -158,10 +158,10 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 AGENT_MODELS=$($AIMI_CLI resolve-models)
 ```
 
-`resolve-models` always emits a single-line JSON object with exactly four keys:
+`resolve-models` always emits a single-line JSON object with exactly five keys:
 
 ```json
-{"research":"<model-or-inherit>","review":"<model-or-inherit>","design":"<model-or-inherit>","workflow":"<model-or-inherit>"}
+{"research":"<model-or-inherit>","review":"<model-or-inherit>","design":"<model-or-inherit>","workflow":"<model-or-inherit>","executor":"<model-or-inherit>"}
 ```
 
 When no `models.json` is configured, every value is the literal string `"inherit"`.
@@ -170,7 +170,10 @@ Store the JSON string as `AGENT_MODELS` (or as a working-memory map keyed by cat
 
 ### Applying the resolved model to a Task call
 
-At each `Task subagent_type="aimi-engineering:CATEGORY:NAME"` spawn site, extract the model for that agent's `CATEGORY` (one of `research`, `review`, `design`, `workflow`) from `AGENT_MODELS`:
+At each `Task` spawn site, extract the model from `AGENT_MODELS` using the agent's `CATEGORY`:
+
+- For namespaced agents (`subagent_type="aimi-engineering:CATEGORY:NAME"`), use the directory category — one of `research`, `review`, `design`, `workflow`.
+- For host built-in `general-purpose` spawns used as **sub-orchestrators** by `/aimi:execute` (the parallel frontend/backend Tasks and the per-story executor), use the `executor` category.
 
 - **When the resolved value is a model string** (anything other than `"inherit"`): add a `model:` line to the Task call with that string as the value.
 - **When the resolved value is `"inherit"`**: omit the `model:` line entirely — current behavior is preserved.
@@ -219,10 +222,10 @@ The model SELECTION must happen at the LLM-orchestrator layer using the interact
 2. Use `AskUserQuestion` with **three questions in one call** — one per tier — letting the user pick a model for each. Each question's options are the models returned by `list-models` (plus the picker's automatic "Other" for free-form input):
 
    - "Modelo para tarefas leves de pesquisa/leitura (tier fast)?" — default category mapping: `research`
-   - "Modelo para tarefas balanceadas (tier balanced)?" — default category mapping: `design`, `workflow`
+   - "Modelo para tarefas balanceadas (tier balanced)?" — default category mapping: `design`, `workflow`, `executor`
    - "Modelo para revisão/trabalho pesado (tier powerful)?" — default category mapping: `review`
 
-   Note: the first-run flow configures by tier with the default category mapping (research=fast, design=balanced, workflow=balanced, review=powerful). Fine-grained per-category control is available by hand-editing `~/.config/aimi/models.json` directly.
+   Note: the first-run flow configures by tier with the default category mapping (research=fast, design=balanced, workflow=balanced, executor=balanced, review=powerful). Fine-grained per-category control is available by hand-editing `~/.config/aimi/models.json` directly.
 
 3. Run `$AIMI_CLI detect-models --fast <chosen_fast> --balanced <chosen_balanced> --powerful <chosen_powerful>` with the user's picks to write the config.
 

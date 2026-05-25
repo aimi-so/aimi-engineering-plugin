@@ -232,16 +232,17 @@ AIMI_CLI="${AIMI_CLI:-${AIMI_PLUGIN_DIR}/scripts/aimi-cli.sh}"
 RESOLVED_MODELS=$($AIMI_CLI resolve-models 2>/dev/null)
 ```
 
-Extract per-category model values (all four keys are always present; value is a model id or the sentinel "inherit"):
+Extract per-category model values (all five keys are always present; value is a model id or the sentinel "inherit"):
 
 ```
 RESEARCH_MODEL=$(printf '\''%s'\'' "$RESOLVED_MODELS" | jq -r '\''.research'\'')
 REVIEW_MODEL=$(printf '\''%s'\'' "$RESOLVED_MODELS" | jq -r '\''.review'\'')
 DESIGN_MODEL=$(printf '\''%s'\'' "$RESOLVED_MODELS" | jq -r '\''.design'\'')
 WORKFLOW_MODEL=$(printf '\''%s'\'' "$RESOLVED_MODELS" | jq -r '\''.workflow'\'')
+EXECUTOR_MODEL=$(printf '\''%s'\'' "$RESOLVED_MODELS" | jq -r '\''.executor'\'')
 ```
 
-If `$AIMI_CLI` is not available or the call fails, set all four variables to the string `inherit`.
+If `$AIMI_CLI` is not available or the call fails, set all five variables to the string `inherit`.
 
 #### First-run configuration prompt (interactive hosts only)
 
@@ -264,7 +265,7 @@ The model SELECTION must happen at the LLM-orchestrator layer using the question
 1. Run `$AIMI_CLI list-models` to get the host'\''s available models as a JSON array.
 2. Use the question tool with **three questions in one call** — one per tier — letting the user pick a model for each. Each question'\''s options are the models returned by `list-models`:
    - "Modelo para tarefas leves de pesquisa/leitura (tier fast)?" — default category mapping: `research`
-   - "Modelo para tarefas balanceadas (tier balanced)?" — default category mapping: `design`, `workflow`
+   - "Modelo para tarefas balanceadas (tier balanced)?" — default category mapping: `design`, `workflow`, `executor`
    - "Modelo para revisão/trabalho pesado (tier powerful)?" — default category mapping: `review`
    Note: fine-grained per-category control is available by hand-editing `~/.config/aimi/models.json` directly.
 3. Run `$AIMI_CLI detect-models --fast <chosen_fast> --balanced <chosen_balanced> --powerful <chosen_powerful>` with the user'\''s picks to write the config.
@@ -292,7 +293,17 @@ When this command references agents via `Task subagent_type="aimi-engineering:CA
    ```
    Omit the `model` argument entirely when the resolved value is `inherit`.
 
-General-purpose spawns (`Task(subagent_type="general", ...)`) are left unchanged — do NOT route them through aimi-task.
+For `Task(subagent_type="general", model: ...)` spawns (the parallel sub-orchestrators and per-story executor of /aimi:execute) — also route through **aimi-task** using `$EXECUTOR_MODEL` as the model, since the native `task` tool ignores per-call `model:` arguments:
+
+```
+aimi-task(
+  subagent_type="general",
+  model="[$EXECUTOR_MODEL, omit if inherit]",
+  prompt="[original task prompt]"
+)
+```
+
+`Task(subagent_type="general", ...)` spawns **without** a `model:` annotation (no executor category set) are left unchanged — do NOT route them through aimi-task.
 
 Run all agent Tasks in parallel as instructed by the command below.
 
