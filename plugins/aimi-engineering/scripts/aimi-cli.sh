@@ -1931,11 +1931,18 @@ cmd_detect_interactivity() {
 }
 
 # Resolve which configured model for each agent category.
-# Reads ~/.config/aimi/models.json and maps each of the five categories
-# (research, review, design, workflow, executor) to a concrete model ID.
+# Reads ~/.config/aimi/models.json (schema v2.0) and maps each of the five
+# categories (research, review, design, workflow, executor) to a concrete model ID.
+# Schema v2.0 shape: {schemaVersion:"2.0", categories:{<host>:{<cat>:<modelId>}}}
+# Direct one-level lookup: .categories[<host>][<category>] → model id.
 # Always emits a single-line compact JSON object with all five keys.
 # Unconfigured or fallback entries use the literal string "inherit".
 # All warnings go to stderr; stdout is always valid JSON.
+#
+# v1.0 rejection: if the parsed JSON has a top-level .models key OR
+# .schemaVersion is not "2.0", emits a stderr warning containing "schema 1.0"
+# and returns the all-inherit fallback. Re-run `aimi-cli detect-models` to
+# upgrade the config to v2.0.
 #
 # Performance notes:
 #   - The standalone jq-empty validation pass is omitted; the resolution jq
@@ -1967,6 +1974,18 @@ cmd_resolve_models() {
     return 0
   fi
 
+  # v1.0 rejection guard: reject any config that has a top-level .models key OR
+  # whose .schemaVersion is not exactly "2.0". Both are signs of the old schema.
+  local _schema_ok
+  _schema_ok=$(printf '%s' "$config_json" | jq -r '
+    if (has("models") or (.schemaVersion // "") != "2.0") then "reject" else "ok" end
+  ' 2>/dev/null) || _schema_ok="reject"
+  if [ "$_schema_ok" = "reject" ]; then
+    echo "Warning: resolve-models: schema 1.0 obsoleto — re-rode aimi-cli detect-models" >&2
+    printf '%s\n' "$_fallback"
+    return 0
+  fi
+
   # Determine host key
   local host
   if _is_claude_code_host; then
@@ -1975,18 +1994,14 @@ cmd_resolve_models() {
     host="opencode"
   fi
 
-  # Resolve each category: .categories[cat] → tier, .models[host][tier] → model_id
-  # Missing category or tier → inherit
+  # Resolve each category via single-step lookup: .categories[$host][$cat] → model_id
+  # Missing category or null value → inherit
   # The error handler catches malformed JSON (no separate jq empty pass needed).
   local _result
   _result=$(printf '%s' "$config_json" | jq -r --arg host "$host" '
     def resolve_cat($cat):
-      ((.categories[$cat] // null) | if . == null or . == "" then null else . end) as $tier |
-      if $tier == null then "inherit"
-      else
-        ((.models[$host][$tier] // null) | if . == null or . == "" then null else . end) as $model |
-        if $model == null then "inherit" else $model end
-      end;
+      ((.categories[$host][$cat] // null) | if . == null or . == "" then null else . end) as $model |
+      if $model == null then "inherit" else $model end;
     {
       research: resolve_cat("research"),
       review:   resolve_cat("review"),
@@ -2141,44 +2156,59 @@ anthropic/claude-opus-4-7"
 }
 
 # Detect available models on the current host and write ~/.config/aimi/models.json.
+# Writes schema v2.0: {schemaVersion:"2.0", categories:{<host>:{<cat>:<modelId>}}}
+# Direct category-to-model mapping — no tier indirection.
 # On Claude Code (CLAUDECODE=1): fixed set — haiku, sonnet, opus (short aliases required by Task tool).
 # On OpenCode: reads `opencode models`; falls back to a built-in default Anthropic list
 #   with one warning when the opencode binary is absent.
 #
-# Flag mode (non-interactive write): when ANY of --fast, --balanced, --powerful is provided,
-#   build and write models.json with the given tier-to-model assignments directly, skipping
-#   the TTY prompt. Preserves the other host's models sub-table when a pre-existing file exists.
-#   --fast <model>      Model id for the fast tier
-#   --balanced <model>  Model id for the balanced tier
-#   --powerful <model>  Model id for the powerful tier
+# Flag mode (non-interactive write): when ANY of --research, --review, --design,
+#   --workflow, --executor is provided, build and write models.json with the given
+#   category-to-model assignments directly, skipping the TTY prompt. Preserves the
+#   other host's categories sub-table when a pre-existing file exists.
+#   --research <model>  Model id for the research category
+#   --review <model>    Model id for the review category
+#   --design <model>    Model id for the design category
+#   --workflow <model>  Model id for the workflow category
+#   --executor <model>  Model id for the executor category
+#   All five flags must be supplied together.
 #
-# Interactive (stdin is a TTY, no tier flags): prompts once per category for a tier assignment.
-# Non-interactive (no tier flags, stdin is not TTY): writes a sensible default mapping without prompting.
+# Interactive (stdin is a TTY, no category flags): prompts once per category for a
+#   concrete model id, validated against the host's available-model list.
+# Non-interactive (no flags, stdin is not TTY): writes sensible defaults without prompting.
 # Writes atomically via write_aimi_models_config (mktemp + chmod 0600 + mv).
 # NOTE: Only the current host's sub-table is written. Re-run on the other host to
 #       populate both claudeCode and opencode tables.
 cmd_detect_models() {
   check_jq
 
-  # ---- Parse tier flags ------------------------------------------------------
-  local _flag_fast="" _flag_balanced="" _flag_powerful=""
+  # ---- Parse category flags --------------------------------------------------
+  local _flag_research="" _flag_review="" _flag_design="" _flag_workflow="" _flag_executor=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --fast)
+      --research)
         shift
-        _flag_fast="${1:-}"
+        _flag_research="${1:-}"
         ;;
-      --balanced)
+      --review)
         shift
-        _flag_balanced="${1:-}"
+        _flag_review="${1:-}"
         ;;
-      --powerful)
+      --design)
         shift
-        _flag_powerful="${1:-}"
+        _flag_design="${1:-}"
+        ;;
+      --workflow)
+        shift
+        _flag_workflow="${1:-}"
+        ;;
+      --executor)
+        shift
+        _flag_executor="${1:-}"
         ;;
       -*)
         echo "Error: detect-models: unknown flag: $1" >&2
-        echo "Usage: aimi-cli.sh detect-models [--fast <model>] [--balanced <model>] [--powerful <model>]" >&2
+        echo "Usage: aimi-cli.sh detect-models [--research <model>] [--review <model>] [--design <model>] [--workflow <model>] [--executor <model>]" >&2
         exit 1
         ;;
     esac
@@ -2193,81 +2223,58 @@ cmd_detect_models() {
     _host_key="opencode"
   fi
 
-  # ---- Flag mode: tier flags provided → non-interactive write ---------------
-  if [ -n "$_flag_fast" ] || [ -n "$_flag_balanced" ] || [ -n "$_flag_powerful" ]; then
-    # Require all three tiers when using flag mode
-    if [ -z "$_flag_fast" ] || [ -z "$_flag_balanced" ] || [ -z "$_flag_powerful" ]; then
-      echo "Error: detect-models: when using tier flags, all three must be provided: --fast, --balanced, --powerful" >&2
+  # ---- Flag mode: category flags provided → non-interactive write -----------
+  if [ -n "$_flag_research" ] || [ -n "$_flag_review" ] || [ -n "$_flag_design" ] || [ -n "$_flag_workflow" ] || [ -n "$_flag_executor" ]; then
+    # Require all five categories when using flag mode
+    if [ -z "$_flag_research" ] || [ -z "$_flag_review" ] || [ -z "$_flag_design" ] || [ -z "$_flag_workflow" ] || [ -z "$_flag_executor" ]; then
+      echo "Error: detect-models: when using category flags, all five must be provided: --research, --review, --design, --workflow, --executor" >&2
       exit 1
     fi
 
-    # Default category→tier mapping
-    local _tier_research="fast"
-    local _tier_review="powerful"
-    local _tier_design="balanced"
-    local _tier_workflow="balanced"
-    local _tier_executor="balanced"
-
-    # Read existing config to preserve the other host's models sub-table
+    # Read existing config to preserve the other host's categories sub-table
     local _existing_json
     _existing_json=$(read_aimi_models_config) || _existing_json=""
 
     local _models_json
     if [ -n "$_existing_json" ] && printf '%s' "$_existing_json" | jq empty 2>/dev/null; then
-      # Merge: preserve other host's table, replace current host's table
+      # Merge: preserve other host's categories block, replace current host's block
       _models_json=$(printf '%s' "$_existing_json" | jq \
-        --arg host_key "$_host_key" \
-        --arg fast     "$_flag_fast" \
-        --arg balanced "$_flag_balanced" \
-        --arg powerful "$_flag_powerful" \
-        --arg r_tier   "$_tier_research" \
-        --arg rv_tier  "$_tier_review" \
-        --arg d_tier   "$_tier_design" \
-        --arg w_tier   "$_tier_workflow" \
-        --arg e_tier   "$_tier_executor" \
+        --arg host_key  "$_host_key" \
+        --arg research  "$_flag_research" \
+        --arg review    "$_flag_review" \
+        --arg design    "$_flag_design" \
+        --arg workflow  "$_flag_workflow" \
+        --arg executor  "$_flag_executor" \
         '{
-          schemaVersion: "1.0",
-          categories: {
-            research: $r_tier,
-            review:   $rv_tier,
-            design:   $d_tier,
-            workflow: $w_tier,
-            executor: $e_tier
-          },
-          models: ((.models // {}) + {
+          schemaVersion: "2.0",
+          categories: ((.categories // {}) + {
             ($host_key): {
-              fast:     $fast,
-              balanced: $balanced,
-              powerful: $powerful
+              research: $research,
+              review:   $review,
+              design:   $design,
+              workflow: $workflow,
+              executor: $executor
             }
           })
         }')
     else
       # No existing config or malformed — create fresh
       _models_json=$(jq -n \
-        --arg fast     "$_flag_fast" \
-        --arg balanced "$_flag_balanced" \
-        --arg powerful "$_flag_powerful" \
-        --arg host_key "$_host_key" \
-        --arg r_tier   "$_tier_research" \
-        --arg rv_tier  "$_tier_review" \
-        --arg d_tier   "$_tier_design" \
-        --arg w_tier   "$_tier_workflow" \
-        --arg e_tier   "$_tier_executor" \
+        --arg host_key  "$_host_key" \
+        --arg research  "$_flag_research" \
+        --arg review    "$_flag_review" \
+        --arg design    "$_flag_design" \
+        --arg workflow  "$_flag_workflow" \
+        --arg executor  "$_flag_executor" \
         '{
-          schemaVersion: "1.0",
+          schemaVersion: "2.0",
           categories: {
-            research: $r_tier,
-            review:   $rv_tier,
-            design:   $d_tier,
-            workflow: $w_tier,
-            executor: $e_tier
-          },
-          models: {
             ($host_key): {
-              fast:     $fast,
-              balanced: $balanced,
-              powerful: $powerful
+              research: $research,
+              review:   $review,
+              design:   $design,
+              workflow: $workflow,
+              executor: $executor
             }
           }
         }')
@@ -2284,8 +2291,6 @@ cmd_detect_models() {
   fi
 
   # ---- Available model sets per host ----------------------------------------
-  local _TIERS="fast balanced powerful"
-
   local _available_models
   local _oc_absent=0
 
@@ -2308,8 +2313,9 @@ anthropic/claude-opus-4-7"
     fi
   fi
 
-  # ---- Build per-tier model defaults ----------------------------------------
-  # Fast → haiku, balanced → sonnet, powerful → opus (substring match)
+  # ---- Build per-category model defaults ------------------------------------
+  # research → fast (haiku), review → powerful (opus),
+  # design/workflow/executor → balanced (sonnet)
   local _fast_model _balanced_model _powerful_model
 
   _fast_model=$(printf '%s\n' "$_available_models" | grep -i "haiku" | head -1)
@@ -2322,66 +2328,67 @@ anthropic/claude-opus-4-7"
   _powerful_model=$(printf '%s\n' "$_available_models" | grep -i "opus" | head -1)
   [ -z "$_powerful_model" ] && _powerful_model=$(printf '%s\n' "$_available_models" | tail -1)
 
-  # ---- Per-category tier assignment -----------------------------------------
-  # Default mapping: research=fast, review=powerful, design=balanced,
-  # workflow=balanced, executor=balanced
-  local _tier_research="fast"
-  local _tier_review="powerful"
-  local _tier_design="balanced"
-  local _tier_workflow="balanced"
-  local _tier_executor="balanced"
+  # Per-category defaults: research=fast, review=powerful, design/workflow/executor=balanced
+  local _default_research="$_fast_model"
+  local _default_review="$_powerful_model"
+  local _default_design="$_balanced_model"
+  local _default_workflow="$_balanced_model"
+  local _default_executor="$_balanced_model"
+
+  # ---- Per-category model assignment ----------------------------------------
+  local _model_research="$_default_research"
+  local _model_review="$_default_review"
+  local _model_design="$_default_design"
+  local _model_workflow="$_default_workflow"
+  local _model_executor="$_default_executor"
 
   if [ -t 0 ]; then
-    # stdin is a TTY — prompt once per category
-    local _prompt_tiers
-    _prompt_tiers=$(printf '%s\n' $_TIERS | tr '\n' '|' | sed 's/|$//')
+    # stdin is a TTY — prompt once per category for a concrete model id
+    local _prompt_models
+    _prompt_models=$(printf '%s\n' "$_available_models" | tr '\n' '|' | sed 's/|$//')
 
     _prompt_category() {
       local cat="$1"
       local default="$2"
       local answer
-      printf 'Category %s — tier [%s] (default: %s): ' "$cat" "$_prompt_tiers" "$default" >&2
+      printf 'Category %s — model [%s] (default: %s): ' "$cat" "$_prompt_models" "$default" >&2
       read -r answer </dev/tty
       answer=$(printf '%s' "$answer" | tr -d '[:space:]')
-      case "$answer" in
-        fast|balanced|powerful) printf '%s' "$answer" ;;
-        *) printf '%s' "$default" ;;
-      esac
+      # Validate against available models; fall back to default on empty or invalid input
+      if [ -z "$answer" ]; then
+        printf '%s' "$default"
+      elif printf '%s\n' "$_available_models" | grep -qxF "$answer"; then
+        printf '%s' "$answer"
+      else
+        printf '%s' "$default"
+      fi
     }
 
-    _tier_research=$(_prompt_category "research" "$_tier_research")
-    _tier_review=$(_prompt_category "review"   "$_tier_review")
-    _tier_design=$(_prompt_category "design"   "$_tier_design")
-    _tier_workflow=$(_prompt_category "workflow"  "$_tier_workflow")
-    _tier_executor=$(_prompt_category "executor"  "$_tier_executor")
+    _model_research=$(_prompt_category "research" "$_default_research")
+    _model_review=$(_prompt_category "review"    "$_default_review")
+    _model_design=$(_prompt_category "design"    "$_default_design")
+    _model_workflow=$(_prompt_category "workflow"  "$_default_workflow")
+    _model_executor=$(_prompt_category "executor"  "$_default_executor")
   fi
 
-  # ---- Assemble the models.json document ------------------------------------
+  # ---- Assemble the models.json document (v2.0 schema) ----------------------
   local _models_json
   _models_json=$(jq -n \
-    --arg fast     "$_fast_model" \
-    --arg balanced "$_balanced_model" \
-    --arg powerful "$_powerful_model" \
-    --arg host_key "$_host_key" \
-    --arg r_tier   "$_tier_research" \
-    --arg rv_tier  "$_tier_review" \
-    --arg d_tier   "$_tier_design" \
-    --arg w_tier   "$_tier_workflow" \
-    --arg e_tier   "$_tier_executor" \
+    --arg host_key  "$_host_key" \
+    --arg research  "$_model_research" \
+    --arg review    "$_model_review" \
+    --arg design    "$_model_design" \
+    --arg workflow  "$_model_workflow" \
+    --arg executor  "$_model_executor" \
     '{
-      schemaVersion: "1.0",
+      schemaVersion: "2.0",
       categories: {
-        research: $r_tier,
-        review:   $rv_tier,
-        design:   $d_tier,
-        workflow: $w_tier,
-        executor: $e_tier
-      },
-      models: {
         ($host_key): {
-          fast:     $fast,
-          balanced: $balanced,
-          powerful: $powerful
+          research: $research,
+          review:   $review,
+          design:   $design,
+          workflow: $workflow,
+          executor: $executor
         }
       }
     }')
@@ -3611,25 +3618,30 @@ COMMANDS:
                               Anthropic list with one warning when opencode is absent.
                               stdout is always a valid JSON array; warnings go to stderr.
     resolve-models            Resolve configured model for each agent category.
-                              Reads ~/.config/aimi/models.json and emits a single-line
-                              JSON object with keys research, review, design, workflow,
-                              executor.
+                              Reads ~/.config/aimi/models.json (schema v2.0) and emits
+                              a single-line JSON object with keys research, review,
+                              design, workflow, executor.
+                              Schema v2.0 shape: categories.<host>.<category> = model id.
                               Unconfigured or fallback entries use the literal "inherit".
+                              v1.0 configs (top-level .models key or schemaVersion != "2.0")
+                              are rejected with a stderr warning; all-inherit returned.
                               Warnings go to stderr; stdout is always valid JSON.
-    detect-models [--fast <model>] [--balanced <model>] [--powerful <model>]
+    detect-models [--research <model>] [--review <model>] [--design <model>] [--workflow <model>] [--executor <model>]
                               Detect available models on the current host and write
-                              ~/.config/aimi/models.json.
+                              ~/.config/aimi/models.json (schema v2.0).
                               Claude Code: fixed set (opus, sonnet, haiku).
                               OpenCode: reads `opencode models`; falls back to built-in
                               Anthropic list with one warning when opencode is absent.
-                              Tier flags (--fast/--balanced/--powerful): non-interactive
-                              write mode — writes the given tier-to-model assignments
-                              with the default category mapping (research=fast,
-                              design+workflow+executor=balanced, review=powerful). Preserves the
-                              other host's models sub-table when a file already exists.
-                              All three tier flags must be supplied together.
-                              Interactive (stdin TTY, no flags): prompts per category.
-                              Non-interactive (no flags, stdin not TTY): default mapping.
+                              Category flags (--research/--review/--design/--workflow/--executor):
+                              non-interactive write mode — writes the given
+                              category-to-model assignments directly. Preserves the
+                              other host's categories sub-table when a file already exists.
+                              All five category flags must be supplied together.
+                              Interactive (stdin TTY, no flags): prompts per category,
+                              validates answer against available-model list.
+                              Non-interactive (no flags, stdin not TTY): default mapping
+                              (research=fast/haiku, review=powerful/opus,
+                              design+workflow+executor=balanced/sonnet).
                               Emits the written JSON on stdout.
     models-prompt-check       Check whether the one-time model-selection prompt should
                               be shown. Echoes 'prompt' when neither models.json nor the
