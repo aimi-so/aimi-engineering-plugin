@@ -2483,7 +2483,51 @@ cmd_models_prompt_check() {
   local config_file
   config_file=$(_aimi_models_config_path)
 
-  if [ -f "$config_file" ]; then
+  # Missing config → prompt
+  if [ ! -f "$config_file" ]; then
+    echo "prompt"
+    return 0
+  fi
+
+  # Empty/unreadable file → prompt (user should re-configure)
+  local config_json
+  config_json=$(read_aimi_models_config) || config_json=""
+  if [ -z "$config_json" ]; then
+    echo "prompt"
+    return 0
+  fi
+
+  # v1.0 schema (has top-level .models OR schemaVersion != "2.0") → prompt
+  # The picker re-writes the file in v2.0 shape on next configure.
+  local _schema_ok
+  _schema_ok=$(printf '%s' "$config_json" | jq -r '
+    if (has("models") or (.schemaVersion // "") != "2.0") then "reject" else "ok" end
+  ' 2>/dev/null) || _schema_ok="reject"
+  if [ "$_schema_ok" = "reject" ]; then
+    echo "prompt"
+    return 0
+  fi
+
+  # v2.0 with current host configured (at least one category non-null) → skip.
+  # Aligns with get-current-models: if the picker would pre-fill nothing for
+  # this host, ask the user instead of silently falling back to all-inherit.
+  local host
+  if _is_claude_code_host; then
+    host="claudeCode"
+  else
+    host="opencode"
+  fi
+
+  local _has_config
+  _has_config=$(printf '%s' "$config_json" | jq -r --arg host "$host" '
+    (.categories[$host] // {}) as $h |
+    [($h.research // null), ($h.review // null), ($h.design // null),
+     ($h.workflow // null), ($h.executor // null)]
+    | map(select(. != null and . != ""))
+    | (length > 0)
+  ' 2>/dev/null) || _has_config="false"
+
+  if [ "$_has_config" = "true" ]; then
     echo "skip"
   else
     echo "prompt"
@@ -3721,9 +3765,12 @@ COMMANDS:
                               design+workflow+executor=balanced/sonnet).
                               Emits the written JSON on stdout.
     models-prompt-check       Check whether the model-selection prompt should be shown.
-                              Echoes 'prompt' when ~/.config/aimi/models.json is missing,
-                              'skip' when it exists. The marker file is no longer read —
-                              deleting models.json always re-triggers the first-run prompt.
+                              Echoes 'prompt' when the current host (claudeCode or
+                              opencode) has no configured categories — i.e., when
+                              get-current-models would return all-null for this host.
+                              Echoes 'skip' when at least one category for the current
+                              host has a non-null model id. The marker file is no longer
+                              read; v1.0 configs are treated as unconfigured.
     models-prompt-dismiss     Atomically create the models first-run prompt marker file
                               (~/.config/aimi/models-prompt-seen). Idempotent. Run after
                               the user responds to the first-run prompt (regardless of

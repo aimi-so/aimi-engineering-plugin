@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.93.1] - 2026-05-25
+
+### Changed
+
+- `aimi-cli models-prompt-check` now decides on the **current host's** configured categories rather than mere file existence. Previously the check returned `skip` whenever `~/.config/aimi/models.json` existed, even if the current host's `categories.<host>` sub-table was missing or empty — which silently left users on all-inherit when they ran a command on a host they had never configured (e.g., opened Claude Code after only configuring OpenCode). Now `prompt` is returned when `get-current-models` would emit all-null for the active host (no category configured, host key absent, host key with empty `{}`, or all category values explicitly null). `skip` requires at least one category for the current host to carry a non-null model id. Schema v1.0 configs are treated as unconfigured (prompt). Empty/malformed files also prompt instead of skipping silently.
+
 ## [1.93.0] - 2026-05-25
 
 ### Added

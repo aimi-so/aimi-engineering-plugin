@@ -6568,19 +6568,68 @@ test_models_prompt_check_returns_prompt() {
   rm -rf "$tmpdir"
 }
 
-test_models_prompt_check_skip_when_models_json_exists() {
+test_models_prompt_check_skip_when_current_host_configured() {
   echo ""
-  echo "=== Testing models-prompt-check returns 'skip' when models.json exists ==="
+  echo "=== Testing models-prompt-check returns 'skip' when current host has at least one configured category ==="
 
   local tmpdir
   tmpdir=$(mktemp -d)
-  # Create models.json (content irrelevant — only existence matters)
-  printf '{"schemaVersion":"1.0"}\n' > "$tmpdir/models.json"
+  # v2.0 config with claudeCode host configured; CLAUDECODE=1 in the call.
+  printf '{"schemaVersion":"2.0","categories":{"claudeCode":{"research":"haiku"}}}\n' > "$tmpdir/models.json"
 
   local output
-  output=$(AIMI_CONFIG_DIR="$tmpdir" "$CLI" models-prompt-check)
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
 
-  assert_eq "skip" "$output" "models-prompt-check: returns 'skip' when models.json exists"
+  assert_eq "skip" "$output" "models-prompt-check: returns 'skip' when current host (claudeCode) has a configured category"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_check_prompt_when_other_host_only_configured() {
+  echo ""
+  echo "=== Testing models-prompt-check returns 'prompt' when only the other host is configured ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  # opencode configured; CLAUDECODE=1 means current host is claudeCode (absent).
+  printf '{"schemaVersion":"2.0","categories":{"opencode":{"research":"anthropic/claude-haiku-4-5"}}}\n' > "$tmpdir/models.json"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+
+  assert_eq "prompt" "$output" "models-prompt-check: returns 'prompt' when only the other host is configured"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_check_prompt_when_current_host_all_null() {
+  echo ""
+  echo "=== Testing models-prompt-check returns 'prompt' when current host has all-null categories ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  printf '{"schemaVersion":"2.0","categories":{"claudeCode":{"research":null,"review":null,"design":null,"workflow":null,"executor":null}}}\n' > "$tmpdir/models.json"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+
+  assert_eq "prompt" "$output" "models-prompt-check: returns 'prompt' when current host has all-null categories"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_check_prompt_when_v1_config() {
+  echo ""
+  echo "=== Testing models-prompt-check returns 'prompt' when config is v1.0 (treated as obsolete) ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  printf '{"schemaVersion":"1.0","models":{"claudeCode":{"fast":"haiku"}}}\n' > "$tmpdir/models.json"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+
+  assert_eq "prompt" "$output" "models-prompt-check: returns 'prompt' on v1.0 config (treat as unconfigured)"
 
   rm -rf "$tmpdir"
 }
@@ -6602,19 +6651,36 @@ test_models_prompt_check_prompt_when_only_marker_exists() {
   rm -rf "$tmpdir"
 }
 
-test_models_prompt_check_skip_when_both_exist() {
+test_models_prompt_check_skip_when_current_host_configured_with_marker() {
   echo ""
-  echo "=== Testing models-prompt-check returns 'skip' when both config and marker exist ==="
+  echo "=== Testing models-prompt-check returns 'skip' when current host configured (marker irrelevant) ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  # Both config (with current host configured) AND marker present.
+  printf '{"schemaVersion":"2.0","categories":{"claudeCode":{"research":"haiku","review":"opus","design":"sonnet","workflow":"sonnet","executor":"sonnet"}}}\n' > "$tmpdir/models.json"
+  printf 'models-prompt-seen: 2026-01-01T00:00:00Z\n' > "$tmpdir/models-prompt-seen"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+
+  assert_eq "skip" "$output" "models-prompt-check: returns 'skip' when current host configured; marker is irrelevant"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_check_prompt_when_categories_empty_object() {
+  echo ""
+  echo "=== Testing models-prompt-check returns 'prompt' when categories is empty {} ==="
 
   local tmpdir
   tmpdir=$(mktemp -d)
   printf '{"schemaVersion":"2.0","categories":{}}\n' > "$tmpdir/models.json"
-  printf 'models-prompt-seen: 2026-01-01T00:00:00Z\n' > "$tmpdir/models-prompt-seen"
 
   local output
-  output=$(AIMI_CONFIG_DIR="$tmpdir" "$CLI" models-prompt-check)
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
 
-  assert_eq "skip" "$output" "models-prompt-check: returns 'skip' when both config and marker exist"
+  assert_eq "prompt" "$output" "models-prompt-check: returns 'prompt' when categories is empty {} (no host configured)"
 
   rm -rf "$tmpdir"
 }
@@ -7924,9 +7990,13 @@ main() {
   echo ""
   echo "--- models-prompt-check / models-prompt-dismiss Tests ---"
   test_models_prompt_check_returns_prompt
-  test_models_prompt_check_skip_when_models_json_exists
+  test_models_prompt_check_skip_when_current_host_configured
+  test_models_prompt_check_prompt_when_other_host_only_configured
+  test_models_prompt_check_prompt_when_current_host_all_null
+  test_models_prompt_check_prompt_when_v1_config
   test_models_prompt_check_prompt_when_only_marker_exists
-  test_models_prompt_check_skip_when_both_exist
+  test_models_prompt_check_skip_when_current_host_configured_with_marker
+  test_models_prompt_check_prompt_when_categories_empty_object
   test_models_prompt_dismiss_creates_marker_with_correct_perms
   test_models_prompt_dismiss_idempotent
 
