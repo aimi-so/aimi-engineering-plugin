@@ -6444,26 +6444,43 @@ test_models_prompt_check_skip_when_models_json_exists() {
   rm -rf "$tmpdir"
 }
 
-test_models_prompt_check_skip_when_marker_exists() {
+test_models_prompt_check_prompt_when_only_marker_exists() {
   echo ""
-  echo "=== Testing models-prompt-check returns 'skip' when marker exists (no models.json) ==="
+  echo "=== Testing models-prompt-check returns 'prompt' when only marker exists (no models.json) ==="
 
   local tmpdir
   tmpdir=$(mktemp -d)
-  # Create marker only — no models.json
+  # Create marker only — no models.json. New behavior: missing config always re-prompts.
   printf 'models-prompt-seen: 2026-01-01T00:00:00Z\n' > "$tmpdir/models-prompt-seen"
 
   local output
   output=$(AIMI_CONFIG_DIR="$tmpdir" "$CLI" models-prompt-check)
 
-  assert_eq "skip" "$output" "models-prompt-check: returns 'skip' when marker exists and models.json absent"
+  assert_eq "prompt" "$output" "models-prompt-check: returns 'prompt' when marker exists but models.json is missing"
 
   rm -rf "$tmpdir"
 }
 
-test_models_prompt_dismiss_creates_marker_and_check_skips() {
+test_models_prompt_check_skip_when_both_exist() {
   echo ""
-  echo "=== Testing models-prompt-dismiss creates marker; subsequent check returns 'skip' ==="
+  echo "=== Testing models-prompt-check returns 'skip' when both config and marker exist ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  printf '{"schemaVersion":"2.0","categories":{}}\n' > "$tmpdir/models.json"
+  printf 'models-prompt-seen: 2026-01-01T00:00:00Z\n' > "$tmpdir/models-prompt-seen"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" "$CLI" models-prompt-check)
+
+  assert_eq "skip" "$output" "models-prompt-check: returns 'skip' when both config and marker exist"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_dismiss_creates_marker_with_correct_perms() {
+  echo ""
+  echo "=== Testing models-prompt-dismiss creates marker file with 0600 permissions ==="
 
   local tmpdir
   tmpdir=$(mktemp -d)
@@ -6490,10 +6507,10 @@ test_models_prompt_dismiss_creates_marker_and_check_skips() {
   perms=$(stat -c '%a' "$tmpdir/models-prompt-seen" 2>/dev/null || stat -f '%Lp' "$tmpdir/models-prompt-seen" 2>/dev/null)
   assert_eq "600" "$perms" "models-prompt-dismiss: marker file has 0600 permissions"
 
-  # After dismiss: should skip
+  # After dismiss (models.json still missing): check still returns 'prompt' — marker no longer suppresses
   local after
   after=$(AIMI_CONFIG_DIR="$tmpdir" "$CLI" models-prompt-check)
-  assert_eq "skip" "$after" "models-prompt-dismiss: check returns 'skip' after dismiss"
+  assert_eq "prompt" "$after" "models-prompt-dismiss: check still returns 'prompt' when models.json missing (marker no longer suppresses)"
 
   rm -rf "$tmpdir"
 }
@@ -6517,10 +6534,10 @@ test_models_prompt_dismiss_idempotent() {
   exit2=$?
   assert_eq "0" "$exit2" "models-prompt-dismiss idempotent: second call exits 0"
 
-  # Check is still skip
+  # Check still returns 'prompt' (models.json still missing — marker no longer suppresses)
   local output
   output=$(AIMI_CONFIG_DIR="$tmpdir" "$CLI" models-prompt-check)
-  assert_eq "skip" "$output" "models-prompt-dismiss idempotent: check returns 'skip' after two dismisses"
+  assert_eq "prompt" "$output" "models-prompt-dismiss idempotent: check still returns 'prompt' after two dismisses when models.json missing"
 
   rm -rf "$tmpdir"
 }
@@ -7758,8 +7775,9 @@ main() {
   echo "--- models-prompt-check / models-prompt-dismiss Tests ---"
   test_models_prompt_check_returns_prompt
   test_models_prompt_check_skip_when_models_json_exists
-  test_models_prompt_check_skip_when_marker_exists
-  test_models_prompt_dismiss_creates_marker_and_check_skips
+  test_models_prompt_check_prompt_when_only_marker_exists
+  test_models_prompt_check_skip_when_both_exist
+  test_models_prompt_dismiss_creates_marker_with_correct_perms
   test_models_prompt_dismiss_idempotent
 
   # Design bundle detection tests

@@ -2409,11 +2409,10 @@ anthropic/claude-opus-4-7"
 #   prompt — neither file exists (first run, not yet configured)
 # No jq needed — pure file-existence checks.
 cmd_models_prompt_check() {
-  local config_file marker_file
+  local config_file
   config_file=$(_aimi_models_config_path)
-  marker_file=$(_aimi_models_prompt_marker_path)
 
-  if [ -f "$config_file" ] || [ -f "$marker_file" ]; then
+  if [ -f "$config_file" ]; then
     echo "skip"
   else
     echo "prompt"
@@ -3643,9 +3642,10 @@ COMMANDS:
                               (research=fast/haiku, review=powerful/opus,
                               design+workflow+executor=balanced/sonnet).
                               Emits the written JSON on stdout.
-    models-prompt-check       Check whether the one-time model-selection prompt should
-                              be shown. Echoes 'prompt' when neither models.json nor the
-                              marker file exists; echoes 'skip' otherwise.
+    models-prompt-check       Check whether the model-selection prompt should be shown.
+                              Echoes 'prompt' when ~/.config/aimi/models.json is missing,
+                              'skip' when it exists. The marker file is no longer read —
+                              deleting models.json always re-triggers the first-run prompt.
     models-prompt-dismiss     Atomically create the models first-run prompt marker file
                               (~/.config/aimi/models-prompt-seen). Idempotent. Run after
                               the user responds to the first-run prompt (regardless of
