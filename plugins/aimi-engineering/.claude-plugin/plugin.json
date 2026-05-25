@@ -1,6 +1,6 @@
 {
   "name": "aimi-engineering",
-  "version": "2.0.0",
+  "version": "1.91.0",
   "description": "Autonomous task execution with standalone aimi-native agents. Direct tasks.json generation, research-driven planning, multi-agent review, iterative execution.",
   "author": {
     "name": "Aimi — Autonomous Code Companion"
