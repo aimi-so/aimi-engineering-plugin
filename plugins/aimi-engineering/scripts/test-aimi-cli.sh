@@ -1680,6 +1680,12 @@ source_cache_functions() {
   eval "$(sed -n '/^cmd_validate_tasks()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_validate_designspec_citation()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_validate_businessspec_field()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_aimi_models_config_path()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_aimi_models_prompt_marker_path()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^read_aimi_models_config()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^write_aimi_models_config()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^cmd_models_prompt_check()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^cmd_models_prompt_dismiss()/,/^}/p' "$CLI")"
 }
 
 test_write_global_cli_cache() {
@@ -5610,6 +5616,1526 @@ test_detect_interactivity_opencode_host() {
 }
 
 # ============================================================================
+# resolve-models Tests
+# ============================================================================
+
+# Helper: create an isolated temp dir with a custom AIMI_CONFIG_DIR for models tests.
+_setup_models_env() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  printf '%s\n' "$tmpdir"
+}
+
+test_resolve_models_no_config() {
+  echo ""
+  echo "=== Testing resolve-models with no config file ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
+
+  # Expect all five keys with inherit
+  local research review design workflow executor
+  research=$(printf '%s' "$output" | jq -r '.research' 2>/dev/null)
+  review=$(printf '%s' "$output" | jq -r '.review' 2>/dev/null)
+  design=$(printf '%s' "$output" | jq -r '.design' 2>/dev/null)
+  workflow=$(printf '%s' "$output" | jq -r '.workflow' 2>/dev/null)
+  executor=$(printf '%s' "$output" | jq -r '.executor' 2>/dev/null)
+
+  assert_eq "inherit" "$research" "resolve-models no-config: research=inherit"
+  assert_eq "inherit" "$review"   "resolve-models no-config: review=inherit"
+  assert_eq "inherit" "$design"   "resolve-models no-config: design=inherit"
+  assert_eq "inherit" "$workflow" "resolve-models no-config: workflow=inherit"
+  assert_eq "inherit" "$executor" "resolve-models no-config: executor=inherit"
+}
+
+test_resolve_models_malformed_config() {
+  echo ""
+  echo "=== Testing resolve-models with malformed JSON config ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  printf 'this is not json\n' > "$tmpdir/models.json"
+
+  local stdout stderr
+  stderr=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>&1 1>/dev/null)
+  stdout=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
+
+  # stderr must contain a warning
+  if printf '%s' "$stderr" | grep -qi "warning"; then
+    echo -e "${GREEN}✓${NC} resolve-models malformed-config: warning sent to stderr"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} resolve-models malformed-config: expected warning on stderr, got: $stderr"
+    ((TESTS_FAILED++))
+  fi
+
+  # stdout must be valid JSON with all five inherit keys
+  local research executor
+  research=$(printf '%s' "$stdout" | jq -r '.research' 2>/dev/null)
+  executor=$(printf '%s' "$stdout" | jq -r '.executor' 2>/dev/null)
+  assert_eq "inherit" "$research" "resolve-models malformed-config: stdout is valid JSON with research=inherit"
+  assert_eq "inherit" "$executor" "resolve-models malformed-config: stdout includes executor=inherit"
+}
+
+test_resolve_models_partial_config() {
+  echo ""
+  echo "=== Testing resolve-models with partial config (missing categories) ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # v2.0 schema: only configure research; leave others absent.
+  # Direct lookup: .categories.claudeCode.research = "sonnet"
+  printf '%s\n' '{"schemaVersion":"2.0","categories":{"claudeCode":{"research":"sonnet"}}}' \
+    > "$tmpdir/models.json"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
+
+  local research review design workflow executor
+  research=$(printf '%s' "$output" | jq -r '.research' 2>/dev/null)
+  review=$(printf '%s' "$output" | jq -r '.review' 2>/dev/null)
+  design=$(printf '%s' "$output" | jq -r '.design' 2>/dev/null)
+  workflow=$(printf '%s' "$output" | jq -r '.workflow' 2>/dev/null)
+  executor=$(printf '%s' "$output" | jq -r '.executor' 2>/dev/null)
+
+  assert_eq "sonnet"  "$research" "resolve-models partial-config: configured category resolves correctly"
+  assert_eq "inherit" "$review"   "resolve-models partial-config: missing category=inherit"
+  assert_eq "inherit" "$design"   "resolve-models partial-config: missing category=inherit"
+  assert_eq "inherit" "$workflow" "resolve-models partial-config: missing category=inherit"
+  assert_eq "inherit" "$executor" "resolve-models partial-config: missing executor=inherit"
+}
+
+test_resolve_models_host_detection_claudecode() {
+  echo ""
+  echo "=== Testing resolve-models host detection: CLAUDECODE=1 uses claudeCode table ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # v2.0 schema: claudeCode and opencode have separate categories sub-tables.
+  # Only claudeCode has research; opencode has a different value so we can confirm host selection.
+  printf '%s\n' '{
+    "schemaVersion": "2.0",
+    "categories": {
+      "claudeCode": {
+        "research": "sonnet",
+        "review":   "sonnet",
+        "design":   "sonnet",
+        "workflow":  "sonnet",
+        "executor":  "sonnet"
+      },
+      "opencode": {
+        "research": "opencode-model-xyz",
+        "review":   "opencode-model-xyz",
+        "design":   "opencode-model-xyz",
+        "workflow":  "opencode-model-xyz",
+        "executor":  "opencode-model-xyz"
+      }
+    }
+  }' > "$tmpdir/models.json"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
+
+  local research
+  research=$(printf '%s' "$output" | jq -r '.research' 2>/dev/null)
+
+  assert_eq "sonnet" "$research" "resolve-models host-detection: CLAUDECODE=1 reads claudeCode table"
+}
+
+test_resolve_models_host_detection_opencode() {
+  echo ""
+  echo "=== Testing resolve-models host detection: no CLAUDECODE uses opencode table ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Detect a valid OpenCode model to use in the config (or use a known fallback)
+  local oc_model="anthropic/claude-sonnet-4-6"
+  if command -v opencode >/dev/null 2>&1; then
+    local first_oc_model
+    first_oc_model=$(opencode models 2>/dev/null | head -1)
+    if [ -n "$first_oc_model" ]; then
+      oc_model="$first_oc_model"
+    fi
+  fi
+
+  # v2.0 schema: opencode and claudeCode have separate categories sub-tables.
+  printf '%s\n' "{
+    \"schemaVersion\": \"2.0\",
+    \"categories\": {
+      \"claudeCode\": {
+        \"research\": \"sonnet\",
+        \"review\":   \"sonnet\",
+        \"design\":   \"sonnet\",
+        \"workflow\":  \"sonnet\",
+        \"executor\":  \"sonnet\"
+      },
+      \"opencode\": {
+        \"research\": \"$oc_model\",
+        \"review\":   \"$oc_model\",
+        \"design\":   \"$oc_model\",
+        \"workflow\":  \"$oc_model\",
+        \"executor\":  \"$oc_model\"
+      }
+    }
+  }" > "$tmpdir/models.json"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE= "$CLI" resolve-models 2>/dev/null)
+
+  local research claudecode_research
+  research=$(printf '%s' "$output" | jq -r '.research' 2>/dev/null)
+  # Also verify Claude Code host returns the claudeCode model (different from opencode)
+  claudecode_research=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null | jq -r '.research' 2>/dev/null)
+
+  assert_eq "$oc_model" "$research" "resolve-models host-detection: no CLAUDECODE reads opencode table"
+
+  # When oc_model != "sonnet", verify the hosts return different values
+  if [ "$oc_model" != "sonnet" ]; then
+    if [ "$research" != "$claudecode_research" ]; then
+      echo -e "${GREEN}✓${NC} resolve-models host-detection: CLAUDECODE=1 and no CLAUDECODE read different tables"
+      ((TESTS_PASSED++))
+    else
+      echo -e "${RED}✗${NC} resolve-models host-detection: expected different results per host (research=$research, claudecode=$claudecode_research)"
+      ((TESTS_FAILED++))
+    fi
+  fi
+}
+
+test_resolve_models_invalid_model_claudecode() {
+  echo ""
+  echo "=== Testing resolve-models: invalid model for Claude Code falls back to inherit ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # v2.0 schema: direct category-to-model mapping.
+  # research has an invalid model; review has a valid exact alias "sonnet".
+  printf '%s\n' '{
+    "schemaVersion": "2.0",
+    "categories": {
+      "claudeCode": {
+        "research":  "totally-invalid-model-xyz",
+        "review":    "sonnet",
+        "design":    "sonnet",
+        "workflow":  "sonnet",
+        "executor":  "sonnet"
+      }
+    }
+  }' > "$tmpdir/models.json"
+
+  local stdout stderr
+  stderr=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>&1 1>/dev/null)
+  stdout=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
+
+  # Invalid model should produce a warning on stderr
+  if printf '%s' "$stderr" | grep -qi "warning"; then
+    echo -e "${GREEN}✓${NC} resolve-models invalid-model-claudecode: warning sent to stderr"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} resolve-models invalid-model-claudecode: expected warning on stderr, got: $stderr"
+    ((TESTS_FAILED++))
+  fi
+
+  # Invalid category should fall back to inherit
+  local research
+  research=$(printf '%s' "$stdout" | jq -r '.research' 2>/dev/null)
+  assert_eq "inherit" "$research" "resolve-models invalid-model-claudecode: invalid model falls back to inherit"
+
+  # Valid category should still resolve (exact alias "sonnet" passes)
+  local review
+  review=$(printf '%s' "$stdout" | jq -r '.review' 2>/dev/null)
+  assert_eq "sonnet" "$review" "resolve-models invalid-model-claudecode: valid exact-alias model still resolves"
+}
+
+test_resolve_models_all_keys_always_present() {
+  echo ""
+  echo "=== Testing resolve-models: output always has all five keys ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Empty config dir — no models.json
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
+
+  local keys
+  keys=$(printf '%s' "$output" | jq -r 'keys | sort | join(",")' 2>/dev/null)
+
+  assert_eq "design,executor,research,review,workflow" "$keys" "resolve-models: output always contains all five keys"
+}
+
+test_resolve_models_stdout_always_valid_json() {
+  echo ""
+  echo "=== Testing resolve-models: stdout is always valid JSON ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Write malformed JSON
+  printf 'not json at all\n' > "$tmpdir/models.json"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
+
+  if printf '%s' "$output" | jq empty 2>/dev/null; then
+    echo -e "${GREEN}✓${NC} resolve-models stdout-valid-json: malformed config still produces valid JSON stdout"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} resolve-models stdout-valid-json: stdout is not valid JSON: $output"
+    ((TESTS_FAILED++))
+  fi
+}
+
+test_resolve_models_exact_match_validation() {
+  echo ""
+  echo "=== Testing resolve-models: Claude Code exact-match rejects version-suffixed models ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # v2.0 schema: direct category mapping.
+  # "claude-haiku-4-5" / "claude-sonnet-4-6" / "claude-opus-4-7" contain keywords but are NOT
+  # exact aliases — they must be rejected under the exact-match rule.
+  printf '%s\n' '{
+    "schemaVersion": "2.0",
+    "categories": {
+      "claudeCode": {
+        "research":  "claude-haiku-4-5",
+        "review":    "claude-sonnet-4-6",
+        "design":    "claude-opus-4-7",
+        "workflow":  "claude-haiku-4-5",
+        "executor":  "claude-sonnet-4-6"
+      }
+    }
+  }' > "$tmpdir/models.json"
+
+  local stdout stderr
+  stderr=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>&1 1>/dev/null)
+  stdout=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
+
+  # All five should be rejected → inherit (no version suffix allowed)
+  local research review design workflow executor
+  research=$(printf '%s' "$stdout" | jq -r '.research' 2>/dev/null)
+  review=$(printf '%s' "$stdout" | jq -r '.review' 2>/dev/null)
+  design=$(printf '%s' "$stdout" | jq -r '.design' 2>/dev/null)
+  workflow=$(printf '%s' "$stdout" | jq -r '.workflow' 2>/dev/null)
+  executor=$(printf '%s' "$stdout" | jq -r '.executor' 2>/dev/null)
+
+  assert_eq "inherit" "$research" "resolve-models exact-match: claude-haiku-4-5 rejected → inherit (research)"
+  assert_eq "inherit" "$review"   "resolve-models exact-match: claude-sonnet-4-6 rejected → inherit (review)"
+  assert_eq "inherit" "$design"   "resolve-models exact-match: claude-opus-4-7 rejected → inherit (design)"
+  assert_eq "inherit" "$workflow" "resolve-models exact-match: claude-haiku-4-5 rejected → inherit (workflow)"
+  assert_eq "inherit" "$executor" "resolve-models exact-match: claude-sonnet-4-6 rejected → inherit (executor)"
+
+  # Warnings must be emitted (one per invalid category — at least 3)
+  local warn_count
+  warn_count=$(printf '%s' "$stderr" | grep -c -i "warning" 2>/dev/null || echo "0")
+  if [ "$warn_count" -ge 3 ]; then
+    echo -e "${GREEN}✓${NC} resolve-models exact-match: warnings emitted for each invalid model ($warn_count)"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} resolve-models exact-match: expected >=3 warnings, got $warn_count; stderr=$stderr"
+    ((TESTS_FAILED++))
+  fi
+}
+
+test_resolve_models_exact_aliases_accepted() {
+  echo ""
+  echo "=== Testing resolve-models: Claude Code exact aliases haiku/sonnet/opus are accepted ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # v2.0 schema: direct category-to-model mapping using exact aliases.
+  printf '%s\n' '{
+    "schemaVersion": "2.0",
+    "categories": {
+      "claudeCode": {
+        "research":  "haiku",
+        "review":    "sonnet",
+        "design":    "opus",
+        "workflow":  "haiku",
+        "executor":  "sonnet"
+      }
+    }
+  }' > "$tmpdir/models.json"
+
+  local stdout stderr
+  stderr=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>&1 1>/dev/null)
+  stdout=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
+
+  local research review design workflow executor
+  research=$(printf '%s' "$stdout" | jq -r '.research' 2>/dev/null)
+  review=$(printf '%s' "$stdout" | jq -r '.review' 2>/dev/null)
+  design=$(printf '%s' "$stdout" | jq -r '.design' 2>/dev/null)
+  workflow=$(printf '%s' "$stdout" | jq -r '.workflow' 2>/dev/null)
+  executor=$(printf '%s' "$stdout" | jq -r '.executor' 2>/dev/null)
+
+  assert_eq "haiku"  "$research" "resolve-models exact-match: haiku alias accepted (research)"
+  assert_eq "sonnet" "$review"   "resolve-models exact-match: sonnet alias accepted (review)"
+  assert_eq "opus"   "$design"   "resolve-models exact-match: opus alias accepted (design)"
+  assert_eq "haiku"  "$workflow" "resolve-models exact-match: haiku alias accepted (workflow)"
+  assert_eq "sonnet" "$executor" "resolve-models exact-match: sonnet alias accepted (executor)"
+
+  # No warnings should be emitted for valid models
+  if [ -z "$stderr" ]; then
+    echo -e "${GREEN}✓${NC} resolve-models exact-match: no warnings for valid exact aliases"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} resolve-models exact-match: unexpected warnings: $stderr"
+    ((TESTS_FAILED++))
+  fi
+}
+
+test_resolve_models_v1_rejected() {
+  echo ""
+  echo "=== Testing resolve-models: v1.0-shaped config is rejected with warning and all-inherit fallback ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Write a v1.0-shaped config (has top-level .models key and schemaVersion "1.0")
+  printf '%s\n' '{
+    "schemaVersion": "1.0",
+    "categories": {
+      "research": "fast"
+    },
+    "models": {
+      "claudeCode": {
+        "fast": "haiku"
+      }
+    }
+  }' > "$tmpdir/models.json"
+
+  local stdout stderr
+  stderr=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>&1 1>/dev/null)
+  stdout=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
+
+  # stderr must contain "schema 1.0" (case-sensitive)
+  if printf '%s' "$stderr" | grep -q "schema 1.0"; then
+    echo -e "${GREEN}✓${NC} resolve-models v1-rejected: stderr contains 'schema 1.0'"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} resolve-models v1-rejected: expected 'schema 1.0' in stderr, got: $stderr"
+    ((TESTS_FAILED++))
+  fi
+
+  # stdout must be the all-inherit JSON on all five keys
+  local research review design workflow executor
+  research=$(printf '%s' "$stdout" | jq -r '.research' 2>/dev/null)
+  review=$(printf '%s' "$stdout" | jq -r '.review' 2>/dev/null)
+  design=$(printf '%s' "$stdout" | jq -r '.design' 2>/dev/null)
+  workflow=$(printf '%s' "$stdout" | jq -r '.workflow' 2>/dev/null)
+  executor=$(printf '%s' "$stdout" | jq -r '.executor' 2>/dev/null)
+
+  assert_eq "inherit" "$research" "resolve-models v1-rejected: research=inherit"
+  assert_eq "inherit" "$review"   "resolve-models v1-rejected: review=inherit"
+  assert_eq "inherit" "$design"   "resolve-models v1-rejected: design=inherit"
+  assert_eq "inherit" "$workflow" "resolve-models v1-rejected: workflow=inherit"
+  assert_eq "inherit" "$executor" "resolve-models v1-rejected: executor=inherit"
+}
+
+test_resolve_models_opencode_mtime_cache() {
+  echo ""
+  echo "=== Testing resolve-models: OpenCode mtime cache avoids repeated opencode shell-out ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Create a fake opencode script that records invocation count via a counter file
+  local fake_oc_dir
+  fake_oc_dir=$(mktemp -d)
+  trap "rm -rf '$fake_oc_dir'" RETURN
+
+  local counter_file="$fake_oc_dir/call_count"
+  printf '0\n' > "$counter_file"
+
+  cat > "$fake_oc_dir/opencode" << 'FAKE_OC'
+#!/usr/bin/env bash
+counter_file="COUNTER_PLACEHOLDER"
+count=$(cat "$counter_file" 2>/dev/null || echo 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$counter_file"
+printf 'anthropic/claude-sonnet-4-6\nanthropic/claude-haiku-4-5\n'
+FAKE_OC
+  sed -i "s|COUNTER_PLACEHOLDER|$counter_file|" "$fake_oc_dir/opencode"
+  chmod +x "$fake_oc_dir/opencode"
+
+  # Write a v2.0 models.json that references a valid OpenCode model
+  printf '%s\n' '{
+    "schemaVersion": "2.0",
+    "categories": {
+      "opencode": {
+        "research":  "anthropic/claude-sonnet-4-6",
+        "review":    "anthropic/claude-sonnet-4-6",
+        "design":    "anthropic/claude-sonnet-4-6",
+        "workflow":  "anthropic/claude-sonnet-4-6",
+        "executor":  "anthropic/claude-sonnet-4-6"
+      }
+    }
+  }' > "$tmpdir/models.json"
+
+  # First call: opencode should be invoked once to populate the cache
+  PATH="$fake_oc_dir:$PATH" AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE= "$CLI" resolve-models 2>/dev/null
+  local count_after_first
+  count_after_first=$(cat "$counter_file" 2>/dev/null || echo 0)
+
+  # Second call: cache should be hit — opencode must NOT be invoked again
+  PATH="$fake_oc_dir:$PATH" AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE= "$CLI" resolve-models 2>/dev/null
+  local count_after_second
+  count_after_second=$(cat "$counter_file" 2>/dev/null || echo 0)
+
+  if [ "$count_after_first" -eq 1 ]; then
+    echo -e "${GREEN}✓${NC} resolve-models opencode mtime-cache: first call invokes opencode once"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} resolve-models opencode mtime-cache: expected 1 call after first invoke, got $count_after_first"
+    ((TESTS_FAILED++))
+  fi
+
+  if [ "$count_after_second" -eq 1 ]; then
+    echo -e "${GREEN}✓${NC} resolve-models opencode mtime-cache: second call uses cache (opencode not called again)"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} resolve-models opencode mtime-cache: expected 1 total calls after second invoke, got $count_after_second"
+    ((TESTS_FAILED++))
+  fi
+
+  # Verify the second call still produces correct output
+  local second_output
+  second_output=$(PATH="$fake_oc_dir:$PATH" AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE= "$CLI" resolve-models 2>/dev/null)
+  local research
+  research=$(printf '%s' "$second_output" | jq -r '.research' 2>/dev/null)
+  assert_eq "anthropic/claude-sonnet-4-6" "$research" "resolve-models opencode mtime-cache: cached result is correct"
+}
+
+# ============================================================================
+# get-current-models Tests
+# ============================================================================
+
+test_get_current_models_no_config() {
+  echo ""
+  echo "=== Testing get-current-models with no config file (all null) ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" get-current-models 2>/dev/null)
+
+  # Verify all five keys are JSON null (not the string "null", not "inherit")
+  local research_null review_null design_null workflow_null executor_null
+  research_null=$(printf '%s' "$output" | jq '.research == null' 2>/dev/null)
+  review_null=$(printf '%s' "$output"   | jq '.review == null'   2>/dev/null)
+  design_null=$(printf '%s' "$output"   | jq '.design == null'   2>/dev/null)
+  workflow_null=$(printf '%s' "$output" | jq '.workflow == null' 2>/dev/null)
+  executor_null=$(printf '%s' "$output" | jq '.executor == null' 2>/dev/null)
+
+  assert_eq "true" "$research_null" "get-current-models no-config: research is JSON null"
+  assert_eq "true" "$review_null"   "get-current-models no-config: review is JSON null"
+  assert_eq "true" "$design_null"   "get-current-models no-config: design is JSON null"
+  assert_eq "true" "$workflow_null" "get-current-models no-config: workflow is JSON null"
+  assert_eq "true" "$executor_null" "get-current-models no-config: executor is JSON null"
+}
+
+test_get_current_models_v2_full_config_claudecode() {
+  echo ""
+  echo "=== Testing get-current-models v2.0 full config (claudeCode host) ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+  _write_full_models_config "$tmpdir"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" get-current-models 2>/dev/null)
+
+  local research review design workflow executor
+  research=$(printf '%s' "$output" | jq -r '.research' 2>/dev/null)
+  review=$(printf '%s'   "$output" | jq -r '.review'   2>/dev/null)
+  design=$(printf '%s'   "$output" | jq -r '.design'   2>/dev/null)
+  workflow=$(printf '%s' "$output" | jq -r '.workflow' 2>/dev/null)
+  executor=$(printf '%s' "$output" | jq -r '.executor' 2>/dev/null)
+
+  assert_eq "sonnet" "$research" "get-current-models v2.0 claudeCode: research=sonnet"
+  assert_eq "opus"   "$review"   "get-current-models v2.0 claudeCode: review=opus"
+  assert_eq "sonnet" "$design"   "get-current-models v2.0 claudeCode: design=sonnet"
+  assert_eq "haiku"  "$workflow" "get-current-models v2.0 claudeCode: workflow=haiku"
+  assert_eq "haiku"  "$executor" "get-current-models v2.0 claudeCode: executor=haiku"
+}
+
+test_get_current_models_host_branch_opencode() {
+  echo ""
+  echo "=== Testing get-current-models host branch (opencode host) ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+  _write_full_models_config "$tmpdir"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE= "$CLI" get-current-models 2>/dev/null)
+
+  local research executor
+  research=$(printf '%s' "$output" | jq -r '.research' 2>/dev/null)
+  executor=$(printf '%s' "$output" | jq -r '.executor' 2>/dev/null)
+
+  assert_eq "anthropic/claude-sonnet-4-6" "$research" "get-current-models opencode: research id from opencode sub-table"
+  assert_eq "anthropic/claude-haiku-4-5"  "$executor" "get-current-models opencode: executor id from opencode sub-table"
+}
+
+test_get_current_models_partial_config_emits_null_for_unset() {
+  echo ""
+  echo "=== Testing get-current-models with partial config (unset categories emit null) ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Only research and review configured for claudeCode; the other three should be null.
+  printf '{
+  "schemaVersion": "2.0",
+  "categories": {
+    "claudeCode": {
+      "research": "sonnet",
+      "review":   "opus"
+    }
+  }
+}\n' > "$tmpdir/models.json"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" get-current-models 2>/dev/null)
+
+  local research review design_null workflow_null executor_null
+  research=$(printf '%s' "$output" | jq -r '.research' 2>/dev/null)
+  review=$(printf '%s'   "$output" | jq -r '.review'   2>/dev/null)
+  design_null=$(printf '%s'   "$output" | jq '.design == null'   2>/dev/null)
+  workflow_null=$(printf '%s' "$output" | jq '.workflow == null' 2>/dev/null)
+  executor_null=$(printf '%s' "$output" | jq '.executor == null' 2>/dev/null)
+
+  assert_eq "sonnet" "$research" "get-current-models partial: research has configured value"
+  assert_eq "opus"   "$review"   "get-current-models partial: review has configured value"
+  assert_eq "true"   "$design_null"   "get-current-models partial: design is JSON null"
+  assert_eq "true"   "$workflow_null" "get-current-models partial: workflow is JSON null"
+  assert_eq "true"   "$executor_null" "get-current-models partial: executor is JSON null"
+}
+
+test_get_current_models_v1_config_rejected() {
+  echo ""
+  echo "=== Testing get-current-models rejects v1.0 config with stderr warning ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  printf '{"schemaVersion":"1.0","models":{"claudeCode":{"fast":"haiku"}}}\n' > "$tmpdir/models.json"
+
+  local stdout stderr
+  stdout=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" get-current-models 2>/dev/null)
+  stderr=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" get-current-models 2>&1 1>/dev/null)
+
+  if printf '%s' "$stderr" | grep -q 'schema 1.0'; then
+    echo -e "${GREEN}✓${NC} get-current-models v1.0: stderr contains 'schema 1.0' warning"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} get-current-models v1.0: expected 'schema 1.0' on stderr, got: $stderr"
+    ((TESTS_FAILED++))
+  fi
+
+  local research_null executor_null
+  research_null=$(printf '%s' "$stdout" | jq '.research == null' 2>/dev/null)
+  executor_null=$(printf '%s' "$stdout" | jq '.executor == null' 2>/dev/null)
+  assert_eq "true" "$research_null" "get-current-models v1.0: stdout has research as JSON null"
+  assert_eq "true" "$executor_null" "get-current-models v1.0: stdout has executor as JSON null"
+}
+
+# ============================================================================
+# detect-models Tests
+# ============================================================================
+
+# Helper: write a valid full v2.0 models.json for round-trip tests.
+# claudeCode categories use short aliases (haiku/sonnet/opus) as required by the Task tool.
+# opencode categories use provider/model-id format.
+_write_full_models_config() {
+  local dir="$1"
+  printf '{
+  "schemaVersion": "2.0",
+  "categories": {
+    "claudeCode": {
+      "research":  "sonnet",
+      "review":    "opus",
+      "design":    "sonnet",
+      "workflow":  "haiku",
+      "executor":  "haiku"
+    },
+    "opencode": {
+      "research":  "anthropic/claude-sonnet-4-6",
+      "review":    "anthropic/claude-opus-4-7",
+      "design":    "anthropic/claude-sonnet-4-6",
+      "workflow":  "anthropic/claude-haiku-4-5",
+      "executor":  "anthropic/claude-haiku-4-5"
+    }
+  }
+}\n' > "$dir/models.json"
+}
+
+test_detect_models_claudecode_generates_config() {
+  echo ""
+  echo "=== Testing detect-models on Claude Code host generates valid models.json ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Run detect-models as Claude Code host (non-interactive, stdin is not a TTY in tests)
+  local stdout
+  stdout=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" detect-models 2>/dev/null </dev/null)
+
+  # models.json must exist
+  if [ -f "$tmpdir/models.json" ]; then
+    echo -e "${GREEN}✓${NC} detect-models claudecode: models.json written"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models claudecode: models.json not found in $tmpdir"
+    ((TESTS_FAILED++))
+  fi
+
+  # stdout must be valid JSON
+  if printf '%s' "$stdout" | jq empty 2>/dev/null; then
+    echo -e "${GREEN}✓${NC} detect-models claudecode: stdout is valid JSON"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models claudecode: stdout is not valid JSON: $stdout"
+    ((TESTS_FAILED++))
+  fi
+
+  # schemaVersion must be "2.0"
+  local schema_ver
+  schema_ver=$(printf '%s' "$stdout" | jq -r '.schemaVersion // empty' 2>/dev/null)
+  assert_eq "2.0" "$schema_ver" "detect-models claudecode: schemaVersion is 2.0"
+
+  # categories.claudeCode must have all five keys
+  local cat_keys
+  cat_keys=$(printf '%s' "$stdout" | jq -r '.categories.claudeCode | keys | sort | join(",")' 2>/dev/null)
+  assert_eq "design,executor,research,review,workflow" "$cat_keys" "detect-models claudecode: categories.claudeCode has all five keys"
+
+  # categories.claudeCode must have claudeCode key (no top-level .models key in v2.0)
+  local has_cc_cats
+  has_cc_cats=$(printf '%s' "$stdout" | jq -r '(.categories | has("claudeCode")) | tostring' 2>/dev/null)
+  assert_eq "true" "$has_cc_cats" "detect-models claudecode: categories has claudeCode sub-table"
+
+  # All five categories must be present with valid exact short aliases: haiku/sonnet/opus
+  local research_model review_model design_model workflow_model executor_model
+  research_model=$(printf '%s' "$stdout" | jq -r '.categories.claudeCode.research // empty' 2>/dev/null)
+  review_model=$(printf '%s' "$stdout" | jq -r '.categories.claudeCode.review // empty' 2>/dev/null)
+  design_model=$(printf '%s' "$stdout" | jq -r '.categories.claudeCode.design // empty' 2>/dev/null)
+  workflow_model=$(printf '%s' "$stdout" | jq -r '.categories.claudeCode.workflow // empty' 2>/dev/null)
+  executor_model=$(printf '%s' "$stdout" | jq -r '.categories.claudeCode.executor // empty' 2>/dev/null)
+
+  # Each must be one of the valid aliases (haiku/sonnet/opus)
+  local valid_aliases="haiku sonnet opus"
+  for _cat_name in research review design workflow executor; do
+    local _val
+    eval "_val=\$${_cat_name}_model"
+    if printf '%s' "$valid_aliases" | grep -qw "$_val"; then
+      echo -e "${GREEN}✓${NC} detect-models claudecode: ${_cat_name} is a valid alias (${_val})"
+      ((TESTS_PASSED++))
+    else
+      echo -e "${RED}✗${NC} detect-models claudecode: ${_cat_name} expected valid alias, got '${_val}'"
+      ((TESTS_FAILED++))
+    fi
+  done
+}
+
+test_detect_models_opencode_absent_fallback() {
+  echo ""
+  echo "=== Testing detect-models on OpenCode host with opencode binary absent — fallback with warning ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Run detect-models without CLAUDECODE, PATH stripped of opencode
+  local stdout stderr
+  stderr=$(PATH="/usr/bin:/bin" AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE= "$CLI" detect-models 2>&1 1>/dev/null </dev/null)
+  stdout=$(PATH="/usr/bin:/bin" AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE= "$CLI" detect-models 2>/dev/null </dev/null)
+
+  # models.json must be written
+  if [ -f "$tmpdir/models.json" ]; then
+    echo -e "${GREEN}✓${NC} detect-models opencode-absent: models.json written despite absent binary"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models opencode-absent: models.json not found in $tmpdir"
+    ((TESTS_FAILED++))
+  fi
+
+  # Exactly one warning must go to stderr
+  if printf '%s' "$stderr" | grep -q "Warning: detect-models: opencode binary not found"; then
+    echo -e "${GREEN}✓${NC} detect-models opencode-absent: one warning on stderr"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models opencode-absent: expected warning on stderr, got: $stderr"
+    ((TESTS_FAILED++))
+  fi
+
+  # stdout must still be valid JSON
+  if printf '%s' "$stdout" | jq empty 2>/dev/null; then
+    echo -e "${GREEN}✓${NC} detect-models opencode-absent: stdout is valid JSON"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models opencode-absent: stdout is not valid JSON: $stdout"
+    ((TESTS_FAILED++))
+  fi
+
+  # categories must have opencode key (not claudeCode) for OpenCode host — v2.0 schema
+  local has_oc
+  has_oc=$(printf '%s' "$stdout" | jq -r '(.categories | has("opencode")) | tostring' 2>/dev/null)
+  assert_eq "true" "$has_oc" "detect-models opencode-absent: categories has opencode sub-table"
+}
+
+test_detect_models_atomic_write_no_corruption() {
+  echo ""
+  echo "=== Testing detect-models atomic write: pre-existing valid config is never partially overwritten ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Write a known-good pre-existing models.json
+  _write_full_models_config "$tmpdir"
+  local original_content
+  original_content=$(cat "$tmpdir/models.json")
+
+  # Run detect-models normally — it should overwrite atomically
+  AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" detect-models 2>/dev/null </dev/null
+
+  # Result must still be valid JSON
+  local new_content
+  new_content=$(cat "$tmpdir/models.json" 2>/dev/null)
+  if printf '%s' "$new_content" | jq empty 2>/dev/null; then
+    echo -e "${GREEN}✓${NC} detect-models atomic-write: post-run models.json is valid JSON"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models atomic-write: post-run models.json is not valid JSON: $new_content"
+    ((TESTS_FAILED++))
+  fi
+
+  # No leftover temp file must exist (mktemp + mv atomicity guarantee)
+  local leftover_count
+  leftover_count=$(find "$tmpdir" -name 'models.json.*' | wc -l)
+  if [ "$leftover_count" -eq 0 ]; then
+    echo -e "${GREEN}✓${NC} detect-models atomic-write: no leftover temp files"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models atomic-write: found $leftover_count leftover temp files"
+    ((TESTS_FAILED++))
+  fi
+
+  # File must have permission 0600
+  local perms
+  perms=$(stat -c '%a' "$tmpdir/models.json" 2>/dev/null || stat -f '%Lp' "$tmpdir/models.json" 2>/dev/null)
+  assert_eq "600" "$perms" "detect-models atomic-write: models.json permission is 0600"
+}
+
+test_detect_models_roundtrip_with_resolve_models() {
+  echo ""
+  echo "=== Testing detect-models output round-trips correctly through resolve-models ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # detect-models writes the config
+  AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" detect-models 2>/dev/null </dev/null
+
+  # resolve-models must consume it without warnings
+  local resolve_stdout resolve_stderr
+  resolve_stderr=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>&1 1>/dev/null)
+  resolve_stdout=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" resolve-models 2>/dev/null)
+
+  # stdout must be valid JSON
+  if printf '%s' "$resolve_stdout" | jq empty 2>/dev/null; then
+    echo -e "${GREEN}✓${NC} detect-models roundtrip: resolve-models produces valid JSON"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models roundtrip: resolve-models stdout is not valid JSON: $resolve_stdout"
+    ((TESTS_FAILED++))
+  fi
+
+  # No warnings on stderr from resolve-models
+  if [ -z "$resolve_stderr" ]; then
+    echo -e "${GREEN}✓${NC} detect-models roundtrip: resolve-models produced no warnings"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models roundtrip: resolve-models warnings: $resolve_stderr"
+    ((TESTS_FAILED++))
+  fi
+
+  # All five keys must be present in resolve-models output
+  local keys
+  keys=$(printf '%s' "$resolve_stdout" | jq -r 'keys | sort | join(",")' 2>/dev/null)
+  assert_eq "design,executor,research,review,workflow" "$keys" "detect-models roundtrip: all five category keys present"
+}
+
+test_write_aimi_models_config() {
+  echo ""
+  echo "=== Testing write_aimi_models_config atomic write helper ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  source_cache_functions
+
+  local test_json='{"schemaVersion":"1.0","categories":{"research":"balanced"},"models":{}}'
+  AIMI_CONFIG_DIR="$tmpdir" write_aimi_models_config "$test_json"
+
+  local config_file="$tmpdir/models.json"
+
+  # File must exist
+  if [ -f "$config_file" ]; then
+    echo -e "${GREEN}✓${NC} write_aimi_models_config: file written"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} write_aimi_models_config: file not found at $config_file"
+    ((TESTS_FAILED++))
+  fi
+
+  # Content must match
+  local content
+  content=$(cat "$config_file" 2>/dev/null | tr -d '\n')
+  if printf '%s' "$content" | grep -q '"schemaVersion":"1.0"'; then
+    echo -e "${GREEN}✓${NC} write_aimi_models_config: content matches"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} write_aimi_models_config: content mismatch: $content"
+    ((TESTS_FAILED++))
+  fi
+
+  # Permission must be 0600
+  local perms
+  perms=$(stat -c '%a' "$config_file" 2>/dev/null || stat -f '%Lp' "$config_file" 2>/dev/null)
+  assert_eq "600" "$perms" "write_aimi_models_config: permission is 0600"
+
+  # No leftover temp files
+  local leftover
+  leftover=$(find "$tmpdir" -name 'models.json.*' | wc -l)
+  if [ "$leftover" -eq 0 ]; then
+    echo -e "${GREEN}✓${NC} write_aimi_models_config: no leftover temp files"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} write_aimi_models_config: $leftover leftover temp files"
+    ((TESTS_FAILED++))
+  fi
+}
+
+# ============================================================================
+# models-prompt-check / models-prompt-dismiss Tests
+# ============================================================================
+
+test_models_prompt_check_returns_prompt() {
+  echo ""
+  echo "=== Testing models-prompt-check returns 'prompt' when neither file exists ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" "$CLI" models-prompt-check)
+
+  assert_eq "prompt" "$output" "models-prompt-check: returns 'prompt' when neither models.json nor marker exists"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_check_skip_when_current_host_configured() {
+  echo ""
+  echo "=== Testing models-prompt-check returns 'skip' when current host has at least one configured category ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  # v2.0 config with claudeCode host configured; CLAUDECODE=1 in the call.
+  printf '{"schemaVersion":"2.0","categories":{"claudeCode":{"research":"haiku"}}}\n' > "$tmpdir/models.json"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+
+  assert_eq "skip" "$output" "models-prompt-check: returns 'skip' when current host (claudeCode) has a configured category"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_check_prompt_when_other_host_only_configured() {
+  echo ""
+  echo "=== Testing models-prompt-check returns 'prompt' when only the other host is configured ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  # opencode configured; CLAUDECODE=1 means current host is claudeCode (absent).
+  printf '{"schemaVersion":"2.0","categories":{"opencode":{"research":"anthropic/claude-haiku-4-5"}}}\n' > "$tmpdir/models.json"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+
+  assert_eq "prompt" "$output" "models-prompt-check: returns 'prompt' when only the other host is configured"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_check_prompt_when_current_host_all_null() {
+  echo ""
+  echo "=== Testing models-prompt-check returns 'prompt' when current host has all-null categories ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  printf '{"schemaVersion":"2.0","categories":{"claudeCode":{"research":null,"review":null,"design":null,"workflow":null,"executor":null}}}\n' > "$tmpdir/models.json"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+
+  assert_eq "prompt" "$output" "models-prompt-check: returns 'prompt' when current host has all-null categories"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_check_prompt_when_v1_config() {
+  echo ""
+  echo "=== Testing models-prompt-check returns 'prompt' when config is v1.0 (treated as obsolete) ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  printf '{"schemaVersion":"1.0","models":{"claudeCode":{"fast":"haiku"}}}\n' > "$tmpdir/models.json"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+
+  assert_eq "prompt" "$output" "models-prompt-check: returns 'prompt' on v1.0 config (treat as unconfigured)"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_check_prompt_when_file_missing_even_with_per_host_marker() {
+  echo ""
+  echo "=== Testing models-prompt-check returns 'prompt' when models.json is missing, even with per-host marker ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  # Per-host marker present, no models.json. File-missing always wins.
+  printf 'models-prompt-seen: 2026-01-01T00:00:00Z\n' > "$tmpdir/models-prompt-seen-claudeCode"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+
+  assert_eq "prompt" "$output" "models-prompt-check: file-missing re-prompts even with per-host marker present"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_check_skip_when_per_host_marker_dismisses() {
+  echo ""
+  echo "=== Testing models-prompt-check returns 'skip' when host unconfigured but per-host marker present ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  # Config file present with only the OTHER host configured; current host (claudeCode)
+  # is unconfigured BUT has a dismissal marker — should skip.
+  printf '{"schemaVersion":"2.0","categories":{"opencode":{"research":"anthropic/claude-haiku-4-5"}}}\n' > "$tmpdir/models.json"
+  printf 'dismissed on 2026-01-01\n' > "$tmpdir/models-prompt-seen-claudeCode"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+
+  assert_eq "skip" "$output" "models-prompt-check: per-host marker suppresses prompt when host unconfigured + file present"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_check_per_host_marker_isolation() {
+  echo ""
+  echo "=== Testing models-prompt-check: other host's marker does NOT suppress prompt on this host ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  # Config file present, current host (claudeCode) unconfigured, but only OPENCODE
+  # marker is present — claudeCode prompt should still fire.
+  printf '{"schemaVersion":"2.0","categories":{"opencode":{"research":"x"}}}\n' > "$tmpdir/models.json"
+  printf 'dismissed on opencode\n' > "$tmpdir/models-prompt-seen-opencode"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+
+  assert_eq "prompt" "$output" "models-prompt-check: opencode marker does not silence claudeCode prompt"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_check_legacy_global_marker_ignored() {
+  echo ""
+  echo "=== Testing models-prompt-check: legacy global marker (no host suffix) is NOT honored ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  # Config file present, current host unconfigured, only the legacy global marker exists.
+  # New code ignores the legacy file — should prompt.
+  printf '{"schemaVersion":"2.0","categories":{"opencode":{"research":"x"}}}\n' > "$tmpdir/models.json"
+  printf 'legacy global marker from pre-1.93.2\n' > "$tmpdir/models-prompt-seen"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+
+  assert_eq "prompt" "$output" "models-prompt-check: legacy global marker is ignored (must migrate to per-host)"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_check_skip_when_current_host_configured_with_marker() {
+  echo ""
+  echo "=== Testing models-prompt-check returns 'skip' when current host configured (marker irrelevant) ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  # Both config (with current host configured) AND per-host marker present.
+  # The check short-circuits at "host configured" — marker is not consulted.
+  printf '{"schemaVersion":"2.0","categories":{"claudeCode":{"research":"haiku","review":"opus","design":"sonnet","workflow":"sonnet","executor":"sonnet"}}}\n' > "$tmpdir/models.json"
+  printf 'models-prompt-seen: 2026-01-01T00:00:00Z\n' > "$tmpdir/models-prompt-seen-claudeCode"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+
+  assert_eq "skip" "$output" "models-prompt-check: returns 'skip' when current host configured; marker is irrelevant"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_check_prompt_when_categories_empty_object() {
+  echo ""
+  echo "=== Testing models-prompt-check returns 'prompt' when categories is empty {} ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  printf '{"schemaVersion":"2.0","categories":{}}\n' > "$tmpdir/models.json"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+
+  assert_eq "prompt" "$output" "models-prompt-check: returns 'prompt' when categories is empty {} (no host configured)"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_dismiss_creates_per_host_marker_claudecode() {
+  echo ""
+  echo "=== Testing models-prompt-dismiss writes per-host marker for claudeCode ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  # Before dismiss: should prompt
+  local before
+  before=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+  assert_eq "prompt" "$before" "models-prompt-dismiss claudeCode: check returns 'prompt' before dismiss"
+
+  # Dismiss on claudeCode
+  AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-dismiss > /dev/null
+
+  # Per-host marker file should exist
+  if [ -f "$tmpdir/models-prompt-seen-claudeCode" ]; then
+    echo -e "${GREEN}✓${NC} models-prompt-dismiss claudeCode: per-host marker file exists at models-prompt-seen-claudeCode"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} models-prompt-dismiss claudeCode: per-host marker file not found"
+    ((TESTS_FAILED++))
+  fi
+
+  # Per-host marker should have 0600 permissions
+  local perms
+  perms=$(stat -c '%a' "$tmpdir/models-prompt-seen-claudeCode" 2>/dev/null || stat -f '%Lp' "$tmpdir/models-prompt-seen-claudeCode" 2>/dev/null)
+  assert_eq "600" "$perms" "models-prompt-dismiss claudeCode: per-host marker has 0600 permissions"
+
+  # Opencode marker should NOT exist (per-host isolation)
+  if [ ! -f "$tmpdir/models-prompt-seen-opencode" ]; then
+    echo -e "${GREEN}✓${NC} models-prompt-dismiss claudeCode: opencode marker NOT created (per-host isolation)"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} models-prompt-dismiss claudeCode: opencode marker leaked"
+    ((TESTS_FAILED++))
+  fi
+
+  # After dismiss (models.json still missing): check still returns 'prompt' — file-missing wins over marker
+  local after
+  after=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+  assert_eq "prompt" "$after" "models-prompt-dismiss claudeCode: check returns 'prompt' when models.json missing (marker does not override file-missing)"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_dismiss_creates_per_host_marker_opencode() {
+  echo ""
+  echo "=== Testing models-prompt-dismiss writes per-host marker for opencode ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  # Dismiss on opencode (no CLAUDECODE)
+  AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE= "$CLI" models-prompt-dismiss > /dev/null
+
+  # Per-host marker file should exist with opencode suffix
+  if [ -f "$tmpdir/models-prompt-seen-opencode" ]; then
+    echo -e "${GREEN}✓${NC} models-prompt-dismiss opencode: per-host marker file exists at models-prompt-seen-opencode"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} models-prompt-dismiss opencode: per-host marker file not found"
+    ((TESTS_FAILED++))
+  fi
+
+  # ClaudeCode marker should NOT exist
+  if [ ! -f "$tmpdir/models-prompt-seen-claudeCode" ]; then
+    echo -e "${GREEN}✓${NC} models-prompt-dismiss opencode: claudeCode marker NOT created"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} models-prompt-dismiss opencode: claudeCode marker leaked"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_dismiss_then_check_skips_when_file_present() {
+  echo ""
+  echo "=== Testing dismiss + file present + host unconfigured → check returns 'skip' (full UX flow) ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  # Simulate: user already configured opencode; opens Claude Code; picks "Manter o padrão";
+  # next session on same host should not re-prompt.
+  printf '{"schemaVersion":"2.0","categories":{"opencode":{"research":"x"}}}\n' > "$tmpdir/models.json"
+
+  # First check (no marker yet): prompt
+  local before
+  before=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+  assert_eq "prompt" "$before" "dismiss-flow: pre-dismiss check returns 'prompt' (host unconfigured, no marker)"
+
+  # User picks "Manter o padrão" → models-prompt-dismiss
+  AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-dismiss > /dev/null
+
+  # Subsequent check: skip (dismissal honored)
+  local after
+  after=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+  assert_eq "skip" "$after" "dismiss-flow: post-dismiss check returns 'skip' (per-host marker suppresses)"
+
+  rm -rf "$tmpdir"
+}
+
+test_models_prompt_dismiss_idempotent() {
+  echo ""
+  echo "=== Testing models-prompt-dismiss is idempotent (calling twice does not error) ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  # First call
+  local exit1
+  AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-dismiss > /dev/null
+  exit1=$?
+  assert_eq "0" "$exit1" "models-prompt-dismiss idempotent: first call exits 0"
+
+  # Second call (marker already exists)
+  local exit2
+  AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-dismiss > /dev/null
+  exit2=$?
+  assert_eq "0" "$exit2" "models-prompt-dismiss idempotent: second call exits 0"
+
+  # Check still returns 'prompt' (models.json still missing — file-missing wins over marker)
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
+  assert_eq "prompt" "$output" "models-prompt-dismiss idempotent: check returns 'prompt' when models.json missing (marker does not override file-missing)"
+
+  rm -rf "$tmpdir"
+}
+
+# ============================================================================
+# list-models Tests
+# ============================================================================
+
+test_list_models_claudecode_returns_three_aliases() {
+  echo ""
+  echo "=== Testing list-models on Claude Code host returns [opus,sonnet,haiku] ==="
+
+  local output
+  output=$(CLAUDECODE=1 "$CLI" list-models 2>/dev/null)
+
+  # Output must be a valid JSON array
+  if printf '%s' "$output" | jq -e 'type == "array"' > /dev/null 2>&1; then
+    echo -e "${GREEN}✓${NC} list-models claudecode: output is a JSON array"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} list-models claudecode: output is not a JSON array: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  # Must contain exactly 3 elements
+  local length
+  length=$(printf '%s' "$output" | jq 'length' 2>/dev/null)
+  assert_eq "3" "$length" "list-models claudecode: array has exactly 3 elements"
+
+  # Must contain opus, sonnet, haiku
+  local has_opus has_sonnet has_haiku
+  has_opus=$(printf '%s' "$output" | jq -r 'index("opus") != null | tostring' 2>/dev/null)
+  has_sonnet=$(printf '%s' "$output" | jq -r 'index("sonnet") != null | tostring' 2>/dev/null)
+  has_haiku=$(printf '%s' "$output" | jq -r 'index("haiku") != null | tostring' 2>/dev/null)
+  assert_eq "true" "$has_opus"   "list-models claudecode: array contains 'opus'"
+  assert_eq "true" "$has_sonnet" "list-models claudecode: array contains 'sonnet'"
+  assert_eq "true" "$has_haiku"  "list-models claudecode: array contains 'haiku'"
+}
+
+test_list_models_opencode_absent_fallback() {
+  echo ""
+  echo "=== Testing list-models on OpenCode host with opencode binary absent — fallback with warning ==="
+
+  local stdout stderr
+  stderr=$(PATH="/usr/bin:/bin" CLAUDECODE= "$CLI" list-models 2>&1 1>/dev/null)
+  stdout=$(PATH="/usr/bin:/bin" CLAUDECODE= "$CLI" list-models 2>/dev/null)
+
+  # stdout must be a valid JSON array
+  if printf '%s' "$stdout" | jq -e 'type == "array"' > /dev/null 2>&1; then
+    echo -e "${GREEN}✓${NC} list-models opencode-absent: output is a JSON array"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} list-models opencode-absent: output is not a JSON array: $stdout"
+    ((TESTS_FAILED++))
+  fi
+
+  # Must contain the 3 built-in fallback Anthropic models
+  local length
+  length=$(printf '%s' "$stdout" | jq 'length' 2>/dev/null)
+  assert_eq "3" "$length" "list-models opencode-absent: fallback array has 3 elements"
+
+  # Warning must be sent to stderr
+  if printf '%s' "$stderr" | grep -q "Warning: list-models"; then
+    echo -e "${GREEN}✓${NC} list-models opencode-absent: warning sent to stderr"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} list-models opencode-absent: expected warning on stderr, got: $stderr"
+    ((TESTS_FAILED++))
+  fi
+}
+
+# ============================================================================
+# detect-models tier-flag Tests
+# ============================================================================
+
+test_detect_models_tier_flags_claudecode() {
+  echo ""
+  echo "=== Testing detect-models category flags (--research/--review/--design/--workflow/--executor) on Claude Code host ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  local stdout
+  stdout=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" detect-models \
+    --research haiku --review opus --design sonnet --workflow haiku --executor sonnet 2>/dev/null)
+
+  # models.json must be written
+  if [ -f "$tmpdir/models.json" ]; then
+    echo -e "${GREEN}✓${NC} detect-models tier-flags claudecode: models.json written"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models tier-flags claudecode: models.json not found in $tmpdir"
+    ((TESTS_FAILED++))
+  fi
+
+  # stdout must be valid JSON
+  if printf '%s' "$stdout" | jq empty 2>/dev/null; then
+    echo -e "${GREEN}✓${NC} detect-models tier-flags claudecode: stdout is valid JSON"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models tier-flags claudecode: stdout is not valid JSON: $stdout"
+    ((TESTS_FAILED++))
+  fi
+
+  # schemaVersion must be "2.0"
+  local schema_ver
+  schema_ver=$(printf '%s' "$stdout" | jq -r '.schemaVersion // empty' 2>/dev/null)
+  assert_eq "2.0" "$schema_ver" "detect-models tier-flags claudecode: schemaVersion is 2.0"
+
+  # on-disk file must also contain schemaVersion 2.0
+  local disk_schema
+  disk_schema=$(jq -r '.schemaVersion // empty' "$tmpdir/models.json" 2>/dev/null)
+  assert_eq "2.0" "$disk_schema" "detect-models tier-flags claudecode: on-disk schemaVersion is 2.0"
+
+  # categories.claudeCode must have all five keys populated from the flag values
+  local research_val review_val design_val workflow_val executor_val
+  research_val=$(printf '%s' "$stdout" | jq -r '.categories.claudeCode.research // empty' 2>/dev/null)
+  review_val=$(printf '%s' "$stdout"   | jq -r '.categories.claudeCode.review   // empty' 2>/dev/null)
+  design_val=$(printf '%s' "$stdout"   | jq -r '.categories.claudeCode.design   // empty' 2>/dev/null)
+  workflow_val=$(printf '%s' "$stdout" | jq -r '.categories.claudeCode.workflow  // empty' 2>/dev/null)
+  executor_val=$(printf '%s' "$stdout" | jq -r '.categories.claudeCode.executor  // empty' 2>/dev/null)
+  assert_eq "haiku"  "$research_val"  "detect-models tier-flags claudecode: research=haiku"
+  assert_eq "opus"   "$review_val"    "detect-models tier-flags claudecode: review=opus"
+  assert_eq "sonnet" "$design_val"    "detect-models tier-flags claudecode: design=sonnet"
+  assert_eq "haiku"  "$workflow_val"  "detect-models tier-flags claudecode: workflow=haiku"
+  assert_eq "sonnet" "$executor_val"  "detect-models tier-flags claudecode: executor=sonnet"
+}
+
+test_detect_models_tier_flags_preserve_other_host() {
+  echo ""
+  echo "=== Testing detect-models category flags preserve the other host's categories sub-table ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Pre-populate with a v2.0 opencode categories block
+  printf '%s\n' '{
+    "schemaVersion": "2.0",
+    "categories": {
+      "opencode": {
+        "research":  "anthropic/claude-sonnet-4-6",
+        "review":    "anthropic/claude-opus-4-7",
+        "design":    "anthropic/claude-sonnet-4-6",
+        "workflow":  "anthropic/claude-haiku-4-5",
+        "executor":  "anthropic/claude-haiku-4-5"
+      }
+    }
+  }' > "$tmpdir/models.json"
+
+  # Run detect-models with category flags as Claude Code host
+  AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" detect-models \
+    --research haiku --review opus --design sonnet --workflow haiku --executor sonnet 2>/dev/null
+
+  local result
+  result=$(cat "$tmpdir/models.json" 2>/dev/null)
+
+  # Overall result must be valid JSON
+  if printf '%s' "$result" | jq empty 2>/dev/null; then
+    echo -e "${GREEN}✓${NC} detect-models tier-flags preserve: merged models.json is valid JSON"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models tier-flags preserve: merged models.json is not valid JSON: $result"
+    ((TESTS_FAILED++))
+  fi
+
+  # schemaVersion must be "2.0"
+  local schema_ver
+  schema_ver=$(printf '%s' "$result" | jq -r '.schemaVersion // empty' 2>/dev/null)
+  assert_eq "2.0" "$schema_ver" "detect-models tier-flags preserve: schemaVersion is 2.0"
+
+  # The opencode categories block must still be present with original values
+  local oc_research oc_review oc_design oc_workflow oc_executor
+  oc_research=$(printf '%s' "$result" | jq -r '.categories.opencode.research // empty' 2>/dev/null)
+  oc_review=$(printf '%s' "$result"   | jq -r '.categories.opencode.review   // empty' 2>/dev/null)
+  oc_design=$(printf '%s' "$result"   | jq -r '.categories.opencode.design   // empty' 2>/dev/null)
+  oc_workflow=$(printf '%s' "$result" | jq -r '.categories.opencode.workflow  // empty' 2>/dev/null)
+  oc_executor=$(printf '%s' "$result" | jq -r '.categories.opencode.executor  // empty' 2>/dev/null)
+  assert_eq "anthropic/claude-sonnet-4-6" "$oc_research"  "detect-models tier-flags preserve: opencode.research preserved"
+  assert_eq "anthropic/claude-opus-4-7"   "$oc_review"    "detect-models tier-flags preserve: opencode.review preserved"
+  assert_eq "anthropic/claude-sonnet-4-6" "$oc_design"    "detect-models tier-flags preserve: opencode.design preserved"
+  assert_eq "anthropic/claude-haiku-4-5"  "$oc_workflow"  "detect-models tier-flags preserve: opencode.workflow preserved"
+  assert_eq "anthropic/claude-haiku-4-5"  "$oc_executor"  "detect-models tier-flags preserve: opencode.executor preserved"
+
+  # The claudeCode categories block must reflect the new flag values
+  local cc_research cc_review cc_design cc_workflow cc_executor
+  cc_research=$(printf '%s' "$result" | jq -r '.categories.claudeCode.research // empty' 2>/dev/null)
+  cc_review=$(printf '%s' "$result"   | jq -r '.categories.claudeCode.review   // empty' 2>/dev/null)
+  cc_design=$(printf '%s' "$result"   | jq -r '.categories.claudeCode.design   // empty' 2>/dev/null)
+  cc_workflow=$(printf '%s' "$result" | jq -r '.categories.claudeCode.workflow  // empty' 2>/dev/null)
+  cc_executor=$(printf '%s' "$result" | jq -r '.categories.claudeCode.executor  // empty' 2>/dev/null)
+  assert_eq "haiku"  "$cc_research"  "detect-models tier-flags preserve: claudeCode.research written"
+  assert_eq "opus"   "$cc_review"    "detect-models tier-flags preserve: claudeCode.review written"
+  assert_eq "sonnet" "$cc_design"    "detect-models tier-flags preserve: claudeCode.design written"
+  assert_eq "haiku"  "$cc_workflow"  "detect-models tier-flags preserve: claudeCode.workflow written"
+  assert_eq "sonnet" "$cc_executor"  "detect-models tier-flags preserve: claudeCode.executor written"
+}
+
+test_detect_models_preserves_other_host() {
+  echo ""
+  echo "=== Testing detect-models (OpenCode host) preserves existing claudeCode categories block ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Prime models.json with a complete v2.0 claudeCode block
+  local primed_cc_block='{"research":"haiku","review":"opus","design":"sonnet","workflow":"haiku","executor":"sonnet"}'
+  printf '%s\n' "{
+    \"schemaVersion\": \"2.0\",
+    \"categories\": {
+      \"claudeCode\": $primed_cc_block
+    }
+  }" > "$tmpdir/models.json"
+
+  # Capture the claudeCode block before the run (compact form for byte-identical comparison)
+  local before_cc
+  before_cc=$(jq -c '.categories.claudeCode' "$tmpdir/models.json" 2>/dev/null)
+
+  # Run detect-models on the OpenCode host (unset CLAUDECODE) with all five category flags
+  CLAUDECODE= AIMI_CONFIG_DIR="$tmpdir" "$CLI" detect-models \
+    --research "anthropic/claude-sonnet-4-6" \
+    --review   "anthropic/claude-opus-4-7" \
+    --design   "anthropic/claude-sonnet-4-6" \
+    --workflow  "anthropic/claude-haiku-4-5" \
+    --executor  "anthropic/claude-haiku-4-5" 2>/dev/null
+
+  local result
+  result=$(cat "$tmpdir/models.json" 2>/dev/null)
+
+  # The claudeCode block must be byte-identical to the primed value
+  local after_cc
+  after_cc=$(printf '%s' "$result" | jq -c '.categories.claudeCode' 2>/dev/null)
+
+  if [ "$before_cc" = "$after_cc" ]; then
+    echo -e "${GREEN}✓${NC} detect-models preserves-other-host: claudeCode block unchanged"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models preserves-other-host: claudeCode block changed (before=$before_cc, after=$after_cc)"
+    ((TESTS_FAILED++))
+  fi
+
+  # The new opencode block must reflect the flag values passed to the run
+  local oc_research oc_review oc_design oc_workflow oc_executor
+  oc_research=$(printf '%s' "$result" | jq -r '.categories.opencode.research // empty' 2>/dev/null)
+  oc_review=$(printf '%s' "$result"   | jq -r '.categories.opencode.review   // empty' 2>/dev/null)
+  oc_design=$(printf '%s' "$result"   | jq -r '.categories.opencode.design   // empty' 2>/dev/null)
+  oc_workflow=$(printf '%s' "$result" | jq -r '.categories.opencode.workflow  // empty' 2>/dev/null)
+  oc_executor=$(printf '%s' "$result" | jq -r '.categories.opencode.executor  // empty' 2>/dev/null)
+  assert_eq "anthropic/claude-sonnet-4-6" "$oc_research"  "detect-models preserves-other-host: opencode.research written"
+  assert_eq "anthropic/claude-opus-4-7"   "$oc_review"    "detect-models preserves-other-host: opencode.review written"
+  assert_eq "anthropic/claude-sonnet-4-6" "$oc_design"    "detect-models preserves-other-host: opencode.design written"
+  assert_eq "anthropic/claude-haiku-4-5"  "$oc_workflow"  "detect-models preserves-other-host: opencode.workflow written"
+  assert_eq "anthropic/claude-haiku-4-5"  "$oc_executor"  "detect-models preserves-other-host: opencode.executor written"
+
+  # Overall result must be valid JSON
+  if printf '%s' "$result" | jq empty 2>/dev/null; then
+    echo -e "${GREEN}✓${NC} detect-models preserves-other-host: merged models.json is valid JSON"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models preserves-other-host: merged models.json is not valid JSON: $result"
+    ((TESTS_FAILED++))
+  fi
+}
+
+# ============================================================================
 # detect-design-bundle Tests
 # ============================================================================
 
@@ -6540,6 +8066,68 @@ main() {
   test_detect_interactivity_opencode_host
   test_detect_interactivity_non_interactive_flag
   test_detect_interactivity_opencode_shell_sim
+
+  # resolve-models tests
+  echo ""
+  echo "--- resolve-models Tests ---"
+  test_resolve_models_no_config
+  test_resolve_models_malformed_config
+  test_resolve_models_partial_config
+  test_resolve_models_host_detection_claudecode
+  test_resolve_models_host_detection_opencode
+  test_resolve_models_invalid_model_claudecode
+  test_resolve_models_all_keys_always_present
+  test_resolve_models_stdout_always_valid_json
+  test_resolve_models_exact_match_validation
+  test_resolve_models_exact_aliases_accepted
+  test_resolve_models_v1_rejected
+  test_resolve_models_opencode_mtime_cache
+
+  # get-current-models tests
+  echo ""
+  echo "--- get-current-models Tests ---"
+  test_get_current_models_no_config
+  test_get_current_models_v2_full_config_claudecode
+  test_get_current_models_host_branch_opencode
+  test_get_current_models_partial_config_emits_null_for_unset
+  test_get_current_models_v1_config_rejected
+
+  # list-models tests
+  echo ""
+  echo "--- list-models Tests ---"
+  test_list_models_claudecode_returns_three_aliases
+  test_list_models_opencode_absent_fallback
+
+  # detect-models tests
+  echo ""
+  echo "--- detect-models Tests ---"
+  test_write_aimi_models_config
+  test_detect_models_claudecode_generates_config
+  test_detect_models_opencode_absent_fallback
+  test_detect_models_atomic_write_no_corruption
+  test_detect_models_roundtrip_with_resolve_models
+  test_detect_models_tier_flags_claudecode
+  test_detect_models_tier_flags_preserve_other_host
+  test_detect_models_preserves_other_host
+
+  # models-prompt-check / models-prompt-dismiss tests
+  echo ""
+  echo "--- models-prompt-check / models-prompt-dismiss Tests ---"
+  test_models_prompt_check_returns_prompt
+  test_models_prompt_check_skip_when_current_host_configured
+  test_models_prompt_check_prompt_when_other_host_only_configured
+  test_models_prompt_check_prompt_when_current_host_all_null
+  test_models_prompt_check_prompt_when_v1_config
+  test_models_prompt_check_prompt_when_file_missing_even_with_per_host_marker
+  test_models_prompt_check_skip_when_per_host_marker_dismisses
+  test_models_prompt_check_per_host_marker_isolation
+  test_models_prompt_check_legacy_global_marker_ignored
+  test_models_prompt_check_skip_when_current_host_configured_with_marker
+  test_models_prompt_check_prompt_when_categories_empty_object
+  test_models_prompt_dismiss_creates_per_host_marker_claudecode
+  test_models_prompt_dismiss_creates_per_host_marker_opencode
+  test_models_prompt_dismiss_then_check_skips_when_file_present
+  test_models_prompt_dismiss_idempotent
 
   # Design bundle detection tests
   echo ""

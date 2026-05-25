@@ -213,6 +213,16 @@ translate_command_body() {
   # and AIMI_PLUGIN_DIR is set by this installer for OpenCode. The <required_skills> section
   # is injected verbatim into Task prompts — no OpenCode-specific translation required.
 
+  # --- Task → aimi-task rewriting (namespaced agent calls only) ---
+  # OpenCode's native `task` tool rejects plugin-namespaced subagent_type
+  # strings like "aimi-engineering:research:aimi-codebase-researcher". The
+  # `aimi-task` tool (plugins/aimi-engineering/tools/aimi-task.ts) strips the
+  # prefix and shells out to `opencode run --agent <bare-name>`. Physically
+  # rewriting the body removes the LLM's burden of doing this rewrite on every
+  # invocation — previously the preamble told the model to translate Task →
+  # aimi-task at call time, and the model sometimes forgot.
+  body="${body//Task subagent_type=\"aimi-engineering:/aimi-task subagent_type=\"aimi-engineering:}"
+
   # --- Agent invocation preamble (only for commands referencing named agents) ---
   case "$body" in
     *'subagent_type="aimi-engineering:'*)
@@ -223,15 +233,88 @@ translate_command_body() {
       local preamble
       preamble='## OpenCode Agent Invocation
 
-When this command references agents via `Task subagent_type="aimi-engineering:CATEGORY:NAME"`, follow this pattern instead:
+### Step 0 — Resolve Agent Models
 
-1. Extract CATEGORY and NAME from the reference (e.g., `aimi-engineering:review:aimi-security-sentinel` -> category=review, name=aimi-security-sentinel)
-2. Read the agent definition file: `$AIMI_PLUGIN_DIR/agents/CATEGORY/NAME.md`
-3. Strip the YAML frontmatter (everything between the first two `---` lines)
-4. Use the remaining body as the agent'"'"'s system prompt
-5. Spawn: `Task(subagent_type="general", prompt="[agent system prompt]\n\n[original task prompt]")`
+Before spawning any agent, run once:
 
-Run all agent Tasks in parallel as instructed by the command below.
+```bash
+AIMI_CLI="${AIMI_CLI:-${AIMI_PLUGIN_DIR}/scripts/aimi-cli.sh}"
+RESOLVED_MODELS=$($AIMI_CLI resolve-models 2>/dev/null)
+```
+
+Extract per-category model values (all five keys are always present; value is a model id or the sentinel "inherit"):
+
+```
+RESEARCH_MODEL=$(printf '\''%s'\'' "$RESOLVED_MODELS" | jq -r '\''.research'\'')
+REVIEW_MODEL=$(printf '\''%s'\'' "$RESOLVED_MODELS" | jq -r '\''.review'\'')
+DESIGN_MODEL=$(printf '\''%s'\'' "$RESOLVED_MODELS" | jq -r '\''.design'\'')
+WORKFLOW_MODEL=$(printf '\''%s'\'' "$RESOLVED_MODELS" | jq -r '\''.workflow'\'')
+EXECUTOR_MODEL=$(printf '\''%s'\'' "$RESOLVED_MODELS" | jq -r '\''.executor'\'')
+```
+
+If `$AIMI_CLI` is not available or the call fails, set all five variables to the string `inherit`.
+
+#### First-run configuration prompt (interactive hosts only)
+
+After `AGENT_MODELS` is resolved, check once whether the one-time model-selection prompt should be shown:
+
+```bash
+_AIMI_INTERACTIVITY=$($AIMI_CLI detect-interactivity 2>/dev/null)
+_AIMI_PROMPT_CHECK=$($AIMI_CLI models-prompt-check 2>/dev/null)
+```
+
+Only when `_AIMI_INTERACTIVITY` is `picker` AND `_AIMI_PROMPT_CHECK` is `prompt`, ask the user via the question tool:
+
+> "Nenhuma configuração de modelo de subagente encontrada — os agentes herdam o modelo da thread principal. Quer configurar a seleção de modelo por categoria?"
+> Options: A — "Configurar agora" ; B — "Manter o padrão (inherit)"
+
+**Option A — "Configurar agora":**
+
+The model SELECTION must happen at the LLM-orchestrator layer using the question tool, NOT inside a bash subprocess. The bash layer only lists available models and writes the config from explicit choices.
+
+1. Run `$AIMI_CLI list-models` to get the host'\''s available models as a JSON array.
+2. Use the question tool with **five questions in one call** — one per category — letting the user pick a model for each. Each question'\''s options are the models returned by `list-models`:
+   - "Modelo para tarefas de pesquisa/leitura (research)?" — suggested default: an Anthropic Haiku model id from `opencode models`
+   - "Modelo para revisão e análise (review)?" — suggested default: an Anthropic Opus model id
+   - "Modelo para tarefas de design (design)?" — suggested default: an Anthropic Sonnet model id
+   - "Modelo para tarefas de workflow (workflow)?" — suggested default: an Anthropic Sonnet model id
+   - "Modelo para sub-orquestradores de execução (executor)?" — suggested default: an Anthropic Sonnet model id
+3. Run `$AIMI_CLI detect-models --research <chosen_research> --review <chosen_review> --design <chosen_design> --workflow <chosen_workflow> --executor <chosen_executor>` with the user'\''s picks to write the config.
+4. Re-run `$AIMI_CLI resolve-models` to refresh the model variables.
+
+**Option B — "Manter o padrão (inherit)":** no action needed beyond dismissal.
+
+- Regardless of choice: always run `$AIMI_CLI models-prompt-dismiss` so the prompt is never shown again.
+
+When `_AIMI_INTERACTIVITY` is not `picker` (agent-mode / CI) OR `_AIMI_PROMPT_CHECK` is `skip`, do nothing — proceed silently.
+
+### Step 1 — Per-spawn model selection
+
+The command body below uses `aimi-task subagent_type="aimi-engineering:CATEGORY:NAME"` invocations directly (rewritten at install time from the upstream `Task subagent_type=...` form). For each invocation, look up the model by CATEGORY and pass it as the `model` argument:
+
+- research → `$RESEARCH_MODEL`
+- review → `$REVIEW_MODEL`
+- design → `$DESIGN_MODEL`
+- workflow → `$WORKFLOW_MODEL`
+- executor → `$EXECUTOR_MODEL`
+
+**Omit the `model` argument entirely when the resolved value is `inherit`** — do not pass `model="inherit"` literally, the spawned agent must inherit the session model.
+
+For `Task(subagent_type="general", model: ...)` spawns (the parallel sub-orchestrators and per-story executor of /aimi:execute), route through **aimi-task** using `$EXECUTOR_MODEL` as the model, since the native `task` tool ignores per-call `model:` arguments:
+
+```
+aimi-task(
+  subagent_type="general",
+  model="[$EXECUTOR_MODEL, omit if inherit]",
+  prompt="[original task prompt]"
+)
+```
+
+`Task(subagent_type="general", ...)` spawns **without** a `model:` annotation are left unchanged — do NOT route them through aimi-task.
+
+**HARD RULE — never call OpenCode'\''s native `task` tool with any `subagent_type` starting with `aimi-engineering:`.** OpenCode does not recognize plugin-namespaced agent names; only the `aimi-task` tool strips the prefix and routes correctly. If the command body ever shows `Task subagent_type="aimi-engineering:..."` (rare — should have been rewritten at install time), treat it as `aimi-task subagent_type="aimi-engineering:..."` instead.
+
+Run all aimi-task invocations in parallel as instructed by the command below.
 
 ---
 
@@ -552,6 +635,72 @@ install_skills() {
 }
 
 # ---------------------------------------------------------------------------
+# install_custom_tools — copy plugin tools/ to the OpenCode tools directory
+# ---------------------------------------------------------------------------
+install_custom_tools() {
+  local src="$1"
+  local target_dir="$2"
+  local tools_src="$src/tools"
+  local tools_dst="$target_dir/tools"
+
+  # Explicit allowlist — only these two files are managed by this plugin.
+  # A glob over tools_src/* would risk copying unrelated files and could
+  # silently destroy a pre-existing package.json owned by the user.
+  local TOOL_ALLOWLIST="aimi-task.ts package.json"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] Would install custom tools to $tools_dst"
+    if [ -d "$tools_src" ]; then
+      for basename in $TOOL_ALLOWLIST; do
+        [ -f "$tools_src/$basename" ] || continue
+        if [ "$basename" = "package.json" ] && [ -f "$tools_dst/package.json" ]; then
+          if ! cmp -s "$tools_src/package.json" "$tools_dst/package.json" 2>/dev/null; then
+            log "[dry-run]   Would WARN: $tools_dst/package.json exists and differs — would skip (not plugin-owned)"
+          else
+            log "[dry-run]   Would install tool: $basename (identical, safe to overwrite)"
+          fi
+        else
+          log "[dry-run]   Would install tool: $basename"
+        fi
+      done
+    fi
+    return 0
+  fi
+
+  if [ ! -d "$tools_src" ]; then
+    [ "$VERBOSE" -eq 1 ] && log "No tools/ directory found in plugin source, skipping"
+    return 0
+  fi
+
+  mkdir -p "$tools_dst"
+
+  local count=0
+  for basename in $TOOL_ALLOWLIST; do
+    local f="$tools_src/$basename"
+    [ -f "$f" ] || continue
+
+    # Guard package.json: only write when destination is absent or identical to ours.
+    if [ "$basename" = "package.json" ] && [ -f "$tools_dst/package.json" ]; then
+      if cmp -s "$f" "$tools_dst/package.json" 2>/dev/null; then
+        # Identical — safe no-op (already installed)
+        [ "$VERBOSE" -eq 1 ] && log "  Tool: $basename (already up to date)"
+        count=$((count + 1))
+        continue
+      else
+        warn "Skipping $tools_dst/package.json — file exists and was not installed by this plugin. Add aimi-task dependencies manually or back it up and re-run."
+        continue
+      fi
+    fi
+
+    cp "$f" "$tools_dst/$basename"
+    count=$((count + 1))
+    [ "$VERBOSE" -eq 1 ] && log "  Tool: $basename"
+  done
+
+  ok "Installed $count custom tools to $tools_dst"
+}
+
+# ---------------------------------------------------------------------------
 # install_mcp — add context7 to opencode.json
 # ---------------------------------------------------------------------------
 install_mcp() {
@@ -762,6 +911,7 @@ install_opencode() {
   install_commands "$src" "$target_dir"
   install_agents "$src" "$target_dir"
   install_skills "$src" "$target_dir"
+  install_custom_tools "$src" "$target_dir"
   install_mcp "$target_dir"
   install_permissions "$target_dir"
 
@@ -800,6 +950,7 @@ install_opencode() {
   log "Commands:      $target_dir/commands/aimi/*.md"
   log "Agents:        $target_dir/agents/aimi-*.md"
   log "Skills:        $target_dir/skills/aimi-*/"
+  log "Tools:         $target_dir/tools/aimi-task.ts"
   log "MCP:           $target_dir/opencode.json"
   echo
   log "Restart your shell or run:"
@@ -821,9 +972,12 @@ uninstall_opencode() {
     log "[dry-run] Would remove $target_dir/agents/aimi-*.md"
     log "[dry-run] Would remove $target_dir/skills/aimi-*/"
     log "[dry-run] Would remove $target_dir/plugins/$PLUGIN_NAME/"
+    log "[dry-run] Would remove $target_dir/tools/aimi-task.ts"
+    log "[dry-run] Would remove $target_dir/tools/package.json (only if plugin-owned; skipped otherwise with warning)"
     log "[dry-run] Would remove context7 from $target_dir/opencode.json"
     log "[dry-run] Would remove permissions from $target_dir/opencode.json"
     log "[dry-run] Would remove AIMI_PLUGIN_DIR from shell profiles"
+    log "[dry-run] NOTE: models.json user config is preserved (not removed)"
     local new_cache_file="${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path"
     local legacy_cache_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path"
     [ -f "$new_cache_file" ]    && log "[dry-run] Would remove $new_cache_file"
@@ -875,6 +1029,33 @@ uninstall_opencode() {
     rm -rf "$target_dir/plugins/$PLUGIN_NAME"
     ok "Removed plugin source"
   fi
+
+  # Remove shipped aimi-task tool artifacts from the OpenCode tools directory.
+  # Only the files we installed (aimi-task.ts and package.json) are removed.
+  # package.json is only removed when it matches the plugin-owned copy; if the
+  # user has modified it (or it belongs to another tool) we warn and leave it.
+  # The user config file models.json under the aimi config directory is NOT touched.
+  local plugin_src
+  plugin_src=$(detect_plugin_source) 2>/dev/null || plugin_src=""
+  local tools_dir="$target_dir/tools"
+  local removed_tools=0
+  if [ -f "$tools_dir/aimi-task.ts" ]; then
+    rm -f "$tools_dir/aimi-task.ts"
+    removed_tools=$((removed_tools + 1))
+    [ "$VERBOSE" -eq 1 ] && log "Removed $tools_dir/aimi-task.ts"
+  fi
+  if [ -f "$tools_dir/package.json" ]; then
+    local src_pkg=""
+    [ -n "$plugin_src" ] && src_pkg="$plugin_src/tools/package.json"
+    if [ -n "$src_pkg" ] && [ -f "$src_pkg" ] && cmp -s "$src_pkg" "$tools_dir/package.json" 2>/dev/null; then
+      rm -f "$tools_dir/package.json"
+      removed_tools=$((removed_tools + 1))
+      [ "$VERBOSE" -eq 1 ] && log "Removed $tools_dir/package.json"
+    else
+      warn "Skipping $tools_dir/package.json — not identical to plugin-owned copy; remove manually if no longer needed."
+    fi
+  fi
+  [ "$removed_tools" -gt 0 ] && ok "Removed aimi-task tool artifacts from $tools_dir"
 
   # Remove MCP from opencode.json
   local config_file="$target_dir/opencode.json"

@@ -79,6 +79,10 @@ INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity $NON_INTERACTIVE_FLAG)
 
 Store `INTERACTIVE_MODE` for use by Phase 0.5, Phase 1.8, and Phase 2.5 to decide whether to present AskUserQuestion prompts or auto-defer open questions. Use `FEATURE_DESCRIPTION` (not `$ARGUMENTS`) everywhere a feature description string is needed from this point forward.
 
+### Resolve Agent Models
+
+Read and follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS`. When resolution fails, treat every category as `"inherit"` and continue.
+
 ## Phase 0: Idea Refinement
 
 Check `.aimi/brainstorms/` for a matching brainstorm (semantic match on topic, within 14 days):
@@ -177,6 +181,7 @@ mkdir -p "$(dirname "<output_path>")"
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-bundle-prototype-author"
+  [model: <AGENT_MODELS.research when not "inherit">]
   prompt: "Generate a self-contained HTML prototype for the bundle.
            bundlePath: <bundlePath>
            viewList: <view_list extracted names as JSON array>
@@ -379,6 +384,7 @@ Run these agents **in parallel** using the Task tool.
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
+  [model: <AGENT_MODELS.research when not "inherit">]
   prompt: "Analyze the codebase for patterns relevant to: [feature description].
            topicSlug: [topicSlug]
            [If pathHints is non-empty]: paths: [<comma-joined pathHints>]
@@ -396,6 +402,7 @@ Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
+  [model: <AGENT_MODELS.research when not "inherit">]
   prompt: "Search .aimi/solutions/ for learnings relevant to: [feature description].
            topicSlug: [topicSlug]
            Look for: gotchas, patterns, past solutions, lessons learned.
@@ -413,6 +420,7 @@ If any spawned agent fails, proceed with available results.
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-design-bundle-researcher"
+  [model: <AGENT_MODELS.research when not "inherit">]
   prompt: "Ingest the Claude Design handoff bundle and produce the
            16-section research doc, including § Open Questions with
            any spec-prototype coverage gaps marked
@@ -444,6 +452,7 @@ Only if Phase 1.5 decides external research is needed, run the applicable agents
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
+  [model: <AGENT_MODELS.research when not "inherit">]
   prompt: "Research current best practices for: [feature description].
            researchDepth: [computed researchDepth from Phase 1.5]
            topicSlug: [topicSlug]
@@ -456,6 +465,7 @@ Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-framework-docs-researcher"
+  [model: <AGENT_MODELS.research when not "inherit">]
   prompt: "Research framework documentation for: [feature description].
            researchDepth: [computed researchDepth from Phase 1.5]
            topicSlug: [topicSlug]
@@ -547,6 +557,7 @@ where `<N>` is the count of questions deferred this phase.
 
 ```
 Task subagent_type="aimi-engineering:workflow:aimi-spec-flow-analyzer"
+  [model: <AGENT_MODELS.workflow when not "inherit">]
   prompt: "Analyze this feature specification for flow completeness, gaps, and edge cases:
            Feature: [feature description]
            Context from research: [consolidated research summary]

@@ -11,6 +11,9 @@ allowed-tools:
   - Bash(chmod:*)
   - Bash(ls:*)
   - Bash(command:*)
+  - Bash(AIMI_CLI=*)
+  - Bash($AIMI_CLI:*)
+  - Task
 ---
 
 # Aimi Validate Bug
@@ -91,12 +94,17 @@ If `$AIMI_CLI` is still empty after all layers, report the error and STOP:
 $AIMI_CLI check-version --quiet --fix
 ```
 
+## Step 2.5: Resolve Agent Models
+
+Read and follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS`. When resolution fails, treat every category as `"inherit"` and continue.
+
 ## Step 3: Spawn the Bug Reproduction Validator Agent
 
 Spawn a single Task agent with the bug context gathered in Step 1:
 
 ```
 Task subagent_type="aimi-engineering:workflow:aimi-bug-reproduction-validator"
+  [model: <AGENT_MODELS.workflow when not "inherit">]
   prompt: "Validate and reproduce the following bug report.
 
 Bug Context:

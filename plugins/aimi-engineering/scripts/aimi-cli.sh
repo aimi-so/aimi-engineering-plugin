@@ -274,6 +274,67 @@ _global_worktree_cache_path() {
   printf '%s\n' "$aimi_dir/worktree-path"
 }
 
+# Return the path to the models config file (XDG location)
+_aimi_models_config_path() {
+  local aimi_dir
+  aimi_dir=$(_aimi_config_dir)
+  printf '%s\n' "$aimi_dir/models.json"
+}
+
+# Return the path to the models first-run prompt marker file for the active host.
+# The marker is per-host: `models-prompt-seen-claudeCode` or `models-prompt-seen-opencode`.
+# This lets a user dismiss the prompt independently on each host — picking
+# "Manter o padrão (inherit)" on Claude Code does not silence the prompt on OpenCode.
+# The legacy global `models-prompt-seen` file (no host suffix) is no longer read.
+_aimi_models_prompt_marker_path() {
+  local host
+  if _is_claude_code_host; then
+    host="claudeCode"
+  else
+    host="opencode"
+  fi
+  local aimi_dir
+  aimi_dir=$(_aimi_config_dir)
+  printf '%s\n' "$aimi_dir/models-prompt-seen-$host"
+}
+
+# Read the models config JSON, returning empty string when the file is absent.
+# Does not validate contents — callers must handle malformed JSON.
+read_aimi_models_config() {
+  local config_file
+  config_file=$(_aimi_models_config_path)
+  if [ ! -f "$config_file" ]; then
+    return 0
+  fi
+  cat "$config_file" 2>/dev/null
+}
+
+# Atomically write JSON content to the models config file (chmod 0600, mktemp + mv).
+# Usage: write_aimi_models_config <json_content>
+# Mirrors write_global_cli_cache — interrupted runs never corrupt a pre-existing file.
+# chmod is applied BEFORE writing content (create-then-restrict-then-write pattern).
+# Temp file is removed on mv failure so no stray files remain.
+write_aimi_models_config() {
+  local json_content="$1"
+  local config_file
+  config_file=$(_aimi_models_config_path)
+  local config_dir
+  config_dir=$(dirname "$config_file")
+  if ! mkdir -p "$config_dir" 2>/dev/null; then
+    echo "Error: write_aimi_models_config: cannot create directory: $config_dir" >&2
+    return 1
+  fi
+  local tmp_file
+  tmp_file=$(mktemp "${config_file}.XXXXXX")
+  chmod 0600 "$tmp_file"
+  printf '%s\n' "$json_content" > "$tmp_file"
+  if ! mv "$tmp_file" "$config_file"; then
+    rm -f "$tmp_file" 2>/dev/null
+    echo "Error: write_aimi_models_config: mv failed for $config_file" >&2
+    return 1
+  fi
+}
+
 # Atomically write the CLI path to the global cache file
 # Usage: write_global_cli_cache "/path/to/aimi-cli.sh"
 write_global_cli_cache() {
@@ -1837,6 +1898,16 @@ cmd_bundle_prototype_finalize() {
     '{ written: $sidecar_path, generatedAt: $generatedAt }'
 }
 
+# Return the path to the OpenCode models validation cache file, keyed by mtime.
+# Usage: _oc_models_cache_path <mtime>
+# The cache stores the `opencode models` output for a specific models.json mtime.
+_oc_models_cache_path() {
+  local mtime="$1"
+  local aimi_dir
+  aimi_dir=$(_aimi_config_dir)
+  printf '%s\n' "$aimi_dir/models-oc-cache-${mtime}.txt"
+}
+
 # Resolve which interactivity mode applies to the current shell.
 # Prints exactly one of: picker, agent
 #   agent  - AIMI_AGENT_MODE=true or CI=true (explicit overrides), OR no host
@@ -1867,6 +1938,647 @@ cmd_detect_interactivity() {
     return
   fi
   echo "picker"
+}
+
+# Resolve which configured model for each agent category.
+# Reads ~/.config/aimi/models.json (schema v2.0) and maps each of the five
+# categories (research, review, design, workflow, executor) to a concrete model ID.
+# Schema v2.0 shape: {schemaVersion:"2.0", categories:{<host>:{<cat>:<modelId>}}}
+# Direct one-level lookup: .categories[<host>][<category>] → model id.
+# Always emits a single-line compact JSON object with all five keys.
+# Unconfigured or fallback entries use the literal string "inherit".
+# All warnings go to stderr; stdout is always valid JSON.
+#
+# v1.0 rejection: if the parsed JSON has a top-level .models key OR
+# .schemaVersion is not "2.0", emits a stderr warning containing "schema 1.0"
+# and returns the all-inherit fallback. Re-run `aimi-cli detect-models` to
+# upgrade the config to v2.0.
+#
+# Performance notes:
+#   - The standalone jq-empty validation pass is omitted; the resolution jq
+#     error handler already catches malformed JSON.
+#   - Multi-pass INVALID tagging is merged into a single jq invocation per host.
+#   - OpenCode: `opencode models` output is cached by models.json mtime so
+#     repeated calls within the same models.json state skip the shell-out.
+cmd_resolve_models() {
+  check_jq
+
+  local config_file
+  config_file=$(_aimi_models_config_path)
+
+  # Fallback JSON — all five categories as inherit
+  local _fallback='{"research":"inherit","review":"inherit","design":"inherit","workflow":"inherit","executor":"inherit"}'
+
+  # No config file → silent fallback (preserves current behavior)
+  if [ ! -f "$config_file" ]; then
+    printf '%s\n' "$_fallback"
+    return 0
+  fi
+
+  # Read config (use read_aimi_models_config for consistent access)
+  local config_json
+  config_json=$(read_aimi_models_config) || config_json=""
+  if [ -z "$config_json" ]; then
+    echo "Warning: resolve-models: models config file is empty: $config_file" >&2
+    printf '%s\n' "$_fallback"
+    return 0
+  fi
+
+  # v1.0 rejection guard: reject any config that has a top-level .models key OR
+  # whose .schemaVersion is not exactly "2.0". Both are signs of the old schema.
+  local _schema_ok
+  _schema_ok=$(printf '%s' "$config_json" | jq -r '
+    if (has("models") or (.schemaVersion // "") != "2.0") then "reject" else "ok" end
+  ' 2>/dev/null) || _schema_ok="reject"
+  if [ "$_schema_ok" = "reject" ]; then
+    echo "Warning: resolve-models: schema 1.0 obsoleto — re-rode aimi-cli detect-models" >&2
+    printf '%s\n' "$_fallback"
+    return 0
+  fi
+
+  # Determine host key
+  local host
+  if _is_claude_code_host; then
+    host="claudeCode"
+  else
+    host="opencode"
+  fi
+
+  # Resolve each category via single-step lookup: .categories[$host][$cat] → model_id
+  # Missing category or null value → inherit
+  # The error handler catches malformed JSON (no separate jq empty pass needed).
+  local _result
+  _result=$(printf '%s' "$config_json" | jq -r --arg host "$host" '
+    def resolve_cat($cat):
+      ((.categories[$host][$cat] // null) | if . == null or . == "" then null else . end) as $model |
+      if $model == null then "inherit" else $model end;
+    {
+      research: resolve_cat("research"),
+      review:   resolve_cat("review"),
+      design:   resolve_cat("design"),
+      workflow: resolve_cat("workflow"),
+      executor: resolve_cat("executor")
+    } | @json
+  ' 2>/dev/null) || {
+    echo "Warning: resolve-models: models config file is malformed JSON or failed to parse: $config_file" >&2
+    printf '%s\n' "$_fallback"
+    return 0
+  }
+
+  if [ -z "$_result" ]; then
+    echo "Warning: resolve-models: empty result from models config: $config_file" >&2
+    printf '%s\n' "$_fallback"
+    return 0
+  fi
+
+  # Validate resolved model IDs per host in a single jq pass:
+  #   - invalid entries get value "INVALID\t<original>" (tab-delimited to handle = in model names)
+  #   - warnings emitted via tab-delimited IFS read loop
+  #   - validated result has INVALID entries replaced with "inherit"
+  if _is_claude_code_host; then
+    # Claude Code: exact-match against the set {opus, sonnet, haiku}.
+    # The Task tool only accepts these short aliases — no version suffixes.
+    local _tagged
+    _tagged=$(printf '%s' "$_result" | jq -r '
+      to_entries | map(
+        .key as $cat |
+        .value as $model |
+        if $model == "inherit" then {key: $cat, value: "inherit"}
+        elif ($model == "opus" or $model == "sonnet" or $model == "haiku") then
+          {key: $cat, value: $model}
+        else {key: $cat, value: ("INVALID\t" + $model)}
+        end
+      ) | from_entries | @json
+    ' 2>/dev/null)
+
+    # Emit warnings and build clean result in one pass
+    local _validated
+    _validated=$(printf '%s' "$_tagged" | jq -r '
+      to_entries | map(
+        if (.value | startswith("INVALID\t")) then {key: .key, value: "inherit"}
+        else .
+        end
+      ) | from_entries | @json
+    ' 2>/dev/null)
+
+    # Print warnings for invalid entries (tab delimiter avoids = truncation)
+    while IFS=$'\t' read -r _cat _val; do
+      [ -n "$_cat" ] || continue
+      echo "Warning: resolve-models: model '$_val' is not valid for Claude Code host (must be exactly opus, sonnet, or haiku; category: $_cat), falling back to inherit" >&2
+    done < <(printf '%s' "$_tagged" | jq -r 'to_entries[] | select(.value | startswith("INVALID\t")) | .key + "\t" + (.value | ltrimstr("INVALID\t"))' 2>/dev/null)
+
+    _result="$_validated"
+  else
+    # OpenCode: validate against `opencode models` output; skip validation when binary absent.
+    # Cache the models list by models.json mtime to avoid shelling out on every call.
+    if command -v opencode >/dev/null 2>&1; then
+      local _config_mtime
+      _config_mtime=$(stat -c '%Y' "$config_file" 2>/dev/null || stat -f '%m' "$config_file" 2>/dev/null || echo "0")
+      local _oc_cache_file
+      _oc_cache_file=$(_oc_models_cache_path "$_config_mtime")
+
+      local _oc_models=""
+      if [ -f "$_oc_cache_file" ]; then
+        _oc_models=$(cat "$_oc_cache_file" 2>/dev/null) || _oc_models=""
+      fi
+
+      if [ -z "$_oc_models" ]; then
+        _oc_models=$(opencode models 2>/dev/null) || _oc_models=""
+        if [ -n "$_oc_models" ]; then
+          # Write to cache (best-effort; failure is non-fatal)
+          local _oc_aimi_dir
+          _oc_aimi_dir=$(_aimi_config_dir)
+          mkdir -p "$_oc_aimi_dir" 2>/dev/null || true
+          printf '%s\n' "$_oc_models" > "$_oc_cache_file" 2>/dev/null || true
+        fi
+      fi
+
+      if [ -n "$_oc_models" ]; then
+        # Single jq pass: tag invalid entries with INVALID\t prefix
+        local _oc_tagged
+        _oc_tagged=$(printf '%s' "$_result" | jq -r --arg ocmodels "$_oc_models" '
+          ($ocmodels | split("\n") | map(select(. != "")) | map(ltrimstr(" ") | rtrimstr(" "))) as $valid_list |
+          to_entries | map(
+            .key as $cat |
+            .value as $model |
+            if $model == "inherit" then {key: $cat, value: "inherit"}
+            elif ($valid_list | index($model)) != null then {key: $cat, value: $model}
+            else {key: $cat, value: ("INVALID\t" + $model)}
+            end
+          ) | from_entries | @json
+        ' 2>/dev/null)
+
+        local _oc_validated
+        _oc_validated=$(printf '%s' "$_oc_tagged" | jq -r '
+          to_entries | map(
+            if (.value | startswith("INVALID\t")) then {key: .key, value: "inherit"}
+            else .
+            end
+          ) | from_entries | @json
+        ' 2>/dev/null)
+
+        while IFS=$'\t' read -r _cat _val; do
+          [ -n "$_cat" ] || continue
+          echo "Warning: resolve-models: model '$_val' is not valid for OpenCode host (category: $_cat), falling back to inherit" >&2
+        done < <(printf '%s' "$_oc_tagged" | jq -r 'to_entries[] | select(.value | startswith("INVALID\t")) | .key + "\t" + (.value | ltrimstr("INVALID\t"))' 2>/dev/null)
+
+        _result="$_oc_validated"
+      fi
+      # If opencode models output is empty, skip validation and use configured values
+    fi
+    # If opencode binary is absent, skip validation (fail-safe: use configured value as-is)
+  fi
+
+  printf '%s\n' "$_result"
+}
+
+# Emit the current per-category model assignments for the active host.
+# Shape: {"research": <id|null>, "review": <id|null>, "design": <id|null>,
+#         "workflow": <id|null>, "executor": <id|null>}
+# Unlike resolve-models, unset entries emit JSON null (not the string "inherit")
+# so the /aimi:setup-models picker can distinguish "not configured" from a literal
+# "inherit" override and pre-select sensible defaults.
+# Schema v1.0 configs are rejected with the same stderr warning resolve-models emits;
+# stdout falls back to all-null on rejection or any error.
+cmd_get_current_models() {
+  check_jq
+
+  local config_file
+  config_file=$(_aimi_models_config_path)
+
+  local _fallback='{"research":null,"review":null,"design":null,"workflow":null,"executor":null}'
+
+  if [ ! -f "$config_file" ]; then
+    printf '%s\n' "$_fallback"
+    return 0
+  fi
+
+  local config_json
+  config_json=$(read_aimi_models_config) || config_json=""
+  if [ -z "$config_json" ]; then
+    echo "Warning: get-current-models: models config file is empty: $config_file" >&2
+    printf '%s\n' "$_fallback"
+    return 0
+  fi
+
+  local _schema_ok
+  _schema_ok=$(printf '%s' "$config_json" | jq -r '
+    if (has("models") or (.schemaVersion // "") != "2.0") then "reject" else "ok" end
+  ' 2>/dev/null) || _schema_ok="reject"
+  if [ "$_schema_ok" = "reject" ]; then
+    echo "Warning: get-current-models: schema 1.0 obsoleto — re-rode aimi-cli detect-models" >&2
+    printf '%s\n' "$_fallback"
+    return 0
+  fi
+
+  local host
+  if _is_claude_code_host; then
+    host="claudeCode"
+  else
+    host="opencode"
+  fi
+
+  local _result
+  _result=$(printf '%s' "$config_json" | jq -r --arg host "$host" '
+    def get_cat($cat):
+      ((.categories[$host][$cat] // null) | if . == null or . == "" then null else . end);
+    {
+      research: get_cat("research"),
+      review:   get_cat("review"),
+      design:   get_cat("design"),
+      workflow: get_cat("workflow"),
+      executor: get_cat("executor")
+    } | @json
+  ' 2>/dev/null) || {
+    echo "Warning: get-current-models: models config file is malformed JSON or failed to parse: $config_file" >&2
+    printf '%s\n' "$_fallback"
+    return 0
+  }
+
+  if [ -z "$_result" ]; then
+    printf '%s\n' "$_fallback"
+    return 0
+  fi
+
+  printf '%s\n' "$_result"
+}
+
+# List available models for the current host as a JSON array on stdout.
+# Claude Code host: fixed array ["opus","sonnet","haiku"].
+# OpenCode host: runs `opencode models` and parses its output into a JSON array.
+#   Falls back to the built-in default Anthropic list when the opencode binary is absent,
+#   printing one warning to stderr.
+# stdout is always a valid JSON array; warnings go to stderr.
+cmd_list_models() {
+  check_jq
+
+  local _models_list
+  if _is_claude_code_host; then
+    # Claude Code: short aliases only — the Task tool only accepts haiku/sonnet/opus
+    printf '["opus","sonnet","haiku"]\n'
+    return 0
+  fi
+
+  # OpenCode: query `opencode models`
+  _models_list=""
+  if command -v opencode >/dev/null 2>&1; then
+    _models_list=$(opencode models 2>/dev/null) || _models_list=""
+  fi
+
+  if [ -z "${_models_list:-}" ]; then
+    echo "Warning: list-models: opencode binary not found or returned no models; using built-in Anthropic model list." >&2
+    _models_list="anthropic/claude-haiku-4-5
+anthropic/claude-sonnet-4-6
+anthropic/claude-opus-4-7"
+  fi
+
+  # Convert newline-delimited list to a JSON array
+  printf '%s\n' "$_models_list" | jq -R . | jq -s .
+}
+
+# Detect available models on the current host and write ~/.config/aimi/models.json.
+# Writes schema v2.0: {schemaVersion:"2.0", categories:{<host>:{<cat>:<modelId>}}}
+# Direct category-to-model mapping — no tier indirection.
+# On Claude Code (CLAUDECODE=1): fixed set — haiku, sonnet, opus (short aliases required by Task tool).
+# On OpenCode: reads `opencode models`; falls back to a built-in default Anthropic list
+#   with one warning when the opencode binary is absent.
+#
+# Flag mode (non-interactive write): when ANY of --research, --review, --design,
+#   --workflow, --executor is provided, build and write models.json with the given
+#   category-to-model assignments directly, skipping the TTY prompt. Preserves the
+#   other host's categories sub-table when a pre-existing file exists.
+#   --research <model>  Model id for the research category
+#   --review <model>    Model id for the review category
+#   --design <model>    Model id for the design category
+#   --workflow <model>  Model id for the workflow category
+#   --executor <model>  Model id for the executor category
+#   All five flags must be supplied together.
+#
+# Interactive (stdin is a TTY, no category flags): prompts once per category for a
+#   concrete model id, validated against the host's available-model list.
+# Non-interactive (no flags, stdin is not TTY): writes sensible defaults without prompting.
+# Writes atomically via write_aimi_models_config (mktemp + chmod 0600 + mv).
+# NOTE: Only the current host's sub-table is written. Re-run on the other host to
+#       populate both claudeCode and opencode tables.
+cmd_detect_models() {
+  check_jq
+
+  # ---- Parse category flags --------------------------------------------------
+  local _flag_research="" _flag_review="" _flag_design="" _flag_workflow="" _flag_executor=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --research)
+        shift
+        _flag_research="${1:-}"
+        ;;
+      --review)
+        shift
+        _flag_review="${1:-}"
+        ;;
+      --design)
+        shift
+        _flag_design="${1:-}"
+        ;;
+      --workflow)
+        shift
+        _flag_workflow="${1:-}"
+        ;;
+      --executor)
+        shift
+        _flag_executor="${1:-}"
+        ;;
+      -*)
+        echo "Error: detect-models: unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh detect-models [--research <model>] [--review <model>] [--design <model>] [--workflow <model>] [--executor <model>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  # ---- Determine host key for models table ----------------------------------
+  local _host_key
+  if _is_claude_code_host; then
+    _host_key="claudeCode"
+  else
+    _host_key="opencode"
+  fi
+
+  # ---- Flag mode: category flags provided → non-interactive write -----------
+  if [ -n "$_flag_research" ] || [ -n "$_flag_review" ] || [ -n "$_flag_design" ] || [ -n "$_flag_workflow" ] || [ -n "$_flag_executor" ]; then
+    # Require all five categories when using flag mode
+    if [ -z "$_flag_research" ] || [ -z "$_flag_review" ] || [ -z "$_flag_design" ] || [ -z "$_flag_workflow" ] || [ -z "$_flag_executor" ]; then
+      echo "Error: detect-models: when using category flags, all five must be provided: --research, --review, --design, --workflow, --executor" >&2
+      exit 1
+    fi
+
+    # Read existing config to preserve the other host's categories sub-table
+    local _existing_json
+    _existing_json=$(read_aimi_models_config) || _existing_json=""
+
+    local _models_json
+    if [ -n "$_existing_json" ] && printf '%s' "$_existing_json" | jq empty 2>/dev/null; then
+      # Merge: preserve other host's categories block, replace current host's block
+      _models_json=$(printf '%s' "$_existing_json" | jq \
+        --arg host_key  "$_host_key" \
+        --arg research  "$_flag_research" \
+        --arg review    "$_flag_review" \
+        --arg design    "$_flag_design" \
+        --arg workflow  "$_flag_workflow" \
+        --arg executor  "$_flag_executor" \
+        '{
+          schemaVersion: "2.0",
+          categories: ((.categories // {}) + {
+            ($host_key): {
+              research: $research,
+              review:   $review,
+              design:   $design,
+              workflow: $workflow,
+              executor: $executor
+            }
+          })
+        }')
+    else
+      # No existing config or malformed — create fresh
+      _models_json=$(jq -n \
+        --arg host_key  "$_host_key" \
+        --arg research  "$_flag_research" \
+        --arg review    "$_flag_review" \
+        --arg design    "$_flag_design" \
+        --arg workflow  "$_flag_workflow" \
+        --arg executor  "$_flag_executor" \
+        '{
+          schemaVersion: "2.0",
+          categories: {
+            ($host_key): {
+              research: $research,
+              review:   $review,
+              design:   $design,
+              workflow: $workflow,
+              executor: $executor
+            }
+          }
+        }')
+    fi
+
+    write_aimi_models_config "$_models_json"
+
+    local _config_path
+    _config_path=$(_aimi_models_config_path)
+    printf 'detect-models: wrote %s table to %s\n' "$_host_key" "$_config_path" >&2
+    printf 'detect-models: re-run on the other host to populate both claudeCode and opencode tables\n' >&2
+    printf '%s\n' "$_models_json"
+    return 0
+  fi
+
+  # ---- Available model sets per host ----------------------------------------
+  local _available_models
+  local _oc_absent=0
+
+  if _is_claude_code_host; then
+    # Claude Code: short aliases only — the Task tool only accepts haiku/sonnet/opus
+    _available_models="haiku
+sonnet
+opus"
+  else
+    # OpenCode: query `opencode models`; fall back to built-in list if absent
+    if command -v opencode >/dev/null 2>&1; then
+      _available_models=$(opencode models 2>/dev/null) || _available_models=""
+    fi
+    if [ -z "${_available_models:-}" ]; then
+      _oc_absent=1
+      echo "Warning: detect-models: opencode binary not found or returned no models; using built-in Anthropic model list." >&2
+      _available_models="anthropic/claude-haiku-4-5
+anthropic/claude-sonnet-4-6
+anthropic/claude-opus-4-7"
+    fi
+  fi
+
+  # ---- Build per-category model defaults ------------------------------------
+  # research → fast (haiku), review → powerful (opus),
+  # design/workflow/executor → balanced (sonnet)
+  local _fast_model _balanced_model _powerful_model
+
+  _fast_model=$(printf '%s\n' "$_available_models" | grep -i "haiku" | head -1)
+  [ -z "$_fast_model" ] && _fast_model=$(printf '%s\n' "$_available_models" | head -1)
+
+  _balanced_model=$(printf '%s\n' "$_available_models" | grep -i "sonnet" | head -1)
+  [ -z "$_balanced_model" ] && _balanced_model=$(printf '%s\n' "$_available_models" | sed -n '2p')
+  [ -z "$_balanced_model" ] && _balanced_model=$(printf '%s\n' "$_available_models" | head -1)
+
+  _powerful_model=$(printf '%s\n' "$_available_models" | grep -i "opus" | head -1)
+  [ -z "$_powerful_model" ] && _powerful_model=$(printf '%s\n' "$_available_models" | tail -1)
+
+  # Per-category defaults: research=fast, review=powerful, design/workflow/executor=balanced
+  local _default_research="$_fast_model"
+  local _default_review="$_powerful_model"
+  local _default_design="$_balanced_model"
+  local _default_workflow="$_balanced_model"
+  local _default_executor="$_balanced_model"
+
+  # ---- Per-category model assignment ----------------------------------------
+  local _model_research="$_default_research"
+  local _model_review="$_default_review"
+  local _model_design="$_default_design"
+  local _model_workflow="$_default_workflow"
+  local _model_executor="$_default_executor"
+
+  if [ -t 0 ]; then
+    # stdin is a TTY — prompt once per category for a concrete model id
+    local _prompt_models
+    _prompt_models=$(printf '%s\n' "$_available_models" | tr '\n' '|' | sed 's/|$//')
+
+    _prompt_category() {
+      local cat="$1"
+      local default="$2"
+      local answer
+      printf 'Category %s — model [%s] (default: %s): ' "$cat" "$_prompt_models" "$default" >&2
+      read -r answer </dev/tty
+      answer=$(printf '%s' "$answer" | tr -d '[:space:]')
+      # Validate against available models; fall back to default on empty or invalid input
+      if [ -z "$answer" ]; then
+        printf '%s' "$default"
+      elif printf '%s\n' "$_available_models" | grep -qxF "$answer"; then
+        printf '%s' "$answer"
+      else
+        printf '%s' "$default"
+      fi
+    }
+
+    _model_research=$(_prompt_category "research" "$_default_research")
+    _model_review=$(_prompt_category "review"    "$_default_review")
+    _model_design=$(_prompt_category "design"    "$_default_design")
+    _model_workflow=$(_prompt_category "workflow"  "$_default_workflow")
+    _model_executor=$(_prompt_category "executor"  "$_default_executor")
+  fi
+
+  # ---- Assemble the models.json document (v2.0 schema) ----------------------
+  local _models_json
+  _models_json=$(jq -n \
+    --arg host_key  "$_host_key" \
+    --arg research  "$_model_research" \
+    --arg review    "$_model_review" \
+    --arg design    "$_model_design" \
+    --arg workflow  "$_model_workflow" \
+    --arg executor  "$_model_executor" \
+    '{
+      schemaVersion: "2.0",
+      categories: {
+        ($host_key): {
+          research: $research,
+          review:   $review,
+          design:   $design,
+          workflow: $workflow,
+          executor: $executor
+        }
+      }
+    }')
+
+  # ---- Atomic write ---------------------------------------------------------
+  write_aimi_models_config "$_models_json"
+
+  local _config_path
+  _config_path=$(_aimi_models_config_path)
+  printf 'detect-models: wrote %s table to %s\n' "$_host_key" "$_config_path" >&2
+  printf 'detect-models: re-run on the other host to populate both claudeCode and opencode tables\n' >&2
+  printf '%s\n' "$_models_json"
+}
+
+# Check whether the first-run model-selection prompt should be shown.
+# Echoes exactly one token to stdout:
+#   skip   — models.json already exists OR the marker file already exists
+#   prompt — neither file exists (first run, not yet configured)
+# No jq needed — pure file-existence checks.
+cmd_models_prompt_check() {
+  local config_file
+  config_file=$(_aimi_models_config_path)
+
+  # Missing config → prompt
+  if [ ! -f "$config_file" ]; then
+    echo "prompt"
+    return 0
+  fi
+
+  # Empty/unreadable file → prompt (user should re-configure)
+  local config_json
+  config_json=$(read_aimi_models_config) || config_json=""
+  if [ -z "$config_json" ]; then
+    echo "prompt"
+    return 0
+  fi
+
+  # v1.0 schema (has top-level .models OR schemaVersion != "2.0") → prompt
+  # The picker re-writes the file in v2.0 shape on next configure.
+  local _schema_ok
+  _schema_ok=$(printf '%s' "$config_json" | jq -r '
+    if (has("models") or (.schemaVersion // "") != "2.0") then "reject" else "ok" end
+  ' 2>/dev/null) || _schema_ok="reject"
+  if [ "$_schema_ok" = "reject" ]; then
+    echo "prompt"
+    return 0
+  fi
+
+  # v2.0 with current host configured (at least one category non-null) → skip.
+  # Aligns with get-current-models: if the picker would pre-fill nothing for
+  # this host, ask the user instead of silently falling back to all-inherit.
+  local host
+  if _is_claude_code_host; then
+    host="claudeCode"
+  else
+    host="opencode"
+  fi
+
+  local _has_config
+  _has_config=$(printf '%s' "$config_json" | jq -r --arg host "$host" '
+    (.categories[$host] // {}) as $h |
+    [($h.research // null), ($h.review // null), ($h.design // null),
+     ($h.workflow // null), ($h.executor // null)]
+    | map(select(. != null and . != ""))
+    | (length > 0)
+  ' 2>/dev/null) || _has_config="false"
+
+  if [ "$_has_config" = "true" ]; then
+    echo "skip"
+    return 0
+  fi
+
+  # Host not configured but config file is present — honor the per-host
+  # dismissal marker if it exists. File-missing always re-prompts (above);
+  # this branch only matters when the user kept some config but explicitly
+  # opted out for this host.
+  local marker_file
+  marker_file=$(_aimi_models_prompt_marker_path)
+  if [ -f "$marker_file" ]; then
+    echo "skip"
+  else
+    echo "prompt"
+  fi
+}
+
+# Atomically create the models first-run prompt marker file.
+# Idempotent — safe to call when the marker already exists.
+# Content: current date or a short sentinel line.
+cmd_models_prompt_dismiss() {
+  local marker_file
+  marker_file=$(_aimi_models_prompt_marker_path)
+  local marker_dir
+  marker_dir=$(dirname "$marker_file")
+
+  if ! mkdir -p "$marker_dir" 2>/dev/null; then
+    echo "Error: models-prompt-dismiss: cannot create directory: $marker_dir" >&2
+    return 1
+  fi
+
+  local tmp_file
+  tmp_file=$(mktemp "${marker_file}.XXXXXX")
+  chmod 0600 "$tmp_file"
+  printf 'models-prompt-seen: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%SZ')" > "$tmp_file"
+  if ! mv "$tmp_file" "$marker_file"; then
+    rm -f "$tmp_file" 2>/dev/null
+    echo "Error: models-prompt-dismiss: mv failed for $marker_file" >&2
+    return 1
+  fi
+  echo "models-prompt-dismiss: marker written to $marker_file"
 }
 
 # Setup branch: deterministic branch creation/checkout logic
@@ -3035,6 +3747,63 @@ COMMANDS:
                               Print resolved interactivity mode (picker|agent)
                               Returns picker by default; returns agent only when
                               --non-interactive is passed, AIMI_AGENT_MODE=true, or CI=true
+    list-models               List available models for the current host as a JSON array.
+                              Claude Code: ["opus","sonnet","haiku"].
+                              OpenCode: reads `opencode models`; falls back to built-in
+                              Anthropic list with one warning when opencode is absent.
+                              stdout is always a valid JSON array; warnings go to stderr.
+    resolve-models            Resolve configured model for each agent category.
+                              Reads ~/.config/aimi/models.json (schema v2.0) and emits
+                              a single-line JSON object with keys research, review,
+                              design, workflow, executor.
+                              Schema v2.0 shape: categories.<host>.<category> = model id.
+                              Unconfigured or fallback entries use the literal "inherit".
+                              v1.0 configs (top-level .models key or schemaVersion != "2.0")
+                              are rejected with a stderr warning; all-inherit returned.
+                              Warnings go to stderr; stdout is always valid JSON.
+    get-current-models        Emit current per-category model assignments for the
+                              active host as a JSON object with keys research, review,
+                              design, workflow, executor. Unset entries emit JSON null
+                              (not the string "inherit" returned by resolve-models) so
+                              picker UIs can pre-select sensible defaults and distinguish
+                              "not configured" from an explicit "inherit" override.
+                              v1.0 configs rejected identically to resolve-models.
+    detect-models [--research <model>] [--review <model>] [--design <model>] [--workflow <model>] [--executor <model>]
+                              Detect available models on the current host and write
+                              ~/.config/aimi/models.json (schema v2.0).
+                              Claude Code: fixed set (opus, sonnet, haiku).
+                              OpenCode: reads `opencode models`; falls back to built-in
+                              Anthropic list with one warning when opencode is absent.
+                              Category flags (--research/--review/--design/--workflow/--executor):
+                              non-interactive write mode — writes the given
+                              category-to-model assignments directly. Preserves the
+                              other host's categories sub-table when a file already exists.
+                              All five category flags must be supplied together.
+                              Interactive (stdin TTY, no flags): prompts per category,
+                              validates answer against available-model list.
+                              Non-interactive (no flags, stdin not TTY): default mapping
+                              (research=fast/haiku, review=powerful/opus,
+                              design+workflow+executor=balanced/sonnet).
+                              Emits the written JSON on stdout.
+    models-prompt-check       Check whether the model-selection prompt should be shown.
+                              Per-host decision:
+                              - prompt when the config file is missing entirely (always
+                                re-trigger after deletion, regardless of any marker)
+                              - skip when the current host (claudeCode or opencode) has
+                                at least one non-null category
+                              - skip when the file is present, the current host is
+                                unconfigured, AND the per-host dismissal marker exists
+                                (~/.config/aimi/models-prompt-seen-<host>)
+                              - prompt otherwise (file present, host unconfigured, no
+                                marker) — including v1.0 configs and empty/malformed files
+    models-prompt-dismiss     Atomically create the per-host first-run prompt marker file
+                              (~/.config/aimi/models-prompt-seen-<host> where <host> is
+                              claudeCode or opencode based on CLAUDECODE). Idempotent.
+                              Run after the user responds to the prompt on this host
+                              (regardless of their choice) so the prompt is not re-shown
+                              when the host stays unconfigured. Re-deleting models.json
+                              still re-triggers the prompt — the marker only suppresses
+                              when the file exists but the host has no config.
     setup-branch <name> --default-branch <branch> [--project <path>]
                               Create or checkout branch with deterministic logic
     clear-state               Clear all state files
@@ -3143,6 +3912,12 @@ main() {
     help|--help|-h) cmd_help; return ;;
     version) cmd_version; return ;;
     detect-interactivity) shift; cmd_detect_interactivity "$@"; return ;;
+    list-models) cmd_list_models; return ;;
+    resolve-models) shift; cmd_resolve_models "$@"; return ;;
+    get-current-models) cmd_get_current_models; return ;;
+    detect-models) shift; cmd_detect_models "$@"; return ;;
+    models-prompt-check) cmd_models_prompt_check; return ;;
+    models-prompt-dismiss) cmd_models_prompt_dismiss; return ;;
     prime-cache) cmd_prime_cache; return ;;
   esac
 

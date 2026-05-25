@@ -2,7 +2,7 @@
 
 Autonomous task execution for Claude Code with structured JSON task management.
 
-Transform implementation plans into executable user stories, then run them autonomously with full context isolation. Stories with independent dependencies execute in parallel via Team orchestration with git worktrees. Each story gets its own agent with automatic state tracking.
+Transform implementation plans into executable user stories, then run them autonomously with full context isolation. Stories with independent dependencies execute in parallel via Team orchestration with git worktrees. Each story gets its own agent with automatic state tracking. Per-category model selection lets you route research, review, design, and workflow agents to different Claude models via `~/.config/aimi/models.json`.
 
 ## Table of Contents
 
@@ -470,6 +470,16 @@ Each Task agent starts with clean context:
 - Full context window available for current story
 - Learnings stored in CLAUDE.md/AGENTS.md for persistence
 
+### Per-Category Model Configuration
+
+Route different agent categories to different Claude models via `~/.config/aimi/models.json`. Generate the initial config interactively:
+
+```bash
+aimi-cli detect-models
+```
+
+The config maps four categories (`research`, `review`, `design`, `workflow`) to logical tiers, then resolves tiers to concrete model ids per host (`claudeCode`, `opencode`). Resolved models are passed via the Task tool `model:` parameter on Claude Code; the `aimi-task` OpenCode tool provides equivalent per-spawn model selection on OpenCode. Use `aimi-cli resolve-models` to inspect the resolved ids at runtime.
+
 ### Project Guidelines Discovery
 
 Agents automatically discover and follow project conventions:
@@ -592,6 +602,7 @@ For the full version history, see [CHANGELOG.md](CHANGELOG.md).
 | Commands | 15 | Slash commands for workflow stages |
 | Skills | 17 | 3 core, 8 development/style, 4 tooling/automation, 2 disabled/reference |
 | Agents | 25 | 6 research, 15 review, 2 design, 2 workflow |
+| Tools | 1 | OpenCode custom tool: `aimi-task` (per-spawn model selection for OpenCode) |
 
 ## License
 

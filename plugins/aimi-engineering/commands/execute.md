@@ -23,6 +23,10 @@ If resolution fails, report error and STOP.
 
 **Each Bash tool call is an isolated shell — `$AIMI_CLI` does not persist.** Re-read the cache at the top of every subsequent Bash call that needs `$AIMI_CLI` or `$WORKTREE_MGR`. See the **Per-Call Resolution** section of `commands/references/cli-path-resolution.md` for the one-liner and shell guard to prepend.
 
+### Resolve Agent Models
+
+Read and follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS`. When resolution fails, treat every category as `"inherit"` and continue.
+
 ## Multi-Repo Handling
 
 This section is the single source of truth for multi-repo layout detection and per-project story routing. All call sites below reference it by name.
@@ -257,6 +261,7 @@ In a **single tool-call turn**, emit two foreground Tasks:
 ```
 Task(
     subagent_type: "general-purpose",
+    model: <AGENT_MODELS.executor when not "inherit">,
     description: "Execute frontend tasks: [frontend-file]",
     prompt: [Full execute.md flow (Steps 1–5) with:
         - WORKTREE_PATH = [frontend worktree path]
@@ -269,6 +274,7 @@ Task(
 
 Task(
     subagent_type: "general-purpose",
+    model: <AGENT_MODELS.executor when not "inherit">,
     description: "Execute backend tasks: [backend-file]",
     prompt: [Full execute.md flow (Steps 1–5) with:
         - WORKTREE_PATH = [backend worktree path]
@@ -872,6 +878,7 @@ while true:
 
         Task(
             subagent_type: "general-purpose",
+            model: <AGENT_MODELS.executor when not "inherit">,
             description: "Execute [full_story.id]: [full_story.title]",
             prompt: [story-executor SKILL.md [template] with:
                 - WORKTREE_PATH = wt.worktree_path
@@ -1043,6 +1050,7 @@ while true:
                         # 3. Spawn the reviewer in foreground (capture output)
                         DESIGN_REVIEW_OUTPUT = Task(
                             subagent_type: "aimi-engineering:design:aimi-design-implementation-reviewer",
+                            model: <AGENT_MODELS.design when not "inherit">,
                             description: "Design review: [full_story.id]",
                             prompt: "Review the implementation of [full_story.id] ([full_story.title]).
 

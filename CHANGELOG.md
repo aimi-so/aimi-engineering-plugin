@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.93.2] - 2026-05-25
+
+### Changed
+
+- First-run dismissal marker is now **per-host**. The marker file path is `~/.config/aimi/models-prompt-seen-claudeCode` or `~/.config/aimi/models-prompt-seen-opencode` depending on the active host. Picking "Manter o padrão (inherit)" on one host no longer silences the prompt on the other — each host's dismissal is independent. The legacy global marker at `~/.config/aimi/models-prompt-seen` is no longer read; existing users may see one extra prompt after upgrade (on each host where they had dismissed without configuring) and will not see it again after dismissing or configuring on that host.
+- `aimi-cli models-prompt-check` now honors the per-host marker as a tie-breaker: when the config file is present but the current host has no configured categories, `skip` is returned if the host's marker exists (explicit dismissal preserved), `prompt` otherwise. The file-missing branch still re-prompts regardless of any marker — the v1.93.0 behavior (deleting `models.json` always re-triggers the prompt) is preserved.
+- `aimi-cli models-prompt-dismiss` writes the per-host marker for the active host. Idempotent. Other host's marker is not touched.
+
+## [1.93.1] - 2026-05-25
+
+### Changed
+
+- `aimi-cli models-prompt-check` now decides on the **current host's** configured categories rather than mere file existence. Previously the check returned `skip` whenever `~/.config/aimi/models.json` existed, even if the current host's `categories.<host>` sub-table was missing or empty — which silently left users on all-inherit when they ran a command on a host they had never configured (e.g., opened Claude Code after only configuring OpenCode). Now `prompt` is returned when `get-current-models` would emit all-null for the active host (no category configured, host key absent, host key with empty `{}`, or all category values explicitly null). `skip` requires at least one category for the current host to carry a non-null model id. Schema v1.0 configs are treated as unconfigured (prompt). Empty/malformed files also prompt instead of skipping silently.
+
+## [1.93.0] - 2026-05-25
+
+### Added
+
+- `/aimi:setup-models` slash command for interactive (re)configuration of per-category model assignments at any time. Shows current values for the active host (claudeCode or opencode), then runs the same five-question picker used by the first-run prompt — with current values pre-selected as defaults so the common "tweak one category" workflow takes one keystroke per question. The picker question text is identical to the first-run prompt (Portuguese, per the existing localisation). Writes via `aimi-cli detect-models`, which validates each model id against the host's available-model list and preserves the other host's `categories.<host>` sub-table on merge.
+- `aimi-cli get-current-models` subcommand emitting current per-category model assignments for the active host as a JSON object with keys `research`, `review`, `design`, `workflow`, `executor`. Unset entries emit JSON null (not the literal `"inherit"` returned by `resolve-models`) so picker UIs can distinguish "not configured" from an explicit `"inherit"` override and pre-select sensible defaults. Schema v1.0 configs rejected identically to `resolve-models` (stderr warning, all-null on stdout).
+
+### Fixed
+
+- `aimi-cli models-prompt-check` now returns `prompt` whenever `~/.config/aimi/models.json` is missing, regardless of whether the `~/.config/aimi/models-prompt-seen` marker file exists. Previously the marker file suppressed the prompt even after the config was deleted, leaving the user silently stuck on all-inherit defaults with no way to re-trigger the prompt short of also deleting the marker. The marker is no longer read; `models-prompt-dismiss` still writes the marker for backward compatibility with callers in `install.sh` and `cli-path-resolution.md`, but the marker now has no effect on the check.
+
+## [1.92.1] - 2026-05-25
+
+### Fixed
+
+- OpenCode translation: `install.sh` now physically rewrites `Task subagent_type="aimi-engineering:CATEGORY:NAME"` invocations in command bodies to `aimi-task subagent_type="aimi-engineering:CATEGORY:NAME"`. Previously the OpenCode preamble instructed the LLM to perform this rewrite at call time, but the orchestrator sometimes ignored it and called OpenCode's native `task` tool with the plugin-namespaced string — OpenCode rejected the call with `Unknown agent type: aimi-engineering:...` because only flat agent names are registered on the OpenCode side. The body rewrite eliminates that class of error for all 25 namespaced invocations across `/aimi:plan`, `/aimi:brainstorm`, `/aimi:deepen`, `/aimi:review`, `/aimi:design:polish`, and `/aimi:validate-bug`.
+- OpenCode preamble Step 1 reworded: now describes per-spawn model selection only (the body uses `aimi-task` directly) and adds a hard prohibition against ever calling the native `task` tool with `aimi-engineering:*` subagent types — covering the remaining rare multi-line `Task(...)` form in `/aimi:execute`'s design-review block which is not eligible for the body rewrite.
+
+## [1.92.0] - 2026-05-25
+
+### Changed
+
+- `models.json` schema migrated from `1.0` to `2.0`. The two-level tier indirection (`categories.<cat> → tier`, `models.<host>.<tier> → modelId`) is replaced with direct one-level mapping (`categories.<host>.<cat> → modelId`). The top-level `.models` key is removed. Five categories are honored: `research`, `review`, `design`, `workflow`, `executor`.
+- `aimi-cli detect-models` flag set renamed: the three-tier flags `--fast` / `--balanced` / `--powerful` (all-or-nothing) are replaced with five per-category flags `--research` / `--review` / `--design` / `--workflow` / `--executor` (all five required when any is provided). The interactive picker (TTY and first-run prompt) now asks five per-category questions instead of three per-tier questions.
+- First-run prompt documentation in `commands/references/cli-path-resolution.md` and the mirrored block in `install.sh` updated to describe the five-question per-category flow.
+
+### Breaking
+
+- Existing v1.0 configs at `~/.config/aimi/models.json` are no longer honored. `aimi-cli resolve-models` detects v1.0 (presence of top-level `.models` key or `schemaVersion` other than `"2.0"`), emits a stderr warning containing `schema 1.0`, and falls back to all-inherit until the file is regenerated.
+- Action required after upgrade: re-run `aimi-cli detect-models` (interactive) or `aimi-cli detect-models --research <id> --review <id> --design <id> --workflow <id> --executor <id>` (flag mode) on each host (`claudeCode` and `opencode`) to write the v2.0 file. The writer preserves the other host's `categories.<host>` sub-table on merge.
+
+## [1.91.0] - 2026-05-25
+
+### Added
+
+- New `executor` agent category for sub-orchestrator spawns. `/aimi:execute` now resolves an `EXECUTOR_MODEL` and annotates `model: <AGENT_MODELS.executor when not "inherit">` on the three `general-purpose` Task spawns (parallel frontend/backend sub-orchestrators and per-story executor). Default tier mapping is `executor=balanced`. Users can override per-tier via `~/.config/aimi/models.json` or via the first-run picker (the `balanced` tier already covered design/workflow; executor now also maps to it by default).
+- `resolve-models` output now includes the `executor` key alongside `research`, `review`, `design`, `workflow` (five keys total). Unconfigured executor entries fall back to the literal `"inherit"`.
+- OpenCode translation: `install.sh` extracts `EXECUTOR_MODEL` from `resolve-models` and routes `Task(subagent_type="general", model: ...)` spawns through `aimi-task` so the per-call model is honored on OpenCode too. Untyped general-purpose spawns (no `model:` annotation) remain native.
+
+### Added
+
+- `aimi-cli resolve-models` — reads `~/.config/aimi/models.json` and resolves the configured model id for each agent category (`research`, `review`, `design`, `workflow`). Always emits all four category keys; uses the sentinel `inherit` when no override is configured so commands can pass it through without special-casing.
+- `aimi-cli detect-models` — interactive generator for the host-aware `~/.config/aimi/models.json` config. When stdin is a TTY, prompts per category; otherwise writes a sensible default mapping. Falls back to a built-in Anthropic default list when the `opencode` binary is not on PATH.
+- `~/.config/aimi/models.json` host-aware config: a `categories` map (category name → logical tier) plus a per-host `models` table (`claudeCode` and `opencode`) resolving tiers to concrete model ids. Includes a `schemaVersion` field following the `tasks.json` precedent.
+- Per-spawn model selection wired into the planning/research and review/execution commands (`/aimi:plan`, `/aimi:brainstorm`, `/aimi:deepen`, `/aimi:review`, `/aimi:design:polish`, `/aimi:validate-bug`, `/aimi:execute`). On Claude Code, resolved model ids are passed via the native `Task` tool `model:` parameter; the sentinel `inherit` leaves the model at host default.
+- `tools/aimi-task.ts` — OpenCode custom tool (TypeScript, loaded by the Bun runtime) that spawns subagents with an explicit `model` parameter, giving OpenCode per-spawn model selection parity with Claude Code. `install.sh` copies the tool and its `tools/package.json` companion into the OpenCode config directory and registers it in `opencode.json`. The tool regex-validates the model id before any shell-out.
+- One-time first-run prompt to configure model selection: when no `models.json` exists and no prior dismissal marker is present, commands show a single `AskUserQuestion` offering to configure model selection now or keep the default "inherit" behavior. The prompt is shown at most once (gated on interactive / picker mode only) and permanently suppressed after the user responds via `aimi-cli models-prompt-dismiss`. Two new `aimi-cli` subcommands support this: `models-prompt-check` (echoes `prompt` or `skip`) and `models-prompt-dismiss` (atomically writes `~/.config/aimi/models-prompt-seen`).
+- `aimi-cli list-models` — lists available models for the current host as a JSON array on stdout. Claude Code returns `["opus","sonnet","haiku"]`; OpenCode reads `opencode models` and falls back to the built-in Anthropic default list when the binary is absent. Used by the first-run flow so the LLM orchestrator can present real model options to the user.
+- `aimi-cli detect-models --fast <model> --balanced <model> --powerful <model>` — new non-interactive tier-flag mode: when all three flags are provided, writes `models.json` with the given tier-to-model assignments and the default category mapping (research=fast, design=balanced, workflow=balanced, review=powerful). Preserves the other host's `models` sub-table when a file already exists. The existing interactive / default-write path is unchanged.
+
+### Changed
+
+- First-run "Configurar agora" flow: model selection now happens at the LLM-orchestrator layer via `AskUserQuestion` (Claude Code) / the `question` tool (OpenCode) with three questions — one per tier (fast / balanced / powerful) — using the model list from `list-models` as picker options. The orchestrator then calls `detect-models --fast … --balanced … --powerful …` with the chosen values. Previously the flow delegated to `detect-models` in a subprocess which could never prompt interactively inside a Bash tool call.
+
 ## [1.89.0] - 2026-05-21
 
 ### Added

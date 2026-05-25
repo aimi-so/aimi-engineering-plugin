@@ -74,7 +74,11 @@ See `references/interactivity.md` for the full contract. Every question site
 below includes an agent-mode fallback note describing its specific auto-pick
 behavior.
 
-## Step 0.6: Detect Claude Design Bundle
+## Step 0.6: Resolve Agent Models
+
+Read and follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS`. When resolution fails, treat every category as `"inherit"` and continue.
+
+## Step 0.7: Detect Claude Design Bundle
 
 Extract an optional `--root <path>` flag from `$ARGUMENTS` (do not modify
 existing feature-description handling — this extraction is local to this step
@@ -111,7 +115,7 @@ Derive working-memory values from the result:
 When `bundleDetected=false`, all downstream phases degrade gracefully — no
 error, no warning, no change to existing behavior.
 
-### Step 0.6 Post-Processing: Bundle Prototype Generation Gate
+### Step 0.7 Post-Processing: Bundle Prototype Generation Gate
 
 **Check render bundle flag (at bundle-detection gate):** Immediately after deriving `bundleDetected`, check whether the topic text or any user reply so far contains `render bundle` (case-insensitive substring). If matched and not already emitted this session, set `renderBundlePending = true` and emit `render-bundle override active — regenerating prototype from specs` once to chat.
 
@@ -152,6 +156,7 @@ error, no warning, no change to existing behavior.
    Spawn the bundle prototype author agent:
    ```
    Task subagent_type="aimi-engineering:research:aimi-bundle-prototype-author"
+     [model: <AGENT_MODELS.research when not "inherit">]
      prompt: "Generate a prototype HTML for the design bundle.
               bundlePath=<bundlePath>
               viewList=<view_list as JSON array of name strings>
@@ -330,6 +335,7 @@ Spawn the selected research agents **in parallel** using the Task tool:
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
+  [model: <AGENT_MODELS.research when not "inherit">]
   prompt: "Understand existing patterns related to: [feature description].
            Look for: similar features, established patterns, CLAUDE.md guidance,
            relevant file paths, technology choices.
@@ -339,6 +345,7 @@ Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
            outputPath: .aimi/research/YYYY-MM-DD-<topic-slug>-[RUN_TS]-codebase.md"
 
 Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
+  [model: <AGENT_MODELS.research when not "inherit">]
   prompt: "Research current best practices for: [feature description].
            Look for: industry standards, community conventions, recommended
            patterns, common pitfalls, and authoritative guidance.
@@ -347,6 +354,7 @@ Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
            outputPath: .aimi/research/YYYY-MM-DD-<topic-slug>-[RUN_TS]-best-practices.md"
 
 Task subagent_type="aimi-engineering:research:aimi-design-bundle-researcher"
+  [model: <AGENT_MODELS.research when not "inherit">]
   prompt: "Analyse the Claude Design bundle to extract design intent and chat
            context relevant to: [feature description].
            bundlePath=<bundlePath>

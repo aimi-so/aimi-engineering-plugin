@@ -2,11 +2,24 @@
 name: aimi:deepen
 description: Enrich tasks.json stories with research insights
 argument-hint: "[path to tasks.json (optional)]"
+allowed-tools: Read, Write, Task, Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Bash(ls:*), Bash(jq:*), Bash(mkdir:*), Bash(date:*)
 ---
 
 # Aimi Deepen
 
 Enrich tasks.json stories directly with research insights, better acceptance criteria, and story splitting when needed.
+
+## Step 0: Resolve CLI Path and Agent Models
+
+Read `${CLAUDE_PLUGIN_ROOT}/commands/references/cli-path-resolution.md` and follow the **Resolve CLI Path** and **Version Check** sections to set `$AIMI_CLI`. Each layer is a separate Bash call.
+
+If resolution fails, report error and STOP.
+
+**Each Bash tool call is an isolated shell — `$AIMI_CLI` does not persist.** Re-read the cache at the top of every subsequent Bash call that needs `$AIMI_CLI`. See the **Per-Call Resolution** section of `commands/references/cli-path-resolution.md` for the one-liner to prepend.
+
+### Resolve Agent Models
+
+Read and follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS`. When resolution fails, treat every category as `"inherit"` and continue.
 
 ## Step 1: Locate Tasks File
 
@@ -75,6 +88,7 @@ For each pending story, spawn a research agent **in parallel**. Pass the `output
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
+  [model: <AGENT_MODELS.research when not "inherit">]
   prompt: "Find codebase patterns relevant to this story:
            Title: [story.title]
            Description: [story.description]

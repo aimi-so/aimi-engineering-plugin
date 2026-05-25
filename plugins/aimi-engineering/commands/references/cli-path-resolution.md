@@ -148,6 +148,95 @@ Cause: `$AIMI_CLI` (or `$WORKTREE_MGR`) expanded to empty in this Bash call. The
 
 Fix: add the per-call re-read one-liner at the top of the failing Bash call. If the re-read itself returns empty, Step 0 has not yet run in this session — run the full Layer 0–3 resolution first.
 
+## Resolve Agent Models
+
+After `$AIMI_CLI` is resolved and the version check passes, call `resolve-models` **once per command invocation** to obtain the category-to-model map. Re-read `$AIMI_CLI` from the cache before calling (each Bash tool call is an isolated shell):
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+AGENT_MODELS=$($AIMI_CLI resolve-models)
+```
+
+`resolve-models` always emits a single-line JSON object with exactly five keys:
+
+```json
+{"research":"<model-or-inherit>","review":"<model-or-inherit>","design":"<model-or-inherit>","workflow":"<model-or-inherit>","executor":"<model-or-inherit>"}
+```
+
+When no `models.json` is configured, every value is the literal string `"inherit"`.
+
+Store the JSON string as `AGENT_MODELS` (or as a working-memory map keyed by category) for the rest of the command invocation.
+
+### Applying the resolved model to a Task call
+
+At each `Task` spawn site, extract the model from `AGENT_MODELS` using the agent's `CATEGORY`:
+
+- For namespaced agents (`subagent_type="aimi-engineering:CATEGORY:NAME"`), use the directory category — one of `research`, `review`, `design`, `workflow`.
+- For host built-in `general-purpose` spawns used as **sub-orchestrators** by `/aimi:execute` (the parallel frontend/backend Tasks and the per-story executor), use the `executor` category.
+
+- **When the resolved value is a model string** (anything other than `"inherit"`): add a `model:` line to the Task call with that string as the value.
+- **When the resolved value is `"inherit"`**: omit the `model:` line entirely — current behavior is preserved.
+
+Example (model configured for the `research` category):
+
+```
+Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
+  model: claude-sonnet-4-5
+  prompt: "…"
+```
+
+Example (model is `"inherit"` — line omitted):
+
+```
+Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
+  prompt: "…"
+```
+
+When `AGENT_MODELS` could not be parsed or `$AIMI_CLI` was not resolved, treat every category as `"inherit"` and proceed — never abort a command because model resolution failed.
+
+### First-run configuration prompt (interactive hosts only)
+
+After `AGENT_MODELS` is resolved, check once whether the user should be offered the one-time model-selection prompt:
+
+```bash
+_aimi_interactivity=$($AIMI_CLI detect-interactivity)
+_aimi_prompt_check=$($AIMI_CLI models-prompt-check)
+```
+
+**Only** when `detect-interactivity` returns `picker` AND `models-prompt-check` returns `prompt`, show the user exactly this question via `AskUserQuestion`:
+
+> Question: "Nenhuma configuração de modelo de subagente encontrada — os agentes herdam o modelo da thread principal. Quer configurar a seleção de modelo por categoria?"
+> Options: A — "Configurar agora" ; B — "Manter o padrão (inherit)"
+
+**Option A — "Configurar agora":**
+
+The model SELECTION must happen at the LLM-orchestrator layer using the interactive picker (`AskUserQuestion`), NOT inside a bash subprocess. The bash layer's job is only to list available models and write the config from explicit choices.
+
+1. Run `$AIMI_CLI list-models` to get the host's available models as a JSON array:
+
+   ```bash
+   _aimi_available_models=$($AIMI_CLI list-models)
+   ```
+
+2. Use `AskUserQuestion` with **five questions in one call** — one per category — letting the user pick a model for each. Each question's options are the models returned by `list-models` (plus the picker's automatic "Other" for free-form input):
+
+   - "Modelo para tarefas de pesquisa/leitura (research)?" — suggested default: Claude Code → `haiku`, OpenCode → an Anthropic Haiku model id from `opencode models`
+   - "Modelo para revisão e análise (review)?" — suggested default: Claude Code → `opus`, OpenCode → an Anthropic Opus model id
+   - "Modelo para tarefas de design (design)?" — suggested default: Claude Code → `sonnet`, OpenCode → an Anthropic Sonnet model id
+   - "Modelo para tarefas de workflow (workflow)?" — suggested default: Claude Code → `sonnet`, OpenCode → an Anthropic Sonnet model id
+   - "Modelo para sub-orquestradores de execução (executor)?" — suggested default: Claude Code → `sonnet`, OpenCode → an Anthropic Sonnet model id
+
+3. Run `$AIMI_CLI detect-models --research <chosen_research> --review <chosen_review> --design <chosen_design> --workflow <chosen_workflow> --executor <chosen_executor>` with the user's picks to write the config.
+
+4. Re-run `$AIMI_CLI resolve-models` to refresh `AGENT_MODELS`.
+
+**Option B — "Manter o padrão (inherit)":** no action needed beyond dismissal.
+
+- Regardless of the choice (A or B): always run `$AIMI_CLI models-prompt-dismiss` so the prompt is never shown again.
+
+When `detect-interactivity` is not `picker` (agent-mode / CI) OR `models-prompt-check` returns `skip`, do nothing — proceed silently with the already-resolved map. The prompt is shown at most once ever.
+
 ## CWD Auto-Discovery
 
 The CLI automatically discovers the project root by walking up the directory tree from CWD looking for `.aimi/`. This means:
