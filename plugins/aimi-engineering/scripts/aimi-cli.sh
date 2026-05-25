@@ -2122,6 +2122,77 @@ cmd_resolve_models() {
   printf '%s\n' "$_result"
 }
 
+# Emit the current per-category model assignments for the active host.
+# Shape: {"research": <id|null>, "review": <id|null>, "design": <id|null>,
+#         "workflow": <id|null>, "executor": <id|null>}
+# Unlike resolve-models, unset entries emit JSON null (not the string "inherit")
+# so the /aimi:setup-models picker can distinguish "not configured" from a literal
+# "inherit" override and pre-select sensible defaults.
+# Schema v1.0 configs are rejected with the same stderr warning resolve-models emits;
+# stdout falls back to all-null on rejection or any error.
+cmd_get_current_models() {
+  check_jq
+
+  local config_file
+  config_file=$(_aimi_models_config_path)
+
+  local _fallback='{"research":null,"review":null,"design":null,"workflow":null,"executor":null}'
+
+  if [ ! -f "$config_file" ]; then
+    printf '%s\n' "$_fallback"
+    return 0
+  fi
+
+  local config_json
+  config_json=$(read_aimi_models_config) || config_json=""
+  if [ -z "$config_json" ]; then
+    echo "Warning: get-current-models: models config file is empty: $config_file" >&2
+    printf '%s\n' "$_fallback"
+    return 0
+  fi
+
+  local _schema_ok
+  _schema_ok=$(printf '%s' "$config_json" | jq -r '
+    if (has("models") or (.schemaVersion // "") != "2.0") then "reject" else "ok" end
+  ' 2>/dev/null) || _schema_ok="reject"
+  if [ "$_schema_ok" = "reject" ]; then
+    echo "Warning: get-current-models: schema 1.0 obsoleto — re-rode aimi-cli detect-models" >&2
+    printf '%s\n' "$_fallback"
+    return 0
+  fi
+
+  local host
+  if _is_claude_code_host; then
+    host="claudeCode"
+  else
+    host="opencode"
+  fi
+
+  local _result
+  _result=$(printf '%s' "$config_json" | jq -r --arg host "$host" '
+    def get_cat($cat):
+      ((.categories[$host][$cat] // null) | if . == null or . == "" then null else . end);
+    {
+      research: get_cat("research"),
+      review:   get_cat("review"),
+      design:   get_cat("design"),
+      workflow: get_cat("workflow"),
+      executor: get_cat("executor")
+    } | @json
+  ' 2>/dev/null) || {
+    echo "Warning: get-current-models: models config file is malformed JSON or failed to parse: $config_file" >&2
+    printf '%s\n' "$_fallback"
+    return 0
+  }
+
+  if [ -z "$_result" ]; then
+    printf '%s\n' "$_fallback"
+    return 0
+  fi
+
+  printf '%s\n' "$_result"
+}
+
 # List available models for the current host as a JSON array on stdout.
 # Claude Code host: fixed array ["opus","sonnet","haiku"].
 # OpenCode host: runs `opencode models` and parses its output into a JSON array.
@@ -3625,6 +3696,13 @@ COMMANDS:
                               v1.0 configs (top-level .models key or schemaVersion != "2.0")
                               are rejected with a stderr warning; all-inherit returned.
                               Warnings go to stderr; stdout is always valid JSON.
+    get-current-models        Emit current per-category model assignments for the
+                              active host as a JSON object with keys research, review,
+                              design, workflow, executor. Unset entries emit JSON null
+                              (not the string "inherit" returned by resolve-models) so
+                              picker UIs can pre-select sensible defaults and distinguish
+                              "not configured" from an explicit "inherit" override.
+                              v1.0 configs rejected identically to resolve-models.
     detect-models [--research <model>] [--review <model>] [--design <model>] [--workflow <model>] [--executor <model>]
                               Detect available models on the current host and write
                               ~/.config/aimi/models.json (schema v2.0).
@@ -3760,6 +3838,7 @@ main() {
     detect-interactivity) shift; cmd_detect_interactivity "$@"; return ;;
     list-models) cmd_list_models; return ;;
     resolve-models) shift; cmd_resolve_models "$@"; return ;;
+    get-current-models) cmd_get_current_models; return ;;
     detect-models) shift; cmd_detect_models "$@"; return ;;
     models-prompt-check) cmd_models_prompt_check; return ;;
     models-prompt-dismiss) cmd_models_prompt_dismiss; return ;;

@@ -6129,6 +6129,147 @@ FAKE_OC
 }
 
 # ============================================================================
+# get-current-models Tests
+# ============================================================================
+
+test_get_current_models_no_config() {
+  echo ""
+  echo "=== Testing get-current-models with no config file (all null) ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" get-current-models 2>/dev/null)
+
+  # Verify all five keys are JSON null (not the string "null", not "inherit")
+  local research_null review_null design_null workflow_null executor_null
+  research_null=$(printf '%s' "$output" | jq '.research == null' 2>/dev/null)
+  review_null=$(printf '%s' "$output"   | jq '.review == null'   2>/dev/null)
+  design_null=$(printf '%s' "$output"   | jq '.design == null'   2>/dev/null)
+  workflow_null=$(printf '%s' "$output" | jq '.workflow == null' 2>/dev/null)
+  executor_null=$(printf '%s' "$output" | jq '.executor == null' 2>/dev/null)
+
+  assert_eq "true" "$research_null" "get-current-models no-config: research is JSON null"
+  assert_eq "true" "$review_null"   "get-current-models no-config: review is JSON null"
+  assert_eq "true" "$design_null"   "get-current-models no-config: design is JSON null"
+  assert_eq "true" "$workflow_null" "get-current-models no-config: workflow is JSON null"
+  assert_eq "true" "$executor_null" "get-current-models no-config: executor is JSON null"
+}
+
+test_get_current_models_v2_full_config_claudecode() {
+  echo ""
+  echo "=== Testing get-current-models v2.0 full config (claudeCode host) ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+  _write_full_models_config "$tmpdir"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" get-current-models 2>/dev/null)
+
+  local research review design workflow executor
+  research=$(printf '%s' "$output" | jq -r '.research' 2>/dev/null)
+  review=$(printf '%s'   "$output" | jq -r '.review'   2>/dev/null)
+  design=$(printf '%s'   "$output" | jq -r '.design'   2>/dev/null)
+  workflow=$(printf '%s' "$output" | jq -r '.workflow' 2>/dev/null)
+  executor=$(printf '%s' "$output" | jq -r '.executor' 2>/dev/null)
+
+  assert_eq "sonnet" "$research" "get-current-models v2.0 claudeCode: research=sonnet"
+  assert_eq "opus"   "$review"   "get-current-models v2.0 claudeCode: review=opus"
+  assert_eq "sonnet" "$design"   "get-current-models v2.0 claudeCode: design=sonnet"
+  assert_eq "haiku"  "$workflow" "get-current-models v2.0 claudeCode: workflow=haiku"
+  assert_eq "haiku"  "$executor" "get-current-models v2.0 claudeCode: executor=haiku"
+}
+
+test_get_current_models_host_branch_opencode() {
+  echo ""
+  echo "=== Testing get-current-models host branch (opencode host) ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+  _write_full_models_config "$tmpdir"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE= "$CLI" get-current-models 2>/dev/null)
+
+  local research executor
+  research=$(printf '%s' "$output" | jq -r '.research' 2>/dev/null)
+  executor=$(printf '%s' "$output" | jq -r '.executor' 2>/dev/null)
+
+  assert_eq "anthropic/claude-sonnet-4-6" "$research" "get-current-models opencode: research id from opencode sub-table"
+  assert_eq "anthropic/claude-haiku-4-5"  "$executor" "get-current-models opencode: executor id from opencode sub-table"
+}
+
+test_get_current_models_partial_config_emits_null_for_unset() {
+  echo ""
+  echo "=== Testing get-current-models with partial config (unset categories emit null) ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Only research and review configured for claudeCode; the other three should be null.
+  printf '{
+  "schemaVersion": "2.0",
+  "categories": {
+    "claudeCode": {
+      "research": "sonnet",
+      "review":   "opus"
+    }
+  }
+}\n' > "$tmpdir/models.json"
+
+  local output
+  output=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" get-current-models 2>/dev/null)
+
+  local research review design_null workflow_null executor_null
+  research=$(printf '%s' "$output" | jq -r '.research' 2>/dev/null)
+  review=$(printf '%s'   "$output" | jq -r '.review'   2>/dev/null)
+  design_null=$(printf '%s'   "$output" | jq '.design == null'   2>/dev/null)
+  workflow_null=$(printf '%s' "$output" | jq '.workflow == null' 2>/dev/null)
+  executor_null=$(printf '%s' "$output" | jq '.executor == null' 2>/dev/null)
+
+  assert_eq "sonnet" "$research" "get-current-models partial: research has configured value"
+  assert_eq "opus"   "$review"   "get-current-models partial: review has configured value"
+  assert_eq "true"   "$design_null"   "get-current-models partial: design is JSON null"
+  assert_eq "true"   "$workflow_null" "get-current-models partial: workflow is JSON null"
+  assert_eq "true"   "$executor_null" "get-current-models partial: executor is JSON null"
+}
+
+test_get_current_models_v1_config_rejected() {
+  echo ""
+  echo "=== Testing get-current-models rejects v1.0 config with stderr warning ==="
+
+  local tmpdir
+  tmpdir=$(_setup_models_env)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  printf '{"schemaVersion":"1.0","models":{"claudeCode":{"fast":"haiku"}}}\n' > "$tmpdir/models.json"
+
+  local stdout stderr
+  stdout=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" get-current-models 2>/dev/null)
+  stderr=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" get-current-models 2>&1 1>/dev/null)
+
+  if printf '%s' "$stderr" | grep -q 'schema 1.0'; then
+    echo -e "${GREEN}✓${NC} get-current-models v1.0: stderr contains 'schema 1.0' warning"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} get-current-models v1.0: expected 'schema 1.0' on stderr, got: $stderr"
+    ((TESTS_FAILED++))
+  fi
+
+  local research_null executor_null
+  research_null=$(printf '%s' "$stdout" | jq '.research == null' 2>/dev/null)
+  executor_null=$(printf '%s' "$stdout" | jq '.executor == null' 2>/dev/null)
+  assert_eq "true" "$research_null" "get-current-models v1.0: stdout has research as JSON null"
+  assert_eq "true" "$executor_null" "get-current-models v1.0: stdout has executor as JSON null"
+}
+
+# ============================================================================
 # detect-models Tests
 # ============================================================================
 
@@ -7751,6 +7892,15 @@ main() {
   test_resolve_models_exact_aliases_accepted
   test_resolve_models_v1_rejected
   test_resolve_models_opencode_mtime_cache
+
+  # get-current-models tests
+  echo ""
+  echo "--- get-current-models Tests ---"
+  test_get_current_models_no_config
+  test_get_current_models_v2_full_config_claudecode
+  test_get_current_models_host_branch_opencode
+  test_get_current_models_partial_config_emits_null_for_unset
+  test_get_current_models_v1_config_rejected
 
   # list-models tests
   echo ""
