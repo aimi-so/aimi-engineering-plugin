@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.92.1] - 2026-05-25
+
+### Fixed
+
+- OpenCode translation: `install.sh` now physically rewrites `Task subagent_type="aimi-engineering:CATEGORY:NAME"` invocations in command bodies to `aimi-task subagent_type="aimi-engineering:CATEGORY:NAME"`. Previously the OpenCode preamble instructed the LLM to perform this rewrite at call time, but the orchestrator sometimes ignored it and called OpenCode's native `task` tool with the plugin-namespaced string — OpenCode rejected the call with `Unknown agent type: aimi-engineering:...` because only flat agent names are registered on the OpenCode side. The body rewrite eliminates that class of error for all 25 namespaced invocations across `/aimi:plan`, `/aimi:brainstorm`, `/aimi:deepen`, `/aimi:review`, `/aimi:design:polish`, and `/aimi:validate-bug`.
+- OpenCode preamble Step 1 reworded: now describes per-spawn model selection only (the body uses `aimi-task` directly) and adds a hard prohibition against ever calling the native `task` tool with `aimi-engineering:*` subagent types — covering the remaining rare multi-line `Task(...)` form in `/aimi:execute`'s design-review block which is not eligible for the body rewrite.
+
 ## [1.92.0] - 2026-05-25
 
 ### Changed

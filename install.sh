@@ -213,6 +213,16 @@ translate_command_body() {
   # and AIMI_PLUGIN_DIR is set by this installer for OpenCode. The <required_skills> section
   # is injected verbatim into Task prompts — no OpenCode-specific translation required.
 
+  # --- Task → aimi-task rewriting (namespaced agent calls only) ---
+  # OpenCode's native `task` tool rejects plugin-namespaced subagent_type
+  # strings like "aimi-engineering:research:aimi-codebase-researcher". The
+  # `aimi-task` tool (plugins/aimi-engineering/tools/aimi-task.ts) strips the
+  # prefix and shells out to `opencode run --agent <bare-name>`. Physically
+  # rewriting the body removes the LLM's burden of doing this rewrite on every
+  # invocation — previously the preamble told the model to translate Task →
+  # aimi-task at call time, and the model sometimes forgot.
+  body="${body//Task subagent_type=\"aimi-engineering:/aimi-task subagent_type=\"aimi-engineering:}"
+
   # --- Agent invocation preamble (only for commands referencing named agents) ---
   case "$body" in
     *'subagent_type="aimi-engineering:'*)
@@ -278,23 +288,19 @@ The model SELECTION must happen at the LLM-orchestrator layer using the question
 
 When `_AIMI_INTERACTIVITY` is not `picker` (agent-mode / CI) OR `_AIMI_PROMPT_CHECK` is `skip`, do nothing — proceed silently.
 
-### Step 1 — Spawn categorized agents via aimi-task
+### Step 1 — Per-spawn model selection
 
-When this command references agents via `Task subagent_type="aimi-engineering:CATEGORY:NAME"`, follow this pattern instead:
+The command body below uses `aimi-task subagent_type="aimi-engineering:CATEGORY:NAME"` invocations directly (rewritten at install time from the upstream `Task subagent_type=...` form). For each invocation, look up the model by CATEGORY and pass it as the `model` argument:
 
-1. Extract CATEGORY and NAME from the reference (e.g., `aimi-engineering:review:aimi-security-sentinel` -> category=review, name=aimi-security-sentinel)
-2. Look up the model for CATEGORY: research->$RESEARCH_MODEL, review->$REVIEW_MODEL, design->$DESIGN_MODEL, workflow->$WORKFLOW_MODEL
-3. Spawn via the **aimi-task** tool:
-   ```
-   aimi-task(
-     subagent_type="aimi-engineering:CATEGORY:NAME",
-     model="[model from step 2, omit if inherit]",
-     prompt="[original task prompt]"
-   )
-   ```
-   Omit the `model` argument entirely when the resolved value is `inherit`.
+- research → `$RESEARCH_MODEL`
+- review → `$REVIEW_MODEL`
+- design → `$DESIGN_MODEL`
+- workflow → `$WORKFLOW_MODEL`
+- executor → `$EXECUTOR_MODEL`
 
-For `Task(subagent_type="general", model: ...)` spawns (the parallel sub-orchestrators and per-story executor of /aimi:execute) — also route through **aimi-task** using `$EXECUTOR_MODEL` as the model, since the native `task` tool ignores per-call `model:` arguments:
+**Omit the `model` argument entirely when the resolved value is `inherit`** — do not pass `model="inherit"` literally, the spawned agent must inherit the session model.
+
+For `Task(subagent_type="general", model: ...)` spawns (the parallel sub-orchestrators and per-story executor of /aimi:execute), route through **aimi-task** using `$EXECUTOR_MODEL` as the model, since the native `task` tool ignores per-call `model:` arguments:
 
 ```
 aimi-task(
@@ -304,9 +310,11 @@ aimi-task(
 )
 ```
 
-`Task(subagent_type="general", ...)` spawns **without** a `model:` annotation (no executor category set) are left unchanged — do NOT route them through aimi-task.
+`Task(subagent_type="general", ...)` spawns **without** a `model:` annotation are left unchanged — do NOT route them through aimi-task.
 
-Run all agent Tasks in parallel as instructed by the command below.
+**HARD RULE — never call OpenCode'\''s native `task` tool with any `subagent_type` starting with `aimi-engineering:`.** OpenCode does not recognize plugin-namespaced agent names; only the `aimi-task` tool strips the prefix and routes correctly. If the command body ever shows `Task subagent_type="aimi-engineering:..."` (rare — should have been rewritten at install time), treat it as `aimi-task subagent_type="aimi-engineering:..."` instead.
+
+Run all aimi-task invocations in parallel as instructed by the command below.
 
 ---
 
