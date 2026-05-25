@@ -219,15 +219,15 @@ The model SELECTION must happen at the LLM-orchestrator layer using the interact
    _aimi_available_models=$($AIMI_CLI list-models)
    ```
 
-2. Use `AskUserQuestion` with **three questions in one call** — one per tier — letting the user pick a model for each. Each question's options are the models returned by `list-models` (plus the picker's automatic "Other" for free-form input):
+2. Use `AskUserQuestion` with **five questions in one call** — one per category — letting the user pick a model for each. Each question's options are the models returned by `list-models` (plus the picker's automatic "Other" for free-form input):
 
-   - "Modelo para tarefas leves de pesquisa/leitura (tier fast)?" — default category mapping: `research`
-   - "Modelo para tarefas balanceadas (tier balanced)?" — default category mapping: `design`, `workflow`, `executor`
-   - "Modelo para revisão/trabalho pesado (tier powerful)?" — default category mapping: `review`
+   - "Modelo para tarefas de pesquisa/leitura (research)?" — suggested default: Claude Code → `haiku`, OpenCode → an Anthropic Haiku model id from `opencode models`
+   - "Modelo para revisão e análise (review)?" — suggested default: Claude Code → `opus`, OpenCode → an Anthropic Opus model id
+   - "Modelo para tarefas de design (design)?" — suggested default: Claude Code → `sonnet`, OpenCode → an Anthropic Sonnet model id
+   - "Modelo para tarefas de workflow (workflow)?" — suggested default: Claude Code → `sonnet`, OpenCode → an Anthropic Sonnet model id
+   - "Modelo para sub-orquestradores de execução (executor)?" — suggested default: Claude Code → `sonnet`, OpenCode → an Anthropic Sonnet model id
 
-   Note: the first-run flow configures by tier with the default category mapping (research=fast, design=balanced, workflow=balanced, executor=balanced, review=powerful). Fine-grained per-category control is available by hand-editing `~/.config/aimi/models.json` directly.
-
-3. Run `$AIMI_CLI detect-models --fast <chosen_fast> --balanced <chosen_balanced> --powerful <chosen_powerful>` with the user's picks to write the config.
+3. Run `$AIMI_CLI detect-models --research <chosen_research> --review <chosen_review> --design <chosen_design> --workflow <chosen_workflow> --executor <chosen_executor>` with the user's picks to write the config.
 
 4. Re-run `$AIMI_CLI resolve-models` to refresh `AGENT_MODELS`.
 

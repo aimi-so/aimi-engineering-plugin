@@ -263,12 +263,13 @@ Only when `_AIMI_INTERACTIVITY` is `picker` AND `_AIMI_PROMPT_CHECK` is `prompt`
 The model SELECTION must happen at the LLM-orchestrator layer using the question tool, NOT inside a bash subprocess. The bash layer only lists available models and writes the config from explicit choices.
 
 1. Run `$AIMI_CLI list-models` to get the host'\''s available models as a JSON array.
-2. Use the question tool with **three questions in one call** — one per tier — letting the user pick a model for each. Each question'\''s options are the models returned by `list-models`:
-   - "Modelo para tarefas leves de pesquisa/leitura (tier fast)?" — default category mapping: `research`
-   - "Modelo para tarefas balanceadas (tier balanced)?" — default category mapping: `design`, `workflow`, `executor`
-   - "Modelo para revisão/trabalho pesado (tier powerful)?" — default category mapping: `review`
-   Note: fine-grained per-category control is available by hand-editing `~/.config/aimi/models.json` directly.
-3. Run `$AIMI_CLI detect-models --fast <chosen_fast> --balanced <chosen_balanced> --powerful <chosen_powerful>` with the user'\''s picks to write the config.
+2. Use the question tool with **five questions in one call** — one per category — letting the user pick a model for each. Each question'\''s options are the models returned by `list-models`:
+   - "Modelo para tarefas de pesquisa/leitura (research)?" — suggested default: an Anthropic Haiku model id from `opencode models`
+   - "Modelo para revisão e análise (review)?" — suggested default: an Anthropic Opus model id
+   - "Modelo para tarefas de design (design)?" — suggested default: an Anthropic Sonnet model id
+   - "Modelo para tarefas de workflow (workflow)?" — suggested default: an Anthropic Sonnet model id
+   - "Modelo para sub-orquestradores de execução (executor)?" — suggested default: an Anthropic Sonnet model id
+3. Run `$AIMI_CLI detect-models --research <chosen_research> --review <chosen_review> --design <chosen_design> --workflow <chosen_workflow> --executor <chosen_executor>` with the user'\''s picks to write the config.
 4. Re-run `$AIMI_CLI resolve-models` to refresh the model variables.
 
 **Option B — "Manter o padrão (inherit)":** no action needed beyond dismissal.
