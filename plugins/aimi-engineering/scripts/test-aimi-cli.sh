@@ -5807,6 +5807,121 @@ TASKEOF
   rm -rf "$arch_dir"
 }
 
+test_research_lookup() {
+  echo ""
+  echo "=== Testing research-lookup subcommand ==="
+
+  local rl_dir
+  rl_dir=$(mktemp -d)
+  mkdir -p "$rl_dir/.aimi" "$rl_dir/src"
+
+  # Create two source files
+  local src1="$rl_dir/src/foo.sh"
+  local src2="$rl_dir/src/bar.sh"
+  printf 'echo foo\n' > "$src1"
+  printf 'echo bar\n' > "$src2"
+
+  # Create a research file citing those source paths
+  local research_file="$rl_dir/.aimi/research.md"
+  cat > "$research_file" << 'RESEOF'
+# My Research
+
+## Summary
+Some summary text.
+
+## File References
+- src/foo.sh
+- src/bar.sh
+
+## Open Questions
+None.
+RESEOF
+
+  # --- Test 1: fresh (research file written after source files) ---
+  # Set source files to a known old time, research file to a newer time
+  touch -t 202001010000.00 "$src1" "$src2"
+  touch -t 202001020000.00 "$research_file"
+
+  local stdout exit_code
+  pushd "$rl_dir" >/dev/null
+  stdout=$("$CLI" research-lookup "$research_file" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "research-lookup: fresh file exits 0"
+  assert_contains ".aimi/research.md" "$stdout" "research-lookup: fresh file prints research path"
+
+  # --- Test 2: stale (source file newer than research) ---
+  # Set source file to a newer time than the research file
+  touch -t 202001030000.00 "$src1"
+
+  pushd "$rl_dir" >/dev/null
+  stdout=$("$CLI" research-lookup "$research_file" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "research-lookup: stale (source newer) exits 1"
+  assert_eq "" "$stdout" "research-lookup: stale produces empty stdout"
+
+  # Restore research file freshness for next tests
+  touch -t 202001040000.00 "$research_file"
+
+  # --- Test 3: missing cited path -> stale ---
+  local research_missing="$rl_dir/.aimi/research-missing.md"
+  cat > "$research_missing" << 'RESEOF'
+## File References
+- src/foo.sh
+- src/does-not-exist.sh
+RESEOF
+  touch -t 202001040000.00 "$research_missing"
+
+  local stderr_out
+  pushd "$rl_dir" >/dev/null
+  stderr_out=$("$CLI" research-lookup "$research_missing" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "research-lookup: missing cited path exits 1 (stale)"
+  assert_contains "does-not-exist.sh" "$stderr_out" "research-lookup: missing cited path logs warning"
+
+  # --- Test 4: no File References section -> stale ---
+  local research_norefs="$rl_dir/.aimi/research-norefs.md"
+  cat > "$research_norefs" << 'RESEOF'
+# Research Without File References
+
+## Summary
+No file refs here.
+RESEOF
+
+  pushd "$rl_dir" >/dev/null
+  stdout=$("$CLI" research-lookup "$research_norefs" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "research-lookup: no File References section exits 1"
+  assert_eq "" "$stdout" "research-lookup: no File References section produces empty stdout"
+
+  # --- Test 5: path outside project root -> rejected ---
+  local research_escape="$rl_dir/.aimi/research-escape.md"
+  cat > "$research_escape" << 'RESEOF'
+## File References
+- ../../etc/passwd
+RESEOF
+
+  pushd "$rl_dir" >/dev/null
+  stderr_out=$("$CLI" research-lookup "$research_escape" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "research-lookup: outside-root path rejected (exit 1)"
+  assert_contains "escapes project root" "$stderr_out" "research-lookup: outside-root path error on stderr"
+
+  # --- Test 6: missing argument -> usage on stderr, exit 1 ---
+  pushd "$rl_dir" >/dev/null
+  stderr_out=$("$CLI" research-lookup 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "research-lookup: missing arg exits 1"
+  assert_contains "Usage:" "$stderr_out" "research-lookup: missing arg shows usage on stderr"
+
+  rm -rf "$rl_dir"
+}
+
 test_detect_interactivity_agent_mode_env() {
   echo ""
   echo "=== Testing detect-interactivity with AIMI_AGENT_MODE=true ==="
@@ -8335,6 +8450,11 @@ main() {
   test_archive_task_without_prototype_paths
   test_archive_task_missing_prototype_files
   test_archive_task_both_research_and_prototype_paths
+
+  # Research-lookup tests — each creates its own isolated temp dir
+  echo ""
+  echo "--- Research Lookup Tests ---"
+  test_research_lookup
 
   # Interactivity mode detection tests
   echo ""
