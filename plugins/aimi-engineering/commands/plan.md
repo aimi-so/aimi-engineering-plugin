@@ -1132,6 +1132,18 @@ $AIMI_CLI validate-tasks
 
 Do **not** proceed to the report step until all validations succeed.
 
+## Step 4.6: Research GC (advisory, non-fatal)
+
+After all validations pass, invoke research-gc once to prune orphaned research files older than 30 days. This must run **after** Phase 4 writes metadata (so newly registered researchPaths are not pruned), and only once per session.
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI research-gc || true
+```
+
+If `research-gc` fails or prints an error, log it but continue to Step 5 — GC failure is never blocking.
+
 ## Step 5: Aimi-Branded Report
 
 ```

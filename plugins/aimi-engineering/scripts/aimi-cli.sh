@@ -3967,6 +3967,141 @@ cmd_research_lookup() {
   fi
 }
 
+# Usage: research-gc
+# Garbage-collect orphaned research files from .aimi/research/*.md.
+# A file is deleted only when BOTH conditions are true:
+#   1. It is NOT referenced by any active .aimi/tasks/*.json metadata.researchPaths
+#      AND is NOT referenced by any .aimi/brainstorms/*.md frontmatter researchPaths.
+#   2. Its mtime is older than 30 days.
+# .aimi/archive is ignored entirely.
+# Prints "Cleaned <N> orphaned research files (>30 days)" when N>0; silent when N=0.
+cmd_research_gc() {
+  local research_dir="$AIMI_DIR/research"
+
+  # Nothing to do if research dir doesn't exist
+  if [ ! -d "$research_dir" ]; then
+    return 0
+  fi
+
+  # Build the referenced-set: union of researchPaths across all active tasks/*.json
+  # plus researchPaths from all brainstorms/*.md frontmatter.
+  local referenced_set=""
+
+  # --- Source 1: .aimi/tasks/*.json metadata.researchPaths ---
+  local tasks_dir="$AIMI_DIR/tasks"
+  if [ -d "$tasks_dir" ]; then
+    while IFS= read -r rpath; do
+      [ -z "$rpath" ] && continue
+      # Normalize: strip leading ./ and collapse to a canonical relative path
+      rpath="${rpath#./}"
+      referenced_set="$referenced_set
+$rpath"
+    done < <(
+      for f in "$tasks_dir"/*.json; do
+        [ -f "$f" ] || continue
+        jq -r '.metadata.researchPaths[]? // empty' "$f" 2>/dev/null
+      done
+    )
+  fi
+
+  # --- Source 2: .aimi/brainstorms/*.md frontmatter researchPaths ---
+  local brainstorms_dir="$AIMI_DIR/brainstorms"
+  if [ -d "$brainstorms_dir" ]; then
+    for bfile in "$brainstorms_dir"/*.md; do
+      [ -f "$bfile" ] || continue
+      # Extract YAML frontmatter (lines between opening and closing ---)
+      # Parse researchPaths: list entries (lines starting with - under that key)
+      local in_front=0 past_open=0 in_rp=0
+      while IFS= read -r line; do
+        if [ "$past_open" -eq 0 ] && [ "$line" = "---" ]; then
+          past_open=1
+          in_front=1
+          continue
+        fi
+        if [ "$in_front" -eq 1 ] && [ "$line" = "---" ]; then
+          break
+        fi
+        if [ "$in_front" -eq 0 ]; then
+          # First non-frontmatter line without opening --- means no frontmatter
+          break
+        fi
+        # Inside frontmatter
+        if printf '%s\n' "$line" | grep -qE '^researchPaths\s*:'; then
+          in_rp=1
+          continue
+        fi
+        if [ "$in_rp" -eq 1 ]; then
+          # List item: lines starting with optional spaces then - followed by space
+          if printf '%s\n' "$line" | grep -qE '^\s*-\s+'; then
+            local rp_entry
+            rp_entry=$(printf '%s\n' "$line" | sed 's/^\s*-\s\+//')
+            rp_entry="${rp_entry#./}"
+            referenced_set="$referenced_set
+$rp_entry"
+          elif printf '%s\n' "$line" | grep -qE '^\s*[a-zA-Z]'; then
+            # A new key — exit researchPaths block
+            in_rp=0
+          fi
+        fi
+      done < "$bfile"
+    done
+  fi
+
+  # Compute threshold: now - 30 days in seconds
+  local now threshold
+  now=$(date +%s)
+  threshold=$((now - 30 * 86400))
+
+  local cleaned=0
+
+  # Iterate .aimi/research/*.md
+  for rfile in "$research_dir"/*.md; do
+    [ -f "$rfile" ] || continue
+
+    # Compute relative path from PROJECT_ROOT (for set membership check)
+    local rel_path
+    if [ "${rfile#/}" = "$rfile" ]; then
+      # Relative path already — but canonicalize via PROJECT_ROOT
+      rel_path="$AIMI_DIR/research/$(basename "$rfile")"
+    else
+      # Absolute — make relative to PROJECT_ROOT
+      rel_path="${rfile#"$PROJECT_ROOT/"}"
+    fi
+    rel_path="${rel_path#./}"
+
+    # Check if this file is in the referenced-set
+    local is_referenced=0
+    while IFS= read -r ref; do
+      [ -z "$ref" ] && continue
+      ref_norm="${ref#./}"
+      if [ "$ref_norm" = "$rel_path" ]; then
+        is_referenced=1
+        break
+      fi
+    done <<< "$referenced_set"
+
+    if [ "$is_referenced" -eq 1 ]; then
+      continue
+    fi
+
+    # Check mtime: only delete if older than threshold
+    local file_mtime
+    file_mtime=$(stat -c '%Y' "$rfile" 2>/dev/null || stat -f '%m' "$rfile" 2>/dev/null)
+    if [ -z "$file_mtime" ]; then
+      continue
+    fi
+
+    if [ "$file_mtime" -lt "$threshold" ]; then
+      rm -f "$rfile"
+      cleaned=$((cleaned + 1))
+    fi
+  done
+
+  if [ "$cleaned" -gt 0 ]; then
+    echo "Cleaned $cleaned orphaned research files (>30 days)"
+  fi
+}
+
 # Display help
 cmd_help() {
   cat << 'EOF'
@@ -4095,6 +4230,10 @@ COMMANDS:
                               Stale/undecidable: prints nothing, exits 1.
                               Cited path not found -> stale + stderr warning.
                               Absolute or outside-root path -> rejected (exit 1).
+    research-gc               Delete orphaned .aimi/research/*.md files not referenced by any
+                              active .aimi/tasks/*.json metadata.researchPaths or any
+                              .aimi/brainstorms/*.md frontmatter researchPaths, AND older than
+                              30 days. .aimi/archive is ignored. Silent when nothing cleaned.
     detect-design-bundle [--root <path>] [--all] [--json]
                               Detect a Claude Design handoff bundle. --root may
                               point at a bundle directory directly, or at a
@@ -4254,6 +4393,7 @@ main() {
     list-archivable)   cmd_list_archivable ;;
     archive-task)      cmd_archive_task "${2:-}" ;;
     research-lookup)   cmd_research_lookup "${2:-}" ;;
+    research-gc)       cmd_research_gc ;;
     detect-design-bundle) shift; cmd_detect_design_bundle "$@" ;;
     bundle-prototype-status)   shift; cmd_bundle_prototype_status "$@" ;;
     bundle-prototype-finalize) shift; cmd_bundle_prototype_finalize "$@" ;;

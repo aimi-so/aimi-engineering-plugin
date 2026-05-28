@@ -5922,6 +5922,139 @@ RESEOF
   rm -rf "$rl_dir"
 }
 
+test_research_gc() {
+  echo ""
+  echo "=== Testing research-gc subcommand ==="
+
+  local gc_dir
+  gc_dir=$(mktemp -d)
+  mkdir -p "$gc_dir/.aimi/research" "$gc_dir/.aimi/tasks" "$gc_dir/.aimi/brainstorms" "$gc_dir/.aimi/archive"
+
+  # --- Setup: fixed timestamps ---
+  # old_time: >30 days ago (2020-01-01)
+  # recent_time: <30 days ago (use a far-future date to guarantee "recent")
+  local old_time="202001010000.00"
+  local recent_time="209901010000.00"
+
+  # Research files
+  local orphan_old="$gc_dir/.aimi/research/orphan-old.md"
+  local orphan_recent="$gc_dir/.aimi/research/orphan-recent.md"
+  local ref_by_task="$gc_dir/.aimi/research/ref-by-task.md"
+  local ref_by_brainstorm="$gc_dir/.aimi/research/ref-by-brainstorm.md"
+  local ref_by_archive="$gc_dir/.aimi/research/ref-by-archive.md"
+
+  printf '# Orphan old\n' > "$orphan_old"
+  printf '# Orphan recent\n' > "$orphan_recent"
+  printf '# Referenced by task\n' > "$ref_by_task"
+  printf '# Referenced by brainstorm\n' > "$ref_by_brainstorm"
+  printf '# Referenced by archive (ignored)\n' > "$ref_by_archive"
+
+  # Set mtimes: all old except orphan_recent
+  touch -t "$old_time" "$orphan_old" "$ref_by_task" "$ref_by_brainstorm" "$ref_by_archive"
+  touch -t "$recent_time" "$orphan_recent"
+
+  # Active task file referencing ref_by_task
+  local task_file="$gc_dir/.aimi/tasks/2020-01-01-gc-test-tasks.json"
+  cat > "$task_file" << 'TASKEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: GC test",
+    "type": "feat",
+    "branchName": "feat/gc-test",
+    "createdAt": "2020-01-01",
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 1,
+    "researchPaths": [
+      ".aimi/research/ref-by-task.md"
+    ]
+  },
+  "userStories": []
+}
+TASKEOF
+
+  # Brainstorm file with frontmatter referencing ref_by_brainstorm
+  local brainstorm_file="$gc_dir/.aimi/brainstorms/2020-01-01-gc-brainstorm.md"
+  cat > "$brainstorm_file" << 'BSEOF'
+---
+researchPaths:
+  - .aimi/research/ref-by-brainstorm.md
+---
+
+# GC test brainstorm
+BSEOF
+
+  # Archive task referencing ref_by_archive (should be IGNORED)
+  # We put this in .aimi/archive — GC must not read it
+  mkdir -p "$gc_dir/.aimi/archive"
+  cat > "$gc_dir/.aimi/archive/2020-01-01-archived-tasks.json" << 'ARCHEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Archived",
+    "type": "feat",
+    "branchName": "feat/archived",
+    "createdAt": "2020-01-01",
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 1,
+    "researchPaths": [
+      ".aimi/research/ref-by-archive.md"
+    ]
+  },
+  "userStories": []
+}
+ARCHEOF
+
+  # Run research-gc from gc_dir
+  local stdout exit_code
+  pushd "$gc_dir" >/dev/null
+  stdout=$("$CLI" research-gc 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "research-gc: exits 0"
+
+  # --- Case 1: orphan >30d should be deleted ---
+  local orphan_old_exists="yes"
+  [ -e "$orphan_old" ] || orphan_old_exists="no"
+  assert_eq "no" "$orphan_old_exists" "research-gc: orphan >30d deleted"
+
+  # --- Case 2: orphan <30d (recent) should be preserved ---
+  local orphan_recent_exists="no"
+  [ -e "$orphan_recent" ] && orphan_recent_exists="yes"
+  assert_eq "yes" "$orphan_recent_exists" "research-gc: orphan <30d preserved"
+
+  # --- Case 3: referenced by active task should be preserved (even though old) ---
+  local ref_task_exists="no"
+  [ -e "$ref_by_task" ] && ref_task_exists="yes"
+  assert_eq "yes" "$ref_task_exists" "research-gc: referenced-by-task preserved"
+
+  # --- Case 4: referenced by brainstorm should be preserved (even though old) ---
+  local ref_brainstorm_exists="no"
+  [ -e "$ref_by_brainstorm" ] && ref_brainstorm_exists="yes"
+  assert_eq "yes" "$ref_brainstorm_exists" "research-gc: referenced-by-brainstorm preserved"
+
+  # --- Case 5: archive-referenced file not in active refs; since archive is ignored,
+  #     ref_by_archive is NOT in the referenced-set, and it IS old -> should be deleted ---
+  local ref_archive_exists="yes"
+  [ -e "$ref_by_archive" ] || ref_archive_exists="no"
+  assert_eq "no" "$ref_archive_exists" "research-gc: archive-referenced (but not active) file deleted"
+
+  # --- Case 6: stdout contains cleaned count (1 old orphan + 1 archive-ref = 2) ---
+  assert_contains "Cleaned 2 orphaned research files (>30 days)" "$stdout" "research-gc: prints cleaned count"
+
+  # --- Case 7: running again on empty dir is silent (N=0) ---
+  pushd "$gc_dir" >/dev/null
+  stdout=$("$CLI" research-gc 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "research-gc: idempotent second run exits 0"
+  assert_eq "" "$stdout" "research-gc: silent when nothing to clean"
+
+  rm -rf "$gc_dir"
+}
+
 test_detect_interactivity_agent_mode_env() {
   echo ""
   echo "=== Testing detect-interactivity with AIMI_AGENT_MODE=true ==="
@@ -8455,6 +8588,11 @@ main() {
   echo ""
   echo "--- Research Lookup Tests ---"
   test_research_lookup
+
+  # Research-gc tests — each creates its own isolated temp dir
+  echo ""
+  echo "--- Research GC Tests ---"
+  test_research_gc
 
   # Interactivity mode detection tests
   echo ""

@@ -308,6 +308,16 @@ $AIMI_CLI validate-stories
 
 Do **not** proceed to the report step until all validations succeed.
 
+## Step 5.6: Research GC (advisory, non-fatal)
+
+After all validations pass, invoke research-gc once to prune orphaned research files older than 30 days. This must run **after** Step 5 writes updated metadata (so newly registered researchPaths are not pruned), and only once per session.
+
+```bash
+$AIMI_CLI research-gc || true
+```
+
+If `research-gc` fails or prints an error, log it but continue to Step 6 — GC failure is never blocking.
+
 ## Step 6: Aimi-Branded Report
 
 ```
