@@ -120,20 +120,20 @@ Before returning results to the caller, persist full findings to a research file
 
    The body contains the complete research output (no word limit in the file).
 
-5. **Return a structured summary** to the caller, capped by `researchDepth`:
+5. **Return a pointer block** to the caller — a fenced YAML block with exactly these keys:
 
-   | researchDepth | Cap |
-   |---------------|-----|
-   | skip | ~100 words |
-   | quick | ~200 words |
-   | standard (default) | ~800 words |
-   | deep | ~1500 words |
+   ```yaml
+   research_file: .aimi/research/<filename>.md   # exact path written in step 4
+   summary:
+     - <headline finding 1>
+     - <headline finding 2>
+     - <headline finding 3>
+   sections:
+     - "## <h2 or h3 heading from the file>"
+     - "## ..."
+   ```
 
-   When `researchDepth` is not provided, default to **quick**.
-
-   The returned summary must include:
-   - Key findings (condensed)
-   - `**Research file:** .aimi/research/<filename>.md` (the exact path written)
+   `summary` must contain **exactly 3** headline bullets (compressed per `plugins/aimi-engineering/AGENTS.md` compression rules). `sections` lists every h2/h3 anchor written to the file, in document order. The full on-disk file is uncapped — only this Task return is the pointer block.
 
 6. **Safety escape:** Security findings, compliance issues, or conflicts with other researchers auto-expand beyond caps — user safety overrides brevity.
 

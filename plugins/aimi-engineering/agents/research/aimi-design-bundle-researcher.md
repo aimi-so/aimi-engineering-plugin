@@ -91,21 +91,20 @@ Include provenance on the first line of each section (or inline with each rule/i
 
    The body contains the complete 16-section research output (no word limit in the file).
 
-5. **Return a structured summary** to the caller, capped by `researchDepth`:
+5. **Return a pointer block** to the caller — a fenced YAML block with exactly these keys:
 
-   | researchDepth | Cap |
-   |---------------|-----|
-   | skip | ~100 words |
-   | quick | ~200 words |
-   | standard (default) | ~800 words |
-   | deep | ~1500 words |
+   ```yaml
+   research_file: .aimi/research/<filename>.md   # exact path written in step 4
+   summary:
+     - <headline finding 1>
+     - <headline finding 2>
+     - <headline finding 3>
+   sections:
+     - "## <h2 or h3 heading from the file>"
+     - "## ..."
+   ```
 
-   When `researchDepth` is not provided, default to **standard**.
-
-   The returned summary must include:
-   - Key findings per section (condensed)
-   - Count of open questions found
-   - `**Research file:** .aimi/research/<filename>.md` (the exact path written)
+   `summary` must contain **exactly 3** headline bullets (compressed per `plugins/aimi-engineering/AGENTS.md` compression rules). `sections` lists every h2/h3 anchor written to the file, in document order. The full on-disk file is uncapped — only this Task return is the pointer block.
 
 6. **Safety escape:** Security findings, data-privacy issues, accessibility blockers, or conflicts between spec versions auto-expand beyond caps — user safety overrides brevity.
 
