@@ -3849,6 +3849,124 @@ cmd_archive_task() {
     '{archived: {task: $task, brainstorm: (if $brainstorm == "" then null else $brainstorm end), researchCleaned: $researchCleaned, prototypeCleaned: $prototypeCleaned}}'
 }
 
+# Usage: research-lookup <path>
+# Check whether a research file is fresh relative to its cited source paths.
+# Freshness: research-file mtime >= newest mtime among existing cited source paths.
+# A cited path that does not exist -> stale (logs a warning to stderr).
+# No '## File References' section -> stale.
+# Fresh: prints the research path + exits 0.
+# Stale/undecidable: prints nothing + exits 1.
+# Missing argument: usage on stderr + exits 1.
+cmd_research_lookup() {
+  local research_path="$1"
+
+  if [ -z "$research_path" ]; then
+    echo "Usage: aimi-cli.sh research-lookup <path>" >&2
+    exit 1
+  fi
+
+  if [ ! -f "$research_path" ]; then
+    echo "Error: Research file not found: $research_path" >&2
+    exit 1
+  fi
+
+  # Resolve and validate the research file path
+  local resolved_research
+  resolved_research=$(resolve_path "$research_path")
+  validate_path_in_project "$resolved_research"
+
+  # Get the mtime (seconds since epoch) of the research file
+  local research_mtime
+  research_mtime=$(stat -c '%Y' "$resolved_research" 2>/dev/null || stat -f '%m' "$resolved_research" 2>/dev/null)
+  if [ -z "$research_mtime" ]; then
+    echo "Error: Cannot stat research file: $resolved_research" >&2
+    exit 1
+  fi
+
+  # Extract the '## File References' section: lines between the h2 header and the next h2/EOF
+  # Parse bullet list entries (lines starting with - or *)
+  local file_refs_section
+  file_refs_section=$(awk '
+    /^## File References/ { in_section=1; next }
+    /^## / && in_section { exit }
+    in_section { print }
+  ' "$resolved_research")
+
+  # If no File References section found -> stale
+  if [ -z "$file_refs_section" ]; then
+    exit 1
+  fi
+
+  # Parse bullet list: lines starting with optional whitespace then - or *
+  # Extract the path portion (strip leading bullet marker and whitespace)
+  local cited_paths
+  cited_paths=$(printf '%s\n' "$file_refs_section" | grep -E '^\s*[-*]\s+' | sed 's/^\s*[-*]\s\+//')
+
+  # If section exists but has no bullet entries -> stale
+  if [ -z "$cited_paths" ]; then
+    exit 1
+  fi
+
+  local newest_source_mtime=0
+  local stale=0
+
+  while IFS= read -r cited_path; do
+    [ -z "$cited_path" ] && continue
+
+    # Reject absolute paths outright
+    if [ "${cited_path#/}" != "$cited_path" ]; then
+      echo "Warning: Absolute path rejected in File References: $cited_path" >&2
+      stale=1
+      continue
+    fi
+
+    # Resolve relative to PROJECT_ROOT, canonicalizing any .. traversals
+    local abs_cited_path
+    if [ "$_HAS_REALPATH" -eq 1 ]; then
+      # realpath -m normalizes .. without requiring the path to exist
+      abs_cited_path=$(realpath -m "$PROJECT_ROOT/$cited_path" 2>/dev/null) || abs_cited_path="$PROJECT_ROOT/$cited_path"
+    else
+      abs_cited_path="$PROJECT_ROOT/$cited_path"
+    fi
+
+    # Validate stays within project (exit on escape attempt)
+    validate_path_in_project "$abs_cited_path"
+
+    # Check existence
+    if [ ! -e "$abs_cited_path" ]; then
+      echo "Warning: Cited source path does not exist (stale): $cited_path" >&2
+      stale=1
+      continue
+    fi
+
+    # Get mtime of the source file
+    local src_mtime
+    src_mtime=$(stat -c '%Y' "$abs_cited_path" 2>/dev/null || stat -f '%m' "$abs_cited_path" 2>/dev/null)
+    if [ -z "$src_mtime" ]; then
+      echo "Warning: Cannot stat cited path (stale): $abs_cited_path" >&2
+      stale=1
+      continue
+    fi
+
+    if [ "$src_mtime" -gt "$newest_source_mtime" ]; then
+      newest_source_mtime=$src_mtime
+    fi
+  done <<< "$cited_paths"
+
+  # If any cited path was missing or unreadable -> stale
+  if [ "$stale" -ne 0 ]; then
+    exit 1
+  fi
+
+  # Freshness check: research mtime must be >= newest source mtime
+  if [ "$research_mtime" -ge "$newest_source_mtime" ]; then
+    printf '%s\n' "$resolved_research"
+    exit 0
+  else
+    exit 1
+  fi
+}
+
 # Display help
 cmd_help() {
   cat << 'EOF'
@@ -3970,6 +4088,13 @@ COMMANDS:
     cleanup-versions          Remove old cached plugin versions, keep latest only
     list-archivable           List task files where all stories are completed/skipped (JSON array)
     archive-task <path>       Move completed task file (and linked brainstorm) to .aimi/archive/
+    research-lookup <path>    Check whether a research .md file is fresh relative to cited source
+                              paths listed under its '## File References' h2 bullet section.
+                              Freshness: research mtime >= newest mtime of cited source paths.
+                              Fresh: prints the resolved research path, exits 0.
+                              Stale/undecidable: prints nothing, exits 1.
+                              Cited path not found -> stale + stderr warning.
+                              Absolute or outside-root path -> rejected (exit 1).
     detect-design-bundle [--root <path>] [--all] [--json]
                               Detect a Claude Design handoff bundle. --root may
                               point at a bundle directory directly, or at a
@@ -4128,6 +4253,7 @@ main() {
     prime-cache)       cmd_prime_cache ;;
     list-archivable)   cmd_list_archivable ;;
     archive-task)      cmd_archive_task "${2:-}" ;;
+    research-lookup)   cmd_research_lookup "${2:-}" ;;
     detect-design-bundle) shift; cmd_detect_design_bundle "$@" ;;
     bundle-prototype-status)   shift; cmd_bundle_prototype_status "$@" ;;
     bundle-prototype-finalize) shift; cmd_bundle_prototype_finalize "$@" ;;
