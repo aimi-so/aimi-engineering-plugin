@@ -665,39 +665,6 @@ command -v agent-browser
   agent-browser --headed --session visual-follow open "$VISUAL_URL"
   ```
 
-## Step 3.4: Load Design Context
-
-Resolve `brainstormPath` from tasks metadata and extract design decisions for worker prompts:
-
-```bash
-BRAINSTORM_PATH=$(jq -r '.metadata.brainstormPath // empty' "$AIMI_ROOT/$TASKS_PATH")
-```
-
-If `BRAINSTORM_PATH` is non-empty and the file exists at `$AIMI_ROOT/$BRAINSTORM_PATH`:
-
-1. Extract the `## Design Decisions` section content (everything between `## Design Decisions` and the next `##` heading or end of file)
-2. **Sanitize** the extracted content before injection — apply the base rules from
-   `commands/references/sanitization.md`.
-3. Store the sanitized content as `DESIGN_CONTEXT`
-
-If any of these conditions fail (no `brainstormPath` in metadata, file not found, no `## Design Decisions` section, or extracted content is empty after sanitization), set `DESIGN_CONTEXT` to empty string. No error — this is optional context.
-
-## Step 3.6: Resolve Skill Injection Base Path
-
-Resolve the base directory for skill files. Mirror the CLI path resolution pattern:
-
-```bash
-if [ -n "${CLAUDECODE}" ]; then
-    # Claude Code: glob the plugin cache
-    SKILLS_BASE_DIR=$(echo ~/.claude/plugins/cache/*/aimi-engineering/*/skills 2>/dev/null | tr ' ' '\n' | head -1)
-else
-    # OpenCode: use the installed plugin dir
-    SKILLS_BASE_DIR="${AIMI_PLUGIN_DIR}/skills"
-fi
-```
-
-If the glob matches nothing (no cache entry found) or `AIMI_PLUGIN_DIR` is unset, set `SKILLS_BASE_DIR` to empty string. A missing or empty `SKILLS_BASE_DIR` causes skill loading to silently produce no output (all skill reads are skipped as "not found").
-
 ## Step 4: Wave Execution Loop
 
 ```
@@ -845,35 +812,6 @@ while true:
         project_path = project_roots[wt.group_key] if wt.group_key != "DEFAULT" else null
         project_guidelines = PROJECT_GUIDELINES_MAP[wt.group_key] if wt.group_key != "DEFAULT" else PROJECT_GUIDELINES
 
-        # Resolve required skills for this story
-        required_skills_block = ''
-        if full_story.skills is non-empty and SKILLS_BASE_DIR is non-empty:
-            aggregate_size = 0
-            skill_blocks = []
-            for skill_name in full_story.skills:
-                skill_path = "$SKILLS_BASE_DIR/[skill_name]/SKILL.md"
-                if file does not exist at skill_path:
-                    log: "skill [skill_name] not found at [skill_path] — skipped"
-                    continue
-                skill_content = read file at skill_path verbatim
-                # Tag-breakout escape: prevent wrapper-tag injection
-                skill_content = replace literal "</required_skills" with "&lt;/required_skills"
-                skill_content = replace literal "<required_skills" with "&lt;required_skills"
-                skill_blocks.append({name: skill_name, path: "skills/[skill_name]/SKILL.md", content: skill_content})
-                aggregate_size += byte_length(skill_content)
-
-            # Aggregate size cap: 100KB across all skills
-            while aggregate_size > 102400 and len(skill_blocks) > 0:
-                dropped = skill_blocks.pop()  # drop last (reverse order)
-                aggregate_size -= byte_length(dropped.content)
-                log: "skill [dropped.name] dropped — aggregate skills context exceeded 100KB"
-
-            if len(skill_blocks) > 0:
-                parts = []
-                for block in skill_blocks:
-                    parts.append("<skill name=\"[block.name]\" path=\"[block.path]\">\n[block.content]\n</skill>")
-                required_skills_block = join(parts, "\n")
-
         template = full_template if (is_first_story_in_session and story_index == 0) else compact_template
 
         Task(
@@ -884,12 +822,10 @@ while true:
                 - WORKTREE_PATH = wt.worktree_path
                 - PROJECT_PATH = project_path (only include if non-null)
                 - PROJECT_GUIDELINES = project_guidelines
-                - REQUIRED_SKILLS = required_skills_block (include <required_skills> section only if non-empty)
                 - HEADED_MODE = (do NOT include for worktree stories — visual verification runs post-merge, not inside the worktree)
                 - Omit the <visual_verification> section entirely for worktree stories
                   (the dev server cannot see worktree changes; verification runs after merge-all instead)
                 - STORY_ID = full_story.id  ← only the id; no description, no criteria, no prototype HTML
-                - DESIGN_CONTEXT = design_context (include <design_context> section only if non-empty)
                 - Do NOT modify the tasks.json file — report result (success/failure + details)
             ]
         )

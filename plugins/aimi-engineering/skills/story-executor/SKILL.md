@@ -54,7 +54,7 @@ The agent spawns fresh with no memory of previous work. If the story is too big,
 
 ## Design Bundle Fidelity Guidance
 
-Fires only when the inlined story payload includes `metadata.designBundle`. The caller (execute.md) injects the `[DESIGN_BUNDLE_CONTEXT]` XML block; the executor does not test for `designBundle` itself.
+Fires only when the story context includes `metadata.designBundle`. The worker receives bundle guidance via `designContext.bundleGuidance` in the `get-story-context` JSON; the executor reads any spec file paths cited there via the Read tool before authoring implementation code.
 
 ### Spec-aware read order
 
@@ -168,14 +168,6 @@ You are executing a single story from the tasks file.
 
 </project_guidelines>
 
-<required_skills>
-
-Apply these skill conventions in addition to project guidelines. (Section omitted when no skills are declared for this story.)
-
-[REQUIRED_SKILLS]
-
-</required_skills>
-
 <output_rules>
 
 Apply output compression rules from `AGENTS.md` (spawned-agent status updates: fragments over sentences, drop filler, preserve safety escapes).
@@ -246,11 +238,13 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 $AIMI_CLI get-story-context [STORY_ID]
 ```
-Parse the returned JSON for two top-level fields:
+Parse the returned JSON for four top-level fields:
 - `story` — contains `id`, `title`, `description`, `acceptanceCriteria`, `notes`, `tasks`, `implementation`, `verification`, `gate`
 - `metadata` — contains `prototypePaths`, `prototypeAnchor`, `branchName`, and other session metadata
+- `skills` — array of required skill blocks; treat each `.content` as additional project conventions
+- `designContext` — contains `.decisions` (design intent) and `.bundleGuidance` (may cite spec file paths)
 
-Use `story` and `metadata` for all subsequent steps. If the command fails, report failure immediately and stop.
+Use all four keys for subsequent steps. If the command fails, report failure immediately and stop.
 
 </task_pointer>
 
@@ -321,12 +315,6 @@ Visual verification is **advisory** — failures do NOT block the story commit.
 
 </previous_notes>
 
-<design_context>
-
-[DESIGN_CONTEXT]
-
-</design_context>
-
 <prototype_context>
 
 When `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, read each prototype file yourself using the Read tool.
@@ -337,14 +325,6 @@ When `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAn
 - Read all available prototypes before writing any implementation code.
 
 </prototype_context>
-
-<design_bundle_context>
-
-Design bundle fidelity guidance — spec-aware read order, translate-not-copy, match-visual-output, designTokens passthrough, component-mapping, and rule-ID citation rules (see `## Design Bundle Fidelity Guidance`). Omit when `metadata.designBundle` is absent.
-
-[DESIGN_BUNDLE_CONTEXT]
-
-</design_bundle_context>
 
 <tools>
 
@@ -368,6 +348,8 @@ All file operations MUST stay within the project boundary: PROJECT_PATH when set
 0a. **Bootstrap (FIRST ACTION):** Re-read `$AIMI_CLI` from cache (per-call re-read — see `<task_pointer>` Step 0 above), then run `$AIMI_CLI get-story-context $STORY_ID` and parse the returned JSON. Extract:
     - `story` — full story object (`id`, `title`, `description`, `acceptanceCriteria`, `notes`, `tasks`, `implementation`, `verification`, `gate`)
     - `metadata` — session metadata (`prototypePaths`, `prototypeAnchor`, `branchName`, etc.)
+    - `skills` — array of required skill blocks; for each entry, read its `.content` verbatim as additional project conventions (treat each as a required SKILL.md conventions block, in addition to project CLAUDE.md)
+    - `designContext` — read `.decisions` as design intent for any UI-touching work; if `.bundleGuidance` cites spec file paths (DesignSpec / BusinessSpec), use the Read tool to load those files before authoring implementation code
     If this command fails, report failure immediately and stop.
 0b. If `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, read each prototype file with the Read tool:
     - Resolve path as `$AIMI_ROOT/<path>` for each entry in `metadata.prototypePaths[]` and for `story.implementation.prototypeAnchor` when set
@@ -421,12 +403,6 @@ You are executing a single story from the tasks file.
 <project_guidelines>
 Follow project guidelines from CLAUDE.md/AGENTS.md. Apply output compression rules from AGENTS.md.
 </project_guidelines>
-
-<required_skills>
-Apply these skill conventions in addition to project guidelines. (Section omitted when no skills are declared for this story.)
-
-[REQUIRED_SKILLS]
-</required_skills>
 
 <project_context>
 
@@ -489,24 +465,12 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 $AIMI_CLI get-story-context [STORY_ID]
 ```
 
-Parse `{story, metadata}` from the returned JSON. If the command fails, report failure and stop.
+Parse `{story, metadata, skills, designContext}` from the returned JSON. For each entry in `skills[]`, read its `.content` verbatim as additional project conventions. Read `designContext.decisions` as design intent for UI-touching work. If `designContext.bundleGuidance` cites spec file paths (DesignSpec / BusinessSpec), use the Read tool to load those files before authoring implementation code. If the command fails, report failure and stop.
 </task_pointer>
 
 <prototype_context>
 When `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, read each prototype file with the Read tool (resolve as `$AIMI_ROOT/<path>`). Log `prototype <path> missing — skipped` for any missing file and continue. Read all available prototypes before writing implementation code.
 </prototype_context>
-
-<design_context>
-
-[DESIGN_CONTEXT]
-
-</design_context>
-
-<design_bundle_context>
-Design bundle fidelity: spec-aware read order (businessSpec → designSpec → chats → prototypes → existing components), translate-not-copy (no CDN React/Babel/Alpine/inline styles), match-visual-output, designTokens passthrough, component-mapping, rule-ID citation. Omit when `metadata.designBundle` absent.
-
-[DESIGN_BUNDLE_CONTEXT]
-</design_bundle_context>
 
 <tools>
 Use standard tools: Read, Write, Edit, Bash, Grep, Glob. Do NOT invoke these via the Skill tool.
@@ -517,7 +481,7 @@ CRITICAL: Stay within project root. Never read/write outside project boundary. W
 </project_root_boundary>
 
 <execution_flow>
-Bootstrap: re-read `$AIMI_CLI` from cache (per-call re-read one-liner — see `<task_pointer>` above), run `$AIMI_CLI get-story-context $STORY_ID`, parse `{story, metadata}`. Read prototype files from `metadata.prototypePaths[]` and `story.implementation.prototypeAnchor` via Read tool (log missing, skip). Then follow standard execution flow: read criteria → implement → test → commit. If `story.verification.strategy == "visual"` OR `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, run the Visual Source-of-Truth Protocol (V1/V2/V3) before writing code. Stage only story-related files (never `-A` or `.`). Commit format: `git commit -m "type(scope): Story title"`. Verify with `git log -1 --oneline`. On commit failure: report immediately, do not retry. Do NOT update tasks file — caller handles status. When a reference artifact is declared, run the Reference-Artifact Parity Pass before committing (see full named section above).
+Bootstrap: re-read `$AIMI_CLI` from cache (per-call re-read one-liner — see `<task_pointer>` above), run `$AIMI_CLI get-story-context $STORY_ID`, parse `{story, metadata, skills, designContext}`. For each entry in `skills[]`, read its `.content` verbatim as additional project conventions (in addition to CLAUDE.md). Read `designContext.decisions` as design intent for UI-touching work; if `designContext.bundleGuidance` cites spec file paths (DesignSpec / BusinessSpec), use the Read tool to load those files before authoring implementation code. Read prototype files from `metadata.prototypePaths[]` and `story.implementation.prototypeAnchor` via Read tool (log missing, skip). Then follow standard execution flow: read criteria → implement → test → commit. If `story.verification.strategy == "visual"` OR `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, run the Visual Source-of-Truth Protocol (V1/V2/V3) before writing code. Stage only story-related files (never `-A` or `.`). Commit format: `git commit -m "type(scope): Story title"`. Verify with `git log -1 --oneline`. On commit failure: report immediately, do not retry. Do NOT update tasks file — caller handles status. When a reference artifact is declared, run the Reference-Artifact Parity Pass before committing (see full named section above).
 </execution_flow>
 
 <on_failure>
