@@ -82,9 +82,59 @@ Validate `TOPIC_SLUG` against `^[a-z0-9][a-z0-9-]*$`. If it fails validation (em
 
 Store both values for use in Step 3.
 
-## Step 3: Research Per Story (Parallel)
+## Step 2e: Build Coverage Set
 
-For each pending story, spawn a research agent **in parallel**. Pass the `outputPath:` as a structured field so the researcher writes to the exact canonical path (agents honor caller-supplied `outputPath:` per their Output Contract):
+Read `metadata.researchPaths` from the tasks file and, if a brainstorm document exists, its `researchPaths` frontmatter key. Merge these into a **coverage set** — a flat list of research file paths that plan or brainstorm has already produced for this feature.
+
+```bash
+# From tasks.json metadata
+tasks_research_paths=$(jq -r '.metadata.researchPaths[]? // empty' <tasks-file-path>)
+
+# From brainstorm document (when metadata.brainstormPath is set)
+brainstorm_path=$(jq -r '.metadata.brainstormPath // empty' <tasks-file-path>)
+```
+
+When `brainstorm_path` is non-empty, read the brainstorm file and parse its YAML frontmatter for a `researchPaths:` list. Each entry is a path string relative to `AIMI_ROOT`. Add valid entries to the coverage set.
+
+The merged, deduplicated list of these paths is the **coverage set** for this run. Store it in working memory as `COVERAGE_PATHS`.
+
+**Legacy degrade path:** When `metadata.researchPaths` is absent from the tasks file and no brainstorm document is found (or the brainstorm has no `researchPaths` key), `COVERAGE_PATHS` is empty. In this case Step 3 behaves exactly as before this change — every pending story spawns an unconditional researcher. No error or warning is emitted for a legacy tasks file.
+
+## Step 3: Research Per Story (Reuse-Gate)
+
+For each pending story, apply the following gate before deciding whether to spawn a researcher. Spawn decisions may be made **in parallel** across all pending stories once the gate logic is resolved.
+
+### 3a: Coverage Check
+
+A story is **covered** when `COVERAGE_PATHS` contains at least one path that matches either condition:
+1. The path matches `*-<story.id>-codebase.md` (per-story codebase research written by a prior deepen run), **OR**
+2. The path ends with `-codebase.md` and does **not** contain a story-ID segment — i.e., it is a topic-level codebase research file. In this case, the story is covered only when every file in `story.implementation.files` (if present) is a subset of the file paths listed in that topic-level research file's `## File References` section.
+
+When `COVERAGE_PATHS` is empty (legacy tasks file — see Step 2e), skip the gate and proceed directly to Step 3c for every pending story.
+
+### 3b: Freshness Check
+
+For each covered story, determine the matching research path (prefer the per-story path if both conditions apply). Confirm freshness via:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" \
+           2>/dev/null || \
+           cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+"$AIMI_CLI" research-lookup <matched-research-path>
+```
+
+- **Exit 0 (fresh):** Reuse the existing file. Record `research_path_for_story[story.id] = <matched-research-path>`. This story does **not** spawn a researcher — Step 4 will read the existing file.
+- **Exit 1 (stale or file not found):** Treat as a cache miss; proceed to Step 3c for this story. Log: `[deepen] research stale for <story.id> — re-spawning`.
+
+### 3c: Spawn Scoped Researcher (on miss or stale)
+
+For stories that are uncovered or stale, spawn a codebase researcher **scoped** to the story's implementation files. Compute the per-story output path once and pass it as `outputPath:` in the prompt:
+
+```
+per_story_path = .aimi/research/YYYY-MM-DD-[TOPIC_SLUG]-[RUN_TS]-[story.id]-codebase.md
+```
+
+When a prior path for this story already exists in `COVERAGE_PATHS` (stale case), the new researcher **overwrites** that same per-story path — do **not** accumulate multiple per-story files. Use the computed `per_story_path` above (which shares the new `RUN_TS`) as the target; the old file is replaced.
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
@@ -94,6 +144,7 @@ Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
            Description: [story.description]
            Acceptance Criteria: [story.acceptanceCriteria]
            Research Depth: $RESEARCH_DEPTH
+           --paths [story.implementation.files joined as space-separated list]
 
            Look for: relevant files, existing patterns, potential conflicts,
            edge cases, and anything that would help an agent implement this.
@@ -101,11 +152,22 @@ Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
            outputPath: .aimi/research/YYYY-MM-DD-[TOPIC_SLUG]-[RUN_TS]-[story.id]-codebase.md"
 ```
 
-Every parallel agent in a single deepen invocation shares the same `YYYY-MM-DD-<TOPIC_SLUG>-<RUN_TS>-` prefix; the story ID is the per-agent discriminator. Collect all results.
+When `story.implementation.files` is absent or empty, omit the `--paths` line — the researcher scopes itself from the story context.
+
+Every parallel agent in a single deepen invocation shares the same `YYYY-MM-DD-<TOPIC_SLUG>-<RUN_TS>-` prefix; the story ID is the per-agent discriminator.
+
+### 3d: Collect Research Paths
+
+After all researcher tasks complete (or are confirmed reused), collect the resolved research path for every pending story:
+
+- **Reused story:** the fresh path returned by `research-lookup` (exit 0 printed the path to stdout).
+- **Newly spawned story:** parse the researcher's return for a pointer-block. A pointer-block is a fenced code block or inline text containing `outputPath: <path>`. When present and the path exists on disk, use that path. **When the pointer-block is missing or malformed**, fall back to the `outputPath` value that was passed in the spawn prompt (`per_story_path`). Verify the fallback path exists on disk before recording it; log a warning if neither path is found: `[deepen] warning: no research file found for <story.id> — skipping enrichment`.
+
+Record the resolved path as `research_path_for_story[story.id]` for use in Step 4.
 
 ## Step 4: Enrich Stories
 
-For each pending story, **Read** the full research file at `.aimi/research/YYYY-MM-DD-<TOPIC_SLUG>-<RUN_TS>-[story.id]-codebase.md` using the Read tool. Use both the returned agent summary and the full file content for richer enrichment.
+For each pending story, **Read** the full research file at `research_path_for_story[story.id]` (resolved in Step 3d) using the Read tool. Use both the returned agent summary and the full file content for richer enrichment. When no research path was recorded for a story (all attempts failed), enrich from story text alone and note the missing research in the story's `notes`.
 
 For each pending story, using the research results:
 
@@ -205,12 +267,14 @@ For each pending component-creation story whose title matches an entry in Design
 
 ## Step 4.5: Append `researchPaths` to Metadata
 
-Collect the paths of every research file that was successfully written in Step 3 (one per pending story, using the `YYYY-MM-DD-<TOPIC_SLUG>-<RUN_TS>-<story.id>-codebase.md` pattern). Append them to `metadata.researchPaths[]` in the tasks.json so `$AIMI_CLI archive-task` can clean them up when the tasks file is archived.
+Collect the resolved research paths from `research_path_for_story` (all entries recorded in Step 3d). This includes both **reused** paths (fresh files confirmed by `research-lookup`) and **newly written** paths (files produced by a spawned researcher this run). Append them to `metadata.researchPaths[]` in the tasks.json so `$AIMI_CLI archive-task` can clean them up when the tasks file is archived.
 
 - If `metadata.researchPaths` is absent, create it as a new array.
 - If present, append the new paths to the existing array.
-- Deduplicate the final array (no repeated entries — useful when deepen is re-run on the same tasks file).
-- Skip any story whose research file write failed — do not record paths that do not exist on disk.
+- Deduplicate the final array (no repeated entries — useful when deepen is re-run on the same tasks file). First-occurrence wins; insertion order is preserved.
+- Skip any story whose research path could not be confirmed on disk — do not record paths that do not exist.
+
+**Legacy degrade (no `metadata.researchPaths` in tasks.json and no brainstorm researchPaths):** Step 3 spawned researchers unconditionally (one per pending story). This step appends all successfully written paths exactly as before this change — no behavioral difference for legacy tasks files.
 
 ## Step 5: Write Updated Tasks File
 
