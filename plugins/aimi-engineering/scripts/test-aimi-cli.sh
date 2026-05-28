@@ -2003,6 +2003,42 @@ test_write_global_cli_cache() {
   teardown_global_cache_env
 }
 
+test_write_global_cli_cache_rejects_worktree() {
+  echo ""
+  echo "=== Testing write_global_cli_cache refuses to persist a .worktrees/ path ==="
+
+  setup_global_cache_env
+  source_cache_functions
+
+  local cache_file
+  cache_file=$(_global_cache_path)
+
+  # Seed the cache with a valid path so we can prove the guard does not clobber it.
+  write_global_cli_cache "$MOCK_CLI_PATH"
+  local before
+  before=$(cat "$cache_file")
+
+  # Attempt to cache an ephemeral worktree copy — must be a no-op success.
+  local worktree_path="/home/dev/project/.worktrees/feat-x/plugins/aimi-engineering/scripts/aimi-cli.sh"
+  write_global_cli_cache "$worktree_path"
+  local rc=$?
+  assert_eq "0" "$rc" "write_global_cli_cache: worktree path returns success (no-op)"
+
+  local after
+  after=$(cat "$cache_file")
+  assert_eq "$before" "$after" "write_global_cli_cache: cache unchanged after worktree-path write"
+
+  if [ "$after" = "$worktree_path" ]; then
+    echo -e "${RED}✗${NC} write_global_cli_cache: worktree path must NOT be persisted"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} write_global_cli_cache: worktree path not persisted"
+    ((TESTS_PASSED++))
+  fi
+
+  teardown_global_cache_env
+}
+
 test_read_global_cli_cache_valid() {
   echo ""
   echo "=== Testing read_global_cli_cache returns cached path when valid ==="
@@ -8471,6 +8507,7 @@ main() {
   echo ""
   echo "--- Global Cache Tests ---"
   test_write_global_cli_cache
+  test_write_global_cli_cache_rejects_worktree
   test_read_global_cli_cache_valid
   test_read_global_cli_cache_missing
   test_read_global_cli_cache_tampered

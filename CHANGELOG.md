@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.95.1] — 2026-05-28
+
+### Fixed
+
+- `aimi-cli.sh` — `write_global_cli_cache` no longer persists an ephemeral git-worktree path to the global cache (`~/.config/aimi/cli-path`). When `init-session` ran from a `.worktrees/` checkout (e.g. `test-aimi-cli.sh` inside a worktree, or an `/aimi:execute` wave), the worktree-local `aimi-cli.sh` path was cached globally; after the worktree was removed during merge cleanup, every later command resolved `$AIMI_CLI` to a deleted file and failed with exit 127. The write now no-ops on any path containing a `.worktrees/` segment.
+
 ## [1.95.0] — 2026-05-28
 
 ### Added

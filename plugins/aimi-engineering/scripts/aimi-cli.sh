@@ -337,8 +337,18 @@ write_aimi_models_config() {
 
 # Atomically write the CLI path to the global cache file
 # Usage: write_global_cli_cache "/path/to/aimi-cli.sh"
+# Never persists an ephemeral git-worktree copy: a path under a `.worktrees/`
+# segment is invoked from a throwaway checkout (e.g. test-aimi-cli.sh running
+# inside a worktree, or an /aimi:execute wave). Caching it globally would point
+# every later session at a file that vanishes on worktree cleanup (exit 127).
 write_global_cli_cache() {
   local path="$1"
+  case "$path" in
+    */.worktrees/*)
+      # Refuse to cache a worktree-local copy globally; treat as no-op success.
+      return 0
+      ;;
+  esac
   local cache_file
   cache_file=$(_global_cache_path)
   local cache_dir
