@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.94.1] — 2026-05-28
+
+### Changed
+
+- `story-executor/SKILL.md` — both the full and compact execution-flow templates now explicitly direct the spawned agent to follow `story.tasks[]` as the ordered implementation recipe when present, with special attention to `"Wire <X> into <Y>"` entries that encode cross-story file wiring. `acceptanceCriteria` remains the completion gate; `tasks[]` is planner guidance. Closes the planner→executor wiring gap where the planner was required to enumerate cross-story integration steps but the executor template never instructed the agent to walk them.
+
 ## [1.94.0] — 2026-05-28
 
 ### Added
