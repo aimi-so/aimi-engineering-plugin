@@ -811,6 +811,283 @@ test_get_story_context() {
   assert_stderr_contains "not found" "$stderr_output" "get-story-context US-999 shows not found error"
 }
 
+test_get_story_context_skills_present() {
+  echo ""
+  echo "=== Testing get-story-context emits skills[] when story declares skills ==="
+
+  # Create an isolated temp dir with its own .aimi layout
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  mkdir -p "$tmp_dir/.aimi/tasks"
+
+  # Create a fake skills base dir with two SKILL.md files
+  local fake_skills_base="$tmp_dir/skills"
+  mkdir -p "$fake_skills_base/story-executor"
+  mkdir -p "$fake_skills_base/plan"
+  printf 'Story executor skill content.\n' > "$fake_skills_base/story-executor/SKILL.md"
+  printf 'Plan skill content.\n' > "$fake_skills_base/plan/SKILL.md"
+
+  # Create a tasks file with a story that declares both skills
+  cat > "$tmp_dir/.aimi/tasks/9999-99-99-skills-test-tasks.json" << 'TASKSEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: skills test",
+    "type": "feat",
+    "branchName": "feat/skills-test",
+    "createdAt": "2026-05-28",
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 1
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story with skills",
+      "description": "Test story",
+      "acceptanceCriteria": ["Skills present in context"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "skills": ["story-executor", "plan"],
+      "notes": ""
+    }
+  ]
+}
+TASKSEOF
+
+  # Run CLI from $tmp_dir so find_aimi_root() discovers $tmp_dir/.aimi/
+  # CLAUDECODE must be unset so AIMI_PLUGIN_DIR is honored for skills resolution
+  local output exit_code
+  output=$(cd "$tmp_dir" && unset CLAUDECODE; AIMI_PLUGIN_DIR="$tmp_dir" "$CLI" get-story-context US-001 2>&1)
+  exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "skills_present: exits 0"
+
+  # skills array should have 2 entries
+  local skills_len
+  skills_len=$(echo "$output" | jq '.skills | length')
+  assert_eq "2" "$skills_len" "skills_present: skills array has 2 entries"
+
+  # First skill: story-executor
+  local first_name first_path first_content
+  first_name=$(echo "$output" | jq -r '.skills[0].name')
+  first_path=$(echo "$output" | jq -r '.skills[0].path')
+  first_content=$(echo "$output" | jq -r '.skills[0].content')
+  assert_eq "story-executor" "$first_name" "skills_present: skills[0].name is story-executor"
+  assert_eq "skills/story-executor/SKILL.md" "$first_path" "skills_present: skills[0].path is plugin-relative"
+  assert_contains "Story executor skill content" "$first_content" "skills_present: skills[0].content matches file"
+
+  # Second skill: plan
+  local second_name second_path
+  second_name=$(echo "$output" | jq -r '.skills[1].name')
+  second_path=$(echo "$output" | jq -r '.skills[1].path')
+  assert_eq "plan" "$second_name" "skills_present: skills[1].name is plan"
+  assert_eq "skills/plan/SKILL.md" "$second_path" "skills_present: skills[1].path is plugin-relative"
+
+  # designContext keys present
+  local has_dc
+  has_dc=$(echo "$output" | jq 'has("designContext")')
+  assert_eq "true" "$has_dc" "skills_present: designContext key present"
+
+  rm -rf "$tmp_dir"
+}
+
+test_get_story_context_skills_absent() {
+  echo ""
+  echo "=== Testing get-story-context emits skills:[] when story has no skills ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  # The standard fixture has stories with no skills field
+  local output exit_code
+  output=$("$CLI" get-story-context US-001 2>&1)
+  exit_code=$?
+  assert_exit_code "0" "$exit_code" "skills_absent: exits 0"
+
+  local skills_val
+  skills_val=$(echo "$output" | jq '.skills')
+  assert_eq "[]" "$skills_val" "skills_absent: skills key is empty array"
+
+  # designContext is still present
+  local has_dc decisions bundleGuidance
+  has_dc=$(echo "$output" | jq 'has("designContext")')
+  assert_eq "true" "$has_dc" "skills_absent: designContext key present"
+  decisions=$(echo "$output" | jq -r '.designContext.decisions')
+  assert_eq "" "$decisions" "skills_absent: designContext.decisions is empty string"
+  bundleGuidance=$(echo "$output" | jq -r '.designContext.bundleGuidance')
+  assert_eq "" "$bundleGuidance" "skills_absent: designContext.bundleGuidance is empty string"
+}
+
+test_get_story_context_skills_cap_drop() {
+  echo ""
+  echo "=== Testing get-story-context 100KB cap: drops last skills in reverse-insertion order ==="
+
+  # Create isolated temp dir
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  mkdir -p "$tmp_dir/.aimi/tasks"
+
+  # Create 3 synthetic skill files: 40KB + 40KB + 40KB = 120KB > 100KB
+  local fake_skills_base="$tmp_dir/skills"
+  mkdir -p "$fake_skills_base/alpha"
+  mkdir -p "$fake_skills_base/beta"
+  mkdir -p "$fake_skills_base/gamma"
+
+  # Generate ~40KB of content per file (40960 chars)
+  python3 -c "print('x' * 40960)" > "$fake_skills_base/alpha/SKILL.md"
+  python3 -c "print('y' * 40960)" > "$fake_skills_base/beta/SKILL.md"
+  python3 -c "print('z' * 40960)" > "$fake_skills_base/gamma/SKILL.md"
+
+  cat > "$tmp_dir/.aimi/tasks/9999-99-99-cap-test-tasks.json" << 'TASKSEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: cap test",
+    "type": "feat",
+    "branchName": "feat/cap-test",
+    "createdAt": "2026-05-28",
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 1
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Cap test story",
+      "description": "Test 100KB cap",
+      "acceptanceCriteria": ["Cap enforced"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "skills": ["alpha", "beta", "gamma"],
+      "notes": ""
+    }
+  ]
+}
+TASKSEOF
+
+  # Capture stdout and stderr separately; cd to $tmp_dir so find_aimi_root() uses it
+  local output stderr_output exit_code
+  local stderr_file
+  stderr_file=$(mktemp)
+  output=$(cd "$tmp_dir" && unset CLAUDECODE; AIMI_PLUGIN_DIR="$tmp_dir" "$CLI" get-story-context US-001 2>"$stderr_file")
+  exit_code=$?
+  stderr_output=$(cat "$stderr_file" 2>/dev/null || true)
+  rm -f "$stderr_file"
+
+  assert_exit_code "0" "$exit_code" "skills_cap_drop: exits 0"
+
+  # stderr must contain the cap warning
+  assert_stderr_contains "dropped — aggregate skills context exceeded 100KB" "$stderr_output" \
+    "skills_cap_drop: stderr contains cap drop warning"
+
+  # The dropped entry is gamma (last in insertion order = last in story.skills[])
+  assert_contains "gamma" "$stderr_output" "skills_cap_drop: gamma is reported as dropped"
+
+  # alpha and beta should be in the output (first two skills, totalling ~80KB ≤ 100KB)
+  local skills_len
+  skills_len=$(echo "$output" | jq '.skills | length')
+  # At least alpha should survive; beta may or may not depending on exact sizes
+  local alpha_present
+  alpha_present=$(echo "$output" | jq '[.skills[].name] | index("alpha") != null')
+  assert_eq "true" "$alpha_present" "skills_cap_drop: alpha survives cap enforcement"
+
+  # gamma should NOT be in the output
+  local gamma_present
+  gamma_present=$(echo "$output" | jq '[.skills[].name] | index("gamma") != null')
+  assert_eq "false" "$gamma_present" "skills_cap_drop: gamma dropped from output"
+
+  rm -rf "$tmp_dir"
+}
+
+test_get_story_context_design_context() {
+  echo ""
+  echo "=== Testing get-story-context populates designContext from brainstormPath + designBundle ==="
+
+  # Create isolated temp dir
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  mkdir -p "$tmp_dir/.aimi/tasks"
+  mkdir -p "$tmp_dir/.aimi/brainstorms"
+
+  # Create a brainstorm file with a ## Design Decisions section
+  cat > "$tmp_dir/.aimi/brainstorms/test-brainstorm.md" << 'BRAINSTORMEOF'
+# Brainstorm: Test Feature
+
+## Overview
+
+Some overview text.
+
+## Design Decisions
+
+Use approach A over approach B because it is simpler.
+Prefer jq for JSON manipulation to avoid bash hallucination.
+
+## Next Steps
+
+Do the implementation.
+BRAINSTORMEOF
+
+  # Create tasks file with brainstormPath and designBundle
+  cat > "$tmp_dir/.aimi/tasks/9999-99-99-dc-test-tasks.json" << 'TASKSEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: design context test",
+    "type": "feat",
+    "branchName": "feat/dc-test",
+    "createdAt": "2026-05-28",
+    "planPath": null,
+    "brainstormPath": ".aimi/brainstorms/test-brainstorm.md",
+    "maxConcurrency": 1,
+    "designBundle": {
+      "root": ".aimi/design/my-bundle",
+      "designSpec": ".aimi/design/my-bundle/design-spec.md",
+      "businessSpec": ".aimi/design/my-bundle/business-spec.md"
+    }
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Design context story",
+      "description": "Test design context",
+      "acceptanceCriteria": ["designContext populated"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "skills": [],
+      "notes": ""
+    }
+  ]
+}
+TASKSEOF
+
+  # cd to $tmp_dir so find_aimi_root() picks up $tmp_dir/.aimi/
+  local output exit_code
+  output=$(cd "$tmp_dir" && unset CLAUDECODE; AIMI_PLUGIN_DIR="$tmp_dir" "$CLI" get-story-context US-001 2>&1)
+  exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "design_context: exits 0"
+
+  # designContext.decisions should be non-empty and contain key text
+  local decisions
+  decisions=$(echo "$output" | jq -r '.designContext.decisions')
+  assert_contains "approach A" "$decisions" "design_context: decisions contains expected text"
+  assert_contains "jq for JSON" "$decisions" "design_context: decisions contains second decision"
+
+  # designContext.bundleGuidance should be non-empty and contain spec paths
+  local bundle_guidance
+  bundle_guidance=$(echo "$output" | jq -r '.designContext.bundleGuidance')
+  assert_contains "Apply design bundle fidelity rules" "$bundle_guidance" \
+    "design_context: bundleGuidance contains fidelity preamble"
+  assert_contains "design-spec.md" "$bundle_guidance" "design_context: bundleGuidance contains designSpec path"
+  assert_contains "business-spec.md" "$bundle_guidance" "design_context: bundleGuidance contains businessSpec path"
+
+  rm -rf "$tmp_dir"
+}
+
 test_reset_orphaned_empty() {
   echo ""
   echo "=== Testing reset-orphaned with no orphans ==="
@@ -7874,6 +8151,10 @@ main() {
   test_status_uses_user_stories_key
   test_story_id_not_found
   test_get_story_context
+  test_get_story_context_skills_present
+  test_get_story_context_skills_absent
+  test_get_story_context_skills_cap_drop
+  test_get_story_context_design_context
   test_reset_orphaned_empty
   test_reset_orphaned_with_orphans
   test_stale_state_warning

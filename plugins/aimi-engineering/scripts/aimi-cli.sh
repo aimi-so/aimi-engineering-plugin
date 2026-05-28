@@ -766,7 +766,32 @@ cmd_get_story() {
   jq --arg id "$story_id" '.userStories[] | select(.id == $id)' "$tasks_file"
 }
 
-# Get story context (story slice + metadata) by ID — for subagent self-brief
+# Resolve the skills base directory for the current host.
+# Returns the absolute path to the skills/ directory, or empty string when unresolvable.
+# Claude Code (CLAUDECODE=1): glob ~/.claude/plugins/cache/*/aimi-engineering/*/skills, take first.
+# OpenCode (AIMI_PLUGIN_DIR set, CLAUDECODE unset): $AIMI_PLUGIN_DIR/skills.
+# Otherwise: empty string — caller emits skills: [] silently.
+_resolve_skills_base_dir() {
+  if _is_claude_code_host; then
+    local config_dir
+    config_dir=$(_claude_config_dir)
+    local skills_dir
+    skills_dir=$(bash -c "ls -d \"$config_dir\"/plugins/cache/*/aimi-engineering/*/skills 2>/dev/null | head -1")
+    printf '%s\n' "${skills_dir:-}"
+    return 0
+  fi
+  if [ -n "${AIMI_PLUGIN_DIR:-}" ]; then
+    local plugin_dir
+    plugin_dir=$(_validate_plugin_dir)
+    if [ -n "$plugin_dir" ]; then
+      printf '%s\n' "$plugin_dir/skills"
+      return 0
+    fi
+  fi
+  printf ''
+}
+
+# Get story context (story slice + metadata + skills + designContext) by ID — for subagent self-brief
 cmd_get_story_context() {
   local story_id="$1"
   local tasks_file
@@ -781,7 +806,134 @@ cmd_get_story_context() {
   tasks_file=$(get_tasks_file)
   validate_story_exists "$story_id" "$tasks_file"
 
-  jq --arg id "$story_id" '{story: (.userStories[] | select(.id == $id)), metadata: .metadata}' "$tasks_file"
+  # ---- Resolve skills ----
+  local skills_base_dir
+  skills_base_dir=$(_resolve_skills_base_dir)
+
+  # Read skill names declared by this story
+  local skill_names_json
+  skill_names_json=$(jq -r --arg id "$story_id" \
+    '(.userStories[] | select(.id == $id) | .skills // []) | @json' "$tasks_file")
+
+  # Build skills array: name, path, content
+  # We accumulate in a bash array of jq --arg entries, then assemble with jq.
+  local skill_names_arr
+  mapfile -t skill_names_arr < <(echo "$skill_names_json" | jq -r '.[]' 2>/dev/null)
+
+  # Collect valid skill entries and track aggregate char count
+  local skill_names_collected=()
+  local skill_contents_collected=()
+  local skill_aggregate_chars=0
+
+  local skill_name
+  for skill_name in "${skill_names_arr[@]+"${skill_names_arr[@]}"}"; do
+    local skill_rel_path="skills/${skill_name}/SKILL.md"
+    if [ -z "$skills_base_dir" ]; then
+      # No resolution — skip silently (aggregate will be empty)
+      continue
+    fi
+    local skill_abs_path="${skills_base_dir}/${skill_name}/SKILL.md"
+    if [ ! -f "$skill_abs_path" ]; then
+      echo "skill ${skill_name} not found at ${skill_rel_path} — skipped" >&2
+      continue
+    fi
+    # Read content and apply tag-breakout escapes before jq ingestion
+    local skill_content
+    skill_content=$(sed \
+      -e 's|</required_skills|\&lt;/required_skills|g' \
+      -e 's|<required_skills|\&lt;required_skills|g' \
+      "$skill_abs_path")
+    skill_names_collected+=("$skill_name")
+    skill_contents_collected+=("$skill_content")
+    (( skill_aggregate_chars += ${#skill_content} ))
+  done
+
+  # Apply 100KB aggregate cap: pop in reverse-of-insertion order until aggregate <= 102400
+  local cap=102400
+  while [ "${skill_aggregate_chars}" -gt "${cap}" ] && [ "${#skill_names_collected[@]}" -gt 0 ]; do
+    local last_idx=$(( ${#skill_names_collected[@]} - 1 ))
+    local dropped_name="${skill_names_collected[$last_idx]}"
+    local dropped_len="${#skill_contents_collected[$last_idx]}"
+    echo "skill ${dropped_name} dropped — aggregate skills context exceeded 100KB" >&2
+    unset 'skill_names_collected[$last_idx]'
+    unset 'skill_contents_collected[$last_idx]'
+    skill_names_collected=("${skill_names_collected[@]+"${skill_names_collected[@]}"}")
+    skill_contents_collected=("${skill_contents_collected[@]+"${skill_contents_collected[@]}"}")
+    (( skill_aggregate_chars -= dropped_len ))
+  done
+
+  # Build skills JSON array using jq with null input
+  local skills_json='[]'
+  local i
+  for (( i=0; i<${#skill_names_collected[@]}; i++ )); do
+    local sname="${skill_names_collected[$i]}"
+    local scontent="${skill_contents_collected[$i]}"
+    local spath="skills/${sname}/SKILL.md"
+    skills_json=$(jq -n \
+      --argjson existing "$skills_json" \
+      --arg name "$sname" \
+      --arg path "$spath" \
+      --arg content "$scontent" \
+      '$existing + [{name: $name, path: $path, content: $content}]')
+  done
+
+  # ---- Resolve designContext ----
+  local brainstorm_path_rel decisions_text=""
+  brainstorm_path_rel=$(jq -r --arg id "$story_id" '.metadata.brainstormPath // empty' "$tasks_file")
+
+  if [ -n "$brainstorm_path_rel" ]; then
+    # Resolve relative to PROJECT_ROOT (absolute if already absolute)
+    local brainstorm_abs
+    if [ "${brainstorm_path_rel#/}" = "$brainstorm_path_rel" ]; then
+      brainstorm_abs="${PROJECT_ROOT}/${brainstorm_path_rel}"
+    else
+      brainstorm_abs="$brainstorm_path_rel"
+    fi
+    if [ -f "$brainstorm_abs" ]; then
+      # Extract the ## Design Decisions section: text from that heading up to (but not
+      # including) the next ## heading (or end of file).
+      decisions_text=$(awk '
+        /^## Design Decisions/ { in_section=1; next }
+        in_section && /^## / { exit }
+        in_section { print }
+      ' "$brainstorm_abs" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | \
+        awk 'NF || (prev_nf) {print; prev_nf=NF}' | \
+        sed '/^$/d' | head -c 65536)
+    fi
+  fi
+
+  # bundleGuidance
+  local bundle_guidance=""
+  local design_bundle_json
+  design_bundle_json=$(jq -r '.metadata.designBundle // empty' "$tasks_file" 2>/dev/null)
+  if [ -n "$design_bundle_json" ]; then
+    local bundle_root design_spec business_spec
+    bundle_root=$(jq -r '.metadata.designBundle.root // "(none)"' "$tasks_file")
+    design_spec=$(jq -r '.metadata.designBundle.designSpec // "(none)"' "$tasks_file")
+    business_spec=$(jq -r '.metadata.designBundle.businessSpec // "(none)"' "$tasks_file")
+    bundle_guidance="Apply design bundle fidelity rules. Read the spec files cited below using the Read tool before authoring implementation code.
+
+Bundle root: ${bundle_root}
+DesignSpec: ${design_spec}
+BusinessSpec: ${business_spec}"
+  fi
+
+  # ---- Emit final JSON ----
+  jq -n \
+    --arg id "$story_id" \
+    --argjson skills "$skills_json" \
+    --arg decisions "$decisions_text" \
+    --arg bundleGuidance "$bundle_guidance" \
+    --slurpfile tf "$tasks_file" \
+    '{
+      story: ($tf[0].userStories[] | select(.id == $id)),
+      metadata: $tf[0].metadata,
+      skills: $skills,
+      designContext: {
+        decisions: $decisions,
+        bundleGuidance: $bundleGuidance
+      }
+    }'
 }
 
 # Mark a story as in-progress
@@ -3739,7 +3891,10 @@ COMMANDS:
     reset-orphaned            Reset all in_progress stories to failed
     get-branch                Get branchName from metadata
     get-story <id>            Get full story object by ID (read-only)
-    get-story-context <id>    Get story slice + metadata block as JSON (for subagent self-brief)
+    get-story-context <id>    Get story slice + metadata + skills[] + designContext as JSON
+                              (for subagent self-brief). Output keys: story, metadata, skills,
+                              designContext. skills[] contains {name, path, content} per
+                              declared skill. designContext contains {decisions, bundleGuidance}.
     get-state                 Get all state files as JSON
     detect-default-branch [--project <path>]
                               Detect and cache the repository's default branch
@@ -3888,7 +4043,8 @@ EXAMPLES:
     # Fetch a specific story by ID
     $AIMI_CLI get-story US-003
 
-    # Fetch story slice + metadata block (for subagent self-brief)
+    # Fetch story slice + metadata + skills + designContext (for subagent self-brief)
+    # Output: {story, metadata, skills[{name,path,content}], designContext{decisions,bundleGuidance}}
     $AIMI_CLI get-story-context US-003
 
     # Cascade skip after failure
