@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.95.0] — 2026-05-28
+
+### Added
+
+- `research-lookup <path>` CLI subcommand — content-aware freshness check for research `.md` files. Compares the research file's mtime against the newest mtime of all source paths listed under its `## File References` h2 bullet section. Prints the resolved path and exits 0 when fresh; prints nothing and exits 1 (stale) when any cited source is newer, missing, or outside the project root. Consumed by `plan` and `deepen` before spawning researchers.
+- `research-gc` CLI subcommand — prunes orphaned `.aimi/research/*.md` files older than 30 days that are not referenced by any active `.aimi/tasks/*.json` `metadata.researchPaths` or any `.aimi/brainstorms/*.md` frontmatter `researchPaths`. Called opportunistically (once per session) from `plan` and `deepen` to prevent unbounded accumulation. Silent when nothing is removed.
+
+### Changed
+
+- `plan` / `brainstorm` — reusedResearch map generalized from a flat lookup to a `{kind → path}` map covering all four research kinds (`codebase`, `learnings`, `best-practices`, `framework-docs`). Both commands now populate `metadata.researchPaths` on the tasks.json after writing, closing the orphan gap that previously left per-run research files untracked.
+- `deepen` Step 3 reuse-gate — before spawning per-story researchers, deepen now checks `research-lookup` freshness on any existing per-story research file. A fresh hit skips the re-research spawn entirely; a stale or missing file triggers a targeted researcher with `--paths` narrowed to `story.implementation.files`.
+- Research agents (`aimi-codebase-researcher`, `aimi-learnings-researcher`, `aimi-best-practices-researcher`, `aimi-framework-docs-researcher`) — output a pointer block (`{outputPath, researchKind, sourcePaths[]}`) instead of restating a summary in the agent response. Callers resolve the actual content from disk via the pointer; reduces orchestrator working-memory and eliminates cross-agent summary drift.
+
 ## [1.94.1] — 2026-05-28
 
 ### Changed

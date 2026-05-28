@@ -83,6 +83,14 @@ Learnings are stored in project files (not separate progress log):
 - `CLAUDE.md` (root) - Project-wide patterns and conventions
 - `AGENTS.md` (plugin-level) - Single source of truth for spawned agent output compression rules; portable across tools (Claude Code, OpenCode). Per-directory AGENTS.md files in skills/ extend these base rules with domain-specific patterns
 
+## aimi-cli.sh Research Subcommands
+
+Two CLI subcommands manage the research lifecycle. Both are internal — consumed by `plan` and `deepen` commands, not invoked by users directly.
+
+- **`research-lookup <path>`** — Content-aware freshness check. Reads the `## File References` h2 bullet section of the given research `.md` file, compares its mtime against the newest mtime of every cited source path, and exits 0 (fresh) or 1 (stale). Cited paths that are missing or outside the project root are treated as stale. Used by `plan`/`deepen` before deciding whether to spawn a researcher.
+
+- **`research-gc`** — Orphan garbage collector. Deletes `.aimi/research/*.md` files older than 30 days that are not referenced by any active `.aimi/tasks/*.json` `metadata.researchPaths` or any `.aimi/brainstorms/*.md` frontmatter `researchPaths`. Called opportunistically once per `plan`/`deepen` session. Silent when nothing is removed.
+
 ## Tasks File Schema
 
 > Key fields: `schemaVersion` ("3.3"), `metadata{title,type,branchName,researchDepth,maxConcurrency,researchPaths[](optional),prototypePaths[](optional),frontendOnly(optional),backendSpec(optional:{endpoints[],dataModels[],businessRules[],businessContext{summary,userRoles[],constraints[],assumptions[],successCriteria[]}})}`, `userStories[]{id(US-NNN),title,description,acceptanceCriteria,status,dependsOn,project,wave,tasks[](optional,max50,each≤5000chars),implementation{files,approach,verify},verification{strategy,status,url,expect},gate{type,status,prompt,options}}`
