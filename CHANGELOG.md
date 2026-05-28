@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.94.0] — 2026-05-28
+
+### Added
+
+- `get-story-context` CLI command now emits two new top-level keys alongside `story` and `metadata`:
+  - `skills` — array of `{name, path, content}` objects assembled from each story's `skills[]` declarations, with tag-breakout escapes (`</required_skills` → `&lt;`) and a 100 KB aggregate cap that drops in reverse-of-insertion order.
+  - `designContext` — `{decisions, bundleGuidance}` sourced from `metadata.brainstormPath` and `metadata.designBundle`, respectively. Wires the previously orphaned `[DESIGN_BUNDLE_CONTEXT]` placeholder in `story-executor/SKILL.md` for the first time.
+- New internal helper `_resolve_skills_base_dir` in `aimi-cli.sh` mirroring execute.md's prior `SKILLS_BASE_DIR` resolution (Claude Code cache glob; OpenCode plugin dir; silent fallback to empty skills array).
+- Four new tests covering the extended `get-story-context`: skills present, skills absent, 100 KB cap drop, designContext extraction.
+
+### Changed
+
+- `story-executor/SKILL.md` (both full and compact templates) — removed the inlined `<required_skills>`, `[DESIGN_CONTEXT]`, and `<design_bundle_context>` blocks. Workers now consume that material from the extended `get-story-context` JSON. Bootstrap step 0a updated accordingly.
+- `commands/execute.md` — deleted the wave-loop skill-assembly logic, the Step 3.4 design-context build, the Step 3.6 `SKILLS_BASE_DIR` resolution, and the `REQUIRED_SKILLS` / `DESIGN_CONTEXT` / `DESIGN_BUNDLE_CONTEXT` spawn variables. The orchestrator's working memory per wave is correspondingly smaller.
+
 ## [1.93.2] - 2026-05-25
 
 ### Changed
