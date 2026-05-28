@@ -49,6 +49,14 @@ This file provides base rules. Skill-level AGENTS.md files are additive and doma
 Skill rules extend but never override safety escapes.
 </precedence>
 
+<research_return_contract>
+Research agent Task returns use the pointer-block form — a fenced YAML block with keys
+`research_file` (the written path), `summary` (exactly 3 headline bullets, compressed per
+the rules above), and `sections` (list of the file's h2/h3 anchors in document order).
+The on-disk research FILE is exempt from compression and word caps (see <preservation_rules>
+above); only the Task return follows the pointer-block contract.
+</research_return_contract>
+
 <examples>
 
 ## Status update
