@@ -203,6 +203,16 @@ translate_command_body() {
   # AskUserQuestion to it so picker UX works on both hosts with one source body.
   # Permission is gated by "question" in opencode.json (default: "ask").
   # Order matters: match longer/more-specific patterns first.
+  #
+  # Coverage verified (US-003): these four rules cover every AskUserQuestion
+  # call site in plan.md — including the Phase 3c iterative outline-gate
+  # pickers (single-operation picker loop: approve|rename|add|remove|reorder)
+  # introduced by the two-pass outline+expand pipeline. The outline-gate calls
+  # use the "via AskUserQuestion" and plain "AskUserQuestion" patterns, both of
+  # which are matched by the third and fourth substitution lines below.
+  # The aimi-cli story-merge invocation (Phase 3e) uses the standard per-call
+  # AIMI_CLI resolution and requires no additional translation — the CLI-path
+  # rewrite above handles the path, and the subcommand name is preserved verbatim.
   body="${body//Use \*\*AskUserQuestion\*\*/Use the **question** tool}"
   body="${body//Use AskUserQuestion/Use the question tool}"
   body="${body//via AskUserQuestion/via the question tool}"
