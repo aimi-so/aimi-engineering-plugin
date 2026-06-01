@@ -4112,6 +4112,756 @@ $rp_entry"
   fi
 }
 
+# ============================================================================
+# story-merge: Consolidate staging files into a validated tasks.json
+# Usage: aimi-cli.sh story-merge --staging-dir <dir> --output <path>
+#           [--split legacy|full-stack] [--agent-mode]
+# ============================================================================
+
+# _story_merge_assign_ids: given a JSON array of story objects (already loaded),
+# assign sequential US-NNN IDs by lexicographic order of their source filename.
+# The $1 array has objects with a synthetic "srcFile" key attached before this call.
+# Returns the array with id fields populated.
+
+cmd_story_merge() {
+  local staging_dir="" output_path="" split_mode="legacy" agent_mode=false
+
+  # --- Parse flags ---
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --staging-dir)
+        shift
+        staging_dir="${1:-}"
+        ;;
+      --output)
+        shift
+        output_path="${1:-}"
+        ;;
+      --split)
+        shift
+        split_mode="${1:-legacy}"
+        ;;
+      --agent-mode)
+        agent_mode=true
+        ;;
+      *)
+        echo "Error: story-merge: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  # --- Validate required flags ---
+  if [ -z "$staging_dir" ]; then
+    echo "Error: story-merge: --staging-dir <path> is required" >&2
+    exit 1
+  fi
+  if [ -z "$output_path" ]; then
+    echo "Error: story-merge: --output <path> is required" >&2
+    exit 1
+  fi
+  if [ "$split_mode" != "legacy" ] && [ "$split_mode" != "full-stack" ]; then
+    echo "Error: story-merge: --split must be 'legacy' or 'full-stack', got: $split_mode" >&2
+    exit 1
+  fi
+
+  # --- Validate paths are inside project ---
+  validate_path_in_project "$staging_dir"
+  local output_parent
+  output_parent=$(dirname "$output_path")
+  # output_path may not exist yet; validate parent dir or the path itself
+  if [ -e "$output_path" ]; then
+    validate_path_in_project "$output_path"
+  elif [ -e "$output_parent" ]; then
+    validate_path_in_project "$output_parent"
+  fi
+
+  # --- Staging dir must exist ---
+  if [ ! -d "$staging_dir" ]; then
+    echo "Error: story-merge: staging directory does not exist: $staging_dir" >&2
+    exit 1
+  fi
+
+  # --- Glob *.json files, sorted lexicographically ---
+  local staging_files=()
+  while IFS= read -r f; do
+    staging_files+=("$f")
+  done < <(find "$staging_dir" -maxdepth 1 -name '*.json' -type f | sort)
+
+  if [ ${#staging_files[@]} -eq 0 ]; then
+    echo "Error: story-merge: no *.json files found in $staging_dir" >&2
+    exit 1
+  fi
+
+  # --- Validate each file is valid JSON and extract numeric index prefix ---
+  # Also detect duplicate numeric index prefixes
+  local -A seen_indices
+  local files_ordered=()
+  for f in "${staging_files[@]}"; do
+    local base
+    base=$(basename "$f")
+    # Validate JSON
+    if ! jq -e . "$f" >/dev/null 2>&1; then
+      echo "Error: story-merge: malformed JSON in file: $base" >&2
+      exit 1
+    fi
+    # Extract numeric prefix (leading digits up to first non-digit)
+    local idx
+    idx=$(printf '%s' "$base" | sed 's/^\([0-9]*\).*/\1/')
+    if [ -n "$idx" ]; then
+      if [ -n "${seen_indices[$idx]+_}" ]; then
+        echo "Error: story-merge: duplicate index '$idx' in files: ${seen_indices[$idx]} and $base" >&2
+        exit 1
+      fi
+      seen_indices[$idx]="$base"
+    fi
+    files_ordered+=("$f")
+  done
+
+  # --- Load all staging story objects, attaching a _srcIdx field (0-based) ---
+  # Build a single merged JSON array from all files.
+  # Each staging file should be either a single story object or an array of stories.
+  local merged_array="[]"
+  local story_idx=0
+  for f in "${files_ordered[@]}"; do
+    local content
+    content=$(cat "$f")
+    # Detect if top-level is array or object
+    local kind
+    kind=$(printf '%s' "$content" | jq -r 'if type == "array" then "array" else "object" end')
+    if [ "$kind" = "array" ]; then
+      # Flatten array entries, attaching _srcIdx to each
+      local base
+      base=$(basename "$f")
+      merged_array=$(printf '%s\n%s' "$merged_array" "$content" | jq -s \
+        --arg base "$base" \
+        '.[0] as $acc | .[1] as $arr |
+         $acc + ($arr | map(. + {_srcIdx: ('$story_idx' + (. | path) | if . == null then 0 else . end)}))
+        ' 2>/dev/null) || true
+      # Simpler approach: just append with sequential indices
+      local arr_len
+      arr_len=$(printf '%s' "$content" | jq 'length')
+      local i
+      for (( i=0; i<arr_len; i++ )); do
+        local story_obj
+        story_obj=$(printf '%s' "$content" | jq ".[$i]")
+        merged_array=$(printf '%s' "$merged_array" | jq \
+          --argjson s "$story_obj" \
+          --argjson idx "$story_idx" \
+          '. + [$s + {_srcIdx: $idx}]')
+        story_idx=$((story_idx + 1))
+      done
+      merged_array=$(printf '%s' "$merged_array" | jq '.')
+    else
+      # Single story object
+      merged_array=$(printf '%s' "$merged_array" | jq \
+        --argjson s "$content" \
+        --argjson idx "$story_idx" \
+        '. + [$s + {_srcIdx: $idx}]')
+      story_idx=$((story_idx + 1))
+    fi
+  done
+
+  local total_stories
+  total_stories=$(printf '%s' "$merged_array" | jq 'length')
+
+  # --- Assign US-NNN IDs by source index (lex order of files, order within file) ---
+  merged_array=$(printf '%s' "$merged_array" | jq '
+    to_entries | map(
+      .value + {id: ("US-" + ((.key + 1) | tostring | if length == 1 then "00" + . elif length == 2 then "0" + . else . end))}
+    )
+  ')
+
+  # Also build index→id map (srcIdx → US-NNN) for outline:NN remap
+  local idx_to_id
+  idx_to_id=$(printf '%s' "$merged_array" | jq '[
+    .[] | {key: (.._srcIdx | tostring), value: .id} | select(.key != null)
+  ] | from_entries' 2>/dev/null || echo '{}')
+  # Simpler: build map as array of [srcIdx, id]
+  idx_to_id=$(printf '%s' "$merged_array" | jq '[.[] | {srcIdx: ._srcIdx, id: .id}]')
+
+  # --- Remap outline:NN tokens in dependsOn arrays ---
+  # "outline:02" → US-NNN where srcIdx == 2 (zero-padded 2 = index 1? no: outline index is 1-based per decision)
+  # Decision: "Sub-agents emit dependsOn entries as 'outline:NN' (zero-padded, matching the outline order)"
+  # The outline order matches file lex order → outline:01 = first story (srcIdx=0) → US-001
+  # So outline:NN (1-based) → srcIdx = NN - 1 → look up US-NNN
+  merged_array=$(printf '%s\n%s' "$merged_array" "$idx_to_id" | jq -s '
+    .[0] as $stories |
+    .[1] as $idx_map |
+
+    # Build outline-index → US-NNN map: outline:01 means 1-based index = srcIdx 0
+    ($stories | to_entries | map({key: (.key + 1 | tostring | if length == 1 then "0" + . else . end), value: .value.id}) | from_entries) as $outline_map |
+
+    $stories | map(
+      .dependsOn = [
+        (.dependsOn // [])[] |
+        if startswith("outline:") then
+          (ltrimstr("outline:")) as $nn |
+          if $outline_map[$nn] != null then $outline_map[$nn]
+          else "UNRESOLVED_OUTLINE:" + $nn
+          end
+        else
+          .
+        end
+      ]
+    )
+  ')
+
+  # Check for unresolved outline refs
+  local unresolved
+  unresolved=$(printf '%s' "$merged_array" | jq -r '
+    [.[] | .id as $sid | (.dependsOn // [])[] | select(startswith("UNRESOLVED_OUTLINE:")) | $sid + ": " + .] | .[]
+  ')
+  if [ -n "$unresolved" ]; then
+    echo "Error: story-merge: unresolved outline reference(s):" >&2
+    printf '%s\n' "$unresolved" >&2
+    exit 1
+  fi
+
+  # --- Remove synthetic _srcIdx field before further processing ---
+  merged_array=$(printf '%s' "$merged_array" | jq '[.[] | del(._srcIdx)]')
+
+  # --- DAG cycle detection via topological sort (Kahn's algorithm in jq) ---
+  local cycle_result
+  cycle_result=$(printf '%s' "$merged_array" | jq '
+    . as $stories |
+    ($stories | map(.id)) as $all_ids |
+
+    # Build adjacency: dependsOn edges (dep → story means story depends on dep)
+    # For cycle detection, we want to find if any node is reachable from itself
+    # via Kahn topological sort: if remaining nodes exist after sort, there is a cycle
+
+    # Compute in-degree for each node
+    (reduce $stories[] as $s (
+      {};
+      . + {($s.id): (($s.dependsOn // []) | length)}
+    )) as $in_degree |
+
+    # Compute adjacency list: adj[dep_id] = [story_ids that depend on dep_id]
+    (reduce $stories[] as $s (
+      {};
+      reduce ($s.dependsOn // [])[] as $dep (
+        .;
+        .[$dep] = (.[$dep] // []) + [$s.id]
+      )
+    )) as $adj |
+
+    # Kahn: start with zero in-degree nodes
+    ([$stories[] | select((($in_degree[.id]) // 0) == 0) | .id]) as $initial_queue |
+
+    # Iterate using fixed accumulator variable binding
+    (reduce range($stories | length) as $_ (
+      {queue: $initial_queue, deg: $in_degree, visited: []};
+      if (.queue | length) == 0 then .
+      else
+        .queue[0] as $node |
+        .deg as $cur_deg |
+        .visited as $cur_vis |
+        .queue[1:] as $rest_q |
+        ($adj[$node] // []) as $neighbors |
+        (reduce $neighbors[] as $n ($cur_deg; .[$n] = ((.[$n] // 1) - 1))) as $new_deg |
+        {
+          queue: ($rest_q + [$neighbors[] | . as $n | select(($new_deg[$n] // 0) == 0)]),
+          deg: $new_deg,
+          visited: ($cur_vis + [$node])
+        }
+      end
+    )) as $result |
+
+    if ($result.visited | length) == ($stories | length) then
+      {cycle: false, stories_in_cycle: []}
+    else
+      {
+        cycle: true,
+        stories_in_cycle: [$stories[] | .id | select(. as $id | ($result.visited | index($id)) == null)]
+      }
+    end
+  ')
+
+  local has_cycle
+  has_cycle=$(printf '%s' "$cycle_result" | jq -r '.cycle')
+  if [ "$has_cycle" = "true" ]; then
+    local cycle_stories
+    cycle_stories=$(printf '%s' "$cycle_result" | jq -r '.stories_in_cycle | join(", ")')
+    echo "Error: story-merge: circular dependency detected among stories: $cycle_stories" >&2
+    exit 1
+  fi
+
+  # --- Wave computation: roots = wave 1, others = max(dep waves) + 1 ---
+  merged_array=$(printf '%s' "$merged_array" | jq '
+    . as $stories |
+    # Iterative wave assignment: repeat until stable (max N iterations)
+    reduce range($stories | length) as $_ (
+      ($stories | map(. + {wave: (if (.dependsOn // []) == [] then 1 else 0 end)}));
+      . as $current |
+      map(
+        if .wave > 0 then .
+        else
+          . as $story |
+          ([$story.dependsOn[] | . as $dep_id | ($current[] | select(.id == $dep_id) | .wave)] | if length == 0 then [0] else . end) as $dep_waves |
+          if ($dep_waves | all(. > 0)) then
+            . + {wave: (($dep_waves | max) + 1)}
+          else
+            .
+          end
+        end
+      )
+    )
+  ')
+
+  # --- Rule 22: Mock-sync AC routing ---
+  # Process each schema-extending story: route mock-sync ACs to consumer stories.
+  # We implement this as a shell loop to avoid complex nested jq.
+  local schema_ids
+  schema_ids=$(printf '%s' "$merged_array" | jq -r '
+    .[] | select(
+      (.implementation.files // []) | any(
+        test("schemas/.*\\.(ts|js|py|rb)$") or
+        test("types/.*\\.(ts|js)$") or
+        test("zod/.*\\.(ts|js)$") or
+        test("\\.schema\\.ts$") or
+        test("\\.types\\.ts$")
+      )
+    ) | .id
+  ')
+
+  local schema_id
+  for schema_id in $schema_ids; do
+    # Check if schema story has a mock-sync AC
+    local has_mock
+    has_mock=$(printf '%s' "$merged_array" | jq -r \
+      --arg sid "$schema_id" \
+      '.[] | select(.id == $sid) | .acceptanceCriteria // [] | map(select(test("[Mm]ock.*updated|mock.*sync|[Uu]pdate.*mock|[Mm]ock.*data|[Vv]erify.*mock"; ""))) | length > 0')
+    [ "$has_mock" = "true" ] || continue
+
+    # Extract schema story text for field-name extraction
+    local schema_text
+    schema_text=$(printf '%s' "$merged_array" | jq -r \
+      --arg sid "$schema_id" \
+      '.[] | select(.id == $sid) | [.title, (.description // "")] + (.acceptanceCriteria // []) | join(" ")')
+
+    # Step 1: Extract camelCase field names (lowercase-starting)
+    local field_names
+    field_names=$(printf '%s' "$schema_text" | jq -rR \
+      '[scan("[a-z][a-zA-Z0-9]*[A-Z][a-zA-Z0-9]*|[a-z][a-z0-9_]*_[a-z][a-z0-9_]*")] | map(select(length > 3)) | .[]' 2>/dev/null || true)
+
+    # Step 2: Find consumers via field-name literal match
+    local consumer_ids=""
+    if [ -n "$field_names" ]; then
+      consumer_ids=$(printf '%s' "$merged_array" | jq -r \
+        --arg sid "$schema_id" \
+        --arg fields "$field_names" \
+        '
+        ($fields | split("\n") | map(select(length > 0))) as $fn_list |
+        .[] | select(.id != $sid) |
+        . as $c |
+        ([$c.title, ($c.description // "")] + ($c.acceptanceCriteria // []) | join(" ")) as $ctext |
+        select($fn_list | any(. as $fn | ($ctext | test($fn; "")))) |
+        .id
+        ' 2>/dev/null || true)
+    fi
+
+    # Step 3: CamelCase entity-name fuzzy fallback
+    if [ -z "$consumer_ids" ]; then
+      local schema_title
+      schema_title=$(printf '%s' "$merged_array" | jq -r --arg sid "$schema_id" '.[] | select(.id == $sid) | .title')
+      local word_parts
+      word_parts=$(printf '%s' "$schema_title" | jq -rR '[scan("[A-Z][a-z]+")] | .[]' 2>/dev/null || true)
+      if [ -n "$word_parts" ]; then
+        consumer_ids=$(printf '%s' "$merged_array" | jq -r \
+          --arg sid "$schema_id" \
+          --arg words "$word_parts" \
+          '
+          ($words | split("\n") | map(select(length > 0))) as $wp_list |
+          .[] | select(.id != $sid) |
+          . as $c |
+          ([$c.title, ($c.description // "")] + ($c.acceptanceCriteria // []) | join(" ")) as $ctext |
+          select($wp_list | any(. as $wp | ($ctext | test($wp; "i")))) |
+          .id
+          ' 2>/dev/null || true)
+      fi
+    fi
+
+    [ -n "$consumer_ids" ] || continue
+
+    # Route: move mock-sync AC from schema story to each consumer
+    merged_array=$(printf '%s' "$merged_array" | jq \
+      --arg sid "$schema_id" \
+      --arg consumer_list "$consumer_ids" \
+      '
+      ($consumer_list | split("\n") | map(select(length > 0))) as $cids |
+
+      # Extract mock-sync ACs from schema story
+      ((.[] | select(.id == $sid)).acceptanceCriteria // [] |
+        map(select(test("[Mm]ock.*updated|mock.*sync|[Uu]pdate.*mock|[Mm]ock.*data|[Vv]erify.*mock"; "")))) as $mock_acs |
+
+      map(
+        . as $s |
+        if $s.id == $sid then
+          $s + {acceptanceCriteria: ($s.acceptanceCriteria // [] | map(select(test("[Mm]ock.*updated|mock.*sync|[Uu]pdate.*mock|[Mm]ock.*data|[Vv]erify.*mock"; "") | not)))}
+        elif ($cids | index($s.id)) != null then
+          ($s.acceptanceCriteria // [] | map(select(test("[Mm]ock.*updated|mock.*sync|[Uu]pdate.*mock|[Mm]ock.*data|[Vv]erify.*mock"; ""))) | length == 0) as $no_mock |
+          if $no_mock then
+            $s + {acceptanceCriteria: (($s.acceptanceCriteria // []) + $mock_acs)}
+          else $s
+          end
+        else $s
+        end
+      )
+      ')
+  done
+
+  # --- Phase 3.1: Reference Element Inventory verdict check ---
+  # Check for any story that has an inventory with unverdicted rows
+  local inventory_errors=""
+  local inventory_warnings=""
+  local inv_check
+  inv_check=$(printf '%s' "$merged_array" | jq '
+    [.[] |
+      . as $s |
+      select(
+        (.referenceInventory != null) and
+        (.referenceInventory | type) == "array" and
+        (.referenceInventory | length) > 0
+      ) |
+      . as $s |
+      [.referenceInventory[] | select(
+        (.verdict == null or .verdict == "" or (.verdict | test("^(encoded|excluded|deferred)$") | not))
+      )] as $unverdicted |
+      select(($unverdicted | length) > 0) |
+      {id: $s.id, unverdicted_count: ($unverdicted | length), elements: ($unverdicted | map(.element // "unknown"))}
+    ]
+  ')
+  local inv_violations
+  inv_violations=$(printf '%s' "$inv_check" | jq 'length')
+  if [ "$inv_violations" -gt 0 ]; then
+    local inv_msg
+    inv_msg=$(printf '%s' "$inv_check" | jq -r '.[] | "  Story \(.id): \(.unverdicted_count) unverdicted inventory row(s): \(.elements | join(", "))"')
+    if [ "$agent_mode" = "true" ]; then
+      echo "Warning: story-merge: Phase 3.1 inventory verdict incomplete (--agent-mode: proceeding):" >&2
+      printf '%s\n' "$inv_msg" >&2
+    else
+      echo "Error: story-merge: Phase 3.1 Reference Element Inventory has unverdicted rows:" >&2
+      printf '%s\n' "$inv_msg" >&2
+      exit 1
+    fi
+  fi
+
+  # --- Phase 4.1: Coverage Self-Check ---
+  # For each story with a referenceInventory, check ac_anchors >= floor(proto_elements * 0.6)
+  local coverage_check
+  coverage_check=$(printf '%s' "$merged_array" | jq '
+    [.[] |
+      select(
+        (.referenceInventory != null) and
+        (.referenceInventory | type) == "array" and
+        (.referenceInventory | length) > 0
+      ) |
+      . as $s |
+      (.referenceInventory | length) as $proto_elements |
+      ($s.ac_anchors // (.acceptanceCriteria // [] | length)) as $ac_anchors |
+      ($proto_elements * 0.6 | floor) as $threshold |
+      select($ac_anchors < $threshold) |
+      {id: $s.id, ac_anchors: $ac_anchors, proto_elements: $proto_elements, threshold: $threshold}
+    ]
+  ')
+  local coverage_violations
+  coverage_violations=$(printf '%s' "$coverage_check" | jq 'length')
+  if [ "$coverage_violations" -gt 0 ]; then
+    local cov_msg
+    cov_msg=$(printf '%s' "$coverage_check" | jq -r '.[] | "  Story \(.id): ac_anchors=\(.ac_anchors) < floor(\(.proto_elements) * 0.6)=\(.threshold)"')
+    if [ "$agent_mode" = "true" ]; then
+      echo "Warning: story-merge: Phase 4.1 coverage ratio not met (--agent-mode: proceeding):" >&2
+      printf '%s\n' "$cov_msg" >&2
+    else
+      echo "Error: story-merge: Phase 4.1 Coverage Self-Check failed:" >&2
+      printf '%s\n' "$cov_msg" >&2
+      exit 1
+    fi
+  fi
+
+  # ============================================================
+  # Branch on split mode
+  # ============================================================
+  if [ "$split_mode" = "full-stack" ]; then
+    _story_merge_write_split "$merged_array" "$output_path" "$staging_dir"
+  else
+    _story_merge_write_legacy "$merged_array" "$output_path" "$staging_dir"
+  fi
+}
+
+# Write a single merged tasks.json (legacy mode)
+_story_merge_write_legacy() {
+  local merged_array="$1"
+  local output_path="$2"
+  local staging_dir="$3"
+
+  # Build the final tasks.json structure
+  # Metadata is minimal; the caller (plan command) fills in the full metadata.
+  # story-merge only provides structure; metadata.title, branchName, etc. come from
+  # the staging context or are set to sensible defaults.
+  local tasks_json
+  tasks_json=$(printf '%s' "$merged_array" | jq '
+    {
+      schemaVersion: "3.3",
+      metadata: {
+        title: "feat: merged tasks",
+        type: "feat",
+        branchName: "feat/merged",
+        createdAt: (now | strftime("%Y-%m-%d")),
+        planPath: null
+      },
+      userStories: [.[] | del(.referenceInventory) | del(.ac_anchors)]
+    }
+  ')
+
+  # Ensure output directory exists
+  mkdir -p "$(dirname "$output_path")"
+
+  # Atomic write via _lock
+  local tmp_file
+  tmp_file=$(mktemp "${output_path}.XXXXXX")
+  (
+    _lock "${output_path}.lock"
+    printf '%s\n' "$tasks_json" > "$tmp_file"
+    mv "$tmp_file" "$output_path"
+  ) 200>"${output_path}.lock"
+  local exit_code=$?
+  rm -f "$tmp_file" 2>/dev/null
+  if [ $exit_code -ne 0 ]; then
+    echo "Error: story-merge: failed to write output file: $output_path" >&2
+    exit 1
+  fi
+
+  # On success: delete the staging dir
+  rm -rf "$staging_dir"
+
+  local story_count
+  story_count=$(printf '%s' "$merged_array" | jq 'length')
+  jq -n \
+    --arg output "$output_path" \
+    --argjson stories "$story_count" \
+    '{merged: $output, stories: $stories}'
+}
+
+# Write two split tasks files (full-stack mode)
+_story_merge_write_split() {
+  local merged_array="$1"
+  local output_path="$2"
+  local staging_dir="$3"
+
+  # Partition by layer:
+  # - UI stories → frontend (stories whose title/description contains UI/Frontend/React/Vue/component keywords,
+  #   or implementation.files match frontend patterns)
+  # - schema + backend + aggregation → backend
+
+  # Partition stories
+  local frontend_stories backend_stories
+  frontend_stories=$(printf '%s' "$merged_array" | jq '
+    [.[] | select(
+      ((.implementation.files // []) | any(
+        test("\\.(tsx|jsx)$") or test("components?/") or test("pages?/") or test("views?/") or
+        test("frontend") or test("ui/") or test("client/") or test("app/") or
+        test("\\.(css|scss)$") or test("tailwind")
+      )) or
+      ((.title + " " + (.description // "")) | test("UI|Frontend|Component|Page|View|React|Vue|Tailwind|CSS|modal|form|screen|dashboard"; "i"))
+    )]
+  ')
+  backend_stories=$(printf '%s' "$merged_array" | jq '
+    [.[] | select(
+      ((.implementation.files // []) | any(
+        test("schema|migration|model|backend|api|endpoint|server|database|db/") or
+        test("\\.(rb|py|go|java|kt|rs)$") or
+        test("controllers?/") or test("services?/") or test("repositories?/")
+      )) or
+      ((.title + " " + (.description // "")) | test("Schema|Migration|Backend|API|Endpoint|Model|Database|Service|Repository"; "i")) or
+      # Any story not clearly frontend goes to backend
+      (((.implementation.files // []) | any(
+        test("\\.(tsx|jsx)$") or test("components?/") or test("pages?/") or test("views?/") or
+        test("frontend") or test("ui/") or test("client/") or test("app/")
+      )) | not)
+    )]
+  ')
+
+  # Deduplicate: if a story appears in both, prefer frontend for UI stories
+  # Actually re-assign: stories explicitly UI → frontend, all others → backend
+  # Simpler and more deterministic: frontend = stories matching UI patterns; backend = the rest
+  frontend_stories=$(printf '%s' "$merged_array" | jq '
+    [.[] | select(
+      ((.implementation.files // []) | any(
+        test("\\.(tsx|jsx)$") or test("components?/") or test("pages?/") or
+        test("frontend/") or test("ui/") or test("client/")
+      )) or
+      ((.title + " " + (.description // "")) | test("\\b(UI|Frontend|Component|Page|View|React|Tailwind)\\b"; "i"))
+    )]
+  ')
+  backend_stories=$(printf '%s' "$merged_array" | jq '
+    (map(.id)) as $all_ids |
+    '"$(printf '%s' "$frontend_stories" | jq '[.[] | .id]')"' as $frontend_ids |
+    [.[] | select((.id as $id | $frontend_ids | index($id)) == null)]
+  ')
+
+  # Re-assign unique IDs: frontend US-001 ... US-N, backend US-(N+1) ... US-M
+  local fe_count be_count
+  fe_count=$(printf '%s' "$frontend_stories" | jq 'length')
+  be_count=$(printf '%s' "$backend_stories" | jq 'length')
+
+  # Build ID remapping for frontend
+  local fe_id_map="{}"
+  fe_id_map=$(printf '%s' "$frontend_stories" | jq '
+    to_entries | map({key: .value.id, value: ("US-" + ((.key + 1) | tostring | if length == 1 then "00" + . elif length == 2 then "0" + . else . end))}) | from_entries
+  ')
+
+  # Build ID remapping for backend (offset by frontend count)
+  local fe_count_n
+  fe_count_n=$(printf '%s' "$frontend_stories" | jq 'length')
+  local be_id_map="{}"
+  be_id_map=$(printf '%s' "$backend_stories" | jq \
+    --argjson offset "$fe_count_n" \
+    'to_entries | map({key: .value.id, value: ("US-" + ((.key + $offset + 1) | tostring | if length == 1 then "00" + . elif length == 2 then "0" + . else . end))}) | from_entries')
+
+  # Apply ID remap and rebuild dependsOn (remove cross-file refs) for frontend
+  frontend_stories=$(printf '%s\n%s' "$frontend_stories" "$fe_id_map" | jq -s '
+    .[0] as $stories | .[1] as $id_map |
+    $stories | map(
+      .id = ($id_map[.id] // .id) |
+      .dependsOn = [(.dependsOn // [])[] | . as $dep | ($id_map[$dep] // null) | select(. != null)]
+    )
+  ')
+
+  # Apply ID remap and rebuild dependsOn for backend
+  backend_stories=$(printf '%s\n%s' "$backend_stories" "$be_id_map" | jq -s '
+    .[0] as $stories | .[1] as $id_map |
+    $stories | map(
+      .id = ($id_map[.id] // .id) |
+      .dependsOn = [(.dependsOn // [])[] | . as $dep | ($id_map[$dep] // null) | select(. != null)]
+    )
+  ')
+
+  # Recompute waves independently per file
+  frontend_stories=$(printf '%s' "$frontend_stories" | jq '
+    reduce range(length) as $_ (
+      map(. + {wave: (if (.dependsOn // []) == [] then 1 else 0 end)});
+      . as $current |
+      map(
+        if .wave > 0 then .
+        else
+          . as $story |
+          ([$story.dependsOn[] | . as $dep_id | ($current[] | select(.id == $dep_id) | .wave)] | if length == 0 then [0] else . end) as $dep_waves |
+          if ($dep_waves | all(. > 0)) then
+            . + {wave: (($dep_waves | max) + 1)}
+          else
+            .
+          end
+        end
+      )
+    )
+  ')
+  backend_stories=$(printf '%s' "$backend_stories" | jq '
+    reduce range(length) as $_ (
+      map(. + {wave: (if (.dependsOn // []) == [] then 1 else 0 end)});
+      . as $current |
+      map(
+        if .wave > 0 then .
+        else
+          . as $story |
+          ([$story.dependsOn[] | . as $dep_id | ($current[] | select(.id == $dep_id) | .wave)] | if length == 0 then [0] else . end) as $dep_waves |
+          if ($dep_waves | all(. > 0)) then
+            . + {wave: (($dep_waves | max) + 1)}
+          else
+            .
+          end
+        end
+      )
+    )
+  ')
+
+  # Derive output paths
+  local base_name ext fe_path be_path
+  base_name=$(basename "$output_path")
+  ext="${base_name##*.}"
+  local base_no_ext="${base_name%.$ext}"
+  local dir_part
+  dir_part=$(dirname "$output_path")
+  fe_path="${dir_part}/${base_no_ext}-frontend-tasks.json"
+  be_path="${dir_part}/${base_no_ext}-backend-tasks.json"
+
+  # Ensure output directory exists
+  mkdir -p "$dir_part"
+
+  # Build and write frontend tasks.json atomically
+  local fe_json
+  fe_json=$(printf '%s' "$frontend_stories" | jq '
+    {
+      schemaVersion: "3.3",
+      metadata: {
+        title: "feat: merged tasks (frontend)",
+        type: "feat",
+        branchName: "feat/merged-frontend",
+        createdAt: (now | strftime("%Y-%m-%d")),
+        planPath: null
+      },
+      userStories: [.[] | del(.referenceInventory) | del(.ac_anchors)]
+    }
+  ')
+  local tmp_fe
+  tmp_fe=$(mktemp "${fe_path}.XXXXXX")
+  (
+    _lock "${fe_path}.lock"
+    printf '%s\n' "$fe_json" > "$tmp_fe"
+    mv "$tmp_fe" "$fe_path"
+  ) 200>"${fe_path}.lock"
+  local fe_exit=$?
+  rm -f "$tmp_fe" 2>/dev/null
+  if [ $fe_exit -ne 0 ]; then
+    echo "Error: story-merge: failed to write frontend output: $fe_path" >&2
+    exit 1
+  fi
+
+  # Build and write backend tasks.json atomically
+  local be_json
+  be_json=$(printf '%s' "$backend_stories" | jq '
+    {
+      schemaVersion: "3.3",
+      metadata: {
+        title: "feat: merged tasks (backend)",
+        type: "feat",
+        branchName: "feat/merged-backend",
+        createdAt: (now | strftime("%Y-%m-%d")),
+        planPath: null
+      },
+      userStories: [.[] | del(.referenceInventory) | del(.ac_anchors)]
+    }
+  ')
+  local tmp_be
+  tmp_be=$(mktemp "${be_path}.XXXXXX")
+  (
+    _lock "${be_path}.lock"
+    printf '%s\n' "$be_json" > "$tmp_be"
+    mv "$tmp_be" "$be_path"
+  ) 200>"${be_path}.lock"
+  local be_exit=$?
+  rm -f "$tmp_be" 2>/dev/null
+  if [ $be_exit -ne 0 ]; then
+    echo "Error: story-merge: failed to write backend output: $be_path" >&2
+    exit 1
+  fi
+
+  # On success: delete the staging dir
+  rm -rf "$staging_dir"
+
+  local fe_count_out be_count_out
+  fe_count_out=$(printf '%s' "$frontend_stories" | jq 'length')
+  be_count_out=$(printf '%s' "$backend_stories" | jq 'length')
+  jq -n \
+    --arg fe "$fe_path" \
+    --arg be "$be_path" \
+    --argjson fe_count "$fe_count_out" \
+    --argjson be_count "$be_count_out" \
+    '{frontend: $fe, backend: $be, frontend_stories: $fe_count, backend_stories: $be_count}'
+}
+
 # Display help
 cmd_help() {
   cat << 'EOF'
@@ -4271,6 +5021,23 @@ COMMANDS:
                               Sidecar path: .aimi/brainstorms/prototypes/<slug>-bundle-sidecar.json
                               chmod 600 applied; writes are atomic (tmp + mv).
                               --source-command must be exactly 'brainstorm' or 'plan'.
+    story-merge --staging-dir <dir> --output <path>
+                              [--split legacy|full-stack] [--agent-mode]
+                              Consolidate per-story staging *.json files into a
+                              validated tasks.json. Steps: glob+validate JSON,
+                              assign US-NNN IDs by lex order, remap outline:NN
+                              tokens in dependsOn, DAG cycle detection, wave
+                              computation, Rule 22 mock-sync AC routing, Phase
+                              3.1 inventory verdict check, Phase 4.1 coverage
+                              ratio (ac_anchors >= floor(proto_elements * 0.6)).
+                              Writes atomically via _lock (tmp+mv). Deletes
+                              staging dir on success; preserves on error.
+                              --split full-stack writes two output files:
+                              <base>-frontend-tasks.json and
+                              <base>-backend-tasks.json with unique IDs, rebuilt
+                              dependsOn, and independent wave numbers.
+                              --agent-mode demotes Phase 3.1 and Phase 4.1
+                              hard rejects to warnings and proceeds.
     help                      Show this help message
 
 ENVIRONMENT:
@@ -4407,6 +5174,7 @@ main() {
     detect-design-bundle) shift; cmd_detect_design_bundle "$@" ;;
     bundle-prototype-status)   shift; cmd_bundle_prototype_status "$@" ;;
     bundle-prototype-finalize) shift; cmd_bundle_prototype_finalize "$@" ;;
+    story-merge)       shift; cmd_story_merge "$@" ;;
     help|--help|-h)    cmd_help ;;
     *)
       echo "Unknown command: $1" >&2

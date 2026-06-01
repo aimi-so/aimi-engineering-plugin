@@ -8377,6 +8377,382 @@ test_update_field_nested_path() {
 }
 
 # ============================================================================
+# story-merge Tests
+# ============================================================================
+
+# Helper: create a minimal staging story JSON file
+_sm_make_story() {
+  local path="$1"
+  local title="${2:-Story}"
+  local depends="${3:-[]}"
+  cat > "$path" << EOF
+{
+  "title": "$title",
+  "description": "As a developer, I want $title so that it works.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 1,
+  "status": "pending",
+  "dependsOn": $depends,
+  "notes": ""
+}
+EOF
+}
+
+# TC1: Happy path — three staging files produce US-001..003 with contiguous waves
+test_story_merge_happy_path() {
+  echo ""
+  echo "=== TC1: story-merge happy path ==="
+
+  # Use paths inside the project (TEST_DIR == cwd after main cd "$TEST_DIR")
+  local stg=".aimi/.tasks-staging-tc1"
+  local out_file=".aimi/tasks/sm-tc1-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  # Create 3 staging files in lex order: 01, 02, 03
+  _sm_make_story "$stg/01-setup.json"   "Setup story"
+  _sm_make_story "$stg/02-core.json"    "Core story"  '["outline:01"]'
+  _sm_make_story "$stg/03-ui.json"      "UI story"    '["outline:02"]'
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC1: story-merge happy path exits 0"
+
+  # Output file must exist
+  if [ -f "$out_file" ]; then
+    echo -e "${GREEN}✓${NC} TC1: output file written"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC1: output file missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  # IDs should be US-001, US-002, US-003
+  if [ -f "$out_file" ]; then
+    local ids
+    ids=$(jq -r '[.userStories[].id] | join(",")' "$out_file" 2>/dev/null)
+    assert_eq "US-001,US-002,US-003" "$ids" "TC1: IDs are US-001,US-002,US-003"
+
+    # Waves: US-001 wave 1, US-002 wave 2, US-003 wave 3
+    local waves
+    waves=$(jq -r '[.userStories[].wave] | join(",")' "$out_file" 2>/dev/null)
+    assert_eq "1,2,3" "$waves" "TC1: waves are 1,2,3 (contiguous)"
+
+    # dependsOn remapped from outline:NN to US-NNN
+    local dep2
+    dep2=$(jq -r '.userStories[] | select(.id == "US-002") | .dependsOn[0]' "$out_file" 2>/dev/null)
+    assert_eq "US-001" "$dep2" "TC1: outline:01 remapped to US-001"
+  fi
+
+  # Staging dir should be deleted on success
+  if [ ! -d "$stg" ]; then
+    echo -e "${GREEN}✓${NC} TC1: staging dir deleted on success"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC1: staging dir NOT deleted on success"
+    ((TESTS_FAILED++))
+    rm -rf "$stg"
+  fi
+
+  rm -f "$out_file"
+}
+
+# TC2: Missing staging dir → non-zero exit
+test_story_merge_missing_dir() {
+  echo ""
+  echo "=== TC2: story-merge missing staging dir ==="
+
+  # Use a staging dir that doesn't exist but has a path inside project
+  local stg=".aimi/.tasks-staging-nonexistent-tc2-$$"
+  local out_file=".aimi/tasks/sm-tc2-tasks.json"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC2: missing staging dir exits 1"
+  assert_contains "does not exist" "$output" "TC2: error mentions 'does not exist'"
+}
+
+# TC3: Malformed JSON in staging file → non-zero exit with filename in error
+test_story_merge_malformed_json() {
+  echo ""
+  echo "=== TC3: story-merge malformed JSON ==="
+
+  local stg=".aimi/.tasks-staging-tc3"
+  local out_file=".aimi/tasks/sm-tc3-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  _sm_make_story "$stg/01-good.json" "Good story"
+  printf '{ "title": "Bad, unclosed' > "$stg/02-bad.json"  # malformed JSON
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC3: malformed JSON exits 1"
+  assert_contains "02-bad.json" "$output" "TC3: offending filename in error"
+
+  # Staging dir preserved on error
+  if [ -d "$stg" ]; then
+    echo -e "${GREEN}✓${NC} TC3: staging dir preserved on error"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC3: staging dir should be preserved on error"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg"
+}
+
+# TC4: Duplicate numeric index prefix → non-zero exit
+test_story_merge_duplicate_index() {
+  echo ""
+  echo "=== TC4: story-merge duplicate index prefix ==="
+
+  local stg=".aimi/.tasks-staging-tc4"
+  local out_file=".aimi/tasks/sm-tc4-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  _sm_make_story "$stg/01-alpha.json" "Alpha"
+  _sm_make_story "$stg/01-beta.json"  "Beta"   # same '01' prefix
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC4: duplicate index exits 1"
+  assert_contains "duplicate index" "$output" "TC4: error mentions 'duplicate index'"
+
+  rm -rf "$stg"
+}
+
+# TC5: Circular dependsOn cycle → non-zero exit naming cycle stories
+test_story_merge_cycle() {
+  echo ""
+  echo "=== TC5: story-merge DAG cycle ==="
+
+  local stg=".aimi/.tasks-staging-tc5"
+  local out_file=".aimi/tasks/sm-tc5-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  # Create two stories that depend on each other via outline tokens
+  _sm_make_story "$stg/01-a.json" "Story A" '["outline:02"]'
+  _sm_make_story "$stg/02-b.json" "Story B" '["outline:01"]'
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC5: cycle exits 1"
+  assert_contains "circular" "$output" "TC5: error mentions 'circular'"
+
+  rm -rf "$stg"
+}
+
+# TC6: Dangling outline reference → non-zero exit naming missing reference
+test_story_merge_dangling_ref() {
+  echo ""
+  echo "=== TC6: story-merge dangling outline ref ==="
+
+  local stg=".aimi/.tasks-staging-tc6"
+  local out_file=".aimi/tasks/sm-tc6-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  # outline:99 doesn't exist (only 1 story at index 01)
+  _sm_make_story "$stg/01-story.json" "Story A" '["outline:99"]'
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC6: dangling ref exits 1"
+  assert_contains "unresolved outline" "$output" "TC6: error mentions unresolved outline reference"
+
+  rm -rf "$stg"
+}
+
+# TC7: Rule 22 mock-sync AC routing — schema story with consumer
+test_story_merge_rule22_routing() {
+  echo ""
+  echo "=== TC7: story-merge Rule 22 mock-sync AC routing ==="
+
+  local stg=".aimi/.tasks-staging-tc7"
+  local out_file=".aimi/tasks/sm-tc7-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  # Story 1: schema-extending (matches schema glob via .schema.ts)
+  cat > "$stg/01-schema.json" << 'EOF'
+{
+  "title": "Add UserProfile schema",
+  "description": "As a developer, I want a UserProfile schema so that user data is typed.",
+  "acceptanceCriteria": [
+    "Typecheck passes",
+    "Update mock data in matching **/mocks/** path to populate new fields (or document why mocks are intentionally unchanged)."
+  ],
+  "priority": 1,
+  "status": "pending",
+  "dependsOn": [],
+  "notes": "",
+  "implementation": {
+    "files": ["src/types/UserProfile.schema.ts"],
+    "approach": "Add UserProfile type",
+    "verify": "tsc --noEmit"
+  }
+}
+EOF
+
+  # Story 2: consumer — references "UserProfile" in description
+  cat > "$stg/02-consumer.json" << 'EOF'
+{
+  "title": "UserProfile display page",
+  "description": "As a user, I want to view my UserProfile so that I can see my data.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 2,
+  "status": "pending",
+  "dependsOn": [],
+  "notes": ""
+}
+EOF
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC7: Rule 22 routing exits 0"
+
+  if [ -f "$out_file" ]; then
+    # The mock-sync AC should be on the consumer (US-002), not the schema story (US-001)
+    local consumer_has_mock schema_has_mock
+    local mock_pattern="[Mm]ock.*updated|mock.*sync|[Uu]pdate.*mock|[Mm]ock.*data|[Vv]erify.*mock"
+    consumer_has_mock=$(jq -r --arg p "$mock_pattern" '.userStories[] | select(.id == "US-002") | .acceptanceCriteria[] | select(test($p; ""))' "$out_file" 2>/dev/null)
+    schema_has_mock=$(jq -r --arg p "$mock_pattern" '.userStories[] | select(.id == "US-001") | .acceptanceCriteria[] | select(test($p; ""))' "$out_file" 2>/dev/null)
+
+    if [ -n "$consumer_has_mock" ]; then
+      echo -e "${GREEN}✓${NC} TC7: mock-sync AC routed to consumer"
+      ((TESTS_PASSED++))
+    else
+      echo -e "${RED}✗${NC} TC7: mock-sync AC NOT on consumer"
+      echo "  consumer ACs: $(jq -r '.userStories[] | select(.id == "US-002") | .acceptanceCriteria[]' "$out_file" 2>/dev/null)"
+      ((TESTS_FAILED++))
+    fi
+
+    if [ -z "$schema_has_mock" ]; then
+      echo -e "${GREEN}✓${NC} TC7: mock-sync AC removed from schema story"
+      ((TESTS_PASSED++))
+    else
+      echo -e "${RED}✗${NC} TC7: mock-sync AC still on schema story (should have been moved)"
+      ((TESTS_FAILED++))
+    fi
+  fi
+
+  rm -f "$out_file"
+}
+
+# TC8: Full-stack split — two output files with unique IDs and independent waves
+test_story_merge_full_stack_split() {
+  echo ""
+  echo "=== TC8: story-merge --split full-stack ==="
+
+  local stg=".aimi/.tasks-staging-tc8"
+  local out_file=".aimi/tasks/sm-tc8-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  # Frontend story
+  cat > "$stg/01-ui.json" << 'EOF'
+{
+  "title": "React UserProfile page",
+  "description": "As a user, I want a React page so that I can view data.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 1,
+  "status": "pending",
+  "dependsOn": [],
+  "notes": "",
+  "implementation": {
+    "files": ["src/components/UserProfile.tsx"],
+    "approach": "Build React component",
+    "verify": "tsc --noEmit"
+  }
+}
+EOF
+
+  # Backend story
+  cat > "$stg/02-api.json" << 'EOF'
+{
+  "title": "UserProfile API endpoint",
+  "description": "As a developer, I want a backend endpoint so that data is served.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 2,
+  "status": "pending",
+  "dependsOn": [],
+  "notes": "",
+  "implementation": {
+    "files": ["app/controllers/user_profiles_controller.rb"],
+    "approach": "Rails controller",
+    "verify": "rspec"
+  }
+}
+EOF
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC8: full-stack split exits 0"
+
+  local fe_file=".aimi/tasks/sm-tc8-tasks-frontend-tasks.json"
+  local be_file=".aimi/tasks/sm-tc8-tasks-backend-tasks.json"
+
+  # Both output files must exist
+  if [ -f "$fe_file" ]; then
+    echo -e "${GREEN}✓${NC} TC8: frontend tasks file written"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC8: frontend tasks file missing ($fe_file)"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  if [ -f "$be_file" ]; then
+    echo -e "${GREEN}✓${NC} TC8: backend tasks file written"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC8: backend tasks file missing ($be_file)"
+    ((TESTS_FAILED++))
+  fi
+
+  if [ -f "$fe_file" ] && [ -f "$be_file" ]; then
+    # IDs unique across both files
+    local fe_ids be_ids
+    fe_ids=$(jq -r '[.userStories[].id] | .[]' "$fe_file" 2>/dev/null)
+    be_ids=$(jq -r '[.userStories[].id] | .[]' "$be_file" 2>/dev/null)
+
+    # No ID should appear in both files
+    local collision
+    collision=$(printf '%s\n%s\n' "$fe_ids" "$be_ids" | sort | uniq -d)
+    if [ -z "$collision" ]; then
+      echo -e "${GREEN}✓${NC} TC8: no ID collisions across frontend/backend files"
+      ((TESTS_PASSED++))
+    else
+      echo -e "${RED}✗${NC} TC8: ID collision found: $collision"
+      ((TESTS_FAILED++))
+    fi
+
+    # Each file has wave 1 for its roots
+    local fe_wave1 be_wave1
+    fe_wave1=$(jq '[.userStories[] | select(.dependsOn == []) | .wave] | all(. == 1)' "$fe_file" 2>/dev/null)
+    be_wave1=$(jq '[.userStories[] | select(.dependsOn == []) | .wave] | all(. == 1)' "$be_file" 2>/dev/null)
+    assert_eq "true" "$fe_wave1" "TC8: frontend root stories have wave 1"
+    assert_eq "true" "$be_wave1" "TC8: backend root stories have wave 1"
+  fi
+
+  # Staging dir deleted on success
+  if [ ! -d "$stg" ]; then
+    echo -e "${GREEN}✓${NC} TC8: staging dir deleted on success"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC8: staging dir NOT deleted on success"
+    ((TESTS_FAILED++))
+    rm -rf "$stg"
+  fi
+
+  rm -f "$fe_file" "$be_file" "$out_file"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -8704,6 +9080,18 @@ main() {
   test_models_prompt_dismiss_creates_per_host_marker_opencode
   test_models_prompt_dismiss_then_check_skips_when_file_present
   test_models_prompt_dismiss_idempotent
+
+  # story-merge tests — each creates its own isolated staging/output dirs
+  echo ""
+  echo "--- story-merge Tests ---"
+  test_story_merge_happy_path
+  test_story_merge_missing_dir
+  test_story_merge_malformed_json
+  test_story_merge_duplicate_index
+  test_story_merge_cycle
+  test_story_merge_dangling_ref
+  test_story_merge_rule22_routing
+  test_story_merge_full_stack_split
 
   # Design bundle detection tests
   echo ""
