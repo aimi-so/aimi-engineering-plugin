@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.96.0] - 2026-06-01
+
+### Added
+
+- `aimi-cli story-merge` subcommand: consolidates per-story staging files into a validated `tasks.json` with deterministic `US-NNN` ID assignment, DAG cycle detection, wave computation, Rule 22 mock-sync AC routing, Phase 3.1 inventory verdict check, Phase 4.1 coverage ratio check, and atomic `flock`-protected write. Supports `--split full-stack` for paired frontend/backend output and `--agent-mode` to demote hard rejects to warnings in CI.
+- `/aimi:plan` outline gate: between Pass 1 outline generation and Pass 2 expansion, the user can approve / rename / add / remove / reorder stories via iterative `AskUserQuestion` pickers. Edits are recorded in `metadata.decisions[]` with new anchor format `outline:edit:<idx>` and `source: "outline"`.
+- `/aimi:plan` Pass 2 parallel expansion: each outline entry expands in its own Task sub-agent with `outline:NN` dependsOn tokens; story-merge remaps tokens to final `US-NNN`. Schema-validation failures trigger up to 2 retries with sanitized validator error injected into the next prompt (`$(`, backticks, newlines stripped; truncated to 500 chars).
+- `--non-interactive` outline auto-approve: emits `[plan] outline auto-approved (non-interactive): N stories` log line.
+
+### Changed
+
+- `/aimi:plan` Phase 3 + Phase 4 replaced with a two-pass outline+expand pipeline (Pass 1 outline → outline gate → Pass 2 fan-out → `story-merge` deterministic merge). Drop-in: schema of `tasks.json` is unchanged; `/aimi:execute`, `/aimi:status`, `/aimi:deepen` consumers unaffected.
+- `metadata.decisions[]` accepts new `source` value `outline` for outline-gate edits (additive; no schema version bump).
+- Rule 22 mock-sync AC routing, Phase 3.1 Reference Element Inventory, and Phase 4.1 Coverage Self-Check now execute inside `story-merge` instead of inline in plan.md Phase 3.
+
+### Security
+
+- Pass 2 retry prompt sanitization: validator error strings are stripped of `$(`, backticks, and newlines, then truncated to 500 chars before injection into retry prompts — prevents shell-expansion and prompt-injection vectors from poisoning auto-correction context.
+- Staging-path validation: outline-title slug sanitization rejects `..` traversal, `/` characters, and leading dots before staging file paths are constructed. Per-run staging subdirectory `.aimi/.tasks-staging/<topic-slug>-<RUN_TS>/` isolates each run.
+
 ## [1.95.1] — 2026-05-28
 
 ### Fixed
