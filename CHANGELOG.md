@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.96.1] - 2026-06-01
+
+### Fixed
+
+- Added missing `aimi-story-expander` workflow agent referenced by `/aimi:plan` Phase 3d. The 1.96.0 plan.md rewrite invoked `subagent_type="aimi-engineering:workflow:aimi-story-expander"` but the corresponding agent file was never authored, causing the orchestrator to fall back to authoring staging JSON inline on every run (defeating the point of parallel Pass 2 expansion). The agent receives one outline entry plus full context (outline, research, decisions, optional specs) and writes one staging JSON file using `outline:NN` dependsOn tokens that `story-merge` later remaps.
+
 ## [1.96.0] - 2026-06-01
 
 ### Added
