@@ -142,6 +142,8 @@ The session is opened exactly once. It is never closed mid-run.
 
 After each story merges, visual stories are verified. When `VISUAL_FOLLOW=true`, the existing `visual-follow` session is reused (`agent-browser --session visual-follow open/screenshot`). When `VISUAL_FOLLOW=false`, a fresh headless `agent-browser` session is opened, screenshot taken, and closed per story. If `agent-browser` is absent in either case, `verification.status` is set to `skipped`.
 
+**Console capture (additive, per story).** Immediately before each per-story `open`, the wave loop issues `agent-browser console --clear` to drop logs accumulated from prior stories in the same wave. Right after `screenshot`, it captures `agent-browser console --json` and `agent-browser errors --json` for this story's page-load output and feeds both into the `attribute_console_errors()` pass defined in the Console Error Attribution section. Capture is advisory only — it never changes `verification.status` and never blocks the wave. The per-story `--clear` is what enables per-story attribution; without it, the buffer is wave-cumulative and the LAST verified story would inherit every prior story's errors.
+
 ### Phase 4 — Keep Open on Completion (Post-Loop)
 
 When `VISUAL_FOLLOW=true`, the `visual-follow` session is intentionally left open after execution ends so the user can inspect the final UI state. The user must close it manually.
@@ -671,6 +673,7 @@ command -v agent-browser
 wave = 1
 is_first_story_in_session = true
 DESIGN_REVIEW_BUFFERS = {}  # key: story_id, value: {title, output}; populated by post-merge design reviewer
+CONSOLE_BUFFER = {}         # key: story_id, value: ATTRIBUTION object; populated by post-merge console capture (see Console Error Attribution section)
 
 while true:
     # Check remaining work
@@ -982,14 +985,32 @@ while true:
 
                 # --- Post-merge visual verification for visual stories ---
                 # Session lifecycle: see Visual Follow Lifecycle section.
+                # Capture sequence per story (when agent-browser is available):
+                #   1. console --clear  ← drop logs accumulated from PRIOR story in this wave
+                #   2. open <url>       ← navigate
+                #   3. screenshot       ← visual snapshot
+                #   4. console --json   ← capture this story's console output
+                #   5. errors  --json   ← capture this story's uncaught exceptions
+                # Per-story attribution depends on the --clear in step 1 — without it,
+                # console buffer is wave-cumulative and last-story-merged eats the blame.
                 if full_story.verification and full_story.verification.strategy == "visual" and full_story.verification.status == "pending":
                     if VISUAL_FOLLOW == true:
                         # Reuse the existing headed session (managed by execute.md)
+                        agent-browser --session visual-follow console --clear
                         agent-browser --session visual-follow open [full_story.verification.url]
                         agent-browser --session visual-follow screenshot /tmp/verify-[full_story.id].png
+                        CONSOLE_JSON=$(agent-browser --session visual-follow console --json)
+                        ERRORS_JSON=$(agent-browser --session visual-follow errors --json)
                         # Read screenshot and compare against full_story.verification.expect
                         Read /tmp/verify-[full_story.id].png
                         Compare visual output against full_story.verification.expect
+
+                        # Run console attribution pass (see "Console Error Attribution" section below)
+                        ATTRIBUTION = attribute_console_errors(
+                            console_json=CONSOLE_JSON,
+                            errors_json=ERRORS_JSON,
+                            wave_stories=succeeded_stories
+                        )
 
                         if visual matches expectations:
                             $AIMI_CLI update-field [full_story.id] verification.status passed
@@ -997,20 +1018,40 @@ while true:
                         else:
                             $AIMI_CLI update-field [full_story.id] verification.status failed
                             Report: "[full_story.id] visual verification failed — [reason]. (advisory, not blocking)"
+
+                        # Report attribution lines as advisory (do NOT toggle verification.status)
+                        if ATTRIBUTION.has_errors:
+                            Report: "[full_story.id] console: \(ATTRIBUTION.summary)"
+                            # Push attribution into wave-level CONSOLE_BUFFER for the wave summary
+                            CONSOLE_BUFFER[full_story.id] = ATTRIBUTION
                     else:
                         # No visual-follow session — headless verification
                         has_browser = command -v agent-browser
                         if has_browser:
+                            agent-browser console --clear
                             agent-browser open [full_story.verification.url]
                             agent-browser screenshot /tmp/verify-[full_story.id].png
+                            CONSOLE_JSON=$(agent-browser console --json)
+                            ERRORS_JSON=$(agent-browser errors --json)
                             Read /tmp/verify-[full_story.id].png
                             Compare visual output against full_story.verification.expect
+
+                            ATTRIBUTION = attribute_console_errors(
+                                console_json=CONSOLE_JSON,
+                                errors_json=ERRORS_JSON,
+                                wave_stories=succeeded_stories
+                            )
 
                             if visual matches expectations:
                                 $AIMI_CLI update-field [full_story.id] verification.status passed
                             else:
                                 $AIMI_CLI update-field [full_story.id] verification.status failed
                                 Report: "[full_story.id] visual verification failed — [reason]. (advisory)"
+
+                            if ATTRIBUTION.has_errors:
+                                Report: "[full_story.id] console: \(ATTRIBUTION.summary)"
+                                CONSOLE_BUFFER[full_story.id] = ATTRIBUTION
+
                             agent-browser close
                         else:
                             $AIMI_CLI update-field [full_story.id] verification.status skipped
@@ -1114,6 +1155,59 @@ If `VISUAL_FOLLOW=true`, do NOT close the `visual-follow` session.
 
 Report: `"Visual follow session still open — close manually when done: agent-browser --session visual-follow close"`
 
+## Console Error Attribution
+
+Defines `attribute_console_errors()`, called by the per-story post-merge visual verification step above. Pure orchestrator-side reasoning — no new CLI calls, no new subagents. Adds ≤ 1 turn of orchestrator inference per wave (typically far less because most stories have 0 errors).
+
+### Inputs
+
+- `console_json` — JSON returned by `agent-browser console --json` for this story's verification page-load. Shape: `{"data":{"messages":[{"type":"log|warning|error|info","text":"...","args":[...]}]}}`. Messages with `type == "error"` and `type == "warning"` are the only ones considered; `log` / `info` are ignored.
+- `errors_json` — JSON from `agent-browser errors --json`. Uncaught exceptions and unhandled promise rejections. Shape: `{"data":{"errors":[{"message":"...","stack":"..."}]}}`.
+- `wave_stories` — the wave's `succeeded_stories` array, each carrying `id`, `title`, and `implementation.files[]`.
+
+### Procedure
+
+1. **Merge** the `messages` (filtered to type `error`/`warning`) and `errors` arrays into a flat list of `{kind, text, stack}` records where `kind ∈ {error, warning, exception}`.
+2. **Drop the noise** — ignore well-known browser/extension noise that does not indicate code defects:
+   - Lines matching `/extension:|chrome-extension:|moz-extension:/`
+   - Lines matching `/DevTools failed to load source map/`
+   - Lines matching `/Download the React DevTools/`
+   - Lines whose `text` is empty after trim
+3. **For each remaining record, attribute** by trying these strategies in order; first match wins, no fallthrough:
+   - **a. Stack-trace file match**: parse `stack` for tokens that look like project paths (anything matching `/[A-Za-z0-9_./-]+\.(tsx?|jsx?|vue|svelte|rb|py|go|rs|java|kt)/`). For each path token, check whether it appears in any `wave_stories[*].implementation.files[]`. First story whose `files[]` contains the token → attributed.
+   - **b. Text component-name match**: when no stack-trace match, scan the `text` for `PascalCase` identifiers (`/\b[A-Z][a-zA-Z0-9]+\b/`). For each, check whether any `wave_stories[*].implementation.files[]` contains a path with that identifier as a basename component (e.g., text mentions `ContributorsCard` → match story with `…/ContributorsCard/index.tsx`). First match → attributed.
+   - **c. Wave-shared**: when neither matches, attribute to the wave as a whole with reason `"shared module or ambiguous origin"`.
+4. **Build the `ATTRIBUTION` object**:
+   ```
+   ATTRIBUTION = {
+     has_errors: <bool — true when any error|exception remains after de-noising>,
+     summary: <one-line string: e.g., "2 errors, 1 warning (1 attributed: US-003)"
+              when this is the per-story output; or "2 errors, 1 warning, 1 wave-shared">,
+     attributed: [{kind, text, story_id, attribution_method: "stack-file"|"text-component"|"wave-shared"}],
+   }
+   ```
+5. **Per-story output** (when called from the post-merge step):
+   - Filter `attributed` to entries where `story_id == full_story.id` for the `Report` line.
+   - Push the full per-story attribution object into `CONSOLE_BUFFER[full_story.id]` so the wave summary can emit a consolidated view.
+
+### Confidence and policy
+
+- Attribution is **advisory only**. It NEVER toggles `verification.status` and NEVER triggers a cascade-skip. A failed visual story stays failed only when the screenshot does not match `verification.expect` — console errors are reported in parallel.
+- When attribution method is `text-component` or `wave-shared`, the report line MUST include the word "likely" (e.g., `"likely US-004 (FooComponent ref)"`) so the user knows it is heuristic.
+
+### Wave summary section (rendered at end of wave)
+
+After the per-story post-merge loop finishes, if `CONSOLE_BUFFER` has any entries for the wave just completed, append to the wave summary report:
+
+```
+Console (advisory):
+  - US-003: 2 errors (attributed via stack: ContributorsCard/index.tsx)
+  - US-005: 1 error (likely from text match: UserProfile)
+  - wave-shared: 1 warning (could not attribute to a single story)
+```
+
+This is ADDITIVE to the existing `Wave [wave] complete: ...` line — does not replace it.
+
 ## Step 5: Completion
 
 When execution ends (all stories complete, or deadlock detected):
@@ -1174,6 +1268,32 @@ For each entry in DESIGN_REVIEW_BUFFERS (keyed by story id, insertion order):
 ```
 
 If `DESIGN_REVIEW_BUFFERS` is empty, omit the `## Design Review` section entirely.
+
+If `CONSOLE_BUFFER` is non-empty, append:
+```
+## Console (advisory)
+
+For each entry in CONSOLE_BUFFER (keyed by story id, insertion order):
+
+### [story_id]
+- [N] errors, [M] warnings, [E] exceptions
+[For each entry in attributed where story_id matches:]
+  - [kind] [text] (attribution: [attribution_method])
+
+If any record was attributed via "text-component" or "wave-shared", prefix the
+record's line with "likely:" so the user knows the call is heuristic.
+
+[After per-story groups, if any wave-shared entries exist:]
+### wave-shared
+- [N] message(s) could not be attributed to a single story
+  - [kind] [text]
+
+Reminder: Console output is advisory. It does NOT change `verification.status`
+and never blocks the wave — failed visual stories still fail on screenshot
+mismatch only.
+```
+
+If `CONSOLE_BUFFER` is empty, omit the `## Console` section entirely.
 
 If any pending gates exist, append:
 ```

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.97.1] - 2026-06-03
+
+### Added
+
+- **Console error attribution in post-merge visual verification.** `/aimi:execute` now captures `agent-browser console --json` and `agent-browser errors --json` after every per-story screenshot in a visual wave, and runs an `attribute_console_errors()` pass that links each error/warning back to the wave story most likely to have caused it. Attribution strategies: (a) stack-trace file match against `implementation.files[]`, (b) PascalCase component-name match in error text, (c) wave-shared fallback when neither matches. Output goes into a `## Console (advisory)` section in the wave summary alongside the existing `## Design Review` block. Advisory only — never changes `verification.status`, never blocks the wave.
+- Per-story `agent-browser console --clear` before each `open` so the console buffer is per-story, not wave-cumulative. Without this, attribution would silently blame the last-merged story for every prior story's errors.
+
+### Notes
+
+- Requires `agent-browser` ≥ 0.25.x (the version exposing `console` and `errors` subcommands — undocumented in `--help` but present and stable; verified against 0.25.3).
+- Multi-`/aimi:execute` runs in parallel that share `--session visual-follow` will see cross-run console contamination (upstream issue `vercel-labs/agent-browser#326`). Workaround: each run uses a unique session name. Not applied here because single-user-single-run is the common case.
+
 ## [1.97.0] - 2026-06-03
 
 ### Added
