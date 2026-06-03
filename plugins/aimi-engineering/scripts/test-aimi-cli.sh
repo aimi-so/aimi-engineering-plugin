@@ -7696,6 +7696,69 @@ test_detect_models_preserves_other_host() {
   fi
 }
 
+# detect-models (DEFAULT mode, no flags) must also preserve the OTHER host's
+# sub-table. Previously only the FLAG-mode branch merged; the no-flag branch
+# wrote a fresh {schemaVersion, categories:{<current host>:{...}}} and silently
+# dropped the inactive host's configured models on every invocation.
+# Regression coverage for that bug.
+test_detect_models_default_mode_preserves_other_host() {
+  echo ""
+  echo "=== Testing detect-models (DEFAULT mode, no flags) preserves the other host's block ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Prime models.json with both hosts populated — opencode block carries
+  # provider-specific model IDs that the test will assert survive untouched.
+  local primed_oc_block='{"research":"deepseek/deepseek-v4-flash","review":"zai-coding-plan/glm-5.1","design":"zai-coding-plan/glm-5.1","workflow":"deepseek/deepseek-v4-flash","executor":"deepseek/deepseek-v4-pro"}'
+  printf '%s\n' "{
+    \"schemaVersion\": \"2.0\",
+    \"categories\": {
+      \"claudeCode\": {\"research\":\"haiku\",\"review\":\"opus\",\"design\":\"sonnet\",\"workflow\":\"sonnet\",\"executor\":\"sonnet\"},
+      \"opencode\": $primed_oc_block
+    }
+  }" > "$tmpdir/models.json"
+
+  local before_oc
+  before_oc=$(jq -c '.categories.opencode' "$tmpdir/models.json" 2>/dev/null)
+
+  # Run detect-models on the Claude Code host with NO flags (default mode).
+  # Stdin is not a TTY here, so the prompt loop is skipped and the run uses
+  # the default haiku/opus/sonnet selections for claudeCode.
+  CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" "$CLI" detect-models </dev/null >/dev/null 2>&1
+
+  local result
+  result=$(cat "$tmpdir/models.json" 2>/dev/null)
+
+  # The opencode block must be byte-identical to the primed value
+  local after_oc
+  after_oc=$(printf '%s' "$result" | jq -c '.categories.opencode' 2>/dev/null)
+
+  if [ "$before_oc" = "$after_oc" ]; then
+    echo -e "${GREEN}✓${NC} detect-models default-mode-preserves: opencode block unchanged"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models default-mode-preserves: opencode block changed"
+    echo "  before: $before_oc"
+    echo "  after:  $after_oc"
+    ((TESTS_FAILED++))
+  fi
+
+  # The claudeCode block must be present (with the default model selections)
+  local cc_count
+  cc_count=$(printf '%s' "$result" | jq '.categories.claudeCode | keys | length' 2>/dev/null)
+  assert_eq "5" "$cc_count" "detect-models default-mode-preserves: claudeCode block has all five categories"
+
+  if printf '%s' "$result" | jq empty 2>/dev/null; then
+    echo -e "${GREEN}✓${NC} detect-models default-mode-preserves: merged models.json is valid JSON"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models default-mode-preserves: merged models.json is not valid JSON: $result"
+    ((TESTS_FAILED++))
+  fi
+}
+
 # ============================================================================
 # detect-design-bundle Tests
 # ============================================================================
@@ -9102,6 +9165,7 @@ main() {
   test_detect_models_tier_flags_claudecode
   test_detect_models_tier_flags_preserve_other_host
   test_detect_models_preserves_other_host
+  test_detect_models_default_mode_preserves_other_host
 
   # models-prompt-check / models-prompt-dismiss tests
   echo ""

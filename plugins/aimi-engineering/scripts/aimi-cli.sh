@@ -2615,26 +2615,59 @@ anthropic/claude-opus-4-7"
   fi
 
   # ---- Assemble the models.json document (v2.0 schema) ----------------------
+  # Read the existing config FIRST so we preserve the other host's sub-table.
+  # Without this merge, an unflagged detect-models invocation (e.g., the
+  # /aimi:plan automatic resolve at the top of every command) overwrites the
+  # file with only the current host's block, silently dropping the inactive
+  # host's configured models. This is the same merge pattern the flag-mode
+  # branch above uses (lines 2477-2502).
+  local _existing_json
+  _existing_json=$(read_aimi_models_config) || _existing_json=""
+
   local _models_json
-  _models_json=$(jq -n \
-    --arg host_key  "$_host_key" \
-    --arg research  "$_model_research" \
-    --arg review    "$_model_review" \
-    --arg design    "$_model_design" \
-    --arg workflow  "$_model_workflow" \
-    --arg executor  "$_model_executor" \
-    '{
-      schemaVersion: "2.0",
-      categories: {
-        ($host_key): {
-          research: $research,
-          review:   $review,
-          design:   $design,
-          workflow: $workflow,
-          executor: $executor
+  if [ -n "$_existing_json" ] && printf '%s' "$_existing_json" | jq empty 2>/dev/null; then
+    # Merge: preserve other host's categories block, replace current host's block
+    _models_json=$(printf '%s' "$_existing_json" | jq \
+      --arg host_key  "$_host_key" \
+      --arg research  "$_model_research" \
+      --arg review    "$_model_review" \
+      --arg design    "$_model_design" \
+      --arg workflow  "$_model_workflow" \
+      --arg executor  "$_model_executor" \
+      '{
+        schemaVersion: "2.0",
+        categories: ((.categories // {}) + {
+          ($host_key): {
+            research: $research,
+            review:   $review,
+            design:   $design,
+            workflow: $workflow,
+            executor: $executor
+          }
+        })
+      }')
+  else
+    # No existing config or malformed — create fresh
+    _models_json=$(jq -n \
+      --arg host_key  "$_host_key" \
+      --arg research  "$_model_research" \
+      --arg review    "$_model_review" \
+      --arg design    "$_model_design" \
+      --arg workflow  "$_model_workflow" \
+      --arg executor  "$_model_executor" \
+      '{
+        schemaVersion: "2.0",
+        categories: {
+          ($host_key): {
+            research: $research,
+            review:   $review,
+            design:   $design,
+            workflow: $workflow,
+            executor: $executor
+          }
         }
-      }
-    }')
+      }')
+  fi
 
   # ---- Atomic write ---------------------------------------------------------
   write_aimi_models_config "$_models_json"

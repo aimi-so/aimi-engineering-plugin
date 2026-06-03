@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.97.2] - 2026-06-03
+
+### Fixed
+
+- `aimi-cli detect-models` in **default mode (no `--research/--review/...` flags)** now preserves the OTHER host's sub-table in `~/.config/aimi/models.json`. Previously the no-flag branch wrote a fresh `{schemaVersion, categories:{<current host>:{...}}}` document via `jq -n`, silently dropping the inactive host's configured models on every invocation. This caused `/aimi:plan`'s automatic resolve to wipe a user's OpenCode model assignments whenever the command ran inside Claude Code (and vice-versa). The fix applies the same merge pattern the flag-mode branch already uses (read existing config → merge by `host_key`). Regression test added: `test_detect_models_default_mode_preserves_other_host`.
+
 ## [1.97.1] - 2026-06-03
 
 ### Added
