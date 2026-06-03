@@ -397,15 +397,24 @@ This structured summary feeds into Phase 2 question generation and Phase 4 desig
 
 #### Collect researchPaths
 
-After merging findings, collect the output paths of every researcher that succeeded into a `researchPaths` working-memory list:
+After merging findings, collect the output paths of every researcher that succeeded into a `researchPaths` working-memory list. Brainstorm tracks four research kinds that plan can later reuse:
 
-1. For each researcher that completed successfully (codebase and/or best-practices), record the `outputPath` that was passed to that agent's prompt (e.g., `.aimi/research/YYYY-MM-DD-<topic-slug>-[RUN_TS]-codebase.md`).
+| Kind | Filename suffix | Agent |
+|------|----------------|-------|
+| `codebase` | `-codebase.md` | `aimi-codebase-researcher` |
+| `best-practices` | `-best-practices.md` | `aimi-best-practices-researcher` |
+| `framework-docs` | `-framework-docs.md` | `aimi-framework-docs-researcher` (when spawned) |
+| `learnings` | `-learnings.md` | `aimi-learnings-researcher` (when spawned) |
+
+1. For each researcher that completed successfully, record the `outputPath` that was passed to that agent's prompt (e.g., `.aimi/research/YYYY-MM-DD-<topic-slug>-[RUN_TS]-codebase.md`). Include all four kinds above when the corresponding agent was spawned and succeeded.
 2. Paths are relative to AIMI_ROOT (no leading `./`, no `..` components).
 3. Deduplicate: if the same path appears more than once, keep only one entry.
 4. Validate each path exists on disk under AIMI_ROOT before adding it to the list. Drop any path that fails this check and emit one warning line per dropped entry: `warning: researchPaths entry not found on disk — dropping: <path>`.
 5. If all researchers were skipped or failed (the "Failed/Skipped + Failed/Skipped" row), the list remains empty.
 
 Store the final list in working memory as `researchPaths`. It is consumed when writing the brainstorm document in Phase 4.
+
+**Reuse contract for plan:** When `/aimi:plan` reads a brainstorm with a `researchPaths` frontmatter key, it classifies each path by filename suffix (per the table above) and builds a `reusedResearch{kind: path}` map. Plan uses this map to skip re-spawning researchers for kinds that are already fresh (within 14 days). A brainstorm without a `researchPaths` key (legacy) disables all reuse silently — no error. Plan never reuses paths for kinds whose suffix is not in the table (e.g., `-design-bundle.md` paths are ignored for reuse).
 
 ### Quality Gate: Research Adequacy
 
@@ -890,9 +899,13 @@ Use the design document template:
 date: YYYY-MM-DD
 topic: <topic-slug>
 # researchPaths: emitted only when at least one researcher succeeded (non-empty list)
+# Covers all four reusable kinds (codebase, best-practices, framework-docs, learnings);
+# include only the entries whose agents actually ran and succeeded this session.
 researchPaths:
   - .aimi/research/YYYY-MM-DD-<topic-slug>-<RUN_TS>-codebase.md
   - .aimi/research/YYYY-MM-DD-<topic-slug>-<RUN_TS>-best-practices.md
+  - .aimi/research/YYYY-MM-DD-<topic-slug>-<RUN_TS>-framework-docs.md
+  - .aimi/research/YYYY-MM-DD-<topic-slug>-<RUN_TS>-learnings.md
 prototype:
   - path: .aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html
     question_category: Aesthetic Direction
@@ -1018,9 +1031,11 @@ If neither variant prototypes were saved nor bundle prototypes are available (ne
 ### researchPaths frontmatter rules
 
 - **Emit only when non-empty:** Include the `researchPaths:` key in frontmatter only when the working-memory `researchPaths` list collected in Step 1c contains at least one entry. When the list is empty (all researchers were skipped or failed), omit the key entirely — do **not** emit `researchPaths: []`.
+- **Four reusable kinds:** Include entries for any of the four reusable research kinds that succeeded this session — `codebase` (`-codebase.md`), `best-practices` (`-best-practices.md`), `framework-docs` (`-framework-docs.md`), and `learnings` (`-learnings.md`). Entries for kinds whose agents were skipped or failed are simply absent from the list (not emitted as empty or null). Other research kinds (e.g., `-design-bundle.md`) are not included in `researchPaths` — they are not reusable by plan.
 - **Relative paths:** Each entry is a path relative to AIMI_ROOT. Use no leading `./` and no `..` components (e.g., `.aimi/research/2026-05-06-my-topic-143022-codebase.md`).
 - **Deduplicate:** If the same path was collected more than once, include it only once.
 - **Validate before emission:** Confirm each path exists on disk under AIMI_ROOT. Drop entries that fail this check with one warning line each: `warning: researchPaths entry not found on disk — dropping: <path>`. If validation drops all entries, omit the key entirely.
+- **Backward compatibility:** Brainstorm documents that do not have the `researchPaths` key (written before this feature) are still valid. When `/aimi:plan` reads such a legacy brainstorm, it silently disables research reuse for that session — no error or warning is emitted. New brainstorms always emit this key when at least one researcher succeeds.
 
 ### Resolve Open Questions
 

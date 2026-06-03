@@ -54,7 +54,7 @@ The agent spawns fresh with no memory of previous work. If the story is too big,
 
 ## Design Bundle Fidelity Guidance
 
-Fires only when the inlined story payload includes `metadata.designBundle`. The caller (execute.md) injects the `[DESIGN_BUNDLE_CONTEXT]` XML block; the executor does not test for `designBundle` itself.
+Fires only when the story context includes `metadata.designBundle`. The worker receives bundle guidance via `designContext.bundleGuidance` in the `get-story-context` JSON; the executor reads any spec file paths cited there via the Read tool before authoring implementation code.
 
 ### Spec-aware read order
 
@@ -153,6 +153,52 @@ Verdict values: `PASS` (implementation matches prototype), `DIVERGES` (implement
 
 ---
 
+## Result Contract (REQUIRED for all workers)
+
+Every worker MUST end its final message with a `<result_json>` block. The orchestrator parses this block as its source of truth — anything outside the block is debugging prose that the leader does NOT consume in the happy path.
+
+Required shape (omit optional fields when empty rather than emitting null/empty arrays):
+
+```
+<result_json>
+{
+  "status": "ok | failed | skipped",
+  "commit": "<short SHA, or null when no commit was made>",
+  "tests": {"passed": <int>, "failed": <int>, "total": <int>},   // optional, omit when no test was run
+  "typecheck": "ok | failed | skipped",                            // optional
+  "knownGaps": ["<short gap label>"],                              // optional, omit when empty
+  "deviations": ["<short deviation label>"],                       // optional, omit when empty
+  "failureCause": "<one-line cause>"                               // REQUIRED when status != ok
+}
+</result_json>
+```
+
+Rules:
+
+- The block MUST be the LAST thing in the worker's final message. Anything after it is ignored by the orchestrator.
+- The JSON inside MUST parse cleanly (no trailing commas, no comments).
+- `status` is mandatory. `commit` is mandatory but may be `null` when intentionally no commit was created.
+- `failureCause` is mandatory when `status` is `failed` or `skipped` — one short sentence the leader will surface to the user.
+- Prose OUTSIDE the block is for human debugging only. Keep it short; the orchestrator does not need it.
+- Examples — success:
+  ```
+  <result_json>
+  {"status":"ok","commit":"a6cd4678","tests":{"passed":7,"failed":0,"total":7},"typecheck":"ok"}
+  </result_json>
+  ```
+  Failure:
+  ```
+  <result_json>
+  {"status":"failed","commit":null,"failureCause":"Pre-commit hook failed: tsc not in PATH"}
+  </result_json>
+  ```
+  Skipped (gate blocked):
+  ```
+  <result_json>
+  {"status":"skipped","commit":null,"failureCause":"Decision gate pending: choose OAuth provider"}
+  </result_json>
+  ```
+
 ## Prompt Template
 
 > This is the canonical worker prompt template. execute.md and next.md should reference this skill rather than duplicating the prompt inline.
@@ -167,14 +213,6 @@ You are executing a single story from the tasks file.
 [CLAUDE.md content or default rules]
 
 </project_guidelines>
-
-<required_skills>
-
-Apply these skill conventions in addition to project guidelines. (Section omitted when no skills are declared for this story.)
-
-[REQUIRED_SKILLS]
-
-</required_skills>
 
 <output_rules>
 
@@ -246,11 +284,13 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 $AIMI_CLI get-story-context [STORY_ID]
 ```
-Parse the returned JSON for two top-level fields:
+Parse the returned JSON for four top-level fields:
 - `story` — contains `id`, `title`, `description`, `acceptanceCriteria`, `notes`, `tasks`, `implementation`, `verification`, `gate`
 - `metadata` — contains `prototypePaths`, `prototypeAnchor`, `branchName`, and other session metadata
+- `skills` — array of required skill blocks; treat each `.content` as additional project conventions
+- `designContext` — contains `.decisions` (design intent) and `.bundleGuidance` (may cite spec file paths)
 
-Use `story` and `metadata` for all subsequent steps. If the command fails, report failure immediately and stop.
+Use all four keys for subsequent steps. If the command fails, report failure immediately and stop.
 
 </task_pointer>
 
@@ -321,12 +361,6 @@ Visual verification is **advisory** — failures do NOT block the story commit.
 
 </previous_notes>
 
-<design_context>
-
-[DESIGN_CONTEXT]
-
-</design_context>
-
 <prototype_context>
 
 When `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, read each prototype file yourself using the Read tool.
@@ -337,14 +371,6 @@ When `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAn
 - Read all available prototypes before writing any implementation code.
 
 </prototype_context>
-
-<design_bundle_context>
-
-Design bundle fidelity guidance — spec-aware read order, translate-not-copy, match-visual-output, designTokens passthrough, component-mapping, and rule-ID citation rules (see `## Design Bundle Fidelity Guidance`). Omit when `metadata.designBundle` is absent.
-
-[DESIGN_BUNDLE_CONTEXT]
-
-</design_bundle_context>
 
 <tools>
 
@@ -368,13 +394,15 @@ All file operations MUST stay within the project boundary: PROJECT_PATH when set
 0a. **Bootstrap (FIRST ACTION):** Re-read `$AIMI_CLI` from cache (per-call re-read — see `<task_pointer>` Step 0 above), then run `$AIMI_CLI get-story-context $STORY_ID` and parse the returned JSON. Extract:
     - `story` — full story object (`id`, `title`, `description`, `acceptanceCriteria`, `notes`, `tasks`, `implementation`, `verification`, `gate`)
     - `metadata` — session metadata (`prototypePaths`, `prototypeAnchor`, `branchName`, etc.)
+    - `skills` — array of required skill blocks; for each entry, read its `.content` verbatim as additional project conventions (treat each as a required SKILL.md conventions block, in addition to project CLAUDE.md)
+    - `designContext` — read `.decisions` as design intent for any UI-touching work; if `.bundleGuidance` cites spec file paths (DesignSpec / BusinessSpec), use the Read tool to load those files before authoring implementation code
     If this command fails, report failure immediately and stop.
 0b. If `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, read each prototype file with the Read tool:
     - Resolve path as `$AIMI_ROOT/<path>` for each entry in `metadata.prototypePaths[]` and for `story.implementation.prototypeAnchor` when set
     - If a file does not exist at the resolved path, log: `prototype <path> missing — skipped` and continue
 0c. If PROJECT_PATH is set, cd to PROJECT_PATH; if WORKTREE_PATH is also set, cd to WORKTREE_PATH instead (takes precedence)
 1. Read CLAUDE.md for project conventions (from PROJECT_PATH root when set)
-2. Implement the story requirements
+2. Implement the story requirements. When `story.tasks[]` is present, follow it as the ordered recipe (creation → integration wiring → local verification) — pay particular attention to any `"Wire <X> into <Y>"` entries, which encode cross-story file wiring that AC alone cannot enforce. `tasks[]` is planner guidance; `acceptanceCriteria` remains the completion gate.
 3. Verify ALL acceptance criteria are met
 3.5. If `story.verification.strategy == "visual"` OR `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set: run the Visual Source-of-Truth Protocol (V1/V2/V3 enumeration → mapping → escalation) BEFORE writing code, then proceed to the Reference-Artifact Parity Pass.
 3.6. Run Reference-Artifact Parity Pass (see full procedure in the named section above) if the story declares any reference artifact or any AC line contains a prototype/spec citation or `verification.strategy` implies a reference. Block commit until every element has a verdict; on unreadable reference, log `Parity pass skipped — reference not readable: <path>` as a commit trailer and proceed.
@@ -393,6 +421,7 @@ All file operations MUST stay within the project boundary: PROJECT_PATH when set
 
 6. If WORKTREE_PATH is set: do NOT update tasks file — return result report instead
    If no WORKTREE_PATH: do NOT update tasks file directly — the caller (next.md/execute.md) handles status updates via the CLI
+7. **Emit the `<result_json>` block as the LAST element of your final message** (see "Result Contract" section above). The orchestrator parses this block as source of truth — prose outside the block is debugging only and is NOT consumed by the leader.
 
 </execution_flow>
 
@@ -401,8 +430,8 @@ All file operations MUST stay within the project boundary: PROJECT_PATH when set
 If you cannot complete the story:
 
 1. Do NOT update the tasks file (the caller handles status via CLI)
-2. Return with clear failure report including error details
-3. The caller will mark the story as failed and handle dependent stories
+2. Emit `<result_json>` with `"status":"failed"` and a one-line `"failureCause"` — the leader reads this to decide cascade-skip and report to the user.
+3. Optional prose (above the block) may include longer error details for human debugging.
 
 </on_failure>
 ```
@@ -421,12 +450,6 @@ You are executing a single story from the tasks file.
 <project_guidelines>
 Follow project guidelines from CLAUDE.md/AGENTS.md. Apply output compression rules from AGENTS.md.
 </project_guidelines>
-
-<required_skills>
-Apply these skill conventions in addition to project guidelines. (Section omitted when no skills are declared for this story.)
-
-[REQUIRED_SKILLS]
-</required_skills>
 
 <project_context>
 
@@ -489,24 +512,12 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 $AIMI_CLI get-story-context [STORY_ID]
 ```
 
-Parse `{story, metadata}` from the returned JSON. If the command fails, report failure and stop.
+Parse `{story, metadata, skills, designContext}` from the returned JSON. For each entry in `skills[]`, read its `.content` verbatim as additional project conventions. Read `designContext.decisions` as design intent for UI-touching work. If `designContext.bundleGuidance` cites spec file paths (DesignSpec / BusinessSpec), use the Read tool to load those files before authoring implementation code. If the command fails, report failure and stop.
 </task_pointer>
 
 <prototype_context>
 When `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, read each prototype file with the Read tool (resolve as `$AIMI_ROOT/<path>`). Log `prototype <path> missing — skipped` for any missing file and continue. Read all available prototypes before writing implementation code.
 </prototype_context>
-
-<design_context>
-
-[DESIGN_CONTEXT]
-
-</design_context>
-
-<design_bundle_context>
-Design bundle fidelity: spec-aware read order (businessSpec → designSpec → chats → prototypes → existing components), translate-not-copy (no CDN React/Babel/Alpine/inline styles), match-visual-output, designTokens passthrough, component-mapping, rule-ID citation. Omit when `metadata.designBundle` absent.
-
-[DESIGN_BUNDLE_CONTEXT]
-</design_bundle_context>
 
 <tools>
 Use standard tools: Read, Write, Edit, Bash, Grep, Glob. Do NOT invoke these via the Skill tool.
@@ -517,11 +528,11 @@ CRITICAL: Stay within project root. Never read/write outside project boundary. W
 </project_root_boundary>
 
 <execution_flow>
-Bootstrap: re-read `$AIMI_CLI` from cache (per-call re-read one-liner — see `<task_pointer>` above), run `$AIMI_CLI get-story-context $STORY_ID`, parse `{story, metadata}`. Read prototype files from `metadata.prototypePaths[]` and `story.implementation.prototypeAnchor` via Read tool (log missing, skip). Then follow standard execution flow: read criteria → implement → test → commit. If `story.verification.strategy == "visual"` OR `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, run the Visual Source-of-Truth Protocol (V1/V2/V3) before writing code. Stage only story-related files (never `-A` or `.`). Commit format: `git commit -m "type(scope): Story title"`. Verify with `git log -1 --oneline`. On commit failure: report immediately, do not retry. Do NOT update tasks file — caller handles status. When a reference artifact is declared, run the Reference-Artifact Parity Pass before committing (see full named section above).
+Bootstrap: re-read `$AIMI_CLI` from cache (per-call re-read one-liner — see `<task_pointer>` above), run `$AIMI_CLI get-story-context $STORY_ID`, parse `{story, metadata, skills, designContext}`. For each entry in `skills[]`, read its `.content` verbatim as additional project conventions (in addition to CLAUDE.md). Read `designContext.decisions` as design intent for UI-touching work; if `designContext.bundleGuidance` cites spec file paths (DesignSpec / BusinessSpec), use the Read tool to load those files before authoring implementation code. Read prototype files from `metadata.prototypePaths[]` and `story.implementation.prototypeAnchor` via Read tool (log missing, skip). Then follow standard execution flow: read criteria → implement (follow `story.tasks[]` as the ordered recipe when present; treat `"Wire <X> into <Y>"` entries as mandatory cross-story integration steps; AC remains the completion gate) → test → commit. If `story.verification.strategy == "visual"` OR `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, run the Visual Source-of-Truth Protocol (V1/V2/V3) before writing code. Stage only story-related files (never `-A` or `.`). Commit format: `git commit -m "type(scope): Story title"`. Verify with `git log -1 --oneline`. On commit failure: report immediately, do not retry. Do NOT update tasks file — caller handles status. When a reference artifact is declared, run the Reference-Artifact Parity Pass before committing (see full named section above). **End your final message with the `<result_json>` block per the Result Contract section — the orchestrator parses ONLY that block; prose outside is debugging only.**
 </execution_flow>
 
 <on_failure>
-On failure: do NOT update the tasks file. Return clear failure report with error details. The caller handles status and dependent stories.
+On failure: do NOT update the tasks file. Emit `<result_json>` with `"status":"failed"` and a one-line `"failureCause"` as the LAST element of your message — that field is what the leader reads to decide cascade-skip and surface to the user. Optional prose above the block may include longer error details.
 </on_failure>
 ```
 
@@ -533,11 +544,9 @@ If you cannot complete a story:
 
 1. **Do NOT** update the tasks file — the caller (next.md or execute.md leader) handles all status changes via CLI
 2. **Do NOT** run cascade-skip — the caller handles dependent story skipping
-3. **Return** a clear failure report with:
-   - Story ID
-   - Error description
-   - Any partial work committed (or not)
-4. The caller will mark the story as failed and handle dependent stories
+3. **Emit `<result_json>` with `"status":"failed"`** as the LAST element of your final message. Include `"commit": null` (or partial commit SHA if one landed) and `"failureCause": "<one-line cause>"` so the leader can surface it to the user without parsing prose.
+4. Optional prose above the block may include longer error details for human debugging.
+5. The caller will mark the story as failed and handle dependent stories based on `result_json`.
 
 ---
 
@@ -550,4 +559,5 @@ Before completing a story:
 - [ ] Typecheck passes (`npx tsc --noEmit`)
 - [ ] Changes committed with proper format (one commit per story, never skip hooks)
 - [ ] Commit verified via `git log -1 --oneline`
+- [ ] **`<result_json>` block emitted as the LAST element of the final message** (Result Contract section above)
 - [ ] Result report returned to caller (do NOT update tasks file directly — caller handles via CLI)

@@ -77,7 +77,7 @@ esac
 INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity $NON_INTERACTIVE_FLAG)
 ```
 
-Store `INTERACTIVE_MODE` for use by Phase 0.5, Phase 1.8, and Phase 2.5 to decide whether to present AskUserQuestion prompts or auto-defer open questions. Use `FEATURE_DESCRIPTION` (not `$ARGUMENTS`) everywhere a feature description string is needed from this point forward.
+Store `INTERACTIVE_MODE` for use by Phase 0.5, Phase 1.8, Phase 2.5, and Phase 3c to decide whether to present AskUserQuestion prompts or auto-defer open questions. Use `FEATURE_DESCRIPTION` (not `$ARGUMENTS`) everywhere a feature description string is needed from this point forward.
 
 ### Resolve Agent Models
 
@@ -113,7 +113,7 @@ After reading the brainstorm (if one was found), parse it for referenced prototy
      </prototype_html>
      ```
 6. **Aggregate size cap:** after loading, measure the total byte size of all wrapped blocks. If the total exceeds **200 KB**, drop blocks in reverse label order (Z → A) until the aggregate fits under the cap. Log one warning line per dropped block: `prototype <path> dropped — aggregate prototype context exceeded 200KB`.
-7. Collect all successfully loaded blocks into a variable `prototypeBlocks` (empty string if none loaded). This variable, together with `prototypeTokens`, is threaded into Phase 1 and Phase 3 prompts below. Also collect the resolved absolute paths of every successfully loaded prototype HTML file (those not dropped by the size cap and not missing on disk) into a variable `resolvedPrototypePaths` (empty list if none); append the tokens-sidecar JSON path (`.aimi/brainstorms/prototypes/<topic-slug>-tokens.json`) to `resolvedPrototypePaths` when `prototypeTokens` loaded successfully.
+7. Collect all successfully loaded blocks into a variable `prototypeBlocks` (empty string if none loaded). This variable, together with `prototypeTokens`, is threaded into Phase 1 and Pass 2 sub-agent prompts below. Also collect the resolved absolute paths of every successfully loaded prototype HTML file (those not dropped by the size cap and not missing on disk) into a variable `resolvedPrototypePaths` (empty list if none); append the tokens-sidecar JSON path (`.aimi/brainstorms/prototypes/<topic-slug>-tokens.json`) to `resolvedPrototypePaths` when `prototypeTokens` loaded successfully.
 
 ### Design Bundle Detection
 
@@ -133,6 +133,7 @@ If `BUNDLE_OVERRIDE` is non-empty, pass it as the override flag:
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 BUNDLE_META=$($AIMI_CLI detect-design-bundle --root "$BUNDLE_OVERRIDE" 2>/dev/null) || BUNDLE_META=""
+
 ```
 
 Store the JSON output as `designBundleMeta`. When `BUNDLE_META` is empty or the command fails, set `designBundleMeta` to `null` and continue.
@@ -233,23 +234,24 @@ When either spec file is missing from disk, log a warning and set the correspond
 
 After reading the brainstorm (if one was found), parse its YAML frontmatter for a `researchPaths` key:
 
-1. **Parse `researchPaths`** from the brainstorm frontmatter — the value is a YAML list of path strings (relative to `AIMI_ROOT`). If the key is absent (legacy brainstorm), skip this entire sub-step and leave all reuse variables unset.
+1. **Parse `researchPaths`** from the brainstorm frontmatter — the value is a YAML list of path strings (relative to `AIMI_ROOT`). If the key is absent (legacy brainstorm), skip this entire sub-step and leave `reusedResearch` unset (no error).
 2. **Validate each path**:
    - Resolve the absolute path by joining `AIMI_ROOT` + the listed path.
    - Verify the file exists on disk.
    - Check mtime: the file must have been written within the last **14 days**. Files older than 14 days are treated as stale and excluded from reuse.
-3. **Classify valid paths by filename suffix**:
-   - Path ending with `-codebase.md` → assign as `reusedCodebasePath` (use the first valid match).
-   - Path ending with `-best-practices.md` → assign as `reusedBestPracticesPath` (use the first valid match).
-   - Path ending with `-framework-docs.md` → assign as `reusedFrameworkDocsPath` (use the first valid match; framework-docs reuse is informational only — Phase 1.5b still applies its normal heuristic gate).
-   - Paths with other suffixes (e.g., `-learnings.md`) → ignore (learnings research always re-runs).
+3. **Classify valid paths by filename suffix** into the `reusedResearch` flat-object map `{kind: path}`. Use the first valid match per kind; emit only non-null keys; omit the key entirely when no path for that kind is found:
+   - Path ending with `-codebase.md` → `reusedResearch.codebase`
+   - Path ending with `-best-practices.md` → `reusedResearch["best-practices"]`
+   - Path ending with `-framework-docs.md` → `reusedResearch["framework-docs"]` (informational only — Phase 1.5b still applies its normal heuristic gate)
+   - Path ending with `-learnings.md` → `reusedResearch.learnings`
+   - Paths with other suffixes (e.g., `-design-bundle.md`) → ignore
 4. **Log findings** (one line per classification):
-   - Valid reuse: `Research reuse: [suffix type] → [path] (mtime OK)`
+   - Valid reuse: `Research reuse: [kind] → [path] (mtime OK)`
    - Stale skip: `Research reuse: [path] skipped — older than 14 days`
    - Missing skip: `Research reuse: [path] skipped — file not found`
-5. **Collect `reusedPaths`**: a list of all paths that were successfully classified (not skipped). This list is used in Phase 4 metadata and Phase 5 report.
+5. **Collect `reusedPaths`**: a list of all path values in `reusedResearch` (i.e., the successfully classified, non-skipped paths). This list is used in Phase 4 metadata and Phase 5 report.
 
-If no brainstorm was found, or the brainstorm has no `researchPaths` key, all reuse variables remain unset and behaviour is unchanged.
+If no brainstorm was found, or the brainstorm has no `researchPaths` key, `reusedResearch` remains unset and behaviour is unchanged (backward-compatible with legacy brainstorms).
 
 ### Implementation Scope Detection
 
@@ -335,7 +337,7 @@ Generate a single timestamp for this run to prevent same-day re-runs from overwr
 RUN_TS=$(date +%H%M%S)
 ```
 
-Store `RUN_TS` and use it in **all** research agent prompts for this run.
+Store `RUN_TS` and use it in **all** research agent prompts and Phase 3a staging directory construction for this run.
 
 ### Auto-Scan for Git Repos
 
@@ -351,7 +353,7 @@ done
 List discovered repos with their relative paths from the `.aimi/` parent.
 
 - If **zero** or **one** repo is found, no multi-repo handling is needed
-- If **multiple** repos are found, pass the list to research agents and use it in Phase 3 for `project` assignment
+- If **multiple** repos are found, pass the list to research agents and use it in Phase 3d for `project` assignment
 
 ### Extract Path Hints
 
@@ -380,7 +382,7 @@ Store the surviving tokens as `pathHints` (a list). If no tokens survive, set `p
 
 Run these agents **in parallel** using the Task tool.
 
-**If `reusedCodebasePath` is unset** (no valid codebase research from brainstorm):
+**If `reusedResearch.codebase` is unset** (no valid codebase research from brainstorm):
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
@@ -396,9 +398,9 @@ Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
            [prototypeBlocks]"
 ```
 
-**If `reusedCodebasePath` is set**: skip the codebase researcher Task entirely. The existing file at `reusedCodebasePath` will be read directly in Phase 1.6.
+**If `reusedResearch.codebase` is set**: skip the codebase researcher Task entirely. The existing file at `reusedResearch.codebase` will be read directly in Phase 1.6.
 
-**Always run** (brainstorm does not produce learnings research, so reuse never applies):
+**If `reusedResearch.learnings` is unset** (brainstorm did not produce learnings research, or reuse is not available):
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
@@ -411,6 +413,8 @@ Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
            Prototype designs chosen for this feature (use as implementation reference):
            [prototypeBlocks]"
 ```
+
+**If `reusedResearch.learnings` is set**: skip the learnings researcher Task entirely. The existing file at `reusedResearch.learnings` will be read directly in Phase 1.6.
 
 If any spawned agent fails, proceed with available results.
 
@@ -448,7 +452,7 @@ Compute `researchDepth` and store in metadata: `skip` (internal + strong pattern
 
 Only if Phase 1.5 decides external research is needed, run the applicable agents in parallel:
 
-**If `reusedBestPracticesPath` is unset** (no valid best-practices research from brainstorm):
+**If `reusedResearch["best-practices"]` is unset** (no valid best-practices research from brainstorm):
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
@@ -459,9 +463,9 @@ Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
            outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-best-practices.md"
 ```
 
-**If `reusedBestPracticesPath` is set**: skip the best-practices researcher Task entirely. The existing file at `reusedBestPracticesPath` will be read directly in Phase 1.6.
+**If `reusedResearch["best-practices"]` is set**: skip the best-practices researcher Task entirely. The existing file at `reusedResearch["best-practices"]` will be read directly in Phase 1.6.
 
-**Framework-docs** — always gated by the Phase 1.5 heuristic; brainstorm reuse does not bypass it:
+**If `reusedResearch["framework-docs"]` is unset** — and Phase 1.5 heuristic triggers framework-docs research:
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-framework-docs-researcher"
@@ -472,14 +476,18 @@ Task subagent_type="aimi-engineering:research:aimi-framework-docs-researcher"
            outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-framework-docs.md"
 ```
 
+**If `reusedResearch["framework-docs"]` is set**: skip the framework-docs researcher Task entirely. The existing file at `reusedResearch["framework-docs"]` will be read directly in Phase 1.6. Note: `reusedResearch["framework-docs"]` reuse is informational only — it only skips the spawn when the Phase 1.5 heuristic would have triggered framework-docs research; when the heuristic says to skip entirely, this entry is irrelevant.
+
 ## Phase 1.6: Research Consolidation
 
 Consume researcher agent **summary returns** (the brief outputs from Task calls) — do NOT re-read the full `.aimi/research/` files unless a summary is insufficient for a planning decision.
 
-**Reused research files** (when `reusedCodebasePath` or `reusedBestPracticesPath` is set): no Task summary is available for these. Instead, read each reused file directly:
+**Reused research files** (when any key in `reusedResearch` is set): no Task summary is available for these. Instead, read each reused file directly using the corresponding path from the map:
 
-- If `reusedCodebasePath` is set: Read the file at `reusedCodebasePath` and treat its contents as the codebase research input for consolidation.
-- If `reusedBestPracticesPath` is set: Read the file at `reusedBestPracticesPath` and treat its contents as the best-practices input for the **External Insights** section.
+- If `reusedResearch.codebase` is set: Read the file and treat its contents as the codebase research input for consolidation.
+- If `reusedResearch["best-practices"]` is set: Read the file and treat its contents as the best-practices input for the **External Insights** section.
+- If `reusedResearch["framework-docs"]` is set: Read the file and treat its contents as supplemental framework guidance for the **External Insights** section (alongside best-practices when both are present).
+- If `reusedResearch.learnings` is set: Read the file and treat its contents as the **Learnings** section input.
 
 > **Fallback:** If a researcher summary lacks detail needed for a specific planning decision, the orchestrator may read the corresponding `.aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-*.md` file on demand.
 
@@ -495,12 +503,12 @@ Merge all findings into a structured consolidation with these sections:
 
 **Trigger:** Only when `researchDepth` is `quick`, `standard`, or `deep`. For `skip` or unset, this phase is a no-op — proceed directly to Phase 2 with no change to Phase 1.6 output.
 
-**Purpose:** Read the full on-disk content of every research file listed in `metadata.researchPaths` so that Phase 3 acceptance-criteria authoring can draw on complete detail rather than the capped summary returns from Phase 1.6.
+**Purpose:** Read the full on-disk content of every research file listed in `metadata.researchPaths` so that Pass 2 sub-agent acceptance-criteria authoring can draw on complete detail rather than the capped summary returns from Phase 1.6.
 
 **File collection:**
 
 1. Start with every path in `metadata.researchPaths`.
-2. Deduplicate against `reusedCodebasePath` and `reusedBestPracticesPath` (the files Phase 1.6 already reads at the reused-research step above) — any path that matches either of those is already in context; skip it.
+2. Deduplicate against the values in `reusedResearch` (the files Phase 1.6 already reads directly) — any path that appears as a value in the `reusedResearch` map is already in context; skip it.
 3. For each remaining path: attempt to read the file. If the file is missing from disk, **silently skip** it — emit no warning, do not abort.
 4. Apply **no per-file size cap and no aggregate cap** — ingest the full file contents.
 
@@ -516,7 +524,7 @@ Each successfully read file is wrapped as:
 
 Light sanitization: replace any literal `</research_file` sequence in the file contents with `&lt;/research_file`, and any literal `<research_file` sequence with `&lt;research_file`. This prevents a file from breaking out of its wrapper tag (analogous to the `prototype_html` escape at the Prototype Context section above).
 
-Collect all successfully wrapped blocks into a variable `researchFileBlocks` (empty string if no files were read). This variable is threaded into Phase 3 below.
+Collect all successfully wrapped blocks into a variable `researchFileBlocks` (empty string if no files were read). This variable is threaded into Pass 2 sub-agent prompts below.
 
 ## Phase 1.8: Post-Research Open Questions Gate
 
@@ -524,7 +532,7 @@ Collect open questions surfaced by the research agents before spec analysis begi
 
 **Source set — scan each researcher file that was written or reused this run:**
 
-1. **Researcher `## Open Questions` sections.** For each research file path in `metadata.researchPaths` (plus `reusedCodebasePath` and `reusedBestPracticesPath` when set), read the file and locate its `## Open Questions` section. Each list entry in that section — lines starting with `-` or `*` — that does not already carry a `[resolved: ...]` or `[deferred: ...]` suffix becomes an OQ entry with:
+1. **Researcher `## Open Questions` sections.** For each research file path in `metadata.researchPaths` (plus every path value in `reusedResearch` when set), read the file and locate its `## Open Questions` section. Each list entry in that section — lines starting with `-` or `*` — that does not already carry a `[resolved: ...]` or `[deferred: ...]` suffix becomes an OQ entry with:
    - `source: researchFile`
    - `anchor: <basename>:OQ<n>` where `<basename>` is the filename without path and `<n>` is the 1-based index of the entry within that file's `## Open Questions` list.
 2. **`[PROMOTE-TO-OPEN-QUESTIONS]` tags.** Scan every researcher file for lines containing the literal tag `[PROMOTE-TO-OPEN-QUESTIONS]`. Each such line (regardless of which section it lives in) that is not already in the collected list becomes an OQ entry with the same `anchor` format: `<basename>:OQ<n>`.
@@ -595,7 +603,7 @@ Merge all collected entries into the shared `openQuestions[]` accumulator.
 
 **Do NOT write sentinels back to the spec-flow analyzer output** — that output is a read-only artifact from this gate's perspective. Only `oqDecisions[]` is mutated.
 
-Block Phase 3 until every new entry carries a resolution or `[deferred: ...]`.
+Block Phase 3a until every new entry carries a resolution or `[deferred: ...]`.
 
 **Agent-mode fallback:** when `INTERACTIVE_MODE=agent`, auto-defer all entries with reason `agent-mode auto-defer` — do not block. Emit exactly one log line:
 
@@ -605,168 +613,421 @@ agent-mode: phase-2.5-oq-gate deferred <N> questions
 
 where `<N>` is the count of questions deferred this phase.
 
-## Phase 3: Story Decomposition
+## Phase 3a: Run Setup
 
-Using consolidated research and spec-flow output (and `prototypeBlocks` from Phase 0 Prototype Context if non-empty, and `researchFileBlocks` from Phase 1.7 if non-empty):
+### Create Run ID and Staging Directory
 
-**If `prototypeBlocks` is non-empty**, prepend the following block to this phase's working context before decomposing stories:
+Generate the per-run staging directory path from `topicSlug` and `RUN_TS` (both set during Phase 1):
 
-```
-Prototype designs chosen for this feature — implementation stories MUST reference these
-directly when describing UI acceptance criteria, component structure, and visual behaviour:
-[prototypeBlocks]
-```
-
-**If `researchFileBlocks` is non-empty**, prepend the following block to this phase's working context (after prototypeBlocks if present) before decomposing stories:
-
-```
-Full research file contents — use these to author precise, detail-grounded acceptance criteria:
-[researchFileBlocks]
+```bash
+RUN_DIR=".aimi/.tasks-staging/${topicSlug}-${RUN_TS}"
+mkdir -p "$RUN_DIR"
 ```
 
-1. Extract all requirements (explicit + spec-flow identified)
-2. **Group by user-facing capability (vertical slices).** Each story must bundle all layers needed to deliver one complete, user-observable outcome — schema + backend + UI together. Do NOT create horizontal layer-only stories (e.g., a story that only migrates a table without the backend or UI that exposes it). If a slice requires more than ~10 files or spans more than ~4 architectural layers, emit the comment `Large slice ({n} files across {k} layers). Consider splitting if there's a natural seam, otherwise proceed.` for human review — this is a soft flag, not a hard cap.
-2a. **Re-scope orphan UI**: any UI component (modal, panel, form) not yet wired to a real backend action must be integrated into the vertical slice that introduces that capability. Do NOT introduce dev-only preview routes or storybook-only verification as a substitute for a real integrated slice.
-3. Assign IDs in `US-NNN` zero-padded format (`US-001`, `US-002`, ...) — never `US-1`, `story-1`, `S1`, or any other format
-4. Size check: each story must be completable in ONE agent iteration (one context window)
-5. Order by capability dependency: assign `dependsOn` arrays (explicit story IDs) and `priority` as tiebreaker — capabilities that unlock other capabilities come first
-6. **Assign `project` field** when multiple repos were discovered in Phase 1:
-   - Set `project` to the repo's relative path (e.g., `backend`, `services/api`)
-   - Omit `project` when only one repo exists or the story targets the CWD repo
-   - Path format: no leading `./`, no `..` components, must match `^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$`
-   - Cross-repo dependencies in `dependsOn` are valid
-7. **Compute `wave` numbers** from `dependsOn` graph: roots = wave 1; non-roots = max(wave of deps) + 1; contiguous, no gaps
-8. **Populate `implementation` object** when research provides file paths and patterns: `files` (concrete paths), `approach` (actionable strategy), `verify` (executable check). Omit when research is insufficient.
-9. **Assign `verification` strategy** per story type: `api` (endpoints), `visual` (UI), `test` (backend logic). Set `status: "pending"`.
-   **IMPORTANT: `verification` MUST be an object — never a bare string.** Examples:
-   - visual: `{"strategy": "visual", "status": "pending", "url": "http://localhost:3000/page", "expect": "Dashboard visible"}`
-   - api: `{"strategy": "api", "status": "pending", "url": "http://localhost:3000/api/endpoint", "expect": "200 with JSON"}`
-   - test: `{"strategy": "test", "status": "pending", "expect": "All tests pass"}`
-9.5. **Populate `skills[]` from file patterns** — inspect `implementation.files` for each story and attach matching skill names. Skip entirely when `implementation.files` is absent or empty (no files = no signal; leave `skills` unset).
+Store `RUN_DIR` for use in all subsequent Phase 3 steps and in Phase 3e.
 
-   Mapping table (Extend this table when adding new skills):
+Also derive the final output path for `story-merge --output`:
 
-   ```
-   File pattern                                     → Skill name
-   ────────────────────────────────────────────────────────────────
-   *.rb, *_spec.rb                                  → dhh-rails-style
-   app/javascript/**,  *.tsx (non-test), *.jsx      → react-best-practices
-   *tailwind*, *.css, *design-token*                → frontend-design
-   *.rake, db/migrate/**                            → dhh-rails-style
-   .aimi/solutions/*.md  (authoring story)          → every-style-editor
-   ```
+```bash
+TASKS_PATH=".aimi/tasks/YYYY-MM-DD-${topicSlug}-tasks.json"
+```
 
-   Rules:
-   - Match each path in `implementation.files` against the patterns above
-   - Collect all matched skill names; deduplicate (insertion order, first match wins)
-   - Cap at 10 entries; if more than 10 match, keep the 10 highest-priority matches (order in table = priority)
-   - Produce **no** `skills` field when the deduplicated list is empty (do not emit `"skills": []`)
-   - Skill names must satisfy `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`
+When `implementationScope` is set, the split path is derived by story-merge (see Phase 3e). Store `TASKS_PATH` for Phase 3e and Phase 4.5.
 
-   **Plugin-self-build default** — when the current repo is the `aimi-engineering-plugin` itself (detected by top-level `CLAUDE.md` containing the phrase `This repo builds the aimi-engineering plugin`), override inference for stories whose `implementation.files` touch `plugins/aimi-engineering/skills/` or `plugins/aimi-engineering/commands/` and set `skills: ["create-agent-skills"]` regardless of extension matches. This ensures plugin-authoring stories always pull the authoring skill.
+## Phase 3b: Pass 1 — Outline Generation
 
-9.6. **Populate `tasks[]` — horizontal mechanical breakdown** — for every story, generate a `tasks` array of concrete mechanical sub-steps the executing agent should carry out in order. The goal is to make implicit "Wire X into Y" integration steps explicit at planning time, so parallel-worktree executions cannot drop cross-story file wiring.
+Using consolidated research (Phase 1.6), research file blocks (Phase 1.7), spec-flow output (Phase 2), resolved OQs (`oqDecisions[]`), and any `prototypeBlocks` and `researchFileBlocks` in context, generate a numbered outline of story titles and one-line summaries.
 
-   Rules:
-   - **3–15 entries per story** (soft target). Hard schema cap is 20.
-   - Each entry ≤ 5000 chars; plain imperative verb-object phrasing (e.g., `"Add status column to migrations/001_add_status.sql"`, `"Import StatusBadge into TaskCard and pass status prop"`).
-   - **Integration steps are mandatory**: whenever this story's `implementation.files` lists (or implies a registration into) a path that also appears in another story's `implementation.files`, the `tasks` array MUST include an explicit entry of the form `"Wire <component/handler/route> into <owning file>"`. Cross-story file wiring must never be implicit.
-   - Order: creation/scaffolding first → integration wiring → local verification last.
-   - Do not duplicate `acceptanceCriteria` text verbatim. AC are the observable gate (vertical); tasks are the recipe (horizontal, planner guidance only).
-   - Forbidden content (matches validator at `aimi-cli.sh:891-898`): triple-backticks, `$(`, backticks, the strings `ignore previous`, `system:`, `INSTRUCTIONS`.
-   - **Omit the field entirely** (do not emit `"tasks": []`) only when fewer than 3 meaningful steps can be identified. Stories without `implementation.files` are not blocked from generating `tasks[]` — enumerate steps from the description.
+**Outline format** — produce a JSON array and persist it immediately:
 
-10. **Detect and attach `gate` objects**: `verify` (OAuth/email/webhooks), `decision` (multiple viable approaches), `action` (external manual action). Most stories have no gate.
-11. Write descriptions in user story format: "As a [specific role], I want [feature] so that [benefit]" — role must name the actor, never just "user"
-12. Generate verifiable acceptance criteria: every story must include at least one user-observable, end-to-end outcome listed **first** (e.g., "A logged-in user can submit the form and see the confirmation banner"). Mixed mechanical + behavioral criteria are allowed, but the user-observable item must come first. Every story must also have "Typecheck passes".
-13. Initialize every story with `status: "pending"` and appropriate `dependsOn` array
-14. Validate: no circular dependencies in `dependsOn`, no self-references, all referenced IDs exist, no vague criteria
-15. **Spec-driven screen decomposition** (when `businessSpecContent` is non-null): drive decomposition from `BusinessSpec § 2` (Screens/Pages) — create **one story per screen** listed. Do not infer screens from the feature description when the spec is present.
-16. **Spec-driven entity/endpoint/persona decomposition** (when `businessSpecContent` is non-null):
-    - One story per entity in `BusinessSpec § 4` (Data Models) when the entity is non-trivial (has fields beyond a primary key or references another entity).
-    - One story per endpoint group in `BusinessSpec § 5.1` (REST endpoints) and `§ 5.3` (WebSocket / real-time) when those sections are present.
-    - One story per persona/permission tier in `BusinessSpec § 7` (User Roles & Permissions) when permission boundaries differ across tiers.
-17. **Spec-driven acceptance criteria seeding** (when `businessSpecContent` is non-null): seed each story's `acceptanceCriteria` verbatim from the matching entries in `BusinessSpec § 9` (Critérios de aceite). Preserve rule IDs (`RN-01`, `RN-02`, …) exactly as written in the spec. Do **not** paraphrase, reformat, or summarize seeded criteria.
-18. **Spec-driven component stories** (when `designSpecContent` is non-null): create one story per entry in `DesignSpec § 2.2` (NOVOS components). Each component story must include as an acceptance criterion the prop type signature verbatim from the spec (e.g., `type PlantaCardProps satisfies the prop signature in DesignSpec § 2.2 L70-73`).
-19. **Prototype-region citations for visual-layout AC** (when `metadata.prototypePaths` is non-empty AND a story's `verification.strategy == "visual"`): every visual-layout acceptance criterion must include a citation to the specific prototype region it describes. Use one of the two machine-parseable shapes — pick the first that applies:
-    - **Heading citation** (preferred): `(prototype: <relative-path> §<heading-text>)` — where `<heading-text>` is the text of the nearest preceding `<h1>`–`<h6>` element in the prototype HTML that covers the cited region (e.g., `(prototype: draives-monitor/project/Monitoramento.html §Visão Geral)`).
-    - **Line-range fallback**: when the cited region has no preceding heading element, use `(prototype: <relative-path>:L<start>-L<end>)` with the line numbers from the prototype HTML (e.g., `(prototype: draives-monitor/project/Monitoramento.html:L42-L67)`).
+Each entry:
+```json
+{
+  "idx": "01",
+  "title": "Story title (≤ 200 chars, imperative)",
+  "summary": "One-line description of what this story delivers (≤ 120 chars)"
+}
+```
 
-    **No double-deriving** (spatial layout only): when a prototype covers a layout region, AC must cite the prototype — not re-derive spatial layout (positioning, sizing, stacking, alignment) from `DesignSpec.md`. The prototype is canonical for visual layout; `DesignSpec.md` remains canonical for design tokens, component prop types, and interaction states. A story may hold both a prototype citation and a spec reference when they cover different concerns (e.g., layout from prototype, color tokens from spec). Literal string content (labels, headings, copy) is always governed by Rule 19a regardless of which artifact covers the region.
+Rules for outline authoring:
+- Each entry represents one vertical slice: a single user-observable outcome bundled across all layers needed to deliver it.
+- Use the same dependency reasoning as the final decomposition — entries that unlock others come first.
+- `idx` is zero-padded, 1-based, matching position in the array (`"01"`, `"02"`, …).
+- Do not assign `US-NNN` IDs yet — IDs are assigned by `story-merge` after approval.
+- Target 3–15 entries. Entries beyond 15 are allowed but surface a warning at the outline gate.
 
-    The decomposition LLM authors citations; they are never auto-injected. Violations surface at the post-decomposition checklist stage.
+Persist the outline immediately after generation:
 
-19a. **Verbatim DesignSpec citations for visual ACs** (when `designSpecContent` is non-null AND `verification.strategy` is `visual` for a story): every visible-text element in the cited region MUST be extracted verbatim from the DesignSpec § N.N subsection — including page H1, subtitle, KPI/metric card labels, table column headers, filter/dropdown/button labels, footer/disclaimer text, and badge text. Do not paraphrase, translate, abbreviate, or reorder. Wrap each literal in double quotes and follow it with the anchor `(DesignSpec § N.N L<line>)`.
+```bash
+# Write outline.json to staging dir
+# Content: JSON array of {idx, title, summary} objects
+```
 
-    Example (correct):
-    - `"Benchmark do portfolio" (DesignSpec § 3.1 L42) MUST appear as the page H1.`
+Use the Write tool to write the array to `<RUN_DIR>/outline.json`. This file is the checkpoint for Phase 3c; it is also consumed by Phase 3d sub-agents as their ordered work list.
 
-    Example (wrong — paraphrase):
-    - `The page header shows the portfolio benchmark name.`
+Initialize `outlineEditCount = 0` to track user edits during the gate.
 
-20. **Mock-sync AC injection for schema-extending stories**: after all stories are drafted, scan each story's `implementation.files` array against the following globs:
-    - `**/schemas/**/*.{ts,js,py,rb}`
-    - `**/types/**/*.{ts,js}`
-    - `**/zod/**/*.{ts,js}`
-    - `*.schema.ts`
-    - `*.types.ts`
+## Phase 3c: Outline Gate
 
-    When any file in a story's `implementation.files` matches one or more of these globs:
-    - **Idempotency guard first**: skip injection if the story's `acceptanceCriteria` already contains any entry matching `/[Mm]ock.*updated|mock.*sync/i` — prevents double-injection on deepen or re-plan flows.
-    - **Mocks directory present** (project contains at least one `**/mocks/**` path): append the following AC to the story: `Update mock data in matching **/mocks/** path to populate new fields (or document why mocks are intentionally unchanged).`
-    - **No mocks directory**: append the following AC instead: `Verify no mock data files require updates`.
+Present the outline to the user and allow iterative editing before any expansion sub-agent is dispatched.
 
-    Multi-story independence: when multiple stories independently match the schema-file glob, each receives its own mock-sync AC — do not consolidate or deduplicate across stories.
+### Non-Interactive Fast Path
 
-21. **prototypeAnchor emission for single-prototype visual stories** (when `metadata.prototypePaths` is non-empty): after all stories are drafted, for each story whose `acceptanceCriteria` contains F3-syntax prototype citations — `(prototype: <path> §<heading>)` or `(prototype: <path>:L<start>-L<end>)` — count the distinct `<path>` values cited across all AC entries:
-    - **Exactly one distinct path**: set `story.implementation.prototypeAnchor` to that relative path (no leading `./`).
-    - **Zero or multiple distinct paths**: leave `prototypeAnchor` unset (field omitted).
+When `INTERACTIVE_MODE` is `agent` or `--non-interactive` was passed:
+- Skip AskUserQuestion entirely.
+- Emit **exactly** this chat line (substitute actual N):
+  ```
+  [plan] outline auto-approved (non-interactive): N stories
+  ```
+  where `N` is the number of entries in `outline.json`.
+- Proceed directly to Phase 3d.
 
-    The anchor is additive — it never overrides or removes other `implementation` fields. Stories without any F3 citation remain unchanged (backwards compatible).
+### Interactive Outline Gate Loop
 
-22. **Mock-sync AC routing to schema consumers** (F9): after rule 20 has injected mock-sync ACs, for each story that received a mock-sync AC in rule 20, execute the following routing pass before finalising stories:
+Render the current outline as a numbered list:
 
-    **Step 1 — Extract field names**: from the schema-extending story's `title`, `description`, and `acceptanceCriteria` text, heuristically identify new property/field identifiers (camelCase or snake_case tokens that look like new schema field names — e.g., `prototypeAnchor`, `user_id`, `createdAt`).
+```
+Outline (N stories):
+01. <title> — <summary>
+02. <title> — <summary>
+…
+```
 
-    **Step 2 — Scan other stories for literal field-name matches**: search all OTHER stories' `description` and `acceptanceCriteria` text for a literal match of any extracted field name (case-sensitive substring match). Collect every story that contains at least one match — these are **consumer stories**.
+When the outline contains more than 15 entries, prepend a warning line:
+```
+Warning: N stories in outline. Consider splitting into smaller feature sets.
+```
 
-    **Step 3 — CamelCase entity-name fuzzy fallback**: when step 2 yields zero consumer stories, derive the entity name from the schema-extending story's title (the CamelCase identifier — e.g., `UserProfile`, `DesignBundle`). Split CamelCase into individual word parts (e.g., `["User", "Profile"]`). Search all OTHER stories' `description` and `acceptanceCriteria` for each word part independently (case-insensitive). Any story matching at least one word part becomes a consumer story.
+Present via AskUserQuestion with these options:
 
-    **Step 4 — Move or keep the mock-sync AC**:
-    - **At least one consumer identified**: copy the mock-sync AC onto each consumer story (deduplicate: skip if that consumer already has an AC matching `/[Mm]ock.*updated|mock.*sync/i`). Then **remove** the mock-sync AC from the schema-extending story (moved, not copied).
-    - **No consumer identified after both steps 2 and 3**: leave the mock-sync AC on the schema-extending story unchanged (preserves rule 20 / F5 baseline behaviour).
+```
+Approve — proceed to expansion
+Rename <idx> — change a story title/summary
+Add — insert a new story at a position
+Remove <idx> — remove a story from the outline
+Reorder — change story order
+```
 
-    **Constraints**:
-    - Rule 22 never creates new stories — it only routes ACs between existing stories.
-    - Multi-story independence from rule 20 is preserved: each schema-extending story is routed independently.
-    - When multiple schema-extending stories exist, each is processed in order; a consumer story may accumulate mock-sync ACs from more than one schema story (each deduplication check is per-story).
+**For each edit operation:**
 
-### Phase 3.1: Reference Element Inventory (BLOCKING when triggered)
+- **Approve**: exit the loop, proceed to Phase 3d.
+- **Rename `<idx>`**: ask for the new title and summary; update `outline.json` entry at `idx`. Record in `oqDecisions[]`:
+  ```json
+  {
+    "anchor": "outline:edit:<idx>",
+    "source": "outline",
+    "text": "User renamed outline entry <idx>",
+    "resolution": "title: '<new-title>' / summary: '<new-summary>'"
+  }
+  ```
+  Increment `outlineEditCount`. Re-present the gate.
+- **Add**: ask for position (after which `idx`) and the new title/summary; insert the entry, renumber all subsequent `idx` values. Record in `oqDecisions[]`:
+  ```json
+  {
+    "anchor": "outline:edit:<new-idx>",
+    "source": "outline",
+    "text": "User added outline entry at position <new-idx>",
+    "resolution": "title: '<title>' / summary: '<summary>'"
+  }
+  ```
+  Increment `outlineEditCount`. Rewrite `outline.json`. Re-present the gate.
+- **Remove `<idx>`**: remove the entry; renumber subsequent `idx` values. Record in `oqDecisions[]`:
+  ```json
+  {
+    "anchor": "outline:edit:<idx>",
+    "source": "outline",
+    "text": "User removed outline entry <idx>",
+    "resolution": "removed: '<title>'"
+  }
+  ```
+  Increment `outlineEditCount`. Rewrite `outline.json`. Re-present the gate. If removing an entry causes zero stories remaining, present an error and ask the user to add at least one story before approving.
+- **Reorder**: ask for the new order as a comma-separated list of `idx` values; rebuild the array in the specified order, renumber `idx` from `01`. Record in `oqDecisions[]`:
+  ```json
+  {
+    "anchor": "outline:edit:reorder",
+    "source": "outline",
+    "text": "User reordered outline",
+    "resolution": "new order: <comma-separated original idx values>"
+  }
+  ```
+  Increment `outlineEditCount`. Rewrite `outline.json`. Re-present the gate.
 
-**Trigger:** Fires when any story in the current decomposition declares a reference artifact — any field from: `prototypeAnchor`, `specSection`, `referenceCommand`, `referenceFixture`, `migrationDiff`, `referenceUrl`, or any other field whose value is a path, URL, or identifier pointing to an external artifact that acceptance criteria will cite.
+Loop until the user selects **Approve**.
 
-For each story that triggers this phase, open the cited artifact and enumerate every addressable element in the cited region. Element vocabulary depends on artifact kind:
+## Phase 3d: Pass 2 — Parallel Story Expansion
 
-- **HTML / UI prototypes** → text nodes, attribute values, slot composition, interactive state variants
-- **OpenAPI / JSON Schema** → endpoints, request/response fields, status codes, error shapes
-- **CLI man pages** → flags, arguments, exit codes, output sections
-- **SQL / migration diffs** → columns, indexes, constraints, defaults, trigger behavior
-- **Business rules tables** → per-row pre-conditions and post-conditions
+Dispatch one Task sub-agent per approved outline entry in parallel. Each sub-agent writes a single-story staging file. Collect results after all agents complete (or fail).
 
-Record findings in a table:
+### Staging File Naming
 
-| Element | Locator | Verdict | AC anchor |
-|---------|---------|---------|-----------|
+Each sub-agent writes to:
+```
+<RUN_DIR>/<idx>-<slug>.json
+```
 
-Every row MUST be marked either `encoded` (an AC line in this story directly addresses it) or `excluded` (the element is out of scope — written reason required) before the story JSON is emitted. Rows that are neither encoded nor excluded are incomplete and block emission.
+Where `<idx>` is the zero-padded outline index (`01`, `02`, …) and `<slug>` is the story title sanitized to lowercase-hyphenated form (spaces → hyphens, strip non-alphanumeric, truncate to 40 chars).
 
-**Block Phase 4 until every row in every inventory table is verdicted.**
+### Sub-Agent Prompt Template
 
-Agent-mode fallback: auto-mark any unverdicted row as `deferred` with reason "agent-mode: interactive verdict skipped" appended to the row, emit a chat warning listing the deferred elements, and proceed without blocking.
+Spawn each sub-agent with:
 
-### `dependsOn` Inference Rules
+```
+Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
+  [model: <AGENT_MODELS.workflow when not "inherit">]
+  prompt: "Expand outline entry <idx> into a full story JSON object.
 
-- **Same layer, independent concerns** (different tables, different pages, different routes) → no dependency between them (`dependsOn: []`)
+  Outline entry:
+    idx: <idx>
+    title: <title>
+    summary: <summary>
+
+  Full outline context (for dependsOn reasoning):
+  <full outline.json array rendered as numbered list: idx. title — summary>
+
+  Research context:
+  [consolidated research summary from Phase 1.6]
+
+  [If researchFileBlocks is non-empty]:
+  Full research file contents — use to author precise, detail-grounded acceptance criteria:
+  [researchFileBlocks]
+
+  [If prototypeBlocks is non-empty]:
+  Prototype designs — implementation stories MUST reference these for UI acceptance criteria:
+  [prototypeBlocks]
+
+  Resolved decisions (oqDecisions[]):
+  [oqDecisions[] serialized as key: resolution pairs]
+
+  Spec-flow gaps and critical questions resolved:
+  [specFlow OQ resolutions from oqDecisions[]]
+
+  [If businessSpecContent is non-null]:
+  Business spec content:
+  [businessSpecContent]
+
+  [If designSpecContent is non-null]:
+  Design spec content:
+  [designSpecContent]
+
+  Output: write a single JSON object to outputPath.
+
+  outputPath: <RUN_DIR>/<idx>-<slug>.json
+
+  Story JSON shape:
+  {
+    'title': '<string, max 200 chars>',
+    'description': '<user story format: As a [role], I want [feature] so that [benefit]; max 500 chars>',
+    'acceptanceCriteria': ['<string, each max 5000 chars; must include Typecheck passes>'],
+    'priority': <integer, sequential tiebreaker>,
+    'dependsOn': ['outline:NN', ...],
+    'notes': '<optional string>',
+    'project': '<optional, relative repo path for multi-repo>',
+    'implementation': {
+      'files': ['<concrete file paths>'],
+      'approach': '<actionable strategy referencing codebase patterns>',
+      'verify': '<executable command or checkable assertion>',
+      'prototypeAnchor': '<optional, relative path to single prototype file>'
+    },
+    'verification': {
+      'strategy': 'test|visual|api',
+      'status': 'pending',
+      'url': '<optional>',
+      'expect': '<optional>'
+    },
+    'gate': { 'type': '...', 'status': 'pending', 'prompt': '...', 'options': [...] },
+    'skills': ['<bare skill names>'],
+    'tasks': ['<imperative verb-object steps, 3-15 entries>']
+  }
+
+  IMPORTANT — dependsOn encoding:
+  Use 'outline:NN' tokens (zero-padded, matching the outline index) to express
+  dependencies. Do NOT invent US-NNN IDs. story-merge will remap every
+  outline:NN token to its assigned US-NNN after all stories are merged.
+  Roots (no upstream dependencies): emit dependsOn: [].
+
+  IMPORTANT — decomposition guidance (applied to this single story):
+  - Group by user-facing capability (vertical slice): bundle all layers needed
+    to deliver one complete, user-observable outcome.
+  - Do NOT create horizontal layer-only stories (schema-only, backend-only,
+    UI-only) unless the outline entry explicitly scopes to one layer.
+  - Size check: story must be completable in ONE agent iteration (one context window).
+  - Assign verification.strategy per story type: api (endpoints), visual (UI),
+    test (backend logic). Set status: 'pending'.
+  - verification MUST be an object — never a bare string.
+  - Populate skills[] from implementation.files using the file-pattern mapping:
+      *.rb, *_spec.rb → dhh-rails-style
+      app/javascript/**, *.tsx (non-test), *.jsx → react-best-practices
+      *tailwind*, *.css, *design-token* → frontend-design
+      *.rake, db/migrate/** → dhh-rails-style
+      .aimi/solutions/*.md → every-style-editor
+    Cap at 10; omit field when empty.
+  - Plugin-self-build default: when current repo is aimi-engineering-plugin
+    (top-level CLAUDE.md contains 'This repo builds the aimi-engineering plugin'),
+    override inference for stories touching plugins/aimi-engineering/skills/ or
+    plugins/aimi-engineering/commands/ — set skills: ['create-agent-skills'].
+  - tasks[] (3-15 entries): creation/scaffolding first, integration wiring
+    second, local verification last. Integration steps are mandatory when
+    implementation.files lists a path shared with another story.
+    Forbidden in tasks[]: triple-backticks, \$(, backticks, 'ignore previous',
+    'system:', 'INSTRUCTIONS'.
+  - Mock-sync AC injection: scan implementation.files against
+    **/schemas/**/*.{ts,js,py,rb}, **/types/**/*.{ts,js}, **/zod/**/*.{ts,js},
+    *.schema.ts, *.types.ts. When matched and no mock-sync AC already present:
+    if project has **/mocks/**: append 'Update mock data in matching **/mocks/**
+    path to populate new fields (or document why mocks are intentionally unchanged).'
+    Otherwise: append 'Verify no mock data files require updates'.
+  - Spec-driven decomposition (when businessSpecContent non-null):
+    Drive screen decomposition from BusinessSpec § 2 (one story per screen listed).
+    Seed acceptanceCriteria verbatim from BusinessSpec § 9 matching entries;
+    preserve rule IDs (RN-01, RN-02, ...) exactly as written.
+    One story per entity in BusinessSpec § 4 (non-trivial entities).
+    One story per endpoint group in BusinessSpec § 5.1 and § 5.3.
+    One story per persona/permission tier in BusinessSpec § 7.
+  - Spec-driven component stories (when designSpecContent non-null):
+    One story per entry in DesignSpec § 2.2 (NOVOS components); include prop
+    type signature verbatim as acceptance criterion.
+  - Prototype-region citations for visual-layout AC (when prototypePaths non-empty
+    AND verification.strategy == 'visual'): every visual-layout AC must include
+    (prototype: <path> §<heading>) or (prototype: <path>:L<start>-L<end>).
+    Prototype is canonical for visual layout. DesignSpec.md is canonical for
+    design tokens, component prop types, and interaction states.
+  - Verbatim DesignSpec citations for visual ACs (when designSpecContent non-null
+    AND verification.strategy == 'visual'): every visible-text element MUST be
+    extracted verbatim from DesignSpec § N.N — wrap in double quotes, follow with
+    (DesignSpec § N.N L<line>) anchor. No paraphrase, translation, abbreviation.
+  - prototypeAnchor emission: when AC contains exactly one distinct prototype path
+    cited via (prototype: <path> ...) syntax, set implementation.prototypeAnchor
+    to that relative path. When zero or multiple distinct paths: leave unset.
+
+  NOTE — Rule 22 (mock-sync AC routing to schema consumers), Phase 3.1 (Reference
+  Element Inventory), and Phase 4.1 (Coverage Self-Check) run inside story-merge
+  as post-merge sweeps, after DAG validation and before the atomic write to
+  tasks.json. They are NOT performed by individual sub-agents."
+```
+
+### Schema Validation and Retry
+
+After each sub-agent writes its staging file, validate the JSON:
+
+1. Read `<RUN_DIR>/<idx>-<slug>.json`.
+2. Verify it is valid JSON (well-formed) and contains the required fields: `title`, `description`, `acceptanceCriteria` (non-empty array), `dependsOn` (array), `verification` (object with `strategy` and `status`).
+3. **If validation passes**: mark this expansion as successful.
+4. **If validation fails**: retry up to **2 times** with an enriched prompt appending the sanitized validator error string:
+
+**Sanitize the error string before retry injection:**
+- Strip any `$(` sequences (removes command-substitution attempts).
+- Remove backtick characters.
+- Replace newlines with spaces.
+- Truncate to 500 characters.
+
+Include the sanitized error in the retry prompt as:
+```
+Previous attempt failed validation. Error: <sanitized error string>
+Please fix the JSON and rewrite the file at outputPath.
+```
+
+After 2 failed retries (3 total attempts), mark this expansion as **permanently failed**. Record the story title and outline index.
+
+### Failure Budget
+
+After all expansions complete (in parallel):
+- **All succeeded**: proceed to Phase 3e.
+- **Some permanently failed**: surface to user via AskUserQuestion:
+  ```
+  Pass 2 expansion failed for N story(ies):
+  <list of failed idx + title>
+  Options:
+    Skip failed — proceed to story-merge without them
+    Retry with hint — provide additional context for failed stories, then re-expand
+    Abort — stop plan generation
+  ```
+  When `INTERACTIVE_MODE=agent`, auto-select **Skip failed** and emit one log line:
+  ```
+  [plan] Pass 2: N expansion(s) permanently failed (agent-mode: skipping)
+  ```
+
+## Phase 3e: story-merge Invocation
+
+Invoke `aimi-cli story-merge` to consolidate all staging files into a single validated tasks.json. story-merge performs DAG validation, `outline:NN` → `US-NNN` remapping, Rule 22 (mock-sync AC routing), Phase 3.1 (Reference Element Inventory), and Phase 4.1 (Coverage Self-Check) as post-merge sweeps.
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI story-merge \
+  --staging-dir "$RUN_DIR" \
+  --output "$TASKS_PATH" \
+  [--split full-stack  when implementationScope == "full-stack"] \
+  [--agent-mode        when INTERACTIVE_MODE == "agent"]
+```
+
+**Flag rules:**
+- `--split full-stack`: pass when `implementationScope == "full-stack"`. Causes story-merge to produce two output files (`*-frontend-tasks.json` and `*-backend-tasks.json`) instead of one.
+- `--agent-mode`: pass when `INTERACTIVE_MODE == "agent"`. Demotes Phase 3.1 and Phase 4.1 hard blocks to warnings inside story-merge.
+- `--split legacy` (default): no flag needed; story-merge uses legacy mode when `--split` is omitted.
+
+On **success**: story-merge writes the output file(s), deletes `RUN_DIR`, and exits 0. Proceed to Phase 4.
+
+On **failure** (non-zero exit): do NOT proceed. Surface the error to the user. The staging directory is preserved for inspection. Do not attempt to write tasks.json manually.
+
+## Phase 4: Metadata Patch
+
+After `story-merge` writes the tasks.json, patch the metadata fields that story-merge leaves as placeholder values. story-merge emits a minimal skeleton (`title: "feat: merged tasks"`, `branchName: "feat/merged"`) — the orchestrator must overwrite these with the actual derived values.
+
+### Write metadata.json to staging dir (if RUN_DIR still exists)
+
+When Phase 3e succeeds, `RUN_DIR` is deleted by story-merge. Write `metadata.json` directly as part of the patch step below. If story-merge fails (RUN_DIR preserved), write `metadata.json` to `RUN_DIR` for diagnostic reference:
+
+```bash
+# metadata.json path (for diagnostic reference when story-merge fails)
+# <RUN_DIR>/metadata.json
+```
+
+### Derive and Patch Metadata Fields
+
+Read the tasks.json file written by story-merge and patch the `metadata` object with:
+
+- **title**: `<type>: <Descriptive Name>`
+- **type**: `feat`, `ref`, `bug`, or `chore`
+- **branchName**: Kebab-case, prefixed with type. For split files: `type/[feature]-frontend` and `type/[feature]-backend`
+- **createdAt**: Today's date (YYYY-MM-DD)
+- **planPath**: Always `null`
+- **brainstormPath**: Path to brainstorm if one was used, otherwise omit
+- **researchDepth**: Value computed in Phase 1.5 (`skip`, `quick`, `standard`, `deep`), or omit if not computed
+- **researchPaths**: Populate from two sources, then deduplicate:
+  1. **Fresh-written paths** — every `.aimi/research/` file written this run by Phase 1 agents (codebase, learnings) and Phase 1.5b agents (best-practices, framework-docs). Collect the `outputPath` that was passed to each agent that completed successfully.
+  2. **Reused paths** — the path values in `reusedResearch` (i.e., `reusedPaths` collected in Phase 0). These are always included regardless of `researchDepth`.
+  Normalize each path: relative to `AIMI_ROOT`, no leading `./`, no `..` components. Deduplicate the combined list (insertion-order, first-occurrence wins). If a tasks.json being updated does not already have a `researchPaths` key, create the array. Omit the key entirely when `researchDepth` is `skip` and `reusedPaths` is empty and no research files were written this run.
+- **prototypePaths**: Convert each path in `resolvedPrototypePaths` to a path relative to `AIMI_ROOT` (no leading `./`, no `..` components). Deduplicate with `| unique`. Emit as `metadata.prototypePaths` array. Omit the key entirely when the array is empty.
+- **designBundle**: When `designBundleMeta` is non-null, emit as `metadata.designBundle` with the following shape: `{ root: string, readme: string, chats: string[], businessSpec: string|null, designSpec: string|null }`. All paths relative to `AIMI_ROOT`. Omit the key entirely when no bundle was detected. When the bundle was detected, always emit both `businessSpec` and `designSpec` keys — use `null` for whichever spec file is absent.
+- **designTokens**: When `designSpecContent` is non-null and `DesignSpec § 1` contains a token map, parse it and emit as `metadata.designTokens` — a flat object whose top-level keys are the token categories enumerated in `DesignSpec § 1` (e.g., `color`, `typography`, `spacing`, `radii`, `shadow`, `transition`). Values are written verbatim from the spec without normalization. Omit the key entirely when `designSpecContent` is null or `§ 1` contains no token map.
+- **decisions**: Emit one entry per item in the fully accumulated `oqDecisions[]` working memory — this includes every OQ resolved or deferred by Phase 0.5, Phase 1.8, Phase 2.5, AND outline-gate edits recorded in Phase 3c. Each entry carries `anchor`, `source`, `text`, and `resolution` from the corresponding `oqDecisions[]` record. Omit the `decisions` key entirely when `oqDecisions[]` is empty.
+- **maxConcurrency**: Default `5`. Set to `1` for strictly sequential execution.
+- **frontendOnly** (when `implementationScope == "frontend-only"`): `true`
+- **backendSpec** (when `implementationScope == "frontend-only"`): derive per the rules below
+
+Use the Write tool to patch the output tasks.json with these fields merged into the `metadata` object.
+
+**For split files (full-stack):** patch both `*-frontend-tasks.json` and `*-backend-tasks.json` independently. Assign separate `branchName` values (`type/[feature]-frontend` and `type/[feature]-backend`). Write the same `prototypePaths`, `designBundle`, and `designTokens` to both files.
+
+### Derive `metadata.backendSpec` (frontend-only mode only)
+
+**When `businessSpecPath` is non-null** (spec-driven path — takes precedence over inference):
+- `endpoints`: populate from `BusinessSpec § 5`. Every entry MUST carry a `source` field matching `"BusinessSpec § N[.N] L<line>"`. Every `responseShape` field MUST also carry a `source`. Do NOT invent fields absent from the spec — emit a `gate` of type `decision` on the story instead.
+- `dataModels`: populate from `BusinessSpec § 4`. Every entry MUST carry a `source` field.
+- `businessRules`: populate from `BusinessSpec § 3`.
+- `businessContext.userRoles`: populate from `BusinessSpec § 7`.
+- `businessContext.successCriteria`: populate from `BusinessSpec § 9`.
+- `businessContext.summary`, `businessContext.constraints`, `businessContext.assumptions`: derive from spec context.
+
+**When `businessSpecPath` is null** (inference fallback):
+- `endpoints`: array of `{ method, path, description }` — API contracts implied by UI interactions.
+- `dataModels`: array of `{ name, fields }` — data structures implied by forms and displays.
+- `businessRules`: array of strings — validation rules and business logic from acceptance criteria.
+- `businessContext`: object with `summary`, `userRoles`, `constraints`, `assumptions`, `successCriteria` derived from story content.
+
+### `dependsOn` Inference Rules (for reference — applied by sub-agents in Phase 3d)
+
+- **Same layer, independent concerns** → no dependency (`dependsOn: []`)
 - **Same layer, shared concern** (FK referencing another story's table, component extending another) → add dependency
 - **Cross-layer**: backend depends on schema stories it reads/writes; UI depends on backend it calls; aggregation depends on what it consumes
 - **Skip layers when appropriate**: UI reading directly from a new table depends on the schema story, not a non-existent backend story
@@ -779,92 +1040,6 @@ Agent-mode fallback: auto-mark any unverdicted row as `deferred` with reason "ag
 | `ref` | Refactoring |
 | `bug` | Bug fix |
 | `chore` | Maintenance task |
-
-## Phase 4: Write tasks.json
-
-Branch on `implementationScope` from Phase 0:
-
-### When `implementationScope` is `"full-stack"`:
-
-1. **Partition stories by layer**: UI stories → frontend file; schema + backend + aggregation stories → backend file
-2. **Assign unique IDs across both files**: frontend gets `US-001` to `US-N`, backend gets `US-(N+1)` to `US-M` — no ID collisions
-3. **Rebuild `dependsOn` independently per file**: remove all cross-file references; within each file, only reference IDs that exist in that file
-4. **Recompute `wave` numbers per file**: roots (`dependsOn: []`) are wave 1 within each file, independently
-5. **Derive separate `branchName` per file**: `type/[feature]-frontend` and `type/[feature]-backend`
-6. Write frontend file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
-7. Write backend file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`
-
-Write the same `prototypePaths`, `designBundle`, and `designTokens` arrays/objects to both frontend and backend metadata (symmetric with `researchPaths` precedent).
-
-### When `implementationScope` is `"frontend-only"`:
-
-1. Set `metadata.frontendOnly: true`
-2. **Generate `metadata.backendSpec`**:
-   - **When `businessSpecPath` is non-null** (spec-driven path — takes precedence over inference):
-     - `endpoints`: populate from `BusinessSpec § 5` (endpoints/API contracts). Every entry MUST carry a `source` field matching `"BusinessSpec § N[.N] L<line>"` citing the exact line in § 5 that defines the endpoint. Every `responseShape` field MUST also carry a `source` field in the same format, citing the line that defines that field.
-       - **Do NOT invent fields**: if a `responseShape` field is required by an acceptance criterion but absent from `BusinessSpec § 5`, do NOT add it to `responseShape`. Instead, emit a `gate` of type `decision` on the story asking the user how to source the field, and leave the `responseShape` entry out until the gate resolves.
-       - Fields whose value is derived from multiple spec lines (aggregations, computed values) MUST use the `"derived: <explanation>"` prefix in their `source` value instead of a literal citation. The `derived:` prefix is accepted as a manual-review marker; it does not allow inventing fields.
-     - `dataModels`: populate from `BusinessSpec § 4` (data models / entities). Every entry MUST carry a `source` field matching `"BusinessSpec § N[.N] L<line>"` citing the line in § 4 that defines the model. Individual fields within `fields[]` that are derived MUST use `"derived: <explanation>"`.
-     - `businessRules`: populate from `BusinessSpec § 3` (business rules)
-     - `businessContext.userRoles`: populate from `BusinessSpec § 7` (user roles / personas)
-     - `businessContext.successCriteria`: populate from `BusinessSpec § 9` (acceptance criteria)
-     - `businessContext.summary`, `businessContext.constraints`, `businessContext.assumptions`: derive from spec context as normal
-   - **When `businessSpecPath` is null** (inference fallback — current behavior):
-     - `endpoints`: array of `{ method, path, description }` — API contracts implied by UI interactions
-     - `dataModels`: array of `{ name, fields }` — data structures implied by forms and displays
-     - `businessRules`: array of strings — validation rules and business logic from acceptance criteria
-     - `businessContext`: object with structured business context:
-       - `summary`: high-level overview of the business domain and purpose
-       - `userRoles`: extract persona names from story descriptions ("As a [role]" patterns)
-       - `constraints`: identify non-functional requirements from acceptance criteria (scalability, compliance, performance SLAs)
-       - `assumptions`: document integration assumptions, data patterns, auth model, API style
-       - `successCriteria`: derive measurable success criteria from acceptance criteria across all stories
-3. Write single file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
-
-### When `implementationScope` is unset (legacy):
-
-Write single file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
-
-### Derive Metadata (all modes)
-
-- **title**: `<type>: <Descriptive Name>`
-- **type**: `feat`, `ref`, `bug`, or `chore`
-- **branchName**: Kebab-case, prefixed with type. For split files: `type/[feature]-frontend` and `type/[feature]-backend`
-- **createdAt**: Today's date (YYYY-MM-DD)
-- **planPath**: Always `null`
-- **brainstormPath**: Path to brainstorm if one was used, otherwise omit
-- **researchDepth**: Value computed in Phase 1.5 (`skip`, `quick`, `standard`, `deep`), or omit if not computed
-- **researchPaths**: Collect all `.aimi/research/` file paths written by Phase 1 agents (codebase, learnings) and Phase 1.5b agents (best-practices, framework-docs), **plus** any paths in `reusedPaths` from Phase 0 Reuse Brainstorm Research (reused paths are included regardless of `researchDepth`). Deduplicate the combined list. Omit entirely when `researchDepth` is `skip` and `reusedPaths` is empty and no research files were written.
-- **prototypePaths**: Convert each path in `resolvedPrototypePaths` to a path relative to `AIMI_ROOT` (no leading `./`, no `..` components). Deduplicate with `| unique`. Emit as `metadata.prototypePaths` array. Omit the key entirely when the array is empty.
-- **designBundle**: When `designBundleMeta` is non-null, emit as `metadata.designBundle` with the following shape: `{ root: string, readme: string, chats: string[], businessSpec: string|null, designSpec: string|null }`. All paths relative to `AIMI_ROOT`. Omit the key entirely when no bundle was detected. When the bundle was detected, always emit both `businessSpec` and `designSpec` keys — use `null` for whichever spec file is absent.
-- **designTokens**: When `designSpecContent` is non-null and `DesignSpec § 1` contains a token map, parse it and emit as `metadata.designTokens` — a flat object whose top-level keys are the token categories enumerated in `DesignSpec § 1` (e.g., `color`, `typography`, `spacing`, `radii`, `shadow`, `transition`). Values are written verbatim from the spec without normalization. Omit the key entirely when `designSpecContent` is null or `§ 1` contains no token map.
-- **decisions**: Emit one entry per item in the fully accumulated `oqDecisions[]` working memory — this includes every OQ resolved or deferred by Phase 0.5, Phase 1.8, AND Phase 2.5. Do not scope this derivation to Phase 0.5 entries only. Each entry carries `anchor`, `source`, `text`, and `resolution` from the corresponding `oqDecisions[]` record. Omit the `decisions` key entirely when `oqDecisions[]` is empty.
-- **maxConcurrency**: Default `5`. Set to `1` for strictly sequential execution.
-
-### Phase 4.1: Coverage Self-Check (BLOCKING)
-
-For each story whose Phase 3.1 inventory contains at least one row, compute:
-
-- `proto_elements` = total number of rows in that story's inventory table
-- `ac_anchors` = number of AC lines that cite a literal value, locator, or identifier drawn from the cited reference region (a citation is any AC phrase that would fail if the referenced element changed)
-
-If `ac_anchors < floor(proto_elements * 0.6)`, return to Phase 3.1 for that story and either:
-- Add AC lines to bring `ac_anchors` up to the threshold, OR
-- Upgrade under-justified rows to `excluded` with a written reason, reducing `proto_elements`
-
-Repeat until the ratio is satisfied for every affected story.
-
-**Block Write File until every story with an inventory satisfies the coverage ratio.**
-
-Agent-mode fallback: compute the deficit (`floor(proto_elements * 0.6) - ac_anchors`) per story, emit the deficit report as a structured warning in chat output, and proceed to Write File without blocking.
-
-### Write File
-
-```bash
-mkdir -p .aimi/tasks
-```
-
-Write JSON using the Write tool. Validate JSON is well-formed before writing.
 
 ### Schema v3.3 Structure
 
@@ -891,9 +1066,9 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
     "designTokens": "object (optional, flat token map parsed from DesignSpec § 1; keys are token categories e.g. color, typography, spacing, radii, shadow, transition; values verbatim from spec)",
     "decisions": [
       {
-        "anchor": "string (unique key, one of: <brainstorm-path>:L<line> | businessSpec:L<line> | designSpec:L<line> | researchFile:<basename>:OQ<n> | specFlow:CriticalQ<n> | specFlow:Gap<n>)",
-        "source": "string (<brainstorm-path>:L<line> for brainstorm-sourced OQs | businessSpec:L<line> | designSpec:L<line> | researchFile:<basename>:OQ<n> for Phase 1.8 researcher OQs | specFlow:CriticalQ<n> for Phase 2.5 critical questions | specFlow:Gap<n> for Phase 2.5 gap entries)",
-        "text": "string (the OQ text or the trimmed line containing the marker)",
+        "anchor": "string (unique key, one of: <brainstorm-path>:L<line> | businessSpec:L<line> | designSpec:L<line> | researchFile:<basename>:OQ<n> | specFlow:CriticalQ<n> | specFlow:Gap<n> | outline:edit:<idx> | outline:edit:reorder)",
+        "source": "string (one of: <brainstorm-path>:L<line> | businessSpec:L<line> | designSpec:L<line> | researchFile:<basename>:OQ<n> | specFlow:CriticalQ<n> | specFlow:Gap<n> | outline — for outline-gate edits recorded in Phase 3c)",
+        "text": "string (the OQ text or the trimmed line containing the marker, or description of the outline edit)",
         "resolution": "string (the user's choice, or '[deferred]')"
       }
     ],
@@ -947,7 +1122,7 @@ Write JSON using the Write tool. Validate JSON is well-formed before writing.
         "files": ["string[] (required, concrete file paths from research)"],
         "approach": "string (required, actionable strategy referencing codebase patterns)",
         "verify": "string (required, executable command or checkable assertion)",
-        "prototypeAnchor": "string (optional, relative path to the single prototype file most relevant to this story; set by Phase 3 when AC cites exactly one prototype via F3 syntax; absent when AC cites zero or multiple prototypes)"
+        "prototypeAnchor": "string (optional, relative path to the single prototype file most relevant to this story; set by Pass 2 sub-agent when AC cites exactly one prototype via F3 syntax; absent when AC cites zero or multiple prototypes)"
       },
       "verification": {
         "strategy": "test|visual|api (required)",
@@ -999,11 +1174,18 @@ The `metadata.backendSpec.endpoints[].responseShape` field follows a strict flat
 }
 ```
 
-The validator treats `portfolio.totalUsinas` as a single token and cannot find that exact substring in § 5.3 — the substring matcher fails.
-
 **Notes:** `implementation`, `verification`, `gate`, `skills`, and `tasks` are optional per story. `wave` is required on all stories.
 
-**`metadata.decisions[].source` field:** each entry records where the Open Question originated. Six valid forms: `<brainstorm-path>:L<line>` (an OQ line from the brainstorm doc), `businessSpec:L<line>` (a marker-style OQ scanned from `businessSpecContent`), `designSpec:L<line>` (a marker-style OQ scanned from `designSpecContent`), `researchFile:<basename>:OQ<n>` (an OQ entry from a researcher file's `## Open Questions` section or a `[PROMOTE-TO-OPEN-QUESTIONS]` tag, resolved at Phase 1.8), `specFlow:CriticalQ<n>` (an entry from the spec-flow analyzer's `### Critical Questions Requiring Clarification` section, resolved at Phase 2.5), or `specFlow:Gap<n>` (an entry from the spec-flow analyzer's `### Missing Elements & Gaps` section, resolved at Phase 2.5). Consumers can branch on the prefix to distinguish decisions by origin: brainstorm, inline spec markers, post-research researcher OQs, or spec-flow gaps.
+**`metadata.decisions[].source` field:** each entry records where the Open Question or outline edit originated. Seven valid source values:
+- `<brainstorm-path>:L<line>` — an OQ line from the brainstorm doc (Phase 0.5)
+- `businessSpec:L<line>` — a marker-style OQ scanned from `businessSpecContent` (Phase 0.5)
+- `designSpec:L<line>` — a marker-style OQ scanned from `designSpecContent` (Phase 0.5)
+- `researchFile:<basename>:OQ<n>` — an OQ entry from a researcher file's `## Open Questions` section or a `[PROMOTE-TO-OPEN-QUESTIONS]` tag, resolved at Phase 1.8
+- `specFlow:CriticalQ<n>` — an entry from the spec-flow analyzer's `### Critical Questions Requiring Clarification` section, resolved at Phase 2.5
+- `specFlow:Gap<n>` — an entry from the spec-flow analyzer's `### Missing Elements & Gaps` section, resolved at Phase 2.5
+- `outline` — an outline-gate edit recorded in Phase 3c (rename, add, remove, reorder)
+
+Consumers can branch on the prefix to distinguish decisions by origin.
 
 ### Anti-Citation-Bias Reminder
 
@@ -1016,15 +1198,15 @@ Specific obligations:
 - **Edge cases** enumerated in the spec MUST each map to at least one AC line. An edge case that appears in the spec but has no corresponding AC is a coverage gap, not a citation-format issue.
 - When in doubt, encode more not less. Excess AC lines are far cheaper than missing coverage discovered at review time.
 
-### Checklist Before Writing
+### Checklist Before Phase 4.5
 
-- [ ] Every story `id` uses `US-NNN` zero-padded format (`US-001`, `US-002`, ...) — not `US-1`, `S1`, `TASK-1`, or any other format
+- [ ] Every story `id` uses `US-NNN` zero-padded format (`US-001`, `US-002`, ...) — not `US-1`, `S1`, `TASK-1`, or any other format (assigned by story-merge)
 - [ ] Each story completable in one agent iteration
 - [ ] Stories ordered by capability dependency (capabilities that unlock other capabilities come first; vertical slices, not horizontal layers)
 - [ ] Every story has "Typecheck passes" as criterion
 - [ ] Acceptance criteria are verifiable (not vague)
-- [ ] `dependsOn` arrays are valid: no circular dependencies, no self-references, all referenced IDs exist
-- [ ] No story depends on a story that depends on it (DAG validation)
+- [ ] `dependsOn` arrays are valid: no circular dependencies, no self-references, all referenced IDs exist (validated by story-merge)
+- [ ] No story depends on a story that depends on it (DAG validation — performed by story-merge)
 - [ ] Every story has `status` initialized to `"pending"`
 - [ ] `dependsOn` is `[]` for root stories with no upstream dependencies
 - [ ] branchName is valid (alphanumeric, hyphens, slashes)
@@ -1047,11 +1229,11 @@ Specific obligations:
 - [ ] Rule 19a compliance (when `designSpecContent` is non-null): every visual story's `acceptanceCriteria` wraps each visible-text literal in double quotes followed by a `(DesignSpec § N.N L<line>)` anchor; no paraphrasing, translation, abbreviation, or reordering of the cited text
 
 ### Split-File Checks (when `implementationScope` is set)
-- [ ] Full-stack: two files generated (`*-frontend-tasks.json` and `*-backend-tasks.json`)
-- [ ] Full-stack: each file has its own `branchName` (`type/[feature]-frontend`, `type/[feature]-backend`)
-- [ ] Full-stack: story IDs are unique across both files (no ID collisions)
-- [ ] Full-stack: no cross-file `dependsOn` references — each file's graph is self-contained
-- [ ] Full-stack: wave numbers computed independently per file (roots = wave 1 within each file)
+- [ ] Full-stack: two files generated (`*-frontend-tasks.json` and `*-backend-tasks.json`) — produced by story-merge `--split full-stack`
+- [ ] Full-stack: each file has its own `branchName` (`type/[feature]-frontend`, `type/[feature]-backend`) — patched in Phase 4
+- [ ] Full-stack: story IDs are unique across both files (no ID collisions) — enforced by story-merge
+- [ ] Full-stack: no cross-file `dependsOn` references — each file's graph is self-contained — enforced by story-merge
+- [ ] Full-stack: wave numbers computed independently per file (roots = wave 1 within each file) — enforced by story-merge
 - [ ] Frontend-only: single `*-frontend-tasks.json` with `metadata.frontendOnly: true`
 - [ ] Frontend-only: `metadata.backendSpec` contains `endpoints`, `dataModels`, `businessRules`, `businessContext`
 - [ ] Full-stack: `metadata.designBundle` (if set) and `metadata.designTokens` (if set) are written to both frontend and backend files
@@ -1118,9 +1300,21 @@ $AIMI_CLI validate-tasks
 3. Re-write the tasks.json file using the Write tool
 4. Re-run all validations until they pass
 
-**Note:** `validate-stories` (US-001) catches malformed `skills[]` — entries that fail the `^[a-zA-Z0-9][a-zA-Z0-9_-]*$` regex, lists exceeding 10 entries, or an explicitly empty `skills: []` array (field must be omitted when no skills apply). It also enforces the **gate schema** (US-003): the plural `gates` field is rejected outright (use singular `gate`, see L687-692 above), and any singular `gate` object must carry all three required keys — `type`, `status`, and `prompt`.
+**Note:** `validate-stories` catches malformed `skills[]` — entries that fail the `^[a-zA-Z0-9][a-zA-Z0-9_-]*$` regex, lists exceeding 10 entries, or an explicitly empty `skills: []` array (field must be omitted when no skills apply). It also enforces the **gate schema**: the plural `gates` field is rejected outright (use singular `gate`), and any singular `gate` object must carry all three required keys — `type`, `status`, and `prompt`.
 
 Do **not** proceed to the report step until all validations succeed.
+
+## Step 4.6: Research GC (advisory, non-fatal)
+
+After all validations pass, invoke research-gc once to prune orphaned research files older than 30 days. This must run **after** Phase 4 writes metadata (so newly registered researchPaths are not pruned), and only once per session.
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI research-gc || true
+```
+
+If `research-gc` fails or prints an error, log it but continue to Step 5 — GC failure is never blocking.
 
 ## Step 5: Aimi-Branded Report
 
@@ -1132,6 +1326,7 @@ Tasks: .aimi/tasks/[tasks-filename].json
 Stories: [X] total
 Schema version: 3.3
 Waves: [N] total
+Outline: [N] stories (edits: [M])
 [If gates found]: Gates: [N] (verify: [X], decision: [Y], action: [Z])
 [If brainstorm used]: Context: .aimi/brainstorms/[brainstorm-file]
 [If reusedPaths non-empty]: Research reused: [N] file(s) from brainstorm
@@ -1147,6 +1342,8 @@ Next steps:
 4. **Run `/aimi:execute`** - Begin autonomous execution
 ```
 
+**Outline line:** `Outline: N stories (edits: M)` where `N` is the number of stories in the approved outline (from `outline.json`) and `M` is `outlineEditCount` (the number of edits applied during the Phase 3c gate — rename, add, remove, and reorder each count as one edit).
+
 **IMPORTANT:** Output the "Next steps" block EXACTLY as shown above — use `/aimi:` prefix (e.g., `/aimi:deepen`), NOT the fully-qualified plugin name (e.g., `/aimi-engineering:deepen`). Copy the block verbatim.
 
 ## Error Handling
@@ -1158,9 +1355,13 @@ Next steps:
 | Phase 1.5b | External research fails | Proceed without external context |
 | Phase 1.8 | No researcher files have `## Open Questions` sections | Skip gate, proceed to Phase 2 |
 | Phase 1.8 | Researcher file missing from disk | Skip that file silently, continue with remaining files |
-| Phase 2.5 | Spec-flow output has no `### Missing Elements & Gaps` or `### Critical Questions Requiring Clarification` sections | Skip gate, proceed to Phase 3 |
+| Phase 2.5 | Spec-flow output has no `### Missing Elements & Gaps` or `### Critical Questions Requiring Clarification` sections | Skip gate, proceed to Phase 3a |
 | Phase 2.5 | User defers all spec-flow OQs in agent-mode | Auto-defer all, emit log line, proceed |
 | Phase 2 | Spec-flow finds critical gaps | Add gaps as story notes, flag in report |
-| Phase 3 | Zero stories produced | Report error, ask user to refine scope |
-| Phase 3 | 10+ stories produced | Proceed with warning in report |
+| Phase 3b | Outline generation produces zero stories | Report error (`[plan] outline empty — cannot proceed`), ask user to refine feature description |
+| Phase 3c | User removes last story from outline | Present error at gate, require at least one story before approving |
+| Phase 3d | Pass 2 sub-agent times out | Count as failed attempt; retry up to 2x with enriched prompt (Gap5 / CriticalQ5 resolution: rely on Task tool's built-in timeout) |
+| Phase 3d | Pass 2 sub-agent fails schema validation after 2 retries | Mark permanently failed; surface to user with skip/retry-with-hint/abort options; auto-skip in agent-mode |
+| Phase 3e | story-merge exits non-zero | Report error with full stderr output; preserve staging dir for inspection; do not write tasks.json manually |
 | Phase 4 | File write fails | Report error with path |
+| Phase 4.5 | Validation fails | Fix issues and re-run until passing |

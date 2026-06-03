@@ -811,6 +811,283 @@ test_get_story_context() {
   assert_stderr_contains "not found" "$stderr_output" "get-story-context US-999 shows not found error"
 }
 
+test_get_story_context_skills_present() {
+  echo ""
+  echo "=== Testing get-story-context emits skills[] when story declares skills ==="
+
+  # Create an isolated temp dir with its own .aimi layout
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  mkdir -p "$tmp_dir/.aimi/tasks"
+
+  # Create a fake skills base dir with two SKILL.md files
+  local fake_skills_base="$tmp_dir/skills"
+  mkdir -p "$fake_skills_base/story-executor"
+  mkdir -p "$fake_skills_base/plan"
+  printf 'Story executor skill content.\n' > "$fake_skills_base/story-executor/SKILL.md"
+  printf 'Plan skill content.\n' > "$fake_skills_base/plan/SKILL.md"
+
+  # Create a tasks file with a story that declares both skills
+  cat > "$tmp_dir/.aimi/tasks/9999-99-99-skills-test-tasks.json" << 'TASKSEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: skills test",
+    "type": "feat",
+    "branchName": "feat/skills-test",
+    "createdAt": "2026-05-28",
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 1
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story with skills",
+      "description": "Test story",
+      "acceptanceCriteria": ["Skills present in context"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "skills": ["story-executor", "plan"],
+      "notes": ""
+    }
+  ]
+}
+TASKSEOF
+
+  # Run CLI from $tmp_dir so find_aimi_root() discovers $tmp_dir/.aimi/
+  # CLAUDECODE must be unset so AIMI_PLUGIN_DIR is honored for skills resolution
+  local output exit_code
+  output=$(cd "$tmp_dir" && unset CLAUDECODE; AIMI_PLUGIN_DIR="$tmp_dir" "$CLI" get-story-context US-001 2>&1)
+  exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "skills_present: exits 0"
+
+  # skills array should have 2 entries
+  local skills_len
+  skills_len=$(echo "$output" | jq '.skills | length')
+  assert_eq "2" "$skills_len" "skills_present: skills array has 2 entries"
+
+  # First skill: story-executor
+  local first_name first_path first_content
+  first_name=$(echo "$output" | jq -r '.skills[0].name')
+  first_path=$(echo "$output" | jq -r '.skills[0].path')
+  first_content=$(echo "$output" | jq -r '.skills[0].content')
+  assert_eq "story-executor" "$first_name" "skills_present: skills[0].name is story-executor"
+  assert_eq "skills/story-executor/SKILL.md" "$first_path" "skills_present: skills[0].path is plugin-relative"
+  assert_contains "Story executor skill content" "$first_content" "skills_present: skills[0].content matches file"
+
+  # Second skill: plan
+  local second_name second_path
+  second_name=$(echo "$output" | jq -r '.skills[1].name')
+  second_path=$(echo "$output" | jq -r '.skills[1].path')
+  assert_eq "plan" "$second_name" "skills_present: skills[1].name is plan"
+  assert_eq "skills/plan/SKILL.md" "$second_path" "skills_present: skills[1].path is plugin-relative"
+
+  # designContext keys present
+  local has_dc
+  has_dc=$(echo "$output" | jq 'has("designContext")')
+  assert_eq "true" "$has_dc" "skills_present: designContext key present"
+
+  rm -rf "$tmp_dir"
+}
+
+test_get_story_context_skills_absent() {
+  echo ""
+  echo "=== Testing get-story-context emits skills:[] when story has no skills ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  # The standard fixture has stories with no skills field
+  local output exit_code
+  output=$("$CLI" get-story-context US-001 2>&1)
+  exit_code=$?
+  assert_exit_code "0" "$exit_code" "skills_absent: exits 0"
+
+  local skills_val
+  skills_val=$(echo "$output" | jq '.skills')
+  assert_eq "[]" "$skills_val" "skills_absent: skills key is empty array"
+
+  # designContext is still present
+  local has_dc decisions bundleGuidance
+  has_dc=$(echo "$output" | jq 'has("designContext")')
+  assert_eq "true" "$has_dc" "skills_absent: designContext key present"
+  decisions=$(echo "$output" | jq -r '.designContext.decisions')
+  assert_eq "" "$decisions" "skills_absent: designContext.decisions is empty string"
+  bundleGuidance=$(echo "$output" | jq -r '.designContext.bundleGuidance')
+  assert_eq "" "$bundleGuidance" "skills_absent: designContext.bundleGuidance is empty string"
+}
+
+test_get_story_context_skills_cap_drop() {
+  echo ""
+  echo "=== Testing get-story-context 100KB cap: drops last skills in reverse-insertion order ==="
+
+  # Create isolated temp dir
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  mkdir -p "$tmp_dir/.aimi/tasks"
+
+  # Create 3 synthetic skill files: 40KB + 40KB + 40KB = 120KB > 100KB
+  local fake_skills_base="$tmp_dir/skills"
+  mkdir -p "$fake_skills_base/alpha"
+  mkdir -p "$fake_skills_base/beta"
+  mkdir -p "$fake_skills_base/gamma"
+
+  # Generate ~40KB of content per file (40960 chars)
+  python3 -c "print('x' * 40960)" > "$fake_skills_base/alpha/SKILL.md"
+  python3 -c "print('y' * 40960)" > "$fake_skills_base/beta/SKILL.md"
+  python3 -c "print('z' * 40960)" > "$fake_skills_base/gamma/SKILL.md"
+
+  cat > "$tmp_dir/.aimi/tasks/9999-99-99-cap-test-tasks.json" << 'TASKSEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: cap test",
+    "type": "feat",
+    "branchName": "feat/cap-test",
+    "createdAt": "2026-05-28",
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 1
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Cap test story",
+      "description": "Test 100KB cap",
+      "acceptanceCriteria": ["Cap enforced"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "skills": ["alpha", "beta", "gamma"],
+      "notes": ""
+    }
+  ]
+}
+TASKSEOF
+
+  # Capture stdout and stderr separately; cd to $tmp_dir so find_aimi_root() uses it
+  local output stderr_output exit_code
+  local stderr_file
+  stderr_file=$(mktemp)
+  output=$(cd "$tmp_dir" && unset CLAUDECODE; AIMI_PLUGIN_DIR="$tmp_dir" "$CLI" get-story-context US-001 2>"$stderr_file")
+  exit_code=$?
+  stderr_output=$(cat "$stderr_file" 2>/dev/null || true)
+  rm -f "$stderr_file"
+
+  assert_exit_code "0" "$exit_code" "skills_cap_drop: exits 0"
+
+  # stderr must contain the cap warning
+  assert_stderr_contains "dropped — aggregate skills context exceeded 100KB" "$stderr_output" \
+    "skills_cap_drop: stderr contains cap drop warning"
+
+  # The dropped entry is gamma (last in insertion order = last in story.skills[])
+  assert_contains "gamma" "$stderr_output" "skills_cap_drop: gamma is reported as dropped"
+
+  # alpha and beta should be in the output (first two skills, totalling ~80KB ≤ 100KB)
+  local skills_len
+  skills_len=$(echo "$output" | jq '.skills | length')
+  # At least alpha should survive; beta may or may not depending on exact sizes
+  local alpha_present
+  alpha_present=$(echo "$output" | jq '[.skills[].name] | index("alpha") != null')
+  assert_eq "true" "$alpha_present" "skills_cap_drop: alpha survives cap enforcement"
+
+  # gamma should NOT be in the output
+  local gamma_present
+  gamma_present=$(echo "$output" | jq '[.skills[].name] | index("gamma") != null')
+  assert_eq "false" "$gamma_present" "skills_cap_drop: gamma dropped from output"
+
+  rm -rf "$tmp_dir"
+}
+
+test_get_story_context_design_context() {
+  echo ""
+  echo "=== Testing get-story-context populates designContext from brainstormPath + designBundle ==="
+
+  # Create isolated temp dir
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  mkdir -p "$tmp_dir/.aimi/tasks"
+  mkdir -p "$tmp_dir/.aimi/brainstorms"
+
+  # Create a brainstorm file with a ## Design Decisions section
+  cat > "$tmp_dir/.aimi/brainstorms/test-brainstorm.md" << 'BRAINSTORMEOF'
+# Brainstorm: Test Feature
+
+## Overview
+
+Some overview text.
+
+## Design Decisions
+
+Use approach A over approach B because it is simpler.
+Prefer jq for JSON manipulation to avoid bash hallucination.
+
+## Next Steps
+
+Do the implementation.
+BRAINSTORMEOF
+
+  # Create tasks file with brainstormPath and designBundle
+  cat > "$tmp_dir/.aimi/tasks/9999-99-99-dc-test-tasks.json" << 'TASKSEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: design context test",
+    "type": "feat",
+    "branchName": "feat/dc-test",
+    "createdAt": "2026-05-28",
+    "planPath": null,
+    "brainstormPath": ".aimi/brainstorms/test-brainstorm.md",
+    "maxConcurrency": 1,
+    "designBundle": {
+      "root": ".aimi/design/my-bundle",
+      "designSpec": ".aimi/design/my-bundle/design-spec.md",
+      "businessSpec": ".aimi/design/my-bundle/business-spec.md"
+    }
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Design context story",
+      "description": "Test design context",
+      "acceptanceCriteria": ["designContext populated"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "skills": [],
+      "notes": ""
+    }
+  ]
+}
+TASKSEOF
+
+  # cd to $tmp_dir so find_aimi_root() picks up $tmp_dir/.aimi/
+  local output exit_code
+  output=$(cd "$tmp_dir" && unset CLAUDECODE; AIMI_PLUGIN_DIR="$tmp_dir" "$CLI" get-story-context US-001 2>&1)
+  exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "design_context: exits 0"
+
+  # designContext.decisions should be non-empty and contain key text
+  local decisions
+  decisions=$(echo "$output" | jq -r '.designContext.decisions')
+  assert_contains "approach A" "$decisions" "design_context: decisions contains expected text"
+  assert_contains "jq for JSON" "$decisions" "design_context: decisions contains second decision"
+
+  # designContext.bundleGuidance should be non-empty and contain spec paths
+  local bundle_guidance
+  bundle_guidance=$(echo "$output" | jq -r '.designContext.bundleGuidance')
+  assert_contains "Apply design bundle fidelity rules" "$bundle_guidance" \
+    "design_context: bundleGuidance contains fidelity preamble"
+  assert_contains "design-spec.md" "$bundle_guidance" "design_context: bundleGuidance contains designSpec path"
+  assert_contains "business-spec.md" "$bundle_guidance" "design_context: bundleGuidance contains businessSpec path"
+
+  rm -rf "$tmp_dir"
+}
+
 test_reset_orphaned_empty() {
   echo ""
   echo "=== Testing reset-orphaned with no orphans ==="
@@ -1722,6 +1999,42 @@ test_write_global_cli_cache() {
   local perms
   perms=$(stat -c '%a' "$cache_file" 2>/dev/null || stat -f '%Lp' "$cache_file" 2>/dev/null)
   assert_eq "600" "$perms" "write_global_cli_cache: file permissions are 0600"
+
+  teardown_global_cache_env
+}
+
+test_write_global_cli_cache_rejects_worktree() {
+  echo ""
+  echo "=== Testing write_global_cli_cache refuses to persist a .worktrees/ path ==="
+
+  setup_global_cache_env
+  source_cache_functions
+
+  local cache_file
+  cache_file=$(_global_cache_path)
+
+  # Seed the cache with a valid path so we can prove the guard does not clobber it.
+  write_global_cli_cache "$MOCK_CLI_PATH"
+  local before
+  before=$(cat "$cache_file")
+
+  # Attempt to cache an ephemeral worktree copy — must be a no-op success.
+  local worktree_path="/home/dev/project/.worktrees/feat-x/plugins/aimi-engineering/scripts/aimi-cli.sh"
+  write_global_cli_cache "$worktree_path"
+  local rc=$?
+  assert_eq "0" "$rc" "write_global_cli_cache: worktree path returns success (no-op)"
+
+  local after
+  after=$(cat "$cache_file")
+  assert_eq "$before" "$after" "write_global_cli_cache: cache unchanged after worktree-path write"
+
+  if [ "$after" = "$worktree_path" ]; then
+    echo -e "${RED}✗${NC} write_global_cli_cache: worktree path must NOT be persisted"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} write_global_cli_cache: worktree path not persisted"
+    ((TESTS_PASSED++))
+  fi
 
   teardown_global_cache_env
 }
@@ -5530,6 +5843,254 @@ TASKEOF
   rm -rf "$arch_dir"
 }
 
+test_research_lookup() {
+  echo ""
+  echo "=== Testing research-lookup subcommand ==="
+
+  local rl_dir
+  rl_dir=$(mktemp -d)
+  mkdir -p "$rl_dir/.aimi" "$rl_dir/src"
+
+  # Create two source files
+  local src1="$rl_dir/src/foo.sh"
+  local src2="$rl_dir/src/bar.sh"
+  printf 'echo foo\n' > "$src1"
+  printf 'echo bar\n' > "$src2"
+
+  # Create a research file citing those source paths
+  local research_file="$rl_dir/.aimi/research.md"
+  cat > "$research_file" << 'RESEOF'
+# My Research
+
+## Summary
+Some summary text.
+
+## File References
+- src/foo.sh
+- src/bar.sh
+
+## Open Questions
+None.
+RESEOF
+
+  # --- Test 1: fresh (research file written after source files) ---
+  # Set source files to a known old time, research file to a newer time
+  touch -t 202001010000.00 "$src1" "$src2"
+  touch -t 202001020000.00 "$research_file"
+
+  local stdout exit_code
+  pushd "$rl_dir" >/dev/null
+  stdout=$("$CLI" research-lookup "$research_file" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "research-lookup: fresh file exits 0"
+  assert_contains ".aimi/research.md" "$stdout" "research-lookup: fresh file prints research path"
+
+  # --- Test 2: stale (source file newer than research) ---
+  # Set source file to a newer time than the research file
+  touch -t 202001030000.00 "$src1"
+
+  pushd "$rl_dir" >/dev/null
+  stdout=$("$CLI" research-lookup "$research_file" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "research-lookup: stale (source newer) exits 1"
+  assert_eq "" "$stdout" "research-lookup: stale produces empty stdout"
+
+  # Restore research file freshness for next tests
+  touch -t 202001040000.00 "$research_file"
+
+  # --- Test 3: missing cited path -> stale ---
+  local research_missing="$rl_dir/.aimi/research-missing.md"
+  cat > "$research_missing" << 'RESEOF'
+## File References
+- src/foo.sh
+- src/does-not-exist.sh
+RESEOF
+  touch -t 202001040000.00 "$research_missing"
+
+  local stderr_out
+  pushd "$rl_dir" >/dev/null
+  stderr_out=$("$CLI" research-lookup "$research_missing" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "research-lookup: missing cited path exits 1 (stale)"
+  assert_contains "does-not-exist.sh" "$stderr_out" "research-lookup: missing cited path logs warning"
+
+  # --- Test 4: no File References section -> stale ---
+  local research_norefs="$rl_dir/.aimi/research-norefs.md"
+  cat > "$research_norefs" << 'RESEOF'
+# Research Without File References
+
+## Summary
+No file refs here.
+RESEOF
+
+  pushd "$rl_dir" >/dev/null
+  stdout=$("$CLI" research-lookup "$research_norefs" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "research-lookup: no File References section exits 1"
+  assert_eq "" "$stdout" "research-lookup: no File References section produces empty stdout"
+
+  # --- Test 5: path outside project root -> rejected ---
+  local research_escape="$rl_dir/.aimi/research-escape.md"
+  cat > "$research_escape" << 'RESEOF'
+## File References
+- ../../etc/passwd
+RESEOF
+
+  pushd "$rl_dir" >/dev/null
+  stderr_out=$("$CLI" research-lookup "$research_escape" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "research-lookup: outside-root path rejected (exit 1)"
+  assert_contains "escapes project root" "$stderr_out" "research-lookup: outside-root path error on stderr"
+
+  # --- Test 6: missing argument -> usage on stderr, exit 1 ---
+  pushd "$rl_dir" >/dev/null
+  stderr_out=$("$CLI" research-lookup 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "research-lookup: missing arg exits 1"
+  assert_contains "Usage:" "$stderr_out" "research-lookup: missing arg shows usage on stderr"
+
+  rm -rf "$rl_dir"
+}
+
+test_research_gc() {
+  echo ""
+  echo "=== Testing research-gc subcommand ==="
+
+  local gc_dir
+  gc_dir=$(mktemp -d)
+  mkdir -p "$gc_dir/.aimi/research" "$gc_dir/.aimi/tasks" "$gc_dir/.aimi/brainstorms" "$gc_dir/.aimi/archive"
+
+  # --- Setup: fixed timestamps ---
+  # old_time: >30 days ago (2020-01-01)
+  # recent_time: <30 days ago (use a far-future date to guarantee "recent")
+  local old_time="202001010000.00"
+  local recent_time="209901010000.00"
+
+  # Research files
+  local orphan_old="$gc_dir/.aimi/research/orphan-old.md"
+  local orphan_recent="$gc_dir/.aimi/research/orphan-recent.md"
+  local ref_by_task="$gc_dir/.aimi/research/ref-by-task.md"
+  local ref_by_brainstorm="$gc_dir/.aimi/research/ref-by-brainstorm.md"
+  local ref_by_archive="$gc_dir/.aimi/research/ref-by-archive.md"
+
+  printf '# Orphan old\n' > "$orphan_old"
+  printf '# Orphan recent\n' > "$orphan_recent"
+  printf '# Referenced by task\n' > "$ref_by_task"
+  printf '# Referenced by brainstorm\n' > "$ref_by_brainstorm"
+  printf '# Referenced by archive (ignored)\n' > "$ref_by_archive"
+
+  # Set mtimes: all old except orphan_recent
+  touch -t "$old_time" "$orphan_old" "$ref_by_task" "$ref_by_brainstorm" "$ref_by_archive"
+  touch -t "$recent_time" "$orphan_recent"
+
+  # Active task file referencing ref_by_task
+  local task_file="$gc_dir/.aimi/tasks/2020-01-01-gc-test-tasks.json"
+  cat > "$task_file" << 'TASKEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: GC test",
+    "type": "feat",
+    "branchName": "feat/gc-test",
+    "createdAt": "2020-01-01",
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 1,
+    "researchPaths": [
+      ".aimi/research/ref-by-task.md"
+    ]
+  },
+  "userStories": []
+}
+TASKEOF
+
+  # Brainstorm file with frontmatter referencing ref_by_brainstorm
+  local brainstorm_file="$gc_dir/.aimi/brainstorms/2020-01-01-gc-brainstorm.md"
+  cat > "$brainstorm_file" << 'BSEOF'
+---
+researchPaths:
+  - .aimi/research/ref-by-brainstorm.md
+---
+
+# GC test brainstorm
+BSEOF
+
+  # Archive task referencing ref_by_archive (should be IGNORED)
+  # We put this in .aimi/archive — GC must not read it
+  mkdir -p "$gc_dir/.aimi/archive"
+  cat > "$gc_dir/.aimi/archive/2020-01-01-archived-tasks.json" << 'ARCHEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Archived",
+    "type": "feat",
+    "branchName": "feat/archived",
+    "createdAt": "2020-01-01",
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 1,
+    "researchPaths": [
+      ".aimi/research/ref-by-archive.md"
+    ]
+  },
+  "userStories": []
+}
+ARCHEOF
+
+  # Run research-gc from gc_dir
+  local stdout exit_code
+  pushd "$gc_dir" >/dev/null
+  stdout=$("$CLI" research-gc 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "research-gc: exits 0"
+
+  # --- Case 1: orphan >30d should be deleted ---
+  local orphan_old_exists="yes"
+  [ -e "$orphan_old" ] || orphan_old_exists="no"
+  assert_eq "no" "$orphan_old_exists" "research-gc: orphan >30d deleted"
+
+  # --- Case 2: orphan <30d (recent) should be preserved ---
+  local orphan_recent_exists="no"
+  [ -e "$orphan_recent" ] && orphan_recent_exists="yes"
+  assert_eq "yes" "$orphan_recent_exists" "research-gc: orphan <30d preserved"
+
+  # --- Case 3: referenced by active task should be preserved (even though old) ---
+  local ref_task_exists="no"
+  [ -e "$ref_by_task" ] && ref_task_exists="yes"
+  assert_eq "yes" "$ref_task_exists" "research-gc: referenced-by-task preserved"
+
+  # --- Case 4: referenced by brainstorm should be preserved (even though old) ---
+  local ref_brainstorm_exists="no"
+  [ -e "$ref_by_brainstorm" ] && ref_brainstorm_exists="yes"
+  assert_eq "yes" "$ref_brainstorm_exists" "research-gc: referenced-by-brainstorm preserved"
+
+  # --- Case 5: archive-referenced file not in active refs; since archive is ignored,
+  #     ref_by_archive is NOT in the referenced-set, and it IS old -> should be deleted ---
+  local ref_archive_exists="yes"
+  [ -e "$ref_by_archive" ] || ref_archive_exists="no"
+  assert_eq "no" "$ref_archive_exists" "research-gc: archive-referenced (but not active) file deleted"
+
+  # --- Case 6: stdout contains cleaned count (1 old orphan + 1 archive-ref = 2) ---
+  assert_contains "Cleaned 2 orphaned research files (>30 days)" "$stdout" "research-gc: prints cleaned count"
+
+  # --- Case 7: running again on empty dir is silent (N=0) ---
+  pushd "$gc_dir" >/dev/null
+  stdout=$("$CLI" research-gc 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "research-gc: idempotent second run exits 0"
+  assert_eq "" "$stdout" "research-gc: silent when nothing to clean"
+
+  rm -rf "$gc_dir"
+}
+
 test_detect_interactivity_agent_mode_env() {
   echo ""
   echo "=== Testing detect-interactivity with AIMI_AGENT_MODE=true ==="
@@ -7135,6 +7696,69 @@ test_detect_models_preserves_other_host() {
   fi
 }
 
+# detect-models (DEFAULT mode, no flags) must also preserve the OTHER host's
+# sub-table. Previously only the FLAG-mode branch merged; the no-flag branch
+# wrote a fresh {schemaVersion, categories:{<current host>:{...}}} and silently
+# dropped the inactive host's configured models on every invocation.
+# Regression coverage for that bug.
+test_detect_models_default_mode_preserves_other_host() {
+  echo ""
+  echo "=== Testing detect-models (DEFAULT mode, no flags) preserves the other host's block ==="
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Prime models.json with both hosts populated — opencode block carries
+  # provider-specific model IDs that the test will assert survive untouched.
+  local primed_oc_block='{"research":"deepseek/deepseek-v4-flash","review":"zai-coding-plan/glm-5.1","design":"zai-coding-plan/glm-5.1","workflow":"deepseek/deepseek-v4-flash","executor":"deepseek/deepseek-v4-pro"}'
+  printf '%s\n' "{
+    \"schemaVersion\": \"2.0\",
+    \"categories\": {
+      \"claudeCode\": {\"research\":\"haiku\",\"review\":\"opus\",\"design\":\"sonnet\",\"workflow\":\"sonnet\",\"executor\":\"sonnet\"},
+      \"opencode\": $primed_oc_block
+    }
+  }" > "$tmpdir/models.json"
+
+  local before_oc
+  before_oc=$(jq -c '.categories.opencode' "$tmpdir/models.json" 2>/dev/null)
+
+  # Run detect-models on the Claude Code host with NO flags (default mode).
+  # Stdin is not a TTY here, so the prompt loop is skipped and the run uses
+  # the default haiku/opus/sonnet selections for claudeCode.
+  CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" "$CLI" detect-models </dev/null >/dev/null 2>&1
+
+  local result
+  result=$(cat "$tmpdir/models.json" 2>/dev/null)
+
+  # The opencode block must be byte-identical to the primed value
+  local after_oc
+  after_oc=$(printf '%s' "$result" | jq -c '.categories.opencode' 2>/dev/null)
+
+  if [ "$before_oc" = "$after_oc" ]; then
+    echo -e "${GREEN}✓${NC} detect-models default-mode-preserves: opencode block unchanged"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models default-mode-preserves: opencode block changed"
+    echo "  before: $before_oc"
+    echo "  after:  $after_oc"
+    ((TESTS_FAILED++))
+  fi
+
+  # The claudeCode block must be present (with the default model selections)
+  local cc_count
+  cc_count=$(printf '%s' "$result" | jq '.categories.claudeCode | keys | length' 2>/dev/null)
+  assert_eq "5" "$cc_count" "detect-models default-mode-preserves: claudeCode block has all five categories"
+
+  if printf '%s' "$result" | jq empty 2>/dev/null; then
+    echo -e "${GREEN}✓${NC} detect-models default-mode-preserves: merged models.json is valid JSON"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} detect-models default-mode-preserves: merged models.json is not valid JSON: $result"
+    ((TESTS_FAILED++))
+  fi
+}
+
 # ============================================================================
 # detect-design-bundle Tests
 # ============================================================================
@@ -7816,6 +8440,423 @@ test_update_field_nested_path() {
 }
 
 # ============================================================================
+# story-merge Tests
+# ============================================================================
+
+# Helper: create a minimal staging story JSON file
+_sm_make_story() {
+  local path="$1"
+  local title="${2:-Story}"
+  local depends="${3:-[]}"
+  cat > "$path" << EOF
+{
+  "title": "$title",
+  "description": "As a developer, I want $title so that it works.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 1,
+  "status": "pending",
+  "dependsOn": $depends,
+  "notes": ""
+}
+EOF
+}
+
+# TC1: Happy path — three staging files produce US-001..003 with contiguous waves
+test_story_merge_happy_path() {
+  echo ""
+  echo "=== TC1: story-merge happy path ==="
+
+  # Use paths inside the project (TEST_DIR == cwd after main cd "$TEST_DIR")
+  local stg=".aimi/.tasks-staging-tc1"
+  local out_file=".aimi/tasks/sm-tc1-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  # Create 3 staging files in lex order: 01, 02, 03
+  _sm_make_story "$stg/01-setup.json"   "Setup story"
+  _sm_make_story "$stg/02-core.json"    "Core story"  '["outline:01"]'
+  _sm_make_story "$stg/03-ui.json"      "UI story"    '["outline:02"]'
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC1: story-merge happy path exits 0"
+
+  # Output file must exist
+  if [ -f "$out_file" ]; then
+    echo -e "${GREEN}✓${NC} TC1: output file written"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC1: output file missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  # IDs should be US-001, US-002, US-003
+  if [ -f "$out_file" ]; then
+    local ids
+    ids=$(jq -r '[.userStories[].id] | join(",")' "$out_file" 2>/dev/null)
+    assert_eq "US-001,US-002,US-003" "$ids" "TC1: IDs are US-001,US-002,US-003"
+
+    # Waves: US-001 wave 1, US-002 wave 2, US-003 wave 3
+    local waves
+    waves=$(jq -r '[.userStories[].wave] | join(",")' "$out_file" 2>/dev/null)
+    assert_eq "1,2,3" "$waves" "TC1: waves are 1,2,3 (contiguous)"
+
+    # dependsOn remapped from outline:NN to US-NNN
+    local dep2
+    dep2=$(jq -r '.userStories[] | select(.id == "US-002") | .dependsOn[0]' "$out_file" 2>/dev/null)
+    assert_eq "US-001" "$dep2" "TC1: outline:01 remapped to US-001"
+  fi
+
+  # Staging dir should be deleted on success
+  if [ ! -d "$stg" ]; then
+    echo -e "${GREEN}✓${NC} TC1: staging dir deleted on success"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC1: staging dir NOT deleted on success"
+    ((TESTS_FAILED++))
+    rm -rf "$stg"
+  fi
+
+  rm -f "$out_file"
+}
+
+# TC2: Missing staging dir → non-zero exit
+test_story_merge_missing_dir() {
+  echo ""
+  echo "=== TC2: story-merge missing staging dir ==="
+
+  # Use a staging dir that doesn't exist but has a path inside project
+  local stg=".aimi/.tasks-staging-nonexistent-tc2-$$"
+  local out_file=".aimi/tasks/sm-tc2-tasks.json"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC2: missing staging dir exits 1"
+  assert_contains "does not exist" "$output" "TC2: error mentions 'does not exist'"
+}
+
+# TC3: Malformed JSON in staging file → non-zero exit with filename in error
+test_story_merge_malformed_json() {
+  echo ""
+  echo "=== TC3: story-merge malformed JSON ==="
+
+  local stg=".aimi/.tasks-staging-tc3"
+  local out_file=".aimi/tasks/sm-tc3-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  _sm_make_story "$stg/01-good.json" "Good story"
+  printf '{ "title": "Bad, unclosed' > "$stg/02-bad.json"  # malformed JSON
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC3: malformed JSON exits 1"
+  assert_contains "02-bad.json" "$output" "TC3: offending filename in error"
+
+  # Staging dir preserved on error
+  if [ -d "$stg" ]; then
+    echo -e "${GREEN}✓${NC} TC3: staging dir preserved on error"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC3: staging dir should be preserved on error"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg"
+}
+
+# TC4: Duplicate numeric index prefix → non-zero exit
+test_story_merge_duplicate_index() {
+  echo ""
+  echo "=== TC4: story-merge duplicate index prefix ==="
+
+  local stg=".aimi/.tasks-staging-tc4"
+  local out_file=".aimi/tasks/sm-tc4-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  _sm_make_story "$stg/01-alpha.json" "Alpha"
+  _sm_make_story "$stg/01-beta.json"  "Beta"   # same '01' prefix
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC4: duplicate index exits 1"
+  assert_contains "duplicate index" "$output" "TC4: error mentions 'duplicate index'"
+
+  rm -rf "$stg"
+}
+
+# TC5: Circular dependsOn cycle → non-zero exit naming cycle stories
+test_story_merge_cycle() {
+  echo ""
+  echo "=== TC5: story-merge DAG cycle ==="
+
+  local stg=".aimi/.tasks-staging-tc5"
+  local out_file=".aimi/tasks/sm-tc5-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  # Create two stories that depend on each other via outline tokens
+  _sm_make_story "$stg/01-a.json" "Story A" '["outline:02"]'
+  _sm_make_story "$stg/02-b.json" "Story B" '["outline:01"]'
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC5: cycle exits 1"
+  assert_contains "circular" "$output" "TC5: error mentions 'circular'"
+
+  rm -rf "$stg"
+}
+
+# TC6: Dangling outline reference → non-zero exit naming missing reference
+test_story_merge_dangling_ref() {
+  echo ""
+  echo "=== TC6: story-merge dangling outline ref ==="
+
+  local stg=".aimi/.tasks-staging-tc6"
+  local out_file=".aimi/tasks/sm-tc6-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  # outline:99 doesn't exist (only 1 story at index 01)
+  _sm_make_story "$stg/01-story.json" "Story A" '["outline:99"]'
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC6: dangling ref exits 1"
+  assert_contains "unresolved outline" "$output" "TC6: error mentions unresolved outline reference"
+
+  rm -rf "$stg"
+}
+
+# TC7: Rule 22 mock-sync AC routing — schema story with consumer
+test_story_merge_rule22_routing() {
+  echo ""
+  echo "=== TC7: story-merge Rule 22 mock-sync AC routing ==="
+
+  local stg=".aimi/.tasks-staging-tc7"
+  local out_file=".aimi/tasks/sm-tc7-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  # Story 1: schema-extending (matches schema glob via .schema.ts)
+  cat > "$stg/01-schema.json" << 'EOF'
+{
+  "title": "Add UserProfile schema",
+  "description": "As a developer, I want a UserProfile schema so that user data is typed.",
+  "acceptanceCriteria": [
+    "Typecheck passes",
+    "Update mock data in matching **/mocks/** path to populate new fields (or document why mocks are intentionally unchanged)."
+  ],
+  "priority": 1,
+  "status": "pending",
+  "dependsOn": [],
+  "notes": "",
+  "implementation": {
+    "files": ["src/types/UserProfile.schema.ts"],
+    "approach": "Add UserProfile type",
+    "verify": "tsc --noEmit"
+  }
+}
+EOF
+
+  # Story 2: consumer — references "UserProfile" in description
+  cat > "$stg/02-consumer.json" << 'EOF'
+{
+  "title": "UserProfile display page",
+  "description": "As a user, I want to view my UserProfile so that I can see my data.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 2,
+  "status": "pending",
+  "dependsOn": [],
+  "notes": ""
+}
+EOF
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC7: Rule 22 routing exits 0"
+
+  if [ -f "$out_file" ]; then
+    # The mock-sync AC should be on the consumer (US-002), not the schema story (US-001)
+    local consumer_has_mock schema_has_mock
+    local mock_pattern="[Mm]ock.*updated|mock.*sync|[Uu]pdate.*mock|[Mm]ock.*data|[Vv]erify.*mock"
+    consumer_has_mock=$(jq -r --arg p "$mock_pattern" '.userStories[] | select(.id == "US-002") | .acceptanceCriteria[] | select(test($p; ""))' "$out_file" 2>/dev/null)
+    schema_has_mock=$(jq -r --arg p "$mock_pattern" '.userStories[] | select(.id == "US-001") | .acceptanceCriteria[] | select(test($p; ""))' "$out_file" 2>/dev/null)
+
+    if [ -n "$consumer_has_mock" ]; then
+      echo -e "${GREEN}✓${NC} TC7: mock-sync AC routed to consumer"
+      ((TESTS_PASSED++))
+    else
+      echo -e "${RED}✗${NC} TC7: mock-sync AC NOT on consumer"
+      echo "  consumer ACs: $(jq -r '.userStories[] | select(.id == "US-002") | .acceptanceCriteria[]' "$out_file" 2>/dev/null)"
+      ((TESTS_FAILED++))
+    fi
+
+    if [ -z "$schema_has_mock" ]; then
+      echo -e "${GREEN}✓${NC} TC7: mock-sync AC removed from schema story"
+      ((TESTS_PASSED++))
+    else
+      echo -e "${RED}✗${NC} TC7: mock-sync AC still on schema story (should have been moved)"
+      ((TESTS_FAILED++))
+    fi
+  fi
+
+  rm -f "$out_file"
+}
+
+# TC8: Full-stack split — two output files with unique IDs and independent waves
+test_story_merge_full_stack_split() {
+  echo ""
+  echo "=== TC8: story-merge --split full-stack ==="
+
+  local stg=".aimi/.tasks-staging-tc8"
+  local out_file=".aimi/tasks/sm-tc8-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  # Frontend story
+  cat > "$stg/01-ui.json" << 'EOF'
+{
+  "title": "React UserProfile page",
+  "description": "As a user, I want a React page so that I can view data.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 1,
+  "status": "pending",
+  "dependsOn": [],
+  "notes": "",
+  "implementation": {
+    "files": ["src/components/UserProfile.tsx"],
+    "approach": "Build React component",
+    "verify": "tsc --noEmit"
+  }
+}
+EOF
+
+  # Backend story
+  cat > "$stg/02-api.json" << 'EOF'
+{
+  "title": "UserProfile API endpoint",
+  "description": "As a developer, I want a backend endpoint so that data is served.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 2,
+  "status": "pending",
+  "dependsOn": [],
+  "notes": "",
+  "implementation": {
+    "files": ["app/controllers/user_profiles_controller.rb"],
+    "approach": "Rails controller",
+    "verify": "rspec"
+  }
+}
+EOF
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC8: full-stack split exits 0"
+
+  local fe_file=".aimi/tasks/sm-tc8-tasks-frontend-tasks.json"
+  local be_file=".aimi/tasks/sm-tc8-tasks-backend-tasks.json"
+
+  # Both output files must exist
+  if [ -f "$fe_file" ]; then
+    echo -e "${GREEN}✓${NC} TC8: frontend tasks file written"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC8: frontend tasks file missing ($fe_file)"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  if [ -f "$be_file" ]; then
+    echo -e "${GREEN}✓${NC} TC8: backend tasks file written"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC8: backend tasks file missing ($be_file)"
+    ((TESTS_FAILED++))
+  fi
+
+  if [ -f "$fe_file" ] && [ -f "$be_file" ]; then
+    # IDs unique across both files
+    local fe_ids be_ids
+    fe_ids=$(jq -r '[.userStories[].id] | .[]' "$fe_file" 2>/dev/null)
+    be_ids=$(jq -r '[.userStories[].id] | .[]' "$be_file" 2>/dev/null)
+
+    # No ID should appear in both files
+    local collision
+    collision=$(printf '%s\n%s\n' "$fe_ids" "$be_ids" | sort | uniq -d)
+    if [ -z "$collision" ]; then
+      echo -e "${GREEN}✓${NC} TC8: no ID collisions across frontend/backend files"
+      ((TESTS_PASSED++))
+    else
+      echo -e "${RED}✗${NC} TC8: ID collision found: $collision"
+      ((TESTS_FAILED++))
+    fi
+
+    # Each file has wave 1 for its roots
+    local fe_wave1 be_wave1
+    fe_wave1=$(jq '[.userStories[] | select(.dependsOn == []) | .wave] | all(. == 1)' "$fe_file" 2>/dev/null)
+    be_wave1=$(jq '[.userStories[] | select(.dependsOn == []) | .wave] | all(. == 1)' "$be_file" 2>/dev/null)
+    assert_eq "true" "$fe_wave1" "TC8: frontend root stories have wave 1"
+    assert_eq "true" "$be_wave1" "TC8: backend root stories have wave 1"
+  fi
+
+  # Staging dir deleted on success
+  if [ ! -d "$stg" ]; then
+    echo -e "${GREEN}✓${NC} TC8: staging dir deleted on success"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC8: staging dir NOT deleted on success"
+    ((TESTS_FAILED++))
+    rm -rf "$stg"
+  fi
+
+  rm -f "$fe_file" "$be_file" "$out_file"
+}
+
+# TC9: outline.json sidecar in staging dir is ignored (Phase 3b artifact)
+test_story_merge_outline_sidecar_ignored() {
+  echo ""
+  echo "=== TC9: story-merge ignores outline.json sidecar ==="
+
+  local stg=".aimi/.tasks-staging-tc9"
+  local out_file=".aimi/tasks/sm-tc9-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  # Two real stories
+  _sm_make_story "$stg/01-setup.json" "Setup story"
+  _sm_make_story "$stg/02-core.json"  "Core story" '["outline:01"]'
+
+  # Phase 3b sidecar (NOT a story — would crash story-merge if not filtered)
+  cat > "$stg/outline.json" << 'EOF'
+[
+  {"idx": "01", "title": "Setup story", "summary": "scaffold things"},
+  {"idx": "02", "title": "Core story",  "summary": "do work"}
+]
+EOF
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC9: outline.json sidecar does not crash story-merge"
+
+  # Only two real stories merged (outline.json must be ignored)
+  if [ -f "$out_file" ]; then
+    local count
+    count=$(jq -r '.userStories | length' "$out_file" 2>/dev/null)
+    assert_eq "2" "$count" "TC9: only 2 real stories merged (outline.json filtered)"
+
+    local ids
+    ids=$(jq -r '[.userStories[].id] | join(",")' "$out_file" 2>/dev/null)
+    assert_eq "US-001,US-002" "$ids" "TC9: IDs are US-001,US-002 (no phantom US-003 from outline.json)"
+  fi
+
+  rm -f "$out_file"
+  rm -rf "$stg"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -7874,6 +8915,10 @@ main() {
   test_status_uses_user_stories_key
   test_story_id_not_found
   test_get_story_context
+  test_get_story_context_skills_present
+  test_get_story_context_skills_absent
+  test_get_story_context_skills_cap_drop
+  test_get_story_context_design_context
   test_reset_orphaned_empty
   test_reset_orphaned_with_orphans
   test_stale_state_warning
@@ -7942,6 +8987,7 @@ main() {
   echo ""
   echo "--- Global Cache Tests ---"
   test_write_global_cli_cache
+  test_write_global_cli_cache_rejects_worktree
   test_read_global_cli_cache_valid
   test_read_global_cli_cache_missing
   test_read_global_cli_cache_tampered
@@ -8055,6 +9101,16 @@ main() {
   test_archive_task_missing_prototype_files
   test_archive_task_both_research_and_prototype_paths
 
+  # Research-lookup tests — each creates its own isolated temp dir
+  echo ""
+  echo "--- Research Lookup Tests ---"
+  test_research_lookup
+
+  # Research-gc tests — each creates its own isolated temp dir
+  echo ""
+  echo "--- Research GC Tests ---"
+  test_research_gc
+
   # Interactivity mode detection tests
   echo ""
   echo "--- Interactivity Mode Detection Tests ---"
@@ -8109,6 +9165,7 @@ main() {
   test_detect_models_tier_flags_claudecode
   test_detect_models_tier_flags_preserve_other_host
   test_detect_models_preserves_other_host
+  test_detect_models_default_mode_preserves_other_host
 
   # models-prompt-check / models-prompt-dismiss tests
   echo ""
@@ -8128,6 +9185,19 @@ main() {
   test_models_prompt_dismiss_creates_per_host_marker_opencode
   test_models_prompt_dismiss_then_check_skips_when_file_present
   test_models_prompt_dismiss_idempotent
+
+  # story-merge tests — each creates its own isolated staging/output dirs
+  echo ""
+  echo "--- story-merge Tests ---"
+  test_story_merge_happy_path
+  test_story_merge_missing_dir
+  test_story_merge_malformed_json
+  test_story_merge_duplicate_index
+  test_story_merge_cycle
+  test_story_merge_dangling_ref
+  test_story_merge_rule22_routing
+  test_story_merge_full_stack_split
+  test_story_merge_outline_sidecar_ignored
 
   # Design bundle detection tests
   echo ""

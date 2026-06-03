@@ -7,6 +7,115 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.97.2] - 2026-06-03
+
+### Fixed
+
+- `aimi-cli detect-models` in **default mode (no `--research/--review/...` flags)** now preserves the OTHER host's sub-table in `~/.config/aimi/models.json`. Previously the no-flag branch wrote a fresh `{schemaVersion, categories:{<current host>:{...}}}` document via `jq -n`, silently dropping the inactive host's configured models on every invocation. This caused `/aimi:plan`'s automatic resolve to wipe a user's OpenCode model assignments whenever the command ran inside Claude Code (and vice-versa). The fix applies the same merge pattern the flag-mode branch already uses (read existing config → merge by `host_key`). Regression test added: `test_detect_models_default_mode_preserves_other_host`.
+
+## [1.97.1] - 2026-06-03
+
+### Added
+
+- **Console error attribution in post-merge visual verification.** `/aimi:execute` now captures `agent-browser console --json` and `agent-browser errors --json` after every per-story screenshot in a visual wave, and runs an `attribute_console_errors()` pass that links each error/warning back to the wave story most likely to have caused it. Attribution strategies: (a) stack-trace file match against `implementation.files[]`, (b) PascalCase component-name match in error text, (c) wave-shared fallback when neither matches. Output goes into a `## Console (advisory)` section in the wave summary alongside the existing `## Design Review` block. Advisory only — never changes `verification.status`, never blocks the wave.
+- Per-story `agent-browser console --clear` before each `open` so the console buffer is per-story, not wave-cumulative. Without this, attribution would silently blame the last-merged story for every prior story's errors.
+
+### Notes
+
+- Requires `agent-browser` ≥ 0.25.x (the version exposing `console` and `errors` subcommands — undocumented in `--help` but present and stable; verified against 0.25.3).
+- Multi-`/aimi:execute` runs in parallel that share `--session visual-follow` will see cross-run console contamination (upstream issue `vercel-labs/agent-browser#326`). Workaround: each run uses a unique session name. Not applied here because single-user-single-run is the common case.
+
+## [1.97.0] - 2026-06-03
+
+### Added
+
+- **Structured `<result_json>` contract for story-executor workers.** Workers MUST end their final message with a `<result_json>` block carrying `{status, commit, tests?, typecheck?, knownGaps?, deviations?, failureCause?}`. The orchestrator parses this block as source of truth — prose outside is debugging only.
+- `execute.md` wave loop parses `<result_json>` from each worker tool_result: status drives the success/fail branch; `commit` is cross-checked against `git rev-parse HEAD` in the worktree; `failureCause` is surfaced verbatim to the user via `mark-failed`; `knownGaps` is preferred over the legacy `KNOWN-GAP:` commit-trailer grep.
+
+### Changed
+
+- `story-executor` SKILL.md `<execution_flow>` (full + compact templates) and Failure Handling now end on the explicit instruction to emit the `<result_json>` block. The Checklist gains a new line to lock the contract in.
+
+### Rationale
+
+- Measured 5 most-recent `/aimi:execute` worker runs from `Feats/migration`: average **680 result tokens** emitted per worker, of which **~0.8% reused verbatim** by the orchestrator (≈50-200 tokens of structured signal actually consumed). The contract shrinks the consumed payload toward ~120 tokens per worker — ~82% reduction on the orchestrator's next-turn input cost.
+
+### Compatibility
+
+- Workers that DO NOT emit `<result_json>` (legacy) fall back to the existing behavior: Task's own success/failure exit signal + commit verification. No worker is forced to update immediately. New workers MUST emit the block.
+
+## [1.96.2] - 2026-06-03
+
+### Fixed
+
+- `aimi-cli story-merge` no longer attempts to merge the `outline.json` sidecar (written by `plan.md` Phase 3b) as if it were a story. The previous glob in `cmd_story_merge` picked up every `*.json` in the staging directory, including the outline sidecar; the sidecar's shape (a list of `{idx, title, summary}` entries) tripped jq later in Rule 22 / Phase 3.1 / Phase 4.1 with `null (null) has no keys`, aborting the entire merge. The fix filters `outline.json`, any `*outline*.json`, and `metadata.json` from the staging glob before processing. Added test TC9 to lock in the behaviour.
+
+## [1.96.1] - 2026-06-01
+
+### Fixed
+
+- Added missing `aimi-story-expander` workflow agent referenced by `/aimi:plan` Phase 3d. The 1.96.0 plan.md rewrite invoked `subagent_type="aimi-engineering:workflow:aimi-story-expander"` but the corresponding agent file was never authored, causing the orchestrator to fall back to authoring staging JSON inline on every run (defeating the point of parallel Pass 2 expansion). The agent receives one outline entry plus full context (outline, research, decisions, optional specs) and writes one staging JSON file using `outline:NN` dependsOn tokens that `story-merge` later remaps.
+
+## [1.96.0] - 2026-06-01
+
+### Added
+
+- `aimi-cli story-merge` subcommand: consolidates per-story staging files into a validated `tasks.json` with deterministic `US-NNN` ID assignment, DAG cycle detection, wave computation, Rule 22 mock-sync AC routing, Phase 3.1 inventory verdict check, Phase 4.1 coverage ratio check, and atomic `flock`-protected write. Supports `--split full-stack` for paired frontend/backend output and `--agent-mode` to demote hard rejects to warnings in CI.
+- `/aimi:plan` outline gate: between Pass 1 outline generation and Pass 2 expansion, the user can approve / rename / add / remove / reorder stories via iterative `AskUserQuestion` pickers. Edits are recorded in `metadata.decisions[]` with new anchor format `outline:edit:<idx>` and `source: "outline"`.
+- `/aimi:plan` Pass 2 parallel expansion: each outline entry expands in its own Task sub-agent with `outline:NN` dependsOn tokens; story-merge remaps tokens to final `US-NNN`. Schema-validation failures trigger up to 2 retries with sanitized validator error injected into the next prompt (`$(`, backticks, newlines stripped; truncated to 500 chars).
+- `--non-interactive` outline auto-approve: emits `[plan] outline auto-approved (non-interactive): N stories` log line.
+
+### Changed
+
+- `/aimi:plan` Phase 3 + Phase 4 replaced with a two-pass outline+expand pipeline (Pass 1 outline → outline gate → Pass 2 fan-out → `story-merge` deterministic merge). Drop-in: schema of `tasks.json` is unchanged; `/aimi:execute`, `/aimi:status`, `/aimi:deepen` consumers unaffected.
+- `metadata.decisions[]` accepts new `source` value `outline` for outline-gate edits (additive; no schema version bump).
+- Rule 22 mock-sync AC routing, Phase 3.1 Reference Element Inventory, and Phase 4.1 Coverage Self-Check now execute inside `story-merge` instead of inline in plan.md Phase 3.
+
+### Security
+
+- Pass 2 retry prompt sanitization: validator error strings are stripped of `$(`, backticks, and newlines, then truncated to 500 chars before injection into retry prompts — prevents shell-expansion and prompt-injection vectors from poisoning auto-correction context.
+- Staging-path validation: outline-title slug sanitization rejects `..` traversal, `/` characters, and leading dots before staging file paths are constructed. Per-run staging subdirectory `.aimi/.tasks-staging/<topic-slug>-<RUN_TS>/` isolates each run.
+
+## [1.95.1] — 2026-05-28
+
+### Fixed
+
+- `aimi-cli.sh` — `write_global_cli_cache` no longer persists an ephemeral git-worktree path to the global cache (`~/.config/aimi/cli-path`). When `init-session` ran from a `.worktrees/` checkout (e.g. `test-aimi-cli.sh` inside a worktree, or an `/aimi:execute` wave), the worktree-local `aimi-cli.sh` path was cached globally; after the worktree was removed during merge cleanup, every later command resolved `$AIMI_CLI` to a deleted file and failed with exit 127. The write now no-ops on any path containing a `.worktrees/` segment.
+
+## [1.95.0] — 2026-05-28
+
+### Added
+
+- `research-lookup <path>` CLI subcommand — content-aware freshness check for research `.md` files. Compares the research file's mtime against the newest mtime of all source paths listed under its `## File References` h2 bullet section. Prints the resolved path and exits 0 when fresh; prints nothing and exits 1 (stale) when any cited source is newer, missing, or outside the project root. Consumed by `plan` and `deepen` before spawning researchers.
+- `research-gc` CLI subcommand — prunes orphaned `.aimi/research/*.md` files older than 30 days that are not referenced by any active `.aimi/tasks/*.json` `metadata.researchPaths` or any `.aimi/brainstorms/*.md` frontmatter `researchPaths`. Called opportunistically (once per session) from `plan` and `deepen` to prevent unbounded accumulation. Silent when nothing is removed.
+
+### Changed
+
+- `plan` / `brainstorm` — reusedResearch map generalized from a flat lookup to a `{kind → path}` map covering all four research kinds (`codebase`, `learnings`, `best-practices`, `framework-docs`). Both commands now populate `metadata.researchPaths` on the tasks.json after writing, closing the orphan gap that previously left per-run research files untracked.
+- `deepen` Step 3 reuse-gate — before spawning per-story researchers, deepen now checks `research-lookup` freshness on any existing per-story research file. A fresh hit skips the re-research spawn entirely; a stale or missing file triggers a targeted researcher with `--paths` narrowed to `story.implementation.files`.
+- Research agents (`aimi-codebase-researcher`, `aimi-learnings-researcher`, `aimi-best-practices-researcher`, `aimi-framework-docs-researcher`) — output a pointer block (`{outputPath, researchKind, sourcePaths[]}`) instead of restating a summary in the agent response. Callers resolve the actual content from disk via the pointer; reduces orchestrator working-memory and eliminates cross-agent summary drift.
+
+## [1.94.1] — 2026-05-28
+
+### Changed
+
+- `story-executor/SKILL.md` — both the full and compact execution-flow templates now explicitly direct the spawned agent to follow `story.tasks[]` as the ordered implementation recipe when present, with special attention to `"Wire <X> into <Y>"` entries that encode cross-story file wiring. `acceptanceCriteria` remains the completion gate; `tasks[]` is planner guidance. Closes the planner→executor wiring gap where the planner was required to enumerate cross-story integration steps but the executor template never instructed the agent to walk them.
+
+## [1.94.0] — 2026-05-28
+
+### Added
+
+- `get-story-context` CLI command now emits two new top-level keys alongside `story` and `metadata`:
+  - `skills` — array of `{name, path, content}` objects assembled from each story's `skills[]` declarations, with tag-breakout escapes (`</required_skills` → `&lt;`) and a 100 KB aggregate cap that drops in reverse-of-insertion order.
+  - `designContext` — `{decisions, bundleGuidance}` sourced from `metadata.brainstormPath` and `metadata.designBundle`, respectively. Wires the previously orphaned `[DESIGN_BUNDLE_CONTEXT]` placeholder in `story-executor/SKILL.md` for the first time.
+- New internal helper `_resolve_skills_base_dir` in `aimi-cli.sh` mirroring execute.md's prior `SKILLS_BASE_DIR` resolution (Claude Code cache glob; OpenCode plugin dir; silent fallback to empty skills array).
+- Four new tests covering the extended `get-story-context`: skills present, skills absent, 100 KB cap drop, designContext extraction.
+
+### Changed
+
+- `story-executor/SKILL.md` (both full and compact templates) — removed the inlined `<required_skills>`, `[DESIGN_CONTEXT]`, and `<design_bundle_context>` blocks. Workers now consume that material from the extended `get-story-context` JSON. Bootstrap step 0a updated accordingly.
+- `commands/execute.md` — deleted the wave-loop skill-assembly logic, the Step 3.4 design-context build, the Step 3.6 `SKILLS_BASE_DIR` resolution, and the `REQUIRED_SKILLS` / `DESIGN_CONTEXT` / `DESIGN_BUNDLE_CONTEXT` spawn variables. The orchestrator's working memory per wave is correspondingly smaller.
+
 ## [1.93.2] - 2026-05-25
 
 ### Changed

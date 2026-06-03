@@ -83,10 +83,36 @@ Learnings are stored in project files (not separate progress log):
 - `CLAUDE.md` (root) - Project-wide patterns and conventions
 - `AGENTS.md` (plugin-level) - Single source of truth for spawned agent output compression rules; portable across tools (Claude Code, OpenCode). Per-directory AGENTS.md files in skills/ extend these base rules with domain-specific patterns
 
+## aimi-cli.sh Research Subcommands
+
+Two CLI subcommands manage the research lifecycle. Both are internal — consumed by `plan` and `deepen` commands, not invoked by users directly.
+
+- **`research-lookup <path>`** — Content-aware freshness check. Reads the `## File References` h2 bullet section of the given research `.md` file, compares its mtime against the newest mtime of every cited source path, and exits 0 (fresh) or 1 (stale). Cited paths that are missing or outside the project root are treated as stale. Used by `plan`/`deepen` before deciding whether to spawn a researcher.
+
+- **`research-gc`** — Orphan garbage collector. Deletes `.aimi/research/*.md` files older than 30 days that are not referenced by any active `.aimi/tasks/*.json` `metadata.researchPaths` or any `.aimi/brainstorms/*.md` frontmatter `researchPaths`. Called opportunistically once per `plan`/`deepen` session. Silent when nothing is removed.
+
+## aimi-cli.sh Story Lifecycle Subcommands
+
+One CLI subcommand manages the story-merge lifecycle. It is consumed by the `/aimi:plan` two-pass pipeline, not invoked by users directly.
+
+- **`story-merge`** — Consolidates per-story JSON staging files written by Pass 2 sub-agents into a single validated `tasks.json`. Key behaviors:
+  - **Deterministic ID assignment**: each staging file receives a stable `US-NNN` identifier in outline order.
+  - **dependsOn token remapping**: `outline:NN` tokens emitted by sub-agents are rewritten to the assigned `US-NNN` before write.
+  - **DAG validation**: cycle detection aborts the merge before any write.
+  - **Wave computation**: BFS over the dependency graph assigns each story to a parallelism wave.
+  - **Post-merge sweeps**: Rule 22 mock-sync AC routing, Phase 3.1 Reference Element Inventory verdict check, and Phase 4.1 Coverage Self-Check run after DAG validation and before the atomic write.
+  - **Atomic write**: output file is written under `flock` to prevent partial reads by concurrent processes.
+  - **Flags**:
+    - `--staging-dir <path>` — directory containing per-story staging `.json` files (default: `.aimi/.tasks-staging/<topic-slug>-<RUN_TS>/`).
+    - `--output <path>` — destination `tasks.json` path (default: `.aimi/tasks/<date>-<topic-slug>-tasks.json`).
+    - `--split legacy|full-stack` — `full-stack` emits two files (frontend + backend) partitioned by story `project` field; `legacy` (default) emits one file.
+    - `--agent-mode` — demotes Phase 3.1 and Phase 4.1 hard rejects to warnings, allowing CI pipelines to proceed without a user review gate.
+
 ## Tasks File Schema
 
-> Key fields: `schemaVersion` ("3.3"), `metadata{title,type,branchName,researchDepth,maxConcurrency,researchPaths[](optional),prototypePaths[](optional),frontendOnly(optional),backendSpec(optional:{endpoints[],dataModels[],businessRules[],businessContext{summary,userRoles[],constraints[],assumptions[],successCriteria[]}})}`, `userStories[]{id(US-NNN),title,description,acceptanceCriteria,status,dependsOn,project,wave,tasks[](optional,max50,each≤5000chars),implementation{files,approach,verify},verification{strategy,status,url,expect},gate{type,status,prompt,options}}`
+> Key fields: `schemaVersion` ("3.3"), `metadata{title,type,branchName,researchDepth,maxConcurrency,researchPaths[](optional),prototypePaths[](optional),frontendOnly(optional),backendSpec(optional:{endpoints[],dataModels[],businessRules[],businessContext{summary,userRoles[],constraints[],assumptions[],successCriteria[]}}),decisions[](optional:{anchor,source,text,resolution})}`, `userStories[]{id(US-NNN),title,description,acceptanceCriteria,status,dependsOn,project,wave,tasks[](optional,max50,each≤5000chars),implementation{files,approach,verify},verification{strategy,status,url,expect},gate{type,status,prompt,options}}`
 > The `project` field is optional on stories — when present, it specifies the relative path from AIMI_ROOT to the target git repository for multi-repo execution.
+> `metadata.decisions[].anchor` valid forms: `specFlow:<key>`, `outline:edit:<idx>` (zero-padded index into the outline list, e.g. `outline:edit:02`). `metadata.decisions[].source` valid values: `"specFlow:CriticalQ<n>"`, `"specFlow:Gap<n>"`, `"outline"` (for outline-gate edits recorded during the `/aimi:plan` outline gate).
 
 
 ## Performance Guidelines

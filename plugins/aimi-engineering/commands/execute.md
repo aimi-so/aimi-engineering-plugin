@@ -142,6 +142,8 @@ The session is opened exactly once. It is never closed mid-run.
 
 After each story merges, visual stories are verified. When `VISUAL_FOLLOW=true`, the existing `visual-follow` session is reused (`agent-browser --session visual-follow open/screenshot`). When `VISUAL_FOLLOW=false`, a fresh headless `agent-browser` session is opened, screenshot taken, and closed per story. If `agent-browser` is absent in either case, `verification.status` is set to `skipped`.
 
+**Console capture (additive, per story).** Immediately before each per-story `open`, the wave loop issues `agent-browser console --clear` to drop logs accumulated from prior stories in the same wave. Right after `screenshot`, it captures `agent-browser console --json` and `agent-browser errors --json` for this story's page-load output and feeds both into the `attribute_console_errors()` pass defined in the Console Error Attribution section. Capture is advisory only — it never changes `verification.status` and never blocks the wave. The per-story `--clear` is what enables per-story attribution; without it, the buffer is wave-cumulative and the LAST verified story would inherit every prior story's errors.
+
 ### Phase 4 — Keep Open on Completion (Post-Loop)
 
 When `VISUAL_FOLLOW=true`, the `visual-follow` session is intentionally left open after execution ends so the user can inspect the final UI state. The user must close it manually.
@@ -665,45 +667,13 @@ command -v agent-browser
   agent-browser --headed --session visual-follow open "$VISUAL_URL"
   ```
 
-## Step 3.4: Load Design Context
-
-Resolve `brainstormPath` from tasks metadata and extract design decisions for worker prompts:
-
-```bash
-BRAINSTORM_PATH=$(jq -r '.metadata.brainstormPath // empty' "$AIMI_ROOT/$TASKS_PATH")
-```
-
-If `BRAINSTORM_PATH` is non-empty and the file exists at `$AIMI_ROOT/$BRAINSTORM_PATH`:
-
-1. Extract the `## Design Decisions` section content (everything between `## Design Decisions` and the next `##` heading or end of file)
-2. **Sanitize** the extracted content before injection — apply the base rules from
-   `commands/references/sanitization.md`.
-3. Store the sanitized content as `DESIGN_CONTEXT`
-
-If any of these conditions fail (no `brainstormPath` in metadata, file not found, no `## Design Decisions` section, or extracted content is empty after sanitization), set `DESIGN_CONTEXT` to empty string. No error — this is optional context.
-
-## Step 3.6: Resolve Skill Injection Base Path
-
-Resolve the base directory for skill files. Mirror the CLI path resolution pattern:
-
-```bash
-if [ -n "${CLAUDECODE}" ]; then
-    # Claude Code: glob the plugin cache
-    SKILLS_BASE_DIR=$(echo ~/.claude/plugins/cache/*/aimi-engineering/*/skills 2>/dev/null | tr ' ' '\n' | head -1)
-else
-    # OpenCode: use the installed plugin dir
-    SKILLS_BASE_DIR="${AIMI_PLUGIN_DIR}/skills"
-fi
-```
-
-If the glob matches nothing (no cache entry found) or `AIMI_PLUGIN_DIR` is unset, set `SKILLS_BASE_DIR` to empty string. A missing or empty `SKILLS_BASE_DIR` causes skill loading to silently produce no output (all skill reads are skipped as "not found").
-
 ## Step 4: Wave Execution Loop
 
 ```
 wave = 1
 is_first_story_in_session = true
 DESIGN_REVIEW_BUFFERS = {}  # key: story_id, value: {title, output}; populated by post-merge design reviewer
+CONSOLE_BUFFER = {}         # key: story_id, value: ATTRIBUTION object; populated by post-merge console capture (see Console Error Attribution section)
 
 while true:
     # Check remaining work
@@ -845,35 +815,6 @@ while true:
         project_path = project_roots[wt.group_key] if wt.group_key != "DEFAULT" else null
         project_guidelines = PROJECT_GUIDELINES_MAP[wt.group_key] if wt.group_key != "DEFAULT" else PROJECT_GUIDELINES
 
-        # Resolve required skills for this story
-        required_skills_block = ''
-        if full_story.skills is non-empty and SKILLS_BASE_DIR is non-empty:
-            aggregate_size = 0
-            skill_blocks = []
-            for skill_name in full_story.skills:
-                skill_path = "$SKILLS_BASE_DIR/[skill_name]/SKILL.md"
-                if file does not exist at skill_path:
-                    log: "skill [skill_name] not found at [skill_path] — skipped"
-                    continue
-                skill_content = read file at skill_path verbatim
-                # Tag-breakout escape: prevent wrapper-tag injection
-                skill_content = replace literal "</required_skills" with "&lt;/required_skills"
-                skill_content = replace literal "<required_skills" with "&lt;required_skills"
-                skill_blocks.append({name: skill_name, path: "skills/[skill_name]/SKILL.md", content: skill_content})
-                aggregate_size += byte_length(skill_content)
-
-            # Aggregate size cap: 100KB across all skills
-            while aggregate_size > 102400 and len(skill_blocks) > 0:
-                dropped = skill_blocks.pop()  # drop last (reverse order)
-                aggregate_size -= byte_length(dropped.content)
-                log: "skill [dropped.name] dropped — aggregate skills context exceeded 100KB"
-
-            if len(skill_blocks) > 0:
-                parts = []
-                for block in skill_blocks:
-                    parts.append("<skill name=\"[block.name]\" path=\"[block.path]\">\n[block.content]\n</skill>")
-                required_skills_block = join(parts, "\n")
-
         template = full_template if (is_first_story_in_session and story_index == 0) else compact_template
 
         Task(
@@ -884,12 +825,10 @@ while true:
                 - WORKTREE_PATH = wt.worktree_path
                 - PROJECT_PATH = project_path (only include if non-null)
                 - PROJECT_GUIDELINES = project_guidelines
-                - REQUIRED_SKILLS = required_skills_block (include <required_skills> section only if non-empty)
                 - HEADED_MODE = (do NOT include for worktree stories — visual verification runs post-merge, not inside the worktree)
                 - Omit the <visual_verification> section entirely for worktree stories
                   (the dev server cannot see worktree changes; verification runs after merge-all instead)
                 - STORY_ID = full_story.id  ← only the id; no description, no criteria, no prototype HTML
-                - DESIGN_CONTEXT = design_context (include <design_context> section only if non-empty)
                 - Do NOT modify the tasks.json file — report result (success/failure + details)
             ]
         )
@@ -900,25 +839,67 @@ while true:
     # All Tasks return in the same turn. Collect results.
     failed_stories = []
     succeeded_stories = []
+    result_payload_by_id = {}  # full_story.id → parsed result_json object
+
+    # ========================================
+    # PARSE WORKER RESULT_JSON BLOCK (per story-executor SKILL.md Result Contract)
+    # ========================================
+    # The orchestrator's source of truth is the <result_json>...</result_json>
+    # block at the END of each worker's final message. Prose outside the block
+    # is debugging only and is NOT consumed here.
+    #
+    # Extraction rule (regex): the LAST occurrence in the message of
+    #   <result_json>\s*({.*?})\s*</result_json>   (DOTALL, non-greedy)
+    # is parsed as JSON. If the block is malformed, missing, or fails to parse,
+    # fall back to the legacy heuristic: Task's own exit signal (succeeded/failed)
+    # + commit verification below.
+    #
+    # Reading the structured block keeps the next orchestrator turn's input
+    # token cost down — empirically a worker returns ~600 tokens of prose where
+    # the orchestrator only consumes ~50-200 tokens of structured signal.
 
     for each Task result:
-        if Task succeeded:
-            succeeded_stories.append(full_story)
+        payload = parse_result_json(Task.final_message_text)  # see extraction rule above
+        if payload is not None:
+            result_payload_by_id[full_story.id] = payload
+            status = payload.get("status")
+            if status == "ok":
+                succeeded_stories.append(full_story)
+            else:
+                failed_stories.append(full_story)
         else:
-            failed_stories.append(full_story)
+            # Legacy fallback: trust Task's own success/failure signal.
+            # Log: "[full_story.id] missing or malformed <result_json> — falling back to Task exit signal"
+            if Task succeeded:
+                succeeded_stories.append(full_story)
+            else:
+                failed_stories.append(full_story)
 
     # --- Post-Wave Processing ---
 
     # ========================================
     # COMMIT VERIFICATION (parallel path)
     # ========================================
-    # For each succeeded story, verify that a commit was actually created
-    # by comparing worktree HEAD against the base SHA captured before worktree creation.
+    # Prefer the commit SHA from result_payload_by_id[full_story.id].commit when
+    # present and non-null — cross-check it against git rev-parse HEAD in the
+    # worktree. Mismatch → treat as no-commit (worker lied or aborted post-emit).
+    # When result_json is absent, fall back to the legacy "HEAD differs from
+    # base_sha" check unchanged.
     no_commit_stories = []
     verified_stories = []
     for full_story in succeeded_stories:
         wt = all_worktrees[full_story.id]
         worktree_head = git -C [wt.worktree_path] rev-parse HEAD
+        payload = result_payload_by_id.get(full_story.id)
+
+        if payload is not None and payload.get("commit"):
+            # Cross-check declared SHA against actual HEAD (short-SHA prefix match OK)
+            declared = payload["commit"]
+            if not worktree_head.startswith(declared) and declared != worktree_head:
+                # Declared commit not at HEAD — treat as no-commit
+                no_commit_stories.append(full_story)
+                continue
+
         if worktree_head == base_sha[wt.group_key]:
             no_commit_stories.append(full_story)
         else:
@@ -935,9 +916,12 @@ while true:
 
     # Handle failures first
     for full_story in failed_stories:
-        $AIMI_CLI mark-failed [full_story.id] "Failed during parallel wave [wave]"
+        # Prefer the structured failureCause over generic message when available
+        payload = result_payload_by_id.get(full_story.id)
+        cause = (payload.get("failureCause") if payload else None) or "Failed during parallel wave [wave]"
+        $AIMI_CLI mark-failed [full_story.id] "[cause]"
         $AIMI_CLI cascade-skip [full_story.id]
-        Report: "[full_story.id] failed. Dependent stories cascade-skipped."
+        Report: "[full_story.id] failed: [cause]. Dependent stories cascade-skipped."
 
     # ========================================
     # MERGE PER PROJECT GROUP (not across repos)
@@ -977,10 +961,19 @@ while true:
 
             # Merges succeeded for this project group — mark stories complete
             for full_story in stories:
-                # --- Extract KNOWN-GAP trailers from worker commit ---
+                # --- Extract knownGaps: prefer result_json.knownGaps, fall back to commit trailers ---
+                # When result_payload_by_id[full_story.id].knownGaps is a non-empty array,
+                # use those entries (one line each). Otherwise, fall back to grepping
+                # KNOWN-GAP: trailers from the commit body for backward compat.
                 ```bash
                 mkdir -p .aimi/known-gaps
-                WORKER_GAPS=$(git -C "[all_worktrees[full_story.id].worktree_path]" log -1 --format=%B | grep -E '^KNOWN-GAP:' || true)
+                # Pseudo: prefer payload; fall back to commit grep
+                payload_gaps="${result_payload_by_id[full_story.id].knownGaps or []}"
+                if [ -n "$payload_gaps" ] && [ "$payload_gaps" != "[]" ]; then
+                  WORKER_GAPS=$(printf '%s\n' "$payload_gaps")
+                else
+                  WORKER_GAPS=$(git -C "[all_worktrees[full_story.id].worktree_path]" log -1 --format=%B | grep -E '^KNOWN-GAP:' || true)
+                fi
                 if [ -n "$WORKER_GAPS" ]; then
                   GAP_DATE=$(date +%Y-%m-%d)
                   GAP_FILE=".aimi/known-gaps/${GAP_DATE}-[full_story.id].md"
@@ -992,14 +985,32 @@ while true:
 
                 # --- Post-merge visual verification for visual stories ---
                 # Session lifecycle: see Visual Follow Lifecycle section.
+                # Capture sequence per story (when agent-browser is available):
+                #   1. console --clear  ← drop logs accumulated from PRIOR story in this wave
+                #   2. open <url>       ← navigate
+                #   3. screenshot       ← visual snapshot
+                #   4. console --json   ← capture this story's console output
+                #   5. errors  --json   ← capture this story's uncaught exceptions
+                # Per-story attribution depends on the --clear in step 1 — without it,
+                # console buffer is wave-cumulative and last-story-merged eats the blame.
                 if full_story.verification and full_story.verification.strategy == "visual" and full_story.verification.status == "pending":
                     if VISUAL_FOLLOW == true:
                         # Reuse the existing headed session (managed by execute.md)
+                        agent-browser --session visual-follow console --clear
                         agent-browser --session visual-follow open [full_story.verification.url]
                         agent-browser --session visual-follow screenshot /tmp/verify-[full_story.id].png
+                        CONSOLE_JSON=$(agent-browser --session visual-follow console --json)
+                        ERRORS_JSON=$(agent-browser --session visual-follow errors --json)
                         # Read screenshot and compare against full_story.verification.expect
                         Read /tmp/verify-[full_story.id].png
                         Compare visual output against full_story.verification.expect
+
+                        # Run console attribution pass (see "Console Error Attribution" section below)
+                        ATTRIBUTION = attribute_console_errors(
+                            console_json=CONSOLE_JSON,
+                            errors_json=ERRORS_JSON,
+                            wave_stories=succeeded_stories
+                        )
 
                         if visual matches expectations:
                             $AIMI_CLI update-field [full_story.id] verification.status passed
@@ -1007,20 +1018,40 @@ while true:
                         else:
                             $AIMI_CLI update-field [full_story.id] verification.status failed
                             Report: "[full_story.id] visual verification failed — [reason]. (advisory, not blocking)"
+
+                        # Report attribution lines as advisory (do NOT toggle verification.status)
+                        if ATTRIBUTION.has_errors:
+                            Report: "[full_story.id] console: \(ATTRIBUTION.summary)"
+                            # Push attribution into wave-level CONSOLE_BUFFER for the wave summary
+                            CONSOLE_BUFFER[full_story.id] = ATTRIBUTION
                     else:
                         # No visual-follow session — headless verification
                         has_browser = command -v agent-browser
                         if has_browser:
+                            agent-browser console --clear
                             agent-browser open [full_story.verification.url]
                             agent-browser screenshot /tmp/verify-[full_story.id].png
+                            CONSOLE_JSON=$(agent-browser console --json)
+                            ERRORS_JSON=$(agent-browser errors --json)
                             Read /tmp/verify-[full_story.id].png
                             Compare visual output against full_story.verification.expect
+
+                            ATTRIBUTION = attribute_console_errors(
+                                console_json=CONSOLE_JSON,
+                                errors_json=ERRORS_JSON,
+                                wave_stories=succeeded_stories
+                            )
 
                             if visual matches expectations:
                                 $AIMI_CLI update-field [full_story.id] verification.status passed
                             else:
                                 $AIMI_CLI update-field [full_story.id] verification.status failed
                                 Report: "[full_story.id] visual verification failed — [reason]. (advisory)"
+
+                            if ATTRIBUTION.has_errors:
+                                Report: "[full_story.id] console: \(ATTRIBUTION.summary)"
+                                CONSOLE_BUFFER[full_story.id] = ATTRIBUTION
+
                             agent-browser close
                         else:
                             $AIMI_CLI update-field [full_story.id] verification.status skipped
@@ -1124,6 +1155,59 @@ If `VISUAL_FOLLOW=true`, do NOT close the `visual-follow` session.
 
 Report: `"Visual follow session still open — close manually when done: agent-browser --session visual-follow close"`
 
+## Console Error Attribution
+
+Defines `attribute_console_errors()`, called by the per-story post-merge visual verification step above. Pure orchestrator-side reasoning — no new CLI calls, no new subagents. Adds ≤ 1 turn of orchestrator inference per wave (typically far less because most stories have 0 errors).
+
+### Inputs
+
+- `console_json` — JSON returned by `agent-browser console --json` for this story's verification page-load. Shape: `{"data":{"messages":[{"type":"log|warning|error|info","text":"...","args":[...]}]}}`. Messages with `type == "error"` and `type == "warning"` are the only ones considered; `log` / `info` are ignored.
+- `errors_json` — JSON from `agent-browser errors --json`. Uncaught exceptions and unhandled promise rejections. Shape: `{"data":{"errors":[{"message":"...","stack":"..."}]}}`.
+- `wave_stories` — the wave's `succeeded_stories` array, each carrying `id`, `title`, and `implementation.files[]`.
+
+### Procedure
+
+1. **Merge** the `messages` (filtered to type `error`/`warning`) and `errors` arrays into a flat list of `{kind, text, stack}` records where `kind ∈ {error, warning, exception}`.
+2. **Drop the noise** — ignore well-known browser/extension noise that does not indicate code defects:
+   - Lines matching `/extension:|chrome-extension:|moz-extension:/`
+   - Lines matching `/DevTools failed to load source map/`
+   - Lines matching `/Download the React DevTools/`
+   - Lines whose `text` is empty after trim
+3. **For each remaining record, attribute** by trying these strategies in order; first match wins, no fallthrough:
+   - **a. Stack-trace file match**: parse `stack` for tokens that look like project paths (anything matching `/[A-Za-z0-9_./-]+\.(tsx?|jsx?|vue|svelte|rb|py|go|rs|java|kt)/`). For each path token, check whether it appears in any `wave_stories[*].implementation.files[]`. First story whose `files[]` contains the token → attributed.
+   - **b. Text component-name match**: when no stack-trace match, scan the `text` for `PascalCase` identifiers (`/\b[A-Z][a-zA-Z0-9]+\b/`). For each, check whether any `wave_stories[*].implementation.files[]` contains a path with that identifier as a basename component (e.g., text mentions `ContributorsCard` → match story with `…/ContributorsCard/index.tsx`). First match → attributed.
+   - **c. Wave-shared**: when neither matches, attribute to the wave as a whole with reason `"shared module or ambiguous origin"`.
+4. **Build the `ATTRIBUTION` object**:
+   ```
+   ATTRIBUTION = {
+     has_errors: <bool — true when any error|exception remains after de-noising>,
+     summary: <one-line string: e.g., "2 errors, 1 warning (1 attributed: US-003)"
+              when this is the per-story output; or "2 errors, 1 warning, 1 wave-shared">,
+     attributed: [{kind, text, story_id, attribution_method: "stack-file"|"text-component"|"wave-shared"}],
+   }
+   ```
+5. **Per-story output** (when called from the post-merge step):
+   - Filter `attributed` to entries where `story_id == full_story.id` for the `Report` line.
+   - Push the full per-story attribution object into `CONSOLE_BUFFER[full_story.id]` so the wave summary can emit a consolidated view.
+
+### Confidence and policy
+
+- Attribution is **advisory only**. It NEVER toggles `verification.status` and NEVER triggers a cascade-skip. A failed visual story stays failed only when the screenshot does not match `verification.expect` — console errors are reported in parallel.
+- When attribution method is `text-component` or `wave-shared`, the report line MUST include the word "likely" (e.g., `"likely US-004 (FooComponent ref)"`) so the user knows it is heuristic.
+
+### Wave summary section (rendered at end of wave)
+
+After the per-story post-merge loop finishes, if `CONSOLE_BUFFER` has any entries for the wave just completed, append to the wave summary report:
+
+```
+Console (advisory):
+  - US-003: 2 errors (attributed via stack: ContributorsCard/index.tsx)
+  - US-005: 1 error (likely from text match: UserProfile)
+  - wave-shared: 1 warning (could not attribute to a single story)
+```
+
+This is ADDITIVE to the existing `Wave [wave] complete: ...` line — does not replace it.
+
 ## Step 5: Completion
 
 When execution ends (all stories complete, or deadlock detected):
@@ -1184,6 +1268,32 @@ For each entry in DESIGN_REVIEW_BUFFERS (keyed by story id, insertion order):
 ```
 
 If `DESIGN_REVIEW_BUFFERS` is empty, omit the `## Design Review` section entirely.
+
+If `CONSOLE_BUFFER` is non-empty, append:
+```
+## Console (advisory)
+
+For each entry in CONSOLE_BUFFER (keyed by story id, insertion order):
+
+### [story_id]
+- [N] errors, [M] warnings, [E] exceptions
+[For each entry in attributed where story_id matches:]
+  - [kind] [text] (attribution: [attribution_method])
+
+If any record was attributed via "text-component" or "wave-shared", prefix the
+record's line with "likely:" so the user knows the call is heuristic.
+
+[After per-story groups, if any wave-shared entries exist:]
+### wave-shared
+- [N] message(s) could not be attributed to a single story
+  - [kind] [text]
+
+Reminder: Console output is advisory. It does NOT change `verification.status`
+and never blocks the wave — failed visual stories still fail on screenshot
+mismatch only.
+```
+
+If `CONSOLE_BUFFER` is empty, omit the `## Console` section entirely.
 
 If any pending gates exist, append:
 ```
