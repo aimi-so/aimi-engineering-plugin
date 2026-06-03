@@ -8752,6 +8752,47 @@ EOF
   rm -f "$fe_file" "$be_file" "$out_file"
 }
 
+# TC9: outline.json sidecar in staging dir is ignored (Phase 3b artifact)
+test_story_merge_outline_sidecar_ignored() {
+  echo ""
+  echo "=== TC9: story-merge ignores outline.json sidecar ==="
+
+  local stg=".aimi/.tasks-staging-tc9"
+  local out_file=".aimi/tasks/sm-tc9-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  # Two real stories
+  _sm_make_story "$stg/01-setup.json" "Setup story"
+  _sm_make_story "$stg/02-core.json"  "Core story" '["outline:01"]'
+
+  # Phase 3b sidecar (NOT a story — would crash story-merge if not filtered)
+  cat > "$stg/outline.json" << 'EOF'
+[
+  {"idx": "01", "title": "Setup story", "summary": "scaffold things"},
+  {"idx": "02", "title": "Core story",  "summary": "do work"}
+]
+EOF
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC9: outline.json sidecar does not crash story-merge"
+
+  # Only two real stories merged (outline.json must be ignored)
+  if [ -f "$out_file" ]; then
+    local count
+    count=$(jq -r '.userStories | length' "$out_file" 2>/dev/null)
+    assert_eq "2" "$count" "TC9: only 2 real stories merged (outline.json filtered)"
+
+    local ids
+    ids=$(jq -r '[.userStories[].id] | join(",")' "$out_file" 2>/dev/null)
+    assert_eq "US-001,US-002" "$ids" "TC9: IDs are US-001,US-002 (no phantom US-003 from outline.json)"
+  fi
+
+  rm -f "$out_file"
+  rm -rf "$stg"
+}
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -9092,6 +9133,7 @@ main() {
   test_story_merge_dangling_ref
   test_story_merge_rule22_routing
   test_story_merge_full_stack_split
+  test_story_merge_outline_sidecar_ignored
 
   # Design bundle detection tests
   echo ""

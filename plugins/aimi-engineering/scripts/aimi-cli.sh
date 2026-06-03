@@ -4184,8 +4184,16 @@ cmd_story_merge() {
   fi
 
   # --- Glob *.json files, sorted lexicographically ---
+  # Skip non-story sidecars written by plan.md Phase 3b (outline.json) and any
+  # future *outline*.json metadata files — they have a different shape and would
+  # be mis-merged as bogus stories.
   local staging_files=()
   while IFS= read -r f; do
+    local fbase
+    fbase=$(basename "$f")
+    case "$fbase" in
+      outline.json|*outline*.json|metadata.json) continue ;;
+    esac
     staging_files+=("$f")
   done < <(find "$staging_dir" -maxdepth 1 -name '*.json' -type f | sort)
 

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.96.2] - 2026-06-03
+
+### Fixed
+
+- `aimi-cli story-merge` no longer attempts to merge the `outline.json` sidecar (written by `plan.md` Phase 3b) as if it were a story. The previous glob in `cmd_story_merge` picked up every `*.json` in the staging directory, including the outline sidecar; the sidecar's shape (a list of `{idx, title, summary}` entries) tripped jq later in Rule 22 / Phase 3.1 / Phase 4.1 with `null (null) has no keys`, aborting the entire merge. The fix filters `outline.json`, any `*outline*.json`, and `metadata.json` from the staging glob before processing. Added test TC9 to lock in the behaviour.
+
 ## [1.96.1] - 2026-06-01
 
 ### Fixed
