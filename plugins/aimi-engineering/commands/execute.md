@@ -836,25 +836,67 @@ while true:
     # All Tasks return in the same turn. Collect results.
     failed_stories = []
     succeeded_stories = []
+    result_payload_by_id = {}  # full_story.id → parsed result_json object
+
+    # ========================================
+    # PARSE WORKER RESULT_JSON BLOCK (per story-executor SKILL.md Result Contract)
+    # ========================================
+    # The orchestrator's source of truth is the <result_json>...</result_json>
+    # block at the END of each worker's final message. Prose outside the block
+    # is debugging only and is NOT consumed here.
+    #
+    # Extraction rule (regex): the LAST occurrence in the message of
+    #   <result_json>\s*({.*?})\s*</result_json>   (DOTALL, non-greedy)
+    # is parsed as JSON. If the block is malformed, missing, or fails to parse,
+    # fall back to the legacy heuristic: Task's own exit signal (succeeded/failed)
+    # + commit verification below.
+    #
+    # Reading the structured block keeps the next orchestrator turn's input
+    # token cost down — empirically a worker returns ~600 tokens of prose where
+    # the orchestrator only consumes ~50-200 tokens of structured signal.
 
     for each Task result:
-        if Task succeeded:
-            succeeded_stories.append(full_story)
+        payload = parse_result_json(Task.final_message_text)  # see extraction rule above
+        if payload is not None:
+            result_payload_by_id[full_story.id] = payload
+            status = payload.get("status")
+            if status == "ok":
+                succeeded_stories.append(full_story)
+            else:
+                failed_stories.append(full_story)
         else:
-            failed_stories.append(full_story)
+            # Legacy fallback: trust Task's own success/failure signal.
+            # Log: "[full_story.id] missing or malformed <result_json> — falling back to Task exit signal"
+            if Task succeeded:
+                succeeded_stories.append(full_story)
+            else:
+                failed_stories.append(full_story)
 
     # --- Post-Wave Processing ---
 
     # ========================================
     # COMMIT VERIFICATION (parallel path)
     # ========================================
-    # For each succeeded story, verify that a commit was actually created
-    # by comparing worktree HEAD against the base SHA captured before worktree creation.
+    # Prefer the commit SHA from result_payload_by_id[full_story.id].commit when
+    # present and non-null — cross-check it against git rev-parse HEAD in the
+    # worktree. Mismatch → treat as no-commit (worker lied or aborted post-emit).
+    # When result_json is absent, fall back to the legacy "HEAD differs from
+    # base_sha" check unchanged.
     no_commit_stories = []
     verified_stories = []
     for full_story in succeeded_stories:
         wt = all_worktrees[full_story.id]
         worktree_head = git -C [wt.worktree_path] rev-parse HEAD
+        payload = result_payload_by_id.get(full_story.id)
+
+        if payload is not None and payload.get("commit"):
+            # Cross-check declared SHA against actual HEAD (short-SHA prefix match OK)
+            declared = payload["commit"]
+            if not worktree_head.startswith(declared) and declared != worktree_head:
+                # Declared commit not at HEAD — treat as no-commit
+                no_commit_stories.append(full_story)
+                continue
+
         if worktree_head == base_sha[wt.group_key]:
             no_commit_stories.append(full_story)
         else:
@@ -871,9 +913,12 @@ while true:
 
     # Handle failures first
     for full_story in failed_stories:
-        $AIMI_CLI mark-failed [full_story.id] "Failed during parallel wave [wave]"
+        # Prefer the structured failureCause over generic message when available
+        payload = result_payload_by_id.get(full_story.id)
+        cause = (payload.get("failureCause") if payload else None) or "Failed during parallel wave [wave]"
+        $AIMI_CLI mark-failed [full_story.id] "[cause]"
         $AIMI_CLI cascade-skip [full_story.id]
-        Report: "[full_story.id] failed. Dependent stories cascade-skipped."
+        Report: "[full_story.id] failed: [cause]. Dependent stories cascade-skipped."
 
     # ========================================
     # MERGE PER PROJECT GROUP (not across repos)
@@ -913,10 +958,19 @@ while true:
 
             # Merges succeeded for this project group — mark stories complete
             for full_story in stories:
-                # --- Extract KNOWN-GAP trailers from worker commit ---
+                # --- Extract knownGaps: prefer result_json.knownGaps, fall back to commit trailers ---
+                # When result_payload_by_id[full_story.id].knownGaps is a non-empty array,
+                # use those entries (one line each). Otherwise, fall back to grepping
+                # KNOWN-GAP: trailers from the commit body for backward compat.
                 ```bash
                 mkdir -p .aimi/known-gaps
-                WORKER_GAPS=$(git -C "[all_worktrees[full_story.id].worktree_path]" log -1 --format=%B | grep -E '^KNOWN-GAP:' || true)
+                # Pseudo: prefer payload; fall back to commit grep
+                payload_gaps="${result_payload_by_id[full_story.id].knownGaps or []}"
+                if [ -n "$payload_gaps" ] && [ "$payload_gaps" != "[]" ]; then
+                  WORKER_GAPS=$(printf '%s\n' "$payload_gaps")
+                else
+                  WORKER_GAPS=$(git -C "[all_worktrees[full_story.id].worktree_path]" log -1 --format=%B | grep -E '^KNOWN-GAP:' || true)
+                fi
                 if [ -n "$WORKER_GAPS" ]; then
                   GAP_DATE=$(date +%Y-%m-%d)
                   GAP_FILE=".aimi/known-gaps/${GAP_DATE}-[full_story.id].md"

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.97.0] - 2026-06-03
+
+### Added
+
+- **Structured `<result_json>` contract for story-executor workers.** Workers MUST end their final message with a `<result_json>` block carrying `{status, commit, tests?, typecheck?, knownGaps?, deviations?, failureCause?}`. The orchestrator parses this block as source of truth — prose outside is debugging only.
+- `execute.md` wave loop parses `<result_json>` from each worker tool_result: status drives the success/fail branch; `commit` is cross-checked against `git rev-parse HEAD` in the worktree; `failureCause` is surfaced verbatim to the user via `mark-failed`; `knownGaps` is preferred over the legacy `KNOWN-GAP:` commit-trailer grep.
+
+### Changed
+
+- `story-executor` SKILL.md `<execution_flow>` (full + compact templates) and Failure Handling now end on the explicit instruction to emit the `<result_json>` block. The Checklist gains a new line to lock the contract in.
+
+### Rationale
+
+- Measured 5 most-recent `/aimi:execute` worker runs from `Feats/migration`: average **680 result tokens** emitted per worker, of which **~0.8% reused verbatim** by the orchestrator (≈50-200 tokens of structured signal actually consumed). The contract shrinks the consumed payload toward ~120 tokens per worker — ~82% reduction on the orchestrator's next-turn input cost.
+
+### Compatibility
+
+- Workers that DO NOT emit `<result_json>` (legacy) fall back to the existing behavior: Task's own success/failure exit signal + commit verification. No worker is forced to update immediately. New workers MUST emit the block.
+
 ## [1.96.2] - 2026-06-03
 
 ### Fixed

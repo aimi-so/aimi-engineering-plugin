@@ -153,6 +153,52 @@ Verdict values: `PASS` (implementation matches prototype), `DIVERGES` (implement
 
 ---
 
+## Result Contract (REQUIRED for all workers)
+
+Every worker MUST end its final message with a `<result_json>` block. The orchestrator parses this block as its source of truth — anything outside the block is debugging prose that the leader does NOT consume in the happy path.
+
+Required shape (omit optional fields when empty rather than emitting null/empty arrays):
+
+```
+<result_json>
+{
+  "status": "ok | failed | skipped",
+  "commit": "<short SHA, or null when no commit was made>",
+  "tests": {"passed": <int>, "failed": <int>, "total": <int>},   // optional, omit when no test was run
+  "typecheck": "ok | failed | skipped",                            // optional
+  "knownGaps": ["<short gap label>"],                              // optional, omit when empty
+  "deviations": ["<short deviation label>"],                       // optional, omit when empty
+  "failureCause": "<one-line cause>"                               // REQUIRED when status != ok
+}
+</result_json>
+```
+
+Rules:
+
+- The block MUST be the LAST thing in the worker's final message. Anything after it is ignored by the orchestrator.
+- The JSON inside MUST parse cleanly (no trailing commas, no comments).
+- `status` is mandatory. `commit` is mandatory but may be `null` when intentionally no commit was created.
+- `failureCause` is mandatory when `status` is `failed` or `skipped` — one short sentence the leader will surface to the user.
+- Prose OUTSIDE the block is for human debugging only. Keep it short; the orchestrator does not need it.
+- Examples — success:
+  ```
+  <result_json>
+  {"status":"ok","commit":"a6cd4678","tests":{"passed":7,"failed":0,"total":7},"typecheck":"ok"}
+  </result_json>
+  ```
+  Failure:
+  ```
+  <result_json>
+  {"status":"failed","commit":null,"failureCause":"Pre-commit hook failed: tsc not in PATH"}
+  </result_json>
+  ```
+  Skipped (gate blocked):
+  ```
+  <result_json>
+  {"status":"skipped","commit":null,"failureCause":"Decision gate pending: choose OAuth provider"}
+  </result_json>
+  ```
+
 ## Prompt Template
 
 > This is the canonical worker prompt template. execute.md and next.md should reference this skill rather than duplicating the prompt inline.
@@ -375,6 +421,7 @@ All file operations MUST stay within the project boundary: PROJECT_PATH when set
 
 6. If WORKTREE_PATH is set: do NOT update tasks file — return result report instead
    If no WORKTREE_PATH: do NOT update tasks file directly — the caller (next.md/execute.md) handles status updates via the CLI
+7. **Emit the `<result_json>` block as the LAST element of your final message** (see "Result Contract" section above). The orchestrator parses this block as source of truth — prose outside the block is debugging only and is NOT consumed by the leader.
 
 </execution_flow>
 
@@ -383,8 +430,8 @@ All file operations MUST stay within the project boundary: PROJECT_PATH when set
 If you cannot complete the story:
 
 1. Do NOT update the tasks file (the caller handles status via CLI)
-2. Return with clear failure report including error details
-3. The caller will mark the story as failed and handle dependent stories
+2. Emit `<result_json>` with `"status":"failed"` and a one-line `"failureCause"` — the leader reads this to decide cascade-skip and report to the user.
+3. Optional prose (above the block) may include longer error details for human debugging.
 
 </on_failure>
 ```
@@ -481,11 +528,11 @@ CRITICAL: Stay within project root. Never read/write outside project boundary. W
 </project_root_boundary>
 
 <execution_flow>
-Bootstrap: re-read `$AIMI_CLI` from cache (per-call re-read one-liner — see `<task_pointer>` above), run `$AIMI_CLI get-story-context $STORY_ID`, parse `{story, metadata, skills, designContext}`. For each entry in `skills[]`, read its `.content` verbatim as additional project conventions (in addition to CLAUDE.md). Read `designContext.decisions` as design intent for UI-touching work; if `designContext.bundleGuidance` cites spec file paths (DesignSpec / BusinessSpec), use the Read tool to load those files before authoring implementation code. Read prototype files from `metadata.prototypePaths[]` and `story.implementation.prototypeAnchor` via Read tool (log missing, skip). Then follow standard execution flow: read criteria → implement (follow `story.tasks[]` as the ordered recipe when present; treat `"Wire <X> into <Y>"` entries as mandatory cross-story integration steps; AC remains the completion gate) → test → commit. If `story.verification.strategy == "visual"` OR `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, run the Visual Source-of-Truth Protocol (V1/V2/V3) before writing code. Stage only story-related files (never `-A` or `.`). Commit format: `git commit -m "type(scope): Story title"`. Verify with `git log -1 --oneline`. On commit failure: report immediately, do not retry. Do NOT update tasks file — caller handles status. When a reference artifact is declared, run the Reference-Artifact Parity Pass before committing (see full named section above).
+Bootstrap: re-read `$AIMI_CLI` from cache (per-call re-read one-liner — see `<task_pointer>` above), run `$AIMI_CLI get-story-context $STORY_ID`, parse `{story, metadata, skills, designContext}`. For each entry in `skills[]`, read its `.content` verbatim as additional project conventions (in addition to CLAUDE.md). Read `designContext.decisions` as design intent for UI-touching work; if `designContext.bundleGuidance` cites spec file paths (DesignSpec / BusinessSpec), use the Read tool to load those files before authoring implementation code. Read prototype files from `metadata.prototypePaths[]` and `story.implementation.prototypeAnchor` via Read tool (log missing, skip). Then follow standard execution flow: read criteria → implement (follow `story.tasks[]` as the ordered recipe when present; treat `"Wire <X> into <Y>"` entries as mandatory cross-story integration steps; AC remains the completion gate) → test → commit. If `story.verification.strategy == "visual"` OR `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, run the Visual Source-of-Truth Protocol (V1/V2/V3) before writing code. Stage only story-related files (never `-A` or `.`). Commit format: `git commit -m "type(scope): Story title"`. Verify with `git log -1 --oneline`. On commit failure: report immediately, do not retry. Do NOT update tasks file — caller handles status. When a reference artifact is declared, run the Reference-Artifact Parity Pass before committing (see full named section above). **End your final message with the `<result_json>` block per the Result Contract section — the orchestrator parses ONLY that block; prose outside is debugging only.**
 </execution_flow>
 
 <on_failure>
-On failure: do NOT update the tasks file. Return clear failure report with error details. The caller handles status and dependent stories.
+On failure: do NOT update the tasks file. Emit `<result_json>` with `"status":"failed"` and a one-line `"failureCause"` as the LAST element of your message — that field is what the leader reads to decide cascade-skip and surface to the user. Optional prose above the block may include longer error details.
 </on_failure>
 ```
 
@@ -497,11 +544,9 @@ If you cannot complete a story:
 
 1. **Do NOT** update the tasks file — the caller (next.md or execute.md leader) handles all status changes via CLI
 2. **Do NOT** run cascade-skip — the caller handles dependent story skipping
-3. **Return** a clear failure report with:
-   - Story ID
-   - Error description
-   - Any partial work committed (or not)
-4. The caller will mark the story as failed and handle dependent stories
+3. **Emit `<result_json>` with `"status":"failed"`** as the LAST element of your final message. Include `"commit": null` (or partial commit SHA if one landed) and `"failureCause": "<one-line cause>"` so the leader can surface it to the user without parsing prose.
+4. Optional prose above the block may include longer error details for human debugging.
+5. The caller will mark the story as failed and handle dependent stories based on `result_json`.
 
 ---
 
@@ -514,4 +559,5 @@ Before completing a story:
 - [ ] Typecheck passes (`npx tsc --noEmit`)
 - [ ] Changes committed with proper format (one commit per story, never skip hooks)
 - [ ] Commit verified via `git log -1 --oneline`
+- [ ] **`<result_json>` block emitted as the LAST element of the final message** (Result Contract section above)
 - [ ] Result report returned to caller (do NOT update tasks file directly — caller handles via CLI)
