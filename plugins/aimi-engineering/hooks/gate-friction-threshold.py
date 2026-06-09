@@ -11,8 +11,10 @@ if str(_HOOKS_DIR) not in sys.path:
 
 from hook_utils import safe_hook, safe_json_input, load_aimi_config, resolve_session_id, extract_skill_name  # noqa: E402
 import friction_store  # noqa: E402
+import frame_helpers  # noqa: E402
 
 _SKIP_SKILLS = {"aimi:learnings", "aimi-engineering:learnings"}
+_EXECUTOR_FRAME_PREFIXES = ("aimi:execute", "aimi-engineering:execute", "general-purpose")
 _DEFAULT_THRESHOLD = 5
 
 
@@ -31,8 +33,22 @@ def _read_threshold() -> int:
         return _DEFAULT_THRESHOLD
 
 
+def _nudge_enabled() -> bool:
+    """Read learnings.nudge.enabled from .aimi/config.json (default True)."""
+    config = load_aimi_config()
+    learnings = config.get("learnings", {})
+    nudge = learnings.get("nudge", {})
+    if isinstance(nudge, dict):
+        return bool(nudge.get("enabled", True))
+    return True
+
+
 @safe_hook
 def main(tool_input: dict) -> None:
+    # Check if nudge is enabled via config
+    if not _nudge_enabled():
+        sys.exit(0)
+
     # Extract skill name using the unified helper
     skill_name: str = extract_skill_name(tool_input) or ""
 
@@ -40,8 +56,15 @@ def main(tool_input: dict) -> None:
     if skill_name in _SKIP_SKILLS:
         sys.exit(0)
 
-    # Rate limit: check if nudge already emitted this session
+    # Skip silently when an executor frame is active
     sid = resolve_session_id(tool_input)
+    current = frame_helpers.current_frame(sid)
+    if current is not None:
+        for prefix in _EXECUTOR_FRAME_PREFIXES:
+            if current.name.startswith(prefix):
+                sys.exit(0)
+
+    # Rate limit: check if nudge already emitted this session
     sess_dir = _session_dir(sid)
     nudge_flag = sess_dir / "learnings-nudge-emitted"
     if nudge_flag.exists():
