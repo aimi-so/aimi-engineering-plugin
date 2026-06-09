@@ -667,6 +667,71 @@ Use the Write tool to write the array to `<RUN_DIR>/outline.json`. This file is 
 
 Initialize `outlineEditCount = 0` to track user edits during the gate.
 
+### Phase 3b Outline Validation
+
+After writing `outline.json`, run a non-blocking validator over the entries. Produce an in-memory list `outlineWarnings` (used in Phase 3c). Warnings do NOT block approval and are NOT recorded in `oqDecisions[]`.
+
+**Step 1 — Extract File References from consolidated research.**
+
+Scan the consolidated research string (produced by Phase 1.6) for an `## File References` h2 heading. Collect every bullet line (lines starting with `-` or `*`) that appears directly beneath that heading, stopping at the next h2 (`##`) or end-of-string. Store these lines as `fileRefLines`.
+
+```bash
+# Pseudo-code: extract ## File References bullet lines from consolidatedResearch string
+# fileRefLines = lines in consolidatedResearch between "## File References" h2 and next "## " heading
+# If "## File References" is absent OR fileRefLines is empty → set fileRefsPresent = false
+# Otherwise → set fileRefsPresent = true
+```
+
+When `fileRefsPresent` is `false`, the file-reference check is **suppressed entirely** — no path-token warnings fire for any entry regardless of content.
+
+**Step 2 — Check each outline entry.**
+
+For each entry in `outline.json` (in order), apply the checks below. Collect **at most one warning string per entry** (stop at the first failing check):
+
+1. **Short-summary check**: if `entry.summary` has fewer than 40 characters, produce:
+   ```
+   [warn] outline:<idx>: summary too short (<N> chars) — expand to clarify scope.
+   ```
+   where `<idx>` is the entry's `idx` field and `<N>` is the actual character count. Skip the file-reference check for this entry (already warned).
+
+2. **File-reference check** (only when `fileRefsPresent` is `true` and the entry did **not** trigger the short-summary warning): split the concatenation of `entry.title` and `entry.summary` on whitespace. For each token, test whether it contains `/` **and** does **not** contain `://` (i.e. it is path-like but not a URL). For the **first** such token that does not appear as a substring in any line of `fileRefLines`, produce:
+   ```
+   [warn] outline:<idx>: path token '<token>' not found in File References — verify coverage.
+   ```
+   Stop checking further tokens for this entry once one warning is produced.
+
+```bash
+# Pseudo-code: outline validation loop
+# outlineWarnings=()
+# for entry in outline_entries:
+#   warn=""
+#   if len(entry.summary) < 40:
+#     warn="[warn] outline:${entry.idx}: summary too short (${#entry.summary} chars) — expand to clarify scope."
+#   elif fileRefsPresent:
+#     tokens = split(entry.title + " " + entry.summary, whitespace)
+#     for token in tokens:
+#       if "/" in token and "://" not in token:
+#         matched = false
+#         for line in fileRefLines:
+#           if token in line: matched=true; break
+#         if not matched:
+#           warn="[warn] outline:${entry.idx}: path token '${token}' not found in File References — verify coverage."
+#           break
+#   if warn != "": outlineWarnings.append(warn)
+```
+
+**Step 3 — Cap warnings and compute overflow.**
+
+```bash
+# Pseudo-code: cap at 10 and compute overflow
+# overflow = max(0, len(outlineWarnings) - 10)
+# if overflow > 0:
+#   outlineWarnings = outlineWarnings[0:10]
+#   outlineWarnings.append("[warn] ... and ${overflow} more entries with potential outline gaps.")
+```
+
+When `outlineWarnings` is empty after this step, no preamble is rendered at the Phase 3c gate — the gate proceeds identically to the current behavior.
+
 ## Phase 3c: Outline Gate
 
 Present the outline to the user and allow iterative editing before any expansion sub-agent is dispatched.
@@ -675,6 +740,13 @@ Present the outline to the user and allow iterative editing before any expansion
 
 When `INTERACTIVE_MODE` is `agent` or `--non-interactive` was passed:
 - Skip AskUserQuestion entirely.
+- If `outlineWarnings` is non-empty, emit each warning as a chat log line **before** the auto-approve line:
+  ```
+  [warn] outline:<idx>: summary too short (<N> chars) — expand to clarify scope.
+  [warn] outline:<idx>: path token '<token>' not found in File References — verify coverage.
+  [warn] ... and N more entries with potential outline gaps.
+  ```
+  (emit only the lines present in `outlineWarnings` — the examples above show the possible formats)
 - Emit **exactly** this chat line (substitute actual N):
   ```
   [plan] outline auto-approved (non-interactive): N stories
@@ -697,6 +769,14 @@ When the outline contains more than 15 entries, prepend a warning line:
 ```
 Warning: N stories in outline. Consider splitting into smaller feature sets.
 ```
+
+When `outlineWarnings` is non-empty, prepend each line from `outlineWarnings` as preamble text before the AskUserQuestion picker. Emit these lines in order, one per line, immediately before the picker options (after the N>15 warning when both apply):
+```
+[warn] outline:<idx>: summary too short (<N> chars) — expand to clarify scope.
+[warn] outline:<idx>: path token '<token>' not found in File References — verify coverage.
+[warn] ... and N more entries with potential outline gaps.
+```
+(emit only the lines present in `outlineWarnings` — the examples above show the possible formats)
 
 Present via AskUserQuestion with these options:
 
