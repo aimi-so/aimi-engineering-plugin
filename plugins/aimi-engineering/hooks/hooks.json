@@ -122,7 +122,16 @@
         ]
       }
     ],
-    "SessionStart": [],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inspect-session.py"
+          }
+        ]
+      }
+    ],
     "Stop": []
   }
 }
