@@ -16,6 +16,8 @@ Run `/aimi:learnings` to review all pending friction events. Pass
 Pass `--since <date>` to narrow to events newer than a given date (e.g.
 `--since 2026-06-01`).
 
+For orchestrators that want a read-only JSON snapshot without prompting, spawn `aimi-engineering:workflow:aimi-learnings-triage` as a Task subagent instead of invoking this command.
+
 ## Arguments
 
 <arguments> $ARGUMENTS </arguments>
