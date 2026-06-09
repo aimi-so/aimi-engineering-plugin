@@ -91,6 +91,8 @@ def test_writer_rotates_at_50mb(monkeypatch, tmp_path):
     monkeypatch.setattr(telemetry_writer, "_telemetry_dir",
                         lambda: tmp_path / ".aimi" / "telemetry")
     monkeypatch.setattr(telemetry_writer, "_ROTATE_THRESHOLD_BYTES", 100)
+    # Set _SAMPLE_EVERY=1 so rotation is checked on every write (preserves pre-US-004 semantics)
+    monkeypatch.setattr(telemetry_writer, "_SAMPLE_EVERY", 1)
 
     tdir = tmp_path / ".aimi" / "telemetry"
     tdir.mkdir(parents=True, exist_ok=True)
@@ -99,7 +101,7 @@ def test_writer_rotates_at_50mb(monkeypatch, tmp_path):
     # Write enough bytes to exceed threshold
     target.write_text("x" * 101, encoding="utf-8")
 
-    # Now append — should rotate
+    # Now append — should rotate (write #1, and 1 % 1 == 0 triggers the check)
     telemetry_writer.append("rot_cat", {"after": "rotation"})
 
     rotated = tdir / "rot_cat.jsonl.1"
@@ -111,6 +113,46 @@ def test_writer_rotates_at_50mb(monkeypatch, tmp_path):
     assert len(lines) == 1
     parsed = json.loads(lines[0])
     assert parsed["after"] == "rotation"
+
+
+def test_writer_samples_rotation_check(monkeypatch, tmp_path):
+    """Rotation check only fires at multiples of _SAMPLE_EVERY.
+
+    With _SAMPLE_EVERY=5: writes 1-4 are small and don't check size even if
+    file is big; write 5 triggers the sample point and rotates.
+    """
+    monkeypatch.setattr(telemetry_writer, "_telemetry_dir",
+                        lambda: tmp_path / ".aimi" / "telemetry")
+    monkeypatch.setattr(telemetry_writer, "_ROTATE_THRESHOLD_BYTES", 10)
+    monkeypatch.setattr(telemetry_writer, "_SAMPLE_EVERY", 5)
+
+    tdir = tmp_path / ".aimi" / "telemetry"
+    tdir.mkdir(parents=True, exist_ok=True)
+    target = tdir / "sample_cat.jsonl"
+
+    # Pre-fill with content exceeding threshold
+    target.write_text("x" * 11, encoding="utf-8")
+
+    # Writes 1-4: counter is 1,2,3,4 — none are multiples of 5 — no rotation
+    for i in range(4):
+        telemetry_writer.append("sample_cat", {"write": i})
+
+    rotated = tdir / "sample_cat.jsonl.1"
+    assert not rotated.exists(), (
+        "Rotation should NOT have happened after writes 1-4 (not at sample boundary)"
+    )
+
+    # Write 5: counter becomes 5 → 5 % 5 == 0 → rotation fires
+    telemetry_writer.append("sample_cat", {"write": 4})
+
+    assert rotated.exists(), "Rotation SHOULD happen at write #5 (sample boundary)"
+
+    # After rotation the fresh .jsonl should contain only the writes that came
+    # after the rotation (just write #5, the one that triggered it).
+    lines = [l for l in target.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert len(lines) == 1
+    parsed = json.loads(lines[0])
+    assert parsed["write"] == 4
 
 
 def test_writer_silent_on_io_error(monkeypatch, tmp_path):
