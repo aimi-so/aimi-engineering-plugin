@@ -75,6 +75,15 @@
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pop-skill-frame.py"
           }
         ]
+      },
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/gate-friction-threshold.py"
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
@@ -83,6 +92,14 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/stash-prompt.py"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/capture-correction.py"
           }
         ]
       }
