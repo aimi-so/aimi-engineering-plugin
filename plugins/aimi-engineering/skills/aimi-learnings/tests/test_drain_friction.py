@@ -84,6 +84,17 @@ def _write_event(tmp_path: Path, scope: str = "project", suffix: str = "") -> No
         friction_store._STORE_DIR = original
 
 
+def _get_event_ids(tmp_path: Path) -> list[str]:
+    """Return event_ids for all live events in the store under tmp_path."""
+    store_dir = tmp_path / ".aimi" / "learnings"
+    original = friction_store._STORE_DIR
+    friction_store._STORE_DIR = store_dir
+    try:
+        return [eid for eid, _ in friction_store.iter_events()]
+    finally:
+        friction_store._STORE_DIR = original
+
+
 # ---------------------------------------------------------------------------
 # Tests — --list
 # ---------------------------------------------------------------------------
@@ -128,8 +139,22 @@ def test_list_samples_capped_at_3(tmp_path):
     assert len(data["groups"]["project"]["samples"]) == 3
 
 
+def test_list_samples_include_event_id(tmp_path):
+    """Each sample entry must include an event_id field."""
+    _write_event(tmp_path, scope="project", suffix="x")
+
+    env = _make_env(tmp_path)
+    data = _run(["--list"], env=env)
+
+    samples = data["groups"]["project"]["samples"]
+    assert len(samples) == 1
+    assert "event_id" in samples[0]
+    assert isinstance(samples[0]["event_id"], str)
+    assert samples[0]["event_id"]  # non-empty
+
+
 # ---------------------------------------------------------------------------
-# Tests — --mark
+# Tests — --mark (uses event_ids)
 # ---------------------------------------------------------------------------
 
 def _get_store_file(tmp_path: Path) -> Path:
@@ -155,17 +180,23 @@ def _count_live_lines(path: Path) -> int:
 
 
 def test_mark_promoted_writes_companion_and_removes_from_live(tmp_path):
-    """Mark indices [0, 2] as promoted → live file has 3 events left, companion has 2."""
+    """Mark 2 event_ids as promoted → live file has 3 events left, companion has 2."""
     for i in range(5):
         _write_event(tmp_path, scope="project", suffix=str(i))
 
+    all_ids = _get_event_ids(tmp_path)
+    assert len(all_ids) == 5
+    ids_to_promote = all_ids[:2]  # first 2
+
     live_path = _get_store_file(tmp_path)
-    companion = live_path.with_suffix(".promoted.jsonl")
+    companion = live_path.with_name(live_path.stem + ".promoted.jsonl")
 
     env = _make_env(tmp_path)
-    mark_payload = json.dumps({"promoted": [0, 2], "discarded": []})
-    _run(["--mark"], env=env, stdin=mark_payload)
+    mark_payload = json.dumps({"promoted": ids_to_promote, "discarded": []})
+    result = _run(["--mark"], env=env, stdin=mark_payload)
 
+    assert result.get("promoted") == 2
+    assert result.get("discarded") == 0
     assert _count_live_lines(live_path) == 3
 
     companion_events = []
@@ -180,17 +211,21 @@ def test_mark_promoted_writes_companion_and_removes_from_live(tmp_path):
 
 
 def test_mark_discarded_writes_companion_too(tmp_path):
-    """Mark indices [1, 3] as discarded → companion has 2 entries with decision=discarded."""
+    """Mark 2 event_ids as discarded → discarded.jsonl has 2 entries."""
     for i in range(5):
         _write_event(tmp_path, scope="plugin", suffix=str(i))
 
+    all_ids = _get_event_ids(tmp_path)
+    ids_to_discard = all_ids[1:3]  # middle 2
+
     live_path = _get_store_file(tmp_path)
-    companion = live_path.with_suffix(".promoted.jsonl")
+    companion = live_path.with_name(live_path.stem + ".discarded.jsonl")
 
     env = _make_env(tmp_path)
-    mark_payload = json.dumps({"promoted": [], "discarded": [1, 3]})
-    _run(["--mark"], env=env, stdin=mark_payload)
+    mark_payload = json.dumps({"promoted": [], "discarded": ids_to_discard})
+    result = _run(["--mark"], env=env, stdin=mark_payload)
 
+    assert result.get("discarded") == 2
     assert _count_live_lines(live_path) == 3
 
     companion_events = []
@@ -205,20 +240,27 @@ def test_mark_discarded_writes_companion_too(tmp_path):
 
 
 def test_mark_idempotent(tmp_path):
-    """Calling mark twice with the same indices does not double-write companion."""
+    """Calling mark twice with the same event_ids: second call returns skipped=1."""
     for i in range(3):
         _write_event(tmp_path, scope="project", suffix=str(i))
 
+    all_ids = _get_event_ids(tmp_path)
+    first_id = all_ids[:1]
+
     live_path = _get_store_file(tmp_path)
-    companion = live_path.with_suffix(".promoted.jsonl")
+    companion = live_path.with_name(live_path.stem + ".promoted.jsonl")
 
     env = _make_env(tmp_path)
-    mark_payload = json.dumps({"promoted": [0], "discarded": []})
+    mark_payload = json.dumps({"promoted": first_id, "discarded": []})
 
     # First call
-    _run(["--mark"], env=env, stdin=mark_payload)
-    # Second call — same indices, should not duplicate companion entries
-    _run(["--mark"], env=env, stdin=mark_payload)
+    result1 = _run(["--mark"], env=env, stdin=mark_payload)
+    assert result1["promoted"] == 1
+
+    # Second call — same event_ids, should not duplicate companion entries
+    result2 = _run(["--mark"], env=env, stdin=mark_payload)
+    assert result2["promoted"] == 0
+    assert result2["skipped"] == 1
 
     companion_events = []
     if companion.exists():
@@ -232,6 +274,24 @@ def test_mark_idempotent(tmp_path):
     )
 
 
+def test_mark_returns_counts_json(tmp_path):
+    """--mark must print JSON with promoted/discarded/skipped keys."""
+    for i in range(4):
+        _write_event(tmp_path, scope="project", suffix=str(i))
+
+    all_ids = _get_event_ids(tmp_path)
+    env = _make_env(tmp_path)
+    mark_payload = json.dumps({"promoted": all_ids[:2], "discarded": all_ids[2:4]})
+    result = _run(["--mark"], env=env, stdin=mark_payload)
+
+    assert "promoted" in result
+    assert "discarded" in result
+    assert "skipped" in result
+    assert result["promoted"] == 2
+    assert result["discarded"] == 2
+    assert result["skipped"] == 0
+
+
 # ---------------------------------------------------------------------------
 # Tests — --summary
 # ---------------------------------------------------------------------------
@@ -241,9 +301,11 @@ def test_summary_reports_correct_counts(tmp_path):
     for i in range(3):
         _write_event(tmp_path, scope="project", suffix=str(i))
 
+    all_ids = _get_event_ids(tmp_path)
     env = _make_env(tmp_path)
-    # Promote index 0, discard index 1
-    mark_payload = json.dumps({"promoted": [0], "discarded": [1]})
+
+    # Promote first, discard second
+    mark_payload = json.dumps({"promoted": all_ids[:1], "discarded": all_ids[1:2]})
     _run(["--mark"], env=env, stdin=mark_payload)
 
     data = _run(["--summary"], env=env)

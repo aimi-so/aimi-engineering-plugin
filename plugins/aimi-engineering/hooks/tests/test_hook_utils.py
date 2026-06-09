@@ -260,4 +260,10 @@ def test_friction_store_round_trip(tmp_path, monkeypatch):
     assert friction_store.pending_count() == 3
 
     collected = list(friction_store.read_pending())
-    assert collected == events
+    # append_event now adds event_id to every stored event; strip it for comparison.
+    collected_stripped = [{k: v for k, v in e.items() if k != "event_id"} for e in collected]
+    assert collected_stripped == events
+    # Verify event_id was actually added to each stored event
+    for e in collected:
+        assert "event_id" in e
+        assert len(e["event_id"]) == 16
