@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/guard-default-branch.py"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pre-bash-dispatcher.py"
           }
         ]
       },
@@ -30,29 +30,11 @@
         ]
       },
       {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/guard-shell-true.py"
-          }
-        ]
-      },
-      {
         "matcher": "Skill",
         "hooks": [
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/guard-tasks-presence.py"
-          }
-        ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/guard-worktree-budget.py"
           }
         ]
       },
