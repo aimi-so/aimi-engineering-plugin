@@ -10,7 +10,7 @@ _HOOKS_DIR = Path(__file__).parent
 if str(_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(_HOOKS_DIR))
 
-from hook_utils import safe_hook, safe_json_input, find_aimi_dir, deny, SCHEMA_VERSIONS  # noqa: E402
+from hook_utils import safe_hook, find_aimi_dir, deny, SCHEMA_VERSIONS  # noqa: E402
 
 
 _EXECUTE_SKILLS = {"aimi:execute", "aimi-engineering:execute"}
