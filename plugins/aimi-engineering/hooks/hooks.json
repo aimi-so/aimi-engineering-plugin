@@ -10,6 +10,24 @@
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/auto-approve-cli.sh"
           }
         ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/guard-runtime-state.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/guard-tasks-presence.py"
+          }
+        ]
       }
     ],
     "PostToolUse": [],
