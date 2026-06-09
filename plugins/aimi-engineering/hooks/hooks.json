@@ -10,10 +10,38 @@
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/auto-approve-cli.sh"
           }
         ]
+      },
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/push-skill-frame.py"
+          }
+        ]
       }
     ],
-    "PostToolUse": [],
-    "UserPromptSubmit": [],
+    "PostToolUse": [
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pop-skill-frame.py"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/stash-prompt.py"
+          }
+        ]
+      }
+    ],
     "SessionStart": [],
     "Stop": []
   }
