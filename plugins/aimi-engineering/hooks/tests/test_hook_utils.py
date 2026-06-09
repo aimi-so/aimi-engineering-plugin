@@ -16,6 +16,7 @@ if str(_HOOKS_DIR) not in sys.path:
 
 import friction_store  # noqa: E402
 import hook_utils  # noqa: E402
+import scope_classifier  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +237,19 @@ def test_deny_custom_event_name():
 # ---------------------------------------------------------------------------
 # friction_store tests
 # ---------------------------------------------------------------------------
+
+
+def test_scope_return_type_annotation():
+    """classify_scope return annotation is Literal['project', 'plugin', 'inbox']."""
+    import typing
+    from typing import Literal, get_args, get_type_hints
+    # Use get_type_hints to resolve string annotations (from __future__ import annotations)
+    hints = get_type_hints(scope_classifier.classify_scope)
+    ann = hints.get("return")
+    assert ann is not None, "classify_scope must have a return annotation"
+    # The annotation should be Literal["project", "plugin", "inbox"]
+    assert hasattr(ann, "__args__"), "return annotation must be a Literal type"
+    assert set(get_args(ann)) == {"project", "plugin", "inbox"}
 
 
 def test_friction_store_round_trip(tmp_path, monkeypatch):

@@ -15,6 +15,7 @@ if str(_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(_HOOKS_DIR))
 
 import frame_helpers  # noqa: E402
+from frame_helpers import SkillFrame  # noqa: E402
 import hook_utils  # noqa: E402
 
 
@@ -158,11 +159,13 @@ def test_push_pop_lifo_order(monkeypatch, tmp_path):
 
     frame = frame_helpers.current_frame("default")
     assert frame is not None
-    assert frame["name"] == "A"
+    assert isinstance(frame, SkillFrame)
+    assert frame.name == "A"
 
     stack = frame_helpers.frame_stack("default")
     assert len(stack) == 1
-    assert stack[0]["name"] == "A"
+    assert isinstance(stack[0], SkillFrame)
+    assert stack[0].name == "A"
 
 
 def test_pop_missing_name_no_op(monkeypatch, tmp_path):
@@ -253,7 +256,8 @@ def test_frame_helpers_session_id_fallback(monkeypatch, tmp_path):
     # Call with no session_id arg and no CLAUDE_SESSION_ID env
     result = frame_helpers.frame_stack()
     assert len(result) == 1
-    assert result[0]["name"] == "my-skill"
+    assert isinstance(result[0], SkillFrame)
+    assert result[0].name == "my-skill"
 
 
 def test_session_id_from_tool_input(monkeypatch, tmp_path):
@@ -275,7 +279,8 @@ def test_session_id_from_tool_input(monkeypatch, tmp_path):
     # Verify that passing "tool-session" explicitly wins
     result = frame_helpers.current_frame("tool-session")
     assert result is not None
-    assert result["name"] == "tool-skill"
+    assert isinstance(result, SkillFrame)
+    assert result.name == "tool-skill"
 
     # And that "env-session" (from env) returns None (no file there)
     result_env = frame_helpers.current_frame(None)

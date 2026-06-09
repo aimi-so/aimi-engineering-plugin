@@ -16,18 +16,12 @@ import friction_store  # noqa: E402
 import frame_helpers  # noqa: E402
 import scope_classifier  # noqa: E402
 
-# Heuristic correction patterns (case-insensitive)
+# Heuristic correction patterns (case-insensitive) — high-precision only
 _CORRECTION_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\bn[aã]o,?\s+na\s+verdade\b", re.IGNORECASE),
-    re.compile(r"\bisso\s+est[aá]\s+errado\b", re.IGNORECASE),
-    re.compile(r"\bespera,?\b", re.IGNORECASE),
     re.compile(r"\bna\s+realidade\b", re.IGNORECASE),
-    re.compile(r"\bn[aã]o\s+era\s+isso\b", re.IGNORECASE),
-    re.compile(r"\bdeveria\s+ser\b", re.IGNORECASE),
-    re.compile(r"\brefaz\b", re.IGNORECASE),
-    re.compile(r"\buse?\s+\w+\s+em\s+vez\s+de\b", re.IGNORECASE),
     re.compile(r"\bnot,?\s+actually\b", re.IGNORECASE),
-    re.compile(r"\bwait,?\b", re.IGNORECASE),
+    re.compile(r"\bdever[ií]a\s+ser\b", re.IGNORECASE),
     re.compile(r"\bshould\s+be\b", re.IGNORECASE),
 ]
 
@@ -75,13 +69,13 @@ def main(tool_input: dict) -> None:
         sys.exit(0)
 
     # Classify scope
-    scope = scope_classifier.classify_scope(current_prompt, frame.get("name"))
+    scope = scope_classifier.classify_scope(current_prompt, frame.name)
 
     # Build event
     event = {
         "ts": datetime.now(tz=timezone.utc).isoformat(),
         "session_id": sid,
-        "frame": frame.get("name"),
+        "frame": frame.name,
         "scope": scope,
         "previous_prompt": previous_prompt,
         "current_prompt": current_prompt,

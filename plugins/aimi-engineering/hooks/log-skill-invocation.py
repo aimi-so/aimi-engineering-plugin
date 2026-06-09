@@ -34,9 +34,9 @@ def main(tool_input: dict) -> None:
 
     # Compute duration_ms from frame started_at if available
     duration_ms: int | None = None
-    if frame and frame.get("started_at"):
+    if frame and frame.started_at:
         try:
-            started_at = datetime.fromisoformat(frame["started_at"])
+            started_at = datetime.fromisoformat(frame.started_at)
             now = datetime.now(timezone.utc)
             duration_ms = int((now - started_at).total_seconds() * 1000)
         except Exception:  # noqa: BLE001

@@ -19,6 +19,7 @@ if str(_HOOKS_DIR) not in sys.path:
 import scope_classifier  # noqa: E402
 import friction_store  # noqa: E402
 import frame_helpers  # noqa: E402
+from frame_helpers import SkillFrame  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +294,22 @@ def test_capture_skips_when_no_previous_prompt_file(monkeypatch, tmp_path):
                         lambda sid: tmp_path / ".aimi" / "session" / sid)
 
     payload = {"prompt": "wait, should be httpx"}
+    _run_capture_hook(monkeypatch, tmp_path, payload)
+
+    events = list(friction_store.read_pending())
+    assert len(events) == 0
+
+
+def test_capture_does_not_match_weak_phrase(monkeypatch, tmp_path):
+    """Weak signal phrases like 'espera, vou pensar nisso' do NOT trigger capture-correction."""
+    _write_frame(tmp_path, name="aimi:plan")
+    _write_last_prompt(tmp_path, "vou implementar o módulo de login")
+
+    monkeypatch.setattr(friction_store, "_STORE_DIR", tmp_path / ".aimi" / "learnings")
+    monkeypatch.setattr(frame_helpers, "_session_dir",
+                        lambda sid: tmp_path / ".aimi" / "session" / sid)
+
+    payload = {"prompt": "espera, vou pensar nisso"}
     _run_capture_hook(monkeypatch, tmp_path, payload)
 
     events = list(friction_store.read_pending())
