@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -78,36 +79,29 @@ def handle_default_branch(command: str, tool_input: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _scan_for_shell_true(blob: str) -> list[int]:
-    """Return 1-based line numbers where shell=True appears outside comments/docstrings."""
+    """Return 1-based line numbers where shell=True is passed as a keyword argument.
+
+    Uses ast.parse to walk Call nodes so that occurrences inside string
+    literals, comments, and docstrings are never flagged.  On SyntaxError the
+    file is skipped (returns []) to avoid blocking legitimate WIP.
+    """
+    try:
+        tree = ast.parse(blob)
+    except SyntaxError:
+        return []
+
     hits: list[int] = []
-    in_triple: str | None = None  # current open triple-quote style: '"""' or "'''"
-
-    for lineno, line in enumerate(blob.splitlines(), start=1):
-        stripped = line.strip()
-
-        # Toggle triple-quote tracking (very simple heuristic)
-        for marker in ('"""', "'''"):
-            count = line.count(marker)
-            if count > 0:
-                if in_triple is None:
-                    if count % 2 == 1:
-                        in_triple = marker
-                elif in_triple == marker:
-                    if count % 2 == 1:
-                        in_triple = None
-                # If count is even, open/close balance on same line — state unchanged
-
-        if in_triple is not None:
-            # Inside a docstring — skip
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
             continue
-
-        # Skip comment lines
-        if stripped.startswith("#"):
-            continue
-
-        if re.search(r"\bshell\s*=\s*True\b", line):
-            hits.append(lineno)
-
+        for kw in node.keywords:
+            if (
+                kw.arg == "shell"
+                and isinstance(kw.value, ast.Constant)
+                and kw.value.value is True
+            ):
+                hits.append(kw.value.lineno)
+    hits.sort()
     return hits
 
 

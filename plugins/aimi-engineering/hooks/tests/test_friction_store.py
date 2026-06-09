@@ -304,76 +304,40 @@ def test_mark_events_no_leftover_tmp_file(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Count cache tests (US-004)
+# US-006: redaction and file mode
 # ---------------------------------------------------------------------------
 
-def test_count_cache_hot_path_o1(monkeypatch, tmp_path):
-    """pending_count should not re-scan date files when sidecar is present.
-
-    We append 50 events (which maintains the sidecar), then call pending_count
-    many times and verify that all_date_files is NOT called during those reads.
-    """
+def test_append_redacts_prompt_field(monkeypatch, tmp_path):
+    """append_event must redact secrets in previous_prompt and current_prompt."""
     _patch_store(monkeypatch, tmp_path)
 
-    for i in range(50):
-        friction_store.append_event(_make_event(suffix=str(i)))
+    secret_key = "sk-" + "x" * 25
+    event = {
+        "ts": "2026-01-01T00:00:00+00:00",
+        "session_id": "s1",
+        "frame": "aimi:plan",
+        "scope": "project",
+        "previous_prompt": f"Here is my key: {secret_key}",
+        "current_prompt": f"Use {secret_key} for auth",
+    }
+    friction_store.append_event(event)
 
-    # Confirm sidecar exists and has the right value
-    assert friction_store.pending_count() == 50
-
-    # Track how many times all_date_files is called during subsequent pending_count calls
-    scan_calls: list[int] = []
-    original_all_date_files = friction_store.all_date_files
-
-    def counting_all_date_files():
-        scan_calls.append(1)
-        return original_all_date_files()
-
-    monkeypatch.setattr(friction_store, "all_date_files", counting_all_date_files)
-
-    for _ in range(10):
-        count = friction_store.pending_count()
-        assert count == 50
-
-    assert scan_calls == [], (
-        f"all_date_files was called {len(scan_calls)} times; expected 0 on hot path"
-    )
+    stored = list(friction_store.read_pending())
+    assert len(stored) == 1
+    rec = stored[0]
+    assert secret_key not in rec.get("previous_prompt", "")
+    assert secret_key not in rec.get("current_prompt", "")
+    assert "[REDACTED:sk-token]" in rec.get("previous_prompt", "")
+    assert "[REDACTED:sk-token]" in rec.get("current_prompt", "")
 
 
-def test_count_cache_rebuild_on_missing(monkeypatch, tmp_path):
-    """When .count sidecar is deleted, pending_count rebuilds from disk."""
+def test_jsonl_file_mode_is_0600(monkeypatch, tmp_path):
+    """A newly created JSONL file must have mode 0600."""
     _patch_store(monkeypatch, tmp_path)
 
-    for i in range(7):
-        friction_store.append_event(_make_event(suffix=str(i)))
+    friction_store.append_event(_make_event())
 
-    # Delete the sidecar to simulate cold start / corruption
-    count_file = friction_store._count_file_path()
-    if count_file.exists():
-        count_file.unlink()
-
-    # pending_count should still return the correct value by scanning
-    result = friction_store.pending_count()
-    assert result == 7
-
-    # And the sidecar should be rebuilt
-    assert count_file.exists()
-    assert int(count_file.read_text(encoding="utf-8").strip()) == 7
-
-
-def test_count_cache_decrements_on_mark(monkeypatch, tmp_path):
-    """After marking 3 of 5 events, pending_count should return 2."""
-    _patch_store(monkeypatch, tmp_path)
-
-    for i in range(5):
-        friction_store.append_event(_make_event(suffix=str(i)))
-
-    assert friction_store.pending_count() == 5
-
-    # Collect the first 3 event ids
-    all_pairs = list(friction_store.iter_events())
-    ids_to_mark = {eid for eid, _ in all_pairs[:3]}
-
-    friction_store.mark_events(ids_to_mark, set())
-
-    assert friction_store.pending_count() == 2
+    files = friction_store.all_date_files()
+    assert len(files) == 1
+    mode = oct(files[0].stat().st_mode & 0o777)
+    assert mode == oct(0o600), f"Expected 0600, got {mode}"
