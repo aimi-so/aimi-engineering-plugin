@@ -72,7 +72,16 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pop-skill-frame.py"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/gate-friction-threshold.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/log-read-trace.py"
           }
         ]
       },
@@ -86,16 +95,24 @@
         ]
       },
       {
-        "matcher": "Read",
+        "matcher": "Skill",
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/log-read-trace.py"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pop-skill-frame.py"
           }
         ]
       }
     ],
     "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/capture-correction.py"
+          }
+        ]
+      },
       {
         "hooks": [
           {
