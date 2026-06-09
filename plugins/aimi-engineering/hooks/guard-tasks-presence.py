@@ -10,7 +10,7 @@ _HOOKS_DIR = Path(__file__).parent
 if str(_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(_HOOKS_DIR))
 
-from hook_utils import safe_hook, safe_json_input, find_aimi_dir, deny  # noqa: E402
+from hook_utils import safe_hook, safe_json_input, find_aimi_dir, deny, SCHEMA_VERSIONS  # noqa: E402
 
 
 _EXECUTE_SKILLS = {"aimi:execute", "aimi-engineering:execute"}
@@ -70,10 +70,10 @@ def main(tool_input: dict) -> None:
         sys.exit(0)
 
     schema_version = data.get("schemaVersion")
-    if schema_version != "3.3":
+    if schema_version not in SCHEMA_VERSIONS:
         print(deny(
             f"tasks file {latest} has schemaVersion {schema_version!r}, "
-            f"expected '3.3'."
+            f"expected one of {sorted(SCHEMA_VERSIONS)}."
         ))
         sys.exit(0)
 

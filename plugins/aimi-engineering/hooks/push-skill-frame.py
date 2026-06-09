@@ -10,21 +10,7 @@ _HOOKS_DIR = Path(__file__).parent
 if str(_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(_HOOKS_DIR))
 
-from hook_utils import safe_hook, safe_json_input, resolve_session_id  # noqa: E402
-
-
-def _extract_skill_name(tool_input: dict) -> str | None:
-    # Claude Code Skill tool puts the skill name in tool_input.tool_input.skill
-    nested = tool_input.get("tool_input")
-    if isinstance(nested, dict):
-        name = nested.get("skill")
-        if name:
-            return str(name)
-    # Also try top-level tool_input.skill
-    name = tool_input.get("skill")
-    if name:
-        return str(name)
-    return None
+from hook_utils import safe_hook, safe_json_input, resolve_session_id, extract_skill_name  # noqa: E402
 
 
 def _session_dir(session_id: str) -> Path:
@@ -33,7 +19,7 @@ def _session_dir(session_id: str) -> Path:
 
 @safe_hook
 def main(tool_input: dict) -> None:
-    skill_name = _extract_skill_name(tool_input)
+    skill_name = extract_skill_name(tool_input)
     if not skill_name:
         sys.exit(0)
 

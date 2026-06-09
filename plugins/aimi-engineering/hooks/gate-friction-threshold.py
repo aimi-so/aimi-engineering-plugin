@@ -9,7 +9,7 @@ _HOOKS_DIR = Path(__file__).parent
 if str(_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(_HOOKS_DIR))
 
-from hook_utils import safe_hook, safe_json_input, load_aimi_config, resolve_session_id  # noqa: E402
+from hook_utils import safe_hook, safe_json_input, load_aimi_config, resolve_session_id, extract_skill_name  # noqa: E402
 import friction_store  # noqa: E402
 
 _SKIP_SKILLS = {"aimi:learnings", "aimi-engineering:learnings"}
@@ -33,11 +33,8 @@ def _read_threshold() -> int:
 
 @safe_hook
 def main(tool_input: dict) -> None:
-    # Extract skill name from tool input
-    skill_name: str = tool_input.get("skill_name", "") or tool_input.get("name", "") or ""
-    # Also check nested structures Claude Code may use
-    if not skill_name:
-        skill_name = tool_input.get("toolName", "") or ""
+    # Extract skill name using the unified helper
+    skill_name: str = extract_skill_name(tool_input) or ""
 
     # Skip silently when skill is a learnings skill (avoid recursion)
     if skill_name in _SKIP_SKILLS:

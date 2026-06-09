@@ -37,6 +37,7 @@ def _run_hook(monkeypatch, tmp_path: Path, payload: dict | None = None) -> str:
     if payload is None:
         payload = {}
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDECODE", "1")
     monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
     monkeypatch.setattr(friction_store, "_STORE_DIR", tmp_path / ".aimi" / "learnings")
@@ -104,6 +105,28 @@ def _old_iso(hours: int = 25) -> str:
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+def test_silent_exit_when_not_claude_code(monkeypatch, tmp_path):
+    """When CLAUDECODE env var is absent, hook exits 0 silently (OpenCode host)."""
+    # Write friction events so there would be output if the gate were absent.
+    _write_friction_events(tmp_path, 3)
+
+    # Run without setting CLAUDECODE (simulates OpenCode host).
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+    monkeypatch.setattr(friction_store, "_STORE_DIR", tmp_path / ".aimi" / "learnings")
+
+    mod = _load_hook()
+    captured = io.StringIO()
+    monkeypatch.setattr("sys.stdout", captured)
+
+    with pytest.raises(SystemExit) as exc_info:
+        mod.main()
+    assert exc_info.value.code == 0
+    assert captured.getvalue().strip() == ""
+
 
 def test_silent_when_all_zero(monkeypatch, tmp_path):
     """No friction, no telemetry → no stdout output."""

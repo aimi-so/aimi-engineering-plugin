@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Callable
 
 
+SCHEMA_VERSIONS: frozenset[str] = frozenset({"3.3"})  # acceptable tasks.json schema versions
+
+
 def safe_hook(fn: Callable[[dict], None]) -> Callable[[], None]:
     """Decorator that wraps a handler(tool_input: dict) -> None.
 
@@ -134,6 +137,25 @@ def find_aimi_dir(start: Path | None = None) -> Path | None:
         if parent == current:
             return None
         current = parent
+
+
+def extract_skill_name(tool_input: dict) -> str | None:
+    """Extract the skill name from a Skill tool_input dict.
+
+    Priority:
+    1. tool_input["tool_input"]["skill"]  (Claude Code's actual shape)
+    2. tool_input["skill"]               (flat fallback)
+    3. None if neither is present
+    """
+    nested = tool_input.get("tool_input")
+    if isinstance(nested, dict):
+        name = nested.get("skill")
+        if name:
+            return str(name)
+    name = tool_input.get("skill")
+    if name:
+        return str(name)
+    return None
 
 
 def deny(user_message: str, event_name: str = "PreToolUse") -> str:

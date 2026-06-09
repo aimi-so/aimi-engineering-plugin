@@ -334,7 +334,7 @@ def test_gate_skips_for_learnings_skill(monkeypatch, tmp_path):
     """skill name aimi:learnings → no advisory even with 99 events."""
     _write_friction_events(tmp_path, 99)
 
-    payload = {"skill_name": "aimi:learnings"}
+    payload = {"tool_input": {"skill": "aimi:learnings"}}
     output = _run_gate_hook(monkeypatch, tmp_path, payload, cwd=str(tmp_path))
 
     assert output.strip() == ""
@@ -344,7 +344,7 @@ def test_gate_skips_for_aimi_engineering_learnings_skill(monkeypatch, tmp_path):
     """skill name aimi-engineering:learnings → no advisory even with 99 events."""
     _write_friction_events(tmp_path, 99)
 
-    payload = {"skill_name": "aimi-engineering:learnings"}
+    payload = {"tool_input": {"skill": "aimi-engineering:learnings"}}
     output = _run_gate_hook(monkeypatch, tmp_path, payload, cwd=str(tmp_path))
 
     assert output.strip() == ""
@@ -361,6 +361,17 @@ def test_gate_rate_limit_prevents_double_emit(monkeypatch, tmp_path):
     nudge_flag.write_bytes(b"")
 
     payload = {"skill_name": "aimi:plan"}
+    output = _run_gate_hook(monkeypatch, tmp_path, payload, cwd=str(tmp_path))
+
+    assert output.strip() == ""
+
+
+def test_gate_uses_unified_skill_name_extractor(monkeypatch, tmp_path):
+    """tool_input.tool_input.skill='aimi:learnings' → recursion guard fires, no advisory."""
+    _write_friction_events(tmp_path, 99)
+
+    # Use Claude Code's actual nested shape: tool_input -> { tool_input: { skill: "..." } }
+    payload = {"tool_input": {"skill": "aimi:learnings"}}
     output = _run_gate_hook(monkeypatch, tmp_path, payload, cwd=str(tmp_path))
 
     assert output.strip() == ""
