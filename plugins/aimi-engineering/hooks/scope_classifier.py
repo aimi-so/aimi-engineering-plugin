@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Literal
 
 
-def classify_scope(prompt_text: str, frame_name: str | None) -> str:
+def classify_scope(prompt_text: str, frame_name: str | None) -> Literal["project", "plugin", "inbox"]:
     """Classify the scope of a prompt/frame as 'plugin', 'project', or 'inbox'.
 
     Classification priority:

@@ -37,7 +37,7 @@ def main(tool_input: dict) -> None:
 
     session_id = resolve_session_id(tool_input)
     frame = frame_helpers.current_frame(session_id)
-    frame_name: str | None = frame.get("name") if frame else None
+    frame_name: str | None = frame.name if frame else None
 
     payload = {
         "ts": datetime.now(timezone.utc).isoformat(),
