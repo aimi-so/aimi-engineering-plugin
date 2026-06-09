@@ -75,6 +75,24 @@
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pop-skill-frame.py"
           }
         ]
+      },
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/log-skill-invocation.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/log-read-trace.py"
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
