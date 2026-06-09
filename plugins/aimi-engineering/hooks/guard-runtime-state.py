@@ -9,7 +9,7 @@ _HOOKS_DIR = Path(__file__).parent
 if str(_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(_HOOKS_DIR))
 
-from hook_utils import safe_hook, safe_json_input, find_aimi_dir, deny  # noqa: E402
+from hook_utils import safe_hook, find_aimi_dir, deny  # noqa: E402
 
 
 def _deny_path(path: str, reason: str) -> None:
@@ -48,9 +48,9 @@ def main(tool_input: dict) -> None:
 
     target = Path(file_path_raw).resolve()
 
-    home = Path(os.path.expanduser("~")).resolve()
-    learnings_dir = (home / ".aimi" / "learnings").resolve()
-    telemetry_dir = (home / ".aimi" / "telemetry").resolve()
+    home = Path("~").expanduser().resolve(strict=False)
+    learnings_dir = (home / ".aimi" / "learnings").resolve(strict=False)
+    telemetry_dir = (home / ".aimi" / "telemetry").resolve(strict=False)
 
     # Always-blocked: ~/.aimi/learnings/ (recursive)
     try:

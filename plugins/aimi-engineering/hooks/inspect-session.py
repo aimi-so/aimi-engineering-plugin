@@ -13,7 +13,7 @@ _HOOKS_DIR = Path(__file__).parent
 if str(_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(_HOOKS_DIR))
 
-from hook_utils import safe_hook, safe_json_input, is_quiet_mode, load_aimi_config  # noqa: E402
+from hook_utils import safe_hook, is_quiet_mode, load_aimi_config  # noqa: E402
 import friction_store  # noqa: E402
 
 _BUDGET_SECS = 0.5  # 500 ms hard budget
@@ -45,9 +45,9 @@ def _read_telemetry_file(path: Path, cutoff: datetime) -> list[dict]:
                             ts = ts.replace(tzinfo=timezone.utc)
                         if ts >= cutoff:
                             results.append(entry)
-                except Exception:  # noqa: BLE001
+                except (json.JSONDecodeError, ValueError):
                     continue
-    except Exception:  # noqa: BLE001
+    except (OSError, json.JSONDecodeError, ValueError):
         pass
     return results
 

@@ -10,7 +10,7 @@ _HOOKS_DIR = Path(__file__).parent
 if str(_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(_HOOKS_DIR))
 
-from hook_utils import safe_hook, safe_json_input, resolve_session_id, extract_skill_name  # noqa: E402
+from hook_utils import safe_hook, resolve_session_id, extract_skill_name  # noqa: E402
 
 
 def _session_dir(session_id: str) -> Path:

@@ -9,7 +9,7 @@ _HOOKS_DIR = Path(__file__).parent
 if str(_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(_HOOKS_DIR))
 
-from hook_utils import safe_hook, safe_json_input, load_aimi_config, resolve_session_id, extract_skill_name  # noqa: E402
+from hook_utils import safe_hook, load_aimi_config, resolve_session_id, extract_skill_name  # noqa: E402
 import friction_store  # noqa: E402
 
 _SKIP_SKILLS = {"aimi:learnings", "aimi-engineering:learnings"}
@@ -27,7 +27,7 @@ def _read_threshold() -> int:
     threshold = learnings.get("frictionThreshold", _DEFAULT_THRESHOLD)
     try:
         return int(threshold)
-    except Exception:  # noqa: BLE001
+    except (OSError, json.JSONDecodeError, ValueError):
         return _DEFAULT_THRESHOLD
 
 

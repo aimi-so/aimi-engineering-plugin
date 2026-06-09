@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from hook_utils import safe_hook, safe_json_input, effective_cwd, load_aimi_config, deny  # noqa: E402
+from hook_utils import safe_hook, effective_cwd, load_aimi_config, deny  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module-level pre-compiled regexes — compiled once on import
