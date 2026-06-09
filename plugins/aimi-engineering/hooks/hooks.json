@@ -1,7 +1,7 @@
 {
   "description": "Auto-approve AIMI CLI Bash commands",
   "hooks": {
-    "PermissionRequest": [
+    "PreToolUse": [
       {
         "matcher": "Bash",
         "hooks": [
@@ -11,6 +11,10 @@
           }
         ]
       }
-    ]
+    ],
+    "PostToolUse": [],
+    "UserPromptSubmit": [],
+    "SessionStart": [],
+    "Stop": []
   }
 }
