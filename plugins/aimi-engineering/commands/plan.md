@@ -1543,6 +1543,7 @@ Outline: [N] stories (edits: [M])
 [If reusedPaths non-empty]: Research reused: [N] file(s) from brainstorm
 [If prototypePaths non-empty]: Prototypes: [N] variant file(s) registered
 [If gaps found]: Gaps identified: [N] (captured as criteria/notes)
+[If audit unresolved non-empty]: Audit warnings: [N] cross-story issues
 [If 10+ stories]: Warning: [N] stories generated. Consider splitting into smaller feature sets.
 [If parallel stories detected]: Parallel groups: [N] stories can run concurrently (max concurrency: [maxConcurrency])
 
@@ -1556,6 +1557,10 @@ Next steps:
 **Outline line:** `Outline: N stories (edits: M)` where `N` is the number of stories in the approved outline (from `outline.json`) and `M` is `outlineEditCount` (the number of edits applied during the Phase 3c gate — rename, add, remove, and reorder each count as one edit).
 
 **IMPORTANT:** Output the "Next steps" block EXACTLY as shown above — use `/aimi:` prefix (e.g., `/aimi:deepen`), NOT the fully-qualified plugin name (e.g., `/aimi-engineering:deepen`). Copy the block verbatim.
+
+**Audit warnings line:** present only when Phase 3d.5 ran and `unresolved[]` is non-empty. `N` is the count of items in `unresolved[]`. Render each item as a bullet immediately after the `Audit warnings` line:
+- `[storyIdx]: [message]` (`storyIdx` and `message` from the `unresolved[]` entry schema `{storyIdx, message}`).
+When `unresolved[]` is empty or Phase 3d.5 was skipped (fewer than 2 stories), omit the `Audit warnings` line and bullet list entirely — do not render an empty section.
 
 ## Error Handling
 
@@ -1573,6 +1578,10 @@ Next steps:
 | Phase 3c | User removes last story from outline | Present error at gate, require at least one story before approving |
 | Phase 3d | Pass 2 sub-agent times out | Count as failed attempt; retry up to 2x with enriched prompt (Gap5 / CriticalQ5 resolution: rely on Task tool's built-in timeout) |
 | Phase 3d | Pass 2 sub-agent fails schema validation after 2 retries | Mark permanently failed; surface to user with skip/retry-with-hint/abort options; auto-skip in agent-mode |
+| Phase 3d.5 | Auditor Task crashes, times out, or returns malformed JSON | Skip silently; one log line, one `unresolved[]` entry; proceed to Phase 3e without patches |
+| Phase 3d.5 | Patch targets field outside allowlist (`dependsOn`/`tasks`/`notes`) | Skip patch silently as malformed; do not abort |
+| Phase 3d.5 | Patches exceed 10-per-storyIdx cap | Drop excess silently with one aggregate `unresolved[]` entry naming the storyIdx |
+| Phase 3d.5 | Patch result fails post-apply JSON / required-field validation | Roll back the single patch; continue with remaining patches |
 | Phase 3e | story-merge exits non-zero | Report error with full stderr output; preserve staging dir for inspection; do not write tasks.json manually |
 | Phase 4 | File write fails | Report error with path |
 | Phase 4.5 | Validation fails | Fix issues and re-run until passing |
