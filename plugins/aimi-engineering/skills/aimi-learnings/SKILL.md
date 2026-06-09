@@ -93,15 +93,20 @@ For each group:
 ### Step 3 — Mark Processed Events
 
 After all groups have been reviewed, call the drain script's mark subcommand
-with the collected indices:
+with the collected event_ids (thread the `event_id` values returned in each
+sample entry through the AskUserQuestion answers):
 
 ```bash
-echo '{"promoted": [<indices>], "discarded": [<indices>]}' \
+echo '{"promoted": ["<event_id>", ...], "discarded": ["<event_id>", ...]}' \
   | python3 plugins/aimi-engineering/skills/aimi-learnings/scripts/drain-friction.py --mark
 ```
 
-This writes a companion `<friction_file>.promoted.jsonl` file and removes the
-marked entries from the live friction file.
+The script prints counts as JSON: `{"promoted": N, "discarded": N, "skipped": N}`.
+
+This atomically rewrites the live friction file (tmp+os.replace) and appends
+marked entries to `<friction_file>.promoted.jsonl` or `<friction_file>.discarded.jsonl`
+with a `decision` field. The operation is idempotent: event_ids already present
+in a companion file are skipped and counted separately.
 
 ### Step 4 — Report Results
 

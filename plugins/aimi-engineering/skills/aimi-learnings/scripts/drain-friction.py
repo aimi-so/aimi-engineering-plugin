@@ -7,9 +7,11 @@ Subcommands
     Output JSON to stdout describing pending friction events grouped by scope.
 
 --mark
-    Read JSON from stdin with {"promoted": [...], "discarded": [...]} index lists.
-    Write a companion <friction_file>.promoted.jsonl with a "decision" field.
-    Remove marked entries from the live friction file.
+    Read JSON from stdin with {"promoted": [<event_id>, ...], "discarded": [<event_id>, ...]}.
+    Move matched events to companion files with a "decision" field.
+    Print counts as JSON: {"promoted": N, "discarded": N, "skipped": N}.
+    Atomic: live file is rewritten via tmp+os.replace.
+    Idempotent: event_ids already in a companion file are no-ops (counted as skipped).
 
 --summary
     Output JSON with counts of pending, promoted, and discarded events.
@@ -52,33 +54,22 @@ def _empty_groups() -> dict[str, Any]:
     return {s: {"count": 0, "samples": []} for s in _SCOPES}
 
 
-def _load_all_events() -> list[tuple[int, dict]]:
-    """Return (original_index, event) pairs across all pending JSONL files."""
-    if friction_store is None:
-        return []
-    try:
-        return list(enumerate(friction_store.read_pending()))
-    except Exception:
-        return []
-
-
 def _live_files() -> list[Path]:
     """Return all date-suffixed JSONL files from the store directory."""
     if friction_store is None:
         return []
     try:
-        # Access private helper — same package, documented internal API
-        return friction_store._all_date_files()
+        return friction_store.all_date_files()
     except Exception:
         return []
 
 
-def _companion_path(live_path: Path) -> Path:
-    return live_path.with_suffix(".promoted.jsonl")
+def _companion_path(live_path: Path, decision: str = "promoted") -> Path:
+    return live_path.with_name(live_path.stem + f".{decision}.jsonl")
 
 
 def _read_companion_events(companion: Path) -> list[dict]:
-    """Read all events from a companion .promoted.jsonl file."""
+    """Read all events from a companion .jsonl file."""
     if not companion.exists():
         return []
     events: list[dict] = []
@@ -102,21 +93,25 @@ def _read_companion_events(companion: Path) -> list[dict]:
 
 def cmd_list() -> None:
     """Group pending events by scope and output JSON."""
-    indexed = _load_all_events()
+    if friction_store is None:
+        print(json.dumps({"groups": _empty_groups(), "total_pending": 0}, indent=2))
+        return
 
     groups: dict[str, Any] = _empty_groups()
-    for idx, event in indexed:
-        scope = event.get("scope", "inbox")
-        if scope not in _SCOPES:
-            scope = "inbox"
-        groups[scope]["count"] += 1
-        if len(groups[scope]["samples"]) < _SAMPLES_CAP:
-            sample = dict(event)
-            sample["_index"] = idx
-            groups[scope]["samples"].append(sample)
+    try:
+        for event_id, event in friction_store.iter_events():
+            scope = event.get("scope", "inbox")
+            if scope not in _SCOPES:
+                scope = "inbox"
+            groups[scope]["count"] += 1
+            if len(groups[scope]["samples"]) < _SAMPLES_CAP:
+                sample = dict(event)
+                sample["event_id"] = event_id
+                groups[scope]["samples"].append(sample)
+    except Exception:
+        pass
 
     total_pending = sum(g["count"] for g in groups.values())
-
     print(json.dumps({"groups": groups, "total_pending": total_pending}, indent=2))
 
 
@@ -124,136 +119,29 @@ def cmd_list() -> None:
 # Subcommand: --mark
 # ---------------------------------------------------------------------------
 
-def _load_claimed_global_indices(live_files: list[Path]) -> set[int]:
-    """Return the set of global indices already recorded in companion files.
-
-    Each companion entry stores a ``_global_index`` field written at mark time.
-    This allows subsequent mark calls to skip indices that were already claimed,
-    even after the live file has been rewritten (which would otherwise shift
-    remaining events to lower indices).
-    """
-    claimed: set[int] = set()
-    for path in live_files:
-        companion = _companion_path(path)
-        for entry in _read_companion_events(companion):
-            gi = entry.get("_global_index")
-            if isinstance(gi, int):
-                claimed.add(gi)
-    return claimed
-
-
 def cmd_mark() -> None:
     """Read mark decisions from stdin and update live + companion files.
 
     Input JSON (from stdin):
-      {"promoted": [<indices>], "discarded": [<indices>]}
+      {"promoted": ["<event_id>", ...], "discarded": ["<event_id>", ...]}
 
-    Behaviour:
-    - Appends marked entries (with "decision" and "_global_index" fields) to
-      the companion file.
-    - Removes marked entries from the live friction file.
-    - Idempotent: a global index already present in any companion file is skipped.
+    Output JSON (to stdout):
+      {"promoted": N, "discarded": N, "skipped": N}
     """
     try:
         payload = json.loads(sys.stdin.read())
     except (json.JSONDecodeError, OSError):
         payload = {}
 
-    promoted_indices: set[int] = set(payload.get("promoted", []))
-    discarded_indices: set[int] = set(payload.get("discarded", []))
-    all_marked = promoted_indices | discarded_indices
+    promoted_ids: set[str] = set(payload.get("promoted", []))
+    discarded_ids: set[str] = set(payload.get("discarded", []))
 
-    if not all_marked:
+    if friction_store is None:
+        print(json.dumps({"promoted": 0, "discarded": 0, "skipped": 0}))
         return
 
-    live_files = _live_files()
-    if not live_files:
-        return
-
-    # Load already-claimed global indices to ensure idempotency across calls.
-    claimed_global = _load_claimed_global_indices(live_files)
-
-    # Re-read raw lines per file to do precise removal.
-    per_file_lines: dict[Path, list[str]] = {}
-    for path in live_files:
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                per_file_lines[path] = fh.readlines()
-        except OSError:
-            per_file_lines[path] = []
-
-    # Map global index → (path, line_index_in_file) for ALL current live events.
-    # Note: global indices here are relative to the CURRENT live file state, not
-    # the original state before any marks. Combined with claimed_global tracking
-    # (which stores the ORIGINAL global index at first-mark time), repeated calls
-    # with the same payload will find those indices in claimed_global and skip.
-    global_idx = 0
-    index_map: dict[int, tuple[Path, int]] = {}
-    for path in live_files:
-        for line_idx, line in enumerate(per_file_lines[path]):
-            stripped = line.strip()
-            if stripped:
-                try:
-                    json.loads(stripped)
-                    index_map[global_idx] = (path, line_idx)
-                    global_idx += 1
-                except json.JSONDecodeError:
-                    pass
-
-    # Determine which requested indices are unclaimed.
-    effective_marked = all_marked - claimed_global
-
-    if not effective_marked:
-        return
-
-    lines_to_remove: dict[Path, set[int]] = {p: set() for p in live_files}
-
-    for path in live_files:
-        companion = _companion_path(path)
-        append_entries: list[dict] = []
-
-        for g_idx, (file_path, line_idx) in index_map.items():
-            if file_path != path:
-                continue
-            if g_idx not in effective_marked:
-                continue
-
-            raw_line = per_file_lines[path][line_idx].strip()
-            try:
-                event = json.loads(raw_line)
-            except json.JSONDecodeError:
-                continue
-
-            decision = "promoted" if g_idx in promoted_indices else "discarded"
-            entry = dict(event)
-            entry["decision"] = decision
-            entry["_global_index"] = g_idx  # stable idempotency key for future calls
-            append_entries.append(entry)
-            lines_to_remove[path].add(line_idx)
-
-        if append_entries:
-            try:
-                companion.parent.mkdir(parents=True, exist_ok=True)
-                with companion.open("a", encoding="utf-8") as fh:
-                    for entry in append_entries:
-                        fh.write(json.dumps(entry) + "\n")
-            except OSError:
-                pass
-
-    # Rewrite live files with marked lines removed.
-    for path in live_files:
-        remove_set = lines_to_remove[path]
-        if not remove_set:
-            continue
-        remaining = [
-            line for idx, line in enumerate(per_file_lines[path])
-            if idx not in remove_set
-        ]
-        try:
-            with path.open("w", encoding="utf-8") as fh:
-                fh.writelines(remaining)
-        except OSError:
-            pass
+    counts = friction_store.mark_events(promoted_ids, discarded_ids)
+    print(json.dumps(counts))
 
 
 # ---------------------------------------------------------------------------
@@ -280,13 +168,13 @@ def cmd_summary() -> None:
         except OSError:
             pass
 
-        companion = _companion_path(path)
-        for entry in _read_companion_events(companion):
-            decision = entry.get("decision", "")
-            if decision == "promoted":
-                promoted += 1
-            elif decision == "discarded":
-                discarded += 1
+        for decision in ("promoted", "discarded"):
+            companion = _companion_path(path, decision)
+            for entry in _read_companion_events(companion):
+                if entry.get("decision") == "promoted":
+                    promoted += 1
+                elif entry.get("decision") == "discarded":
+                    discarded += 1
 
     print(json.dumps({"pending": pending, "promoted": promoted, "discarded": discarded}))
 
@@ -311,7 +199,7 @@ def main() -> None:
         "--mark",
         action="store_true",
         default=False,
-        help="Read mark decisions from stdin and update friction files.",
+        help="Read mark decisions (event_ids) from stdin and update friction files.",
     )
     group.add_argument(
         "--summary",
@@ -332,7 +220,7 @@ def main() -> None:
     except Exception:
         # Silent on unexpected errors — return safe empty output
         if args.mark:
-            pass
+            print(json.dumps({"promoted": 0, "discarded": 0, "skipped": 0}))
         elif args.summary:
             print(json.dumps({"pending": 0, "promoted": 0, "discarded": 0}))
         else:
