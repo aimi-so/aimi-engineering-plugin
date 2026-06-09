@@ -9,7 +9,7 @@ _HOOKS_DIR = Path(__file__).parent
 if str(_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(_HOOKS_DIR))
 
-from hook_utils import safe_hook, safe_json_input, resolve_session_id  # noqa: E402
+from hook_utils import safe_hook, safe_json_input, resolve_session_id, extract_skill_name  # noqa: E402
 import frame_helpers  # noqa: E402
 import telemetry_writer  # noqa: E402
 
@@ -19,13 +19,7 @@ def main(tool_input: dict) -> None:
     if not telemetry_writer.is_telemetry_enabled():
         sys.exit(0)
 
-    # Extract skill name: nested tool_input.tool_input.skill, then tool_input.skill
-    skill_name: str | None = None
-    nested = tool_input.get("tool_input")
-    if isinstance(nested, dict):
-        skill_name = nested.get("skill") or None
-    if not skill_name:
-        skill_name = tool_input.get("skill") or None
+    skill_name = extract_skill_name(tool_input)
     if not skill_name:
         sys.exit(0)
 

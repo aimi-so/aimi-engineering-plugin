@@ -53,6 +53,10 @@ aimi-engineering-plugin/
    - `Bash(git:*), Bash(npm:*), Bash(bun:*), Bash(tsc:*)` etc.
    - Never use unrestricted `Bash` in commands that spawn Task agents
 
+## Hook Conventions
+
+- Hooks emitting hookSpecificOutput must gate on CLAUDECODE env var when their output schema is Claude Code-specific.
+
 ## Command Conventions
 
 - Use `aimi:` prefix for all commands — always show `/aimi:plan`, `/aimi:execute`, etc. in output, NEVER the fully-qualified `/aimi-engineering:plan` form

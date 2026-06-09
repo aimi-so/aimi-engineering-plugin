@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from collections import Counter
@@ -53,6 +54,9 @@ def _read_telemetry_file(path: Path, cutoff: datetime) -> list[dict]:
 
 @safe_hook
 def main(tool_input: dict) -> None:
+    if not os.environ.get("CLAUDECODE"):
+        sys.exit(0)
+
     t_start = time.monotonic()
 
     if is_quiet_mode():

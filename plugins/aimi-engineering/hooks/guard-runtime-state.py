@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
@@ -22,23 +21,6 @@ def _deny_path(path: str, reason: str) -> None:
     )
     print(deny(msg))
     sys.exit(0)
-
-
-def _load_extra_paths(aimi_dir: Path) -> list[Path]:
-    """Load guards.runtimeStatePaths from .aimi/config.json if present."""
-    config_file = aimi_dir / "config.json"
-    if not config_file.exists():
-        return []
-    try:
-        config = json.loads(config_file.read_text())
-        raw_paths = config.get("guards", {}).get("runtimeStatePaths", [])
-        result = []
-        for p in raw_paths:
-            expanded = Path(os.path.expanduser(p)).resolve()
-            result.append(expanded)
-        return result
-    except Exception:
-        return []
 
 
 def _is_alive(pid: int) -> bool:
@@ -117,15 +99,6 @@ def main(tool_input: dict) -> None:
                 # else: no lock file → allow
         except ValueError:
             pass
-
-        # Check extra paths from config
-        extra_paths = _load_extra_paths(aimi_dir)
-        for extra in extra_paths:
-            try:
-                target.relative_to(extra)
-                _deny_path(str(target), "State files reflect live runtime")
-            except ValueError:
-                pass
 
     sys.exit(0)
 

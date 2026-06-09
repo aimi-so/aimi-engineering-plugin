@@ -307,30 +307,6 @@ def test_runtime_guard_bypass_env(tmp_path, monkeypatch):
     assert output.strip() == "" or "deny" not in output
 
 
-def test_runtime_guard_custom_config_path(tmp_path, monkeypatch):
-    """Paths in .aimi/config.json guards.runtimeStatePaths should be blocked."""
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.delenv("AIMI_RUNTIME_STATE_GUARD", raising=False)
-    monkeypatch.chdir(tmp_path)
-
-    aimi_dir = tmp_path / ".aimi"
-    aimi_dir.mkdir()
-
-    custom_protected = tmp_path / "custom-protected"
-    custom_protected.mkdir()
-    target = custom_protected / "sensitive.json"
-    target.touch()
-
-    config = {"guards": {"runtimeStatePaths": [str(custom_protected)]}}
-    (aimi_dir / "config.json").write_text(json.dumps(config))
-
-    output, exit_code = _run_guard_runtime_state(monkeypatch, _make_write_input(str(target)))
-
-    assert exit_code == 0
-    result = _parse_deny_output(output)
-    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-
 # ---------------------------------------------------------------------------
 # guard-tasks-presence.py tests
 # ---------------------------------------------------------------------------

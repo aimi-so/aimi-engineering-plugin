@@ -234,6 +234,52 @@ def test_deny_custom_event_name():
 
 
 # ---------------------------------------------------------------------------
+# extract_skill_name tests
+# ---------------------------------------------------------------------------
+
+
+def test_extract_skill_name_nested_shape():
+    """Returns skill name from tool_input.tool_input.skill (Claude Code shape)."""
+    tool_input = {"tool_input": {"skill": "aimi:plan"}}
+    assert hook_utils.extract_skill_name(tool_input) == "aimi:plan"
+
+
+def test_extract_skill_name_flat_fallback():
+    """Returns skill name from tool_input.skill when nested key is absent."""
+    tool_input = {"skill": "aimi:review"}
+    assert hook_utils.extract_skill_name(tool_input) == "aimi:review"
+
+
+def test_extract_skill_name_nested_takes_precedence():
+    """Nested tool_input.tool_input.skill wins over top-level tool_input.skill."""
+    tool_input = {"tool_input": {"skill": "aimi:plan"}, "skill": "aimi:other"}
+    assert hook_utils.extract_skill_name(tool_input) == "aimi:plan"
+
+
+def test_extract_skill_name_returns_none_when_absent():
+    """Returns None when neither shape provides a skill name."""
+    assert hook_utils.extract_skill_name({}) is None
+    assert hook_utils.extract_skill_name({"tool_input": {}}) is None
+    assert hook_utils.extract_skill_name({"tool_input": {"other": "x"}}) is None
+
+
+# ---------------------------------------------------------------------------
+# SCHEMA_VERSIONS tests
+# ---------------------------------------------------------------------------
+
+
+def test_schema_versions_contains_3_3():
+    """SCHEMA_VERSIONS must include '3.3'."""
+    assert "3.3" in hook_utils.SCHEMA_VERSIONS
+
+
+def test_schema_versions_rejects_unknown():
+    """SCHEMA_VERSIONS must not include arbitrary version strings."""
+    assert "1.0" not in hook_utils.SCHEMA_VERSIONS
+    assert "99.0" not in hook_utils.SCHEMA_VERSIONS
+
+
+# ---------------------------------------------------------------------------
 # friction_store tests
 # ---------------------------------------------------------------------------
 
