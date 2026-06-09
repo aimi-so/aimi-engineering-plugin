@@ -1026,6 +1026,137 @@ After all expansions complete (in parallel):
   [plan] Pass 2: N expansion(s) permanently failed (agent-mode: skipping)
   ```
 
+## Phase 3d.5: Cross-Story DAG Audit
+
+After all Pass 2 expansions complete (and the Failure Budget decision is made), the orchestrator optionally spawns a single `aimi-cross-story-auditor` agent to detect cross-story dependency gaps, endpoint-name drift, missing integration tasks, and approach duplication across the full set of staging files. The agent reads all staging JSON contents provided inline in its prompt and emits a `{patches[], unresolved[]}` JSON object. The orchestrator then applies allowlisted patches directly to the staging files using Edit/Write tools before invoking story-merge. This phase is entirely non-blocking: if the auditor fails or produces no useful patches, plan generation continues to Phase 3e without interruption.
+
+### Skip Condition
+
+At Phase 3d.5 entry, count the actual staging JSON files present in `RUN_DIR`, excluding `outline.json`, any filename matching `*outline*.json`, and `metadata.json`:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+_staging_count=$(find "$RUN_DIR" -maxdepth 1 -name '*.json' \
+  ! -name 'outline.json' ! -name '*outline*.json' ! -name 'metadata.json' \
+  | wc -l)
+```
+
+When `_staging_count` is fewer than 2, skip Phase 3d.5 entirely and proceed immediately to Phase 3e. Emit exactly one log line:
+
+```
+[plan] Phase 3d.5 skipped: fewer than 2 stories expanded
+```
+
+No further action is taken in Phase 3d.5. The `unresolved[]` working-memory list remains at its current state (empty or populated by prior phases).
+
+### Auditor Task Spawn
+
+Collect the inputs and spawn the auditor as a single Task:
+
+```
+Task subagent_type="aimi-engineering:workflow:aimi-cross-story-auditor"
+  [model: <AGENT_MODELS.workflow when not "inherit">]
+  prompt: "Audit all staging story JSON objects for cross-story drift and dependency gaps.
+
+  Staging story contents (one block per expanded story):
+  [For each staging JSON file in RUN_DIR (sorted by filename, excluding outline.json,
+   *outline*.json, metadata.json) — emit as a labeled block:]
+  === <idx>-<slug>.json ===
+  <full file contents>
+
+  Full outline (for cross-story dependency reasoning):
+  [full outline.json array rendered as a numbered list: idx. title — summary]
+
+  Consolidated research summary (Phase 1.6):
+  [consolidated research summary from Phase 1.6]
+
+  [If researchFileBlocks is non-empty]:
+  Full research file contents:
+  [researchFileBlocks]
+
+  Failed expansion idx values (do NOT emit patches targeting these):
+  [comma-separated list of zero-padded idx strings that permanently failed expansion,
+   or 'none' when all expansions succeeded]"
+```
+
+The auditor emits its result as a single fenced `json` block at the end of its response. Parse the **last** fenced `json` block from the agent's response text. If no fenced `json` block is found, treat this as a malformed-JSON parse failure and apply the Failure Fallback below.
+
+### Patch Validation and Application
+
+After receiving the auditor's `{patches[], unresolved[]}` output, the orchestrator validates and applies each patch. All patch application is performed **orchestrator-side** using Edit/Write tools — the auditor agent writes no file.
+
+#### Field allowlist
+
+Drop any patch whose `field` value is not one of: `dependsOn`, `tasks`, `notes`. Treat dropped patches as malformed; skip silently without logging.
+
+#### Per-story patch cap
+
+For each distinct `storyIdx` value in the patches array, process at most **10 patches**. Count patches in array order; drop any patch beyond the 10th for a given `storyIdx` silently.
+
+#### `remove` op guard
+
+For patches with `op: remove`, check whether the target `field` exists in the staging JSON before applying. If the field is absent, treat the patch as a no-op and skip silently.
+
+#### Pre-validation (post-patch check)
+
+Before writing a patched staging file to disk, verify that the resulting JSON object:
+1. Parses as valid JSON (well-formed).
+2. Contains the required fields: `title`, `description`, `acceptanceCriteria` (non-empty array), `dependsOn` (array), `verification` (object with `strategy` and `status`).
+
+If the post-patch object fails either check, **roll back that single patch** and continue processing the remaining patches in sequence. Do not propagate the validation failure — skip the offending patch silently.
+
+#### Application procedure
+
+Apply patches in the deterministic order returned by the auditor (array order). For each patch that passes all validation rules:
+
+1. Read the target staging file `<RUN_DIR>/<storyIdx>-<slug>.json`.
+2. Apply the patch operation to the in-memory object:
+   - `op: add` on an array field — append `value` to the existing array; on a scalar field, behave as `replace`.
+   - `op: replace` — overwrite the entire field with `value`.
+   - `op: remove` — delete the field from the object (guarded by the `remove` op guard above).
+3. Run the pre-validation check on the resulting object.
+4. If pre-validation passes, write the patched object back to the staging file using the Edit or Write tool.
+5. Do not modify `outline.json`, `metadata.json`, or any sidecar file — only per-story staging files (`<idx>-<slug>.json`) are eligible for patching.
+
+After all patches are processed, collect any `unresolved[]` entries returned by the auditor and append them to the working-memory `unresolved[]` list (schema: `{storyIdx: string, message: string}`).
+
+### Failure Fallback
+
+If the auditor Task crashes, times out, or its response contains no parseable fenced `json` block (malformed output), skip Phase 3d.5 silently:
+
+1. Sanitize the error string using the same rules as Phase 3d retry sanitization:
+   - Strip any `$(` sequences.
+   - Remove backtick characters.
+   - Replace newlines with spaces.
+   - Truncate to 500 characters.
+
+2. Emit exactly one log line:
+   ```
+   [plan] Phase 3d.5 audit failed: <sanitized error>; proceeding to story-merge without patches
+   ```
+
+3. Append exactly one entry to the working-memory `unresolved[]` list:
+   ```json
+   { "storyIdx": "_audit", "message": "audit failed - no patches applied" }
+   ```
+
+No patches are applied. Proceed immediately to Phase 3e.
+
+### Agent-Mode Behavior
+
+When `INTERACTIVE_MODE=agent`, the audit runs normally: the auditor Task is spawned, patches are validated, and approved patches are applied to staging files. No behavior is suppressed. Any entries accumulated in `unresolved[]` (from auditor output or from the Failure Fallback) are emitted as log lines prefixed `[plan]` rather than surfacing a blocking gate. Emit:
+
+```
+[plan] agent-mode: phase-3d.5 ran with <N> patches, <M> unresolved
+```
+
+where N is the count of patches successfully applied and M is the count of `unresolved[]` entries added during this phase.
+
+### unresolved[] Forwarding
+
+The working-memory `unresolved[]` list (schema: `{storyIdx: string, message: string}`) is accumulated during Phase 3d.5 and forwarded to Step 5 / Phase 4 for inclusion in the plan report. This phase only accumulates and passes the variable — the actual report line and Error Handling rows are added by outline:04 (US-004).
+
 ## Phase 3e: story-merge Invocation
 
 Invoke `aimi-cli story-merge` to consolidate all staging files into a single validated tasks.json. story-merge performs DAG validation, `outline:NN` → `US-NNN` remapping, Rule 22 (mock-sync AC routing), Phase 3.1 (Reference Element Inventory), and Phase 4.1 (Coverage Self-Check) as post-merge sweeps.
