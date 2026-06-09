@@ -12,16 +12,33 @@ if str(_HOOKS_DIR) not in sys.path:
 from hook_utils import load_aimi_config  # noqa: E402
 
 _ROTATE_THRESHOLD_BYTES = 50_000_000
+# Only check file size every _SAMPLE_EVERY writes to avoid a stat() syscall
+# on each append.  Overridable in tests via monkeypatch.
+_SAMPLE_EVERY = 1000
 
 
 def _telemetry_dir() -> Path:
     return Path.home() / ".aimi" / "telemetry"
 
 
+def _counter_path(tdir: Path, category: str) -> Path:
+    """Return path for the per-category write-counter sidecar file."""
+    return tdir / f"{category}.jsonl.counter"
+
+
+def _read_counter(counter_file: Path) -> int:
+    """Read the integer counter from the sidecar; returns 0 on any failure."""
+    try:
+        return int(counter_file.read_text(encoding="utf-8").strip())
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def append(category: str, payload: dict) -> None:
     """Append payload as a single JSON line to ~/.aimi/telemetry/<category>.jsonl.
 
     Rotates the file (rename to .jsonl.1) when it exceeds _ROTATE_THRESHOLD_BYTES.
+    Rotation check is sampled every _SAMPLE_EVERY writes to reduce stat() syscalls.
     Silent on any IO error.
     """
     try:
@@ -29,9 +46,18 @@ def append(category: str, payload: dict) -> None:
         tdir.mkdir(parents=True, exist_ok=True)
         target = tdir / f"{category}.jsonl"
 
-        if target.exists() and target.stat().st_size > _ROTATE_THRESHOLD_BYTES:
-            rotated = tdir / f"{category}.jsonl.1"
-            target.replace(rotated)
+        # Increment per-category write counter and check rotation every _SAMPLE_EVERY writes.
+        cpath = _counter_path(tdir, category)
+        new_count = _read_counter(cpath) + 1
+        try:
+            cpath.write_text(str(new_count), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
+
+        if new_count % _SAMPLE_EVERY == 0:
+            if target.exists() and target.stat().st_size > _ROTATE_THRESHOLD_BYTES:
+                rotated = tdir / f"{category}.jsonl.1"
+                target.replace(rotated)
 
         line = json.dumps(payload, separators=(",", ":")) + "\n"
         with target.open("a", encoding="utf-8") as fh:
