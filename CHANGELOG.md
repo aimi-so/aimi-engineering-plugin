@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.97.3] - 2026-06-09
+
+### Added
+
+- Phase 3b outline validator — non-blocking warnings at Phase 3c gate for entries with `summary < 40` chars and entries whose title/summary path-like tokens have no match in the consolidated research `## File References` section. Cap of 10 warning lines with overflow count.
+- Phase 3d.5 cross-story DAG audit — new `aimi-cross-story-auditor` workflow agent (Read-only) emits `patches[]` and `unresolved[]`; orchestrator applies allowlisted patches (`dependsOn`, `tasks`, `notes`; max 10 per story) to staging files before story-merge. Skipped when fewer than 2 stories expanded. Auditor failure degrades gracefully — proceeds to story-merge without patches.
+
 ## [1.97.2] - 2026-06-03
 
 ### Fixed
