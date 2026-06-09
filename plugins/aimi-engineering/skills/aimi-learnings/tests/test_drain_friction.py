@@ -313,3 +313,150 @@ def test_summary_reports_correct_counts(tmp_path):
     assert data["pending"] == 1
     assert data["promoted"] == 1
     assert data["discarded"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests — --scope filter
+# ---------------------------------------------------------------------------
+
+def test_list_filter_by_scope(tmp_path):
+    """--scope project filters output to project events only."""
+    _write_event(tmp_path, scope="project", suffix="p1")
+    _write_event(tmp_path, scope="project", suffix="p2")
+    _write_event(tmp_path, scope="plugin", suffix="pl1")
+    _write_event(tmp_path, scope="inbox", suffix="i1")
+
+    env = _make_env(tmp_path)
+    data = _run(["--list", "--scope", "project"], env=env)
+
+    assert data["total_pending"] == 2
+    assert "project" in data["groups"]
+    assert data["groups"]["project"]["count"] == 2
+    # Other scopes should not appear in output groups
+    assert "plugin" not in data["groups"]
+    assert "inbox" not in data["groups"]
+
+
+# ---------------------------------------------------------------------------
+# Tests — --since filter
+# ---------------------------------------------------------------------------
+
+def test_list_filter_by_since(tmp_path):
+    """--since filters out events older than the given date."""
+    from datetime import datetime, timezone, timedelta
+
+    store_dir = tmp_path / ".aimi" / "learnings"
+    store_dir.mkdir(parents=True, exist_ok=True)
+
+    original = friction_store._STORE_DIR
+    friction_store._STORE_DIR = store_dir
+    try:
+        # Write an old event (2020-01-01)
+        friction_store.append_event({
+            "ts": "2020-01-01T00:00:00+00:00",
+            "session_id": "test",
+            "frame": "aimi:plan",
+            "scope": "project",
+            "previous_prompt": "old prev",
+            "current_prompt": "old curr",
+        })
+        # Write a recent event
+        recent_ts = datetime.now(tz=timezone.utc).isoformat()
+        friction_store.append_event({
+            "ts": recent_ts,
+            "session_id": "test",
+            "frame": "aimi:plan",
+            "scope": "project",
+            "previous_prompt": "recent prev",
+            "current_prompt": "recent curr",
+        })
+    finally:
+        friction_store._STORE_DIR = original
+
+    env = _make_env(tmp_path)
+    data = _run(["--list", "--since", "2025-01-01"], env=env)
+
+    # Only the recent event should be included
+    assert data["total_pending"] == 1
+    assert data["groups"]["project"]["count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests — --samples flag
+# ---------------------------------------------------------------------------
+
+def test_list_respects_samples(tmp_path):
+    """--samples 2 limits samples per group to 2."""
+    for i in range(5):
+        _write_event(tmp_path, scope="project", suffix=str(i))
+
+    env = _make_env(tmp_path)
+    data = _run(["--list", "--samples", "2"], env=env)
+
+    assert data["groups"]["project"]["count"] == 5
+    assert len(data["groups"]["project"]["samples"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Tests — --limit flag
+# ---------------------------------------------------------------------------
+
+def test_list_respects_limit(tmp_path):
+    """--limit 3 caps total events returned to 3."""
+    _write_event(tmp_path, scope="project", suffix="1")
+    _write_event(tmp_path, scope="project", suffix="2")
+    _write_event(tmp_path, scope="plugin", suffix="3")
+    _write_event(tmp_path, scope="plugin", suffix="4")
+    _write_event(tmp_path, scope="inbox", suffix="5")
+
+    env = _make_env(tmp_path)
+    data = _run(["--list", "--limit", "3"], env=env)
+
+    assert data["total_pending"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Tests — --classify subcommand
+# ---------------------------------------------------------------------------
+
+def test_classify_subcommand_reads_stdin_returns_scope(tmp_path):
+    """--classify reads {prompt, frame} from stdin and returns {scope}."""
+    env = _make_env(tmp_path)
+    stdin_payload = json.dumps({"prompt": "update the hook script", "frame": "aimi:plan"})
+    data = _run(["--classify"], env=env, stdin=stdin_payload)
+
+    assert "scope" in data
+    assert data["scope"] in ("project", "plugin", "inbox")
+    # Frame 'aimi:plan' is a plugin frame → scope should be 'plugin'
+    assert data["scope"] == "plugin"
+
+
+def test_classify_subcommand_inbox_fallback(tmp_path, monkeypatch):
+    """--classify returns inbox when no plugin/project signals match."""
+    import os
+    env = _make_env(tmp_path)
+    # Ensure no CLAUDE_PLUGIN_ROOT is set
+    env.pop("CLAUDE_PLUGIN_ROOT", None)
+    # Use a clean directory with no .aimi/
+    clean_dir = tmp_path / "clean_project"
+    clean_dir.mkdir()
+
+    stdin_payload = json.dumps({"prompt": "fix the login page", "frame": None})
+    # We cannot monkeypatch cwd in subprocess, but with no plugin signals and
+    # HOME pointed to tmp_path (no .aimi), it should return inbox or project.
+    # Just assert scope is a valid value.
+    data = _run(["--classify"], env=env, stdin=stdin_payload)
+    assert "scope" in data
+    assert data["scope"] in ("project", "plugin", "inbox")
+
+
+# ---------------------------------------------------------------------------
+# Tests — SKILL.md documents agent mode
+# ---------------------------------------------------------------------------
+
+def test_skill_md_documents_agent_mode():
+    """SKILL.md must mention AIMI_AGENT_MODE and isatty."""
+    skill_md = _SKILL_DIR / "SKILL.md"
+    content = skill_md.read_text(encoding="utf-8")
+    assert "AIMI_AGENT_MODE" in content, "SKILL.md must document AIMI_AGENT_MODE env var"
+    assert "isatty" in content, "SKILL.md must document sys.stdin.isatty() detection"

@@ -411,3 +411,52 @@ def test_gate_custom_threshold_via_config(monkeypatch, tmp_path):
     data = json.loads(output.strip())
     assert "[LEARNINGS CANDIDATE]" in data["hookSpecificOutput"]["additionalContext"]
     assert "3" in data["hookSpecificOutput"]["additionalContext"]
+
+
+def test_nudge_disabled_via_config(monkeypatch, tmp_path):
+    """config.json with learnings.nudge.enabled=false → silent even with many events."""
+    _write_friction_events(tmp_path, 99)
+
+    aimi_dir = tmp_path / ".aimi"
+    aimi_dir.mkdir(exist_ok=True)
+    config = {"learnings": {"nudge": {"enabled": False}}}
+    (aimi_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+    payload = {"skill_name": "aimi:plan"}
+    output = _run_gate_hook(monkeypatch, tmp_path, payload, cwd=str(tmp_path))
+
+    assert output.strip() == "", "Expected no advisory when nudge.enabled=false"
+
+
+def test_nudge_skipped_in_executor_frame(monkeypatch, tmp_path):
+    """Active frame 'aimi:execute' → exit silent even at threshold."""
+    _write_friction_events(tmp_path, 99)
+
+    # Push an executor frame onto the skill stack
+    _write_frame(tmp_path, sid="default", name="aimi:execute")
+
+    # Patch frame_helpers._session_dir to use tmp_path
+    monkeypatch.setattr(frame_helpers, "_session_dir",
+                        lambda sid: tmp_path / ".aimi" / "session" / sid)
+
+    payload = {"skill_name": "aimi:plan"}
+    output = _run_gate_hook(monkeypatch, tmp_path, payload, cwd=str(tmp_path))
+
+    assert output.strip() == "", "Expected no advisory when executor frame is active"
+
+
+def test_nudge_skipped_in_general_purpose_frame(monkeypatch, tmp_path):
+    """Active frame 'general-purpose' → exit silent even at threshold."""
+    _write_friction_events(tmp_path, 99)
+
+    # Push a general-purpose frame onto the skill stack
+    _write_frame(tmp_path, sid="default", name="general-purpose")
+
+    # Patch frame_helpers._session_dir to use tmp_path
+    monkeypatch.setattr(frame_helpers, "_session_dir",
+                        lambda sid: tmp_path / ".aimi" / "session" / sid)
+
+    payload = {"skill_name": "aimi:plan"}
+    output = _run_gate_hook(monkeypatch, tmp_path, payload, cwd=str(tmp_path))
+
+    assert output.strip() == "", "Expected no advisory when general-purpose frame is active"

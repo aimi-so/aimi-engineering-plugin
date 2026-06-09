@@ -20,6 +20,42 @@ a time, and saves any promoted proposals as draft files under
 `~/.aimi/learnings/proposed/` for your review. Nothing is committed or pushed
 until you decide to act on the drafts.
 
+Pass `--scope <project|plugin|inbox>` to filter to a single scope group.
+Pass `--since <date>` to narrow to events newer than a given date (e.g. `--since 2026-06-01`).
+
+---
+
+## Agent Mode
+
+Agent mode is detected automatically using two signals:
+
+1. **`AIMI_AGENT_MODE=1`** environment variable — explicitly set by orchestrators
+   (e.g. `/aimi:execute`, story-executor skill) when spawning sub-agents.
+2. **`sys.stdin.isatty()` is `False`** — stdin is not a terminal, meaning the
+   skill is being driven programmatically rather than interactively.
+
+When **either** signal is present the skill operates in agent mode:
+
+- **Skip ALL `AskUserQuestion` calls.** Do not prompt the user for decisions.
+- **Run `drain-friction.py --list`** (with any scope/since filters passed as
+  `$ARGUMENTS`) and **emit the JSON report on stdout**. This gives the calling
+  agent a machine-readable summary of the pending friction queue.
+- **NEVER call `--mark`.** Agent mode is read-only. Marking decisions require
+  explicit human interaction and must not be automated.
+
+Example agent-mode output (emitted to stdout, nothing else):
+
+```json
+{
+  "groups": {
+    "project": { "count": 2, "samples": [...] },
+    "plugin":  { "count": 1, "samples": [...] },
+    "inbox":   { "count": 0, "samples": [] }
+  },
+  "total_pending": 3
+}
+```
+
 ---
 
 ## Workflow
@@ -47,7 +83,18 @@ The script outputs JSON in this shape:
 
 If `total_pending` is `0`, report "No pending friction events." and stop.
 
-### Step 2 — Present Top Patterns Per Scope Group
+### Step 2 — Branch: Agent Mode or Interactive Mode
+
+**Before entering the review loop, check for agent mode:**
+
+- If `AIMI_AGENT_MODE=1` is set in the environment, OR if `sys.stdin.isatty()`
+  returns `False`, the skill is running in agent mode.
+- In agent mode: emit the JSON output from Step 1 directly to stdout and stop.
+  Do **not** call `AskUserQuestion`, do **not** call `--mark`. Return immediately.
+
+If not in agent mode, proceed with the interactive review loop below.
+
+### Step 2a — Present Top Patterns Per Scope Group
 
 For each scope group whose `count > 0`, present the top patterns using
 **AskUserQuestion**. Work through groups in this order: `project`, `plugin`,
