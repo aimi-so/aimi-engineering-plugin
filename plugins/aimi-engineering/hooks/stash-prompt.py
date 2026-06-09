@@ -30,6 +30,10 @@ def main(tool_input: dict) -> None:
     tmp = sess_dir / "last-prompt.txt.tmp"
     tmp.write_text(prompt, encoding="utf-8")
     os.replace(tmp, target)
+    try:
+        os.chmod(target, 0o600)
+    except OSError:
+        pass
 
     sys.exit(0)
 

@@ -118,3 +118,37 @@ def test_message_lists_each_offending_path_and_line():
     assert "a.py:4" in msg
     # b.py has hit on line 1
     assert "b.py:1" in msg
+
+
+# ---------------------------------------------------------------------------
+# US-006: AST-based scan correctness
+# ---------------------------------------------------------------------------
+
+def test_ast_scan_ignores_string_literal_shell_true():
+    """shell=True inside a string literal must NOT be flagged."""
+    blob = 'example = "subprocess.run(cmd, shell=True)"\n'
+    out = _run_handler("git commit -m x", ["foo.py"], {"foo.py": blob})
+    assert not out, "String literal with shell=True should not be flagged"
+
+
+def test_ast_scan_ignores_docstring_shell_true():
+    """shell=True inside a module/function docstring must NOT be flagged."""
+    blob = '"""Run with shell=True for convenience."""\nimport subprocess\n'
+    out = _run_handler("git commit -m x", ["foo.py"], {"foo.py": blob})
+    assert not out, "Docstring content should not be flagged"
+
+
+def test_ast_scan_detects_shell_equals_true_with_spaces():
+    """AST scan must catch shell = True (with surrounding spaces)."""
+    blob = "import subprocess\nsubprocess.run(['ls'], shell = True)\n"
+    out = _run_handler("git commit -m x", ["foo.py"], {"foo.py": blob})
+    assert out, "shell = True with spaces should be detected"
+    data = json.loads(out[0])
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_ast_scan_skips_unparseable_python():
+    """SyntaxError in a staged file must not block the commit (file is skipped)."""
+    blob = "def broken(\n    # missing closing paren\n"
+    out = _run_handler("git commit -m x", ["broken.py"], {"broken.py": blob})
+    assert not out, "Unparseable Python should be skipped, not blocked"

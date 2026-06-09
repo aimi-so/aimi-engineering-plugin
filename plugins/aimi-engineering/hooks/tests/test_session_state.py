@@ -95,6 +95,31 @@ def test_stash_prompt_no_prompt_field(monkeypatch, tmp_path):
     assert not result_file.exists()
 
 
+def test_last_prompt_file_mode_is_0600(monkeypatch, tmp_path):
+    """stash-prompt.py must set file mode 0600 on last-prompt.txt after writing."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+
+    payload = {"prompt": "Sensitive prompt content"}
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "stash_prompt_mode_test", _HOOKS_DIR / "stash-prompt.py"
+    )
+    mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+
+    with pytest.raises(SystemExit) as exc_info:
+        mod.main()
+
+    assert exc_info.value.code == 0
+    result_file = _session_dir(tmp_path) / "last-prompt.txt"
+    assert result_file.exists()
+    mode = oct(result_file.stat().st_mode & 0o777)
+    assert mode == oct(0o600), f"Expected 0600, got {mode}"
+
+
 # ---------------------------------------------------------------------------
 # push / pop LIFO tests
 # ---------------------------------------------------------------------------

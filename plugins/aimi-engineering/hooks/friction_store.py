@@ -9,8 +9,25 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
+import sys as _sys
+_HOOKS_DIR = Path(__file__).parent
+if str(_HOOKS_DIR) not in _sys.path:
+    _sys.path.insert(0, str(_HOOKS_DIR))
+from hook_utils import redact_secrets  # noqa: E402
+
 _STORE_DIR = Path.home() / ".aimi" / "learnings"
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}\.jsonl$")
+
+
+def _redact_event(event: dict) -> dict:
+    """Return a shallow copy of *event* with secrets redacted from string values."""
+    result = {}
+    for key, value in event.items():
+        if isinstance(value, str):
+            result[key] = redact_secrets(value)
+        else:
+            result[key] = value
+    return result
 
 
 def _today_file() -> Path:
@@ -37,7 +54,8 @@ def append_event(event: dict) -> None:
 
     Creates parent directories if missing.  If the event does not already
     carry an ``event_id`` field one is generated as the first 16 hex chars of
-    sha256(ts|session_id|sorted-json-payload).
+    sha256(ts|session_id|sorted-json-payload).  String fields in the event are
+    passed through :func:`redact_secrets` before writing.
     """
     if "event_id" not in event:
         ts = event.get("ts", "")
@@ -47,10 +65,18 @@ def append_event(event: dict) -> None:
         event = dict(event)
         event["event_id"] = event_id
 
+    event = _redact_event(event)
+
     target = _today_file()
     target.parent.mkdir(parents=True, exist_ok=True)
+    is_new = not target.exists()
     with target.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(event) + "\n")
+    if is_new:
+        try:
+            os.chmod(target, 0o600)
+        except OSError:
+            pass
 
 
 def read_pending() -> Iterator[dict]:
@@ -268,9 +294,15 @@ def mark_events(
             companion = path.with_name(path.stem + ".promoted.jsonl")
             try:
                 companion.parent.mkdir(parents=True, exist_ok=True)
+                companion_is_new = not companion.exists()
                 with companion.open("a", encoding="utf-8") as cfh:
                     for entry in promoted_entries:
                         cfh.write(json.dumps(entry) + "\n")
+                if companion_is_new:
+                    try:
+                        os.chmod(companion, 0o600)
+                    except OSError:
+                        pass
             except OSError:
                 pass
 
@@ -279,9 +311,15 @@ def mark_events(
             companion = path.with_name(path.stem + ".discarded.jsonl")
             try:
                 companion.parent.mkdir(parents=True, exist_ok=True)
+                companion_is_new = not companion.exists()
                 with companion.open("a", encoding="utf-8") as cfh:
                     for entry in discarded_entries:
                         cfh.write(json.dumps(entry) + "\n")
+                if companion_is_new:
+                    try:
+                        os.chmod(companion, 0o600)
+                    except OSError:
+                        pass
             except OSError:
                 pass
 
