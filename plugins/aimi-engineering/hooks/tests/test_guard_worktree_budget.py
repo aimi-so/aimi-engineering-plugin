@@ -17,10 +17,10 @@ if str(_HOOKS_DIR) not in sys.path:
 import importlib.util as _ilu
 
 _spec = _ilu.spec_from_file_location(
-    "guard_worktree_budget", _HOOKS_DIR / "guard-worktree-budget.py"
+    "pre_bash_dispatcher", _HOOKS_DIR / "pre-bash-dispatcher.py"
 )
-guard_worktree_budget = _ilu.module_from_spec(_spec)  # type: ignore[arg-type]
-_spec.loader.exec_module(guard_worktree_budget)  # type: ignore[union-attr]
+dispatcher = _ilu.module_from_spec(_spec)  # type: ignore[arg-type]
+_spec.loader.exec_module(dispatcher)  # type: ignore[union-attr]
 
 
 # ---------------------------------------------------------------------------
@@ -78,11 +78,11 @@ def _fake_run_factory(active_worktree_count: int, cwd: str = "/repo"):
     return fake_run
 
 
-def _stdin_for(command: str, cwd: str = "") -> io.StringIO:
+def _tool_input_for(command: str, cwd: str = "") -> dict:
     payload: dict = {"command": command}
     if cwd:
         payload["cwd"] = cwd
-    return io.StringIO(json.dumps(payload))
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -97,11 +97,10 @@ def test_allows_when_under_budget(tmp_path, monkeypatch):
     monkeypatch.setattr(
         subprocess, "run", _fake_run_factory(2, str(tmp_path))
     )
-    monkeypatch.setattr("sys.stdin", _stdin_for("git worktree add ../wt-new feat/x"))
     monkeypatch.delenv("AIMI_WORKTREE_BUDGET_GUARD", raising=False)
 
     with pytest.raises(SystemExit) as exc_info:
-        guard_worktree_budget.main()
+        dispatcher.handle_worktree_budget("git worktree add ../wt-new feat/x", _tool_input_for("git worktree add ../wt-new feat/x"))
 
     assert exc_info.value.code == 0
 
@@ -113,7 +112,6 @@ def test_denies_when_at_budget(tmp_path, monkeypatch):
     monkeypatch.setattr(
         subprocess, "run", _fake_run_factory(4, str(tmp_path))
     )
-    monkeypatch.setattr("sys.stdin", _stdin_for("git worktree add ../wt-new feat/x"))
     monkeypatch.delenv("AIMI_WORKTREE_BUDGET_GUARD", raising=False)
 
     captured = []
@@ -124,7 +122,7 @@ def test_denies_when_at_budget(tmp_path, monkeypatch):
     monkeypatch.setattr("builtins.print", fake_print)
 
     with pytest.raises(SystemExit) as exc_info:
-        guard_worktree_budget.main()
+        dispatcher.handle_worktree_budget("git worktree add ../wt-new feat/x", _tool_input_for("git worktree add ../wt-new feat/x"))
 
     assert exc_info.value.code == 0
     assert captured, "Expected deny message to be printed"
@@ -139,11 +137,10 @@ def test_denies_when_over_budget(tmp_path, monkeypatch):
     monkeypatch.setattr(
         subprocess, "run", _fake_run_factory(6, str(tmp_path))
     )
-    monkeypatch.setattr("sys.stdin", _stdin_for("git worktree add ../wt-new feat/x"))
     monkeypatch.delenv("AIMI_WORKTREE_BUDGET_GUARD", raising=False)
 
     with pytest.raises(SystemExit) as exc_info:
-        guard_worktree_budget.main()
+        dispatcher.handle_worktree_budget("git worktree add ../wt-new feat/x", _tool_input_for("git worktree add ../wt-new feat/x"))
 
     assert exc_info.value.code == 0
 
@@ -154,9 +151,8 @@ def test_passes_through_non_worktree_commands(tmp_path, monkeypatch):
     monkeypatch.delenv("AIMI_WORKTREE_BUDGET_GUARD", raising=False)
 
     for cmd in ("git status", "git log --oneline", "ls -la", "npm install"):
-        monkeypatch.setattr("sys.stdin", _stdin_for(cmd))
         with pytest.raises(SystemExit) as exc_info:
-            guard_worktree_budget.main()
+            dispatcher.handle_worktree_budget(cmd, _tool_input_for(cmd))
         assert exc_info.value.code == 0, f"Expected allow for: {cmd!r}"
 
 
@@ -166,9 +162,8 @@ def test_passes_through_non_add_worktree_subcommands(tmp_path, monkeypatch):
     monkeypatch.delenv("AIMI_WORKTREE_BUDGET_GUARD", raising=False)
 
     for cmd in ("git worktree list", "git worktree remove ../old-wt"):
-        monkeypatch.setattr("sys.stdin", _stdin_for(cmd))
         with pytest.raises(SystemExit) as exc_info:
-            guard_worktree_budget.main()
+            dispatcher.handle_worktree_budget(cmd, _tool_input_for(cmd))
         assert exc_info.value.code == 0, f"Expected allow for: {cmd!r}"
 
 
@@ -177,10 +172,9 @@ def test_allows_outside_aimi_project(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("AIMI_WORKTREE_BUDGET_GUARD", raising=False)
     # Do NOT create .aimi/ directory.
-    monkeypatch.setattr("sys.stdin", _stdin_for("git worktree add ../wt-new feat/x"))
 
     with pytest.raises(SystemExit) as exc_info:
-        guard_worktree_budget.main()
+        dispatcher.handle_worktree_budget("git worktree add ../wt-new feat/x", _tool_input_for("git worktree add ../wt-new feat/x"))
 
     assert exc_info.value.code == 0
 
@@ -192,11 +186,10 @@ def test_bypass_env_allows(tmp_path, monkeypatch):
     monkeypatch.setattr(
         subprocess, "run", _fake_run_factory(10, str(tmp_path))
     )
-    monkeypatch.setattr("sys.stdin", _stdin_for("git worktree add ../wt-new feat/x"))
     monkeypatch.setenv("AIMI_WORKTREE_BUDGET_GUARD", "off")
 
     with pytest.raises(SystemExit) as exc_info:
-        guard_worktree_budget.main()
+        dispatcher.handle_worktree_budget("git worktree add ../wt-new feat/x", _tool_input_for("git worktree add ../wt-new feat/x"))
 
     assert exc_info.value.code == 0
 
@@ -216,10 +209,9 @@ def test_parses_git_C_path_cwd(tmp_path, monkeypatch):
 
     # Command uses git -C <project_dir> worktree add
     cmd = f"git -C {project_dir} worktree add ../wt-new feat/x"
-    monkeypatch.setattr("sys.stdin", _stdin_for(cmd))
 
     with pytest.raises(SystemExit) as exc_info:
-        guard_worktree_budget.main()
+        dispatcher.handle_worktree_budget(cmd, _tool_input_for(cmd))
 
     # 0 active worktrees → under budget → allow
     assert exc_info.value.code == 0
@@ -239,10 +231,9 @@ def test_parses_cd_prefix_cwd(tmp_path, monkeypatch):
     monkeypatch.delenv("AIMI_WORKTREE_BUDGET_GUARD", raising=False)
 
     cmd = f"cd {project_dir} && git worktree add ../wt-new feat/x"
-    monkeypatch.setattr("sys.stdin", _stdin_for(cmd))
 
     with pytest.raises(SystemExit) as exc_info:
-        guard_worktree_budget.main()
+        dispatcher.handle_worktree_budget(cmd, _tool_input_for(cmd))
 
     assert exc_info.value.code == 0
 
@@ -254,14 +245,13 @@ def test_reads_max_concurrency_from_metadata(tmp_path, monkeypatch):
     monkeypatch.setattr(
         subprocess, "run", _fake_run_factory(3, str(tmp_path))
     )
-    monkeypatch.setattr("sys.stdin", _stdin_for("git worktree add ../wt-new feat/x"))
     monkeypatch.delenv("AIMI_WORKTREE_BUDGET_GUARD", raising=False)
 
     captured = []
     monkeypatch.setattr("builtins.print", lambda msg: captured.append(msg))
 
     with pytest.raises(SystemExit) as exc_info:
-        guard_worktree_budget.main()
+        dispatcher.handle_worktree_budget("git worktree add ../wt-new feat/x", _tool_input_for("git worktree add ../wt-new feat/x"))
 
     assert exc_info.value.code == 0
     deny_data = json.loads(captured[0])
@@ -275,11 +265,10 @@ def test_default_max_when_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(
         subprocess, "run", _fake_run_factory(4, str(tmp_path))
     )
-    monkeypatch.setattr("sys.stdin", _stdin_for("git worktree add ../wt-new feat/x"))
     monkeypatch.delenv("AIMI_WORKTREE_BUDGET_GUARD", raising=False)
 
     with pytest.raises(SystemExit) as exc_info:
-        guard_worktree_budget.main()
+        dispatcher.handle_worktree_budget("git worktree add ../wt-new feat/x", _tool_input_for("git worktree add ../wt-new feat/x"))
 
     assert exc_info.value.code == 0
 
@@ -291,14 +280,13 @@ def test_message_lists_tasks_file_path(tmp_path, monkeypatch):
     monkeypatch.setattr(
         subprocess, "run", _fake_run_factory(2, str(tmp_path))
     )
-    monkeypatch.setattr("sys.stdin", _stdin_for("git worktree add ../wt-new feat/x"))
     monkeypatch.delenv("AIMI_WORKTREE_BUDGET_GUARD", raising=False)
 
     captured = []
     monkeypatch.setattr("builtins.print", lambda msg: captured.append(msg))
 
     with pytest.raises(SystemExit) as exc_info:
-        guard_worktree_budget.main()
+        dispatcher.handle_worktree_budget("git worktree add ../wt-new feat/x", _tool_input_for("git worktree add ../wt-new feat/x"))
 
     assert exc_info.value.code == 0
     deny_data = json.loads(captured[0])
