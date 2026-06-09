@@ -49,6 +49,14 @@ This file provides base rules. Skill-level AGENTS.md files are additive and doma
 Skill rules extend but never override safety escapes.
 </precedence>
 
+## Hook Response Markers
+
+Markers in `additionalContext` are advisory. They never block execution. Treat them as hints; do not interrupt the current task to act on a marker unless explicitly directed.
+
+| Marker | Source | Expected Agent Action |
+|---|---|---|
+| `[LEARNINGS CANDIDATE]` | gate-friction-threshold | If you are the top-level user session, consider running `/aimi:learnings` to triage. If you are an autonomous Task agent inside `/aimi:execute`, IGNORE — only the user-facing session should invoke triage. |
+
 <research_return_contract>
 Research agent Task returns use the pointer-block form — a fenced YAML block with keys
 `research_file` (the written path), `summary` (exactly 3 headline bullets, compressed per

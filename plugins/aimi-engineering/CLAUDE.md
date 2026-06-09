@@ -140,6 +140,18 @@ One CLI subcommand manages the story-merge lifecycle. It is consumed by the `/ai
    - AGENTS.md defines the rules; this file references them (no duplication)
    - AGENTS.md is portable across tools (Claude Code, OpenCode) and is the single source of truth for spawned agent behavior
 
+## Guard Bypass Envs
+
+Hooks support per-guard bypass via environment variables. Set `<name>=off` (or unset to leave the guard active). Bypass is intentional escape hatch — use sparingly and document why.
+
+| Env Var | Hook | Behavior when `off` |
+|---|---|---|
+| `AIMI_DEFAULT_BRANCH_GUARD` | pre-bash-dispatcher (default-branch handler) | Allows commits on protected branches (main/master/develop) |
+| `AIMI_SHELL_TRUE_GUARD` | pre-bash-dispatcher (shell-true handler) | Allows commits with shell=True in staged Python files |
+| `AIMI_WORKTREE_BUDGET_GUARD` | pre-bash-dispatcher (worktree-budget handler) | Allows git worktree add beyond metadata.maxConcurrency |
+| `AIMI_RUNTIME_STATE_GUARD` | guard-runtime-state | Allows direct Write/Edit to .aimi/state/, .aimi/tasks during execution, friction/telemetry logs |
+| `AIMI_AGENT_MODE` | aimi-learnings skill | Forces JSON-only read-only path; never marks events |
+
 ## Dependencies
 
 This plugin is fully standalone. No external plugin dependencies required.
