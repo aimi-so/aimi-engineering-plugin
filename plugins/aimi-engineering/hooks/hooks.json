@@ -48,6 +48,15 @@
         ]
       },
       {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/guard-worktree-budget.py"
+          }
+        ]
+      },
+      {
         "matcher": "Skill",
         "hooks": [
           {
