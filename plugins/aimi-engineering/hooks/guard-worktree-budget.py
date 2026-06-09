@@ -14,45 +14,11 @@ _HOOKS_DIR = Path(__file__).parent
 if str(_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(_HOOKS_DIR))
 
-from hook_utils import safe_hook, safe_json_input  # noqa: E402
-
-
-def _deny(message: str) -> None:
-    """Write a Claude Code hook deny response to stdout and exit 2."""
-    print(json.dumps({"decision": "block", "reason": message}))
-    sys.exit(2)
+from hook_utils import safe_hook, safe_json_input, effective_cwd, deny  # noqa: E402
 
 
 def _allow() -> None:
     sys.exit(0)
-
-
-def _detect_cwd(tool_input: dict) -> str:
-    """Detect the effective working directory from the Bash tool input.
-
-    Priority:
-    1. Parse ``git -C <path>`` from the command string.
-    2. Parse a leading ``cd <path> &&`` from the command string.
-    3. Fall back to tool_input["cwd"] if present.
-    4. Fall back to os.getcwd().
-    """
-    command = tool_input.get("command", "")
-
-    # git -C <path>
-    m = re.search(r"git\s+-C\s+(\S+)", command)
-    if m:
-        return m.group(1)
-
-    # cd <path> &&
-    m = re.match(r"^\s*cd\s+(\S+)\s*&&", command)
-    if m:
-        return m.group(1)
-
-    # tool_input cwd
-    if tool_input.get("cwd"):
-        return tool_input["cwd"]
-
-    return os.getcwd()
 
 
 def _find_tasks_json(start: str):
@@ -112,9 +78,9 @@ def main(tool_input: dict) -> None:
     if os.environ.get("AIMI_WORKTREE_BUDGET_GUARD", "").lower() == "off":
         _allow()
 
-    effective_cwd = _detect_cwd(tool_input)
+    cwd = effective_cwd(tool_input.get("command", ""), tool_input)
 
-    root, tasks_path = _find_tasks_json(effective_cwd)
+    root, tasks_path = _find_tasks_json(cwd)
     if root is None:
         # Not inside an aimi-managed project — silent allow.
         _allow()
@@ -129,15 +95,16 @@ def main(tool_input: dict) -> None:
     except Exception:  # noqa: BLE001
         pass
 
-    active_count = _count_active_worktrees(effective_cwd)
+    active_count = _count_active_worktrees(cwd)
 
     if active_count >= max_concurrency:
         rel_path = tasks_path.relative_to(root)
-        _deny(
+        print(deny(
             f"Worktree budget exhausted: {active_count}/{max_concurrency} active.\n"
             f"Wait for an in-flight story to complete, or raise metadata.maxConcurrency\n"
             f"in {rel_path}. Set AIMI_WORKTREE_BUDGET_GUARD=off to bypass."
-        )
+        ))
+        sys.exit(0)
 
     _allow()
 

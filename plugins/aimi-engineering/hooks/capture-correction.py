@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import json
-import os
 import re
 import sys
 import time
@@ -13,7 +11,7 @@ _HOOKS_DIR = Path(__file__).parent
 if str(_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(_HOOKS_DIR))
 
-from hook_utils import safe_hook, safe_json_input  # noqa: E402
+from hook_utils import safe_hook, safe_json_input, resolve_session_id  # noqa: E402
 import friction_store  # noqa: E402
 import frame_helpers  # noqa: E402
 import scope_classifier  # noqa: E402
@@ -36,16 +34,6 @@ _CORRECTION_PATTERNS: list[re.Pattern[str]] = [
 _STALE_THRESHOLD_SECS = 300  # 5 minutes
 
 
-def _resolve_session_id(tool_input: dict) -> str:
-    sid = tool_input.get("session_id")
-    if sid:
-        return str(sid)
-    sid = os.environ.get("CLAUDE_SESSION_ID")
-    if sid:
-        return str(sid)
-    return "default"
-
-
 def _session_dir(session_id: str) -> Path:
     return Path.home() / ".aimi" / "session" / session_id
 
@@ -62,7 +50,7 @@ def main(tool_input: dict) -> None:
         sys.exit(0)
 
     # Load previous prompt from session file
-    sid = _resolve_session_id(tool_input)
+    sid = resolve_session_id(tool_input)
     sess_dir = _session_dir(sid)
     last_prompt_file = sess_dir / "last-prompt.txt"
 

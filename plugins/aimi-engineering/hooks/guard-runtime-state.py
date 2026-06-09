@@ -10,38 +10,18 @@ _HOOKS_DIR = Path(__file__).parent
 if str(_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(_HOOKS_DIR))
 
-from hook_utils import safe_hook, safe_json_input  # noqa: E402
+from hook_utils import safe_hook, safe_json_input, find_aimi_dir, deny  # noqa: E402
 
 
-def _deny(path: str, reason: str) -> None:
+def _deny_path(path: str, reason: str) -> None:
     msg = (
         f"Direct edits to runtime state are blocked:\n"
         f"  {path}\n"
         f"This file is owned by the aimi runtime. {reason}.\n"
         f"Set AIMI_RUNTIME_STATE_GUARD=off to bypass intentionally."
     )
-    output = {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "userMessage": msg,
-        }
-    }
-    print(json.dumps(output))
+    print(deny(msg))
     sys.exit(0)
-
-
-def _find_aimi_dir(start: Path) -> Path | None:
-    """Walk up from start to find the first directory containing .aimi/."""
-    current = start.resolve()
-    while True:
-        candidate = current / ".aimi"
-        if candidate.is_dir():
-            return candidate
-        parent = current.parent
-        if parent == current:
-            return None
-        current = parent
 
 
 def _load_extra_paths(aimi_dir: Path) -> list[Path]:
@@ -93,20 +73,20 @@ def main(tool_input: dict) -> None:
     # Always-blocked: ~/.aimi/learnings/ (recursive)
     try:
         target.relative_to(learnings_dir)
-        _deny(str(target), "Friction log is append-only")
+        _deny_path(str(target), "Friction log is append-only")
     except ValueError:
         pass
 
     # Always-blocked: ~/.aimi/telemetry/ (recursive)
     try:
         target.relative_to(telemetry_dir)
-        _deny(str(target), "Telemetry log is append-only")
+        _deny_path(str(target), "Telemetry log is append-only")
     except ValueError:
         pass
 
     # Find .aimi/ directory by walking up from cwd.
     cwd = Path(os.getcwd()).resolve()
-    aimi_dir = _find_aimi_dir(cwd)
+    aimi_dir = find_aimi_dir(cwd)
 
     if aimi_dir is not None:
         state_dir = (aimi_dir / "state").resolve()
@@ -116,7 +96,7 @@ def main(tool_input: dict) -> None:
         # Always-blocked: any path inside .aimi/state/ (recursive)
         try:
             target.relative_to(state_dir)
-            _deny(str(target), "State files reflect live runtime")
+            _deny_path(str(target), "State files reflect live runtime")
         except ValueError:
             pass
 
@@ -130,7 +110,7 @@ def main(tool_input: dict) -> None:
                         pid_text = lock_file.read_text().strip()
                         pid = int(pid_text)
                         if _is_alive(pid):
-                            _deny(str(target), "Execute lock is active")
+                            _deny_path(str(target), "Execute lock is active")
                         # else: pid dead, allow
                     except (ValueError, OSError):
                         pass  # unreadable / bad pid → allow
@@ -143,7 +123,7 @@ def main(tool_input: dict) -> None:
         for extra in extra_paths:
             try:
                 target.relative_to(extra)
-                _deny(str(target), "State files reflect live runtime")
+                _deny_path(str(target), "State files reflect live runtime")
             except ValueError:
                 pass
 

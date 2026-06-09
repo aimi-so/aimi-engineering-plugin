@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import json
 import os
 import re
 import subprocess
@@ -9,23 +8,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from hook_utils import safe_hook, safe_json_input  # noqa: E402
-
-
-def _effective_cwd(command: str, tool_input: dict) -> str:
-    """Extract effective cwd from a git command string."""
-    m = re.search(r"\bgit\s+-C\s+(\S+)", command)
-    if m:
-        return os.path.abspath(os.path.expanduser(m.group(1)))
-
-    m = re.match(r"\s*cd\s+(\S+)\s*&&", command)
-    if m:
-        return os.path.abspath(os.path.expanduser(m.group(1)))
-
-    cwd = tool_input.get("cwd")
-    if cwd:
-        return os.path.abspath(os.path.expanduser(cwd))
-    return os.getcwd()
+from hook_utils import safe_hook, safe_json_input, effective_cwd, deny  # noqa: E402
 
 
 def _scan_for_shell_true(blob: str) -> list[int]:
@@ -75,7 +58,7 @@ def main(tool_input: dict) -> None:
     if os.environ.get("AIMI_SHELL_TRUE_GUARD") == "off":
         sys.exit(0)
 
-    cwd = _effective_cwd(command, tool_input)
+    cwd = effective_cwd(command, tool_input)
 
     try:
         result = subprocess.run(
@@ -114,17 +97,7 @@ def main(tool_input: dict) -> None:
             f"{lines}\n"
             "Use shell=False with an argv list, or move the constant into a small helper that quotes inputs."
         )
-        print(
-            json.dumps(
-                {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "userMessage": msg,
-                    }
-                }
-            )
-        )
+        print(deny(msg))
     sys.exit(0)
 
 

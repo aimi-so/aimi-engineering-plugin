@@ -10,17 +10,7 @@ _HOOKS_DIR = Path(__file__).parent
 if str(_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(_HOOKS_DIR))
 
-from hook_utils import safe_hook, safe_json_input  # noqa: E402
-
-
-def _resolve_session_id(tool_input: dict) -> str:
-    sid = tool_input.get("session_id")
-    if sid:
-        return str(sid)
-    sid = os.environ.get("CLAUDE_SESSION_ID")
-    if sid:
-        return str(sid)
-    return "default"
+from hook_utils import safe_hook, safe_json_input, resolve_session_id  # noqa: E402
 
 
 def _extract_skill_name(tool_input: dict) -> str | None:
@@ -47,7 +37,7 @@ def main(tool_input: dict) -> None:
     if not skill_name:
         sys.exit(0)
 
-    sid = _resolve_session_id(tool_input)
+    sid = resolve_session_id(tool_input)
     sess_dir = _session_dir(sid)
     stack_file = sess_dir / "skill-stack.jsonl"
 
@@ -73,8 +63,7 @@ def main(tool_input: dict) -> None:
     tmp = sess_dir / "skill-stack.jsonl.tmp"
     content = "".join(json.dumps(f) + "\n" for f in frames)
     tmp.write_text(content, encoding="utf-8")
-    import os as _os
-    _os.replace(tmp, stack_file)
+    os.replace(tmp, stack_file)
 
     sys.exit(0)
 

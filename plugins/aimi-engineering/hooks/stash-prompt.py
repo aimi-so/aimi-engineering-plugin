@@ -9,17 +9,7 @@ _HOOKS_DIR = Path(__file__).parent
 if str(_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(_HOOKS_DIR))
 
-from hook_utils import safe_hook, safe_json_input  # noqa: E402
-
-
-def _resolve_session_id(tool_input: dict) -> str:
-    sid = tool_input.get("session_id")
-    if sid:
-        return str(sid)
-    sid = os.environ.get("CLAUDE_SESSION_ID")
-    if sid:
-        return str(sid)
-    return "default"
+from hook_utils import safe_hook, safe_json_input, resolve_session_id  # noqa: E402
 
 
 def _session_dir(session_id: str) -> Path:
@@ -32,7 +22,7 @@ def main(tool_input: dict) -> None:
     if not prompt:
         sys.exit(0)
 
-    sid = _resolve_session_id(tool_input)
+    sid = resolve_session_id(tool_input)
     sess_dir = _session_dir(sid)
     sess_dir.mkdir(parents=True, exist_ok=True)
 

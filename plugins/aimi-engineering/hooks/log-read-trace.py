@@ -10,19 +10,9 @@ _HOOKS_DIR = Path(__file__).parent
 if str(_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(_HOOKS_DIR))
 
-from hook_utils import safe_hook, safe_json_input  # noqa: E402
+from hook_utils import safe_hook, safe_json_input, resolve_session_id  # noqa: E402
 import frame_helpers  # noqa: E402
 import telemetry_writer  # noqa: E402
-
-
-def _resolve_session_id(tool_input: dict) -> str:
-    sid = tool_input.get("session_id")
-    if sid:
-        return str(sid)
-    sid = os.environ.get("CLAUDE_SESSION_ID")
-    if sid:
-        return str(sid)
-    return "default"
 
 
 @safe_hook
@@ -45,7 +35,7 @@ def main(tool_input: dict) -> None:
     except Exception:  # noqa: BLE001
         size_bytes = 0
 
-    session_id = _resolve_session_id(tool_input)
+    session_id = resolve_session_id(tool_input)
     frame = frame_helpers.current_frame(session_id)
     frame_name: str | None = frame.get("name") if frame else None
 

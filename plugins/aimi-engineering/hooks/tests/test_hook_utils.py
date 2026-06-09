@@ -74,6 +74,166 @@ def test_is_quiet_mode_reads_flag(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# load_aimi_config tests
+# ---------------------------------------------------------------------------
+
+
+def test_load_aimi_config_returns_empty_when_missing(tmp_path, monkeypatch):
+    """Returns {} when no .aimi/config.json exists."""
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(tmp_path))
+    assert hook_utils.load_aimi_config() == {}
+
+
+def test_load_aimi_config_returns_parsed_dict(tmp_path, monkeypatch):
+    """Returns the parsed dict when config is valid JSON."""
+    config_dir = tmp_path / ".aimi"
+    config_dir.mkdir()
+    data = {"quietMode": True, "telemetry": {"enabled": False}}
+    (config_dir / "config.json").write_text(json.dumps(data))
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(tmp_path))
+    assert hook_utils.load_aimi_config() == data
+
+
+def test_load_aimi_config_returns_empty_on_bad_json(tmp_path, monkeypatch):
+    """Returns {} when config.json contains invalid JSON."""
+    config_dir = tmp_path / ".aimi"
+    config_dir.mkdir()
+    (config_dir / "config.json").write_text("not valid json {{")
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(tmp_path))
+    assert hook_utils.load_aimi_config() == {}
+
+
+def test_load_aimi_config_walks_up(tmp_path, monkeypatch):
+    """Finds config.json by walking up from a nested directory."""
+    config_dir = tmp_path / ".aimi"
+    config_dir.mkdir()
+    data = {"quietMode": True}
+    (config_dir / "config.json").write_text(json.dumps(data))
+    # start from a nested dir that doesn't have its own .aimi
+    nested = tmp_path / "sub" / "deep"
+    nested.mkdir(parents=True)
+    result = hook_utils.load_aimi_config(start=nested)
+    assert result == data
+
+
+# ---------------------------------------------------------------------------
+# effective_cwd tests
+# ---------------------------------------------------------------------------
+
+
+def test_effective_cwd_git_dash_c():
+    """Parses `git -C <path>` from command string."""
+    import os
+    result = hook_utils.effective_cwd("git -C /tmp/foo commit -m 'msg'", {})
+    assert result == os.path.abspath(os.path.expanduser("/tmp/foo"))
+
+
+def test_effective_cwd_cd_prefix():
+    """Parses `cd <path> &&` from command string."""
+    import os
+    result = hook_utils.effective_cwd("cd /tmp/bar && git commit -m 'x'", {})
+    assert result == os.path.abspath(os.path.expanduser("/tmp/bar"))
+
+
+def test_effective_cwd_tool_input_cwd():
+    """Falls back to tool_input['cwd'] when no pattern matches."""
+    import os
+    result = hook_utils.effective_cwd("git commit -m 'x'", {"cwd": "/tmp/baz"})
+    assert result == os.path.abspath(os.path.expanduser("/tmp/baz"))
+
+
+def test_effective_cwd_fallback_getcwd(monkeypatch):
+    """Falls back to os.getcwd() when nothing else matches."""
+    import os
+    monkeypatch.chdir("/tmp")
+    result = hook_utils.effective_cwd("echo hello", {})
+    assert result == os.getcwd()
+
+
+# ---------------------------------------------------------------------------
+# resolve_session_id tests
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_session_id_from_tool_input():
+    """Returns session_id from tool_input when present."""
+    result = hook_utils.resolve_session_id({"session_id": "abc123"})
+    assert result == "abc123"
+
+
+def test_resolve_session_id_from_env(monkeypatch):
+    """Returns CLAUDE_SESSION_ID from environment when tool_input lacks it."""
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "env-session")
+    result = hook_utils.resolve_session_id({})
+    assert result == "env-session"
+
+
+def test_resolve_session_id_default(monkeypatch):
+    """Returns 'default' when neither tool_input nor env has the value."""
+    monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+    result = hook_utils.resolve_session_id({})
+    assert result == "default"
+
+
+def test_resolve_session_id_tool_input_takes_precedence(monkeypatch):
+    """tool_input.session_id wins over CLAUDE_SESSION_ID."""
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "env-session")
+    result = hook_utils.resolve_session_id({"session_id": "tool-session"})
+    assert result == "tool-session"
+
+
+# ---------------------------------------------------------------------------
+# find_aimi_dir tests
+# ---------------------------------------------------------------------------
+
+
+def test_find_aimi_dir_returns_none_when_missing(tmp_path):
+    """Returns None when no .aimi directory exists."""
+    result = hook_utils.find_aimi_dir(tmp_path)
+    assert result is None
+
+
+def test_find_aimi_dir_finds_at_start(tmp_path):
+    """Returns the .aimi directory when it exists at the start path."""
+    aimi = tmp_path / ".aimi"
+    aimi.mkdir()
+    result = hook_utils.find_aimi_dir(tmp_path)
+    assert result == aimi
+
+
+def test_find_aimi_dir_walks_up(tmp_path):
+    """Finds .aimi directory by walking up from a nested path."""
+    aimi = tmp_path / ".aimi"
+    aimi.mkdir()
+    nested = tmp_path / "sub" / "deep"
+    nested.mkdir(parents=True)
+    result = hook_utils.find_aimi_dir(nested)
+    assert result == aimi
+
+
+# ---------------------------------------------------------------------------
+# deny tests
+# ---------------------------------------------------------------------------
+
+
+def test_deny_returns_canonical_json():
+    """Returns well-formed hookSpecificOutput deny JSON."""
+    msg = "You shall not pass."
+    result = hook_utils.deny(msg)
+    parsed = json.loads(result)
+    assert parsed["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+    assert parsed["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert parsed["hookSpecificOutput"]["userMessage"] == msg
+
+
+def test_deny_custom_event_name():
+    """Accepts a custom event_name."""
+    result = hook_utils.deny("msg", event_name="PostToolUse")
+    parsed = json.loads(result)
+    assert parsed["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+
+
+# ---------------------------------------------------------------------------
 # friction_store tests
 # ---------------------------------------------------------------------------
 

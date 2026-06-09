@@ -107,7 +107,7 @@ def test_allows_when_under_budget(tmp_path, monkeypatch):
 
 
 def test_denies_when_at_budget(tmp_path, monkeypatch):
-    """active=4, max=4 → deny, message includes '4/4'."""
+    """active=4, max=4 → deny (exit 0), message includes '4/4'."""
     _make_tasks_json(tmp_path, max_concurrency=4)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
@@ -126,14 +126,14 @@ def test_denies_when_at_budget(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc_info:
         guard_worktree_budget.main()
 
-    assert exc_info.value.code == 2
+    assert exc_info.value.code == 0
     assert captured, "Expected deny message to be printed"
     deny_data = json.loads(captured[0])
-    assert "4/4" in deny_data["reason"]
+    assert "4/4" in deny_data["hookSpecificOutput"]["userMessage"]
 
 
 def test_denies_when_over_budget(tmp_path, monkeypatch):
-    """active=6, max=5 → deny."""
+    """active=6, max=5 → deny (exit 0)."""
     _make_tasks_json(tmp_path, max_concurrency=5)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
@@ -145,7 +145,7 @@ def test_denies_when_over_budget(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc_info:
         guard_worktree_budget.main()
 
-    assert exc_info.value.code == 2
+    assert exc_info.value.code == 0
 
 
 def test_passes_through_non_worktree_commands(tmp_path, monkeypatch):
@@ -248,7 +248,7 @@ def test_parses_cd_prefix_cwd(tmp_path, monkeypatch):
 
 
 def test_reads_max_concurrency_from_metadata(tmp_path, monkeypatch):
-    """tasks.json with metadata.maxConcurrency=3, active=3 → deny."""
+    """tasks.json with metadata.maxConcurrency=3, active=3 → deny (exit 0)."""
     _make_tasks_json(tmp_path, max_concurrency=3)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
@@ -263,9 +263,9 @@ def test_reads_max_concurrency_from_metadata(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc_info:
         guard_worktree_budget.main()
 
-    assert exc_info.value.code == 2
+    assert exc_info.value.code == 0
     deny_data = json.loads(captured[0])
-    assert "3/3" in deny_data["reason"]
+    assert "3/3" in deny_data["hookSpecificOutput"]["userMessage"]
 
 
 def test_default_max_when_missing(tmp_path, monkeypatch):
@@ -300,7 +300,7 @@ def test_message_lists_tasks_file_path(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc_info:
         guard_worktree_budget.main()
 
-    assert exc_info.value.code == 2
+    assert exc_info.value.code == 0
     deny_data = json.loads(captured[0])
     # Should contain the relative path .aimi/tasks/2026-06-09-test-tasks.json
-    assert ".aimi/tasks/2026-06-09-test-tasks.json" in deny_data["reason"]
+    assert ".aimi/tasks/2026-06-09-test-tasks.json" in deny_data["hookSpecificOutput"]["userMessage"]

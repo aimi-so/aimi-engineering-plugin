@@ -12,7 +12,7 @@ _HOOKS_DIR = Path(__file__).parent
 if str(_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(_HOOKS_DIR))
 
-from hook_utils import safe_hook, safe_json_input, is_quiet_mode  # noqa: E402
+from hook_utils import safe_hook, safe_json_input, is_quiet_mode, load_aimi_config  # noqa: E402
 import friction_store  # noqa: E402
 
 _BUDGET_SECS = 0.5  # 500 ms hard budget
@@ -20,22 +20,7 @@ _BUDGET_SECS = 0.5  # 500 ms hard budget
 
 def _read_banner_enabled() -> bool:
     """Walk up from cwd looking for .aimi/config.json -> banner.enabled (default True)."""
-    import os
-
-    start = Path(os.getcwd())
-    current = start
-    while True:
-        candidate = current / ".aimi" / "config.json"
-        if candidate.exists():
-            try:
-                config = json.loads(candidate.read_text(encoding="utf-8"))
-                return bool(config.get("banner", {}).get("enabled", True))
-            except Exception:  # noqa: BLE001
-                return True
-        parent = current.parent
-        if parent == current:
-            return True
-        current = parent
+    return bool(load_aimi_config().get("banner", {}).get("enabled", True))
 
 
 def _read_telemetry_file(path: Path, cutoff: datetime) -> list[dict]:

@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
+
+_HOOKS_DIR = Path(__file__).parent
+if str(_HOOKS_DIR) not in sys.path:
+    sys.path.insert(0, str(_HOOKS_DIR))
+
+from hook_utils import load_aimi_config  # noqa: E402
 
 _ROTATE_THRESHOLD_BYTES = 50_000_000
 
@@ -39,19 +46,4 @@ def is_telemetry_enabled() -> bool:
     Returns config.get("telemetry", {}).get("enabled", True).
     Defaults to True when file is missing.
     """
-    root = os.environ.get("CLAUDE_PLUGIN_ROOT")
-    start = Path(root) if root else Path(os.getcwd())
-
-    current = start
-    while True:
-        candidate = current / ".aimi" / "config.json"
-        if candidate.exists():
-            try:
-                config = json.loads(candidate.read_text(encoding="utf-8"))
-                return bool(config.get("telemetry", {}).get("enabled", True))
-            except Exception:  # noqa: BLE001
-                return True
-        parent = current.parent
-        if parent == current:
-            return True
-        current = parent
+    return bool(load_aimi_config().get("telemetry", {}).get("enabled", True))

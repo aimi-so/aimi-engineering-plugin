@@ -10,32 +10,7 @@ _HOOKS_DIR = Path(__file__).parent
 if str(_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(_HOOKS_DIR))
 
-from hook_utils import safe_hook, safe_json_input  # noqa: E402
-
-
-def _deny(message: str) -> None:
-    output = {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "userMessage": message,
-        }
-    }
-    print(json.dumps(output))
-    sys.exit(0)
-
-
-def _find_aimi_dir(start: Path) -> Path | None:
-    """Walk up from start to find the first directory containing .aimi/."""
-    current = start.resolve()
-    while True:
-        candidate = current / ".aimi"
-        if candidate.is_dir():
-            return candidate
-        parent = current.parent
-        if parent == current:
-            return None
-        current = parent
+from hook_utils import safe_hook, safe_json_input, find_aimi_dir, deny  # noqa: E402
 
 
 _EXECUTE_SKILLS = {"aimi:execute", "aimi-engineering:execute"}
@@ -55,20 +30,22 @@ def main(tool_input: dict) -> None:
         sys.exit(0)
 
     cwd = Path(os.getcwd()).resolve()
-    aimi_dir = _find_aimi_dir(cwd)
+    aimi_dir = find_aimi_dir(cwd)
 
     if aimi_dir is None:
-        _deny(
+        print(deny(
             "No .aimi/ directory found in walk-up from CWD. "
             "Run /aimi:plan first to create the task structure."
-        )
+        ))
+        sys.exit(0)
 
     tasks_dir = aimi_dir / "tasks"
     if not tasks_dir.is_dir():
-        _deny(
+        print(deny(
             "No tasks.json detected in .aimi/tasks/. "
             "Run /aimi:plan to generate one."
-        )
+        ))
+        sys.exit(0)
 
     tasks_files = sorted(
         tasks_dir.glob("*-tasks.json"),
@@ -77,10 +54,11 @@ def main(tool_input: dict) -> None:
     )
 
     if not tasks_files:
-        _deny(
+        print(deny(
             "No tasks.json detected in .aimi/tasks/. "
             "Run /aimi:plan to generate one."
-        )
+        ))
+        sys.exit(0)
 
     # Pick the most recent by mtime.
     latest = tasks_files[0]
@@ -88,14 +66,16 @@ def main(tool_input: dict) -> None:
     try:
         data = json.loads(latest.read_text())
     except Exception as exc:
-        _deny(f"Failed to parse tasks file {latest}: {exc}")
+        print(deny(f"Failed to parse tasks file {latest}: {exc}"))
+        sys.exit(0)
 
     schema_version = data.get("schemaVersion")
     if schema_version != "3.3":
-        _deny(
+        print(deny(
             f"tasks file {latest} has schemaVersion {schema_version!r}, "
             f"expected '3.3'."
-        )
+        ))
+        sys.exit(0)
 
     sys.exit(0)
 

@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import json
-import os
+import sys
 from pathlib import Path
+
+_HOOKS_DIR = Path(__file__).parent
+if str(_HOOKS_DIR) not in sys.path:
+    sys.path.insert(0, str(_HOOKS_DIR))
+
+from hook_utils import resolve_session_id as _resolve_session_id_from_tool_input  # noqa: E402
 
 
 def _resolve_session_id(session_id: str | None) -> str:
+    # frame_helpers accepts session_id as a positional/keyword str arg (not tool_input dict)
+    # We map it to resolve_session_id by constructing a minimal tool_input when not None.
     if session_id is not None:
         return str(session_id)
-    sid = os.environ.get("CLAUDE_SESSION_ID")
-    if sid:
-        return str(sid)
-    return "default"
+    return _resolve_session_id_from_tool_input({})
 
 
 def _session_dir(session_id: str) -> Path:

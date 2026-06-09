@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -10,18 +9,11 @@ _HOOKS_DIR = Path(__file__).parent
 if str(_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(_HOOKS_DIR))
 
-from hook_utils import safe_hook, safe_json_input  # noqa: E402
+from hook_utils import safe_hook, safe_json_input, load_aimi_config, resolve_session_id  # noqa: E402
 import friction_store  # noqa: E402
 
 _SKIP_SKILLS = {"aimi:learnings", "aimi-engineering:learnings"}
 _DEFAULT_THRESHOLD = 5
-
-
-def _resolve_session_id() -> str:
-    sid = os.environ.get("CLAUDE_SESSION_ID")
-    if sid:
-        return str(sid)
-    return "default"
 
 
 def _session_dir(session_id: str) -> Path:
@@ -29,23 +21,14 @@ def _session_dir(session_id: str) -> Path:
 
 
 def _read_threshold() -> int:
-    """Walk up from cwd to find .aimi/config.json and read learnings.frictionThreshold."""
-    current = Path(os.getcwd()).resolve()
-    while True:
-        candidate = current / ".aimi" / "config.json"
-        if candidate.exists():
-            try:
-                config = json.loads(candidate.read_text(encoding="utf-8"))
-                learnings = config.get("learnings", {})
-                threshold = learnings.get("frictionThreshold", _DEFAULT_THRESHOLD)
-                return int(threshold)
-            except Exception:  # noqa: BLE001
-                return _DEFAULT_THRESHOLD
-        parent = current.parent
-        if parent == current:
-            break
-        current = parent
-    return _DEFAULT_THRESHOLD
+    """Read learnings.frictionThreshold from .aimi/config.json (walk-up)."""
+    config = load_aimi_config()
+    learnings = config.get("learnings", {})
+    threshold = learnings.get("frictionThreshold", _DEFAULT_THRESHOLD)
+    try:
+        return int(threshold)
+    except Exception:  # noqa: BLE001
+        return _DEFAULT_THRESHOLD
 
 
 @safe_hook
@@ -61,7 +44,7 @@ def main(tool_input: dict) -> None:
         sys.exit(0)
 
     # Rate limit: check if nudge already emitted this session
-    sid = _resolve_session_id()
+    sid = resolve_session_id(tool_input)
     sess_dir = _session_dir(sid)
     nudge_flag = sess_dir / "learnings-nudge-emitted"
     if nudge_flag.exists():
