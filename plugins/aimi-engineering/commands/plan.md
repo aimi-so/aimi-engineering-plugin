@@ -495,6 +495,8 @@ Task subagent_type="aimi-engineering:research:aimi-framework-docs-researcher"
 
 Consume researcher agent **summary returns** (the brief outputs from Task calls) — do NOT re-read the full `.aimi/research/` files unless a summary is insufficient for a planning decision.
 
+> **Scope-pruning-negative exception:** The trust-the-summary rule does NOT apply when a research conclusion is a **negative that removes a story** (i.e., a claim of the form "X is absent / not yet migrated / not present" that causes a planned user story to be dropped or significantly shrunk). Such negatives require independent re-verification by a method different from the one that produced the negative (data-flow analysis and caller tracing via `aimi-scope-negative-verifier`). See the Phase 1.8 scope-pruning-negative gate below.
+
 **Reused research files** (when any key in `reusedResearch` is set): no Task summary is available for these. Instead, read each reused file directly using the corresponding path from the map:
 
 - If `reusedResearch.codebase` is set: Read the file and treat its contents as the codebase research input for consolidation.
@@ -573,6 +575,35 @@ agent-mode: phase-1.8-oq-gate deferred <N> questions
 ```
 
 where `<N>` is the count of questions deferred this phase.
+
+### Phase 1.8 Scope-Pruning-Negative Gate
+
+After the OQ gate above resolves, scan the consolidated research summary (Phase 1.6) for **scope-pruning negatives**: research conclusions of the form "X is absent / not migrated / not present" that caused a story to be dropped from or significantly shrunk in the tentative outline.
+
+A negative is scope-pruning when it directly justifies removing or shrinking a story you would otherwise have included. For each such negative found:
+
+1. **Spawn `aimi-scope-negative-verifier`** with the claim, entity name, legacy symbol name (if mentioned), and a one-paragraph context summary. Use a Task with `subagent_type="aimi-engineering:workflow:aimi-scope-negative-verifier"`.
+
+2. **Evaluate the verdict:**
+   - **`CONFIRM`** — negative is supported by data-flow evidence. Accept it; the story remains pruned. No user action needed.
+   - **`REFUTE` or `PARTIAL`** — negative is contradicted or incomplete. **Do NOT accept the negative as a plan premise.** Restore the pruned story to the outline (or un-shrink its scope), annotating it with the verifier's `restorationHint`. If restoring automatically is ambiguous, surface a single AskUserQuestion prompt describing the conflict and asking whether to restore the story.
+
+3. **Record the outcome** in `oqDecisions[]` as a new entry with:
+   - `anchor: scopeNeg:<entity-slug>` (where `entity-slug` is the entity name lowercased, spaces replaced with hyphens)
+   - `source: scopeNegVerifier`
+   - `resolution`: `confirmed-absent` | `refuted-restored` | `partial-surfaced`
+
+**Multiple negatives:** run verifier Tasks in parallel (up to `maxConcurrency`) when more than one scope-pruning negative is found.
+
+**Agent-mode fallback:** when `INTERACTIVE_MODE=agent`, do NOT skip the verifier — spawn it regardless, because the verification is automated (no user input required). Only the AskUserQuestion prompt for ambiguous restorations is auto-deferred. When auto-deferring a restoration question, annotate the tentatively-restored story with `[scope-neg-deferred: unresolved — review before execution]`. Emit exactly one log line:
+
+```
+agent-mode: phase-1.8-scope-neg-gate verified <V> negatives; restored <R>; deferred <D> ambiguous restorations
+```
+
+where `<V>` is total negatives checked, `<R>` is count restored automatically, and `<D>` is count deferred.
+
+**No scope-pruning negatives found:** skip this sub-gate entirely — no Task spawn, no log line.
 
 ## Phase 2: Spec Analysis
 
