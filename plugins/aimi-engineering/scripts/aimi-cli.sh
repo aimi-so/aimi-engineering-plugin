@@ -4622,6 +4622,96 @@ cmd_story_merge() {
     fi
   fi
 
+  # --- Phase 4.2: Dead-Code Smell Check ---
+  # Heuristic: for each story whose implementation.approach is non-empty, extract
+  # candidate added symbols (camelCase, PascalCase, or snake_case identifiers of
+  # length >= 4).  A story is flagged when EVERY extracted symbol is absent from
+  # the combined text of all OTHER stories (title + description + acceptanceCriteria
+  # + implementation.approach + implementation.files joined as a corpus).
+  #
+  # Limits of this heuristic (text-based, not semantic):
+  #   - False positives: a symbol may be an intentional leaf (e.g. a CLI entry
+  #     point, a webhook handler, a cron job) with no plan-level caller.
+  #   - False negatives: a caller story might use different naming (aliasing,
+  #     import renaming, dynamic dispatch) that text scan cannot detect.
+  #   - Short or generic names (< 4 chars, or common words) are intentionally
+  #     excluded to reduce noise; adjust the pattern if the project uses very
+  #     short symbol names.
+  #   - Symbol extraction targets the approach field only; file paths are not
+  #     scanned for new exports.
+  # This check emits a WARNING only (never a hard block) in all modes.  The
+  # agent-mode flag controls whether the warning is emitted to stderr
+  # (--agent-mode: proceeding) or shown as a plain warning — both allow the
+  # merge to continue, matching Phase 4.1's warn-vs-block convention for agent
+  # pipelines where a human review gate is already deferred.
+  local dead_code_check
+  dead_code_check=$(printf '%s' "$merged_array" | jq '
+    # Build per-story corpus: title + description + ACs + approach + files
+    . as $all |
+    [.[] |
+      . as $s |
+      # Only check stories with a non-empty implementation.approach
+      select(
+        (.implementation.approach != null) and
+        ((.implementation.approach | type) == "string") and
+        ((.implementation.approach | length) > 0)
+      ) |
+      (.implementation.approach) as $approach |
+
+      # Extract candidate symbols: camelCase (lower-starting with embedded upper),
+      # PascalCase (upper + lowercase + upper), or snake_case (underscore present).
+      # Minimum length 4; plain English words (only one case run) are excluded.
+      ($approach | [scan("[A-Za-z][A-Za-z0-9_]*")] |
+        map(select(
+          length >= 4 and
+          (
+            test("^[a-z].*[A-Z]") or   # camelCase: lower-start, upper inside
+            test("^[A-Z][a-z]+[A-Z]") or # PascalCase: upper, lower(s), upper
+            test("_[a-z]")               # snake_case: underscore + lowercase
+          )
+        ))
+      ) as $symbols |
+
+      # Skip stories that yield no extractable symbols
+      select(($symbols | length) > 0) |
+
+      # Build the combined text of ALL OTHER stories
+      ([$all[] |
+          select(.id != $s.id) |
+          [
+            (.title // ""),
+            (.description // ""),
+            ((.acceptanceCriteria // []) | join(" ")),
+            (.implementation.approach // ""),
+            ((.implementation.files // []) | join(" "))
+          ] | join(" ")
+        ] | join(" ")
+      ) as $other_corpus |
+
+      # Collect symbols that have NO reference in the other-story corpus
+      ($symbols | map(select(. as $sym | ($other_corpus | test($sym; "")) | not))) as $unreferenced |
+
+      # Flag the story only when ALL symbols are unreferenced
+      select(($unreferenced | length) == ($symbols | length)) |
+
+      {id: $s.id, symbols: $symbols}
+    ]
+  ')
+  local dead_code_violations
+  dead_code_violations=$(printf '%s' "$dead_code_check" | jq 'length')
+  if [ "$dead_code_violations" -gt 0 ]; then
+    local dead_msg
+    dead_msg=$(printf '%s' "$dead_code_check" | jq -r \
+      '.[] | "  Story \(.id): added symbols not referenced by any other story: \(.symbols | join(", "))"')
+    if [ "$agent_mode" = "true" ]; then
+      echo "Warning: story-merge: Phase 4.2 dead-code smell detected (--agent-mode: proceeding):" >&2
+      printf '%s\n' "$dead_msg" >&2
+    else
+      echo "Warning: story-merge: Phase 4.2 dead-code smell detected (heuristic; verify before proceeding):" >&2
+      printf '%s\n' "$dead_msg" >&2
+    fi
+  fi
+
   # ============================================================
   # Branch on split mode
   # ============================================================
@@ -5070,7 +5160,10 @@ COMMANDS:
                               tokens in dependsOn, DAG cycle detection, wave
                               computation, Rule 22 mock-sync AC routing, Phase
                               3.1 inventory verdict check, Phase 4.1 coverage
-                              ratio (ac_anchors >= floor(proto_elements * 0.6)).
+                              ratio (ac_anchors >= floor(proto_elements * 0.6)),
+                              Phase 4.2 dead-code smell (heuristic text scan for
+                              symbols added by a story but not referenced by any
+                              other story — always a warning, never a hard block).
                               Writes atomically via _lock (tmp+mv). Deletes
                               staging dir on success; preserves on error.
                               --split full-stack writes two output files:
