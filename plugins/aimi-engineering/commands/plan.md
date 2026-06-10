@@ -268,6 +268,7 @@ If no brainstorm was found, or the brainstorm has no `researchPaths` key, `reuse
 After the brainstorm check, determine the implementation scope:
 
 - **Non-app feature detected** (feature description contains keywords: `refactor`, `rename`, `migrate`, `CLI`, `command-line`, `plugin`, `skill`, `command`, `documentation`, `docs`, `changelog`, `readme` AND does NOT contain app-related signals: `page`, `dashboard`, `form`, `modal`, `UI`, `frontend`, `backend`, `API`) → skip scope question, leave `implementationScope` unset, proceed to Phase 1
+- **Backend migration detected** (feature description contains `migrate` or `migration` AND contains backend/server signals: `backend`, `server`, `API`, `database`, `db`, `schema`, `endpoint`, `service` AND does NOT contain frontend/UI signals: `frontend`, `UI`, `page`, `dashboard`, `form`, `modal`, `component`) → skip scope question, leave `implementationScope` unset (legacy single-file mode), proceed to Phase 1
 - **Conflicting signals** (both non-app keywords and app-related signals present) → do NOT skip, ask the question below
 
 1. **Auto-detect default from brainstorm context** (if a brainstorm was found):
