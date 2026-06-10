@@ -25,6 +25,16 @@ If resolution fails, report error and STOP.
 
 **Each Bash tool call is an isolated shell — `$AIMI_CLI` does not persist.** Re-read the cache at the top of every subsequent Bash call that needs `$AIMI_CLI`. See the **Per-Call Resolution** section of `commands/references/cli-path-resolution.md` for the one-liner and shell guard to prepend.
 
+### Capture AIMI_ROOT
+
+Capture the project root as an absolute path **once** at the start of Step 0. All subsequent phases resolve paths against this value — no phase may rely on the persisted shell CWD, which can drift across Bash calls.
+
+```bash
+AIMI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+```
+
+Store `AIMI_ROOT` in working memory. Every path constructed in Phase 0, Phase 1, Phase 3, and Phase 4 (research output paths, spec paths, prototype paths, staging directories, output tasks file) must be expressed as `$AIMI_ROOT/<relative-path>` or verified to start with the captured value.
+
 ### Detect Git Repo Layout
 
 Check if the current directory (AIMI root) is itself a git repository:
@@ -341,12 +351,14 @@ Store `RUN_TS` and use it in **all** research agent prompts and Phase 3a staging
 
 ### Auto-Scan for Git Repos
 
-Before launching research agents, scan immediate child directories for `.git/` directories to discover sub-projects:
+Before launching research agents, scan immediate child directories for `.git/` directories to discover sub-projects. The loop is anchored to `$AIMI_ROOT` so a leaked CWD from a prior Bash call cannot produce a zero-repos scan:
 
 ```bash
-for dir in */; do
-  case "$dir" in .worktrees/|node_modules/|.aimi/|vendor/) continue;; esac
-  [ -d "$dir/.git" ] && echo "$dir"
+for dir in "$AIMI_ROOT"/*/; do
+  dir="${dir%/}"          # strip trailing slash for consistent naming
+  name="${dir##*/}"       # basename only
+  case "$name" in .worktrees|node_modules|.aimi|vendor) continue;; esac
+  [ -d "$dir/.git" ] && echo "$name/"
 done
 ```
 
