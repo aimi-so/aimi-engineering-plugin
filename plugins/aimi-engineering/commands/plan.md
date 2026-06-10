@@ -406,6 +406,17 @@ Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
            Look for: existing patterns, CLAUDE.md guidance, similar features,
            technology familiarity, file structure conventions.
            outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-codebase.md
+           [If the feature description contains 'migrate' or 'migration']:
+           Migration origin hint (likely renamed in target — NOT the search target):
+             legacySymbol: [legacy class/module/function name, if known]
+           Do NOT treat a failed grep for the legacy symbol name as proof the
+           feature is absent. Instead, verify existence through data flow as
+           described in the agent's Migration-aware existence checks doctrine:
+           locate row writes / persistence calls, confirm the persisted
+           collection or table, find the triggering endpoint or mutation, and
+           trace callers of the legacy symbol. Only after all four signals are
+           checked may you conclude the feature has not been migrated.
+           [End migration clause]
            [If prototypeBlocks is non-empty]:
            Prototype designs chosen for this feature (use as implementation reference):
            [prototypeBlocks]"
