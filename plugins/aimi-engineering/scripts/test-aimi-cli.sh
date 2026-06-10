@@ -8856,6 +8856,128 @@ EOF
   rm -rf "$stg"
 }
 
+# TC10: Phase 4.2 dead-code smell — positive: story adds orphanHelper (camelCase)
+# not referenced by any other story → warning emitted, exit 0
+test_story_merge_dead_code_positive() {
+  echo ""
+  echo "=== TC10: story-merge Phase 4.2 dead-code smell (positive — symbol flagged) ==="
+
+  local stg=".aimi/.tasks-staging-tc10"
+  local out_file=".aimi/tasks/sm-tc10-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  # Story 1: adds orphanHelper — nobody else mentions it
+  cat > "$stg/01-orphan.json" << 'EOF'
+{
+  "title": "Add orphan utility",
+  "description": "As a developer, I want a utility so that it exists.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 1,
+  "status": "pending",
+  "dependsOn": [],
+  "notes": "",
+  "implementation": {
+    "files": ["src/utils.ts"],
+    "approach": "Add orphanHelper function to compute graph metrics",
+    "verify": "tsc --noEmit"
+  }
+}
+EOF
+
+  # Story 2: unrelated — does not mention orphanHelper
+  cat > "$stg/02-unrelated.json" << 'EOF'
+{
+  "title": "Setup scaffolding",
+  "description": "As a developer, I want scaffolding so that the project compiles.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 2,
+  "status": "pending",
+  "dependsOn": [],
+  "notes": "",
+  "implementation": {
+    "files": ["src/index.ts"],
+    "approach": "Bootstrap the project entry point",
+    "verify": "tsc --noEmit"
+  }
+}
+EOF
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC10: dead-code positive — exits 0 (warning only)"
+  assert_contains "Phase 4.2" "$output" "TC10: dead-code positive — Phase 4.2 warning emitted"
+  assert_contains "orphanHelper" "$output" "TC10: dead-code positive — orphanHelper flagged in warning"
+
+  rm -f "$out_file"
+  rm -rf "$stg"
+}
+
+# TC11: Phase 4.2 dead-code smell — negative: story adds fetchUserProfile (camelCase)
+# that IS referenced by another story → no warning emitted
+test_story_merge_dead_code_negative() {
+  echo ""
+  echo "=== TC11: story-merge Phase 4.2 dead-code smell (negative — symbol has caller, not flagged) ==="
+
+  local stg=".aimi/.tasks-staging-tc11"
+  local out_file=".aimi/tasks/sm-tc11-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  # Story 1: defines fetchUserProfile
+  cat > "$stg/01-fetch.json" << 'EOF'
+{
+  "title": "Add fetchUserProfile helper",
+  "description": "As a developer, I want a helper so that profile data is fetched.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 1,
+  "status": "pending",
+  "dependsOn": [],
+  "notes": "",
+  "implementation": {
+    "files": ["src/api/userProfile.ts"],
+    "approach": "Add fetchUserProfile function to retrieve user data from the API",
+    "verify": "tsc --noEmit"
+  }
+}
+EOF
+
+  # Story 2: explicitly calls fetchUserProfile in its approach → not dead code
+  cat > "$stg/02-consumer.json" << 'EOF'
+{
+  "title": "Display user profile page",
+  "description": "As a user, I want to view my profile so that I can see my data.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 2,
+  "status": "pending",
+  "dependsOn": [],
+  "notes": "",
+  "implementation": {
+    "files": ["src/pages/ProfilePage.tsx"],
+    "approach": "Use fetchUserProfile to load data and render the profile view",
+    "verify": "tsc --noEmit"
+  }
+}
+EOF
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC11: dead-code negative — exits 0"
+
+  # No Phase 4.2 warning should appear when the symbol has a referencing story
+  if echo "$output" | grep -q "Phase 4.2"; then
+    echo -e "${RED}✗${NC} TC11: dead-code negative — unexpected Phase 4.2 warning emitted"
+    echo "  output: $output"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} TC11: dead-code negative — no Phase 4.2 warning (symbol has caller)"
+    ((TESTS_PASSED++))
+  fi
+
+  rm -f "$out_file"
+  rm -rf "$stg"
+}
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -9198,6 +9320,8 @@ main() {
   test_story_merge_rule22_routing
   test_story_merge_full_stack_split
   test_story_merge_outline_sidecar_ignored
+  test_story_merge_dead_code_positive
+  test_story_merge_dead_code_negative
 
   # Design bundle detection tests
   echo ""
