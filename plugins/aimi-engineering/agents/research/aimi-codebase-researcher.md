@@ -208,6 +208,23 @@ Use the built-in tools for efficient searching:
 - Check multiple variations of common file names
 - When the caller provides paths, run all Grep and Glob calls with those paths constrained first. Only broaden to repo-wide search if the scoped search returns no results AND the caller's question cannot be answered from scoped findings alone.
 
+**Migration-aware existence checks:**
+
+_Trigger: applies only when the task description contains "migrate" or "migration". Non-migration research is unaffected._
+
+Across a migration boundary only the external contract (API endpoint, event name, user-visible behavior) is preserved; internal symbols — class names, module paths, function names — are typically renamed or restructured. A legacy-name grep that returns no results therefore proves nothing: the feature may exist under a new name.
+
+**Never conclude "absent / not yet migrated" based solely on a grep for the legacy symbol name.**
+
+Instead, verify existence through data flow and callers:
+
+1. **Row writes** — search for `repository.create`, `new Model(`, `Model.create`, `insert into <table>`, or equivalent persistence calls that would record the feature's data.
+2. **Persisted collection / table** — confirm whether the target schema (table definition, collection name, migration file) is present in the codebase.
+3. **Triggering endpoint / mutation** — locate the HTTP route, GraphQL mutation, or event handler that activates the feature's code path.
+4. **Callers of the legacy function** — follow every callsite of the old symbol; if callers were themselves renamed, trace the chain until the data-flow boundary is confirmed present or confirmed absent.
+
+Only after all four signals are checked — and at least the persistence layer and triggering entry point are confirmed absent — may you conclude the feature has not been migrated.
+
 **Important Considerations:**
 
 - Respect any CLAUDE.md or project-specific instructions found
