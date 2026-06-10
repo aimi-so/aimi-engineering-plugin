@@ -212,18 +212,7 @@ Use the built-in tools for efficient searching:
 
 _Trigger: applies only when the task description contains "migrate" or "migration". Non-migration research is unaffected._
 
-Across a migration boundary only the external contract (API endpoint, event name, user-visible behavior) is preserved; internal symbols — class names, module paths, function names — are typically renamed or restructured. A legacy-name grep that returns no results therefore proves nothing: the feature may exist under a new name.
-
-**Never conclude "absent / not yet migrated" based solely on a grep for the legacy symbol name.**
-
-Instead, verify existence through data flow and callers:
-
-1. **Row writes** — search for `repository.create`, `new Model(`, `Model.create`, `insert into <table>`, or equivalent persistence calls that would record the feature's data.
-2. **Persisted collection / table** — confirm whether the target schema (table definition, collection name, migration file) is present in the codebase.
-3. **Triggering endpoint / mutation** — locate the HTTP route, GraphQL mutation, or event handler that activates the feature's code path.
-4. **Callers of the legacy function** — follow every callsite of the old symbol; if callers were themselves renamed, trace the chain until the data-flow boundary is confirmed present or confirmed absent.
-
-Only after all four signals are checked — and at least the persistence layer and triggering entry point are confirmed absent — may you conclude the feature has not been migrated.
+Across a migration boundary internal symbols are typically renamed, so **a legacy-name grep that returns no results proves nothing**. **Never conclude "absent / not yet migrated" based solely on a grep for the legacy symbol name.** Verify by data flow and callers instead — the four signals: (1) row writes, (2) persisted collection/table, (3) triggering endpoint/mutation, (4) callers of the legacy symbol. Read `plugins/aimi-engineering/agents/references/migration-dataflow-signals.md` (the canonical doctrine — search patterns and conclusion rule) and apply it before reporting any migration entity as absent.
 
 **Important Considerations:**
 

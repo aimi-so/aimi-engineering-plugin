@@ -8856,11 +8856,11 @@ EOF
   rm -rf "$stg"
 }
 
-# TC10: Phase 4.2 dead-code smell — positive: story adds orphanHelper (camelCase)
+# TC10: Phase 4.2 orphan-symbol smell — positive: story adds orphanHelper (camelCase)
 # not referenced by any other story → warning emitted, exit 0
 test_story_merge_dead_code_positive() {
   echo ""
-  echo "=== TC10: story-merge Phase 4.2 dead-code smell (positive — symbol flagged) ==="
+  echo "=== TC10: story-merge Phase 4.2 orphan-symbol smell (positive — symbol flagged) ==="
 
   local stg=".aimi/.tasks-staging-tc10"
   local out_file=".aimi/tasks/sm-tc10-tasks.json"
@@ -8913,11 +8913,11 @@ EOF
   rm -rf "$stg"
 }
 
-# TC11: Phase 4.2 dead-code smell — negative: story adds fetchUserProfile (camelCase)
+# TC11: Phase 4.2 orphan-symbol smell — negative: story adds fetchUserProfile (camelCase)
 # that IS referenced by another story → no warning emitted
 test_story_merge_dead_code_negative() {
   echo ""
-  echo "=== TC11: story-merge Phase 4.2 dead-code smell (negative — symbol has caller, not flagged) ==="
+  echo "=== TC11: story-merge Phase 4.2 orphan-symbol smell (negative — symbol has caller, not flagged) ==="
 
   local stg=".aimi/.tasks-staging-tc11"
   local out_file=".aimi/tasks/sm-tc11-tasks.json"
