@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.98.0] - 2026-06-10
+
+### Added
+
+- **`AIMI_ROOT` capture and anchored git auto-scan in `plan.md`.** Phase 0 now records `AIMI_ROOT` (the project root discovered by the CLI) and uses it to anchor all `git log --diff-filter=R` and `git diff --name-status` scans, preventing false-positive or missed migration signals when `/aimi:plan` is invoked from a subdirectory.
+- **Backend-migration scope detection in `plan.md` Phase 0.** A new backend-migration detection pass checks for recent renames / moves of backend source files (models, services, controllers) and surfaces a migration-context summary into the planning context, so plan steps that touch these files are generated with awareness of in-flight migrations.
+- **Phase 4.2 dead-code smell check in `aimi-cli.sh story-merge`.** After DAG validation and before the atomic write, `story-merge` runs a post-merge sweep that flags stories whose `implementation.files` entries are exclusively files removed or renamed in the last 30 days of git history. Flagged stories emit an audit warning rather than a hard error, allowing human review without blocking the merge.
+- **Migration clause in the `plan.md` codebase-researcher Task template.** The researcher prompt now includes an explicit instruction to report any entities that are absent from their expected legacy locations but present under new paths, so the planner receives data-flow context rather than a bare "not found" negative.
+- **New `aimi-scope-negative-verifier` workflow agent.** A dedicated agent (`plugins/aimi-engineering/agents/workflow/aimi-scope-negative-verifier.md`) that independently re-checks negative existence claims (absent / not-migrated entity) using data-flow analysis and caller tracing — not by re-running the same legacy-name grep. Returns a confirm/refute verdict with evidence.
+- **Scope-pruning negative-verify gate in `plan.md` Phase 1.6/1.8.** Before a research negative is accepted as a plan premise, the Phase 1.6/1.8 gate invokes `aimi-scope-negative-verifier`. A refuted negative is escalated to the spec-flow open questions instead of being silently dropped, preventing false-absence premises from propagating into story decomposition.
+
+### Changed
+
+- **Migration-aware data-flow guidance in `aimi-codebase-researcher` agent.** The researcher agent now carries explicit guidance to follow data-flow and import chains when investigating entities — rather than stopping at a "not found" result — and to flag any entity found under a different path than the caller provided as a potential in-flight migration.
+
 ## [1.97.4] - 2026-06-09
 
 ### Fixed

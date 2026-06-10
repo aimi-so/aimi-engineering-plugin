@@ -258,7 +258,7 @@ Used internally by commands — not user-invocable.
 
 ## Agents
 
-25 aimi-native agents organized into 4 categories.
+29 aimi-native agents organized into 4 categories.
 
 ### Research (6)
 
@@ -298,12 +298,16 @@ Used internally by commands — not user-invocable.
 | `aimi-design-implementation-reviewer` | Compare live UI against Figma designs |
 | `aimi-design-iterator` | Iterative UI refinement through screenshot-analyze-improve cycles |
 
-### Workflow (2)
+### Workflow (6)
 
 | Agent | Description |
 |-------|-------------|
 | `aimi-bug-reproduction-validator` | Systematically reproduce and validate bug reports across all languages and frameworks |
+| `aimi-cross-story-auditor` | Audit all Pass 2 staging JSONs for cross-story drift; emits patches and unresolved entries — reads and writes no file |
+| `aimi-learnings-triage` | Read-only triage of friction events from aimi hooks; returns a grouped JSON report without marking events |
+| `aimi-scope-negative-verifier` | Re-check negative existence claims via data-flow analysis and caller tracing; returns a confirm/refute verdict with evidence |
 | `aimi-spec-flow-analyzer` | Analyze specs for user flow completeness and gaps |
+| `aimi-story-expander` | Expand a single outline entry into a full schema v3.3 user-story JSON for the /aimi:plan two-pass pipeline |
 
 ## Workflow
 
@@ -601,7 +605,7 @@ For the full version history, see [CHANGELOG.md](CHANGELOG.md).
 |------|-------|-------------|
 | Commands | 15 | Slash commands for workflow stages |
 | Skills | 17 | 3 core, 8 development/style, 4 tooling/automation, 2 disabled/reference |
-| Agents | 25 | 6 research, 15 review, 2 design, 2 workflow |
+| Agents | 29 | 6 research, 15 review, 2 design, 6 workflow |
 | Tools | 1 | OpenCode custom tool: `aimi-task` (per-spawn model selection for OpenCode) |
 
 ## License
