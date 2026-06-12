@@ -4622,6 +4622,86 @@ cmd_story_merge() {
     fi
   fi
 
+  # --- Phase 4.2: Cross-Story Orphan-Symbol Smell ---
+  # Heuristic, WARNING-ONLY (never a hard block). NOT codebase dead-code
+  # detection: it scans only sibling STORY PROSE, not the codebase. It flags a
+  # story whose every extracted symbol (camelCase / PascalCase / snake_case,
+  # length >= 4) from implementation.approach appears in NO other story's text
+  # corpus (title + description + ACs + approach + files). Signal: a symbol the
+  # plan introduces that no sibling story mentions may be an orphan addition.
+  #
+  # Known limits (text vs. semantics; sibling-prose vs. call graph):
+  #   - Cannot prove a symbol is dead — that depends on existing callers in the
+  #     actual codebase, which this check does not inspect.
+  #   - False positives: legitimate leaf symbols (CLI entry points, webhook /
+  #     cron handlers) have no sibling-story mention by design.
+  #   - False negatives: a referencing story using a different name (alias,
+  #     import rename, dynamic dispatch) is invisible to a text scan.
+  # Skipped for single-story merges (no sibling corpus → every symbol would be
+  # trivially flagged). Mirrors Phase 4.1's agent-mode warn-vs-emit convention.
+  local _sm_story_count orphan_sym_check
+  _sm_story_count=$(printf '%s' "$merged_array" | jq 'length')
+  if [ "${_sm_story_count:-0}" -lt 2 ]; then
+    orphan_sym_check='[]'
+  else
+    orphan_sym_check=$(printf '%s' "$merged_array" | jq '
+      . as $all |
+      [.[] |
+        . as $s |
+        select(
+          (.implementation.approach != null) and
+          ((.implementation.approach | type) == "string") and
+          ((.implementation.approach | length) > 0)
+        ) |
+        (.implementation.approach) as $approach |
+        # camelCase / PascalCase / snake_case identifiers, length >= 4;
+        # single-case plain words are excluded to reduce noise.
+        ($approach | [scan("[A-Za-z][A-Za-z0-9_]*")] |
+          map(select(
+            length >= 4 and
+            (
+              test("^[a-z].*[A-Z]") or
+              test("^[A-Z][a-z]+[A-Z]") or
+              test("_[a-z]")
+            )
+          ))
+        ) as $symbols |
+        select(($symbols | length) > 0) |
+        ([$all[] |
+            select(.id != $s.id) |
+            [
+              (.title // ""),
+              (.description // ""),
+              ((.acceptanceCriteria // []) | join(" ")),
+              (.implementation.approach // ""),
+              ((.implementation.files // []) | join(" "))
+            ] | join(" ")
+          ] | join(" ")
+        ) as $other_corpus |
+        # Word-boundary match: `userId` is NOT treated as referenced by an
+        # unrelated `userIdentifier`. Symbols are [A-Za-z0-9_]+, so no regex
+        # metacharacter can reach test().
+        ($symbols | map(select(. as $sym | ($other_corpus | test("\\b" + $sym + "\\b")) | not))) as $unreferenced |
+        select(($unreferenced | length) == ($symbols | length)) |
+        {id: $s.id, symbols: $symbols}
+      ]
+    ')
+  fi
+  local orphan_sym_violations
+  orphan_sym_violations=$(printf '%s' "$orphan_sym_check" | jq 'length')
+  if [ "$orphan_sym_violations" -gt 0 ]; then
+    local orphan_msg
+    orphan_msg=$(printf '%s' "$orphan_sym_check" | jq -r \
+      '.[] | "  Story \(.id): introduces symbols no other story references: \(.symbols | join(", "))"')
+    if [ "$agent_mode" = "true" ]; then
+      echo "Warning: story-merge: Phase 4.2 orphan-symbol smell detected (--agent-mode: proceeding):" >&2
+      printf '%s\n' "$orphan_msg" >&2
+    else
+      echo "Warning: story-merge: Phase 4.2 orphan-symbol smell detected (heuristic; verify before proceeding):" >&2
+      printf '%s\n' "$orphan_msg" >&2
+    fi
+  fi
+
   # ============================================================
   # Branch on split mode
   # ============================================================
@@ -5070,7 +5150,12 @@ COMMANDS:
                               tokens in dependsOn, DAG cycle detection, wave
                               computation, Rule 22 mock-sync AC routing, Phase
                               3.1 inventory verdict check, Phase 4.1 coverage
-                              ratio (ac_anchors >= floor(proto_elements * 0.6)).
+                              ratio (ac_anchors >= floor(proto_elements * 0.6)),
+                              Phase 4.2 orphan-symbol smell (heuristic scan of
+                              sibling-story prose for symbols a story introduces
+                              that no other story references; not codebase
+                              dead-code detection — always a warning, never a
+                              hard block; skipped for single-story merges).
                               Writes atomically via _lock (tmp+mv). Deletes
                               staging dir on success; preserves on error.
                               --split full-stack writes two output files:

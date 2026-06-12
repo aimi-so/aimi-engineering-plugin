@@ -208,6 +208,12 @@ Use the built-in tools for efficient searching:
 - Check multiple variations of common file names
 - When the caller provides paths, run all Grep and Glob calls with those paths constrained first. Only broaden to repo-wide search if the scoped search returns no results AND the caller's question cannot be answered from scoped findings alone.
 
+**Migration-aware existence checks:**
+
+_Trigger: applies only when the task description contains "migrate" or "migration". Non-migration research is unaffected._
+
+Across a migration boundary internal symbols are typically renamed, so **a legacy-name grep that returns no results proves nothing**. **Never conclude "absent / not yet migrated" based solely on a grep for the legacy symbol name.** Verify by data flow and callers instead — the four signals: (1) row writes, (2) persisted collection/table, (3) triggering endpoint/mutation, (4) callers of the legacy symbol. Read `plugins/aimi-engineering/agents/references/migration-dataflow-signals.md` (the canonical doctrine — search patterns and conclusion rule) and apply it before reporting any migration entity as absent.
+
 **Important Considerations:**
 
 - Respect any CLAUDE.md or project-specific instructions found

@@ -553,6 +553,17 @@ install_agents() {
 
   if [ "$DRY_RUN" -eq 1 ]; then
     log "[dry-run] Would install agents to $agent_dir"
+    for src_file in "$src/agents/"*/*.md; do
+      [ -f "$src_file" ] || continue
+      local basename
+      basename=$(basename "$src_file")
+      local dst_name="$basename"
+      case "$dst_name" in
+        aimi-*) ;;
+        *) dst_name="aimi-$dst_name" ;;
+      esac
+      log "[dry-run]   Would translate agent: $dst_name"
+    done
     return 0
   fi
 

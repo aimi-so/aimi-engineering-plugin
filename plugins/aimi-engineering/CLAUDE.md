@@ -53,6 +53,10 @@ aimi-engineering-plugin/
    - `Bash(git:*), Bash(npm:*), Bash(bun:*), Bash(tsc:*)` etc.
    - Never use unrestricted `Bash` in commands that spawn Task agents
 
+## Hook Conventions
+
+- Hooks emitting hookSpecificOutput must gate on CLAUDECODE env var when their output schema is Claude Code-specific.
+
 ## Command Conventions
 
 - Use `aimi:` prefix for all commands — always show `/aimi:plan`, `/aimi:execute`, etc. in output, NEVER the fully-qualified `/aimi-engineering:plan` form
@@ -135,6 +139,18 @@ One CLI subcommand manages the story-merge lifecycle. It is consumed by the `/ai
 5. **Spawned agent output behavior** - See `AGENTS.md` for output compression, safety escapes, and context-adaptive verbosity rules
    - AGENTS.md defines the rules; this file references them (no duplication)
    - AGENTS.md is portable across tools (Claude Code, OpenCode) and is the single source of truth for spawned agent behavior
+
+## Guard Bypass Envs
+
+Hooks support per-guard bypass via environment variables. Set `<name>=off` (or unset to leave the guard active). Bypass is intentional escape hatch — use sparingly and document why.
+
+| Env Var | Hook | Behavior when `off` |
+|---|---|---|
+| `AIMI_DEFAULT_BRANCH_GUARD` | pre-bash-dispatcher (default-branch handler) | Allows commits on protected branches (main/master/develop) |
+| `AIMI_SHELL_TRUE_GUARD` | pre-bash-dispatcher (shell-true handler) | Allows commits with shell=True in staged Python files |
+| `AIMI_WORKTREE_BUDGET_GUARD` | pre-bash-dispatcher (worktree-budget handler) | Allows git worktree add beyond metadata.maxConcurrency |
+| `AIMI_RUNTIME_STATE_GUARD` | guard-runtime-state | Allows direct Write/Edit to .aimi/state/, .aimi/tasks during execution, friction/telemetry logs |
+| `AIMI_AGENT_MODE` | aimi-learnings skill | Forces JSON-only read-only path; never marks events |
 
 ## Dependencies
 
