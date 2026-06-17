@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.99.1] - 2026-06-17
+
+### Fixed
+
+- **`story-merge` ingests `audit-result.json` as a phantom story (`aimi-cli.sh`).** The staging glob excluded only `outline.json`, `*outline*.json`, and `metadata.json`, but Phase 3d.5 writes its debug artifact to `<RUN_DIR>/audit-result.json` in the same directory — so the merger picked it up as a story-shaped JSON object, producing a malformed `tasks.json` entry with no `title`/`description`/`acceptanceCriteria`. Added `audit-result.json` to the exclusion case. Consistent with the strict `[0-9][0-9]-*.json` prefix glob already used by Phase 3d.5's own staging lookup.
+- **`validate-stories` rejects natural-markdown single backticks in `title`, `description`, and `tasks[]` (`aimi-cli.sh`).** The suspicious-content regex listed single backtick alongside triple-backtick and `$(`, blocking common phrasings like `Run \`bun run test\` after edit` even though `tasks[]` only flows into LLM prompts (one site: `next.md:135`, XML-wrapped) — never into shell. Narrowed the regex to triple-backticks and `$(`, which remain the actual prompt-injection vectors. Authored `plan.md` Pass 2 prompt doc updated to drop `backticks` from the Forbidden list.
+
 ## [1.99.0] - 2026-06-15
 
 ### Added

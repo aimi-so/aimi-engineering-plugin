@@ -1119,7 +1119,7 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
   - tasks[] (3-15 entries): creation/scaffolding first, integration wiring
     second, local verification last. Integration steps are mandatory when
     implementation.files lists a path shared with another story.
-    Forbidden in tasks[]: triple-backticks, \$(, backticks, 'ignore previous',
+    Forbidden in tasks[]: triple-backticks, \$(, 'ignore previous',
     'system:', 'INSTRUCTIONS'.
   - Mock-sync AC injection: scan implementation.files against
     **/schemas/**/*.{ts,js,py,rb}, **/types/**/*.{ts,js}, **/zod/**/*.{ts,js},
