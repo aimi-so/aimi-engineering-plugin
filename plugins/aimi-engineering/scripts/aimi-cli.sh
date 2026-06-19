@@ -4703,12 +4703,25 @@ cmd_story_merge() {
   fi
 
   # ============================================================
+  # Phase 4.2 → smellWarnings metadata field
+  # ============================================================
+  # Surface orphan-symbol findings to the orchestrator's Step 5 report by
+  # embedding them in metadata.smellWarnings. The writers below inject this
+  # field only when non-empty; absent otherwise.
+  local smell_warnings
+  if [ "${orphan_sym_violations:-0}" -gt 0 ]; then
+    smell_warnings=$(printf '%s' "$orphan_sym_check" | jq '[.[] | {type: "orphan-symbol", storyId: .id, symbols: .symbols, message: "introduces symbols no sibling story references"}]')
+  else
+    smell_warnings='[]'
+  fi
+
+  # ============================================================
   # Branch on split mode
   # ============================================================
   if [ "$split_mode" = "full-stack" ]; then
-    _story_merge_write_split "$merged_array" "$output_path" "$staging_dir"
+    _story_merge_write_split "$merged_array" "$output_path" "$staging_dir" "$smell_warnings"
   else
-    _story_merge_write_legacy "$merged_array" "$output_path" "$staging_dir"
+    _story_merge_write_legacy "$merged_array" "$output_path" "$staging_dir" "$smell_warnings"
   fi
 }
 
@@ -4717,23 +4730,29 @@ _story_merge_write_legacy() {
   local merged_array="$1"
   local output_path="$2"
   local staging_dir="$3"
+  local smell_warnings="${4:-[]}"
 
   # Build the final tasks.json structure
   # Metadata is minimal; the caller (plan command) fills in the full metadata.
   # story-merge only provides structure; metadata.title, branchName, etc. come from
   # the staging context or are set to sensible defaults.
+  # smellWarnings is injected only when non-empty so absent-by-default stays the norm.
   local tasks_json
-  tasks_json=$(printf '%s' "$merged_array" | jq '
+  tasks_json=$(printf '%s\n%s' "$merged_array" "$smell_warnings" | jq -s '
+    .[0] as $stories | .[1] as $smells |
     {
       schemaVersion: "3.3",
-      metadata: {
-        title: "feat: merged tasks",
-        type: "feat",
-        branchName: "feat/merged",
-        createdAt: (now | strftime("%Y-%m-%d")),
-        planPath: null
-      },
-      userStories: [.[] | del(.referenceInventory) | del(.ac_anchors)]
+      metadata: (
+        {
+          title: "feat: merged tasks",
+          type: "feat",
+          branchName: "feat/merged",
+          createdAt: (now | strftime("%Y-%m-%d")),
+          planPath: null
+        } +
+        (if ($smells | length) > 0 then {smellWarnings: $smells} else {} end)
+      ),
+      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors)]
     }
   ')
 
@@ -4771,6 +4790,7 @@ _story_merge_write_split() {
   local merged_array="$1"
   local output_path="$2"
   local staging_dir="$3"
+  local smell_warnings="${4:-[]}"
 
   # Partition by layer:
   # - UI stories → frontend (stories whose title/description contains UI/Frontend/React/Vue/component keywords,
@@ -4912,18 +4932,25 @@ _story_merge_write_split() {
   mkdir -p "$dir_part"
 
   # Build and write frontend tasks.json atomically
+  # smellWarnings is injected only when non-empty; written to BOTH split files
+  # so reviewers see the same orphan-symbol surface regardless of which file
+  # they inspect first.
   local fe_json
-  fe_json=$(printf '%s' "$frontend_stories" | jq '
+  fe_json=$(printf '%s\n%s' "$frontend_stories" "$smell_warnings" | jq -s '
+    .[0] as $stories | .[1] as $smells |
     {
       schemaVersion: "3.3",
-      metadata: {
-        title: "feat: merged tasks (frontend)",
-        type: "feat",
-        branchName: "feat/merged-frontend",
-        createdAt: (now | strftime("%Y-%m-%d")),
-        planPath: null
-      },
-      userStories: [.[] | del(.referenceInventory) | del(.ac_anchors)]
+      metadata: (
+        {
+          title: "feat: merged tasks (frontend)",
+          type: "feat",
+          branchName: "feat/merged-frontend",
+          createdAt: (now | strftime("%Y-%m-%d")),
+          planPath: null
+        } +
+        (if ($smells | length) > 0 then {smellWarnings: $smells} else {} end)
+      ),
+      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors)]
     }
   ')
   local tmp_fe
@@ -4942,17 +4969,21 @@ _story_merge_write_split() {
 
   # Build and write backend tasks.json atomically
   local be_json
-  be_json=$(printf '%s' "$backend_stories" | jq '
+  be_json=$(printf '%s\n%s' "$backend_stories" "$smell_warnings" | jq -s '
+    .[0] as $stories | .[1] as $smells |
     {
       schemaVersion: "3.3",
-      metadata: {
-        title: "feat: merged tasks (backend)",
-        type: "feat",
-        branchName: "feat/merged-backend",
-        createdAt: (now | strftime("%Y-%m-%d")),
-        planPath: null
-      },
-      userStories: [.[] | del(.referenceInventory) | del(.ac_anchors)]
+      metadata: (
+        {
+          title: "feat: merged tasks (backend)",
+          type: "feat",
+          branchName: "feat/merged-backend",
+          createdAt: (now | strftime("%Y-%m-%d")),
+          planPath: null
+        } +
+        (if ($smells | length) > 0 then {smellWarnings: $smells} else {} end)
+      ),
+      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors)]
     }
   ')
   local tmp_be

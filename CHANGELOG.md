@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.100.0] - 2026-06-19
+
+### Added
+
+- **Two new built-in audit concerns on `aimi-cross-story-auditor`.** The agent now evaluates six concerns instead of four. (a) **Orphan public APIs** — when a story's `implementation.approach` introduces a named symbol (camelCase / PascalCase / snake_case, length ≥ 6) that does not appear in any sibling story's text corpus (title, description, AC, approach, files, tasks), the agent emits an `unresolved[]` entry naming the symbol and the producer story; reviewer decides whether it is a legitimate leaf API (CLI entry point, webhook handler, SDK surface) or a planning gap. Skipped when staging set contains only one story. (b) **Honored deferrals** — when a story's `notes` contains the strict-regex phrases `deferred to (story )?\d+` or `story \d+ (will|owns|covers)`, the agent extracts the target outline index and the noun phrase immediately before the deferral, then verifies that the target story's `acceptanceCriteria` contains a substring of that noun phrase (case-insensitive). When the deferral is not honored, the agent emits an `unresolved[]` entry naming the source story, target story, and unhonored concept. The regex is intentionally narrow — `future work`, `out of scope`, `intentionally not enforced here` are NOT matched because they signal vague aspirations without a named target.
+- **`metadata.smellWarnings[]` field on the merged tasks.json (`aimi-cli.sh story-merge`).** Phase 4.2 orphan-symbol findings are now embedded in the output tasks.json (in addition to the existing stderr warning), so the orchestrator's Step 5 report can surface them without parsing stderr. Each entry has shape `{type: "orphan-symbol", storyId: "US-NNN", symbols: ["symbolA", ...], message: "..."}`. The field is written by both legacy and split-mode writers (in split mode, the same array is written to both frontend and backend files so per-file summaries stay self-contained). Absent entirely when no orphan symbols were detected — backward-compatible for downstream consumers.
+
+### Changed
+
+- **`/aimi:plan` Step 5 report renders `metadata.smellWarnings`.** A new `Smell warnings: N orphan-symbol finding(s)` line appears in the report when the merged tasks.json has a non-empty `smellWarnings` array, followed by one bullet per entry showing `storyId`, `type`, `symbols`, and `message`. No sanitization required (fields are CLI-emitted literals or regex-constrained). Omitted entirely when absent or empty.
+
 ## [1.99.1] - 2026-06-17
 
 ### Fixed
