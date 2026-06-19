@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.100.1] - 2026-06-19
+
+### Fixed
+
+- **Concern 6 of `aimi-cross-story-auditor` reframed from "verification" to "surfacing".** The 1.100.0 design attempted to auto-verify deferral phrases by substring-matching the noun phrase preceding the deferral against the target story's acceptance criteria. Self-review caught a critical false negative: the noun in a deferral (e.g. "affiliation") commonly appears verbatim in the helper name introduced by the target story (e.g. `requiresAffiliation`), so a substring match produces a tautological "deferral honored" verdict — a silent pass that looks like a clean check. Worse than no check at all, because reviewers trust silence. Replaced with **deferral surfacing**: every matched deferral phrase emits an `unresolved[]` entry naming the source story and target story; the human reviewer judges whether the target wires the deferred behavior or only exposes a helper. The regex stays strict (only `deferred to (story )?\d+` and `story \d+ (will|owns|covers)`) — looser phrases still produce too many false positives.
+
 ## [1.100.0] - 2026-06-19
 
 ### Added

@@ -118,19 +118,19 @@ Skip this check when the staging set contains only one story (every symbol would
 
 Known false-positive cases that are NOT bugs: legitimate leaf APIs (CLI entry points, webhook/cron handlers, public SDK surfaces). The `unresolved[]` entry surfaces the concern; reviewer decides.
 
-### 6. Honored deferrals
+### 6. Deferral surfacing
 
-When a story's `notes` field contains a deferral phrase matching the strict regex `deferred to (story )?(\d+)` OR `story (\d+) (will|owns|covers)`, extract the target outline index (capture group). Verify that the target story's `acceptanceCriteria` array contains at least one line that mentions the deferred concept — defined as the noun phrase appearing immediately before the deferral phrase in the source story's `notes`.
+When a story's `notes` field contains a deferral phrase matching the strict regex `deferred to (story )?(\d+)` OR `story (\d+) (will|owns|covers)`, emit an `unresolved[]` entry flagging the deferral for human reviewer attention. Extract the target outline index (capture group) and include it in the message.
 
-Example: notes containing `"the affiliation requirement is deferred to story 04"` extracts target idx `04` and concept `affiliation requirement`. Confirm at least one AC entry of story `04` contains the substring `affiliation` (case-insensitive).
+Do NOT attempt to auto-verify whether the target story honors the deferral. Text-only substring matching on the "deferred concept" is too weak: the concept's noun (e.g. "affiliation") often appears verbatim in the helper name introduced by the target story (e.g. `requiresAffiliation`), so a substring check produces a tautological "honored" verdict — a false negative that looks like a passed check. The intent of this concern is to ensure no deferral goes silently unreviewed; the human reviewer judges whether the target story actually wires the deferred behavior or only exposes a helper.
 
-When the deferral is NOT honored, emit an `unresolved[]` entry:
+Emit one `unresolved[]` entry per deferral phrase matched:
 
 ```
-{ "storyIdx": "<idx of the source story making the deferral>", "message": "unhonored deferral: notes claim '<deferral phrase>' but target story <target idx> AC does not mention <concept>. Either update story <target idx> AC to wire the deferred behavior, or add a new story that does." }
+{ "storyIdx": "<idx of the source story making the deferral>", "message": "deferral surfaced: notes claim deferral to story <target idx>. Reviewer must confirm story <target idx> wires the deferred concern (not just exposes a helper)." }
 ```
 
-The regex is intentionally narrow — only `deferred to`, `deferred to story`, `story NN will`, `story NN owns`, `story NN covers`. Looser phrases like `future work`, `out of scope`, `intentionally not enforced here` are NOT in scope: they signal vague aspirations without a named target story, and matching them produces too many false positives.
+The regex is intentionally narrow — only `deferred to`, `deferred to story`, `story NN will`, `story NN owns`, `story NN covers`. Looser phrases like `future work`, `out of scope`, `intentionally not enforced here` are NOT in scope: they signal vague aspirations without a named target story, and matching them produces too many false positives. The per-`storyIdx` patch budget (10) does not apply to `unresolved[]` entries, but if a single source story contains many deferrals, the orchestrator's downstream rendering already truncates message text — keep messages short.
 
 ## What you do NOT do
 
