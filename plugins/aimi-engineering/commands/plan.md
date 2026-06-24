@@ -527,10 +527,35 @@ Consume researcher agent **summary returns** (the brief outputs from Task calls)
 Merge all findings into a structured consolidation with these sections:
 
 1. **Key Patterns** — Architectural patterns, conventions, and recurring structures found in the codebase
-2. **Conflicts** — Contradictions between sources (e.g., CLAUDE.md says X but codebase does Y), unresolved trade-offs
+2. **Conflicts** — Contradictions between sources (e.g., CLAUDE.md says X but codebase does Y), unresolved trade-offs. For each conflict entry, apply the following tagging rule during consolidation write-out: tag the entry `[CONFLICT-ESCALATE]` **only** when the finding directly contradicts a load-bearing premise the tentative outline depends on — i.e., the contradiction would invalidate a planned story or require a significant scope change if true. Counter-examples that must NOT be tagged: (a) generic trade-offs and style opinions (e.g., "best practices prefer async but the codebase uses sync") — these do not threaten any outline premise; (b) CLAUDE.md-vs-codebase trivia mismatches (e.g., the readme says to use Yarn but the lockfile is npm) — these are hygiene notes, not premise conflicts. When in doubt, do not tag — Phase 1.6b only escalates; it does not down-scope.
 3. **File References** — Concrete file paths relevant to the feature, grouped by concern (schema, backend, UI, config)
 4. **Learnings** — Institutional knowledge from `.aimi/solutions/`: gotchas, past mistakes, proven approaches
 5. **External Insights** — Best practices and framework guidance from external research (empty if Phase 1.5b was skipped)
+
+### Phase 1.6b: Research Conflict Escalation Gate
+
+**Purpose:** Escalate Phase 1.6 Conflicts entries that contradict a load-bearing outline premise to a user decision gate, so mis-scoped plans are caught before story authoring begins.
+
+**Step 1 — Collect escalated items.** Scan the Phase 1.6 Conflicts section output for entries containing the literal tag `[CONFLICT-ESCALATE]`. Build an ordered list of escalated items; assign each a 1-based index `n` within the escalated set.
+
+**Step 2 — Dedup against existing decisions.** Before prompting, iterate the escalated list and check `oqDecisions[]` for any entry whose `anchor` matches `researchConflict:<n>` or whose `entity` matches the conflict's subject and already carries a resolution from the Phase 1.8 Scope-Pruning-Positive Gate (`source: scopePosVerifier`, anchor `scopePos:<entity-slug>`). Skip any conflict that already has a resolution — do not re-ask.
+
+**Step 3 — 20-OQ aggregate cap.** Conflict-escalations share the same 20-OQ aggregate cap as Phase 1.8 researcher OQs. Conflict-escalations have **lower priority** — they are appended to the researcher OQ list after all Phase 1.8 OQs for priority purposes. If the combined total (Phase 1.8 OQs + remaining conflict-escalations) exceeds 20, emit the overflow warning listing the anchors of dropped `researchConflict:<n>` entries; those conflicts are silently deferred.
+
+**Step 4 — Sanitize and prompt.** For each un-capped escalated item:
+- Sanitize the conflict text: strip newlines, remove any `$(` sequences, remove backtick characters, and truncate to 500 characters (same regime as Phase 1.8 OQ sanitization).
+- Call AskUserQuestion with header `Conflict · researchConflict:<n>` (e.g., `Conflict · researchConflict:1`) so the user knows exactly what they are deciding on.
+- Record the resolution in `oqDecisions[]` with `anchor: researchConflict:<n>` and `source: researchConflict`.
+
+**Agent-mode fallback:** when `INTERACTIVE_MODE=agent`, auto-defer all escalated items with reason `agent-mode auto-defer` — do not block, do not prompt. Emit exactly one log line:
+
+```
+agent-mode: phase-1.6b-conflict-gate deferred <N> contradictions
+```
+
+where `<N>` is the count of items deferred this phase.
+
+**No tagged items — skip silently.** When the escalated list is empty (no `[CONFLICT-ESCALATE]` tags found in the Phase 1.6 Conflicts section), skip this sub-gate entirely with no log output and no AskUserQuestion calls.
 
 ## Phase 1.7: Research File Ingestion
 
@@ -1675,11 +1700,12 @@ The `metadata.backendSpec.endpoints[].responseShape` field follows a strict flat
 
 **Notes:** `implementation`, `verification`, `gate`, `skills`, and `tasks` are optional per story. `wave` is required on all stories.
 
-**`metadata.decisions[].source` field:** each entry records where the Open Question or outline edit originated. Ten valid source values:
+**`metadata.decisions[].source` field:** each entry records where the Open Question or outline edit originated. Eleven valid source values:
 - `<brainstorm-path>:L<line>` — an OQ line from the brainstorm doc (Phase 0.5)
 - `businessSpec:L<line>` — a marker-style OQ scanned from `businessSpecContent` (Phase 0.5)
 - `designSpec:L<line>` — a marker-style OQ scanned from `designSpecContent` (Phase 0.5)
 - `researchFile:<basename>:OQ<n>` — an OQ entry from a researcher file's `## Open Questions` section or a `[PROMOTE-TO-OPEN-QUESTIONS]` tag, resolved at Phase 1.8
+- `researchConflict` — a Phase 1.6 Conflicts entry tagged `[CONFLICT-ESCALATE]` that was escalated to the user via the Phase 1.6b Research Conflict Escalation Gate; anchor format `researchConflict:<n>` (1-based index within the escalated set)
 - `specFlow:CriticalQ<n>` — an entry from the spec-flow analyzer's `### Critical Questions Requiring Clarification` section, resolved at Phase 2.5
 - `specFlow:Gap<n>` — an entry from the spec-flow analyzer's `### Missing Elements & Gaps` section, resolved at Phase 2.5
 - `scopeNegVerifier` — a scope-pruning-negative outcome recorded by the Phase 1.8 Scope-Pruning-Negative Gate (anchor `scopeNeg:<entity-slug>`); `resolution` is `confirmed-absent` | `refuted-restored` | `partial-surfaced`
