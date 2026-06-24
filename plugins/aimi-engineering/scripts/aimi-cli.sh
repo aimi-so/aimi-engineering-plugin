@@ -3938,19 +3938,39 @@ cmd_archive_task() {
     '{archived: {task: $task, brainstorm: (if $brainstorm == "" then null else $brainstorm end), researchCleaned: $researchCleaned, prototypeCleaned: $prototypeCleaned}}'
 }
 
-# Usage: research-lookup <path>
+# Usage: research-lookup [--ignore-missing-cited-paths] <path>
 # Check whether a research file is fresh relative to its cited source paths.
 # Freshness: research-file mtime >= newest mtime among existing cited source paths.
 # A cited path that does not exist -> stale (logs a warning to stderr).
+#   With --ignore-missing-cited-paths: missing cited paths log a warning but do NOT mark stale.
 # No '## File References' section -> stale.
 # Fresh: prints the research path + exits 0.
 # Stale/undecidable: prints nothing + exits 1.
 # Missing argument: usage on stderr + exits 1.
 cmd_research_lookup() {
-  local research_path="$1"
+  local ignore_missing=0
+  local research_path=""
+
+  # Parse flag in either position relative to the positional path arg
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --ignore-missing-cited-paths)
+        ignore_missing=1
+        shift
+        ;;
+      -*)
+        echo "Usage: aimi-cli.sh research-lookup [--ignore-missing-cited-paths] <path>" >&2
+        exit 1
+        ;;
+      *)
+        research_path="$1"
+        shift
+        ;;
+    esac
+  done
 
   if [ -z "$research_path" ]; then
-    echo "Usage: aimi-cli.sh research-lookup <path>" >&2
+    echo "Usage: aimi-cli.sh research-lookup [--ignore-missing-cited-paths] <path>" >&2
     exit 1
   fi
 
@@ -4024,7 +4044,9 @@ cmd_research_lookup() {
     # Check existence
     if [ ! -e "$abs_cited_path" ]; then
       echo "Warning: Cited source path does not exist (stale): $cited_path" >&2
-      stale=1
+      if [ "$ignore_missing" -eq 0 ]; then
+        stale=1
+      fi
       continue
     fi
 
@@ -5185,13 +5207,18 @@ COMMANDS:
     cleanup-versions          Remove old cached plugin versions, keep latest only
     list-archivable           List task files where all stories are completed/skipped (JSON array)
     archive-task <path>       Move completed task file (and linked brainstorm) to .aimi/archive/
-    research-lookup <path>    Check whether a research .md file is fresh relative to cited source
+    research-lookup [--ignore-missing-cited-paths] <path>
+                              Check whether a research .md file is fresh relative to cited source
                               paths listed under its '## File References' h2 bullet section.
                               Freshness: research mtime >= newest mtime of cited source paths.
                               Fresh: prints the resolved research path, exits 0.
                               Stale/undecidable: prints nothing, exits 1.
                               Cited path not found -> stale + stderr warning.
+                              --ignore-missing-cited-paths: a missing cited path logs a warning
+                                but does NOT mark the file stale (mtime staleness is unaffected).
+                                Use when cited sources include to-be-created files.
                               Absolute or outside-root path -> rejected (exit 1).
+                              Flag accepted in either position relative to the path arg.
     research-gc               Delete orphaned .aimi/research/*.md files not referenced by any
                               active .aimi/tasks/*.json metadata.researchPaths or any
                               .aimi/brainstorms/*.md frontmatter researchPaths, AND older than
@@ -5377,7 +5404,7 @@ main() {
     prime-cache)       cmd_prime_cache ;;
     list-archivable)   cmd_list_archivable ;;
     archive-task)      cmd_archive_task "${2:-}" ;;
-    research-lookup)   cmd_research_lookup "${2:-}" ;;
+    research-lookup)   shift; cmd_research_lookup "$@" ;;
     research-gc)       cmd_research_gc ;;
     detect-design-bundle) shift; cmd_detect_design_bundle "$@" ;;
     bundle-prototype-status)   shift; cmd_bundle_prototype_status "$@" ;;

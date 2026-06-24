@@ -108,7 +108,7 @@ For each pending story, apply the following gate before deciding whether to spaw
 
 A story is **covered** when `COVERAGE_PATHS` contains at least one path that matches either condition:
 1. The path matches `*-<story.id>-codebase.md` (per-story codebase research written by a prior deepen run), **OR**
-2. The path ends with `-codebase.md` and does **not** contain a story-ID segment — i.e., it is a topic-level codebase research file. In this case, the story is covered only when every file in `story.implementation.files` (if present) is a subset of the file paths listed in that topic-level research file's `## File References` section.
+2. The path ends with `-codebase.md` and does **not** contain a story-ID segment — i.e., it is a topic-level codebase research file. In this case, the story is covered only when the **existing-file overlap** condition holds: every file in `story.implementation.files` that **currently exists on disk** also appears in the `## File References` section of that topic-level research file. To-be-created files (those that do not yet exist on disk) are excluded from the coverage requirement, because they cannot have been researched before they exist. Formally: `{story files} ∩ {files existing on disk} ⊆ {File References}` — coverage holds when the intersection of {story.implementation.files entries that currently exist on disk} with {File References} equals {story.implementation.files entries that currently exist on disk}. **Fallback:** when zero story files currently exist on disk (e.g., a pure greenfield story), treat the story as uncovered and proceed to Step 3c — there is nothing to reuse.
 
 When `COVERAGE_PATHS` is empty (legacy tasks file — see Step 2e), skip the gate and proceed directly to Step 3c for every pending story.
 
@@ -120,7 +120,7 @@ For each covered story, determine the matching research path (prefer the per-sto
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" \
            2>/dev/null || \
            cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-"$AIMI_CLI" research-lookup <matched-research-path>
+"$AIMI_CLI" research-lookup --ignore-missing-cited-paths <matched-research-path>
 ```
 
 - **Exit 0 (fresh):** Reuse the existing file. Record `research_path_for_story[story.id] = <matched-research-path>`. This story does **not** spawn a researcher — Step 4 will read the existing file.

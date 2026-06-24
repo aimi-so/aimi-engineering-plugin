@@ -5917,6 +5917,32 @@ RESEOF
   assert_exit_code "1" "$exit_code" "research-lookup: missing cited path exits 1 (stale)"
   assert_contains "does-not-exist.sh" "$stderr_out" "research-lookup: missing cited path logs warning"
 
+  # --- Test 3a: --ignore-missing-cited-paths on missing cited path -> exit 0 (not stale) ---
+  # research_missing already set up above: cites src/foo.sh (exists) and src/does-not-exist.sh (missing)
+  # research_missing mtime is 2020-01-04, src/foo.sh mtime is 2020-01-01 (older) -> fresh aside from missing path
+  # Reset src1 back to old time in case Test 2 changed it
+  touch -t 202001010000.00 "$src1"
+  local stderr_3a
+  pushd "$rl_dir" >/dev/null
+  stderr_3a=$("$CLI" research-lookup --ignore-missing-cited-paths "$research_missing" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "research-lookup: --ignore-missing-cited-paths on missing path exits 0 (not stale)"
+  assert_contains "does-not-exist.sh" "$stderr_3a" "research-lookup: --ignore-missing-cited-paths still logs warning for missing path"
+
+  # --- Test 3b: --ignore-missing-cited-paths does NOT suppress mtime staleness ---
+  # Make src/foo.sh newer than research_missing so mtime check fails
+  touch -t 202001050000.00 "$src1"
+  local stderr_3b
+  pushd "$rl_dir" >/dev/null
+  stderr_3b=$("$CLI" research-lookup --ignore-missing-cited-paths "$research_missing" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "research-lookup: --ignore-missing-cited-paths still exits 1 when mtime stale"
+
+  # Restore src1 to original time for subsequent tests
+  touch -t 202001010000.00 "$src1"
+
   # --- Test 4: no File References section -> stale ---
   local research_norefs="$rl_dir/.aimi/research-norefs.md"
   cat > "$research_norefs" << 'RESEOF'
