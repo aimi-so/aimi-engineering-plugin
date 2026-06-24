@@ -1215,6 +1215,9 @@ cmd_validate_stories() {
          else [] end) +
         (if ($s.verification != null and ($s.verification | type) == "string") then
           ["\($s.id): verification must be an object {strategy, status, url, expect}; found bare string — run normalize-verification to fix"]
+         else [] end) +
+        (if (has("status") | not) then
+          ["\($s.id): missing required field: status — run normalize-status to fix"]
          else [] end)
       ) | .[]
     ] |
@@ -1279,6 +1282,49 @@ cmd_normalize_verification() {
   local normalized_count
   normalized_count=$(jq '[.userStories[] | select(.verification != null and (.verification | type) == "object")] | length' "$tasks_file")
   jq -n --argjson count "$normalized_count" '{normalized: $count}'
+}
+
+# Normalize status fields: default any story missing the status field to "pending"
+cmd_normalize_status() {
+  local tasks_file="$1"
+
+  if [ -z "$tasks_file" ]; then
+    echo "Usage: aimi-cli.sh normalize-status <tasks-file-path>" >&2
+    exit 1
+  fi
+
+  if [ ! -f "$tasks_file" ]; then
+    echo "Error: tasks file not found: $tasks_file" >&2
+    exit 1
+  fi
+
+  if [ ! -r "$tasks_file" ]; then
+    echo "Error: tasks file not readable: $tasks_file" >&2
+    exit 1
+  fi
+
+  # Validate input is valid JSON
+  if ! jq empty "$tasks_file" 2>/dev/null; then
+    echo "Error: invalid JSON in tasks file: $tasks_file" >&2
+    exit 1
+  fi
+
+  local tmp_file
+  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  (
+    _lock "${tasks_file}.lock"
+    jq '
+      .userStories |= map(.status //= "pending")
+    ' "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+  ) 200>"${tasks_file}.lock"
+  local exit_code=$?
+  rm -f "$tmp_file" 2>/dev/null
+  [ $exit_code -ne 0 ] && exit $exit_code
+
+  # Report how many stories were healed (now have status field)
+  local healed_count
+  healed_count=$(jq '[.userStories[] | select(has("status"))] | length' "$tasks_file")
+  jq -n --argjson count "$healed_count" '{normalized: $count}'
 }
 
 # Validate all story IDs in the tasks file against the US-NNN format
@@ -4752,7 +4798,7 @@ _story_merge_write_legacy() {
         } +
         (if ($smells | length) > 0 then {smellWarnings: $smells} else {} end)
       ),
-      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors)]
+      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors) | (.status //= "pending")]
     }
   ')
 
@@ -4950,7 +4996,7 @@ _story_merge_write_split() {
         } +
         (if ($smells | length) > 0 then {smellWarnings: $smells} else {} end)
       ),
-      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors)]
+      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors) | (.status //= "pending")]
     }
   ')
   local tmp_fe
@@ -4983,7 +5029,7 @@ _story_merge_write_split() {
         } +
         (if ($smells | length) > 0 then {smellWarnings: $smells} else {} end)
       ),
-      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors)]
+      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors) | (.status //= "pending")]
     }
   ')
   local tmp_be
@@ -5044,6 +5090,10 @@ COMMANDS:
                               into {strategy: S, status: "pending", url: null, expect: null}.
                               Already-object verifications are left unchanged.
                               Writes atomically (tmp + mv). Exits 0 on success.
+    normalize-status <file>   Default any story missing the status field to "pending".
+                              Already-set status values are preserved (uses //= operator).
+                              Writes atomically (tmp + mv). Exits 0 on success.
+                              Reports count of stories with status field after heal.
     validate-ids              Validate all story IDs match US-NNN format
     gate-pass <id> [--option 'value']
                               Pass a gate on a story; optionally store selected option
@@ -5305,6 +5355,7 @@ main() {
     validate-deps)            cmd_validate_deps ;;
     validate-stories)         cmd_validate_stories ;;
     normalize-verification)   cmd_normalize_verification "${2:-}" ;;
+    normalize-status)         cmd_normalize_status "${2:-}" ;;
     validate-ids)             cmd_validate_ids ;;
     gate-pass)         shift; cmd_gate_pass "$@" ;;
     gate-fail)         cmd_gate_fail "${2:-}" ;;

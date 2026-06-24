@@ -1148,6 +1148,7 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
     'title': '<string, max 200 chars>',
     'description': '<user story format: As a [role], I want [feature] so that [benefit]; max 500 chars>',
     'acceptanceCriteria': ['<string, each max 5000 chars; must include Typecheck passes>'],
+    'status': 'pending',
     'priority': <integer, sequential tiebreaker>,
     'dependsOn': ['outline:NN', ...],
     'notes': '<optional string>',
@@ -1240,7 +1241,7 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
 After each sub-agent writes its staging file, validate the JSON:
 
 1. Read `<RUN_DIR>/<idx>-<slug>.json`.
-2. Verify it is valid JSON (well-formed) and contains the required fields: `title`, `description`, `acceptanceCriteria` (non-empty array), `dependsOn` (array), `verification` (object with `strategy` and `status`).
+2. Verify it is valid JSON (well-formed) and contains the required fields: `title`, `description`, `acceptanceCriteria` (non-empty array), `status` (`"pending"`), `dependsOn` (array), `verification` (object with `strategy` and `status`).
 3. **If validation passes**: mark this expansion as successful.
 4. **If validation fails**: retry up to **2 times** with an enriched prompt appending the sanitized validator error string:
 
@@ -1411,7 +1412,7 @@ where `<N>` is the count of patches dropped for that `storyIdx`. One entry per a
 
 Before writing a patched staging file to disk, verify that the resulting JSON object:
 1. Parses as valid JSON (well-formed).
-2. Contains the required fields: `title`, `description`, `acceptanceCriteria` (non-empty array), `dependsOn` (array), `verification` (object with `strategy` and `status`).
+2. Contains the required fields: `title`, `description`, `acceptanceCriteria` (non-empty array), `status` (`"pending"`), `dependsOn` (array), `verification` (object with `strategy` and `status`).
 3. Per-field type check on the patched field: `dependsOn` MUST be an array of strings; `tasks` MUST be an array of strings; `notes` MUST be a string.
 
 If the post-patch object fails any check, **roll back that single patch** and continue processing the remaining patches in sequence. Do not propagate the validation failure — skip the offending patch silently.
@@ -1797,19 +1798,41 @@ fi
 
 If `normalize-verification` exits non-zero, **stop here** — do not run any further validators. Fix the tasks file and retry Phase 4.5 from the top.
 
-**Step 2 — Run validators (after normalize-verification succeeds):**
+**Step 1b — Normalize status fields (run immediately after normalize-verification succeeds):**
+
+Run `normalize-status` to default any story missing the `status` field to `"pending"`. This auto-heals pre-fix tasks files written before the `status` field was added to the schema, preventing `validate-stories` from rejecting them.
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI normalize-status "$TASKS_PATH"
+NORMALIZE_STATUS_EXIT=$?
+if [ $NORMALIZE_STATUS_EXIT -ne 0 ]; then
+  echo "ERROR: normalize-status failed (exit $NORMALIZE_STATUS_EXIT)."
+  echo "Inspect $TASKS_PATH for malformed status fields and fix them before re-running."
+  # Halt — do not proceed to validate-ids/deps/stories/tasks
+fi
+```
+
+If `normalize-status` exits non-zero, **stop here** — do not run any further validators. Fix the tasks file and retry Phase 4.5 from the top.
+
+**Step 2 — Run validators (after normalize-verification and normalize-status succeed):**
 
 **For split files (full-stack):** run validation on each file separately using `init-session --file`:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI normalize-verification .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
+$AIMI_CLI normalize-status .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
 $AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
 $AIMI_CLI validate-ids
 $AIMI_CLI validate-deps
 $AIMI_CLI validate-stories
 $AIMI_CLI validate-tasks
 
+$AIMI_CLI normalize-verification .aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json
+$AIMI_CLI normalize-status .aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json
 $AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json
 $AIMI_CLI validate-ids
 $AIMI_CLI validate-deps
@@ -1822,6 +1845,8 @@ $AIMI_CLI validate-tasks
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI normalize-verification .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
+$AIMI_CLI normalize-status .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
 $AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
 $AIMI_CLI validate-ids
 $AIMI_CLI validate-deps

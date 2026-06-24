@@ -8979,6 +8979,267 @@ EOF
 }
 
 # ============================================================================
+# normalize-status and status field regression tests (US-003)
+# ============================================================================
+
+# TC-STATUS-1: story-merge on a status-less staging file produces status:"pending" in output
+test_story_merge_defaults_status_pending() {
+  echo ""
+  echo "=== TC-STATUS-1: story-merge defaults missing status to pending ==="
+
+  local stg=".aimi/.tasks-staging-status1"
+  local out_file=".aimi/tasks/sm-status1-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  # Manually construct a staging JSON WITHOUT a status field (bypass _sm_make_story)
+  cat > "$stg/01-nostatus.json" << 'EOF'
+{
+  "title": "No-status story",
+  "description": "As a developer, I want to test status defaulting so that it works.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 1,
+  "dependsOn": [],
+  "notes": ""
+}
+EOF
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC-STATUS-1: story-merge exits 0"
+
+  if [ -f "$out_file" ]; then
+    local status_val
+    status_val=$(jq -r '.userStories[0].status' "$out_file" 2>/dev/null)
+    assert_eq "pending" "$status_val" "TC-STATUS-1: status field is 'pending' when absent in staging"
+  else
+    echo -e "${RED}✗${NC} TC-STATUS-1: output file missing"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -f "$out_file"
+}
+
+# TC-STATUS-2: story-merge preserves existing status when already set
+test_story_merge_preserves_existing_status() {
+  echo ""
+  echo "=== TC-STATUS-2: story-merge preserves existing status field ==="
+
+  local stg=".aimi/.tasks-staging-status2"
+  local out_file=".aimi/tasks/sm-status2-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  # Manually construct a staging JSON WITH a non-pending status
+  cat > "$stg/01-withstatus.json" << 'EOF'
+{
+  "title": "With-status story",
+  "description": "As a developer, I want to test status preservation so that it is not overwritten.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 1,
+  "status": "in_progress",
+  "dependsOn": [],
+  "notes": ""
+}
+EOF
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC-STATUS-2: story-merge exits 0"
+
+  if [ -f "$out_file" ]; then
+    local status_val
+    status_val=$(jq -r '.userStories[0].status' "$out_file" 2>/dev/null)
+    assert_eq "in_progress" "$status_val" "TC-STATUS-2: existing status preserved (not overwritten to pending)"
+  else
+    echo -e "${RED}✗${NC} TC-STATUS-2: output file missing"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -f "$out_file"
+}
+
+# TC-STATUS-3: normalize-status heals a status-less tasks file
+test_normalize_status_heals_missing_field() {
+  echo ""
+  echo "=== TC-STATUS-3: normalize-status heals a status-less tasks file ==="
+
+  local fixture_file
+  fixture_file=$(mktemp /tmp/test-normalize-status-XXXXXX.json)
+  cat > "$fixture_file" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Status test",
+    "type": "feat",
+    "branchName": "feat/status-test",
+    "createdAt": "2026-06-24",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story without status",
+      "description": "As a developer, I want to test healing so that status gets set.",
+      "acceptanceCriteria": ["Typecheck passes"],
+      "priority": 1,
+      "dependsOn": [],
+      "notes": ""
+    }
+  ]
+}
+EOF
+
+  local exit_code output
+  output=$("$CLI" normalize-status "$fixture_file") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC-STATUS-3: normalize-status exits 0 on success"
+
+  local status_val
+  status_val=$(jq -r '.userStories[0].status' "$fixture_file")
+  assert_eq "pending" "$status_val" "TC-STATUS-3: status field healed to 'pending'"
+
+  rm -f "$fixture_file"
+}
+
+# TC-STATUS-4: normalize-status preserves existing status values
+test_normalize_status_preserves_existing_status() {
+  echo ""
+  echo "=== TC-STATUS-4: normalize-status preserves existing status values ==="
+
+  local fixture_file
+  fixture_file=$(mktemp /tmp/test-normalize-status-XXXXXX.json)
+  cat > "$fixture_file" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Status preservation test",
+    "type": "feat",
+    "branchName": "feat/status-preservation-test",
+    "createdAt": "2026-06-24",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Completed story",
+      "description": "As a developer, I want to test preservation so that completed is not reset.",
+      "acceptanceCriteria": ["Typecheck passes"],
+      "priority": 1,
+      "status": "completed",
+      "dependsOn": [],
+      "notes": ""
+    }
+  ]
+}
+EOF
+
+  local exit_code
+  "$CLI" normalize-status "$fixture_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC-STATUS-4: normalize-status exits 0"
+
+  local status_val
+  status_val=$(jq -r '.userStories[0].status' "$fixture_file")
+  assert_eq "completed" "$status_val" "TC-STATUS-4: existing status 'completed' preserved (not reset to pending)"
+
+  rm -f "$fixture_file"
+}
+
+# TC-STATUS-5: validate-stories errors on a status-less story (exits non-zero)
+test_validate_stories_rejects_missing_status() {
+  echo ""
+  echo "=== TC-STATUS-5: validate-stories rejects story missing status field ==="
+
+  # Use _setup_project_fixture pattern: write to TASKS_DIR and update current-tasks
+  local fixture_file="$TASKS_DIR/9999-99-95-status-test.json"
+  cat > "$fixture_file" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Status validation test",
+    "type": "feat",
+    "branchName": "feat/status-validation-test",
+    "createdAt": "2026-06-24",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story without status",
+      "description": "As a developer, I want to test validation so that missing status is caught.",
+      "acceptanceCriteria": ["Typecheck passes"],
+      "priority": 1,
+      "dependsOn": [],
+      "notes": ""
+    }
+  ]
+}
+EOF
+  echo "$fixture_file" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-stories 2>&1) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "TC-STATUS-5: validate-stories exits 1 for missing status"
+  assert_contains "missing required field: status" "$output" "TC-STATUS-5: error mentions missing status field"
+  assert_contains "normalize-status" "$output" "TC-STATUS-5: error suggests normalize-status to fix"
+
+  # Restore original tasks file pointer
+  rm -f "$fixture_file"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+# TC-STATUS-6: normalize-status then validate-stories passes
+test_normalize_status_then_validate_stories_passes() {
+  echo ""
+  echo "=== TC-STATUS-6: normalize-status then validate-stories exits 0 ==="
+
+  local fixture_file="$TASKS_DIR/9999-99-94-status-heal-test.json"
+  cat > "$fixture_file" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Status heal and validate test",
+    "type": "feat",
+    "branchName": "feat/status-heal-validate-test",
+    "createdAt": "2026-06-24",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story without status",
+      "description": "As a developer, I want to test heal+validate so that the pipeline succeeds.",
+      "acceptanceCriteria": ["Typecheck passes"],
+      "priority": 1,
+      "dependsOn": [],
+      "notes": ""
+    }
+  ]
+}
+EOF
+  echo "$fixture_file" > "$AIMI_DIR/current-tasks"
+
+  # First: normalize-status should heal the missing status
+  local norm_exit
+  "$CLI" normalize-status "$fixture_file" && norm_exit=0 || norm_exit=$?
+  assert_exit_code "0" "$norm_exit" "TC-STATUS-6: normalize-status exits 0"
+
+  # Then: validate-stories should pass (status now healed to "pending")
+  local validate_output validate_exit
+  validate_output=$("$CLI" validate-stories 2>&1) && validate_exit=0 || validate_exit=$?
+  assert_exit_code "0" "$validate_exit" "TC-STATUS-6: validate-stories exits 0 after normalize-status"
+  assert_contains '"valid": true' "$validate_output" "TC-STATUS-6: validate-stories reports valid:true"
+
+  # Restore original tasks file pointer
+  rm -f "$fixture_file"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -9322,6 +9583,16 @@ main() {
   test_story_merge_outline_sidecar_ignored
   test_story_merge_dead_code_positive
   test_story_merge_dead_code_negative
+
+  # normalize-status and status field regression tests (US-003)
+  echo ""
+  echo "--- normalize-status / status field Tests (US-003) ---"
+  test_story_merge_defaults_status_pending
+  test_story_merge_preserves_existing_status
+  test_normalize_status_heals_missing_field
+  test_normalize_status_preserves_existing_status
+  test_validate_stories_rejects_missing_status
+  test_normalize_status_then_validate_stories_passes
 
   # Design bundle detection tests
   echo ""
