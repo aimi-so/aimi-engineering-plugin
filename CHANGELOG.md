@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.101.0] - 2026-06-24
+
+### Added
+
+- **Phase 1.8 Scope-Pruning-Positive Gate + new `aimi-scope-positive-verifier` workflow agent.** The `/aimi:plan` pipeline now runs a positive-premise verification step (Phase 1.8) after the existing scope-pruning-negative gate. A new standalone agent `aimi-scope-positive-verifier` receives each load-bearing positive spec premise and verifies it by data-flow analysis, tracing the actual call graph to confirm the claimed behavior exists. Premises that cannot be verified emit a `specFlow:CriticalQ` decision entry for human review before story expansion begins. Agent lives at `plugins/aimi-engineering/agents/workflow/aimi-scope-positive-verifier.md`.
+- **Phase 1.6b research-conflict escalation gate.** When a researcher finding directly contradicts a spec premise, the plan pipeline now escalates the conflict as a `researchConflict:<n>` decision (source `"researchConflict"`) instead of silently suppressing it. The human reviewer resolves the conflict at the outline-review gate before story expansion proceeds.
+- **`research-lookup --ignore-missing-cited-paths` flag.** Callers that tolerate missing file references (e.g. migration stories that cite to-be-created files) can now pass this flag to suppress the stale-exit triggered by non-existent cited paths. Freshness is still checked against all paths that do exist.
+- **`normalize-status` CLI subcommand.** `aimi-cli.sh normalize-status <tasks-file>` auto-heals tasks files that are missing the `status` field on one or more stories by injecting `"status": "pending"` in-place. Designed to run before `validate-stories` so pre-fix tasks files self-repair without requiring manual edits.
+
+### Fixed
+
+- **`story-merge` now defaults `status: "pending"` in all three JSON writers** (legacy single-file, split-frontend, split-backend). Previously only the story-expander schema included a default, leaving the merge writers as the authoritative path missing the field. `validate-stories` has been updated with a `has(status)` predicate that rejects any story missing the field — ensuring the `/aimi:deepen` command no longer finds zero pending stories due to a missing `status` key.
+- **`/aimi:deepen` reuse-gate now matches `touched-area` (existing-file overlap) instead of full file-set superset.** The previous gate required the new story's entire file set to be a subset of the cached research file set before allowing reuse. Migration stories that add new files alongside existing ones always failed this check and forced a full researcher re-spawn. The gate now fires when the intersection of the story's `implementation.files` with the cached research's cited paths is non-empty — so migration stories correctly reuse plan research for the files they share.
+
+### Notes
+
+- **Fix 4 (skill map defaults to `dhh-rails` for unmatched files) investigated and confirmed NON-BUG.** The original proposal listed a fix for the story-expander skill map defaulting unmatched file extensions (e.g. `*.ts`) to `dhh-rails-style`. Codebase cross-check (Phase 2.4) confirmed no TypeScript skill exists in this plugin — the only TypeScript-related agent is `aimi-kieran-typescript-reviewer`, which is a review agent, not a skill. The existing omit-on-no-match behavior (no skill selected when the extension has no mapping) is already correct. No skill-map change was shipped in this release.
+
 ## [1.100.1] - 2026-06-19
 
 ### Fixed

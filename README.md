@@ -258,7 +258,7 @@ Used internally by commands — not user-invocable.
 
 ## Agents
 
-29 aimi-native agents organized into 4 categories.
+30 aimi-native agents organized into 4 categories.
 
 ### Research (6)
 
