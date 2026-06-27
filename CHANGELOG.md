@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.98.1] - 2026-06-26
+
+### Fixed
+
+- **OpenCode startup crash on `aimi-migration-dataflow-signals.md`.** `install_agents()` (install.sh) translates `agents/references/migration-dataflow-signals.md` into `~/.config/opencode/agents/aimi-migration-dataflow-signals.md` because the `agents/*/*.md` glob lacks the `references/` exclusion that `install_commands()` enforces. With no frontmatter on the source, `translate_agent` wrote `description: ` (empty), which the YAML parser read as `null`, failing OpenCode's agent schema (`Expected string | undefined, got null description`) and aborting startup. Added a `description` field to the reference so the translated file validates.
+
 ## [1.98.0] - 2026-06-10
 
 ### Added
