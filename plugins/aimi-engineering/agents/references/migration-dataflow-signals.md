@@ -1,3 +1,7 @@
+---
+description: "Use during migration checks to determine whether target functionality already exists by tracing data-flow signals instead of relying on legacy-name grep."
+---
+
 # Migration Data-Flow Signals (canonical)
 
 Single source of truth for "does the target already have X?" during a **migration** task. Referenced by `aimi-codebase-researcher` (Migration-aware existence checks) and `aimi-scope-negative-verifier`. When you tune this doctrine, edit it **here** — both agents link to this file rather than restating it.
