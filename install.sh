@@ -545,6 +545,22 @@ install_commands() {
 # ---------------------------------------------------------------------------
 # install_agents — translate and write agents
 # ---------------------------------------------------------------------------
+# OpenCode workflow subagent_type translation table (kept here for grep-discoverability
+# even though the actual translation is glob-based via "agents/*/*.md"). Each workflow
+# agent listed here is translated from `aimi-engineering:workflow:<name>` (Claude Code)
+# to `aimi-<name>` (OpenCode) by the loop below.
+#
+# | workflow agent                       | translated as                          |
+# | ------------------------------------ | -------------------------------------- |
+# | aimi-bug-reproduction-validator      | aimi-bug-reproduction-validator        |
+# | aimi-cross-story-auditor             | aimi-cross-story-auditor               |
+# | aimi-learnings-triage                | aimi-learnings-triage                  |
+# | aimi-scope-negative-verifier         | aimi-scope-negative-verifier           |
+# | aimi-scope-positive-verifier         | aimi-scope-positive-verifier           |
+# | aimi-spec-flow-analyzer              | aimi-spec-flow-analyzer                |
+# | aimi-spec-flow-symbol-extractor      | aimi-spec-flow-symbol-extractor        |
+# | aimi-story-expander                  | aimi-story-expander                    |
+# ---------------------------------------------------------------------------
 install_agents() {
   local src="$1"
   local target_dir="$2"

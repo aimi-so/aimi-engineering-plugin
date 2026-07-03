@@ -37,6 +37,7 @@ Write exactly one JSON object to `outputPath`. Fields:
     "<each entry max 5000 chars; first AC MUST be the user-observable end-to-end outcome>",
     "Typecheck passes"
   ],
+  "status": "pending",
   "priority": <integer, sequential tiebreaker hint for stories at the same wave>,
   "dependsOn": ["outline:NN", "..."],
   "notes": "<optional>",
@@ -64,7 +65,7 @@ Write exactly one JSON object to `outputPath`. Fields:
 }
 ```
 
-`gate` and `skills` and `tasks` are optional — omit the field entirely when it would be empty. `verification` MUST be an object — never a bare string.
+`gate` and `skills` and `tasks` are optional — omit the field entirely when it would be empty. `verification` MUST be an object — never a bare string. `status` is REQUIRED and MUST be `"pending"` for all new stories.
 
 ## dependsOn encoding
 
@@ -162,3 +163,5 @@ When AC cites exactly one distinct prototype path, set `implementation.prototype
 ## On failure
 
 If you cannot author a valid story JSON (e.g., the outline entry is too ambiguous, required spec content is missing, or research conflicts cannot be reconciled), do NOT write a partial file. Report the failure with: outline `idx`, a 1-line cause, and the specific decision you would need from the caller to proceed. The caller will surface this to the user via the schema-retry-with-enriched-prompt path in `/aimi:plan` Phase 3d.
+
+Required fields that must be present in every output object: `title`, `description`, `acceptanceCriteria` (non-empty array), `status` (always `"pending"`), `dependsOn` (array), `verification` (object with `strategy` and `status`). A story JSON missing any of these fields will fail Phase 3d schema validation and trigger a retry.

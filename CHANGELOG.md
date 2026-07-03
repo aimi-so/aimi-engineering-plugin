@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.103.0] - 2026-06-25
+
+### Changed
+
+- **Restricted `allowed-tools` on the three filesystem-facing research agents to read-only + Write.** `aimi-codebase-researcher`, `aimi-learnings-researcher`, and `aimi-design-bundle-researcher` now declare `allowed-tools: Read, Grep, Glob, Write` (previously they inherited the full tool set). This captures the read-only safety posture of the built-in `Explore` agent — these agents crawl the user's source tree and can no longer `Edit`/`NotebookEdit` existing files or spawn sub-agents — while preserving `Write`, which the pointer-only research handoff depends on (each agent writes its findings to `.aimi/research/*.md` and returns only a pointer). Matches the existing `allowed-tools` convention already used by `aimi-bundle-prototype-author` and the workflow verifier agents. The web/MCP-dependent researchers (`aimi-best-practices-researcher`, `aimi-framework-docs-researcher`) are intentionally left unrestricted, since an allowlist would have to enumerate host-specific Context7 MCP tool names and risk silently breaking their external-documentation lookups.
+
+### Notes
+
+- This restriction is honored under Claude Code (which reads the plugin source verbatim). As with the five pre-existing `allowed-tools` agents, the OpenCode translator (`install.sh` `translate_agent`) does not yet propagate `allowed-tools` into OpenCode agent frontmatter, so under OpenCode these agents retain their current tool set — no regression, but no parity. Adding `allowed-tools` translation to the OpenCode installer is tracked as a separate follow-up.
+
+## [1.102.0] - 2026-06-25
+
+### Changed
+
+- **Default `metadata.maxConcurrency` raised from `5` to `20`.** The wave-based executor now fans out up to 20 stories in parallel by default (previously 5), and the worktree-budget guard (`pre-bash-dispatcher.py`) allows up to 20 concurrent story worktrees before denying `git worktree add`. The new default is applied consistently across `aimi-cli.sh` (`status`/`metadata` fallbacks, including the `<= 0` floor), the `pre-bash-dispatcher` worktree-budget guard, and `/aimi:plan` (the value written into new tasks.json files). Explicit per-task overrides are unaffected — set `metadata.maxConcurrency` to any value (e.g. `1` for strictly sequential execution).
+
+## [1.101.0] - 2026-06-24
+
+### Added
+
+- **Phase 1.8 Scope-Pruning-Positive Gate + new `aimi-scope-positive-verifier` workflow agent.** The `/aimi:plan` pipeline now runs a positive-premise verification step (Phase 1.8) after the existing scope-pruning-negative gate. A new standalone agent `aimi-scope-positive-verifier` receives each load-bearing positive spec premise and verifies it by data-flow analysis, tracing the actual call graph to confirm the claimed behavior exists. Premises that cannot be verified emit a `specFlow:CriticalQ` decision entry for human review before story expansion begins. Agent lives at `plugins/aimi-engineering/agents/workflow/aimi-scope-positive-verifier.md`.
+- **Phase 1.6b research-conflict escalation gate.** When a researcher finding directly contradicts a spec premise, the plan pipeline now escalates the conflict as a `researchConflict:<n>` decision (source `"researchConflict"`) instead of silently suppressing it. The human reviewer resolves the conflict at the outline-review gate before story expansion proceeds.
+- **`research-lookup --ignore-missing-cited-paths` flag.** Callers that tolerate missing file references (e.g. migration stories that cite to-be-created files) can now pass this flag to suppress the stale-exit triggered by non-existent cited paths. Freshness is still checked against all paths that do exist.
+- **`normalize-status` CLI subcommand.** `aimi-cli.sh normalize-status <tasks-file>` auto-heals tasks files that are missing the `status` field on one or more stories by injecting `"status": "pending"` in-place. Designed to run before `validate-stories` so pre-fix tasks files self-repair without requiring manual edits.
+
+### Fixed
+
+- **`story-merge` now defaults `status: "pending"` in all three JSON writers** (legacy single-file, split-frontend, split-backend). Previously only the story-expander schema included a default, leaving the merge writers as the authoritative path missing the field. `validate-stories` has been updated with a `has(status)` predicate that rejects any story missing the field — ensuring the `/aimi:deepen` command no longer finds zero pending stories due to a missing `status` key.
+- **`/aimi:deepen` reuse-gate now matches `touched-area` (existing-file overlap) instead of full file-set superset.** The previous gate required the new story's entire file set to be a subset of the cached research file set before allowing reuse. Migration stories that add new files alongside existing ones always failed this check and forced a full researcher re-spawn. The gate now fires when the intersection of the story's `implementation.files` with the cached research's cited paths is non-empty — so migration stories correctly reuse plan research for the files they share.
+
+### Notes
+
+- **Fix 4 (skill map defaults to `dhh-rails` for unmatched files) investigated and confirmed NON-BUG.** The original proposal listed a fix for the story-expander skill map defaulting unmatched file extensions (e.g. `*.ts`) to `dhh-rails-style`. Codebase cross-check (Phase 2.4) confirmed no TypeScript skill exists in this plugin — the only TypeScript-related agent is `aimi-kieran-typescript-reviewer`, which is a review agent, not a skill. The existing omit-on-no-match behavior (no skill selected when the extension has no mapping) is already correct. No skill-map change was shipped in this release.
+
+## [1.100.1] - 2026-06-19
+
+### Fixed
+
+- **Concern 6 of `aimi-cross-story-auditor` reframed from "verification" to "surfacing".** The 1.100.0 design attempted to auto-verify deferral phrases by substring-matching the noun phrase preceding the deferral against the target story's acceptance criteria. Self-review caught a critical false negative: the noun in a deferral (e.g. "affiliation") commonly appears verbatim in the helper name introduced by the target story (e.g. `requiresAffiliation`), so a substring match produces a tautological "deferral honored" verdict — a silent pass that looks like a clean check. Worse than no check at all, because reviewers trust silence. Replaced with **deferral surfacing**: every matched deferral phrase emits an `unresolved[]` entry naming the source story and target story; the human reviewer judges whether the target wires the deferred behavior or only exposes a helper. The regex stays strict (only `deferred to (story )?\d+` and `story \d+ (will|owns|covers)`) — looser phrases still produce too many false positives.
+
+## [1.100.0] - 2026-06-19
+
+### Added
+
+- **Two new built-in audit concerns on `aimi-cross-story-auditor`.** The agent now evaluates six concerns instead of four. (a) **Orphan public APIs** — when a story's `implementation.approach` introduces a named symbol (camelCase / PascalCase / snake_case, length ≥ 6) that does not appear in any sibling story's text corpus (title, description, AC, approach, files, tasks), the agent emits an `unresolved[]` entry naming the symbol and the producer story; reviewer decides whether it is a legitimate leaf API (CLI entry point, webhook handler, SDK surface) or a planning gap. Skipped when staging set contains only one story. (b) **Honored deferrals** — when a story's `notes` contains the strict-regex phrases `deferred to (story )?\d+` or `story \d+ (will|owns|covers)`, the agent extracts the target outline index and the noun phrase immediately before the deferral, then verifies that the target story's `acceptanceCriteria` contains a substring of that noun phrase (case-insensitive). When the deferral is not honored, the agent emits an `unresolved[]` entry naming the source story, target story, and unhonored concept. The regex is intentionally narrow — `future work`, `out of scope`, `intentionally not enforced here` are NOT matched because they signal vague aspirations without a named target.
+- **`metadata.smellWarnings[]` field on the merged tasks.json (`aimi-cli.sh story-merge`).** Phase 4.2 orphan-symbol findings are now embedded in the output tasks.json (in addition to the existing stderr warning), so the orchestrator's Step 5 report can surface them without parsing stderr. Each entry has shape `{type: "orphan-symbol", storyId: "US-NNN", symbols: ["symbolA", ...], message: "..."}`. The field is written by both legacy and split-mode writers (in split mode, the same array is written to both frontend and backend files so per-file summaries stay self-contained). Absent entirely when no orphan symbols were detected — backward-compatible for downstream consumers.
+
+### Changed
+
+- **`/aimi:plan` Step 5 report renders `metadata.smellWarnings`.** A new `Smell warnings: N orphan-symbol finding(s)` line appears in the report when the merged tasks.json has a non-empty `smellWarnings` array, followed by one bullet per entry showing `storyId`, `type`, `symbols`, and `message`. No sanitization required (fields are CLI-emitted literals or regex-constrained). Omitted entirely when absent or empty.
+
+## [1.99.1] - 2026-06-17
+
+### Fixed
+
+- **`story-merge` ingests `audit-result.json` as a phantom story (`aimi-cli.sh`).** The staging glob excluded only `outline.json`, `*outline*.json`, and `metadata.json`, but Phase 3d.5 writes its debug artifact to `<RUN_DIR>/audit-result.json` in the same directory — so the merger picked it up as a story-shaped JSON object, producing a malformed `tasks.json` entry with no `title`/`description`/`acceptanceCriteria`. Added `audit-result.json` to the exclusion case. Consistent with the strict `[0-9][0-9]-*.json` prefix glob already used by Phase 3d.5's own staging lookup.
+- **`validate-stories` rejects natural-markdown single backticks in `title`, `description`, and `tasks[]` (`aimi-cli.sh`).** The suspicious-content regex listed single backtick alongside triple-backtick and `$(`, blocking common phrasings like `Run \`bun run test\` after edit` even though `tasks[]` only flows into LLM prompts (one site: `next.md:135`, XML-wrapped) — never into shell. Narrowed the regex to triple-backticks and `$(`, which remain the actual prompt-injection vectors. Authored `plan.md` Pass 2 prompt doc updated to drop `backticks` from the Forbidden list.
+
+## [1.99.0] - 2026-06-15
+
+### Added
+
+- **Phase 2.4 Codebase Cross-Check gate (`plan.md`).** A new phase that runs between Phase 2 (spec-flow open questions) and Phase 2.5, auto-resolving sanitized spec-flow OQs when the named symbol is already implemented in the target codebase. For each OQ batched through the `aimi-spec-flow-symbol-extractor` agent, the gate runs `grep -F -rn` against every repo discovered by the Phase 0/1 auto-scan — excluding `.git`, `.worktrees`, `.aimi`, `node_modules`, `vendor`, `dist`, `build`, `.next`, `coverage`, `.cache` — classifies each non-doc/non-comment hit by path category (prod / test / migration / other), and records the OQ as resolved with `source: codebaseVerified` and a per-repo `file:line` evidence string. Eliminates the spec-flow-asks-about-already-implemented-code class of friction without round-tripping the user.
+- **New `aimi-spec-flow-symbol-extractor` workflow agent.** A single batched extractor spawn per Phase 2.4 invocation receives all sanitized spec-flow OQs and returns a JSON `{anchor: [symbols]}` map naming the candidate symbol(s) implied by each question. Each emitted symbol is constrained to `^[A-Za-z_][A-Za-z0-9_.:-]{5,99}$` and is rejected if shorter than 6 chars or in the stoplist `{id, get, set, User, Service, data, result, error, value, name}` — keeping Phase 2.4 grep targets specific enough to avoid false positives on generic identifiers. Batched so the orchestrator spawns the agent once per phase, not once per OQ.
+- **`codebaseVerified` source value on `oqDecisions[]`/`decisions[]` entries.** A ninth allowed value in the `source` enum (joining the existing `specFlow:CriticalQ<n>`, `specFlow:Gap<n>`, `outline`, `scopeNegVerifier`, etc. set), used by Phase 2.4 to mark an OQ as resolved by codebase existence evidence rather than by user answer or research conclusion. Lets downstream `deepen`/`review` distinguish "resolved by what's already shipped" from "resolved by what the user said".
+- **Optional `evidence` string field on `oqDecisions[]`/`decisions[]` entries.** A free-form string capturing classified `file:line` hits per repo for OQs resolved through Phase 2.4 (e.g. `prod: apps/web/src/foo.ts:142; test: apps/web/test/foo.spec.ts:18`). Optional everywhere else on the schema — only Phase 2.4 populates it today — so existing decision entries written by other phases remain valid.
+- **Three Phase 2.4 failure rows in the `/aimi:plan` Error Handling table.** Covers (a) `grep` invocation failure in a scanned repo (Phase 2.4 records the failure as a per-repo skip, continues with remaining repos, never blocks); (b) malformed `aimi-spec-flow-symbol-extractor` output that fails JSON-shape validation (the gate logs a warning and falls through to user-answered resolution for the affected OQs); (c) extracted symbol rejected by the regex / length / stoplist filter (the gate skips Phase 2.4 for that OQ and falls through to user-answered resolution). All three are non-blocking — Phase 2.4 degrades gracefully back to the pre-existing OQ resolution path.
+- **OpenCode translator documentation entry for `aimi-spec-flow-symbol-extractor` (`install.sh`).** The translator's documented agent inventory now lists the new workflow agent alongside the existing `aimi-scope-negative-verifier`, `aimi-cross-story-auditor`, and other Phase-N gate agents, so OpenCode installs ship the same Phase 2.4 capability set as Claude Code.
 ## [1.98.1] - 2026-06-26
 
 ### Fixed

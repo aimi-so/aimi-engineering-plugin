@@ -258,7 +258,7 @@ Used internally by commands — not user-invocable.
 
 ## Agents
 
-29 aimi-native agents organized into 4 categories.
+30 aimi-native agents organized into 4 categories.
 
 ### Research (6)
 
@@ -362,7 +362,7 @@ All execution state lives in `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
     "branchName": "feat/user-auth",
     "createdAt": "2026-02-16",
     "planPath": ".aimi/plans/2026-02-16-user-auth-plan.md",
-    "maxConcurrency": 5
+    "maxConcurrency": 20
   },
   "userStories": [
     {
@@ -403,7 +403,7 @@ All execution state lives in `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`.
 | `createdAt` | string | Creation date (YYYY-MM-DD) |
 | `planPath` | string | Path to source plan file |
 | `brainstormPath` | string | (optional) Path to brainstorm file |
-| `maxConcurrency` | number | (v3) Max parallel workers (default 5) |
+| `maxConcurrency` | number | (v3) Max parallel workers (default 20) |
 
 #### Story Fields (v3)
 

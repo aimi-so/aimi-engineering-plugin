@@ -638,7 +638,7 @@ cmd_status() {
       schemaVersion: .schemaVersion,
       title: .metadata.title,
       branch: .metadata.branchName,
-      maxConcurrency: ((.metadata.maxConcurrency // 5) | if . <= 0 then 5 else . end),
+      maxConcurrency: ((.metadata.maxConcurrency // 20) | if . <= 0 then 20 else . end),
       pending: [.userStories[] | select(.status == "pending")] | length,
       in_progress: [.userStories[] | select(.status == "in_progress")] | length,
       completed: [.userStories[] | select(.status == "completed")] | length,
@@ -651,7 +651,7 @@ cmd_status() {
       schemaVersion: .schemaVersion,
       title: .metadata.title,
       branch: .metadata.branchName,
-      maxConcurrency: ((.metadata.maxConcurrency // 5) | if . <= 0 then 5 else . end),
+      maxConcurrency: ((.metadata.maxConcurrency // 20) | if . <= 0 then 20 else . end),
       pending: [.userStories[] | select(.status == "pending")] | length,
       in_progress: [.userStories[] | select(.status == "in_progress")] | length,
       completed: [.userStories[] | select(.status == "completed")] | length,
@@ -667,7 +667,7 @@ cmd_status() {
 cmd_metadata() {
   local tasks_file
   tasks_file=$(get_tasks_file)
-  jq '.metadata | .maxConcurrency = ((.maxConcurrency // 5) | if . <= 0 then 5 else . end)' "$tasks_file"
+  jq '.metadata | .maxConcurrency = ((.maxConcurrency // 20) | if . <= 0 then 20 else . end)' "$tasks_file"
 }
 
 # List stories that are ready to execute
@@ -1179,8 +1179,8 @@ cmd_validate_stories() {
         (if ($s.title | length) > 200 then ["\($s.id): title exceeds 200 chars"] else [] end) +
         (if ($s.description | length) > 500 then ["\($s.id): description exceeds 500 chars"] else [] end) +
         ([$s.acceptanceCriteria[] | select(length > 5000)] | if length > 0 then ["\($s.id): acceptance criterion exceeds 5000 chars"] else [] end) +
-        (if ($s.title | test("ignore previous|system:|INSTRUCTIONS|```|\\$\\(|`"; "i")) then ["\($s.id): title contains suspicious content"] else [] end) +
-        (if ($s.description | test("ignore previous|system:|INSTRUCTIONS|```|\\$\\(|`"; "i")) then ["\($s.id): description contains suspicious content"] else [] end) +
+        (if ($s.title | test("ignore previous|system:|INSTRUCTIONS|```|\\$\\("; "i")) then ["\($s.id): title contains suspicious content"] else [] end) +
+        (if ($s.description | test("ignore previous|system:|INSTRUCTIONS|```|\\$\\("; "i")) then ["\($s.id): description contains suspicious content"] else [] end) +
         (if ($s.project != null) then
           (if ($s.project | test("^/")) then ["\($s.id): project must not be an absolute path"]
            elif ($s.project | test("\\.\\.")) then ["\($s.id): project must not contain path traversal (..)"]
@@ -1206,7 +1206,7 @@ cmd_validate_stories() {
              (if ($s.tasks | length) > 50 then ["\($s.id): tasks array exceeds 50 entries"] else [] end) +
              [$s.tasks[] | select(type != "string") | "\($s.id): tasks[] element must be a string"] +
              [$s.tasks[] | select(type == "string" and length > 5000) | "\($s.id): tasks[] entry exceeds 5000 chars"] +
-             [$s.tasks[] | select(type == "string" and test("ignore previous|system:|INSTRUCTIONS|```|\\$\\(|`"; "i")) | "\($s.id): tasks[] entry contains suspicious content"]
+             [$s.tasks[] | select(type == "string" and test("ignore previous|system:|INSTRUCTIONS|```|\\$\\("; "i")) | "\($s.id): tasks[] entry contains suspicious content"]
            end)
          else [] end) +
         (if has("gates") then ["\($s.id): gate: 'gates' field is invalid; use singular 'gate' (see plan.md L687-692)"] else [] end) +
@@ -1215,6 +1215,9 @@ cmd_validate_stories() {
          else [] end) +
         (if ($s.verification != null and ($s.verification | type) == "string") then
           ["\($s.id): verification must be an object {strategy, status, url, expect}; found bare string — run normalize-verification to fix"]
+         else [] end) +
+        (if (has("status") | not) then
+          ["\($s.id): missing required field: status — run normalize-status to fix"]
          else [] end)
       ) | .[]
     ] |
@@ -1279,6 +1282,49 @@ cmd_normalize_verification() {
   local normalized_count
   normalized_count=$(jq '[.userStories[] | select(.verification != null and (.verification | type) == "object")] | length' "$tasks_file")
   jq -n --argjson count "$normalized_count" '{normalized: $count}'
+}
+
+# Normalize status fields: default any story missing the status field to "pending"
+cmd_normalize_status() {
+  local tasks_file="$1"
+
+  if [ -z "$tasks_file" ]; then
+    echo "Usage: aimi-cli.sh normalize-status <tasks-file-path>" >&2
+    exit 1
+  fi
+
+  if [ ! -f "$tasks_file" ]; then
+    echo "Error: tasks file not found: $tasks_file" >&2
+    exit 1
+  fi
+
+  if [ ! -r "$tasks_file" ]; then
+    echo "Error: tasks file not readable: $tasks_file" >&2
+    exit 1
+  fi
+
+  # Validate input is valid JSON
+  if ! jq empty "$tasks_file" 2>/dev/null; then
+    echo "Error: invalid JSON in tasks file: $tasks_file" >&2
+    exit 1
+  fi
+
+  local tmp_file
+  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  (
+    _lock "${tasks_file}.lock"
+    jq '
+      .userStories |= map(.status //= "pending")
+    ' "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+  ) 200>"${tasks_file}.lock"
+  local exit_code=$?
+  rm -f "$tmp_file" 2>/dev/null
+  [ $exit_code -ne 0 ] && exit $exit_code
+
+  # Report how many stories were healed (now have status field)
+  local healed_count
+  healed_count=$(jq '[.userStories[] | select(has("status"))] | length' "$tasks_file")
+  jq -n --argjson count "$healed_count" '{normalized: $count}'
 }
 
 # Validate all story IDs in the tasks file against the US-NNN format
@@ -3892,19 +3938,39 @@ cmd_archive_task() {
     '{archived: {task: $task, brainstorm: (if $brainstorm == "" then null else $brainstorm end), researchCleaned: $researchCleaned, prototypeCleaned: $prototypeCleaned}}'
 }
 
-# Usage: research-lookup <path>
+# Usage: research-lookup [--ignore-missing-cited-paths] <path>
 # Check whether a research file is fresh relative to its cited source paths.
 # Freshness: research-file mtime >= newest mtime among existing cited source paths.
 # A cited path that does not exist -> stale (logs a warning to stderr).
+#   With --ignore-missing-cited-paths: missing cited paths log a warning but do NOT mark stale.
 # No '## File References' section -> stale.
 # Fresh: prints the research path + exits 0.
 # Stale/undecidable: prints nothing + exits 1.
 # Missing argument: usage on stderr + exits 1.
 cmd_research_lookup() {
-  local research_path="$1"
+  local ignore_missing=0
+  local research_path=""
+
+  # Parse flag in either position relative to the positional path arg
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --ignore-missing-cited-paths)
+        ignore_missing=1
+        shift
+        ;;
+      -*)
+        echo "Usage: aimi-cli.sh research-lookup [--ignore-missing-cited-paths] <path>" >&2
+        exit 1
+        ;;
+      *)
+        research_path="$1"
+        shift
+        ;;
+    esac
+  done
 
   if [ -z "$research_path" ]; then
-    echo "Usage: aimi-cli.sh research-lookup <path>" >&2
+    echo "Usage: aimi-cli.sh research-lookup [--ignore-missing-cited-paths] <path>" >&2
     exit 1
   fi
 
@@ -3978,7 +4044,9 @@ cmd_research_lookup() {
     # Check existence
     if [ ! -e "$abs_cited_path" ]; then
       echo "Warning: Cited source path does not exist (stale): $cited_path" >&2
-      stale=1
+      if [ "$ignore_missing" -eq 0 ]; then
+        stale=1
+      fi
       continue
     fi
 
@@ -4225,7 +4293,7 @@ cmd_story_merge() {
     local fbase
     fbase=$(basename "$f")
     case "$fbase" in
-      outline.json|*outline*.json|metadata.json) continue ;;
+      outline.json|*outline*.json|metadata.json|audit-result.json) continue ;;
     esac
     staging_files+=("$f")
   done < <(find "$staging_dir" -maxdepth 1 -name '*.json' -type f | sort)
@@ -4703,12 +4771,25 @@ cmd_story_merge() {
   fi
 
   # ============================================================
+  # Phase 4.2 → smellWarnings metadata field
+  # ============================================================
+  # Surface orphan-symbol findings to the orchestrator's Step 5 report by
+  # embedding them in metadata.smellWarnings. The writers below inject this
+  # field only when non-empty; absent otherwise.
+  local smell_warnings
+  if [ "${orphan_sym_violations:-0}" -gt 0 ]; then
+    smell_warnings=$(printf '%s' "$orphan_sym_check" | jq '[.[] | {type: "orphan-symbol", storyId: .id, symbols: .symbols, message: "introduces symbols no sibling story references"}]')
+  else
+    smell_warnings='[]'
+  fi
+
+  # ============================================================
   # Branch on split mode
   # ============================================================
   if [ "$split_mode" = "full-stack" ]; then
-    _story_merge_write_split "$merged_array" "$output_path" "$staging_dir"
+    _story_merge_write_split "$merged_array" "$output_path" "$staging_dir" "$smell_warnings"
   else
-    _story_merge_write_legacy "$merged_array" "$output_path" "$staging_dir"
+    _story_merge_write_legacy "$merged_array" "$output_path" "$staging_dir" "$smell_warnings"
   fi
 }
 
@@ -4717,23 +4798,29 @@ _story_merge_write_legacy() {
   local merged_array="$1"
   local output_path="$2"
   local staging_dir="$3"
+  local smell_warnings="${4:-[]}"
 
   # Build the final tasks.json structure
   # Metadata is minimal; the caller (plan command) fills in the full metadata.
   # story-merge only provides structure; metadata.title, branchName, etc. come from
   # the staging context or are set to sensible defaults.
+  # smellWarnings is injected only when non-empty so absent-by-default stays the norm.
   local tasks_json
-  tasks_json=$(printf '%s' "$merged_array" | jq '
+  tasks_json=$(printf '%s\n%s' "$merged_array" "$smell_warnings" | jq -s '
+    .[0] as $stories | .[1] as $smells |
     {
       schemaVersion: "3.3",
-      metadata: {
-        title: "feat: merged tasks",
-        type: "feat",
-        branchName: "feat/merged",
-        createdAt: (now | strftime("%Y-%m-%d")),
-        planPath: null
-      },
-      userStories: [.[] | del(.referenceInventory) | del(.ac_anchors)]
+      metadata: (
+        {
+          title: "feat: merged tasks",
+          type: "feat",
+          branchName: "feat/merged",
+          createdAt: (now | strftime("%Y-%m-%d")),
+          planPath: null
+        } +
+        (if ($smells | length) > 0 then {smellWarnings: $smells} else {} end)
+      ),
+      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors) | (.status //= "pending")]
     }
   ')
 
@@ -4771,6 +4858,7 @@ _story_merge_write_split() {
   local merged_array="$1"
   local output_path="$2"
   local staging_dir="$3"
+  local smell_warnings="${4:-[]}"
 
   # Partition by layer:
   # - UI stories → frontend (stories whose title/description contains UI/Frontend/React/Vue/component keywords,
@@ -4912,18 +5000,25 @@ _story_merge_write_split() {
   mkdir -p "$dir_part"
 
   # Build and write frontend tasks.json atomically
+  # smellWarnings is injected only when non-empty; written to BOTH split files
+  # so reviewers see the same orphan-symbol surface regardless of which file
+  # they inspect first.
   local fe_json
-  fe_json=$(printf '%s' "$frontend_stories" | jq '
+  fe_json=$(printf '%s\n%s' "$frontend_stories" "$smell_warnings" | jq -s '
+    .[0] as $stories | .[1] as $smells |
     {
       schemaVersion: "3.3",
-      metadata: {
-        title: "feat: merged tasks (frontend)",
-        type: "feat",
-        branchName: "feat/merged-frontend",
-        createdAt: (now | strftime("%Y-%m-%d")),
-        planPath: null
-      },
-      userStories: [.[] | del(.referenceInventory) | del(.ac_anchors)]
+      metadata: (
+        {
+          title: "feat: merged tasks (frontend)",
+          type: "feat",
+          branchName: "feat/merged-frontend",
+          createdAt: (now | strftime("%Y-%m-%d")),
+          planPath: null
+        } +
+        (if ($smells | length) > 0 then {smellWarnings: $smells} else {} end)
+      ),
+      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors) | (.status //= "pending")]
     }
   ')
   local tmp_fe
@@ -4942,17 +5037,21 @@ _story_merge_write_split() {
 
   # Build and write backend tasks.json atomically
   local be_json
-  be_json=$(printf '%s' "$backend_stories" | jq '
+  be_json=$(printf '%s\n%s' "$backend_stories" "$smell_warnings" | jq -s '
+    .[0] as $stories | .[1] as $smells |
     {
       schemaVersion: "3.3",
-      metadata: {
-        title: "feat: merged tasks (backend)",
-        type: "feat",
-        branchName: "feat/merged-backend",
-        createdAt: (now | strftime("%Y-%m-%d")),
-        planPath: null
-      },
-      userStories: [.[] | del(.referenceInventory) | del(.ac_anchors)]
+      metadata: (
+        {
+          title: "feat: merged tasks (backend)",
+          type: "feat",
+          branchName: "feat/merged-backend",
+          createdAt: (now | strftime("%Y-%m-%d")),
+          planPath: null
+        } +
+        (if ($smells | length) > 0 then {smellWarnings: $smells} else {} end)
+      ),
+      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors) | (.status //= "pending")]
     }
   ')
   local tmp_be
@@ -5013,6 +5112,10 @@ COMMANDS:
                               into {strategy: S, status: "pending", url: null, expect: null}.
                               Already-object verifications are left unchanged.
                               Writes atomically (tmp + mv). Exits 0 on success.
+    normalize-status <file>   Default any story missing the status field to "pending".
+                              Already-set status values are preserved (uses //= operator).
+                              Writes atomically (tmp + mv). Exits 0 on success.
+                              Reports count of stories with status field after heal.
     validate-ids              Validate all story IDs match US-NNN format
     gate-pass <id> [--option 'value']
                               Pass a gate on a story; optionally store selected option
@@ -5104,13 +5207,18 @@ COMMANDS:
     cleanup-versions          Remove old cached plugin versions, keep latest only
     list-archivable           List task files where all stories are completed/skipped (JSON array)
     archive-task <path>       Move completed task file (and linked brainstorm) to .aimi/archive/
-    research-lookup <path>    Check whether a research .md file is fresh relative to cited source
+    research-lookup [--ignore-missing-cited-paths] <path>
+                              Check whether a research .md file is fresh relative to cited source
                               paths listed under its '## File References' h2 bullet section.
                               Freshness: research mtime >= newest mtime of cited source paths.
                               Fresh: prints the resolved research path, exits 0.
                               Stale/undecidable: prints nothing, exits 1.
                               Cited path not found -> stale + stderr warning.
+                              --ignore-missing-cited-paths: a missing cited path logs a warning
+                                but does NOT mark the file stale (mtime staleness is unaffected).
+                                Use when cited sources include to-be-created files.
                               Absolute or outside-root path -> rejected (exit 1).
+                              Flag accepted in either position relative to the path arg.
     research-gc               Delete orphaned .aimi/research/*.md files not referenced by any
                               active .aimi/tasks/*.json metadata.researchPaths or any
                               .aimi/brainstorms/*.md frontmatter researchPaths, AND older than
@@ -5274,6 +5382,7 @@ main() {
     validate-deps)            cmd_validate_deps ;;
     validate-stories)         cmd_validate_stories ;;
     normalize-verification)   cmd_normalize_verification "${2:-}" ;;
+    normalize-status)         cmd_normalize_status "${2:-}" ;;
     validate-ids)             cmd_validate_ids ;;
     gate-pass)         shift; cmd_gate_pass "$@" ;;
     gate-fail)         cmd_gate_fail "${2:-}" ;;
@@ -5295,7 +5404,7 @@ main() {
     prime-cache)       cmd_prime_cache ;;
     list-archivable)   cmd_list_archivable ;;
     archive-task)      cmd_archive_task "${2:-}" ;;
-    research-lookup)   cmd_research_lookup "${2:-}" ;;
+    research-lookup)   shift; cmd_research_lookup "$@" ;;
     research-gc)       cmd_research_gc ;;
     detect-design-bundle) shift; cmd_detect_design_bundle "$@" ;;
     bundle-prototype-status)   shift; cmd_bundle_prototype_status "$@" ;;

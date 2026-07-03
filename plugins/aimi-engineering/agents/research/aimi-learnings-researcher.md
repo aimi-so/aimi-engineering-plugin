@@ -2,6 +2,7 @@
 name: aimi-learnings-researcher
 description: "Searches .aimi/solutions/ for relevant past solutions by frontmatter metadata. Use before implementing features or fixing problems to surface institutional knowledge and prevent repeated mistakes."
 model: inherit
+allowed-tools: Read, Grep, Glob, Write
 ---
 
 <examples>

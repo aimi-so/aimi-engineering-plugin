@@ -2,6 +2,7 @@
 name: aimi-codebase-researcher
 description: "Conducts thorough research on repository structure, documentation, conventions, and implementation patterns. Use when onboarding to a new codebase or understanding project conventions."
 model: inherit
+allowed-tools: Read, Grep, Glob, Write
 ---
 
 <examples>

@@ -237,7 +237,7 @@ def handle_worktree_budget(command: str, tool_input: dict) -> None:
         _allow()
 
     # Read maxConcurrency from metadata.
-    max_concurrency = 5
+    max_concurrency = 20
     try:
         tasks_data = json.loads(tasks_path.read_text())
         raw = tasks_data.get("metadata", {}).get("maxConcurrency")
