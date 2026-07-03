@@ -638,7 +638,7 @@ cmd_status() {
       schemaVersion: .schemaVersion,
       title: .metadata.title,
       branch: .metadata.branchName,
-      maxConcurrency: ((.metadata.maxConcurrency // 5) | if . <= 0 then 5 else . end),
+      maxConcurrency: ((.metadata.maxConcurrency // 20) | if . <= 0 then 20 else . end),
       pending: [.userStories[] | select(.status == "pending")] | length,
       in_progress: [.userStories[] | select(.status == "in_progress")] | length,
       completed: [.userStories[] | select(.status == "completed")] | length,
@@ -651,7 +651,7 @@ cmd_status() {
       schemaVersion: .schemaVersion,
       title: .metadata.title,
       branch: .metadata.branchName,
-      maxConcurrency: ((.metadata.maxConcurrency // 5) | if . <= 0 then 5 else . end),
+      maxConcurrency: ((.metadata.maxConcurrency // 20) | if . <= 0 then 20 else . end),
       pending: [.userStories[] | select(.status == "pending")] | length,
       in_progress: [.userStories[] | select(.status == "in_progress")] | length,
       completed: [.userStories[] | select(.status == "completed")] | length,
@@ -667,7 +667,7 @@ cmd_status() {
 cmd_metadata() {
   local tasks_file
   tasks_file=$(get_tasks_file)
-  jq '.metadata | .maxConcurrency = ((.maxConcurrency // 5) | if . <= 0 then 5 else . end)' "$tasks_file"
+  jq '.metadata | .maxConcurrency = ((.maxConcurrency // 20) | if . <= 0 then 20 else . end)' "$tasks_file"
 }
 
 # List stories that are ready to execute

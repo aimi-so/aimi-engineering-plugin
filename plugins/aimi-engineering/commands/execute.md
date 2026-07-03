@@ -622,7 +622,7 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 $AIMI_CLI init-session
 ```
 
-Parse `maxConcurrency` from metadata. If not set, default to `5`.
+Parse `maxConcurrency` from metadata. If not set, default to `20`.
 
 Store as `MAX_CONCURRENCY`.
 

@@ -24,7 +24,7 @@ Example: `.aimi/tasks/2026-02-27-dep-graph-tasks.json`
     "brainstormPath": "string (optional)",
     "researchDepth": "skip|quick|standard|deep (optional, default null)",
     "researchPaths": ["string (optional)"],
-    "maxConcurrency": 5,
+    "maxConcurrency": 20,
     "frontendOnly": "boolean (optional, default absent/false)",
     "backendSpec": "object (optional, see backendSpec sub-fields)"
   },

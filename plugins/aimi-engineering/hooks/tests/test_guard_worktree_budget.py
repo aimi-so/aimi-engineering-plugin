@@ -259,8 +259,8 @@ def test_reads_max_concurrency_from_metadata(tmp_path, monkeypatch):
 
 
 def test_default_max_when_missing(tmp_path, monkeypatch):
-    """No metadata.maxConcurrency → default 5; active=4 → allow."""
-    _make_tasks_json(tmp_path)  # no maxConcurrency → defaults to 5
+    """No metadata.maxConcurrency → default 20; active=4 → allow."""
+    _make_tasks_json(tmp_path)  # no maxConcurrency → defaults to 20
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         subprocess, "run", _fake_run_factory(4, str(tmp_path))

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.103.0] - 2026-06-25
+
+### Changed
+
+- **Restricted `allowed-tools` on the three filesystem-facing research agents to read-only + Write.** `aimi-codebase-researcher`, `aimi-learnings-researcher`, and `aimi-design-bundle-researcher` now declare `allowed-tools: Read, Grep, Glob, Write` (previously they inherited the full tool set). This captures the read-only safety posture of the built-in `Explore` agent — these agents crawl the user's source tree and can no longer `Edit`/`NotebookEdit` existing files or spawn sub-agents — while preserving `Write`, which the pointer-only research handoff depends on (each agent writes its findings to `.aimi/research/*.md` and returns only a pointer). Matches the existing `allowed-tools` convention already used by `aimi-bundle-prototype-author` and the workflow verifier agents. The web/MCP-dependent researchers (`aimi-best-practices-researcher`, `aimi-framework-docs-researcher`) are intentionally left unrestricted, since an allowlist would have to enumerate host-specific Context7 MCP tool names and risk silently breaking their external-documentation lookups.
+
+### Notes
+
+- This restriction is honored under Claude Code (which reads the plugin source verbatim). As with the five pre-existing `allowed-tools` agents, the OpenCode translator (`install.sh` `translate_agent`) does not yet propagate `allowed-tools` into OpenCode agent frontmatter, so under OpenCode these agents retain their current tool set — no regression, but no parity. Adding `allowed-tools` translation to the OpenCode installer is tracked as a separate follow-up.
+
+## [1.102.0] - 2026-06-25
+
+### Changed
+
+- **Default `metadata.maxConcurrency` raised from `5` to `20`.** The wave-based executor now fans out up to 20 stories in parallel by default (previously 5), and the worktree-budget guard (`pre-bash-dispatcher.py`) allows up to 20 concurrent story worktrees before denying `git worktree add`. The new default is applied consistently across `aimi-cli.sh` (`status`/`metadata` fallbacks, including the `<= 0` floor), the `pre-bash-dispatcher` worktree-budget guard, and `/aimi:plan` (the value written into new tasks.json files). Explicit per-task overrides are unaffected — set `metadata.maxConcurrency` to any value (e.g. `1` for strictly sequential execution).
+
 ## [1.101.0] - 2026-06-24
 
 ### Added

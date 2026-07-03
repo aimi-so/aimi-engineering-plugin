@@ -1524,7 +1524,7 @@ Read the tasks.json file written by story-merge and patch the `metadata` object 
 - **designBundle**: When `designBundleMeta` is non-null, emit as `metadata.designBundle` with the following shape: `{ root: string, readme: string, chats: string[], businessSpec: string|null, designSpec: string|null }`. All paths relative to `AIMI_ROOT`. Omit the key entirely when no bundle was detected. When the bundle was detected, always emit both `businessSpec` and `designSpec` keys — use `null` for whichever spec file is absent.
 - **designTokens**: When `designSpecContent` is non-null and `DesignSpec § 1` contains a token map, parse it and emit as `metadata.designTokens` — a flat object whose top-level keys are the token categories enumerated in `DesignSpec § 1` (e.g., `color`, `typography`, `spacing`, `radii`, `shadow`, `transition`). Values are written verbatim from the spec without normalization. Omit the key entirely when `designSpecContent` is null or `§ 1` contains no token map.
 - **decisions**: Emit one entry per item in the fully accumulated `oqDecisions[]` working memory — this includes every OQ resolved or deferred by Phase 0.5, Phase 1.8, Phase 2.5, AND outline-gate edits recorded in Phase 3c. Each entry carries `anchor`, `source`, `text`, and `resolution` from the corresponding `oqDecisions[]` record. Omit the `decisions` key entirely when `oqDecisions[]` is empty.
-- **maxConcurrency**: Default `5`. Set to `1` for strictly sequential execution.
+- **maxConcurrency**: Default `20`. Set to `1` for strictly sequential execution.
 - **frontendOnly** (when `implementationScope == "frontend-only"`): `true`
 - **backendSpec** (when `implementationScope == "frontend-only"`): derive per the rules below
 
@@ -1596,7 +1596,7 @@ Use the Write tool to patch the output tasks.json with these fields merged into 
         "evidence": "string (optional; serialized form `evidence: <class>:<path>:<line>,<class>:<path>:<line>,...`; present only when source=codebaseVerified; comma-separated '<classification>:<path>:<line>' entries from Phase 2.4's per-root grep, truncated to 2000 chars with '…' appended when truncation fires)"
       }
     ],
-    "maxConcurrency": "number (optional, default 5)",
+    "maxConcurrency": "number (optional, default 20)",
     "frontendOnly": "boolean (optional, true when frontend-only scope)",
     "smellWarnings": "array (optional, written by story-merge Phase 4.2; each entry {type, storyId, symbols, message}; absent when no orphan-symbol smells detected)",
     "backendSpec": {

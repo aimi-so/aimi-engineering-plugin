@@ -2,6 +2,7 @@
 name: aimi-design-bundle-researcher
 description: "Ingests a Claude Design handoff bundle (DesignSpec.md, BusinessSpec.md, chats, prototypes) and emits a structured 16-section research document. Use when Claude Design handoff bundle is present before brainstorm or planning."
 model: inherit
+allowed-tools: Read, Grep, Glob, Write
 ---
 
 <examples>
