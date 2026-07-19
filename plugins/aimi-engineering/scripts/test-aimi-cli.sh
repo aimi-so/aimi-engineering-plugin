@@ -9367,8 +9367,13 @@ test_roadmap_claim_race() {
   id_a=$(jq -r '.id' "$out_dir/a.json" 2>/dev/null)
   id_b=$(jq -r '.id' "$out_dir/b.json" 2>/dev/null)
 
+  # Both phases are eligible and unclaimed at race start; the lock serializes the
+  # two calls, so whichever call's lock-holder runs second re-evaluates eligibility
+  # after the first has already claimed the lowest-id phase and falls through to
+  # the other one internally (no retry loop on the execute.md side -- see Step 1.7).
+  # Landing on {1,2} with no duplicate IS the fall-through assertion.
   if [ "$id_a" != "$id_b" ] && { [ "$id_a" = "1" ] || [ "$id_a" = "2" ]; } && { [ "$id_b" = "1" ] || [ "$id_b" = "2" ]; }; then
-    echo -e "${GREEN}✓${NC} roadmap-claim race: each invocation claimed a distinct phase (1 and 2, no double-claim)"
+    echo -e "${GREEN}✓${NC} roadmap-claim race: each invocation claimed a distinct phase (1 and 2, no double-claim, i.e. the loser fell through)"
     ((TESTS_PASSED++))
   else
     echo -e "${RED}✗${NC} roadmap-claim race: expected distinct claims of {1,2}, got id_a=$id_a id_b=$id_b"
@@ -9379,6 +9384,18 @@ test_roadmap_claim_race() {
   local claimants
   claimants=$(jq -c '[.phases[].claim.claimedBy] | sort' "$roadmap_file")
   assert_eq '["race-a","race-b"]' "$claimants" "roadmap-claim race: both phases show exactly one claimant each"
+
+  # No-eligible-phase-remaining: a third session's auto-claim, run after both
+  # phases are already claimed, must not retry or hang -- it reports every
+  # pending phase with its own per-phase blocking reason (all-blocked, exit 3),
+  # naming the actual claimant session id for each.
+  local third_output third_exit
+  third_output=$("$CLI" roadmap-claim --feature "$feature" --session-id race-c --session-pid $$ 2>&1) && third_exit=0 || third_exit=$?
+  assert_exit_code "3" "$third_exit" "roadmap-claim race: third session with no phase left to claim gets all-blocked (not a hang or retry)"
+  assert_contains "phase 1" "$third_output" "roadmap-claim race: blocking-reason payload names phase 1"
+  assert_contains "phase 2" "$third_output" "roadmap-claim race: blocking-reason payload names phase 2"
+  assert_contains "claimed by session race-a" "$third_output" "roadmap-claim race: blocking-reason payload names the actual claimant session id for phase 1's slot"
+  assert_contains "claimed by session race-b" "$third_output" "roadmap-claim race: blocking-reason payload names the actual claimant session id for phase 2's slot"
 
   rm -rf "$out_dir"
   rm -rf ".aimi/tasks/$feature"
@@ -9505,6 +9522,116 @@ test_roadmap_release_claim() {
   # Idempotent no-op when already unclaimed.
   output=$("$CLI" roadmap-release-claim --feature "$feature" --phase 1 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "roadmap-release-claim: no-op on already-unclaimed phase exits 0"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_phase_overlap_disjoint() {
+  echo ""
+  echo "=== phase-overlap: two phases with non-intersecting implementation.files -> empty overlapping_files ==="
+
+  local feature="rm-overlap-disjoint"
+  rm -rf ".aimi/tasks/$feature"
+
+  jq -n '[
+    {id: 1, name: "Alpha", goal: "g", slug: "alpha", dependsOn: []},
+    {id: 2, name: "Beta", goal: "g", slug: "beta", dependsOn: []}
+  ]' | "$CLI" roadmap-init --feature "$feature" >/dev/null
+
+  local dir1="$TASKS_DIR/$feature/phase-1-alpha"
+  local dir2="$TASKS_DIR/$feature/phase-2-beta"
+  mkdir -p "$dir1" "$dir2"
+
+  jq -n '{
+    schemaVersion: "3.3",
+    metadata: {title: "t", type: "feat", branchName: "b"},
+    userStories: [
+      {id: "US-001", title: "t", description: "d", acceptanceCriteria: ["a"], status: "pending", dependsOn: [], implementation: {files: ["src/a.ts", "src/b.ts"], approach: "x", verify: "y"}}
+    ]
+  }' > "$dir1/$feature-phase-1-tasks.json"
+
+  jq -n '{
+    schemaVersion: "3.3",
+    metadata: {title: "t", type: "feat", branchName: "b"},
+    userStories: [
+      {id: "US-001", title: "t", description: "d", acceptanceCriteria: ["a"], status: "pending", dependsOn: [], implementation: {files: ["src/c.ts", "src/d.ts"], approach: "x", verify: "y"}}
+    ]
+  }' > "$dir2/$feature-phase-2-tasks.json"
+
+  local output exit_code
+  output=$("$CLI" phase-overlap "$feature" 1 2 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "phase-overlap disjoint: exits 0"
+
+  local overlap_count
+  overlap_count=$(printf '%s' "$output" | jq '.overlapping_files | length')
+  assert_eq "0" "$overlap_count" "phase-overlap disjoint: overlapping_files is empty"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_phase_overlap_overlapping() {
+  echo ""
+  echo "=== phase-overlap: two phases sharing an implementation.files path -> path appears in overlapping_files ==="
+
+  local feature="rm-overlap-shared"
+  rm -rf ".aimi/tasks/$feature"
+
+  jq -n '[
+    {id: 1, name: "Alpha", goal: "g", slug: "alpha", dependsOn: []},
+    {id: 2, name: "Beta", goal: "g", slug: "beta", dependsOn: []}
+  ]' | "$CLI" roadmap-init --feature "$feature" >/dev/null
+
+  local dir1="$TASKS_DIR/$feature/phase-1-alpha"
+  local dir2="$TASKS_DIR/$feature/phase-2-beta"
+  mkdir -p "$dir1" "$dir2"
+
+  jq -n '{
+    schemaVersion: "3.3",
+    metadata: {title: "t", type: "feat", branchName: "b"},
+    userStories: [
+      {id: "US-001", title: "t", description: "d", acceptanceCriteria: ["a"], status: "pending", dependsOn: [], implementation: {files: ["src/shared.ts", "src/a.ts"], approach: "x", verify: "y"}}
+    ]
+  }' > "$dir1/$feature-phase-1-tasks.json"
+
+  jq -n '{
+    schemaVersion: "3.3",
+    metadata: {title: "t", type: "feat", branchName: "b"},
+    userStories: [
+      {id: "US-001", title: "t", description: "d", acceptanceCriteria: ["a"], status: "pending", dependsOn: [], implementation: {files: ["src/shared.ts", "src/c.ts"], approach: "x", verify: "y"}}
+    ]
+  }' > "$dir2/$feature-phase-2-tasks.json"
+
+  local output exit_code
+  output=$("$CLI" phase-overlap "$feature" 1 2 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "phase-overlap overlapping: exits 0"
+
+  local contains_shared overlap_count
+  contains_shared=$(printf '%s' "$output" | jq '.overlapping_files | index("src/shared.ts") != null')
+  assert_eq "true" "$contains_shared" "phase-overlap overlapping: src/shared.ts present in overlapping_files"
+
+  overlap_count=$(printf '%s' "$output" | jq '.overlapping_files | length')
+  assert_eq "1" "$overlap_count" "phase-overlap overlapping: exactly one overlapping path reported"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_phase_overlap_missing_tasks_file() {
+  echo ""
+  echo "=== phase-overlap: clear non-zero error (not a raw jq stack trace) when a phase's tasks.json is missing ==="
+
+  local feature="rm-overlap-missing"
+  rm -rf ".aimi/tasks/$feature"
+
+  jq -n '[
+    {id: 1, name: "Alpha", goal: "g", slug: "alpha", dependsOn: []},
+    {id: 2, name: "Beta", goal: "g", slug: "beta", dependsOn: []}
+  ]' | "$CLI" roadmap-init --feature "$feature" >/dev/null
+  # Neither phase has been rolling-wave expanded -- no tasks.json exists on disk yet.
+
+  local output exit_code
+  output=$("$CLI" phase-overlap "$feature" 1 2 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "phase-overlap missing file: exits non-zero"
+  assert_contains "no tasks file yet" "$output" "phase-overlap missing file: human-readable error, not a jq stack trace"
 
   rm -rf ".aimi/tasks/$feature"
 }
@@ -11076,6 +11203,9 @@ main() {
   test_roadmap_claim_phase_override_ineligible
   test_roadmap_claim_self_reclaim
   test_roadmap_release_claim
+  test_phase_overlap_disjoint
+  test_phase_overlap_overlapping
+  test_phase_overlap_missing_tasks_file
   test_roadmap_reconcile_divergence
 
   # normalize-status and status field regression tests (US-003)

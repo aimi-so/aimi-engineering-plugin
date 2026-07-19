@@ -636,6 +636,81 @@ fi
 
 Validate `PHASE_BRANCH` against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` (the same regex Step 1.6 already enforces for user-supplied base branches). If it fails, report the invalid branch name and STOP.
 
+### Report Stale Claim Releases
+
+`CLAIM_JSON.staleReleased` is a (possibly empty) array the CLI populates whenever this exact `roadmap-claim` call auto-released one or more dead-PID claims before evaluating eligibility (see the PID-alive check described above). Report each released entry with this exact line, substituting the real values:
+
+```bash
+STALE_COUNT=$(printf '%s' "$CLAIM_JSON" | jq '.staleReleased | length')
+if [ "$STALE_COUNT" -gt 0 ]; then
+  while IFS=$'\t' read -r sr_id sr_sid sr_pid; do
+    [ -z "$sr_id" ] && continue
+    echo "released stale claim on phase $sr_id (session $sr_sid pid $sr_pid not alive)"
+  done < <(printf '%s' "$CLAIM_JSON" | jq -r '.staleReleased[] | [(.id|tostring), .sessionId, (.pid|tostring)] | @tsv')
+fi
+```
+
+This is a report of automatic recovery that already happened inside the atomic `roadmap-claim` call above — it never changes the outcome of this session's own claim.
+
+### Two-Stage Overlap Guard
+
+Before transitioning the newly claimed phase to `in_progress`, check whether any other phase in this roadmap is currently `in_progress` (in a sibling `/aimi:execute` session) and, if so, whether the two phases' declared work overlaps. This guard is **soft in both interactive and agent mode** — it never blocks or fails the claim itself, since `roadmap-claim`'s atomic check-and-set already succeeded before this section runs. Every read of a sibling phase's state below goes through `$AIMI_CLI roadmap-get` / `$AIMI_CLI phase-overlap` — never a direct Read of a phase directory this session does not own.
+
+**Stage 1 (always runs) — coarse `areas` comparison against every `in_progress` sibling, then stage 2 (gated) — exact file intersection via the `phase-overlap` CLI verb, only for siblings whose areas intersected:**
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+ROADMAP_ALL_JSON=$($AIMI_CLI roadmap-get --feature "$FEATURE")
+AREAS_X=$(printf '%s' "$ROADMAP_ALL_JSON" | jq -c --argjson x "$PHASE_ID" '(.phases[] | select(.id == $x) | .areas) // []')
+
+OVERLAP_WARNINGS_JSON='[]'
+while IFS= read -r y_id; do
+  [ -z "$y_id" ] && continue
+  AREAS_Y=$(printf '%s' "$ROADMAP_ALL_JSON" | jq -c --argjson y "$y_id" '(.phases[] | select(.id == $y) | .areas) // []')
+  AREA_OVERLAP_COUNT=$(jq -n --argjson a "$AREAS_X" --argjson b "$AREAS_Y" '[$a[] | . as $v | select($b | index($v) != null)] | length')
+  if [ "$AREA_OVERLAP_COUNT" -gt 0 ]; then
+    # Stage 2, gated on stage 1's non-empty area intersection. phase-overlap
+    # failing here (e.g. the sibling has not been rolling-wave expanded yet,
+    # no tasks.json) is not an error for this soft guard -- skip that sibling.
+    if OVERLAP_JSON=$($AIMI_CLI phase-overlap "$FEATURE" "$PHASE_ID" "$y_id" 2>/dev/null); then
+      FILES_COUNT=$(printf '%s' "$OVERLAP_JSON" | jq '.overlapping_files | length')
+      if [ "$FILES_COUNT" -gt 0 ]; then
+        FILES_ARR=$(printf '%s' "$OVERLAP_JSON" | jq -c '.overlapping_files')
+        OVERLAP_WARNINGS_JSON=$(printf '%s' "$OVERLAP_WARNINGS_JSON" | jq --argjson y "$y_id" --argjson files "$FILES_ARR" '. + [{phaseId: $y, files: $files}]')
+      fi
+    fi
+  fi
+done < <(printf '%s' "$ROADMAP_ALL_JSON" | jq -r --argjson x "$PHASE_ID" '[.phases[] | select(.status == "in_progress" and .id != $x)] | .[].id')
+```
+
+**When `OVERLAP_WARNINGS_JSON` is `[]`** (no `in_progress` sibling, or every sibling's stage-1 area comparison was empty): skip silently — no prompt, no log line. Proceed straight to the status transition below.
+
+**When `OVERLAP_WARNINGS_JSON` is non-empty**, for each `{phaseId: Y_ID, files}` entry in order:
+
+- **`INTERACTIVE_MODE=picker`:** use **AskUserQuestion**:
+  ```
+  Phase [PHASE_ID] and in-progress phase [Y_ID] both touch:
+  [one line per path in files]
+
+  A — Proceed in parallel anyway
+  B — Wait for phase [Y_ID] to finish before claiming
+  C — Abort this claim attempt
+  ```
+  - **Option A:** continue to the next entry (or, if this was the last entry, proceed to the status transition below).
+  - **Option B or C:** release the claim this session just took, and STOP — do not evaluate any remaining entries:
+    ```bash
+    AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+    : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+    $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+    ```
+    Report `Claim on phase [PHASE_ID] released — [waiting for phase [Y_ID] to finish | claim attempt aborted] per user choice.` and STOP.
+- **`INTERACTIVE_MODE=agent`:** log a one-line warning per entry and proceed automatically — never release the claim:
+  ```
+  Warning: phase [PHASE_ID] and in-progress phase [Y_ID] share file(s): [comma-joined files] (agent-mode: proceeding in parallel)
+  ```
+  After logging every entry, continue to the status transition below.
+
 **Immediately after a successful claim, transition the phase to `in_progress`.** This is a SEPARATE call — `roadmap-claim` manages only the claim sub-object (`claimedBy`/`claimedAt`/`claimedPid`) and never drives status itself, so this step contains exactly one roadmap-status-mutating call beyond the claim:
 
 ```bash

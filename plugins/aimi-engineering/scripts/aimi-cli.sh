@@ -5678,7 +5678,10 @@ cmd_roadmap_claim() {
       fi
 
       # Identify stale claims (claimedPid no longer alive) inside this locked pass.
-      claimed_pids=$(jq -c '[.phases[] | select(.claim != null) | {id: .id, pid: .claim.claimedPid}]' "$roadmap_path")
+      # sessionId travels alongside pid here so the release report line below
+      # ("released stale claim on phase <id> (session <sid> pid <pid> not
+      # alive)") can be built without a second read of roadmap.json.
+      claimed_pids=$(jq -c '[.phases[] | select(.claim != null) | {id: .id, pid: .claim.claimedPid, sessionId: .claim.claimedBy}]' "$roadmap_path")
       stale_ids='[]'
       while IFS=$'\t' read -r pid_phase_id pid_val; do
         [ -z "$pid_phase_id" ] && continue
@@ -5686,12 +5689,16 @@ cmd_roadmap_claim() {
           stale_ids=$(printf '%s' "$stale_ids" | jq --argjson id "$pid_phase_id" '. + [$id]')
         fi
       done < <(printf '%s' "$claimed_pids" | jq -r '.[] | [(.id|tostring), (.pid|tostring)] | @tsv')
+      stale_released=$(printf '%s' "$claimed_pids" | jq --argjson stale_ids "$stale_ids" '
+        [.[] | select((.id) as $id | ($stale_ids | index($id)) != null)]
+      ')
 
       now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
       result=$(jq -n \
         --slurpfile cur "$roadmap_path" \
         --argjson stale_ids "$stale_ids" \
+        --argjson stale_released "$stale_released" \
         --arg session_id "$session_id" \
         --arg now "$now" \
         --argjson session_pid "$session_pid" \
@@ -5709,7 +5716,7 @@ cmd_roadmap_claim() {
             (.status == "pending" or .status == "planned" or .status == "in_progress") and
             ($phase_override == null or .id == $phase_override)
           ))) as $self_claimed |
-          if ($self_claimed | length) > 0 then
+          (if ($self_claimed | length) > 0 then
             ($self_claimed | sort_by(.id) | .[0]) as $mine |
             {claimed: true, phase: $mine, phases: $cleared_phases}
           elif $phase_override != null then
@@ -5743,7 +5750,7 @@ cmd_roadmap_claim() {
               else
                 ($remaining | map(
                   if .claim != null then
-                    {id: .id, reason: "claimed by live session"}
+                    {id: .id, reason: ("claimed by session " + .claim.claimedBy)}
                   else
                     {id: .id, reason: ("depends on incomplete phase(s): " + (((.dependsOn // []) | map(select($status_by_id[(.|tostring)] != "completed")) | map(tostring) | join(", "))))}
                   end
@@ -5751,7 +5758,8 @@ cmd_roadmap_claim() {
                 {claimed: false, reason: "all-blocked", blocked: $blocked_reasons, phases: null}
               end
             end
-          end
+          end) as $outcome |
+          $outcome + {staleReleased: $stale_released}
         ')
 
       claimed=$(printf '%s' "$result" | jq -r '.claimed')
@@ -5764,7 +5772,7 @@ cmd_roadmap_claim() {
         printf '%s\n' "$roadmap_doc" > "$tmp_file"
         mv "$tmp_file" "$roadmap_path"
 
-        printf '%s' "$result" | jq '.phase'
+        printf '%s' "$result" | jq '.phase + {staleReleased: .staleReleased}'
         exit 0
       fi
 
@@ -6303,6 +6311,102 @@ cmd_validate_contracts() {
   exit 0
 }
 
+# phase-overlap <feature> <phase-a> <phase-b>
+# Stage 2 of the sibling-phase overlap guard (execute.md calls this only after
+# its own stage-1 roadmap.json `areas` comparison finds a non-empty coarse
+# intersection). Loads both phases' already-expanded tasks.json files, unions
+# each phase's userStories[].implementation.files, and prints the sorted,
+# deduplicated intersection as {"overlapping_files": [...]}.
+cmd_phase_overlap() {
+  local -a positional=()
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -*)
+        echo "Usage: aimi-cli.sh phase-overlap <feature> <phase-a> <phase-b>" >&2
+        exit 1
+        ;;
+      *)
+        positional+=("$1")
+        ;;
+    esac
+    shift
+  done
+
+  if [ "${#positional[@]}" -ne 3 ]; then
+    echo "Usage: aimi-cli.sh phase-overlap <feature> <phase-a> <phase-b>" >&2
+    exit 1
+  fi
+
+  local feature="${positional[0]}" phase_a="${positional[1]}" phase_b="${positional[2]}"
+
+  _roadmap_validate_feature "$feature"
+  _roadmap_validate_phase_id "$phase_a" "phase-overlap"
+  _roadmap_validate_phase_id "$phase_b" "phase-overlap"
+
+  if [ "$phase_a" = "$phase_b" ]; then
+    echo "Error: phase-overlap: phase-a and phase-b must differ, got $phase_a twice" >&2
+    exit 1
+  fi
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_path "$feature")
+  validate_path_in_project "$roadmap_path"
+  if [ ! -f "$roadmap_path" ]; then
+    echo "Error: phase-overlap: roadmap not found: $roadmap_path (run roadmap-init first)" >&2
+    exit 1
+  fi
+  if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
+    echo "Error: phase-overlap: malformed roadmap.json: $roadmap_path" >&2
+    exit 1
+  fi
+
+  local feature_dir
+  feature_dir=$(dirname "$roadmap_path")
+
+  local dir_a dir_b
+  dir_a=$(jq -r --argjson pid "$phase_a" '(.phases[] | select(.id == $pid) | .dir) // empty' "$roadmap_path")
+  dir_b=$(jq -r --argjson pid "$phase_b" '(.phases[] | select(.id == $pid) | .dir) // empty' "$roadmap_path")
+
+  if [ -z "$dir_a" ]; then
+    echo "Error: phase-overlap: phase $phase_a not found in $roadmap_path" >&2
+    exit 1
+  fi
+  if [ -z "$dir_b" ]; then
+    echo "Error: phase-overlap: phase $phase_b not found in $roadmap_path" >&2
+    exit 1
+  fi
+
+  # Mirrors execute.md Step 1.7's PHASE_TASKS_PATH convention:
+  # <feature_dir>/<phase_dir>/<feature>-phase-<id>-tasks.json
+  local tasks_a tasks_b
+  tasks_a="$feature_dir/$dir_a/$feature-phase-$phase_a-tasks.json"
+  tasks_b="$feature_dir/$dir_b/$feature-phase-$phase_b-tasks.json"
+
+  if [ ! -f "$tasks_a" ]; then
+    echo "Error: phase-overlap: phase $phase_a has no tasks file yet ($tasks_a) -- run /aimi:plan --phase $phase_a to materialize it first" >&2
+    exit 1
+  fi
+  if [ ! -f "$tasks_b" ]; then
+    echo "Error: phase-overlap: phase $phase_b has no tasks file yet ($tasks_b) -- run /aimi:plan --phase $phase_b to materialize it first" >&2
+    exit 1
+  fi
+  if ! jq -e . "$tasks_a" >/dev/null 2>&1; then
+    echo "Error: phase-overlap: malformed tasks file: $tasks_a" >&2
+    exit 1
+  fi
+  if ! jq -e . "$tasks_b" >/dev/null 2>&1; then
+    echo "Error: phase-overlap: malformed tasks file: $tasks_b" >&2
+    exit 1
+  fi
+
+  jq -n --slurpfile a "$tasks_a" --slurpfile b "$tasks_b" '
+    ([$a[0].userStories[]?.implementation.files[]?] | unique) as $files_a |
+    ([$b[0].userStories[]?.implementation.files[]?] | unique) as $files_b |
+    {overlapping_files: ([$files_a[] | select(. as $f | $files_b | index($f) != null)] | unique | sort)}
+  '
+}
+
 cmd_roadmap_sweep() {
   local feature=""
 
@@ -6783,6 +6887,16 @@ COMMANDS:
                               completed; any failed -> verification_failed; else
                               in_progress) and corrects any divergent phase status.
                               Prints {corrections:[{id,from,to}...]}.
+    phase-overlap <feature> <phase-a> <phase-b>
+                              Deterministic stage-2 check for the sibling-phase
+                              overlap guard. Loads both phases' already-expanded
+                              phase-<dir>/<feature>-phase-<id>-tasks.json files,
+                              collects userStories[].implementation.files across
+                              all stories in each, and prints the sorted,
+                              deduplicated intersection as {"overlapping_files":[...]}.
+                              Exits non-zero with a clear error (not a jq stack
+                              trace) when either phase's tasks.json is missing --
+                              both phases must already be rolling-wave expanded.
     estimate-payload --outline <path> [--research <path>]... [--spec <path>]...
                               [--prototype <path>]... [--budget-bytes <n>] [--budget-fraction <0-1>]
                               Advisory only -- never blocks, never trims content.
@@ -6944,6 +7058,7 @@ main() {
     roadmap-reconcile)     shift; cmd_roadmap_reconcile "$@" ;;
     roadmap-write-handoff) shift; cmd_roadmap_write_handoff "$@" ;;
     validate-contracts)    shift; cmd_validate_contracts "$@" ;;
+    phase-overlap)         shift; cmd_phase_overlap "$@" ;;
     roadmap-sweep)         shift; cmd_roadmap_sweep "$@" ;;
     estimate-payload)      shift; cmd_estimate_payload "$@" ;;
     help|--help|-h)    cmd_help ;;
