@@ -870,7 +870,7 @@ Detect whether the feature is large enough to need a phase/milestone roadmap, an
 
 ### Step 1: Scope-Context Trigger Check
 
-Classify the feature into scope contexts using the Cut Criteria in `commands/references/scope-contexts.md` — apply that file's criteria as written; do not restate them here. Consider the full feature description, the consolidated research summary (Step 1c), and every answer gathered across Phase 2 and Phase 3.
+Classify the feature into scope contexts using the Cut Criteria in `${CLAUDE_PLUGIN_ROOT}/commands/references/scope-contexts.md` — read that file and apply its criteria as written; do not restate them here. (The `${CLAUDE_PLUGIN_ROOT}` prefix is required: it is the only form `install.sh` rewrites to `${AIMI_PLUGIN_DIR}` for OpenCode. A bare relative path does not resolve there, which would silently degrade the phase cut to improvisation.) Consider the full feature description, the consolidated research summary (Step 1c), and every answer gathered across Phase 2 and Phase 3.
 
 - **0 or 1 scope contexts identified:** Skip this entire phase — emit no log line, propose no phase cut, present no gate. Proceed directly to Phase 4 exactly as today. No `phases:` frontmatter is written and nothing about the document changes.
 - **2 or more scope contexts identified:** Continue to Step 2.

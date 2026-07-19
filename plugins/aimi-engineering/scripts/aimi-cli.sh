@@ -493,11 +493,14 @@ validate_story_exists() {
 # get_tasks_file's stale-state fallback so all three see the same combined
 # view instead of a flat-only glob. Prints nothing (not an error) when
 # TASKS_DIR is missing or empty.
+# NUL-delimited find -> xargs -0 keeps paths containing spaces intact. A
+# newline-delimited `xargs ls -t` word-splits them, which silently emptied
+# discovery for any project whose path contains a space (regression vs the
+# pre-phase-layer quoted glob).
 _find_tasks_files_all() {
-  local found
-  found=$(find "$TASKS_DIR" -mindepth 1 -maxdepth 3 -type f -name '*-tasks.json' 2>/dev/null || true)
-  [ -z "$found" ] && return 0
-  printf '%s\n' "$found" | xargs ls -t 2>/dev/null || true
+  [ -d "$TASKS_DIR" ] || return 0
+  find "$TASKS_DIR" -mindepth 1 -maxdepth 3 -type f -name '*-tasks.json' -print0 2>/dev/null \
+    | xargs -0 ls -t 2>/dev/null || true
 }
 
 # Get the tasks file (from state or discover)
@@ -5577,12 +5580,25 @@ cmd_roadmap_set_status() {
         exit 1
       fi
 
+      # verification_failed is reachable from any non-terminal state (execute
+      # sets it when creates-verification fails). The rest of the graph:
+      #   pending -> planned            plan expands the phase
+      #   pending -> in_progress        execute claims a phase whose planned
+      #                                 transition was lost (plan aborted after
+      #                                 writing tasks.json but before setting
+      #                                 planned) -- allowing it makes execute
+      #                                 self-healing instead of silently
+      #                                 diverging from roadmap.json
+      #   planned -> in_progress        normal start
+      #   in_progress -> in_progress    idempotent resume of a crashed session
+      #   verification_failed -> in_progress   re-verify retry
+      #   in_progress|verification_failed -> completed
       allowed=false
       if [ "$new_status" = "verification_failed" ]; then
         allowed=true
       else
         case "$current_status:$new_status" in
-          pending:planned|planned:in_progress|in_progress:completed|verification_failed:completed) allowed=true ;;
+          pending:planned|pending:in_progress|planned:in_progress|in_progress:in_progress|verification_failed:in_progress|in_progress:completed|verification_failed:completed) allowed=true ;;
         esac
       fi
 
@@ -5740,7 +5756,7 @@ cmd_roadmap_claim() {
               {claimed: false, reason: "phase-not-found", phases: null}
             else
               ($target_arr[0]) as $target |
-              if ($target.status != "pending" and $target.status != "planned") then
+              if ((["pending","planned","in_progress","verification_failed"] | index($target.status)) == null) then
                 {claimed: false, reason: "not-claimable", detail: ("phase status is " + $target.status), phases: null}
               elif $target.claim != null then
                 {claimed: false, reason: "claimed", detail: "claimed by a live session", phases: null}
@@ -5752,14 +5768,20 @@ cmd_roadmap_claim() {
               end
             end
           else
-            ($cleared_phases | map(select((.status == "pending" or .status == "planned") and .claim == null))) as $candidates0 |
+            # Resumable = not yet terminal AND carrying no live claim. Stale
+            # claims were already cleared above, so an unclaimed in_progress
+            # phase is leftover from a crashed session and verification_failed
+            # is awaiting a re-verify run -- both must be re-claimable or crash
+            # recovery and verification retry are dead ends, which is exactly
+            # what execute.md tells the user to recover by re-running.
+            ($cleared_phases | map(select((.status == "pending" or .status == "planned" or .status == "in_progress" or .status == "verification_failed") and .claim == null))) as $candidates0 |
             ($candidates0 | map(select( ((.dependsOn // []) | all(. as $d | $status_by_id[$d|tostring] == "completed")) ))) as $eligible |
             if ($eligible | length) > 0 then
               ($eligible | sort_by(.id) | .[0]) as $chosen |
               ($cleared_phases | map(if .id == $chosen.id then . + {claim: {claimedBy: $session_id, claimedAt: $now, claimedPid: $session_pid}} else . end)) as $final_phases |
               {claimed: true, phase: ($final_phases[] | select(.id == $chosen.id)), phases: $final_phases}
             else
-              ($cleared_phases | map(select(.status == "pending" or .status == "planned"))) as $remaining |
+              ($cleared_phases | map(select(.status == "pending" or .status == "planned" or .status == "in_progress" or .status == "verification_failed"))) as $remaining |
               if ($remaining | length) == 0 then
                 {claimed: false, reason: "none-eligible", phases: null}
               else
@@ -5923,9 +5945,15 @@ cmd_roadmap_reconcile() {
       phase_dirs=$(jq -c '[.phases[] | {id: .id, dir: .dir, status: .status}]' "$roadmap_path")
       corrections='[]'
 
+      blocked='[]'
+
       while IFS=$'\t' read -r rc_id rc_dir rc_status; do
         [ -z "$rc_id" ] && continue
-        rc_tasks_file="$feature_dir/$rc_dir/tasks.json"
+        # Phase tasks files follow <feature>-phase-<id>-tasks.json (the same
+        # convention phase-overlap, execute.md Step 1.7, plan.md Phase 3e and
+        # status.md use). Reading a bare tasks.json here made every lookup miss,
+        # so reconcile silently reported zero corrections.
+        rc_tasks_file="$feature_dir/$rc_dir/$feature-phase-$rc_id-tasks.json"
         if [ ! -f "$rc_tasks_file" ]; then
           continue
         fi
@@ -5941,16 +5969,31 @@ cmd_roadmap_reconcile() {
           end
         ' "$rc_tasks_file")
         if [ "$ground_truth" != "unknown" ] && [ "$ground_truth" != "$rc_status" ]; then
-          corrections=$(printf '%s' "$corrections" | jq --argjson id "$rc_id" --arg from "$rc_status" --arg to "$ground_truth" '. + [{id: $id, from: $from, to: $to}]')
+          # Same hard precondition roadmap-set-status enforces: a phase never
+          # reaches "completed" without handoff.md on disk. Reconcile must not
+          # be a second write path with weaker invariants -- an otherwise-valid
+          # completed correction is reported as blocked instead of applied, so
+          # the divergence stays visible rather than silently healed wrong.
+          if [ "$ground_truth" = "completed" ] && [ ! -f "$feature_dir/$rc_dir/handoff.md" ]; then
+            blocked=$(printf '%s' "$blocked" | jq --argjson id "$rc_id" --arg from "$rc_status" --arg to "$ground_truth" \
+              '. + [{id: $id, from: $from, to: $to, reason: "no handoff.md -- write it with roadmap-write-handoff, then re-run"}]')
+          else
+            corrections=$(printf '%s' "$corrections" | jq --argjson id "$rc_id" --arg from "$rc_status" --arg to "$ground_truth" '. + [{id: $id, from: $from, to: $to}]')
+          fi
         fi
       done < <(printf '%s' "$phase_dirs" | jq -r '.[] | [(.id|tostring), .dir, .status] | @tsv')
 
       if [ "$(printf '%s' "$corrections" | jq 'length')" -gt 0 ]; then
+        # Reaching "completed" also releases the claim in the same atomic write,
+        # mirroring roadmap-set-status -- otherwise a reconciled phase reads as
+        # done while still showing claimed by a dead session.
         roadmap_doc=$(jq --argjson corr "$corrections" '
           .phases |= map(
             . as $p |
             (($corr | map(select(.id == $p.id)) | .[0]) // null) as $c |
-            if $c != null then $p + {status: $c.to} else $p end
+            if $c != null then
+              ($p + {status: $c.to} | if $c.to == "completed" then .claim = null else . end)
+            else $p end
           )
         ' "$roadmap_path")
 
@@ -5959,7 +6002,7 @@ cmd_roadmap_reconcile() {
         mv "$tmp_file" "$roadmap_path"
       fi
 
-      jq -n --argjson corr "$corrections" '{corrections: $corr}'
+      jq -n --argjson corr "$corrections" --argjson blocked "$blocked" '{corrections: $corr, blocked: $blocked}'
     ) 200>"${roadmap_path}.lock"
   ); then
     rc=0

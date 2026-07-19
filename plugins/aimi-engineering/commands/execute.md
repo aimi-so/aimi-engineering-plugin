@@ -718,10 +718,15 @@ done < <(printf '%s' "$ROADMAP_ALL_JSON" | jq -r --argjson x "$PHASE_ID" '[.phas
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-$AIMI_CLI roadmap-set-status --feature "$FEATURE" --phase "$PHASE_ID" --status in_progress || true
+if ! SET_STATUS_ERR=$($AIMI_CLI roadmap-set-status --feature "$FEATURE" --phase "$PHASE_ID" --status in_progress 2>&1); then
+  echo "ERROR: could not transition phase $PHASE_ID to in_progress:" >&2
+  echo "$SET_STATUS_ERR" >&2
+  echo "roadmap.json and this phase's tasks file disagree. Run: $AIMI_CLI roadmap-reconcile --feature \"$FEATURE\"" >&2
+  exit 1
+fi
 ```
 
-The trailing `|| true` covers the idempotent-resume case: `pending→in_progress`/`planned→in_progress` are the only guarded transitions, so re-issuing this call after a self-reclaim (where the phase is already `in_progress`) is rejected by the guard — that rejection is expected and harmless; the phase is already in the right state.
+Do **not** swallow this call's exit status. Every state a claim can hand back — `pending`, `planned`, `in_progress` (crashed-session resume) and `verification_failed` (re-verify retry) — has an explicit `→ in_progress` transition, including the idempotent `in_progress → in_progress`. So a rejection here is never routine: it means the phase is in a state the claim should not have returned, i.e. roadmap.json has diverged from the phase's tasks file. Failing loudly and pointing at `roadmap-reconcile` is the recovery path; an earlier `|| true` hid this and let the phase run to completion only to fail at the final `completed` transition.
 
 **On failure (`CLAIM_EXIT` is 3 or 4):** `CLAIM_JSON` holds the CLI's stderr.
 
@@ -1764,7 +1769,7 @@ For every entry the phase declared in `roadmap.json`'s `creates[]`, confirm the 
   ```bash
   CREATES_RAW=$(printf '%s' "$PHASE_JSON" | jq -r '(.creates // [])[]')
   ```
-  Each line is a `"<identity> (<description>)"` string (see `commands/references/scope-contexts.md`'s Creates/Needs Contracts format).
+  Each line is a `"<identity> (<description>)"` string (see the Creates/Needs Contracts format in `${CLAUDE_PLUGIN_ROOT}/commands/references/scope-contexts.md`).
 - `PHASE_CONTAINER_PATH` — from Step 1.7, absolute, never CWD-derived.
 
 #### Procedure

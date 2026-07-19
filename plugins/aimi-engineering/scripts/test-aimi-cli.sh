@@ -9370,9 +9370,14 @@ test_roadmap_claim_dependency_not_done() {
     {id: 2, name: "Dependent", goal: "g", slug: "dependent", dependsOn: [1]}
   ]' | "$CLI" roadmap-init --feature "$feature" >/dev/null
 
-  # Advance phase 1 past pending/planned so only phase 2 remains eligible-pool,
-  # and phase 2's dependency (phase 1) is not completed.
+  # Phase 1 must be held by a LIVE claim, not merely advanced to in_progress:
+  # an unclaimed in_progress phase is a crashed-session leftover and is
+  # deliberately re-claimable, so it would satisfy this claim instead of
+  # blocking. $$ is this test shell, guaranteed alive, so the stale-claim
+  # sweep leaves the claim in place. Phase 2 then has an unmet dependency and
+  # phase 1 is taken -> genuinely all-blocked.
   "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status planned >/dev/null
+  "$CLI" roadmap-claim --feature "$feature" --session-id sess-holder --session-pid $$ --phase 1 >/dev/null
   "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status in_progress >/dev/null
 
   local roadmap_file=".aimi/tasks/$feature/roadmap.json"
@@ -9741,7 +9746,7 @@ test_phase_overlap_missing_tasks_file() {
 
 test_roadmap_reconcile_divergence() {
   echo ""
-  echo "=== roadmap-reconcile: corrects phase status from phase-<dir>/tasks.json ground truth ==="
+  echo "=== roadmap-reconcile: corrects phase status from <feature>-phase-<id>-tasks.json ground truth ==="
 
   local feature="rm-reconcile"
   rm -rf ".aimi/tasks/$feature"
@@ -9749,36 +9754,62 @@ test_roadmap_reconcile_divergence() {
   jq -n '[
     {id: 1, name: "AllDone", goal: "g", slug: "all-done", dependsOn: []},
     {id: 2, name: "OneFailed", goal: "g", slug: "one-failed", dependsOn: []},
-    {id: 3, name: "NoFixture", goal: "g", slug: "no-fixture", dependsOn: []}
+    {id: 3, name: "NoFixture", goal: "g", slug: "no-fixture", dependsOn: []},
+    {id: 4, name: "DoneNoHandoff", goal: "g", slug: "no-handoff", dependsOn: []}
   ]' | "$CLI" roadmap-init --feature "$feature" >/dev/null
 
+  # Fixtures MUST use the real convention <feature>-phase-<id>-tasks.json --
+  # the same one phase-overlap, execute.md, plan.md and status.md use. A bare
+  # tasks.json here previously made every reconcile lookup miss while the
+  # suite still passed, hiding the bug it was meant to catch.
   local feature_dir=".aimi/tasks/$feature"
   mkdir -p "$feature_dir/phase-1-all-done"
-  cat > "$feature_dir/phase-1-all-done/tasks.json" << 'EOF'
+  cat > "$feature_dir/phase-1-all-done/$feature-phase-1-tasks.json" << 'EOF'
 {"userStories":[{"id":"US-001","status":"completed"},{"id":"US-002","status":"completed"}]}
 EOF
+  # completed corrections require handoff.md on disk, exactly as roadmap-set-status does.
+  printf '# handoff\n' > "$feature_dir/phase-1-all-done/handoff.md"
+
   mkdir -p "$feature_dir/phase-2-one-failed"
-  cat > "$feature_dir/phase-2-one-failed/tasks.json" << 'EOF'
+  cat > "$feature_dir/phase-2-one-failed/$feature-phase-2-tasks.json" << 'EOF'
 {"userStories":[{"id":"US-001","status":"completed"},{"id":"US-002","status":"failed"}]}
 EOF
-  # Phase 3 has no phase dir / tasks.json at all -- must be left untouched.
+  # Phase 3 has no phase dir / tasks file at all -- must be left untouched.
+
+  # Phase 4 is fully done on disk but has NO handoff.md: reconcile must refuse
+  # to write completed (never a weaker second path to the terminal state) and
+  # report it as blocked instead.
+  mkdir -p "$feature_dir/phase-4-no-handoff"
+  cat > "$feature_dir/phase-4-no-handoff/$feature-phase-4-tasks.json" << 'EOF'
+{"userStories":[{"id":"US-001","status":"completed"}]}
+EOF
 
   local output exit_code
   output=$("$CLI" roadmap-reconcile --feature "$feature" 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "roadmap-reconcile: exits 0"
 
   local roadmap_file="$feature_dir/roadmap.json"
-  local status1 status2 status3
+  local status1 status2 status3 status4
   status1=$(jq -r '.phases[] | select(.id == 1) | .status' "$roadmap_file")
   status2=$(jq -r '.phases[] | select(.id == 2) | .status' "$roadmap_file")
   status3=$(jq -r '.phases[] | select(.id == 3) | .status' "$roadmap_file")
-  assert_eq "completed" "$status1" "roadmap-reconcile: all-completed userStories -> phase status completed"
+  status4=$(jq -r '.phases[] | select(.id == 4) | .status' "$roadmap_file")
+  assert_eq "completed" "$status1" "roadmap-reconcile: all-completed userStories + handoff -> phase status completed"
   assert_eq "verification_failed" "$status2" "roadmap-reconcile: any failed userStory -> phase status verification_failed"
-  assert_eq "pending" "$status3" "roadmap-reconcile: phase with no tasks.json is left untouched"
+  assert_eq "pending" "$status3" "roadmap-reconcile: phase with no tasks file is left untouched"
+  assert_eq "pending" "$status4" "roadmap-reconcile: completed correction without handoff.md is NOT applied"
 
-  local corr_count
+  local claim1
+  claim1=$(jq -r '.phases[] | select(.id == 1) | .claim' "$roadmap_file")
+  assert_eq "null" "$claim1" "roadmap-reconcile: completing a phase also clears its claim"
+
+  local corr_count blocked_count blocked_id
   corr_count=$(printf '%s' "$output" | jq '.corrections | length')
   assert_eq "2" "$corr_count" "roadmap-reconcile: reports exactly the two corrections made"
+  blocked_count=$(printf '%s' "$output" | jq '.blocked | length')
+  assert_eq "1" "$blocked_count" "roadmap-reconcile: reports the handoff-blocked correction"
+  blocked_id=$(printf '%s' "$output" | jq -r '.blocked[0].id')
+  assert_eq "4" "$blocked_id" "roadmap-reconcile: blocked entry names the offending phase"
 
   rm -rf ".aimi/tasks/$feature"
 }
