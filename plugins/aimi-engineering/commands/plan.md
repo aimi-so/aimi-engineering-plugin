@@ -1,7 +1,7 @@
 ---
 name: aimi:plan
 description: Generate tasks.json directly from a feature description
-argument-hint: "[feature description] [--non-interactive]"
+argument-hint: "[feature description] [--non-interactive] [--phase <N>]"
 allowed-tools: Read, Write, Edit, Bash(git:*), Bash(mkdir:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Task
 ---
 
@@ -67,34 +67,55 @@ Use the output as the default branch for `branchName` derivation in Phase 4.
 
 **If `AIMI_ROOT_IS_GIT_REPO` is false:** Skip. Default branch detection happens per-project in Phase 4 using `$AIMI_CLI detect-default-branch --project [path]`.
 
+### Parse --phase Override
+
+Scan `$ARGUMENTS` for an explicit `--phase <N>` token (mirrors the extraction style `/aimi:execute` uses for the same flag — see `commands/execute.md` "Parse --phase Override"). This flag is planning plumbing for the Rolling-Wave Phase Selection step below (Phase 0) — it is never part of the feature description text, so it is stripped before any downstream description-derived value (topic slug, research prompts, `metadata.title`) is computed:
+
+```bash
+case " $ARGUMENTS " in
+  *" --phase "*)
+    PHASE_OVERRIDE=$(echo "$ARGUMENTS" | sed -n 's/.*--phase[[:space:]]\+\([0-9][0-9.]*\).*/\1/p')
+    ARGUMENTS_STRIPPED=$(echo "$ARGUMENTS" | sed 's/[[:space:]]*--phase[[:space:]]\+[0-9][0-9.]*[[:space:]]*/  /' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    ;;
+  *)
+    PHASE_OVERRIDE=""
+    ARGUMENTS_STRIPPED="$ARGUMENTS"
+    ;;
+esac
+```
+
+If `PHASE_OVERRIDE` is non-empty but does not match `^[0-9]+(\.[0-9]+)?$`, report `Invalid --phase value: [PHASE_OVERRIDE]. Must be a numeric phase id.` and STOP.
+
+From this point forward, `$ARGUMENTS_STRIPPED` (not raw `$ARGUMENTS`) feeds the `--non-interactive` extraction below and every downstream feature-description derivation.
+
 ### Detect Interactivity
 
 Interactive (picker) mode is the default. Pass `--non-interactive` to `/aimi:plan` to explicitly opt out of all Open Question prompts and auto-defer them instead (agent/CI mode).
 
-Before calling the CLI, scan `$ARGUMENTS` for the whitespace-delimited token `--non-interactive` (case-sensitive, exact match). When present:
-- Strip it from the feature description text — store the cleaned version as `FEATURE_DESCRIPTION` for use in all downstream steps (topic slug derivation, research agent prompts, `metadata.title`). The raw `$ARGUMENTS` string is NOT used after this point.
+Before calling the CLI, scan `$ARGUMENTS_STRIPPED` for the whitespace-delimited token `--non-interactive` (case-sensitive, exact match). When present:
+- Strip it from the feature description text — store the cleaned version as `FEATURE_DESCRIPTION` for use in all downstream steps (topic slug derivation, research agent prompts, `metadata.title`). Neither the raw `$ARGUMENTS` string nor `$ARGUMENTS_STRIPPED` is used after this point.
 - Forward the flag to the CLI call.
 
-When absent, `FEATURE_DESCRIPTION` equals `$ARGUMENTS` unchanged.
+When absent, `FEATURE_DESCRIPTION` equals `$ARGUMENTS_STRIPPED` unchanged.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 # Extract --non-interactive flag and strip it from the feature description
-case " $ARGUMENTS " in
+case " $ARGUMENTS_STRIPPED " in
   *" --non-interactive "*)
     NON_INTERACTIVE_FLAG="--non-interactive"
-    FEATURE_DESCRIPTION=$(echo "$ARGUMENTS" | sed 's/[[:space:]]*--non-interactive[[:space:]]*/  /g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    FEATURE_DESCRIPTION=$(echo "$ARGUMENTS_STRIPPED" | sed 's/[[:space:]]*--non-interactive[[:space:]]*/  /g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     ;;
   *)
     NON_INTERACTIVE_FLAG=""
-    FEATURE_DESCRIPTION="$ARGUMENTS"
+    FEATURE_DESCRIPTION="$ARGUMENTS_STRIPPED"
     ;;
 esac
 INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity $NON_INTERACTIVE_FLAG)
 ```
 
-Store `INTERACTIVE_MODE` for use by Phase 0.5, Phase 1.8, Phase 2.5, and Phase 3c to decide whether to present AskUserQuestion prompts or auto-defer open questions. Use `FEATURE_DESCRIPTION` (not `$ARGUMENTS`) everywhere a feature description string is needed from this point forward.
+Store `INTERACTIVE_MODE` for use by Phase 0.5, Phase 1.8, Phase 2.5, and Phase 3c to decide whether to present AskUserQuestion prompts or auto-defer open questions. Use `FEATURE_DESCRIPTION` (not `$ARGUMENTS` or `$ARGUMENTS_STRIPPED`) everywhere a feature description string is needed from this point forward.
 
 ### Resolve Agent Models
 
@@ -346,7 +367,215 @@ The quoted heredoc delimiter (`<<'PHASES_JSON'`) prevents shell expansion of the
 
 If `roadmap-init` exits non-zero for any other reason (e.g. a dangling `dependsOn` reference introduced by a hand-edited brainstorm), surface the CLI's stderr as a single warning line and continue the rest of the plan pipeline unchanged. Do not abort the whole `/aimi:plan` run over a roadmap-materialization failure — the flat pipeline output is still valuable even when phase tracking could not be initialized this run.
 
-`featureSlug` and `sanitizedPhases` remain in working memory for the rest of this session but do not otherwise change downstream phase behavior — Phase 1 through Phase 3e are unaffected by this story.
+`featureSlug` and `sanitizedPhases` remain in working memory for the rest of this session. `featureSlug` is also the primary input to the Rolling-Wave Phase Selection step immediately below, which drives phase-scoped behavior across Phase 1 through Phase 4.
+
+### Rolling-Wave Phase Selection
+
+Only meaningful for phased features — but unlike Roadmap Materialization above, this step runs whether or not a brainstorm loaded **this** session. This is what lets a bare `/aimi:plan` (or `/aimi:plan --phase <N>`) re-invocation on an *existing* large-scope feature auto-select and expand exactly one pending phase per invocation ("rolling wave"), leaving every other phase outline-only in `roadmap.json`. When the feature has no roadmap at all, this entire section is a no-op and the rest of the pipeline runs byte-for-byte as it does today (see the flat-feature acceptance criterion for this story).
+
+#### Resolve `featureSlug` and detect roadmap mode
+
+```bash
+CANDIDATE_SLUG=""
+if [ -n "$featureSlug" ]; then
+  # Roadmap Materialization above already derived and validated featureSlug
+  # this session (a brainstorm with phases: frontmatter was loaded) — reuse it.
+  CANDIDATE_SLUG="$featureSlug"
+elif [ -n "$FEATURE_DESCRIPTION" ]; then
+  # Derive via the same five-step topic-slug algorithm
+  # (commands/references/topic-slug.md) Phase 1 uses for topicSlug — the only
+  # way to identify an existing roadmap when this invocation did not reload
+  # a brainstorm. Validate against ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ (the --feature
+  # pattern aimi-cli.sh enforces); an invalid result is treated as empty.
+  CANDIDATE_SLUG="<topic-slug algorithm applied to FEATURE_DESCRIPTION, validated>"
+fi
+
+if [ -n "$CANDIDATE_SLUG" ] && [ -f "$AIMI_ROOT/.aimi/tasks/$CANDIDATE_SLUG/roadmap.json" ]; then
+  featureSlug="$CANDIDATE_SLUG"
+  ROADMAP_MODE=true
+else
+  ROADMAP_GLOB_COUNT=$(ls -1 "$AIMI_ROOT"/.aimi/tasks/*/roadmap.json 2>/dev/null | wc -l | tr -d ' ')
+  case "$ROADMAP_GLOB_COUNT" in
+    0) ROADMAP_MODE=false ;;
+    1)
+      ROADMAP_MATCH=$(ls -1 "$AIMI_ROOT"/.aimi/tasks/*/roadmap.json)
+      featureSlug=$(basename "$(dirname "$ROADMAP_MATCH")")
+      ROADMAP_MODE=true
+      echo "[plan] rolling-wave: continuing feature '$featureSlug' (single roadmap.json found in .aimi/tasks/)"
+      ;;
+    *) : ;; # multiple roadmaps — disambiguate below, do not guess
+  esac
+fi
+```
+
+**Multiple roadmaps found** (`ROADMAP_GLOB_COUNT` > 1, and the exact-match fast path above did not resolve one): list every candidate feature slug with its roadmap's phase names (`jq -r '.phases[].name' <path>` joined by `, `) via **AskUserQuestion**:
+
+```
+Multiple large-scope features have an active roadmap. Which one is /aimi:plan continuing?
+A — <featureSlug1> (<phase names>)
+B — <featureSlug2> (<phase names>)
+...
+```
+
+Set `featureSlug` to the chosen slug and `ROADMAP_MODE=true`.
+
+**Agent-mode fallback:** do NOT guess. Report `[plan] rolling-wave: ambiguous feature — N roadmaps found (<slug1>, <slug2>, ...); re-run with a feature description that matches one of them, or with an unambiguous --phase target once the feature is clear.` and STOP the entire `/aimi:plan` invocation. This is the only place in this section where agent-mode still requires a decision — silently picking the wrong feature's roadmap would misfile an entire phase's stories into the wrong container.
+
+**`ROADMAP_MODE=false`:** skip the rest of this section entirely — no log line. Proceed to Implementation Scope Detection; the rest of the pipeline (Phase 1 through Phase 4.5) runs exactly as it does for a flat feature today.
+
+#### Load the roadmap and compute eligible pending phases
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+ROADMAP_JSON=$($AIMI_CLI roadmap-get --feature "$featureSlug")
+ELIGIBLE_JSON=$(printf '%s' "$ROADMAP_JSON" | jq '
+  (reduce .phases[] as $p ({}; . + {($p.id|tostring): $p.status})) as $status_by_id |
+  [.phases[] | select(
+    .status == "pending" and
+    (.claim == null) and
+    ((.dependsOn // []) | all(. as $d | $status_by_id[$d|tostring] == "completed"))
+  )] | sort_by(.id)
+')
+```
+
+This mirrors `roadmap-get --next-eligible`'s own jq exactly, narrowed to `status == "pending"` only. (`--next-eligible` also accepts `"planned"`, because `/aimi:execute`'s claim consumes it for phases that are either awaiting expansion or already expanded-but-not-yet-run; `/aimi:plan` must never re-expand a phase that is already `planned` or later, so this step computes eligibility itself rather than calling `--next-eligible`.) `sort_by(.id)` sorts numerically because `id` is a JSON number, not a string — this is what gives decimal ids (`2`, `2.1`, `3`) their correct ascending order rather than a lexicographic sort. Ties are impossible in practice (`roadmap-init` rejects duplicate ids), so numeric `sort_by(.id)` is inherently the tie-break too.
+
+#### Select the target phase
+
+**With `--phase <N>` override:**
+
+```bash
+SELECTED_PHASE_JSON=$(printf '%s' "$ROADMAP_JSON" | jq --arg n "$PHASE_OVERRIDE" '.phases[] | select((.id|tostring) == $n)')
+```
+
+- **Not found:** report `Phase [PHASE_OVERRIDE] not found in [featureSlug]'s roadmap.` and STOP.
+- **Found but not eligible** (status != `pending`, or `claim` is non-null, or one or more `dependsOn` entries are not `status: completed`): refuse **before any research or expansion Task is spawned**. Compose the refusal from the phase's own fields — never a generic message:
+  ```
+  Phase [id] ([name]) is not eligible for expansion: status is '[status]' (expected 'pending').
+  ```
+  or, when status is `pending` but one or more dependencies are unmet:
+  ```
+  Phase [id] ([name]) is not eligible for expansion — unmet dependencies:
+    phase [depId]: status '[depStatus]' (expected 'completed')
+    ...
+  ```
+  List **every** unmet `dependsOn` entry, not just the first. STOP — never fall through to a different phase.
+- **Eligible:** proceed with this phase as `SELECTED_PHASE_JSON`.
+
+**Bare invocation (no `--phase`):**
+
+```bash
+ELIGIBLE_COUNT=$(printf '%s' "$ELIGIBLE_JSON" | jq 'length')
+```
+
+- `ELIGIBLE_COUNT > 0` → `SELECTED_PHASE_JSON=$(printf '%s' "$ELIGIBLE_JSON" | jq '.[0]')` — the lowest numeric id.
+- `ELIGIBLE_COUNT == 0` → no phase is ready. List every still-`pending` phase together with its specific blocking reason (mirrors `/aimi:execute` Step 1.7's "No phase is ready to claim" style):
+  ```bash
+  printf '%s' "$ROADMAP_JSON" | jq -r '
+    (reduce .phases[] as $p ({}; . + {($p.id|tostring): $p.status})) as $status_by_id |
+    .phases[] | select(.status == "pending") | . as $p |
+    (($p.dependsOn // []) | map(select($status_by_id[(.|tostring)] != "completed"))) as $unmet |
+    if ($unmet | length) > 0 then
+      "phase \($p.id) (\($p.name)): blocked on " + ($unmet | map("phase \(.) (\($status_by_id[(.|tostring)]))") | join(", "))
+    elif $p.claim != null then
+      "phase \($p.id) (\($p.name)): claimed by another session"
+    else empty end
+  '
+  ```
+  Report:
+  ```
+  No eligible pending phase in [featureSlug]'s roadmap:
+  [one line per blocked phase from the jq above]
+
+  Every phase is already planned, in progress, completed, or blocked. Run /aimi:plan --phase <N> to override, or resolve the blocking dependency first.
+  ```
+  STOP the entire `/aimi:plan` invocation — do not fall back to the flat pipeline (that would silently create an unrelated top-level tasks.json instead of expanding this roadmap).
+
+#### Extract selected-phase working memory
+
+```bash
+SELECTED_PHASE_ID=$(printf '%s' "$SELECTED_PHASE_JSON" | jq -r '.id')
+PHASE_NAME=$(printf '%s' "$SELECTED_PHASE_JSON" | jq -r '.name')
+PHASE_SLUG=$(printf '%s' "$SELECTED_PHASE_JSON" | jq -r '.slug // ""')
+PHASE_DIR=$(printf '%s' "$SELECTED_PHASE_JSON" | jq -r '.dir')
+PHASE_GOAL=$(printf '%s' "$SELECTED_PHASE_JSON" | jq -r '.goal')
+PHASE_AREAS_JSON=$(printf '%s' "$SELECTED_PHASE_JSON" | jq -c '.areas // []')
+```
+
+`PHASE_DIR` is the `phase-<id>[-<slug>]` directory segment `roadmap-init` already computed and validated at materialization time — reuse it verbatim here; never re-derive it.
+
+#### Pre-Expansion Contract Gate
+
+Runs once, immediately after selection, before Phase 1 research begins — so a rejected phase never pays for research it cannot use:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+if [ "$INTERACTIVE_MODE" = "agent" ]; then
+  CONTRACTS_JSON=$($AIMI_CLI validate-contracts "$featureSlug" --phase "$SELECTED_PHASE_ID" --agent-mode 2>&1)
+else
+  CONTRACTS_JSON=$($AIMI_CLI validate-contracts "$featureSlug" --phase "$SELECTED_PHASE_ID" 2>&1)
+fi
+CONTRACTS_EXIT=$?
+```
+
+`validate-contracts` performs **two distinct checks in a single call**, and only one of them is demotable:
+
+1. **Duplicate creates** (status-agnostic — scans every phase in the roadmap regardless of `pending`/`planned`/`completed`, since two phases can each declare the same artifact identity long before either is `completed`): when the selected phase's `creates[]` collides with another phase's `creates[]` identity, this is reported. **Interactive mode (no `--agent-mode`): the CLI itself hard-blocks — it exits 1 before even evaluating needs.** **`--agent-mode`: demoted to a warning in the CLI's own JSON output (`duplicateWarnings[]`), and the call proceeds** to the needs check below. This satisfies the "collision surfaces before Pass 2 expansion begins, distinct from and additional to the needs-unmet check" requirement — both checks live inside this one CLI call, and duplicate-creates is evaluated first.
+2. **Needs resolution** (scoped to `--phase`, walking the transitive `dependsOn` closure): a `needs[]` entry with no `completed` phase whose `handoff.md` lists it under `## Artifacts Created` is reported in `missing[]`. **This check always blocks — interactive and agent-mode alike. `--agent-mode` never demotes an unmet need** — only the duplicate-creates finding above is demotable, per `validate-contracts`'s own contract.
+
+**On `CONTRACTS_EXIT = 0`:** proceed. If `CONTRACTS_JSON` contains a non-empty `duplicateWarnings[]` (only possible in agent-mode), log each entry:
+```
+[plan] agent-mode: duplicate creates proceeding — phase [id] and phase [id]: both declare "[identity]"
+```
+
+**On `CONTRACTS_EXIT != 0`:** parse the CLI's stderr (captured above via `2>&1`).
+- **Duplicate-creates block (interactive only):** surface the CLI's own collision message verbatim — it already names both phases and the colliding identity. STOP before any research or expansion Task is spawned.
+- **Unmet needs (either mode):** surface each `missing[]` entry:
+  ```
+  Phase [SELECTED_PHASE_ID] cannot be expanded — unmet need(s):
+    needs "[need]" — no completed phase delivers it (reason: [no-provider|not-delivered])
+    ...
+  ```
+  STOP. Do not spawn any research or expansion Task.
+
+#### Prior Phase Handoff Ingestion
+
+For every phase in `ROADMAP_JSON` with `status == "completed"`, read its `handoff.md` (written by `/aimi:execute`'s `roadmap-write-handoff` step) into planning context, so Pass 2 story expansion reuses prior decisions and artifacts instead of recreating them:
+
+```bash
+COMPLETED_DIRS=$(printf '%s' "$ROADMAP_JSON" | jq -r '.phases[] | select(.status == "completed") | "\(.id)\t\(.name)\t\(.dir)"')
+```
+
+For each `id / name / dir` line (ascending phase-id order, matching `roadmap-get`'s natural ordering):
+
+1. Compute `HANDOFF_PATH="$AIMI_ROOT/.aimi/tasks/$featureSlug/$dir/handoff.md"`.
+2. If missing on disk, skip silently — a phase can be `completed` without a handoff only in a pre-`roadmap-write-handoff` legacy state; do not error.
+3. Read the file verbatim and wrap it (mirrors the `<research_file>` escape used at Phase 1.7):
+   ```
+   <phase_handoff id="<id>" name="<name>">
+   …contents, with any literal </phase_handoff or <phase_handoff sequence replaced by
+   &lt;/phase_handoff / &lt;phase_handoff…
+   </phase_handoff>
+   ```
+4. Append to `phaseHandoffBlocks` (empty string when no completed phase has a handoff, or `ROADMAP_MODE=false`).
+
+**Aggregate cap:** after collecting all blocks, if the total size exceeds **150 KB**, drop the OLDEST completed phase's block first (lowest id — its content is most likely already superseded by later decisions) and continue dropping in ascending-id order until under the cap. Emit one warning line per dropped block: `[plan] phase [id] handoff dropped — aggregate handoff context exceeded 150KB`.
+
+`phaseHandoffBlocks` is threaded into the Phase 3d sub-agent prompt template's **Prior Phase Handoff** section (see below); it is not read by Phase 1 researchers.
+
+#### Phase-Scoped Topic Slug
+
+```bash
+PHASE_TOPIC_SLUG="${featureSlug}-phase-${SELECTED_PHASE_ID}${PHASE_SLUG:+-$PHASE_SLUG}"
+# Apply the same five-step normalization as commands/references/topic-slug.md
+# (lowercase, hyphenate, dedupe hyphens, truncate 50, strip trailing hyphens) —
+# featureSlug and PHASE_SLUG are already lowercase-hyphenated, so this mainly
+# applies the 50-char truncation.
+```
+
+Phase 1's **Derive Topic Slug** step below substitutes `PHASE_TOPIC_SLUG` for a fresh derivation whenever `ROADMAP_MODE=true`. This is what keeps research filenames, `RUN_DIR`, and every other `topicSlug`-keyed artifact phase-scoped automatically, with no further changes needed anywhere else in the pipeline that already references `topicSlug` generically.
 
 ### Implementation Scope Detection
 
@@ -416,7 +645,9 @@ mkdir -p .aimi/research
 
 ### Derive Topic Slug
 
-From the feature description, derive a topic slug for research filename derivation:
+**When `ROADMAP_MODE=true`** (see Rolling-Wave Phase Selection in Phase 0): `topicSlug = PHASE_TOPIC_SLUG` (already computed there) — skip the derivation below entirely. This is what keeps every research filename, `RUN_DIR`, and staging path phase-scoped for the rest of this pipeline with no further per-phase changes needed.
+
+**Otherwise**, from the feature description, derive a topic slug for research filename derivation:
 1. Convert to lowercase
 2. Replace spaces and special characters with hyphens
 3. Remove consecutive hyphens
@@ -476,6 +707,27 @@ Concretely, scan `$ARGUMENTS` for whitespace-delimited tokens that satisfy **all
 
 Store the surviving tokens as `pathHints` (a list). If no tokens survive, set `pathHints` to an empty list.
 
+**When `ROADMAP_MODE=true`:** merge `PHASE_AREAS_JSON` (the selected phase's `areas[]`, already sanitized by `roadmap-init` at materialization time) into `pathHints`, deduplicated. These are phase-declared scope hints, not user-typed tokens, so they skip the six-check filter above — they are appended as-is.
+
+### Phase-Scoped Research Reuse
+
+**When `ROADMAP_MODE=true`:** before spawning any Phase 1 or Phase 1.5b researcher, check for an existing phase-scoped research file to reuse — this is what keeps re-running `/aimi:plan --phase <N>` (e.g. after fixing a validation error) from needlessly re-researching a phase whose codebase context has not changed.
+
+For each research kind not already populated by brainstorm-reuse (`reusedResearch.codebase`, `reusedResearch.learnings`, `reusedResearch["best-practices"]`, `reusedResearch["framework-docs"]` — see Reuse Brainstorm Research above; brainstorm-reuse always takes precedence when both apply for the same kind):
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+CANDIDATE=$(ls -t "$AIMI_ROOT"/.aimi/research/*-"${PHASE_TOPIC_SLUG}"-*-<suffix>.md 2>/dev/null | head -1)
+if [ -n "$CANDIDATE" ]; then
+  FRESH_PATH=$($AIMI_CLI research-lookup --ignore-missing-cited-paths "$CANDIDATE" 2>/dev/null)
+fi
+```
+
+Where `<suffix>` is `codebase`, `learnings`, `best-practices`, or `framework-docs` respectively (run once per kind). On a fresh match (`research-lookup` exits 0, `FRESH_PATH` non-empty), set `reusedResearch.<kind> = FRESH_PATH` — this populates the exact same map the brainstorm-reuse path populates, so every "If `reusedResearch.X` is set: skip the Task" branch already documented in Run Research Agents / Phase 1.5b below applies unchanged. On a stale match or no candidate file, leave that kind unset — its normal Task spawn proceeds.
+
+**When `ROADMAP_MODE=false`:** this step does not run — behavior is unchanged from today.
+
 ### Run Research Agents
 
 Run these agents **in parallel** using the Task tool.
@@ -488,6 +740,8 @@ Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
   prompt: "Analyze the codebase for patterns relevant to: [feature description].
            topicSlug: [topicSlug]
            [If pathHints is non-empty]: paths: [<comma-joined pathHints>]
+           [If ROADMAP_MODE]: Phase scope — this research is scoped to phase
+           [SELECTED_PHASE_ID] ([PHASE_NAME]): goal: [PHASE_GOAL].
            Look for: existing patterns, CLAUDE.md guidance, similar features,
            technology familiarity, file structure conventions.
            outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-codebase.md
@@ -516,6 +770,8 @@ Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
   [model: <AGENT_MODELS.research when not "inherit">]
   prompt: "Search .aimi/solutions/ for learnings relevant to: [feature description].
            topicSlug: [topicSlug]
+           [If ROADMAP_MODE]: Phase scope — this research is scoped to phase
+           [SELECTED_PHASE_ID] ([PHASE_NAME]): goal: [PHASE_GOAL].
            Look for: gotchas, patterns, past solutions, lessons learned.
            outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-learnings.md
            [If prototypeBlocks is non-empty]:
@@ -569,6 +825,8 @@ Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
   prompt: "Research current best practices for: [feature description].
            researchDepth: [computed researchDepth from Phase 1.5]
            topicSlug: [topicSlug]
+           [If ROADMAP_MODE]: Phase scope — this research is scoped to phase
+           [SELECTED_PHASE_ID] ([PHASE_NAME]): goal: [PHASE_GOAL].
            outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-best-practices.md"
 ```
 
@@ -582,6 +840,8 @@ Task subagent_type="aimi-engineering:research:aimi-framework-docs-researcher"
   prompt: "Research framework documentation for: [feature description].
            researchDepth: [computed researchDepth from Phase 1.5]
            topicSlug: [topicSlug]
+           [If ROADMAP_MODE]: Phase scope — this research is scoped to phase
+           [SELECTED_PHASE_ID] ([PHASE_NAME]): goal: [PHASE_GOAL].
            outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-framework-docs.md"
 ```
 
@@ -956,6 +1216,17 @@ Store `RUN_DIR` for use in all subsequent Phase 3 steps and in Phase 3e.
 
 Also derive the final output path for `story-merge --output`:
 
+**When `ROADMAP_MODE=true`:** the output path is phase-scoped, not date-scoped, and lives under the feature's roadmap directory rather than the flat `.aimi/tasks/` root — this is what makes rolling-wave expansion write into the phase's own container instead of a new top-level file:
+
+```bash
+TASKS_PATH=".aimi/tasks/${featureSlug}/${PHASE_DIR}/${featureSlug}-phase-${SELECTED_PHASE_ID}-tasks.json"
+mkdir -p "$AIMI_ROOT/.aimi/tasks/${featureSlug}/${PHASE_DIR}"
+```
+
+The `*-tasks.json` basename convention is preserved — only the directory and the date-vs-phase discriminator in the filename differ from the flat form. `--split full-stack` composes transparently on top of this: story-merge derives its `-frontend-tasks.json`/`-backend-tasks.json` output paths from whatever `--output` base it is given (directory plus basename), unchanged mechanics — no special-casing needed here.
+
+**When `ROADMAP_MODE=false` (unchanged):**
+
 ```bash
 TASKS_PATH=".aimi/tasks/YYYY-MM-DD-${topicSlug}-tasks.json"
 ```
@@ -1162,6 +1433,33 @@ Reorder — change story order
 
 Loop until the user selects **Approve**.
 
+### Phase 3c.5: Payload Estimate (Advisory)
+
+**When `ROADMAP_MODE=true`, runs once immediately after the outline gate approves** (either the non-interactive auto-approve above or the interactive loop's Approve option), before any Phase 3d expansion Task is spawned. **When `ROADMAP_MODE=false`: skip entirely — no log line, no CLI call.**
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+PAYLOAD_JSON=$($AIMI_CLI estimate-payload \
+  --outline "$RUN_DIR/outline.json" \
+  [--research <path> for each path in metadata.researchPaths so far this run] \
+  [--spec <path> for businessSpecPath and/or designSpecPath, each when non-null] \
+  [--prototype <path> for each entry in resolvedPrototypePaths] \
+  2>&1)
+```
+
+This is purely advisory — `estimate-payload` always exits 0 for valid input and never blocks, trims, or otherwise alters the pipeline. Read `PAYLOAD_JSON.overBudget`:
+
+- **`false`:** proceed silently to Phase 3d.
+- **`true`:** surface the CLI's own generic warning (`PAYLOAD_JSON.warning`) plus a concrete, phase-specific split hint the CLI cannot compute on its own (it has no visibility into individual outline entries): take the **second half** of `outline.json`'s entries (rounded down; e.g. 7 entries → last 3) and name them as split candidates:
+  ```
+  Payload estimate for phase [SELECTED_PHASE_ID] exceeds budget ([PAYLOAD_JSON.totalBytes] bytes > [PAYLOAD_JSON.budgetBytes] byte budget).
+  [PAYLOAD_JSON.warning]
+
+  Suggested split: move outline entries [idx]–[idx] ("[title]", "[title]", ...) into a new decimal sub-phase [SELECTED_PHASE_ID].1 at the next /aimi:brainstorm roadmap-gate pass.
+  ```
+  This never blocks — after printing it, proceed to Phase 3d unchanged. The suggestion is advice for a *future* roadmap edit, not an action this run takes automatically.
+
 ## Phase 3d: Pass 2 — Parallel Story Expansion
 
 Dispatch one Task sub-agent per approved outline entry in parallel. Each sub-agent writes a single-story staging file. Collect results after all agents complete (or fail).
@@ -1198,6 +1496,12 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
   [If researchFileBlocks is non-empty]:
   Full research file contents — use to author precise, detail-grounded acceptance criteria:
   [researchFileBlocks]
+
+  [If ROADMAP_MODE and phaseHandoffBlocks is non-empty]:
+  Prior Phase Handoff (reuse these artifacts and decisions — do NOT recreate
+  what a completed prior phase already built; cite the artifact by name in
+  implementation.approach instead of re-describing how to build it):
+  [phaseHandoffBlocks]
 
   [If prototypeBlocks is non-empty]:
   Prototype designs — implementation stories MUST reference these for UI acceptance criteria:
@@ -1566,9 +1870,21 @@ $AIMI_CLI story-merge \
 - `--agent-mode`: pass when `INTERACTIVE_MODE == "agent"`. Demotes Phase 3.1 and Phase 4.1 hard blocks to warnings inside story-merge.
 - `--split legacy` (default): no flag needed; story-merge uses legacy mode when `--split` is omitted.
 
-On **success**: story-merge writes the output file(s), deletes `RUN_DIR`, and exits 0. Proceed to Phase 4.
+On **success**: story-merge writes the output file(s), deletes `RUN_DIR`, and exits 0.
 
-On **failure** (non-zero exit): do NOT proceed. Surface the error to the user. The staging directory is preserved for inspection. Do not attempt to write tasks.json manually.
+**When `ROADMAP_MODE=true`, immediately after confirming story-merge's exit 0** (never before — a failed expansion must leave the phase's roadmap status unchanged):
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI roadmap-set-status --feature "$featureSlug" --phase "$SELECTED_PHASE_ID" --status planned
+```
+
+`pending → planned` is an allowed transition; this call only ever runs once story-merge has already succeeded, so a story-merge failure (see below) never reaches this line and the phase's roadmap status stays `pending` for the next `/aimi:plan` (or `/aimi:plan --phase [SELECTED_PHASE_ID]`) retry.
+
+Proceed to Phase 4.
+
+On **failure** (non-zero exit): do NOT proceed, and do NOT call `roadmap-set-status`. Surface the error to the user. The staging directory is preserved for inspection. Do not attempt to write tasks.json manually.
 
 ## Phase 4: Metadata Patch
 
@@ -1589,9 +1905,11 @@ Read the tasks.json file written by story-merge and patch the `metadata` object 
 
 - **title**: `<type>: <Descriptive Name>`
 - **type**: `feat`, `ref`, `bug`, or `chore`
-- **branchName**: Kebab-case, prefixed with type. For split files: `type/[feature]-frontend` and `type/[feature]-backend`
+- **branchName**: Kebab-case, prefixed with type. For split files: `type/[feature]-frontend` and `type/[feature]-backend`. **When `ROADMAP_MODE=true`:** `type/${featureSlug}-phase-${SELECTED_PHASE_ID}-${PHASE_SLUG}` instead (matches the container branch `/aimi:execute` creates for this phase). Validate against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` before writing — refuse the write (report the invalid computed branch name and STOP; do not fall back to a mangled variant) if it fails, exactly as the flat-mode branchName derivation already requires.
 - **createdAt**: Today's date (YYYY-MM-DD)
 - **planPath**: Always `null`
+- **roadmapPath** (when `ROADMAP_MODE=true`): `.aimi/tasks/${featureSlug}/roadmap.json`, relative to `AIMI_ROOT`. Omit the key entirely when `ROADMAP_MODE=false`.
+- **phase** (when `ROADMAP_MODE=true`): `{ id: SELECTED_PHASE_ID, dir: PHASE_DIR }` — `id` is the selected phase's numeric id, `dir` is its `phase-<id>[-<slug>]` directory segment. Omit the key entirely when `ROADMAP_MODE=false`.
 - **brainstormPath**: Path to brainstorm if one was used, otherwise omit
 - **researchDepth**: Value computed in Phase 1.5 (`skip`, `quick`, `standard`, `deep`), or omit if not computed
 - **researchPaths**: Populate from two sources, then deduplicate:
@@ -1608,7 +1926,7 @@ Read the tasks.json file written by story-merge and patch the `metadata` object 
 
 Use the Write tool to patch the output tasks.json with these fields merged into the `metadata` object.
 
-**For split files (full-stack):** patch both `*-frontend-tasks.json` and `*-backend-tasks.json` independently. Assign separate `branchName` values (`type/[feature]-frontend` and `type/[feature]-backend`). Write the same `prototypePaths`, `designBundle`, and `designTokens` to both files.
+**For split files (full-stack):** patch both `*-frontend-tasks.json` and `*-backend-tasks.json` independently. Assign separate `branchName` values (`type/[feature]-frontend` and `type/[feature]-backend`, or their `ROADMAP_MODE=true` phase-suffixed equivalents per the branchName rule above). Write the same `prototypePaths`, `designBundle`, `designTokens`, `roadmapPath`, and `phase` to both files.
 
 ### Derive `metadata.backendSpec` (frontend-only mode only)
 
@@ -1653,6 +1971,11 @@ Use the Write tool to patch the output tasks.json with these fields merged into 
     "branchName": "string (required, regex: ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$)",
     "createdAt": "YYYY-MM-DD (required)",
     "planPath": "null (always null for planner-generated)",
+    "roadmapPath": "string (optional, present only when this phase was expanded via Rolling-Wave Phase Selection; relative path to the feature's roadmap.json)",
+    "phase": {
+      "id": "number (optional, present only in rolling-wave mode; the selected phase's numeric id)",
+      "dir": "string (optional, present only in rolling-wave mode; the phase-<id>[-<slug>] directory segment)"
+    },
     "brainstormPath": "string (optional)",
     "researchDepth": "skip|quick|standard|deep (optional, computed in Phase 1.5)",
     "researchPaths": "string[] (optional, relative paths to research files written by Phase 1 and Phase 1.5b agents)",
@@ -1841,6 +2164,7 @@ Specific obligations:
 - [ ] Gates only attached when heuristics clearly match
 - [ ] Every story with `verification.strategy == "visual"` and non-empty `metadata.prototypePaths` has at least one `(prototype: ...)` citation in its acceptance criteria (either `(prototype: <path> §<heading>)` or `(prototype: <path>:L<start>-L<end>)`)
 - [ ] Rule 19a compliance (when `designSpecContent` is non-null): every visual story's `acceptanceCriteria` wraps each visible-text literal in double quotes followed by a `(DesignSpec § N.N L<line>)` anchor; no paraphrasing, translation, abbreviation, or reordering of the cited text
+- [ ] Rolling-wave (when `ROADMAP_MODE=true`): `metadata.roadmapPath` and `metadata.phase.{id,dir}` are present and match the selected phase; `metadata.branchName` matches `type/${featureSlug}-phase-${SELECTED_PHASE_ID}-${PHASE_SLUG}` and passes `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$`; the output file lives at `.aimi/tasks/${featureSlug}/${PHASE_DIR}/${featureSlug}-phase-${SELECTED_PHASE_ID}-tasks.json`; `roadmap.json`'s phase `${SELECTED_PHASE_ID}` status is `planned` only after this checklist and Phase 4.5 both pass
 
 ### Split-File Checks (when `implementationScope` is set)
 - [ ] Full-stack: two files generated (`*-frontend-tasks.json` and `*-backend-tasks.json`) — produced by story-merge `--split full-stack`
@@ -1961,6 +2285,7 @@ Tasks generated successfully!
 
 Tasks: .aimi/tasks/[tasks-filename].json
 
+[If ROADMAP_MODE]: Phase: [SELECTED_PHASE_ID] ([PHASE_NAME]) — status: planned
 Stories: [X] total
 Schema version: 3.3
 Waves: [N] total
@@ -2031,6 +2356,14 @@ For split-file output (`--split full-stack`), `metadata.smellWarnings` is writte
 | Phase 3d.5 | Patches exceed 10-per-storyIdx cap | Drop excess silently with one aggregate `unresolved[]` entry naming the storyIdx |
 | Phase 3d.5 | Patch result fails post-apply JSON / required-field / per-field type validation | Roll back the single patch; continue with remaining patches |
 | Phase 3d.5 | Auditor prompt exceeds 150 KB total cap | Drop research file blocks then largest staging blocks until under cap; emit one chat warning line per dropped block |
-| Phase 3e | story-merge exits non-zero | Report error with full stderr output; preserve staging dir for inspection; do not write tasks.json manually |
+| Phase 3e | story-merge exits non-zero | Report error with full stderr output; preserve staging dir for inspection; do not write tasks.json manually; do NOT call roadmap-set-status |
 | Phase 4 | File write fails | Report error with path |
+| Phase 4 | Rolling-wave: computed `branchName` fails `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` | Report the invalid branch name and STOP; do not write a mangled variant |
 | Phase 4.5 | Validation fails | Fix issues and re-run until passing |
+| Rolling-Wave Phase Selection | `--phase <N>` does not match `^[0-9]+(\.[0-9]+)?$` | Report `Invalid --phase value: [N]. Must be a numeric phase id.` and STOP |
+| Rolling-Wave Phase Selection | `--phase <N>` not found in roadmap | Report `Phase [N] not found in [featureSlug]'s roadmap.` and STOP |
+| Rolling-Wave Phase Selection | `--phase <N>` found but ineligible (wrong status, unmet dependsOn, or claimed) | Refuse before any research/expansion Task is spawned; name the phase and list every unmet dependency by id and status; STOP |
+| Rolling-Wave Phase Selection | Bare invocation, no eligible pending phase | List every blocked pending phase with its specific reason; STOP — do not fall back to the flat pipeline |
+| Rolling-Wave Phase Selection | Multiple `.aimi/tasks/*/roadmap.json` found, no exact featureSlug match | Interactive: AskUserQuestion to disambiguate. Agent-mode: report the ambiguous candidates and STOP — never guess |
+| Rolling-Wave Phase Selection | `validate-contracts` reports duplicate creates (interactive mode) | Surface the CLI's collision message verbatim; STOP before any research/expansion Task is spawned |
+| Rolling-Wave Phase Selection | `validate-contracts` reports unmet needs (either mode) | Surface each `missing[]` entry; STOP — this check is never demoted by `--agent-mode` |
