@@ -5082,6 +5082,709 @@ _story_merge_write_split() {
     '{frontend: $fe, backend: $be, frontend_stories: $fe_count, backend_stories: $be_count}'
 }
 
+# ============================================================================
+# Roadmap Lifecycle Subcommands (Phase/Milestone layer for large-scope features)
+# ============================================================================
+#
+# roadmap.json lives at .aimi/tasks/<feature>/roadmap.json and tracks phase
+# lifecycle state (pending -> planned -> in_progress -> completed, or ->
+# verification_failed) plus PID-alive claims so parallel /aimi:execute
+# sessions can safely claim independent phases without hallucinated bash.
+# Every write is a locked read-modify-write (mkdir-then-lock-then-tmpfile-
+# then-move), mirroring _story_merge_write_legacy. flock is held only for
+# the duration of each atomic operation -- never across separate CLI calls.
+
+# Single-path-component pattern for a phase's dir field: phase-N[.M][-slug]
+_ROADMAP_DIR_REGEX='^phase-[0-9]+(\.[0-9]+)?(-[a-z0-9][a-z0-9-]*)?$'
+# Single-path-component pattern for the --feature slug (no slash, no dotdot)
+_ROADMAP_FEATURE_REGEX='^[a-zA-Z0-9][a-zA-Z0-9_-]*$'
+# Reused branchName convention (see plugins/aimi-engineering/CLAUDE.md)
+_ROADMAP_BRANCH_REGEX='^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'
+
+# jq `def` spliced into programs that sanitize free-text roadmap fields
+# (name, goal, successCriteria entries, notes, branch, brainstormPath).
+# Strips code fences/backtick content, newlines, "$(" command-substitution
+# openers, HTML/XML tags, and common instruction-override phrases, then
+# truncates to maxlen. Mirrors commands/references/sanitization.md plus the
+# explicit newline/dollar-paren stripping called for in this story's notes.
+_ROADMAP_SANITIZE_JQ='
+def _rm_sanitize(maxlen):
+  if . == null then null else
+  ( .
+    | gsub("```[\\s\\S]*?```"; "")
+    | gsub("`[^`\n]*`"; "")
+    | gsub("`"; "")
+    | gsub("\r\n|\r|\n"; " ")
+    | gsub("\\$\\("; "")
+    | gsub("<[^>]*>"; "")
+    | gsub("ignore previous( instructions)?"; ""; "i")
+    | gsub("you are now"; ""; "i")
+    | gsub("system\\s*:"; ""; "i")
+    | if (length > maxlen) then .[0:maxlen] else . end
+  ) end;
+'
+
+# Process-liveness probe, ported from guard-runtime-state.py is_alive() (lines 26-34):
+# signal-zero kill probe. "No such process" -> not alive. "Exists, no permission
+# to signal" -> alive (mirrors ProcessLookupError=False / PermissionError=True).
+_is_pid_alive() {
+  local pid="$1"
+  if ! [[ "$pid" =~ ^[0-9]+$ ]] || [ "$pid" -le 0 ]; then
+    return 1
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+  local err
+  err=$(kill -0 "$pid" 2>&1 >/dev/null) || true
+  if printf '%s' "$err" | grep -qi "not permitted"; then
+    return 0
+  fi
+  return 1
+}
+
+# Validate --feature is present and a safe single path component.
+_roadmap_validate_feature() {
+  local feature="$1"
+  if [ -z "$feature" ]; then
+    echo "Error: roadmap: --feature <slug> is required" >&2
+    exit 1
+  fi
+  if ! [[ "$feature" =~ $_ROADMAP_FEATURE_REGEX ]]; then
+    echo "Error: roadmap: --feature must be a single path component matching $_ROADMAP_FEATURE_REGEX, got: $feature" >&2
+    exit 1
+  fi
+}
+
+# Compute the roadmap.json path for a feature (absolute, under TASKS_DIR).
+_roadmap_path() {
+  local feature="$1"
+  printf '%s/%s/roadmap.json\n' "$TASKS_DIR" "$feature"
+}
+
+# Validate --phase is present and a bare numeric id (int or one-decimal-place).
+_roadmap_validate_phase_id() {
+  local phase_id="$1"
+  local label="$2"
+  if [ -z "$phase_id" ] || ! [[ "$phase_id" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    echo "Error: $label: --phase <id> must be a numeric phase id" >&2
+    exit 1
+  fi
+}
+
+cmd_roadmap_init() {
+  local feature="" file="" sync_mode=false brainstorm_path=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      --file) shift; file="${1:-}" ;;
+      --sync) sync_mode=true ;;
+      --brainstorm-path) shift; brainstorm_path="${1:-}" ;;
+      *)
+        echo "Error: roadmap-init: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature"
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_path "$feature")
+  validate_path_in_project "$roadmap_path"
+
+  # --- Read the phases array from --file or stdin ---
+  local input_json
+  if [ -n "$file" ]; then
+    validate_path_in_project "$file"
+    if [ ! -f "$file" ]; then
+      echo "Error: roadmap-init: --file not found: $file" >&2
+      exit 1
+    fi
+    input_json=$(cat "$file")
+  else
+    input_json=$(cat)
+  fi
+
+  if ! printf '%s' "$input_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    echo "Error: roadmap-init: phases payload must be a JSON array" >&2
+    exit 1
+  fi
+
+  # --- Structural validation (payload-only; no I/O yet). Dangling dependsOn refs
+  # are checked later, inside the lock, against existing-file ids unioned with
+  # this payload's ids -- so a --sync phase may legitimately depend on a phase
+  # materialized by an earlier roadmap-init call. ---
+  local validation_errors
+  validation_errors=$(printf '%s' "$input_json" | jq -r '
+    . as $phases |
+    ([$phases[] | .id]) as $ids |
+    ([$ids | group_by(.) | map(select(length > 1)) | map(.[0])[]]) as $dup_ids |
+    [
+      ($dup_ids[] | "duplicate phase id: " + (.|tostring)),
+      ($phases[] | . as $p | if ($p.id == null or ($p.id|type) != "number") then "phase " + ($p.id|tostring) + ": id must be a number" else empty end),
+      ($phases[] | . as $p | if ($p.name == null or ($p.name|type) != "string" or ($p.name|length) == 0) then "phase " + ($p.id|tostring) + ": name is required" else empty end),
+      ($phases[] | . as $p | if ($p.goal == null or ($p.goal|type) != "string" or ($p.goal|length) == 0) then "phase " + ($p.id|tostring) + ": goal is required" else empty end),
+      ($phases[] | . as $p | if ($p.dependsOn != null and ($p.dependsOn|type) != "array") then "phase " + ($p.id|tostring) + ": dependsOn must be an array" else empty end),
+      ($phases[] | . as $p | (($p.dependsOn // [])[] | select(type != "number") | "phase " + ($p.id|tostring) + ": dependsOn entries must be numbers"))
+    ] | .[]
+  ')
+  if [ -n "$validation_errors" ]; then
+    echo "Error: roadmap-init: invalid phase payload:" >&2
+    printf '%s\n' "$validation_errors" >&2
+    exit 1
+  fi
+
+  # --- Sanitize free-text fields, compute dir, validate dir + branch patterns ---
+  local new_phases
+  new_phases=$(printf '%s' "$input_json" | jq "$_ROADMAP_SANITIZE_JQ"'
+    map(
+      .name = (.name | _rm_sanitize(200)) |
+      .goal = (.goal | _rm_sanitize(2000)) |
+      .slug = ((.slug // "") | _rm_sanitize(100)) |
+      .notes = (if .notes != null then (.notes | _rm_sanitize(5000)) else null end) |
+      .successCriteria = ((.successCriteria // []) | map(_rm_sanitize(2000))) |
+      .creates = (.creates // []) |
+      .needs = (.needs // []) |
+      .areas = (.areas // []) |
+      .dependsOn = (.dependsOn // []) |
+      .branch = (if .branch != null then (.branch | _rm_sanitize(200)) else null end) |
+      .dir = ("phase-" + (.id|tostring) + (if (.slug|length) > 0 then "-" + .slug else "" end)) |
+      .status = "pending" |
+      .claim = null
+    )
+  ')
+
+  local dir_errors
+  dir_errors=$(printf '%s' "$new_phases" | jq -r --arg re "$_ROADMAP_DIR_REGEX" '
+    [.[] | select((.dir | test($re)) | not) | "phase " + (.id|tostring) + ": computed dir \"" + .dir + "\" fails required pattern"] | .[]
+  ')
+  if [ -n "$dir_errors" ]; then
+    echo "Error: roadmap-init: invalid phase directory slug(s):" >&2
+    printf '%s\n' "$dir_errors" >&2
+    exit 1
+  fi
+
+  local branch_errors
+  branch_errors=$(printf '%s' "$new_phases" | jq -r --arg re "$_ROADMAP_BRANCH_REGEX" '
+    [.[] | select(.branch != null and ((.branch | test($re)) | not)) | "phase " + (.id|tostring) + ": branch \"" + .branch + "\" contains invalid characters"] | .[]
+  ')
+  if [ -n "$branch_errors" ]; then
+    echo "Error: roadmap-init: invalid branch name(s):" >&2
+    printf '%s\n' "$branch_errors" >&2
+    exit 1
+  fi
+
+  mkdir -p "$(dirname "$roadmap_path")"
+
+  # --- Locked read-modify-write: existence/--sync check, additive merge, atomic write ---
+  local out rc
+  if out=$(
+    (
+      _lock "${roadmap_path}.lock"
+
+      if [ -f "$roadmap_path" ]; then
+        if [ "$sync_mode" != true ]; then
+          echo "Error: roadmap-init: $roadmap_path already exists; pass --sync to merge additively" >&2
+          exit 1
+        fi
+        if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
+          echo "Error: roadmap-init: existing roadmap.json is malformed: $roadmap_path" >&2
+          exit 1
+        fi
+
+        existing_meta=$(jq '{roadmapVersion, feature, createdAt, brainstormPath}' "$roadmap_path")
+        filtered_new=$(jq --argjson new "$new_phases" '
+          [.phases[].id] as $eids | [$new[] | select((.id as $i | $eids | index($i)) == null)]
+        ' "$roadmap_path")
+
+        # Dangling dependsOn check: allowed ids are existing-file ids unioned with
+        # this payload's own ids (covers both already-materialized phases and
+        # sibling phases introduced in this same call).
+        dangling=$(jq --argjson new "$new_phases" --argjson add "$filtered_new" -r '
+          ([.phases[].id] + [$new[].id] | unique) as $ids |
+          [$add[] | . as $p | ($p.dependsOn // [])[] | select((. as $d | $ids | index($d)) == null) | "phase " + ($p.id|tostring) + ": dependsOn references unknown phase id " + (.|tostring)] | .[]
+        ' "$roadmap_path")
+        if [ -n "$dangling" ]; then
+          echo "Error: roadmap-init: dangling dependsOn reference(s):" >&2
+          printf '%s\n' "$dangling" >&2
+          exit 1
+        fi
+
+        merged_phases=$(jq --argjson add "$filtered_new" '
+          (.phases + $add) | sort_by(.id)
+        ' "$roadmap_path")
+        roadmap_doc=$(printf '%s' "$existing_meta" | jq --argjson phases "$merged_phases" '. + {phases: $phases}')
+        added_count=$(printf '%s' "$filtered_new" | jq 'length')
+      else
+        dangling=$(printf '%s' "$new_phases" | jq -r '
+          ([.[].id] | unique) as $ids |
+          [.[] | . as $p | ($p.dependsOn // [])[] | select((. as $d | $ids | index($d)) == null) | "phase " + ($p.id|tostring) + ": dependsOn references unknown phase id " + (.|tostring)] | .[]
+        ')
+        if [ -n "$dangling" ]; then
+          echo "Error: roadmap-init: dangling dependsOn reference(s):" >&2
+          printf '%s\n' "$dangling" >&2
+          exit 1
+        fi
+
+        merged_phases=$(printf '%s' "$new_phases" | jq 'sort_by(.id)')
+        roadmap_doc=$(jq -n --arg feature "$feature" --arg bp "$brainstorm_path" --argjson phases "$merged_phases" "$_ROADMAP_SANITIZE_JQ"'
+          {
+            roadmapVersion: "1.0",
+            feature: $feature,
+            createdAt: (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
+            brainstormPath: (if ($bp|length) == 0 then null else ($bp | _rm_sanitize(500)) end),
+            phases: $phases
+          }
+        ')
+        added_count=$(printf '%s' "$merged_phases" | jq 'length')
+      fi
+
+      tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
+      printf '%s\n' "$roadmap_doc" > "$tmp_file"
+      mv "$tmp_file" "$roadmap_path"
+
+      jq -n --arg path "$roadmap_path" --argjson added "$added_count" --argjson total "$(printf '%s' "$merged_phases" | jq 'length')" \
+        '{roadmap: $path, added: $added, phases: $total}'
+    ) 200>"${roadmap_path}.lock"
+  ); then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  if [ "$rc" -ne 0 ]; then
+    exit "$rc"
+  fi
+  printf '%s\n' "$out"
+}
+
+cmd_roadmap_get() {
+  local feature="" phase_id="" next_eligible=false
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      --phase) shift; phase_id="${1:-}" ;;
+      --next-eligible) next_eligible=true ;;
+      *)
+        echo "Error: roadmap-get: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature"
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_path "$feature")
+  validate_path_in_project "$roadmap_path"
+  if [ ! -f "$roadmap_path" ]; then
+    echo "Error: roadmap-get: roadmap not found: $roadmap_path" >&2
+    exit 1
+  fi
+  if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
+    echo "Error: roadmap-get: malformed roadmap.json: $roadmap_path" >&2
+    exit 1
+  fi
+
+  if [ -n "$phase_id" ]; then
+    _roadmap_validate_phase_id "$phase_id" "roadmap-get"
+    if ! jq -e --argjson pid "$phase_id" '.phases[] | select(.id == $pid)' "$roadmap_path" >/dev/null 2>&1; then
+      echo "Error: roadmap-get: phase $phase_id not found in $roadmap_path" >&2
+      exit 1
+    fi
+    jq --argjson pid "$phase_id" '.phases[] | select(.id == $pid)' "$roadmap_path"
+    return 0
+  fi
+
+  if [ "$next_eligible" = true ]; then
+    local eligible
+    eligible=$(jq '
+      (reduce .phases[] as $p ({}; . + {($p.id|tostring): $p.status})) as $status_by_id |
+      [.phases[] | select(
+        (.status == "pending" or .status == "planned") and
+        (.claim == null) and
+        ((.dependsOn // []) | all(. as $d | $status_by_id[$d|tostring] == "completed"))
+      )] | sort_by(.id) | (.[0] // null)
+    ' "$roadmap_path")
+    if [ "$eligible" = "null" ]; then
+      echo "Error: roadmap-get: no eligible phase found" >&2
+      exit 1
+    fi
+    printf '%s\n' "$eligible"
+    return 0
+  fi
+
+  cat "$roadmap_path"
+}
+
+cmd_roadmap_set_status() {
+  local feature="" phase_id="" new_status="" force=false
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      --phase) shift; phase_id="${1:-}" ;;
+      --status) shift; new_status="${1:-}" ;;
+      --force) force=true ;;
+      *)
+        echo "Error: roadmap-set-status: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature"
+  _roadmap_validate_phase_id "$phase_id" "roadmap-set-status"
+
+  case "$new_status" in
+    pending|planned|in_progress|completed|verification_failed) ;;
+    *)
+      echo "Error: roadmap-set-status: --status must be one of pending|planned|in_progress|completed|verification_failed, got: $new_status" >&2
+      exit 1
+      ;;
+  esac
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_path "$feature")
+  validate_path_in_project "$roadmap_path"
+  if [ ! -f "$roadmap_path" ]; then
+    echo "Error: roadmap-set-status: roadmap not found: $roadmap_path" >&2
+    exit 1
+  fi
+
+  local out rc
+  if out=$(
+    (
+      _lock "${roadmap_path}.lock"
+
+      if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
+        echo "Error: roadmap-set-status: malformed roadmap.json: $roadmap_path" >&2
+        exit 1
+      fi
+
+      current_status=$(jq -r --argjson pid "$phase_id" '(.phases[] | select(.id == $pid) | .status) // empty' "$roadmap_path")
+      if [ -z "$current_status" ]; then
+        echo "Error: roadmap-set-status: phase $phase_id not found in $roadmap_path" >&2
+        exit 1
+      fi
+
+      allowed=false
+      if [ "$new_status" = "verification_failed" ]; then
+        allowed=true
+      else
+        case "$current_status:$new_status" in
+          pending:planned|planned:in_progress|in_progress:completed) allowed=true ;;
+        esac
+      fi
+
+      if [ "$allowed" != true ] && [ "$force" != true ]; then
+        echo "Error: roadmap-set-status: transition $current_status -> $new_status is not allowed without --force" >&2
+        exit 1
+      fi
+
+      roadmap_doc=$(jq --argjson pid "$phase_id" --arg status "$new_status" '
+        .phases |= map(if .id == $pid then .status = $status else . end)
+      ' "$roadmap_path")
+
+      tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
+      printf '%s\n' "$roadmap_doc" > "$tmp_file"
+      mv "$tmp_file" "$roadmap_path"
+
+      jq -n --argjson pid "$phase_id" --arg from "$current_status" --arg to "$new_status" '{phase: $pid, from: $from, to: $to}'
+    ) 200>"${roadmap_path}.lock"
+  ); then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  if [ "$rc" -ne 0 ]; then
+    exit "$rc"
+  fi
+  printf '%s\n' "$out"
+}
+
+cmd_roadmap_claim() {
+  local feature="" session_id="" session_pid=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      --session-id) shift; session_id="${1:-}" ;;
+      --session-pid) shift; session_pid="${1:-}" ;;
+      *)
+        echo "Error: roadmap-claim: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature"
+  if [ -z "$session_id" ]; then
+    echo "Error: roadmap-claim: --session-id <id> is required" >&2
+    exit 1
+  fi
+  if ! [[ "$session_pid" =~ ^[0-9]+$ ]]; then
+    echo "Error: roadmap-claim: --session-pid <pid> must be a positive integer" >&2
+    exit 1
+  fi
+  # Sanitize the caller-supplied session id before it is ever written to roadmap.json.
+  session_id=$(printf '%s' "$session_id" | jq -Rr "$_ROADMAP_SANITIZE_JQ"'_rm_sanitize(200)')
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_path "$feature")
+  validate_path_in_project "$roadmap_path"
+  if [ ! -f "$roadmap_path" ]; then
+    echo "Error: roadmap-claim: roadmap not found: $roadmap_path (run roadmap-init first)" >&2
+    exit 1
+  fi
+
+  local out rc
+  if out=$(
+    (
+      _lock "${roadmap_path}.lock"
+
+      if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
+        echo "Error: roadmap-claim: malformed roadmap.json: $roadmap_path" >&2
+        exit 1
+      fi
+
+      # Identify stale claims (claimedPid no longer alive) inside this locked pass.
+      claimed_pids=$(jq -c '[.phases[] | select(.claim != null) | {id: .id, pid: .claim.claimedPid}]' "$roadmap_path")
+      stale_ids='[]'
+      while IFS=$'\t' read -r pid_phase_id pid_val; do
+        [ -z "$pid_phase_id" ] && continue
+        if ! _is_pid_alive "$pid_val"; then
+          stale_ids=$(printf '%s' "$stale_ids" | jq --argjson id "$pid_phase_id" '. + [$id]')
+        fi
+      done < <(printf '%s' "$claimed_pids" | jq -r '.[] | [(.id|tostring), (.pid|tostring)] | @tsv')
+
+      now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+      result=$(jq -n \
+        --slurpfile cur "$roadmap_path" \
+        --argjson stale_ids "$stale_ids" \
+        --arg session_id "$session_id" \
+        --arg now "$now" \
+        --argjson session_pid "$session_pid" \
+        '
+          ($cur[0]) as $current |
+          ($current.phases | map(if ((.id) as $id | ($stale_ids | index($id)) != null) then .claim = null else . end)) as $cleared_phases |
+          (reduce $cleared_phases[] as $p ({}; . + {($p.id|tostring): $p.status})) as $status_by_id |
+          ($cleared_phases | map(select((.status == "pending" or .status == "planned") and .claim == null))) as $candidates0 |
+          ($candidates0 | map(select( ((.dependsOn // []) | all(. as $d | $status_by_id[$d|tostring] == "completed")) ))) as $eligible |
+          if ($eligible | length) > 0 then
+            ($eligible | sort_by(.id) | .[0]) as $chosen |
+            ($cleared_phases | map(if .id == $chosen.id then . + {claim: {claimedBy: $session_id, claimedAt: $now, claimedPid: $session_pid}} else . end)) as $final_phases |
+            {claimed: true, phase: ($final_phases[] | select(.id == $chosen.id)), phases: $final_phases}
+          else
+            ($cleared_phases | map(select(.status == "pending" or .status == "planned"))) as $remaining |
+            if ($remaining | length) == 0 then
+              {claimed: false, reason: "none-eligible", phases: null}
+            else
+              ($remaining | map(
+                if .claim != null then
+                  {id: .id, reason: "claimed by live session"}
+                else
+                  {id: .id, reason: ("depends on incomplete phase(s): " + (((.dependsOn // []) | map(select($status_by_id[(.|tostring)] != "completed")) | map(tostring) | join(", "))))}
+                end
+              )) as $blocked_reasons |
+              {claimed: false, reason: "all-blocked", blocked: $blocked_reasons, phases: null}
+            end
+          end
+        ')
+
+      claimed=$(printf '%s' "$result" | jq -r '.claimed')
+
+      if [ "$claimed" = "true" ]; then
+        new_phases_out=$(printf '%s' "$result" | jq '.phases')
+        roadmap_doc=$(jq --argjson phases "$new_phases_out" '.phases = $phases' "$roadmap_path")
+
+        tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
+        printf '%s\n' "$roadmap_doc" > "$tmp_file"
+        mv "$tmp_file" "$roadmap_path"
+
+        printf '%s' "$result" | jq '.phase'
+        exit 0
+      fi
+
+      reason=$(printf '%s' "$result" | jq -r '.reason')
+      if [ "$reason" = "none-eligible" ]; then
+        echo "Error: roadmap-claim: no phase remains in pending or planned status" >&2
+        exit 4
+      else
+        echo "Error: roadmap-claim: all remaining pending/planned phases are blocked:" >&2
+        printf '%s' "$result" | jq -r '.blocked[] | "  phase " + (.id|tostring) + ": " + .reason' >&2
+        exit 3
+      fi
+    ) 200>"${roadmap_path}.lock"
+  ); then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  if [ "$rc" -ne 0 ]; then
+    exit "$rc"
+  fi
+  printf '%s\n' "$out"
+}
+
+cmd_roadmap_release_claim() {
+  local feature="" phase_id=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      --phase) shift; phase_id="${1:-}" ;;
+      *)
+        echo "Error: roadmap-release-claim: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature"
+  _roadmap_validate_phase_id "$phase_id" "roadmap-release-claim"
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_path "$feature")
+  validate_path_in_project "$roadmap_path"
+  if [ ! -f "$roadmap_path" ]; then
+    echo "Error: roadmap-release-claim: roadmap not found: $roadmap_path" >&2
+    exit 1
+  fi
+
+  local out rc
+  if out=$(
+    (
+      _lock "${roadmap_path}.lock"
+
+      if ! jq -e --argjson pid "$phase_id" '.phases[] | select(.id == $pid)' "$roadmap_path" >/dev/null 2>&1; then
+        echo "Error: roadmap-release-claim: phase $phase_id not found in $roadmap_path" >&2
+        exit 1
+      fi
+
+      roadmap_doc=$(jq --argjson pid "$phase_id" '
+        .phases |= map(if .id == $pid then .claim = null else . end)
+      ' "$roadmap_path")
+
+      tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
+      printf '%s\n' "$roadmap_doc" > "$tmp_file"
+      mv "$tmp_file" "$roadmap_path"
+
+      jq -n --argjson pid "$phase_id" '{released: $pid}'
+    ) 200>"${roadmap_path}.lock"
+  ); then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  if [ "$rc" -ne 0 ]; then
+    exit "$rc"
+  fi
+  printf '%s\n' "$out"
+}
+
+cmd_roadmap_reconcile() {
+  local feature=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      *)
+        echo "Error: roadmap-reconcile: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature"
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_path "$feature")
+  validate_path_in_project "$roadmap_path"
+  if [ ! -f "$roadmap_path" ]; then
+    echo "Error: roadmap-reconcile: roadmap not found: $roadmap_path" >&2
+    exit 1
+  fi
+
+  local feature_dir
+  feature_dir=$(dirname "$roadmap_path")
+
+  local out rc
+  if out=$(
+    (
+      _lock "${roadmap_path}.lock"
+
+      if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
+        echo "Error: roadmap-reconcile: malformed roadmap.json: $roadmap_path" >&2
+        exit 1
+      fi
+
+      phase_dirs=$(jq -c '[.phases[] | {id: .id, dir: .dir, status: .status}]' "$roadmap_path")
+      corrections='[]'
+
+      while IFS=$'\t' read -r rc_id rc_dir rc_status; do
+        [ -z "$rc_id" ] && continue
+        rc_tasks_file="$feature_dir/$rc_dir/tasks.json"
+        if [ ! -f "$rc_tasks_file" ]; then
+          continue
+        fi
+        if ! jq -e . "$rc_tasks_file" >/dev/null 2>&1; then
+          continue
+        fi
+        ground_truth=$(jq -r '
+          [.userStories[].status] as $statuses |
+          if ($statuses | length) == 0 then "unknown"
+          elif ($statuses | all(. == "completed")) then "completed"
+          elif ($statuses | any(. == "failed")) then "verification_failed"
+          else "in_progress"
+          end
+        ' "$rc_tasks_file")
+        if [ "$ground_truth" != "unknown" ] && [ "$ground_truth" != "$rc_status" ]; then
+          corrections=$(printf '%s' "$corrections" | jq --argjson id "$rc_id" --arg from "$rc_status" --arg to "$ground_truth" '. + [{id: $id, from: $from, to: $to}]')
+        fi
+      done < <(printf '%s' "$phase_dirs" | jq -r '.[] | [(.id|tostring), .dir, .status] | @tsv')
+
+      if [ "$(printf '%s' "$corrections" | jq 'length')" -gt 0 ]; then
+        roadmap_doc=$(jq --argjson corr "$corrections" '
+          .phases |= map(
+            . as $p |
+            (($corr | map(select(.id == $p.id)) | .[0]) // null) as $c |
+            if $c != null then $p + {status: $c.to} else $p end
+          )
+        ' "$roadmap_path")
+
+        tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
+        printf '%s\n' "$roadmap_doc" > "$tmp_file"
+        mv "$tmp_file" "$roadmap_path"
+      fi
+
+      jq -n --argjson corr "$corrections" '{corrections: $corr}'
+    ) 200>"${roadmap_path}.lock"
+  ); then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  if [ "$rc" -ne 0 ]; then
+    exit "$rc"
+  fi
+  printf '%s\n' "$out"
+}
+
 # Display help
 cmd_help() {
   cat << 'EOF'
@@ -5272,6 +5975,49 @@ COMMANDS:
                               dependsOn, and independent wave numbers.
                               --agent-mode demotes Phase 3.1 and Phase 4.1
                               hard rejects to warnings and proceeds.
+    roadmap-init --feature <slug> [--file <path>] [--sync] [--brainstorm-path <path>]
+                              Read a sanitized phases array (stdin or --file) and
+                              atomically create/append to .aimi/tasks/<slug>/roadmap.json.
+                              Without --sync, an existing roadmap.json is a hard error.
+                              With --sync, only phases whose id is not already present
+                              are appended; existing phases are left byte-for-byte
+                              unchanged. Rejects (before any write) phases with a
+                              missing id/name/goal, a dangling dependsOn reference,
+                              or a computed dir that fails ^phase-[0-9]+(\.[0-9]+)?
+                              (-[a-z0-9][a-z0-9-]*)?$. Free-text fields are sanitized
+                              and length-capped per commands/references/sanitization.md.
+    roadmap-get --feature <slug> [--phase <id>] [--next-eligible]
+                              Read-only. Bare: print the full roadmap.json.
+                              --phase <id>: print one phase object.
+                              --next-eligible: print the lowest numeric-id phase
+                              in pending/planned status, unclaimed, whose dependsOn
+                              phases are all completed; exits 1 if none.
+    roadmap-set-status --feature <slug> --phase <id> --status <status> [--force]
+                              Locked read-modify-write. Enforces the guarded order
+                              pending -> planned -> in_progress -> completed; any
+                              status may move to verification_failed. Other
+                              transitions require --force.
+    roadmap-claim --feature <slug> --session-id <id> --session-pid <pid>
+                              Atomic locked read-modify-write. Auto-releases any
+                              claim whose recorded pid fails a signal-zero liveness
+                              probe, then claims the lowest numeric-id phase that is
+                              pending/planned, unclaimed, and dependency-complete.
+                              Exit 0 with the claimed phase JSON on success.
+                              Exit 3 (all-blocked): pending/planned phases remain
+                              but none are currently claimable (stderr lists why).
+                              Exit 4 (none-eligible): no phase remains pending/planned.
+                              roadmap.json is left unmodified on exit 3 or 4.
+    roadmap-release-claim --feature <slug> --phase <id>
+                              Locked read-modify-write. Clears claimedBy/claimedAt/
+                              claimedPid on the named phase without touching status.
+                              No-op success when the phase already has no claim.
+    roadmap-reconcile --feature <slug>
+                              Locked read-modify-write. For each phase with an
+                              existing phase-<dir>/tasks.json, derives ground-truth
+                              status from userStories statuses (all completed ->
+                              completed; any failed -> verification_failed; else
+                              in_progress) and corrects any divergent phase status.
+                              Prints {corrections:[{id,from,to}...]}.
     help                      Show this help message
 
 ENVIRONMENT:
@@ -5410,6 +6156,12 @@ main() {
     bundle-prototype-status)   shift; cmd_bundle_prototype_status "$@" ;;
     bundle-prototype-finalize) shift; cmd_bundle_prototype_finalize "$@" ;;
     story-merge)       shift; cmd_story_merge "$@" ;;
+    roadmap-init)          shift; cmd_roadmap_init "$@" ;;
+    roadmap-get)           shift; cmd_roadmap_get "$@" ;;
+    roadmap-set-status)    shift; cmd_roadmap_set_status "$@" ;;
+    roadmap-claim)         shift; cmd_roadmap_claim "$@" ;;
+    roadmap-release-claim) shift; cmd_roadmap_release_claim "$@" ;;
+    roadmap-reconcile)     shift; cmd_roadmap_reconcile "$@" ;;
     help|--help|-h)    cmd_help ;;
     *)
       echo "Unknown command: $1" >&2
