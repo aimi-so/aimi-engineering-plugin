@@ -484,6 +484,22 @@ validate_story_exists() {
   fi
 }
 
+# Discover tasks files across both the flat layout (.aimi/tasks/*-tasks.json)
+# and the nested phase-folder layout (.aimi/tasks/<feature>/phase-N[.M]-<slug>/
+# <feature>-phase-N-tasks.json), sorted by modification time with the most
+# recent file first. mindepth 1/maxdepth 3 covers flat files (depth 1) and
+# nested phase files (feature dir depth 1, phase dir depth 2, tasks file
+# depth 3) in one pass. Shared by cmd_find_tasks, cmd_find_tasks_all, and
+# get_tasks_file's stale-state fallback so all three see the same combined
+# view instead of a flat-only glob. Prints nothing (not an error) when
+# TASKS_DIR is missing or empty.
+_find_tasks_files_all() {
+  local found
+  found=$(find "$TASKS_DIR" -mindepth 1 -maxdepth 3 -type f -name '*-tasks.json' 2>/dev/null || true)
+  [ -z "$found" ] && return 0
+  printf '%s\n' "$found" | xargs ls -t 2>/dev/null || true
+}
+
 # Get the tasks file (from state or discover)
 get_tasks_file() {
   local tasks_file
@@ -491,7 +507,7 @@ get_tasks_file() {
 
   if [ -n "$tasks_file" ] && [ ! -f "$tasks_file" ]; then
     local stale_path="$tasks_file"
-    tasks_file=$(ls -t "$TASKS_DIR"/*-tasks.json 2>/dev/null | head -1)
+    tasks_file=$(_find_tasks_files_all | head -1)
     if [ -z "$tasks_file" ]; then
       echo "No tasks file found in $TASKS_DIR/" >&2
       exit 1
@@ -501,7 +517,7 @@ get_tasks_file() {
     echo "Warning: state file pointed to $stale_path which no longer exists. Using $tasks_file instead." >&2
     write_state "current-tasks" "$tasks_file"
   elif [ -z "$tasks_file" ]; then
-    tasks_file=$(ls -t "$TASKS_DIR"/*-tasks.json 2>/dev/null | head -1)
+    tasks_file=$(_find_tasks_files_all | head -1)
     if [ -z "$tasks_file" ]; then
       echo "No tasks file found in $TASKS_DIR/" >&2
       exit 1
@@ -519,10 +535,10 @@ get_tasks_file() {
 # Commands
 # ============================================================================
 
-# Find the most recent tasks file
+# Find the most recent tasks file (flat or nested phase layout)
 cmd_find_tasks() {
   local tasks_file
-  tasks_file=$(ls -t "$TASKS_DIR"/*-tasks.json 2>/dev/null | head -1)
+  tasks_file=$(_find_tasks_files_all | head -1)
 
   if [ -z "$tasks_file" ]; then
     echo "No tasks file found in $TASKS_DIR/" >&2
@@ -532,10 +548,11 @@ cmd_find_tasks() {
   resolve_path "$tasks_file"
 }
 
-# Find all tasks files sorted by modification time (most recent first)
+# Find all tasks files sorted by modification time (most recent first),
+# across both the flat and nested phase layouts.
 cmd_find_tasks_all() {
   local files
-  files=$(ls -t "$TASKS_DIR"/*-tasks.json 2>/dev/null)
+  files=$(_find_tasks_files_all)
 
   if [ -z "$files" ]; then
     echo "No tasks files found in $TASKS_DIR/" >&2
@@ -3761,38 +3778,109 @@ _validate_businessspec_field() {
   return 1
 }
 
-# List task files where all stories have terminal status (completed or skipped)
-# Returns a JSON array of file paths
+# Check whether a tasks file's stories are ALL terminal (completed or skipped)
+# and non-empty. Echoes nothing; return code only (0 = archivable-as-a-file).
+_archivable_file_is_terminal() {
+  local tasks_file="$1"
+  local non_terminal
+  non_terminal=$(jq '[.userStories[] | select(.status != "completed" and .status != "skipped")] | length' "$tasks_file" 2>/dev/null)
+  [ -z "$non_terminal" ] && return 1
+  [ "$non_terminal" -ne 0 ] && return 1
+
+  local total
+  total=$(jq '.userStories | length' "$tasks_file" 2>/dev/null)
+  [ -z "$total" ] && return 1
+  [ "$total" -eq 0 ] && return 1
+  return 0
+}
+
+# List task files where all stories have terminal status (completed or skipped).
+# Discovers both the flat layout (.aimi/tasks/*-tasks.json) and the nested
+# phase-folder layout (.aimi/tasks/<feature>/phase-N-slug/<feature>-phase-N-
+# tasks.json) via the shared discovery helper. A feature folder's nested
+# phase tasks files surface together as a single unit -- only when every
+# phase tasks file discovered under that feature is all-terminal AND the
+# feature's roadmap.json (read directly via jq, not a roadmap-lifecycle
+# subcommand, to avoid coupling to its still-evolving CLI surface) marks
+# every phase completed or deferred -- rather than piecemeal as each phase
+# happens to finish. A feature folder with no roadmap.json (or a malformed
+# one) falls back to the flat per-file terminal check, so stray nested files
+# created without roadmap-init are still individually archivable.
+# Returns a JSON array of file paths.
 cmd_list_archivable() {
+  local all_files
+  all_files=$(_find_tasks_files_all)
+
   local result="["
   local first=true
 
-  for tasks_file in "$TASKS_DIR"/*-tasks.json; do
-    # Skip if glob didn't expand
-    [ -f "$tasks_file" ] || continue
-
-    # Check if ALL stories have terminal status (completed or skipped)
-    local non_terminal
-    non_terminal=$(jq '[.userStories[] | select(.status != "completed" and .status != "skipped")] | length' "$tasks_file" 2>/dev/null)
-
-    # Skip files that aren't valid JSON or have non-terminal stories
-    [ -z "$non_terminal" ] && continue
-    [ "$non_terminal" -ne 0 ] && continue
-
-    # Also skip files with zero stories (empty array)
-    local total
-    total=$(jq '.userStories | length' "$tasks_file" 2>/dev/null)
-    [ -z "$total" ] && continue
-    [ "$total" -eq 0 ] && continue
-
+  _archivable_append() {
     local resolved
-    resolved=$(resolve_path "$tasks_file")
+    resolved=$(resolve_path "$1")
     if [ "$first" = true ]; then
       first=false
     else
       result="$result,"
     fi
     result="$result$(printf '"%s"' "$resolved")"
+  }
+
+  # Split discovered files into flat (direct child of TASKS_DIR) vs nested
+  # (feature/phase-slug/file, two directories below TASKS_DIR).
+  local flat_files=() nested_files=()
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    if [ "$(dirname "$f")" = "$TASKS_DIR" ]; then
+      flat_files+=("$f")
+    else
+      nested_files+=("$f")
+    fi
+  done <<< "$all_files"
+
+  for f in "${flat_files[@]}"; do
+    [ -f "$f" ] || continue
+    _archivable_file_is_terminal "$f" && _archivable_append "$f"
+  done
+
+  # Group nested files by feature folder (two directories above each file)
+  # and evaluate the whole feature as a unit.
+  local -A feature_seen
+  for f in "${nested_files[@]}"; do
+    local feature_dir
+    feature_dir=$(dirname "$(dirname "$f")")
+    [ -n "${feature_seen[$feature_dir]:-}" ] && continue
+    feature_seen[$feature_dir]=1
+
+    local feature_files=()
+    local ff
+    for ff in "${nested_files[@]}"; do
+      if [ "$(dirname "$(dirname "$ff")")" = "$feature_dir" ]; then
+        feature_files+=("$ff")
+      fi
+    done
+
+    local all_terminal=true
+    for ff in "${feature_files[@]}"; do
+      if [ ! -f "$ff" ] || ! _archivable_file_is_terminal "$ff"; then
+        all_terminal=false
+        break
+      fi
+    done
+    [ "$all_terminal" = true ] || continue
+
+    local roadmap_path="$feature_dir/roadmap.json"
+    if [ -f "$roadmap_path" ] && jq -e . "$roadmap_path" >/dev/null 2>&1; then
+      local non_terminal_phases
+      non_terminal_phases=$(jq '[.phases[] | select(.status != "completed" and .status != "deferred")] | length' "$roadmap_path" 2>/dev/null)
+      [ -z "$non_terminal_phases" ] && continue
+      [ "$non_terminal_phases" -ne 0 ] && continue
+    fi
+    # No roadmap.json (or malformed): every discovered phase file already
+    # passed the per-file terminal check above, so fall back to including them.
+
+    for ff in "${feature_files[@]}"; do
+      _archivable_append "$ff"
+    done
   done
 
   result="$result]"
@@ -5785,6 +5873,158 @@ cmd_roadmap_reconcile() {
   printf '%s\n' "$out"
 }
 
+# ============================================================================
+# Payload Budget Estimation (advisory; Phase/Milestone Roadmap Layer)
+# ============================================================================
+#
+# estimate-payload is purely advisory per the brainstorm's "budget as
+# validator, not cutting criterion" decision: it never blocks planning and
+# never trims content itself. Its only job is to print a clear warning with
+# an actionable next step when a phase's context payload risks overflowing
+# the sub-agent context window.
+
+# Portable byte-size lookup (GNU stat -c%s, BSD/macOS stat -f%z fallback).
+_file_size_bytes() {
+  stat -c '%s' "$1" 2>/dev/null || stat -f '%z' "$1" 2>/dev/null
+}
+
+# Resolve the effective payload budget in bytes plus the fraction it
+# represents of the 400000-byte reference sub-agent window. config-not-
+# doctrine: no threshold is hardcoded as prose; every tier below can
+# override the default. Priority (highest first):
+#   1. --budget-bytes / --budget-fraction flags (bytes wins if both given)
+#   2. AIMI_PAYLOAD_BUDGET_BYTES / AIMI_PAYLOAD_BUDGET_FRACTION env vars
+#   3. .aimi/config.json's "payload" section ({budgetBytes} or {budgetFraction})
+#   4. default: 50% of the reference window
+# Usage: _estimate_payload_resolve_budget <flag_bytes> <flag_fraction>
+# Prints "<budgetBytes> <budgetFraction>" (space-separated) on stdout.
+_estimate_payload_resolve_budget() {
+  local flag_bytes="$1"
+  local flag_fraction="$2"
+  local reference_window=400000
+  local config_file="$AIMI_DIR/config.json"
+
+  local bytes="" fraction=""
+
+  if [ -n "$flag_bytes" ]; then
+    bytes="$flag_bytes"
+  elif [ -n "$flag_fraction" ]; then
+    fraction="$flag_fraction"
+  elif [ -n "${AIMI_PAYLOAD_BUDGET_BYTES:-}" ]; then
+    bytes="$AIMI_PAYLOAD_BUDGET_BYTES"
+  elif [ -n "${AIMI_PAYLOAD_BUDGET_FRACTION:-}" ]; then
+    fraction="$AIMI_PAYLOAD_BUDGET_FRACTION"
+  elif [ -f "$config_file" ] && jq -e '.payload.budgetBytes // empty' "$config_file" >/dev/null 2>&1; then
+    bytes=$(jq -r '.payload.budgetBytes' "$config_file")
+  elif [ -f "$config_file" ] && jq -e '.payload.budgetFraction // empty' "$config_file" >/dev/null 2>&1; then
+    fraction=$(jq -r '.payload.budgetFraction' "$config_file")
+  else
+    fraction="0.5"
+  fi
+
+  if [ -n "$bytes" ]; then
+    fraction=$(jq -n --argjson b "$bytes" --argjson r "$reference_window" '$b / $r')
+  else
+    bytes=$(jq -n --argjson f "$fraction" --argjson r "$reference_window" '(($r * $f) | floor)')
+  fi
+
+  printf '%s %s\n' "$bytes" "$fraction"
+}
+
+# Sum the byte sizes of --outline (required) plus every repeated --research,
+# --spec, and --prototype path, and report whether the total fits within the
+# effective budget. Always exits 0 for valid input (advisory only); exits 1
+# only on usage errors (missing --outline, a given path that does not exist).
+cmd_estimate_payload() {
+  local outline="" budget_bytes_flag="" budget_fraction_flag=""
+  local research_paths=() spec_paths=() prototype_paths=()
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --outline) shift; outline="${1:-}" ;;
+      --research) shift; research_paths+=("${1:-}") ;;
+      --spec) shift; spec_paths+=("${1:-}") ;;
+      --prototype) shift; prototype_paths+=("${1:-}") ;;
+      --budget-bytes) shift; budget_bytes_flag="${1:-}" ;;
+      --budget-fraction) shift; budget_fraction_flag="${1:-}" ;;
+      *)
+        echo "Error: estimate-payload: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -z "$outline" ]; then
+    echo "Error: estimate-payload: --outline <path> is required" >&2
+    echo "Usage: aimi-cli.sh estimate-payload --outline <path> [--research <path>]... [--spec <path>]... [--prototype <path>]... [--budget-bytes <n>] [--budget-fraction <0-1>]" >&2
+    exit 1
+  fi
+  if [ ! -f "$outline" ]; then
+    echo "Error: estimate-payload: File not found: $outline" >&2
+    exit 1
+  fi
+
+  local outline_bytes research_bytes=0 spec_bytes=0 prototype_bytes=0
+  outline_bytes=$(_file_size_bytes "$outline")
+
+  local p
+  for p in "${research_paths[@]}"; do
+    if [ ! -f "$p" ]; then
+      echo "Error: estimate-payload: File not found: $p" >&2
+      exit 1
+    fi
+    research_bytes=$((research_bytes + $(_file_size_bytes "$p")))
+  done
+  for p in "${spec_paths[@]}"; do
+    if [ ! -f "$p" ]; then
+      echo "Error: estimate-payload: File not found: $p" >&2
+      exit 1
+    fi
+    spec_bytes=$((spec_bytes + $(_file_size_bytes "$p")))
+  done
+  for p in "${prototype_paths[@]}"; do
+    if [ ! -f "$p" ]; then
+      echo "Error: estimate-payload: File not found: $p" >&2
+      exit 1
+    fi
+    prototype_bytes=$((prototype_bytes + $(_file_size_bytes "$p")))
+  done
+
+  local total_bytes=$((outline_bytes + research_bytes + spec_bytes + prototype_bytes))
+
+  local budget_line budget_bytes budget_fraction
+  budget_line=$(_estimate_payload_resolve_budget "$budget_bytes_flag" "$budget_fraction_flag")
+  budget_bytes=$(printf '%s' "$budget_line" | cut -d' ' -f1)
+  budget_fraction=$(printf '%s' "$budget_line" | cut -d' ' -f2)
+
+  local over_budget=false
+  local warning="null"
+  if [ "$total_bytes" -gt "$budget_bytes" ]; then
+    over_budget=true
+    warning='"Payload exceeds budget -- split the phase along a semantic seam in the roadmap, or trim research/prototype scope."'
+  fi
+
+  jq -n \
+    --argjson total "$total_bytes" \
+    --argjson outline "$outline_bytes" \
+    --argjson research "$research_bytes" \
+    --argjson specs "$spec_bytes" \
+    --argjson prototypes "$prototype_bytes" \
+    --argjson budgetBytes "$budget_bytes" \
+    --argjson budgetFraction "$budget_fraction" \
+    --argjson overBudget "$over_budget" \
+    --argjson warning "$warning" \
+    '{
+      totalBytes: $total,
+      breakdown: {outline: $outline, research: $research, specs: $specs, prototypes: $prototypes},
+      budgetBytes: $budgetBytes,
+      budgetFraction: $budgetFraction,
+      overBudget: $overBudget,
+      warning: $warning
+    }'
+}
+
 # Display help
 cmd_help() {
   cat << 'EOF'
@@ -6018,6 +6258,21 @@ COMMANDS:
                               completed; any failed -> verification_failed; else
                               in_progress) and corrects any divergent phase status.
                               Prints {corrections:[{id,from,to}...]}.
+    estimate-payload --outline <path> [--research <path>]... [--spec <path>]...
+                              [--prototype <path>]... [--budget-bytes <n>] [--budget-fraction <0-1>]
+                              Advisory only -- never blocks, never trims content.
+                              Sums the byte sizes of --outline (required) plus every
+                              repeated --research/--spec/--prototype path and compares
+                              against an effective budget: --budget-bytes/--budget-fraction
+                              flags, then AIMI_PAYLOAD_BUDGET_BYTES/AIMI_PAYLOAD_BUDGET_FRACTION
+                              env vars, then .aimi/config.json's "payload" section, then a
+                              default of 50% of a 400000-byte reference sub-agent window.
+                              Prints {totalBytes, breakdown{outline,research,specs,prototypes},
+                              budgetBytes, budgetFraction, overBudget, warning}.
+                              warning is null under budget; otherwise names splitting the
+                              phase along a semantic seam in the roadmap or trimming scope.
+                              Exits 0 for any valid input (even over budget); exits 1 only
+                              when --outline is missing or a given path does not exist.
     help                      Show this help message
 
 ENVIRONMENT:
@@ -6162,6 +6417,7 @@ main() {
     roadmap-claim)         shift; cmd_roadmap_claim "$@" ;;
     roadmap-release-claim) shift; cmd_roadmap_release_claim "$@" ;;
     roadmap-reconcile)     shift; cmd_roadmap_reconcile "$@" ;;
+    estimate-payload)      shift; cmd_estimate_payload "$@" ;;
     help|--help|-h)    cmd_help ;;
     *)
       echo "Unknown command: $1" >&2
