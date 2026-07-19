@@ -5785,6 +5785,303 @@ cmd_roadmap_reconcile() {
   printf '%s\n' "$out"
 }
 
+# ============================================================================
+# Contract Validation Subcommands (validate-contracts, roadmap-sweep)
+# ============================================================================
+# Cross-check a feature's roadmap.json creates[]/needs[] contracts: an unmet
+# need (no phase in the needing phase's dependsOn closure creates it) and a
+# duplicate creates (the same artifact identity declared by two or more
+# phases). Artifact identity is the substring before a creates/needs entry's
+# first "(", trimmed of surrounding whitespace (see outline 01's shared
+# scope-context reference).
+#
+# Schema note: the roadmap phase status enum is pending/planned/in_progress/
+# completed/verification_failed (see cmd_roadmap_set_status above) -- there
+# is no "deferred" status. roadmap-sweep's deferredNeeds check substitutes
+# the existing "provider resolved but status != completed" signal for the
+# undefined "deferred" status value, per this story's authoritative notes
+# reconciling the schema gap against outline 02/outline 14.
+
+# jq `def`s shared by validate-contracts and roadmap-sweep.
+_CONTRACT_JQ_DEFS='
+def _cv_identity: sub("\\(.*"; "") | gsub("^[ \t]+|[ \t]+$"; "");
+def _cv_suspicious: test("ignore previous|system:|INSTRUCTIONS|```|\\$\\("; "i") or test("[$`;|&]");
+'
+
+# Print newline-separated phase ids reachable via transitive dependsOn
+# closure from $2 (excluding $2 itself). $1 = roadmap_path.
+_cv_reachable_ids() {
+  local roadmap_path="$1" start_id="$2"
+  jq -r --argjson start "$start_id" '
+    (reduce .phases[] as $p ({}; . + {($p.id|tostring): ($p.dependsOn // [])})) as $deps |
+    def _cv_expand($cur): ($cur + ($cur | map($deps[(.|tostring)] // []) | add // [])) | unique;
+    ([$start] | until(_cv_expand(.) == .; _cv_expand(.))) - [$start] | .[]
+  ' "$roadmap_path"
+}
+
+# Print "id<TAB>identity<TAB>status<TAB>dir" for every creates[] entry of
+# every phase whose id is in the given newline-separated id list ($2),
+# sorted by phase id ascending (deterministic first-match order for
+# provider lookup). $1 = roadmap_path.
+_cv_creates_in_scope() {
+  local roadmap_path="$1" ids_input="$2"
+  local ids_json='[]'
+  if [ -n "$ids_input" ]; then
+    ids_json=$(printf '%s\n' "$ids_input" | jq -R 'select(length > 0) | tonumber' | jq -s '.')
+  fi
+  jq -r --argjson ids "$ids_json" "$_CONTRACT_JQ_DEFS"'
+    [.phases[] | select(.id as $i | $ids | index($i) != null)] | sort_by(.id) | .[] |
+    . as $p | ((.creates // [])[]? | _cv_identity) as $ident |
+    "\($p.id)\t\($ident)\t\($p.status)\t\($p.dir // "")"
+  ' "$roadmap_path"
+}
+
+# True (exit 0) when handoff.md at $1 lists artifact identity $2 under an
+# "Artifacts Created" section (any heading level). Fixed-string match (-F)
+# so an identity containing regex metacharacters cannot alter the search.
+_cv_handoff_lists_artifact() {
+  local handoff_path="$1" identity="$2"
+  [ -f "$handoff_path" ] || return 1
+  awk '
+    /^#+[ \t]+Artifacts Created/ { flag=1; next }
+    /^#+[ \t]/ { flag=0 }
+    flag { print }
+  ' "$handoff_path" | grep -qF -- "$identity"
+}
+
+cmd_validate_contracts() {
+  local feature="" phase_id="" agent_mode=false
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --phase)
+        shift; phase_id="${1:-}"
+        ;;
+      --agent-mode)
+        agent_mode=true
+        ;;
+      -*)
+        echo "Usage: aimi-cli.sh validate-contracts <feature> [--phase <id>] [--agent-mode]" >&2
+        exit 1
+        ;;
+      *)
+        feature="$1"
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature"
+  if [ -n "$phase_id" ]; then
+    _roadmap_validate_phase_id "$phase_id" "validate-contracts"
+  fi
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_path "$feature")
+  validate_path_in_project "$roadmap_path"
+  if [ ! -f "$roadmap_path" ]; then
+    echo "Error: validate-contracts: roadmap not found: $roadmap_path" >&2
+    exit 1
+  fi
+  if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
+    echo "Error: validate-contracts: malformed roadmap.json: $roadmap_path" >&2
+    exit 1
+  fi
+  if [ -n "$phase_id" ] && ! jq -e --argjson pid "$phase_id" '.phases[] | select(.id == $pid)' "$roadmap_path" >/dev/null 2>&1; then
+    echo "Error: validate-contracts: phase $phase_id not found in $roadmap_path" >&2
+    exit 1
+  fi
+
+  local feature_dir
+  feature_dir=$(dirname "$roadmap_path")
+
+  # --- Sanitization pass: always blocks; never demoted by --agent-mode ---
+  # (a duplicate-creates finding is the only check this story demotes)
+  local sanitize_hits
+  sanitize_hits=$(jq -r "$_CONTRACT_JQ_DEFS"'
+    [.phases[] | . as $p |
+      ("creates","needs") as $field |
+      select(($p[$field] // []) | any(_cv_suspicious)) |
+      {phase: $p.id, field: $field}
+    ] | unique_by([.phase,.field]) | .[] | "\(.phase)\t\(.field)"
+  ' "$roadmap_path")
+  if [ -n "$sanitize_hits" ]; then
+    while IFS=$'\t' read -r hit_phase hit_field; do
+      [ -z "$hit_phase" ] && continue
+      echo "Error: validate-contracts: phase $hit_phase field '$hit_field' contains suspicious content" >&2
+    done <<< "$sanitize_hits"
+    exit 1
+  fi
+
+  # --- Duplicate-creates collision check (across all phases, any status) ---
+  local dup_check dup_count
+  dup_check=$(jq "$_CONTRACT_JQ_DEFS"'
+    [.phases[] | . as $p | (($p.creates // [])[] | _cv_identity) as $ident | {identity: $ident, phase: $p.id}]
+    | group_by(.identity)
+    | map(select(length > 1))
+    | map({identity: .[0].identity, phases: ([.[].phase] | unique | sort)})
+  ' "$roadmap_path")
+  dup_count=$(printf '%s' "$dup_check" | jq 'length')
+
+  if [ "$dup_count" -gt 0 ]; then
+    local dup_msg
+    dup_msg=$(printf '%s' "$dup_check" | jq -r '
+      .[] | "  phase " + (.phases | map(tostring) | join(" and phase ")) +
+      ": both declare \"" + .identity + "\" -- convert the collision into a" +
+      " creates/needs contract between the two phases or promote the" +
+      " artifact to a shared foundation phase"
+    ')
+    if [ "$agent_mode" = "true" ]; then
+      echo "Warning: validate-contracts: duplicate creates (--agent-mode: proceeding):" >&2
+      printf '%s\n' "$dup_msg" >&2
+    else
+      echo "Error: validate-contracts: duplicate creates:" >&2
+      printf '%s\n' "$dup_msg" >&2
+      exit 1
+    fi
+  fi
+
+  # --- Needs resolution: scope is --phase (if given) or every phase ---
+  local scope_ids
+  if [ -n "$phase_id" ]; then
+    scope_ids=$(jq --argjson pid "$phase_id" -r '.phases[] | select(.id == $pid) | .id' "$roadmap_path")
+  else
+    scope_ids=$(jq -r '.phases[].id' "$roadmap_path")
+  fi
+
+  local missing_json='[]'
+  local providers_json='{}'
+
+  local sid
+  while IFS= read -r sid; do
+    [ -z "$sid" ] && continue
+
+    local reach_ids creates_tsv
+    reach_ids=$(_cv_reachable_ids "$roadmap_path" "$sid")
+    creates_tsv=$(_cv_creates_in_scope "$roadmap_path" "$reach_ids")
+
+    local need_ident
+    while IFS= read -r need_ident; do
+      [ -z "$need_ident" ] && continue
+
+      local prov_line
+      prov_line=$(printf '%s\n' "$creates_tsv" | awk -F'\t' -v want="$need_ident" '$2 == want { print; exit }')
+
+      if [ -z "$prov_line" ]; then
+        missing_json=$(printf '%s' "$missing_json" | jq --argjson pid "$sid" --arg need "$need_ident" '. + [{phase: $pid, need: $need, reason: "no-provider"}]')
+        continue
+      fi
+
+      local prov_id prov_status prov_dir
+      IFS=$'\t' read -r prov_id _ prov_status prov_dir <<< "$prov_line"
+
+      if [ -z "$phase_id" ]; then
+        # Unscoped run: identity resolution within the dependsOn closure is
+        # sufficient; the completed+handoff delivery gate only applies when
+        # --phase pins the check to one phase's execution readiness.
+        providers_json=$(printf '%s' "$providers_json" | jq --arg k "$need_ident" --argjson v "$prov_id" '. + {($k): $v}')
+        continue
+      fi
+
+      local delivered=false
+      if [ "$prov_status" = "completed" ] && _cv_handoff_lists_artifact "$feature_dir/$prov_dir/handoff.md" "$need_ident"; then
+        delivered=true
+      fi
+
+      if [ "$delivered" = "true" ]; then
+        providers_json=$(printf '%s' "$providers_json" | jq --arg k "$need_ident" --argjson v "$prov_id" '. + {($k): $v}')
+      else
+        missing_json=$(printf '%s' "$missing_json" | jq --argjson pid "$sid" --arg need "$need_ident" '. + [{phase: $pid, need: $need, reason: "not-delivered"}]')
+      fi
+    done < <(jq -r --argjson pid "$sid" "$_CONTRACT_JQ_DEFS"'.phases[] | select(.id == $pid) | (.needs // [])[] | _cv_identity' "$roadmap_path")
+  done < <(printf '%s\n' "$scope_ids")
+
+  local valid_bool="true"
+  if [ "$(printf '%s' "$missing_json" | jq 'length')" -gt 0 ]; then
+    valid_bool="false"
+  fi
+
+  if [ "$dup_count" -gt 0 ] && [ "$agent_mode" = "true" ]; then
+    jq -n --argjson valid "$valid_bool" --argjson missing "$missing_json" --argjson providers "$providers_json" --argjson dupw "$dup_check" \
+      '{valid: $valid, missing: $missing, providers: $providers, duplicateWarnings: $dupw}'
+  else
+    jq -n --argjson valid "$valid_bool" --argjson missing "$missing_json" --argjson providers "$providers_json" \
+      '{valid: $valid, missing: $missing, providers: $providers}'
+  fi
+
+  if [ "$valid_bool" = "false" ]; then
+    exit 1
+  fi
+  exit 0
+}
+
+cmd_roadmap_sweep() {
+  local feature=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -*)
+        echo "Usage: aimi-cli.sh roadmap-sweep <feature>" >&2
+        exit 1
+        ;;
+      *)
+        feature="$1"
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature"
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_path "$feature")
+  validate_path_in_project "$roadmap_path"
+  if [ ! -f "$roadmap_path" ]; then
+    echo "Error: roadmap-sweep: roadmap not found: $roadmap_path" >&2
+    exit 1
+  fi
+  if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
+    echo "Error: roadmap-sweep: malformed roadmap.json: $roadmap_path" >&2
+    exit 1
+  fi
+
+  # Single-pass, advisory-only computation: never exits non-zero. Suspicious
+  # creates/needs entries are dropped from $clean_phases before orphan/deferred
+  # computation so a flagged entry can never leak into any other output field
+  # -- only its owning phase id and field name are reported, via $warnings.
+  jq "$_CONTRACT_JQ_DEFS"'
+    (
+      [.phases[] | . as $p |
+        ("creates","needs") as $field |
+        select(($p[$field] // []) | any(_cv_suspicious)) |
+        {phase: $p.id, field: $field, message: "contains suspicious content"}
+      ] | unique_by([.phase,.field])
+    ) as $warnings |
+
+    (.phases | map(
+      .creates = ((.creates // []) | map(select(_cv_suspicious | not))) |
+      .needs = ((.needs // []) | map(select(_cv_suspicious | not)))
+    )) as $clean_phases |
+
+    ([$clean_phases[] | (.needs // [])[] | _cv_identity] | unique) as $need_idents |
+    ([$clean_phases[] | . as $p | (($p.creates // [])[] | _cv_identity) as $ident |
+      select(($need_idents | index($ident)) == null) |
+      {phase: $p.id, creates: $ident}
+    ]) as $orphan_creates |
+
+    ([$clean_phases[] | . as $p | (($p.creates // [])[] | _cv_identity) as $ident | {identity: $ident, phase: $p.id, status: $p.status}]) as $providers_flat |
+    ([$clean_phases[] | . as $np | (($np.needs // [])[] | _cv_identity) as $ident |
+      ([$providers_flat[] | select(.identity == $ident)] | sort_by(.phase) | .[0]) as $prov |
+      select($prov != null and $prov.status != "completed") |
+      {phase: $np.id, need: $ident, deferred: $prov.phase}
+    ]) as $deferred_needs |
+
+    {orphanCreates: $orphan_creates, deferredNeeds: $deferred_needs, warnings: $warnings}
+  ' "$roadmap_path"
+
+  exit 0
+}
+
 # Display help
 cmd_help() {
   cat << 'EOF'
@@ -6018,6 +6315,47 @@ COMMANDS:
                               completed; any failed -> verification_failed; else
                               in_progress) and corrects any divergent phase status.
                               Prints {corrections:[{id,from,to}...]}.
+    validate-contracts <feature> [--phase <id>] [--agent-mode]
+                              Read-only. Cross-checks creates[]/needs[] contracts.
+                              Artifact identity is the text before a creates/needs
+                              entry's first "(", trimmed. Always sanitizes creates/
+                              needs strings first (validate-stories' reject-listed
+                              phrases + shell metacharacters); any hit names the
+                              phase id and field (never the raw string) and exits 1,
+                              regardless of --agent-mode. Then checks duplicate
+                              creates (same identity declared by 2+ phases,
+                              regardless of status): blocks with exit 1 by default,
+                              naming both phase ids and the identity; --agent-mode
+                              demotes this one finding to a stderr warning and
+                              continues (mirrors story-merge's Phase 3.1/4.1
+                              convention). Then resolves every needs entry in scope
+                              (--phase <id> only, or every phase when omitted)
+                              against creates identities reachable through the
+                              needing phase's dependsOn closure. Without --phase,
+                              identity resolution alone satisfies a need. With
+                              --phase, the resolved provider phase must also have
+                              status completed AND list the identity under its
+                              phase-<dir>/handoff.md "Artifacts Created" section,
+                              else the need is missing with reason not-delivered;
+                              this delivery check always blocks, never demoted.
+                              Emits {valid, missing:[{phase,need,reason}],
+                              providers:{<need>: <providerPhaseId>}} (plus
+                              duplicateWarnings when --agent-mode demoted a
+                              collision). Exit 0 when valid, 1 otherwise.
+    roadmap-sweep <feature>   Read-only, advisory-only residual sweep: NEVER exits
+                              non-zero. Reports every creates identity that no
+                              needs entry anywhere in the roadmap references, as
+                              orphanCreates:[{phase,creates}]. Reports every needs
+                              entry that resolves (by identity, anywhere in the
+                              roadmap) to a creates entry from a not-yet-completed
+                              phase, as deferredNeeds:[{phase,need,deferred:
+                              <providerPhaseId>}] (there is no "deferred" phase
+                              status; this substitutes the provider-not-completed
+                              signal). Suspicious creates/needs content is dropped
+                              before either check runs and surfaced instead as
+                              warnings:[{phase,field,message}] -- naming only the
+                              phase id and field, never the raw string. Emits
+                              {orphanCreates, deferredNeeds, warnings}.
     help                      Show this help message
 
 ENVIRONMENT:
@@ -6162,6 +6500,8 @@ main() {
     roadmap-claim)         shift; cmd_roadmap_claim "$@" ;;
     roadmap-release-claim) shift; cmd_roadmap_release_claim "$@" ;;
     roadmap-reconcile)     shift; cmd_roadmap_reconcile "$@" ;;
+    validate-contracts)    shift; cmd_validate_contracts "$@" ;;
+    roadmap-sweep)         shift; cmd_roadmap_sweep "$@" ;;
     help|--help|-h)    cmd_help ;;
     *)
       echo "Unknown command: $1" >&2
