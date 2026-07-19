@@ -1,6 +1,7 @@
 ---
 name: aimi:execute
 description: Execute all pending stories autonomously with wave-based parallelism
+argument-hint: "[--phase <N>]"
 disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Bash(git:*), Bash(mkdir:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Bash(WORKTREE_MGR=*), Bash($WORKTREE_MGR:*), Task
 ---
@@ -63,6 +64,41 @@ $WORKTREE_MGR list
 # For each worktree matching "[branchName]-US-*":
 $WORKTREE_MGR remove [worktree_name]
 ```
+
+This rule is unchanged, but does not apply in phase mode — see Phase Mode: Worktree Naming and CWD below, which supersedes `project_root` with `PHASE_CONTAINER_PATH` for the duration of a claimed phase's execution.
+
+## Phase Mode: Worktree Naming and CWD
+
+This section is the single source of truth for how `PHASE_MODE=true` (see Step 1's Phase Mode Detection and Step 1.7's Phase Claim) changes worktree naming and working-directory handling in Step 4's wave loop and its cleanup passes. All call sites below reference it by name. It only applies once a phase has been claimed; when `PHASE_MODE=false` none of this applies and every rule below reduces to the existing flat-mode behavior unchanged.
+
+### Why Story Worktrees Are Phase-Qualified
+
+Git branch names are repository-global. Two parallel `/aimi:execute` sessions each running their own phase container would otherwise mint identical unqualified story branches (e.g. both minting `US-003`) and collide. Story worktree/branch names in phase mode are therefore `<PHASE_BRANCH>-<story.id>` instead of `<branchName>-<story.id>` — qualified by the full phase branch, not just the phase id, so they stay collision-free even against a sibling phase container running concurrently for the same feature.
+
+### CWD For Every Worktree Operation
+
+Every `$WORKTREE_MGR create`/`merge-all`/`remove`/`list` call for a phase's stories runs with CWD set to `PHASE_CONTAINER_PATH`, never `AIMI_ROOT` and never a `project_root` from the Multi-Repo Handling grouping above. Two reasons:
+
+1. **`merge-all` checks out its target branch against whatever repo its CWD belongs to.** `worktree-manager.sh`'s `GIT_ROOT` is computed per-invocation from CWD (`git rev-parse --show-toplevel`), and `merge-all <story-worktree-names> --into <target-branch>` issues a bare `git checkout <target-branch>` against that root. Run from `AIMI_ROOT`, that would check the phase branch out onto the main working tree — forbidden by the Main Working Tree Untouched Invariant below. Run from `PHASE_CONTAINER_PATH`, `GIT_ROOT` resolves to the phase worktree's own root instead, and story worktrees nest at `PHASE_CONTAINER_PATH/.worktrees/<story-worktree-name>` — a pattern `worktree-manager.sh` already supports unmodified, since a linked worktree's own `git rev-parse --show-toplevel` returns its own path, not the main repo's.
+2. **Every Bash call is an isolated shell** (Step 0). `PHASE_CONTAINER_PATH` does not persist across calls on its own — each call that needs it either `cd`s to it explicitly at the top of the call, or passes it via `git -C`/`$WORKTREE_MGR` arguments, exactly like `$AIMI_CLI`/`$WORKTREE_MGR` themselves are re-resolved per call.
+
+Concretely, in Step 4's wave loop, wherever the pseudocode below reads `project_root`, `branchName`, or `[branchName]-US-*` for a phase-mode session, substitute:
+
+| Flat mode (`PHASE_MODE=false`, unchanged) | Phase mode (`PHASE_MODE=true`) |
+|---|---|
+| `worktree_name = "[branchName]-[story.id]"` | `worktree_name = "[PHASE_BRANCH]-[story.id]"` |
+| `cd [project_root]` before create/merge-all/remove | `cd [PHASE_CONTAINER_PATH]` before create/merge-all/remove |
+| `git -C [project_root] rev-parse [branchName]` (base_sha) | `git -C [PHASE_CONTAINER_PATH] rev-parse [PHASE_BRANCH]` |
+| `$WORKTREE_MGR merge-all [...] --into [branchName]` | `$WORKTREE_MGR merge-all [...] --into [PHASE_BRANCH]` |
+| Cleanup scan matches `"[branchName]-US-*"` | Cleanup scan matches `"[PHASE_BRANCH]-US-*"` |
+
+### Main Working Tree Untouched Invariant
+
+For the entire span of a phase's execution — from the moment it is claimed (Step 1.7) through the last wave's merge — `AIMI_ROOT`'s `git rev-parse HEAD` and `git status --porcelain` never change. Every commit for the phase lands only on `PHASE_BRANCH` inside `PHASE_CONTAINER_PATH`. This holds automatically once every rule above is followed: nothing in phase mode ever `cd`s to `AIMI_ROOT` (or runs a mutating git command against it), and Step 2's Main Repo Branch Setup is skipped entirely in phase mode (see Step 2).
+
+### Concurrency Source
+
+`MAX_CONCURRENCY` (Step 3.2) is read from the claimed phase's own tasks file (`PHASE_TASKS_PATH`), not any feature-root or global file — this is the same per-phase value the worktree-budget guard hook enforces against nested story-worktree creation inside the container, so the phase's own setting (not a global default) governs how many story worktrees can exist under it at once.
 
 ---
 
@@ -365,6 +401,26 @@ No tasks file found. Run /aimi:plan to create a task list first.
 ```
 STOP execution.
 
+### Phase Mode Detection
+
+Determine whether the tasks file `init-session` discovered belongs to a phase/milestone roadmap (the nested `.aimi/tasks/<feature>/phase-N[.M]-<slug>/<feature>-phase-N-tasks.json` layout from outline 04) or is a flat v3.3 file (`.aimi/tasks/<date>-<feature>-tasks.json`), and store the result as `PHASE_MODE`:
+
+```bash
+TASKS_PATH="[tasks path from the init-session output above]"
+FEATURE_DIR=$(dirname "$(dirname "$TASKS_PATH")")
+if [ -f "$FEATURE_DIR/roadmap.json" ]; then
+  PHASE_MODE=true
+  FEATURE=$(basename "$FEATURE_DIR")
+  ROADMAP_PATH="$FEATURE_DIR/roadmap.json"
+else
+  PHASE_MODE=false
+fi
+```
+
+This needs no new CLI call: a flat file's tasks path is a direct child of `.aimi/tasks/` (e.g. `.aimi/tasks/2026-02-24-feature-tasks.json`), so `$FEATURE_DIR` resolves to `.aimi` — which never contains `roadmap.json`. A nested phase file's tasks path is `.aimi/tasks/<feature>/phase-N[.M]-<slug>/<feature>-phase-N-tasks.json`, so `$FEATURE_DIR` resolves to `.aimi/tasks/<feature>` — exactly where `roadmap-init` writes `roadmap.json`. This is the same directory-arithmetic `cmd_list_archivable` already uses to group nested files by feature.
+
+**When `PHASE_MODE=false` (flat v3.3 file, no `roadmap.json` sibling): execute.md runs byte-for-byte as it does today.** No further phase-mode logic applies anywhere in this document — Step 1.7 (Phase Claim) is skipped entirely, Step 2 checks out `branchName` directly in the main working tree, and Step 4's story worktrees are named `[branchName]-[story.id]` exactly as now. Phase mode is a parallel path added alongside the flat path; it never changes the flat path's behavior.
+
 ### Orphaned Story Recovery
 
 Check for and reset stories stuck in `in_progress` status (from interrupted previous runs):
@@ -509,13 +565,157 @@ agent-mode: step-1.6 branch-base auto-preserve
 
 If any of the four gating conditions is false, skip silently — do NOT log an agent-mode line. Leave `BASE_BRANCH` unset.
 
+## Step 1.7: Phase Claim
+
+**Skip this step entirely if `PHASE_MODE` is false** (see Phase Mode Detection in Step 1) — proceed straight to Step 2. The rest of this step assumes `PHASE_MODE=true`.
+
+### Parse --phase Override
+
+Scan `$ARGUMENTS` for an explicit `--phase <N>` token (mirrors the `--root <path>` extraction style used by `/aimi:plan`):
+
+```bash
+case " $ARGUMENTS " in
+  *" --phase "*)
+    PHASE_OVERRIDE=$(echo "$ARGUMENTS" | sed -n 's/.*--phase[[:space:]]\+\([0-9][0-9.]*\).*/\1/p')
+    ;;
+  *)
+    PHASE_OVERRIDE=""
+    ;;
+esac
+```
+
+If `PHASE_OVERRIDE` is non-empty but does not match `^[0-9]+(\.[0-9]+)?$`, report `Invalid --phase value: [PHASE_OVERRIDE]. Must be a numeric phase id.` and STOP.
+
+### Resolve Session Identity
+
+`roadmap-claim`'s stale-claim recovery needs a PID that stays alive for the whole `/aimi:execute` session, not the PID of one isolated Bash call (`$$` would be a different, already-dead process by the time any other session checks liveness). `$PPID` inside a Bash tool call is the PID of the process that spawns each isolated shell — the persistent host process for this session — so it stays constant across calls even though `$$` does not.
+
+```bash
+SESSION_ID="${CLAUDE_SESSION_ID:-execute-$PPID}"
+SESSION_PID=$PPID
+```
+
+Compute this once; both `$CLAUDE_SESSION_ID` and `$PPID` re-derive identically on every subsequent Bash call within the same session, so re-running the two lines above anywhere this document calls `roadmap-claim` or `roadmap-release-claim` yields the same `SESSION_ID`/`SESSION_PID` values.
+
+### Claim the Phase
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+if [ -n "$PHASE_OVERRIDE" ]; then
+  CLAIM_JSON=$($AIMI_CLI roadmap-claim --feature "$FEATURE" --session-id "$SESSION_ID" --session-pid "$SESSION_PID" --phase "$PHASE_OVERRIDE" 2>&1)
+else
+  CLAIM_JSON=$($AIMI_CLI roadmap-claim --feature "$FEATURE" --session-id "$SESSION_ID" --session-pid "$SESSION_PID" 2>&1)
+fi
+CLAIM_EXIT=$?
+```
+
+`roadmap-claim` is a single atomic, flock-guarded check-and-set (mirrors the atomic-write pattern already documented for `story-merge`). It auto-releases any claim whose recorded PID fails a liveness probe, then:
+
+- **No `--phase` (auto mode):** claims the lowest-numeric-id phase that is `pending`/`planned`, unclaimed, and whose `dependsOn` phases are all `completed`. If the top candidate loses a claim race to a concurrent session, the CLI falls through internally to the next eligible phase and returns that one — this step contains no retry loop of its own, it consumes whatever phase the single call reports back as claimed.
+- **With `--phase <N>` (explicit override):** claims phase `N` only if it is eligible. If phase `N` is ineligible, the call never falls through to a different phase.
+- **Self-reclaim:** if this exact session already owns an unreleased claim on a phase still in `pending`/`planned`/`in_progress` (matching `--phase N` when an override was given, or any such phase in auto mode), the call returns that same phase again instead of erroring — this is what makes re-running `/aimi:execute` on an already-claimed phase idempotent (see Resuming Execution).
+
+**On success (`CLAIM_EXIT=0`):** `CLAIM_JSON` is the claimed phase object. Extract:
+
+```bash
+PHASE_ID=$(printf '%s' "$CLAIM_JSON" | jq -r '.id')
+PHASE_DIR=$(printf '%s' "$CLAIM_JSON" | jq -r '.dir')
+PHASE_SLUG=$(printf '%s' "$CLAIM_JSON" | jq -r '.slug // ""')
+PHASE_BRANCH=$(printf '%s' "$CLAIM_JSON" | jq -r '.branch // ""')
+FEATURE_TYPE=$(jq -r '.metadata.type // "feat"' "$AIMI_ROOT/$TASKS_PATH")
+```
+
+If `PHASE_BRANCH` is empty (the phase carries no pre-assigned `.branch`), compute it from the `type/<feature>-phase-<N>-<slug>` convention:
+
+```bash
+if [ -z "$PHASE_BRANCH" ]; then
+  PHASE_BRANCH="${FEATURE_TYPE}/${FEATURE}-phase-${PHASE_ID}-${PHASE_SLUG}"
+fi
+```
+
+Validate `PHASE_BRANCH` against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` (the same regex Step 1.6 already enforces for user-supplied base branches). If it fails, report the invalid branch name and STOP.
+
+**Immediately after a successful claim, transition the phase to `in_progress`.** This is a SEPARATE call — `roadmap-claim` manages only the claim sub-object (`claimedBy`/`claimedAt`/`claimedPid`) and never drives status itself, so this step contains exactly one roadmap-status-mutating call beyond the claim:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI roadmap-set-status --feature "$FEATURE" --phase "$PHASE_ID" --status in_progress || true
+```
+
+The trailing `|| true` covers the idempotent-resume case: `pending→in_progress`/`planned→in_progress` are the only guarded transitions, so re-issuing this call after a self-reclaim (where the phase is already `in_progress`) is rejected by the guard — that rejection is expected and harmless; the phase is already in the right state.
+
+**On failure (`CLAIM_EXIT` is 3 or 4):** `CLAIM_JSON` holds the CLI's stderr.
+
+- **Auto mode, `CLAIM_EXIT=4` (no phase remains pending/planned):** report `No eligible phase — every phase in [FEATURE]'s roadmap is already claimed, completed, or terminal.` and STOP.
+- **Auto mode, `CLAIM_EXIT=3` (all remaining phases blocked):** list every ineligible phase with its specific reason, taken verbatim from `CLAIM_JSON`'s `phase N: <reason>` lines (mirrors the "Deadlock detected" reporting style in Step 4):
+  ```
+  No phase is ready to claim:
+  [one line per blocked phase, from CLAIM_JSON]
+
+  Resolve the blocking dependency, or run /aimi:execute --phase <N> to override.
+  ```
+  STOP.
+- **Explicit override, either exit code:** report the specific reason `CLAIM_JSON` gives for phase `PHASE_OVERRIDE` (unmet dependency, still claimed by a live session, wrong status, or not found) — never a generic "not ready" message — and STOP. Do not fall through to a different phase.
+
+### Create or Reuse the Phase Container
+
+```bash
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+cd "$AIMI_ROOT"
+if [ -n "$BASE_BRANCH" ]; then
+  CONTAINER_BASE="$BASE_BRANCH"
+else
+  CONTAINER_BASE="$DEFAULT_BRANCH"
+fi
+$WORKTREE_MGR create "$PHASE_BRANCH" --from "$CONTAINER_BASE"
+```
+
+`<container-base>` is `BASE_BRANCH` when Step 1.6 set one, otherwise `DEFAULT_BRANCH` — reusing the exact default-branch/base-selection values Steps 1.5–1.6 already computed against the main root.
+
+`$WORKTREE_MGR create` prints the worktree path and, when the target directory already exists, reuses it silently instead of recreating it — so calling it idempotently on every claim (including a self-reclaim resume) is sufficient; no separate reuse-detection branch is needed. The path is deterministic given `AIMI_ROOT` and `PHASE_BRANCH`:
+
+```bash
+PHASE_CONTAINER_PATH="$AIMI_ROOT/.worktrees/$PHASE_BRANCH"
+```
+
+**Point the session at this phase's own tasks file** so Steps 2–5 operate on the claimed phase, not whichever nested file `init-session`'s mtime-based auto-discovery happened to pick in Step 1 (a feature with multiple materialized phase tasks files could have a more-recently-touched sibling phase that is not the one just claimed):
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+PHASE_TASKS_PATH="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR/$FEATURE-phase-$PHASE_ID-tasks.json"
+$AIMI_CLI init-session --file "$PHASE_TASKS_PATH"
+```
+
+If this errors with "File not found," the claimed phase has not been planned yet. Report:
+```
+Phase [PHASE_ID] is claimed but has no tasks file yet ([PHASE_TASKS_PATH]).
+Run /aimi:plan --phase [PHASE_ID] to materialize it, then re-run /aimi:execute.
+```
+Release the claim so it does not block other sessions, then STOP:
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+```
+
+### Path and State Notes
+
+From this point forward, for the remainder of this phase's execution:
+
+- Every Bash call that touches this phase's git state passes `PHASE_CONTAINER_PATH` explicitly — `cd "$PHASE_CONTAINER_PATH"` at the top of the call, or `git -C "$PHASE_CONTAINER_PATH"` / `$WORKTREE_MGR` invocations that take it as an argument — never assuming a CWD persisted from a prior call. This is the same "each Bash tool call is an isolated shell" rule from Step 0, applied to the container path instead of `AIMI_ROOT`. See Phase Mode: Worktree Naming and CWD above for how this threads through Step 4's wave loop.
+- `$AIMI_CLI` calls issued with CWD inside `PHASE_CONTAINER_PATH` still resolve to the main root's central `.aimi/` state with no special-casing required: `.aimi/` is gitignored, so it is absent from the container's checkout. `find_aimi_root`'s upward directory walk starts inside `PHASE_CONTAINER_PATH` (`<GIT_ROOT>/.worktrees/<phase-branch>`), finds no `.aimi/` there or in `.worktrees/`, and continues up through `<GIT_ROOT>` where the real `.aimi/` lives — passing straight through the extra nesting.
+
 ## Step 2: Branch Setup
 
 Get the branch name from the init-session output (already validated by CLI).
 
 ### Main Repo Branch Setup
 
-**Skip this step if `AIMI_ROOT_IS_GIT_REPO` is false** — see Multi-Repo Handling above.
+**Skip this step if `AIMI_ROOT_IS_GIT_REPO` is false, or if `PHASE_MODE` is true** — see Multi-Repo Handling above for the first condition. In phase mode, the phase container's `$WORKTREE_MGR create` call in Step 1.7 is the only branch-creating operation for this phase; no `setup-branch` call runs against the main working tree, which is what keeps the Main Working Tree Untouched Invariant (see Phase Mode: Worktree Naming and CWD) true.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -614,7 +814,17 @@ If resolution fails, report error and STOP.
 
 ## Step 3.2: Read Concurrency Setting
 
-Read the tasks file metadata to get maxConcurrency:
+Read the tasks file metadata to get maxConcurrency.
+
+**Phase mode (`PHASE_MODE=true`):** re-run `init-session` with `--file "$PHASE_TASKS_PATH"` explicitly — not the bare form — so `maxConcurrency` is read from the claimed phase's own tasks file (see Concurrency Source in Phase Mode: Worktree Naming and CWD), not any feature-root or global file. The bare form would re-run `init-session`'s mtime-based auto-discovery and could silently re-point session state at a different, more-recently-touched sibling phase file:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI init-session --file "$PHASE_TASKS_PATH"
+```
+
+**Flat mode (`PHASE_MODE=false`):** unchanged — bare `init-session`:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -772,25 +982,34 @@ while true:
     # ========================================
     # CAPTURE BASE SHA PER PROJECT GROUP (for commit verification)
     # ========================================
+    # PHASE_MODE: read from PHASE_CONTAINER_PATH/PHASE_BRANCH instead of
+    # project_root/branchName — see Phase Mode: Worktree Naming and CWD.
     base_sha = {}  # key: group_key, value: HEAD SHA before worktree creation
     for group_key in project_groups:
-        project_root = project_roots[group_key]
-        base_sha[group_key] = git -C [project_root] rev-parse [branchName]
+        if PHASE_MODE:
+            base_sha[group_key] = git -C [PHASE_CONTAINER_PATH] rev-parse [PHASE_BRANCH]
+        else:
+            project_root = project_roots[group_key]
+            base_sha[group_key] = git -C [project_root] rev-parse [branchName]
 
     # ========================================
     # CREATE WORKTREES PER PROJECT GROUP
     # ========================================
+    # PHASE_MODE: every story worktree is created inside the phase container,
+    # never at project_root — see Phase Mode: Worktree Naming and CWD.
     all_worktrees = {}  # key: full_story.id, value: {worktree_name, worktree_path, group_key}
 
     for group_key, stories in project_groups:
         project_root = project_roots[group_key]
+        worktree_cwd = PHASE_CONTAINER_PATH if PHASE_MODE else project_root
+        worktree_base = PHASE_BRANCH if PHASE_MODE else branchName
 
         for full_story in stories:
-            worktree_name = "[branchName]-[full_story.id]"
+            worktree_name = worktree_base + "-" + full_story.id
 
-            # cd to the project's git root before creating worktree
-            cd [project_root]
-            $WORKTREE_MGR create [worktree_name] --from [branchName]
+            # cd to the phase container (phase mode) or the project's git root (flat mode)
+            cd [worktree_cwd]
+            $WORKTREE_MGR create [worktree_name] --from [worktree_base]
 
             worktree_path = [path from output]
             all_worktrees[full_story.id] = {
@@ -938,11 +1157,17 @@ while true:
 
         for group_key, stories in succeeded_by_project:
             project_root = project_roots[group_key]
+            merge_cwd = PHASE_CONTAINER_PATH if PHASE_MODE else project_root
+            merge_target = PHASE_BRANCH if PHASE_MODE else branchName
             succeeded_worktree_names = [all_worktrees[s.id].worktree_name for s in stories]
 
-            # cd to the project's git root before merging
-            cd [project_root]
-            merge_result = $WORKTREE_MGR merge-all [succeeded_worktree_names...] --into [branchName]
+            # cd to the phase container (phase mode) or the project's git root (flat mode) before merging.
+            # PHASE_MODE requires this: merge-all issues a bare `git checkout <target-branch>` against
+            # whatever repo its CWD belongs to -- running it from AIMI_ROOT would check the phase branch
+            # out onto the main working tree, violating the Main Working Tree Untouched Invariant
+            # (see Phase Mode: Worktree Naming and CWD).
+            cd [merge_cwd]
+            merge_result = $WORKTREE_MGR merge-all [succeeded_worktree_names...] --into [merge_target]
 
             if merge conflict (non-zero exit):
                 Report:
@@ -950,11 +1175,11 @@ while true:
                 "Conflicting files:"
                 "[conflict output from merge-all]"
                 ""
-                "Resolve the conflict on branch [branchName] in [project_root] and re-run `/aimi:execute` to continue."
+                "Resolve the conflict on branch [merge_target] in [merge_cwd] and re-run `/aimi:execute` to continue."
 
                 # Cleanup ALL worktrees from this wave (across all project groups) before stopping
                 for full_story_id, wt in all_worktrees:
-                    cd [project_roots[wt.group_key]]
+                    cd (PHASE_CONTAINER_PATH if PHASE_MODE else project_roots[wt.group_key])
                     $WORKTREE_MGR remove [wt.worktree_name]
 
                 STOP execution.
@@ -1110,9 +1335,10 @@ Output your full structured review under the heading '## Design Implementation R
                         Report: "Verification pending for [full_story.id]: [full_story.gate.prompt]"
                         Report: "  Dependents proceed immediately (non-blocking)."
 
-    # Remove all worktrees from this wave (per project group)
+    # Remove all worktrees from this wave (per project group; PHASE_MODE uses
+    # PHASE_CONTAINER_PATH instead — see Phase Mode: Worktree Naming and CWD)
     for full_story_id, wt in all_worktrees:
-        cd [project_roots[wt.group_key]]
+        cd (PHASE_CONTAINER_PATH if PHASE_MODE else project_roots[wt.group_key])
         $WORKTREE_MGR remove [wt.worktree_name]
 
     # Count gate statuses for wave summary
@@ -1131,6 +1357,17 @@ Output your full structured review under the heading '## Design Implementation R
 ### Post-Loop Cleanup
 
 After the wave loop ends (all stories processed or deadlock):
+
+**Phase mode (`PHASE_MODE=true`):** cleanup runs with CWD = `PHASE_CONTAINER_PATH` only, and matches worktrees named `"[PHASE_BRANCH]-US-*"` — see Phase Mode: Worktree Naming and CWD. The main working tree (`AIMI_ROOT`) is never `cd`'d into by this step.
+
+```
+cd [PHASE_CONTAINER_PATH]
+$WORKTREE_MGR list
+# For each worktree matching "[PHASE_BRANCH]-US-*":
+$WORKTREE_MGR remove [worktree_name]
+```
+
+**Flat mode (`PHASE_MODE=false`):** unchanged.
 
 ```
 # Remove any remaining worktrees (safety cleanup)
@@ -1211,6 +1448,8 @@ This is ADDITIVE to the existing `Wave [wave] complete: ...` line — does not r
 ## Step 5: Completion
 
 When execution ends (all stories complete, or deadlock detected):
+
+> **PHASE_MODE scope note:** this step's reporting is written for the flat-mode case (CWD = `AIMI_ROOT`, `HEAD` on `branchName`). Phase-completion behavior — verifying the claimed phase's `creates`, writing `handoff.md`, and reporting commit counts against `PHASE_BRANCH` inside `PHASE_CONTAINER_PATH` — is explicitly out of scope for this story (Step 1.7: Phase Claim only covers claim-and-container mechanics) and is delivered by a later story. Until then, run this step's commands with CWD inside `PHASE_CONTAINER_PATH` and substitute `PHASE_BRANCH` for `branchName` / `CONTAINER_BASE` for `DEFAULT_BRANCH` where used below.
 
 ### If all stories complete:
 
@@ -1342,6 +1581,8 @@ The tasks file preserves all state. Re-running `/aimi:execute` will:
 2. Skip completed stories automatically
 3. Pick up from the next ready wave
 4. Failed stories remain as "failed" -- use `/aimi:status` to review them
+
+**Phase mode:** re-running `/aimi:execute` for a phase this session already claimed and left `in_progress` does not error. `roadmap-claim`'s self-reclaim path (Step 1.7) reports the same phase again instead of a contention failure, and `$WORKTREE_MGR create "$PHASE_BRANCH" --from "$CONTAINER_BASE"` reuses the existing container directory silently since the target already exists — no separate reuse-detection logic is needed beyond calling both idempotently on every claim.
 
 ### After /clear
 
