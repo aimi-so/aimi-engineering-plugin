@@ -9959,6 +9959,464 @@ test_validate_contracts_rejects_suspicious_contract_strings() {
 }
 
 # ============================================================================
+# Phase Folder Discovery Tests (US-004)
+# ============================================================================
+# Each test creates its own isolated temp dir (pushd/popd) so the nested
+# .aimi/tasks/<feature>/phase-N-slug/ layout never collides with the shared
+# TEST_DIR fixture used by earlier tests.
+
+test_find_tasks_all_nested_only() {
+  echo ""
+  echo "=== Testing find-tasks / find-tasks-all: nested-only phase layout ==="
+
+  local iso_dir
+  iso_dir=$(mktemp -d)
+  mkdir -p "$iso_dir/.aimi/tasks/myfeat/phase-1-alpha"
+
+  local nested_file="$iso_dir/.aimi/tasks/myfeat/phase-1-alpha/myfeat-phase-1-tasks.json"
+  cat > "$nested_file" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "feat: Nested phase", "type": "feat", "branchName": "feat/myfeat-phase-1", "maxConcurrency": 4},
+  "userStories": []
+}
+EOF
+
+  pushd "$iso_dir" >/dev/null
+  local single_output all_output
+  single_output=$("$CLI" find-tasks 2>/dev/null)
+  all_output=$("$CLI" find-tasks-all 2>/dev/null)
+  popd >/dev/null
+
+  assert_contains "myfeat/phase-1-alpha/myfeat-phase-1-tasks.json" "$single_output" "find-tasks discovers nested-only phase file"
+  assert_contains "myfeat/phase-1-alpha/myfeat-phase-1-tasks.json" "$all_output" "find-tasks-all discovers nested-only phase file"
+
+  local is_absolute="no"
+  [[ "$single_output" == /* ]] && is_absolute="yes"
+  assert_eq "yes" "$is_absolute" "find-tasks nested-only: returns absolute path"
+
+  rm -rf "$iso_dir"
+}
+
+test_find_tasks_all_mixed_flat_and_nested() {
+  echo ""
+  echo "=== Testing find-tasks-all: mixed flat and nested layouts ==="
+
+  local iso_dir
+  iso_dir=$(mktemp -d)
+  mkdir -p "$iso_dir/.aimi/tasks/myfeat/phase-1-alpha"
+
+  local flat_file="$iso_dir/.aimi/tasks/2026-01-01-flat-tasks.json"
+  cat > "$flat_file" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "feat: Flat", "type": "feat", "branchName": "feat/flat", "maxConcurrency": 2},
+  "userStories": []
+}
+EOF
+
+  local nested_file="$iso_dir/.aimi/tasks/myfeat/phase-1-alpha/myfeat-phase-1-tasks.json"
+  cat > "$nested_file" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "feat: Nested", "type": "feat", "branchName": "feat/myfeat-phase-1", "maxConcurrency": 4},
+  "userStories": []
+}
+EOF
+
+  # Ensure the nested file is strictly more recent than the flat file.
+  sleep 1.1
+  touch "$nested_file"
+
+  pushd "$iso_dir" >/dev/null
+  local output
+  output=$("$CLI" find-tasks-all 2>/dev/null)
+  popd >/dev/null
+
+  assert_contains "2026-01-01-flat-tasks.json" "$output" "find-tasks-all mixed: includes flat file"
+  assert_contains "myfeat-phase-1-tasks.json" "$output" "find-tasks-all mixed: includes nested file"
+
+  local first_line
+  first_line=$(printf '%s\n' "$output" | head -1)
+  assert_contains "myfeat-phase-1-tasks.json" "$first_line" "find-tasks-all mixed: most recent (nested) file is first"
+
+  local line_count
+  line_count=$(printf '%s\n' "$output" | wc -l)
+  assert_eq "2" "$line_count" "find-tasks-all mixed: returns exactly two files"
+
+  rm -rf "$iso_dir"
+}
+
+test_init_session_auto_detect_nested_most_recent() {
+  echo ""
+  echo "=== Testing init-session: auto-detects nested phase file when most recent ==="
+
+  local iso_dir
+  iso_dir=$(mktemp -d)
+  mkdir -p "$iso_dir/.aimi/tasks/myfeat/phase-1-alpha"
+
+  local flat_file="$iso_dir/.aimi/tasks/2026-01-01-flat-tasks.json"
+  cat > "$flat_file" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "feat: Flat", "type": "feat", "branchName": "feat/flat", "maxConcurrency": 2},
+  "userStories": []
+}
+EOF
+
+  local nested_file="$iso_dir/.aimi/tasks/myfeat/phase-1-alpha/myfeat-phase-1-tasks.json"
+  cat > "$nested_file" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "feat: Nested", "type": "feat", "branchName": "feat/myfeat-phase-1", "maxConcurrency": 4},
+  "userStories": [
+    {"id": "US-001", "title": "a", "description": "a", "acceptanceCriteria": ["x"], "priority": 1, "status": "pending", "dependsOn": [], "notes": ""}
+  ]
+}
+EOF
+  sleep 1.1
+  touch "$nested_file"
+
+  pushd "$iso_dir" >/dev/null
+  local output
+  output=$("$CLI" init-session 2>/dev/null)
+  local state_tasks
+  state_tasks=$(cat "$iso_dir/.aimi/current-tasks" 2>/dev/null)
+  popd >/dev/null
+
+  assert_contains "feat/myfeat-phase-1" "$output" "init-session auto-detect: uses nested (most recent) file's branch"
+  assert_contains '"pending": 1' "$output" "init-session auto-detect: counts pending from nested file"
+  assert_contains "myfeat-phase-1-tasks.json" "$state_tasks" "init-session auto-detect: current-tasks points to nested file"
+
+  rm -rf "$iso_dir"
+}
+
+test_init_session_file_flag_nested_path() {
+  echo ""
+  echo "=== Testing init-session --file with a nested phase path ==="
+
+  local iso_dir
+  iso_dir=$(mktemp -d)
+  mkdir -p "$iso_dir/.aimi/tasks/myfeat/phase-2-beta"
+
+  local nested_file="$iso_dir/.aimi/tasks/myfeat/phase-2-beta/myfeat-phase-2-tasks.json"
+  cat > "$nested_file" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "feat: Phase two", "type": "feat", "branchName": "feat/myfeat-phase-2", "maxConcurrency": 3},
+  "userStories": [
+    {"id": "US-001", "title": "a", "description": "a", "acceptanceCriteria": ["x"], "priority": 1, "status": "pending", "dependsOn": [], "notes": ""},
+    {"id": "US-002", "title": "b", "description": "b", "acceptanceCriteria": ["x"], "priority": 2, "status": "completed", "dependsOn": [], "notes": ""}
+  ]
+}
+EOF
+
+  pushd "$iso_dir" >/dev/null
+  local output exit_code
+  output=$("$CLI" init-session --file "$nested_file" 2>&1) && exit_code=0 || exit_code=$?
+  local state_tasks
+  state_tasks=$(cat "$iso_dir/.aimi/current-tasks" 2>/dev/null)
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "init-session --file nested: exit code"
+  assert_contains "feat/myfeat-phase-2" "$output" "init-session --file nested: reports branchName"
+  assert_contains '"pending": 1' "$output" "init-session --file nested: reports pending count"
+  assert_contains '"schemaVersion": "3.3"' "$output" "init-session --file nested: reports schemaVersion"
+  assert_contains "myfeat/phase-2-beta/myfeat-phase-2-tasks.json" "$state_tasks" "init-session --file nested: persists resolved nested path"
+
+  rm -rf "$iso_dir"
+}
+
+test_init_session_file_flag_rejects_bad_basename_in_nested_dir() {
+  echo ""
+  echo "=== Testing init-session --file: nested path with wrong basename still rejected ==="
+
+  local iso_dir
+  iso_dir=$(mktemp -d)
+  mkdir -p "$iso_dir/.aimi/tasks/myfeat/phase-1-alpha"
+
+  local bad_file="$iso_dir/.aimi/tasks/myfeat/phase-1-alpha/roadmap.json"
+  echo '{}' > "$bad_file"
+
+  pushd "$iso_dir" >/dev/null
+  local output exit_code
+  output=$("$CLI" init-session --file "$bad_file" 2>&1) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "init-session --file nested wrong basename: exits 1"
+  assert_contains "does not match" "$output" "init-session --file nested wrong basename: shows error"
+
+  rm -rf "$iso_dir"
+}
+
+test_list_archivable_nested_roadmap_completed_unit() {
+  echo ""
+  echo "=== Testing list-archivable: completed roadmap surfaces phases as a unit ==="
+
+  local iso_dir
+  iso_dir=$(mktemp -d)
+  mkdir -p "$iso_dir/.aimi/tasks"
+
+  pushd "$iso_dir" >/dev/null
+
+  echo '[{"id":1,"name":"Phase One","goal":"Do the thing","slug":"alpha"},{"id":2,"name":"Phase Two","goal":"Do more","slug":"beta"}]' > phases.json
+  "$CLI" roadmap-init --feature archfeat --file phases.json > /dev/null
+
+  mkdir -p .aimi/tasks/archfeat/phase-1-alpha .aimi/tasks/archfeat/phase-2-beta
+  cat > .aimi/tasks/archfeat/phase-1-alpha/archfeat-phase-1-tasks.json << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "p1", "type": "feat", "branchName": "feat/archfeat-phase-1", "maxConcurrency": 4},
+  "userStories": [{"id": "US-001", "title": "a", "description": "a", "acceptanceCriteria": ["x"], "priority": 1, "status": "completed", "dependsOn": [], "notes": ""}]
+}
+EOF
+  cat > .aimi/tasks/archfeat/phase-2-beta/archfeat-phase-2-tasks.json << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "p2", "type": "feat", "branchName": "feat/archfeat-phase-2", "maxConcurrency": 4},
+  "userStories": [{"id": "US-001", "title": "a", "description": "a", "acceptanceCriteria": ["x"], "priority": 1, "status": "skipped", "dependsOn": [], "notes": ""}]
+}
+EOF
+
+  local output_before
+  output_before=$("$CLI" list-archivable 2>/dev/null)
+
+  "$CLI" roadmap-set-status --feature archfeat --phase 1 --status completed --force > /dev/null
+  "$CLI" roadmap-set-status --feature archfeat --phase 2 --status completed --force > /dev/null
+
+  local output_after
+  output_after=$("$CLI" list-archivable 2>/dev/null)
+
+  popd >/dev/null
+
+  assert_eq "[]" "$output_before" "list-archivable: nested phases pending in roadmap -> not archivable yet"
+
+  local count_after
+  count_after=$(printf '%s' "$output_after" | jq 'length')
+  assert_eq "2" "$count_after" "list-archivable: both completed-roadmap phase files reported together"
+  assert_contains "archfeat-phase-1-tasks.json" "$output_after" "list-archivable: includes phase 1 file"
+  assert_contains "archfeat-phase-2-tasks.json" "$output_after" "list-archivable: includes phase 2 file"
+
+  rm -rf "$iso_dir"
+}
+
+test_list_archivable_nested_roadmap_in_progress_excluded() {
+  echo ""
+  echo "=== Testing list-archivable: one in-progress phase excludes the whole feature ==="
+
+  local iso_dir
+  iso_dir=$(mktemp -d)
+  mkdir -p "$iso_dir/.aimi/tasks"
+
+  pushd "$iso_dir" >/dev/null
+
+  echo '[{"id":1,"name":"Phase One","goal":"Do the thing","slug":"alpha"},{"id":2,"name":"Phase Two","goal":"Do more","slug":"beta"}]' > phases.json
+  "$CLI" roadmap-init --feature archfeat2 --file phases.json > /dev/null
+
+  mkdir -p .aimi/tasks/archfeat2/phase-1-alpha .aimi/tasks/archfeat2/phase-2-beta
+  cat > .aimi/tasks/archfeat2/phase-1-alpha/archfeat2-phase-1-tasks.json << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "p1", "type": "feat", "branchName": "feat/archfeat2-phase-1", "maxConcurrency": 4},
+  "userStories": [{"id": "US-001", "title": "a", "description": "a", "acceptanceCriteria": ["x"], "priority": 1, "status": "completed", "dependsOn": [], "notes": ""}]
+}
+EOF
+  cat > .aimi/tasks/archfeat2/phase-2-beta/archfeat2-phase-2-tasks.json << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "p2", "type": "feat", "branchName": "feat/archfeat2-phase-2", "maxConcurrency": 4},
+  "userStories": [{"id": "US-001", "title": "a", "description": "a", "acceptanceCriteria": ["x"], "priority": 1, "status": "completed", "dependsOn": [], "notes": ""}]
+}
+EOF
+
+  "$CLI" roadmap-set-status --feature archfeat2 --phase 1 --status completed --force > /dev/null
+  "$CLI" roadmap-set-status --feature archfeat2 --phase 2 --status in_progress --force > /dev/null
+  # Phase 2's tasks file is all-terminal, but the roadmap still marks it in_progress.
+
+  local output
+  output=$("$CLI" list-archivable 2>/dev/null)
+
+  popd >/dev/null
+
+  assert_eq "[]" "$output" "list-archivable: one non-terminal roadmap phase excludes entire feature"
+
+  rm -rf "$iso_dir"
+}
+
+# ============================================================================
+# Payload Budget Estimation Tests (US-004)
+# ============================================================================
+
+test_estimate_payload_under_budget_default() {
+  echo ""
+  echo "=== Testing estimate-payload: default budget, under budget ==="
+
+  local iso_dir
+  iso_dir=$(mktemp -d)
+  mkdir -p "$iso_dir/.aimi/tasks"
+  printf 'small outline content' > "$iso_dir/outline.json"
+
+  pushd "$iso_dir" >/dev/null
+  local output exit_code
+  output=$("$CLI" estimate-payload --outline outline.json 2>&1) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "estimate-payload under budget: exit code"
+  assert_contains '"budgetBytes": 200000' "$output" "estimate-payload under budget: default budgetBytes is 200000"
+  assert_contains '"budgetFraction": 0.5' "$output" "estimate-payload under budget: default budgetFraction is 0.5"
+  assert_contains '"overBudget": false' "$output" "estimate-payload under budget: overBudget false"
+  assert_contains '"warning": null' "$output" "estimate-payload under budget: warning null"
+
+  rm -rf "$iso_dir"
+}
+
+test_estimate_payload_over_budget_via_flag() {
+  echo ""
+  echo "=== Testing estimate-payload: --budget-bytes override triggers over-budget warning ==="
+
+  local iso_dir
+  iso_dir=$(mktemp -d)
+  mkdir -p "$iso_dir/.aimi/tasks"
+  printf 'this outline content is longer than five bytes' > "$iso_dir/outline.json"
+
+  pushd "$iso_dir" >/dev/null
+  local output exit_code
+  output=$("$CLI" estimate-payload --outline outline.json --budget-bytes 5 2>&1) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "estimate-payload over budget: still exits 0 (advisory only)"
+  assert_contains '"overBudget": true' "$output" "estimate-payload over budget: overBudget true"
+  assert_contains "split the phase along a semantic seam in the roadmap" "$output" "estimate-payload over budget: warning names a semantic-seam split"
+
+  rm -rf "$iso_dir"
+}
+
+test_estimate_payload_missing_outline_flag() {
+  echo ""
+  echo "=== Testing estimate-payload: missing required --outline flag ==="
+
+  local iso_dir
+  iso_dir=$(mktemp -d)
+  mkdir -p "$iso_dir/.aimi/tasks"
+
+  pushd "$iso_dir" >/dev/null
+  local output exit_code
+  output=$("$CLI" estimate-payload --research foo.md 2>&1) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "estimate-payload missing --outline: exits 1"
+  assert_contains "--outline" "$output" "estimate-payload missing --outline: usage error mentions --outline"
+
+  rm -rf "$iso_dir"
+}
+
+test_estimate_payload_missing_file_exits_1() {
+  echo ""
+  echo "=== Testing estimate-payload: nonexistent path exits 1 distinctly from usage error ==="
+
+  local iso_dir
+  iso_dir=$(mktemp -d)
+  mkdir -p "$iso_dir/.aimi/tasks"
+  printf 'outline' > "$iso_dir/outline.json"
+
+  pushd "$iso_dir" >/dev/null
+  local output exit_code
+  output=$("$CLI" estimate-payload --outline outline.json --research /no/such/research.md 2>&1) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "estimate-payload missing file: exits 1"
+  assert_contains "File not found" "$output" "estimate-payload missing file: shows File not found error"
+
+  rm -rf "$iso_dir"
+}
+
+test_estimate_payload_env_var_override() {
+  echo ""
+  echo "=== Testing estimate-payload: AIMI_PAYLOAD_BUDGET_BYTES env override ==="
+
+  local iso_dir
+  iso_dir=$(mktemp -d)
+  mkdir -p "$iso_dir/.aimi/tasks"
+  printf 'outline' > "$iso_dir/outline.json"
+
+  pushd "$iso_dir" >/dev/null
+  local output
+  output=$(AIMI_PAYLOAD_BUDGET_BYTES=1000 "$CLI" estimate-payload --outline outline.json 2>&1)
+  popd >/dev/null
+
+  assert_contains '"budgetBytes": 1000' "$output" "estimate-payload env override: budgetBytes from AIMI_PAYLOAD_BUDGET_BYTES"
+
+  rm -rf "$iso_dir"
+}
+
+test_estimate_payload_config_json_override() {
+  echo ""
+  echo "=== Testing estimate-payload: .aimi/config.json payload section override ==="
+
+  local iso_dir
+  iso_dir=$(mktemp -d)
+  mkdir -p "$iso_dir/.aimi/tasks"
+  printf 'outline' > "$iso_dir/outline.json"
+  echo '{"payload": {"budgetBytes": 555}}' > "$iso_dir/.aimi/config.json"
+
+  pushd "$iso_dir" >/dev/null
+  local output
+  output=$("$CLI" estimate-payload --outline outline.json 2>&1)
+  popd >/dev/null
+
+  assert_contains '"budgetBytes": 555' "$output" "estimate-payload config.json override: budgetBytes from .aimi/config.json payload section"
+
+  rm -rf "$iso_dir"
+}
+
+test_estimate_payload_flag_precedes_env_and_config() {
+  echo ""
+  echo "=== Testing estimate-payload: --budget-bytes flag wins over env and config.json ==="
+
+  local iso_dir
+  iso_dir=$(mktemp -d)
+  mkdir -p "$iso_dir/.aimi/tasks"
+  printf 'outline' > "$iso_dir/outline.json"
+  echo '{"payload": {"budgetBytes": 555}}' > "$iso_dir/.aimi/config.json"
+
+  pushd "$iso_dir" >/dev/null
+  local output
+  output=$(AIMI_PAYLOAD_BUDGET_BYTES=1000 "$CLI" estimate-payload --outline outline.json --budget-bytes 42 2>&1)
+  popd >/dev/null
+
+  assert_contains '"budgetBytes": 42' "$output" "estimate-payload precedence: --budget-bytes flag wins over env and config.json"
+
+  rm -rf "$iso_dir"
+}
+
+test_estimate_payload_breakdown_sums_multiple_paths() {
+  echo ""
+  echo "=== Testing estimate-payload: breakdown sums multiple --research/--spec/--prototype paths ==="
+
+  local iso_dir
+  iso_dir=$(mktemp -d)
+  mkdir -p "$iso_dir/.aimi/tasks"
+  printf '12345' > "$iso_dir/outline.json"      # 5 bytes
+  printf '1234567890' > "$iso_dir/r1.md"         # 10 bytes
+  printf '12345' > "$iso_dir/r2.md"              # 5 bytes
+  printf '123' > "$iso_dir/spec1.md"             # 3 bytes
+  printf '1' > "$iso_dir/proto1.html"            # 1 byte
+
+  pushd "$iso_dir" >/dev/null
+  local output
+  output=$("$CLI" estimate-payload --outline outline.json --research r1.md --research r2.md --spec spec1.md --prototype proto1.html 2>&1)
+  popd >/dev/null
+
+  assert_contains '"outline": 5' "$output" "estimate-payload breakdown: outline bytes"
+  assert_contains '"research": 15' "$output" "estimate-payload breakdown: research bytes summed"
+  assert_contains '"specs": 3' "$output" "estimate-payload breakdown: spec bytes"
+  assert_contains '"prototypes": 1' "$output" "estimate-payload breakdown: prototype bytes"
+  assert_contains '"totalBytes": 24' "$output" "estimate-payload breakdown: totalBytes summed"
+
+  rm -rf "$iso_dir"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -10355,6 +10813,29 @@ main() {
   test_bundle_prototype_finalize_writes_sidecar
   test_bundle_prototype_finalize_rejects_invalid_source_command
   test_bundle_prototype_status_view_list_item_shape
+
+  # Phase folder discovery tests (US-004) — each creates its own isolated temp dir
+  echo ""
+  echo "--- Phase Folder Discovery Tests (US-004) ---"
+  test_find_tasks_all_nested_only
+  test_find_tasks_all_mixed_flat_and_nested
+  test_init_session_auto_detect_nested_most_recent
+  test_init_session_file_flag_nested_path
+  test_init_session_file_flag_rejects_bad_basename_in_nested_dir
+  test_list_archivable_nested_roadmap_completed_unit
+  test_list_archivable_nested_roadmap_in_progress_excluded
+
+  # Payload budget estimation tests (US-004) — each creates its own isolated temp dir
+  echo ""
+  echo "--- Payload Budget Estimation Tests (US-004) ---"
+  test_estimate_payload_under_budget_default
+  test_estimate_payload_over_budget_via_flag
+  test_estimate_payload_missing_outline_flag
+  test_estimate_payload_missing_file_exits_1
+  test_estimate_payload_env_var_override
+  test_estimate_payload_config_json_override
+  test_estimate_payload_flag_precedes_env_and_config
+  test_estimate_payload_breakdown_sums_multiple_paths
 
   # Contract Validation Tests (validate-contracts, roadmap-sweep) (US-003)
   echo ""
