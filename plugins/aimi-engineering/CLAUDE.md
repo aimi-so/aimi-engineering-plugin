@@ -79,6 +79,7 @@ aimi-engineering-plugin/
 All task execution files go in `.aimi/tasks/`:
 
 - `YYYY-MM-DD-[feature-name]-tasks.json` - Structured task list with user stories
+- `<feature-slug>/roadmap.json` + `<feature-slug>/phase-N[.M][-slug]/` - Phase/milestone roadmap layer for large-scope features (see Roadmap File Schema below). Each phase folder holds `<feature-slug>-phase-N-tasks.json` (materialized by `/aimi:plan --phase N`) and `handoff.md` (written by `roadmap-write-handoff`). Single-scope-context features never create this layout — they use the flat `YYYY-MM-DD-[feature-name]-tasks.json` form above, with zero overhead.
 
 > The CLI auto-discovers `.aimi/` by walking up from CWD -- no need to be in the project root to run commands.
 
@@ -112,6 +113,29 @@ One CLI subcommand manages the story-merge lifecycle. It is consumed by the `/ai
     - `--split legacy|full-stack` — `full-stack` emits two files (frontend + backend) partitioned by story `project` field; `legacy` (default) emits one file.
     - `--agent-mode` — demotes Phase 3.1 and Phase 4.1 hard rejects to warnings, allowing CI pipelines to proceed without a user review gate.
     - `--phase-aware` — only meaningful with `--split full-stack`. Strips one trailing `-tasks` segment from the `--output` basename before appending `-frontend-tasks.json`/`-backend-tasks.json`, so a phase-scoped output path (`<feature>-phase-<N>-tasks.json`) produces single-`tasks`-segment split basenames (`<feature>-phase-<N>-frontend-tasks.json`) instead of the legacy double-`tasks` form. Omitted (default): unchanged legacy derivation.
+
+## aimi-cli.sh Roadmap Lifecycle Subcommands
+
+Eleven CLI subcommands manage the phase/milestone roadmap layer for large-scope features (see `commands/references/scope-contexts.md` for when a feature qualifies for phases vs. the flat single-scope-context pipeline). All are internal — consumed by `/aimi:brainstorm`, `/aimi:plan`, `/aimi:execute`, and `/aimi:status`, not invoked by users directly.
+
+- **`roadmap-init --feature <slug> [--file <path>] [--sync] [--brainstorm-path <path>]`** — Materializes `roadmap.json` from a phases array (stdin or `--file`). `--sync` merges additively into an existing roadmap instead of erroring on an existing file.
+- **`roadmap-get --feature <slug> [--phase <id>] [--next-eligible]`** — Reads a single phase, or the next eligible-to-claim phase, from `roadmap.json`.
+- **`roadmap-set-status --feature <slug> --phase <id> --status <status> [--force]`** — Transitions a phase's lifecycle status (`pending → planned → in_progress → completed`, or `→ verification_failed`). Transitioning to `completed` requires a prior `roadmap-write-handoff` for that phase unless `--force` is passed.
+- **`roadmap-claim --feature <slug> --session-id <id> --session-pid <pid> [--phase <id>]`** — Atomically claims the next eligible phase (or a specific `--phase` override) for a session via a locked check-and-set. Auto-releases stale claims whose `claimedPid` is no longer alive before choosing. Idempotent: re-claiming a phase the same session already owns returns it again instead of erroring.
+- **`roadmap-release-claim --feature <slug> --phase <id>`** — Manual escape hatch to release a phase's claim (in addition to automatic stale-claim recovery).
+- **`roadmap-reconcile --feature <slug>`** — Sweeps stale (dead-PID) claims across every phase in a roadmap without claiming a new one.
+- **`roadmap-write-handoff --feature <slug> --phase <id> [--file <path>]`** — Writes `phase-N/handoff.md` from a structured payload (`decisions`, `artifacts`, `deviations`, `deferred`, `contracts` arrays). A precondition for `roadmap-set-status ... --status completed`.
+- **`validate-contracts <feature> [--phase <id>] [--agent-mode]`** — Checks a phase's declared `creates`/`needs` contracts for duplicates and suspicious content; `--agent-mode` demotes hard blocks to warnings (mirrors the Phase 3.1/4.1 `--agent-mode` convention).
+- **`phase-overlap <feature> <phase-a> <phase-b>`** — Compares two expanded phases' task files for symbol/file overlap, surfacing a concrete payload-splitting suggestion.
+- **`roadmap-sweep <feature>`** — Batch contract/status consistency sweep across an entire roadmap.
+- **`estimate-payload --outline <path> [--research <path>]... [--spec <path>]... [--prototype <path>]... [--budget-bytes <n>] [--budget-fraction <0-1>]`** — Advisory token/byte budget estimate for an outline plus its cited sources; used to warn before a phase's expansion payload gets too large, suggesting a split along a semantic seam.
+
+## Roadmap File Schema
+
+> `roadmap.json` lives at `.aimi/tasks/<feature>/roadmap.json` and tracks phase/milestone lifecycle state for large-scope features. Key fields: `roadmapVersion` ("1.0"), `feature` (slug), `createdAt` (ISO 8601), `brainstormPath` (optional), `phases[]{id(number),name,goal,slug,dir,status(pending|planned|in_progress|completed|verification_failed),dependsOn[](phase ids),branch(optional),notes(optional),successCriteria[](optional),creates[](optional),needs[](optional),areas[](optional),claim(null|{claimedBy,claimedAt,claimedPid})}`.
+> `phases[].dir` is a single-path-component directory name matching `^phase-[0-9]+(\.[0-9]+)?(-[a-z0-9][a-z0-9-]*)?$` (e.g. `phase-2`, `phase-2.1-auth-refactor`) — never a slash or `..`.
+> `phases[].claim` is written only by `roadmap-claim` and cleared by `roadmap-release-claim`, or automatically when `claimedPid` is no longer alive (PID-liveness check mirrors the guard-runtime-state `_is_alive` pattern).
+> All free-text phase fields (`name`, `goal`, `notes`, `successCriteria[]`, `branch`, `brainstormPath`) are sanitized before write using the same regime as `commands/references/sanitization.md` (strip newlines/backticks/`$(`, truncate).
 
 ## Tasks File Schema
 
@@ -152,6 +176,8 @@ Hooks support per-guard bypass via environment variables. Set `<name>=off` (or u
 | `AIMI_WORKTREE_BUDGET_GUARD` | pre-bash-dispatcher (worktree-budget handler) | Allows git worktree add beyond metadata.maxConcurrency |
 | `AIMI_RUNTIME_STATE_GUARD` | guard-runtime-state | Allows direct Write/Edit to .aimi/state/, .aimi/tasks during execution, friction/telemetry logs, roadmap.json, and phase-*/handoff.md |
 | `AIMI_AGENT_MODE` | aimi-learnings skill | Forces JSON-only read-only path; never marks events |
+
+> `AIMI_RUNTIME_STATE_GUARD` coverage extends to `roadmap.json` and `phase-*/handoff.md` (see Roadmap File Schema above) — both are guard-protected the same as `.aimi/tasks/`, mutated only through the `roadmap-*` aimi-cli.sh verbs.
 
 ## Dependencies
 
