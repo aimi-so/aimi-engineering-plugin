@@ -5599,13 +5599,14 @@ cmd_roadmap_set_status() {
 }
 
 cmd_roadmap_claim() {
-  local feature="" session_id="" session_pid=""
+  local feature="" session_id="" session_pid="" phase_override=""
 
   while [ $# -gt 0 ]; do
     case "$1" in
       --feature) shift; feature="${1:-}" ;;
       --session-id) shift; session_id="${1:-}" ;;
       --session-pid) shift; session_pid="${1:-}" ;;
+      --phase) shift; phase_override="${1:-}" ;;
       *)
         echo "Error: roadmap-claim: unknown flag: $1" >&2
         exit 1
@@ -5623,6 +5624,9 @@ cmd_roadmap_claim() {
     echo "Error: roadmap-claim: --session-pid <pid> must be a positive integer" >&2
     exit 1
   fi
+  if [ -n "$phase_override" ]; then
+    _roadmap_validate_phase_id "$phase_override" "roadmap-claim"
+  fi
   # Sanitize the caller-supplied session id before it is ever written to roadmap.json.
   session_id=$(printf '%s' "$session_id" | jq -Rr "$_ROADMAP_SANITIZE_JQ"'_rm_sanitize(200)')
 
@@ -5633,6 +5637,11 @@ cmd_roadmap_claim() {
     echo "Error: roadmap-claim: roadmap not found: $roadmap_path (run roadmap-init first)" >&2
     exit 1
   fi
+
+  # --phase is a bare numeric id at this point (validated above); pass it through
+  # to jq as a number, or JSON null when no override was given.
+  local phase_override_json="null"
+  [ -n "$phase_override" ] && phase_override_json="$phase_override"
 
   local out rc
   if out=$(
@@ -5662,29 +5671,61 @@ cmd_roadmap_claim() {
         --arg session_id "$session_id" \
         --arg now "$now" \
         --argjson session_pid "$session_pid" \
+        --argjson phase_override "$phase_override_json" \
         '
           ($cur[0]) as $current |
           ($current.phases | map(if ((.id) as $id | ($stale_ids | index($id)) != null) then .claim = null else . end)) as $cleared_phases |
           (reduce $cleared_phases[] as $p ({}; . + {($p.id|tostring): $p.status})) as $status_by_id |
-          ($cleared_phases | map(select((.status == "pending" or .status == "planned") and .claim == null))) as $candidates0 |
-          ($candidates0 | map(select( ((.dependsOn // []) | all(. as $d | $status_by_id[$d|tostring] == "completed")) ))) as $eligible |
-          if ($eligible | length) > 0 then
-            ($eligible | sort_by(.id) | .[0]) as $chosen |
-            ($cleared_phases | map(if .id == $chosen.id then . + {claim: {claimedBy: $session_id, claimedAt: $now, claimedPid: $session_pid}} else . end)) as $final_phases |
-            {claimed: true, phase: ($final_phases[] | select(.id == $chosen.id)), phases: $final_phases}
-          else
-            ($cleared_phases | map(select(.status == "pending" or .status == "planned"))) as $remaining |
-            if ($remaining | length) == 0 then
-              {claimed: false, reason: "none-eligible", phases: null}
+          # Self-reclaim: this exact session already owns an unreleased claim on a
+          # still-active phase (matching the requested --phase when given). Return
+          # it again instead of erroring or re-running eligibility -- this is what
+          # makes re-running /aimi:execute on an already-claimed phase idempotent.
+          ($cleared_phases | map(select(
+            .claim != null and .claim.claimedBy == $session_id and
+            (.status == "pending" or .status == "planned" or .status == "in_progress") and
+            ($phase_override == null or .id == $phase_override)
+          ))) as $self_claimed |
+          if ($self_claimed | length) > 0 then
+            ($self_claimed | sort_by(.id) | .[0]) as $mine |
+            {claimed: true, phase: $mine, phases: $cleared_phases}
+          elif $phase_override != null then
+            ($cleared_phases | map(select(.id == $phase_override))) as $target_arr |
+            if ($target_arr | length) == 0 then
+              {claimed: false, reason: "phase-not-found", phases: null}
             else
-              ($remaining | map(
-                if .claim != null then
-                  {id: .id, reason: "claimed by live session"}
-                else
-                  {id: .id, reason: ("depends on incomplete phase(s): " + (((.dependsOn // []) | map(select($status_by_id[(.|tostring)] != "completed")) | map(tostring) | join(", "))))}
-                end
-              )) as $blocked_reasons |
-              {claimed: false, reason: "all-blocked", blocked: $blocked_reasons, phases: null}
+              ($target_arr[0]) as $target |
+              if ($target.status != "pending" and $target.status != "planned") then
+                {claimed: false, reason: "not-claimable", detail: ("phase status is " + $target.status), phases: null}
+              elif $target.claim != null then
+                {claimed: false, reason: "claimed", detail: "claimed by a live session", phases: null}
+              elif ((($target.dependsOn // []) | all(. as $d | $status_by_id[$d|tostring] == "completed")) | not) then
+                {claimed: false, reason: "blocked", detail: ("depends on incomplete phase(s): " + ((($target.dependsOn // []) | map(select($status_by_id[(.|tostring)] != "completed")) | map(tostring) | join(", ")))), phases: null}
+              else
+                ($cleared_phases | map(if .id == $target.id then . + {claim: {claimedBy: $session_id, claimedAt: $now, claimedPid: $session_pid}} else . end)) as $final_phases |
+                {claimed: true, phase: ($final_phases[] | select(.id == $target.id)), phases: $final_phases}
+              end
+            end
+          else
+            ($cleared_phases | map(select((.status == "pending" or .status == "planned") and .claim == null))) as $candidates0 |
+            ($candidates0 | map(select( ((.dependsOn // []) | all(. as $d | $status_by_id[$d|tostring] == "completed")) ))) as $eligible |
+            if ($eligible | length) > 0 then
+              ($eligible | sort_by(.id) | .[0]) as $chosen |
+              ($cleared_phases | map(if .id == $chosen.id then . + {claim: {claimedBy: $session_id, claimedAt: $now, claimedPid: $session_pid}} else . end)) as $final_phases |
+              {claimed: true, phase: ($final_phases[] | select(.id == $chosen.id)), phases: $final_phases}
+            else
+              ($cleared_phases | map(select(.status == "pending" or .status == "planned"))) as $remaining |
+              if ($remaining | length) == 0 then
+                {claimed: false, reason: "none-eligible", phases: null}
+              else
+                ($remaining | map(
+                  if .claim != null then
+                    {id: .id, reason: "claimed by live session"}
+                  else
+                    {id: .id, reason: ("depends on incomplete phase(s): " + (((.dependsOn // []) | map(select($status_by_id[(.|tostring)] != "completed")) | map(tostring) | join(", "))))}
+                  end
+                )) as $blocked_reasons |
+                {claimed: false, reason: "all-blocked", blocked: $blocked_reasons, phases: null}
+              end
             end
           end
         ')
@@ -5704,14 +5745,26 @@ cmd_roadmap_claim() {
       fi
 
       reason=$(printf '%s' "$result" | jq -r '.reason')
-      if [ "$reason" = "none-eligible" ]; then
-        echo "Error: roadmap-claim: no phase remains in pending or planned status" >&2
-        exit 4
-      else
-        echo "Error: roadmap-claim: all remaining pending/planned phases are blocked:" >&2
-        printf '%s' "$result" | jq -r '.blocked[] | "  phase " + (.id|tostring) + ": " + .reason' >&2
-        exit 3
-      fi
+      case "$reason" in
+        none-eligible)
+          echo "Error: roadmap-claim: no phase remains in pending or planned status" >&2
+          exit 4
+          ;;
+        phase-not-found)
+          echo "Error: roadmap-claim: phase $phase_override not found in $roadmap_path" >&2
+          exit 4
+          ;;
+        not-claimable|claimed|blocked)
+          detail=$(printf '%s' "$result" | jq -r '.detail')
+          echo "Error: roadmap-claim: phase $phase_override is not claimable: $detail" >&2
+          exit 3
+          ;;
+        *)
+          echo "Error: roadmap-claim: all remaining pending/planned phases are blocked:" >&2
+          printf '%s' "$result" | jq -r '.blocked[] | "  phase " + (.id|tostring) + ": " + .reason' >&2
+          exit 3
+          ;;
+      esac
     ) 200>"${roadmap_path}.lock"
   ); then
     rc=0
@@ -6534,15 +6587,24 @@ COMMANDS:
                               pending -> planned -> in_progress -> completed; any
                               status may move to verification_failed. Other
                               transitions require --force.
-    roadmap-claim --feature <slug> --session-id <id> --session-pid <pid>
+    roadmap-claim --feature <slug> --session-id <id> --session-pid <pid> [--phase <id>]
                               Atomic locked read-modify-write. Auto-releases any
                               claim whose recorded pid fails a signal-zero liveness
-                              probe, then claims the lowest numeric-id phase that is
-                              pending/planned, unclaimed, and dependency-complete.
+                              probe. Self-reclaim: if this session already owns an
+                              unreleased claim on a still-active phase (matching
+                              --phase when given), returns that same phase again
+                              instead of erroring or re-running eligibility.
+                              Without --phase: claims the lowest numeric-id phase
+                              that is pending/planned, unclaimed, and dependency-
+                              complete. With --phase <id>: claims that phase only
+                              if eligible; never falls through to a different phase.
                               Exit 0 with the claimed phase JSON on success.
-                              Exit 3 (all-blocked): pending/planned phases remain
-                              but none are currently claimable (stderr lists why).
-                              Exit 4 (none-eligible): no phase remains pending/planned.
+                              Exit 3 (all-blocked / phase not claimable): pending/
+                              planned phases remain but none (or the named --phase)
+                              are currently claimable (stderr lists why).
+                              Exit 4 (none-eligible / phase not found): no phase
+                              remains pending/planned, or --phase names an id that
+                              does not exist in the roadmap.
                               roadmap.json is left unmodified on exit 3 or 4.
     roadmap-release-claim --feature <slug> --phase <id>
                               Locked read-modify-write. Clears claimedBy/claimedAt/

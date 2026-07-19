@@ -9384,6 +9384,99 @@ test_roadmap_claim_race() {
   rm -rf ".aimi/tasks/$feature"
 }
 
+test_roadmap_claim_phase_override_eligible() {
+  echo ""
+  echo "=== roadmap-claim --phase: claims the named phase even when a lower-id phase is also eligible ==="
+
+  local feature="rm-override-ok"
+  rm -rf ".aimi/tasks/$feature"
+
+  jq -n '[
+    {id: 1, name: "RootA", goal: "g", slug: "root-a", dependsOn: []},
+    {id: 2, name: "RootB", goal: "g", slug: "root-b", dependsOn: []}
+  ]' | "$CLI" roadmap-init --feature "$feature" >/dev/null
+
+  local output exit_code
+  output=$("$CLI" roadmap-claim --feature "$feature" --session-id sess-override --session-pid $$ --phase 2 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-claim --phase: claims the requested phase (exit 0)"
+
+  local claimed_id
+  claimed_id=$(printf '%s' "$output" | jq -r '.id')
+  assert_eq "2" "$claimed_id" "roadmap-claim --phase: claimed id is the override, not the lowest-id eligible phase"
+
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+  local phase1_claim
+  phase1_claim=$(jq -r '.phases[] | select(.id == 1) | .claim' "$roadmap_file")
+  assert_eq "null" "$phase1_claim" "roadmap-claim --phase: the un-requested eligible phase is left unclaimed"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_claim_phase_override_ineligible() {
+  echo ""
+  echo "=== roadmap-claim --phase: reports the specific unmet dependency and never falls through ==="
+
+  local feature="rm-override-blocked"
+  rm -rf ".aimi/tasks/$feature"
+
+  jq -n '[
+    {id: 1, name: "Root", goal: "g", slug: "root", dependsOn: []},
+    {id: 2, name: "Dependent", goal: "g", slug: "dependent", dependsOn: [1]}
+  ]' | "$CLI" roadmap-init --feature "$feature" >/dev/null
+
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+  local before
+  before=$(cat "$roadmap_file")
+
+  local output exit_code
+  output=$("$CLI" roadmap-claim --feature "$feature" --session-id sess-override2 --session-pid $$ --phase 2 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "3" "$exit_code" "roadmap-claim --phase blocked: exits 3, not a generic failure"
+  assert_contains "depends on incomplete phase(s): 1" "$output" "roadmap-claim --phase blocked: names the specific unmet dependency"
+
+  local after
+  after=$(cat "$roadmap_file")
+  assert_eq "$before" "$after" "roadmap-claim --phase blocked: roadmap.json left unmodified (no fall-through claim of phase 1)"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_claim_self_reclaim() {
+  echo ""
+  echo "=== roadmap-claim: re-running for the same session on an already-claimed in_progress phase is idempotent ==="
+
+  local feature="rm-self-reclaim"
+  rm -rf ".aimi/tasks/$feature"
+
+  jq -n '[
+    {id: 1, name: "Root", goal: "g", slug: "root", dependsOn: []},
+    {id: 2, name: "Sibling", goal: "g", slug: "sibling", dependsOn: []}
+  ]' | "$CLI" roadmap-init --feature "$feature" >/dev/null
+
+  local first_output
+  first_output=$("$CLI" roadmap-claim --feature "$feature" --session-id sess-mine --session-pid $$ 2>&1)
+  assert_eq "1" "$(printf '%s' "$first_output" | jq -r '.id')" "roadmap-claim self-reclaim: first call claims phase 1"
+
+  "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status planned >/dev/null
+  "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status in_progress >/dev/null
+
+  local second_output exit_code
+  second_output=$("$CLI" roadmap-claim --feature "$feature" --session-id sess-mine --session-pid $$ 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-claim self-reclaim: re-running does not error"
+
+  local claimed_id claimed_status
+  claimed_id=$(printf '%s' "$second_output" | jq -r '.id')
+  claimed_status=$(printf '%s' "$second_output" | jq -r '.status')
+  assert_eq "1" "$claimed_id" "roadmap-claim self-reclaim: returns the same phase (1) again, not a different eligible phase"
+  assert_eq "in_progress" "$claimed_status" "roadmap-claim self-reclaim: reported status reflects in_progress, not reset"
+
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+  local phase2_claim
+  phase2_claim=$(jq -r '.phases[] | select(.id == 2) | .claim' "$roadmap_file")
+  assert_eq "null" "$phase2_claim" "roadmap-claim self-reclaim: the sibling phase is untouched, not claimed instead"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
 test_roadmap_release_claim() {
   echo ""
   echo "=== roadmap-release-claim: clears claim without touching status; no-op when already unclaimed ==="
@@ -10772,6 +10865,9 @@ main() {
   test_roadmap_claim_dependency_not_done
   test_roadmap_claim_stale_release
   test_roadmap_claim_race
+  test_roadmap_claim_phase_override_eligible
+  test_roadmap_claim_phase_override_ineligible
+  test_roadmap_claim_self_reclaim
   test_roadmap_release_claim
   test_roadmap_reconcile_divergence
 
