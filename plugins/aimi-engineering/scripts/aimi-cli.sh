@@ -5567,7 +5567,7 @@ cmd_roadmap_set_status() {
         allowed=true
       else
         case "$current_status:$new_status" in
-          pending:planned|planned:in_progress|in_progress:completed) allowed=true ;;
+          pending:planned|planned:in_progress|in_progress:completed|verification_failed:completed) allowed=true ;;
         esac
       fi
 
@@ -5576,9 +5576,33 @@ cmd_roadmap_set_status() {
         exit 1
       fi
 
-      roadmap_doc=$(jq --argjson pid "$phase_id" --arg status "$new_status" '
-        .phases |= map(if .id == $pid then .status = $status else . end)
-      ' "$roadmap_path")
+      # Hard rule, not an --force-able ordering convention: a phase can never
+      # reach "completed" without handoff.md already on disk at its phase dir
+      # (see outline 11). handoff.md is written only via roadmap-write-handoff,
+      # which is the guard-protected path guard-runtime-state.py points callers
+      # at. This check runs even when --force is set -- --force overrides
+      # transition *order*, never this physical artifact precondition.
+      if [ "$new_status" = "completed" ]; then
+        phase_dir=$(jq -r --argjson pid "$phase_id" '(.phases[] | select(.id == $pid) | .dir) // empty' "$roadmap_path")
+        feature_dir=$(dirname "$roadmap_path")
+        if [ ! -f "$feature_dir/$phase_dir/handoff.md" ]; then
+          echo "Error: roadmap-set-status: phase $phase_id cannot transition to completed -- no handoff.md found at $feature_dir/$phase_dir/handoff.md. Write it first with roadmap-write-handoff." >&2
+          exit 1
+        fi
+      fi
+
+      # Completing a phase also releases its claim in the same atomic write --
+      # no window where status reads completed while the phase still shows
+      # claimed (see outline 11; mirrors cmd_mark_complete's single-write pattern).
+      if [ "$new_status" = "completed" ]; then
+        roadmap_doc=$(jq --argjson pid "$phase_id" --arg status "$new_status" '
+          .phases |= map(if .id == $pid then .status = $status | .claim = null else . end)
+        ' "$roadmap_path")
+      else
+        roadmap_doc=$(jq --argjson pid "$phase_id" --arg status "$new_status" '
+          .phases |= map(if .id == $pid then .status = $status else . end)
+        ' "$roadmap_path")
+      fi
 
       tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
       printf '%s\n' "$roadmap_doc" > "$tmp_file"
@@ -5913,6 +5937,129 @@ cmd_roadmap_reconcile() {
       fi
 
       jq -n --argjson corr "$corrections" '{corrections: $corr}'
+    ) 200>"${roadmap_path}.lock"
+  ); then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  if [ "$rc" -ne 0 ]; then
+    exit "$rc"
+  fi
+  printf '%s\n' "$out"
+}
+
+# Write a phase's handoff.md through a guard-protected CLI call (see outline
+# 11). guard-runtime-state.py blocks any direct Write/Edit tool call whose
+# target is .aimi/tasks/<feature>/phase-N/handoff.md and points the caller
+# back at this verb -- this is the only path that may create or overwrite
+# that file. Reads a JSON object from --file or stdin with five optional
+# array-of-string fields (decisions, artifacts, deviations, deferred,
+# contracts); each entry is sanitized and length-capped with the same
+# _rm_sanitize regime as every other free-text roadmap field. Always emits
+# exactly five "## " headings in the fixed order
+# "Decisions Made" / "Artifacts Created" / "Deviations" / "Deferred Items" /
+# "Contracts Delivered" -- the order roadmap-set-status's completed-requires-
+# handoff precondition and _cv_handoff_lists_artifact's "Artifacts Created"
+# lookup both depend on. Overwrites any existing handoff.md at that path
+# (idempotent retry after a verification_failed -> completed re-run).
+cmd_roadmap_write_handoff() {
+  local feature="" phase_id="" file=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      --phase) shift; phase_id="${1:-}" ;;
+      --file) shift; file="${1:-}" ;;
+      *)
+        echo "Error: roadmap-write-handoff: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature"
+  _roadmap_validate_phase_id "$phase_id" "roadmap-write-handoff"
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_path "$feature")
+  validate_path_in_project "$roadmap_path"
+  if [ ! -f "$roadmap_path" ]; then
+    echo "Error: roadmap-write-handoff: roadmap not found: $roadmap_path" >&2
+    exit 1
+  fi
+  if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
+    echo "Error: roadmap-write-handoff: malformed roadmap.json: $roadmap_path" >&2
+    exit 1
+  fi
+
+  local phase_dir
+  phase_dir=$(jq -r --argjson pid "$phase_id" '(.phases[] | select(.id == $pid) | .dir) // empty' "$roadmap_path")
+  if [ -z "$phase_dir" ]; then
+    echo "Error: roadmap-write-handoff: phase $phase_id not found in $roadmap_path" >&2
+    exit 1
+  fi
+
+  local input_json
+  if [ -n "$file" ]; then
+    validate_path_in_project "$file"
+    if [ ! -f "$file" ]; then
+      echo "Error: roadmap-write-handoff: --file not found: $file" >&2
+      exit 1
+    fi
+    input_json=$(cat "$file")
+  else
+    input_json=$(cat)
+  fi
+
+  if ! printf '%s' "$input_json" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    echo "Error: roadmap-write-handoff: payload must be a JSON object" >&2
+    exit 1
+  fi
+
+  local key
+  for key in decisions artifacts deviations deferred contracts; do
+    if ! printf '%s' "$input_json" | jq -e --arg k "$key" '(.[$k] // []) as $v | ($v|type) == "array" and ($v | all(type == "string"))' >/dev/null 2>&1; then
+      echo "Error: roadmap-write-handoff: field '$key' must be an array of strings" >&2
+      exit 1
+    fi
+  done
+
+  local body
+  body=$(printf '%s' "$input_json" | jq -r "$_ROADMAP_SANITIZE_JQ"'
+    def clean: map(_rm_sanitize(2000));
+    def section(title; items):
+      "## " + title + "\n\n" +
+      (if (items | length) == 0 then "_None._\n" else ((items | map("- " + .)) | join("\n")) + "\n" end);
+    {
+      decisions: ((.decisions // []) | clean),
+      artifacts: ((.artifacts // []) | clean),
+      deviations: ((.deviations // []) | clean),
+      deferred: ((.deferred // []) | clean),
+      contracts: ((.contracts // []) | clean)
+    } as $s |
+    section("Decisions Made"; $s.decisions) + "\n" +
+    section("Artifacts Created"; $s.artifacts) + "\n" +
+    section("Deviations"; $s.deviations) + "\n" +
+    section("Deferred Items"; $s.deferred) + "\n" +
+    section("Contracts Delivered"; $s.contracts)
+  ')
+
+  local feature_dir handoff_path
+  feature_dir=$(dirname "$roadmap_path")
+  handoff_path="$feature_dir/$phase_dir/handoff.md"
+  validate_path_in_project "$handoff_path"
+
+  local out rc
+  if out=$(
+    (
+      _lock "${roadmap_path}.lock"
+      mkdir -p "$(dirname "$handoff_path")"
+      tmp_file=$(mktemp "${handoff_path}.XXXXXX")
+      printf '%s\n' "$body" > "$tmp_file" && mv "$tmp_file" "$handoff_path"
+      jq -n --arg path "$handoff_path" '{handoff: $path}'
     ) 200>"${roadmap_path}.lock"
   ); then
     rc=0
@@ -6584,9 +6731,28 @@ COMMANDS:
                               phases are all completed; exits 1 if none.
     roadmap-set-status --feature <slug> --phase <id> --status <status> [--force]
                               Locked read-modify-write. Enforces the guarded order
-                              pending -> planned -> in_progress -> completed; any
+                              pending -> planned -> in_progress -> completed, plus
+                              verification_failed -> completed (retry path); any
                               status may move to verification_failed. Other
-                              transitions require --force.
+                              transitions require --force. Transitioning to
+                              completed always requires handoff.md to already
+                              exist on disk at the phase's dir (write it first
+                              with roadmap-write-handoff) -- this precondition
+                              is NOT overridable by --force. A completed
+                              transition also clears the phase's claim in the
+                              same atomic write.
+    roadmap-write-handoff --feature <slug> --phase <id> [--file <path>]
+                              Read a JSON object (stdin or --file) with five
+                              optional array-of-string fields -- decisions,
+                              artifacts, deviations, deferred, contracts --
+                              sanitize each entry, and atomically write
+                              phase-<dir>/handoff.md with exactly five "## "
+                              headings in that fixed order: Decisions Made,
+                              Artifacts Created, Deviations, Deferred Items,
+                              Contracts Delivered. This is the only path that
+                              may create or overwrite that file -- direct
+                              Write/Edit tool calls on it are blocked by
+                              guard-runtime-state.py.
     roadmap-claim --feature <slug> --session-id <id> --session-pid <pid> [--phase <id>]
                               Atomic locked read-modify-write. Auto-releases any
                               claim whose recorded pid fails a signal-zero liveness
@@ -6776,6 +6942,7 @@ main() {
     roadmap-claim)         shift; cmd_roadmap_claim "$@" ;;
     roadmap-release-claim) shift; cmd_roadmap_release_claim "$@" ;;
     roadmap-reconcile)     shift; cmd_roadmap_reconcile "$@" ;;
+    roadmap-write-handoff) shift; cmd_roadmap_write_handoff "$@" ;;
     validate-contracts)    shift; cmd_validate_contracts "$@" ;;
     roadmap-sweep)         shift; cmd_roadmap_sweep "$@" ;;
     estimate-payload)      shift; cmd_estimate_payload "$@" ;;

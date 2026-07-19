@@ -1445,11 +1445,208 @@ Console (advisory):
 
 This is ADDITIVE to the existing `Wave [wave] complete: ...` line — does not replace it.
 
+## Phase Completion
+
+Runs once, immediately after Post-Loop Cleanup and the Visual Follow Session note above, and before Step 5. It fires only when **both** are true:
+
+- `PHASE_MODE == true` (see Phase Mode Detection in Step 1)
+- the phase's own pending count is zero:
+  ```bash
+  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+  $AIMI_CLI count-pending
+  ```
+  (`count-pending` reads the session's tracked tasks file, which Step 1.7 already repointed at `PHASE_TASKS_PATH`.) When this prints anything greater than 0 — the wave loop broke on deadlock or a gate-blocked wave, not true completion — skip this entire section and go straight to Step 5.
+
+**For legacy flat v3.3 tasks.json files (`PHASE_MODE=false`): skip this entire section.** Step 5 runs completely unchanged, exactly as it does today.
+
+Every Bash call in this section that touches the phase container's git state or filesystem passes `$PHASE_CONTAINER_PATH` explicitly (`cd "$PHASE_CONTAINER_PATH"`, `git -C "$PHASE_CONTAINER_PATH"`, or an absolute path built from it) — never a bare relative path, and never anything derived from `find_aimi_root()`'s own CWD. `find_aimi_root()` (invoked internally by every `$AIMI_CLI` call) `cd`s to `PROJECT_ROOT` — the *main* repo root — as a side effect, so by the time any code here runs, CWD cannot be trusted to be `PHASE_CONTAINER_PATH`. This is the same rule Step 1.7's Path and State Notes already established for the rest of phase mode.
+
+Fetch the claimed phase's roadmap object once, reused by every subsection below:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+PHASE_JSON=$($AIMI_CLI roadmap-get --feature "$FEATURE" --phase "$PHASE_ID")
+PHASE_NAME=$(printf '%s' "$PHASE_JSON" | jq -r '.name')
+```
+
+### Creates Verification
+
+For every entry the phase declared in `roadmap.json`'s `creates[]`, confirm the artifact is actually present in the phase branch's code — not merely that some other phase's `needs` resolved against it. This is a distinct, stricter check than `validate-contracts`: `validate-contracts` (outline 03) answers "does a `needs` entry have a completed, handoff-documented provider," using `roadmap.json` and `handoff.md` as its only inputs, and never inspects source code. This check answers "does this phase's own promised artifact exist," by inspecting the phase container's actual tracked files.
+
+> **Cross-story flag for the auditor:** this story's brief describes creates verification as invoking "the outline:03 contract-validation CLI surface... in its phase-closure mode" (e.g. `validate-contracts <phase-id> --root <path>`) as an illustrative example. The landed `validate-contracts` (outline 03) has no `--root` flag or code-existence mode, and its own notes scope it exclusively to needs-vs-creates delivery resolution ("wiring validate-contracts and roadmap-sweep into plan.md and execute.md is owned by outline 08 and outline 11" — this story). Extending `validate-contracts`'s jq-only, roadmap.json-only logic to also grep real source files would be new scope outline 03 never claimed. This section therefore implements creates verification as its own orchestrator-side procedure below — the same pattern Console Error Attribution (above) already uses for judgment-requiring checks that need no new CLI call. Reconcile if a future story wants to fold this into `validate-contracts` instead.
+
+#### Inputs
+
+- `CREATES_RAW` — one line per `creates[]` entry:
+  ```bash
+  CREATES_RAW=$(printf '%s' "$PHASE_JSON" | jq -r '(.creates // [])[]')
+  ```
+  Each line is a `"<identity> (<description>)"` string (see `commands/references/scope-contexts.md`'s Creates/Needs Contracts format).
+- `PHASE_CONTAINER_PATH` — from Step 1.7, absolute, never CWD-derived.
+
+#### Procedure
+
+For each line of `CREATES_RAW`:
+
+1. **Compute identity**: the substring before the first `(`, trimmed of surrounding whitespace (mirrors `_cv_identity` in aimi-cli.sh). Empty identity → missing, reason `"malformed creates entry"`.
+2. **Reject unsafe identities before touching the filesystem**: if identity contains a `..` path segment or starts with `/`, do not resolve it against `PHASE_CONTAINER_PATH` — record it as missing with reason `"unsafe creates identity"` and move on. Mirrors the escape-prevention posture `validate_path_in_project` already enforces inside aimi-cli.sh.
+3. **Direct file check** (covers the `creates` "file" identity kind — a relative path):
+   ```bash
+   [ -f "$PHASE_CONTAINER_PATH/$identity" ]
+   ```
+   Success → verified, `location = identity`.
+4. **Tracked-source search** (covers `creates` "endpoint"/"table"/"service" identity kinds, and files whose identity string differs from their literal path) — only when step 3 did not verify:
+   ```bash
+   MATCH=$(git -C "$PHASE_CONTAINER_PATH" grep -l -F -- "$identity" 2>/dev/null | head -1)
+   ```
+   Non-empty `MATCH` → verified, `location = $MATCH`. `-F` is fixed-string (never regex); `--` stops identity from ever being parsed as a flag even if it starts with `-`.
+5. Neither check succeeds → **missing**, recorded as `{identity, description, entry}`.
+
+Accumulate two lists: `VERIFIED_ARTIFACTS` (`"<identity> — <location>"` strings, in `creates[]` order) and `MISSING_CREATES` (`{identity, description}` objects).
+
+#### On any missing entry
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI roadmap-set-status --feature "$FEATURE" --phase "$PHASE_ID" --status verification_failed
+```
+
+Report:
+```
+## Phase [PHASE_ID] Verification Failed
+
+[len(MISSING_CREATES)] declared creates entr(y|ies) could not be confirmed in the phase branch:
+
+[for each entry in MISSING_CREATES:]
+  - [entry.identity] ([entry.description]) — not found under [PHASE_CONTAINER_PATH]
+
+Phase status set to verification_failed. Fix the missing artifact(s) on branch
+[PHASE_BRANCH], then re-run /aimi:execute to re-verify — creates verification
+re-runs from scratch on the next pass. Next-phase planning stays blocked
+until this phase re-verifies successfully (verification_failed is excluded
+from next-eligible-phase selection, the same way pending/in_progress are).
+```
+
+Do **not** write `handoff.md`, do **not** offer a PR, do **not** run the Next Phase step below. Skip directly to Step 5 (which still reports this phase's own story-level completion, unaffected by the roadmap-level failure).
+
+### Write Handoff
+
+Only reached when every `creates` entry verified. Build the five-section payload:
+
+- **Decisions Made** — one bullet per notable implementation decision surfaced by this phase's stories (their `implementation.approach` text, gate resolutions, or explicit deviations the story-executor agents reported). Empty array if nothing stood out.
+- **Artifacts Created** — exactly `VERIFIED_ARTIFACTS` from Creates Verification above, unmodified. This is the section `validate-contracts`'s `_cv_handoff_lists_artifact` searches when a downstream phase's `needs` references this phase — every identity must appear verbatim.
+- **Deviations** — one bullet per `.aimi/known-gaps/*.md` file belonging to this phase's stories (same source Step 5's "Known Gaps" aggregation reads), summarizing the story id and gap. Empty array if none.
+- **Deferred Items** — one bullet per this phase's own story left in `skipped` status, if any. Empty array if none.
+- **Contracts Delivered** — one bullet per `creates` entry restating the identity now available to dependent phases (`"<identity> — contract fulfilled, available to phases depending on [PHASE_ID]"`), mirroring Artifacts Created's identities but phrased for downstream `needs` resolution.
+
+Write via the guard-protected CLI call only — **never** a direct Write or Edit tool call on `handoff.md`'s path (`guard-runtime-state.py` blocks that and points back at this verb):
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+HANDOFF_PAYLOAD=$(jq -n \
+  --argjson decisions "$DECISIONS_JSON" \
+  --argjson artifacts "$ARTIFACTS_JSON" \
+  --argjson deviations "$DEVIATIONS_JSON" \
+  --argjson deferred "$DEFERRED_JSON" \
+  --argjson contracts "$CONTRACTS_JSON" \
+  '{decisions: $decisions, artifacts: $artifacts, deviations: $deviations, deferred: $deferred, contracts: $contracts}')
+HANDOFF_RESULT=$(printf '%s' "$HANDOFF_PAYLOAD" | $AIMI_CLI roadmap-write-handoff --feature "$FEATURE" --phase "$PHASE_ID" 2>&1)
+HANDOFF_EXIT=$?
+```
+`DECISIONS_JSON` / `ARTIFACTS_JSON` / `DEVIATIONS_JSON` / `DEFERRED_JSON` / `CONTRACTS_JSON` are each a JSON array of strings built from the bullets above (e.g. `jq -Rn '[inputs]'` fed one bullet per line, or a literal JSON array). `ARTIFACTS_JSON` is `VERIFIED_ARTIFACTS` converted to a JSON array directly.
+
+**On failure (`HANDOFF_EXIT != 0`):** the phase's status is left exactly where it already was (`in_progress` — the write failure means the status-mutating call below is never reached, so there is nothing to revert). Report:
+```
+Handoff write failed for phase [PHASE_ID]: [HANDOFF_RESULT]
+
+Phase status remains in_progress. Retry with:
+  $AIMI_CLI roadmap-write-handoff --feature [FEATURE] --phase [PHASE_ID]
+  (same payload as above)
+
+Re-running /aimi:execute re-enters this section and re-verifies creates
+harmlessly — the retry above does not require repeating that step by hand.
+```
+Skip directly to Step 5.
+
+### Mark Phase Completed
+
+Only reached when `handoff.md` is confirmed on disk (the CLI call above returned `{"handoff": "<path>"}`). Exactly one call — sets status to `completed` **and** releases the phase's claim in the same atomic write (no window where status reads completed while still claimed; see `cmd_roadmap_set_status`'s completed-branch in aimi-cli.sh, which also refuses this transition when no `handoff.md` is on disk — a second, CLI-enforced guarantee behind the check above):
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI roadmap-set-status --feature "$FEATURE" --phase "$PHASE_ID" --status completed
+```
+
+Report: `"Phase [PHASE_ID] ([PHASE_SLUG]) completed. Claim released."`
+
+### Offer a Pull Request
+
+Best-effort only — never reverts or changes the already-`completed` status on failure or refusal.
+
+```bash
+if command -v gh >/dev/null 2>&1; then
+  cd "$PHASE_CONTAINER_PATH"
+  git push -u origin "$PHASE_BRANCH"
+  gh pr create --base "$DEFAULT_BRANCH" --head "$PHASE_BRANCH" \
+    --title "Phase [PHASE_ID]: [PHASE_NAME]" \
+    --body "Completes phase [PHASE_ID] of [FEATURE]. See phase-[PHASE_DIR]/handoff.md for details."
+else
+  echo "gh not found — create the PR manually:"
+  echo "  git -C \"$PHASE_CONTAINER_PATH\" push -u origin $PHASE_BRANCH"
+  echo "  Then open a PR: $DEFAULT_BRANCH...$PHASE_BRANCH"
+fi
+```
+
+If `git push` or `gh pr create` fails (no permissions, offline, branch already has an open PR, etc.), report the failure verbatim and continue — do not retry, do not prompt interactively, and never revert the phase's `completed` status.
+
+### Next Phase
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+NEXT_ELIGIBLE_JSON=$($AIMI_CLI roadmap-get --feature "$FEATURE" --next-eligible 2>&1)
+NEXT_ELIGIBLE_EXIT=$?
+```
+
+**When `NEXT_ELIGIBLE_EXIT != 0`** (no phase remains pending/planned, unclaimed, and dependency-complete — the roadmap-exhaustion case; a phase stuck in `verification_failed` also falls here since it is neither `pending` nor `planned`, matching outline 02's landed `roadmap-get --next-eligible` contract): skip both the interactive offer and the agent-mode auto-continue branch entirely. Run the residual sweep exactly once and hand its report to Step 5:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+ROADMAP_SWEEP_REPORT=$($AIMI_CLI roadmap-sweep "$FEATURE")
+```
+`ROADMAP_SWEEP_REPORT` is rendered as a `## Roadmap Sweep` section in Step 5's final summary (see below). No next-phase offer of any kind is shown.
+
+**Otherwise**, `NEXT_ELIGIBLE_JSON` is the next eligible phase object; extract `NEXT_PHASE_ID=$(printf '%s' "$NEXT_ELIGIBLE_JSON" | jq -r '.id')`.
+
+- **Interactive mode** (`$AIMI_CLI detect-interactivity` = `picker`): use **AskUserQuestion** with exactly two options:
+  ```
+  Phase [PHASE_ID] is complete. Plan phase [NEXT_PHASE_ID] now?
+
+  A — Plan it now
+  B — Plan it later
+  ```
+  **Option A:** set `NEXT_PHASE_HANDOFF=$NEXT_PHASE_ID` (consumed after Step 5's report — see below).
+  **Option B:** report `"Resume with: /aimi:plan --phase [NEXT_PHASE_ID]"` and end the session after Step 5's report.
+
+- **Agent mode** (`detect-interactivity` = `agent`): skip AskUserQuestion. Log exactly:
+  ```
+  agent-mode: phase-complete auto-continue [PHASE_ID]
+  ```
+  (`[PHASE_ID]` is the phase that **just completed**, not `NEXT_PHASE_ID`.) Set `NEXT_PHASE_HANDOFF=$NEXT_PHASE_ID`.
+
+After Step 5's report is shown, if `NEXT_PHASE_HANDOFF` is set, proceed immediately into `/aimi:plan --phase [NEXT_PHASE_HANDOFF]`'s command flow — no further prompt, no waiting on additional user input.
+
 ## Step 5: Completion
 
 When execution ends (all stories complete, or deadlock detected):
 
-> **PHASE_MODE scope note:** this step's reporting is written for the flat-mode case (CWD = `AIMI_ROOT`, `HEAD` on `branchName`). Phase-completion behavior — verifying the claimed phase's `creates`, writing `handoff.md`, and reporting commit counts against `PHASE_BRANCH` inside `PHASE_CONTAINER_PATH` — is explicitly out of scope for this story (Step 1.7: Phase Claim only covers claim-and-container mechanics) and is delivered by a later story. Until then, run this step's commands with CWD inside `PHASE_CONTAINER_PATH` and substitute `PHASE_BRANCH` for `branchName` / `CONTAINER_BASE` for `DEFAULT_BRANCH` where used below.
+> **PHASE_MODE scope note:** this step's reporting is written for the flat-mode case (CWD = `AIMI_ROOT`, `HEAD` on `branchName`). In phase mode, run this step's commands with CWD inside `PHASE_CONTAINER_PATH` and substitute `PHASE_BRANCH` for `branchName` / `CONTAINER_BASE` for `DEFAULT_BRANCH` where used below. Phase-level completion — verifying the claimed phase's `creates`, writing `handoff.md`, updating roadmap status, offering a PR, and offering or auto-continuing to the next phase — is handled entirely by the **Phase Completion** section above, which runs before this step whenever `PHASE_MODE=true` and the phase's own pending count reaches zero. This step still runs afterward, in both modes, to report story-level completion for the phase's own tasks file.
 
 ### If all stories complete:
 
@@ -1533,6 +1730,32 @@ mismatch only.
 ```
 
 If `CONSOLE_BUFFER` is empty, omit the `## Console` section entirely.
+
+If `ROADMAP_SWEEP_REPORT` is set (only ever set by Phase Completion's Next Phase step, roadmap-exhaustion branch), append:
+```
+## Roadmap Sweep
+
+No phase remains ready to plan or claim — every phase in [FEATURE]'s roadmap
+is completed, verification_failed, or otherwise not pending/planned.
+Residual report from `roadmap-sweep`:
+
+[If ROADMAP_SWEEP_REPORT.orphanCreates is non-empty:]
+Orphan creates (declared but never consumed by any needs):
+  For each: "  - phase [entry.phase]: [entry.creates]"
+
+[If ROADMAP_SWEEP_REPORT.deferredNeeds is non-empty:]
+Deferred needs (a provider exists but has not completed):
+  For each: "  - phase [entry.phase] needs \"[entry.need]\", provided by phase [entry.deferred] (not yet completed)"
+
+[If ROADMAP_SWEEP_REPORT.warnings is non-empty:]
+Warnings:
+  For each: "  - phase [entry.phase] field '[entry.field]': [entry.message]"
+
+[If orphanCreates, deferredNeeds, and warnings are all empty:]
+No residual gaps — every declared creates entry is consumed and every need is satisfied.
+```
+
+If `ROADMAP_SWEEP_REPORT` is unset, omit the `## Roadmap Sweep` section entirely.
 
 If any pending gates exist, append:
 ```
