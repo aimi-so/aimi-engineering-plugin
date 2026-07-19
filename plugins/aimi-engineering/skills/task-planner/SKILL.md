@@ -69,6 +69,10 @@ After the brainstorm check, determine the implementation scope:
 
 3. **Store the result** as `implementationScope: "frontend-only" | "full-stack"` for use in Phase 4 metadata.
 
+#### Scope-Context Classification (Inline Fallback)
+
+When no brainstorm was loaded, or a loaded brainstorm's frontmatter has no `phases:` key (and no roadmap is already being continued from Rolling-Wave Phase Selection above), classify the feature description into scope contexts using the same shared reference `/aimi:brainstorm`'s roadmap-definition gate applies — [commands/references/scope-contexts.md](../../commands/references/scope-contexts.md) — so a feature gets the same phase cut regardless of which command runs the classification. Zero or one scope context: fall straight through, byte-for-byte unchanged, no folder or roadmap created. Two or more: propose a phase cut (name, goal, successCriteria, dependsOn, creates, needs, areas), gate it via a compact Approve/Edit picker with a coverage-check hard block, then materialize it through the identical `roadmap-init` path Roadmap Materialization above uses and hand off to Rolling-Wave Phase Selection for phase-1-only expansion. Full gate mechanics, agent-mode auto-approve log line, and the `phase:edit:<idx>`/`source: "phase"` decision-recording convention: see `commands/plan.md` "Scope-Context Classification (Inline Fallback)".
+
 ### Resolve Agent Models
 
 Follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS` (JSON map of category→model). Re-read `$AIMI_CLI` from cache in the same Bash call. When resolution fails, treat every category as `"inherit"` and continue.

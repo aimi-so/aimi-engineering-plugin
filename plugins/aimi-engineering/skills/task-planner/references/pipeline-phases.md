@@ -155,6 +155,19 @@ After the brainstorm check, determine the implementation scope:
 
 3. **Store the result** as `implementationScope: "frontend-only" | "full-stack"` for use in Phase 4 metadata.
 
+### Scope-Context Classification (Inline Fallback)
+
+Runs when no brainstorm was loaded, or a loaded brainstorm's frontmatter has no `phases:` key — and `ROADMAP_MODE` is not already `true` from Rolling-Wave Phase Selection above (an existing roadmap is already being continued; do not reclassify). When the loaded brainstorm's frontmatter DOES carry `phases:`, this section is skipped — that cut was already produced by `/aimi:brainstorm`'s Phase 3.5 roadmap-gate and materialized by Roadmap Materialization above.
+
+**Classify.** Apply the Cut Criteria, Collapse Rule, and Anti-Patterns in `commands/references/scope-contexts.md` — the same shared reference `/aimi:brainstorm`'s roadmap-gate applies, exactly as written there — to the feature description plus any loaded spec/prototype content. The question is *which scope contexts exist*, never *how many stories*; no numeric threshold anywhere.
+
+- **0 or 1 scope contexts:** stop. No folder, no roadmap CLI call, no gate — fall straight through to Phase 0.5 unchanged. Default path, no log line.
+- **2 or more:** propose one phase entry per context (`id, name, slug, goal, successCriteria, dependsOn, creates, needs, areas` — identical shape to `/aimi:brainstorm` Phase 3.5's proposal), run the same Shared-Foundation Detection pass, then gate it.
+
+**Compact gate.** Non-interactive (`INTERACTIVE_MODE=agent` or `--non-interactive`): skip AskUserQuestion and the coverage check, auto-approve, emit exactly `agent-mode: plan-roadmap-gate auto-approved <N> phases`. Interactive: present **exactly two** AskUserQuestion options — `Approve` and `Edit` (deliberately narrower than the Phase 3c outline gate's five options and `/aimi:brainstorm`'s seven) — where `Edit` accepts one free-form restructuring request per round, recorded to `oqDecisions[]` as `{anchor: "phase:edit:<idx>", source: "phase", text, resolution}`. Before Approve is accepted, a coverage check blocks on any feature-description/spec/prototype element unmapped to a proposed phase, re-prompting until resolved.
+
+**Materialize and hand off.** Once approved: reuse the `CANDIDATE_SLUG` Rolling-Wave Phase Selection already derived as `featureSlug`; sanitize the approved `phases` array via Roadmap Materialization's own sanitize/derive-directory steps; call `roadmap-init --feature "$featureSlug"` (creation mode, no `--brainstorm-path`, no `--sync`) — the identical CLI verb, not a duplicate implementation. Set `ROADMAP_MODE=true` and re-enter Rolling-Wave Phase Selection's "Load the roadmap and compute eligible pending phases" step, which confines this invocation to expanding exactly one phase — every other phase stays outline-only in `roadmap.json`. Full gate mechanics: `commands/plan.md` "Scope-Context Classification (Inline Fallback)".
+
 ### Pipeline Mode (Non-Interactive)
 
 When `INTERACTIVE_MODE=agent` (set by `/aimi:plan --non-interactive`, `AIMI_AGENT_MODE=true`, or `CI=true`):

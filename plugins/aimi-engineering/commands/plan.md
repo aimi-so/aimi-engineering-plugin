@@ -293,7 +293,7 @@ If no brainstorm was found, or the brainstorm has no `researchPaths` key, `reuse
 
 ### Roadmap Materialization
 
-Only runs when a brainstorm was loaded above — a `phases:` frontmatter key can exist only on a brainstorm document, so when no brainstorm was found this entire section is skipped with no log line. This step turns `/aimi:brainstorm`'s Phase 3.5 roadmap-gate output (the `phases:` frontmatter block — see `commands/brainstorm.md` "phases frontmatter rules") into durable, guard-protected state via `aimi-cli.sh`. `/aimi:brainstorm` never writes `.aimi/tasks/<feature-slug>/roadmap.json` itself; this is the only place that does.
+Only runs when a brainstorm was loaded above — a `phases:` frontmatter key can exist only on a brainstorm document, so when no brainstorm was found this entire section is skipped with no log line. This step turns `/aimi:brainstorm`'s Phase 3.5 roadmap-gate output (the `phases:` frontmatter block — see `commands/brainstorm.md` "phases frontmatter rules") into durable, guard-protected state via `aimi-cli.sh`. `/aimi:brainstorm` never writes `.aimi/tasks/<feature-slug>/roadmap.json` itself; this is the only place that does. The "Sanitize every phase field," "Derive and validate each phase's directory segment," and "Detect existing roadmap.json and materialize" steps below are also reused, by name, by the Scope-Context Classification (Inline Fallback) subsection further down this phase — the fallback proposes a `phases` array itself, from a classification pass rather than brainstorm frontmatter, and re-enters this section's steps to sanitize and materialize it rather than reimplementing them.
 
 **Parse `phases:` frontmatter**
 
@@ -595,6 +595,83 @@ After the brainstorm check, determine the implementation scope:
    Present the auto-detected default if one was determined.
 
 3. **Store the result** as `implementationScope: "frontend-only" | "full-stack"` for use in Phase 4 metadata.
+
+### Scope-Context Classification (Inline Fallback)
+
+**Trigger.** Runs when EITHER no brainstorm was loaded in Phase 0, OR a brainstorm was loaded but its YAML frontmatter has no `phases:` key (legacy brainstorm). When the loaded brainstorm's frontmatter DOES contain a `phases:` key, skip this subsection entirely, with no log line — that feature's phase cut was already produced by `/aimi:brainstorm`'s Phase 3.5 roadmap-definition gate and is materialized by Roadmap Materialization above; it is never reclassified here.
+
+**Additional guard.** Also skip entirely, with no log line, when `ROADMAP_MODE` is already `true` (set by Rolling-Wave Phase Selection above). An existing `.aimi/tasks/<feature>/roadmap.json` for this feature already resolved a phase cut in an earlier session; Rolling-Wave Phase Selection has already selected and is expanding one of its phases this invocation. Proposing a new cut here would conflict with that phase.
+
+**Step 1 — Classify.** Apply the Cut Criteria, the Collapse Rule, and the Anti-Patterns in `commands/references/scope-contexts.md` — the same shared reference `/aimi:brainstorm`'s Phase 3.5 Step 1 applies, exactly as written there; do not restate them here — to the feature description plus any `businessSpecContent`, `designSpecContent`, or already-loaded prototype content this session. The question this step answers is *which scope contexts exist in this feature*, never *how many stories does this need*; no numeric story-count threshold applies anywhere in this subsection.
+
+- **0 or 1 scope contexts identified:** stop here. No `.aimi/tasks/<feature>/` folder is created, no roadmap CLI verb is called, no gate is shown — fall straight through to Phase 0.5 exactly as if this subsection did not exist. This is the default, most common path; emit no log line.
+- **2 or more scope contexts identified:** continue to Step 2.
+
+**Step 2 — Propose the cut.** Draft one phase entry per identified scope context in an in-memory `phases` array, using the identical field set, `id`/`idx` semantics, and JSON shape as `commands/brainstorm.md` Phase 3.5 Step 2 — `id`, `name`, `slug`, `goal`, `successCriteria`, `dependsOn`, `creates`, `needs`, `areas` (coarse file-area declaration), each derived per the matching section of `scope-contexts.md` exactly as that step does; see there for the full shape, not restated here. Before the gate is first presented, run the same Shared-Foundation Detection pass `scope-contexts.md` defines: for any artifact string appearing in more than one proposed phase's `creates`, promote it into its own foundation phase or consolidate it into whichever consuming phase comes first in dependency order, exactly as `commands/brainstorm.md` Phase 3.5 Step 2 does.
+
+**Step 3 — Compact interactive gate.**
+
+*Non-interactive fast path.* When `INTERACTIVE_MODE=agent` or `--non-interactive` was passed:
+- Skip AskUserQuestion entirely — no gate, no Step 4 coverage check (no user is available to resolve an orphan).
+- Auto-approve the `phases` array exactly as proposed in Step 2.
+- Emit exactly one log line: `agent-mode: plan-roadmap-gate auto-approved <N> phases`, where `<N>` is the final phase count.
+- Continue to Step 5.
+
+*Interactive gate.* Render the current `phases` array as a numbered list:
+
+```
+Roadmap (N phases):
+01. <name> — <goal>
+02. <name> — <goal>
+…
+```
+
+Present via AskUserQuestion with **exactly two options** — deliberately narrower than both the Phase 3c outline gate (Approve/Rename/Add/Remove/Reorder) and `/aimi:brainstorm`'s Phase 3.5 gate (Approve/Merge/Split/Reorder/Rename/Add/Remove): this is a compact fallback, not the primary authoring surface for a phase cut.
+
+```
+Approve — proceed with this roadmap
+Edit — describe changes in free form
+```
+
+- **Approve**: run the Step 4 coverage check first.
+  - Zero orphans → exit the loop, continue to Step 5.
+  - One or more orphans → reject the selection, do not exit the loop; list the orphans to the user and re-present the gate. Approve stays unavailable until every orphan is resolved via Edit.
+- **Edit**: ask one open free-text question — "What would you like to change about this phase cut?" — and apply the user's described restructuring (merge, split, reorder, rename, add, remove, or any combination, in a single round) to the `phases` array. Re-derive `slug` (via `commands/references/topic-slug.md`) for any phase whose `name` changed. Renumber `idx` when the edit changes array order or length. Append one entry to `oqDecisions[]`:
+  ```json
+  {
+    "anchor": "phase:edit:<idx>",
+    "source": "phase",
+    "text": "User requested free-form edit to the proposed phase cut",
+    "resolution": "<one-line summary of what changed>"
+  }
+  ```
+  where `<idx>` is the zero-padded 1-based position, at edit time, of the lowest-indexed phase the edit touches — mirroring the `outline:edit:<idx>` convention's "position at edit time" semantics. Re-present the gate.
+
+Loop until the user selects Approve and the coverage check passes with zero orphans.
+
+**Step 4 — Coverage check (hard block).** Before Approve is accepted, verify that every distinct element of the feature description — plus, when loaded, every requirement named in `businessSpecContent`/`designSpecContent` and every distinct capability visible in loaded prototype content — maps to exactly one phase's `goal`, `successCriteria`, `creates`, `needs`, or `areas` field (verbatim or as a clear restatement), across the whole current `phases` array. An element with no match in any phase is an orphan.
+
+- Zero orphans: the check passes.
+- One or more orphans: name each orphan to the user and block Approve — re-present the gate (Step 3) until every orphan is resolved via Edit.
+
+This mirrors `commands/brainstorm.md` Phase 3.5 Step 4, scoped to the feature description and loaded specs/prototypes in place of that gate's accumulated brainstorm-session Q&A.
+
+**Step 5 — Materialize and hand off.** Once approved (interactively, or via the agent-mode fast path above):
+
+1. Reuse `CANDIDATE_SLUG` — already computed and validated against the `--feature` pattern by Rolling-Wave Phase Selection's "Resolve `featureSlug` and detect roadmap mode" step above — as `featureSlug`. Do not re-derive it a second time.
+2. Apply the Roadmap Materialization section's "Sanitize every phase field" and "Derive and validate each phase's directory segment" steps above, verbatim, to the approved `phases` array in place of that section's brainstorm-frontmatter entries, producing `sanitizedPhases`.
+3. Call `roadmap-init` in creation mode — the identical CLI verb Roadmap Materialization's `absent` branch uses, not a parallel implementation — with `--feature "$featureSlug"`, no `--brainstorm-path` (no brainstorm exists on this path), and no `--sync` (the Additional Guard above already rules out an existing roadmap for this feature):
+   ```bash
+   AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+   : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+   $AIMI_CLI roadmap-init --feature "$featureSlug" <<'PHASES_JSON'
+   <sanitizedPhases as a JSON array>
+   PHASES_JSON
+   ```
+   On any non-zero exit, surface the CLI's stderr as a single warning line and continue the rest of the plan pipeline as a flat, non-phased run — exactly the 0/1-scope-context fallback in Step 1 — rather than aborting the whole `/aimi:plan` invocation over a materialization failure.
+4. Set `ROADMAP_MODE=true` and continue at Rolling-Wave Phase Selection's "Load the roadmap and compute eligible pending phases" step above, treating the roadmap this step just wrote exactly as an existing one. Since every phase in a freshly created roadmap is `pending` with no live claim, the bare-invocation branch of "Select the target phase" selects the lowest eligible id automatically — confining this invocation to exactly one phase, per Rolling-Wave Phase Selection's rule; every other phase remains an outline-only entry in `roadmap.json` until a later `/aimi:plan` invocation selects it.
+
+No parallel roadmap-write or phase-selection logic is implemented in this subsection — every step above re-enters an existing section by name rather than reimplementing it.
 
 ### Phase 0.5: Open Questions Resolution Gate
 
@@ -1919,7 +1996,7 @@ Read the tasks.json file written by story-merge and patch the `metadata` object 
 - **prototypePaths**: Convert each path in `resolvedPrototypePaths` to a path relative to `AIMI_ROOT` (no leading `./`, no `..` components). Deduplicate with `| unique`. Emit as `metadata.prototypePaths` array. Omit the key entirely when the array is empty.
 - **designBundle**: When `designBundleMeta` is non-null, emit as `metadata.designBundle` with the following shape: `{ root: string, readme: string, chats: string[], businessSpec: string|null, designSpec: string|null }`. All paths relative to `AIMI_ROOT`. Omit the key entirely when no bundle was detected. When the bundle was detected, always emit both `businessSpec` and `designSpec` keys — use `null` for whichever spec file is absent.
 - **designTokens**: When `designSpecContent` is non-null and `DesignSpec § 1` contains a token map, parse it and emit as `metadata.designTokens` — a flat object whose top-level keys are the token categories enumerated in `DesignSpec § 1` (e.g., `color`, `typography`, `spacing`, `radii`, `shadow`, `transition`). Values are written verbatim from the spec without normalization. Omit the key entirely when `designSpecContent` is null or `§ 1` contains no token map.
-- **decisions**: Emit one entry per item in the fully accumulated `oqDecisions[]` working memory — this includes every OQ resolved or deferred by Phase 0.5, Phase 1.8, Phase 2.5, AND outline-gate edits recorded in Phase 3c. Each entry carries `anchor`, `source`, `text`, and `resolution` from the corresponding `oqDecisions[]` record. Omit the `decisions` key entirely when `oqDecisions[]` is empty.
+- **decisions**: Emit one entry per item in the fully accumulated `oqDecisions[]` working memory — this includes every OQ resolved or deferred by Phase 0.5, Phase 1.8, Phase 2.5, outline-gate edits recorded in Phase 3c, AND phase-cut Edit rounds recorded by the Phase 0 Scope-Context Classification (Inline Fallback) gate. Each entry carries `anchor`, `source`, `text`, and `resolution` from the corresponding `oqDecisions[]` record. Omit the `decisions` key entirely when `oqDecisions[]` is empty.
 - **maxConcurrency**: Default `20`. Set to `1` for strictly sequential execution.
 - **frontendOnly** (when `implementationScope == "frontend-only"`): `true`
 - **backendSpec** (when `implementationScope == "frontend-only"`): derive per the rules below
@@ -2102,7 +2179,7 @@ The `metadata.backendSpec.endpoints[].responseShape` field follows a strict flat
 
 **Notes:** `implementation`, `verification`, `gate`, `skills`, and `tasks` are optional per story. `wave` is required on all stories.
 
-**`metadata.decisions[].source` field:** each entry records where the Open Question or outline edit originated. Eleven valid source values:
+**`metadata.decisions[].source` field:** each entry records where the Open Question or outline edit originated. Twelve valid source values:
 - `<brainstorm-path>:L<line>` — an OQ line from the brainstorm doc (Phase 0.5)
 - `businessSpec:L<line>` — a marker-style OQ scanned from `businessSpecContent` (Phase 0.5)
 - `designSpec:L<line>` — a marker-style OQ scanned from `designSpecContent` (Phase 0.5)
@@ -2114,6 +2191,7 @@ The `metadata.backendSpec.endpoints[].responseShape` field follows a strict flat
 - `scopePosVerifier` — a scope-pruning-positive outcome recorded by the Phase 1.8 Scope-Pruning-Positive Gate (anchor `scopePos:<entity-slug>`); `resolution` is `confirmed-present` | `refuted-corrected` | `partial-surfaced`
 - `codebaseVerified` — auto-resolved by Phase 2.4 codebase cross-check; evidence field holds classified file:line hits
 - `outline` — an outline-gate edit recorded in Phase 3c (rename, add, remove, reorder)
+- `phase` — a phase-cut Edit round recorded by the Phase 0 Scope-Context Classification (Inline Fallback) gate; anchor format `phase:edit:<idx>` (zero-padded index into the proposed phase list at edit time). Distinct from `/aimi:brainstorm`'s own roadmap-gate edits, which are local to that command's `phaseEditDecisions[]` working memory and use `source: "phaseGate"` instead — the two never share a decisions array.
 
 Consumers can branch on the prefix to distinguish decisions by origin.
 
