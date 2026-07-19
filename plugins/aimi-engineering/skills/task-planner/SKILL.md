@@ -46,6 +46,10 @@ Execute these phases in order.
 
 Check `.aimi/brainstorms/` for a matching brainstorm (semantic match, within 14 days). If found, use as context and skip questions. If multiple match, ask user. If none, ask refinement questions via AskUserQuestion until the idea is clear.
 
+#### Roadmap Materialization (phased features only)
+
+When the loaded brainstorm carries a `phases:` frontmatter block (2+ sanitized phase entries — see `commands/brainstorm.md` "phases frontmatter rules"), materialize `.aimi/tasks/<feature-slug>/roadmap.json` via the `aimi-cli.sh` `roadmap-init` verb before continuing — **never** write it with the Write tool. Sanitize every field and re-derive each phase's `phase-<id>[.<n>]-<slug>` directory segment from the (sanitized) `name`, never trusting the frontmatter's own `slug`; fall back to the bare `phase-<id>` form with a warning if the derived segment fails `^phase-[0-9]+(\.[0-9]+)?(-[a-z0-9][a-z0-9-]*)?$`. First run creates the file; a re-run against an existing `roadmap.json` calls `roadmap-init --sync` to append only phases missing by numeric id, leaving existing status/claim/branch fields byte-for-byte untouched. Absent `phases:` frontmatter (the common case): skip entirely — no folder created, no `roadmap.json` written, flow identical to today. Full field-sanitization, directory-validation, and idempotency/additive-sync rules: [pipeline-phases.md](references/pipeline-phases.md#roadmap-materialization).
+
 #### Implementation Scope Detection
 
 After the brainstorm check, determine the implementation scope:

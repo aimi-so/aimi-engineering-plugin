@@ -270,6 +270,84 @@ After reading the brainstorm (if one was found), parse its YAML frontmatter for 
 
 If no brainstorm was found, or the brainstorm has no `researchPaths` key, `reusedResearch` remains unset and behaviour is unchanged (backward-compatible with legacy brainstorms).
 
+### Roadmap Materialization
+
+Only runs when a brainstorm was loaded above — a `phases:` frontmatter key can exist only on a brainstorm document, so when no brainstorm was found this entire section is skipped with no log line. This step turns `/aimi:brainstorm`'s Phase 3.5 roadmap-gate output (the `phases:` frontmatter block — see `commands/brainstorm.md` "phases frontmatter rules") into durable, guard-protected state via `aimi-cli.sh`. `/aimi:brainstorm` never writes `.aimi/tasks/<feature-slug>/roadmap.json` itself; this is the only place that does.
+
+**Parse `phases:` frontmatter**
+
+1. Parse the `phases:` key from the same brainstorm frontmatter block already loaded above. Each entry carries `id, name, slug, goal, successCriteria, dependsOn, creates, needs, areas` in that fixed order.
+2. **If the key is absent** (legacy brainstorm, single scope-context feature, or the roadmap gate was skipped/collapsed): skip the rest of this section entirely. No `.aimi/tasks/<feature-slug>/` folder is created, no `roadmap.json` is written, and the rest of the pipeline (Phase 1 through Phase 3e) behaves identically to today's flat, non-phased flow. This is the default, most common path — emit no log line.
+3. **If present but fewer than 2 entries** (defensive re-check — `/aimi:brainstorm` never emits a single-entry `phases:` list, but a hand-edited or externally authored brainstorm might): treat as absent. Emit one warning line `phases: frontmatter has fewer than 2 entries — ignoring, falling back to flat flow` and skip the rest of this section.
+
+**Sanitize every phase field**
+
+For each remaining phase entry, apply the base rules in `commands/references/sanitization.md` (strip code fences/backtick content, HTML/XML tags, instruction-override patterns) plus the newline/`$(`-stripping extension already applied to Path Hints and Phase 1.8 OQ text elsewhere in this command, to every free-text field, before it is used in any directory-segment derivation, CLI argument, or downstream prompt:
+
+- Replace newlines/carriage returns with spaces.
+- Strip `$(` sequences and backtick characters.
+- Truncate: `name` 200 chars, `goal` 2000 chars, each `successCriteria`/`creates`/`needs`/`areas` entry 2000 chars (these caps match the server-side `_ROADMAP_SANITIZE_JQ` truncation `aimi-cli.sh` re-applies, so nothing added here is silently re-truncated a second time downstream).
+- Each of `successCriteria`, `dependsOn`, `creates`, `needs`, `areas` defaults to an empty list `[]` when absent from the entry.
+- `id` and each `dependsOn` entry are numbers, not text — do not run them through string sanitization. Instead validate `id` is present and numeric; drop (with a warning `phase <n>: dropped — id missing or non-numeric`) any entry that fails.
+- **Discard the frontmatter's own `slug` value entirely — never trust it.** The next step derives a fresh one from the sanitized `name`.
+
+**Derive and validate each phase's directory segment**
+
+For each sanitized phase entry, in order:
+
+1. Derive `candidateSlug` from the *sanitized* `name` using the five-step algorithm in `commands/references/topic-slug.md`.
+2. Compose `candidateDir = "phase-" + <id> + (candidateSlug non-empty ? "-" + candidateSlug : "")`, rendering `<id>` exactly as its numeric frontmatter value (e.g. `2` or `2.1`).
+3. Validate `candidateDir` against `^phase-[0-9]+(\.[0-9]+)?(-[a-z0-9][a-z0-9-]*)?$` — the identical pattern `aimi-cli.sh` enforces server-side as `_ROADMAP_DIR_REGEX`.
+4. **Match:** use `candidateSlug` as the phase's `slug` field in the payload built below.
+5. **No match** (topic-slugging already excludes slashes and `..` in the common case, but this is the required defense-in-depth backstop): emit one warning line `phase <id>: computed dir segment "<candidateDir>" failed validation — falling back to bare phase-<id>` and use an **empty string** as the phase's `slug` field instead, so the CLI computes the bare `phase-<id>` form. Never pass `candidateDir` or the rejected `candidateSlug` itself to `mkdir`, the `roadmap-init` CLI call, or any Write/Edit tool call — only the empty-string fallback is used.
+
+Collect the results into a `sanitizedPhases` working-memory list — each entry `{id, name, slug, goal, successCriteria, dependsOn, creates, needs, areas}` in that fixed key order.
+
+**Derive the feature slug**
+
+`phases:` frontmatter is only ever written by `/aimi:brainstorm`, and every brainstorm document carries a top-level `topic:` frontmatter key (already produced by the same five-step topic-slug algorithm — see brainstorm.md Phase 4 template). Read it as `featureSlug`. Validate it against `^[a-zA-Z0-9][a-zA-Z0-9_-]*$` (the `--feature` pattern `aimi-cli.sh` enforces); on the rare mismatch, re-derive `featureSlug` by running the topic-slug algorithm on the raw `topic:` value. If it is still empty or invalid, skip the rest of this section with warning `roadmap materialization skipped — could not derive a valid feature slug`.
+
+**Detect existing roadmap.json and materialize**
+
+```bash
+[ -f "$AIMI_ROOT/.aimi/tasks/$featureSlug/roadmap.json" ] && echo exists || echo absent
+```
+
+- **`exists`:** call `roadmap-init --sync` — the additive-sync path. Any phase id already present in the file is left byte-for-byte unchanged (status, claim, and branch fields untouched); any phase id present only in `sanitizedPhases` is appended, joining the ordering purely by numeric id (a decimal-inserted phase like `2.1` sorts between its numeric neighbors). This is also the correct call on a byte-for-byte unchanged re-run — `--sync` with zero new ids is a no-op for every existing phase. Never call `roadmap-init` without `--sync` when the file already exists — that path is a hard error by design, guarding against clobbering.
+
+  ```bash
+  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+  $AIMI_CLI roadmap-init --feature "$featureSlug" --sync <<'PHASES_JSON'
+  <sanitizedPhases as a JSON array>
+  PHASES_JSON
+  ```
+
+- **`absent`:** call `roadmap-init` in creation mode, passing the brainstorm's own path (relative to `AIMI_ROOT`, no leading `./`, no `..` — the file read at the top of Phase 0) as `--brainstorm-path`. The CLI creates `.aimi/tasks/<feature-slug>/` itself as part of its locked write — no separate `mkdir` call is needed, and no Write tool call ever touches `roadmap.json`.
+
+  ```bash
+  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+  $AIMI_CLI roadmap-init --feature "$featureSlug" --brainstorm-path "<brainstorm relative path>" <<'PHASES_JSON'
+  <sanitizedPhases as a JSON array>
+  PHASES_JSON
+  ```
+
+In both branches, the JSON array piped via stdin is built directly from `sanitizedPhases` — one object per phase, key order `id, name, slug, goal, successCriteria, dependsOn, creates, needs, areas` — e.g.:
+
+```json
+[
+  {"id": 1, "name": "Foundation", "slug": "foundation", "goal": "...", "successCriteria": ["..."], "dependsOn": [], "creates": ["..."], "needs": [], "areas": ["..."]},
+  {"id": 2, "name": "Notifications", "slug": "notifications", "goal": "...", "successCriteria": ["..."], "dependsOn": [1], "creates": [], "needs": ["..."], "areas": ["..."]}
+]
+```
+
+The quoted heredoc delimiter (`<<'PHASES_JSON'`) prevents shell expansion of the JSON body — defense in depth alongside the field sanitization above.
+
+If `roadmap-init` exits non-zero for any other reason (e.g. a dangling `dependsOn` reference introduced by a hand-edited brainstorm), surface the CLI's stderr as a single warning line and continue the rest of the plan pipeline unchanged. Do not abort the whole `/aimi:plan` run over a roadmap-materialization failure — the flat pipeline output is still valuable even when phase tracking could not be initialized this run.
+
+`featureSlug` and `sanitizedPhases` remain in working memory for the rest of this session but do not otherwise change downstream phase behavior — Phase 1 through Phase 3e are unaffected by this story.
+
 ### Implementation Scope Detection
 
 After the brainstorm check, determine the implementation scope:

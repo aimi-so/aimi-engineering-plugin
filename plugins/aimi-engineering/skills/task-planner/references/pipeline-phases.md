@@ -30,6 +30,62 @@
    - Prefer multiple choice when natural options exist
    - Continue until idea is clear OR user says "proceed"
 
+### Roadmap Materialization
+
+Only runs when a brainstorm was loaded above — a `phases:` frontmatter key can exist only on a brainstorm document written by `/aimi:brainstorm`'s Phase 3.5 roadmap-gate (see `commands/brainstorm.md` "phases frontmatter rules"). When no brainstorm was found, skip this entire section with no log line.
+
+`/aimi:brainstorm` never creates `.aimi/tasks/<feature-slug>/roadmap.json` itself — it only writes the `phases:` frontmatter block. This step is what turns that block into durable, guard-protected state.
+
+**Parse `phases:` frontmatter**
+
+1. Parse the `phases:` key from the already-loaded brainstorm frontmatter. Each entry carries `id, name, slug, goal, successCriteria, dependsOn, creates, needs, areas` in that fixed order.
+2. **Absent** (legacy brainstorm, single scope-context feature, or roadmap gate skipped/collapsed): skip the rest of this section. No `.aimi/tasks/<feature-slug>/` folder is created, no `roadmap.json` is written, and the rest of the pipeline (Phase 1 onward) behaves identically to today's flat, non-phased flow. This is the default path — no log line.
+3. **Present but fewer than 2 entries** (defensive re-check — `/aimi:brainstorm` never emits a single-entry list, but a hand-edited brainstorm might): treat as absent. Emit `phases: frontmatter has fewer than 2 entries — ignoring, falling back to flat flow` and skip.
+
+**Sanitize every phase field**
+
+Apply the base rules in `commands/references/sanitization.md` (strip code fences/backtick content, HTML/XML tags, instruction-override patterns) plus the newline/`$(`-stripping extension used elsewhere in this pipeline, to every free-text field, before it is used in any directory-segment derivation, CLI argument, or downstream prompt:
+
+- Replace newlines/carriage returns with spaces; strip `$(` sequences and backtick characters.
+- Truncate: `name` 200 chars, `goal` 2000 chars, each `successCriteria`/`creates`/`needs`/`areas` entry 2000 chars (matches the server-side `_ROADMAP_SANITIZE_JQ` caps `aimi-cli.sh` re-applies).
+- `successCriteria`, `dependsOn`, `creates`, `needs`, `areas` default to `[]` when absent.
+- `id` and each `dependsOn` entry are numbers — validate `id` is present and numeric; drop (with a warning) any entry that fails.
+- **Discard the frontmatter's own `slug` value entirely.** It is never trusted — the next step derives a fresh one from the sanitized `name`.
+
+**Derive and validate each phase's directory segment**
+
+For each sanitized phase entry:
+
+1. Derive `candidateSlug` from the sanitized `name` via the five-step algorithm in `commands/references/topic-slug.md`.
+2. Compose `candidateDir = "phase-" + <id> + (candidateSlug non-empty ? "-" + candidateSlug : "")`.
+3. Validate against `^phase-[0-9]+(\.[0-9]+)?(-[a-z0-9][a-z0-9-]*)?$` — the same pattern `aimi-cli.sh` enforces server-side as `_ROADMAP_DIR_REGEX`.
+4. **Match:** use `candidateSlug` as the phase's `slug` in the payload.
+5. **No match:** emit `phase <id>: computed dir segment "<candidateDir>" failed validation — falling back to bare phase-<id>` and use an empty string as `slug` instead, so the CLI computes the bare `phase-<id>` form. Never pass the rejected value to `mkdir`, the `roadmap-init` call, or any Write/Edit tool call.
+
+**Derive the feature slug**
+
+Read the brainstorm's top-level `topic:` frontmatter key as `featureSlug` (already produced by the topic-slug algorithm). Validate against `^[a-zA-Z0-9][a-zA-Z0-9_-]*$` (the `--feature` pattern `aimi-cli.sh` enforces); on mismatch, re-derive via the topic-slug algorithm on the raw `topic:` value. If still invalid, skip with warning `roadmap materialization skipped — could not derive a valid feature slug`.
+
+**Detect existing roadmap.json and materialize**
+
+```bash
+[ -f "$AIMI_ROOT/.aimi/tasks/$featureSlug/roadmap.json" ] && echo exists || echo absent
+```
+
+- **`exists`:** call `roadmap-init --feature "$featureSlug" --sync` with the sanitized phases JSON array piped via stdin. Any phase id already present is left byte-for-byte unchanged (status/claim/branch untouched); any phase id present only in the frontmatter is appended, joining by numeric id (decimal-inserted phases like `2.1` sort between their numeric neighbors). This call is also correct — and a no-op for existing phases — on a byte-for-byte unchanged re-run. Never call `roadmap-init` without `--sync` when the file exists; that is a hard error by design.
+- **`absent`:** call `roadmap-init --feature "$featureSlug" --brainstorm-path "<brainstorm relative path>"` (no `--sync`) with the same JSON array piped via stdin. The CLI creates `.aimi/tasks/<feature-slug>/` itself as part of its locked write — no separate `mkdir`, no Write tool call ever touches `roadmap.json`.
+
+Payload shape (one object per phase, fixed key order):
+
+```json
+[
+  {"id": 1, "name": "Foundation", "slug": "foundation", "goal": "...", "successCriteria": ["..."], "dependsOn": [], "creates": ["..."], "needs": [], "areas": ["..."]},
+  {"id": 2, "name": "Notifications", "slug": "notifications", "goal": "...", "successCriteria": ["..."], "dependsOn": [1], "creates": [], "needs": ["..."], "areas": ["..."]}
+]
+```
+
+If `roadmap-init` exits non-zero for any other reason (e.g. a dangling `dependsOn` reference from a hand-edited brainstorm), surface its stderr as a warning and continue the rest of the plan pipeline unchanged — do not abort the whole run over a roadmap-materialization failure.
+
 ### Implementation Scope Detection
 
 After the brainstorm check, determine the implementation scope:
