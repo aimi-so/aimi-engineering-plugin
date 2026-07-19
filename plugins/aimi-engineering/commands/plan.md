@@ -1300,7 +1300,7 @@ TASKS_PATH=".aimi/tasks/${featureSlug}/${PHASE_DIR}/${featureSlug}-phase-${SELEC
 mkdir -p "$AIMI_ROOT/.aimi/tasks/${featureSlug}/${PHASE_DIR}"
 ```
 
-The `*-tasks.json` basename convention is preserved — only the directory and the date-vs-phase discriminator in the filename differ from the flat form. `--split full-stack` composes transparently on top of this: story-merge derives its `-frontend-tasks.json`/`-backend-tasks.json` output paths from whatever `--output` base it is given (directory plus basename), unchanged mechanics — no special-casing needed here.
+The `*-tasks.json` basename convention is preserved — only the directory and the date-vs-phase discriminator in the filename differ from the flat form. `--split full-stack` composes on top of this: story-merge derives its `-frontend-tasks.json`/`-backend-tasks.json` output paths from whatever `--output` base it is given (directory plus basename). The one piece of special-casing needed is basename shape: this `--output` base already ends in `-tasks` (`${featureSlug}-phase-${SELECTED_PHASE_ID}-tasks.json`), so appending directly would double that segment (`...-tasks-frontend-tasks.json`, matching the flat/legacy shape). Phase 3e passes story-merge's `--phase-aware` flag whenever `ROADMAP_MODE=true` and `implementationScope == "full-stack"` so it strips the trailing `-tasks` once first, producing single-`tasks`-segment split basenames (`${featureSlug}-phase-${SELECTED_PHASE_ID}-frontend-tasks.json` / `-backend-tasks.json`) instead — see Phase 3e below.
 
 **When `ROADMAP_MODE=false` (unchanged):**
 
@@ -1939,11 +1939,13 @@ $AIMI_CLI story-merge \
   --staging-dir "$RUN_DIR" \
   --output "$TASKS_PATH" \
   [--split full-stack  when implementationScope == "full-stack"] \
+  [--phase-aware        when ROADMAP_MODE == true AND implementationScope == "full-stack"] \
   [--agent-mode        when INTERACTIVE_MODE == "agent"]
 ```
 
 **Flag rules:**
 - `--split full-stack`: pass when `implementationScope == "full-stack"`. Causes story-merge to produce two output files (`*-frontend-tasks.json` and `*-backend-tasks.json`) instead of one.
+- `--phase-aware`: pass when **both** `ROADMAP_MODE == true` and `implementationScope == "full-stack"` — the composed phase+split case (see outline 13). `$TASKS_PATH` in that case already ends in `-tasks.json` (the phase-scoped form derived above), so story-merge strips the trailing `-tasks` segment once before appending `-frontend-tasks.json`/`-backend-tasks.json`, keeping a single `tasks` segment in each split basename. Never pass this flag when `--split full-stack` is absent, or when `ROADMAP_MODE == false` (flat full-stack split keeps its existing double-`tasks` basename unchanged).
 - `--agent-mode`: pass when `INTERACTIVE_MODE == "agent"`. Demotes Phase 3.1 and Phase 4.1 hard blocks to warnings inside story-merge.
 - `--split legacy` (default): no flag needed; story-merge uses legacy mode when `--split` is omitted.
 
@@ -1982,7 +1984,7 @@ Read the tasks.json file written by story-merge and patch the `metadata` object 
 
 - **title**: `<type>: <Descriptive Name>`
 - **type**: `feat`, `ref`, `bug`, or `chore`
-- **branchName**: Kebab-case, prefixed with type. For split files: `type/[feature]-frontend` and `type/[feature]-backend`. **When `ROADMAP_MODE=true`:** `type/${featureSlug}-phase-${SELECTED_PHASE_ID}-${PHASE_SLUG}` instead (matches the container branch `/aimi:execute` creates for this phase). Validate against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` before writing — refuse the write (report the invalid computed branch name and STOP; do not fall back to a mangled variant) if it fails, exactly as the flat-mode branchName derivation already requires.
+- **branchName**: Kebab-case, prefixed with type. For split files: `type/[feature]-frontend` and `type/[feature]-backend`. **When `ROADMAP_MODE=true` and not split:** `type/${featureSlug}-phase-${SELECTED_PHASE_ID}-${PHASE_SLUG}` instead (matches the container branch `/aimi:execute` creates for this phase). **When `ROADMAP_MODE=true` and split (`implementationScope == "full-stack"`, composed phase+split case — outline 13):** the phase-branch value from the rule above, suffixed the same way the flat split case suffixes its own branchName — `type/${featureSlug}-phase-${SELECTED_PHASE_ID}-${PHASE_SLUG}-frontend` and `-backend` — so each split worktree/branch `/aimi:execute` creates (`<phase-branch>-frontend` / `<phase-branch>-backend`) matches this file's own `metadata.branchName` exactly; this exact-match is what lets the worktree-budget hook's governing-file resolution (`_select_governing_tasks_file`) pick the right split file for each sub-orchestrator's own concurrency limit. Validate against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` before writing — refuse the write (report the invalid computed branch name and STOP; do not fall back to a mangled variant) if it fails, exactly as the flat-mode branchName derivation already requires.
 - **createdAt**: Today's date (YYYY-MM-DD)
 - **planPath**: Always `null`
 - **roadmapPath** (when `ROADMAP_MODE=true`): `.aimi/tasks/${featureSlug}/roadmap.json`, relative to `AIMI_ROOT`. Omit the key entirely when `ROADMAP_MODE=false`.
@@ -2003,7 +2005,7 @@ Read the tasks.json file written by story-merge and patch the `metadata` object 
 
 Use the Write tool to patch the output tasks.json with these fields merged into the `metadata` object.
 
-**For split files (full-stack):** patch both `*-frontend-tasks.json` and `*-backend-tasks.json` independently. Assign separate `branchName` values (`type/[feature]-frontend` and `type/[feature]-backend`, or their `ROADMAP_MODE=true` phase-suffixed equivalents per the branchName rule above). Write the same `prototypePaths`, `designBundle`, `designTokens`, `roadmapPath`, and `phase` to both files.
+**For split files (full-stack):** patch both `*-frontend-tasks.json` and `*-backend-tasks.json` independently. Assign separate `branchName` values (`type/[feature]-frontend` and `type/[feature]-backend`, or their `ROADMAP_MODE=true` phase-suffixed equivalents — `type/${featureSlug}-phase-${SELECTED_PHASE_ID}-${PHASE_SLUG}-frontend`/`-backend` — per the branchName rule above). Write the same `prototypePaths`, `designBundle`, `designTokens`, `roadmapPath`, and `phase` to both files. When `ROADMAP_MODE=true`, these are the two `--phase-aware`-derived files at `.aimi/tasks/${featureSlug}/${PHASE_DIR}/${featureSlug}-phase-${SELECTED_PHASE_ID}-frontend-tasks.json` and `-backend-tasks.json` (single `tasks` segment — see Phase 3e).
 
 ### Derive `metadata.backendSpec` (frontend-only mode only)
 
@@ -2242,17 +2244,19 @@ Specific obligations:
 - [ ] Gates only attached when heuristics clearly match
 - [ ] Every story with `verification.strategy == "visual"` and non-empty `metadata.prototypePaths` has at least one `(prototype: ...)` citation in its acceptance criteria (either `(prototype: <path> §<heading>)` or `(prototype: <path>:L<start>-L<end>)`)
 - [ ] Rule 19a compliance (when `designSpecContent` is non-null): every visual story's `acceptanceCriteria` wraps each visible-text literal in double quotes followed by a `(DesignSpec § N.N L<line>)` anchor; no paraphrasing, translation, abbreviation, or reordering of the cited text
-- [ ] Rolling-wave (when `ROADMAP_MODE=true`): `metadata.roadmapPath` and `metadata.phase.{id,dir}` are present and match the selected phase; `metadata.branchName` matches `type/${featureSlug}-phase-${SELECTED_PHASE_ID}-${PHASE_SLUG}` and passes `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$`; the output file lives at `.aimi/tasks/${featureSlug}/${PHASE_DIR}/${featureSlug}-phase-${SELECTED_PHASE_ID}-tasks.json`; `roadmap.json`'s phase `${SELECTED_PHASE_ID}` status is `planned` only after this checklist and Phase 4.5 both pass
+- [ ] Rolling-wave (when `ROADMAP_MODE=true`, not split): `metadata.roadmapPath` and `metadata.phase.{id,dir}` are present and match the selected phase; `metadata.branchName` matches `type/${featureSlug}-phase-${SELECTED_PHASE_ID}-${PHASE_SLUG}` and passes `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$`; the output file lives at `.aimi/tasks/${featureSlug}/${PHASE_DIR}/${featureSlug}-phase-${SELECTED_PHASE_ID}-tasks.json`; `roadmap.json`'s phase `${SELECTED_PHASE_ID}` status is `planned` only after this checklist and Phase 4.5 both pass
+- [ ] Rolling-wave + full-stack split (when `ROADMAP_MODE=true` and `implementationScope == "full-stack"` — outline 13): story-merge was invoked with both `--split full-stack` and `--phase-aware`; the two output files live at `.aimi/tasks/${featureSlug}/${PHASE_DIR}/${featureSlug}-phase-${SELECTED_PHASE_ID}-frontend-tasks.json` and `-backend-tasks.json` (single `tasks` segment — not the flat split's double-`tasks` shape); each file's `metadata.branchName` is `type/${featureSlug}-phase-${SELECTED_PHASE_ID}-${PHASE_SLUG}-frontend` / `-backend` and passes `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$`; `roadmap.json`'s phase `${SELECTED_PHASE_ID}` status is `planned` only after this checklist and Phase 4.5 both pass
 
 ### Split-File Checks (when `implementationScope` is set)
 - [ ] Full-stack: two files generated (`*-frontend-tasks.json` and `*-backend-tasks.json`) — produced by story-merge `--split full-stack`
-- [ ] Full-stack: each file has its own `branchName` (`type/[feature]-frontend`, `type/[feature]-backend`) — patched in Phase 4
+- [ ] Full-stack: each file has its own `branchName` (`type/[feature]-frontend`, `type/[feature]-backend`, or their `ROADMAP_MODE=true` phase-suffixed equivalents) — patched in Phase 4
 - [ ] Full-stack: story IDs are unique across both files (no ID collisions) — enforced by story-merge
 - [ ] Full-stack: no cross-file `dependsOn` references — each file's graph is self-contained — enforced by story-merge
 - [ ] Full-stack: wave numbers computed independently per file (roots = wave 1 within each file) — enforced by story-merge
 - [ ] Frontend-only: single `*-frontend-tasks.json` with `metadata.frontendOnly: true`
 - [ ] Frontend-only: `metadata.backendSpec` contains `endpoints`, `dataModels`, `businessRules`, `businessContext`
 - [ ] Full-stack: `metadata.designBundle` (if set) and `metadata.designTokens` (if set) are written to both frontend and backend files
+- [ ] Full-stack + `ROADMAP_MODE=true`: `--phase-aware` was passed to story-merge and both split basenames carry a single `tasks` segment (`${featureSlug}-phase-${SELECTED_PHASE_ID}-frontend-tasks.json`, not `${featureSlug}-phase-${SELECTED_PHASE_ID}-tasks-frontend-tasks.json`)
 - [ ] Phase 4.5 validation runs on each file independently using `$AIMI_CLI init-session --file <path>`
 
 ## Phase 4.5: Post-Generation Validation

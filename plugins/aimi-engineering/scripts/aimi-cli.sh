@@ -4304,7 +4304,7 @@ $rp_entry"
 # ============================================================================
 # story-merge: Consolidate staging files into a validated tasks.json
 # Usage: aimi-cli.sh story-merge --staging-dir <dir> --output <path>
-#           [--split legacy|full-stack] [--agent-mode]
+#           [--split legacy|full-stack] [--agent-mode] [--phase-aware]
 # ============================================================================
 
 # _story_merge_assign_ids: given a JSON array of story objects (already loaded),
@@ -4313,7 +4313,7 @@ $rp_entry"
 # Returns the array with id fields populated.
 
 cmd_story_merge() {
-  local staging_dir="" output_path="" split_mode="legacy" agent_mode=false
+  local staging_dir="" output_path="" split_mode="legacy" agent_mode=false phase_aware=false
 
   # --- Parse flags ---
   while [ $# -gt 0 ]; do
@@ -4332,6 +4332,9 @@ cmd_story_merge() {
         ;;
       --agent-mode)
         agent_mode=true
+        ;;
+      --phase-aware)
+        phase_aware=true
         ;;
       *)
         echo "Error: story-merge: unknown flag: $1" >&2
@@ -4875,7 +4878,7 @@ cmd_story_merge() {
   # Branch on split mode
   # ============================================================
   if [ "$split_mode" = "full-stack" ]; then
-    _story_merge_write_split "$merged_array" "$output_path" "$staging_dir" "$smell_warnings"
+    _story_merge_write_split "$merged_array" "$output_path" "$staging_dir" "$smell_warnings" "$phase_aware"
   else
     _story_merge_write_legacy "$merged_array" "$output_path" "$staging_dir" "$smell_warnings"
   fi
@@ -4947,6 +4950,7 @@ _story_merge_write_split() {
   local output_path="$2"
   local staging_dir="$3"
   local smell_warnings="${4:-[]}"
+  local phase_aware="${5:-false}"
 
   # Partition by layer:
   # - UI stories → frontend (stories whose title/description contains UI/Frontend/React/Vue/component keywords,
@@ -5079,6 +5083,17 @@ _story_merge_write_split() {
   base_name=$(basename "$output_path")
   ext="${base_name##*.}"
   local base_no_ext="${base_name%.$ext}"
+  # --phase-aware: the output basename for a phase-scoped invocation already
+  # ends in "-tasks" (e.g. "<feature>-phase-<N>-tasks.json"). Strip that single
+  # trailing "-tasks" segment once before appending "-frontend-tasks.json" /
+  # "-backend-tasks.json" so the split basenames keep a single "tasks" segment
+  # ("<feature>-phase-<N>-frontend-tasks.json") instead of doubling it. Default
+  # (unflagged) derivation is untouched -- it keeps appending directly to the
+  # full ".json"-stripped basename, preserving the existing double-"tasks"
+  # legacy basename (e.g. "<slug>-tasks-frontend-tasks.json").
+  if [ "$phase_aware" = true ]; then
+    base_no_ext="${base_no_ext%-tasks}"
+  fi
   local dir_part
   dir_part=$(dirname "$output_path")
   fe_path="${dir_part}/${base_no_ext}-frontend-tasks.json"
@@ -6796,6 +6811,7 @@ COMMANDS:
                               --source-command must be exactly 'brainstorm' or 'plan'.
     story-merge --staging-dir <dir> --output <path>
                               [--split legacy|full-stack] [--agent-mode]
+                              [--phase-aware]
                               Consolidate per-story staging *.json files into a
                               validated tasks.json. Steps: glob+validate JSON,
                               assign US-NNN IDs by lex order, remap outline:NN
@@ -6814,6 +6830,15 @@ COMMANDS:
                               <base>-frontend-tasks.json and
                               <base>-backend-tasks.json with unique IDs, rebuilt
                               dependsOn, and independent wave numbers.
+                              --phase-aware (only meaningful with --split
+                              full-stack): the --output basename already ends in
+                              "-tasks" (phase-scoped output, e.g.
+                              "<feature>-phase-<N>-tasks.json") — strip that
+                              trailing "-tasks" segment once before appending
+                              "-frontend-tasks.json"/"-backend-tasks.json" so the
+                              split basenames keep a single "tasks" segment
+                              instead of doubling it. Omitted: unchanged legacy
+                              derivation (double "-tasks-frontend-tasks.json").
                               --agent-mode demotes Phase 3.1 and Phase 4.1
                               hard rejects to warnings and proceeds.
     roadmap-init --feature <slug> [--file <path>] [--sync] [--brainstorm-path <path>]

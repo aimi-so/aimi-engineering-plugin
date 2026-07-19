@@ -111,6 +111,7 @@ One CLI subcommand manages the story-merge lifecycle. It is consumed by the `/ai
     - `--output <path>` — destination `tasks.json` path (default: `.aimi/tasks/<date>-<topic-slug>-tasks.json`).
     - `--split legacy|full-stack` — `full-stack` emits two files (frontend + backend) partitioned by story `project` field; `legacy` (default) emits one file.
     - `--agent-mode` — demotes Phase 3.1 and Phase 4.1 hard rejects to warnings, allowing CI pipelines to proceed without a user review gate.
+    - `--phase-aware` — only meaningful with `--split full-stack`. Strips one trailing `-tasks` segment from the `--output` basename before appending `-frontend-tasks.json`/`-backend-tasks.json`, so a phase-scoped output path (`<feature>-phase-<N>-tasks.json`) produces single-`tasks`-segment split basenames (`<feature>-phase-<N>-frontend-tasks.json`) instead of the legacy double-`tasks` form. Omitted (default): unchanged legacy derivation.
 
 ## Tasks File Schema
 

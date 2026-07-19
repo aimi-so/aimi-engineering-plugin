@@ -8841,6 +8841,109 @@ EOF
   rm -f "$fe_file" "$be_file" "$out_file"
 }
 
+# TC12: Full-stack split + --phase-aware — phase-scoped output path collapses
+# the split basenames to a single "tasks" segment instead of TC8's legacy
+# double-"tasks" form (US-013).
+test_story_merge_phase_aware_split() {
+  echo ""
+  echo "=== TC12: story-merge --split full-stack --phase-aware ==="
+
+  local stg=".aimi/.tasks-staging-tc12"
+  local phase_dir=".aimi/tasks/tc12-feature/phase-2-slug"
+  local out_file="${phase_dir}/tc12-feature-phase-2-tasks.json"
+  rm -rf "$stg" "$phase_dir"
+  mkdir -p "$stg" "$phase_dir"
+
+  # Frontend story
+  cat > "$stg/01-ui.json" << 'EOF'
+{
+  "title": "React UserProfile page",
+  "description": "As a user, I want a React page so that I can view data.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 1,
+  "status": "pending",
+  "dependsOn": [],
+  "notes": "",
+  "implementation": {
+    "files": ["src/components/UserProfile.tsx"],
+    "approach": "Build React component",
+    "verify": "tsc --noEmit"
+  }
+}
+EOF
+
+  # Backend story
+  cat > "$stg/02-api.json" << 'EOF'
+{
+  "title": "UserProfile API endpoint",
+  "description": "As a developer, I want a backend endpoint so that data is served.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 2,
+  "status": "pending",
+  "dependsOn": [],
+  "notes": "",
+  "implementation": {
+    "files": ["app/controllers/user_profiles_controller.rb"],
+    "approach": "Rails controller",
+    "verify": "rspec"
+  }
+}
+EOF
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack --phase-aware 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC12: full-stack split --phase-aware exits 0"
+
+  local fe_file="${phase_dir}/tc12-feature-phase-2-frontend-tasks.json"
+  local be_file="${phase_dir}/tc12-feature-phase-2-backend-tasks.json"
+  local fe_file_legacy_shape="${phase_dir}/tc12-feature-phase-2-tasks-frontend-tasks.json"
+  local be_file_legacy_shape="${phase_dir}/tc12-feature-phase-2-tasks-backend-tasks.json"
+
+  # Single-"tasks"-segment basenames must exist
+  if [ -f "$fe_file" ]; then
+    echo -e "${GREEN}✓${NC} TC12: frontend tasks file written with single-'tasks' basename ($fe_file)"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC12: frontend tasks file missing ($fe_file)"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  if [ -f "$be_file" ]; then
+    echo -e "${GREEN}✓${NC} TC12: backend tasks file written with single-'tasks' basename ($be_file)"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC12: backend tasks file missing ($be_file)"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  # The legacy double-"tasks" basename must NOT be produced when --phase-aware is set
+  if [ ! -f "$fe_file_legacy_shape" ] && [ ! -f "$be_file_legacy_shape" ]; then
+    echo -e "${GREEN}✓${NC} TC12: --phase-aware suppresses the legacy double-'tasks' basename"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC12: legacy double-'tasks' basename was produced despite --phase-aware ($fe_file_legacy_shape)"
+    ((TESTS_FAILED++))
+  fi
+
+  if [ -f "$fe_file" ] && [ -f "$be_file" ]; then
+    local fe_ids be_ids collision
+    fe_ids=$(jq -r '[.userStories[].id] | .[]' "$fe_file" 2>/dev/null)
+    be_ids=$(jq -r '[.userStories[].id] | .[]' "$be_file" 2>/dev/null)
+    collision=$(printf '%s\n%s\n' "$fe_ids" "$be_ids" | sort | uniq -d)
+    if [ -z "$collision" ]; then
+      echo -e "${GREEN}✓${NC} TC12: no ID collisions across frontend/backend files"
+      ((TESTS_PASSED++))
+    else
+      echo -e "${RED}✗${NC} TC12: ID collision found: $collision"
+      ((TESTS_FAILED++))
+    fi
+  fi
+
+  rm -rf "$stg" "${phase_dir%/*}"
+}
+
 # TC9: outline.json sidecar in staging dir is ignored (Phase 3b artifact)
 test_story_merge_outline_sidecar_ignored() {
   echo ""
@@ -11184,6 +11287,7 @@ main() {
   test_story_merge_dangling_ref
   test_story_merge_rule22_routing
   test_story_merge_full_stack_split
+  test_story_merge_phase_aware_split
   test_story_merge_outline_sidecar_ignored
   test_story_merge_dead_code_positive
   test_story_merge_dead_code_negative

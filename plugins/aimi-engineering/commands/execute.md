@@ -265,6 +265,8 @@ Example match:
   → Paired split detected
 ```
 
+**Generalized rule (composes with phase mode):** the shared prefix is not limited to the flat date+feature form above. When the two files instead live inside a claimed phase's own directory (`.aimi/tasks/<feature>/phase-<N>-<slug>/`) and share the `<feature>-phase-<N>` prefix — e.g. `<feature>-phase-<N>-frontend-tasks.json` / `-backend-tasks.json` — this is the same paired-split match, just phase-qualified. This flat-mode detection pass (driven by `find-tasks-all`, which runs before Step 1's Phase Mode Detection has resolved a phase branch) never itself matches that phase-prefixed form in practice, since a live phase's two split files are the *only* pair sharing that prefix and phase-qualified worktree/branch naming additionally requires `PHASE_BRANCH` — not yet known this early. The phase-prefixed case is therefore matched and executed by **Phase-Mode Paired Split** (Step 1.7, after the phase branch is claimed and the container exists), which reuses this exact matching rule — same "two files, one `-frontend-tasks.json`, one `-backend-tasks.json`, shared prefix" test — scoped to just that phase's own directory. This subsection's own flat-prefix detection and everything below it (worktree creation from `$DEFAULT_BRANCH`, sub-orchestrator spawn, merge target, Aggregated Completion report, cleanup) is unaffected and runs byte-for-byte as before.
+
 2. If the two files match the paired pattern:
    - Extract `metadata.branchName` from each file using jq:
      ```bash
@@ -756,6 +758,25 @@ $WORKTREE_MGR create "$PHASE_BRANCH" --from "$CONTAINER_BASE"
 PHASE_CONTAINER_PATH="$AIMI_ROOT/.worktrees/$PHASE_BRANCH"
 ```
 
+### Detect a Full-Stack Split Inside This Phase
+
+Before pointing the session at a single governing tasks file, check whether this phase's own directory instead holds a full-stack paired split — the phase-prefixed generalization of Step 0.9's Paired Split Detection matching rule (see above), scoped to just this phase's own directory:
+
+```bash
+PHASE_DIR_PATH="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR"
+PHASE_FE_TASKS="$PHASE_DIR_PATH/$FEATURE-phase-$PHASE_ID-frontend-tasks.json"
+PHASE_BE_TASKS="$PHASE_DIR_PATH/$FEATURE-phase-$PHASE_ID-backend-tasks.json"
+if [ -f "$PHASE_FE_TASKS" ] && [ -f "$PHASE_BE_TASKS" ]; then
+  PHASE_SPLIT_MODE=true
+else
+  PHASE_SPLIT_MODE=false
+fi
+```
+
+**When `PHASE_SPLIT_MODE=true`:** skip **Point the session at this phase's own tasks file** below entirely — a split phase has no single governing tasks file for this session to point at — and, after Path and State Notes immediately below, proceed to **Phase-Mode Paired Split** instead of Step 2.
+
+**When `PHASE_SPLIT_MODE=false` (unchanged):** continue with **Point the session at this phase's own tasks file** below exactly as before.
+
 **Point the session at this phase's own tasks file** so Steps 2–5 operate on the claimed phase, not whichever nested file `init-session`'s mtime-based auto-discovery happened to pick in Step 1 (a feature with multiple materialized phase tasks files could have a more-recently-touched sibling phase that is not the one just claimed):
 
 ```bash
@@ -783,6 +804,172 @@ From this point forward, for the remainder of this phase's execution:
 
 - Every Bash call that touches this phase's git state passes `PHASE_CONTAINER_PATH` explicitly — `cd "$PHASE_CONTAINER_PATH"` at the top of the call, or `git -C "$PHASE_CONTAINER_PATH"` / `$WORKTREE_MGR` invocations that take it as an argument — never assuming a CWD persisted from a prior call. This is the same "each Bash tool call is an isolated shell" rule from Step 0, applied to the container path instead of `AIMI_ROOT`. See Phase Mode: Worktree Naming and CWD above for how this threads through Step 4's wave loop.
 - `$AIMI_CLI` calls issued with CWD inside `PHASE_CONTAINER_PATH` still resolve to the main root's central `.aimi/` state with no special-casing required: `.aimi/` is gitignored, so it is absent from the container's checkout. `find_aimi_root`'s upward directory walk starts inside `PHASE_CONTAINER_PATH` (`<GIT_ROOT>/.worktrees/<phase-branch>`), finds no `.aimi/` there or in `.worktrees/`, and continues up through `<GIT_ROOT>` where the real `.aimi/` lives — passing straight through the extra nesting.
+
+## Phase-Mode Paired Split
+
+**Skip this entire section if `PHASE_SPLIT_MODE` is false** — proceed straight to Step 2 (the unchanged, single-file phase-mode flow described everywhere above). The rest of this section assumes `PHASE_SPLIT_MODE=true`: this phase's own directory holds a full-stack paired split (`$PHASE_FE_TASKS` / `$PHASE_BE_TASKS`), and this section composes that split with the phase container `Step 1.7` already claimed and created — per the binding brainstorm decision that full-stack split and phase mode nest rather than being mutually exclusive.
+
+Every Bash call in this section passes `$PHASE_CONTAINER_PATH` explicitly, exactly like the rest of phase mode (see Path and State Notes above) — never a bare relative path, never `AIMI_ROOT`.
+
+### Derive and Validate Split Branch Names
+
+```bash
+FRONTEND_BRANCH="${PHASE_BRANCH}-frontend"
+BACKEND_BRANCH="${PHASE_BRANCH}-backend"
+```
+
+Validate both against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` (the same regex Step 1.7 already validated `PHASE_BRANCH` against). If either fails, report the invalid branch name and STOP — do not create any worktree. (In practice this can only fail if `PHASE_BRANCH` itself changed since Step 1.7's own validation; the check is defense-in-depth, not expected to trigger.)
+
+### Create Split Worktrees
+
+```bash
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+cd "$PHASE_CONTAINER_PATH"
+$WORKTREE_MGR create "$FRONTEND_BRANCH" --from "$PHASE_BRANCH"
+$WORKTREE_MGR create "$BACKEND_BRANCH" --from "$PHASE_BRANCH"
+```
+
+CWD is `$PHASE_CONTAINER_PATH` — never `$DEFAULT_BRANCH`'s checkout, never `AIMI_ROOT` — so, mirroring the CWD rule Phase Mode: Worktree Naming and CWD already establishes for individual story worktrees, both split worktrees nest at `$PHASE_CONTAINER_PATH/.worktrees/$FRONTEND_BRANCH` and `$PHASE_CONTAINER_PATH/.worktrees/$BACKEND_BRANCH` — inside the phase container's own worktree tree, not a sibling of it under `AIMI_ROOT/.worktrees/`, and branched from `$PHASE_BRANCH`, not `$DEFAULT_BRANCH`.
+
+```bash
+FRONTEND_WORKTREE_PATH="$PHASE_CONTAINER_PATH/.worktrees/$FRONTEND_BRANCH"
+BACKEND_WORKTREE_PATH="$PHASE_CONTAINER_PATH/.worktrees/$BACKEND_BRANCH"
+```
+
+### Spawn Split Sub-Orchestrators
+
+Report:
+```
+Phase [PHASE_ID] full-stack split detected:
+  Frontend: [PHASE_FE_TASKS] (branch: [FRONTEND_BRANCH])
+  Backend:  [PHASE_BE_TASKS] (branch: [BACKEND_BRANCH])
+
+Spawning parallel execution flows inside the phase container...
+```
+
+In a **single tool-call turn**, emit two foreground Tasks. Each runs execute.md's **Steps 2–5 only** — never Step 1's Phase Mode Detection and never Step 1.7's Phase Claim, both of which are already resolved by this parent session; a sub-orchestrator that re-derived or re-claimed the phase itself would either double-claim it or (since it has a different session identity than the parent) fail the claim outright:
+
+```
+Task(
+    subagent_type: "general-purpose",
+    model: <AGENT_MODELS.executor when not "inherit">,
+    description: "Execute frontend split for phase [PHASE_ID]: [PHASE_FE_TASKS]",
+    prompt: [execute.md Steps 2–5, with the following pre-set — do not re-derive:
+        - PHASE_MODE = true
+        - PHASE_BRANCH = [FRONTEND_BRANCH]
+        - PHASE_CONTAINER_PATH = [FRONTEND_WORKTREE_PATH]
+        - PHASE_TASKS_PATH = [PHASE_FE_TASKS]   (Step 3.2 reads maxConcurrency from this)
+        - $AIMI_CLI init-session --file [PHASE_FE_TASKS]
+        - Skip Step 2's Main Repo Branch Setup (PHASE_MODE=true skips it exactly as
+          the single-file case already does) and skip Step 1.7 entirely
+        - Run Step 3 onward (reset-orphaned, validate-stories, wave loop, Post-Loop
+          Cleanup) using the Phase Mode: Worktree Naming and CWD substitution table
+          exactly as written, with the pre-set PHASE_BRANCH/PHASE_CONTAINER_PATH
+          above standing in for the outer phase's own values — so this
+          sub-orchestrator's own story worktrees are named
+          "[FRONTEND_BRANCH]-[story.id]", created --from [FRONTEND_BRANCH], and
+          merged via merge-all --into [FRONTEND_BRANCH] with CWD inside
+          [FRONTEND_WORKTREE_PATH]
+        - Skip this file's own Phase Completion section and Step 5 entirely — the
+          parent aggregates completion after both Tasks return (see below)
+        - PROJECT_GUIDELINES = PROJECT_GUIDELINES
+    ]
+)
+
+Task(
+    subagent_type: "general-purpose",
+    model: <AGENT_MODELS.executor when not "inherit">,
+    description: "Execute backend split for phase [PHASE_ID]: [PHASE_BE_TASKS]",
+    prompt: [execute.md Steps 2–5, with the following pre-set — do not re-derive:
+        - PHASE_MODE = true
+        - PHASE_BRANCH = [BACKEND_BRANCH]
+        - PHASE_CONTAINER_PATH = [BACKEND_WORKTREE_PATH]
+        - PHASE_TASKS_PATH = [PHASE_BE_TASKS]
+        - $AIMI_CLI init-session --file [PHASE_BE_TASKS]
+        - Same substitutions as the frontend Task above, scoped to the backend
+          split: story worktrees "[BACKEND_BRANCH]-[story.id]", created --from
+          [BACKEND_BRANCH], merged via merge-all --into [BACKEND_BRANCH] with CWD
+          inside [BACKEND_WORKTREE_PATH]
+        - Skip this file's own Phase Completion section and Step 5, exactly as the
+          frontend Task
+        - PROJECT_GUIDELINES = PROJECT_GUIDELINES
+    ]
+)
+```
+
+Each sub-orchestrator's individual story-level merges therefore land on its **own** split branch (`[FRONTEND_BRANCH]` / `[BACKEND_BRANCH]`) — never `$DEFAULT_BRANCH`, never `AIMI_ROOT`, and never the sibling split's worktree or branch. This reuses the existing phase-mode Step 4 wave-loop machinery unmodified, one level deeper, with the split worktree standing in for the outer `PHASE_CONTAINER_PATH` and the split branch standing in for the outer `PHASE_BRANCH`.
+
+After both Tasks return, collect each one's completed-story count and failure list.
+
+#### Nested Concurrency
+
+Each split's own `metadata.maxConcurrency` governs only its own sub-orchestrator's wave loop — the frontend split's limit never governs the backend split's worktree creation, or vice versa, and neither is governed by the phase's `roadmap.json` or by any single phase-level tasks file (there is none, in split mode). This falls out of the existing worktree-budget pre-bash-dispatcher hook with **no code change**: `_select_governing_tasks_file` (`hooks/pre-bash-dispatcher.py`) picks the candidate tasks file among every `.aimi/tasks/**/*-tasks.json` whose `metadata.branchName` exactly matches the git branch checked out at the `git worktree add` command's CWD. A story worktree created inside the frontend sub-orchestrator's wave loop runs with CWD inside `$FRONTEND_WORKTREE_PATH` (branch `$FRONTEND_BRANCH`); `plan.md`'s Phase 4 metadata patch writes the frontend split file's `metadata.branchName` as exactly that same value (see Phase 3e/Phase 4's `--phase-aware` composition), so the hook's branch-match resolves to the frontend split's own file uniquely — the backend file's `metadata.branchName` differs (`...-backend`), so it never matches.
+
+### Aggregated Completion Report (Phase-Mode Paired Split)
+
+Report — computed against `$PHASE_BRANCH`, never `$DEFAULT_BRANCH`:
+
+```
+## Execution Complete (Phase [PHASE_ID] — Paired Mode)
+
+Frontend file: [PHASE_FE_TASKS]
+  Branch: [FRONTEND_BRANCH]
+  Stories completed: [count from frontend Task result]
+  Commits: git -C "$PHASE_CONTAINER_PATH" log --oneline [PHASE_BRANCH]..[FRONTEND_BRANCH] | wc -l
+
+Backend file: [PHASE_BE_TASKS]
+  Branch: [BACKEND_BRANCH]
+  Stories completed: [count from backend Task result]
+  Commits: git -C "$PHASE_CONTAINER_PATH" log --oneline [PHASE_BRANCH]..[BACKEND_BRANCH] | wc -l
+
+Total stories: [frontend_count + backend_count]
+Total commits: [frontend_commits + backend_commits]
+```
+
+This report is computed **before** the merge below, while `[FRONTEND_BRANCH]`/`[BACKEND_BRANCH]` are still ahead of `$PHASE_BRANCH` — after the merge the same `git log` range would read zero and the counts would no longer be informative.
+
+### Merge Split Branches Into the Phase Branch
+
+```bash
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+cd "$PHASE_CONTAINER_PATH"
+$WORKTREE_MGR merge-all "$FRONTEND_BRANCH" "$BACKEND_BRANCH" --into "$PHASE_BRANCH"
+```
+
+This is the same `merge-all ... --into` primitive Step 4's own wave loop already uses for individual story branches, reused here for the two split branches: the merge target is `$PHASE_BRANCH`, executed with CWD inside the phase container's own worktree (`$PHASE_CONTAINER_PATH`) — never `$DEFAULT_BRANCH`, never `AIMI_ROOT`. Centralizing both merges in this parent step (rather than having each sub-orchestrator merge into `$PHASE_BRANCH` itself, mid-flight, from its own worktree) avoids two parallel Tasks racing a `git checkout`/`git merge` against the same `$PHASE_CONTAINER_PATH` working directory at once; running them sequentially here, after both Tasks have already returned, is safe by construction. This step is also what makes Phase Completion's Creates Verification (below) meaningful: it inspects `$PHASE_CONTAINER_PATH`'s actual tracked files, which only reflect both splits' work once this merge has landed.
+
+**On merge conflict:** mirrors the existing per-wave conflict handling (Step 4) exactly — report the conflicting files, clean up both split worktrees (the conflict lives in `$PHASE_CONTAINER_PATH`'s own working directory, not in the source worktrees, so removing them is safe), and STOP:
+
+```
+MERGE CONFLICT while merging phase [PHASE_ID]'s split branches into [PHASE_BRANCH].
+Conflicting files:
+[conflict output from merge-all]
+
+Resolve the conflict on branch [PHASE_BRANCH] in [PHASE_CONTAINER_PATH] and re-run
+`/aimi:execute` to continue. Both split files' stories are already marked complete —
+re-running will not re-execute them, only retry this merge and the phase-completion
+checks that follow it.
+```
+
+### Clean Up Split Worktrees
+
+Only reached once the merge above succeeds:
+
+```bash
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+cd "$PHASE_CONTAINER_PATH"
+$WORKTREE_MGR remove "$FRONTEND_BRANCH"
+$WORKTREE_MGR remove "$BACKEND_BRANCH"
+```
+
+Removes only the two split worktrees. `$PHASE_CONTAINER_PATH` itself is left intact — its removal is a separate, later-timed operation owned entirely by Phase Completion's own lifecycle (the phase container is only ever torn down once the *phase* — not just this split — is fully done), never by this section.
+
+### Continue to Phase Completion
+
+Proceed to the **Phase Completion** section below with `PHASE_SPLIT_MODE=true` still in scope. Its "phase's own pending count is zero" gate and Creates Verification step both branch on `PHASE_SPLIT_MODE` — see **Multi-File Pending Count** in Phase Completion. Once Phase Completion (if it ran) has produced its own report, the **Aggregated Completion Report** above is what replaces this file's normal Step 5 — do not additionally run Step 5's single-file reporting for either split file.
 
 ## Step 2: Branch Setup
 
@@ -1522,16 +1709,33 @@ This is ADDITIVE to the existing `Wave [wave] complete: ...` line — does not r
 
 ## Phase Completion
 
-Runs once, immediately after Post-Loop Cleanup and the Visual Follow Session note above, and before Step 5. It fires only when **both** are true:
+Runs once, and before Step 5. Its trigger point depends on whether this phase used a full-stack split:
+
+- **Single-file phase (`PHASE_SPLIT_MODE=false`, unchanged):** immediately after Post-Loop Cleanup and the Visual Follow Session note above.
+- **Full-stack split phase (`PHASE_SPLIT_MODE=true`):** from Phase-Mode Paired Split's **Continue to Phase Completion** step, after both split sub-orchestrators have returned, their branches have been merged into `$PHASE_BRANCH`, and their worktrees have been cleaned up.
+
+It fires only when **both** are true:
 
 - `PHASE_MODE == true` (see Phase Mode Detection in Step 1)
-- the phase's own pending count is zero:
-  ```bash
-  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-  $AIMI_CLI count-pending
-  ```
-  (`count-pending` reads the session's tracked tasks file, which Step 1.7 already repointed at `PHASE_TASKS_PATH`.) When this prints anything greater than 0 — the wave loop broke on deadlock or a gate-blocked wave, not true completion — skip this entire section and go straight to Step 5.
+- the phase's own pending count is zero — see **Multi-File Pending Count** immediately below for how this is computed; when it is greater than 0, the wave loop (or, in split mode, one or both sub-orchestrators) broke on deadlock or a gate-blocked wave, not true completion — skip this entire section and go straight to Step 5 (single-file) or the Aggregated Completion Report (split mode, already produced by Phase-Mode Paired Split before this section was reached).
+
+### Multi-File Pending Count
+
+**When `PHASE_SPLIT_MODE=false` (unchanged):**
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI count-pending
+```
+(`count-pending` reads the session's tracked tasks file, which Step 1.7 already repointed at `PHASE_TASKS_PATH`.)
+
+**When `PHASE_SPLIT_MODE=true`:** `count-pending`'s session-state read does not apply — Step 1.7's Detect a Full-Stack Split Inside This Phase step never pointed this session's state at a single governing file, because a split phase has none. Sum pending stories across both split files directly, by path, instead:
+```bash
+FRONTEND_PENDING=$(jq '[.userStories[] | select(.status == "pending")] | length' "$PHASE_FE_TASKS")
+BACKEND_PENDING=$(jq '[.userStories[] | select(.status == "pending")] | length' "$PHASE_BE_TASKS")
+PHASE_PENDING=$((FRONTEND_PENDING + BACKEND_PENDING))
+```
+The phase's split work only counts as complete when `PHASE_PENDING` is `0` — i.e. **both** files report zero pending stories, not just one.
 
 **For legacy flat v3.3 tasks.json files (`PHASE_MODE=false`): skip this entire section.** Step 5 runs completely unchanged, exactly as it does today.
 
@@ -1549,6 +1753,8 @@ PHASE_NAME=$(printf '%s' "$PHASE_JSON" | jq -r '.name')
 ### Creates Verification
 
 For every entry the phase declared in `roadmap.json`'s `creates[]`, confirm the artifact is actually present in the phase branch's code — not merely that some other phase's `needs` resolved against it. This is a distinct, stricter check than `validate-contracts`: `validate-contracts` (outline 03) answers "does a `needs` entry have a completed, handoff-documented provider," using `roadmap.json` and `handoff.md` as its only inputs, and never inspects source code. This check answers "does this phase's own promised artifact exist," by inspecting the phase container's actual tracked files.
+
+**Split-mode timing (`PHASE_SPLIT_MODE=true`):** this check always runs against `$PHASE_CONTAINER_PATH`'s tracked files, unchanged — but by the time this section is reached in split mode, Phase-Mode Paired Split's Merge Split Branches Into the Phase Branch step has already landed both `$FRONTEND_BRANCH` and `$BACKEND_BRANCH` onto `$PHASE_BRANCH`, so `$PHASE_CONTAINER_PATH`'s checkout already reflects both splits' combined work. This check therefore verifies the merged phase branch state as a natural consequence of running after that merge — never either split branch in isolation — with no special-casing needed in the procedure below.
 
 > **Cross-story flag for the auditor:** this story's brief describes creates verification as invoking "the outline:03 contract-validation CLI surface... in its phase-closure mode" (e.g. `validate-contracts <phase-id> --root <path>`) as an illustrative example. The landed `validate-contracts` (outline 03) has no `--root` flag or code-existence mode, and its own notes scope it exclusively to needs-vs-creates delivery resolution ("wiring validate-contracts and roadmap-sweep into plan.md and execute.md is owned by outline 08 and outline 11" — this story). Extending `validate-contracts`'s jq-only, roadmap.json-only logic to also grep real source files would be new scope outline 03 never claimed. This section therefore implements creates verification as its own orchestrator-side procedure below — the same pattern Console Error Attribution (above) already uses for judgment-requiring checks that need no new CLI call. Reconcile if a future story wants to fold this into `validate-contracts` instead.
 
@@ -1881,6 +2087,8 @@ The tasks file preserves all state. Re-running `/aimi:execute` will:
 4. Failed stories remain as "failed" -- use `/aimi:status` to review them
 
 **Phase mode:** re-running `/aimi:execute` for a phase this session already claimed and left `in_progress` does not error. `roadmap-claim`'s self-reclaim path (Step 1.7) reports the same phase again instead of a contention failure, and `$WORKTREE_MGR create "$PHASE_BRANCH" --from "$CONTAINER_BASE"` reuses the existing container directory silently since the target already exists — no separate reuse-detection logic is needed beyond calling both idempotently on every claim.
+
+**Phase mode with a full-stack split (`PHASE_SPLIT_MODE=true`):** the same idempotency extends to Phase-Mode Paired Split — `$WORKTREE_MGR create "$FRONTEND_BRANCH"/"$BACKEND_BRANCH" --from "$PHASE_BRANCH"` reuses each split worktree silently if a prior run left one in place, and re-spawning both sub-orchestrators is harmless: each one's own `init-session --file` points at a split file whose already-completed stories are skipped automatically (points 1–4 above), so a sub-orchestrator with nothing left pending returns immediately. This is also what makes retrying after a Merge Split Branches Into the Phase Branch conflict safe — re-running does not re-execute any story, only retries the merge and the Multi-File Pending Count / Creates Verification checks that follow it.
 
 ### After /clear
 
