@@ -88,57 +88,7 @@ If `roadmap-init` exits non-zero for any other reason (e.g. a dangling `dependsO
 
 ### Rolling-Wave Phase Selection
 
-Unlike Roadmap Materialization above, this step runs whether or not a brainstorm loaded this session — it is what lets a bare `/aimi:plan` (or `/aimi:plan --phase <N>`) re-invocation continue an *existing* large-scope feature, expanding exactly one pending phase per invocation and leaving every other phase outline-only.
-
-**Resolve `featureSlug` and detect roadmap mode**
-
-1. Reuse `featureSlug` from Roadmap Materialization when it ran this session. Otherwise derive a candidate via the same five-step topic-slug algorithm applied to the feature description.
-2. `.aimi/tasks/<candidate>/roadmap.json` exists → use it, `ROADMAP_MODE=true`.
-3. No exact match → glob `.aimi/tasks/*/roadmap.json`: zero matches → `ROADMAP_MODE=false` (flat flow, no log line, the default case); exactly one match → use it (`ROADMAP_MODE=true`, one info log line); multiple matches → **AskUserQuestion** to disambiguate by feature slug + phase names; agent-mode never guesses — it reports the ambiguous candidates and STOPs the whole run.
-
-**Load the roadmap and compute eligible pending phases**
-
-```bash
-$AIMI_CLI roadmap-get --feature "$featureSlug"
-```
-
-Filter to `status == "pending"`, `claim == null`, and every `dependsOn` entry `status == "completed"`; sort by `.id` (numeric — `2` before `2.1` before `3`). This mirrors `roadmap-get --next-eligible`'s own jq, narrowed to `pending` only (`--next-eligible` also accepts `planned`, which serves `/aimi:execute`'s different consumer — `/aimi:plan` must never re-expand an already-`planned` phase).
-
-**Select the target phase**
-
-- `--phase <N>`: look up phase `N` directly. Not found → error and STOP. Found but ineligible (wrong status, live claim, or unmet `dependsOn`) → refuse **before any research or expansion Task is spawned**, naming the phase and listing every unmet dependency by id and status. Never falls through to a different phase.
-- Bare invocation: first entry of the eligible list (lowest numeric id). Empty eligible list → list every blocked `pending` phase with its specific reason (mirrors `/aimi:execute`'s "No phase is ready to claim" style) and STOP — never fall back to the flat pipeline.
-
-**Pre-Expansion Contract Gate**
-
-One `validate-contracts "$featureSlug" --phase "$SELECTED_PHASE_ID" [--agent-mode]` call, run immediately after selection (before Phase 1 research):
-
-- **Duplicate creates** (scans every phase regardless of status): interactive mode hard-blocks inside the CLI itself; `--agent-mode` demotes to a `duplicateWarnings[]` entry and the call proceeds.
-- **Needs resolution** (scoped to `--phase`, walking the `dependsOn` closure, requiring the provider phase to be `completed` AND list the need under its `handoff.md`'s `## Artifacts Created`): **always blocks, in both modes** — `--agent-mode` never demotes this one.
-
-Any block STOPs before Pass 2 story expansion begins.
-
-**Prior Phase Handoff Ingestion**
-
-For every `status: completed` phase, read `<feature-dir>/<phase.dir>/handoff.md` (written by `/aimi:execute`'s `roadmap-write-handoff`), wrap each as `<phase_handoff id="…" name="…">…</phase_handoff>` (escaping any literal tag-breakout sequence), and concatenate into `phaseHandoffBlocks` (150 KB aggregate cap, dropping the oldest phase first). Threaded into the Phase 3d `aimi-story-expander` prompt's **Prior Phase Handoff** section — never into Phase 1 research prompts.
-
-**Phase-scoped research**
-
-`PHASE_TOPIC_SLUG = <featureSlug>-phase-<id>[-<slug>]` (topic-slug-normalized) replaces `topicSlug` everywhere for the rest of the run — research filenames, `RUN_DIR`, and the output tasks path all inherit phase-scoping automatically. The phase's `areas[]` merge into `pathHints`; its `goal` is appended to every Phase 1/1.5b researcher prompt as a "Phase scope" line. Before spawning each researcher, glob `.aimi/research/*-<PHASE_TOPIC_SLUG>-*-<kind>.md` and run `research-lookup --ignore-missing-cited-paths` on the newest match; a fresh hit populates `reusedResearch.<kind>` (same map brainstorm-reuse populates), skipping that Task entirely.
-
-**Output path and metadata**
-
-`story-merge --output` targets `.aimi/tasks/<featureSlug>/<PHASE_DIR>/<featureSlug>-phase-<id>-tasks.json` (basename convention preserved; `--split full-stack` composes on top of this unchanged). Phase 4 patches `metadata.roadmapPath`, `metadata.phase.{id,dir}`, and a phase-suffixed `branchName` (`type/<featureSlug>-phase-<id>-<slug>`, validated against the standard branch-name regex before writing).
-
-**Post-outline advisory**
-
-After the outline gate approves, `estimate-payload --outline <RUN_DIR>/outline.json [--research …] [--spec …] [--prototype …]` runs once; on `overBudget: true`, the orchestrator additionally names which outline entries (the back half, by index) a future decimal sub-phase split could move — advisory only, never blocks.
-
-**Completion**
-
-`roadmap-set-status --status planned` runs only once `story-merge` exits 0 — a failed expansion leaves the phase `pending` for retry.
-
-**No roadmap.json for the resolved feature:** the entire section above is skipped — no folder, no phase-scoped output, no `roadmapPath`/`phase`/branch-suffix metadata, no `validate-contracts`/duplicate-creates/`estimate-payload` calls. Phase 1 through Phase 4.5 run byte-for-byte as they do today.
+Unlike Roadmap Materialization above, this step runs whether or not a brainstorm loaded this session — it is what lets a bare `/aimi:plan` (or `/aimi:plan --phase <N>`) re-invocation continue an *existing* large-scope feature, auto-selecting and expanding exactly one pending phase per invocation and leaving every other phase outline-only in `roadmap.json`. No `roadmap.json` for the resolved feature → this entire step is a no-op and Phase 1 through Phase 4.5 run byte-for-byte as they do today. Full rules — feature/phase resolution, eligibility filtering, the pre-expansion contract gate, prior-phase handoff ingestion, phase-scoped research, output path/metadata, and the completion transition: `commands/plan.md` "Rolling-Wave Phase Selection".
 
 ### Implementation Scope Detection
 
@@ -157,16 +107,7 @@ After the brainstorm check, determine the implementation scope:
 
 ### Scope-Context Classification (Inline Fallback)
 
-Runs when no brainstorm was loaded, or a loaded brainstorm's frontmatter has no `phases:` key — and `ROADMAP_MODE` is not already `true` from Rolling-Wave Phase Selection above (an existing roadmap is already being continued; do not reclassify). When the loaded brainstorm's frontmatter DOES carry `phases:`, this section is skipped — that cut was already produced by `/aimi:brainstorm`'s Phase 3.5 roadmap-gate and materialized by Roadmap Materialization above.
-
-**Classify.** Apply the Cut Criteria, Collapse Rule, and Anti-Patterns in `commands/references/scope-contexts.md` — the same shared reference `/aimi:brainstorm`'s roadmap-gate applies, exactly as written there — to the feature description plus any loaded spec/prototype content. The question is *which scope contexts exist*, never *how many stories*; no numeric threshold anywhere.
-
-- **0 or 1 scope contexts:** stop. No folder, no roadmap CLI call, no gate — fall straight through to Phase 0.5 unchanged. Default path, no log line.
-- **2 or more:** propose one phase entry per context (`id, name, slug, goal, successCriteria, dependsOn, creates, needs, areas` — identical shape to `/aimi:brainstorm` Phase 3.5's proposal), run the same Shared-Foundation Detection pass, then gate it.
-
-**Compact gate.** Non-interactive (`INTERACTIVE_MODE=agent` or `--non-interactive`): skip AskUserQuestion and the coverage check, auto-approve, emit exactly `agent-mode: plan-roadmap-gate auto-approved <N> phases`. Interactive: present **exactly two** AskUserQuestion options — `Approve` and `Edit` (deliberately narrower than the Phase 3c outline gate's five options and `/aimi:brainstorm`'s seven) — where `Edit` accepts one free-form restructuring request per round, recorded to `oqDecisions[]` as `{anchor: "phase:edit:<idx>", source: "phase", text, resolution}`. Before Approve is accepted, a coverage check blocks on any feature-description/spec/prototype element unmapped to a proposed phase, re-prompting until resolved.
-
-**Materialize and hand off.** Once approved: reuse the `CANDIDATE_SLUG` Rolling-Wave Phase Selection already derived as `featureSlug`; sanitize the approved `phases` array via Roadmap Materialization's own sanitize/derive-directory steps; call `roadmap-init --feature "$featureSlug"` (creation mode, no `--brainstorm-path`, no `--sync`) — the identical CLI verb, not a duplicate implementation. Set `ROADMAP_MODE=true` and re-enter Rolling-Wave Phase Selection's "Load the roadmap and compute eligible pending phases" step, which confines this invocation to expanding exactly one phase — every other phase stays outline-only in `roadmap.json`. Full gate mechanics: `commands/plan.md` "Scope-Context Classification (Inline Fallback)".
+Runs when no brainstorm supplied a `phases:` cut (none loaded, or a legacy brainstorm without one) and no roadmap is already being continued from Rolling-Wave Phase Selection above (that case reclassifies nothing — it is already mid-expansion). Classifies the feature description into scope contexts using the same Cut Criteria, Collapse Rule, and Anti-Patterns in `commands/references/scope-contexts.md` that `/aimi:brainstorm`'s roadmap-gate applies. Zero or one scope context: falls straight through unchanged, no gate, no log line. Two or more: proposes a phase cut, gates it via a compact Approve/Edit picker with a coverage-check hard block, then materializes it through the same `roadmap-init` path Roadmap Materialization above uses and hands off to Rolling-Wave Phase Selection for phase-1-only expansion. Full gate mechanics: `commands/plan.md` "Scope-Context Classification (Inline Fallback)".
 
 ### Pipeline Mode (Non-Interactive)
 

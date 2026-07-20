@@ -416,3 +416,84 @@ def test_no_branch_match_falls_back_to_newest_mtime(tmp_path, monkeypatch):
     assert captured, "Expected deny message from the newest-mtime file's budget"
     deny_data = json.loads(captured[0])
     assert "2/2" in deny_data["hookSpecificOutput"]["userMessage"]
+
+
+def test_malformed_sibling_metadata_null_does_not_disable_guard(tmp_path, monkeypatch):
+    """A sibling *-tasks.json shaped like ``{"metadata": null}`` must not raise
+    and must not silently disable enforcement.
+
+    Regression for: the branch-match comparison in
+    ``_select_governing_tasks_file`` used to sit outside the ``try`` that
+    wraps ``json.loads``, so a successfully-parsed-but-malformed sibling threw
+    an uncaught AttributeError from ``.get("metadata", {}).get("branchName")``
+    (``.get`` on an explicit ``None`` returns ``None``, not ``{}``). That
+    propagated through ``_find_tasks_json`` -> ``handle_worktree_budget`` and,
+    in production, would be swallowed by ``@safe_hook`` -> exit 0 = silent
+    allow, disabling worktree-budget enforcement entirely. This test calls
+    ``handle_worktree_budget`` directly (bypassing ``@safe_hook``), so any
+    unhandled exception fails the test instead of being masked as an allow.
+    """
+    _make_nested_tasks_json(
+        tmp_path, "myfeat", "phase-1-alpha", "myfeat-phase-1-tasks.json",
+        branch_name="feat/myfeat-phase-1", max_concurrency=2,
+    )
+    malformed_dir = tmp_path / ".aimi" / "tasks" / "myfeat" / "phase-2-beta"
+    malformed_dir.mkdir(parents=True, exist_ok=True)
+    (malformed_dir / "myfeat-phase-2-tasks.json").write_text(json.dumps({"metadata": None}))
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        subprocess, "run",
+        _fake_run_with_branch("feat/myfeat-phase-1", active_worktree_count=2, cwd=str(tmp_path)),
+    )
+    monkeypatch.delenv("AIMI_WORKTREE_BUDGET_GUARD", raising=False)
+
+    captured = []
+    monkeypatch.setattr("builtins.print", lambda msg: captured.append(msg))
+
+    with pytest.raises(SystemExit) as exc_info:
+        dispatcher.handle_worktree_budget(
+            "git worktree add ../wt-new feat/x", _tool_input_for("git worktree add ../wt-new feat/x")
+        )
+
+    assert exc_info.value.code == 0
+    assert captured, "Expected deny message -- guard must still enforce budget despite malformed sibling"
+    deny_data = json.loads(captured[0])
+    assert "2/2" in deny_data["hookSpecificOutput"]["userMessage"]
+
+
+def test_malformed_sibling_top_level_list_does_not_disable_guard(tmp_path, monkeypatch):
+    """A sibling *-tasks.json whose top-level JSON value is a list (not an
+    object) must not raise and must not silently disable enforcement.
+
+    Same regression as test_malformed_sibling_metadata_null_does_not_disable_guard,
+    but for the shape where ``data.get(...)`` itself raises AttributeError
+    because ``data`` is a ``list``, not a ``dict``.
+    """
+    _make_nested_tasks_json(
+        tmp_path, "myfeat", "phase-1-alpha", "myfeat-phase-1-tasks.json",
+        branch_name="feat/myfeat-phase-1", max_concurrency=2,
+    )
+    malformed_dir = tmp_path / ".aimi" / "tasks" / "myfeat" / "phase-2-beta"
+    malformed_dir.mkdir(parents=True, exist_ok=True)
+    (malformed_dir / "myfeat-phase-2-tasks.json").write_text(json.dumps([1, 2, 3]))
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        subprocess, "run",
+        _fake_run_with_branch("feat/myfeat-phase-1", active_worktree_count=2, cwd=str(tmp_path)),
+    )
+    monkeypatch.delenv("AIMI_WORKTREE_BUDGET_GUARD", raising=False)
+
+    captured = []
+    monkeypatch.setattr("builtins.print", lambda msg: captured.append(msg))
+
+    with pytest.raises(SystemExit) as exc_info:
+        dispatcher.handle_worktree_budget(
+            "git worktree add ../wt-new feat/x", _tool_input_for("git worktree add ../wt-new feat/x")
+        )
+
+    assert exc_info.value.code == 0
+    assert captured, "Expected deny message -- guard must still enforce budget despite malformed sibling"
+    deny_data = json.loads(captured[0])
+    assert "2/2" in deny_data["hookSpecificOutput"]["userMessage"]

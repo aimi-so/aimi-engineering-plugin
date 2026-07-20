@@ -3805,11 +3805,18 @@ _archivable_file_is_terminal() {
 # phase tasks file discovered under that feature is all-terminal AND the
 # feature's roadmap.json (read directly via jq, not a roadmap-lifecycle
 # subcommand, to avoid coupling to its still-evolving CLI surface) marks
-# every phase completed or deferred -- rather than piecemeal as each phase
-# happens to finish. A feature folder with no roadmap.json (or a malformed
-# one) falls back to the flat per-file terminal check, so stray nested files
-# created without roadmap-init are still individually archivable.
-# Returns a JSON array of file paths.
+# every phase completed -- rather than piecemeal as each phase happens to
+# finish. "completed" is the only terminal phase status (see the roadmap
+# status enum in cmd_roadmap_set_status); there is no "deferred" status. A
+# phase stuck in verification_failed therefore excludes its feature from the
+# result same as any other non-completed status, but is never a *silent*
+# dead end: it's called out on stderr each time, naming the feature and the
+# blocked phase ids, so the block stays discoverable instead of an
+# unexplained permanent absence from the list. A feature folder with no
+# roadmap.json (or a malformed one) falls back to the flat per-file terminal
+# check, so stray nested files created without roadmap-init are still
+# individually archivable.
+# Returns a JSON array of file paths (stdout shape unchanged by the above).
 cmd_list_archivable() {
   local all_files
   all_files=$(_find_tasks_files_all)
@@ -3840,7 +3847,7 @@ cmd_list_archivable() {
     fi
   done <<< "$all_files"
 
-  for f in "${flat_files[@]}"; do
+  for f in "${flat_files[@]+"${flat_files[@]}"}"; do
     [ -f "$f" ] || continue
     _archivable_file_is_terminal "$f" && _archivable_append "$f"
   done
@@ -3848,7 +3855,7 @@ cmd_list_archivable() {
   # Group nested files by feature folder (two directories above each file)
   # and evaluate the whole feature as a unit.
   local -A feature_seen
-  for f in "${nested_files[@]}"; do
+  for f in "${nested_files[@]+"${nested_files[@]}"}"; do
     local feature_dir
     feature_dir=$(dirname "$(dirname "$f")")
     [ -n "${feature_seen[$feature_dir]:-}" ] && continue
@@ -3856,14 +3863,14 @@ cmd_list_archivable() {
 
     local feature_files=()
     local ff
-    for ff in "${nested_files[@]}"; do
+    for ff in "${nested_files[@]+"${nested_files[@]}"}"; do
       if [ "$(dirname "$(dirname "$ff")")" = "$feature_dir" ]; then
         feature_files+=("$ff")
       fi
     done
 
     local all_terminal=true
-    for ff in "${feature_files[@]}"; do
+    for ff in "${feature_files[@]+"${feature_files[@]}"}"; do
       if [ ! -f "$ff" ] || ! _archivable_file_is_terminal "$ff"; then
         all_terminal=false
         break
@@ -3874,14 +3881,25 @@ cmd_list_archivable() {
     local roadmap_path="$feature_dir/roadmap.json"
     if [ -f "$roadmap_path" ] && jq -e . "$roadmap_path" >/dev/null 2>&1; then
       local non_terminal_phases
-      non_terminal_phases=$(jq '[.phases[] | select(.status != "completed" and .status != "deferred")] | length' "$roadmap_path" 2>/dev/null)
+      non_terminal_phases=$(jq '[.phases[] | select(.status != "completed")] | length' "$roadmap_path" 2>/dev/null)
       [ -z "$non_terminal_phases" ] && continue
-      [ "$non_terminal_phases" -ne 0 ] && continue
+      if [ "$non_terminal_phases" -ne 0 ]; then
+        # A stuck (verification_failed) phase is excluded the same as any
+        # other non-completed status, but never silently -- name it and the
+        # feature on stderr every run so the block stays visible instead of
+        # becoming an unexplained permanent absence from the result.
+        local stuck_ids
+        stuck_ids=$(jq -r '[.phases[] | select(.status == "verification_failed") | (.id|tostring)] | join(", ")' "$roadmap_path" 2>/dev/null)
+        if [ -n "$stuck_ids" ]; then
+          echo "Warning: list-archivable: $feature_dir not archivable -- phase(s) $stuck_ids stuck in verification_failed (re-verify via roadmap-set-status, or resolve manually)" >&2
+        fi
+        continue
+      fi
     fi
     # No roadmap.json (or malformed): every discovered phase file already
     # passed the per-file terminal check above, so fall back to including them.
 
-    for ff in "${feature_files[@]}"; do
+    for ff in "${feature_files[@]+"${feature_files[@]}"}"; do
       _archivable_append "$ff"
     done
   done
@@ -5268,6 +5286,36 @@ _roadmap_path() {
   printf '%s/%s/roadmap.json\n' "$TASKS_DIR" "$feature"
 }
 
+# Shared roadmap-verb preamble: resolve the path, validate it's in-project,
+# and fail with a verb-prefixed message if the roadmap is missing or malformed.
+# Echoes the resolved path on success. Usage:
+#   roadmap_path=$(_roadmap_require <verb> <feature> [not-found-suffix] [--skip-malformed])
+# not-found-suffix is appended verbatim to the "roadmap not found" message
+# (e.g. " (run roadmap-init first)"); pass "" to omit it.
+# --skip-malformed omits the malformed-json check (roadmap-release-claim never
+# had one; preserved as-is rather than newly introduced here).
+# Several callers re-check malformed-ness a second time inside their _lock
+# subshell -- that inner check is deliberate (it re-reads under the lock to
+# catch a file that turns malformed between this call and lock acquisition)
+# and is not replaced by this helper.
+_roadmap_require() {
+  local verb="$1" feature="$2" suffix="${3:-}" skip_malformed="${4:-}"
+  local path
+  path=$(_roadmap_path "$feature")
+  validate_path_in_project "$path"
+  if [ ! -f "$path" ]; then
+    echo "Error: $verb: roadmap not found: $path${suffix}" >&2
+    exit 1
+  fi
+  if [ "$skip_malformed" != "--skip-malformed" ]; then
+    if ! jq -e . "$path" >/dev/null 2>&1; then
+      echo "Error: $verb: malformed roadmap.json: $path" >&2
+      exit 1
+    fi
+  fi
+  printf '%s\n' "$path"
+}
+
 # Validate --phase is present and a bare numeric id (int or one-decimal-place).
 _roadmap_validate_phase_id() {
   local phase_id="$1"
@@ -5352,9 +5400,9 @@ cmd_roadmap_init() {
       .slug = ((.slug // "") | _rm_sanitize(100)) |
       .notes = (if .notes != null then (.notes | _rm_sanitize(5000)) else null end) |
       .successCriteria = ((.successCriteria // []) | map(_rm_sanitize(2000))) |
-      .creates = (.creates // []) |
-      .needs = (.needs // []) |
-      .areas = (.areas // []) |
+      .creates = ((.creates // []) | map(_rm_sanitize(500))) |
+      .needs = ((.needs // []) | map(_rm_sanitize(500))) |
+      .areas = ((.areas // []) | map(_rm_sanitize(500))) |
       .dependsOn = (.dependsOn // []) |
       .branch = (if .branch != null then (.branch | _rm_sanitize(200)) else null end) |
       .dir = ("phase-" + (.id|tostring) + (if (.slug|length) > 0 then "-" + .slug else "" end)) |
@@ -5386,8 +5434,8 @@ cmd_roadmap_init() {
   mkdir -p "$(dirname "$roadmap_path")"
 
   # --- Locked read-modify-write: existence/--sync check, additive merge, atomic write ---
-  local out rc
-  if out=$(
+  local out
+  out=$(
     (
       _lock "${roadmap_path}.lock"
 
@@ -5455,15 +5503,7 @@ cmd_roadmap_init() {
       jq -n --arg path "$roadmap_path" --argjson added "$added_count" --argjson total "$(printf '%s' "$merged_phases" | jq 'length')" \
         '{roadmap: $path, added: $added, phases: $total}'
     ) 200>"${roadmap_path}.lock"
-  ); then
-    rc=0
-  else
-    rc=$?
-  fi
-
-  if [ "$rc" -ne 0 ]; then
-    exit "$rc"
-  fi
+  ) || exit $?
   printf '%s\n' "$out"
 }
 
@@ -5486,16 +5526,7 @@ cmd_roadmap_get() {
   _roadmap_validate_feature "$feature"
 
   local roadmap_path
-  roadmap_path=$(_roadmap_path "$feature")
-  validate_path_in_project "$roadmap_path"
-  if [ ! -f "$roadmap_path" ]; then
-    echo "Error: roadmap-get: roadmap not found: $roadmap_path" >&2
-    exit 1
-  fi
-  if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
-    echo "Error: roadmap-get: malformed roadmap.json: $roadmap_path" >&2
-    exit 1
-  fi
+  roadmap_path=$(_roadmap_require "roadmap-get" "$feature")
 
   if [ -n "$phase_id" ]; then
     _roadmap_validate_phase_id "$phase_id" "roadmap-get"
@@ -5557,15 +5588,10 @@ cmd_roadmap_set_status() {
   esac
 
   local roadmap_path
-  roadmap_path=$(_roadmap_path "$feature")
-  validate_path_in_project "$roadmap_path"
-  if [ ! -f "$roadmap_path" ]; then
-    echo "Error: roadmap-set-status: roadmap not found: $roadmap_path" >&2
-    exit 1
-  fi
+  roadmap_path=$(_roadmap_require "roadmap-set-status" "$feature")
 
-  local out rc
-  if out=$(
+  local out
+  out=$(
     (
       _lock "${roadmap_path}.lock"
 
@@ -5641,15 +5667,7 @@ cmd_roadmap_set_status() {
 
       jq -n --argjson pid "$phase_id" --arg from "$current_status" --arg to "$new_status" '{phase: $pid, from: $from, to: $to}'
     ) 200>"${roadmap_path}.lock"
-  ); then
-    rc=0
-  else
-    rc=$?
-  fi
-
-  if [ "$rc" -ne 0 ]; then
-    exit "$rc"
-  fi
+  ) || exit $?
   printf '%s\n' "$out"
 }
 
@@ -5686,20 +5704,15 @@ cmd_roadmap_claim() {
   session_id=$(printf '%s' "$session_id" | jq -Rr "$_ROADMAP_SANITIZE_JQ"'_rm_sanitize(200)')
 
   local roadmap_path
-  roadmap_path=$(_roadmap_path "$feature")
-  validate_path_in_project "$roadmap_path"
-  if [ ! -f "$roadmap_path" ]; then
-    echo "Error: roadmap-claim: roadmap not found: $roadmap_path (run roadmap-init first)" >&2
-    exit 1
-  fi
+  roadmap_path=$(_roadmap_require "roadmap-claim" "$feature" " (run roadmap-init first)")
 
   # --phase is a bare numeric id at this point (validated above); pass it through
   # to jq as a number, or JSON null when no override was given.
   local phase_override_json="null"
   [ -n "$phase_override" ] && phase_override_json="$phase_override"
 
-  local out rc
-  if out=$(
+  local out
+  out=$(
     (
       _lock "${roadmap_path}.lock"
 
@@ -5712,14 +5725,20 @@ cmd_roadmap_claim() {
       # sessionId travels alongside pid here so the release report line below
       # ("released stale claim on phase <id> (session <sid> pid <pid> not
       # alive)") can be built without a second read of roadmap.json.
+      # _is_pid_alive is a bash kill(2) probe, not something jq can do, so
+      # the loop itself stays bash -- but it only accumulates plain phase-id
+      # lines while the lock is held, then converts them to a JSON array in
+      # one jq pass at the end, instead of spawning one jq process per stale
+      # claim to grow the array incrementally.
       claimed_pids=$(jq -c '[.phases[] | select(.claim != null) | {id: .id, pid: .claim.claimedPid, sessionId: .claim.claimedBy}]' "$roadmap_path")
-      stale_ids='[]'
+      stale_id_lines=""
       while IFS=$'\t' read -r pid_phase_id pid_val; do
         [ -z "$pid_phase_id" ] && continue
         if ! _is_pid_alive "$pid_val"; then
-          stale_ids=$(printf '%s' "$stale_ids" | jq --argjson id "$pid_phase_id" '. + [$id]')
+          stale_id_lines="${stale_id_lines}${pid_phase_id}"$'\n'
         fi
       done < <(printf '%s' "$claimed_pids" | jq -r '.[] | [(.id|tostring), (.pid|tostring)] | @tsv')
+      stale_ids=$(printf '%s' "$stale_id_lines" | jq -R -s 'split("\n") | map(select(length > 0) | tonumber)')
       stale_released=$(printf '%s' "$claimed_pids" | jq --argjson stale_ids "$stale_ids" '
         [.[] | select((.id) as $id | ($stale_ids | index($id)) != null)]
       ')
@@ -5835,15 +5854,7 @@ cmd_roadmap_claim() {
           ;;
       esac
     ) 200>"${roadmap_path}.lock"
-  ); then
-    rc=0
-  else
-    rc=$?
-  fi
-
-  if [ "$rc" -ne 0 ]; then
-    exit "$rc"
-  fi
+  ) || exit $?
   printf '%s\n' "$out"
 }
 
@@ -5866,15 +5877,10 @@ cmd_roadmap_release_claim() {
   _roadmap_validate_phase_id "$phase_id" "roadmap-release-claim"
 
   local roadmap_path
-  roadmap_path=$(_roadmap_path "$feature")
-  validate_path_in_project "$roadmap_path"
-  if [ ! -f "$roadmap_path" ]; then
-    echo "Error: roadmap-release-claim: roadmap not found: $roadmap_path" >&2
-    exit 1
-  fi
+  roadmap_path=$(_roadmap_require "roadmap-release-claim" "$feature" "" --skip-malformed)
 
-  local out rc
-  if out=$(
+  local out
+  out=$(
     (
       _lock "${roadmap_path}.lock"
 
@@ -5893,15 +5899,7 @@ cmd_roadmap_release_claim() {
 
       jq -n --argjson pid "$phase_id" '{released: $pid}'
     ) 200>"${roadmap_path}.lock"
-  ); then
-    rc=0
-  else
-    rc=$?
-  fi
-
-  if [ "$rc" -ne 0 ]; then
-    exit "$rc"
-  fi
+  ) || exit $?
   printf '%s\n' "$out"
 }
 
@@ -5922,18 +5920,13 @@ cmd_roadmap_reconcile() {
   _roadmap_validate_feature "$feature"
 
   local roadmap_path
-  roadmap_path=$(_roadmap_path "$feature")
-  validate_path_in_project "$roadmap_path"
-  if [ ! -f "$roadmap_path" ]; then
-    echo "Error: roadmap-reconcile: roadmap not found: $roadmap_path" >&2
-    exit 1
-  fi
+  roadmap_path=$(_roadmap_require "roadmap-reconcile" "$feature")
 
   local feature_dir
   feature_dir=$(dirname "$roadmap_path")
 
-  local out rc
-  if out=$(
+  local out
+  out=$(
     (
       _lock "${roadmap_path}.lock"
 
@@ -6004,15 +5997,7 @@ cmd_roadmap_reconcile() {
 
       jq -n --argjson corr "$corrections" --argjson blocked "$blocked" '{corrections: $corr, blocked: $blocked}'
     ) 200>"${roadmap_path}.lock"
-  ); then
-    rc=0
-  else
-    rc=$?
-  fi
-
-  if [ "$rc" -ne 0 ]; then
-    exit "$rc"
-  fi
+  ) || exit $?
   printf '%s\n' "$out"
 }
 
@@ -6050,16 +6035,7 @@ cmd_roadmap_write_handoff() {
   _roadmap_validate_phase_id "$phase_id" "roadmap-write-handoff"
 
   local roadmap_path
-  roadmap_path=$(_roadmap_path "$feature")
-  validate_path_in_project "$roadmap_path"
-  if [ ! -f "$roadmap_path" ]; then
-    echo "Error: roadmap-write-handoff: roadmap not found: $roadmap_path" >&2
-    exit 1
-  fi
-  if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
-    echo "Error: roadmap-write-handoff: malformed roadmap.json: $roadmap_path" >&2
-    exit 1
-  fi
+  roadmap_path=$(_roadmap_require "roadmap-write-handoff" "$feature")
 
   local phase_dir
   phase_dir=$(jq -r --argjson pid "$phase_id" '(.phases[] | select(.id == $pid) | .dir) // empty' "$roadmap_path")
@@ -6118,8 +6094,8 @@ cmd_roadmap_write_handoff() {
   handoff_path="$feature_dir/$phase_dir/handoff.md"
   validate_path_in_project "$handoff_path"
 
-  local out rc
-  if out=$(
+  local out
+  out=$(
     (
       _lock "${roadmap_path}.lock"
       mkdir -p "$(dirname "$handoff_path")"
@@ -6127,15 +6103,7 @@ cmd_roadmap_write_handoff() {
       printf '%s\n' "$body" > "$tmp_file" && mv "$tmp_file" "$handoff_path"
       jq -n --arg path "$handoff_path" '{handoff: $path}'
     ) 200>"${roadmap_path}.lock"
-  ); then
-    rc=0
-  else
-    rc=$?
-  fi
-
-  if [ "$rc" -ne 0 ]; then
-    exit "$rc"
-  fi
+  ) || exit $?
   printf '%s\n' "$out"
 }
 
@@ -6231,16 +6199,7 @@ cmd_validate_contracts() {
   fi
 
   local roadmap_path
-  roadmap_path=$(_roadmap_path "$feature")
-  validate_path_in_project "$roadmap_path"
-  if [ ! -f "$roadmap_path" ]; then
-    echo "Error: validate-contracts: roadmap not found: $roadmap_path" >&2
-    exit 1
-  fi
-  if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
-    echo "Error: validate-contracts: malformed roadmap.json: $roadmap_path" >&2
-    exit 1
-  fi
+  roadmap_path=$(_roadmap_require "validate-contracts" "$feature")
   if [ -n "$phase_id" ] && ! jq -e --argjson pid "$phase_id" '.phases[] | select(.id == $pid)' "$roadmap_path" >/dev/null 2>&1; then
     echo "Error: validate-contracts: phase $phase_id not found in $roadmap_path" >&2
     exit 1
@@ -6408,16 +6367,7 @@ cmd_phase_overlap() {
   fi
 
   local roadmap_path
-  roadmap_path=$(_roadmap_path "$feature")
-  validate_path_in_project "$roadmap_path"
-  if [ ! -f "$roadmap_path" ]; then
-    echo "Error: phase-overlap: roadmap not found: $roadmap_path (run roadmap-init first)" >&2
-    exit 1
-  fi
-  if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
-    echo "Error: phase-overlap: malformed roadmap.json: $roadmap_path" >&2
-    exit 1
-  fi
+  roadmap_path=$(_roadmap_require "phase-overlap" "$feature" " (run roadmap-init first)")
 
   local feature_dir
   feature_dir=$(dirname "$roadmap_path")
@@ -6484,16 +6434,7 @@ cmd_roadmap_sweep() {
   _roadmap_validate_feature "$feature"
 
   local roadmap_path
-  roadmap_path=$(_roadmap_path "$feature")
-  validate_path_in_project "$roadmap_path"
-  if [ ! -f "$roadmap_path" ]; then
-    echo "Error: roadmap-sweep: roadmap not found: $roadmap_path" >&2
-    exit 1
-  fi
-  if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
-    echo "Error: roadmap-sweep: malformed roadmap.json: $roadmap_path" >&2
-    exit 1
-  fi
+  roadmap_path=$(_roadmap_require "roadmap-sweep" "$feature")
 
   # Single-pass, advisory-only computation: never exits non-zero. Suspicious
   # creates/needs entries are dropped from $clean_phases before orphan/deferred
@@ -6548,35 +6489,20 @@ _file_size_bytes() {
 }
 
 # Resolve the effective payload budget in bytes plus the fraction it
-# represents of the 400000-byte reference sub-agent window. config-not-
-# doctrine: no threshold is hardcoded as prose; every tier below can
-# override the default. Priority (highest first):
-#   1. --budget-bytes / --budget-fraction flags (bytes wins if both given)
-#   2. AIMI_PAYLOAD_BUDGET_BYTES / AIMI_PAYLOAD_BUDGET_FRACTION env vars
-#   3. .aimi/config.json's "payload" section ({budgetBytes} or {budgetFraction})
-#   4. default: 50% of the reference window
-# Usage: _estimate_payload_resolve_budget <flag_bytes> <flag_fraction>
+# represents of the 400000-byte reference sub-agent window. --budget-bytes
+# is a manual debug escape hatch (no caller passes it; plan.md's only
+# caller uses the default); everything else defaults to 50% of the
+# reference window.
+# Usage: _estimate_payload_resolve_budget <flag_bytes>
 # Prints "<budgetBytes> <budgetFraction>" (space-separated) on stdout.
 _estimate_payload_resolve_budget() {
   local flag_bytes="$1"
-  local flag_fraction="$2"
   local reference_window=400000
-  local config_file="$AIMI_DIR/config.json"
 
   local bytes="" fraction=""
 
   if [ -n "$flag_bytes" ]; then
     bytes="$flag_bytes"
-  elif [ -n "$flag_fraction" ]; then
-    fraction="$flag_fraction"
-  elif [ -n "${AIMI_PAYLOAD_BUDGET_BYTES:-}" ]; then
-    bytes="$AIMI_PAYLOAD_BUDGET_BYTES"
-  elif [ -n "${AIMI_PAYLOAD_BUDGET_FRACTION:-}" ]; then
-    fraction="$AIMI_PAYLOAD_BUDGET_FRACTION"
-  elif [ -f "$config_file" ] && jq -e '.payload.budgetBytes // empty' "$config_file" >/dev/null 2>&1; then
-    bytes=$(jq -r '.payload.budgetBytes' "$config_file")
-  elif [ -f "$config_file" ] && jq -e '.payload.budgetFraction // empty' "$config_file" >/dev/null 2>&1; then
-    fraction=$(jq -r '.payload.budgetFraction' "$config_file")
   else
     fraction="0.5"
   fi
@@ -6595,7 +6521,7 @@ _estimate_payload_resolve_budget() {
 # effective budget. Always exits 0 for valid input (advisory only); exits 1
 # only on usage errors (missing --outline, a given path that does not exist).
 cmd_estimate_payload() {
-  local outline="" budget_bytes_flag="" budget_fraction_flag=""
+  local outline="" budget_bytes_flag=""
   local research_paths=() spec_paths=() prototype_paths=()
 
   while [ $# -gt 0 ]; do
@@ -6605,7 +6531,6 @@ cmd_estimate_payload() {
       --spec) shift; spec_paths+=("${1:-}") ;;
       --prototype) shift; prototype_paths+=("${1:-}") ;;
       --budget-bytes) shift; budget_bytes_flag="${1:-}" ;;
-      --budget-fraction) shift; budget_fraction_flag="${1:-}" ;;
       *)
         echo "Error: estimate-payload: unknown flag: $1" >&2
         exit 1
@@ -6616,7 +6541,7 @@ cmd_estimate_payload() {
 
   if [ -z "$outline" ]; then
     echo "Error: estimate-payload: --outline <path> is required" >&2
-    echo "Usage: aimi-cli.sh estimate-payload --outline <path> [--research <path>]... [--spec <path>]... [--prototype <path>]... [--budget-bytes <n>] [--budget-fraction <0-1>]" >&2
+    echo "Usage: aimi-cli.sh estimate-payload --outline <path> [--research <path>]... [--spec <path>]... [--prototype <path>]... [--budget-bytes <n>]" >&2
     exit 1
   fi
   if [ ! -f "$outline" ]; then
@@ -6653,7 +6578,7 @@ cmd_estimate_payload() {
   local total_bytes=$((outline_bytes + research_bytes + spec_bytes + prototype_bytes))
 
   local budget_line budget_bytes budget_fraction
-  budget_line=$(_estimate_payload_resolve_budget "$budget_bytes_flag" "$budget_fraction_flag")
+  budget_line=$(_estimate_payload_resolve_budget "$budget_bytes_flag")
   budget_bytes=$(printf '%s' "$budget_line" | cut -d' ' -f1)
   budget_fraction=$(printf '%s' "$budget_line" | cut -d' ' -f2)
 
@@ -6966,14 +6891,13 @@ COMMANDS:
                               trace) when either phase's tasks.json is missing --
                               both phases must already be rolling-wave expanded.
     estimate-payload --outline <path> [--research <path>]... [--spec <path>]...
-                              [--prototype <path>]... [--budget-bytes <n>] [--budget-fraction <0-1>]
+                              [--prototype <path>]... [--budget-bytes <n>]
                               Advisory only -- never blocks, never trims content.
                               Sums the byte sizes of --outline (required) plus every
                               repeated --research/--spec/--prototype path and compares
-                              against an effective budget: --budget-bytes/--budget-fraction
-                              flags, then AIMI_PAYLOAD_BUDGET_BYTES/AIMI_PAYLOAD_BUDGET_FRACTION
-                              env vars, then .aimi/config.json's "payload" section, then a
-                              default of 50% of a 400000-byte reference sub-agent window.
+                              against an effective budget: --budget-bytes (manual debug
+                              escape hatch; no caller passes it) if given, else 50% of a
+                              400000-byte reference sub-agent window.
                               Prints {totalBytes, breakdown{outline,research,specs,prototypes},
                               budgetBytes, budgetFraction, overBudget, warning}.
                               warning is null under budget; otherwise names splitting the

@@ -102,6 +102,20 @@ For the entire span of a phase's execution — from the moment it is claimed (St
 
 ---
 
+## Release the Claim on Abort
+
+This section is the single source of truth for releasing a phase's `roadmap-claim` when a phase-mode session (Step 1.7 onward) stops without reaching the normal completion path (**Mark Phase Completed** in Phase Completion, which already releases the claim atomically as part of its `completed` status write). Every other STOP/abort in phase mode, once this session has successfully claimed a phase, releases the claim first. There are no exceptions: a session that has stopped acting on a phase is no longer "actively working" it, and `roadmap-claim`'s own auto-mode branch already treats any *unclaimed* `pending`/`planned`/`in_progress`/`verification_failed` phase as re-claimable (lowest id among dependency-eligible candidates) — so an unclaimed phase, whatever its status, is cleanly recoverable by a plain `/aimi:execute` re-run, self or otherwise. Holding the claim past this session's own stop only forces that recovery to wait on PID-liveness staleness instead of being immediate.
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+```
+
+**Guard — only the session that itself ran Step 1.7 calls this.** A Phase-Mode Paired Split sub-orchestrator never runs Step 1.7 (its spawn prompt pre-sets `PHASE_MODE`/`PHASE_BRANCH`/`PHASE_CONTAINER_PATH`/`PHASE_TASKS_PATH` directly and explicitly skips Step 1.7 entirely), so it never learns `$PHASE_ID` and must never call this — doing so would release the *parent's* claim on the whole phase out from under the sibling split still running. Every call site below is therefore written as "when `PHASE_MODE=true` **and** `$PHASE_ID` is set" — true only in the top-level orchestrator that itself claimed the phase, never in a spawned split sub-orchestrator.
+
+---
+
 ## Step 0.5: Archival Check
 
 Before starting a new session, check whether any completed task files should be archived to prevent accidental re-execution of finished work.
@@ -625,18 +639,34 @@ PHASE_ID=$(printf '%s' "$CLAIM_JSON" | jq -r '.id')
 PHASE_DIR=$(printf '%s' "$CLAIM_JSON" | jq -r '.dir')
 PHASE_SLUG=$(printf '%s' "$CLAIM_JSON" | jq -r '.slug // ""')
 PHASE_BRANCH=$(printf '%s' "$CLAIM_JSON" | jq -r '.branch // ""')
-FEATURE_TYPE=$(jq -r '.metadata.type // "feat"' "$AIMI_ROOT/$TASKS_PATH")
 ```
 
-If `PHASE_BRANCH` is empty (the phase carries no pre-assigned `.branch`), compute it from the `type/<feature>-phase-<N>-<slug>` convention:
+`FEATURE_TYPE` must come from this phase's own tasks file, not the mtime-discovered `$TASKS_PATH` from Step 1 — a feature with multiple materialized phase tasks files could have a more-recently-touched sibling phase file win that mtime race, leaking the sibling's `type` into this phase's branch prefix. `PHASE_TASKS_PATH` itself isn't resolved until **Point the session at this phase's own tasks file** below, so read directly from the same path that section computes, tolerating the file not existing yet (a not-yet-planned phase, or a full-stack split phase with no single governing file):
+
+```bash
+FEATURE_TYPE=$(jq -r '.metadata.type // "feat"' "$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR/$FEATURE-phase-$PHASE_ID-tasks.json" 2>/dev/null)
+FEATURE_TYPE="${FEATURE_TYPE:-feat}"
+```
+
+If `PHASE_BRANCH` is empty (the phase carries no pre-assigned `.branch`), compute it from the `type/<feature>-phase-<N>-<slug>` convention. `PHASE_SLUG` can itself be empty (a phase with no slug); when it is, drop the trailing `-` rather than emitting a branch name that ends in one:
 
 ```bash
 if [ -z "$PHASE_BRANCH" ]; then
-  PHASE_BRANCH="${FEATURE_TYPE}/${FEATURE}-phase-${PHASE_ID}-${PHASE_SLUG}"
+  if [ -z "$PHASE_SLUG" ]; then
+    PHASE_BRANCH="${FEATURE_TYPE}/${FEATURE}-phase-${PHASE_ID}"
+  else
+    PHASE_BRANCH="${FEATURE_TYPE}/${FEATURE}-phase-${PHASE_ID}-${PHASE_SLUG}"
+  fi
 fi
 ```
 
-Validate `PHASE_BRANCH` against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` (the same regex Step 1.6 already enforces for user-supplied base branches). If it fails, report the invalid branch name and STOP.
+Validate `PHASE_BRANCH` against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` (the same regex Step 1.6 already enforces for user-supplied base branches). If it fails, release the claim (see Release the Claim on Abort) and report the invalid branch name, then STOP:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+```
 
 ### Report Stale Claim Releases
 
@@ -654,39 +684,63 @@ fi
 
 This is a report of automatic recovery that already happened inside the atomic `roadmap-claim` call above — it never changes the outcome of this session's own claim.
 
-### Two-Stage Overlap Guard
+### Reconcile Roadmap/Tasks Divergence
+
+Immediately after a successful claim — before the `in_progress` status transition below — run `roadmap-reconcile` once as an advisory health check across the whole roadmap. This is the only call site in the command flow; `roadmap-reconcile` is otherwise defined and tested but never invoked, so drift between a phase's `status` in `roadmap.json` and its own tasks file's actual story statuses would otherwise go unnoticed until it surfaces as the `in_progress` transition failure below.
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+RECONCILE_JSON=$($AIMI_CLI roadmap-reconcile --feature "$FEATURE" 2>/dev/null)
+```
+
+If the call fails or returns malformed JSON, skip silently — this is advisory only and never blocks the claim or the transition that follows. Otherwise, count each array and surface non-empty ones to the user without stopping:
+
+```bash
+CORRECTIONS_COUNT=$(printf '%s' "$RECONCILE_JSON" | jq '.corrections | length' 2>/dev/null || echo 0)
+BLOCKED_COUNT=$(printf '%s' "$RECONCILE_JSON" | jq '.blocked | length' 2>/dev/null || echo 0)
+```
+
+```
+[If CORRECTIONS_COUNT > 0:]
+Roadmap reconcile corrected [CORRECTIONS_COUNT] phase(s) whose status had drifted from its tasks file:
+  For each entry in RECONCILE_JSON.corrections: "  - phase [entry.id]: [entry.from] → [entry.to]"
+
+[If BLOCKED_COUNT > 0:]
+Roadmap reconcile found [BLOCKED_COUNT] phase(s) that should be completed but can't be corrected yet:
+  For each entry in RECONCILE_JSON.blocked: "  - phase [entry.id]: [entry.from] → [entry.to] ([entry.reason])"
+```
+
+This is healing, not gating — it never aborts this session's claim, even when it reports corrections or blocked entries for phases other than the one just claimed.
+
+### Overlap Guard
 
 Before transitioning the newly claimed phase to `in_progress`, check whether any other phase in this roadmap is currently `in_progress` (in a sibling `/aimi:execute` session) and, if so, whether the two phases' declared work overlaps. This guard is **soft in both interactive and agent mode** — it never blocks or fails the claim itself, since `roadmap-claim`'s atomic check-and-set already succeeded before this section runs. Every read of a sibling phase's state below goes through `$AIMI_CLI roadmap-get` / `$AIMI_CLI phase-overlap` — never a direct Read of a phase directory this session does not own.
 
-**Stage 1 (always runs) — coarse `areas` comparison against every `in_progress` sibling, then stage 2 (gated) — exact file intersection via the `phase-overlap` CLI verb, only for siblings whose areas intersected:**
+`roadmap-get` is used only to list which siblings are currently `in_progress`; the overlap answer itself always comes from `phase-overlap`'s exact `implementation.files` intersection — there is no coarser pre-filter gating it. A coarse `areas`-array comparison was tried first and dropped: `areas` are declared as broad globs (e.g. `app/checkout/**` vs. `app/checkout/cart/**`), so two phases that provably share files could still compare as disjoint under exact string equality, silently skipping the real check it was meant to gate — and a phase with no `areas` at all disabled the guard entirely. Calling `phase-overlap` unconditionally for every `in_progress` sibling has no such gap:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 ROADMAP_ALL_JSON=$($AIMI_CLI roadmap-get --feature "$FEATURE")
-AREAS_X=$(printf '%s' "$ROADMAP_ALL_JSON" | jq -c --argjson x "$PHASE_ID" '(.phases[] | select(.id == $x) | .areas) // []')
 
 OVERLAP_WARNINGS_JSON='[]'
 while IFS= read -r y_id; do
   [ -z "$y_id" ] && continue
-  AREAS_Y=$(printf '%s' "$ROADMAP_ALL_JSON" | jq -c --argjson y "$y_id" '(.phases[] | select(.id == $y) | .areas) // []')
-  AREA_OVERLAP_COUNT=$(jq -n --argjson a "$AREAS_X" --argjson b "$AREAS_Y" '[$a[] | . as $v | select($b | index($v) != null)] | length')
-  if [ "$AREA_OVERLAP_COUNT" -gt 0 ]; then
-    # Stage 2, gated on stage 1's non-empty area intersection. phase-overlap
-    # failing here (e.g. the sibling has not been rolling-wave expanded yet,
-    # no tasks.json) is not an error for this soft guard -- skip that sibling.
-    if OVERLAP_JSON=$($AIMI_CLI phase-overlap "$FEATURE" "$PHASE_ID" "$y_id" 2>/dev/null); then
-      FILES_COUNT=$(printf '%s' "$OVERLAP_JSON" | jq '.overlapping_files | length')
-      if [ "$FILES_COUNT" -gt 0 ]; then
-        FILES_ARR=$(printf '%s' "$OVERLAP_JSON" | jq -c '.overlapping_files')
-        OVERLAP_WARNINGS_JSON=$(printf '%s' "$OVERLAP_WARNINGS_JSON" | jq --argjson y "$y_id" --argjson files "$FILES_ARR" '. + [{phaseId: $y, files: $files}]')
-      fi
+  # phase-overlap failing here (e.g. the sibling has not been rolling-wave
+  # expanded yet, no tasks.json) is not an error for this soft guard -- skip
+  # that sibling.
+  if OVERLAP_JSON=$($AIMI_CLI phase-overlap "$FEATURE" "$PHASE_ID" "$y_id" 2>/dev/null); then
+    FILES_COUNT=$(printf '%s' "$OVERLAP_JSON" | jq '.overlapping_files | length')
+    if [ "$FILES_COUNT" -gt 0 ]; then
+      FILES_ARR=$(printf '%s' "$OVERLAP_JSON" | jq -c '.overlapping_files')
+      OVERLAP_WARNINGS_JSON=$(printf '%s' "$OVERLAP_WARNINGS_JSON" | jq --argjson y "$y_id" --argjson files "$FILES_ARR" '. + [{phaseId: $y, files: $files}]')
     fi
   fi
 done < <(printf '%s' "$ROADMAP_ALL_JSON" | jq -r --argjson x "$PHASE_ID" '[.phases[] | select(.status == "in_progress" and .id != $x)] | .[].id')
 ```
 
-**When `OVERLAP_WARNINGS_JSON` is `[]`** (no `in_progress` sibling, or every sibling's stage-1 area comparison was empty): skip silently — no prompt, no log line. Proceed straight to the status transition below.
+**When `OVERLAP_WARNINGS_JSON` is `[]`** (no `in_progress` sibling, or `phase-overlap` found no shared file with any sibling it could evaluate): skip silently — no prompt, no log line. Proceed straight to the status transition below.
 
 **When `OVERLAP_WARNINGS_JSON` is non-empty**, for each `{phaseId: Y_ID, files}` entry in order:
 
@@ -722,11 +776,12 @@ if ! SET_STATUS_ERR=$($AIMI_CLI roadmap-set-status --feature "$FEATURE" --phase 
   echo "ERROR: could not transition phase $PHASE_ID to in_progress:" >&2
   echo "$SET_STATUS_ERR" >&2
   echo "roadmap.json and this phase's tasks file disagree. Run: $AIMI_CLI roadmap-reconcile --feature \"$FEATURE\"" >&2
+  $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
   exit 1
 fi
 ```
 
-Do **not** swallow this call's exit status. Every state a claim can hand back — `pending`, `planned`, `in_progress` (crashed-session resume) and `verification_failed` (re-verify retry) — has an explicit `→ in_progress` transition, including the idempotent `in_progress → in_progress`. So a rejection here is never routine: it means the phase is in a state the claim should not have returned, i.e. roadmap.json has diverged from the phase's tasks file. Failing loudly and pointing at `roadmap-reconcile` is the recovery path; an earlier `|| true` hid this and let the phase run to completion only to fail at the final `completed` transition.
+Do **not** swallow this call's exit status. Every state a claim can hand back — `pending`, `planned`, `in_progress` (crashed-session resume) and `verification_failed` (re-verify retry) — has an explicit `→ in_progress` transition, including the idempotent `in_progress → in_progress`. So a rejection here is never routine: it means the phase is in a state the claim should not have returned, i.e. roadmap.json has diverged from the phase's tasks file. Failing loudly and pointing at `roadmap-reconcile` is the recovery path; an earlier `|| true` hid this and let the phase run to completion only to fail at the final `completed` transition. The claim is released (see Release the Claim on Abort) before exiting — `roadmap-reconcile` heals the divergence, and the reconcile call above already ran once for this claim, so a retry (self or otherwise) after running it manually re-claims cleanly instead of piling onto a claim this session can no longer make progress on.
 
 **On failure (`CLAIM_EXIT` is 3 or 4):** `CLAIM_JSON` holds the CLI's stderr.
 
@@ -823,7 +878,13 @@ FRONTEND_BRANCH="${PHASE_BRANCH}-frontend"
 BACKEND_BRANCH="${PHASE_BRANCH}-backend"
 ```
 
-Validate both against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` (the same regex Step 1.7 already validated `PHASE_BRANCH` against). If either fails, report the invalid branch name and STOP — do not create any worktree. (In practice this can only fail if `PHASE_BRANCH` itself changed since Step 1.7's own validation; the check is defense-in-depth, not expected to trigger.)
+Validate both against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` (the same regex Step 1.7 already validated `PHASE_BRANCH` against). If either fails, release the claim (see Release the Claim on Abort), report the invalid branch name, and STOP — do not create any worktree. (In practice this can only fail if `PHASE_BRANCH` itself changed since Step 1.7's own validation; the check is defense-in-depth, not expected to trigger.)
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+```
 
 ### Create Split Worktrees
 
@@ -945,7 +1006,7 @@ $WORKTREE_MGR merge-all "$FRONTEND_BRANCH" "$BACKEND_BRANCH" --into "$PHASE_BRAN
 
 This is the same `merge-all ... --into` primitive Step 4's own wave loop already uses for individual story branches, reused here for the two split branches: the merge target is `$PHASE_BRANCH`, executed with CWD inside the phase container's own worktree (`$PHASE_CONTAINER_PATH`) — never `$DEFAULT_BRANCH`, never `AIMI_ROOT`. Centralizing both merges in this parent step (rather than having each sub-orchestrator merge into `$PHASE_BRANCH` itself, mid-flight, from its own worktree) avoids two parallel Tasks racing a `git checkout`/`git merge` against the same `$PHASE_CONTAINER_PATH` working directory at once; running them sequentially here, after both Tasks have already returned, is safe by construction. This step is also what makes Phase Completion's Creates Verification (below) meaningful: it inspects `$PHASE_CONTAINER_PATH`'s actual tracked files, which only reflect both splits' work once this merge has landed.
 
-**On merge conflict:** mirrors the existing per-wave conflict handling (Step 4) exactly — report the conflicting files, clean up both split worktrees (the conflict lives in `$PHASE_CONTAINER_PATH`'s own working directory, not in the source worktrees, so removing them is safe), and STOP:
+**On merge conflict:** mirrors the existing per-wave conflict handling (Step 4) exactly — report the conflicting files, clean up both split worktrees (the conflict lives in `$PHASE_CONTAINER_PATH`'s own working directory, not in the source worktrees, so removing them is safe), release the claim (see Release the Claim on Abort), and STOP:
 
 ```
 MERGE CONFLICT while merging phase [PHASE_ID]'s split branches into [PHASE_BRANCH].
@@ -956,6 +1017,12 @@ Resolve the conflict on branch [PHASE_BRANCH] in [PHASE_CONTAINER_PATH] and re-r
 `/aimi:execute` to continue. Both split files' stories are already marked complete —
 re-running will not re-execute them, only retry this merge and the phase-completion
 checks that follow it.
+```
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
 ```
 
 ### Clean Up Split Worktrees
@@ -1037,6 +1104,15 @@ $AIMI_CLI count-pending
 ```
 
 If result is `0`:
+
+**When `PHASE_MODE=true` and `$PHASE_ID` is set** (this session itself ran Step 1.7 — never true inside a Phase-Mode Paired Split sub-orchestrator, which never learns `$PHASE_ID`), release the claim first (see Release the Claim on Abort):
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+```
+
 ```
 All stories already complete!
 
@@ -1052,7 +1128,13 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 $AIMI_CLI validate-deps
 ```
 
-If validation fails (non-zero exit), report the error and STOP:
+If validation fails (non-zero exit), release the claim under the same phase-mode guard as above, report the error, and STOP:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+```
 ```
 Dependency validation failed:
 [error output]
@@ -1449,6 +1531,12 @@ while true:
                     cd (PHASE_CONTAINER_PATH if PHASE_MODE else project_roots[wt.group_key])
                     $WORKTREE_MGR remove [wt.worktree_name]
 
+                # PHASE_MODE with PHASE_ID set (this session itself ran Step 1.7 --
+                # never true inside a Phase-Mode Paired Split sub-orchestrator):
+                # release the claim before stopping (see Release the Claim on Abort).
+                if PHASE_MODE and PHASE_ID is set:
+                    $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+
                 STOP execution.
 
             # Merges succeeded for this project group — mark stories complete
@@ -1722,7 +1810,13 @@ Runs once, and before Step 5. Its trigger point depends on whether this phase us
 It fires only when **both** are true:
 
 - `PHASE_MODE == true` (see Phase Mode Detection in Step 1)
-- the phase's own pending count is zero — see **Multi-File Pending Count** immediately below for how this is computed; when it is greater than 0, the wave loop (or, in split mode, one or both sub-orchestrators) broke on deadlock or a gate-blocked wave, not true completion — skip this entire section and go straight to Step 5 (single-file) or the Aggregated Completion Report (split mode, already produced by Phase-Mode Paired Split before this section was reached).
+- the phase's own pending count is zero — see **Multi-File Pending Count** immediately below for how this is computed; when it is greater than 0, the wave loop (or, in split mode, one or both sub-orchestrators) broke on deadlock or a gate-blocked wave, not true completion — release the claim (see Release the Claim on Abort; this section runs only in the top-level orchestrator that itself claimed the phase, so `$PHASE_ID` is always set here) and skip this entire section, going straight to Step 5 (single-file) or the Aggregated Completion Report (split mode, already produced by Phase-Mode Paired Split before this section was reached):
+
+  ```bash
+  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+  $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+  ```
 
 ### Multi-File Pending Count
 
@@ -1798,7 +1892,10 @@ Accumulate two lists: `VERIFIED_ARTIFACTS` (`"<identity> — <location>"` string
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 $AIMI_CLI roadmap-set-status --feature "$FEATURE" --phase "$PHASE_ID" --status verification_failed
+$AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
 ```
+
+Release the claim (see Release the Claim on Abort) right after the status transition above — `verification_failed` is one of the statuses `roadmap-claim`'s auto-mode branch treats as re-claimable once unclaimed, so releasing here is what lets "re-run `/aimi:execute` to re-verify" below actually work on the next attempt, self-session or otherwise.
 
 Report:
 ```
@@ -1845,7 +1942,15 @@ HANDOFF_EXIT=$?
 ```
 `DECISIONS_JSON` / `ARTIFACTS_JSON` / `DEVIATIONS_JSON` / `DEFERRED_JSON` / `CONTRACTS_JSON` are each a JSON array of strings built from the bullets above (e.g. `jq -Rn '[inputs]'` fed one bullet per line, or a literal JSON array). `ARTIFACTS_JSON` is `VERIFIED_ARTIFACTS` converted to a JSON array directly.
 
-**On failure (`HANDOFF_EXIT != 0`):** the phase's status is left exactly where it already was (`in_progress` — the write failure means the status-mutating call below is never reached, so there is nothing to revert). Report:
+**On failure (`HANDOFF_EXIT != 0`):** the phase's status is left exactly where it already was (`in_progress` — the write failure means the status-mutating call below is never reached, so there is nothing to revert). Release the claim (see Release the Claim on Abort) — `in_progress` is re-claimable once unclaimed, the same as any other phase-mode abort:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+```
+
+Report:
 ```
 Handoff write failed for phase [PHASE_ID]: [HANDOFF_RESULT]
 
@@ -1880,7 +1985,7 @@ if command -v gh >/dev/null 2>&1; then
   git push -u origin "$PHASE_BRANCH"
   gh pr create --base "$DEFAULT_BRANCH" --head "$PHASE_BRANCH" \
     --title "Phase [PHASE_ID]: [PHASE_NAME]" \
-    --body "Completes phase [PHASE_ID] of [FEATURE]. See phase-[PHASE_DIR]/handoff.md for details."
+    --body "Completes phase [PHASE_ID] of [FEATURE]. See [PHASE_DIR]/handoff.md for details."
 else
   echo "gh not found — create the PR manually:"
   echo "  git -C \"$PHASE_CONTAINER_PATH\" push -u origin $PHASE_BRANCH"

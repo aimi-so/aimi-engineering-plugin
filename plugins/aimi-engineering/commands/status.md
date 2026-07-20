@@ -227,6 +227,7 @@ For each phase, in the order returned by `roadmap-get` (numeric):
    ```bash
    kill -0 [claim.claimedPid] 2>/dev/null && echo alive || echo stale
    ```
+   When the marker is `(stale)`, append a recovery hint on the same line: `— run $AIMI_CLI roadmap-release-claim --feature [feature] --phase [id] to clear it, or the next roadmap-claim call auto-releases it.`
 4. **Story progress or outline marker:**
    - Construct this phase's expected tasks path: `$TASKS_DIR_ABS/$FEATURE_SLUG/[phase.dir]/$FEATURE_SLUG-phase-[phase.id]-tasks.json`.
    - If that exact path appears in the `find-tasks-all` output fetched above, the phase is **expanded** — point the CLI at it and read counts:
@@ -290,7 +291,15 @@ Rendered instead of Step 1/Step 2/Roadmap Summary whenever Step 0.5 detects a ro
 $AIMI_CLI roadmap-get --feature "$FEATURE_SLUG" --phase [id]
 ```
 
-Returns a single phase object: `{id, name, goal, slug, dir, status, dependsOn, claim}`. If the phase id does not exist, the CLI exits non-zero — report its stderr message and STOP.
+Returns a single phase object — the full roadmap phase record, including `{id, name, goal, slug, dir, status, dependsOn, areas, claim}` and any other optional fields set on it (`successCriteria`, `creates`, `needs`, `notes`, `branch`). If the phase id does not exist, the CLI exits non-zero — report its stderr message and STOP.
+
+### Declared Areas
+
+When `phase.areas` is a non-empty array, render it once, above the expanded/outline-only report below:
+```
+**Areas:** app/checkout/**, lib/payments/**
+```
+Omit this line entirely when `areas` is absent or empty.
 
 ### Expanded vs. Outline Only
 

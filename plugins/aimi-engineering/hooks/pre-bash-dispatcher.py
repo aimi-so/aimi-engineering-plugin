@@ -197,21 +197,22 @@ def _select_governing_tasks_file(candidates: list[Path], branch: str | None) -> 
     unique branch match, preserving the prior flat/legacy newest-mtime
     behavior for flat and non-phase projects.
     """
+    matches: list[Path] = []
     if branch:
-        matches = []
         for candidate in candidates:
             try:
                 data = json.loads(candidate.read_text())
+                meta = data.get("metadata") if isinstance(data, dict) else None
+                if isinstance(meta, dict) and meta.get("branchName") == branch:
+                    matches.append(candidate)
             except Exception:  # noqa: BLE001
                 continue
-            if data.get("metadata", {}).get("branchName") == branch:
-                matches.append(candidate)
         if len(matches) == 1:
             return matches[0]
-    return max(candidates, key=lambda p: p.stat().st_mtime)
+    return max(matches or candidates, key=lambda p: p.stat().st_mtime)
 
 
-def _find_tasks_json(start: str):
+def _find_tasks_json(start: str) -> tuple[Path | None, Path | None]:
     """Walk up from *start* looking for .aimi/tasks/*-tasks.json (flat) or
     .aimi/tasks/<feature>/phase-<N>-<slug>/*-tasks.json (nested phase folders).
 

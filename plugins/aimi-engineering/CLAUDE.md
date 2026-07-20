@@ -120,13 +120,13 @@ Eleven CLI subcommands manage the phase/milestone roadmap layer for large-scope 
 
 - **`roadmap-init --feature <slug> [--file <path>] [--sync] [--brainstorm-path <path>]`** — Materializes `roadmap.json` from a phases array (stdin or `--file`). `--sync` merges additively into an existing roadmap instead of erroring on an existing file.
 - **`roadmap-get --feature <slug> [--phase <id>] [--next-eligible]`** — Reads a single phase, or the next eligible-to-claim phase, from `roadmap.json`.
-- **`roadmap-set-status --feature <slug> --phase <id> --status <status> [--force]`** — Transitions a phase's lifecycle status (`pending → planned → in_progress → completed`, or `→ verification_failed`). Transitioning to `completed` requires a prior `roadmap-write-handoff` for that phase unless `--force` is passed.
+- **`roadmap-set-status --feature <slug> --phase <id> --status <status> [--force]`** — Transitions a phase's lifecycle status (`pending → planned → in_progress → completed`, or `→ verification_failed`). `--force` overrides the *transition-order* check only. It never overrides the hard precondition that a phase can reach `completed` only once `roadmap-write-handoff` has already written that phase's `handoff.md` to disk — that check runs even with `--force`.
 - **`roadmap-claim --feature <slug> --session-id <id> --session-pid <pid> [--phase <id>]`** — Atomically claims the next eligible phase (or a specific `--phase` override) for a session via a locked check-and-set. Auto-releases stale claims whose `claimedPid` is no longer alive before choosing. Idempotent: re-claiming a phase the same session already owns returns it again instead of erroring.
 - **`roadmap-release-claim --feature <slug> --phase <id>`** — Manual escape hatch to release a phase's claim (in addition to automatic stale-claim recovery).
-- **`roadmap-reconcile --feature <slug>`** — Sweeps stale (dead-PID) claims across every phase in a roadmap without claiming a new one.
+- **`roadmap-reconcile --feature <slug>`** — Reconciles every phase's `status` against its own `<feature>-phase-<id>-tasks.json` ground truth (derived from that file's story statuses) and applies corrections in place. A correction that would set a phase to `completed` is applied only when `handoff.md` already exists on disk for that phase; otherwise it is reported as `blocked` rather than applied. Applying a `completed` correction also clears that phase's claim in the same write — reconcile does not otherwise touch claims. Returns `{corrections, blocked}`.
 - **`roadmap-write-handoff --feature <slug> --phase <id> [--file <path>]`** — Writes `phase-N/handoff.md` from a structured payload (`decisions`, `artifacts`, `deviations`, `deferred`, `contracts` arrays). A precondition for `roadmap-set-status ... --status completed`.
 - **`validate-contracts <feature> [--phase <id>] [--agent-mode]`** — Checks a phase's declared `creates`/`needs` contracts for duplicates and suspicious content; `--agent-mode` demotes hard blocks to warnings (mirrors the Phase 3.1/4.1 `--agent-mode` convention).
-- **`phase-overlap <feature> <phase-a> <phase-b>`** — Compares two expanded phases' task files for symbol/file overlap, surfacing a concrete payload-splitting suggestion.
+- **`phase-overlap <feature> <phase-a> <phase-b>`** — Compares two expanded phases' task files' `implementation.files` sets and emits `{overlapping_files: [...]}`. It reports the overlap only — no splitting suggestion; the caller decides what to do with it.
 - **`roadmap-sweep <feature>`** — Batch contract/status consistency sweep across an entire roadmap.
 - **`estimate-payload --outline <path> [--research <path>]... [--spec <path>]... [--prototype <path>]... [--budget-bytes <n>] [--budget-fraction <0-1>]`** — Advisory token/byte budget estimate for an outline plus its cited sources; used to warn before a phase's expansion payload gets too large, suggesting a split along a semantic seam.
 
@@ -177,7 +177,7 @@ Hooks support per-guard bypass via environment variables. Set `<name>=off` (or u
 | `AIMI_RUNTIME_STATE_GUARD` | guard-runtime-state | Allows direct Write/Edit to .aimi/state/, .aimi/tasks during execution, friction/telemetry logs, roadmap.json, and phase-*/handoff.md |
 | `AIMI_AGENT_MODE` | aimi-learnings skill | Forces JSON-only read-only path; never marks events |
 
-> `AIMI_RUNTIME_STATE_GUARD` coverage extends to `roadmap.json` and `phase-*/handoff.md` (see Roadmap File Schema above) — both are guard-protected the same as `.aimi/tasks/`, mutated only through the `roadmap-*` aimi-cli.sh verbs.
+> `AIMI_RUNTIME_STATE_GUARD` (`guard-runtime-state.py`) intercepts the Write/Edit tool path and blocks direct writes to `roadmap.json` and `phase-*/handoff.md` (see Roadmap File Schema above) the same way it blocks `.aimi/tasks/*-tasks.json`, pointing the caller at the `roadmap-*` aimi-cli.sh verbs instead. This coverage is Write/Edit-tool-only — the hook is registered on `matcher: Write|Edit` (`hooks/hooks.json`) and reads `tool_input.file_path`. A Bash command that writes either file directly (e.g. `jq ... > roadmap.json`) is **not** intercepted.
 
 ## Dependencies
 
