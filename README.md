@@ -183,9 +183,11 @@ Features:
 - Auto-retries once on failure
 - Asks user to skip/retry/stop on persistent failures
 
+**Container mode:** when the tasks file's `metadata.execution` is `"container"`, `/aimi:next` creates (or, on a later invocation, reuses) a container for the feature — a git worktree at `.worktrees/<branchName>` — instead of touching the current working tree, and passes that path to the executor as `WORKTREE_PATH`; the story runs and commits inside the container, on the feature branch. Tasks files with `metadata.execution` absent or set to `"inline"` keep running exactly as before this feature shipped: no container is created, no `WORKTREE_PATH` is passed, and the story executes directly against the current working tree (sequential mode).
+
 #### `/aimi:execute`
 
-Orchestrates autonomous execution of all pending stories. Automatically detects schema version and dependency graph shape to choose the optimal execution strategy.
+Orchestrates autonomous execution of all pending stories. Automatically detects schema version, dependency graph shape, and `metadata.execution` to choose the optimal execution strategy.
 
 **v3 with parallel opportunities:**
 1. Validates branch name and dependency graph (DAG validation)
@@ -202,6 +204,24 @@ Orchestrates autonomous execution of all pending stories. Automatically detects 
 3. Loops through stories sequentially via `/aimi:next`
 4. Handles skip/retry/stop decisions
 5. Reports completion with commit count
+
+**Container mode (`metadata.execution: "container"`):**
+
+Instead of checking out the feature branch on your current working tree, `/aimi:execute` creates (or reuses) a container — a git worktree at `.worktrees/<branchName>` — and runs the whole thing there:
+
+1. Creates or reuses the feature container. **The main working tree's checkout is left completely untouched for the entire run.**
+2. Installs dependencies inside the container once (lockfile-detected package manager: bun/pnpm/yarn/npm)
+3. Starts a managed dev server inside the container, automatically, before the wave loop — only when a story needs visual verification
+4. Runs the wave loop inside the container (parallel or sequential, per the strategies above)
+5. On completion: stops the dev server, pushes `<branchName>` to `origin`, then removes the container while preserving the branch. Since nothing is left checked out locally, the report suggests `/aimi:open-pr --branch <branchName>` and `/aimi:review <branchName>` as next steps instead of the usual `gh pr create` / `/aimi:review`.
+
+**Backward compatible by default:** a tasks.json with no `metadata.execution` field — every file created before this feature, and any new one that doesn't set it — keeps running the inline flows described above exactly as before. No container is ever created for it.
+
+**Known limitations of container mode:**
+- Non-Node stacks (no `package.json` with a `dev` script) get no managed dev server — visual verification degrades to `skipped`, not a failure.
+- Ports hardcoded in application config (OAuth redirect URIs, CORS allowlists) are not remapped when the dev server binds to a different free port than expected.
+- Full-stack split runs get one dev server per sibling container with no proxy between them, so one container's visual verification cannot reach its sibling container's API.
+- Uncommitted edits sitting in your main working tree do not propagate into a container — `git worktree add` only branches from committed history, so commit first.
 
 #### `/aimi:review`
 
