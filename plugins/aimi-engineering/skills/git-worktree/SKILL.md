@@ -73,6 +73,9 @@ bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh copy-
 
 # Clean up completed worktrees
 bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh cleanup
+
+# Install dependencies inside a worktree (detects package manager by lockfile)
+bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh install-deps feature-login
 ```
 
 ## Commands
@@ -138,6 +141,26 @@ bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh clean
 2. Asks for confirmation
 3. Removes selected worktrees
 4. Cleans up empty directories
+
+### `install-deps <worktree-name>`
+
+Installs dependencies inside an existing worktree by detecting the package manager from its lockfile. Used by the container execution mode of `/aimi:execute` to prepare a worktree before starting its dev server.
+
+**Example:**
+```bash
+bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh install-deps feature-login
+```
+
+**Package manager detection order (first match wins):**
+1. `bun.lockb` → `bun install`
+2. `pnpm-lock.yaml` → `pnpm install`
+3. `yarn.lock` → `yarn install`
+4. `package-lock.json` → `npm ci` (falls back to `npm install` if `npm ci` fails)
+5. No recognized lockfile but `package.json` present → `npm install`
+
+**No `package.json`:** prints a single informational line and exits `0`. This is never treated as an error — plenty of worktrees are not Node projects.
+
+**Install failure is advisory, not fatal:** if the package manager's install command fails, `install-deps` prints a clear error naming the package manager and worktree, and exits non-zero — but it never leaves partial state or trips the script's own `set -e`. **Callers must treat a non-zero exit as a degradation, not a hard failure.** In particular, the container mode of `/aimi:execute` must fall visual verification back to `skipped`/`failed` and must never abort its wave loop because `install-deps` failed.
 
 For workflow examples, see [workflow-examples.md](references/workflow-examples.md).
 

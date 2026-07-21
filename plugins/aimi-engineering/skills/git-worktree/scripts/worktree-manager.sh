@@ -326,6 +326,76 @@ remove_worktree() {
   fi
 }
 
+# Install dependencies inside a worktree by detecting the package manager from its lockfile.
+# Advisory/non-fatal contract: a missing package.json is not an error (exit 0), and an install
+# failure is reported clearly but never left in a state that trips the script's `set -e`.
+install_deps() {
+  local worktree_name="$1"
+
+  if [[ -z "$worktree_name" ]]; then
+    echo -e "${RED}Error: Worktree name required${NC}"
+    echo "Usage: worktree-manager.sh install-deps <worktree-name>"
+    exit 1
+  fi
+
+  # Validate worktree name before any filesystem access
+  validate_branch_name "$worktree_name"
+
+  local worktree_path="$WORKTREE_DIR/$worktree_name"
+
+  if [[ ! -d "$worktree_path" ]]; then
+    echo -e "${RED}Error: Worktree directory not found: $worktree_name${NC}" >&2
+    exit 1
+  fi
+
+  if [[ ! -f "$worktree_path/package.json" ]]; then
+    echo -e "${YELLOW}ℹ️  No package.json in worktree, skipping dependency install: $worktree_name${NC}"
+    return 0
+  fi
+
+  # Detect package manager by lockfile, fixed priority order: bun > pnpm > yarn > npm.
+  # NOTE: if `serve start` grows its own lockfile-based detector, factor both into one
+  # shared helper so the detection order is defined once instead of duplicated.
+  local pm_name pm_cmd
+  if [[ -f "$worktree_path/bun.lockb" ]]; then
+    pm_name="bun"
+    pm_cmd="bun install"
+  elif [[ -f "$worktree_path/pnpm-lock.yaml" ]]; then
+    pm_name="pnpm"
+    pm_cmd="pnpm install"
+  elif [[ -f "$worktree_path/yarn.lock" ]]; then
+    pm_name="yarn"
+    pm_cmd="yarn install"
+  elif [[ -f "$worktree_path/package-lock.json" ]]; then
+    pm_name="npm"
+    pm_cmd="npm ci"
+  else
+    pm_name="npm"
+    pm_cmd="npm install"
+  fi
+
+  echo -e "${BLUE}Installing dependencies in worktree '$worktree_name' with $pm_name...${NC}"
+
+  # Guarded subshell: an install failure must never trip the script's top-level `set -e`.
+  if ! ( cd "$worktree_path" && eval "$pm_cmd" ); then
+    if [[ "$pm_cmd" == "npm ci" ]]; then
+      echo -e "${YELLOW}⚠️  npm ci failed, falling back to npm install...${NC}"
+      if ! ( cd "$worktree_path" && npm install ); then
+        echo -e "${RED}Error: Dependency install failed for worktree '$worktree_name' (npm, after npm ci and npm install fallback)${NC}" >&2
+        return 1
+      fi
+      echo -e "${GREEN}✓ Dependencies installed successfully with npm (install fallback) in worktree: $worktree_name${NC}"
+      return 0
+    fi
+
+    echo -e "${RED}Error: Dependency install failed for worktree '$worktree_name' using $pm_name${NC}" >&2
+    return 1
+  fi
+
+  echo -e "${GREEN}✓ Dependencies installed successfully with $pm_name in worktree: $worktree_name${NC}"
+  return 0
+}
+
 # Merge a worktree branch into a target branch
 merge_worktree() {
   local worktree_name=""
@@ -515,6 +585,9 @@ main() {
     cleanup|clean)
       cleanup_worktrees
       ;;
+    install-deps)
+      install_deps "$2"
+      ;;
     help)
       show_help
       ;;
@@ -546,6 +619,8 @@ Commands:
   merge-all <b1> <b2> ... [--into <b>]  Merge multiple branches sequentially
                                          (stops on first conflict)
   cleanup | clean                     Clean up inactive worktrees
+  install-deps <worktree-name>        Install dependencies inside a worktree
+                                      (detects package manager by lockfile)
   help                                Show this help message
 
 Environment Files:
@@ -560,6 +635,19 @@ Merge:
   - On conflict: prints conflicting files and exits with code 1
   - merge-all stops on first conflict and reports which branch failed
 
+Install Deps:
+  - Detection order (first lockfile match wins): bun.lockb -> bun install;
+    pnpm-lock.yaml -> pnpm install; yarn.lock -> yarn install;
+    package-lock.json -> npm ci (falls back to npm install on failure);
+    no recognized lockfile but package.json present -> npm install
+  - No package.json: prints an informational line and exits 0 (not an error)
+  - Install failure: prints a clear error naming the package manager and
+    worktree, and exits non-zero
+  - Advisory/non-fatal contract for callers: a non-zero exit here must be
+    treated as a degradation, not a fatal error. Callers such as the
+    container mode of /aimi:execute should fall visual verification back to
+    skipped/failed and never abort the wave loop because install-deps failed
+
 Examples:
   worktree-manager.sh create feature-login
   worktree-manager.sh create feature-auth --from develop
@@ -570,6 +658,7 @@ Examples:
   worktree-manager.sh merge feature-login --into main
   worktree-manager.sh merge-all feat-a feat-b --into develop
   worktree-manager.sh cleanup
+  worktree-manager.sh install-deps feature-login
   worktree-manager.sh list
 
 EOF
