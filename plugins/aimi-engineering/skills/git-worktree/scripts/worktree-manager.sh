@@ -25,7 +25,7 @@ DEV_SERVER_STOP_GRACE=5          # seconds to wait after SIGTERM before escalati
 # Validate branch name to prevent command injection
 validate_branch_name() {
   local name="$1"
-  if ! [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$ ]]; then
+  if ! [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
     echo -e "${RED}Error: Invalid branch name: $name${NC}" >&2
     exit 1
   fi
@@ -372,6 +372,16 @@ install_deps() {
   validate_branch_name "$worktree_name"
 
   local worktree_path="$WORKTREE_DIR/$worktree_name"
+
+  # Path containment check — prevent directory traversal
+  local resolved_path
+  resolved_path=$(realpath -m "$worktree_path")
+  local resolved_dir
+  resolved_dir=$(realpath -m "$WORKTREE_DIR")
+  if [[ ! "$resolved_path" == "$resolved_dir"/* ]]; then
+    echo -e "${RED}Error: Worktree path escapes expected directory${NC}" >&2
+    exit 1
+  fi
 
   if [[ ! -d "$worktree_path" ]]; then
     echo -e "${RED}Error: Worktree directory not found: $worktree_name${NC}" >&2
@@ -840,6 +850,17 @@ serve_start() {
   validate_branch_name "$worktree_name"
 
   local worktree_path="$WORKTREE_DIR/$worktree_name"
+
+  # Path containment check — prevent directory traversal
+  local resolved_path
+  resolved_path=$(realpath -m "$worktree_path")
+  local resolved_dir
+  resolved_dir=$(realpath -m "$WORKTREE_DIR")
+  if [[ ! "$resolved_path" == "$resolved_dir"/* ]]; then
+    echo -e "${RED}Error: Worktree path escapes expected directory${NC}" >&2
+    return 0
+  fi
+
   if [[ ! -d "$worktree_path" ]]; then
     echo -e "${RED}Error: Worktree directory not found: $worktree_name${NC}" >&2
     return 0
