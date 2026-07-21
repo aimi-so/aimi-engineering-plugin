@@ -13,6 +13,15 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Detect flock availability once (Linux has it; macOS falls back to a mkdir spinlock)
+_HAS_FLOCK=$(command -v flock &>/dev/null && echo 1 || echo 0)
+
+# serve start|stop|status configuration
+DEV_SERVER_BASE_PORT=4100        # first port probed when picking a free loopback port
+DEV_SERVER_PORT_SCAN_LIMIT=500   # give up after this many ports scanned upward from base
+DEV_SERVER_READY_TIMEOUT=30      # seconds to wait for the readiness probe per launch attempt
+DEV_SERVER_STOP_GRACE=5          # seconds to wait after SIGTERM before escalating to SIGKILL
+
 # Validate branch name to prevent command injection
 validate_branch_name() {
   local name="$1"
@@ -574,6 +583,490 @@ merge_all_worktrees() {
   echo -e "${GREEN}All ${#branches[@]} branch(es) merged successfully into '$target_branch'!${NC}"
 }
 
+# ============================================================================
+# Dev server management (serve start|stop|status)
+# ============================================================================
+#
+# Manages a loopback-only dev server for a container worktree: picks a free
+# 127.0.0.1 port, launches the worktree's `dev` script as its own process
+# group (via setsid), confirms readiness with an HTTP probe, confirms the
+# listening socket actually belongs to the process it just spawned, and
+# tracks the result in .aimi/state/dev-server.json keyed by worktree/branch
+# name. Every failure mode here degrades gracefully (exit 0, clear message)
+# except a missing worktree-name argument, which is a usage error.
+
+# Portable exclusive lock (Linux: flock, macOS: mkdir spinlock).
+# Usage: call inside a subshell with an FD 200 redirect: ( _lock "$f"; ... ) 200>"$f"
+_lock() {
+  if [[ "$_HAS_FLOCK" -eq 1 ]]; then
+    flock -x 200
+  else
+    local lockdir="$1.d"
+    local attempts=0
+    while ! mkdir "$lockdir" 2>/dev/null; do
+      sleep 0.05
+      attempts=$((attempts + 1))
+      if [[ "$attempts" -ge 200 ]]; then
+        rmdir "$lockdir" 2>/dev/null || rm -rf "$lockdir"
+        attempts=0
+      fi
+    done
+    trap "rmdir '$lockdir' 2>/dev/null" EXIT
+  fi
+}
+
+# Process-liveness probe, mirroring aimi-cli.sh's _is_pid_alive: a kill -0
+# signal-zero probe. "No such process" -> dead. "Exists, not permitted to
+# signal" -> alive (a foreign/other-user process is still a live process).
+_is_pid_alive() {
+  local pid="$1"
+  if ! [[ "$pid" =~ ^[0-9]+$ ]] || [[ "$pid" -le 0 ]]; then
+    return 1
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+  local err
+  err=$(kill -0 "$pid" 2>&1 >/dev/null) || true
+  if printf '%s' "$err" | grep -qi "not permitted"; then
+    return 0
+  fi
+  return 1
+}
+
+# Walk upward from CWD looking for a .aimi/ directory, mirroring aimi-cli.sh's
+# find_aimi_root. Stops at $HOME. GIT_ROOT (line ~27) cannot be assumed to be
+# the right place: inside a nested phase/story container GIT_ROOT resolves to
+# that container's own worktree root, and in a multi-repo layout .aimi/ sits
+# above any single git repo. Prints the discovered root on stdout; returns 1
+# (prints nothing) if none is found.
+find_aimi_root() {
+  local dir="$PWD"
+  while true; do
+    if [[ -d "$dir/.aimi" ]]; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+    if [[ "$dir" == "$HOME" ]]; then
+      return 1
+    fi
+    local parent
+    parent=$(dirname "$dir")
+    if [[ "$parent" == "$dir" ]]; then
+      return 1
+    fi
+    dir="$parent"
+  done
+}
+
+# A successful connect means something is already listening (occupied); a
+# refused/failed connect means the port is free. Loopback-only by construction.
+_port_free() {
+  local port="$1"
+  if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+    exec 3>&- 3<&- 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
+
+# Scan upward from DEV_SERVER_BASE_PORT for the first free loopback port.
+_pick_free_port() {
+  local port="$DEV_SERVER_BASE_PORT"
+  local tries=0
+  while [[ "$tries" -lt "$DEV_SERVER_PORT_SCAN_LIMIT" ]]; do
+    if _port_free "$port"; then
+      printf '%s\n' "$port"
+      return 0
+    fi
+    port=$((port + 1))
+    tries=$((tries + 1))
+  done
+  return 1
+}
+
+# Poll http://127.0.0.1:<port> (never a wildcard address) until it answers or
+# a bounded timeout elapses. "Process started" is not "server up" — only an
+# actual HTTP response counts.
+_wait_ready() {
+  local port="$1"
+  local timeout_s="${2:-$DEV_SERVER_READY_TIMEOUT}"
+  local iterations=$((timeout_s * 2))
+  local i=0
+  while [[ "$i" -lt "$iterations" ]]; do
+    if curl -sf -o /dev/null --max-time 1 "http://127.0.0.1:${port}" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.5
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# Resolve the pid holding the LISTEN socket on 127.0.0.1:<port>, preferring
+# `ss` (iproute2) and falling back to `lsof`. Prints nothing if neither tool
+# is available or nothing is found.
+_port_listener_pid() {
+  local port="$1"
+  local out=""
+  if command -v ss &>/dev/null; then
+    out=$(ss -H -ltnp "sport = :${port}" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -n1) || true
+  fi
+  if [[ -z "$out" ]] && command -v lsof &>/dev/null; then
+    out=$(lsof -ti tcp:"${port}" -sTCP:LISTEN 2>/dev/null | head -n1) || true
+  fi
+  printf '%s' "$out"
+}
+
+# Kill the entire process group of a setsid-launched leader: SIGTERM the
+# group first, wait a grace period, then fall back to a plain kill on the pid
+# itself, then SIGKILL (group and plain) as a last resort. Never fails hard —
+# stop must always be able to clear the state entry afterward.
+_kill_process_group() {
+  local pgid="$1"
+  [[ -z "$pgid" ]] && return 0
+
+  kill -TERM -- "-$pgid" 2>/dev/null || true
+
+  local waited=0
+  while _is_pid_alive "$pgid" && [[ "$waited" -lt "$DEV_SERVER_STOP_GRACE" ]]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  if _is_pid_alive "$pgid"; then
+    kill -- "$pgid" 2>/dev/null || true
+    sleep 1
+  fi
+
+  if _is_pid_alive "$pgid"; then
+    kill -9 -- "-$pgid" 2>/dev/null || true
+    kill -9 -- "$pgid" 2>/dev/null || true
+  fi
+
+  return 0
+}
+
+# Launch a dev command under setsid so it becomes its own session/process-
+# group leader (pid == pgid), which is what serve_stop later negates for the
+# group kill. We don't rely on setsid's own pid (util-linux versions differ
+# on whether setsid forks before exec-ing its argument) — instead the exec'd
+# process reports its own $$ to pid_file just before replacing its image via
+# exec, which is reliable regardless of that fork behavior.
+# Args: port log_file pid_file -- dev_cmd_words...
+_launch_dev_server() {
+  local port="$1" log_file="$2" pid_file="$3"
+  shift 3
+  rm -f "$pid_file"
+
+  setsid env PORT="$port" HOST=127.0.0.1 bash -c 'printf "%s" "$$" > "$0"; exec "$@"' \
+    "$pid_file" "$@" </dev/null >"$log_file" 2>&1 &
+  disown 2>/dev/null || true
+
+  local waited=0
+  while [[ ! -s "$pid_file" ]] && [[ "$waited" -lt 20 ]]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+
+  if [[ -s "$pid_file" ]]; then
+    cat "$pid_file"
+  fi
+  return 0
+}
+
+# Read dev-server.json in full, defaulting to "{}" when absent or malformed.
+_dev_server_read_all() {
+  local state_file="$1"
+  if [[ -f "$state_file" ]] && jq empty "$state_file" >/dev/null 2>&1; then
+    cat "$state_file"
+  else
+    printf '{}'
+  fi
+}
+
+# Print the branch's entry (compact JSON) on stdout, or nothing if absent.
+_dev_server_get_entry() {
+  local state_file="$1" branch="$2"
+  _dev_server_read_all "$state_file" | jq -c --arg branch "$branch" '.[$branch] // empty'
+  return 0
+}
+
+# Atomic (mktemp-then-move, flock-protected) upsert of one branch's entry.
+_dev_server_write_entry() {
+  local state_file="$1" branch="$2" entry_json="$3"
+  mkdir -p "$(dirname "$state_file")"
+  local lock_file="${state_file}.lock"
+  (
+    _lock "$lock_file"
+    local current updated tmp_file
+    current=$(_dev_server_read_all "$state_file")
+    updated=$(printf '%s' "$current" | jq --arg branch "$branch" --argjson entry "$entry_json" '.[$branch] = $entry')
+    tmp_file=$(mktemp "${state_file}.XXXXXX")
+    printf '%s\n' "$updated" > "$tmp_file"
+    mv "$tmp_file" "$state_file"
+  ) 200>"$lock_file"
+  return 0
+}
+
+# Atomic (mktemp-then-move, flock-protected) removal of one branch's entry.
+# A no-op (not an error) when the state file doesn't exist yet.
+_dev_server_remove_entry() {
+  local state_file="$1" branch="$2"
+  [[ -f "$state_file" ]] || return 0
+  local lock_file="${state_file}.lock"
+  (
+    _lock "$lock_file"
+    local current updated tmp_file
+    current=$(_dev_server_read_all "$state_file")
+    updated=$(printf '%s' "$current" | jq --arg branch "$branch" 'del(.[$branch])')
+    tmp_file=$(mktemp "${state_file}.XXXXXX")
+    printf '%s\n' "$updated" > "$tmp_file"
+    mv "$tmp_file" "$state_file"
+  ) 200>"$lock_file"
+  return 0
+}
+
+# Start (or reuse) a loopback dev server for a container worktree.
+serve_start() {
+  local worktree_name="$1"
+
+  if [[ -z "$worktree_name" ]]; then
+    echo -e "${RED}Error: Worktree name required${NC}" >&2
+    echo "Usage: worktree-manager.sh serve start <worktree-name>" >&2
+    exit 1
+  fi
+
+  validate_branch_name "$worktree_name"
+
+  local worktree_path="$WORKTREE_DIR/$worktree_name"
+  if [[ ! -d "$worktree_path" ]]; then
+    echo -e "${RED}Error: Worktree directory not found: $worktree_name${NC}" >&2
+    return 0
+  fi
+
+  if [[ ! -f "$worktree_path/package.json" ]]; then
+    echo -e "${YELLOW}ℹ️  No package.json in worktree, no dev server applies: $worktree_name${NC}"
+    return 0
+  fi
+
+  local has_dev_script
+  has_dev_script=$(jq -r 'if (.scripts.dev // empty) != "" then "yes" else "no" end' "$worktree_path/package.json" 2>/dev/null || echo "no")
+  if [[ "$has_dev_script" != "yes" ]]; then
+    echo -e "${YELLOW}ℹ️  No 'dev' script in package.json, no dev server applies: $worktree_name${NC}"
+    return 0
+  fi
+
+  local aimi_root
+  if ! aimi_root=$(find_aimi_root); then
+    echo -e "${RED}Error: Could not locate a .aimi/ directory searching upward from $(pwd)${NC}" >&2
+    return 0
+  fi
+
+  local state_file="$aimi_root/.aimi/state/dev-server.json"
+
+  # Reuse a live registered entry after a pid-alive check; discard a dead one.
+  local existing_entry
+  existing_entry=$(_dev_server_get_entry "$state_file" "$worktree_name")
+  if [[ -n "$existing_entry" ]]; then
+    local existing_pid existing_port
+    existing_pid=$(printf '%s' "$existing_entry" | jq -r '.pid // empty')
+    existing_port=$(printf '%s' "$existing_entry" | jq -r '.port // empty')
+    if [[ -n "$existing_pid" ]] && _is_pid_alive "$existing_pid"; then
+      echo -e "${GREEN}✓ Dev server already running for '$worktree_name' at http://127.0.0.1:${existing_port} (pid $existing_pid)${NC}"
+      echo "http://127.0.0.1:${existing_port}"
+      return 0
+    fi
+    _dev_server_remove_entry "$state_file" "$worktree_name"
+  fi
+
+  # Detect package manager by lockfile, fixed priority order: bun > pnpm > yarn > npm.
+  # NOTE: mirrors install_deps' detection order above; a later cross-story pass
+  # may factor both into one shared helper if the duplication becomes a problem.
+  local pm_name
+  local -a pm_cmd
+  if [[ -f "$worktree_path/bun.lockb" ]]; then
+    pm_name="bun"; pm_cmd=(bun run dev)
+  elif [[ -f "$worktree_path/pnpm-lock.yaml" ]]; then
+    pm_name="pnpm"; pm_cmd=(pnpm run dev)
+  elif [[ -f "$worktree_path/yarn.lock" ]]; then
+    pm_name="yarn"; pm_cmd=(yarn run dev)
+  else
+    pm_name="npm"; pm_cmd=(npm run dev)
+  fi
+
+  local port
+  if ! port=$(_pick_free_port); then
+    echo -e "${RED}Error: No free 127.0.0.1 port found for dev server (scanned $DEV_SERVER_BASE_PORT-$((DEV_SERVER_BASE_PORT + DEV_SERVER_PORT_SCAN_LIMIT)))${NC}" >&2
+    return 0
+  fi
+
+  mkdir -p "$aimi_root/.aimi/state"
+  local safe_name="${worktree_name//\//_}"
+  local log_file="$aimi_root/.aimi/state/.dev-server-${safe_name}.log"
+  local pid_file
+  pid_file=$(mktemp -u "$aimi_root/.aimi/state/.dev-server-pid-${safe_name}.XXXXXX")
+
+  echo -e "${BLUE}Starting dev server for '$worktree_name' with $pm_name on port $port (attempt 1: PORT env var)...${NC}"
+
+  local leader_pid=""
+  leader_pid=$(cd "$worktree_path" && _launch_dev_server "$port" "$log_file" "$pid_file" "${pm_cmd[@]}")
+
+  local ready=false
+  if [[ -n "$leader_pid" ]] && _wait_ready "$port" "$DEV_SERVER_READY_TIMEOUT"; then
+    ready=true
+  else
+    [[ -n "$leader_pid" ]] && _kill_process_group "$leader_pid"
+    rm -f "$pid_file"
+
+    echo -e "${BLUE}PORT env var attempt did not answer on port $port; retrying with -- --port ${port} (attempt 2)...${NC}"
+    leader_pid=$(cd "$worktree_path" && _launch_dev_server "$port" "$log_file" "$pid_file" "${pm_cmd[@]}" -- --port "$port")
+
+    if [[ -n "$leader_pid" ]] && _wait_ready "$port" "$DEV_SERVER_READY_TIMEOUT"; then
+      ready=true
+    fi
+  fi
+
+  rm -f "$pid_file"
+
+  if [[ "$ready" != true ]]; then
+    [[ -n "$leader_pid" ]] && _kill_process_group "$leader_pid"
+    echo -e "${RED}Error: Dev server for '$worktree_name' never answered on http://127.0.0.1:${port} after trying both the PORT env var and -- --port ${port}. See log: $log_file${NC}" >&2
+    return 0
+  fi
+
+  # Ownership check: the listening socket must belong to the process group we
+  # just spawned, not a stale or unrelated foreign process on that port.
+  local listener_pid
+  listener_pid=$(_port_listener_pid "$port")
+  if [[ -z "$listener_pid" ]]; then
+    echo -e "${RED}Error: Dev server for '$worktree_name' answered on port $port but its listener pid could not be resolved for the ownership check (no ss/lsof?); not adopting it${NC}" >&2
+    _kill_process_group "$leader_pid"
+    return 0
+  fi
+
+  local listener_pgid
+  listener_pgid=$(ps -o pgid= -p "$listener_pid" 2>/dev/null | tr -d ' ')
+  if [[ "$listener_pgid" != "$leader_pid" ]]; then
+    echo -e "${RED}Error: Port $port is already held by an unrelated process (pid $listener_pid, pgid $listener_pgid) — not adopting it as the dev server for '$worktree_name'${NC}" >&2
+    _kill_process_group "$leader_pid"
+    return 0
+  fi
+
+  local entry
+  entry=$(jq -n --argjson port "$port" --argjson pid "$leader_pid" --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{port: $port, pid: $pid, startedAt: $started}')
+  _dev_server_write_entry "$state_file" "$worktree_name" "$entry"
+
+  echo -e "${GREEN}✓ Dev server ready for '$worktree_name': http://127.0.0.1:${port} (pid $leader_pid)${NC}"
+  echo "http://127.0.0.1:${port}"
+}
+
+# Stop a container worktree's dev server, killing its whole process group.
+serve_stop() {
+  local worktree_name="$1"
+
+  if [[ -z "$worktree_name" ]]; then
+    echo -e "${RED}Error: Worktree name required${NC}" >&2
+    echo "Usage: worktree-manager.sh serve stop <worktree-name>" >&2
+    exit 1
+  fi
+
+  validate_branch_name "$worktree_name"
+
+  local aimi_root
+  if ! aimi_root=$(find_aimi_root); then
+    echo -e "${YELLOW}ℹ️  Could not locate a .aimi/ directory; nothing to stop for '$worktree_name'${NC}"
+    return 0
+  fi
+
+  local state_file="$aimi_root/.aimi/state/dev-server.json"
+  local entry
+  entry=$(_dev_server_get_entry "$state_file" "$worktree_name")
+
+  if [[ -z "$entry" ]]; then
+    echo -e "${YELLOW}ℹ️  No dev server registered for '$worktree_name'${NC}"
+    return 0
+  fi
+
+  local pid
+  pid=$(printf '%s' "$entry" | jq -r '.pid // empty')
+
+  if [[ -n "$pid" ]] && _is_pid_alive "$pid"; then
+    echo -e "${BLUE}Stopping dev server for '$worktree_name' (process group $pid)...${NC}"
+    _kill_process_group "$pid"
+  fi
+
+  # Remove the state entry whether or not the kill fully succeeded.
+  _dev_server_remove_entry "$state_file" "$worktree_name"
+  echo -e "${GREEN}✓ Dev server stopped and state cleared for '$worktree_name'${NC}"
+}
+
+# Report a container worktree's dev server status. Contract (consumed by
+# US-007/US-013 via jq): prints EXACTLY one line of JSON with keys
+# running (boolean), port (number|null), pid (number|null); exit 0 always.
+# No other stdout output is permitted in this function.
+serve_status() {
+  local worktree_name="$1"
+
+  if [[ -z "$worktree_name" ]]; then
+    echo -e "${RED}Error: Worktree name required${NC}" >&2
+    echo "Usage: worktree-manager.sh serve status <worktree-name>" >&2
+    exit 1
+  fi
+
+  validate_branch_name "$worktree_name"
+
+  local aimi_root
+  if ! aimi_root=$(find_aimi_root); then
+    jq -n -c '{running: false, port: null, pid: null}'
+    return 0
+  fi
+
+  local state_file="$aimi_root/.aimi/state/dev-server.json"
+  local entry
+  entry=$(_dev_server_get_entry "$state_file" "$worktree_name")
+
+  if [[ -z "$entry" ]]; then
+    jq -n -c '{running: false, port: null, pid: null}'
+    return 0
+  fi
+
+  local pid port
+  pid=$(printf '%s' "$entry" | jq -r '.pid // empty')
+  port=$(printf '%s' "$entry" | jq -r '.port // empty')
+
+  if [[ -n "$pid" ]] && _is_pid_alive "$pid"; then
+    jq -n -c --argjson port "$port" --argjson pid "$pid" '{running: true, port: $port, pid: $pid}'
+  else
+    # Stale entry: pid no longer alive. Remove it as a side effect.
+    _dev_server_remove_entry "$state_file" "$worktree_name"
+    jq -n -c '{running: false, port: null, pid: null}'
+  fi
+}
+
+# Dispatch serve start|stop|status <worktree-name>
+serve_dispatch() {
+  local subcmd="$1"
+  shift || true
+  case "$subcmd" in
+    start)
+      serve_start "$1"
+      ;;
+    stop)
+      serve_stop "$1"
+      ;;
+    status)
+      serve_status "$1"
+      ;;
+    *)
+      echo -e "${RED}Error: Unknown serve subcommand: ${subcmd:-<none>}${NC}" >&2
+      echo "Usage: worktree-manager.sh serve start|stop|status <worktree-name>" >&2
+      exit 1
+      ;;
+  esac
+}
+
 # Main command handler
 main() {
   local command="${1:-list}"
@@ -610,6 +1103,10 @@ main() {
     install-deps)
       install_deps "$2"
       ;;
+    serve)
+      shift
+      serve_dispatch "$@"
+      ;;
     help)
       show_help
       ;;
@@ -644,6 +1141,12 @@ Commands:
   cleanup | clean                     Clean up inactive worktrees
   install-deps <worktree-name>        Install dependencies inside a worktree
                                       (detects package manager by lockfile)
+  serve start <worktree-name>         Start a loopback-only (127.0.0.1) dev server
+                                      for a worktree, print its URL and pid
+  serve stop <worktree-name>          Stop a worktree's dev server (kills the
+                                      whole process group)
+  serve status <worktree-name>        Report a worktree's dev server status as
+                                      single-line JSON: {"running":bool,"port":n|null,"pid":n|null}
   help                                Show this help message
 
 Environment Files:
@@ -671,6 +1174,43 @@ Install Deps:
     container mode of /aimi:execute should fall visual verification back to
     skipped/failed and never abort the wave loop because install-deps failed
 
+Serve (Dev Server):
+  - Loopback-only: the dev server is always bound to 127.0.0.1, never 0.0.0.0
+    or a wildcard/empty host; the readiness probe only ever connects to
+    127.0.0.1:<port>
+  - Port injection, tried in order: (1) PORT env var (Next.js, CRA, Nuxt,
+    Remix); (2) if the readiness probe still fails, kill that attempt and
+    retry once with '-- --port <n>' appended (Vite, Astro). If neither
+    yields a listener, serve start reports the failure and exits 0
+  - Readiness probe: polls http://127.0.0.1:<port> with a bounded timeout.
+    A process merely starting is never enough — only an observed HTTP
+    response counts as ready
+  - Ownership check: before adopting the port's listener as this worktree's
+    dev server, serve start confirms the listening pid's process group
+    matches the process it just spawned, so a stale or foreign process on
+    that port is never mistaken for the dev server
+  - State: .aimi/state/dev-server.json, keyed by worktree/branch name, each
+    entry holding port, pid (the process-group leader pid), and startedAt.
+    Written exclusively via a Bash-level atomic (mktemp-then-move,
+    flock-protected) write inside this script — never via the Write/Edit
+    tool, which guard-runtime-state.py blocks unconditionally for this path
+  - serve start reuses a live entry (kill -0 check) instead of respawning;
+    a dead entry is discarded and a fresh server is spawned
+  - serve stop kills the recorded process group (negative-pid kill against
+    the setsid-launched leader), not just the single pid, so forked children
+    (a next-server worker, a vite worker) don't survive; the state entry is
+    removed whether or not the kill fully succeeded
+  - serve status prints EXACTLY one line of JSON to stdout:
+    {"running":<bool>,"port":<number|null>,"pid":<number|null>}, exit 0 in
+    both the running and not-running cases. This exact shape is a contract
+    consumed by other tooling via jq — do not add or rename keys
+  - No package.json, or no "dev" script: clean skip — exits 0, writes no
+    state, and is never reported as an error
+  - Every failure mode (port exhaustion, readiness timeout, ownership
+    mismatch, missing dev script, kill failure) degrades gracefully: serve
+    start/stop/status never exit non-zero for these conditions. Only a
+    missing worktree-name argument is a usage error
+
 Examples:
   worktree-manager.sh create feature-login
   worktree-manager.sh create feature-auth --from develop
@@ -684,6 +1224,9 @@ Examples:
   worktree-manager.sh merge-all feat-a feat-b --into develop
   worktree-manager.sh cleanup
   worktree-manager.sh install-deps feature-login
+  worktree-manager.sh serve start feature-login
+  worktree-manager.sh serve status feature-login
+  worktree-manager.sh serve stop feature-login
   worktree-manager.sh list
 
 EOF
