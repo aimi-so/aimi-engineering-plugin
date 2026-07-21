@@ -1261,6 +1261,16 @@ In neither interactive mode does execute.md ever print git's raw stderr for the 
 
 #### Create or Reuse the Container
 
+Read and validate `branchName` — defense in depth, mirroring `PHASE_BRANCH`'s validate-once-quote-everywhere discipline (`cmd_init_session` already rejected an invalid `branchName` in Step 1, before this subsection ever runs):
+
+```bash
+BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
+if ! [[ "$BRANCH_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+  echo "Invalid branchName: $BRANCH_NAME" >&2
+  exit 1
+fi
+```
+
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
@@ -1270,13 +1280,13 @@ if [ -n "$BASE_BRANCH" ]; then
 else
   CONTAINER_BASE="$DEFAULT_BRANCH"
 fi
-$WORKTREE_MGR create [branchName] --from "$CONTAINER_BASE"
+$WORKTREE_MGR create "$BRANCH_NAME" --from "$CONTAINER_BASE"
 ```
 
 `CONTAINER_BASE` is `BASE_BRANCH` when Step 1.6 set one, otherwise `DEFAULT_BRANCH` — the exact same base-selection rule the phase container already uses (see Create or Reuse the Phase Container). `$WORKTREE_MGR create` prints the worktree path and, when the target directory already exists, reuses it silently instead of recreating it — so calling it idempotently on every run (first run or interrupted-resume) is sufficient; no separate reuse-detection branch is needed, mirroring the phase container's own idempotent-create behavior. The path is deterministic given `AIMI_ROOT` and `[branchName]`:
 
 ```bash
-FEATURE_CONTAINER_PATH="$AIMI_ROOT/.worktrees/[branchName]"
+FEATURE_CONTAINER_PATH="$AIMI_ROOT/.worktrees/$BRANCH_NAME"
 CONTAINER_PATHS["DEFAULT"]="$FEATURE_CONTAINER_PATH"
 ```
 
@@ -1315,20 +1325,25 @@ Run the following sub-steps when any story has a non-null `project` field, or wh
 
 1. Collect unique project paths from ALL pending stories (not just ready ones — use `$AIMI_CLI status` and filter stories with a `project` field).
 2. Resolve each project path to an absolute path: `AIMI_ROOT / story.project` where AIMI_ROOT is the directory containing `.aimi/`.
-3. For each unique project path, detect its default branch:
+3. For each unique project path, detect its default branch. Read and validate `branchName` here too — defense in depth, mirroring `PHASE_BRANCH`'s validate-once-quote-everywhere discipline (`cmd_init_session` already rejected an invalid `branchName` in Step 1); every sub-step below reuses this same `$BRANCH_NAME`, exactly like `$PROJECT_DEFAULT` is computed once here and reused below:
    ```bash
    AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
    : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
    PROJECT_DEFAULT=$($AIMI_CLI detect-default-branch --project [resolved_project_path])
    git -C [resolved_project_path] fetch origin 2>/dev/null || true
+   BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
+   if ! [[ "$BRANCH_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+     echo "Invalid branchName: $BRANCH_NAME" >&2
+     exit 1
+   fi
    ```
 
    **When `CONTAINER_MODE` is false** (`EXECUTION_MODE` inline or absent): set up the branch directly — unchanged:
    ```bash
    if [ -n "$BASE_BRANCH" ]; then
-     PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $PROJECT_DEFAULT --project [resolved_project_path] --base $BASE_BRANCH)
+     PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch "$BRANCH_NAME" --default-branch $PROJECT_DEFAULT --project [resolved_project_path] --base $BASE_BRANCH)
    else
-     PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $PROJECT_DEFAULT --project [resolved_project_path])
+     PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch "$BRANCH_NAME" --default-branch $PROJECT_DEFAULT --project [resolved_project_path])
    fi
    ```
    Extract the action from the JSON output and report:
@@ -1364,8 +1379,8 @@ Run the following sub-steps when any story has a non-null `project` field, or wh
    else
      CONTAINER_BASE="$PROJECT_DEFAULT"
    fi
-   $WORKTREE_MGR create [branchName] --from "$CONTAINER_BASE"
-   CONTAINER_PATHS[project_path]="[resolved_project_path]/.worktrees/[branchName]"
+   $WORKTREE_MGR create "$BRANCH_NAME" --from "$CONTAINER_BASE"
+   CONTAINER_PATHS[project_path]="[resolved_project_path]/.worktrees/$BRANCH_NAME"
    ```
 
    `[project_path]` here is the group_key from Multi-Repo Handling's grouping pattern (the raw `story.project` value being iterated) — the map is keyed by `project_path`/`group_key`, not by the resolved absolute path, exactly like `PROJECT_GUIDELINES_MAP[project_path]` above and the Report line below.
@@ -1498,14 +1513,19 @@ For each `group_key` in `VISUAL_GROUP_KEYS`, resolve its project root exactly as
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
+if ! [[ "$BRANCH_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+  echo "Invalid branchName: $BRANCH_NAME" >&2
+  exit 1
+fi
 if [ "[group_key]" = "DEFAULT" ]; then
   cd "$AIMI_ROOT"
 else
   cd "$AIMI_ROOT/[group_key]"
 fi
-$WORKTREE_MGR install-deps [branchName]
-$WORKTREE_MGR serve start [branchName]
-SERVE_STATUS_JSON=$($WORKTREE_MGR serve status [branchName])
+$WORKTREE_MGR install-deps "$BRANCH_NAME"
+$WORKTREE_MGR serve start "$BRANCH_NAME"
+SERVE_STATUS_JSON=$($WORKTREE_MGR serve status "$BRANCH_NAME")
 ```
 
 `install-deps`/`serve start` are invoked with CWD at the project root and `[branchName]` as the worktree-name argument — never CWD'd into the container itself — because `worktree-manager.sh` resolves its worktree-name argument against `$(git rev-parse --show-toplevel)/.worktrees/<name>` relative to the CWD it runs in; this is the exact same reason `Create or Reuse the Container` above `cd`s to the project root, never into the container, before calling `$WORKTREE_MGR create`. The resulting target is `CONTAINER_PATHS[group_key]` (`<project_root>/.worktrees/[branchName]`).
@@ -2007,19 +2027,28 @@ while true:
                         $AIMI_CLI update-field [full_story.id] verification.status skipped
                         Report: "[full_story.id] visual verification skipped — no dev server resolved for project group [group_key]."
                     else:
+                        # Read this story's verification.url via jq into a variable, never
+                        # re-interpolated as raw bracket-placeholder text inside a quoted
+                        # string — same discipline as Open Visual Follow Session's VISUAL_URL.
+                        if PHASE_MODE:
+                            STORY_TASKS_FILE="$PHASE_TASKS_PATH"
+                        else:
+                            STORY_TASKS_FILE="$AIMI_ROOT/$TASKS_PATH"
+                        STORY_VERIFICATION_URL=$(jq -r --arg id "[full_story.id]" '.userStories[] | select(.id == $id) | .verification.url // empty' "$STORY_TASKS_FILE")
+
                         if PHASE_MODE:
                             # Same inline sed one-liner as Step 3.3's Open Visual Follow Session —
                             # never a shared function, since each Bash call is an isolated shell.
-                            PATH_QUERY=$(printf '%s' "[full_story.verification.url]" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+##')
+                            PATH_QUERY=$(printf '%s' "$STORY_VERIFICATION_URL" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+##')
                             EFFECTIVE_URL="http://127.0.0.1:${PHASE_SERVE_PORT}${PATH_QUERY}"
                         elif CONTAINER_MODE:
                             # Same inline sed one-liner as Step 3.3's Open Visual Follow Session —
                             # never a shared function, since each Bash call is an isolated shell.
                             BASE="${CONTAINER_DEV_URL[group_key]}"
-                            PATH_QUERY=$(printf '%s' "[full_story.verification.url]" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+##')
+                            PATH_QUERY=$(printf '%s' "$STORY_VERIFICATION_URL" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+##')
                             EFFECTIVE_URL="${BASE%/}${PATH_QUERY}"
                         else:
-                            EFFECTIVE_URL = full_story.verification.url
+                            EFFECTIVE_URL="$STORY_VERIFICATION_URL"
 
                         if VISUAL_FOLLOW == true:
                             # Reuse the existing headed session (managed by execute.md)
@@ -2550,11 +2579,16 @@ $WORKTREE_MGR serve stop [branchName]
 
 #### Container Mode: Push the Branch
 
-**Runs only when `CONTAINER_MODE=true`, after every dev-server stop above has completed.** For each unique `group_key`, push `[branchName]` to `origin` from inside that group's container:
+**Runs only when `CONTAINER_MODE=true`, after every dev-server stop above has completed.** For each unique `group_key`, push `[branchName]` to `origin` from inside that group's container. Read and validate `branchName` first — defense in depth, mirroring `PHASE_BRANCH`'s validate-once-quote-everywhere discipline (`cmd_init_session` already rejected an invalid `branchName` in Step 1):
 
 ```bash
+BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
+if ! [[ "$BRANCH_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+  echo "Invalid branchName: $BRANCH_NAME" >&2
+  exit 1
+fi
 cd [CONTAINER_PATHS[group_key]]
-PUSH_OUTPUT=$(git push -u origin [branchName] 2>&1)
+PUSH_OUTPUT=$(git push -u origin "$BRANCH_NAME" 2>&1)
 PUSH_EXIT=$?
 if [ "$PUSH_EXIT" -ne 0 ]; then
   echo "$PUSH_OUTPUT"
@@ -2570,8 +2604,13 @@ If the push fails (offline, no remote permission, branch rejected, etc.), `$PUSH
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
+if ! [[ "$BRANCH_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+  echo "Invalid branchName: $BRANCH_NAME" >&2
+  exit 1
+fi
 cd "$AIMI_ROOT"
-$WORKTREE_MGR remove [branchName] --keep-branch
+$WORKTREE_MGR remove "$BRANCH_NAME" --keep-branch
 ```
 
 Repeat once per `group_key` in a multi-repo run. `--keep-branch` (outline 02) preserves the local branch ref: this container is the deliverable the report below is about to point the user at for review and a PR, not a throwaway per-story worktree, so removing it without `--keep-branch` would delete the very branch the Next Steps suggestions tell the user to open a PR from. This call must never run before **Container Mode: Stop the Dev Server** above.
@@ -2583,9 +2622,14 @@ Count commits on this branch:
 git log --oneline $DEFAULT_BRANCH..HEAD | wc -l
 ```
 
-**When `CONTAINER_MODE=true`:** the main working tree's `HEAD` was never checked out to `[branchName]` during container-mode execution (the same invariant Phase Mode's Main Working Tree Untouched Invariant establishes for `PHASE_BRANCH`, applied here by analogy), and the container that held it has just been removed above — count against the branch itself instead of `HEAD`:
+**When `CONTAINER_MODE=true`:** the main working tree's `HEAD` was never checked out to `[branchName]` during container-mode execution (the same invariant Phase Mode's Main Working Tree Untouched Invariant establishes for `PHASE_BRANCH`, applied here by analogy), and the container that held it has just been removed above — count against the branch itself instead of `HEAD`. Read and validate `branchName` again — each Bash call is an isolated shell:
 ```bash
-git log --oneline $DEFAULT_BRANCH..[branchName] | wc -l
+BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
+if ! [[ "$BRANCH_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+  echo "Invalid branchName: $BRANCH_NAME" >&2
+  exit 1
+fi
+git log --oneline $DEFAULT_BRANCH.."$BRANCH_NAME" | wc -l
 ```
 
 Check for any remaining pending gates across all stories:
