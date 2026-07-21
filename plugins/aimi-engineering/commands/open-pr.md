@@ -1,6 +1,7 @@
 ---
 name: aimi:open-pr
 description: Open a pull request with title and description derived from git commits and diff
+argument-hint: "[--branch <name>]"
 disable-model-invocation: true
 allowed-tools: Bash(gh:*), Bash(git:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*)
 ---
@@ -31,6 +32,31 @@ Use `$AIMI_CLI` for all subsequent script calls.
 
 Run these checks before proceeding. STOP on failure unless noted.
 
+### Parse --branch Argument
+
+Scan `$ARGUMENTS` for an explicit `--branch <name>` token (mirrors the `--phase <N>` extraction style used by `/aimi:execute`):
+
+```bash
+case " $ARGUMENTS " in
+  *" --branch "*)
+    CURRENT_BRANCH=$(echo "$ARGUMENTS" | sed -n 's/.*--branch[[:space:]]\+\([^ ]*\).*/\1/p')
+    ;;
+  *)
+    CURRENT_BRANCH=""
+    ;;
+esac
+```
+
+If `$CURRENT_BRANCH` is non-empty, validate it before any other `git`/`gh` call:
+
+```bash
+echo "$CURRENT_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'
+```
+
+If validation fails, report `Invalid --branch value: $CURRENT_BRANCH` and STOP.
+
+When `--branch` was not passed, `$CURRENT_BRANCH` stays empty here — Step 2a resolves it from the current checked-out branch as before.
+
 ### 1a. Verify GitHub CLI authentication
 
 ```bash
@@ -40,6 +66,14 @@ gh auth status
 If this fails, report: "GitHub CLI not authenticated. Run `gh auth login` first." and STOP.
 
 ### 1b. Check for existing PR on this branch
+
+When `$CURRENT_BRANCH` is already set (from `--branch`), check that branch explicitly:
+
+```bash
+gh pr view "$CURRENT_BRANCH" --json url --jq '.url' 2>/dev/null
+```
+
+Otherwise, check the currently checked-out branch:
 
 ```bash
 gh pr view --json url --jq '.url' 2>/dev/null
@@ -51,6 +85,8 @@ PR already exists for this branch: <url>
 ```
 
 ### 1c. Warn about uncommitted changes
+
+**Skip this step entirely when `$CURRENT_BRANCH` is already set (from `--branch`)** — this check inspects the CWD working tree, which is irrelevant for a branch checked out elsewhere or nowhere.
 
 ```bash
 git status --porcelain
@@ -69,6 +105,8 @@ Build the PR from git state directly — commits and diff against the base branc
 
 ### 2a. Get current branch
 
+**Skip this step entirely when `$CURRENT_BRANCH` is already set (from `--branch`)** — reuse that value instead of resolving HEAD.
+
 ```bash
 git rev-parse --abbrev-ref HEAD
 ```
@@ -78,7 +116,7 @@ Store as `$CURRENT_BRANCH`.
 ### 2b. Detect parent branch via decorated ancestor
 
 ```bash
-git log --pretty=format:'%D' --first-parent | grep -v '^$' | grep -v "HEAD" | grep -v "$CURRENT_BRANCH" | head -1
+git log "$CURRENT_BRANCH" --pretty=format:'%D' --first-parent | grep -v '^$' | grep -v "HEAD" | grep -v "$CURRENT_BRANCH" | head -1
 ```
 
 Parse the output to extract a branch name. The output may contain multiple refs separated by commas (e.g., `origin/main, main`). Extract the first local branch name (without `origin/` prefix). If the output contains `origin/branch-name`, strip the `origin/` prefix.
@@ -108,7 +146,7 @@ If validation fails, report: "Invalid parent branch name detected: $BASE_BRANCH"
 Capture every non-merge commit on the branch with hash, subject, and body separated by ASCII unit separators (`%x1f`), one commit per record terminated by an ASCII record separator (`%x1e`). This lets the renderer split records cleanly even when commit bodies contain newlines:
 
 ```bash
-COMMIT_LOG=$(git log "$BASE_BRANCH"..HEAD --pretty=format:'%H%x1f%s%x1f%b%x1e' --no-merges)
+COMMIT_LOG=$(git log "$BASE_BRANCH".."$CURRENT_BRANCH" --pretty=format:'%H%x1f%s%x1f%b%x1e' --no-merges)
 ```
 
 Store as `$COMMIT_LOG`.
@@ -116,8 +154,8 @@ Store as `$COMMIT_LOG`.
 ### 2f. Capture diff summary and file list
 
 ```bash
-DIFF_STAT=$(git diff --stat "$BASE_BRANCH"..HEAD)
-FILES_CHANGED=$(git diff --name-only "$BASE_BRANCH"..HEAD)
+DIFF_STAT=$(git diff --stat "$BASE_BRANCH".."$CURRENT_BRANCH")
+FILES_CHANGED=$(git diff --name-only "$BASE_BRANCH".."$CURRENT_BRANCH")
 ```
 
 Store as `$DIFF_STAT` and `$FILES_CHANGED`.
@@ -129,7 +167,7 @@ Store as `$DIFF_STAT` and `$FILES_CHANGED`.
 Derive the PR title from the first commit subject on the branch (preserving conventional-commit form). When the branch has zero commits ahead of base, fall back to `$CURRENT_BRANCH`:
 
 ```bash
-PR_TITLE=$(git log "$BASE_BRANCH"..HEAD --reverse --pretty=format:'%s' --no-merges | head -1)
+PR_TITLE=$(git log "$BASE_BRANCH".."$CURRENT_BRANCH" --reverse --pretty=format:'%s' --no-merges | head -1)
 if [ -z "$PR_TITLE" ]; then
   PR_TITLE="$CURRENT_BRANCH"
 fi
@@ -220,6 +258,8 @@ When `$INCLUDE_BACKEND_SPEC=1`, render the spec deterministically from `metadata
 
 ### 5a. Push branch to origin
 
+Works unchanged for a branch not checked out anywhere, as long as the local ref exists — `git push` does not require checkout.
+
 ```bash
 git push -u origin "$CURRENT_BRANCH"
 ```
@@ -229,7 +269,7 @@ git push -u origin "$CURRENT_BRANCH"
 Use HEREDOC for the body to handle multi-line content safely. The Summary/Changes/Files Changed sections always appear. The Backend Implementation Spec section is appended only when `$INCLUDE_BACKEND_SPEC=1`:
 
 ```bash
-gh pr create --title "$PR_TITLE" --base "$BASE_BRANCH" --body "$(cat <<'EOF'
+gh pr create --title "$PR_TITLE" --base "$BASE_BRANCH" --head "$CURRENT_BRANCH" --body "$(cat <<'EOF'
 ## Summary
 
 <aggregated commit bodies from $COMMIT_LOG (fallback to concatenated subjects if all bodies empty)>
