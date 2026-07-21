@@ -341,7 +341,7 @@ if [ -z "$INTERACTIVE_MODE" ]; then
 fi
 ```
 
-For each of `[FRONTEND_BRANCH]` and `[BACKEND_BRANCH]` in turn, detect a checkout conflict and remediate exactly as Flat Container Mode's **Detect a Checkout Conflict** / **Remediate a Checkout Conflict** do (see Step 2) — comparing `git -C "$AIMI_ROOT" branch --show-current` against the branch, offering (picker, clean tree) or auto-checking-out (agent mode, clean tree) `$DEFAULT_BRANCH`, aborting on a dirty tree in both modes with the same uncommitted-changes message, and never surfacing git's raw stderr. Once both branches are conflict-free, create both containers from the same `CONTAINER_BASE` (`BASE_BRANCH` when Step 1.6 already set one — never true this early except when a sibling split's own Step 1.6 already ran in this session — otherwise `$DEFAULT_BRANCH`):
+For each of `[FRONTEND_BRANCH]` and `[BACKEND_BRANCH]` in turn, call `$WORKTREE_MGR create` and handle its exit code exactly as Flat Container Mode's **Create or Reuse the Container** does (see Step 2) — no pre-flight checkout check is needed; `$WORKTREE_MGR create` is branch-aware and, on non-zero exit, its stderr already names the worktree holding the branch. Report that stderr verbatim and STOP without attempting remediation. Once both `$WORKTREE_MGR create` calls succeed, both containers are ready, built from the same `CONTAINER_BASE` (`BASE_BRANCH` when Step 1.6 already set one — never true this early except when a sibling split's own Step 1.6 already ran in this session — otherwise `$DEFAULT_BRANCH`):
 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
@@ -882,7 +882,7 @@ $WORKTREE_MGR create "$PHASE_BRANCH" --from "$CONTAINER_BASE"
 
 `<container-base>` is `BASE_BRANCH` when Step 1.6 set one, otherwise `DEFAULT_BRANCH` — reusing the exact default-branch/base-selection values Steps 1.5–1.6 already computed against the main root.
 
-`$WORKTREE_MGR create` prints the worktree path and, when the target directory already exists, reuses it silently instead of recreating it — so calling it idempotently on every claim (including a self-reclaim resume) is sufficient; no separate reuse-detection branch is needed. The path is deterministic given `AIMI_ROOT` and `PHASE_BRANCH`:
+`$WORKTREE_MGR create` is branch-aware, not a blind idempotent create: it reuses the target directory silently when it's already a worktree there, creates `PHASE_BRANCH` fresh when the branch doesn't exist yet, attaches to the branch without recreating it when the branch exists but no worktree holds it, and exits non-zero — naming the worktree that holds it — when another worktree already has it checked out. Calling it on every claim (including a self-reclaim resume) is still safe, since the first two cases are exactly the reuse paths a resume needs. The path is deterministic given `AIMI_ROOT` and `PHASE_BRANCH`:
 
 ```bash
 PHASE_CONTAINER_PATH="$AIMI_ROOT/.worktrees/$PHASE_BRANCH"
@@ -1213,52 +1213,6 @@ Get the branch name from the init-session output (already validated by CLI).
 
 **Skip this subsection entirely unless `CONTAINER_MODE` is true** (see Execution Mode Detection in Step 1) **and `AIMI_ROOT_IS_GIT_REPO` is true** — the multi-repo case is handled per project group inside Per-Project Branch Setup below, not here. When skipped, `### Main Repo Branch Setup` below runs exactly as it does today.
 
-#### Detect a Checkout Conflict
-
-`git worktree add -b <branch>` refuses when `<branch>` is already checked out anywhere, including the main working tree — this must be detected and remediated before ever calling `$WORKTREE_MGR create`, so its raw refusal never reaches the user.
-
-```bash
-git -C "$AIMI_ROOT" branch --show-current
-```
-
-- **Result differs from `[branchName]` (no conflict):** skip straight to **Create or Reuse the Container** below.
-- **Result equals `[branchName]` (conflict):** `[branchName]` is currently checked out in the main working tree. Remediate per **Remediate a Checkout Conflict** below before creating the container.
-
-#### Remediate a Checkout Conflict
-
-Check whether the main working tree is clean:
-
-```bash
-git -C "$AIMI_ROOT" status --porcelain
-```
-
-- **`INTERACTIVE_MODE=picker`:**
-  - **Clean (empty output):** use **AskUserQuestion**:
-    ```
-    [branchName] is currently checked out in the main working tree. Container mode needs the branch free to create its own worktree.
-
-    A — Check out $DEFAULT_BRANCH in the main working tree, then create the container
-    B — Abort
-    ```
-    - **Option A:** `git -C "$AIMI_ROOT" checkout "$DEFAULT_BRANCH"`, then proceed to **Create or Reuse the Container** below.
-    - **Option B:** report `Aborted — [branchName] must be freed from the main working tree before container mode can create its worktree.` and STOP.
-  - **Dirty (non-empty output):** the move option is never presented against a dirty tree — skip the offer entirely and report:
-    ```
-    [branchName] is checked out in the main working tree, which has uncommitted changes. Commit, stash, or discard them, then re-run /aimi:execute.
-    ```
-    STOP.
-- **`INTERACTIVE_MODE=agent`:**
-  - **Clean:** automatically move the main working tree, log the resolution, then proceed to **Create or Reuse the Container** below:
-    ```bash
-    git -C "$AIMI_ROOT" checkout "$DEFAULT_BRANCH"
-    ```
-    ```
-    agent-mode: flat-container checkout-conflict auto-resolved (moved main tree to [DEFAULT_BRANCH])
-    ```
-  - **Dirty:** abort with the exact same uncommitted-changes message the picker path uses above, and STOP. Agent mode never proceeds with a dirty main tree.
-
-In neither interactive mode does execute.md ever print git's raw stderr for the checkout-conflict refusal — only the composed messages above.
-
 #### Create or Reuse the Container
 
 ```bash
@@ -1273,7 +1227,7 @@ fi
 $WORKTREE_MGR create [branchName] --from "$CONTAINER_BASE"
 ```
 
-`CONTAINER_BASE` is `BASE_BRANCH` when Step 1.6 set one, otherwise `DEFAULT_BRANCH` — the exact same base-selection rule the phase container already uses (see Create or Reuse the Phase Container). `$WORKTREE_MGR create` prints the worktree path and, when the target directory already exists, reuses it silently instead of recreating it — so calling it idempotently on every run (first run or interrupted-resume) is sufficient; no separate reuse-detection branch is needed, mirroring the phase container's own idempotent-create behavior. The path is deterministic given `AIMI_ROOT` and `[branchName]`:
+`$WORKTREE_MGR create` is branch-aware and needs no pre-flight checkout check: it reuses the target directory silently when it's already a worktree there, creates `[branchName]` fresh when the branch doesn't exist yet, attaches to the branch without recreating it when the branch exists but no worktree holds it (e.g. after a prior run's `remove --keep-branch`), and exits non-zero — naming the worktree that holds it, resolved from `git worktree list --porcelain` — when another worktree (including the main working tree) already has it checked out. On non-zero exit, report the command's stderr verbatim (it already names the offending worktree) and STOP; do not attempt any remediation and never print a second, composed error on top of it. `CONTAINER_BASE` is `BASE_BRANCH` when Step 1.6 set one, otherwise `DEFAULT_BRANCH` — the exact same base-selection rule the phase container already uses (see Create or Reuse the Phase Container). The path is deterministic given `AIMI_ROOT` and `[branchName]`:
 
 ```bash
 FEATURE_CONTAINER_PATH="$AIMI_ROOT/.worktrees/[branchName]"
@@ -1336,9 +1290,9 @@ Run the following sub-steps when any story has a non-null `project` field, or wh
    Branch [branchName] set up in project: [project_path] (action: [action])
    ```
 
-   **When `CONTAINER_MODE` is true:** run the same checkout-conflict-detection-and-remediation plus idempotent-create logic Flat Container Mode defines above (Step 2), scoped to `[resolved_project_path]` instead of `$AIMI_ROOT` and to `PROJECT_DEFAULT` instead of `$DEFAULT_BRANCH` — producing one container per project group at `[resolved_project_path]/.worktrees/[branchName]`, never one container spanning multiple project roots.
+   **When `CONTAINER_MODE` is true:** call `$WORKTREE_MGR create` and handle its exit code exactly as Flat Container Mode's **Create or Reuse the Container** does above (Step 2), scoped to `[resolved_project_path]` instead of `$AIMI_ROOT` and to `PROJECT_DEFAULT` instead of `$DEFAULT_BRANCH` — producing one container per project group at `[resolved_project_path]/.worktrees/[branchName]`, never one container spanning multiple project roots. No pre-flight checkout check is needed — `$WORKTREE_MGR create` is branch-aware and reports the conflict itself when one exists.
 
-   Pure multi-repo layout (`AIMI_ROOT_IS_GIT_REPO=false`) skips Step 1.6 entirely and therefore never sets `INTERACTIVE_MODE`. Re-resolve it here when still unset, before running the checkout-conflict remediation branch below:
+   Pure multi-repo layout (`AIMI_ROOT_IS_GIT_REPO=false`) skips Step 1.6 entirely and therefore never sets `INTERACTIVE_MODE`, which downstream picker/agent-mode gates elsewhere in this document still expect to be set. Re-resolve it here when still unset:
    ```bash
    AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
    : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
@@ -1346,13 +1300,6 @@ Run the following sub-steps when any story has a non-null `project` field, or wh
      INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
    fi
    ```
-
-   Detect a checkout conflict scoped to this project:
-   ```bash
-   git -C [resolved_project_path] branch --show-current
-   ```
-   - **Differs from `[branchName]` (no conflict):** skip straight to creation below.
-   - **Equals `[branchName]` (conflict):** remediate exactly as Flat Container Mode's **Remediate a Checkout Conflict** does, substituting `[resolved_project_path]` for `$AIMI_ROOT` and `$PROJECT_DEFAULT` for `$DEFAULT_BRANCH` in every git call and composed message — same picker/agent-mode branching, same clean/dirty gate, never surfacing git's raw stderr.
 
    Create or reuse the container:
    ```bash
@@ -1367,6 +1314,7 @@ Run the following sub-steps when any story has a non-null `project` field, or wh
    $WORKTREE_MGR create [branchName] --from "$CONTAINER_BASE"
    CONTAINER_PATHS[project_path]="[resolved_project_path]/.worktrees/[branchName]"
    ```
+   On non-zero exit from `$WORKTREE_MGR create`, report the command's stderr verbatim (it already names the worktree holding `[branchName]`) and STOP — do not attempt any remediation.
 
    `[project_path]` here is the group_key from Multi-Repo Handling's grouping pattern (the raw `story.project` value being iterated) — the map is keyed by `project_path`/`group_key`, not by the resolved absolute path, exactly like `PROJECT_GUIDELINES_MAP[project_path]` above and the Report line below.
 

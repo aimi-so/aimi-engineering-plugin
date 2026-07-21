@@ -128,8 +128,10 @@ create_worktree() {
     exit 1
   fi
 
-  # Check if worktree already exists — reuse silently (non-interactive)
-  if [[ -d "$worktree_path" ]]; then
+  # Check if worktree already exists — reuse silently (non-interactive).
+  # Require the .git entry, not just the directory, so a stray non-worktree
+  # directory at this path isn't mistaken for a worktree to reuse.
+  if [[ -d "$worktree_path" && -e "$worktree_path/.git" ]]; then
     echo -e "${YELLOW}Worktree already exists at: $worktree_path${NC}"
     echo "$worktree_path"
     return
@@ -143,8 +145,30 @@ create_worktree() {
   mkdir -p "$WORKTREE_DIR"
   ensure_gitignore
 
-  echo -e "${BLUE}Creating worktree...${NC}"
-  git worktree add -b "$branch_name" "$worktree_path" -- "$from_branch"
+  if git show-ref --verify --quiet "refs/heads/$branch_name"; then
+    # Branch already exists (e.g. `remove --keep-branch` preserved it from a
+    # prior run). Find out whether another worktree — or the main checkout —
+    # already holds it before deciding how to attach.
+    local holder_path="" current_wt=""
+    while IFS= read -r line; do
+      if [[ "$line" == worktree\ * ]]; then
+        current_wt="${line#worktree }"
+      elif [[ "$line" == "branch refs/heads/$branch_name" ]]; then
+        holder_path="$current_wt"
+      fi
+    done < <(git worktree list --porcelain)
+
+    if [[ -n "$holder_path" ]]; then
+      echo -e "${RED}Error: Branch '$branch_name' is already checked out at: $holder_path${NC}" >&2
+      exit 1
+    fi
+
+    echo -e "${BLUE}Branch exists and is unused, attaching worktree...${NC}"
+    git worktree add "$worktree_path" "$branch_name"
+  else
+    echo -e "${BLUE}Creating worktree...${NC}"
+    git worktree add -b "$branch_name" "$worktree_path" -- "$from_branch"
+  fi
 
   # Copy environment files
   copy_env_files "$worktree_path"
