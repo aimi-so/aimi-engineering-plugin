@@ -2162,7 +2162,7 @@ PHASE_PENDING=$((FRONTEND_PENDING + BACKEND_PENDING))
 ```
 The phase's split work only counts as complete when `PHASE_PENDING` is `0` — i.e. **both** files report zero pending stories, not just one.
 
-**For legacy flat v3.3 tasks.json files (`PHASE_MODE=false`): skip this entire section.** Step 5 runs completely unchanged, exactly as it does today.
+**For legacy flat v3.3 tasks.json files (`PHASE_MODE=false`): skip this entire section.** Step 5 runs completely unchanged only for inline-mode executions (`CONTAINER_MODE=false`, the default) — exactly as it does today. Container-mode flat executions (`CONTAINER_MODE=true`, still `PHASE_MODE=false`) also skip this Phase Completion section — a claimed phase's own container is a separate concept from a flat container-mode container — but Step 5 itself runs an additional completion path for them; see the CONTAINER_MODE scope note under Step 5: Completion below.
 
 Every Bash call in this section that touches the phase container's git state or filesystem passes `$PHASE_CONTAINER_PATH` explicitly (`cd "$PHASE_CONTAINER_PATH"`, `git -C "$PHASE_CONTAINER_PATH"`, or an absolute path built from it) — never a bare relative path, and never anything derived from `find_aimi_root()`'s own CWD. `find_aimi_root()` (invoked internally by every `$AIMI_CLI` call) `cd`s to `PROJECT_ROOT` — the *main* repo root — as a side effect, so by the time any code here runs, CWD cannot be trusted to be `PHASE_CONTAINER_PATH`. This is the same rule Step 1.7's Path and State Notes already established for the rest of phase mode.
 
@@ -2365,11 +2365,63 @@ When execution ends (all stories complete, or deadlock detected):
 
 > **PHASE_MODE scope note:** this step's reporting is written for the flat-mode case (CWD = `AIMI_ROOT`, `HEAD` on `branchName`). In phase mode, run this step's commands with CWD inside `PHASE_CONTAINER_PATH` and substitute `PHASE_BRANCH` for `branchName` / `CONTAINER_BASE` for `DEFAULT_BRANCH` where used below. Phase-level completion — verifying the claimed phase's `creates`, writing `handoff.md`, updating roadmap status, offering a PR, and offering or auto-continuing to the next phase — is handled entirely by the **Phase Completion** section above, which runs before this step whenever `PHASE_MODE=true` and the phase's own pending count reaches zero. This step still runs afterward, in both modes, to report story-level completion for the phase's own tasks file.
 
+> **CONTAINER_MODE scope note:** when `CONTAINER_MODE=true` and `PHASE_MODE=false` (flat container-mode execution — see Execution Mode Detection in Step 1), the **If all stories complete** branch below runs three additional ordered steps before its existing report: stop each project group's dev server, push `[branchName]` to `origin`, then remove each project group's container while preserving its branch. See **Container Mode: Stop the Dev Server**, **Container Mode: Push the Branch**, and **Container Mode: Remove the Container** immediately below — the order there is load-bearing; removing a container before its dev server is stopped orphans that server, still holding its port with no backing directory. When `CONTAINER_MODE=false` (inline mode, the default and unchanged), none of the three subsections apply: no `git push` is invoked, no container is removed, and `serve stop` is never called.
+
 ### If all stories complete:
 
+#### Container Mode: Stop the Dev Server
+
+**Runs only when `CONTAINER_MODE=true`, before anything else in this list.** Stopping the dev server must complete before its container is removed further below — otherwise the server is orphaned, still holding its port, with no backing worktree directory left to serve it.
+
+For each unique `group_key` with a container from this run (see Container Paths Per Project Group):
+
+```bash
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+cd [CONTAINER_PATHS[group_key]]
+$WORKTREE_MGR serve stop [branchName]
+```
+
+`serve stop` (outline 04's contract) kills the dev server's full process group and clears its state entry; it exits 0 and reports "No dev server registered" when no server was ever started for that container (no `package.json`, or the wave loop never launched one) — so this call is always safe to issue. Wait for it to finish before moving to the next subsection.
+
+#### Container Mode: Push the Branch
+
+**Runs only when `CONTAINER_MODE=true`, after every dev-server stop above has completed.** For each unique `group_key`, push `[branchName]` to `origin` from inside that group's container:
+
+```bash
+cd [CONTAINER_PATHS[group_key]]
+PUSH_OUTPUT=$(git push -u origin [branchName] 2>&1)
+PUSH_EXIT=$?
+if [ "$PUSH_EXIT" -ne 0 ]; then
+  echo "$PUSH_OUTPUT"
+fi
+```
+
+If the push fails (offline, no remote permission, branch rejected, etc.), `$PUSH_OUTPUT` is reported verbatim in the completion report below — do not retry, do not prompt interactively, and never roll back any story's completed status. Continue unconditionally to the next subsection regardless of `$PUSH_EXIT`: a failed push here is never fatal, because `/aimi:open-pr`'s own push step (outline 11) retries the push when the user later runs `/aimi:open-pr --branch [branchName]`, so the Next Steps suggestions below stay safe to print no matter this step's outcome.
+
+#### Container Mode: Remove the Container
+
+**Runs only when `CONTAINER_MODE=true`, after the push above completes — regardless of its outcome.** A worktree cannot be removed while CWD sits inside it, so return to `$AIMI_ROOT` first:
+
+```bash
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+cd "$AIMI_ROOT"
+$WORKTREE_MGR remove [branchName] --keep-branch
+```
+
+Repeat once per `group_key` in a multi-repo run. `--keep-branch` (outline 02) preserves the local branch ref: this container is the deliverable the report below is about to point the user at for review and a PR, not a throwaway per-story worktree, so removing it without `--keep-branch` would delete the very branch the Next Steps suggestions tell the user to open a PR from. This call must never run before **Container Mode: Stop the Dev Server** above.
+
 Count commits on this branch:
+
+**When `CONTAINER_MODE=false` (inline mode, unchanged):**
 ```bash
 git log --oneline $DEFAULT_BRANCH..HEAD | wc -l
+```
+
+**When `CONTAINER_MODE=true`:** the main working tree's `HEAD` was never checked out to `[branchName]` during container-mode execution (the same invariant Phase Mode's Main Working Tree Untouched Invariant establishes for `PHASE_BRANCH`, applied here by analogy), and the container that held it has just been removed above — count against the branch itself instead of `HEAD`:
+```bash
+git log --oneline $DEFAULT_BRANCH..[branchName] | wc -l
 ```
 
 Check for any remaining pending gates across all stories:
@@ -2493,12 +2545,22 @@ Decision gates ([pending_decision_gates]):
 Resolve gates with: $AIMI_CLI gate-pass <story-id> [--option 'value']
 ```
 
+**When `CONTAINER_MODE=false` (inline mode, unchanged):**
 ```
 ### Next Steps
 
 - Review commits: `git log --oneline -[count]`
 - Run `/aimi:review` for code review
 - Create PR when ready: `gh pr create`
+```
+
+**When `CONTAINER_MODE=true`:** the container was already removed above and nothing is checked out anywhere, so use the argument forms that work for a branch checked out nowhere instead:
+```
+### Next Steps
+
+- Review commits: `git log --oneline -[count]`
+- Open a PR: `/aimi:open-pr --branch [branchName]`
+- Run `/aimi:review [branchName]` for code review
 ```
 
 ### If deadlock detected:
