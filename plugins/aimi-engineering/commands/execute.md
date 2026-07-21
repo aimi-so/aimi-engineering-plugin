@@ -65,11 +65,11 @@ $WORKTREE_MGR list
 $WORKTREE_MGR remove [worktree_name]
 ```
 
-This rule is unchanged, but does not apply in phase mode — see Phase Mode: Worktree Naming and CWD below, which supersedes `project_root` with `PHASE_CONTAINER_PATH` for the duration of a claimed phase's execution.
+This rule is unchanged, but does not apply in phase mode — see Phase Mode: Worktree Naming and CWD below, which supersedes `project_root` with `PHASE_CONTAINER_PATH` for the duration of a claimed phase's execution — nor does it apply, in the same way, to flat container mode (`PHASE_MODE=false`, `EXECUTION_MODE=container`; see Execution Mode Detection in Step 1), which supersedes `project_root` with `FEATURE_CONTAINER_PATH`/`CONTAINER_PATHS` instead. The wave-loop/cleanup mechanics that actually thread those paths through Step 4 are outline story 06's responsibility, not this section's.
 
 ## Phase Mode: Worktree Naming and CWD
 
-This section is the single source of truth for how `PHASE_MODE=true` (see Step 1's Phase Mode Detection and Step 1.7's Phase Claim) changes worktree naming and working-directory handling in Step 4's wave loop and its cleanup passes. All call sites below reference it by name. It only applies once a phase has been claimed; when `PHASE_MODE=false` none of this applies and every rule below reduces to the existing flat-mode behavior unchanged.
+This section is the single source of truth for how `PHASE_MODE=true` (see Step 1's Phase Mode Detection and Step 1.7's Phase Claim) changes worktree naming and working-directory handling in Step 4's wave loop and its cleanup passes. All call sites below reference it by name. It only applies once a phase has been claimed; when `PHASE_MODE=false` none of this applies and every rule below reduces to the existing flat-mode behavior unchanged, for `EXECUTION_MODE` inline or absent. Flat container mode (`PHASE_MODE=false`, `EXECUTION_MODE=container`; see Execution Mode Detection in Step 1) is an analogous parallel substitution — `FEATURE_CONTAINER_PATH`/`CONTAINER_PATHS` in place of `PHASE_CONTAINER_PATH` — whose own wave-loop substitution values are defined by outline story 06, not by the rules below.
 
 ### Why Story Worktrees Are Phase-Qualified
 
@@ -84,13 +84,15 @@ Every `$WORKTREE_MGR create`/`merge-all`/`remove`/`list` call for a phase's stor
 
 Concretely, in Step 4's wave loop, wherever the pseudocode below reads `project_root`, `branchName`, or `[branchName]-US-*` for a phase-mode session, substitute:
 
-| Flat mode (`PHASE_MODE=false`, unchanged) | Phase mode (`PHASE_MODE=true`) |
+| Flat inline mode (`PHASE_MODE=false`, `EXECUTION_MODE` inline/absent, unchanged) | Phase mode (`PHASE_MODE=true`) |
 |---|---|
 | `worktree_name = "[branchName]-[story.id]"` | `worktree_name = "[PHASE_BRANCH]-[story.id]"` |
 | `cd [project_root]` before create/merge-all/remove | `cd [PHASE_CONTAINER_PATH]` before create/merge-all/remove |
 | `git -C [project_root] rev-parse [branchName]` (base_sha) | `git -C [PHASE_CONTAINER_PATH] rev-parse [PHASE_BRANCH]` |
 | `$WORKTREE_MGR merge-all [...] --into [branchName]` | `$WORKTREE_MGR merge-all [...] --into [PHASE_BRANCH]` |
 | Cleanup scan matches `"[branchName]-US-*"` | Cleanup scan matches `"[PHASE_BRANCH]-US-*"` |
+
+Flat container mode (`PHASE_MODE=false`, `EXECUTION_MODE=container`) is a third column this table does not carry — its own `FEATURE_CONTAINER_PATH`/`CONTAINER_PATHS` substitution values (in place of `project_root`) are added by outline story 06, not duplicated here.
 
 ### Main Working Tree Untouched Invariant
 
@@ -302,13 +304,47 @@ Report:
 "Spawning parallel execution flows..."
 ```
 
-Create worktrees for isolation:
+Create worktrees for isolation. `EXECUTION_MODE` (Step 1's mode detection) is not yet in scope this early in the document, so read `metadata.execution` directly from the frontend split file via jq:
+
+```bash
+SPLIT_EXECUTION_MODE=$(jq -r '.metadata.execution // "inline"' <frontend-file>)
+```
+
+**When `SPLIT_EXECUTION_MODE` is `inline` or absent (the fail-safe default — see `commands/references/execution-mode.md`): unchanged.**
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
 $WORKTREE_MGR create [FRONTEND_BRANCH] --from $DEFAULT_BRANCH
 $WORKTREE_MGR create [BACKEND_BRANCH] --from $DEFAULT_BRANCH
 ```
+
+**When `SPLIT_EXECUTION_MODE` is `container`:** replace the unconditional pair above with two independently checkout-conflict-checked containers — one per split branch, mirroring the phase-mode split pattern (Create Split Worktrees) of giving each split its own dedicated container rather than nesting one inside the other.
+
+Resolve `INTERACTIVE_MODE` first — this early in the document (before Step 1.6), it has never been set:
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+if [ -z "$INTERACTIVE_MODE" ]; then
+  INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
+fi
+```
+
+For each of `[FRONTEND_BRANCH]` and `[BACKEND_BRANCH]` in turn, detect a checkout conflict and remediate exactly as Flat Container Mode's **Detect a Checkout Conflict** / **Remediate a Checkout Conflict** do (see Step 2) — comparing `git -C "$AIMI_ROOT" branch --show-current` against the branch, offering (picker, clean tree) or auto-checking-out (agent mode, clean tree) `$DEFAULT_BRANCH`, aborting on a dirty tree in both modes with the same uncommitted-changes message, and never surfacing git's raw stderr. Once both branches are conflict-free, create both containers from the same `CONTAINER_BASE` (`BASE_BRANCH` when Step 1.6 already set one — never true this early except when a sibling split's own Step 1.6 already ran in this session — otherwise `$DEFAULT_BRANCH`):
+
+```bash
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+cd "$AIMI_ROOT"
+if [ -n "$BASE_BRANCH" ]; then
+  CONTAINER_BASE="$BASE_BRANCH"
+else
+  CONTAINER_BASE="$DEFAULT_BRANCH"
+fi
+$WORKTREE_MGR create [FRONTEND_BRANCH] --from "$CONTAINER_BASE"
+$WORKTREE_MGR create [BACKEND_BRANCH] --from "$CONTAINER_BASE"
+```
+
+Both containers land as siblings directly under `$AIMI_ROOT/.worktrees/` — `$AIMI_ROOT/.worktrees/[FRONTEND_BRANCH]` and `$AIMI_ROOT/.worktrees/[BACKEND_BRANCH]` — exactly the worktree paths the Parallel Execution section below already refers to as `[frontend worktree path]`/`[backend worktree path]`.
 
 In a **single tool-call turn**, emit two foreground Tasks:
 
@@ -435,7 +471,29 @@ fi
 
 This needs no new CLI call: a flat file's tasks path is a direct child of `.aimi/tasks/` (e.g. `.aimi/tasks/2026-02-24-feature-tasks.json`), so `$FEATURE_DIR` resolves to `.aimi` — which never contains `roadmap.json`. A nested phase file's tasks path is `.aimi/tasks/<feature>/phase-N[.M]-<slug>/<feature>-phase-N-tasks.json`, so `$FEATURE_DIR` resolves to `.aimi/tasks/<feature>` — exactly where `roadmap-init` writes `roadmap.json`. This is the same directory-arithmetic `cmd_list_archivable` already uses to group nested files by feature.
 
-**When `PHASE_MODE=false` (flat v3.3 file, no `roadmap.json` sibling): execute.md runs byte-for-byte as it does today.** No further phase-mode logic applies anywhere in this document — Step 1.7 (Phase Claim) is skipped entirely, Step 2 checks out `branchName` directly in the main working tree, and Step 4's story worktrees are named `[branchName]-[story.id]` exactly as now. Phase mode is a parallel path added alongside the flat path; it never changes the flat path's behavior.
+**When `PHASE_MODE=false` (flat v3.3 file, no `roadmap.json` sibling): execute.md runs byte-for-byte as it does today.** No further phase-mode logic applies anywhere in this document — Step 1.7 (Phase Claim) is skipped entirely; when `EXECUTION_MODE` is `inline` or absent (see Execution Mode Detection below), Step 2 checks out `branchName` directly in the main working tree exactly as before, while `EXECUTION_MODE=container` instead routes Step 2 through Flat Container Mode's own worktree creation (see Step 2); and Step 4's story worktrees are named `[branchName]-[story.id]` exactly as now. Phase mode is a parallel path added alongside the flat path; it never changes the flat path's behavior.
+
+### Execution Mode Detection
+
+Read `metadata.execution` — the discriminator defined in `commands/references/execution-mode.md` — from the tasks file `init-session` discovered:
+
+```bash
+EXECUTION_MODE=$(jq -r '.metadata.execution // "inline"' "$AIMI_ROOT/$TASKS_PATH")
+```
+
+Only the literal string `"container"` selects the container path; every other value (`"inline"`, absence, or anything unrecognized) resolves to `inline` — the same fail-safe default rule the reference doc defines.
+
+Derive `CONTAINER_MODE`, the single boolean this document's flat-mode container logic (Step 0.9, Step 2) gates on:
+
+```bash
+if [ "$PHASE_MODE" = "false" ] && [ "$EXECUTION_MODE" = "container" ]; then
+  CONTAINER_MODE=true
+else
+  CONTAINER_MODE=false
+fi
+```
+
+`CONTAINER_MODE` is always false when `PHASE_MODE=true` — a claimed phase already has its own container (`PHASE_CONTAINER_PATH`, see Create or Reuse the Phase Container), so flat container mode never applies during phase-mode execution. In a multi-repo layout (`AIMI_ROOT_IS_GIT_REPO=false`), `CONTAINER_MODE=true` produces one container per project group instead of one at `AIMI_ROOT` — stored in the map `CONTAINER_PATHS[group_key]` (see Per-Project Branch Setup in Step 2), keyed identically to the project-root grouping in Multi-Repo Handling above.
 
 ### Orphaned Story Recovery
 
@@ -1047,9 +1105,81 @@ Proceed to the **Phase Completion** section below with `PHASE_SPLIT_MODE=true` s
 
 Get the branch name from the init-session output (already validated by CLI).
 
+### Flat Container Mode: Create or Reuse the Feature Container
+
+**Skip this subsection entirely unless `CONTAINER_MODE` is true** (see Execution Mode Detection in Step 1) **and `AIMI_ROOT_IS_GIT_REPO` is true** — the multi-repo case is handled per project group inside Per-Project Branch Setup below, not here. When skipped, `### Main Repo Branch Setup` below runs exactly as it does today.
+
+#### Detect a Checkout Conflict
+
+`git worktree add -b <branch>` refuses when `<branch>` is already checked out anywhere, including the main working tree — this must be detected and remediated before ever calling `$WORKTREE_MGR create`, so its raw refusal never reaches the user.
+
+```bash
+git -C "$AIMI_ROOT" branch --show-current
+```
+
+- **Result differs from `[branchName]` (no conflict):** skip straight to **Create or Reuse the Container** below.
+- **Result equals `[branchName]` (conflict):** `[branchName]` is currently checked out in the main working tree. Remediate per **Remediate a Checkout Conflict** below before creating the container.
+
+#### Remediate a Checkout Conflict
+
+Check whether the main working tree is clean:
+
+```bash
+git -C "$AIMI_ROOT" status --porcelain
+```
+
+- **`INTERACTIVE_MODE=picker`:**
+  - **Clean (empty output):** use **AskUserQuestion**:
+    ```
+    [branchName] is currently checked out in the main working tree. Container mode needs the branch free to create its own worktree.
+
+    A — Check out $DEFAULT_BRANCH in the main working tree, then create the container
+    B — Abort
+    ```
+    - **Option A:** `git -C "$AIMI_ROOT" checkout "$DEFAULT_BRANCH"`, then proceed to **Create or Reuse the Container** below.
+    - **Option B:** report `Aborted — [branchName] must be freed from the main working tree before container mode can create its worktree.` and STOP.
+  - **Dirty (non-empty output):** the move option is never presented against a dirty tree — skip the offer entirely and report:
+    ```
+    [branchName] is checked out in the main working tree, which has uncommitted changes. Commit, stash, or discard them, then re-run /aimi:execute.
+    ```
+    STOP.
+- **`INTERACTIVE_MODE=agent`:**
+  - **Clean:** automatically move the main working tree, log the resolution, then proceed to **Create or Reuse the Container** below:
+    ```bash
+    git -C "$AIMI_ROOT" checkout "$DEFAULT_BRANCH"
+    ```
+    ```
+    agent-mode: flat-container checkout-conflict auto-resolved (moved main tree to [DEFAULT_BRANCH])
+    ```
+  - **Dirty:** abort with the exact same uncommitted-changes message the picker path uses above, and STOP. Agent mode never proceeds with a dirty main tree.
+
+In neither interactive mode does execute.md ever print git's raw stderr for the checkout-conflict refusal — only the composed messages above.
+
+#### Create or Reuse the Container
+
+```bash
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+cd "$AIMI_ROOT"
+if [ -n "$BASE_BRANCH" ]; then
+  CONTAINER_BASE="$BASE_BRANCH"
+else
+  CONTAINER_BASE="$DEFAULT_BRANCH"
+fi
+$WORKTREE_MGR create [branchName] --from "$CONTAINER_BASE"
+```
+
+`CONTAINER_BASE` is `BASE_BRANCH` when Step 1.6 set one, otherwise `DEFAULT_BRANCH` — the exact same base-selection rule the phase container already uses (see Create or Reuse the Phase Container). `$WORKTREE_MGR create` prints the worktree path and, when the target directory already exists, reuses it silently instead of recreating it — so calling it idempotently on every run (first run or interrupted-resume) is sufficient; no separate reuse-detection branch is needed, mirroring the phase container's own idempotent-create behavior. The path is deterministic given `AIMI_ROOT` and `[branchName]`:
+
+```bash
+FEATURE_CONTAINER_PATH="$AIMI_ROOT/.worktrees/[branchName]"
+```
+
+Because this subsection's own `$WORKTREE_MGR create` call is the branch-creating operation for this run, `### Main Repo Branch Setup` below is skipped whenever this subsection applies — see its skip condition.
+
 ### Main Repo Branch Setup
 
-**Skip this step if `AIMI_ROOT_IS_GIT_REPO` is false, or if `PHASE_MODE` is true** — see Multi-Repo Handling above for the first condition. In phase mode, the phase container's `$WORKTREE_MGR create` call in Step 1.7 is the only branch-creating operation for this phase; no `setup-branch` call runs against the main working tree, which is what keeps the Main Working Tree Untouched Invariant (see Phase Mode: Worktree Naming and CWD) true.
+**Skip this step if `AIMI_ROOT_IS_GIT_REPO` is false, if `PHASE_MODE` is true, or if flat container mode applies (`PHASE_MODE=false` and `EXECUTION_MODE=container`, i.e. `CONTAINER_MODE=true`)** — see Multi-Repo Handling above for the first condition. In phase mode, the phase container's `$WORKTREE_MGR create` call in Step 1.7 is the only branch-creating operation for this phase; no `setup-branch` call runs against the main working tree, which is what keeps the Main Working Tree Untouched Invariant (see Phase Mode: Worktree Naming and CWD) true. In flat container mode, Flat Container Mode's own `$WORKTREE_MGR create` call above is likewise the only branch-creating operation for this run. When `EXECUTION_MODE` is `inline` or absent, this subsection runs byte-for-byte exactly as it does today — no observable change to the inline path.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -1078,12 +1208,16 @@ Run the following sub-steps when any story has a non-null `project` field, or wh
 
 1. Collect unique project paths from ALL pending stories (not just ready ones — use `$AIMI_CLI status` and filter stories with a `project` field).
 2. Resolve each project path to an absolute path: `AIMI_ROOT / story.project` where AIMI_ROOT is the directory containing `.aimi/`.
-3. For each unique project path, detect its default branch and set up the branch:
+3. For each unique project path, detect its default branch:
    ```bash
    AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
    : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
    PROJECT_DEFAULT=$($AIMI_CLI detect-default-branch --project [resolved_project_path])
    git -C [resolved_project_path] fetch origin 2>/dev/null || true
+   ```
+
+   **When `CONTAINER_MODE` is false** (`EXECUTION_MODE` inline or absent): set up the branch directly — unchanged:
+   ```bash
    if [ -n "$BASE_BRANCH" ]; then
      PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $PROJECT_DEFAULT --project [resolved_project_path] --base $BASE_BRANCH)
    else
@@ -1093,6 +1227,42 @@ Run the following sub-steps when any story has a non-null `project` field, or wh
    Extract the action from the JSON output and report:
    ```
    Branch [branchName] set up in project: [project_path] (action: [action])
+   ```
+
+   **When `CONTAINER_MODE` is true:** run the same checkout-conflict-detection-and-remediation plus idempotent-create logic Flat Container Mode defines above (Step 2), scoped to `[resolved_project_path]` instead of `$AIMI_ROOT` and to `PROJECT_DEFAULT` instead of `$DEFAULT_BRANCH` — producing one container per project group at `[resolved_project_path]/.worktrees/[branchName]`, never one container spanning multiple project roots.
+
+   Pure multi-repo layout (`AIMI_ROOT_IS_GIT_REPO=false`) skips Step 1.6 entirely and therefore never sets `INTERACTIVE_MODE`. Re-resolve it here when still unset, before running the checkout-conflict remediation branch below:
+   ```bash
+   AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+   : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+   if [ -z "$INTERACTIVE_MODE" ]; then
+     INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
+   fi
+   ```
+
+   Detect a checkout conflict scoped to this project:
+   ```bash
+   git -C [resolved_project_path] branch --show-current
+   ```
+   - **Differs from `[branchName]` (no conflict):** skip straight to creation below.
+   - **Equals `[branchName]` (conflict):** remediate exactly as Flat Container Mode's **Remediate a Checkout Conflict** does, substituting `[resolved_project_path]` for `$AIMI_ROOT` and `$PROJECT_DEFAULT` for `$DEFAULT_BRANCH` in every git call and composed message — same picker/agent-mode branching, same clean/dirty gate, never surfacing git's raw stderr.
+
+   Create or reuse the container:
+   ```bash
+   WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+   : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+   cd [resolved_project_path]
+   if [ -n "$BASE_BRANCH" ]; then
+     CONTAINER_BASE="$BASE_BRANCH"
+   else
+     CONTAINER_BASE="$PROJECT_DEFAULT"
+   fi
+   $WORKTREE_MGR create [branchName] --from "$CONTAINER_BASE"
+   CONTAINER_PATHS[resolved_project_path]="[resolved_project_path]/.worktrees/[branchName]"
+   ```
+   Report:
+   ```
+   Container for [branchName] ready in project: [project_path] (CONTAINER_PATHS[project_path])
    ```
 
 ## Step 3: Check for Pending Stories
