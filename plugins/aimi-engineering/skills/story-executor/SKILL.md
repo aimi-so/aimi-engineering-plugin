@@ -400,9 +400,10 @@ All file operations MUST stay within the project boundary: PROJECT_PATH when set
     - `skills` — array of required skill blocks; for each entry, read its `.content` verbatim as additional project conventions (treat each as a required SKILL.md conventions block, in addition to project CLAUDE.md)
     - `designContext` — read `.decisions` as design intent for any UI-touching work; if `.bundleGuidance` cites spec file paths (DesignSpec / BusinessSpec), use the Read tool to load those files before authoring implementation code
     If this command fails, report failure immediately and stop.
-    - Compute `EFFECTIVE_VERIFICATION_URL` from `story.verification.url` and `VERIFICATION_BASE_URL` (see `<worktree_context>` above). This is a plain inline one-liner, repeated at every call site that needs it — never a shared function persisted across calls, since each Bash call is an isolated shell:
+    - Compute `EFFECTIVE_VERIFICATION_URL` from `story.verification.url` and `VERIFICATION_BASE_URL` (see `<worktree_context>` above). This is a plain inline one-liner, repeated at every call site that needs it — never a shared function persisted across calls, since each Bash call is an isolated shell. `story.verification.url` is read via `jq -r` into a variable, never reinterpolated as raw bracket-placeholder text inside a quoted string — same discipline as `execute.md`'s `VISUAL_URL=$(printf '%s' "$FIRST_VISUAL" | jq -r '.verification.url')`:
       ```bash
-      RAW_VERIFICATION_URL="[story.verification.url]"
+      STORY_CONTEXT_JSON=$($AIMI_CLI get-story-context "$STORY_ID")
+      RAW_VERIFICATION_URL=$(printf '%s' "$STORY_CONTEXT_JSON" | jq -r '.story.verification.url // empty')
       if [ -n "$VERIFICATION_BASE_URL" ] && [ -n "$RAW_VERIFICATION_URL" ]; then
         PATH_QUERY=$(printf '%s' "$RAW_VERIFICATION_URL" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+##')
         EFFECTIVE_VERIFICATION_URL="${VERIFICATION_BASE_URL%/}${PATH_QUERY}"

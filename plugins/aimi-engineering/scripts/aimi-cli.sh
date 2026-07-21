@@ -3633,6 +3633,43 @@ cmd_validate_tasks() {
     errors+=("${tasks_file}: metadata.execution has invalid value \"${execution_mode}\" (expected \"container\" or \"inline\")")
   fi
 
+  # metadata.branchName validation: must match the same mandated pattern
+  # already enforced by cmd_init_session and open-pr.md (see CLAUDE.md's
+  # Security Requirements) — branchName is interpolated into git/gh commands
+  # downstream, so a value outside this charset is a command-injection vector.
+  # An absent/empty value also fails, since the pattern requires a leading
+  # alphanumeric character.
+  local branch_name
+  branch_name=$(jq -r '.metadata.branchName // empty' "$tasks_file" 2>/dev/null)
+
+  if ! [[ "$branch_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    errors+=("${tasks_file}: metadata.branchName \"${branch_name}\" does not match the required pattern ^[a-zA-Z0-9][a-zA-Z0-9/_-]*\$")
+  fi
+
+  # verification.url charset validation: a conservative allowlist (letters,
+  # digits, and :/?#@!&*+,._~%=- , first character alphanumeric or /) that
+  # excludes backtick, $, quotes, ;, |, <, >, and whitespace — the characters
+  # needed for shell command injection when a URL is later interpolated into
+  # a quoted string (see I10 review finding). Stories without a verification
+  # object, or with a null/empty/non-string url, are ignored — same tolerance
+  # the metadata.execution check above gives to an absent field.
+  local url_charset_re='^[A-Za-z0-9/][A-Za-z0-9:/?#@!&*+,._~%=-]*$'
+  local bad_urls
+  bad_urls=$(jq -r --arg re "$url_charset_re" '
+    .userStories[] |
+    select(.verification | type == "object") |
+    select((.verification.url | type == "string") and (.verification.url != "")) |
+    select((.verification.url | test($re)) | not) |
+    [.id, .verification.url] | @tsv
+  ' "$tasks_file" 2>/dev/null)
+
+  if [ -n "$bad_urls" ]; then
+    while IFS=$'\t' read -r story_id bad_url; do
+      [ -z "$story_id" ] && continue
+      errors+=("${tasks_file}: ${story_id} verification.url \"${bad_url}\" contains characters outside the allowed charset")
+    done <<< "$bad_urls"
+  fi
+
   # Emit result JSON
   if [ ${#errors[@]} -eq 0 ]; then
     echo '{"valid": true, "errors": []}'

@@ -4536,6 +4536,106 @@ VALIDATETASKSEXECINVALIDEOF
   echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
 }
 
+test_validate_tasks_branchname_invalid_rejected() {
+  echo ""
+  echo "=== Testing validate-tasks: metadata.branchName outside the mandated regex is rejected ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-82-validate-tasks-branchname-invalid.json"
+  cat > "$tasks_fixture" << 'VALIDATETASKSBRANCHNAMEINVALIDEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Invalid branchName test",
+    "type": "feat",
+    "branchName": "feat/bad branch;rm -rf",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "A bad-branchName story",
+      "description": "branchName contains a space and a semicolon",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 0
+    }
+  ]
+}
+VALIDATETASKSBRANCHNAMEINVALIDEOF
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": false' "$output" "validate-tasks: invalid branchName returns valid=false"
+  assert_contains 'metadata.branchName' "$output" \
+    "validate-tasks: invalid branchName names the offending field"
+  assert_contains 'bad branch;rm -rf' "$output" "validate-tasks: invalid branchName names the offending value"
+  assert_exit_code "1" "$exit_code" "validate-tasks: invalid branchName exits non-zero"
+
+  rm -f "$tasks_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_tasks_verification_url_invalid_rejected() {
+  echo ""
+  echo "=== Testing validate-tasks: verification.url outside the conservative charset is rejected ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-81-validate-tasks-verification-url-invalid.json"
+  cat > "$tasks_fixture" << 'VALIDATETASKSVERIFICATIONURLINVALIDEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Invalid verification.url test",
+    "type": "feat",
+    "branchName": "feat/invalid-verification-url-test",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "A bad-verification-url story",
+      "description": "verification.url contains a backtick and a command substitution",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 0,
+      "verification": {"strategy": "visual", "status": "pending", "url": "/dashboard`$(rm -rf /)`", "expect": "looks right"}
+    }
+  ]
+}
+VALIDATETASKSVERIFICATIONURLINVALIDEOF
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": false' "$output" "validate-tasks: invalid verification.url returns valid=false"
+  assert_contains 'US-001' "$output" "validate-tasks: invalid verification.url names the offending story"
+  assert_contains 'verification.url' "$output" "validate-tasks: invalid verification.url names the offending field"
+  assert_exit_code "1" "$exit_code" "validate-tasks: invalid verification.url exits non-zero"
+
+  rm -f "$tasks_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
 test_validate_tasks_designspec_passing_case() {
   echo ""
   echo "=== Testing validate-tasks: DesignSpec passing case (literal found in cited subsection) ==="
@@ -11392,6 +11492,8 @@ main() {
   test_validate_tasks_execution_container_valid
   test_validate_tasks_execution_inline_valid
   test_validate_tasks_execution_invalid_value_rejected
+  test_validate_tasks_branchname_invalid_rejected
+  test_validate_tasks_verification_url_invalid_rejected
   test_validate_tasks_designspec_passing_case
   test_validate_tasks_designspec_paraphrase_fails
   test_validate_tasks_designspec_unicode_normalize
