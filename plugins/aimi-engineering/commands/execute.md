@@ -1083,6 +1083,10 @@ Resolve the conflict on branch [PHASE_BRANCH] in [PHASE_CONTAINER_PATH] and re-r
 `/aimi:execute` to continue. Both split files' stories are already marked complete —
 re-running will not re-execute them, only retry this merge and the phase-completion
 checks that follow it.
+
+The phase container [PHASE_CONTAINER_PATH] itself — and any live dev server running
+inside it — is left untouched by this failure; only the two split worktrees above are
+removed.
 ```
 
 ```bash
@@ -1796,6 +1800,7 @@ while true:
                 "[conflict output from merge-all]"
                 ""
                 "Resolve the conflict on branch [merge_target] in [merge_cwd] and re-run `/aimi:execute` to continue."
+                "[merge_cwd] itself — the phase container, the feature container, or (inline mode) the project's own git root — and any live dev server running inside it are left untouched by this failure; only this wave's story worktrees (cleaned up below) are removed, so the conflict can be resolved directly in the still-live working tree."
 
                 # Cleanup ALL worktrees from this wave (across all project groups) before stopping
                 for full_story_id, wt in all_worktrees:
@@ -2366,6 +2371,8 @@ When execution ends (all stories complete, or deadlock detected):
 > **PHASE_MODE scope note:** this step's reporting is written for the flat-mode case (CWD = `AIMI_ROOT`, `HEAD` on `branchName`). In phase mode, run this step's commands with CWD inside `PHASE_CONTAINER_PATH` and substitute `PHASE_BRANCH` for `branchName` / `CONTAINER_BASE` for `DEFAULT_BRANCH` where used below. Phase-level completion — verifying the claimed phase's `creates`, writing `handoff.md`, updating roadmap status, offering a PR, and offering or auto-continuing to the next phase — is handled entirely by the **Phase Completion** section above, which runs before this step whenever `PHASE_MODE=true` and the phase's own pending count reaches zero. This step still runs afterward, in both modes, to report story-level completion for the phase's own tasks file.
 
 > **CONTAINER_MODE scope note:** when `CONTAINER_MODE=true` and `PHASE_MODE=false` (flat container-mode execution — see Execution Mode Detection in Step 1), the **If all stories complete** branch below runs three additional ordered steps before its existing report: stop each project group's dev server, push `[branchName]` to `origin`, then remove each project group's container while preserving its branch. See **Container Mode: Stop the Dev Server**, **Container Mode: Push the Branch**, and **Container Mode: Remove the Container** immediately below — the order there is load-bearing; removing a container before its dev server is stopped orphans that server, still holding its port with no backing directory. When `CONTAINER_MODE=false` (inline mode, the default and unchanged), none of the three subsections apply: no `git push` is invoked, no container is removed, and `serve stop` is never called.
+>
+> **Container removal is completion-path-only.** The **Container Mode: Remove the Container** step below is the only place in flat container mode that `$WORKTREE_MGR remove <branchName>` is ever called against the feature container itself — as opposed to a per-story worktree nested inside it. The **If deadlock detected** branch below, the per-wave merge-conflict report path (Step 4), and the Error Recovery section's **Abandoning a Containerized Run** procedure never call it outside of this completion path or that explicit, user-initiated abandonment — every other exit leaves the feature container (and any dev server inside it) exactly as it was. (Phase mode's own container, `PHASE_CONTAINER_PATH`, is never removed anywhere in this document — see Phase Completion's **Mark Phase Completed**, which updates roadmap status only — so the same guarantee holds there trivially; the phase-mode split-merge conflict report below states it explicitly anyway, for parity with the flat case.)
 
 ### If all stories complete:
 
@@ -2565,14 +2572,25 @@ Resolve gates with: $AIMI_CLI gate-pass <story-id> [--option 'value']
 
 ### If deadlock detected:
 
+This branch also fires for the gate-blocked case above (Step 4's Gate-Blocked Story Detection reports its own "blocked by gates" message inline and then breaks the loop into this same completion path) — "none ready" is never caused only by cascade-skip.
+
 ```
 ## Execution Stopped - Deadlock
 
 [N] stories remain pending but none are ready for execution.
-This may be caused by failed stories whose dependents were cascade-skipped.
+This may be caused by failed stories whose dependents were cascade-skipped, or by a
+permanently pending action gate blocking every remaining dependent story.
 
 Run `/aimi:status` to see the dependency state.
 Review failed stories and either retry or adjust dependencies.
+```
+
+**Container mode (`CONTAINER_MODE=true` or `PHASE_MODE=true`):** this branch never runs Container Mode: Stop the Dev Server / Push the Branch / Remove the Container — those only run in the **If all stories complete** branch above. The feature or phase container and its `.aimi/state/dev-server.json` entry are left exactly as they were; append to the report above:
+
+```
+The feature container and any dev server inside it are untouched — inspect the
+branch there directly, or resume with a plain /aimi:execute re-run (see Resuming
+Execution).
 ```
 
 ## Resuming Execution
@@ -2583,6 +2601,8 @@ The tasks file preserves all state. Re-running `/aimi:execute` will:
 2. Skip completed stories automatically
 3. Pick up from the next ready wave
 4. Failed stories remain as "failed" -- use `/aimi:status` to review them
+
+**Flat container mode (`CONTAINER_MODE=true`, `PHASE_MODE=false`):** re-running `/aimi:execute` after a run stopped short of full completion (deadlock, a gate-blocked wave, a per-wave merge conflict, or an unexpected session crash) needs no new resumption mechanism. Step 2's Flat Container Mode `$WORKTREE_MGR create [branchName] --from "$CONTAINER_BASE"` call (see Create or Reuse the Container) is already idempotent — it reuses `CONTAINER_PATHS[group_key]`'s existing directory silently instead of recreating it — so the container, its branch, any dev server still running inside it, and every story already merged onto `[branchName]` all survive the stop untouched, and the re-run simply picks up in the next ready wave exactly as points 1–4 above describe.
 
 **Phase mode:** re-running `/aimi:execute` for a phase this session already claimed and left `in_progress` does not error. `roadmap-claim`'s self-reclaim path (Step 1.7) reports the same phase again instead of a contention failure, and `$WORKTREE_MGR create "$PHASE_BRANCH" --from "$CONTAINER_BASE"` reuses the existing container directory silently since the target already exists — no separate reuse-detection logic is needed beyond calling both idempotently on every claim.
 
@@ -2622,3 +2642,12 @@ If execution is interrupted unexpectedly:
 4. Orphaned worktrees are cleaned up on next run (safety cleanup in Post-Loop Cleanup)
 
 The loop will automatically skip completed stories and continue from the next pending/ready one.
+
+### Abandoning a Containerized Run
+
+Container mode (flat or phase) never removes the feature/phase container or stops its dev server outside the completion path (see Step 5's Container removal is completion-path-only note) — a deadlock, a gate-blocked wave, a merge conflict, or a crash all leave both alive on disk for inspection or resumption. Before this feature existed, giving up on flat in-progress work was just switching branches; in container mode a stale container directory and possibly a still-running dev server survive instead, so abandoning a run for good — rather than resuming it — needs its own manual teardown, run from `$AIMI_ROOT` (or the relevant project root in a multi-repo layout, never from inside the container itself, since a worktree cannot be removed while CWD sits inside it) in this order:
+
+1. **Stop the dev server first:** `$WORKTREE_MGR serve stop <branchName>` (or `<PHASE_BRANCH>` in phase mode). This kills the dev server's full process group — not just the pid recorded in `.aimi/state/dev-server.json` — and clears that state entry whether or not a live process was found.
+2. **Then remove the container and its branch:** `$WORKTREE_MGR remove <branchName>`. Omitting `--keep-branch` here is intentional — unlike the completion-path removal in Step 5 (which preserves the branch for review and a PR), abandonment discards the branch too. This is the container-mode replacement for what used to be a plain branch switch.
+
+Never trust or reuse a `.aimi/state/dev-server.json` pid entry on a later resume without first re-checking its liveness — the same `kill -0` / `_is_pid_alive` probe `aimi-cli.sh` already uses for stale-claim recovery (`$WORKTREE_MGR serve status <branchName>` performs exactly this check and self-heals a stale entry). A pid that is no longer alive is treated as "no server running" — never reused, and never assumed still killable.
