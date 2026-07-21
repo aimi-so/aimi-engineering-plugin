@@ -2,7 +2,7 @@
 name: aimi:next
 description: Execute the next pending story from tasks.json
 disable-model-invocation: true
-allowed-tools: Read, Write, Edit, Bash(git:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Bash(npm:*), Bash(bun:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(tsc:*), Bash(eslint:*), Bash(prettier:*), Task
+allowed-tools: Read, Write, Edit, Bash(git:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Bash(WORKTREE_MGR=*), Bash($WORKTREE_MGR:*), Bash(npm:*), Bash(bun:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(tsc:*), Bash(eslint:*), Bash(prettier:*), Task
 ---
 
 # Aimi Next
@@ -72,6 +72,71 @@ If the story JSON contains a `project` field:
 
 If the story does **not** have a `project` field, skip this step — `PROJECT_PATH` remains unset and behavior is unchanged (CWD fallback).
 
+## Step 1c: Resolve Container
+
+Read `metadata.execution` to decide whether this story runs inline (today's behavior) or inside a per-branch container that survives across `/aimi:next` invocations. See `commands/references/execution-mode.md` for the full read contract.
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+METADATA_JSON=$($AIMI_CLI metadata)
+EXECUTION_MODE=$(echo "$METADATA_JSON" | jq -r '.execution // "inline"')
+BRANCH_NAME=$(echo "$METADATA_JSON" | jq -r '.branchName')
+```
+
+**When `EXECUTION_MODE` is not exactly `"container"`** (absent, `"inline"`, or any unrecognized value — every non-`"container"` value resolves to inline per the fail-safe default in `execution-mode.md`): leave `CONTAINER_PATH` unset and skip the rest of this step entirely. Step 4 proceeds exactly as it does today — no worktree resolution, no `WORKTREE_PATH` interpolation.
+
+**When `EXECUTION_MODE` is `"container"`:**
+
+1. **Validate `BRANCH_NAME`** against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` before using it in any git or worktree command. If it does not match, report `Invalid branchName in metadata.branchName: [BRANCH_NAME]` and STOP.
+
+2. **Resolve `CONTAINER_ROOT`** — one container per project group, following the same convention execute.md's flat mode uses (context.md decision 3):
+   - `CONTAINER_ROOT = PROJECT_PATH` (from Step 1b) when the story has a `project` field
+   - `CONTAINER_ROOT = AIMI_ROOT` (i.e. `$PWD`) otherwise
+
+3. **Test whether the container already exists — before calling create.** This is what gates install-deps below to first-creation only:
+
+```bash
+CONTAINER_DIR="$CONTAINER_ROOT/.worktrees/$BRANCH_NAME"
+if [ -d "$CONTAINER_DIR" ]; then CONTAINER_EXISTED=true; else CONTAINER_EXISTED=false; fi
+```
+
+4. **Detect the default branch to create the container from.** Scope detection to `CONTAINER_ROOT` via `--project` only when Step 1b resolved a `PROJECT_PATH` — mirrors execute.md's Main-Repo-vs-Per-Project split:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+if [ -n "$PROJECT_PATH" ]; then
+  DEFAULT_BRANCH=$($AIMI_CLI detect-default-branch --project "$CONTAINER_ROOT")
+else
+  DEFAULT_BRANCH=$($AIMI_CLI detect-default-branch)
+fi
+```
+
+5. **Create or reuse the container**, with CWD set to `CONTAINER_ROOT` so `worktree-manager.sh`'s own `git rev-parse --show-toplevel` resolves against the right repo:
+
+```bash
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+cd "$CONTAINER_ROOT"
+$WORKTREE_MGR create "$BRANCH_NAME" --from "$DEFAULT_BRANCH"
+CONTAINER_PATH="$CONTAINER_ROOT/.worktrees/$BRANCH_NAME"
+```
+
+`$WORKTREE_MGR create` reuses an existing target directory silently instead of recreating it, so calling it on every invocation is idempotent — a second `/aimi:next` run against the same branch reuses `$CONTAINER_PATH` unchanged instead of recreating it. No per-story worktree is created; the story executes and commits directly inside this container, on `$BRANCH_NAME`.
+
+6. **Install dependencies on first creation only.** When `CONTAINER_EXISTED` was `false`:
+
+```bash
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+$WORKTREE_MGR install-deps "$BRANCH_NAME" || true
+```
+
+`install-deps` is advisory (see `skills/git-worktree/scripts/worktree-manager.sh`) — never let a non-zero exit block story execution; log a warning and continue regardless of outcome.
+
+When `CONTAINER_EXISTED` was `true`, skip this call entirely — dependencies are already installed from a prior `/aimi:next` invocation.
+
 ## Step 2: Load Project Guidelines
 
 Load project guidelines following the discovery order defined in `story-executor/SKILL.md` → "PROJECT GUIDELINES" section:
@@ -134,7 +199,7 @@ Interpolate the following into the template:
 - `ACCEPTANCE_CRITERIA` = story.acceptanceCriteria (bulleted)
 - `story.tasks` = story.tasks (include <tasks> block only if story.tasks is a non-empty array; place after <acceptance_criteria> and before <notes>)
 - `story.notes` = story.notes (include <previous_notes> section only if non-empty)
-- No WORKTREE_PATH (sequential mode — worker operates in current directory, or PROJECT_PATH if set)
+- `WORKTREE_PATH` = `CONTAINER_PATH` from Step 1c when that step resolved a container (`metadata.execution == "container"`) — the story executes and commits inside the container, on the feature branch, with no per-story worktree. Otherwise (inline or absent `metadata.execution`), no WORKTREE_PATH (sequential mode — worker operates in current directory, or PROJECT_PATH if set), exactly as before this story.
 
 ```
 # IMPORTANT: subagent_type MUST be "general-purpose" — story-executor is a skill, NOT an agent.
@@ -143,6 +208,8 @@ Task general-purpose: "Execute [STORY_ID]: [STORY_TITLE]
 [story-executor/SKILL.md prompt template with interpolated values]
 "
 ```
+
+> Passing `WORKTREE_PATH` does not change the tasks-file-update contract below. Both the with-`WORKTREE_PATH` and without-`WORKTREE_PATH` branches of `story-executor/SKILL.md`'s `<worktree_context>` already forbid the worker from touching `tasks.json` and leave status updates to the caller — so Step 5 is unchanged by container mode.
 
 ## Step 5: Handle Result
 
