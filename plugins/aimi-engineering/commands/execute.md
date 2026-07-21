@@ -196,11 +196,15 @@ The session is opened exactly once. It is never closed mid-run.
 
 **Container mode:** `$VISUAL_URL` is not the raw `verification.url` in this case — its origin (scheme + host + port) is rewritten to the first visual story's own project group's container dev server, preserving path and query (see Container Dev Server Bootstrap and Open Visual Follow Session, both in Step 3.3). The dev server is started, and its port resolved, before this URL is computed — never after. Outside container mode, `$VISUAL_URL` is the unrewritten `verification.url`, exactly as before.
 
+**Phase mode:** the same origin rewrite applies, keyed by `PHASE_BRANCH` instead of a project group — but unlike container mode, the port is never cached from the earlier bootstrap: it is re-queried fresh via `serve status "$PHASE_BRANCH"` at this exact point, since a phase's wave loop can run long after Step 1.7's bootstrap and each Bash call is an isolated shell (see Phase Container Dev Server Bootstrap and Open Visual Follow Session, both in Step 1.7/Step 3.3). This applies unmodified inside a Phase-Mode Paired Split sub-orchestrator too, whose spawn prompt already pre-sets `PHASE_BRANCH`/`PHASE_CONTAINER_PATH` to its own split before this step runs.
+
 ### Phase 3 — Reuse Within Wave (Step 4 per-story)
 
 After each story merges, visual stories are verified. When `VISUAL_FOLLOW=true`, the existing `visual-follow` session is reused (`agent-browser --session visual-follow open/screenshot`). When `VISUAL_FOLLOW=false`, a fresh headless `agent-browser` session is opened, screenshot taken, and closed per story. If `agent-browser` is absent in either case, `verification.status` is set to `skipped`.
 
 **Container mode:** the URL used at each per-story verification call is likewise rewritten to that story's own project group's container dev server origin (see the post-merge verification block in Step 4). When that group's dev server never resolved a port, `verification.status` is set to `skipped` for that story — mirroring the "agent-browser not installed" degradation above — without ever blocking `mark-complete` or the wave loop.
+
+**Phase mode:** the same per-story rewrite applies, again via a fresh `serve status "$PHASE_BRANCH"` query at this exact call site rather than any cached value. A full-stack split story whose page depends on an API served by the sibling split's container may fail or show a broken API call against its own split's server — there is no proxy between the two split servers (see Split Container Dev Server Bootstrap in Phase-Mode Paired Split). This is a documented limitation, not a bug: it degrades that story's `verification.status` exactly like a missing dev server does, and never blocks the wave or triggers a retry.
 
 **Console capture (additive, per story).** Immediately before each per-story `open`, the wave loop issues `agent-browser console --clear` to drop logs accumulated from prior stories in the same wave. Right after `screenshot`, it captures `agent-browser console --json` and `agent-browser errors --json` for this story's page-load output and feeds both into the `attribute_console_errors()` pass defined in the Console Error Attribution section. Capture is advisory only — it never changes `verification.status` and never blocks the wave. The per-story `--clear` is what enables per-story attribution; without it, the buffer is wave-cumulative and the LAST verified story would inherit every prior story's errors.
 
@@ -924,6 +928,39 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
 ```
 
+### Phase Container Dev Server Bootstrap
+
+**Skip this subsection entirely when `PHASE_SPLIT_MODE` is true** — a split phase never lands a story directly on `PHASE_CONTAINER_PATH` itself, so there is nothing to serve here; each split gets its own independently-bootstrapped server instead (see Split Container Dev Server Bootstrap in Phase-Mode Paired Split below). The rest of this subsection assumes `PHASE_SPLIT_MODE=false`.
+
+When it applies, this MUST complete before Step 3.3's Open Visual Follow Session computes `VISUAL_URL` — the same hard ordering rule Container Dev Server Bootstrap (Step 3.3) already enforces for flat container mode: install-deps → serve start → compute VISUAL_URL → open the visual-follow session. Both later call sites (Step 3.3 and Step 4's post-merge visual verification) re-query the server's port fresh rather than reusing anything cached here — see Open Visual Follow Session and Step 4 below.
+
+Gate on the phase's own tasks file having at least one visual story — the same jq shape Step 0.7 already uses — and `PHASE_CONTAINER_PATH` having a `package.json` with a non-empty `scripts.dev`:
+
+```bash
+PHASE_VISUAL_STORIES=$(jq '[.userStories[] | select(.verification | type == "object" and .strategy == "visual")] | length' "$PHASE_TASKS_PATH" 2>/dev/null)
+if [ -f "$PHASE_CONTAINER_PATH/package.json" ]; then
+  PHASE_HAS_DEV_SCRIPT=$(jq -r 'if (.scripts.dev // empty) != "" then "yes" else "no" end' "$PHASE_CONTAINER_PATH/package.json" 2>/dev/null || echo "no")
+else
+  PHASE_HAS_DEV_SCRIPT="no"
+fi
+```
+
+**When `PHASE_VISUAL_STORIES` is 0/empty, or `PHASE_HAS_DEV_SCRIPT` is `no`:** skip silently — no server is started, and the rest of Step 1.7 proceeds unaffected.
+
+**Otherwise**, run `install-deps` then `serve start` against `PHASE_CONTAINER_PATH`, keyed by `PHASE_BRANCH` — CWD at `$AIMI_ROOT` (the project root), never inside the container itself, for the same reason Create or Reuse the Phase Container above `cd`s to the project root before calling `$WORKTREE_MGR create`: the worktree-name argument resolves against `$(git rev-parse --show-toplevel)/.worktrees/<name>` relative to CWD:
+
+```bash
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+cd "$AIMI_ROOT"
+$WORKTREE_MGR install-deps "$PHASE_BRANCH"
+$WORKTREE_MGR serve start "$PHASE_BRANCH"
+```
+
+The returned port is discarded here — never cached across this isolated Bash call. Every later consumer (Step 3.3's Open Visual Follow Session, and Step 4's post-merge visual verification) re-queries `serve status "$PHASE_BRANCH"` fresh at the point it needs the port, since a wave can run long after this bootstrap and each Bash call is its own isolated shell (Step 0).
+
+**Degradation is advisory, never fatal** — the identical contract Container Dev Server Bootstrap (Step 3.3) already uses for flat container mode: a missing package manager, a failed install, port exhaustion, or a readiness-probe timeout never aborts Step 1.7, the wave loop, or Phase Completion. When the server never comes up, the visual-story call sites below simply find no port on their own fresh `serve status` query and degrade that story's `verification.status` to `skipped`, exactly as flat container mode already does.
+
 ### Path and State Notes
 
 From this point forward, for the remainder of this phase's execution:
@@ -968,6 +1005,47 @@ CWD is `$PHASE_CONTAINER_PATH` — never `$DEFAULT_BRANCH`'s checkout, never `AI
 FRONTEND_WORKTREE_PATH="$PHASE_CONTAINER_PATH/.worktrees/$FRONTEND_BRANCH"
 BACKEND_WORKTREE_PATH="$PHASE_CONTAINER_PATH/.worktrees/$BACKEND_BRANCH"
 ```
+
+### Split Container Dev Server Bootstrap
+
+Independently for each split — never against `PHASE_CONTAINER_PATH` itself, since no story ever lands directly on the un-merged phase branch — gate on that split's own tasks file having at least one visual story and that split's own worktree having a `package.json` with a non-empty `scripts.dev`, mirroring Phase Container Dev Server Bootstrap's gate above exactly, scoped one level deeper:
+
+```bash
+FE_VISUAL_STORIES=$(jq '[.userStories[] | select(.verification | type == "object" and .strategy == "visual")] | length' "$PHASE_FE_TASKS" 2>/dev/null)
+if [ -f "$FRONTEND_WORKTREE_PATH/package.json" ]; then
+  FE_HAS_DEV_SCRIPT=$(jq -r 'if (.scripts.dev // empty) != "" then "yes" else "no" end' "$FRONTEND_WORKTREE_PATH/package.json" 2>/dev/null || echo "no")
+else
+  FE_HAS_DEV_SCRIPT="no"
+fi
+BE_VISUAL_STORIES=$(jq '[.userStories[] | select(.verification | type == "object" and .strategy == "visual")] | length' "$PHASE_BE_TASKS" 2>/dev/null)
+if [ -f "$BACKEND_WORKTREE_PATH/package.json" ]; then
+  BE_HAS_DEV_SCRIPT=$(jq -r 'if (.scripts.dev // empty) != "" then "yes" else "no" end' "$BACKEND_WORKTREE_PATH/package.json" 2>/dev/null || echo "no")
+else
+  BE_HAS_DEV_SCRIPT="no"
+fi
+```
+
+For each split whose gate passes, run `install-deps` then `serve start` keyed by that split's own branch — CWD inside `$PHASE_CONTAINER_PATH`, the same CWD Create Split Worktrees above already used to create both worktrees, since `worktree-manager.sh` resolves the worktree-name argument relative to `$(git rev-parse --show-toplevel)` at CWD:
+
+```bash
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+cd "$PHASE_CONTAINER_PATH"
+if [ -n "$FE_VISUAL_STORIES" ] && [ "$FE_VISUAL_STORIES" -gt 0 ] && [ "$FE_HAS_DEV_SCRIPT" = "yes" ]; then
+  $WORKTREE_MGR install-deps "$FRONTEND_BRANCH"
+  $WORKTREE_MGR serve start "$FRONTEND_BRANCH"
+fi
+if [ -n "$BE_VISUAL_STORIES" ] && [ "$BE_VISUAL_STORIES" -gt 0 ] && [ "$BE_HAS_DEV_SCRIPT" = "yes" ]; then
+  $WORKTREE_MGR install-deps "$BACKEND_BRANCH"
+  $WORKTREE_MGR serve start "$BACKEND_BRANCH"
+fi
+```
+
+A split with no dev script (e.g. a pure-API backend) never gets nor blocks on a server — its gate simply fails and both its calls are skipped, exactly like the single-file bootstrap above. Every port is discarded here too — re-resolved fresh via `serve status` at the point each split sub-orchestrator's own Step 3.3 / Step 4 call sites need it. A split sub-orchestrator's spawn prompt pre-sets `PHASE_MODE=true`, `PHASE_BRANCH=[its own split branch]`, and `PHASE_CONTAINER_PATH=[its own split worktree path]` (see Spawn Split Sub-Orchestrators below), so its own copies of Open Visual Follow Session and Step 4's post-merge visual verification apply unmodified — no split-specific code path is needed at either call site.
+
+**Degradation is advisory here too** — identical contract to the single-file bootstrap above.
+
+**Documented limitation — no proxy between split servers:** when a story's page depends on an API served by the sibling split's container, its visual verification runs only against its own split's server; there is no proxy between the two. A broken API call or failed visual check caused solely by this is expected, not a bug — it must never block the wave and never trigger a retry.
 
 ### Spawn Split Sub-Orchestrators
 
@@ -1085,6 +1163,16 @@ re-running will not re-execute them, only retry this merge and the phase-complet
 checks that follow it.
 ```
 
+Before cleaning up both split worktrees, stop each split's own dev server — an orphaned server would otherwise keep holding its port after its worktree is gone:
+
+```bash
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+cd "$PHASE_CONTAINER_PATH"
+$WORKTREE_MGR serve stop "$FRONTEND_BRANCH"
+$WORKTREE_MGR serve stop "$BACKEND_BRANCH"
+```
+
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
@@ -1093,15 +1181,19 @@ $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
 
 ### Clean Up Split Worktrees
 
-Only reached once the merge above succeeds:
+Only reached once the merge above succeeds. Stop each split's own dev server first — same ordering rule as the merge-conflict path above, so neither split's server outlives its own worktree:
 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
 cd "$PHASE_CONTAINER_PATH"
+$WORKTREE_MGR serve stop "$FRONTEND_BRANCH"
+$WORKTREE_MGR serve stop "$BACKEND_BRANCH"
 $WORKTREE_MGR remove "$FRONTEND_BRANCH"
 $WORKTREE_MGR remove "$BACKEND_BRANCH"
 ```
+
+`serve stop` exits 0 and reports "No dev server registered" when no server was ever started for a split (its own gate in Split Container Dev Server Bootstrap never passed) — so both calls above are always safe to issue, identical to Container Mode: Stop the Dev Server's own contract in Step 5.
 
 Removes only the two split worktrees. `$PHASE_CONTAINER_PATH` itself is left intact — its removal is a separate, later-timed operation owned entirely by Phase Completion's own lifecycle (the phase container is only ever torn down once the *phase* — not just this split — is fully done), never by this section.
 
@@ -1444,15 +1536,38 @@ command -v agent-browser
   ```
   Set `VISUAL_FOLLOW=false`.
 
-- **If `agent-browser` is available:** Get the verification URL from the first visual story:
+- **If `agent-browser` is available:** Get the verification URL from the first visual story. In phase mode, source it from `$PHASE_TASKS_PATH` — never the mtime-discovered `$TASKS_PATH` from Step 1, which (exactly like `FEATURE_TYPE` in Step 1.7) could belong to a different, more-recently-touched sibling phase file when several are materialized:
 
   ```bash
-  FIRST_VISUAL=$(jq -c '[.userStories[] | select(.verification | type == "object" and .strategy == "visual")][0]' "$AIMI_ROOT/$TASKS_PATH")
+  if [ "$PHASE_MODE" = "true" ]; then
+    VISUAL_SOURCE="$PHASE_TASKS_PATH"
+  else
+    VISUAL_SOURCE="$AIMI_ROOT/$TASKS_PATH"
+  fi
+  FIRST_VISUAL=$(jq -c '[.userStories[] | select(.verification | type == "object" and .strategy == "visual")][0]' "$VISUAL_SOURCE")
   VISUAL_URL=$(printf '%s' "$FIRST_VISUAL" | jq -r '.verification.url')
   VISUAL_GROUP_KEY=$(printf '%s' "$FIRST_VISUAL" | jq -r '.project // "DEFAULT"')
   ```
 
-  **When `CONTAINER_MODE` is true and `CONTAINER_DEV_URL[VISUAL_GROUP_KEY]` resolved** (see Container Dev Server Bootstrap above): rewrite only `VISUAL_URL`'s origin, preserving path and query, using that project group's container dev server URL. This resolves the port of the FIRST visual story's OWN project group only — a second visual story from a different project group is unaffected by this rewrite and is instead resolved independently at its own post-merge verification step (Step 4). One inline sed one-liner, repeated at every call site that needs it — never a shared function, since each Bash call is an isolated shell:
+  **When `PHASE_MODE` is true** (the top-level single-file phase orchestrator, or a Phase-Mode Paired Split sub-orchestrator whose spawn prompt pre-set `PHASE_BRANCH`/`PHASE_CONTAINER_PATH` to its own split — see Spawn Split Sub-Orchestrators — so this branch applies unmodified in either case, keyed by whichever branch this session owns): query `serve status` fresh for `$PHASE_BRANCH` — never a value cached from Phase Container Dev Server Bootstrap or Split Container Dev Server Bootstrap earlier in this run, since each Bash call is an isolated shell (Step 0):
+
+  ```bash
+  WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+  : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+  PHASE_SERVE_JSON=$($WORKTREE_MGR serve status "$PHASE_BRANCH" 2>/dev/null)
+  PHASE_SERVE_PORT=$(printf '%s' "$PHASE_SERVE_JSON" | jq -r '.port // empty' 2>/dev/null)
+  ```
+
+  When `PHASE_SERVE_PORT` is non-empty, rewrite `VISUAL_URL`'s origin, preserving path and query — the same inline sed one-liner container mode uses below:
+
+  ```bash
+  PATH_QUERY=$(printf '%s' "$VISUAL_URL" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+##')
+  VISUAL_URL="http://127.0.0.1:${PHASE_SERVE_PORT}${PATH_QUERY}"
+  ```
+
+  When `PHASE_SERVE_PORT` is empty (server absent or dead), `VISUAL_URL` remains the raw `verification.url` — the same advisory-degradation fallback container mode uses below.
+
+  **When `CONTAINER_MODE` is true and `CONTAINER_DEV_URL[VISUAL_GROUP_KEY]` resolved** (see Container Dev Server Bootstrap above; `PHASE_MODE` and `CONTAINER_MODE` are mutually exclusive — see Execution Mode Detection — so at most one of these two branches ever applies): rewrite only `VISUAL_URL`'s origin, preserving path and query, using that project group's container dev server URL. This resolves the port of the FIRST visual story's OWN project group only — a second visual story from a different project group is unaffected by this rewrite and is instead resolved independently at its own post-merge verification step (Step 4). One inline sed one-liner, repeated at every call site that needs it — never a shared function, since each Bash call is an isolated shell:
 
   ```bash
   BASE="${CONTAINER_DEV_URL[VISUAL_GROUP_KEY]}"
@@ -1460,7 +1575,7 @@ command -v agent-browser
   VISUAL_URL="${BASE%/}${PATH_QUERY}"
   ```
 
-  **Otherwise** (not container mode, or that group's port never resolved): `VISUAL_URL` remains the raw `verification.url` — unchanged from today.
+  **Otherwise** (neither phase mode nor container mode applies, or the relevant server's port never resolved): `VISUAL_URL` remains the raw `verification.url` — unchanged from today.
 
   ```bash
   agent-browser --headed --session visual-follow open "$VISUAL_URL"
@@ -1850,18 +1965,49 @@ while true:
                 # Per-story attribution depends on the --clear in step 1 — without it,
                 # console buffer is wave-cumulative and last-story-merged eats the blame.
                 if full_story.verification and full_story.verification.strategy == "visual" and full_story.verification.status == "pending":
-                    # --- Container-mode origin rewrite / degradation gate ---
+                    # --- Container-mode / phase-mode origin rewrite / degradation gate ---
                     # `group_key` is already in scope here from the enclosing
                     # "for group_key, stories in succeeded_by_project" loop above —
-                    # this story's own project group.
-                    if CONTAINER_MODE and group_key not in CONTAINER_DEV_URL:
+                    # this story's own project group. PHASE_MODE and CONTAINER_MODE
+                    # are mutually exclusive (Execution Mode Detection), so at most
+                    # one of the next two branches ever applies for a given story.
+                    if PHASE_MODE:
+                        # Fresh serve-status query for PHASE_BRANCH — never a value
+                        # cached from Phase/Split Container Dev Server Bootstrap or
+                        # Step 3.3 earlier in this run: a wave can run long after
+                        # either, and each Bash call is an isolated shell (Step 0).
+                        # Inside a split sub-orchestrator, PHASE_BRANCH is already
+                        # that split's own branch (see Spawn Split Sub-Orchestrators),
+                        # so this applies unmodified one level deeper too.
+                        ```bash
+                        WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+                        : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+                        PHASE_SERVE_JSON=$($WORKTREE_MGR serve status "$PHASE_BRANCH" 2>/dev/null)
+                        PHASE_SERVE_PORT=$(printf '%s' "$PHASE_SERVE_JSON" | jq -r '.port // empty' 2>/dev/null)
+                        ```
+                    if PHASE_MODE and PHASE_SERVE_PORT is empty:
+                        # No dev server running for this phase's (or split's) own
+                        # branch. Degrade to skipped — this is also the expected,
+                        # non-bug outcome for a full-stack split story whose page
+                        # depends on the sibling split's API (no proxy exists between
+                        # the two split servers — see Split Container Dev Server
+                        # Bootstrap). mark-complete already ran above; this never
+                        # blocks it, never blocks the wave, and never retries.
+                        $AIMI_CLI update-field [full_story.id] verification.status skipped
+                        Report: "[full_story.id] visual verification skipped — no dev server running for [PHASE_BRANCH]."
+                    elif CONTAINER_MODE and group_key not in CONTAINER_DEV_URL:
                         # No dev server ever resolved a port for this group (see Container
                         # Dev Server Bootstrap in Step 3.3) — degrade to skipped. mark-complete
                         # already ran above; this never blocks it or the wave loop.
                         $AIMI_CLI update-field [full_story.id] verification.status skipped
                         Report: "[full_story.id] visual verification skipped — no dev server resolved for project group [group_key]."
                     else:
-                        if CONTAINER_MODE:
+                        if PHASE_MODE:
+                            # Same inline sed one-liner as Step 3.3's Open Visual Follow Session —
+                            # never a shared function, since each Bash call is an isolated shell.
+                            PATH_QUERY=$(printf '%s' "[full_story.verification.url]" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+##')
+                            EFFECTIVE_URL="http://127.0.0.1:${PHASE_SERVE_PORT}${PATH_QUERY}"
+                        elif CONTAINER_MODE:
                             # Same inline sed one-liner as Step 3.3's Open Visual Follow Session —
                             # never a shared function, since each Bash call is an isolated shell.
                             BASE="${CONTAINER_DEV_URL[group_key]}"
@@ -2300,6 +2446,17 @@ $AIMI_CLI roadmap-set-status --feature "$FEATURE" --phase "$PHASE_ID" --status c
 ```
 
 Report: `"Phase [PHASE_ID] ([PHASE_SLUG]) completed. Claim released."`
+
+Stop this phase's own dev server, if one is still running, before the branch is offered for a PR below — an orphaned server would otherwise keep holding its port after the phase's container is later removed by some future step. This call is unconditional (never gated on `PHASE_SPLIT_MODE`): a single-file phase's server, if any, was started against `PHASE_BRANCH` by Phase Container Dev Server Bootstrap in Step 1.7; a split phase's own two split servers were already stopped earlier, immediately before their worktrees were removed (see Merge Split Branches Into the Phase Branch's Clean Up Split Worktrees and its merge-conflict path) — `PHASE_BRANCH` itself never had a server running against it in split mode, so this call is a harmless no-op there:
+
+```bash
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+cd "$PHASE_CONTAINER_PATH"
+$WORKTREE_MGR serve stop "$PHASE_BRANCH"
+```
+
+`serve stop` kills the dev server's full process group and clears its state entry; it exits 0 and reports "No dev server registered" when no server was ever started — identical to Container Mode: Stop the Dev Server's own contract in Step 5. This only runs on the `completed` path reached here: every non-completion exit above it in Phase Completion (the pending-count guard, Creates Verification's `verification_failed` branch, and Write Handoff's failure branch) returns before this subsection, so a phase that ends on deadlock, a gate-blocked wave, or `verification_failed` never calls `serve stop` — its dev server stays alive between waves and across a paused session, resumable via `serve status` on the next `/aimi:execute` run against the same phase, exactly like the flat container's own resumable contract.
 
 ### Offer a Pull Request
 
