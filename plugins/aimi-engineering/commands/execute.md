@@ -194,9 +194,13 @@ agent-browser --headed --session visual-follow open "$VISUAL_URL"
 
 The session is opened exactly once. It is never closed mid-run.
 
+**Container mode:** `$VISUAL_URL` is not the raw `verification.url` in this case — its origin (scheme + host + port) is rewritten to the first visual story's own project group's container dev server, preserving path and query (see Container Dev Server Bootstrap and Open Visual Follow Session, both in Step 3.3). The dev server is started, and its port resolved, before this URL is computed — never after. Outside container mode, `$VISUAL_URL` is the unrewritten `verification.url`, exactly as before.
+
 ### Phase 3 — Reuse Within Wave (Step 4 per-story)
 
 After each story merges, visual stories are verified. When `VISUAL_FOLLOW=true`, the existing `visual-follow` session is reused (`agent-browser --session visual-follow open/screenshot`). When `VISUAL_FOLLOW=false`, a fresh headless `agent-browser` session is opened, screenshot taken, and closed per story. If `agent-browser` is absent in either case, `verification.status` is set to `skipped`.
+
+**Container mode:** the URL used at each per-story verification call is likewise rewritten to that story's own project group's container dev server origin (see the post-merge verification block in Step 4). When that group's dev server never resolved a port, `verification.status` is set to `skipped` for that story — mirroring the "agent-browser not installed" degradation above — without ever blocking `mark-complete` or the wave loop.
 
 **Console capture (additive, per story).** Immediately before each per-story `open`, the wave loop issues `agent-browser console --clear` to drop logs accumulated from prior stories in the same wave. Right after `screenshot`, it captures `agent-browser console --json` and `agent-browser errors --json` for this story's page-load output and feeds both into the `attribute_console_errors()` pass defined in the Console Error Attribution section. Capture is advisory only — it never changes `verification.status` and never blocks the wave. The per-story `--clear` is what enables per-story attribution; without it, the buffer is wave-cumulative and the LAST verified story would inherit every prior story's errors.
 
@@ -1383,6 +1387,47 @@ When stories target different projects (via the `project` field), each project m
 - For stories with a `project` field, look up `PROJECT_GUIDELINES_MAP[story.project]` and pass it as `PROJECT_GUIDELINES` in the worker prompt.
 - If no stories have `project` fields, skip this map and use default `PROJECT_GUIDELINES` (backwards compatible).
 
+### Container Dev Server Bootstrap
+
+**Skip this subsection entirely unless `CONTAINER_MODE` is true** (see Execution Mode Detection in Step 1). When it applies, it MUST complete before Open Visual Follow Session below computes `VISUAL_URL` — the dev server's port is not known until `serve start` succeeds, and this ordering (install-deps → serve start → compute VISUAL_URL → open the visual-follow session → wave loop) is a hard requirement. Starting a container's dev server after the visual-follow session has already opened leaves the browser pointed at a stale or nonexistent port and is treated as a defect, never a valid alternative ordering.
+
+Scan ALL pending stories (not just this wave's ready set — the dev server is started once, before the wave loop, and kept alive across every wave rather than restarted per wave) for the set of project groups that have at least one visual story:
+
+```bash
+VISUAL_GROUP_KEYS=$(jq -r '[.userStories[] | select(.verification | type == "object" and .strategy == "visual") | (.project // "DEFAULT")] | unique | .[]' "$AIMI_ROOT/$TASKS_PATH")
+```
+
+For each `group_key` in `VISUAL_GROUP_KEYS`, resolve its project root exactly as Multi-Repo Handling's grouping pattern does (`CWD`/`$AIMI_ROOT` for `"DEFAULT"`, otherwise `$AIMI_ROOT/[group_key]`), then run `install-deps` and `serve start` against that group's container — `CONTAINER_PATHS[group_key]`, already created by Step 2:
+
+```bash
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+if [ "[group_key]" = "DEFAULT" ]; then
+  cd "$AIMI_ROOT"
+else
+  cd "$AIMI_ROOT/[group_key]"
+fi
+$WORKTREE_MGR install-deps [branchName]
+$WORKTREE_MGR serve start [branchName]
+SERVE_STATUS_JSON=$($WORKTREE_MGR serve status [branchName])
+```
+
+`install-deps`/`serve start` are invoked with CWD at the project root and `[branchName]` as the worktree-name argument — never CWD'd into the container itself — because `worktree-manager.sh` resolves its worktree-name argument against `$(git rev-parse --show-toplevel)/.worktrees/<name>` relative to the CWD it runs in; this is the exact same reason `Create or Reuse the Container` above `cd`s to the project root, never into the container, before calling `$WORKTREE_MGR create`. The resulting target is `CONTAINER_PATHS[group_key]` (`<project_root>/.worktrees/[branchName]`).
+
+Parse `SERVE_STATUS_JSON` — single-line JSON, exactly `{"running":bool,"port":n|null,"pid":n|null}` per its documented contract (see `serve status` in `worktree-manager.sh` help text) — and record the port only when a server is actually running:
+
+```bash
+RUNNING=$(printf '%s' "$SERVE_STATUS_JSON" | jq -r '.running')
+PORT=$(printf '%s' "$SERVE_STATUS_JSON" | jq -r '.port // empty')
+if [ "$RUNNING" = "true" ] && [ -n "$PORT" ]; then
+  CONTAINER_DEV_URL[group_key]="http://127.0.0.1:$PORT"
+fi
+```
+
+**Degradation is advisory, never fatal.** `install-deps` and `serve start` both degrade gracefully by their own contract (non-Node stack with no `package.json`, a failed install, port exhaustion, a missing `dev` script, a readiness-probe timeout) — none of these abort the wave loop or this session. When a group's port never resolves, `CONTAINER_DEV_URL[group_key]` is simply never set for that group; Open Visual Follow Session below and the per-story post-merge verification block (Step 4) both treat a missing entry as "no dev server available for this group" and degrade that group's visual verification to `skipped` rather than blocking anything.
+
+`CONTAINER_DEV_URL` is a map keyed identically to `CONTAINER_PATHS`/`project_roots` — one entry per project group, never a single global URL. A visual story in a different project group is resolved and rewritten independently, using its own group's entry.
+
 ### Open Visual Follow Session
 
 See the Visual Follow Lifecycle section for context (Phase 2 — Session Open).
@@ -1402,7 +1447,22 @@ command -v agent-browser
 - **If `agent-browser` is available:** Get the verification URL from the first visual story:
 
   ```bash
-  VISUAL_URL=$(jq -r '[.userStories[] | select(.verification | type == "object" and .strategy == "visual")][0].verification.url' "$AIMI_ROOT/$TASKS_PATH")
+  FIRST_VISUAL=$(jq -c '[.userStories[] | select(.verification | type == "object" and .strategy == "visual")][0]' "$AIMI_ROOT/$TASKS_PATH")
+  VISUAL_URL=$(printf '%s' "$FIRST_VISUAL" | jq -r '.verification.url')
+  VISUAL_GROUP_KEY=$(printf '%s' "$FIRST_VISUAL" | jq -r '.project // "DEFAULT"')
+  ```
+
+  **When `CONTAINER_MODE` is true and `CONTAINER_DEV_URL[VISUAL_GROUP_KEY]` resolved** (see Container Dev Server Bootstrap above): rewrite only `VISUAL_URL`'s origin, preserving path and query, using that project group's container dev server URL. This resolves the port of the FIRST visual story's OWN project group only — a second visual story from a different project group is unaffected by this rewrite and is instead resolved independently at its own post-merge verification step (Step 4). One inline sed one-liner, repeated at every call site that needs it — never a shared function, since each Bash call is an isolated shell:
+
+  ```bash
+  BASE="${CONTAINER_DEV_URL[VISUAL_GROUP_KEY]}"
+  PATH_QUERY=$(printf '%s' "$VISUAL_URL" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+##')
+  VISUAL_URL="${BASE%/}${PATH_QUERY}"
+  ```
+
+  **Otherwise** (not container mode, or that group's port never resolved): `VISUAL_URL` remains the raw `verification.url` — unchanged from today.
+
+  ```bash
   agent-browser --headed --session visual-follow open "$VISUAL_URL"
   ```
 
@@ -1587,9 +1647,18 @@ while true:
                 - WORKTREE_PATH = wt.worktree_path
                 - PROJECT_PATH = project_path (only include if non-null)
                 - PROJECT_GUIDELINES = project_guidelines
-                - HEADED_MODE = (do NOT include for worktree stories — visual verification runs post-merge, not inside the worktree)
-                - Omit the <visual_verification> section entirely for worktree stories
-                  (the dev server cannot see worktree changes; verification runs after merge-all instead)
+                - When CONTAINER_MODE is false (EXECUTION_MODE inline or absent — unchanged):
+                    - HEADED_MODE = (do NOT include for worktree stories — visual verification runs post-merge, not inside the worktree)
+                    - Omit the <visual_verification> section entirely for worktree stories
+                      (the dev server cannot see worktree changes; verification runs after merge-all instead)
+                - When CONTAINER_MODE is true (Step 3.3's Container Dev Server Bootstrap already
+                  started this project group's dev server before the wave loop began):
+                    - HEADED_MODE = true, only when VISUAL_FOLLOW == true (omit otherwise)
+                    - Do NOT omit the <visual_verification> section
+                    - VERIFICATION_BASE_URL = CONTAINER_DEV_URL[wt.group_key], only when that
+                      group's port resolved this run (omit the item entirely when it did not —
+                      that story's own post-merge visual verification degrades to skipped
+                      further below; this never blocks mark-complete or the wave loop)
                 - STORY_ID = full_story.id  ← only the id; no description, no criteria, no prototype HTML
                 - Do NOT modify the tasks.json file — report result (success/failure + details)
             ]
@@ -1781,48 +1850,38 @@ while true:
                 # Per-story attribution depends on the --clear in step 1 — without it,
                 # console buffer is wave-cumulative and last-story-merged eats the blame.
                 if full_story.verification and full_story.verification.strategy == "visual" and full_story.verification.status == "pending":
-                    if VISUAL_FOLLOW == true:
-                        # Reuse the existing headed session (managed by execute.md)
-                        agent-browser --session visual-follow console --clear
-                        agent-browser --session visual-follow open [full_story.verification.url]
-                        agent-browser --session visual-follow screenshot /tmp/verify-[full_story.id].png
-                        CONSOLE_JSON=$(agent-browser --session visual-follow console --json)
-                        ERRORS_JSON=$(agent-browser --session visual-follow errors --json)
-                        # Read screenshot and compare against full_story.verification.expect
-                        Read /tmp/verify-[full_story.id].png
-                        Compare visual output against full_story.verification.expect
-
-                        # Run console attribution pass (see "Console Error Attribution" section below)
-                        ATTRIBUTION = attribute_console_errors(
-                            console_json=CONSOLE_JSON,
-                            errors_json=ERRORS_JSON,
-                            wave_stories=succeeded_stories
-                        )
-
-                        if visual matches expectations:
-                            $AIMI_CLI update-field [full_story.id] verification.status passed
-                            Report: "[full_story.id] visual verification passed."
-                        else:
-                            $AIMI_CLI update-field [full_story.id] verification.status failed
-                            Report: "[full_story.id] visual verification failed — [reason]. (advisory, not blocking)"
-
-                        # Report attribution lines as advisory (do NOT toggle verification.status)
-                        if ATTRIBUTION.has_errors:
-                            Report: "[full_story.id] console: \(ATTRIBUTION.summary)"
-                            # Push attribution into wave-level CONSOLE_BUFFER for the wave summary
-                            CONSOLE_BUFFER[full_story.id] = ATTRIBUTION
+                    # --- Container-mode origin rewrite / degradation gate ---
+                    # `group_key` is already in scope here from the enclosing
+                    # "for group_key, stories in succeeded_by_project" loop above —
+                    # this story's own project group.
+                    if CONTAINER_MODE and group_key not in CONTAINER_DEV_URL:
+                        # No dev server ever resolved a port for this group (see Container
+                        # Dev Server Bootstrap in Step 3.3) — degrade to skipped. mark-complete
+                        # already ran above; this never blocks it or the wave loop.
+                        $AIMI_CLI update-field [full_story.id] verification.status skipped
+                        Report: "[full_story.id] visual verification skipped — no dev server resolved for project group [group_key]."
                     else:
-                        # No visual-follow session — headless verification
-                        has_browser = command -v agent-browser
-                        if has_browser:
-                            agent-browser console --clear
-                            agent-browser open [full_story.verification.url]
-                            agent-browser screenshot /tmp/verify-[full_story.id].png
-                            CONSOLE_JSON=$(agent-browser console --json)
-                            ERRORS_JSON=$(agent-browser errors --json)
+                        if CONTAINER_MODE:
+                            # Same inline sed one-liner as Step 3.3's Open Visual Follow Session —
+                            # never a shared function, since each Bash call is an isolated shell.
+                            BASE="${CONTAINER_DEV_URL[group_key]}"
+                            PATH_QUERY=$(printf '%s' "[full_story.verification.url]" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+##')
+                            EFFECTIVE_URL="${BASE%/}${PATH_QUERY}"
+                        else:
+                            EFFECTIVE_URL = full_story.verification.url
+
+                        if VISUAL_FOLLOW == true:
+                            # Reuse the existing headed session (managed by execute.md)
+                            agent-browser --session visual-follow console --clear
+                            agent-browser --session visual-follow open [EFFECTIVE_URL]
+                            agent-browser --session visual-follow screenshot /tmp/verify-[full_story.id].png
+                            CONSOLE_JSON=$(agent-browser --session visual-follow console --json)
+                            ERRORS_JSON=$(agent-browser --session visual-follow errors --json)
+                            # Read screenshot and compare against full_story.verification.expect
                             Read /tmp/verify-[full_story.id].png
                             Compare visual output against full_story.verification.expect
 
+                            # Run console attribution pass (see "Console Error Attribution" section below)
                             ATTRIBUTION = attribute_console_errors(
                                 console_json=CONSOLE_JSON,
                                 errors_json=ERRORS_JSON,
@@ -1831,18 +1890,48 @@ while true:
 
                             if visual matches expectations:
                                 $AIMI_CLI update-field [full_story.id] verification.status passed
+                                Report: "[full_story.id] visual verification passed."
                             else:
                                 $AIMI_CLI update-field [full_story.id] verification.status failed
-                                Report: "[full_story.id] visual verification failed — [reason]. (advisory)"
+                                Report: "[full_story.id] visual verification failed — [reason]. (advisory, not blocking)"
 
+                            # Report attribution lines as advisory (do NOT toggle verification.status)
                             if ATTRIBUTION.has_errors:
                                 Report: "[full_story.id] console: \(ATTRIBUTION.summary)"
+                                # Push attribution into wave-level CONSOLE_BUFFER for the wave summary
                                 CONSOLE_BUFFER[full_story.id] = ATTRIBUTION
-
-                            agent-browser close
                         else:
-                            $AIMI_CLI update-field [full_story.id] verification.status skipped
-                            Report: "[full_story.id] visual verification skipped — agent-browser not installed."
+                            # No visual-follow session — headless verification
+                            has_browser = command -v agent-browser
+                            if has_browser:
+                                agent-browser console --clear
+                                agent-browser open [EFFECTIVE_URL]
+                                agent-browser screenshot /tmp/verify-[full_story.id].png
+                                CONSOLE_JSON=$(agent-browser console --json)
+                                ERRORS_JSON=$(agent-browser errors --json)
+                                Read /tmp/verify-[full_story.id].png
+                                Compare visual output against full_story.verification.expect
+
+                                ATTRIBUTION = attribute_console_errors(
+                                    console_json=CONSOLE_JSON,
+                                    errors_json=ERRORS_JSON,
+                                    wave_stories=succeeded_stories
+                                )
+
+                                if visual matches expectations:
+                                    $AIMI_CLI update-field [full_story.id] verification.status passed
+                                else:
+                                    $AIMI_CLI update-field [full_story.id] verification.status failed
+                                    Report: "[full_story.id] visual verification failed — [reason]. (advisory)"
+
+                                if ATTRIBUTION.has_errors:
+                                    Report: "[full_story.id] console: \(ATTRIBUTION.summary)"
+                                    CONSOLE_BUFFER[full_story.id] = ATTRIBUTION
+
+                                agent-browser close
+                            else:
+                                $AIMI_CLI update-field [full_story.id] verification.status skipped
+                                Report: "[full_story.id] visual verification skipped — agent-browser not installed."
 
                 # Non-visual stories: keep existing behavior
                 elif full_story.verification and full_story.verification.status == "pending":
