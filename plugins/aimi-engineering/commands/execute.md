@@ -382,12 +382,12 @@ Total commits: [frontend_commits + backend_commits]
 - Create PRs when ready: gh pr create
 ```
 
-Clean up worktrees after reporting:
+Clean up worktrees after reporting. Both branches are the deliverable the report above just pointed the user at for review and PR creation — not throwaway per-story worktrees — so `--keep-branch` is required here to avoid deleting the very branches the user was told to open PRs against:
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-$WORKTREE_MGR remove [FRONTEND_BRANCH]
-$WORKTREE_MGR remove [BACKEND_BRANCH]
+$WORKTREE_MGR remove [FRONTEND_BRANCH] --keep-branch
+$WORKTREE_MGR remove [BACKEND_BRANCH] --keep-branch
 ```
 
 STOP execution (aggregated report replaces normal Step 5).

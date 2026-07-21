@@ -124,6 +124,22 @@ bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh switc
 **Optional:**
 - If name not provided, lists available worktrees and prompts for selection
 
+### `remove <name>` or `rm <name>`
+
+Removes a specific worktree and, by default, deletes its branch too (non-interactive).
+
+**Options:**
+- `name` (required): The worktree/branch name to remove
+- `--keep-branch` (optional): Skip branch deletion — remove only the worktree directory, leaving the branch intact (default: off, branch is deleted)
+
+**Example:**
+```bash
+bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh remove feature-login
+bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh remove feature-login --keep-branch
+```
+
+Use `--keep-branch` when the worktree's branch is the actual deliverable — e.g. a feature or split branch a report just pointed the user at for review or `gh pr create` — and must survive worktree teardown.
+
 ### `cleanup` or `clean`
 
 Interactively cleans up inactive worktrees with confirmation.

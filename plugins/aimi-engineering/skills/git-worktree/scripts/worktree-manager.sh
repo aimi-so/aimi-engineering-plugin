@@ -295,11 +295,28 @@ cleanup_worktrees() {
 
 # Remove a specific worktree and its branch (non-interactive)
 remove_worktree() {
-  local worktree_name="$1"
+  local worktree_name=""
+  local keep_branch=false
+
+  # Parse arguments (supports both positional and --keep-branch flag)
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --keep-branch)
+        keep_branch=true
+        shift
+        ;;
+      *)
+        if [[ -z "$worktree_name" ]]; then
+          worktree_name="$1"
+        fi
+        shift
+        ;;
+    esac
+  done
 
   if [[ -z "$worktree_name" ]]; then
     echo -e "${RED}Error: Worktree name required${NC}"
-    echo "Usage: worktree-manager.sh remove <worktree-name>"
+    echo "Usage: worktree-manager.sh remove <worktree-name> [--keep-branch]"
     exit 1
   fi
 
@@ -317,8 +334,12 @@ remove_worktree() {
     git worktree prune 2>/dev/null || true
   fi
 
-  # Clean up the associated branch
-  git branch -D "$worktree_name" 2>/dev/null || true
+  # Clean up the associated branch, unless the caller asked to keep it
+  if [[ "$keep_branch" == true ]]; then
+    echo -e "${BLUE}ℹ️  Preserving branch: $worktree_name${NC}"
+  else
+    git branch -D "$worktree_name" 2>/dev/null || true
+  fi
 
   # Remove empty .worktrees directory
   if [[ -d "$WORKTREE_DIR" ]] && [[ -z "$(ls -A "$WORKTREE_DIR" 2>/dev/null)" ]]; then
@@ -499,7 +520,8 @@ main() {
       switch_worktree "$2"
       ;;
     remove|rm)
-      remove_worktree "$2"
+      shift
+      remove_worktree "$@"
       ;;
     copy-env|env)
       copy_env_to_worktree "$2"
@@ -536,7 +558,8 @@ Usage: worktree-manager.sh <command> [options]
 Commands:
   create <branch-name> [--from <branch>]  Create new worktree (copies .env files automatically)
                                           (from-branch defaults to main)
-  remove | rm <worktree-name>         Remove a specific worktree and its branch
+  remove | rm <name> [--keep-branch]  Remove a specific worktree and its branch
+                                      (--keep-branch skips branch deletion, default off)
   list | ls                           List all worktrees
   switch | go <name>                  Switch to worktree
   copy-env | env [name]               Copy .env files from main repo to worktree
@@ -564,6 +587,8 @@ Examples:
   worktree-manager.sh create feature-login
   worktree-manager.sh create feature-auth --from develop
   worktree-manager.sh switch feature-login
+  worktree-manager.sh remove feature-login              # removes worktree and branch
+  worktree-manager.sh remove feature-login --keep-branch  # removes worktree, keeps branch
   worktree-manager.sh copy-env feature-login
   worktree-manager.sh copy-env                   # copies to current worktree
   worktree-manager.sh merge feature-login        # merge into current branch
