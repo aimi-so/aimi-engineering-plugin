@@ -65,11 +65,15 @@ $WORKTREE_MGR list
 $WORKTREE_MGR remove [worktree_name]
 ```
 
-This rule is unchanged, but does not apply in phase mode — see Phase Mode: Worktree Naming and CWD below, which supersedes `project_root` with `PHASE_CONTAINER_PATH` for the duration of a claimed phase's execution — nor does it apply, in the same way, to flat container mode (`PHASE_MODE=false`, `EXECUTION_MODE=container`; see Execution Mode Detection in Step 1), which supersedes `project_root` with `FEATURE_CONTAINER_PATH`/`CONTAINER_PATHS` instead. The wave-loop/cleanup mechanics that actually thread those paths through Step 4 are outline story 06's responsibility, not this section's.
+This rule is unchanged, but does not apply in phase mode — see Phase Mode: Worktree Naming and CWD below, which supersedes `project_root` with `PHASE_CONTAINER_PATH` for the duration of a claimed phase's execution — nor does it apply, in the same way, to container mode (`PHASE_MODE=false`, `CONTAINER_MODE=true`; see Execution Mode Detection in Step 1), which supersedes `project_root` with `CONTAINER_PATHS[group_key]` for the duration of that project group's container-mode execution. See Phase Mode: Worktree Naming and CWD below for the full three-way substitution table.
+
+### Container Paths Per Project Group (Container Mode)
+
+When `CONTAINER_MODE=true` (see Execution Mode Detection in Step 1), each project group gets its own feature container instead of one shared across the whole run: `CONTAINER_PATHS[group_key] = project_roots[group_key] + "/.worktrees/" + branchName` for every group with at least one story scheduled this run — keyed identically to `project_roots[group_key]` above, never a single global `CONTAINER_PATH` scalar. Step 2's Flat Container Mode (single-repo, `group_key = "DEFAULT"`) and Per-Project Branch Setup (multi-repo, one entry per project group) are what populate this map; Step 4's wave loop and both cleanup passes consume it — see Phase Mode: Worktree Naming and CWD below for the exact substitution.
 
 ## Phase Mode: Worktree Naming and CWD
 
-This section is the single source of truth for how `PHASE_MODE=true` (see Step 1's Phase Mode Detection and Step 1.7's Phase Claim) changes worktree naming and working-directory handling in Step 4's wave loop and its cleanup passes. All call sites below reference it by name. It only applies once a phase has been claimed; when `PHASE_MODE=false` none of this applies and every rule below reduces to the existing flat-mode behavior unchanged, for `EXECUTION_MODE` inline or absent. Flat container mode (`PHASE_MODE=false`, `EXECUTION_MODE=container`; see Execution Mode Detection in Step 1) is an analogous parallel substitution — `FEATURE_CONTAINER_PATH`/`CONTAINER_PATHS` in place of `PHASE_CONTAINER_PATH` — whose own wave-loop substitution values are defined by outline story 06, not by the rules below.
+This section is the single source of truth for how `PHASE_MODE=true` (see Step 1's Phase Mode Detection and Step 1.7's Phase Claim) and `CONTAINER_MODE=true` (flat container mode; see Execution Mode Detection in Step 1) each change worktree naming and working-directory handling in Step 4's wave loop and its cleanup passes. All call sites below reference it by name. `PHASE_MODE`'s rules only apply once a phase has been claimed; `CONTAINER_MODE`'s rules apply for the whole run once Step 2 has created or reused the feature container(s) for every project group. When both are false (`EXECUTION_MODE` inline or absent — the byte-for-byte-unchanged default), every rule below reduces to exactly today's flat-mode behavior: no new variable is read and no new conditional branch is taken beyond evaluating a single `CONTAINER_MODE` check that is immediately false.
 
 ### Why Story Worktrees Are Phase-Qualified
 
@@ -82,17 +86,17 @@ Every `$WORKTREE_MGR create`/`merge-all`/`remove`/`list` call for a phase's stor
 1. **`merge-all` checks out its target branch against whatever repo its CWD belongs to.** `worktree-manager.sh`'s `GIT_ROOT` is computed per-invocation from CWD (`git rev-parse --show-toplevel`), and `merge-all <story-worktree-names> --into <target-branch>` issues a bare `git checkout <target-branch>` against that root. Run from `AIMI_ROOT`, that would check the phase branch out onto the main working tree — forbidden by the Main Working Tree Untouched Invariant below. Run from `PHASE_CONTAINER_PATH`, `GIT_ROOT` resolves to the phase worktree's own root instead, and story worktrees nest at `PHASE_CONTAINER_PATH/.worktrees/<story-worktree-name>` — a pattern `worktree-manager.sh` already supports unmodified, since a linked worktree's own `git rev-parse --show-toplevel` returns its own path, not the main repo's.
 2. **Every Bash call is an isolated shell** (Step 0). `PHASE_CONTAINER_PATH` does not persist across calls on its own — each call that needs it either `cd`s to it explicitly at the top of the call, or passes it via `git -C`/`$WORKTREE_MGR` arguments, exactly like `$AIMI_CLI`/`$WORKTREE_MGR` themselves are re-resolved per call.
 
-Concretely, in Step 4's wave loop, wherever the pseudocode below reads `project_root`, `branchName`, or `[branchName]-US-*` for a phase-mode session, substitute:
+Concretely, in Step 4's wave loop, wherever the pseudocode below reads `project_root`, `branchName`, or `[branchName]-US-*`, substitute per the session's mode:
 
-| Flat inline mode (`PHASE_MODE=false`, `EXECUTION_MODE` inline/absent, unchanged) | Phase mode (`PHASE_MODE=true`) |
-|---|---|
-| `worktree_name = "[branchName]-[story.id]"` | `worktree_name = "[PHASE_BRANCH]-[story.id]"` |
-| `cd [project_root]` before create/merge-all/remove | `cd [PHASE_CONTAINER_PATH]` before create/merge-all/remove |
-| `git -C [project_root] rev-parse [branchName]` (base_sha) | `git -C [PHASE_CONTAINER_PATH] rev-parse [PHASE_BRANCH]` |
-| `$WORKTREE_MGR merge-all [...] --into [branchName]` | `$WORKTREE_MGR merge-all [...] --into [PHASE_BRANCH]` |
-| Cleanup scan matches `"[branchName]-US-*"` | Cleanup scan matches `"[PHASE_BRANCH]-US-*"` |
+| | Inline flat mode (`PHASE_MODE=false`, `CONTAINER_MODE=false`, unchanged) | Container flat mode (`PHASE_MODE=false`, `CONTAINER_MODE=true`) | Phase mode (`PHASE_MODE=true`) |
+|---|---|---|---|
+| `worktree_name` | `"[branchName]-[story.id]"` | `"[branchName]-[story.id]"` (unchanged — container mode never mints a new branch name) | `"[PHASE_BRANCH]-[story.id]"` |
+| `cd` target before create/merge-all/remove | `[project_root]` | `[CONTAINER_PATHS[group_key]]` | `[PHASE_CONTAINER_PATH]` |
+| base_sha capture | `git -C [project_root] rev-parse [branchName]` | `git -C [CONTAINER_PATHS[group_key]] rev-parse [branchName]` | `git -C [PHASE_CONTAINER_PATH] rev-parse [PHASE_BRANCH]` |
+| `merge-all --into` target | `[branchName]` | `[branchName]` (unchanged) | `[PHASE_BRANCH]` |
+| Cleanup scan pattern | `"[branchName]-US-*"` | `"[branchName]-US-*"` (unchanged — same `worktree_name`) | `"[PHASE_BRANCH]-US-*"` |
 
-Flat container mode (`PHASE_MODE=false`, `EXECUTION_MODE=container`) is a third column this table does not carry — its own `FEATURE_CONTAINER_PATH`/`CONTAINER_PATHS` substitution values (in place of `project_root`) are added by outline story 06, not duplicated here.
+`CONTAINER_PATHS[group_key]` is the same map Step 2 populates per project group (one container per group, keyed identically to `project_roots[group_key]` above) — never a single global container path. See Container Paths Per Project Group above for how `group_key` is derived and where each entry is created.
 
 ### Main Working Tree Untouched Invariant
 
@@ -1173,7 +1177,10 @@ $WORKTREE_MGR create [branchName] --from "$CONTAINER_BASE"
 
 ```bash
 FEATURE_CONTAINER_PATH="$AIMI_ROOT/.worktrees/[branchName]"
+CONTAINER_PATHS["DEFAULT"]="$FEATURE_CONTAINER_PATH"
 ```
+
+`CONTAINER_PATHS["DEFAULT"]` aliases the single-repo container into the same map Per-Project Branch Setup populates below, under the `"DEFAULT"` key Multi-Repo Handling's grouping pattern already uses for stories without a `project` field — so Step 4's wave loop can look up `CONTAINER_PATHS[group_key]` uniformly regardless of single-repo or multi-repo layout.
 
 Because this subsection's own `$WORKTREE_MGR create` call is the branch-creating operation for this run, `### Main Repo Branch Setup` below is skipped whenever this subsection applies — see its skip condition.
 
@@ -1258,8 +1265,11 @@ Run the following sub-steps when any story has a non-null `project` field, or wh
      CONTAINER_BASE="$PROJECT_DEFAULT"
    fi
    $WORKTREE_MGR create [branchName] --from "$CONTAINER_BASE"
-   CONTAINER_PATHS[resolved_project_path]="[resolved_project_path]/.worktrees/[branchName]"
+   CONTAINER_PATHS[project_path]="[resolved_project_path]/.worktrees/[branchName]"
    ```
+
+   `[project_path]` here is the group_key from Multi-Repo Handling's grouping pattern (the raw `story.project` value being iterated) — the map is keyed by `project_path`/`group_key`, not by the resolved absolute path, exactly like `PROJECT_GUIDELINES_MAP[project_path]` above and the Report line below.
+
    Report:
    ```
    Container for [branchName] ready in project: [project_path] (CONTAINER_PATHS[project_path])
@@ -1502,11 +1512,15 @@ while true:
     # CAPTURE BASE SHA PER PROJECT GROUP (for commit verification)
     # ========================================
     # PHASE_MODE: read from PHASE_CONTAINER_PATH/PHASE_BRANCH instead of
-    # project_root/branchName — see Phase Mode: Worktree Naming and CWD.
+    # project_root/branchName. CONTAINER_MODE (PHASE_MODE=false): read from
+    # CONTAINER_PATHS[group_key], but still branchName — container mode never
+    # mints a new branch name — see Phase Mode: Worktree Naming and CWD.
     base_sha = {}  # key: group_key, value: HEAD SHA before worktree creation
     for group_key in project_groups:
         if PHASE_MODE:
             base_sha[group_key] = git -C [PHASE_CONTAINER_PATH] rev-parse [PHASE_BRANCH]
+        elif CONTAINER_MODE:
+            base_sha[group_key] = git -C [CONTAINER_PATHS[group_key]] rev-parse [branchName]
         else:
             project_root = project_roots[group_key]
             base_sha[group_key] = git -C [project_root] rev-parse [branchName]
@@ -1515,18 +1529,28 @@ while true:
     # CREATE WORKTREES PER PROJECT GROUP
     # ========================================
     # PHASE_MODE: every story worktree is created inside the phase container,
-    # never at project_root — see Phase Mode: Worktree Naming and CWD.
+    # never at project_root. CONTAINER_MODE (PHASE_MODE=false): every story
+    # worktree is created inside CONTAINER_PATHS[group_key] instead, but
+    # worktree_base stays branchName in both inline and container mode — only
+    # phase mode substitutes PHASE_BRANCH — see Phase Mode: Worktree Naming
+    # and CWD.
     all_worktrees = {}  # key: full_story.id, value: {worktree_name, worktree_path, group_key}
 
     for group_key, stories in project_groups:
         project_root = project_roots[group_key]
-        worktree_cwd = PHASE_CONTAINER_PATH if PHASE_MODE else project_root
+        if PHASE_MODE:
+            worktree_cwd = PHASE_CONTAINER_PATH
+        elif CONTAINER_MODE:
+            worktree_cwd = CONTAINER_PATHS[group_key]
+        else:
+            worktree_cwd = project_root
         worktree_base = PHASE_BRANCH if PHASE_MODE else branchName
 
         for full_story in stories:
             worktree_name = worktree_base + "-" + full_story.id
 
-            # cd to the phase container (phase mode) or the project's git root (flat mode)
+            # cd to the phase container (phase mode), the feature container
+            # (container mode), or the project's git root (inline mode)
             cd [worktree_cwd]
             $WORKTREE_MGR create [worktree_name] --from [worktree_base]
 
@@ -1676,15 +1700,23 @@ while true:
 
         for group_key, stories in succeeded_by_project:
             project_root = project_roots[group_key]
-            merge_cwd = PHASE_CONTAINER_PATH if PHASE_MODE else project_root
+            if PHASE_MODE:
+                merge_cwd = PHASE_CONTAINER_PATH
+            elif CONTAINER_MODE:
+                merge_cwd = CONTAINER_PATHS[group_key]
+            else:
+                merge_cwd = project_root
             merge_target = PHASE_BRANCH if PHASE_MODE else branchName
             succeeded_worktree_names = [all_worktrees[s.id].worktree_name for s in stories]
 
-            # cd to the phase container (phase mode) or the project's git root (flat mode) before merging.
+            # cd to the phase container (phase mode), the feature container (container
+            # mode), or the project's git root (inline mode) before merging.
             # PHASE_MODE requires this: merge-all issues a bare `git checkout <target-branch>` against
             # whatever repo its CWD belongs to -- running it from AIMI_ROOT would check the phase branch
             # out onto the main working tree, violating the Main Working Tree Untouched Invariant
-            # (see Phase Mode: Worktree Naming and CWD).
+            # (see Phase Mode: Worktree Naming and CWD). CONTAINER_MODE requires the same for the
+            # feature container; merge_target stays branchName in container mode — it never
+            # introduces a new merge target the way PHASE_BRANCH does.
             cd [merge_cwd]
             merge_result = $WORKTREE_MGR merge-all [succeeded_worktree_names...] --into [merge_target]
 
@@ -1698,7 +1730,12 @@ while true:
 
                 # Cleanup ALL worktrees from this wave (across all project groups) before stopping
                 for full_story_id, wt in all_worktrees:
-                    cd (PHASE_CONTAINER_PATH if PHASE_MODE else project_roots[wt.group_key])
+                    if PHASE_MODE:
+                        cd PHASE_CONTAINER_PATH
+                    elif CONTAINER_MODE:
+                        cd CONTAINER_PATHS[wt.group_key]
+                    else:
+                        cd project_roots[wt.group_key]
                     $WORKTREE_MGR remove [wt.worktree_name]
 
                 # PHASE_MODE with PHASE_ID set (this session itself ran Step 1.7 --
@@ -1861,9 +1898,17 @@ Output your full structured review under the heading '## Design Implementation R
                         Report: "  Dependents proceed immediately (non-blocking)."
 
     # Remove all worktrees from this wave (per project group; PHASE_MODE uses
-    # PHASE_CONTAINER_PATH instead — see Phase Mode: Worktree Naming and CWD)
+    # PHASE_CONTAINER_PATH and CONTAINER_MODE uses CONTAINER_PATHS[wt.group_key]
+    # instead — see Phase Mode: Worktree Naming and CWD). Branch deletion here is
+    # unconditional in every mode (no --keep-branch) — container mode's own
+    # teardown (outline:08) is the only removal call that preserves branchName.
     for full_story_id, wt in all_worktrees:
-        cd (PHASE_CONTAINER_PATH if PHASE_MODE else project_roots[wt.group_key])
+        if PHASE_MODE:
+            cd PHASE_CONTAINER_PATH
+        elif CONTAINER_MODE:
+            cd CONTAINER_PATHS[wt.group_key]
+        else:
+            cd project_roots[wt.group_key]
         $WORKTREE_MGR remove [wt.worktree_name]
 
     # Count gate statuses for wave summary
@@ -1892,7 +1937,29 @@ $WORKTREE_MGR list
 $WORKTREE_MGR remove [worktree_name]
 ```
 
-**Flat mode (`PHASE_MODE=false`):** unchanged.
+**Flat/container mode (`PHASE_MODE=false`, `CONTAINER_MODE=true`):** cleanup runs per project group with CWD = `CONTAINER_PATHS[group_key]` — the single-CWD-per-container form phase mode already uses above, not the flat per-project-root loop below — and matches worktrees named `"[branchName]-US-*"` (worktree name is unchanged from inline mode; only the CWD moves).
+
+```
+for each unique group_key with at least one story scheduled this run:
+    cd [CONTAINER_PATHS[group_key]]
+    $WORKTREE_MGR list
+    # For each worktree matching "[branchName]-US-*":
+    $WORKTREE_MGR remove [worktree_name]
+```
+
+**One-time migration safeguard (flat/container mode only):** additionally run one sweep pass per project group with CWD = `[project_root]` itself — the pre-upgrade, un-containerized location — scanning the same `"[branchName]-US-*"` pattern:
+
+```
+for each unique project_root (including CWD for the DEFAULT group):
+    cd [project_root]
+    $WORKTREE_MGR list
+    # For each worktree matching "[branchName]-US-*":
+    $WORKTREE_MGR remove [worktree_name]
+```
+
+Once this step's container-mode branch scans only `CONTAINER_PATHS[group_key]`, a story worktree stranded directly under `project_root/.worktrees/` by an execution from before container mode shipped would otherwise never be swept by either cleanup pass again. This extra pass closes that gap; it is a no-op once no such pre-upgrade worktrees remain.
+
+**Flat/inline mode (`PHASE_MODE=false`, `CONTAINER_MODE=false`):** unchanged.
 
 ```
 # Remove any remaining worktrees (safety cleanup)
