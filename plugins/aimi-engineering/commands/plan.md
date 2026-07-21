@@ -2000,6 +2000,7 @@ Read the tasks.json file written by story-merge and patch the `metadata` object 
 - **designTokens**: When `designSpecContent` is non-null and `DesignSpec § 1` contains a token map, parse it and emit as `metadata.designTokens` — a flat object whose top-level keys are the token categories enumerated in `DesignSpec § 1` (e.g., `color`, `typography`, `spacing`, `radii`, `shadow`, `transition`). Values are written verbatim from the spec without normalization. Omit the key entirely when `designSpecContent` is null or `§ 1` contains no token map.
 - **decisions**: Emit one entry per item in the fully accumulated `oqDecisions[]` working memory — this includes every OQ resolved or deferred by Phase 0.5, Phase 1.8, Phase 2.5, outline-gate edits recorded in Phase 3c, AND phase-cut Edit rounds recorded by the Phase 0 Scope-Context Classification (Inline Fallback) gate. Each entry carries `anchor`, `source`, `text`, and `resolution` from the corresponding `oqDecisions[]` record. Omit the `decisions` key entirely when `oqDecisions[]` is empty.
 - **maxConcurrency**: Default `20`. Set to `1` for strictly sequential execution.
+- **execution**: Always write `"container"` into every newly generated tasks.json file — flat or split, phase or non-phase alike. `/aimi:plan` never generates inline-mode output going forward. See `commands/references/execution-mode.md` for the read contract this discriminator feeds.
 - **frontendOnly** (when `implementationScope == "frontend-only"`): `true`
 - **backendSpec** (when `implementationScope == "frontend-only"`): derive per the rules below
 
@@ -2077,6 +2078,7 @@ Use the Write tool to patch the output tasks.json with these fields merged into 
       }
     ],
     "maxConcurrency": "number (optional, default 20)",
+    "execution": "container|inline (optional, default 'inline' when absent; /aimi:plan always writes 'container' into freshly generated files — see commands/references/execution-mode.md for the read contract)",
     "frontendOnly": "boolean (optional, true when frontend-only scope)",
     "smellWarnings": "array (optional, written by story-merge Phase 4.2; each entry {type, storyId, symbols, message}; absent when no orphan-symbol smells detected)",
     "backendSpec": {
@@ -2231,6 +2233,7 @@ Specific obligations:
 - [ ] Every description follows "As a [specific role], I want [feature] so that [benefit]" format — role names the actor, never just "user"
 - [ ] Field lengths: title ≤ 200, description ≤ 500, criterion ≤ 5000
 - [ ] `schemaVersion` is `"3.3"`
+- [ ] `metadata.execution` is exactly `"container"` on every freshly generated file; when present on any file it is exactly `"container"` or `"inline"`
 - [ ] `researchDepth` (if set) is one of: `skip`, `quick`, `standard`, `deep`
 - [ ] `prototypePaths` (if set) contains only paths that exist on disk and were successfully loaded into `prototypeBlocks`
 - [ ] `metadata.designBundle` (if set) — all paths (`root`, `readme`, `chats[]`, `businessSpec`, `designSpec`) that are non-null exist on disk under `AIMI_ROOT`

@@ -3622,6 +3622,17 @@ cmd_validate_tasks() {
     fi
   fi
 
+  # metadata.execution validation: optional discriminator, must be exactly
+  # "container" or "inline" when present. Absent is valid (defaults to inline
+  # for backward compatibility with every tasks.json written before this field
+  # existed) — see commands/references/execution-mode.md for the read contract.
+  local execution_mode
+  execution_mode=$(jq -r '.metadata.execution // empty' "$tasks_file" 2>/dev/null)
+
+  if [ -n "$execution_mode" ] && [ "$execution_mode" != "container" ] && [ "$execution_mode" != "inline" ]; then
+    errors+=("${tasks_file}: metadata.execution has invalid value \"${execution_mode}\" (expected \"container\" or \"inline\")")
+  fi
+
   # Emit result JSON
   if [ ${#errors[@]} -eq 0 ]; then
     echo '{"valid": true, "errors": []}'

@@ -4338,6 +4338,204 @@ VALIDATETASKSV32EOF
   echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
 }
 
+test_validate_tasks_execution_absent_valid() {
+  echo ""
+  echo "=== Testing validate-tasks: metadata.execution absent (legacy fixture) is valid and defaults to inline ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-86-validate-tasks-execution-absent.json"
+  cat > "$tasks_fixture" << 'VALIDATETASKSEXECABSENTEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Legacy execution test",
+    "type": "feat",
+    "branchName": "feat/legacy-execution-test",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "A legacy story",
+      "description": "No execution field yet",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 0
+    }
+  ]
+}
+VALIDATETASKSEXECABSENTEOF
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": true' "$output" "validate-tasks: execution absent returns valid=true"
+  assert_contains '"errors": []' "$output" "validate-tasks: execution absent returns empty errors array"
+  assert_exit_code "0" "$exit_code" "validate-tasks: execution absent exits 0"
+
+  rm -f "$tasks_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_tasks_execution_container_valid() {
+  echo ""
+  echo "=== Testing validate-tasks: metadata.execution=\"container\" (freshly-generated fixture) is valid ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-85-validate-tasks-execution-container.json"
+  cat > "$tasks_fixture" << 'VALIDATETASKSEXECCONTAINEREOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Container execution test",
+    "type": "feat",
+    "branchName": "feat/container-execution-test",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "execution": "container"
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "A container-mode story",
+      "description": "execution is container",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 0
+    }
+  ]
+}
+VALIDATETASKSEXECCONTAINEREOF
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": true' "$output" "validate-tasks: execution=container returns valid=true"
+  assert_contains '"errors": []' "$output" "validate-tasks: execution=container returns empty errors array"
+  assert_exit_code "0" "$exit_code" "validate-tasks: execution=container exits 0"
+
+  rm -f "$tasks_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_tasks_execution_inline_valid() {
+  echo ""
+  echo "=== Testing validate-tasks: metadata.execution=\"inline\" (explicit) is valid ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-84-validate-tasks-execution-inline.json"
+  cat > "$tasks_fixture" << 'VALIDATETASKSEXECINLINEEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Inline execution test",
+    "type": "feat",
+    "branchName": "feat/inline-execution-test",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "execution": "inline"
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "An inline-mode story",
+      "description": "execution is inline",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 0
+    }
+  ]
+}
+VALIDATETASKSEXECINLINEEOF
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": true' "$output" "validate-tasks: execution=inline returns valid=true"
+  assert_contains '"errors": []' "$output" "validate-tasks: execution=inline returns empty errors array"
+  assert_exit_code "0" "$exit_code" "validate-tasks: execution=inline exits 0"
+
+  rm -f "$tasks_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_tasks_execution_invalid_value_rejected() {
+  echo ""
+  echo "=== Testing validate-tasks: metadata.execution with an invalid value is rejected ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-83-validate-tasks-execution-invalid.json"
+  cat > "$tasks_fixture" << 'VALIDATETASKSEXECINVALIDEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Invalid execution test",
+    "type": "feat",
+    "branchName": "feat/invalid-execution-test",
+    "createdAt": "2026-05-11",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "execution": "worktree"
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "A bad-execution story",
+      "description": "execution is an invalid value",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 0
+    }
+  ]
+}
+VALIDATETASKSEXECINVALIDEOF
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": false' "$output" "validate-tasks: execution=worktree returns valid=false"
+  assert_contains 'metadata.execution has invalid value' "$output" \
+    "validate-tasks: execution=worktree names the offending field"
+  assert_contains 'worktree' "$output" "validate-tasks: execution=worktree names the offending value"
+  assert_contains "$tasks_fixture" "$output" "validate-tasks: execution=worktree names the file path"
+  assert_exit_code "1" "$exit_code" "validate-tasks: execution=worktree exits non-zero"
+
+  rm -f "$tasks_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
 test_validate_tasks_designspec_passing_case() {
   echo ""
   echo "=== Testing validate-tasks: DesignSpec passing case (literal found in cited subsection) ==="
@@ -11190,6 +11388,10 @@ main() {
   test_validate_waves_mismatch
   test_validate_tasks_skeleton_exits_zero
   test_validate_tasks_skips_pre_v33
+  test_validate_tasks_execution_absent_valid
+  test_validate_tasks_execution_container_valid
+  test_validate_tasks_execution_inline_valid
+  test_validate_tasks_execution_invalid_value_rejected
   test_validate_tasks_designspec_passing_case
   test_validate_tasks_designspec_paraphrase_fails
   test_validate_tasks_designspec_unicode_normalize
