@@ -25,20 +25,73 @@ fi
 
 Use `$DEFAULT_BRANCH` in all subsequent git diff commands instead of a hardcoded branch name.
 
+### Detect Current Branch
+
+```bash
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+```
+
 ### Detect Target Type
 
 1. **PR number** (numeric): Fetch PR with `gh pr view $ARGUMENTS --json title,body,files,headRefName,baseRefName`
 2. **GitHub URL**: Extract PR number, then fetch as above
 3. **Branch name**: Compare against default branch with `git diff $DEFAULT_BRANCH...$ARGUMENTS --name-only`
-4. **Empty** (no arguments): Review current branch against default branch
+4. **Empty** (no arguments): Resolve `$REVIEW_BRANCH` per **Resolve Review Branch (Empty Argument)** below, then compare with `git diff $DEFAULT_BRANCH...$REVIEW_BRANCH --name-only`
+
+### Resolve Review Branch (Empty Argument)
+
+Only runs when `$ARGUMENTS` is empty (Detect Target Type item 4). It determines `$REVIEW_BRANCH` without assuming `$CURRENT_BRANCH` is the feature branch — HEAD parked on `$DEFAULT_BRANCH` is the normal end state after a container-mode or phase-mode `/aimi:execute` run, since the main working tree is never checked out onto the feature branch in either mode.
+
+**Case A — HEAD is already on a real feature branch.** When `$CURRENT_BRANCH` is non-empty, is not the literal string `HEAD` (detached), and differs from `$DEFAULT_BRANCH`, reuse it unchanged — no behavior change from before:
+
+```bash
+REVIEW_BRANCH="$CURRENT_BRANCH"
+```
+
+**Case B — HEAD is on `$DEFAULT_BRANCH` (or detached).** Resolve the target from the active tasks file's `metadata.branchName` instead of diffing against `HEAD`:
+
+1. Resolve `$AIMI_CLI` by following the **Resolve CLI Path** and **Version Check** sections of `commands/references/cli-path-resolution.md`.
+2. Discover the active tasks file with the **read-only** lookup only — never `$AIMI_CLI init-session`, which writes `.aimi/state/current-tasks` and `.aimi/state/current-branch` as a side effect and could repoint a concurrently running `/aimi:execute` session's tracked tasks file:
+
+   ```bash
+   TASKS_FILE=$($AIMI_CLI find-tasks 2>/dev/null)
+   ```
+
+3. When `$TASKS_FILE` is non-empty, read its branch name:
+
+   ```bash
+   CANDIDATE_BRANCH=$(jq -r '.metadata.branchName // empty' "$TASKS_FILE" 2>/dev/null)
+   ```
+
+4. Validate `$CANDIDATE_BRANCH` against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` before it is ever interpolated into a git command:
+
+   ```bash
+   if [ -n "$CANDIDATE_BRANCH" ] && echo "$CANDIDATE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'; then
+     REVIEW_BRANCH="$CANDIDATE_BRANCH"
+   fi
+   ```
+
+5. **Fallback.** When `$TASKS_FILE` is empty (no tasks file discoverable), `$CANDIDATE_BRANCH` is empty, or validation fails, do not proceed with an unvalidated value — fall back to the checked-out branch and warn:
+
+   ```bash
+   REVIEW_BRANCH="$CURRENT_BRANCH"
+   ```
+
+   ```
+   Warning: No active tasks file found (or its branchName is missing/invalid) and HEAD is on $DEFAULT_BRANCH — nothing to review.
+   ```
+
+Track whether `$REVIEW_BRANCH` was resolved from the tasks file (i.e. `$REVIEW_BRANCH` != `$CURRENT_BRANCH`) — Step 5's report surfaces this so the user is never confused about what was diffed.
 
 ### Setup
 
 ```bash
 # Get changed files
 gh pr view [number] --json files --jq '.files[].path'
-# OR for branch comparison:
-git diff $DEFAULT_BRANCH...HEAD --name-only
+# OR for branch comparison (REVIEW_BRANCH is $ARGUMENTS for the explicit
+# branch-name path in item 3 above, or the value resolved by "Resolve Review
+# Branch (Empty Argument)" when no argument was given):
+git diff $DEFAULT_BRANCH...$REVIEW_BRANCH --name-only
 ```
 
 Read the changed files to understand the PR content. Collect the diff for agent context.
@@ -207,7 +260,7 @@ For each finding: Small (< 30 min), Medium (30 min - 2 hours), Large (> 2 hours)
 ## Review Complete
 
 **Review Target:** [PR title or branch name]
-**Branch:** [branch-name]
+**Branch:** [$REVIEW_BRANCH — the branch actually diffed]<if the empty-argument fallback resolved $REVIEW_BRANCH from the active tasks file and it differs from $CURRENT_BRANCH, append: " (resolved from the active tasks file; the working tree is on $CURRENT_BRANCH)">
 
 ### Findings Summary
 
@@ -262,3 +315,4 @@ For each finding: Small (< 30 min), Medium (30 min - 2 hours), Large (> 2 hours)
 | Agent fails | Proceed with available results, note in report |
 | No changed files | Report "No changes to review" |
 | gh CLI not installed | Fall back to git diff for branch comparison |
+| Empty arguments, HEAD on `$DEFAULT_BRANCH` (or detached), no active tasks file discoverable (or its `branchName` is missing/invalid) | Fall back to `$CURRENT_BRANCH`; warn "nothing to review" (see Resolve Review Branch (Empty Argument)) |
