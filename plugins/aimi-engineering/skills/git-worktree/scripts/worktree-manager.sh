@@ -19,7 +19,8 @@ _HAS_FLOCK=$(command -v flock &>/dev/null && echo 1 || echo 0)
 # serve start|stop|status configuration
 DEV_SERVER_BASE_PORT=4100        # first port probed when picking a free loopback port
 DEV_SERVER_PORT_SCAN_LIMIT=500   # give up after this many ports scanned upward from base
-DEV_SERVER_READY_TIMEOUT=30      # seconds to wait for the readiness probe per launch attempt
+DEV_SERVER_READY_TIMEOUT="${DEV_SERVER_READY_TIMEOUT:-90}"      # seconds to wait for the readiness probe per launch attempt (env-overridable; a cold-compiling bundler needs headroom beyond the old 30s default)
+DEV_SERVER_PROBE_MAX_TIME="${DEV_SERVER_PROBE_MAX_TIME:-5}"     # max seconds per individual HTTP probe inside _wait_ready (env-overridable)
 DEV_SERVER_STOP_GRACE=5          # seconds to wait after SIGTERM before escalating to SIGKILL
 
 # Validate branch name to prevent command injection
@@ -313,6 +314,10 @@ cleanup_worktrees() {
   echo -e "${BLUE}Cleaning up $found worktree(s)...${NC}"
   for worktree_path in "${to_remove[@]}"; do
     local worktree_name=$(basename "$worktree_path")
+    # Best-effort stop before removal — see remove_worktree's own comment for
+    # why: an unconditional cleanup that skips this would orphan any dev
+    # server still running against one of these worktrees.
+    serve_stop "$worktree_name" || true
     git worktree remove "$worktree_path" --force 2>/dev/null || true
     git branch -D "$worktree_name" 2>/dev/null || true
     echo -e "${GREEN}✓ Removed: $worktree_name${NC}"
@@ -355,6 +360,14 @@ remove_worktree() {
 
   # Validate worktree name
   validate_branch_name "$worktree_name"
+
+  # Stop any dev server registered for this worktree before removing its
+  # backing directory — best-effort: serve_stop always returns 0 on every
+  # path, so this never fails or blocks removal even when it finds nothing
+  # to stop. Without this, a live server outlives the container it was
+  # serving from, still holding its port with dev-server.json reporting
+  # running:true forever.
+  serve_stop "$worktree_name" || true
 
   local worktree_path="$WORKTREE_DIR/$worktree_name"
 
@@ -420,22 +433,42 @@ install_deps() {
   # Detect package manager by lockfile, fixed priority order: bun > pnpm > yarn > npm.
   # NOTE: if `serve start` grows its own lockfile-based detector, factor both into one
   # shared helper so the detection order is defined once instead of duplicated.
-  local pm_name pm_cmd
+  local pm_name pm_cmd lockfile_path=""
   if [[ -f "$worktree_path/bun.lockb" ]]; then
     pm_name="bun"
     pm_cmd="bun install"
+    lockfile_path="$worktree_path/bun.lockb"
   elif [[ -f "$worktree_path/pnpm-lock.yaml" ]]; then
     pm_name="pnpm"
     pm_cmd="pnpm install"
+    lockfile_path="$worktree_path/pnpm-lock.yaml"
   elif [[ -f "$worktree_path/yarn.lock" ]]; then
     pm_name="yarn"
     pm_cmd="yarn install"
+    lockfile_path="$worktree_path/yarn.lock"
   elif [[ -f "$worktree_path/package-lock.json" ]]; then
     pm_name="npm"
     pm_cmd="npm ci"
+    lockfile_path="$worktree_path/package-lock.json"
   else
     pm_name="npm"
     pm_cmd="npm install"
+  fi
+
+  # Idempotency short-circuit: when a recognized lockfile exists and node_modules/
+  # is already at least as fresh as it, skip the install entirely — a resumed
+  # container that already had correct dependencies never pays a cold reinstall,
+  # and npm ci never deletes a node_modules/ that was already correct. Only
+  # applies when a lockfile was detected above; the no-lockfile (npm install)
+  # branch and a missing node_modules/ always fall through to a real install.
+  if [[ -n "$lockfile_path" ]] && [[ -d "$worktree_path/node_modules" ]]; then
+    local lockfile_mtime node_modules_mtime
+    lockfile_mtime=$(stat -c '%Y' "$lockfile_path" 2>/dev/null || stat -f '%m' "$lockfile_path" 2>/dev/null)
+    node_modules_mtime=$(stat -c '%Y' "$worktree_path/node_modules" 2>/dev/null || stat -f '%m' "$worktree_path/node_modules" 2>/dev/null)
+    if [[ -n "$lockfile_mtime" ]] && [[ -n "$node_modules_mtime" ]] && [[ "$node_modules_mtime" -ge "$lockfile_mtime" ]]; then
+      echo -e "${GREEN}✓ Dependencies already up to date in worktree '$worktree_name' (node_modules/ is not older than the lockfile), skipping install${NC}"
+      return 0
+    fi
   fi
 
   echo -e "${BLUE}Installing dependencies in worktree '$worktree_name' with $pm_name...${NC}"
@@ -638,16 +671,38 @@ _lock() {
     flock -x 200
   else
     local lockdir="$1.d"
+    local pidfile="$lockdir/pid"
     local attempts=0
     while ! mkdir "$lockdir" 2>/dev/null; do
       sleep 0.05
       attempts=$((attempts + 1))
       if [[ "$attempts" -ge 200 ]]; then
-        rmdir "$lockdir" 2>/dev/null || rm -rf "$lockdir"
+        # Only force-break a lock whose holder is comprovably dead (or whose
+        # pid file is missing/unreadable) — never a live holder just because
+        # the spin threshold passed. Always reset attempts so the next pass
+        # re-evaluates instead of spinning here forever.
+        local holder_pid
+        holder_pid=$(cat "$pidfile" 2>/dev/null)
+        if [[ -z "$holder_pid" ]] || ! _is_pid_alive "$holder_pid"; then
+          rmdir "$lockdir" 2>/dev/null || rm -rf "$lockdir"
+        fi
         attempts=0
       fi
     done
-    trap "rmdir '$lockdir' 2>/dev/null" EXIT
+    printf '%s' "$$" > "$pidfile" 2>/dev/null || true
+
+    # Chain onto any EXIT trap the caller already installed instead of
+    # silently overwriting it.
+    local existing_trap
+    existing_trap=$(trap -p EXIT)
+    existing_trap="${existing_trap#trap -- \'}"
+    existing_trap="${existing_trap%\' EXIT}"
+    # rm -rf, not rmdir: $lockdir now holds the pid file written above, so a
+    # plain rmdir would fail on "Directory not empty" — and under `set -e`,
+    # a trap whose own command exits non-zero propagates that failure to the
+    # caller's shell instead of quietly cleaning up. The explicit `|| true`
+    # guards the same way for good measure.
+    trap "rm -rf '$lockdir' 2>/dev/null || true; ${existing_trap}" EXIT
   fi
 }
 
@@ -697,10 +752,15 @@ find_aimi_root() {
 
 # A successful connect means something is already listening (occupied); a
 # refused/failed connect means the port is free. Loopback-only by construction.
+# FD 3 is opened by, and belongs entirely to, the `(exec 3<> ...)` subshell —
+# it closes automatically when that subshell exits, so there is nothing of
+# ours left to clean up here. An explicit `exec 3>&-` in this (parent) scope
+# would not be closing that socket at all; it would be blindly closing
+# whatever FD 3 happens to mean in the caller's own shell, which is exactly
+# the kind of action-at-a-distance a shared script like this must never risk.
 _port_free() {
   local port="$1"
   if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
-    exec 3>&- 3<&- 2>/dev/null || true
     return 1
   fi
   return 0
@@ -723,20 +783,28 @@ _pick_free_port() {
 
 # Poll http://127.0.0.1:<port> (never a wildcard address) until it answers or
 # a bounded timeout elapses. "Process started" is not "server up" — only an
-# actual HTTP response counts.
+# actual HTTP response counts. Bounded by real wall-clock time via the bash
+# SECONDS builtin rather than an iteration count times an assumed per-probe
+# duration — a fixed iteration count would let a slow --max-time compound
+# with the iteration count and blow well past the declared timeout.
+# Returns: 0 ready; 1 nothing was ever listening on the port; 2 something was
+# listening but never answered HTTP within the budget — callers use 1 vs 2 to
+# tell "wrong port/flag, worth another attempt" from "just slow, retrying
+# would only repeat the same failure."
 _wait_ready() {
   local port="$1"
   local timeout_s="${2:-$DEV_SERVER_READY_TIMEOUT}"
-  local iterations=$((timeout_s * 2))
-  local i=0
-  while [[ "$i" -lt "$iterations" ]]; do
-    if curl -sf -o /dev/null --max-time 1 "http://127.0.0.1:${port}" 2>/dev/null; then
+  local start_s=$SECONDS
+  while [[ $((SECONDS - start_s)) -lt "$timeout_s" ]]; do
+    if curl -sf -o /dev/null --max-time "$DEV_SERVER_PROBE_MAX_TIME" "http://127.0.0.1:${port}" 2>/dev/null; then
       return 0
     fi
     sleep 0.5
-    i=$((i + 1))
   done
-  return 1
+  if _port_free "$port"; then
+    return 1
+  fi
+  return 2
 }
 
 # Resolve the pid holding the LISTEN socket on 127.0.0.1:<port>, preferring
@@ -799,10 +867,13 @@ _kill_process_group() {
     sleep 1
   fi
 
-  if _is_pid_alive "$pgid"; then
-    kill -9 -- "-$pgid" 2>/dev/null || true
-    kill -9 -- "$pgid" 2>/dev/null || true
-  fi
+  # Unconditional final escalation: gating this on the leader's own liveness
+  # would let a surviving child that ignored SIGTERM keep the port forever
+  # once the leader itself has already exited (e.g. an npm that forks and
+  # returns) — always SIGKILL the whole group, whether or not the leader is
+  # still around to report itself alive.
+  kill -9 -- "-$pgid" 2>/dev/null || true
+  kill -9 -- "$pgid" 2>/dev/null || true
 
   return 0
 }
@@ -1037,9 +1108,31 @@ serve_start() {
     leader_pid=$(cd "$worktree_path" && _launch_dev_server "$port" "$log_file" "$pid_file" "${pm_cmd[@]}")
   fi
 
+  # Capture _wait_ready's distinguishing return code (0 ready, 1 nothing ever
+  # listened, 2 listened but never answered HTTP) via an if-condition so a
+  # non-zero return never trips the script's top-level `set -e`.
   local ready=false
-  if [[ -n "$leader_pid" ]] && _wait_ready "$port" "$DEV_SERVER_READY_TIMEOUT"; then
+  local wait_rc=1
+  if [[ -n "$leader_pid" ]]; then
+    if _wait_ready "$port" "$DEV_SERVER_READY_TIMEOUT"; then
+      wait_rc=0
+    else
+      wait_rc=$?
+    fi
+  fi
+
+  if [[ "$wait_rc" -eq 0 ]]; then
     ready=true
+  elif [[ "$wait_rc" -eq 2 ]]; then
+    # Something was already listening on $port but never answered HTTP
+    # within the budget — killing a process mid-compile and discarding the
+    # cache it had warmed, only to repeat the identical PORT-env attempt a
+    # second time for the same reason (slow, not a wrong port/flag), would
+    # never help. Report the cause and don't retry.
+    _kill_process_group "$leader_pid"
+    rm -f "$pid_file"
+    echo -e "${RED}Error: Dev server for '$worktree_name' occupied port $port but never answered HTTP within ${DEV_SERVER_READY_TIMEOUT}s; not retrying a second attempt for the same reason. See log: $log_file${NC}" >&2
+    return 0
   else
     [[ -n "$leader_pid" ]] && _kill_process_group "$leader_pid"
     rm -f "$pid_file"
@@ -1321,6 +1414,12 @@ Install Deps:
     pnpm-lock.yaml -> pnpm install; yarn.lock -> yarn install;
     package-lock.json -> npm ci (falls back to npm install on failure);
     no recognized lockfile but package.json present -> npm install
+  - Idempotency short-circuit: when a recognized lockfile exists and
+    node_modules/ is already at least as fresh as it (mtime comparison),
+    the install is skipped entirely and this exits 0 with an informational
+    line — a resumed container that already had correct dependencies never
+    pays a cold reinstall. Does not apply when there's no recognized
+    lockfile, or node_modules/ doesn't exist yet, or the lockfile is newer
   - No package.json: prints an informational line and exits 0 (not an error)
   - Install failure: prints a clear error naming the package manager and
     worktree, and exits non-zero
@@ -1342,13 +1441,24 @@ Serve (Dev Server):
     and the actual address found, and writes no state entry. This is what
     turns the flag from a best-effort attempt into a guarantee
   - Port injection, tried in order: (1) PORT env var (Next.js, CRA, Nuxt,
-    Remix); (2) if the readiness probe still fails, kill that attempt and
-    retry once with '-- --port <n>' appended (Vite, Astro). Both attempts
-    also pass the framework-specific host flag above, when one applies. If
-    neither yields a listener, serve start reports the failure and exits 0
-  - Readiness probe: polls http://127.0.0.1:<port> with a bounded timeout.
-    A process merely starting is never enough — only an observed HTTP
-    response counts as ready
+    Remix); (2) if the readiness probe finds nothing ever listening on the
+    port, kill that attempt and retry once with '-- --port <n>' appended
+    (Vite, Astro). Both attempts also pass the framework-specific host flag
+    above, when one applies. If neither yields a listener, serve start
+    reports the failure and exits 0. Attempt 2 is skipped — not retried —
+    when attempt 1's port was occupied but never answered HTTP (see
+    Readiness probe below); killing a mid-compile process to repeat the
+    identical PORT-env attempt for the same reason (slow, not a wrong
+    port/flag) would never help, so that case reports its cause directly
+  - Readiness probe (_wait_ready): polls http://127.0.0.1:<port> with a
+    real wall-clock budget (DEV_SERVER_READY_TIMEOUT, default 90s,
+    env-overridable) rather than an iteration count, so a slow per-probe
+    --max-time (DEV_SERVER_PROBE_MAX_TIME, default 5s, env-overridable)
+    can never make the actual wait exceed the declared timeout. A process
+    merely starting is never enough — only an observed HTTP response counts
+    as ready. On timeout it distinguishes "nothing ever listened" from
+    "something listened but never answered HTTP", which is what lets
+    attempt 2 above be skipped when retrying would be pointless
   - Ownership check: before adopting the port's listener as this worktree's
     dev server, serve start confirms the listening pid's process group
     matches the process it just spawned, so a stale or foreign process on
