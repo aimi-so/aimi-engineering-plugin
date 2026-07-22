@@ -1518,21 +1518,15 @@ else
   cd "$AIMI_ROOT/[group_key]"
 fi
 $WORKTREE_MGR install-deps "$BRANCH_NAME"
-$WORKTREE_MGR serve start "$BRANCH_NAME"
-SERVE_STATUS_JSON=$($WORKTREE_MGR serve status "$BRANCH_NAME")
+CONTAINER_SERVE_URL=$($WORKTREE_MGR serve start "$BRANCH_NAME")
+if [ -n "$CONTAINER_SERVE_URL" ]; then
+  CONTAINER_DEV_URL[group_key]="$CONTAINER_SERVE_URL"
+fi
 ```
 
 `install-deps`/`serve start` are invoked with CWD at the project root and `[branchName]` as the worktree-name argument — never CWD'd into the container itself — because `worktree-manager.sh` resolves its worktree-name argument against `$(git rev-parse --show-toplevel)/.worktrees/<name>` relative to the CWD it runs in; this is the exact same reason `Create or Reuse the Container` above `cd`s to the project root, never into the container, before calling `$WORKTREE_MGR create`. The resulting target is `CONTAINER_PATHS[group_key]` (`<project_root>/.worktrees/[branchName]`). This CWD is also what keeps two project groups' `dev-server.json` entries distinct: `serve start` keys its state by the container's absolute resolved path (`<project_root>/.worktrees/[branchName]`, unique per group), never by the literal `[branchName]` — so two groups whose container happens to get the same branch name never collide.
 
-Parse `SERVE_STATUS_JSON` — single-line JSON, exactly `{"running":bool,"port":n|null,"pid":n|null}` per its documented contract (see `serve status` in `worktree-manager.sh` help text) — and record the port only when a server is actually running:
-
-```bash
-RUNNING=$(printf '%s' "$SERVE_STATUS_JSON" | jq -r '.running')
-PORT=$(printf '%s' "$SERVE_STATUS_JSON" | jq -r '.port // empty')
-if [ "$RUNNING" = "true" ] && [ -n "$PORT" ]; then
-  CONTAINER_DEV_URL[group_key]="http://127.0.0.1:$PORT"
-fi
-```
+`serve start`'s stdout, on both the reuse path and a successful fresh launch, is exactly the raw URL as its only line (all decorated narration goes to stderr — see `serve start` in `worktree-manager.sh` help text), so `CONTAINER_SERVE_URL` is captured directly instead of re-querying `serve status` right after. A no-op `serve status` call here would only ever race a concurrent `serve start`/`serve stop` for nothing — it can't tell this call anything its own stdout didn't already say. Leave `CONTAINER_DEV_URL[group_key]` unset when `CONTAINER_SERVE_URL` is empty: that means `serve start` degraded (no package.json, no dev script, port exhaustion, timeout, ownership mismatch, non-loopback bind) and reported nothing to adopt.
 
 **Degradation is advisory, never fatal.** `install-deps` and `serve start` both degrade gracefully by their own contract (non-Node stack with no `package.json`, a failed install, port exhaustion, a missing `dev` script, a readiness-probe timeout) — none of these abort the wave loop or this session. When a group's port never resolves, `CONTAINER_DEV_URL[group_key]` is simply never set for that group; Open Visual Follow Session below and the per-story post-merge verification block (Step 4) both treat a missing entry as "no dev server available for this group" and degrade that group's visual verification to `skipped` rather than blocking anything.
 
@@ -2852,4 +2846,4 @@ Container mode (flat or phase) never removes the feature/phase container or stop
 1. **Stop the dev server first:** `$WORKTREE_MGR serve stop <branchName>` (or `<PHASE_BRANCH>` in phase mode). This kills the dev server's full process group — not just the pid recorded in `.aimi/state/dev-server.json` — and clears that state entry whether or not a live process was found.
 2. **Then remove the container and its branch:** `$WORKTREE_MGR remove <branchName>`. Omitting `--keep-branch` here is intentional — unlike the completion-path removal in Step 5 (which preserves the branch for review and a PR), abandonment discards the branch too. This is the container-mode replacement for what used to be a plain branch switch.
 
-Never trust or reuse a `.aimi/state/dev-server.json` pid entry on a later resume based on liveness alone. A `kill -0` / `_is_pid_alive` probe (the same primitive `aimi-cli.sh` uses for stale-claim recovery) only proves *something* is running at that pid right now — pids get recycled by the OS, so a live pid is never by itself proof it is the dev server this tool started. The actual guarantee is `worktree-manager.sh`'s `dev_server_entry_is_ours`: it additionally compares the entry's recorded identity token (the process's `/proc/pid/stat` starttime, or `ps -o lstart=` as a portable fallback) against that pid's identity right now, and only a match counts. `serve start`'s reuse path and `serve stop`'s process-group kill both require that match before ever touching the pid — a live pid with a missing (pre-upgrade entry) or mismatched identity is treated exactly like a dead one: never reused, never signaled. (`$WORKTREE_MGR serve status <branchName>` still self-heals a stale entry using the plain liveness probe alone — that's safe there because status only reports and removes, it never kills or reuses a pid.)
+Never trust or reuse a `.aimi/state/dev-server.json` pid entry on a later resume based on liveness alone. A `kill -0` / `_is_pid_alive` probe (the same primitive `aimi-cli.sh` uses for stale-claim recovery) only proves *something* is running at that pid right now — pids get recycled by the OS, so a live pid is never by itself proof it is the dev server this tool started. The actual guarantee is `worktree-manager.sh`'s `dev_server_entry_is_ours`: it additionally compares the entry's recorded identity token (the process's `/proc/pid/stat` starttime, or `ps -o lstart=` as a portable fallback) against that pid's identity right now, and only a match counts. `serve start`'s reuse path and `serve stop`'s process-group kill both require that match before ever touching the pid — a live pid with a missing (pre-upgrade entry) or mismatched identity is treated exactly like a dead one: never reused, never signaled. (`$WORKTREE_MGR serve status <branchName>` still reports a dead-pid entry as `running:false` using the plain liveness probe alone, but — unlike a resume's reuse/kill decisions — never removes the stale entry itself: status is a true read-only verb now; only `serve start`'s own reuse path and `serve stop` ever write `dev-server.json`.)
