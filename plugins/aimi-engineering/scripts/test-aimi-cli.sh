@@ -4536,6 +4536,225 @@ VALIDATETASKSEXECINVALIDEOF
   echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
 }
 
+test_validate_tasks_execution_phase_conflict_rejected() {
+  echo ""
+  echo "=== Testing validate-tasks: metadata.execution and metadata.phase together is rejected ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-75-validate-tasks-execution-phase-conflict.json"
+  cat > "$tasks_fixture" << 'VALIDATETASKSEXECPHASECONFLICTEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Execution/phase conflict test",
+    "type": "feat",
+    "branchName": "feat/execution-phase-conflict-test",
+    "createdAt": "2026-07-21",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "execution": "container",
+    "phase": {"id": 3, "dir": "phase-3-billing"}
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "A conflicted story",
+      "description": "execution and phase both present",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 0
+    }
+  ]
+}
+VALIDATETASKSEXECPHASECONFLICTEOF
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": false' "$output" "validate-tasks: execution+phase conflict returns valid=false"
+  assert_contains 'metadata.execution and metadata.phase cannot both be present' "$output" \
+    "validate-tasks: execution+phase conflict names the rule"
+  assert_exit_code "1" "$exit_code" "validate-tasks: execution+phase conflict exits non-zero"
+
+  rm -f "$tasks_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_set_execution_mode_container_roundtrip() {
+  echo ""
+  echo "=== Testing set-execution-mode: container round-trip ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-79-set-execution-mode-container.json"
+  cat > "$tasks_fixture" << 'SETEXECMODECONTAINEREOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Set execution mode container test",
+    "type": "feat",
+    "branchName": "feat/set-execution-mode-container-test",
+    "createdAt": "2026-07-21",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "A story",
+      "description": "No execution field yet",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 0
+    }
+  ]
+}
+SETEXECMODECONTAINEREOF
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" set-execution-mode container) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "set-execution-mode container exits 0"
+  assert_contains '"execution":"container"' "$output" "set-execution-mode container reports execution:container"
+
+  local persisted
+  persisted=$(jq -r '.metadata.execution' "$tasks_fixture")
+  assert_eq "container" "$persisted" "set-execution-mode container persists metadata.execution=container"
+
+  rm -f "$tasks_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_set_execution_mode_inline_roundtrip() {
+  echo ""
+  echo "=== Testing set-execution-mode: inline round-trip ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-78-set-execution-mode-inline.json"
+  cat > "$tasks_fixture" << 'SETEXECMODEINLINEEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Set execution mode inline test",
+    "type": "feat",
+    "branchName": "feat/set-execution-mode-inline-test",
+    "createdAt": "2026-07-21",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "execution": "container"
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "A story",
+      "description": "execution already container",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 0
+    }
+  ]
+}
+SETEXECMODEINLINEEOF
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" set-execution-mode inline) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "set-execution-mode inline exits 0"
+  assert_contains '"execution":"inline"' "$output" "set-execution-mode inline reports execution:inline"
+
+  local persisted
+  persisted=$(jq -r '.metadata.execution' "$tasks_fixture")
+  assert_eq "inline" "$persisted" "set-execution-mode inline persists metadata.execution=inline"
+
+  rm -f "$tasks_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_set_execution_mode_invalid_value_rejected() {
+  echo ""
+  echo "=== Testing set-execution-mode: an invalid value is rejected ==="
+
+  reset_fixture
+
+  local stderr_output exit_code
+  stderr_output=$("$CLI" set-execution-mode worktree 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_contains "Invalid execution mode" "$stderr_output" "set-execution-mode worktree reports invalid mode error"
+  assert_exit_code "1" "$exit_code" "set-execution-mode worktree exits non-zero"
+}
+
+test_set_execution_mode_refuses_phase_scoped() {
+  echo ""
+  echo "=== Testing set-execution-mode: refuses a phase-scoped tasks file ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-76-set-execution-mode-phase-scoped.json"
+  cat > "$tasks_fixture" << 'SETEXECMODEPHASEEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Phase-scoped set-execution-mode test",
+    "type": "feat",
+    "branchName": "feat/set-execution-mode-phase-test",
+    "createdAt": "2026-07-21",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "phase": {"id": 2, "dir": "phase-2-auth"}
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "A phase story",
+      "description": "Phase-scoped",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 0
+    }
+  ]
+}
+SETEXECMODEPHASEEOF
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+  "$CLI" init-session > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local stderr_output exit_code
+  stderr_output=$("$CLI" set-execution-mode container 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_contains "phase-scoped" "$stderr_output" "set-execution-mode refuses a phase-scoped file"
+  assert_exit_code "1" "$exit_code" "set-execution-mode on phase-scoped file exits non-zero"
+
+  local persisted
+  persisted=$(jq -r '.metadata.execution // "absent"' "$tasks_fixture")
+  assert_eq "absent" "$persisted" "set-execution-mode refusal leaves metadata.execution absent"
+
+  rm -f "$tasks_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
 test_validate_tasks_branchname_invalid_rejected() {
   echo ""
   echo "=== Testing validate-tasks: metadata.branchName outside the mandated regex is rejected ==="
@@ -11492,6 +11711,11 @@ main() {
   test_validate_tasks_execution_container_valid
   test_validate_tasks_execution_inline_valid
   test_validate_tasks_execution_invalid_value_rejected
+  test_validate_tasks_execution_phase_conflict_rejected
+  test_set_execution_mode_container_roundtrip
+  test_set_execution_mode_inline_roundtrip
+  test_set_execution_mode_invalid_value_rejected
+  test_set_execution_mode_refuses_phase_scoped
   test_validate_tasks_branchname_invalid_rejected
   test_validate_tasks_verification_url_invalid_rejected
   test_validate_tasks_designspec_passing_case

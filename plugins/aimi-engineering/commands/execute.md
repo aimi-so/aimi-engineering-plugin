@@ -1,7 +1,7 @@
 ---
 name: aimi:execute
 description: Execute all pending stories autonomously with wave-based parallelism
-argument-hint: "[--phase <N>]"
+argument-hint: "[--phase <N>] [--container|--inline]"
 disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Bash(git:*), Bash(mkdir:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Bash(WORKTREE_MGR=*), Bash($WORKTREE_MGR:*), Task
 ---
@@ -485,6 +485,33 @@ This needs no new CLI call: a flat file's tasks path is a direct child of `.aimi
 
 **When `PHASE_MODE=false` (flat v3.3 file, no `roadmap.json` sibling): execute.md runs byte-for-byte as it does today.** No further phase-mode logic applies anywhere in this document — Step 1.7 (Phase Claim) is skipped entirely; when `EXECUTION_MODE` is `inline` or absent (see Execution Mode Detection below), Step 2 checks out `branchName` directly in the main working tree exactly as before, while `EXECUTION_MODE=container` instead routes Step 2 through Flat Container Mode's own worktree creation (see Step 2); and Step 4's story worktrees are named `[branchName]-[story.id]` exactly as now. Phase mode is a parallel path added alongside the flat path; it never changes the flat path's behavior.
 
+### Parse --container/--inline Override
+
+Scan `$ARGUMENTS` for an explicit `--container` or `--inline` token (mirrors the `--phase <N>` extraction style used by Step 1.7's Parse --phase Override):
+
+```bash
+case " $ARGUMENTS " in
+  *" --container "*) CONTAINER_FLAG=true ;;
+  *) CONTAINER_FLAG=false ;;
+esac
+case " $ARGUMENTS " in
+  *" --inline "*) INLINE_FLAG=true ;;
+  *) INLINE_FLAG=false ;;
+esac
+
+if [ "$CONTAINER_FLAG" = "true" ] && [ "$INLINE_FLAG" = "true" ]; then
+  EXECUTION_OVERRIDE="conflict"
+elif [ "$CONTAINER_FLAG" = "true" ]; then
+  EXECUTION_OVERRIDE="container"
+elif [ "$INLINE_FLAG" = "true" ]; then
+  EXECUTION_OVERRIDE="inline"
+else
+  EXECUTION_OVERRIDE=""
+fi
+```
+
+If `EXECUTION_OVERRIDE` is `"conflict"`, report `--container and --inline are mutually exclusive — pass at most one.` and STOP. Otherwise `EXECUTION_OVERRIDE` is `"container"`, `"inline"`, or empty (no flag passed) — consumed by Execution Mode Detection below.
+
 ### Execution Mode Detection
 
 Read `metadata.execution` — the discriminator defined in `commands/references/execution-mode.md` — from the tasks file `init-session` discovered:
@@ -494,6 +521,25 @@ EXECUTION_MODE=$(jq -r '.metadata.execution // "inline"' "$AIMI_ROOT/$TASKS_PATH
 ```
 
 Only the literal string `"container"` selects the container path; every other value (`"inline"`, absence, or anything unrecognized) resolves to `inline` — the same fail-safe default rule the reference doc defines.
+
+**Apply the `--container`/`--inline` override from above, when one was passed:**
+
+- **`PHASE_MODE=true`:** the override is always ignored — a claimed phase already runs inside its own phase container regardless of `metadata.execution` (see the `CONTAINER_MODE` derivation below). If `EXECUTION_OVERRIDE` is non-empty, report a warning and leave `EXECUTION_MODE` exactly as read from the file:
+  ```
+  Warning: --container/--inline is ignored on a phase-scoped tasks file. Phase mode always runs inside its own phase container; see /aimi:execute --phase.
+  ```
+- **`PHASE_MODE=false` and `EXECUTION_OVERRIDE` non-empty:** the override replaces `EXECUTION_MODE` for this run. When it differs from the value already on disk, persist it via `set-execution-mode` so a later invocation without the flag continues in the same mode:
+
+```bash
+if [ "$PHASE_MODE" = "false" ] && [ -n "$EXECUTION_OVERRIDE" ]; then
+  if [ "$EXECUTION_OVERRIDE" != "$EXECUTION_MODE" ]; then
+    AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+    : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+    $AIMI_CLI set-execution-mode "$EXECUTION_OVERRIDE"
+  fi
+  EXECUTION_MODE="$EXECUTION_OVERRIDE"
+fi
+```
 
 Derive `CONTAINER_MODE`, the single boolean this document's flat-mode container logic (Step 0.9, Step 2) gates on:
 

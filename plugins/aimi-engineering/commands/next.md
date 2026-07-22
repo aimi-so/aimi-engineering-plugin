@@ -1,7 +1,7 @@
 ---
 name: aimi:next
 description: Execute the next pending story from tasks.json
-argument-hint: "[--base <branch>]"
+argument-hint: "[--base <branch>] [--container|--inline]"
 disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Bash(git:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Bash(WORKTREE_MGR=*), Bash($WORKTREE_MGR:*), Bash(npm:*), Bash(bun:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(tsc:*), Bash(eslint:*), Bash(prettier:*), Task
 ---
@@ -81,9 +81,60 @@ Read `metadata.execution` to decide whether this story runs inline (today's beha
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 METADATA_JSON=$($AIMI_CLI metadata)
+PHASE_ID=$(echo "$METADATA_JSON" | jq -r '.phase.id // empty')
 EXECUTION_MODE=$(echo "$METADATA_JSON" | jq -r '.execution // "inline"')
 BRANCH_NAME=$(echo "$METADATA_JSON" | jq -r '.branchName')
 ```
+
+**Phase-scope refusal.** If `PHASE_ID` is non-empty, the active tasks file belongs to a phase/milestone roadmap. `/aimi:next` has no phase-claim step and no phase-container base resolution, so it cannot safely build a container here — the prior behavior of constructing one straight from `metadata.branchName` with `--from DEFAULT_BRANCH` used the wrong base entirely (that name is the phase's own branch, not a fresh branch point). Report:
+
+```
+This tasks file is phase-scoped (phase [PHASE_ID]). /aimi:next does not execute stories from a phase/milestone roadmap.
+
+Run /aimi:execute instead — it claims the phase and executes its stories inside the phase's own container.
+```
+
+and STOP execution entirely — do not continue to Step 2 or any later step. This check runs first and unconditionally, before evaluating `--container`/`--inline` or any other container logic below, so it also gates the Container Mode: Complete the Run logic in Step 5.
+
+**Parse `--container`/`--inline` Override.** Reached only when `PHASE_ID` is empty. Scan `$ARGUMENTS` for an explicit `--container` or `--inline` token (mirrors execute.md's own Parse --container/--inline Override, and the `--base` extraction style just below):
+
+```bash
+case " $ARGUMENTS " in
+  *" --container "*) CONTAINER_FLAG=true ;;
+  *) CONTAINER_FLAG=false ;;
+esac
+case " $ARGUMENTS " in
+  *" --inline "*) INLINE_FLAG=true ;;
+  *) INLINE_FLAG=false ;;
+esac
+
+if [ "$CONTAINER_FLAG" = "true" ] && [ "$INLINE_FLAG" = "true" ]; then
+  EXECUTION_OVERRIDE="conflict"
+elif [ "$CONTAINER_FLAG" = "true" ]; then
+  EXECUTION_OVERRIDE="container"
+elif [ "$INLINE_FLAG" = "true" ]; then
+  EXECUTION_OVERRIDE="inline"
+else
+  EXECUTION_OVERRIDE=""
+fi
+```
+
+If `EXECUTION_OVERRIDE` is `"conflict"`, report `--container and --inline are mutually exclusive — pass at most one.` and STOP.
+
+When `EXECUTION_OVERRIDE` is non-empty, it replaces `EXECUTION_MODE` for this run. When it differs from the value already on disk, persist it via `set-execution-mode` so a later `/aimi:next` invocation without the flag continues in the same mode:
+
+```bash
+if [ -n "$EXECUTION_OVERRIDE" ]; then
+  if [ "$EXECUTION_OVERRIDE" != "$EXECUTION_MODE" ]; then
+    AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+    : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+    $AIMI_CLI set-execution-mode "$EXECUTION_OVERRIDE"
+  fi
+  EXECUTION_MODE="$EXECUTION_OVERRIDE"
+fi
+```
+
+`set-execution-mode` itself refuses on a phase-scoped file, but that path is unreachable here — the phase-scope refusal above already STOPped on any such file before this point.
 
 **When `EXECUTION_MODE` is not exactly `"container"`** (absent, `"inline"`, or any unrecognized value — every non-`"container"` value resolves to inline per the fail-safe default in `execution-mode.md`): leave `CONTAINER_PATH` unset, set `CONTAINER_MODE=false`, and skip the rest of this step entirely. Step 4 proceeds exactly as it does today — no worktree resolution, no `WORKTREE_PATH` interpolation.
 
@@ -229,7 +280,7 @@ Interpolate the following into the template:
 - `ACCEPTANCE_CRITERIA` = story.acceptanceCriteria (bulleted)
 - `story.tasks` = story.tasks (include <tasks> block only if story.tasks is a non-empty array; place after <acceptance_criteria> and before <notes>)
 - `story.notes` = story.notes (include <previous_notes> section only if non-empty)
-- `WORKTREE_PATH` = `CONTAINER_PATH` from Step 1c when that step resolved a container (`metadata.execution == "container"`) — the story executes and commits inside the container, on the feature branch, with no per-story worktree. Otherwise (inline or absent `metadata.execution`), no WORKTREE_PATH (sequential mode — worker operates in current directory, or PROJECT_PATH if set), exactly as before this story.
+- `WORKTREE_PATH` = `CONTAINER_PATH` from Step 1c when that step resolved a container (`CONTAINER_MODE=true` — the file's own `metadata.execution` or, when passed, a `--container` override that resolved `EXECUTION_MODE` to `"container"`) — the story executes and commits inside the container, on the feature branch, with no per-story worktree. Otherwise (`CONTAINER_MODE=false`), no WORKTREE_PATH (sequential mode — worker operates in current directory, or PROJECT_PATH if set), exactly as before this story.
 
 ```
 # IMPORTANT: subagent_type MUST be "general-purpose" — story-executor is a skill, NOT an agent.

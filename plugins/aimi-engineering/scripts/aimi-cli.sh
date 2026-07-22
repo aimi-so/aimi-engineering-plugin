@@ -1098,6 +1098,51 @@ cmd_mark_skipped() {
   printf '{"id":"%s","status":"skipped"}\n' "$story_id"
 }
 
+# Persist a --container/--inline override onto metadata.execution.
+# execute.md and next.md call this after resolving a session-level override so
+# a later re-invocation without the flag continues in the same mode instead of
+# silently falling back to the file's original value. Refuses (non-zero exit)
+# on a phase-scoped tasks file (metadata.phase present) — a claimed phase
+# always runs inside its own phase container, so writing metadata.execution
+# there would be the exact dead-data bug this subcommand exists to fix.
+cmd_set_execution_mode() {
+  local mode="$1"
+  local tasks_file
+
+  if [ -z "$mode" ]; then
+    echo "Usage: aimi-cli.sh set-execution-mode <container|inline>" >&2
+    exit 1
+  fi
+
+  if [ "$mode" != "container" ] && [ "$mode" != "inline" ]; then
+    echo "Error: Invalid execution mode: $mode (expected container or inline)" >&2
+    exit 1
+  fi
+
+  tasks_file=$(get_tasks_file)
+
+  local has_phase
+  has_phase=$(jq -r 'if (.metadata.phase // null) != null then "true" else "false" end' "$tasks_file")
+  if [ "$has_phase" = "true" ]; then
+    echo "Error: Cannot set metadata.execution on a phase-scoped tasks file (metadata.phase is present): $tasks_file" >&2
+    exit 1
+  fi
+
+  # Atomic update using flock and unique temp file
+  local tmp_file
+  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  (
+    _lock "${tasks_file}.lock"
+    jq --arg mode "$mode" \
+      '.metadata.execution = $mode' \
+      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+  ) 200>"${tasks_file}.lock"
+  # Cleanup temp file on failure
+  rm -f "$tmp_file" 2>/dev/null
+
+  printf '{"execution":"%s"}\n' "$mode"
+}
+
 # Count pending stories
 cmd_count_pending() {
   local tasks_file
@@ -3631,6 +3676,18 @@ cmd_validate_tasks() {
 
   if [ -n "$execution_mode" ] && [ "$execution_mode" != "container" ] && [ "$execution_mode" != "inline" ]; then
     errors+=("${tasks_file}: metadata.execution has invalid value \"${execution_mode}\" (expected \"container\" or \"inline\")")
+  fi
+
+  # metadata.execution / metadata.phase mutual exclusivity: a phase-scoped
+  # file (metadata.phase present) always executes inside its own phase
+  # container, so metadata.execution would be dead data there — the exact
+  # confusion US-006 corrects. /aimi:plan never writes both; this rule
+  # catches a hand-edited or stale file that carries both anyway.
+  local has_phase
+  has_phase=$(jq -r 'if (.metadata.phase // null) != null then "true" else "false" end' "$tasks_file" 2>/dev/null)
+
+  if [ "$has_phase" = "true" ] && [ -n "$execution_mode" ]; then
+    errors+=("${tasks_file}: metadata.execution and metadata.phase cannot both be present (phase-scoped files never carry metadata.execution)")
   fi
 
   # metadata.branchName validation: must match the same mandated pattern
@@ -6679,6 +6736,10 @@ COMMANDS:
     mark-complete <id>        Mark story as completed (returns {id, status} JSON)
     mark-failed <id> [notes]  Mark story as failed (returns {id, status, notes} JSON)
     mark-skipped <id>         Mark story as skipped (returns {id, status} JSON)
+    set-execution-mode <container|inline>
+                              Persist a --container/--inline override onto metadata.execution
+                              (returns {execution} JSON). Refuses with non-zero exit on a
+                              phase-scoped tasks file (metadata.phase present).
     count-pending             Count pending stories
     validate-deps             Validate dependency graph (no cycles, no missing refs)
     validate-stories          Validate story content (length, suspicious patterns)
@@ -7058,6 +7119,7 @@ main() {
     mark-complete)     cmd_mark_complete "${2:-}" ;;
     mark-failed)       cmd_mark_failed "${2:-}" "${3:-}" ;;
     mark-skipped)      cmd_mark_skipped "${2:-}" ;;
+    set-execution-mode) cmd_set_execution_mode "${2:-}" ;;
     count-pending)     cmd_count_pending ;;
     validate-deps)            cmd_validate_deps ;;
     validate-stories)         cmd_validate_stories ;;
