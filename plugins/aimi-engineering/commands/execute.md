@@ -65,98 +65,15 @@ $WORKTREE_MGR list
 $WORKTREE_MGR remove [worktree_name]
 ```
 
-This rule is unchanged, but does not apply in phase mode — see Phase Mode: Worktree Naming and CWD below, which supersedes `project_root` with `PHASE_CONTAINER_PATH` for the duration of a claimed phase's execution — nor does it apply, in the same way, to container mode (`PHASE_MODE=false`, `CONTAINER_MODE=true`; see Execution Mode Detection in Step 1), which supersedes `project_root` with `CONTAINER_PATHS[group_key]` for the duration of that project group's container-mode execution. See Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH in Phase Mode: Worktree Naming and CWD below for the contract that replaces this per-consumer branching.
+This rule is unchanged, but does not apply in phase mode — see `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Mode: Worktree Naming and CWD, which supersedes `project_root` with `PHASE_CONTAINER_PATH` for the duration of a claimed phase's execution — nor does it apply, in the same way, to container mode (`PHASE_MODE=false`, `CONTAINER_MODE=true`; see Execution Mode Detection in Step 1), which supersedes `project_root` with `CONTAINER_PATHS[group_key]` for the duration of that project group's container-mode execution. See that same reference's Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH subsection for the contract that replaces this per-consumer branching.
 
 ### Container Paths Per Project Group (Container Mode)
 
-When `CONTAINER_MODE=true` (see Execution Mode Detection in Step 1), each project group gets its own feature container instead of one shared across the whole run: `CONTAINER_PATHS[group_key] = project_roots[group_key] + "/.worktrees/" + branchName` for every group with at least one story scheduled this run — keyed identically to `project_roots[group_key]` above, never a single global `CONTAINER_PATH` scalar. Step 2's Flat Container Mode (single-repo, `group_key = "DEFAULT"`) and Per-Project Branch Setup (multi-repo, one entry per project group) are what populate this map; Step 4's wave loop and both cleanup passes consume it via `EXEC_ROOT`/`EXEC_BRANCH` — see Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH in Phase Mode: Worktree Naming and CWD below for how `EXEC_ROOT` derives from it.
+Read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Container Paths Per Project Group — defines `CONTAINER_PATHS[group_key]`, populated by Step 2's Flat Container Mode / Per-Project Branch Setup and consumed by Step 4's wave loop and both cleanup passes via `EXEC_ROOT`/`EXEC_BRANCH`.
 
-## Phase Mode: Worktree Naming and CWD
+Read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Mode: Worktree Naming and CWD — the single source of truth for how `PHASE_MODE=true` and `CONTAINER_MODE=true` each change worktree naming, CWD, and the `EXEC_ROOT`/`EXEC_BRANCH`/`EXEC_OWNS_ROOT`/`EXEC_KEEPS_BRANCH` execution context that Step 4's wave loop, its cleanup passes, and the post-merge visual-verification origin rewrite all consume. When both modes are false (inline, the default), every rule there reduces to exactly today's flat-mode behavior — no new variable is read, no new conditional branch is taken.
 
-This section is the single source of truth for how `PHASE_MODE=true` (see Step 1's Phase Mode Detection and Step 1.7's Phase Claim) and `CONTAINER_MODE=true` (flat container mode; see Execution Mode Detection in Step 1) each change worktree naming and working-directory handling in Step 4's wave loop and its cleanup passes. All call sites below reference it by name. `PHASE_MODE`'s rules only apply once a phase has been claimed; `CONTAINER_MODE`'s rules apply for the whole run once Step 2 has created or reused the feature container(s) for every project group. When both are false (`EXECUTION_MODE` inline or absent — the byte-for-byte-unchanged default), every rule below reduces to exactly today's flat-mode behavior: no new variable is read and no new conditional branch is taken beyond evaluating a single `CONTAINER_MODE` check that is immediately false.
-
-### Why Story Worktrees Are Phase-Qualified
-
-Git branch names are repository-global. Two parallel `/aimi:execute` sessions each running their own phase container would otherwise mint identical unqualified story branches (e.g. both minting `US-003`) and collide. Story worktree/branch names in phase mode are therefore `<PHASE_BRANCH>-<story.id>` instead of `<branchName>-<story.id>` — qualified by the full phase branch, not just the phase id, so they stay collision-free even against a sibling phase container running concurrently for the same feature.
-
-### CWD For Every Worktree Operation
-
-Every `$WORKTREE_MGR create`/`merge-all`/`remove`/`list` call for a phase's stories runs with CWD set to `PHASE_CONTAINER_PATH`, never `AIMI_ROOT` and never a `project_root` from the Multi-Repo Handling grouping above. Two reasons:
-
-1. **`merge-all` checks out its target branch against whatever repo its CWD belongs to.** `worktree-manager.sh`'s `GIT_ROOT` is computed per-invocation from CWD (`git rev-parse --show-toplevel`), and `merge-all <story-worktree-names> --into <target-branch>` issues a bare `git checkout <target-branch>` against that root. Run from `AIMI_ROOT`, that would check the phase branch out onto the main working tree — forbidden by the Main Working Tree Untouched Invariant below. Run from `PHASE_CONTAINER_PATH`, `GIT_ROOT` resolves to the phase worktree's own root instead, and story worktrees nest at `PHASE_CONTAINER_PATH/.worktrees/<story-worktree-name>` — a pattern `worktree-manager.sh` already supports unmodified, since a linked worktree's own `git rev-parse --show-toplevel` returns its own path, not the main repo's.
-2. **Every Bash call is an isolated shell** (Step 0). `PHASE_CONTAINER_PATH` does not persist across calls on its own — each call that needs it either `cd`s to it explicitly at the top of the call, or passes it via `git -C`/`$WORKTREE_MGR` arguments, exactly like `$AIMI_CLI`/`$WORKTREE_MGR` themselves are re-resolved per call.
-
-### Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH
-
-Step 4's wave loop, both of its cleanup passes, and the post-merge visual-verification origin rewrite do not branch on `PHASE_MODE`/`CONTAINER_MODE` at each of their own call sites. Instead, Step 4 derives a four-part execution context **once per `group_key`**, immediately after the loop that populates `project_roots` (see GROUP STORIES BY PROJECT in Step 4) — every downstream consumer reads it directly instead of repeating the branch:
-
-- **`EXEC_ROOT[group_key]`** — the path every `$WORKTREE_MGR create`/`merge-all`/`remove`/`list` call and every `git -C` invocation `cd`s to or targets for this group.
-- **`EXEC_BRANCH[group_key]`** — the branch every worktree is created `--from`, every `merge-all --into` targets, and every cleanup scan pattern (`"[EXEC_BRANCH[group_key]]-US-*"`) matches.
-- **`EXEC_OWNS_ROOT`** — a single run-wide scalar (not a map — it does not vary by `group_key` within one run), true when this run's own worktree-manager invocations created `EXEC_ROOT` as a container it is responsible for (container and phase mode), false when `EXEC_ROOT` is a pre-existing project checkout this run never created (inline mode). Consumed today only by the post-merge visual-verification origin rewrite (see Step 4).
-- **`EXEC_KEEPS_BRANCH`** — a single run-wide scalar, `true` in all four modes today. No call site in this document reads it yet; it exists so future per-mode teardown work (e.g. a container-mode `remove --keep-branch` step) has a documented place to branch on without reopening this contract.
-
-The four bindings:
-
-| Mode | `EXEC_ROOT[group_key]` | `EXEC_BRANCH[group_key]` |
-|---|---|---|
-| Inline (`PHASE_MODE=false`, `CONTAINER_MODE=false`) | `project_roots[group_key]` | `branchName` |
-| Container, flat or per-project (`PHASE_MODE=false`, `CONTAINER_MODE=true`) | `CONTAINER_PATHS[group_key]` | `branchName` |
-| Phase (`PHASE_MODE=true`) | `PHASE_CONTAINER_PATH` | `PHASE_BRANCH` |
-| Split (a Phase-Mode Paired Split sub-orchestrator; `PHASE_MODE=true` with pre-set values — see Spawn Split Sub-Orchestrators) | `FRONTEND_WORKTREE_PATH` or `BACKEND_WORKTREE_PATH` | `FRONTEND_BRANCH` or `BACKEND_BRANCH` |
-
-The split row is not a new derivation — it is exactly what Create Split Worktrees and Spawn Split Sub-Orchestrators already pre-assign to `PHASE_CONTAINER_PATH`/`PHASE_BRANCH` before a split sub-orchestrator starts (see those sections above); the sub-orchestrator's own Step 4 then derives `EXEC_ROOT`/`EXEC_BRANCH` from the Phase row using those pre-set values, with no split-specific code path.
-
-`EXEC_OWNS_ROOT = PHASE_MODE or CONTAINER_MODE` (true for phase, container, and split; false for inline). `EXEC_KEEPS_BRANCH = true` unconditionally, in every mode, today.
-
-**`project_roots` is a distinct, orthogonal concept and is never absorbed into `EXEC_ROOT`.** Four consumers keep reading `project_roots[group_key]` (or the resolved project path it is built from) directly, independent of whichever mode's `EXEC_ROOT` a run is using:
-
-1. `PROJECT_PATH` passed to each story-executor Task and its worktree boundary (Step 4's per-story spawn loop).
-2. `PROJECT_GUIDELINES_MAP` keying (Step 3.3, Per-Project Guidelines).
-3. `detect-default-branch`/`setup-branch` scoping (Step 2, Per-Project Branch Setup).
-4. Post-Loop Cleanup's One-time migration safeguard, which must keep scanning `project_root` even in container/phase mode — it looks for worktrees stranded OUTSIDE the container by a run predating container mode.
-
-None of these four reads `EXEC_ROOT` in its place: "which repository" (`project_roots`) and "which checkout of it this run is executing against" (`EXEC_ROOT`) are independent questions, and all four consumers above need the former regardless of the latter.
-
-### Main Working Tree Untouched Invariant
-
-For the entire span of a phase's execution — from the moment it is claimed (Step 1.7) through the last wave's merge — `AIMI_ROOT`'s `git rev-parse HEAD` and `git status --porcelain` never change. Every commit for the phase lands only on `PHASE_BRANCH` inside `PHASE_CONTAINER_PATH`. This holds automatically once every rule above is followed: nothing in phase mode ever `cd`s to `AIMI_ROOT` (or runs a mutating git command against it), and Step 2's Main Repo Branch Setup is skipped entirely in phase mode (see Step 2).
-
-### Concurrency Source
-
-`MAX_CONCURRENCY` (Step 3.2) is read from the claimed phase's own tasks file (`PHASE_TASKS_PATH`), not any feature-root or global file — this is the same per-phase value the worktree-budget guard hook enforces against nested story-worktree creation inside the container, so the phase's own setting (not a global default) governs how many story worktrees can exist under it at once.
-
-## Create or Reuse a Container
-
-This section is the single source of truth for creating (or reusing) a container worktree. Every call site below sets three values first — `EXEC_ROOT` (the directory to `cd` into before calling `$WORKTREE_MGR create`: the project root, i.e. `AIMI_ROOT` or a resolved multi-repo project path — never the container path itself, which doesn't exist yet at creation time), `EXEC_BRANCH` (the `create`/worktree-name argument), and `CONTAINER_BASE` (the `--from` argument, already resolved by the caller's own `BASE_BRANCH`-vs-default selection) — then cites this section instead of restating the call or its reuse/idempotency behavior:
-
-```bash
-WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-cd "$EXEC_ROOT"
-$WORKTREE_MGR create "$EXEC_BRANCH" --from "$CONTAINER_BASE"
-```
-
-`$WORKTREE_MGR create` is branch-aware, not a blind idempotent create: it reuses the target directory silently when it's already a worktree there, creates `EXEC_BRANCH` fresh when the branch doesn't exist yet, attaches to the branch without recreating it when the branch exists but no worktree holds it (e.g. after a prior run's `remove --keep-branch`), and exits non-zero — naming the worktree that holds it, resolved from `git worktree list --porcelain` — when another worktree (including the main working tree) already has it checked out. Calling it on every claim (including a self-reclaim resume) is still safe, since the first two cases are exactly the reuse paths a resume needs. On non-zero exit, the caller reports the command's stderr verbatim (it already names the offending worktree) and STOPs — never remediate, never print a second, composed error on top of it. The resulting path is always deterministic: `$EXEC_ROOT/.worktrees/$EXEC_BRANCH`.
-
-## Bootstrap a Container Dev Server
-
-This section is the single source of truth for starting (or reusing) a container's dev server, once a caller has already computed its own `HAS_VISUAL_STORY` gate against its own tasks source (a phase's `PHASE_TASKS_PATH`, a split's `PHASE_FE_TASKS`/`PHASE_BE_TASKS`, or the flat/multi-repo `VISUAL_GROUP_KEYS` loop) — that jq query is legitimately site-specific and stays at each call site; only what happens once the gate passes is written here.
-
-**When `HAS_VISUAL_STORY` is false:** skip entirely — no server is started, no `WORKTREE_MGR` resolution needed.
-
-**Otherwise**, with `EXEC_ROOT` (the same project-root `cd` target Create or Reuse a Container above uses — never the container path itself, since `worktree-manager.sh` resolves its worktree-name argument against `$(git rev-parse --show-toplevel)/.worktrees/<name>` relative to CWD) and `EXEC_BRANCH` (the worktree-name argument) already set by the caller:
-
-```bash
-WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-cd "$EXEC_ROOT"
-$WORKTREE_MGR install-deps "$EXEC_BRANCH"
-SERVE_URL=$($WORKTREE_MGR serve start "$EXEC_BRANCH")
-```
-
-`serve start`'s stdout, on both the reuse path and a successful fresh launch, is exactly the raw URL as its only line (all decorated narration goes to stderr) — so `SERVE_URL` is captured directly from it, and no immediate follow-up `serve status` call is made: a no-op status call right here would only ever race a concurrent `serve start`/`serve stop` for nothing, since it can't tell the caller anything this stdout didn't already say. A caller that needs the URL adopts `$SERVE_URL` into its own variable when non-empty; a caller that doesn't (this bootstrap alone is only ever about getting the server running, not about resolving a URL for later use) simply discards it. Empty `$SERVE_URL` means `serve start` degraded (no package.json, no dev script, port exhaustion, timeout, ownership mismatch, non-loopback bind) and reported nothing to adopt. No `package.json`/`scripts.dev` pre-check runs here, before or after this call — `install-deps` and `serve start` already perform that presence check internally and degrade to a clean, silent skip on their own, so re-checking it at the call-site layer would only duplicate work they already do.
-
-**Degradation is advisory, never fatal.** A missing package manager, a failed install, port exhaustion, or a readiness-probe timeout never aborts the caller. This `EXEC_ROOT`/`EXEC_BRANCH` CWD choice is also what keeps two callers' `dev-server.json` entries distinct: `serve start`/`serve status`/`serve url` all key state by the container's absolute resolved path (`$EXEC_ROOT/.worktrees/$EXEC_BRANCH`, unique per caller), never by the branch name alone — so two callers whose container happens to share a branch name (e.g. two project groups, or two split branches) never collide. Every later consumer (Open Visual Follow Session, Step 4's post-merge visual verification) re-queries the server fresh via `serve url` at the point it needs the URL, rather than trusting a value cached here — a wave can run long after this bootstrap, and each Bash call is its own isolated shell (Step 0).
+Read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Create or Reuse a Container and § Bootstrap a Container Dev Server — the shared mechanisms every container, phase-container, and split-container creation and dev-server bootstrap call site below delegates to.
 
 ---
 
@@ -537,6 +454,8 @@ This needs no new CLI call: a flat file's tasks path is a direct child of `.aimi
 
 **When `PHASE_MODE=false` (flat v3.3 file, no `roadmap.json` sibling): execute.md runs byte-for-byte as it does today.** No further phase-mode logic applies anywhere in this document — Step 1.7 (Phase Claim) is skipped entirely; when `EXECUTION_MODE` is `inline` or absent (see Execution Mode Detection below), Step 2 checks out `branchName` directly in the main working tree exactly as before, while `EXECUTION_MODE=container` instead routes Step 2 through Flat Container Mode's own worktree creation (see Step 2); and Step 4's story worktrees are named `[branchName]-[story.id]` exactly as now. Phase mode is a parallel path added alongside the flat path; it never changes the flat path's behavior.
 
+**When `PHASE_MODE=true`:** read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` now — it is the single source of truth for the worktree naming/CWD, container creation, and dev-server bootstrap mechanisms every phase-mode step from Step 1.7 onward delegates to by name.
+
 ### Parse --container/--inline Override
 
 Scan `$ARGUMENTS` for an explicit `--container` or `--inline` token (mirrors the `--phase <N>` extraction style used by Step 1.7's Parse --phase Override):
@@ -566,7 +485,7 @@ If `EXECUTION_OVERRIDE` is `"conflict"`, report `--container and --inline are mu
 
 ### Parse --push Override
 
-Scan `$ARGUMENTS` for an explicit `--push` token, the same way. `PUSH_FLAG` is consumed later, only in flat container mode, at **Container Mode: Push the Branch** in Step 5 — it is agent mode's explicit opt-in to publish `[branchName]` to `origin` on completion; see that section for why an opt-in is required at all:
+Scan `$ARGUMENTS` for an explicit `--push` token, the same way. `PUSH_FLAG` is consumed later, only in flat container mode, at container-execution.md's **Container Mode: Push the Branch** (invoked from Step 5) — it is agent mode's explicit opt-in to publish `[branchName]` to `origin` on completion; see that section for why an opt-in is required at all:
 
 ```bash
 case " $ARGUMENTS " in
@@ -615,6 +534,8 @@ fi
 ```
 
 `CONTAINER_MODE` is always false when `PHASE_MODE=true` — a claimed phase already has its own container (`PHASE_CONTAINER_PATH`, see Create or Reuse the Phase Container), so flat container mode never applies during phase-mode execution. In a multi-repo layout (`AIMI_ROOT_IS_GIT_REPO=false`), `CONTAINER_MODE=true` produces one container per project group instead of one at `AIMI_ROOT` — stored in the map `CONTAINER_PATHS[group_key]` (see Per-Project Branch Setup in Step 2), keyed identically to the project-root grouping in Multi-Repo Handling above.
+
+**When `CONTAINER_MODE=true`:** read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` now (if Phase Mode Detection above didn't already — the two conditions are mutually exclusive, so this is never a second read in the same run) — it is the single source of truth for the worktree naming/CWD, container creation, dev-server bootstrap, and Step 5 teardown mechanisms every flat-container-mode step from Step 2 onward delegates to by name. A session that resolves both `PHASE_MODE` and `CONTAINER_MODE` false (inline mode, the default) never reads this file — no call site below reads it unconditionally.
 
 ### Orphaned Story Recovery
 
@@ -1055,7 +976,7 @@ Delegate to **Bootstrap a Container Dev Server** with `EXEC_ROOT="$AIMI_ROOT"` (
 
 From this point forward, for the remainder of this phase's execution:
 
-- Every Bash call that touches this phase's git state passes `PHASE_CONTAINER_PATH` explicitly — `cd "$PHASE_CONTAINER_PATH"` at the top of the call, or `git -C "$PHASE_CONTAINER_PATH"` / `$WORKTREE_MGR` invocations that take it as an argument — never assuming a CWD persisted from a prior call. This is the same "each Bash tool call is an isolated shell" rule from Step 0, applied to the container path instead of `AIMI_ROOT`. See Phase Mode: Worktree Naming and CWD above for how this threads through Step 4's wave loop.
+- Every Bash call that touches this phase's git state passes `PHASE_CONTAINER_PATH` explicitly — `cd "$PHASE_CONTAINER_PATH"` at the top of the call, or `git -C "$PHASE_CONTAINER_PATH"` / `$WORKTREE_MGR` invocations that take it as an argument — never assuming a CWD persisted from a prior call. This is the same "each Bash tool call is an isolated shell" rule from Step 0, applied to the container path instead of `AIMI_ROOT`. See `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Mode: Worktree Naming and CWD for how this threads through Step 4's wave loop.
 - `$AIMI_CLI` calls issued with CWD inside `PHASE_CONTAINER_PATH` still resolve to the main root's central `.aimi/` state with no special-casing required: `.aimi/` is gitignored, so it is absent from the container's checkout. `find_aimi_root`'s upward directory walk starts inside `PHASE_CONTAINER_PATH` (`<GIT_ROOT>/.worktrees/<phase-branch>`), finds no `.aimi/` there or in `.worktrees/`, and continues up through `<GIT_ROOT>` where the real `.aimi/` lives — passing straight through the extra nesting.
 
 ## Phase-Mode Paired Split
@@ -1089,7 +1010,7 @@ $WORKTREE_MGR create "$FRONTEND_BRANCH" --from "$PHASE_BRANCH"
 $WORKTREE_MGR create "$BACKEND_BRANCH" --from "$PHASE_BRANCH"
 ```
 
-CWD is `$PHASE_CONTAINER_PATH` — never `$DEFAULT_BRANCH`'s checkout, never `AIMI_ROOT` — so, mirroring the CWD rule Phase Mode: Worktree Naming and CWD already establishes for individual story worktrees, both split worktrees nest at `$PHASE_CONTAINER_PATH/.worktrees/$FRONTEND_BRANCH` and `$PHASE_CONTAINER_PATH/.worktrees/$BACKEND_BRANCH` — inside the phase container's own worktree tree, not a sibling of it under `AIMI_ROOT/.worktrees/`, and branched from `$PHASE_BRANCH`, not `$DEFAULT_BRANCH`.
+CWD is `$PHASE_CONTAINER_PATH` — never `$DEFAULT_BRANCH`'s checkout, never `AIMI_ROOT` — so, mirroring the CWD rule `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Mode: Worktree Naming and CWD already establishes for individual story worktrees, both split worktrees nest at `$PHASE_CONTAINER_PATH/.worktrees/$FRONTEND_BRANCH` and `$PHASE_CONTAINER_PATH/.worktrees/$BACKEND_BRANCH` — inside the phase container's own worktree tree, not a sibling of it under `AIMI_ROOT/.worktrees/`, and branched from `$PHASE_BRANCH`, not `$DEFAULT_BRANCH`.
 
 ```bash
 FRONTEND_WORKTREE_PATH="$PHASE_CONTAINER_PATH/.worktrees/$FRONTEND_BRANCH"
@@ -1138,8 +1059,9 @@ Task(
         - Skip Step 2's Main Repo Branch Setup (PHASE_MODE=true skips it exactly as
           the single-file case already does) and skip Step 1.7 entirely
         - Run Step 3 onward (reset-orphaned, validate-stories, wave loop, Post-Loop
-          Cleanup) using the Phase Mode: Worktree Naming and CWD Execution Context
-          contract exactly as written, with the pre-set PHASE_BRANCH/PHASE_CONTAINER_PATH
+          Cleanup) using the container-execution.md § Phase Mode: Worktree Naming
+          and CWD Execution Context contract exactly as written, with the pre-set
+          PHASE_BRANCH/PHASE_CONTAINER_PATH
           above standing in for the outer phase's own values — so this
           sub-orchestrator's own story worktrees are named
           "[FRONTEND_BRANCH]-[story.id]", created --from [FRONTEND_BRANCH], and
@@ -1261,7 +1183,7 @@ $WORKTREE_MGR remove "$FRONTEND_BRANCH"
 $WORKTREE_MGR remove "$BACKEND_BRANCH"
 ```
 
-`serve stop` exits 0 and reports "No dev server registered" when no server was ever started for a split (its own gate in Split Container Dev Server Bootstrap never passed) — so both calls above are always safe to issue, identical to Container Mode: Stop the Dev Server's own contract in Step 5.
+`serve stop` exits 0 and reports "No dev server registered" when no server was ever started for a split (its own gate in Split Container Dev Server Bootstrap never passed) — so both calls above are always safe to issue, identical to container-execution.md's Container Mode: Stop the Dev Server contract (invoked from Step 5).
 
 Removes only the two split worktrees. `$PHASE_CONTAINER_PATH` itself is left intact — its removal is a separate, later-timed operation owned entirely by Phase Completion's own lifecycle (the phase container is only ever torn down once the *phase* — not just this split — is fully done), never by this section.
 
@@ -1310,7 +1232,7 @@ Because this subsection's own `$WORKTREE_MGR create` call is the branch-creating
 
 ### Main Repo Branch Setup
 
-**Skip this step if `AIMI_ROOT_IS_GIT_REPO` is false, if `PHASE_MODE` is true, or if flat container mode applies (`PHASE_MODE=false` and `EXECUTION_MODE=container`, i.e. `CONTAINER_MODE=true`)** — see Multi-Repo Handling above for the first condition. In phase mode, the phase container's `$WORKTREE_MGR create` call in Step 1.7 is the only branch-creating operation for this phase; no `setup-branch` call runs against the main working tree, which is what keeps the Main Working Tree Untouched Invariant (see Phase Mode: Worktree Naming and CWD) true. In flat container mode, Flat Container Mode's own `$WORKTREE_MGR create` call above is likewise the only branch-creating operation for this run. When `EXECUTION_MODE` is `inline` or absent, this subsection runs byte-for-byte exactly as it does today — no observable change to the inline path.
+**Skip this step if `AIMI_ROOT_IS_GIT_REPO` is false, if `PHASE_MODE` is true, or if flat container mode applies (`PHASE_MODE=false` and `EXECUTION_MODE=container`, i.e. `CONTAINER_MODE=true`)** — see Multi-Repo Handling above for the first condition. In phase mode, the phase container's `$WORKTREE_MGR create` call in Step 1.7 is the only branch-creating operation for this phase; no `setup-branch` call runs against the main working tree, which is what keeps the Main Working Tree Untouched Invariant (see `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Mode: Worktree Naming and CWD) true. In flat container mode, Flat Container Mode's own `$WORKTREE_MGR create` call above is likewise the only branch-creating operation for this run. When `EXECUTION_MODE` is `inline` or absent, this subsection runs byte-for-byte exactly as it does today — no observable change to the inline path.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -1467,7 +1389,7 @@ If resolution fails, report error and STOP.
 
 Read the tasks file metadata to get maxConcurrency.
 
-**Phase mode (`PHASE_MODE=true`):** re-run `init-session` with `--file "$PHASE_TASKS_PATH"` explicitly — not the bare form — so `maxConcurrency` is read from the claimed phase's own tasks file (see Concurrency Source in Phase Mode: Worktree Naming and CWD), not any feature-root or global file. The bare form would re-run `init-session`'s mtime-based auto-discovery and could silently re-point session state at a different, more-recently-touched sibling phase file:
+**Phase mode (`PHASE_MODE=true`):** re-run `init-session` with `--file "$PHASE_TASKS_PATH"` explicitly — not the bare form — so `maxConcurrency` is read from the claimed phase's own tasks file (see Concurrency Source in `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Mode: Worktree Naming and CWD), not any feature-root or global file. The bare form would re-run `init-session`'s mtime-based auto-discovery and could silently re-point session state at a different, more-recently-touched sibling phase file:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -1573,7 +1495,7 @@ command -v agent-browser
   VISUAL_GROUP_KEY=$(printf '%s' "$FIRST_VISUAL" | jq -r '.project // "DEFAULT"')
   ```
 
-  **When `PHASE_MODE` is true** (the top-level single-file phase orchestrator, or a Phase-Mode Paired Split sub-orchestrator whose spawn prompt pre-set `PHASE_BRANCH`/`PHASE_CONTAINER_PATH` to its own split — see Spawn Split Sub-Orchestrators — so this branch applies unmodified in either case, keyed by whichever branch this session owns): rewrite `VISUAL_URL`'s origin via `serve url`, keyed by `$PHASE_BRANCH` — never a value cached from Phase Container Dev Server Bootstrap or Split Container Dev Server Bootstrap earlier in this run, since each Bash call is an isolated shell (Step 0). CWD must be `$AIMI_ROOT`, the exact same CWD Phase Container Dev Server Bootstrap used for its own `serve start` — `serve url` resolves its dev-server.json key from CWD (see `_dev_server_key` in `worktree-manager.sh`), so a mismatched CWD here would silently miss the entry rather than report it stale:
+  **When `PHASE_MODE` is true** (the top-level single-file phase orchestrator, or a Phase-Mode Paired Split sub-orchestrator whose spawn prompt pre-set `PHASE_BRANCH`/`PHASE_CONTAINER_PATH` to its own split — see Spawn Split Sub-Orchestrators — so this branch applies unmodified in either case, keyed by whichever branch this session owns): read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Rewrite a Verification URL Origin and apply it with `EXEC_ROOT="$AIMI_ROOT"` (the same CWD Phase Container Dev Server Bootstrap used for its own `serve start`), `EXEC_BRANCH="$PHASE_BRANCH"`, and `RAW_URL="$VISUAL_URL"` — never a value cached from Phase Container Dev Server Bootstrap or Split Container Dev Server Bootstrap earlier in this run, since each Bash call is an isolated shell (Step 0):
 
   ```bash
   WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
@@ -1583,9 +1505,9 @@ command -v agent-browser
   VISUAL_URL=$(printf '%s' "$SERVE_URL_JSON" | jq -r '.url')
   ```
 
-  `serve url` prints `{"url":...,"rewritten":bool}` and exits 0 in every case — no server running, and no partial/corrupt dev-server.json entry, both degrade to `rewritten:false` with `.url` echoing the raw input back unchanged (see `serve_status`'s own never-fails contract, which `serve url` reuses internally). `VISUAL_URL` is simply reassigned to `.url` either way — the same advisory-degradation outcome container mode uses below.
+  `VISUAL_URL` is simply reassigned to `.url` either way — the reference's degrade-safely contract (never fails, falls back to the raw URL unchanged) applies here unconditionally, with no gating on `.rewritten`.
 
-  **When `CONTAINER_MODE` is true and `CONTAINER_DEV_URL[VISUAL_GROUP_KEY]` resolved** (see Container Dev Server Bootstrap above; `PHASE_MODE` and `CONTAINER_MODE` are mutually exclusive — see Execution Mode Detection — so at most one of these two branches ever applies): rewrite `VISUAL_URL`'s origin via `serve url` too, keyed by this run's `branchName`, scoped to the FIRST visual story's OWN project group. This resolves the port of that group only — a second visual story from a different project group is unaffected by this rewrite and is instead resolved independently at its own post-merge verification step (Step 4). CWD is the same project root Container Dev Server Bootstrap (Step 3.3) already used for `VISUAL_GROUP_KEY` — `$AIMI_ROOT` for `"DEFAULT"`, otherwise `$AIMI_ROOT/[VISUAL_GROUP_KEY]`:
+  **When `CONTAINER_MODE` is true and `CONTAINER_DEV_URL[VISUAL_GROUP_KEY]` resolved** (see Container Dev Server Bootstrap above; `PHASE_MODE` and `CONTAINER_MODE` are mutually exclusive — see Execution Mode Detection — so at most one of these two branches ever applies): apply the same reference section with `EXEC_BRANCH` = this run's `branchName`, scoped to the FIRST visual story's OWN project group. This resolves the port of that group only — a second visual story from a different project group is unaffected by this rewrite and is instead resolved independently at its own post-merge verification step (Step 4). `EXEC_ROOT` is the same project root Container Dev Server Bootstrap (Step 3.3) already used for `VISUAL_GROUP_KEY` — `$AIMI_ROOT` for `"DEFAULT"`, otherwise `$AIMI_ROOT/[VISUAL_GROUP_KEY]`:
 
   ```bash
   WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
@@ -1709,9 +1631,9 @@ while true:
             project_roots[group_key] = AIMI_ROOT / group_key  (resolve to absolute path)
 
     # ========================================
-    # DERIVE EXEC_ROOT / EXEC_BRANCH PER PROJECT GROUP — see Execution Context:
-    # EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH in Phase Mode:
-    # Worktree Naming and CWD above. This is the only place in the wave loop
+    # DERIVE EXEC_ROOT / EXEC_BRANCH PER PROJECT GROUP — see container-
+    # execution.md's Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT,
+    # EXEC_KEEPS_BRANCH. This is the only place in the wave loop
     # and its cleanup passes that checks PHASE_MODE/CONTAINER_MODE directly —
     # every consumer below reads EXEC_ROOT[group_key]/EXEC_BRANCH[group_key]
     # instead (project_roots itself still survives untouched for the four
@@ -1904,9 +1826,9 @@ while true:
             merge_target = EXEC_BRANCH[group_key]
             succeeded_worktree_names = [all_worktrees[s.id].worktree_name for s in stories]
 
-            # cd to this group's execution root before merging (see Execution
-            # Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH in
-            # Phase Mode: Worktree Naming and CWD) -- merge-all issues a bare
+            # cd to this group's execution root before merging (see container-
+            # execution.md's Execution Context: EXEC_ROOT, EXEC_BRANCH,
+            # EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH) -- merge-all issues a bare
             # `git checkout <target-branch>` against whatever repo its CWD belongs
             # to, so running it from AIMI_ROOT in phase mode would check the phase
             # branch out onto the main working tree, violating the Main Working
@@ -1975,8 +1897,8 @@ while true:
                     # `group_key` is already in scope here from the enclosing "for
                     # group_key, stories in succeeded_by_project" loop above — this
                     # story's own project group. Discriminates on EXEC_OWNS_ROOT (see
-                    # Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT,
-                    # EXEC_KEEPS_BRANCH in Phase Mode: Worktree Naming and CWD) rather
+                    # container-execution.md's Execution Context: EXEC_ROOT,
+                    # EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH) rather
                     # than checking PHASE_MODE/CONTAINER_MODE separately at this top
                     # level: false only for inline mode (no shared server exists to
                     # rewrite against), true for both phase and container mode, which
@@ -1994,19 +1916,14 @@ while true:
                         # two modes' own distinct port-acquisition mechanisms — never
                         # again as a top-level EXEC_ROOT/EXEC_BRANCH mode gate.
                         if PHASE_MODE:
-                            # Fresh `serve url` call for PHASE_BRANCH — never a value
-                            # cached from Phase/Split Container Dev Server Bootstrap or
-                            # Step 3.3 earlier in this run: a wave can run long after
-                            # either, and each Bash call is an isolated shell (Step 0).
-                            # Inside a split sub-orchestrator, PHASE_BRANCH is already
-                            # that split's own branch (see Spawn Split Sub-Orchestrators),
-                            # so this applies unmodified one level deeper too. CWD is
-                            # closed explicitly to $AIMI_ROOT — the same CWD Phase
-                            # Container Dev Server Bootstrap used for its own `serve
-                            # start` — rather than relying on the ambient CWD survived
-                            # from an earlier Bash call, since `serve url` resolves its
-                            # dev-server.json key from CWD (see `_dev_server_key` in
-                            # `worktree-manager.sh`).
+                            # Apply container-execution.md's § Rewrite a Verification
+                            # URL Origin with EXEC_ROOT="$AIMI_ROOT", EXEC_BRANCH=
+                            # "$PHASE_BRANCH" — never a value cached from Phase/Split
+                            # Container Dev Server Bootstrap or Step 3.3 earlier in
+                            # this run. Inside a split sub-orchestrator, PHASE_BRANCH
+                            # is already that split's own branch (see Spawn Split
+                            # Sub-Orchestrators), so this applies unmodified one level
+                            # deeper too.
                             ```bash
                             WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
                             : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
@@ -2030,9 +1947,10 @@ while true:
                                 SKIP_VISUAL=true
                         else:
                             # CONTAINER_MODE — EXEC_OWNS_ROOT is true and PHASE_MODE is
-                            # false, so this is the only remaining case. Reads the Step
-                            # 3.3 cache exactly as today, keyed by this story's own
-                            # project group.
+                            # false, so this is the only remaining case. Gates on the
+                            # Step 3.3 cache before applying container-execution.md's
+                            # § Rewrite a Verification URL Origin, keyed by this story's
+                            # own project group.
                             if group_key not in CONTAINER_DEV_URL:
                                 # No dev server ever resolved a port for this group (see Container
                                 # Dev Server Bootstrap in Step 3.3) — degrade to skipped. mark-complete
@@ -2175,8 +2093,8 @@ Output your full structured review under the heading '## Design Implementation R
                         Report: "  Dependents proceed immediately (non-blocking)."
 
     # Remove all worktrees from this wave (per project group, EXEC_ROOT[wt.group_key]
-    # — see Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT,
-    # EXEC_KEEPS_BRANCH in Phase Mode: Worktree Naming and CWD). Branch deletion
+    # — see container-execution.md's Execution Context: EXEC_ROOT, EXEC_BRANCH,
+    # EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH). Branch deletion
     # here is unconditional in every mode (no --keep-branch) — container mode's
     # own teardown (outline:08) is the only removal call that preserves branchName.
     for full_story_id, wt in all_worktrees:
@@ -2200,7 +2118,7 @@ Output your full structured review under the heading '## Design Implementation R
 
 After the wave loop ends (all stories processed or deadlock):
 
-**Phase and container mode (`EXEC_OWNS_ROOT=true`):** cleanup runs per project group with CWD = `EXEC_ROOT[group_key]`, matching worktrees named `"[EXEC_BRANCH[group_key]]-US-*"` — the same derivation rule as Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH above (`PHASE_CONTAINER_PATH`/`PHASE_BRANCH` in phase mode, `CONTAINER_PATHS[group_key]`/`branchName` in container mode). Step 4's own wave loop rebuilds `EXEC_ROOT`/`EXEC_BRANCH` fresh each wave, scoped to that wave's own stories; Post-Loop Cleanup runs after the loop ends, so it re-derives them here across every unique `group_key` with at least one story scheduled this run, rather than reading a stale, single-wave-scoped copy. In phase mode every `group_key` resolves to the same `PHASE_CONTAINER_PATH`/`PHASE_BRANCH` — in the common case of a single group_key this degenerates to exactly the single iteration today's phase-only cleanup already runs; on the rarer phase-mode wave that grouped stories under more than one `group_key`, the loop below repeats that same pass once per group_key, each an idempotent no-op against the worktrees the first pass already swept, never a different path or branch. The main working tree (`AIMI_ROOT`) is never `cd`'d into by this step.
+**Phase and container mode (`EXEC_OWNS_ROOT=true`):** cleanup runs per project group with CWD = `EXEC_ROOT[group_key]`, matching worktrees named `"[EXEC_BRANCH[group_key]]-US-*"` — the same derivation rule as `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md`'s Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH subsection (`PHASE_CONTAINER_PATH`/`PHASE_BRANCH` in phase mode, `CONTAINER_PATHS[group_key]`/`branchName` in container mode). Step 4's own wave loop rebuilds `EXEC_ROOT`/`EXEC_BRANCH` fresh each wave, scoped to that wave's own stories; Post-Loop Cleanup runs after the loop ends, so it re-derives them here across every unique `group_key` with at least one story scheduled this run, rather than reading a stale, single-wave-scoped copy. In phase mode every `group_key` resolves to the same `PHASE_CONTAINER_PATH`/`PHASE_BRANCH` — in the common case of a single group_key this degenerates to exactly the single iteration today's phase-only cleanup already runs; on the rarer phase-mode wave that grouped stories under more than one `group_key`, the loop below repeats that same pass once per group_key, each an idempotent no-op against the worktrees the first pass already swept, never a different path or branch. The main working tree (`AIMI_ROOT`) is never `cd`'d into by this step.
 
 ```
 for each unique group_key with at least one story scheduled this run:
@@ -2488,7 +2406,7 @@ $WORKTREE_MGR serve stop "$PHASE_BRANCH"
 
 CWD is `$AIMI_ROOT`, the same CWD Phase Container Dev Server Bootstrap used for its own `serve start "$PHASE_BRANCH"` in Step 1.7 — never `$PHASE_CONTAINER_PATH` — since `serve stop` resolves its dev-server.json key from CWD (see `_dev_server_key` in `worktree-manager.sh`); a mismatched CWD here would silently miss the registered entry instead of stopping it.
 
-`serve stop` kills the dev server's full process group and clears its state entry; it exits 0 and reports "No dev server registered" when no server was ever started — identical to Container Mode: Stop the Dev Server's own contract in Step 5. This only runs on the `completed` path reached here: every non-completion exit above it in Phase Completion (the pending-count guard, Creates Verification's `verification_failed` branch, and Write Handoff's failure branch) returns before this subsection, so a phase that ends on deadlock, a gate-blocked wave, or `verification_failed` never calls `serve stop` — its dev server stays alive between waves and across a paused session, resumable via `serve status` on the next `/aimi:execute` run against the same phase, exactly like the flat container's own resumable contract.
+`serve stop` kills the dev server's full process group and clears its state entry; it exits 0 and reports "No dev server registered" when no server was ever started — identical to container-execution.md's Container Mode: Stop the Dev Server contract (invoked from Step 5). This only runs on the `completed` path reached here: every non-completion exit above it in Phase Completion (the pending-count guard, Creates Verification's `verification_failed` branch, and Write Handoff's failure branch) returns before this subsection, so a phase that ends on deadlock, a gate-blocked wave, or `verification_failed` never calls `serve stop` — its dev server stays alive between waves and across a paused session, resumable via `serve status` on the next `/aimi:execute` run against the same phase, exactly like the flat container's own resumable contract.
 
 ### Offer a Pull Request
 
@@ -2554,97 +2472,13 @@ When execution ends (all stories complete, or deadlock detected):
 
 > **PHASE_MODE scope note:** this step's reporting is written for the flat-mode case (CWD = `AIMI_ROOT`, `HEAD` on `branchName`). In phase mode, run this step's commands with CWD inside `PHASE_CONTAINER_PATH` and substitute `PHASE_BRANCH` for `branchName` / `CONTAINER_BASE` for `DEFAULT_BRANCH` where used below. Phase-level completion — verifying the claimed phase's `creates`, writing `handoff.md`, updating roadmap status, offering a PR, and offering or auto-continuing to the next phase — is handled entirely by the **Phase Completion** section above, which runs before this step whenever `PHASE_MODE=true` and the phase's own pending count reaches zero. This step still runs afterward, in both modes, to report story-level completion for the phase's own tasks file.
 
-> **CONTAINER_MODE scope note:** when `CONTAINER_MODE=true` and `PHASE_MODE=false` (flat container-mode execution — see Execution Mode Detection in Step 1), the **If all stories complete** branch below runs three additional ordered steps before its existing report: stop each project group's dev server, confirm and (unless declined or not opted into) push `[branchName]` to `origin`, then remove each project group's container while preserving its branch. See **Container Mode: Stop the Dev Server**, **Container Mode: Push the Branch**, and **Container Mode: Remove the Container** immediately below — the order there is load-bearing; removing a container before its dev server is stopped orphans that server, still holding its port with no backing directory. When `CONTAINER_MODE=false` (inline mode, the default and unchanged), none of the three subsections apply: no `git push` is invoked, no container is removed, and `serve stop` is never called.
+> **CONTAINER_MODE scope note:** when `CONTAINER_MODE=true` and `PHASE_MODE=false` (flat container-mode execution — see Execution Mode Detection in Step 1), the **If all stories complete** branch below runs three additional ordered steps before its existing report: stop each project group's dev server, confirm and (unless declined or not opted into) push `[branchName]` to `origin`, then remove each project group's container while preserving its branch. Read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Container Mode: Stop the Dev Server, § Container Mode: Push the Branch, and § Container Mode: Remove the Container immediately below — the order there is load-bearing; removing a container before its dev server is stopped orphans that server, still holding its port with no backing directory. When `CONTAINER_MODE=false` (inline mode, the default and unchanged), none of the three apply: no `git push` is invoked, no container is removed, and `serve stop` is never called.
 >
-> **Container removal is completion-path-only.** The **Container Mode: Remove the Container** step below is the only place in flat container mode that `$WORKTREE_MGR remove <branchName>` is ever called against the feature container itself — as opposed to a per-story worktree nested inside it. The **If deadlock detected** branch below, the per-wave merge-conflict report path (Step 4), and the Error Recovery section's **Abandoning a Containerized Run** procedure never call it outside of this completion path or that explicit, user-initiated abandonment — every other exit leaves the feature container (and any dev server inside it) exactly as it was. (Phase mode's own container, `PHASE_CONTAINER_PATH`, is never removed anywhere in this document — see Phase Completion's **Mark Phase Completed**, which updates roadmap status only — so the same guarantee holds there trivially; the phase-mode split-merge conflict report below states it explicitly anyway, for parity with the flat case.)
+> **Container removal is completion-path-only.** The reference's **Container Mode: Remove the Container** step is the only place in flat container mode that `$WORKTREE_MGR remove <branchName>` is ever called against the feature container itself — as opposed to a per-story worktree nested inside it. The **If deadlock detected** branch below, the per-wave merge-conflict report path (Step 4), and the reference's **Abandoning a Containerized Run** procedure never call it outside of this completion path or that explicit, user-initiated abandonment — every other exit leaves the feature container (and any dev server inside it) exactly as it was. (Phase mode's own container, `PHASE_CONTAINER_PATH`, is never removed anywhere in this document — see Phase Completion's **Mark Phase Completed**, which updates roadmap status only — so the same guarantee holds there trivially; the phase-mode split-merge conflict report below states it explicitly anyway, for parity with the flat case.)
 
 ### If all stories complete:
 
-#### Container Mode: Stop the Dev Server
-
-**Runs only when `CONTAINER_MODE=true`, before anything else in this list.** Stopping the dev server must complete before its container is removed further below — otherwise the server is orphaned, still holding its port, with no backing worktree directory left to serve it.
-
-For each unique `group_key` with a container from this run (see Container Paths Per Project Group):
-
-```bash
-WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-if [ "[group_key]" = "DEFAULT" ]; then
-  cd "$AIMI_ROOT"
-else
-  cd "$AIMI_ROOT/[group_key]"
-fi
-$WORKTREE_MGR serve stop [branchName]
-```
-
-CWD is the same project-root conditional Container Dev Server Bootstrap already used before its `serve start [branchName]` for this group — never `cd [CONTAINER_PATHS[group_key]]` into the container itself — since `serve stop` resolves its dev-server.json key from CWD (see `_dev_server_key` in `worktree-manager.sh`); a mismatched CWD here would silently miss the registered entry instead of stopping it.
-
-`serve stop` (outline 04's contract) kills the dev server's full process group and clears its state entry; it exits 0 and reports "No dev server registered" when no server was ever started for that container (no `package.json`, or the wave loop never launched one) — so this call is always safe to issue. Wait for it to finish before moving to the next subsection.
-
-#### Container Mode: Push the Branch
-
-**Runs only when `CONTAINER_MODE=true`, after every dev-server stop above has completed.** Pushing publishes `[branchName]` to `origin` — an outward-facing action, and `CONTAINER_MODE` itself is just a field inside the tasks file, so a tasks file must never be able to trigger a publish on its own. Confirm before pushing, the same interactivity-gated pattern Phase Completion's **Next Phase** uses for its own AskUserQuestion/agent-mode branching. Resolve interactivity fresh — each Bash call is an isolated shell (Step 0):
-
-```bash
-AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
-```
-
-- **`INTERACTIVE_MODE=picker`:** use **AskUserQuestion** with exactly two options:
-  ```
-  All stories are complete. Push [branchName] to origin now?
-
-  A — Push now
-  B — Skip (push it yourself later, or run /aimi:open-pr)
-  ```
-  **Option A:** proceed to the push below. **Option B:** set `SKIP_PUSH=true` and skip straight to **Container Mode: Remove the Container**.
-
-- **`INTERACTIVE_MODE=agent`:** skip AskUserQuestion — an unattended run cannot answer a prompt. Push only when `--push` was passed on `$ARGUMENTS` (see Parse --push Override in Step 1):
-  ```bash
-  if [ "$PUSH_FLAG" = "true" ]; then
-    echo "agent-mode: container-push [branchName]"
-  else
-    echo "agent-mode: container-push skipped (no --push flag)"
-    SKIP_PUSH=true
-  fi
-  ```
-
-**When `SKIP_PUSH` is not set:** for each unique `group_key`, push `[branchName]` to `origin` from inside that group's container. Read and validate `branchName` first — defense in depth, mirroring `PHASE_BRANCH`'s validate-once-quote-everywhere discipline (`cmd_init_session` already rejected an invalid `branchName` in Step 1):
-
-```bash
-BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
-if ! [[ "$BRANCH_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
-  echo "Invalid branchName: $BRANCH_NAME" >&2
-  exit 1
-fi
-cd [CONTAINER_PATHS[group_key]]
-PUSH_OUTPUT=$(git push -u origin "$BRANCH_NAME" 2>&1)
-PUSH_EXIT=$?
-if [ "$PUSH_EXIT" -ne 0 ]; then
-  echo "$PUSH_OUTPUT"
-fi
-```
-
-If the push fails (offline, no remote permission, branch rejected, etc.), `$PUSH_OUTPUT` is reported verbatim in the completion report below — do not retry, do not prompt interactively, and never roll back any story's completed status. Continue unconditionally to the next subsection regardless of `$PUSH_EXIT` or `$SKIP_PUSH`: neither a failed nor a skipped push here is fatal, because `/aimi:open-pr`'s own push step (outline 11) retries the push when the user later runs `/aimi:open-pr --branch [branchName]`, so the Next Steps suggestions below stay safe to print either way.
-
-#### Container Mode: Remove the Container
-
-**Runs only when `CONTAINER_MODE=true`, after the push above completes — regardless of its outcome.** A worktree cannot be removed while CWD sits inside it, so return to `$AIMI_ROOT` first:
-
-```bash
-WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
-if ! [[ "$BRANCH_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
-  echo "Invalid branchName: $BRANCH_NAME" >&2
-  exit 1
-fi
-cd "$AIMI_ROOT"
-$WORKTREE_MGR remove "$BRANCH_NAME" --keep-branch
-```
-
-Repeat once per `group_key` in a multi-repo run. `--keep-branch` (outline 02) preserves the local branch ref: this container is the deliverable the report below is about to point the user at for review and a PR, not a throwaway per-story worktree, so removing it without `--keep-branch` would delete the very branch the Next Steps suggestions tell the user to open a PR from. This call must never run before **Container Mode: Stop the Dev Server** above.
+**When `CONTAINER_MODE=true`:** read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Container Mode: Stop the Dev Server, § Container Mode: Push the Branch, and § Container Mode: Remove the Container, and run all three, in that order, before continuing below. When `CONTAINER_MODE=false` (inline mode), skip all three and continue directly below.
 
 Count commits on this branch:
 
@@ -2894,9 +2728,4 @@ The loop will automatically skip completed stories and continue from the next pe
 
 ### Abandoning a Containerized Run
 
-Container mode (flat or phase) never removes the feature/phase container or stops its dev server outside the completion path (see Step 5's Container removal is completion-path-only note) — a deadlock, a gate-blocked wave, a merge conflict, or a crash all leave both alive on disk for inspection or resumption. Before this feature existed, giving up on flat in-progress work was just switching branches; in container mode a stale container directory and possibly a still-running dev server survive instead, so abandoning a run for good — rather than resuming it — needs its own manual teardown, run from `$AIMI_ROOT` (or the relevant project root in a multi-repo layout, never from inside the container itself, since a worktree cannot be removed while CWD sits inside it) in this order:
-
-1. **Stop the dev server first:** `$WORKTREE_MGR serve stop <branchName>` (or `<PHASE_BRANCH>` in phase mode). This kills the dev server's full process group — not just the pid recorded in `.aimi/state/dev-server.json` — and clears that state entry whether or not a live process was found.
-2. **Then remove the container and its branch:** `$WORKTREE_MGR remove <branchName>`. Omitting `--keep-branch` here is intentional — unlike the completion-path removal in Step 5 (which preserves the branch for review and a PR), abandonment discards the branch too. This is the container-mode replacement for what used to be a plain branch switch.
-
-Never trust or reuse a `.aimi/state/dev-server.json` pid entry on a later resume based on liveness alone. A `kill -0` / `_is_pid_alive` probe (the same primitive `aimi-cli.sh` uses for stale-claim recovery) only proves *something* is running at that pid right now — pids get recycled by the OS, so a live pid is never by itself proof it is the dev server this tool started. The actual guarantee is `worktree-manager.sh`'s `dev_server_entry_is_ours`: it additionally compares the entry's recorded identity token (the process's `/proc/pid/stat` starttime, or `ps -o lstart=` as a portable fallback) against that pid's identity right now, and only a match counts. `serve start`'s reuse path and `serve stop`'s process-group kill both require that match before ever touching the pid — a live pid with a missing (pre-upgrade entry) or mismatched identity is treated exactly like a dead one: never reused, never signaled. (`$WORKTREE_MGR serve status <branchName>` still reports a dead-pid entry as `running:false` using the plain liveness probe alone, but — unlike a resume's reuse/kill decisions — never removes the stale entry itself: status is a true read-only verb now; only `serve start`'s own reuse path and `serve stop` ever write `dev-server.json`.)
+Read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Abandoning a Containerized Run — container mode (flat or phase) never removes the feature/phase container or stops its dev server outside the completion path, so giving up on a run for good (rather than resuming it) needs its own manual teardown; the reference defines the order (stop the dev server, then remove the container) and the pid-identity guarantees that make it safe.
