@@ -1,6 +1,7 @@
 ---
 name: aimi:next
 description: Execute the next pending story from tasks.json
+argument-hint: "[--base <branch>]"
 disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Bash(git:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Bash(WORKTREE_MGR=*), Bash($WORKTREE_MGR:*), Bash(npm:*), Bash(bun:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(tsc:*), Bash(eslint:*), Bash(prettier:*), Task
 ---
@@ -84,24 +85,38 @@ EXECUTION_MODE=$(echo "$METADATA_JSON" | jq -r '.execution // "inline"')
 BRANCH_NAME=$(echo "$METADATA_JSON" | jq -r '.branchName')
 ```
 
-**When `EXECUTION_MODE` is not exactly `"container"`** (absent, `"inline"`, or any unrecognized value — every non-`"container"` value resolves to inline per the fail-safe default in `execution-mode.md`): leave `CONTAINER_PATH` unset and skip the rest of this step entirely. Step 4 proceeds exactly as it does today — no worktree resolution, no `WORKTREE_PATH` interpolation.
+**When `EXECUTION_MODE` is not exactly `"container"`** (absent, `"inline"`, or any unrecognized value — every non-`"container"` value resolves to inline per the fail-safe default in `execution-mode.md`): leave `CONTAINER_PATH` unset, set `CONTAINER_MODE=false`, and skip the rest of this step entirely. Step 4 proceeds exactly as it does today — no worktree resolution, no `WORKTREE_PATH` interpolation.
 
 **When `EXECUTION_MODE` is `"container"`:**
 
 1. **Validate `BRANCH_NAME`** against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` before using it in any git or worktree command. If it does not match, report `Invalid branchName in metadata.branchName: [BRANCH_NAME]` and STOP.
 
-2. **Resolve `CONTAINER_ROOT`** — one container per project group, following the same convention execute.md's flat mode uses (context.md decision 3):
+2. **Parse `--base` Argument.** Scan `$ARGUMENTS` for an explicit `--base <branch>` token (mirrors the `--phase <N>` extraction style used by `/aimi:execute` and the `--branch <name>` extraction style used by `/aimi:open-pr`):
+
+```bash
+case " $ARGUMENTS " in
+  *" --base "*)
+    BASE_BRANCH=$(echo "$ARGUMENTS" | sed -n 's/.*--base[[:space:]]\+\([^ ]*\).*/\1/p')
+    ;;
+  *)
+    BASE_BRANCH=""
+    ;;
+esac
+```
+
+If `$BASE_BRANCH` is non-empty, validate it before any other git/worktree call:
+
+```bash
+echo "$BASE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'
+```
+
+If validation fails, report `Invalid --base value: $BASE_BRANCH` and STOP. When `--base` was not passed, `$BASE_BRANCH` stays empty and the container is created from `$DEFAULT_BRANCH`, exactly as before this story.
+
+3. **Resolve `CONTAINER_ROOT`** — one container per project group, following the same convention execute.md's flat mode uses (context.md decision 3):
    - `CONTAINER_ROOT = PROJECT_PATH` (from Step 1b) when the story has a `project` field
    - `CONTAINER_ROOT = AIMI_ROOT` (i.e. `$PWD`) otherwise
 
-3. **Test whether the container already exists — before calling create.** This is what gates install-deps below to first-creation only:
-
-```bash
-CONTAINER_DIR="$CONTAINER_ROOT/.worktrees/$BRANCH_NAME"
-if [ -d "$CONTAINER_DIR" ]; then CONTAINER_EXISTED=true; else CONTAINER_EXISTED=false; fi
-```
-
-4. **Detect the default branch to create the container from.** Scope detection to `CONTAINER_ROOT` via `--project` only when Step 1b resolved a `PROJECT_PATH` — mirrors execute.md's Main-Repo-vs-Per-Project split:
+4. **Detect the default branch to create the container from.** Scope detection to `CONTAINER_ROOT` via `--project` only when Step 1b resolved a `PROJECT_PATH` — mirrors execute.md's Main-Repo-vs-Per-Project split. `DEFAULT_BRANCH` is computed unconditionally, regardless of `--base` — Step 5's completion report counts commits against it later:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -111,6 +126,11 @@ if [ -n "$PROJECT_PATH" ]; then
 else
   DEFAULT_BRANCH=$($AIMI_CLI detect-default-branch)
 fi
+if [ -n "$BASE_BRANCH" ]; then
+  CONTAINER_BASE="$BASE_BRANCH"
+else
+  CONTAINER_BASE="$DEFAULT_BRANCH"
+fi
 ```
 
 5. **Create or reuse the container**, with CWD set to `CONTAINER_ROOT` so `worktree-manager.sh`'s own `git rev-parse --show-toplevel` resolves against the right repo:
@@ -119,13 +139,25 @@ fi
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
 cd "$CONTAINER_ROOT"
-$WORKTREE_MGR create "$BRANCH_NAME" --from "$DEFAULT_BRANCH"
+CREATE_OUTPUT=$($WORKTREE_MGR create "$BRANCH_NAME" --from "$CONTAINER_BASE" 2>&1)
+CREATE_EXIT=$?
+if [ "$CREATE_EXIT" -ne 0 ]; then
+  echo "$CREATE_OUTPUT"
+fi
+```
+
+`$WORKTREE_MGR create` is branch-aware: it reuses the target directory silently when it's already a worktree there, creates `$BRANCH_NAME` fresh when the branch doesn't exist yet, attaches to the branch without recreating it when the branch exists but no worktree holds it (e.g. after a prior run's `remove --keep-branch`), and exits non-zero — naming the worktree that holds it — when another worktree (including the main working tree) already has it checked out. If `CREATE_EXIT` is non-zero, `$CREATE_OUTPUT` (just printed above) already names the occupying worktree — STOP here without any further checkout-conflict detection or remediation, and without `AskUserQuestion`.
+
+If `CREATE_EXIT` is zero, continue:
+
+```bash
 CONTAINER_PATH="$CONTAINER_ROOT/.worktrees/$BRANCH_NAME"
+CONTAINER_MODE=true
 ```
 
 `$WORKTREE_MGR create` reuses an existing target directory silently instead of recreating it, so calling it on every invocation is idempotent — a second `/aimi:next` run against the same branch reuses `$CONTAINER_PATH` unchanged instead of recreating it. No per-story worktree is created; the story executes and commits directly inside this container, on `$BRANCH_NAME`.
 
-6. **Install dependencies on first creation only.** When `CONTAINER_EXISTED` was `false`:
+6. **Install dependencies on every create-or-reuse call, unconditionally** — never gated on whether the container directory already existed:
 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
@@ -133,9 +165,7 @@ WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/w
 $WORKTREE_MGR install-deps "$BRANCH_NAME" || true
 ```
 
-`install-deps` is advisory (see `skills/git-worktree/scripts/worktree-manager.sh`) — never let a non-zero exit block story execution; log a warning and continue regardless of outcome.
-
-When `CONTAINER_EXISTED` was `true`, skip this call entirely — dependencies are already installed from a prior `/aimi:next` invocation.
+`install-deps` is advisory (see `skills/git-worktree/scripts/worktree-manager.sh`) — never let a non-zero exit block story execution; log a warning and continue regardless of outcome. Calling it unconditionally, instead of gating on the container directory's pre-existence, means a first install that failed is retried on the next invocation rather than being skipped forever just because the directory already exists.
 
 ## Step 2: Load Project Guidelines
 
@@ -221,12 +251,79 @@ Mark the story as complete:
 $AIMI_CLI mark-complete [STORY_ID]
 ```
 
-Report success:
+**When `CONTAINER_MODE` is false** (inline mode, unchanged): report success exactly as before:
 ```
 [STORY_ID] - [STORY_TITLE] completed successfully.
 
 Run /aimi:next for the next story.
 Run /aimi:status to see overall progress.
+```
+
+**When `CONTAINER_MODE` is true:** check whether any stories remain pending:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI count-pending
+```
+
+**If the result is greater than 0** — stories remain, and the container survives untouched for the next `/aimi:next` invocation. Report:
+```
+[STORY_ID] - [STORY_TITLE] completed successfully.
+
+Work is in [CONTAINER_PATH] on branch [BRANCH_NAME].
+
+Run /aimi:next for the next story.
+Run /aimi:status to see overall progress.
+```
+
+**If the result is 0** — this was the last pending story. Run **Container Mode: Complete the Run** below, then report its output instead of the message above.
+
+#### Container Mode: Complete the Run
+
+**Runs only when `CONTAINER_MODE` is true and `count-pending` above returned 0.** Push the branch and remove the container while keeping the branch — same push-never-blocks contract and same ordering as execute.md's own Container Mode: Push the Branch / Remove the Container in its Step 5, minus the dev server stop (next.md never starts one — see notes above).
+
+1. **Push the branch (best-effort).** From inside the container:
+
+```bash
+cd "$CONTAINER_PATH"
+PUSH_OUTPUT=$(git push -u origin "$BRANCH_NAME" 2>&1)
+PUSH_EXIT=$?
+if [ "$PUSH_EXIT" -ne 0 ]; then
+  echo "$PUSH_OUTPUT"
+fi
+```
+
+If the push fails (offline, no remote permission, branch rejected, etc.), `$PUSH_OUTPUT` is reported verbatim — never retried automatically, and never reverts the `mark-complete` above. Continue unconditionally to the next step regardless of `$PUSH_EXIT`: `/aimi:open-pr`'s own push step retries the push when the user later runs `/aimi:open-pr --branch [BRANCH_NAME]`, so the Next Steps suggestions below stay safe to print either way.
+
+2. **Remove the container, keeping the branch.** A worktree cannot be removed while CWD sits inside it, so return to `$CONTAINER_ROOT` first:
+
+```bash
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+cd "$CONTAINER_ROOT"
+$WORKTREE_MGR remove "$BRANCH_NAME" --keep-branch
+```
+
+`--keep-branch` preserves the local branch ref: this container is the deliverable the report below points the user at for review and a PR, not a throwaway per-story worktree — removing it without `--keep-branch` would delete the very branch the Next Steps suggestions tell the user to open a PR from.
+
+3. **Count commits against the default branch.** The branch is no longer checked out anywhere after the removal above, so count against the branch name directly, from `$CONTAINER_ROOT`:
+
+```bash
+cd "$CONTAINER_ROOT"
+git log --oneline "$DEFAULT_BRANCH".."$BRANCH_NAME" | wc -l
+```
+
+4. Report:
+```
+All stories complete! [STORY_ID] - [STORY_TITLE] completed successfully.
+
+Branch: [BRANCH_NAME]
+Commits: [count]
+
+Review commits: `git log --oneline -[count]`
+Open a PR: `/aimi:open-pr --branch [BRANCH_NAME]`
+Run `/aimi:review [BRANCH_NAME]` for code review
 ```
 
 ### If Task fails (first attempt):
