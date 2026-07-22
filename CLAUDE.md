@@ -27,13 +27,14 @@ A single source tree serves both hosts. Anything touching CLI path resolution, e
 
 ### Testing
 
-The only test suite is the CLI test suite:
+Two independent test suites, both plain Bash:
 
 ```bash
 bash plugins/aimi-engineering/scripts/test-aimi-cli.sh
+bash plugins/aimi-engineering/scripts/test-worktree-manager.sh
 ```
 
-There is no build step, no lint step, no package manager — everything is Bash. Run this suite after any change to `plugins/aimi-engineering/scripts/aimi-cli.sh` or files it sources.
+There is no build step, no lint step, no package manager — everything is Bash. Run `test-aimi-cli.sh` after any change to `plugins/aimi-engineering/scripts/aimi-cli.sh` or files it sources. Run `test-worktree-manager.sh` after any change to `plugins/aimi-engineering/skills/git-worktree/scripts/worktree-manager.sh`.
 
 ### OpenCode install verification
 
