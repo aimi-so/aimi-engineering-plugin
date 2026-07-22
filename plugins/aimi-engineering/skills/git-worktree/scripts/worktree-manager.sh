@@ -630,6 +630,17 @@ merge_all_worktrees() {
 # name, since two project groups in a multi-repo layout can share the same
 # `[branchName]`. Every failure mode here degrades gracefully (exit 0, clear
 # message) except a missing worktree-name argument, which is a usage error.
+#
+# A live pid is NOT proof of identity. The OS recycles pids, so a dead dev
+# server's pid can be reassigned to a completely unrelated process before
+# stop/start ever runs again. _is_pid_alive (below) only answers "is
+# something running at this pid right now" — that alone is never grounds to
+# kill or reuse a registered pid. The actual safety gate is
+# dev_server_entry_is_ours, which additionally compares the pid's current
+# process-identity token (its /proc/pid/stat starttime, or `ps -o lstart=`
+# where /proc is unavailable) against the token recorded in the entry at
+# start time; a live pid with a missing or mismatched token is treated
+# exactly like a dead one.
 
 # Portable exclusive lock (Linux: flock, macOS: mkdir spinlock).
 # Usage: call inside a subshell with an FD 200 redirect: ( _lock "$f"; ... ) 200>"$f"
@@ -654,6 +665,8 @@ _lock() {
 # Process-liveness probe, mirroring aimi-cli.sh's _is_pid_alive: a kill -0
 # signal-zero probe. "No such process" -> dead. "Exists, not permitted to
 # signal" -> alive (a foreign/other-user process is still a live process).
+# Liveness alone is NOT identity — see dev_server_entry_is_ours below, the
+# real gate used before any kill or reuse of a registered dev-server.json pid.
 _is_pid_alive() {
   local pid="$1"
   if ! [[ "$pid" =~ ^[0-9]+$ ]] || [[ "$pid" -le 0 ]]; then
@@ -668,6 +681,65 @@ _is_pid_alive() {
     return 0
   fi
   return 1
+}
+
+# Process-identity token for <pid>: starttime (field 22 overall of
+# /proc/pid/stat on Linux), falling back to `ps -o lstart=` when /proc is
+# unavailable or unreadable (e.g. macOS). This is what tells "this exact
+# process" apart from "some process that now happens to hold this pid" — a
+# plain liveness check cannot, since pids get recycled by the OS.
+#
+# /proc/pid/stat's second field (comm) is parenthesized and may itself
+# contain spaces or parens, so fields can't be split by position from the
+# start of the line; instead, strip everything up to and including the
+# LAST ')' — the remainder starts at field 3 (state), so its 20th
+# whitespace-separated field is field 22 (starttime) overall.
+#
+# Prints empty on any failure. Callers MUST treat empty as "no identity
+# proof" — never as a wildcard match.
+process_identity() {
+  local pid="$1"
+  if ! [[ "$pid" =~ ^[0-9]+$ ]] || [[ "$pid" -le 0 ]]; then
+    return 0
+  fi
+  if [[ -r "/proc/$pid/stat" ]]; then
+    local stat_line rest starttime
+    stat_line=$(cat "/proc/$pid/stat" 2>/dev/null) || true
+    if [[ -n "$stat_line" ]]; then
+      rest="${stat_line##*)}"
+      starttime=$(printf '%s' "$rest" | awk '{print $20}')
+      if [[ -n "$starttime" ]]; then
+        printf '%s' "$starttime"
+        return 0
+      fi
+    fi
+  fi
+  # Portable fallback: /proc absent (macOS) or unreadable for this pid.
+  if command -v ps &>/dev/null; then
+    local lstart
+    lstart=$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    if [[ -n "$lstart" ]]; then
+      printf '%s' "$lstart"
+      return 0
+    fi
+  fi
+  return 0
+}
+
+# The real safety gate before killing or reusing a dev-server.json pid:
+# alive AND the entry's recorded identity token is non-empty AND it matches
+# the pid's identity right now. Any other combination — dead pid, an empty
+# recorded token (a pre-upgrade entry written before this field existed), or
+# a mismatched token (a recycled pid) — is a hard failure, so a single
+# non-ours pid is never treated as ours by one caller and foreign by another.
+dev_server_entry_is_ours() {
+  local pid="$1" recorded_identity="$2"
+  _is_pid_alive "$pid" || return 1
+  [[ -n "$recorded_identity" ]] || return 1
+  local current_identity
+  current_identity=$(process_identity "$pid")
+  [[ -n "$current_identity" ]] || return 1
+  [[ "$current_identity" == "$recorded_identity" ]]
 }
 
 # Walk upward from CWD looking for a .aimi/ directory, mirroring aimi-cli.sh's
@@ -980,18 +1052,47 @@ serve_start() {
 
   local state_file="$aimi_root/.aimi/state/dev-server.json"
 
-  # Reuse a live registered entry after a pid-alive check; discard a dead one.
+  # Reuse a registered entry only when it survives BOTH gates: identity
+  # (pid alive AND its identity token matches what was recorded at start —
+  # see dev_server_entry_is_ours) and, only once identity passes, a fresh
+  # port-ownership re-check (the registered port may have been taken over by
+  # something else in the interval since the last write). Any other case —
+  # dead pid, mismatched/missing identity, or a port no longer held by that
+  # pid's process group — is discarded exactly like an absent entry, and
+  # falls through to the fresh-start flow below.
   local existing_entry
   existing_entry=$(_dev_server_get_entry "$state_file" "$dev_server_key")
   if [[ -n "$existing_entry" ]]; then
-    local existing_pid existing_port
+    local existing_pid existing_port existing_identity
     existing_pid=$(printf '%s' "$existing_entry" | jq -r '.pid // empty')
     existing_port=$(printf '%s' "$existing_entry" | jq -r '.port // empty')
-    if [[ -n "$existing_pid" ]] && _is_pid_alive "$existing_pid"; then
+    existing_identity=$(printf '%s' "$existing_entry" | jq -r '.identity // empty')
+
+    local reused=false
+    if [[ -n "$existing_pid" ]] && dev_server_entry_is_ours "$existing_pid" "$existing_identity"; then
+      # Identity match alone isn't enough to reuse: re-resolve who currently
+      # holds the registered port's LISTEN socket and require its pgid to
+      # match the recorded pid, mirroring the fresh-start ownership check
+      # further below (listener pid -> pgid == leader pid).
+      local reuse_listener_pid reuse_listener_pgid
+      reuse_listener_pid=$(_port_listener_pid "$existing_port")
+      reuse_listener_pgid=""
+      [[ -n "$reuse_listener_pid" ]] && reuse_listener_pgid=$(ps -o pgid= -p "$reuse_listener_pid" 2>/dev/null | tr -d ' ')
+      if [[ -n "$reuse_listener_pgid" ]] && [[ "$reuse_listener_pgid" == "$existing_pid" ]]; then
+        reused=true
+      else
+        echo -e "${YELLOW}⚠️  Registered dev server for '$worktree_name' (pid $existing_pid) no longer holds port ${existing_port}; discarding the stale entry and starting fresh${NC}" >&2
+      fi
+    elif [[ -n "$existing_pid" ]] && _is_pid_alive "$existing_pid"; then
+      echo -e "${YELLOW}⚠️  pid $existing_pid registered for '$worktree_name' is alive but its identity is missing or does not match this tool's record (likely a recycled pid); treating the entry as dead and starting fresh${NC}" >&2
+    fi
+
+    if [[ "$reused" == true ]]; then
       echo -e "${GREEN}✓ Dev server already running for '$worktree_name' at http://127.0.0.1:${existing_port} (pid $existing_pid)${NC}"
       echo "http://127.0.0.1:${existing_port}"
       return 0
     fi
+
     _dev_server_remove_entry "$state_file" "$dev_server_key"
   fi
 
@@ -1078,6 +1179,12 @@ serve_start() {
     return 0
   fi
 
+  # Capture the identity token now that ownership is confirmed, so a later
+  # stop or start has proof this leader_pid is the exact process this run
+  # spawned — not just a pid that happens to be alive (see dev_server_entry_is_ours).
+  local leader_identity
+  leader_identity=$(process_identity "$leader_pid")
+
   # Bind-address verification: an attempted host flag is not a guarantee —
   # some frameworks silently ignore an unrecognized flag or env var. The
   # readiness probe and the ownership check above both query 127.0.0.1 and
@@ -1102,8 +1209,8 @@ serve_start() {
   fi
 
   local entry
-  entry=$(jq -n --argjson port "$port" --argjson pid "$leader_pid" --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '{port: $port, pid: $pid, startedAt: $started}')
+  entry=$(jq -n --argjson port "$port" --argjson pid "$leader_pid" --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg identity "$leader_identity" \
+    '{port: $port, pid: $pid, startedAt: $started, identity: $identity}')
   _dev_server_write_entry "$state_file" "$dev_server_key" "$entry"
 
   echo -e "${GREEN}✓ Dev server ready for '$worktree_name': http://127.0.0.1:${port} (pid $leader_pid)${NC}"
@@ -1140,15 +1247,23 @@ serve_stop() {
     return 0
   fi
 
-  local pid
+  local pid identity
   pid=$(printf '%s' "$entry" | jq -r '.pid // empty')
+  identity=$(printf '%s' "$entry" | jq -r '.identity // empty')
 
-  if [[ -n "$pid" ]] && _is_pid_alive "$pid"; then
-    echo -e "${BLUE}Stopping dev server for '$worktree_name' (process group $pid)...${NC}"
-    _kill_process_group "$pid"
+  if [[ -n "$pid" ]]; then
+    if dev_server_entry_is_ours "$pid" "$identity"; then
+      echo -e "${BLUE}Stopping dev server for '$worktree_name' (process group $pid)...${NC}"
+      _kill_process_group "$pid"
+    elif _is_pid_alive "$pid"; then
+      echo -e "${YELLOW}⚠️  pid $pid registered for '$worktree_name' is alive but its identity is missing or does not match the dev server this tool started (likely a recycled pid); not sending it any signal${NC}" >&2
+    fi
   fi
 
-  # Remove the state entry whether or not the kill fully succeeded.
+  # Remove the state entry regardless of outcome — whether the kill fully
+  # succeeded, or was skipped entirely because the identity gate above
+  # failed (a live-but-foreign pid must never be treated as this tool's
+  # dev server, so it is dropped from state without ever being signaled).
   _dev_server_remove_entry "$state_file" "$dev_server_key"
   echo -e "${GREEN}✓ Dev server stopped and state cleared for '$worktree_name'${NC}"
 }
@@ -1358,16 +1473,31 @@ Serve (Dev Server):
     resolved path (realpath -m of the worktree directory, not by worktree/
     branch name — so two project groups whose container shares the same
     `[branchName]` never collide on the same entry), each entry holding
-    port, pid (the process-group leader pid), and startedAt. Written
-    exclusively via a Bash-level atomic (mktemp-then-move, flock-protected)
-    write inside this script — never via the Write/Edit tool, which
-    guard-runtime-state.py blocks unconditionally for this path
-  - serve start reuses a live entry (kill -0 check) instead of respawning;
-    a dead entry is discarded and a fresh server is spawned
+    port, pid (the process-group leader pid), startedAt, and identity (the
+    pid's process-identity token at start — /proc/pid/stat starttime, or
+    `ps -o lstart=` as a portable fallback). Written exclusively via a
+    Bash-level atomic (mktemp-then-move, flock-protected) write inside this
+    script — never via the Write/Edit tool, which guard-runtime-state.py
+    blocks unconditionally for this path
+  - Liveness is not identity: pids get recycled by the OS, so a kill -0
+    check alone cannot tell "the process we started" apart from "whatever
+    unrelated process now holds that pid". serve start's reuse path and
+    serve stop's kill both gate on dev_server_entry_is_ours instead, which
+    additionally requires the entry's recorded identity token to match the
+    pid's identity right now; a live pid with a missing (pre-upgrade entry)
+    or mismatched identity is treated exactly like a dead one — never
+    reused, never signaled
+  - serve start reuses an entry only once it passes that identity gate AND
+    a fresh port-ownership re-check (the port's current LISTEN-socket owner
+    must still resolve to the recorded pid's process group) — a foreign
+    process on the recorded pid, or one that has since taken over the port,
+    is discarded exactly like a dead entry, and a fresh server is spawned
   - serve stop kills the recorded process group (negative-pid kill against
     the setsid-launched leader), not just the single pid, so forked children
-    (a next-server worker, a vite worker) don't survive; the state entry is
-    removed whether or not the kill fully succeeded
+    (a next-server worker, a vite worker) don't survive — but only once the
+    same identity gate passes; when it fails but the pid is still alive, a
+    warning is printed and no signal is sent. The state entry is removed in
+    every case: kill succeeded, kill failed, or kill was never attempted
   - serve status prints EXACTLY one line of JSON to stdout:
     {"running":<bool>,"port":<number|null>,"pid":<number|null>}, exit 0 in
     both the running and not-running cases. This exact shape is a contract
