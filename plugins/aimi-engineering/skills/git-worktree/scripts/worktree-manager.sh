@@ -394,6 +394,25 @@ remove_worktree() {
   fi
 }
 
+# Detect the package manager for <worktree_path> by lockfile, fixed priority
+# order: bun.lockb > pnpm-lock.yaml > yarn.lock > else npm. Prints exactly one
+# of bun|pnpm|yarn|npm on stdout. Shared by install_deps (which layers its own
+# package-lock.json npm-ci-vs-install distinction on top) and serve_start
+# (which only needs the pm name to pick its `<pm> run dev` command) — the
+# single place this detection order is defined, instead of two drifted copies.
+_detect_package_manager() {
+  local worktree_path="$1"
+  if [[ -f "$worktree_path/bun.lockb" ]]; then
+    printf 'bun'
+  elif [[ -f "$worktree_path/pnpm-lock.yaml" ]]; then
+    printf 'pnpm'
+  elif [[ -f "$worktree_path/yarn.lock" ]]; then
+    printf 'yarn'
+  else
+    printf 'npm'
+  fi
+}
+
 # Install dependencies inside a worktree by detecting the package manager from its lockfile.
 # Advisory/non-fatal contract: a missing package.json is not an error (exit 0), and an install
 # failure is reported clearly but never left in a state that trips the script's `set -e`.
@@ -431,30 +450,33 @@ install_deps() {
     return 0
   fi
 
-  # Detect package manager by lockfile, fixed priority order: bun > pnpm > yarn > npm.
-  # NOTE: if `serve start` grows its own lockfile-based detector, factor both into one
-  # shared helper so the detection order is defined once instead of duplicated.
+  # Package manager name comes from the shared detector; the install-specific
+  # command and lockfile path (used below for the idempotency mtime check)
+  # are layered on top here since serve_start never needs either.
   local pm_name pm_cmd lockfile_path=""
-  if [[ -f "$worktree_path/bun.lockb" ]]; then
-    pm_name="bun"
-    pm_cmd="bun install"
-    lockfile_path="$worktree_path/bun.lockb"
-  elif [[ -f "$worktree_path/pnpm-lock.yaml" ]]; then
-    pm_name="pnpm"
-    pm_cmd="pnpm install"
-    lockfile_path="$worktree_path/pnpm-lock.yaml"
-  elif [[ -f "$worktree_path/yarn.lock" ]]; then
-    pm_name="yarn"
-    pm_cmd="yarn install"
-    lockfile_path="$worktree_path/yarn.lock"
-  elif [[ -f "$worktree_path/package-lock.json" ]]; then
-    pm_name="npm"
-    pm_cmd="npm ci"
-    lockfile_path="$worktree_path/package-lock.json"
-  else
-    pm_name="npm"
-    pm_cmd="npm install"
-  fi
+  pm_name=$(_detect_package_manager "$worktree_path")
+  case "$pm_name" in
+    bun)
+      pm_cmd="bun install"
+      lockfile_path="$worktree_path/bun.lockb"
+      ;;
+    pnpm)
+      pm_cmd="pnpm install"
+      lockfile_path="$worktree_path/pnpm-lock.yaml"
+      ;;
+    yarn)
+      pm_cmd="yarn install"
+      lockfile_path="$worktree_path/yarn.lock"
+      ;;
+    npm)
+      if [[ -f "$worktree_path/package-lock.json" ]]; then
+        pm_cmd="npm ci"
+        lockfile_path="$worktree_path/package-lock.json"
+      else
+        pm_cmd="npm install"
+      fi
+      ;;
+  esac
 
   # Idempotency short-circuit: when a recognized lockfile exists and node_modules/
   # is already at least as fresh as it, skip the install entirely — a resumed
@@ -1209,20 +1231,17 @@ serve_start() {
     _dev_server_remove_entry "$state_file" "$dev_server_key"
   fi
 
-  # Detect package manager by lockfile, fixed priority order: bun > pnpm > yarn > npm.
-  # NOTE: mirrors install_deps' detection order above; a later cross-story pass
-  # may factor both into one shared helper if the duplication becomes a problem.
+  # Package manager name comes from the shared detector (see install_deps
+  # above); only the run-dev command array is specific to serve_start.
   local pm_name
   local -a pm_cmd
-  if [[ -f "$worktree_path/bun.lockb" ]]; then
-    pm_name="bun"; pm_cmd=(bun run dev)
-  elif [[ -f "$worktree_path/pnpm-lock.yaml" ]]; then
-    pm_name="pnpm"; pm_cmd=(pnpm run dev)
-  elif [[ -f "$worktree_path/yarn.lock" ]]; then
-    pm_name="yarn"; pm_cmd=(yarn run dev)
-  else
-    pm_name="npm"; pm_cmd=(npm run dev)
-  fi
+  pm_name=$(_detect_package_manager "$worktree_path")
+  case "$pm_name" in
+    bun) pm_cmd=(bun run dev) ;;
+    pnpm) pm_cmd=(pnpm run dev) ;;
+    yarn) pm_cmd=(yarn run dev) ;;
+    npm) pm_cmd=(npm run dev) ;;
+  esac
 
   local port
   if ! port=$(_pick_free_port); then
@@ -1469,7 +1488,42 @@ serve_status() {
   fi
 }
 
-# Dispatch serve start|stop|status <worktree-name>
+# Rewrite <raw-url>'s origin to point at <worktree-name>'s running dev server,
+# preserving path and query — the single place the origin-rewrite one-liner
+# used to be inlined at every execute.md/next.md call site lives now. Reuses
+# serve_status internally (never re-implements the pid/port read) and shares
+# its never-fails contract: prints EXACTLY one line of compact JSON
+# {"url":<string>,"rewritten":<bool>} and exits 0 in every case. When no
+# server is running (or serve_status reports a dead/absent entry), <raw-url>
+# is echoed back unchanged with rewritten:false — the same advisory
+# degradation every other serve verb uses. The only usage error is a missing
+# worktree-name argument (see validate_branch_name), matching start/stop/status.
+serve_url() {
+  local worktree_name="$1" raw_url="$2"
+
+  if [[ -z "$worktree_name" ]]; then
+    echo -e "${RED}Error: Worktree name required${NC}" >&2
+    echo "Usage: worktree-manager.sh serve url <worktree-name> <raw-url>" >&2
+    exit 1
+  fi
+
+  validate_branch_name "$worktree_name"
+
+  local status_json running port
+  status_json=$(serve_status "$worktree_name")
+  running=$(printf '%s' "$status_json" | jq -r '.running')
+  port=$(printf '%s' "$status_json" | jq -r '.port // empty')
+
+  if [[ "$running" == "true" ]] && [[ -n "$port" ]]; then
+    local path_query
+    path_query=$(printf '%s' "$raw_url" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+##')
+    jq -n -c --arg url "http://127.0.0.1:${port}${path_query}" '{url: $url, rewritten: true}'
+  else
+    jq -n -c --arg url "$raw_url" '{url: $url, rewritten: false}'
+  fi
+}
+
+# Dispatch serve start|stop|status|url <worktree-name> [<raw-url>]
 serve_dispatch() {
   local subcmd="$1"
   shift || true
@@ -1483,9 +1537,12 @@ serve_dispatch() {
     status)
       serve_status "$1"
       ;;
+    url)
+      serve_url "$1" "$2"
+      ;;
     *)
       echo -e "${RED}Error: Unknown serve subcommand: ${subcmd:-<none>}${NC}" >&2
-      echo "Usage: worktree-manager.sh serve start|stop|status <worktree-name>" >&2
+      echo "Usage: worktree-manager.sh serve start|stop|status|url <worktree-name> [<raw-url>]" >&2
       exit 1
       ;;
   esac
@@ -1573,6 +1630,9 @@ Commands:
                                       whole process group)
   serve status <worktree-name>        Report a worktree's dev server status as
                                       single-line JSON: {"running":bool,"port":n|null,"pid":n|null}
+  serve url <name> <raw-url>          Rewrite <raw-url>'s origin to the worktree's
+                                      running dev server (path/query preserved);
+                                      prints {"url":string,"rewritten":bool}, exit 0 always
   help                                Show this help message
 
 Environment Files:
@@ -1687,19 +1747,29 @@ Serve (Dev Server):
     confirmation, the final readiness message) go to stderr instead, so
     scripted callers can capture stdout directly without parsing it out of
     human-readable text
+  - serve url <name> <raw-url> rewrites <raw-url>'s origin to point at the
+    worktree's currently running dev server, preserving path and query —
+    the single implementation of the origin-rewrite every visual-verification
+    call site in execute.md/next.md used to inline as its own sed one-liner.
+    It reuses serve status internally (never re-implements the pid/port
+    read) and shares its never-fails contract: EXACTLY one line of compact
+    JSON {"url":<string>,"rewritten":<bool>} on stdout, exit 0 in every
+    state case. When no server is running (or the registered entry is dead),
+    <raw-url> is echoed back unchanged with rewritten:false — never an error
   - No package.json, or no "dev" script: clean skip — exits 0, writes no
     state, and is never reported as an error
   - Every failure mode (port exhaustion, readiness timeout, ownership
     mismatch, a confirmed non-loopback bind, no package.json, no dev script,
-    kill failure) degrades gracefully: serve start/stop/status never exit
-    non-zero for these conditions. A missing or invalid worktree-name
-    argument (see validate_branch_name) is a usage error in all three verbs
-    — non-zero exit, stderr message, no stdout line at all. serve start adds
-    two more usage errors in the same category, because both mean the
-    caller passed a name that never corresponded to a real worktree, not a
-    runtime degradation: a worktree directory that doesn't exist, and a
-    resolved path that escapes .worktrees/ (the same containment check and
-    exit code install-deps already uses for both)
+    kill failure, no server running for a url rewrite) degrades gracefully:
+    serve start/stop/status/url never exit non-zero for these conditions. A
+    missing or invalid worktree-name argument (see validate_branch_name) is
+    a usage error in all four verbs — non-zero exit, stderr message, no
+    stdout line at all. serve start adds two more usage errors in the same
+    category, because both mean the caller passed a name that never
+    corresponded to a real worktree, not a runtime degradation: a worktree
+    directory that doesn't exist, and a resolved path that escapes
+    .worktrees/ (the same containment check and exit code install-deps
+    already uses for both)
 
 Examples:
   worktree-manager.sh create feature-login
@@ -1716,6 +1786,7 @@ Examples:
   worktree-manager.sh install-deps feature-login
   worktree-manager.sh serve start feature-login
   worktree-manager.sh serve status feature-login
+  worktree-manager.sh serve url feature-login "https://example.com/dashboard?tab=1"
   worktree-manager.sh serve stop feature-login
   worktree-manager.sh list
 

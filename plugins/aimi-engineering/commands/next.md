@@ -184,7 +184,7 @@ else
 fi
 ```
 
-5. **Create or reuse the container**, with CWD set to `CONTAINER_ROOT` so `worktree-manager.sh`'s own `git rev-parse --show-toplevel` resolves against the right repo:
+5. **Create or reuse the container**, with CWD set to `CONTAINER_ROOT` so `worktree-manager.sh`'s own `git rev-parse --show-toplevel` resolves against the right repo. This is execute.md's **Create or Reuse a Container** with `EXEC_ROOT="$CONTAINER_ROOT"`, `EXEC_BRANCH="$BRANCH_NAME"`, `CONTAINER_BASE` as computed above — see that section for the full reuse/idempotency behavior. `/aimi:next` captures the exit code inline instead of letting the Bash tool call surface it, since its own STOP messaging (below) never uses `AskUserQuestion`:
 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
@@ -197,7 +197,7 @@ if [ "$CREATE_EXIT" -ne 0 ]; then
 fi
 ```
 
-`$WORKTREE_MGR create` is branch-aware: it reuses the target directory silently when it's already a worktree there, creates `$BRANCH_NAME` fresh when the branch doesn't exist yet, attaches to the branch without recreating it when the branch exists but no worktree holds it (e.g. after a prior run's `remove --keep-branch`), and exits non-zero — naming the worktree that holds it — when another worktree (including the main working tree) already has it checked out. If `CREATE_EXIT` is non-zero, `$CREATE_OUTPUT` (just printed above) already names the occupying worktree — STOP here without any further checkout-conflict detection or remediation, and without `AskUserQuestion`.
+If `CREATE_EXIT` is non-zero, `$CREATE_OUTPUT` (just printed above) already names the occupying worktree — STOP here without any further checkout-conflict detection or remediation, and without `AskUserQuestion`.
 
 If `CREATE_EXIT` is zero, continue:
 

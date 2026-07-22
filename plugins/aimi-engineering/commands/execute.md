@@ -125,6 +125,39 @@ For the entire span of a phase's execution — from the moment it is claimed (St
 
 `MAX_CONCURRENCY` (Step 3.2) is read from the claimed phase's own tasks file (`PHASE_TASKS_PATH`), not any feature-root or global file — this is the same per-phase value the worktree-budget guard hook enforces against nested story-worktree creation inside the container, so the phase's own setting (not a global default) governs how many story worktrees can exist under it at once.
 
+## Create or Reuse a Container
+
+This section is the single source of truth for creating (or reusing) a container worktree. Every call site below sets three values first — `EXEC_ROOT` (the directory to `cd` into before calling `$WORKTREE_MGR create`: the project root, i.e. `AIMI_ROOT` or a resolved multi-repo project path — never the container path itself, which doesn't exist yet at creation time), `EXEC_BRANCH` (the `create`/worktree-name argument), and `CONTAINER_BASE` (the `--from` argument, already resolved by the caller's own `BASE_BRANCH`-vs-default selection) — then cites this section instead of restating the call or its reuse/idempotency behavior:
+
+```bash
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+cd "$EXEC_ROOT"
+$WORKTREE_MGR create "$EXEC_BRANCH" --from "$CONTAINER_BASE"
+```
+
+`$WORKTREE_MGR create` is branch-aware, not a blind idempotent create: it reuses the target directory silently when it's already a worktree there, creates `EXEC_BRANCH` fresh when the branch doesn't exist yet, attaches to the branch without recreating it when the branch exists but no worktree holds it (e.g. after a prior run's `remove --keep-branch`), and exits non-zero — naming the worktree that holds it, resolved from `git worktree list --porcelain` — when another worktree (including the main working tree) already has it checked out. Calling it on every claim (including a self-reclaim resume) is still safe, since the first two cases are exactly the reuse paths a resume needs. On non-zero exit, the caller reports the command's stderr verbatim (it already names the offending worktree) and STOPs — never remediate, never print a second, composed error on top of it. The resulting path is always deterministic: `$EXEC_ROOT/.worktrees/$EXEC_BRANCH`.
+
+## Bootstrap a Container Dev Server
+
+This section is the single source of truth for starting (or reusing) a container's dev server, once a caller has already computed its own `HAS_VISUAL_STORY` gate against its own tasks source (a phase's `PHASE_TASKS_PATH`, a split's `PHASE_FE_TASKS`/`PHASE_BE_TASKS`, or the flat/multi-repo `VISUAL_GROUP_KEYS` loop) — that jq query is legitimately site-specific and stays at each call site; only what happens once the gate passes is written here.
+
+**When `HAS_VISUAL_STORY` is false:** skip entirely — no server is started, no `WORKTREE_MGR` resolution needed.
+
+**Otherwise**, with `EXEC_ROOT` (the same project-root `cd` target Create or Reuse a Container above uses — never the container path itself, since `worktree-manager.sh` resolves its worktree-name argument against `$(git rev-parse --show-toplevel)/.worktrees/<name>` relative to CWD) and `EXEC_BRANCH` (the worktree-name argument) already set by the caller:
+
+```bash
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+cd "$EXEC_ROOT"
+$WORKTREE_MGR install-deps "$EXEC_BRANCH"
+SERVE_URL=$($WORKTREE_MGR serve start "$EXEC_BRANCH")
+```
+
+`serve start`'s stdout, on both the reuse path and a successful fresh launch, is exactly the raw URL as its only line (all decorated narration goes to stderr) — so `SERVE_URL` is captured directly from it, and no immediate follow-up `serve status` call is made: a no-op status call right here would only ever race a concurrent `serve start`/`serve stop` for nothing, since it can't tell the caller anything this stdout didn't already say. A caller that needs the URL adopts `$SERVE_URL` into its own variable when non-empty; a caller that doesn't (this bootstrap alone is only ever about getting the server running, not about resolving a URL for later use) simply discards it. Empty `$SERVE_URL` means `serve start` degraded (no package.json, no dev script, port exhaustion, timeout, ownership mismatch, non-loopback bind) and reported nothing to adopt. No `package.json`/`scripts.dev` pre-check runs here, before or after this call — `install-deps` and `serve start` already perform that presence check internally and degrade to a clean, silent skip on their own, so re-checking it at the call-site layer would only duplicate work they already do.
+
+**Degradation is advisory, never fatal.** A missing package manager, a failed install, port exhaustion, or a readiness-probe timeout never aborts the caller. This `EXEC_ROOT`/`EXEC_BRANCH` CWD choice is also what keeps two callers' `dev-server.json` entries distinct: `serve start`/`serve status`/`serve url` all key state by the container's absolute resolved path (`$EXEC_ROOT/.worktrees/$EXEC_BRANCH`, unique per caller), never by the branch name alone — so two callers whose container happens to share a branch name (e.g. two project groups, or two split branches) never collide. Every later consumer (Open Visual Follow Session, Step 4's post-merge visual verification) re-queries the server fresh via `serve url` at the point it needs the URL, rather than trusting a value cached here — a wave can run long after this bootstrap, and each Bash call is its own isolated shell (Step 0).
+
 ---
 
 ## Release the Claim on Abort
@@ -934,20 +967,15 @@ Do **not** swallow this call's exit status. Every state a claim can hand back �
 ### Create or Reuse the Phase Container
 
 ```bash
-WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
 cd "$AIMI_ROOT"
 if [ -n "$BASE_BRANCH" ]; then
   CONTAINER_BASE="$BASE_BRANCH"
 else
   CONTAINER_BASE="$DEFAULT_BRANCH"
 fi
-$WORKTREE_MGR create "$PHASE_BRANCH" --from "$CONTAINER_BASE"
 ```
 
-`<container-base>` is `BASE_BRANCH` when Step 1.6 set one, otherwise `DEFAULT_BRANCH` — reusing the exact default-branch/base-selection values Steps 1.5–1.6 already computed against the main root.
-
-`$WORKTREE_MGR create` is branch-aware, not a blind idempotent create: it reuses the target directory silently when it's already a worktree there, creates `PHASE_BRANCH` fresh when the branch doesn't exist yet, attaches to the branch without recreating it when the branch exists but no worktree holds it, and exits non-zero — naming the worktree that holds it — when another worktree already has it checked out. Calling it on every claim (including a self-reclaim resume) is still safe, since the first two cases are exactly the reuse paths a resume needs. The path is deterministic given `AIMI_ROOT` and `PHASE_BRANCH`:
+`CONTAINER_BASE` is `BASE_BRANCH` when Step 1.6 set one, otherwise `DEFAULT_BRANCH` — reusing the exact default-branch/base-selection values Steps 1.5–1.6 already computed against the main root. Delegate to **Create or Reuse a Container** with `EXEC_ROOT="$AIMI_ROOT"`, `EXEC_BRANCH="$PHASE_BRANCH"`, and `CONTAINER_BASE` as just computed. The resulting path is deterministic given `AIMI_ROOT` and `PHASE_BRANCH`:
 
 ```bash
 PHASE_CONTAINER_PATH="$AIMI_ROOT/.worktrees/$PHASE_BRANCH"
@@ -997,34 +1025,20 @@ $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
 
 **Skip this subsection entirely when `PHASE_SPLIT_MODE` is true** — a split phase never lands a story directly on `PHASE_CONTAINER_PATH` itself, so there is nothing to serve here; each split gets its own independently-bootstrapped server instead (see Split Container Dev Server Bootstrap in Phase-Mode Paired Split below). The rest of this subsection assumes `PHASE_SPLIT_MODE=false`.
 
-When it applies, this MUST complete before Step 3.3's Open Visual Follow Session computes `VISUAL_URL` — the same hard ordering rule Container Dev Server Bootstrap (Step 3.3) already enforces for flat container mode: install-deps → serve start → compute VISUAL_URL → open the visual-follow session. Both later call sites (Step 3.3 and Step 4's post-merge visual verification) re-query the server's port fresh rather than reusing anything cached here — see Open Visual Follow Session and Step 4 below.
+When it applies, this MUST complete before Step 3.3's Open Visual Follow Session computes `VISUAL_URL` — the same hard ordering rule Container Dev Server Bootstrap (Step 3.3) already enforces for flat container mode: install-deps → serve start → compute VISUAL_URL → open the visual-follow session.
 
-Gate on the phase's own tasks file having at least one visual story — the same jq shape Step 0.7 already uses — and `PHASE_CONTAINER_PATH` having a `package.json` with a non-empty `scripts.dev`:
+Gate on the phase's own tasks file having at least one visual story — the same jq shape Step 0.7 already uses:
 
 ```bash
 PHASE_VISUAL_STORIES=$(jq '[.userStories[] | select(.verification | type == "object" and .strategy == "visual")] | length' "$PHASE_TASKS_PATH" 2>/dev/null)
-if [ -f "$PHASE_CONTAINER_PATH/package.json" ]; then
-  PHASE_HAS_DEV_SCRIPT=$(jq -r 'if (.scripts.dev // empty) != "" then "yes" else "no" end' "$PHASE_CONTAINER_PATH/package.json" 2>/dev/null || echo "no")
+if [ -n "$PHASE_VISUAL_STORIES" ] && [ "$PHASE_VISUAL_STORIES" -gt 0 ]; then
+  HAS_VISUAL_STORY=true
 else
-  PHASE_HAS_DEV_SCRIPT="no"
+  HAS_VISUAL_STORY=false
 fi
 ```
 
-**When `PHASE_VISUAL_STORIES` is 0/empty, or `PHASE_HAS_DEV_SCRIPT` is `no`:** skip silently — no server is started, and the rest of Step 1.7 proceeds unaffected.
-
-**Otherwise**, run `install-deps` then `serve start` against `PHASE_CONTAINER_PATH`, keyed by `PHASE_BRANCH` — CWD at `$AIMI_ROOT` (the project root), never inside the container itself, for the same reason Create or Reuse the Phase Container above `cd`s to the project root before calling `$WORKTREE_MGR create`: the worktree-name argument resolves against `$(git rev-parse --show-toplevel)/.worktrees/<name>` relative to CWD:
-
-```bash
-WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-cd "$AIMI_ROOT"
-$WORKTREE_MGR install-deps "$PHASE_BRANCH"
-$WORKTREE_MGR serve start "$PHASE_BRANCH"
-```
-
-The returned port is discarded here — never cached across this isolated Bash call. Every later consumer (Step 3.3's Open Visual Follow Session, and Step 4's post-merge visual verification) re-queries `serve status "$PHASE_BRANCH"` fresh at the point it needs the port, since a wave can run long after this bootstrap and each Bash call is its own isolated shell (Step 0).
-
-**Degradation is advisory, never fatal** — the identical contract Container Dev Server Bootstrap (Step 3.3) already uses for flat container mode: a missing package manager, a failed install, port exhaustion, or a readiness-probe timeout never aborts Step 1.7, the wave loop, or Phase Completion. When the server never comes up, the visual-story call sites below simply find no port on their own fresh `serve status` query and degrade that story's `verification.status` to `skipped`, exactly as flat container mode already does.
+Delegate to **Bootstrap a Container Dev Server** with `EXEC_ROOT="$AIMI_ROOT"` (the project root, never inside the container itself — the same reason Create or Reuse the Phase Container above `cd`s to the project root before calling `$WORKTREE_MGR create`), `EXEC_BRANCH="$PHASE_BRANCH"`, and `HAS_VISUAL_STORY` as just computed. Its captured URL is discarded here — every later consumer (Step 3.3's Open Visual Follow Session, and Step 4's post-merge visual verification) re-queries the server fresh via `serve url` at the point it needs it.
 
 ### Path and State Notes
 
@@ -1073,42 +1087,16 @@ BACKEND_WORKTREE_PATH="$PHASE_CONTAINER_PATH/.worktrees/$BACKEND_BRANCH"
 
 ### Split Container Dev Server Bootstrap
 
-Independently for each split — never against `PHASE_CONTAINER_PATH` itself, since no story ever lands directly on the un-merged phase branch — gate on that split's own tasks file having at least one visual story and that split's own worktree having a `package.json` with a non-empty `scripts.dev`, mirroring Phase Container Dev Server Bootstrap's gate above exactly, scoped one level deeper:
+Independently for each split — never against `PHASE_CONTAINER_PATH` itself, since no story ever lands directly on the un-merged phase branch — gate on that split's own tasks file having at least one visual story, mirroring Phase Container Dev Server Bootstrap's gate above exactly, scoped one level deeper:
 
 ```bash
 FE_VISUAL_STORIES=$(jq '[.userStories[] | select(.verification | type == "object" and .strategy == "visual")] | length' "$PHASE_FE_TASKS" 2>/dev/null)
-if [ -f "$FRONTEND_WORKTREE_PATH/package.json" ]; then
-  FE_HAS_DEV_SCRIPT=$(jq -r 'if (.scripts.dev // empty) != "" then "yes" else "no" end' "$FRONTEND_WORKTREE_PATH/package.json" 2>/dev/null || echo "no")
-else
-  FE_HAS_DEV_SCRIPT="no"
-fi
 BE_VISUAL_STORIES=$(jq '[.userStories[] | select(.verification | type == "object" and .strategy == "visual")] | length' "$PHASE_BE_TASKS" 2>/dev/null)
-if [ -f "$BACKEND_WORKTREE_PATH/package.json" ]; then
-  BE_HAS_DEV_SCRIPT=$(jq -r 'if (.scripts.dev // empty) != "" then "yes" else "no" end' "$BACKEND_WORKTREE_PATH/package.json" 2>/dev/null || echo "no")
-else
-  BE_HAS_DEV_SCRIPT="no"
-fi
 ```
 
-For each split whose gate passes, run `install-deps` then `serve start` keyed by that split's own branch — CWD inside `$PHASE_CONTAINER_PATH`, the same CWD Create Split Worktrees above already used to create both worktrees, since `worktree-manager.sh` resolves the worktree-name argument relative to `$(git rev-parse --show-toplevel)` at CWD:
+For each split, delegate to **Bootstrap a Container Dev Server** with `EXEC_ROOT="$PHASE_CONTAINER_PATH"` (the same CWD Create Split Worktrees above already used to create both worktrees) and `HAS_VISUAL_STORY` derived from that split's own count above: `EXEC_BRANCH="$FRONTEND_BRANCH"` with `HAS_VISUAL_STORY` true when `FE_VISUAL_STORIES > 0` for the frontend, `EXEC_BRANCH="$BACKEND_BRANCH"` with `HAS_VISUAL_STORY` true when `BE_VISUAL_STORIES > 0` for the backend.
 
-```bash
-WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-cd "$PHASE_CONTAINER_PATH"
-if [ -n "$FE_VISUAL_STORIES" ] && [ "$FE_VISUAL_STORIES" -gt 0 ] && [ "$FE_HAS_DEV_SCRIPT" = "yes" ]; then
-  $WORKTREE_MGR install-deps "$FRONTEND_BRANCH"
-  $WORKTREE_MGR serve start "$FRONTEND_BRANCH"
-fi
-if [ -n "$BE_VISUAL_STORIES" ] && [ "$BE_VISUAL_STORIES" -gt 0 ] && [ "$BE_HAS_DEV_SCRIPT" = "yes" ]; then
-  $WORKTREE_MGR install-deps "$BACKEND_BRANCH"
-  $WORKTREE_MGR serve start "$BACKEND_BRANCH"
-fi
-```
-
-A split with no dev script (e.g. a pure-API backend) never gets nor blocks on a server — its gate simply fails and both its calls are skipped, exactly like the single-file bootstrap above. Every port is discarded here too — re-resolved fresh via `serve status` at the point each split sub-orchestrator's own Step 3.3 / Step 4 call sites need it. A split sub-orchestrator's spawn prompt pre-sets `PHASE_MODE=true`, `PHASE_BRANCH=[its own split branch]`, and `PHASE_CONTAINER_PATH=[its own split worktree path]` (see Spawn Split Sub-Orchestrators below), so its own copies of Open Visual Follow Session and Step 4's post-merge visual verification apply unmodified — no split-specific code path is needed at either call site.
-
-**Degradation is advisory here too** — identical contract to the single-file bootstrap above.
+A split with no visual story (e.g. a pure-API backend) never gets nor blocks on a server — its gate simply fails, exactly like the single-file bootstrap above. Every port is discarded here too — re-resolved fresh via `serve url` at the point each split sub-orchestrator's own Step 3.3 / Step 4 call sites need it. A split sub-orchestrator's spawn prompt pre-sets `PHASE_MODE=true`, `PHASE_BRANCH=[its own split branch]`, and `PHASE_CONTAINER_PATH=[its own split worktree path]` (see Spawn Split Sub-Orchestrators below), so its own copies of Open Visual Follow Session and Step 4's post-merge visual verification apply unmodified — no split-specific code path is needed at either call site.
 
 **Documented limitation — no proxy between split servers:** when a story's page depends on an API served by the sibling split's container, its visual verification runs only against its own split's server; there is no proxy between the two. A broken API call or failed visual check caused solely by this is expected, not a bug — it must never block the wave and never trigger a retry.
 
@@ -1291,18 +1279,14 @@ fi
 ```
 
 ```bash
-WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-cd "$AIMI_ROOT"
 if [ -n "$BASE_BRANCH" ]; then
   CONTAINER_BASE="$BASE_BRANCH"
 else
   CONTAINER_BASE="$DEFAULT_BRANCH"
 fi
-$WORKTREE_MGR create "$BRANCH_NAME" --from "$CONTAINER_BASE"
 ```
 
-`$WORKTREE_MGR create` is branch-aware and needs no pre-flight checkout check: it reuses the target directory silently when it's already a worktree there, creates `[branchName]` fresh when the branch doesn't exist yet, attaches to the branch without recreating it when the branch exists but no worktree holds it (e.g. after a prior run's `remove --keep-branch`), and exits non-zero — naming the worktree that holds it, resolved from `git worktree list --porcelain` — when another worktree (including the main working tree) already has it checked out. On non-zero exit, report the command's stderr verbatim (it already names the offending worktree) and STOP; do not attempt any remediation and never print a second, composed error on top of it. `CONTAINER_BASE` is `BASE_BRANCH` when Step 1.6 set one, otherwise `DEFAULT_BRANCH` — the exact same base-selection rule the phase container already uses (see Create or Reuse the Phase Container). The path is deterministic given `AIMI_ROOT` and `[branchName]`:
+Delegate to **Create or Reuse a Container** with `EXEC_ROOT="$AIMI_ROOT"`, `EXEC_BRANCH="$BRANCH_NAME"`, and `CONTAINER_BASE` as just computed (`BASE_BRANCH` when Step 1.6 set one, otherwise `DEFAULT_BRANCH` — the exact same base-selection rule the phase container already uses; see Create or Reuse the Phase Container). The path is deterministic given `AIMI_ROOT` and `[branchName]`:
 
 ```bash
 FEATURE_CONTAINER_PATH="$AIMI_ROOT/.worktrees/$BRANCH_NAME"
@@ -1370,7 +1354,7 @@ Run the following sub-steps when any story has a non-null `project` field, or wh
    Branch [branchName] set up in project: [project_path] (action: [action])
    ```
 
-   **When `CONTAINER_MODE` is true:** call `$WORKTREE_MGR create` and handle its exit code exactly as Flat Container Mode's **Create or Reuse the Container** does above (Step 2), scoped to `[resolved_project_path]` instead of `$AIMI_ROOT` and to `PROJECT_DEFAULT` instead of `$DEFAULT_BRANCH` — producing one container per project group at `[resolved_project_path]/.worktrees/[branchName]`, never one container spanning multiple project roots. No pre-flight checkout check is needed — `$WORKTREE_MGR create` is branch-aware and reports the conflict itself when one exists.
+   **When `CONTAINER_MODE` is true:**
 
    Pure multi-repo layout (`AIMI_ROOT_IS_GIT_REPO=false`) skips Step 1.6 entirely and therefore never sets `INTERACTIVE_MODE`, which downstream picker/agent-mode gates elsewhere in this document still expect to be set. Re-resolve it here when still unset:
    ```bash
@@ -1381,20 +1365,19 @@ Run the following sub-steps when any story has a non-null `project` field, or wh
    fi
    ```
 
-   Create or reuse the container:
    ```bash
-   WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-   : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-   cd [resolved_project_path]
    if [ -n "$BASE_BRANCH" ]; then
      CONTAINER_BASE="$BASE_BRANCH"
    else
      CONTAINER_BASE="$PROJECT_DEFAULT"
    fi
-   $WORKTREE_MGR create "$BRANCH_NAME" --from "$CONTAINER_BASE"
+   ```
+
+   Delegate to **Create or Reuse a Container** with `EXEC_ROOT=[resolved_project_path]`, `EXEC_BRANCH="$BRANCH_NAME"`, and `CONTAINER_BASE` as just computed (`BASE_BRANCH` when Step 1.6 set one, otherwise `PROJECT_DEFAULT`) — producing one container per project group at `[resolved_project_path]/.worktrees/[branchName]`, never one container spanning multiple project roots:
+
+   ```bash
    CONTAINER_PATHS[project_path]="[resolved_project_path]/.worktrees/$BRANCH_NAME"
    ```
-   On non-zero exit from `$WORKTREE_MGR create`, report the command's stderr verbatim (it already names the worktree holding `[branchName]`) and STOP — do not attempt any remediation.
 
    `[project_path]` here is the group_key from Multi-Repo Handling's grouping pattern (the raw `story.project` value being iterated) — the map is keyed by `project_path`/`group_key`, not by the resolved absolute path, exactly like `PROJECT_GUIDELINES_MAP[project_path]` above and the Report line below.
 
@@ -1521,33 +1504,32 @@ Scan ALL pending stories (not just this wave's ready set — the dev server is s
 VISUAL_GROUP_KEYS=$(jq -r '[.userStories[] | select(.verification | type == "object" and .strategy == "visual") | (.project // "DEFAULT")] | unique | .[]' "$AIMI_ROOT/$TASKS_PATH")
 ```
 
-For each `group_key` in `VISUAL_GROUP_KEYS`, resolve its project root exactly as Multi-Repo Handling's grouping pattern does (`CWD`/`$AIMI_ROOT` for `"DEFAULT"`, otherwise `$AIMI_ROOT/[group_key]`), then run `install-deps` and `serve start` against that group's container — `CONTAINER_PATHS[group_key]`, already created by Step 2:
+For each `group_key` in `VISUAL_GROUP_KEYS`, resolve its project root exactly as Multi-Repo Handling's grouping pattern does (`CWD`/`$AIMI_ROOT` for `"DEFAULT"`, otherwise `$AIMI_ROOT/[group_key]`):
 
 ```bash
-WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
 BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
 if ! [[ "$BRANCH_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
   echo "Invalid branchName: $BRANCH_NAME" >&2
   exit 1
 fi
 if [ "[group_key]" = "DEFAULT" ]; then
-  cd "$AIMI_ROOT"
+  EXEC_ROOT="$AIMI_ROOT"
 else
-  cd "$AIMI_ROOT/[group_key]"
+  EXEC_ROOT="$AIMI_ROOT/[group_key]"
 fi
-$WORKTREE_MGR install-deps "$BRANCH_NAME"
-CONTAINER_SERVE_URL=$($WORKTREE_MGR serve start "$BRANCH_NAME")
-if [ -n "$CONTAINER_SERVE_URL" ]; then
-  CONTAINER_DEV_URL[group_key]="$CONTAINER_SERVE_URL"
+EXEC_BRANCH="$BRANCH_NAME"
+HAS_VISUAL_STORY=true
+```
+
+Delegate to **Bootstrap a Container Dev Server** with these values — targeting `CONTAINER_PATHS[group_key]`, already created by Step 2. Adopt its captured URL into this group's own entry:
+
+```bash
+if [ -n "$SERVE_URL" ]; then
+  CONTAINER_DEV_URL[group_key]="$SERVE_URL"
 fi
 ```
 
-`install-deps`/`serve start` are invoked with CWD at the project root and `[branchName]` as the worktree-name argument — never CWD'd into the container itself — because `worktree-manager.sh` resolves its worktree-name argument against `$(git rev-parse --show-toplevel)/.worktrees/<name>` relative to the CWD it runs in; this is the exact same reason `Create or Reuse the Container` above `cd`s to the project root, never into the container, before calling `$WORKTREE_MGR create`. The resulting target is `CONTAINER_PATHS[group_key]` (`<project_root>/.worktrees/[branchName]`). This CWD is also what keeps two project groups' `dev-server.json` entries distinct: `serve start` keys its state by the container's absolute resolved path (`<project_root>/.worktrees/[branchName]`, unique per group), never by the literal `[branchName]` — so two groups whose container happens to get the same branch name never collide.
-
-`serve start`'s stdout, on both the reuse path and a successful fresh launch, is exactly the raw URL as its only line (all decorated narration goes to stderr — see `serve start` in `worktree-manager.sh` help text), so `CONTAINER_SERVE_URL` is captured directly instead of re-querying `serve status` right after. A no-op `serve status` call here would only ever race a concurrent `serve start`/`serve stop` for nothing — it can't tell this call anything its own stdout didn't already say. Leave `CONTAINER_DEV_URL[group_key]` unset when `CONTAINER_SERVE_URL` is empty: that means `serve start` degraded (no package.json, no dev script, port exhaustion, timeout, ownership mismatch, non-loopback bind) and reported nothing to adopt.
-
-**Degradation is advisory, never fatal.** `install-deps` and `serve start` both degrade gracefully by their own contract (non-Node stack with no `package.json`, a failed install, port exhaustion, a missing `dev` script, a readiness-probe timeout) — none of these abort the wave loop or this session. When a group's port never resolves, `CONTAINER_DEV_URL[group_key]` is simply never set for that group; Open Visual Follow Session below and the per-story post-merge verification block (Step 4) both treat a missing entry as "no dev server available for this group" and degrade that group's visual verification to `skipped` rather than blocking anything.
+**Degradation is advisory, never fatal.** When a group's port never resolves, `CONTAINER_DEV_URL[group_key]` is simply never set for that group; Open Visual Follow Session below and the per-story post-merge verification block (Step 4) both treat a missing entry as "no dev server available for this group" and degrade that group's visual verification to `skipped` rather than blocking anything.
 
 `CONTAINER_DEV_URL` is a map keyed identically to `CONTAINER_PATHS`/`project_roots` — one entry per project group, never a single global URL. A visual story in a different project group is resolved and rewritten independently, using its own group's entry.
 
@@ -1580,31 +1562,31 @@ command -v agent-browser
   VISUAL_GROUP_KEY=$(printf '%s' "$FIRST_VISUAL" | jq -r '.project // "DEFAULT"')
   ```
 
-  **When `PHASE_MODE` is true** (the top-level single-file phase orchestrator, or a Phase-Mode Paired Split sub-orchestrator whose spawn prompt pre-set `PHASE_BRANCH`/`PHASE_CONTAINER_PATH` to its own split — see Spawn Split Sub-Orchestrators — so this branch applies unmodified in either case, keyed by whichever branch this session owns): query `serve status` fresh for `$PHASE_BRANCH` — never a value cached from Phase Container Dev Server Bootstrap or Split Container Dev Server Bootstrap earlier in this run, since each Bash call is an isolated shell (Step 0). CWD must be `$AIMI_ROOT`, the exact same CWD Phase Container Dev Server Bootstrap used for its own `serve start` — `serve status` resolves its dev-server.json key from CWD (see `_dev_server_key` in `worktree-manager.sh`), so a mismatched CWD here would silently miss the entry rather than report it stale:
+  **When `PHASE_MODE` is true** (the top-level single-file phase orchestrator, or a Phase-Mode Paired Split sub-orchestrator whose spawn prompt pre-set `PHASE_BRANCH`/`PHASE_CONTAINER_PATH` to its own split — see Spawn Split Sub-Orchestrators — so this branch applies unmodified in either case, keyed by whichever branch this session owns): rewrite `VISUAL_URL`'s origin via `serve url`, keyed by `$PHASE_BRANCH` — never a value cached from Phase Container Dev Server Bootstrap or Split Container Dev Server Bootstrap earlier in this run, since each Bash call is an isolated shell (Step 0). CWD must be `$AIMI_ROOT`, the exact same CWD Phase Container Dev Server Bootstrap used for its own `serve start` — `serve url` resolves its dev-server.json key from CWD (see `_dev_server_key` in `worktree-manager.sh`), so a mismatched CWD here would silently miss the entry rather than report it stale:
 
   ```bash
   WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
   : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
   cd "$AIMI_ROOT"
-  PHASE_SERVE_JSON=$($WORKTREE_MGR serve status "$PHASE_BRANCH" 2>/dev/null)
-  PHASE_SERVE_PORT=$(printf '%s' "$PHASE_SERVE_JSON" | jq -r '.port // empty' 2>/dev/null)
+  SERVE_URL_JSON=$($WORKTREE_MGR serve url "$PHASE_BRANCH" "$VISUAL_URL")
+  VISUAL_URL=$(printf '%s' "$SERVE_URL_JSON" | jq -r '.url')
   ```
 
-  When `PHASE_SERVE_PORT` is non-empty, rewrite `VISUAL_URL`'s origin, preserving path and query — the same inline sed one-liner container mode uses below:
+  `serve url` prints `{"url":...,"rewritten":bool}` and exits 0 in every case — no server running, and no partial/corrupt dev-server.json entry, both degrade to `rewritten:false` with `.url` echoing the raw input back unchanged (see `serve_status`'s own never-fails contract, which `serve url` reuses internally). `VISUAL_URL` is simply reassigned to `.url` either way — the same advisory-degradation outcome container mode uses below.
+
+  **When `CONTAINER_MODE` is true and `CONTAINER_DEV_URL[VISUAL_GROUP_KEY]` resolved** (see Container Dev Server Bootstrap above; `PHASE_MODE` and `CONTAINER_MODE` are mutually exclusive — see Execution Mode Detection — so at most one of these two branches ever applies): rewrite `VISUAL_URL`'s origin via `serve url` too, keyed by this run's `branchName`, scoped to the FIRST visual story's OWN project group. This resolves the port of that group only — a second visual story from a different project group is unaffected by this rewrite and is instead resolved independently at its own post-merge verification step (Step 4). CWD is the same project root Container Dev Server Bootstrap (Step 3.3) already used for `VISUAL_GROUP_KEY` — `$AIMI_ROOT` for `"DEFAULT"`, otherwise `$AIMI_ROOT/[VISUAL_GROUP_KEY]`:
 
   ```bash
-  PATH_QUERY=$(printf '%s' "$VISUAL_URL" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+##')
-  VISUAL_URL="http://127.0.0.1:${PHASE_SERVE_PORT}${PATH_QUERY}"
-  ```
-
-  When `PHASE_SERVE_PORT` is empty (server absent or dead), `VISUAL_URL` remains the raw `verification.url` — the same advisory-degradation fallback container mode uses below.
-
-  **When `CONTAINER_MODE` is true and `CONTAINER_DEV_URL[VISUAL_GROUP_KEY]` resolved** (see Container Dev Server Bootstrap above; `PHASE_MODE` and `CONTAINER_MODE` are mutually exclusive — see Execution Mode Detection — so at most one of these two branches ever applies): rewrite only `VISUAL_URL`'s origin, preserving path and query, using that project group's container dev server URL. This resolves the port of the FIRST visual story's OWN project group only — a second visual story from a different project group is unaffected by this rewrite and is instead resolved independently at its own post-merge verification step (Step 4). One inline sed one-liner, repeated at every call site that needs it — never a shared function, since each Bash call is an isolated shell:
-
-  ```bash
-  BASE="${CONTAINER_DEV_URL[VISUAL_GROUP_KEY]}"
-  PATH_QUERY=$(printf '%s' "$VISUAL_URL" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+##')
-  VISUAL_URL="${BASE%/}${PATH_QUERY}"
+  WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+  : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+  BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
+  if [ "[VISUAL_GROUP_KEY]" = "DEFAULT" ]; then
+    cd "$AIMI_ROOT"
+  else
+    cd "$AIMI_ROOT/[VISUAL_GROUP_KEY]"
+  fi
+  SERVE_URL_JSON=$($WORKTREE_MGR serve url "$BRANCH_NAME" "$VISUAL_URL")
+  VISUAL_URL=$(printf '%s' "$SERVE_URL_JSON" | jq -r '.url')
   ```
 
   **Otherwise** (neither phase mode nor container mode applies, or the relevant server's port never resolved): `VISUAL_URL` remains the raw `verification.url` — unchanged from today.
@@ -2001,7 +1983,7 @@ while true:
                         # two modes' own distinct port-acquisition mechanisms — never
                         # again as a top-level EXEC_ROOT/EXEC_BRANCH mode gate.
                         if PHASE_MODE:
-                            # Fresh serve-status query for PHASE_BRANCH — never a value
+                            # Fresh `serve url` call for PHASE_BRANCH — never a value
                             # cached from Phase/Split Container Dev Server Bootstrap or
                             # Step 3.3 earlier in this run: a wave can run long after
                             # either, and each Bash call is an isolated shell (Step 0).
@@ -2011,17 +1993,20 @@ while true:
                             # closed explicitly to $AIMI_ROOT — the same CWD Phase
                             # Container Dev Server Bootstrap used for its own `serve
                             # start` — rather than relying on the ambient CWD survived
-                            # from an earlier Bash call, since `serve status` resolves
-                            # its dev-server.json key from CWD (see `_dev_server_key`
-                            # in `worktree-manager.sh`).
+                            # from an earlier Bash call, since `serve url` resolves its
+                            # dev-server.json key from CWD (see `_dev_server_key` in
+                            # `worktree-manager.sh`).
                             ```bash
                             WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
                             : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
                             cd "$AIMI_ROOT"
-                            PHASE_SERVE_JSON=$($WORKTREE_MGR serve status "$PHASE_BRANCH" 2>/dev/null)
-                            PHASE_SERVE_PORT=$(printf '%s' "$PHASE_SERVE_JSON" | jq -r '.port // empty' 2>/dev/null)
+                            STORY_TASKS_FILE="$PHASE_TASKS_PATH"
+                            STORY_VERIFICATION_URL=$(jq -r --arg id "[full_story.id]" '.userStories[] | select(.id == $id) | .verification.url // empty' "$STORY_TASKS_FILE")
+                            SERVE_URL_JSON=$($WORKTREE_MGR serve url "$PHASE_BRANCH" "$STORY_VERIFICATION_URL")
+                            REWRITTEN=$(printf '%s' "$SERVE_URL_JSON" | jq -r '.rewritten')
+                            EFFECTIVE_URL=$(printf '%s' "$SERVE_URL_JSON" | jq -r '.url')
                             ```
-                            if PHASE_SERVE_PORT is empty:
+                            if REWRITTEN != "true":
                                 # No dev server running for this phase's (or split's) own
                                 # branch. Degrade to skipped — this is also the expected,
                                 # non-bug outcome for a full-stack split story whose page
@@ -2032,13 +2017,6 @@ while true:
                                 $AIMI_CLI update-field [full_story.id] verification.status skipped
                                 Report: "[full_story.id] visual verification skipped — no dev server running for [PHASE_BRANCH]."
                                 SKIP_VISUAL=true
-                            else:
-                                STORY_TASKS_FILE="$PHASE_TASKS_PATH"
-                                STORY_VERIFICATION_URL=$(jq -r --arg id "[full_story.id]" '.userStories[] | select(.id == $id) | .verification.url // empty' "$STORY_TASKS_FILE")
-                                # Same inline sed one-liner as Step 3.3's Open Visual Follow Session —
-                                # never a shared function, since each Bash call is an isolated shell.
-                                PATH_QUERY=$(printf '%s' "$STORY_VERIFICATION_URL" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+##')
-                                EFFECTIVE_URL="http://127.0.0.1:${PHASE_SERVE_PORT}${PATH_QUERY}"
                         else:
                             # CONTAINER_MODE — EXEC_OWNS_ROOT is true and PHASE_MODE is
                             # false, so this is the only remaining case. Reads the Step
@@ -2052,13 +2030,20 @@ while true:
                                 Report: "[full_story.id] visual verification skipped — no dev server resolved for project group [group_key]."
                                 SKIP_VISUAL=true
                             else:
+                                ```bash
+                                WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+                                : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+                                BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
+                                if [ "[group_key]" = "DEFAULT" ]; then
+                                  cd "$AIMI_ROOT"
+                                else
+                                  cd "$AIMI_ROOT/[group_key]"
+                                fi
                                 STORY_TASKS_FILE="$AIMI_ROOT/$TASKS_PATH"
                                 STORY_VERIFICATION_URL=$(jq -r --arg id "[full_story.id]" '.userStories[] | select(.id == $id) | .verification.url // empty' "$STORY_TASKS_FILE")
-                                # Same inline sed one-liner as Step 3.3's Open Visual Follow Session —
-                                # never a shared function, since each Bash call is an isolated shell.
-                                BASE="${CONTAINER_DEV_URL[group_key]}"
-                                PATH_QUERY=$(printf '%s' "$STORY_VERIFICATION_URL" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+##')
-                                EFFECTIVE_URL="${BASE%/}${PATH_QUERY}"
+                                SERVE_URL_JSON=$($WORKTREE_MGR serve url "$BRANCH_NAME" "$STORY_VERIFICATION_URL")
+                                EFFECTIVE_URL=$(printf '%s' "$SERVE_URL_JSON" | jq -r '.url')
+                                ```
 
                     if not SKIP_VISUAL:
 
