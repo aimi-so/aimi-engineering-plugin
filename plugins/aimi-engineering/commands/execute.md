@@ -65,11 +65,11 @@ $WORKTREE_MGR list
 $WORKTREE_MGR remove [worktree_name]
 ```
 
-This rule is unchanged, but does not apply in phase mode — see Phase Mode: Worktree Naming and CWD below, which supersedes `project_root` with `PHASE_CONTAINER_PATH` for the duration of a claimed phase's execution — nor does it apply, in the same way, to container mode (`PHASE_MODE=false`, `CONTAINER_MODE=true`; see Execution Mode Detection in Step 1), which supersedes `project_root` with `CONTAINER_PATHS[group_key]` for the duration of that project group's container-mode execution. See Phase Mode: Worktree Naming and CWD below for the full three-way substitution table.
+This rule is unchanged, but does not apply in phase mode — see Phase Mode: Worktree Naming and CWD below, which supersedes `project_root` with `PHASE_CONTAINER_PATH` for the duration of a claimed phase's execution — nor does it apply, in the same way, to container mode (`PHASE_MODE=false`, `CONTAINER_MODE=true`; see Execution Mode Detection in Step 1), which supersedes `project_root` with `CONTAINER_PATHS[group_key]` for the duration of that project group's container-mode execution. See Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH in Phase Mode: Worktree Naming and CWD below for the contract that replaces this per-consumer branching.
 
 ### Container Paths Per Project Group (Container Mode)
 
-When `CONTAINER_MODE=true` (see Execution Mode Detection in Step 1), each project group gets its own feature container instead of one shared across the whole run: `CONTAINER_PATHS[group_key] = project_roots[group_key] + "/.worktrees/" + branchName` for every group with at least one story scheduled this run — keyed identically to `project_roots[group_key]` above, never a single global `CONTAINER_PATH` scalar. Step 2's Flat Container Mode (single-repo, `group_key = "DEFAULT"`) and Per-Project Branch Setup (multi-repo, one entry per project group) are what populate this map; Step 4's wave loop and both cleanup passes consume it — see Phase Mode: Worktree Naming and CWD below for the exact substitution.
+When `CONTAINER_MODE=true` (see Execution Mode Detection in Step 1), each project group gets its own feature container instead of one shared across the whole run: `CONTAINER_PATHS[group_key] = project_roots[group_key] + "/.worktrees/" + branchName` for every group with at least one story scheduled this run — keyed identically to `project_roots[group_key]` above, never a single global `CONTAINER_PATH` scalar. Step 2's Flat Container Mode (single-repo, `group_key = "DEFAULT"`) and Per-Project Branch Setup (multi-repo, one entry per project group) are what populate this map; Step 4's wave loop and both cleanup passes consume it via `EXEC_ROOT`/`EXEC_BRANCH` — see Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH in Phase Mode: Worktree Naming and CWD below for how `EXEC_ROOT` derives from it.
 
 ## Phase Mode: Worktree Naming and CWD
 
@@ -86,17 +86,36 @@ Every `$WORKTREE_MGR create`/`merge-all`/`remove`/`list` call for a phase's stor
 1. **`merge-all` checks out its target branch against whatever repo its CWD belongs to.** `worktree-manager.sh`'s `GIT_ROOT` is computed per-invocation from CWD (`git rev-parse --show-toplevel`), and `merge-all <story-worktree-names> --into <target-branch>` issues a bare `git checkout <target-branch>` against that root. Run from `AIMI_ROOT`, that would check the phase branch out onto the main working tree — forbidden by the Main Working Tree Untouched Invariant below. Run from `PHASE_CONTAINER_PATH`, `GIT_ROOT` resolves to the phase worktree's own root instead, and story worktrees nest at `PHASE_CONTAINER_PATH/.worktrees/<story-worktree-name>` — a pattern `worktree-manager.sh` already supports unmodified, since a linked worktree's own `git rev-parse --show-toplevel` returns its own path, not the main repo's.
 2. **Every Bash call is an isolated shell** (Step 0). `PHASE_CONTAINER_PATH` does not persist across calls on its own — each call that needs it either `cd`s to it explicitly at the top of the call, or passes it via `git -C`/`$WORKTREE_MGR` arguments, exactly like `$AIMI_CLI`/`$WORKTREE_MGR` themselves are re-resolved per call.
 
-Concretely, in Step 4's wave loop, wherever the pseudocode below reads `project_root`, `branchName`, or `[branchName]-US-*`, substitute per the session's mode:
+### Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH
 
-| | Inline flat mode (`PHASE_MODE=false`, `CONTAINER_MODE=false`, unchanged) | Container flat mode (`PHASE_MODE=false`, `CONTAINER_MODE=true`) | Phase mode (`PHASE_MODE=true`) |
-|---|---|---|---|
-| `worktree_name` | `"[branchName]-[story.id]"` | `"[branchName]-[story.id]"` (unchanged — container mode never mints a new branch name) | `"[PHASE_BRANCH]-[story.id]"` |
-| `cd` target before create/merge-all/remove | `[project_root]` | `[CONTAINER_PATHS[group_key]]` | `[PHASE_CONTAINER_PATH]` |
-| base_sha capture | `git -C [project_root] rev-parse [branchName]` | `git -C [CONTAINER_PATHS[group_key]] rev-parse [branchName]` | `git -C [PHASE_CONTAINER_PATH] rev-parse [PHASE_BRANCH]` |
-| `merge-all --into` target | `[branchName]` | `[branchName]` (unchanged) | `[PHASE_BRANCH]` |
-| Cleanup scan pattern | `"[branchName]-US-*"` | `"[branchName]-US-*"` (unchanged — same `worktree_name`) | `"[PHASE_BRANCH]-US-*"` |
+Step 4's wave loop, both of its cleanup passes, and the post-merge visual-verification origin rewrite do not branch on `PHASE_MODE`/`CONTAINER_MODE` at each of their own call sites. Instead, Step 4 derives a four-part execution context **once per `group_key`**, immediately after the loop that populates `project_roots` (see GROUP STORIES BY PROJECT in Step 4) — every downstream consumer reads it directly instead of repeating the branch:
 
-`CONTAINER_PATHS[group_key]` is the same map Step 2 populates per project group (one container per group, keyed identically to `project_roots[group_key]` above) — never a single global container path. See Container Paths Per Project Group above for how `group_key` is derived and where each entry is created.
+- **`EXEC_ROOT[group_key]`** — the path every `$WORKTREE_MGR create`/`merge-all`/`remove`/`list` call and every `git -C` invocation `cd`s to or targets for this group.
+- **`EXEC_BRANCH[group_key]`** — the branch every worktree is created `--from`, every `merge-all --into` targets, and every cleanup scan pattern (`"[EXEC_BRANCH[group_key]]-US-*"`) matches.
+- **`EXEC_OWNS_ROOT`** — a single run-wide scalar (not a map — it does not vary by `group_key` within one run), true when this run's own worktree-manager invocations created `EXEC_ROOT` as a container it is responsible for (container and phase mode), false when `EXEC_ROOT` is a pre-existing project checkout this run never created (inline mode). Consumed today only by the post-merge visual-verification origin rewrite (see Step 4).
+- **`EXEC_KEEPS_BRANCH`** — a single run-wide scalar, `true` in all four modes today. No call site in this document reads it yet; it exists so future per-mode teardown work (e.g. a container-mode `remove --keep-branch` step) has a documented place to branch on without reopening this contract.
+
+The four bindings:
+
+| Mode | `EXEC_ROOT[group_key]` | `EXEC_BRANCH[group_key]` |
+|---|---|---|
+| Inline (`PHASE_MODE=false`, `CONTAINER_MODE=false`) | `project_roots[group_key]` | `branchName` |
+| Container, flat or per-project (`PHASE_MODE=false`, `CONTAINER_MODE=true`) | `CONTAINER_PATHS[group_key]` | `branchName` |
+| Phase (`PHASE_MODE=true`) | `PHASE_CONTAINER_PATH` | `PHASE_BRANCH` |
+| Split (a Phase-Mode Paired Split sub-orchestrator; `PHASE_MODE=true` with pre-set values — see Spawn Split Sub-Orchestrators) | `FRONTEND_WORKTREE_PATH` or `BACKEND_WORKTREE_PATH` | `FRONTEND_BRANCH` or `BACKEND_BRANCH` |
+
+The split row is not a new derivation — it is exactly what Create Split Worktrees and Spawn Split Sub-Orchestrators already pre-assign to `PHASE_CONTAINER_PATH`/`PHASE_BRANCH` before a split sub-orchestrator starts (see those sections above); the sub-orchestrator's own Step 4 then derives `EXEC_ROOT`/`EXEC_BRANCH` from the Phase row using those pre-set values, with no split-specific code path.
+
+`EXEC_OWNS_ROOT = PHASE_MODE or CONTAINER_MODE` (true for phase, container, and split; false for inline). `EXEC_KEEPS_BRANCH = true` unconditionally, in every mode, today.
+
+**`project_roots` is a distinct, orthogonal concept and is never absorbed into `EXEC_ROOT`.** Four consumers keep reading `project_roots[group_key]` (or the resolved project path it is built from) directly, independent of whichever mode's `EXEC_ROOT` a run is using:
+
+1. `PROJECT_PATH` passed to each story-executor Task and its worktree boundary (Step 4's per-story spawn loop).
+2. `PROJECT_GUIDELINES_MAP` keying (Step 3.3, Per-Project Guidelines).
+3. `detect-default-branch`/`setup-branch` scoping (Step 2, Per-Project Branch Setup).
+4. Post-Loop Cleanup's One-time migration safeguard, which must keep scanning `project_root` even in container/phase mode — it looks for worktrees stranded OUTSIDE the container by a run predating container mode.
+
+None of these four reads `EXEC_ROOT` in its place: "which repository" (`project_roots`) and "which checkout of it this run is executing against" (`EXEC_ROOT`) are independent questions, and all four consumers above need the former regardless of the latter.
 
 ### Main Working Tree Untouched Invariant
 
@@ -1120,8 +1139,8 @@ Task(
         - Skip Step 2's Main Repo Branch Setup (PHASE_MODE=true skips it exactly as
           the single-file case already does) and skip Step 1.7 entirely
         - Run Step 3 onward (reset-orphaned, validate-stories, wave loop, Post-Loop
-          Cleanup) using the Phase Mode: Worktree Naming and CWD substitution table
-          exactly as written, with the pre-set PHASE_BRANCH/PHASE_CONTAINER_PATH
+          Cleanup) using the Phase Mode: Worktree Naming and CWD Execution Context
+          contract exactly as written, with the pre-set PHASE_BRANCH/PHASE_CONTAINER_PATH
           above standing in for the outer phase's own values — so this
           sub-orchestrator's own story worktrees are named
           "[FRONTEND_BRANCH]-[story.id]", created --from [FRONTEND_BRANCH], and
@@ -1697,48 +1716,49 @@ while true:
             project_roots[group_key] = AIMI_ROOT / group_key  (resolve to absolute path)
 
     # ========================================
-    # CAPTURE BASE SHA PER PROJECT GROUP (for commit verification)
+    # DERIVE EXEC_ROOT / EXEC_BRANCH PER PROJECT GROUP — see Execution Context:
+    # EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH in Phase Mode:
+    # Worktree Naming and CWD above. This is the only place in the wave loop
+    # and its cleanup passes that checks PHASE_MODE/CONTAINER_MODE directly —
+    # every consumer below reads EXEC_ROOT[group_key]/EXEC_BRANCH[group_key]
+    # instead (project_roots itself still survives untouched for the four
+    # consumers that need it independently of EXEC_ROOT — see that section).
     # ========================================
-    # PHASE_MODE: read from PHASE_CONTAINER_PATH/PHASE_BRANCH instead of
-    # project_root/branchName. CONTAINER_MODE (PHASE_MODE=false): read from
-    # CONTAINER_PATHS[group_key], but still branchName — container mode never
-    # mints a new branch name — see Phase Mode: Worktree Naming and CWD.
-    base_sha = {}  # key: group_key, value: HEAD SHA before worktree creation
+    EXEC_ROOT = {}    # key: group_key, value: path every git/worktree op targets
+    EXEC_BRANCH = {}  # key: group_key, value: branch every git/worktree op targets
     for group_key in project_groups:
         if PHASE_MODE:
-            base_sha[group_key] = git -C [PHASE_CONTAINER_PATH] rev-parse [PHASE_BRANCH]
+            EXEC_ROOT[group_key] = PHASE_CONTAINER_PATH
+            EXEC_BRANCH[group_key] = PHASE_BRANCH
         elif CONTAINER_MODE:
-            base_sha[group_key] = git -C [CONTAINER_PATHS[group_key]] rev-parse [branchName]
+            EXEC_ROOT[group_key] = CONTAINER_PATHS[group_key]
+            EXEC_BRANCH[group_key] = branchName
         else:
-            project_root = project_roots[group_key]
-            base_sha[group_key] = git -C [project_root] rev-parse [branchName]
+            EXEC_ROOT[group_key] = project_roots[group_key]
+            EXEC_BRANCH[group_key] = branchName
+    EXEC_OWNS_ROOT = PHASE_MODE or CONTAINER_MODE    # single scalar, not a map
+    EXEC_KEEPS_BRANCH = true                         # single scalar; no consumer reads it yet
+
+    # ========================================
+    # CAPTURE BASE SHA PER PROJECT GROUP (for commit verification)
+    # ========================================
+    base_sha = {}  # key: group_key, value: HEAD SHA before worktree creation
+    for group_key in project_groups:
+        base_sha[group_key] = git -C [EXEC_ROOT[group_key]] rev-parse [EXEC_BRANCH[group_key]]
 
     # ========================================
     # CREATE WORKTREES PER PROJECT GROUP
     # ========================================
-    # PHASE_MODE: every story worktree is created inside the phase container,
-    # never at project_root. CONTAINER_MODE (PHASE_MODE=false): every story
-    # worktree is created inside CONTAINER_PATHS[group_key] instead, but
-    # worktree_base stays branchName in both inline and container mode — only
-    # phase mode substitutes PHASE_BRANCH — see Phase Mode: Worktree Naming
-    # and CWD.
     all_worktrees = {}  # key: full_story.id, value: {worktree_name, worktree_path, group_key}
 
     for group_key, stories in project_groups:
-        project_root = project_roots[group_key]
-        if PHASE_MODE:
-            worktree_cwd = PHASE_CONTAINER_PATH
-        elif CONTAINER_MODE:
-            worktree_cwd = CONTAINER_PATHS[group_key]
-        else:
-            worktree_cwd = project_root
-        worktree_base = PHASE_BRANCH if PHASE_MODE else branchName
+        worktree_cwd = EXEC_ROOT[group_key]
+        worktree_base = EXEC_BRANCH[group_key]
 
         for full_story in stories:
             worktree_name = worktree_base + "-" + full_story.id
 
-            # cd to the phase container (phase mode), the feature container
-            # (container mode), or the project's git root (inline mode)
+            # cd to this group's execution root (see Execution Context above)
             cd [worktree_cwd]
             $WORKTREE_MGR create [worktree_name] --from [worktree_base]
 
@@ -1887,24 +1907,17 @@ while true:
             succeeded_by_project[group_key].append(full_story)
 
         for group_key, stories in succeeded_by_project:
-            project_root = project_roots[group_key]
-            if PHASE_MODE:
-                merge_cwd = PHASE_CONTAINER_PATH
-            elif CONTAINER_MODE:
-                merge_cwd = CONTAINER_PATHS[group_key]
-            else:
-                merge_cwd = project_root
-            merge_target = PHASE_BRANCH if PHASE_MODE else branchName
+            merge_cwd = EXEC_ROOT[group_key]
+            merge_target = EXEC_BRANCH[group_key]
             succeeded_worktree_names = [all_worktrees[s.id].worktree_name for s in stories]
 
-            # cd to the phase container (phase mode), the feature container (container
-            # mode), or the project's git root (inline mode) before merging.
-            # PHASE_MODE requires this: merge-all issues a bare `git checkout <target-branch>` against
-            # whatever repo its CWD belongs to -- running it from AIMI_ROOT would check the phase branch
-            # out onto the main working tree, violating the Main Working Tree Untouched Invariant
-            # (see Phase Mode: Worktree Naming and CWD). CONTAINER_MODE requires the same for the
-            # feature container; merge_target stays branchName in container mode — it never
-            # introduces a new merge target the way PHASE_BRANCH does.
+            # cd to this group's execution root before merging (see Execution
+            # Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH in
+            # Phase Mode: Worktree Naming and CWD) -- merge-all issues a bare
+            # `git checkout <target-branch>` against whatever repo its CWD belongs
+            # to, so running it from AIMI_ROOT in phase mode would check the phase
+            # branch out onto the main working tree, violating the Main Working
+            # Tree Untouched Invariant.
             cd [merge_cwd]
             merge_result = $WORKTREE_MGR merge-all [succeeded_worktree_names...] --into [merge_target]
 
@@ -1915,16 +1928,11 @@ while true:
                 "[conflict output from merge-all]"
                 ""
                 "Resolve the conflict on branch [merge_target] in [merge_cwd] and re-run `/aimi:execute` to continue."
-                "[merge_cwd] itself — the phase container, the feature container, or (inline mode) the project's own git root — and any live dev server running inside it are left untouched by this failure; only this wave's story worktrees (cleaned up below) are removed, so the conflict can be resolved directly in the still-live working tree."
+                "[merge_cwd] itself — this group's execution root, whichever mode created it — and any live dev server running inside it are left untouched by this failure; only this wave's story worktrees (cleaned up below) are removed, so the conflict can be resolved directly in the still-live working tree."
 
                 # Cleanup ALL worktrees from this wave (across all project groups) before stopping
                 for full_story_id, wt in all_worktrees:
-                    if PHASE_MODE:
-                        cd PHASE_CONTAINER_PATH
-                    elif CONTAINER_MODE:
-                        cd CONTAINER_PATHS[wt.group_key]
-                    else:
-                        cd project_roots[wt.group_key]
+                    cd EXEC_ROOT[wt.group_key]
                     $WORKTREE_MGR remove [wt.worktree_name]
 
                 # PHASE_MODE with PHASE_ID set (this session itself ran Step 1.7 --
@@ -1970,72 +1978,89 @@ while true:
                 # Per-story attribution depends on the --clear in step 1 — without it,
                 # console buffer is wave-cumulative and last-story-merged eats the blame.
                 if full_story.verification and full_story.verification.strategy == "visual" and full_story.verification.status == "pending":
-                    # --- Container-mode / phase-mode origin rewrite / degradation gate ---
-                    # `group_key` is already in scope here from the enclosing
-                    # "for group_key, stories in succeeded_by_project" loop above —
-                    # this story's own project group. PHASE_MODE and CONTAINER_MODE
-                    # are mutually exclusive (Execution Mode Detection), so at most
-                    # one of the next two branches ever applies for a given story.
-                    if PHASE_MODE:
-                        # Fresh serve-status query for PHASE_BRANCH — never a value
-                        # cached from Phase/Split Container Dev Server Bootstrap or
-                        # Step 3.3 earlier in this run: a wave can run long after
-                        # either, and each Bash call is an isolated shell (Step 0).
-                        # Inside a split sub-orchestrator, PHASE_BRANCH is already
-                        # that split's own branch (see Spawn Split Sub-Orchestrators),
-                        # so this applies unmodified one level deeper too. CWD is
-                        # closed explicitly to $AIMI_ROOT — the same CWD Phase
-                        # Container Dev Server Bootstrap used for its own `serve
-                        # start` — rather than relying on the ambient CWD survived
-                        # from an earlier Bash call, since `serve status` resolves
-                        # its dev-server.json key from CWD (see `_dev_server_key`
-                        # in `worktree-manager.sh`).
-                        ```bash
-                        WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-                        : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-                        cd "$AIMI_ROOT"
-                        PHASE_SERVE_JSON=$($WORKTREE_MGR serve status "$PHASE_BRANCH" 2>/dev/null)
-                        PHASE_SERVE_PORT=$(printf '%s' "$PHASE_SERVE_JSON" | jq -r '.port // empty' 2>/dev/null)
-                        ```
-                    if PHASE_MODE and PHASE_SERVE_PORT is empty:
-                        # No dev server running for this phase's (or split's) own
-                        # branch. Degrade to skipped — this is also the expected,
-                        # non-bug outcome for a full-stack split story whose page
-                        # depends on the sibling split's API (no proxy exists between
-                        # the two split servers — see Split Container Dev Server
-                        # Bootstrap). mark-complete already ran above; this never
-                        # blocks it, never blocks the wave, and never retries.
-                        $AIMI_CLI update-field [full_story.id] verification.status skipped
-                        Report: "[full_story.id] visual verification skipped — no dev server running for [PHASE_BRANCH]."
-                    elif CONTAINER_MODE and group_key not in CONTAINER_DEV_URL:
-                        # No dev server ever resolved a port for this group (see Container
-                        # Dev Server Bootstrap in Step 3.3) — degrade to skipped. mark-complete
-                        # already ran above; this never blocks it or the wave loop.
-                        $AIMI_CLI update-field [full_story.id] verification.status skipped
-                        Report: "[full_story.id] visual verification skipped — no dev server resolved for project group [group_key]."
-                    else:
-                        # Read this story's verification.url via jq into a variable, never
-                        # re-interpolated as raw bracket-placeholder text inside a quoted
-                        # string — same discipline as Open Visual Follow Session's VISUAL_URL.
-                        if PHASE_MODE:
-                            STORY_TASKS_FILE="$PHASE_TASKS_PATH"
-                        else:
-                            STORY_TASKS_FILE="$AIMI_ROOT/$TASKS_PATH"
+                    # --- Post-merge visual verification origin rewrite / degradation gate ---
+                    # `group_key` is already in scope here from the enclosing "for
+                    # group_key, stories in succeeded_by_project" loop above — this
+                    # story's own project group. Discriminates on EXEC_OWNS_ROOT (see
+                    # Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT,
+                    # EXEC_KEEPS_BRANCH in Phase Mode: Worktree Naming and CWD) rather
+                    # than checking PHASE_MODE/CONTAINER_MODE separately at this top
+                    # level: false only for inline mode (no shared server exists to
+                    # rewrite against), true for both phase and container mode, which
+                    # keep their own distinct port-acquisition mechanisms below.
+                    SKIP_VISUAL=false
+                    if not EXEC_OWNS_ROOT:
+                        # Inline mode — identical to today's inline branch: the
+                        # story's own verification.url, no rewrite, no gate.
+                        STORY_TASKS_FILE="$AIMI_ROOT/$TASKS_PATH"
                         STORY_VERIFICATION_URL=$(jq -r --arg id "[full_story.id]" '.userStories[] | select(.id == $id) | .verification.url // empty' "$STORY_TASKS_FILE")
-
+                        EFFECTIVE_URL="$STORY_VERIFICATION_URL"
+                    else:
+                        # EXEC_OWNS_ROOT is true for both phase and container mode.
+                        # PHASE_MODE is read here too, but only to pick between the
+                        # two modes' own distinct port-acquisition mechanisms — never
+                        # again as a top-level EXEC_ROOT/EXEC_BRANCH mode gate.
                         if PHASE_MODE:
-                            # Same inline sed one-liner as Step 3.3's Open Visual Follow Session —
-                            # never a shared function, since each Bash call is an isolated shell.
-                            PATH_QUERY=$(printf '%s' "$STORY_VERIFICATION_URL" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+##')
-                            EFFECTIVE_URL="http://127.0.0.1:${PHASE_SERVE_PORT}${PATH_QUERY}"
-                        elif CONTAINER_MODE:
-                            # Same inline sed one-liner as Step 3.3's Open Visual Follow Session —
-                            # never a shared function, since each Bash call is an isolated shell.
-                            BASE="${CONTAINER_DEV_URL[group_key]}"
-                            PATH_QUERY=$(printf '%s' "$STORY_VERIFICATION_URL" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+##')
-                            EFFECTIVE_URL="${BASE%/}${PATH_QUERY}"
+                            # Fresh serve-status query for PHASE_BRANCH — never a value
+                            # cached from Phase/Split Container Dev Server Bootstrap or
+                            # Step 3.3 earlier in this run: a wave can run long after
+                            # either, and each Bash call is an isolated shell (Step 0).
+                            # Inside a split sub-orchestrator, PHASE_BRANCH is already
+                            # that split's own branch (see Spawn Split Sub-Orchestrators),
+                            # so this applies unmodified one level deeper too. CWD is
+                            # closed explicitly to $AIMI_ROOT — the same CWD Phase
+                            # Container Dev Server Bootstrap used for its own `serve
+                            # start` — rather than relying on the ambient CWD survived
+                            # from an earlier Bash call, since `serve status` resolves
+                            # its dev-server.json key from CWD (see `_dev_server_key`
+                            # in `worktree-manager.sh`).
+                            ```bash
+                            WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+                            : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+                            cd "$AIMI_ROOT"
+                            PHASE_SERVE_JSON=$($WORKTREE_MGR serve status "$PHASE_BRANCH" 2>/dev/null)
+                            PHASE_SERVE_PORT=$(printf '%s' "$PHASE_SERVE_JSON" | jq -r '.port // empty' 2>/dev/null)
+                            ```
+                            if PHASE_SERVE_PORT is empty:
+                                # No dev server running for this phase's (or split's) own
+                                # branch. Degrade to skipped — this is also the expected,
+                                # non-bug outcome for a full-stack split story whose page
+                                # depends on the sibling split's API (no proxy exists between
+                                # the two split servers — see Split Container Dev Server
+                                # Bootstrap). mark-complete already ran above; this never
+                                # blocks it, never blocks the wave, and never retries.
+                                $AIMI_CLI update-field [full_story.id] verification.status skipped
+                                Report: "[full_story.id] visual verification skipped — no dev server running for [PHASE_BRANCH]."
+                                SKIP_VISUAL=true
+                            else:
+                                STORY_TASKS_FILE="$PHASE_TASKS_PATH"
+                                STORY_VERIFICATION_URL=$(jq -r --arg id "[full_story.id]" '.userStories[] | select(.id == $id) | .verification.url // empty' "$STORY_TASKS_FILE")
+                                # Same inline sed one-liner as Step 3.3's Open Visual Follow Session —
+                                # never a shared function, since each Bash call is an isolated shell.
+                                PATH_QUERY=$(printf '%s' "$STORY_VERIFICATION_URL" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+##')
+                                EFFECTIVE_URL="http://127.0.0.1:${PHASE_SERVE_PORT}${PATH_QUERY}"
                         else:
-                            EFFECTIVE_URL="$STORY_VERIFICATION_URL"
+                            # CONTAINER_MODE — EXEC_OWNS_ROOT is true and PHASE_MODE is
+                            # false, so this is the only remaining case. Reads the Step
+                            # 3.3 cache exactly as today, keyed by this story's own
+                            # project group.
+                            if group_key not in CONTAINER_DEV_URL:
+                                # No dev server ever resolved a port for this group (see Container
+                                # Dev Server Bootstrap in Step 3.3) — degrade to skipped. mark-complete
+                                # already ran above; this never blocks it or the wave loop.
+                                $AIMI_CLI update-field [full_story.id] verification.status skipped
+                                Report: "[full_story.id] visual verification skipped — no dev server resolved for project group [group_key]."
+                                SKIP_VISUAL=true
+                            else:
+                                STORY_TASKS_FILE="$AIMI_ROOT/$TASKS_PATH"
+                                STORY_VERIFICATION_URL=$(jq -r --arg id "[full_story.id]" '.userStories[] | select(.id == $id) | .verification.url // empty' "$STORY_TASKS_FILE")
+                                # Same inline sed one-liner as Step 3.3's Open Visual Follow Session —
+                                # never a shared function, since each Bash call is an isolated shell.
+                                BASE="${CONTAINER_DEV_URL[group_key]}"
+                                PATH_QUERY=$(printf '%s' "$STORY_VERIFICATION_URL" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+##')
+                                EFFECTIVE_URL="${BASE%/}${PATH_QUERY}"
+
+                    if not SKIP_VISUAL:
 
                         if VISUAL_FOLLOW == true:
                             # Reuse the existing headed session (managed by execute.md)
@@ -2153,18 +2178,13 @@ Output your full structured review under the heading '## Design Implementation R
                         Report: "Verification pending for [full_story.id]: [full_story.gate.prompt]"
                         Report: "  Dependents proceed immediately (non-blocking)."
 
-    # Remove all worktrees from this wave (per project group; PHASE_MODE uses
-    # PHASE_CONTAINER_PATH and CONTAINER_MODE uses CONTAINER_PATHS[wt.group_key]
-    # instead — see Phase Mode: Worktree Naming and CWD). Branch deletion here is
-    # unconditional in every mode (no --keep-branch) — container mode's own
-    # teardown (outline:08) is the only removal call that preserves branchName.
+    # Remove all worktrees from this wave (per project group, EXEC_ROOT[wt.group_key]
+    # — see Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT,
+    # EXEC_KEEPS_BRANCH in Phase Mode: Worktree Naming and CWD). Branch deletion
+    # here is unconditional in every mode (no --keep-branch) — container mode's
+    # own teardown (outline:08) is the only removal call that preserves branchName.
     for full_story_id, wt in all_worktrees:
-        if PHASE_MODE:
-            cd PHASE_CONTAINER_PATH
-        elif CONTAINER_MODE:
-            cd CONTAINER_PATHS[wt.group_key]
-        else:
-            cd project_roots[wt.group_key]
+        cd EXEC_ROOT[wt.group_key]
         $WORKTREE_MGR remove [wt.worktree_name]
 
     # Count gate statuses for wave summary
@@ -2184,22 +2204,13 @@ Output your full structured review under the heading '## Design Implementation R
 
 After the wave loop ends (all stories processed or deadlock):
 
-**Phase mode (`PHASE_MODE=true`):** cleanup runs with CWD = `PHASE_CONTAINER_PATH` only, and matches worktrees named `"[PHASE_BRANCH]-US-*"` — see Phase Mode: Worktree Naming and CWD. The main working tree (`AIMI_ROOT`) is never `cd`'d into by this step.
-
-```
-cd [PHASE_CONTAINER_PATH]
-$WORKTREE_MGR list
-# For each worktree matching "[PHASE_BRANCH]-US-*":
-$WORKTREE_MGR remove [worktree_name]
-```
-
-**Flat/container mode (`PHASE_MODE=false`, `CONTAINER_MODE=true`):** cleanup runs per project group with CWD = `CONTAINER_PATHS[group_key]` — the single-CWD-per-container form phase mode already uses above, not the flat per-project-root loop below — and matches worktrees named `"[branchName]-US-*"` (worktree name is unchanged from inline mode; only the CWD moves).
+**Phase and container mode (`EXEC_OWNS_ROOT=true`):** cleanup runs per project group with CWD = `EXEC_ROOT[group_key]`, matching worktrees named `"[EXEC_BRANCH[group_key]]-US-*"` — the same derivation rule as Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH above (`PHASE_CONTAINER_PATH`/`PHASE_BRANCH` in phase mode, `CONTAINER_PATHS[group_key]`/`branchName` in container mode). Step 4's own wave loop rebuilds `EXEC_ROOT`/`EXEC_BRANCH` fresh each wave, scoped to that wave's own stories; Post-Loop Cleanup runs after the loop ends, so it re-derives them here across every unique `group_key` with at least one story scheduled this run, rather than reading a stale, single-wave-scoped copy. In phase mode every `group_key` resolves to the same `PHASE_CONTAINER_PATH`/`PHASE_BRANCH` — in the common case of a single group_key this degenerates to exactly the single iteration today's phase-only cleanup already runs; on the rarer phase-mode wave that grouped stories under more than one `group_key`, the loop below repeats that same pass once per group_key, each an idempotent no-op against the worktrees the first pass already swept, never a different path or branch. The main working tree (`AIMI_ROOT`) is never `cd`'d into by this step.
 
 ```
 for each unique group_key with at least one story scheduled this run:
-    cd [CONTAINER_PATHS[group_key]]
+    cd [EXEC_ROOT[group_key]]
     $WORKTREE_MGR list
-    # For each worktree matching "[branchName]-US-*":
+    # For each worktree matching "[EXEC_BRANCH[group_key]]-US-*":
     $WORKTREE_MGR remove [worktree_name]
 ```
 
