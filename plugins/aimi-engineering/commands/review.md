@@ -35,7 +35,16 @@ CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 
 1. **PR number** (numeric): Fetch PR with `gh pr view $ARGUMENTS --json title,body,files,headRefName,baseRefName`
 2. **GitHub URL**: Extract PR number, then fetch as above
-3. **Branch name**: Compare against default branch with `git diff $DEFAULT_BRANCH...$ARGUMENTS --name-only`
+3. **Branch name**: Validate `$ARGUMENTS` against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` before it is ever interpolated into a git command — the same check Case B step 4 below applies to `$CANDIDATE_BRANCH`:
+
+   ```bash
+   if ! echo "$ARGUMENTS" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'; then
+     echo "Error: Invalid branch name: $ARGUMENTS" >&2
+     exit 1
+   fi
+   ```
+
+   Then compare against default branch with `git diff $DEFAULT_BRANCH...$ARGUMENTS --name-only`
 4. **Empty** (no arguments): Resolve `$REVIEW_BRANCH` per **Resolve Review Branch (Empty Argument)** below, then compare with `git diff $DEFAULT_BRANCH...$REVIEW_BRANCH --name-only`
 
 ### Resolve Review Branch (Empty Argument)

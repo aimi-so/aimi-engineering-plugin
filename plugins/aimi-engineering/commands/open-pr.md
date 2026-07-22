@@ -34,12 +34,21 @@ Run these checks before proceeding. STOP on failure unless noted.
 
 ### Parse --branch Argument
 
-Scan `$ARGUMENTS` for an explicit `--branch <name>` token (mirrors the `--phase <N>` extraction style used by `/aimi:execute`):
+Scan `$ARGUMENTS` for an explicit `--branch <name>` token (mirrors the `--phase <N>` extraction style used by `/aimi:execute`). A bare `--branch` (no value) and `--branch=<name>` (equals form, not supported — use the space-separated form) must both hard-stop rather than silently falling through to Step 2a's HEAD-branch resolution the same way an omitted `--branch` does:
 
 ```bash
 case " $ARGUMENTS " in
+  *" --branch="*)
+    echo "Error: --branch requires a value." >&2
+    echo "Use '--branch <name>' (space-separated) — '--branch=<name>' is not supported." >&2
+    exit 1
+    ;;
   *" --branch "*)
     CURRENT_BRANCH=$(echo "$ARGUMENTS" | sed -n 's/.*--branch[[:space:]]\+\([^ ]*\).*/\1/p')
+    if [ -z "$CURRENT_BRANCH" ]; then
+      echo "Error: --branch requires a value." >&2
+      exit 1
+    fi
     ;;
   *)
     CURRENT_BRANCH=""

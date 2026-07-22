@@ -1,7 +1,7 @@
 ---
 name: aimi:execute
 description: Execute all pending stories autonomously with wave-based parallelism
-argument-hint: "[--phase <N>] [--container|--inline]"
+argument-hint: "[--phase <N>] [--container|--inline] [--push]"
 disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Bash(git:*), Bash(mkdir:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Bash(WORKTREE_MGR=*), Bash($WORKTREE_MGR:*), Task
 ---
@@ -563,6 +563,17 @@ fi
 ```
 
 If `EXECUTION_OVERRIDE` is `"conflict"`, report `--container and --inline are mutually exclusive — pass at most one.` and STOP. Otherwise `EXECUTION_OVERRIDE` is `"container"`, `"inline"`, or empty (no flag passed) — consumed by Execution Mode Detection below.
+
+### Parse --push Override
+
+Scan `$ARGUMENTS` for an explicit `--push` token, the same way. `PUSH_FLAG` is consumed later, only in flat container mode, at **Container Mode: Push the Branch** in Step 5 — it is agent mode's explicit opt-in to publish `[branchName]` to `origin` on completion; see that section for why an opt-in is required at all:
+
+```bash
+case " $ARGUMENTS " in
+  *" --push "*) PUSH_FLAG=true ;;
+  *) PUSH_FLAG=false ;;
+esac
+```
 
 ### Execution Mode Detection
 
@@ -1341,7 +1352,7 @@ Run the following sub-steps when any story has a non-null `project` field, or wh
    fi
    ```
 
-   **When `CONTAINER_MODE` is false** (`EXECUTION_MODE` inline or absent): set up the branch directly — unchanged:
+   **When `CONTAINER_MODE` is false** (`EXECUTION_MODE` inline or absent): set up the branch directly — unchanged for an inline-mode run. `CONTAINER_MODE` is forced false whenever `PHASE_MODE` is true (see Execution Mode Detection in Step 1), so a phase-mode run with a project-scoped story falls into this same branch today; unlike Main Repo Branch Setup above, this subsection has no `PHASE_MODE` skip condition of its own. Phase mode pairing with per-story `project` fields is not yet a validated combination — running `setup-branch` here would check out `[branchName]` directly onto that project's own working tree, the same operation the Main Working Tree Untouched Invariant forbids for a claimed phase. Treat this as a known gap, not as "unchanged," until phase mode grows its own per-project container handling:
    ```bash
    if [ -n "$BASE_BRANCH" ]; then
      PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch "$BRANCH_NAME" --default-branch $PROJECT_DEFAULT --project [resolved_project_path] --base $BASE_BRANCH)
@@ -2211,6 +2222,8 @@ for each unique project_root (including CWD for the DEFAULT group):
 
 Once this step's container-mode branch scans only `CONTAINER_PATHS[group_key]`, a story worktree stranded directly under `project_root/.worktrees/` by an execution from before container mode shipped would otherwise never be swept by either cleanup pass again. This extra pass closes that gap; it is a no-op once no such pre-upgrade worktrees remain.
 
+**Removal marker:** this safeguard exists only to catch worktrees stranded by runs that predate container mode (introduced in 1.105.0). Delete this subsection outright once the plugin reaches **1.110.0** — five minor releases is enough runway for any pre-existing stray worktrees to have been swept, and an unbounded extra list-and-parse pass per project group on every future run stops paying for itself after that.
+
 **Flat/inline mode (`PHASE_MODE=false`, `CONTAINER_MODE=false`):** unchanged.
 
 ```
@@ -2541,7 +2554,7 @@ When execution ends (all stories complete, or deadlock detected):
 
 > **PHASE_MODE scope note:** this step's reporting is written for the flat-mode case (CWD = `AIMI_ROOT`, `HEAD` on `branchName`). In phase mode, run this step's commands with CWD inside `PHASE_CONTAINER_PATH` and substitute `PHASE_BRANCH` for `branchName` / `CONTAINER_BASE` for `DEFAULT_BRANCH` where used below. Phase-level completion — verifying the claimed phase's `creates`, writing `handoff.md`, updating roadmap status, offering a PR, and offering or auto-continuing to the next phase — is handled entirely by the **Phase Completion** section above, which runs before this step whenever `PHASE_MODE=true` and the phase's own pending count reaches zero. This step still runs afterward, in both modes, to report story-level completion for the phase's own tasks file.
 
-> **CONTAINER_MODE scope note:** when `CONTAINER_MODE=true` and `PHASE_MODE=false` (flat container-mode execution — see Execution Mode Detection in Step 1), the **If all stories complete** branch below runs three additional ordered steps before its existing report: stop each project group's dev server, push `[branchName]` to `origin`, then remove each project group's container while preserving its branch. See **Container Mode: Stop the Dev Server**, **Container Mode: Push the Branch**, and **Container Mode: Remove the Container** immediately below — the order there is load-bearing; removing a container before its dev server is stopped orphans that server, still holding its port with no backing directory. When `CONTAINER_MODE=false` (inline mode, the default and unchanged), none of the three subsections apply: no `git push` is invoked, no container is removed, and `serve stop` is never called.
+> **CONTAINER_MODE scope note:** when `CONTAINER_MODE=true` and `PHASE_MODE=false` (flat container-mode execution — see Execution Mode Detection in Step 1), the **If all stories complete** branch below runs three additional ordered steps before its existing report: stop each project group's dev server, confirm and (unless declined or not opted into) push `[branchName]` to `origin`, then remove each project group's container while preserving its branch. See **Container Mode: Stop the Dev Server**, **Container Mode: Push the Branch**, and **Container Mode: Remove the Container** immediately below — the order there is load-bearing; removing a container before its dev server is stopped orphans that server, still holding its port with no backing directory. When `CONTAINER_MODE=false` (inline mode, the default and unchanged), none of the three subsections apply: no `git push` is invoked, no container is removed, and `serve stop` is never called.
 >
 > **Container removal is completion-path-only.** The **Container Mode: Remove the Container** step below is the only place in flat container mode that `$WORKTREE_MGR remove <branchName>` is ever called against the feature container itself — as opposed to a per-story worktree nested inside it. The **If deadlock detected** branch below, the per-wave merge-conflict report path (Step 4), and the Error Recovery section's **Abandoning a Containerized Run** procedure never call it outside of this completion path or that explicit, user-initiated abandonment — every other exit leaves the feature container (and any dev server inside it) exactly as it was. (Phase mode's own container, `PHASE_CONTAINER_PATH`, is never removed anywhere in this document — see Phase Completion's **Mark Phase Completed**, which updates roadmap status only — so the same guarantee holds there trivially; the phase-mode split-merge conflict report below states it explicitly anyway, for parity with the flat case.)
 
@@ -2570,7 +2583,34 @@ CWD is the same project-root conditional Container Dev Server Bootstrap already 
 
 #### Container Mode: Push the Branch
 
-**Runs only when `CONTAINER_MODE=true`, after every dev-server stop above has completed.** For each unique `group_key`, push `[branchName]` to `origin` from inside that group's container. Read and validate `branchName` first — defense in depth, mirroring `PHASE_BRANCH`'s validate-once-quote-everywhere discipline (`cmd_init_session` already rejected an invalid `branchName` in Step 1):
+**Runs only when `CONTAINER_MODE=true`, after every dev-server stop above has completed.** Pushing publishes `[branchName]` to `origin` — an outward-facing action, and `CONTAINER_MODE` itself is just a field inside the tasks file, so a tasks file must never be able to trigger a publish on its own. Confirm before pushing, the same interactivity-gated pattern Phase Completion's **Next Phase** uses for its own AskUserQuestion/agent-mode branching. Resolve interactivity fresh — each Bash call is an isolated shell (Step 0):
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
+```
+
+- **`INTERACTIVE_MODE=picker`:** use **AskUserQuestion** with exactly two options:
+  ```
+  All stories are complete. Push [branchName] to origin now?
+
+  A — Push now
+  B — Skip (push it yourself later, or run /aimi:open-pr)
+  ```
+  **Option A:** proceed to the push below. **Option B:** set `SKIP_PUSH=true` and skip straight to **Container Mode: Remove the Container**.
+
+- **`INTERACTIVE_MODE=agent`:** skip AskUserQuestion — an unattended run cannot answer a prompt. Push only when `--push` was passed on `$ARGUMENTS` (see Parse --push Override in Step 1):
+  ```bash
+  if [ "$PUSH_FLAG" = "true" ]; then
+    echo "agent-mode: container-push [branchName]"
+  else
+    echo "agent-mode: container-push skipped (no --push flag)"
+    SKIP_PUSH=true
+  fi
+  ```
+
+**When `SKIP_PUSH` is not set:** for each unique `group_key`, push `[branchName]` to `origin` from inside that group's container. Read and validate `branchName` first — defense in depth, mirroring `PHASE_BRANCH`'s validate-once-quote-everywhere discipline (`cmd_init_session` already rejected an invalid `branchName` in Step 1):
 
 ```bash
 BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
@@ -2586,7 +2626,7 @@ if [ "$PUSH_EXIT" -ne 0 ]; then
 fi
 ```
 
-If the push fails (offline, no remote permission, branch rejected, etc.), `$PUSH_OUTPUT` is reported verbatim in the completion report below — do not retry, do not prompt interactively, and never roll back any story's completed status. Continue unconditionally to the next subsection regardless of `$PUSH_EXIT`: a failed push here is never fatal, because `/aimi:open-pr`'s own push step (outline 11) retries the push when the user later runs `/aimi:open-pr --branch [branchName]`, so the Next Steps suggestions below stay safe to print no matter this step's outcome.
+If the push fails (offline, no remote permission, branch rejected, etc.), `$PUSH_OUTPUT` is reported verbatim in the completion report below — do not retry, do not prompt interactively, and never roll back any story's completed status. Continue unconditionally to the next subsection regardless of `$PUSH_EXIT` or `$SKIP_PUSH`: neither a failed nor a skipped push here is fatal, because `/aimi:open-pr`'s own push step (outline 11) retries the push when the user later runs `/aimi:open-pr --branch [branchName]`, so the Next Steps suggestions below stay safe to print either way.
 
 #### Container Mode: Remove the Container
 
@@ -2613,15 +2653,26 @@ Count commits on this branch:
 git log --oneline $DEFAULT_BRANCH..HEAD | wc -l
 ```
 
-**When `CONTAINER_MODE=true`:** the main working tree's `HEAD` was never checked out to `[branchName]` during container-mode execution (the same invariant Phase Mode's Main Working Tree Untouched Invariant establishes for `PHASE_BRANCH`, applied here by analogy), and the container that held it has just been removed above — count against the branch itself instead of `HEAD`. Read and validate `branchName` again — each Bash call is an isolated shell:
+**When `CONTAINER_MODE=true`:** the main working tree's `HEAD` was never checked out to `[branchName]` during container-mode execution (the same invariant Phase Mode's Main Working Tree Untouched Invariant establishes for `PHASE_BRANCH`, applied here by analogy), and the container that held it has just been removed above — count against the branch itself instead of `HEAD`, scoped per project group. A single global `$AIMI_ROOT`/`$DEFAULT_BRANCH` git log is wrong here: in a multi-repo layout (`AIMI_ROOT_IS_GIT_REPO=false`) there is no repo at `$AIMI_ROOT` and `$DEFAULT_BRANCH` was never set. For each unique `group_key` with a container from this run (see Container Paths Per Project Group), mirroring the same "for each unique `group_key`" loop **Container Mode: Push the Branch** and **Container Mode: Remove the Container** above already use. Read and validate `branchName` again — each Bash call is an isolated shell:
 ```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
 if ! [[ "$BRANCH_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
   echo "Invalid branchName: $BRANCH_NAME" >&2
   exit 1
 fi
-git log --oneline $DEFAULT_BRANCH.."$BRANCH_NAME" | wc -l
+if [ "[group_key]" = "DEFAULT" ]; then
+  GROUP_ROOT="$AIMI_ROOT"
+  GROUP_DEFAULT="$DEFAULT_BRANCH"
+else
+  GROUP_ROOT="$AIMI_ROOT/[group_key]"
+  GROUP_DEFAULT=$($AIMI_CLI detect-default-branch --project "$GROUP_ROOT")
+fi
+git -C "$GROUP_ROOT" log --oneline "$GROUP_DEFAULT".."$BRANCH_NAME" | wc -l
 ```
+
+When exactly one `group_key` was scheduled this run (the common single-repo case, `group_key = "DEFAULT"`), report its count on today's single `Commits: [count]` line below — no format change for that case. When more than one `group_key` was scheduled (multi-repo), report one `Commits (project_path): [count]` line per group instead, in place of the single line.
 
 Check for any remaining pending gates across all stories:
 ```bash
@@ -2643,6 +2694,12 @@ All stories completed successfully!
 Branch: [branchName]
 Waves: [total_waves]
 Commits: [count]
+```
+
+In flat container mode with more than one `group_key` scheduled this run, replace the single `Commits: [count]` line above with one line per group instead:
+```
+Commits (project_path): [count]
+Commits (project_path): [count]
 ```
 
 Aggregate known-gap files from this run:

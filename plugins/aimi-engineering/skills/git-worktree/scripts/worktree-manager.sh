@@ -39,8 +39,29 @@ WORKTREE_DIR="$GIT_ROOT/.worktrees"
 
 # Ensure .worktrees is in .gitignore
 ensure_gitignore() {
-  if ! grep -q "^\.worktrees$" "$GIT_ROOT/.gitignore" 2>/dev/null; then
-    echo ".worktrees" >> "$GIT_ROOT/.gitignore"
+  local gi="$GIT_ROOT/.gitignore"
+
+  # Committed truth first: if .worktrees is already in HEAD's .gitignore,
+  # there is nothing to do — appending on top of that risks a stray
+  # duplicate line without fixing anything. grep against the working copy
+  # alone would miss this when the file has since been edited but not
+  # staged/committed yet.
+  if git -C "$GIT_ROOT" show HEAD:.gitignore 2>/dev/null | grep -q "^\.worktrees$"; then
+    return
+  fi
+
+  # HEAD doesn't have the entry (or there's no HEAD commit yet). Only
+  # append when doing so introduces no *new* uncommitted-diff signal: the
+  # file is untracked (nothing committed to diff against) or it already has
+  # uncommitted changes of its own (one more line is not a new violation of
+  # a clean tree). A tracked-and-clean file missing the entry is the one
+  # case container mode must never silently dirty — warn instead.
+  if ! git -C "$GIT_ROOT" ls-files --error-unmatch "$gi" &>/dev/null; then
+    echo ".worktrees" >> "$gi"
+  elif ! git -C "$GIT_ROOT" diff --quiet -- "$gi" 2>/dev/null; then
+    echo ".worktrees" >> "$gi"
+  else
+    echo -e "${YELLOW}Warning: .gitignore is tracked and clean but missing a .worktrees entry. Add it and commit — container mode will not modify a tracked, clean .gitignore for you.${NC}" >&2
   fi
 }
 
