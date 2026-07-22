@@ -752,6 +752,30 @@ _port_listener_pid() {
   printf '%s' "$out"
 }
 
+# Resolve the actual local bind address of the LISTEN socket owned by <pid> on
+# <port>, mirroring _port_listener_pid's ss-then-lsof fallback. A readiness
+# probe and an ownership check both query 127.0.0.1 and answer identically
+# whether the underlying socket is loopback-only or wildcard, so this is the
+# only way to tell the two apart. Strips the trailing :<port> and any IPv6
+# brackets from the resolved address. Prints nothing (fail closed) if neither
+# tool resolves an address.
+_listener_bind_addr() {
+  local pid="$1" port="$2"
+  local addr=""
+  if command -v ss &>/dev/null; then
+    addr=$(ss -H -ltnp "sport = :${port}" 2>/dev/null | grep "pid=${pid}," | awk '{print $4}' | head -n1) || true
+  fi
+  if [[ -z "$addr" ]] && command -v lsof &>/dev/null; then
+    # lsof's NAME column (second-to-last field) is "<addr>:<port>"; the last
+    # field is always the literal "(LISTEN)" state marker we already filtered on.
+    addr=$(lsof -Pan -p "$pid" -i tcp:"${port}" -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $(NF-1)}' | head -n1) || true
+  fi
+  addr="${addr%:${port}}"
+  addr="${addr#\[}"
+  addr="${addr%\]}"
+  printf '%s' "$addr"
+}
+
 # Kill the entire process group of a setsid-launched leader: SIGTERM the
 # group first, wait a grace period, then fall back to a plain kill on the pid
 # itself, then SIGKILL (group and plain) as a last resort. Never fails hard —
@@ -861,6 +885,21 @@ _dev_server_remove_entry() {
   return 0
 }
 
+# Classify a package.json scripts.dev string by substring match, so
+# serve_start can pick the host-restricting flag the actual dev command
+# needs instead of trying the same PORT/HOST env pair for every framework.
+_classify_dev_command() {
+  local script="$1"
+  case "$script" in
+    *"next dev"*) printf 'next-dev' ;;
+    *"astro dev"*) printf 'astro-dev' ;;
+    *"nuxt dev"*) printf 'nuxt-dev' ;;
+    *"vite"*) printf 'vite' ;;
+    *"react-scripts"*) printf 'react-scripts' ;;
+    *) printf 'unrecognized' ;;
+  esac
+}
+
 # Start (or reuse) a loopback dev server for a container worktree.
 serve_start() {
   local worktree_name="$1"
@@ -895,12 +934,26 @@ serve_start() {
     return 0
   fi
 
-  local has_dev_script
-  has_dev_script=$(jq -r 'if (.scripts.dev // empty) != "" then "yes" else "no" end' "$worktree_path/package.json" 2>/dev/null || echo "no")
-  if [[ "$has_dev_script" != "yes" ]]; then
+  local dev_script
+  dev_script=$(jq -r '.scripts.dev // empty' "$worktree_path/package.json" 2>/dev/null || echo "")
+  if [[ -z "$dev_script" ]]; then
     echo -e "${YELLOW}ℹ️  No 'dev' script in package.json, no dev server applies: $worktree_name${NC}"
     return 0
   fi
+
+  # Pick the loopback-binding flag the detected dev command actually needs.
+  # HOST=127.0.0.1 (set unconditionally in _launch_dev_server) only satisfies
+  # CRA/webpack-dev-server; every other framework here needs its own flag, or
+  # (react-scripts / unrecognized) is left to the env var alone.
+  local dev_framework
+  dev_framework=$(_classify_dev_command "$dev_script")
+
+  local -a host_flag_args=()
+  case "$dev_framework" in
+    next-dev) host_flag_args=(-H 127.0.0.1) ;;
+    vite|astro-dev|nuxt-dev) host_flag_args=(--host 127.0.0.1) ;;
+    *) host_flag_args=() ;;
+  esac
 
   local aimi_root
   if ! aimi_root=$(find_aimi_root); then
@@ -952,10 +1005,20 @@ serve_start() {
   local pid_file
   pid_file=$(mktemp -u "$aimi_root/.aimi/state/.dev-server-pid-${safe_name}.XXXXXX")
 
-  echo -e "${BLUE}Starting dev server for '$worktree_name' with $pm_name on port $port (attempt 1: PORT env var)...${NC}"
+  # Build each attempt's `-- <extra args>` passthrough: the framework-specific
+  # host flag is added to BOTH attempts, alongside — never instead of — the
+  # PORT/HOST env vars _launch_dev_server already sets unconditionally.
+  local -a attempt1_extra=("${host_flag_args[@]}")
+  local -a attempt2_extra=(--port "$port" "${host_flag_args[@]}")
+
+  echo -e "${BLUE}Starting dev server for '$worktree_name' with $pm_name on port $port (attempt 1: PORT env var, dev command: $dev_framework)...${NC}"
 
   local leader_pid=""
-  leader_pid=$(cd "$worktree_path" && _launch_dev_server "$port" "$log_file" "$pid_file" "${pm_cmd[@]}")
+  if [[ ${#attempt1_extra[@]} -gt 0 ]]; then
+    leader_pid=$(cd "$worktree_path" && _launch_dev_server "$port" "$log_file" "$pid_file" "${pm_cmd[@]}" -- "${attempt1_extra[@]}")
+  else
+    leader_pid=$(cd "$worktree_path" && _launch_dev_server "$port" "$log_file" "$pid_file" "${pm_cmd[@]}")
+  fi
 
   local ready=false
   if [[ -n "$leader_pid" ]] && _wait_ready "$port" "$DEV_SERVER_READY_TIMEOUT"; then
@@ -965,7 +1028,7 @@ serve_start() {
     rm -f "$pid_file"
 
     echo -e "${BLUE}PORT env var attempt did not answer on port $port; retrying with -- --port ${port} (attempt 2)...${NC}"
-    leader_pid=$(cd "$worktree_path" && _launch_dev_server "$port" "$log_file" "$pid_file" "${pm_cmd[@]}" -- --port "$port")
+    leader_pid=$(cd "$worktree_path" && _launch_dev_server "$port" "$log_file" "$pid_file" "${pm_cmd[@]}" -- "${attempt2_extra[@]}")
 
     if [[ -n "$leader_pid" ]] && _wait_ready "$port" "$DEV_SERVER_READY_TIMEOUT"; then
       ready=true
@@ -994,6 +1057,29 @@ serve_start() {
   listener_pgid=$(ps -o pgid= -p "$listener_pid" 2>/dev/null | tr -d ' ')
   if [[ "$listener_pgid" != "$leader_pid" ]]; then
     echo -e "${RED}Error: Port $port is already held by an unrelated process (pid $listener_pid, pgid $listener_pgid) — not adopting it as the dev server for '$worktree_name'${NC}" >&2
+    _kill_process_group "$leader_pid"
+    return 0
+  fi
+
+  # Bind-address verification: an attempted host flag is not a guarantee —
+  # some frameworks silently ignore an unrecognized flag or env var. The
+  # readiness probe and the ownership check above both query 127.0.0.1 and
+  # answer identically whether the underlying socket is loopback-only or a
+  # wildcard bind (0.0.0.0 / ::), so this is the only check that can actually
+  # see the difference. Refuse anything but exactly 127.0.0.1 or ::1.
+  local bind_addr
+  bind_addr=$(_listener_bind_addr "$listener_pid" "$port")
+  if [[ "$bind_addr" != "127.0.0.1" && "$bind_addr" != "::1" ]]; then
+    local framework_desc
+    case "$dev_framework" in
+      next-dev) framework_desc="next dev" ;;
+      astro-dev) framework_desc="astro dev" ;;
+      nuxt-dev) framework_desc="nuxt dev" ;;
+      vite) framework_desc="vite" ;;
+      react-scripts) framework_desc="react-scripts" ;;
+      *) framework_desc="unrecognized dev command" ;;
+    esac
+    echo -e "${RED}Error: Dev server for '$worktree_name' ($framework_desc) is listening on '${bind_addr:-an address that could not be determined}', not a loopback-only address — the loopback bind could not be confirmed; not adopting it${NC}" >&2
     _kill_process_group "$leader_pid"
     return 0
   fi
@@ -1186,8 +1272,9 @@ Commands:
   cleanup | clean                     Clean up inactive worktrees
   install-deps <worktree-name>        Install dependencies inside a worktree
                                       (detects package manager by lockfile)
-  serve start <worktree-name>         Start a loopback-only (127.0.0.1) dev server
-                                      for a worktree, print its URL and pid
+  serve start <worktree-name>         Start a dev server for a worktree, verify its
+                                      listener is actually loopback-only, print its
+                                      URL and pid (refuses and kills a wildcard bind)
   serve stop <worktree-name>          Stop a worktree's dev server (kills the
                                       whole process group)
   serve status <worktree-name>        Report a worktree's dev server status as
@@ -1220,20 +1307,30 @@ Install Deps:
     skipped/failed and never abort the wave loop because install-deps failed
 
 Serve (Dev Server):
-  - Loopback-only: the dev server is always bound to 127.0.0.1, never 0.0.0.0
-    or a wildcard/empty host; the readiness probe only ever connects to
-    127.0.0.1:<port>
+  - Attempt-then-verify loopback bind: serve start reads scripts.dev from the
+    worktree's package.json and picks the host flag the detected command
+    actually needs (-H 127.0.0.1 for next dev; --host 127.0.0.1 for vite,
+    astro dev, nuxt dev; the PORT/HOST env pair alone for react-scripts or an
+    unrecognized command) — but an attempted flag is never trusted blindly.
+    Once the readiness probe succeeds, serve start resolves the listening
+    socket's actual local address (via ss, falling back to lsof) and refuses
+    to adopt anything but exactly 127.0.0.1 or ::1: it kills the process
+    group, prints an error naming the detected (or 'unrecognized') command
+    and the actual address found, and writes no state entry. This is what
+    turns the flag from a best-effort attempt into a guarantee
   - Port injection, tried in order: (1) PORT env var (Next.js, CRA, Nuxt,
     Remix); (2) if the readiness probe still fails, kill that attempt and
-    retry once with '-- --port <n>' appended (Vite, Astro). If neither
-    yields a listener, serve start reports the failure and exits 0
+    retry once with '-- --port <n>' appended (Vite, Astro). Both attempts
+    also pass the framework-specific host flag above, when one applies. If
+    neither yields a listener, serve start reports the failure and exits 0
   - Readiness probe: polls http://127.0.0.1:<port> with a bounded timeout.
     A process merely starting is never enough — only an observed HTTP
     response counts as ready
   - Ownership check: before adopting the port's listener as this worktree's
     dev server, serve start confirms the listening pid's process group
     matches the process it just spawned, so a stale or foreign process on
-    that port is never mistaken for the dev server
+    that port is never mistaken for the dev server. This runs before, and is
+    unaffected by, the bind-address verification above
   - State: .aimi/state/dev-server.json, keyed by worktree/branch name, each
     entry holding port, pid (the process-group leader pid), and startedAt.
     Written exclusively via a Bash-level atomic (mktemp-then-move,
@@ -1252,9 +1349,10 @@ Serve (Dev Server):
   - No package.json, or no "dev" script: clean skip — exits 0, writes no
     state, and is never reported as an error
   - Every failure mode (port exhaustion, readiness timeout, ownership
-    mismatch, missing dev script, kill failure) degrades gracefully: serve
-    start/stop/status never exit non-zero for these conditions. Only a
-    missing worktree-name argument is a usage error
+    mismatch, a confirmed non-loopback bind, missing dev script, kill
+    failure) degrades gracefully: serve start/stop/status never exit
+    non-zero for these conditions. Only a missing worktree-name argument is
+    a usage error
 
 Examples:
   worktree-manager.sh create feature-login
