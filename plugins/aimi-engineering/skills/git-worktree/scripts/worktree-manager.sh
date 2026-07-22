@@ -18,10 +18,11 @@ _HAS_FLOCK=$(command -v flock &>/dev/null && echo 1 || echo 0)
 
 # serve start|stop|status configuration
 DEV_SERVER_BASE_PORT=4100        # first port probed when picking a free loopback port
-DEV_SERVER_PORT_SCAN_LIMIT=500   # give up after this many ports scanned upward from base
+DEV_SERVER_PORT_SCAN_LIMIT=20    # give up after this many ports scanned upward from base
 DEV_SERVER_READY_TIMEOUT="${DEV_SERVER_READY_TIMEOUT:-90}"      # seconds to wait for the readiness probe per launch attempt (env-overridable; a cold-compiling bundler needs headroom beyond the old 30s default)
 DEV_SERVER_PROBE_MAX_TIME="${DEV_SERVER_PROBE_MAX_TIME:-5}"     # max seconds per individual HTTP probe inside _wait_ready (env-overridable)
 DEV_SERVER_STOP_GRACE=5          # seconds to wait after SIGTERM before escalating to SIGKILL
+DEV_SERVER_LOG_MAX_BYTES="${DEV_SERVER_LOG_MAX_BYTES:-10485760}" # 10MB cap (env-overridable); serve_start's reuse path truncates to the final half when exceeded, so a server kept alive across phase-mode waves never grows its log unbounded
 
 # Validate branch name to prevent command injection
 validate_branch_name() {
@@ -662,7 +663,12 @@ merge_all_worktrees() {
 # absolute resolved path (see _dev_server_key below) — not by worktree/branch
 # name, since two project groups in a multi-repo layout can share the same
 # `[branchName]`. Every failure mode here degrades gracefully (exit 0, clear
-# message) except a missing worktree-name argument, which is a usage error.
+# message) except a missing or invalid worktree-name argument (usage error:
+# non-zero exit, stderr message, no stdout at all) — and, for serve_start
+# specifically, a worktree directory that doesn't exist or a resolved path
+# that escapes .worktrees/ are the same usage-error category, not a runtime
+# degradation: both mean the caller passed a name that never corresponded to
+# a real worktree.
 #
 # A live pid is NOT proof of identity. The OS recycles pids, so a dead dev
 # server's pid can be reassigned to a completely unrelated process before
@@ -919,9 +925,13 @@ _listener_bind_addr() {
 }
 
 # Kill the entire process group of a setsid-launched leader: SIGTERM the
-# group first, wait a grace period, then fall back to a plain kill on the pid
-# itself, then SIGKILL (group and plain) as a last resort. Never fails hard —
-# stop must always be able to clear the state entry afterward.
+# group, wait a grace period, then SIGKILL the group as a last resort. Never
+# fails hard — stop must always be able to clear the state entry afterward.
+# Three steps only, no isolated kill against the bare pid: _launch_dev_server
+# always launches via setsid, so the leader's pid IS its pgid by construction
+# — any signal a plain `kill $pgid` could deliver is already delivered by the
+# matching `kill -- "-$pgid"` group signal above it, so the isolated form
+# never reaches anything the group form doesn't.
 _kill_process_group() {
   local pgid="$1"
   [[ -z "$pgid" ]] && return 0
@@ -934,18 +944,12 @@ _kill_process_group() {
     waited=$((waited + 1))
   done
 
-  if _is_pid_alive "$pgid"; then
-    kill -- "$pgid" 2>/dev/null || true
-    sleep 1
-  fi
-
   # Unconditional final escalation: gating this on the leader's own liveness
   # would let a surviving child that ignored SIGTERM keep the port forever
   # once the leader itself has already exited (e.g. an npm that forks and
   # returns) — always SIGKILL the whole group, whether or not the leader is
   # still around to report itself alive.
   kill -9 -- "-$pgid" 2>/dev/null || true
-  kill -9 -- "$pgid" 2>/dev/null || true
 
   return 0
 }
@@ -960,9 +964,14 @@ _kill_process_group() {
 _launch_dev_server() {
   local port="$1" log_file="$2" pid_file="$3"
   shift 3
-  rm -f "$pid_file"
+  # Truncate in place — never delete-then-recreate. pid_file was created
+  # atomically by a real `mktemp` in serve_start (not `mktemp -u`), so its
+  # path already exists; deleting and letting a later open() recreate it
+  # would open a window for a symlink planted at that exact path to be
+  # followed. `>|` also overrides noclobber, for the same reason.
+  : >| "$pid_file"
 
-  setsid env PORT="$port" HOST=127.0.0.1 bash -c 'printf "%s" "$$" > "$0"; exec "$@"' \
+  setsid env PORT="$port" HOST=127.0.0.1 bash -c 'printf "%s" "$$" >| "$0"; exec "$@"' \
     "$pid_file" "$@" </dev/null >"$log_file" 2>&1 &
   disown 2>/dev/null || true
 
@@ -1080,24 +1089,32 @@ serve_start() {
   local resolved_dir
   resolved_dir=$(realpath -m "$WORKTREE_DIR")
   if [[ ! "$resolved_path" == "$resolved_dir"/* ]]; then
+    # Argument-validation failure, not a runtime degradation: the caller
+    # passed a structurally invalid or malicious name. Same category as a
+    # missing argument (see validate_branch_name above), and the same exit
+    # code install_deps already uses for the identical check.
     echo -e "${RED}Error: Worktree path escapes expected directory${NC}" >&2
-    return 0
+    exit 1
   fi
 
   if [[ ! -d "$worktree_path" ]]; then
+    # Also a caller bug, not a degradation: a worktree that was supposed to
+    # exist doesn't. Mirrors install_deps' exit 1 for the same condition —
+    # distinct from "no package.json"/"no dev script" below, which are
+    # legitimate skips for a real, existing worktree.
     echo -e "${RED}Error: Worktree directory not found: $worktree_name${NC}" >&2
-    return 0
+    exit 1
   fi
 
   if [[ ! -f "$worktree_path/package.json" ]]; then
-    echo -e "${YELLOW}ℹ️  No package.json in worktree, no dev server applies: $worktree_name${NC}"
+    echo -e "${YELLOW}ℹ️  No package.json in worktree, no dev server applies: $worktree_name${NC}" >&2
     return 0
   fi
 
   local dev_script
   dev_script=$(jq -r '.scripts.dev // empty' "$worktree_path/package.json" 2>/dev/null || echo "")
   if [[ -z "$dev_script" ]]; then
-    echo -e "${YELLOW}ℹ️  No 'dev' script in package.json, no dev server applies: $worktree_name${NC}"
+    echo -e "${YELLOW}ℹ️  No 'dev' script in package.json, no dev server applies: $worktree_name${NC}" >&2
     return 0
   fi
 
@@ -1122,6 +1139,16 @@ serve_start() {
   fi
 
   local state_file="$aimi_root/.aimi/state/dev-server.json"
+
+  # log_file's path only depends on dev_server_key, so it's resolved here —
+  # before the reuse check below — rather than after it, alongside pid_file.
+  # touch + chmod unconditionally on every call (reuse or fresh start) so the
+  # log never inherits the process umask and any permission drift on an
+  # existing file self-heals on the next serve_start.
+  mkdir -p "$aimi_root/.aimi/state"
+  local safe_name="${dev_server_key//\//_}"
+  local log_file="$aimi_root/.aimi/state/.dev-server-${safe_name}.log"
+  touch "$log_file" && chmod 600 "$log_file"
 
   # Reuse a registered entry only when it survives BOTH gates: identity
   # (pid alive AND its identity token matches what was recorded at start —
@@ -1159,7 +1186,22 @@ serve_start() {
     fi
 
     if [[ "$reused" == true ]]; then
-      echo -e "${GREEN}✓ Dev server already running for '$worktree_name' at http://127.0.0.1:${existing_port} (pid $existing_pid)${NC}"
+      # Cap the log on reuse: a server kept alive across phase-mode waves
+      # otherwise keeps the same log file growing for the life of the
+      # container. Truncate to the final half in place (reopen the existing
+      # path with `>`, never delete-then-recreate) so a still-writing dev
+      # server's own fd offset isn't left pointing at an unlinked inode.
+      if [[ -f "$log_file" ]]; then
+        local log_size
+        log_size=$(wc -c < "$log_file" 2>/dev/null | tr -d ' ')
+        if [[ -n "$log_size" ]] && [[ "$log_size" -gt "$DEV_SERVER_LOG_MAX_BYTES" ]]; then
+          local log_tail
+          log_tail=$(tail -c "$((DEV_SERVER_LOG_MAX_BYTES / 2))" "$log_file")
+          printf '%s\n' "$log_tail" > "$log_file"
+          chmod 600 "$log_file"
+        fi
+      fi
+      echo -e "${GREEN}✓ Dev server already running for '$worktree_name' at http://127.0.0.1:${existing_port} (pid $existing_pid)${NC}" >&2
       echo "http://127.0.0.1:${existing_port}"
       return 0
     fi
@@ -1188,11 +1230,11 @@ serve_start() {
     return 0
   fi
 
-  mkdir -p "$aimi_root/.aimi/state"
-  local safe_name="${dev_server_key//\//_}"
-  local log_file="$aimi_root/.aimi/state/.dev-server-${safe_name}.log"
+  # Real mktemp (no -u): creates the file atomically, so _launch_dev_server's
+  # in-place truncation of it never has to recreate a deleted path — see the
+  # symlink-race note on _launch_dev_server above.
   local pid_file
-  pid_file=$(mktemp -u "$aimi_root/.aimi/state/.dev-server-pid-${safe_name}.XXXXXX")
+  pid_file=$(mktemp "$aimi_root/.aimi/state/.dev-server-pid-${safe_name}.XXXXXX")
 
   # Build each attempt's `-- <extra args>` passthrough: the framework-specific
   # host flag is added to BOTH attempts, alongside — never instead of — the
@@ -1200,7 +1242,7 @@ serve_start() {
   local -a attempt1_extra=("${host_flag_args[@]}")
   local -a attempt2_extra=(--port "$port" "${host_flag_args[@]}")
 
-  echo -e "${BLUE}Starting dev server for '$worktree_name' with $pm_name on port $port (attempt 1: PORT env var, dev command: $dev_framework)...${NC}"
+  echo -e "${BLUE}Starting dev server for '$worktree_name' with $pm_name on port $port (attempt 1: PORT env var, dev command: $dev_framework)...${NC}" >&2
 
   local leader_pid=""
   if [[ ${#attempt1_extra[@]} -gt 0 ]]; then
@@ -1236,9 +1278,11 @@ serve_start() {
     return 0
   else
     [[ -n "$leader_pid" ]] && _kill_process_group "$leader_pid"
-    rm -f "$pid_file"
+    # No intermediate pid_file deletion here: _launch_dev_server truncates it
+    # in place at the start of every call, so a delete before the next call
+    # would be redundant with that truncation (see _launch_dev_server above).
 
-    echo -e "${BLUE}PORT env var attempt did not answer on port $port; retrying with -- --port ${port} (attempt 2)...${NC}"
+    echo -e "${BLUE}PORT env var attempt did not answer on port $port; retrying with -- --port ${port} (attempt 2)...${NC}" >&2
     leader_pid=$(cd "$worktree_path" && _launch_dev_server "$port" "$log_file" "$pid_file" "${pm_cmd[@]}" -- "${attempt2_extra[@]}")
 
     if [[ -n "$leader_pid" ]] && _wait_ready "$port" "$DEV_SERVER_READY_TIMEOUT"; then
@@ -1306,7 +1350,7 @@ serve_start() {
     '{port: $port, pid: $pid, startedAt: $started, identity: $identity}')
   _dev_server_write_entry "$state_file" "$dev_server_key" "$entry"
 
-  echo -e "${GREEN}✓ Dev server ready for '$worktree_name': http://127.0.0.1:${port} (pid $leader_pid)${NC}"
+  echo -e "${GREEN}✓ Dev server ready for '$worktree_name': http://127.0.0.1:${port} (pid $leader_pid)${NC}" >&2
   echo "http://127.0.0.1:${port}"
 }
 
@@ -1361,10 +1405,20 @@ serve_stop() {
   echo -e "${GREEN}✓ Dev server stopped and state cleared for '$worktree_name'${NC}"
 }
 
-# Report a container worktree's dev server status. Contract (consumed by
-# US-007/US-013 via jq): prints EXACTLY one line of JSON with keys
-# running (boolean), port (number|null), pid (number|null); exit 0 always.
-# No other stdout output is permitted in this function.
+# Report a container worktree's dev server status: a true read-only verb.
+# Contract (consumed by US-007/US-013 via jq): prints EXACTLY one line of
+# JSON with keys running (boolean), port (number|null), pid (number|null);
+# exit 0 in EVERY state case — no .aimi/ locatable, no entry registered, a
+# dead pid, a live pid with a complete entry, and a live pid with a
+# partial/corrupt entry (e.g. missing port). No other stdout output is
+# permitted in this function. The one exception is a missing or invalid
+# worktree-name argument: a usage error (see validate_branch_name) — stderr
+# message, non-zero exit, no stdout line at all.
+# Never writes state, unlike before: a dead-pid entry is reported as
+# running:false without removing it. Cleanup of a stale entry is exclusively
+# serve_start's job (on its own reuse path) and serve_stop's — never a read
+# verb's — so a concurrent status call can never race a start writing the
+# same key.
 serve_status() {
   local worktree_name="$1"
 
@@ -1386,23 +1440,31 @@ serve_status() {
   fi
 
   local state_file="$aimi_root/.aimi/state/dev-server.json"
-  local entry
-  entry=$(_dev_server_get_entry "$state_file" "$dev_server_key")
 
-  if [[ -z "$entry" ]]; then
-    jq -n -c '{running: false, port: null, pid: null}'
-    return 0
-  fi
-
-  local pid port
-  pid=$(printf '%s' "$entry" | jq -r '.pid // empty')
-  port=$(printf '%s' "$entry" | jq -r '.port // empty')
+  # Single jq call reading pid and port together, bound to the resolved
+  # dev_server_key (never the raw worktree name — see _dev_server_key).
+  # Tolerates a missing file, invalid JSON, or a non-object root: all fall
+  # through to an empty line via `2>/dev/null` plus the `type == "object"`
+  # guard, same as an absent entry. Comma-separated, not space-separated:
+  # `read` with a space/tab IFS collapses an empty leading field (e.g. a
+  # corrupt entry with no port) into the wrong variable — verified that
+  # `read -r a b <<<" 4100"` yields a=4100, b empty, when pid should be
+  # empty and port 4100.
+  local line pid port
+  line=$(jq -r --arg key "$dev_server_key" \
+    'if type == "object" then (.[$key] // {}) else {} end | "\(.pid // ""),\(.port // "")"' \
+    "$state_file" 2>/dev/null)
+  IFS=',' read -r pid port <<<"$line"
 
   if [[ -n "$pid" ]] && _is_pid_alive "$pid"; then
-    jq -n -c --argjson port "$port" --argjson pid "$pid" '{running: true, port: $port, pid: $pid}'
+    # --arg + tonumber?, never --argjson: --argjson requires a valid JSON
+    # literal, so an empty or non-numeric port/pid string would abort jq
+    # with exit 2 and no stdout at all — exactly the contract violation this
+    # rewrite fixes. tonumber? // null degrades a missing/non-numeric field
+    # to JSON null instead of crashing.
+    jq -n -c --arg port "$port" --arg pid "$pid" \
+      '{running: true, port: ($port | tonumber? // null), pid: ($pid | tonumber? // null)}'
   else
-    # Stale entry: pid no longer alive. Remove it as a side effect.
-    _dev_server_remove_entry "$state_file" "$dev_server_key"
     jq -n -c '{running: false, port: null, pid: null}'
   fi
 }
@@ -1505,7 +1567,8 @@ Commands:
                                       (detects package manager by lockfile)
   serve start <worktree-name>         Start a dev server for a worktree, verify its
                                       listener is actually loopback-only, print its
-                                      URL and pid (refuses and kills a wildcard bind)
+                                      raw URL to stdout only — pid and all narration
+                                      go to stderr (refuses and kills a wildcard bind)
   serve stop <worktree-name>          Stop a worktree's dev server (kills the
                                       whole process group)
   serve status <worktree-name>        Report a worktree's dev server status as
@@ -1610,15 +1673,33 @@ Serve (Dev Server):
     every case: kill succeeded, kill failed, or kill was never attempted
   - serve status prints EXACTLY one line of JSON to stdout:
     {"running":<bool>,"port":<number|null>,"pid":<number|null>}, exit 0 in
-    both the running and not-running cases. This exact shape is a contract
-    consumed by other tooling via jq — do not add or rename keys
+    EVERY state case — no .aimi/ locatable, no entry registered, a dead pid,
+    a live pid with a complete entry, or a live pid with a partial/corrupt
+    entry (e.g. missing port). This exact shape is a contract consumed by
+    other tooling via jq — do not add or rename keys. status is a true
+    read-only verb: unlike before, it never removes a stale (dead-pid) entry
+    as a side effect — that cleanup is exclusively serve start's (its own
+    reuse path) and serve stop's job, never a read verb's, so a concurrent
+    status call can never race a start writing the same key
+  - serve start's stdout, on both the reuse path and a successful fresh
+    launch, is exactly the raw URL http://127.0.0.1:<port> as its only line
+    — pid and all decorated progress narration (attempt 1/2, the reuse
+    confirmation, the final readiness message) go to stderr instead, so
+    scripted callers can capture stdout directly without parsing it out of
+    human-readable text
   - No package.json, or no "dev" script: clean skip — exits 0, writes no
     state, and is never reported as an error
   - Every failure mode (port exhaustion, readiness timeout, ownership
-    mismatch, a confirmed non-loopback bind, missing dev script, kill
-    failure) degrades gracefully: serve start/stop/status never exit
-    non-zero for these conditions. Only a missing worktree-name argument is
-    a usage error
+    mismatch, a confirmed non-loopback bind, no package.json, no dev script,
+    kill failure) degrades gracefully: serve start/stop/status never exit
+    non-zero for these conditions. A missing or invalid worktree-name
+    argument (see validate_branch_name) is a usage error in all three verbs
+    — non-zero exit, stderr message, no stdout line at all. serve start adds
+    two more usage errors in the same category, because both mean the
+    caller passed a name that never corresponded to a real worktree, not a
+    runtime degradation: a worktree directory that doesn't exist, and a
+    resolved path that escapes .worktrees/ (the same containment check and
+    exit code install-deps already uses for both)
 
 Examples:
   worktree-manager.sh create feature-login
