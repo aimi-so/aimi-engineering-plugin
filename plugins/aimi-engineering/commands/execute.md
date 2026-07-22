@@ -1476,7 +1476,7 @@ $WORKTREE_MGR serve start "$BRANCH_NAME"
 SERVE_STATUS_JSON=$($WORKTREE_MGR serve status "$BRANCH_NAME")
 ```
 
-`install-deps`/`serve start` are invoked with CWD at the project root and `[branchName]` as the worktree-name argument — never CWD'd into the container itself — because `worktree-manager.sh` resolves its worktree-name argument against `$(git rev-parse --show-toplevel)/.worktrees/<name>` relative to the CWD it runs in; this is the exact same reason `Create or Reuse the Container` above `cd`s to the project root, never into the container, before calling `$WORKTREE_MGR create`. The resulting target is `CONTAINER_PATHS[group_key]` (`<project_root>/.worktrees/[branchName]`).
+`install-deps`/`serve start` are invoked with CWD at the project root and `[branchName]` as the worktree-name argument — never CWD'd into the container itself — because `worktree-manager.sh` resolves its worktree-name argument against `$(git rev-parse --show-toplevel)/.worktrees/<name>` relative to the CWD it runs in; this is the exact same reason `Create or Reuse the Container` above `cd`s to the project root, never into the container, before calling `$WORKTREE_MGR create`. The resulting target is `CONTAINER_PATHS[group_key]` (`<project_root>/.worktrees/[branchName]`). This CWD is also what keeps two project groups' `dev-server.json` entries distinct: `serve start` keys its state by the container's absolute resolved path (`<project_root>/.worktrees/[branchName]`, unique per group), never by the literal `[branchName]` — so two groups whose container happens to get the same branch name never collide.
 
 Parse `SERVE_STATUS_JSON` — single-line JSON, exactly `{"running":bool,"port":n|null,"pid":n|null}` per its documented contract (see `serve status` in `worktree-manager.sh` help text) — and record the port only when a server is actually running:
 
@@ -1521,11 +1521,12 @@ command -v agent-browser
   VISUAL_GROUP_KEY=$(printf '%s' "$FIRST_VISUAL" | jq -r '.project // "DEFAULT"')
   ```
 
-  **When `PHASE_MODE` is true** (the top-level single-file phase orchestrator, or a Phase-Mode Paired Split sub-orchestrator whose spawn prompt pre-set `PHASE_BRANCH`/`PHASE_CONTAINER_PATH` to its own split — see Spawn Split Sub-Orchestrators — so this branch applies unmodified in either case, keyed by whichever branch this session owns): query `serve status` fresh for `$PHASE_BRANCH` — never a value cached from Phase Container Dev Server Bootstrap or Split Container Dev Server Bootstrap earlier in this run, since each Bash call is an isolated shell (Step 0):
+  **When `PHASE_MODE` is true** (the top-level single-file phase orchestrator, or a Phase-Mode Paired Split sub-orchestrator whose spawn prompt pre-set `PHASE_BRANCH`/`PHASE_CONTAINER_PATH` to its own split — see Spawn Split Sub-Orchestrators — so this branch applies unmodified in either case, keyed by whichever branch this session owns): query `serve status` fresh for `$PHASE_BRANCH` — never a value cached from Phase Container Dev Server Bootstrap or Split Container Dev Server Bootstrap earlier in this run, since each Bash call is an isolated shell (Step 0). CWD must be `$AIMI_ROOT`, the exact same CWD Phase Container Dev Server Bootstrap used for its own `serve start` — `serve status` resolves its dev-server.json key from CWD (see `_dev_server_key` in `worktree-manager.sh`), so a mismatched CWD here would silently miss the entry rather than report it stale:
 
   ```bash
   WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
   : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+  cd "$AIMI_ROOT"
   PHASE_SERVE_JSON=$($WORKTREE_MGR serve status "$PHASE_BRANCH" 2>/dev/null)
   PHASE_SERVE_PORT=$(printf '%s' "$PHASE_SERVE_JSON" | jq -r '.port // empty' 2>/dev/null)
   ```
@@ -1942,10 +1943,17 @@ while true:
                         # either, and each Bash call is an isolated shell (Step 0).
                         # Inside a split sub-orchestrator, PHASE_BRANCH is already
                         # that split's own branch (see Spawn Split Sub-Orchestrators),
-                        # so this applies unmodified one level deeper too.
+                        # so this applies unmodified one level deeper too. CWD is
+                        # closed explicitly to $AIMI_ROOT — the same CWD Phase
+                        # Container Dev Server Bootstrap used for its own `serve
+                        # start` — rather than relying on the ambient CWD survived
+                        # from an earlier Bash call, since `serve status` resolves
+                        # its dev-server.json key from CWD (see `_dev_server_key`
+                        # in `worktree-manager.sh`).
                         ```bash
                         WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
                         : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+                        cd "$AIMI_ROOT"
                         PHASE_SERVE_JSON=$($WORKTREE_MGR serve status "$PHASE_BRANCH" 2>/dev/null)
                         PHASE_SERVE_PORT=$(printf '%s' "$PHASE_SERVE_JSON" | jq -r '.port // empty' 2>/dev/null)
                         ```
@@ -2425,9 +2433,11 @@ Stop this phase's own dev server, if one is still running, before the branch is 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-cd "$PHASE_CONTAINER_PATH"
+cd "$AIMI_ROOT"
 $WORKTREE_MGR serve stop "$PHASE_BRANCH"
 ```
+
+CWD is `$AIMI_ROOT`, the same CWD Phase Container Dev Server Bootstrap used for its own `serve start "$PHASE_BRANCH"` in Step 1.7 — never `$PHASE_CONTAINER_PATH` — since `serve stop` resolves its dev-server.json key from CWD (see `_dev_server_key` in `worktree-manager.sh`); a mismatched CWD here would silently miss the registered entry instead of stopping it.
 
 `serve stop` kills the dev server's full process group and clears its state entry; it exits 0 and reports "No dev server registered" when no server was ever started — identical to Container Mode: Stop the Dev Server's own contract in Step 5. This only runs on the `completed` path reached here: every non-completion exit above it in Phase Completion (the pending-count guard, Creates Verification's `verification_failed` branch, and Write Handoff's failure branch) returns before this subsection, so a phase that ends on deadlock, a gate-blocked wave, or `verification_failed` never calls `serve stop` — its dev server stays alive between waves and across a paused session, resumable via `serve status` on the next `/aimi:execute` run against the same phase, exactly like the flat container's own resumable contract.
 
@@ -2510,9 +2520,15 @@ For each unique `group_key` with a container from this run (see Container Paths 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-cd [CONTAINER_PATHS[group_key]]
+if [ "[group_key]" = "DEFAULT" ]; then
+  cd "$AIMI_ROOT"
+else
+  cd "$AIMI_ROOT/[group_key]"
+fi
 $WORKTREE_MGR serve stop [branchName]
 ```
+
+CWD is the same project-root conditional Container Dev Server Bootstrap already used before its `serve start [branchName]` for this group — never `cd [CONTAINER_PATHS[group_key]]` into the container itself — since `serve stop` resolves its dev-server.json key from CWD (see `_dev_server_key` in `worktree-manager.sh`); a mismatched CWD here would silently miss the registered entry instead of stopping it.
 
 `serve stop` (outline 04's contract) kills the dev server's full process group and clears its state entry; it exits 0 and reports "No dev server registered" when no server was ever started for that container (no `package.json`, or the wave loop never launched one) — so this call is always safe to issue. Wait for it to finish before moving to the next subsection.
 
