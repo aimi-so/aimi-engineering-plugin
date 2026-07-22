@@ -625,9 +625,11 @@ merge_all_worktrees() {
 # 127.0.0.1 port, launches the worktree's `dev` script as its own process
 # group (via setsid), confirms readiness with an HTTP probe, confirms the
 # listening socket actually belongs to the process it just spawned, and
-# tracks the result in .aimi/state/dev-server.json keyed by worktree/branch
-# name. Every failure mode here degrades gracefully (exit 0, clear message)
-# except a missing worktree-name argument, which is a usage error.
+# tracks the result in .aimi/state/dev-server.json keyed by the container's
+# absolute resolved path (see _dev_server_key below) — not by worktree/branch
+# name, since two project groups in a multi-repo layout can share the same
+# `[branchName]`. Every failure mode here degrades gracefully (exit 0, clear
+# message) except a missing worktree-name argument, which is a usage error.
 
 # Portable exclusive lock (Linux: flock, macOS: mkdir spinlock).
 # Usage: call inside a subshell with an FD 200 redirect: ( _lock "$f"; ... ) 200>"$f"
@@ -819,23 +821,36 @@ _dev_server_read_all() {
   fi
 }
 
-# Print the branch's entry (compact JSON) on stdout, or nothing if absent.
+# Resolve a worktree/branch name to the absolute path used as the
+# dev-server.json key — the same realpath -m computation create_worktree's
+# containment check already performs. Absolute-path-by-construction, so two
+# project groups whose container happens to get the same `[branchName]`
+# (e.g. two `.aimi/`-sharing project_roots in a multi-repo layout) never
+# collide on the same key, even though WORKTREE_DIR is recomputed fresh in
+# every invocation from that call's own CWD (git rev-parse --show-toplevel).
+_dev_server_key() {
+  local worktree_name="$1"
+  realpath -m "$WORKTREE_DIR/$worktree_name"
+}
+
+# Print the entry (compact JSON) for a dev-server.json key on stdout, or
+# nothing if absent.
 _dev_server_get_entry() {
-  local state_file="$1" branch="$2"
-  _dev_server_read_all "$state_file" | jq -c --arg branch "$branch" '.[$branch] // empty'
+  local state_file="$1" key="$2"
+  _dev_server_read_all "$state_file" | jq -c --arg key "$key" '.[$key] // empty'
   return 0
 }
 
-# Atomic (mktemp-then-move, flock-protected) upsert of one branch's entry.
+# Atomic (mktemp-then-move, flock-protected) upsert of one key's entry.
 _dev_server_write_entry() {
-  local state_file="$1" branch="$2" entry_json="$3"
+  local state_file="$1" key="$2" entry_json="$3"
   mkdir -p "$(dirname "$state_file")"
   local lock_file="${state_file}.lock"
   (
     _lock "$lock_file"
     local current updated tmp_file
     current=$(_dev_server_read_all "$state_file")
-    updated=$(printf '%s' "$current" | jq --arg branch "$branch" --argjson entry "$entry_json" '.[$branch] = $entry')
+    updated=$(printf '%s' "$current" | jq --arg key "$key" --argjson entry "$entry_json" '.[$key] = $entry')
     tmp_file=$(mktemp "${state_file}.XXXXXX")
     printf '%s\n' "$updated" > "$tmp_file"
     mv "$tmp_file" "$state_file"
@@ -843,17 +858,17 @@ _dev_server_write_entry() {
   return 0
 }
 
-# Atomic (mktemp-then-move, flock-protected) removal of one branch's entry.
+# Atomic (mktemp-then-move, flock-protected) removal of one key's entry.
 # A no-op (not an error) when the state file doesn't exist yet.
 _dev_server_remove_entry() {
-  local state_file="$1" branch="$2"
+  local state_file="$1" key="$2"
   [[ -f "$state_file" ]] || return 0
   local lock_file="${state_file}.lock"
   (
     _lock "$lock_file"
     local current updated tmp_file
     current=$(_dev_server_read_all "$state_file")
-    updated=$(printf '%s' "$current" | jq --arg branch "$branch" 'del(.[$branch])')
+    updated=$(printf '%s' "$current" | jq --arg key "$key" 'del(.[$key])')
     tmp_file=$(mktemp "${state_file}.XXXXXX")
     printf '%s\n' "$updated" > "$tmp_file"
     mv "$tmp_file" "$state_file"
@@ -874,6 +889,8 @@ serve_start() {
   validate_branch_name "$worktree_name"
 
   local worktree_path="$WORKTREE_DIR/$worktree_name"
+  local dev_server_key
+  dev_server_key=$(_dev_server_key "$worktree_name")
 
   # Path containment check — prevent directory traversal
   local resolved_path
@@ -912,7 +929,7 @@ serve_start() {
 
   # Reuse a live registered entry after a pid-alive check; discard a dead one.
   local existing_entry
-  existing_entry=$(_dev_server_get_entry "$state_file" "$worktree_name")
+  existing_entry=$(_dev_server_get_entry "$state_file" "$dev_server_key")
   if [[ -n "$existing_entry" ]]; then
     local existing_pid existing_port
     existing_pid=$(printf '%s' "$existing_entry" | jq -r '.pid // empty')
@@ -922,7 +939,7 @@ serve_start() {
       echo "http://127.0.0.1:${existing_port}"
       return 0
     fi
-    _dev_server_remove_entry "$state_file" "$worktree_name"
+    _dev_server_remove_entry "$state_file" "$dev_server_key"
   fi
 
   # Detect package manager by lockfile, fixed priority order: bun > pnpm > yarn > npm.
@@ -947,7 +964,7 @@ serve_start() {
   fi
 
   mkdir -p "$aimi_root/.aimi/state"
-  local safe_name="${worktree_name//\//_}"
+  local safe_name="${dev_server_key//\//_}"
   local log_file="$aimi_root/.aimi/state/.dev-server-${safe_name}.log"
   local pid_file
   pid_file=$(mktemp -u "$aimi_root/.aimi/state/.dev-server-pid-${safe_name}.XXXXXX")
@@ -1001,7 +1018,7 @@ serve_start() {
   local entry
   entry=$(jq -n --argjson port "$port" --argjson pid "$leader_pid" --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{port: $port, pid: $pid, startedAt: $started}')
-  _dev_server_write_entry "$state_file" "$worktree_name" "$entry"
+  _dev_server_write_entry "$state_file" "$dev_server_key" "$entry"
 
   echo -e "${GREEN}✓ Dev server ready for '$worktree_name': http://127.0.0.1:${port} (pid $leader_pid)${NC}"
   echo "http://127.0.0.1:${port}"
@@ -1019,6 +1036,9 @@ serve_stop() {
 
   validate_branch_name "$worktree_name"
 
+  local dev_server_key
+  dev_server_key=$(_dev_server_key "$worktree_name")
+
   local aimi_root
   if ! aimi_root=$(find_aimi_root); then
     echo -e "${YELLOW}ℹ️  Could not locate a .aimi/ directory; nothing to stop for '$worktree_name'${NC}"
@@ -1027,7 +1047,7 @@ serve_stop() {
 
   local state_file="$aimi_root/.aimi/state/dev-server.json"
   local entry
-  entry=$(_dev_server_get_entry "$state_file" "$worktree_name")
+  entry=$(_dev_server_get_entry "$state_file" "$dev_server_key")
 
   if [[ -z "$entry" ]]; then
     echo -e "${YELLOW}ℹ️  No dev server registered for '$worktree_name'${NC}"
@@ -1043,7 +1063,7 @@ serve_stop() {
   fi
 
   # Remove the state entry whether or not the kill fully succeeded.
-  _dev_server_remove_entry "$state_file" "$worktree_name"
+  _dev_server_remove_entry "$state_file" "$dev_server_key"
   echo -e "${GREEN}✓ Dev server stopped and state cleared for '$worktree_name'${NC}"
 }
 
@@ -1062,6 +1082,9 @@ serve_status() {
 
   validate_branch_name "$worktree_name"
 
+  local dev_server_key
+  dev_server_key=$(_dev_server_key "$worktree_name")
+
   local aimi_root
   if ! aimi_root=$(find_aimi_root); then
     jq -n -c '{running: false, port: null, pid: null}'
@@ -1070,7 +1093,7 @@ serve_status() {
 
   local state_file="$aimi_root/.aimi/state/dev-server.json"
   local entry
-  entry=$(_dev_server_get_entry "$state_file" "$worktree_name")
+  entry=$(_dev_server_get_entry "$state_file" "$dev_server_key")
 
   if [[ -z "$entry" ]]; then
     jq -n -c '{running: false, port: null, pid: null}'
@@ -1085,7 +1108,7 @@ serve_status() {
     jq -n -c --argjson port "$port" --argjson pid "$pid" '{running: true, port: $port, pid: $pid}'
   else
     # Stale entry: pid no longer alive. Remove it as a side effect.
-    _dev_server_remove_entry "$state_file" "$worktree_name"
+    _dev_server_remove_entry "$state_file" "$dev_server_key"
     jq -n -c '{running: false, port: null, pid: null}'
   fi
 }
@@ -1234,11 +1257,14 @@ Serve (Dev Server):
     dev server, serve start confirms the listening pid's process group
     matches the process it just spawned, so a stale or foreign process on
     that port is never mistaken for the dev server
-  - State: .aimi/state/dev-server.json, keyed by worktree/branch name, each
-    entry holding port, pid (the process-group leader pid), and startedAt.
-    Written exclusively via a Bash-level atomic (mktemp-then-move,
-    flock-protected) write inside this script — never via the Write/Edit
-    tool, which guard-runtime-state.py blocks unconditionally for this path
+  - State: .aimi/state/dev-server.json, keyed by the container's absolute
+    resolved path (realpath -m of the worktree directory, not by worktree/
+    branch name — so two project groups whose container shares the same
+    `[branchName]` never collide on the same entry), each entry holding
+    port, pid (the process-group leader pid), and startedAt. Written
+    exclusively via a Bash-level atomic (mktemp-then-move, flock-protected)
+    write inside this script — never via the Write/Edit tool, which
+    guard-runtime-state.py blocks unconditionally for this path
   - serve start reuses a live entry (kill -0 check) instead of respawning;
     a dead entry is discarded and a fresh server is spawned
   - serve stop kills the recorded process group (negative-pid kill against
