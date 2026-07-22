@@ -234,7 +234,6 @@ If PROJECT_PATH is provided:
 <worktree_context>
 
 [WORKTREE_PATH]  ← optional, provided by execute.md parallel mode
-[VERIFICATION_BASE_URL]  ← optional, provided by execute.md in container mode
 
 If both PROJECT_PATH and WORKTREE_PATH are provided:
 - cd to WORKTREE_PATH (worktree takes precedence; it is inside the project repo)
@@ -254,8 +253,6 @@ If neither is provided:
 - Work in current directory (standard sequential behavior)
 - Report result — the caller (next.md/execute.md) handles status updates via the CLI
 
-When VERIFICATION_BASE_URL is provided, it overrides only the origin (scheme + host + port) of `story.verification.url` — path and query are preserved exactly. See the `EFFECTIVE_VERIFICATION_URL` computation in `<execution_flow>` below (step 0a) for the exact rewrite. When VERIFICATION_BASE_URL is absent, the effective URL is `story.verification.url` unchanged — byte-for-byte today's behavior.
-
 </worktree_context>
 
 <headed_mode_context>
@@ -266,7 +263,7 @@ If HEADED_MODE is true:
 - A headed browser session named `visual-follow` is already running (opened by execute.md)
 - Use `--session visual-follow` for all agent-browser commands (do NOT pass --headed; the session inherits it)
 - The session lifecycle is managed by execute.md — do NOT close it
-- Navigate to EFFECTIVE_VERIFICATION_URL at story start (step 0) for live preview
+- Navigate to verification.url at story start (step 0) for live preview
 
 If HEADED_MODE is false or absent:
 - Standard headless mode — executor owns the full browser lifecycle (open → use → close)
@@ -304,14 +301,14 @@ Visual verification is **advisory** — failures do NOT block the story commit.
 <headed_mode_visual>
 
 0. **Navigate to verification URL at story start (before implementation):**
-   `agent-browser --session visual-follow open [EFFECTIVE_VERIFICATION_URL]`
+   `agent-browser --session visual-follow open [verification.url]`
    This gives the user a live preview in the headed browser while implementation proceeds.
 
 1. **Check agent-browser availability:**
    Run `command -v agent-browser`. If not found, note "visual verification skipped — agent-browser not installed" in your report and proceed to commit.
 
 2. **Navigate to verification URL:**
-   `agent-browser --session visual-follow open [EFFECTIVE_VERIFICATION_URL]`
+   `agent-browser --session visual-follow open [verification.url]`
 
 3. **Take screenshot:**
    `agent-browser --session visual-follow screenshot /tmp/verify-[STORY_ID].png`
@@ -336,7 +333,7 @@ Visual verification is **advisory** — failures do NOT block the story commit.
    Run `command -v agent-browser`. If not found, note "visual verification skipped — agent-browser not installed" in your report and proceed to commit.
 
 2. **Open the page:**
-   `agent-browser open [EFFECTIVE_VERIFICATION_URL]`
+   `agent-browser open [verification.url]`
 
 3. **Take screenshot:**
    `agent-browser screenshot /tmp/verify-[STORY_ID].png`
@@ -400,18 +397,6 @@ All file operations MUST stay within the project boundary: PROJECT_PATH when set
     - `skills` — array of required skill blocks; for each entry, read its `.content` verbatim as additional project conventions (treat each as a required SKILL.md conventions block, in addition to project CLAUDE.md)
     - `designContext` — read `.decisions` as design intent for any UI-touching work; if `.bundleGuidance` cites spec file paths (DesignSpec / BusinessSpec), use the Read tool to load those files before authoring implementation code
     If this command fails, report failure immediately and stop.
-    - Compute `EFFECTIVE_VERIFICATION_URL` from `story.verification.url` and `VERIFICATION_BASE_URL` (see `<worktree_context>` above). This is a plain inline one-liner, repeated at every call site that needs it — never a shared function persisted across calls, since each Bash call is an isolated shell. `story.verification.url` is read via `jq -r` into a variable, never reinterpolated as raw bracket-placeholder text inside a quoted string — same discipline as `execute.md`'s `VISUAL_URL=$(printf '%s' "$FIRST_VISUAL" | jq -r '.verification.url')`:
-      ```bash
-      STORY_CONTEXT_JSON=$($AIMI_CLI get-story-context "$STORY_ID")
-      RAW_VERIFICATION_URL=$(printf '%s' "$STORY_CONTEXT_JSON" | jq -r '.story.verification.url // empty')
-      if [ -n "$VERIFICATION_BASE_URL" ] && [ -n "$RAW_VERIFICATION_URL" ]; then
-        PATH_QUERY=$(printf '%s' "$RAW_VERIFICATION_URL" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+##')
-        EFFECTIVE_VERIFICATION_URL="${VERIFICATION_BASE_URL%/}${PATH_QUERY}"
-      else
-        EFFECTIVE_VERIFICATION_URL="$RAW_VERIFICATION_URL"
-      fi
-      ```
-      Absent `VERIFICATION_BASE_URL`, `EFFECTIVE_VERIFICATION_URL` equals `story.verification.url` unchanged — byte-for-byte today's behavior.
 0b. If `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, read each prototype file with the Read tool:
     - Resolve path as `$AIMI_ROOT/<path>` for each entry in `metadata.prototypePaths[]` and for `story.implementation.prototypeAnchor` when set
     - If a file does not exist at the resolved path, log: `prototype <path> missing — skipped` and continue
@@ -480,7 +465,6 @@ If PROJECT_PATH is provided:
 <worktree_context>
 
 [WORKTREE_PATH]  ← optional, provided by execute.md parallel mode
-[VERIFICATION_BASE_URL]  ← optional, provided by execute.md in container mode
 
 If both PROJECT_PATH and WORKTREE_PATH are provided:
 - cd to WORKTREE_PATH (worktree takes precedence; it is inside the project repo)
@@ -500,8 +484,6 @@ If neither is provided:
 - Work in current directory (standard sequential behavior)
 - Report result — the caller (next.md/execute.md) handles status updates via the CLI
 
-When VERIFICATION_BASE_URL is provided, it overrides only the origin (scheme + host + port) of `story.verification.url` — path and query are preserved exactly. See the `EFFECTIVE_VERIFICATION_URL` computation in `<execution_flow>` below for the exact rewrite. When VERIFICATION_BASE_URL is absent, the effective URL is `story.verification.url` unchanged — byte-for-byte today's behavior.
-
 </worktree_context>
 
 <headed_mode_context>
@@ -512,7 +494,7 @@ If HEADED_MODE is true:
 - A headed browser session named `visual-follow` is already running (opened by execute.md)
 - Use `--session visual-follow` for all agent-browser commands (do NOT pass --headed; the session inherits it)
 - The session lifecycle is managed by execute.md — do NOT close it
-- Navigate to EFFECTIVE_VERIFICATION_URL at story start (step 0) for live preview
+- Navigate to verification.url at story start (step 0) for live preview
 
 If HEADED_MODE is false or absent:
 - Standard headless mode — executor owns the full browser lifecycle (open → use → close)
@@ -546,7 +528,7 @@ CRITICAL: Stay within project root. Never read/write outside project boundary. W
 </project_root_boundary>
 
 <execution_flow>
-Bootstrap: re-read `$AIMI_CLI` from cache (per-call re-read one-liner — see `<task_pointer>` above), run `$AIMI_CLI get-story-context $STORY_ID`, parse `{story, metadata, skills, designContext}`. For each entry in `skills[]`, read its `.content` verbatim as additional project conventions (in addition to CLAUDE.md). Read `designContext.decisions` as design intent for UI-touching work; if `designContext.bundleGuidance` cites spec file paths (DesignSpec / BusinessSpec), use the Read tool to load those files before authoring implementation code. Read prototype files from `metadata.prototypePaths[]` and `story.implementation.prototypeAnchor` via Read tool (log missing, skip). Compute `EFFECTIVE_VERIFICATION_URL` from `story.verification.url`, with its origin (scheme + host + port) overridden by `VERIFICATION_BASE_URL` when provided — same inline sed one-liner as the Prompt Template's bootstrap step (see there for the exact rewrite; never a shared function, since each Bash call is an isolated shell). Absent `VERIFICATION_BASE_URL`, `EFFECTIVE_VERIFICATION_URL` equals `story.verification.url` unchanged. Then follow standard execution flow: read criteria → implement (follow `story.tasks[]` as the ordered recipe when present; treat `"Wire <X> into <Y>"` entries as mandatory cross-story integration steps; AC remains the completion gate) → test → commit. If `story.verification.strategy == "visual"` OR `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, run the Visual Source-of-Truth Protocol (V1/V2/V3) before writing code. Stage only story-related files (never `-A` or `.`). Commit format: `git commit -m "type(scope): Story title"`. Verify with `git log -1 --oneline`. On commit failure: report immediately, do not retry. Do NOT update tasks file — caller handles status. When a reference artifact is declared, run the Reference-Artifact Parity Pass before committing (see full named section above). **End your final message with the `<result_json>` block per the Result Contract section — the orchestrator parses ONLY that block; prose outside is debugging only.**
+Bootstrap: re-read `$AIMI_CLI` from cache (per-call re-read one-liner — see `<task_pointer>` above), run `$AIMI_CLI get-story-context $STORY_ID`, parse `{story, metadata, skills, designContext}`. For each entry in `skills[]`, read its `.content` verbatim as additional project conventions (in addition to CLAUDE.md). Read `designContext.decisions` as design intent for UI-touching work; if `designContext.bundleGuidance` cites spec file paths (DesignSpec / BusinessSpec), use the Read tool to load those files before authoring implementation code. Read prototype files from `metadata.prototypePaths[]` and `story.implementation.prototypeAnchor` via Read tool (log missing, skip). Then follow standard execution flow: read criteria → implement (follow `story.tasks[]` as the ordered recipe when present; treat `"Wire <X> into <Y>"` entries as mandatory cross-story integration steps; AC remains the completion gate) → test → commit. If `story.verification.strategy == "visual"` OR `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, run the Visual Source-of-Truth Protocol (V1/V2/V3) before writing code. Stage only story-related files (never `-A` or `.`). Commit format: `git commit -m "type(scope): Story title"`. Verify with `git log -1 --oneline`. On commit failure: report immediately, do not retry. Do NOT update tasks file — caller handles status. When a reference artifact is declared, run the Reference-Artifact Parity Pass before committing (see full named section above). **End your final message with the `<result_json>` block per the Result Contract section — the orchestrator parses ONLY that block; prose outside is debugging only.**
 </execution_flow>
 
 <on_failure>

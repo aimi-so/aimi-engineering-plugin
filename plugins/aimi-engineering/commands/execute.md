@@ -1734,18 +1734,9 @@ while true:
                 - WORKTREE_PATH = wt.worktree_path
                 - PROJECT_PATH = project_path (only include if non-null)
                 - PROJECT_GUIDELINES = project_guidelines
-                - When CONTAINER_MODE is false (EXECUTION_MODE inline or absent — unchanged):
-                    - HEADED_MODE = (do NOT include for worktree stories — visual verification runs post-merge, not inside the worktree)
-                    - Omit the <visual_verification> section entirely for worktree stories
-                      (the dev server cannot see worktree changes; verification runs after merge-all instead)
-                - When CONTAINER_MODE is true (Step 3.3's Container Dev Server Bootstrap already
-                  started this project group's dev server before the wave loop began):
-                    - HEADED_MODE = true, only when VISUAL_FOLLOW == true (omit otherwise)
-                    - Do NOT omit the <visual_verification> section
-                    - VERIFICATION_BASE_URL = CONTAINER_DEV_URL[wt.group_key], only when that
-                      group's port resolved this run (omit the item entirely when it did not —
-                      that story's own post-merge visual verification degrades to skipped
-                      further below; this never blocks mark-complete or the wave loop)
+                - HEADED_MODE = (do NOT include for worktree stories — visual verification runs post-merge, not inside the worktree)
+                - Omit the <visual_verification> section entirely for worktree stories
+                  (the dev server cannot see worktree changes; verification runs after merge-all instead)
                 - STORY_ID = full_story.id  ← only the id; no description, no criteria, no prototype HTML
                 - Do NOT modify the tasks.json file — report result (success/failure + details)
             ]
