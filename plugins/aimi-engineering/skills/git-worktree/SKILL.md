@@ -16,7 +16,7 @@ This skill provides a unified interface for managing Git worktrees across your d
 - **Interactive confirmations** at each step
 - **Automatic .gitignore management** for worktree directory
 - **Automatic .env file copying** from main repo to new worktrees
-- **Manage a loopback-only dev server** (`serve start|stop|status`) for a worktree, with a readiness probe and an ownership check
+- **Manage a dev server** (`serve start|stop|status`) for a worktree, with a readiness probe, an ownership check, and a bind-address verification that refuses and kills any listener that isn't actually loopback-only
 
 ## CRITICAL: Always Use the Manager Script
 
@@ -78,7 +78,7 @@ bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh clean
 # Install dependencies inside a worktree (detects package manager by lockfile)
 bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh install-deps feature-login
 
-# Start a loopback-only dev server for a worktree (prints http://127.0.0.1:<port> and pid)
+# Start a dev server for a worktree, verified loopback-only after readiness (prints http://127.0.0.1:<port> and pid)
 bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh serve start feature-login
 
 # Check a worktree's dev server status (single-line JSON: running/port/pid)
@@ -190,27 +190,29 @@ bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh insta
 
 ### `serve start|stop|status <worktree-name>`
 
-Manages a **loopback-only** dev server for a container worktree, so `/aimi:execute`'s container mode (and its visual verification step) can bring one up before a wave and tear it down afterward.
+Manages a dev server for a container worktree, so `/aimi:execute`'s container mode (and its visual verification step) can bring one up before a wave and tear it down afterward. `serve start` never reports a server "ready" unless it has verified the listener is actually loopback-only — see **Attempt-then-verify loopback bind** below.
 
-- **`serve start <name>`** — Picks a free `127.0.0.1` port, launches the worktree's `dev` script bound to that port, blocks on a readiness probe (an actual HTTP response, not just "the process started"), confirms via an ownership check that the port's listener really is the process it just spawned, prints `http://127.0.0.1:<port>` plus the pid, and records the entry. A live, already-registered server for the same worktree is reused as-is (a `kill -0` liveness check) instead of spawning a duplicate.
+- **`serve start <name>`** — Picks a free `127.0.0.1` port, launches the worktree's `dev` script bound to that port with the framework-appropriate host flag (see below), blocks on a readiness probe (an actual HTTP response, not just "the process started"), confirms via an ownership check that the port's listener really is the process it just spawned, then confirms via a bind-address check that the listener is actually loopback-only, prints `http://127.0.0.1:<port>` plus the pid, and records the entry. A live, already-registered server for the same worktree is reused as-is (a `kill -0` liveness check) instead of spawning a duplicate — the bind-address check runs only against a freshly-launched listener, never on reuse.
 - **`serve stop <name>`** — Kills the whole recorded process group (a negative-pid kill against the setsid-launched leader, not just the single pid), so children forked by `next dev`, `vite`, or similar are not orphaned. The state entry is removed whether or not the kill fully succeeded.
-- **`serve status <name>`** — Prints **exactly one line of JSON** to stdout: `{"running":<bool>,"port":<number|null>,"pid":<number|null>}`, exit code `0` in both the running and not-running cases. This exact shape is a contract — other tooling parses it with `jq`; do not add, rename, or omit keys.
+- **`serve status <name>`** — Prints **exactly one line of JSON** to stdout: `{"running":<bool>,"port":<number|null>,"pid":<number|null>}`, exit code `0` in both the running and not-running cases. This exact shape is a contract — other tooling parses it with `jq`; do not add, rename, or omit keys. Status is read-only: it never runs the bind-address check.
 
-**Loopback-only, always:** the dev server is bound to `127.0.0.1` and never `0.0.0.0` or a wildcard host, and the readiness probe itself only ever connects to `127.0.0.1:<port>` — an autonomously-started server must never be reachable from outside the loopback interface.
+**Attempt-then-verify loopback bind:** only `HOST=127.0.0.1` is set unconditionally, and that alone satisfies CRA/webpack-dev-server but not Next.js (wants `-H`/`HOSTNAME`), Vite, Astro, or Nuxt (want `--host`) — an unrecognized flag can be silently ignored, leaving the dev server bound to a wildcard address (`0.0.0.0`/`::`) reachable from the local network, with the worktree's real `.env` secrets loaded. `serve start` closes that gap in two halves:
+1. **Attempt:** it reads `scripts.dev` from the worktree's `package.json` and classifies the command (`next dev`, `vite`, `astro dev`, `nuxt dev`, `react-scripts`, or unrecognized) to pick the right flag — `-H 127.0.0.1` for Next.js, `--host 127.0.0.1` for Vite/Astro/Nuxt, or none beyond the env pair for react-scripts/unrecognized.
+2. **Verify:** once the readiness probe succeeds, it resolves the listening socket's actual local address (via `ss`, falling back to `lsof`) and refuses to adopt anything but exactly `127.0.0.1` or `::1` — killing the process group, printing an error naming the detected (or "unrecognized") command and the actual address found, and writing no state entry. This is the guarantee; the flag in step 1 is only the mechanism.
 
-**Port injection has no universal mechanism**, so `serve start` tries two, in order:
+**Port injection has no universal mechanism**, so `serve start` tries two, in order, each carrying the host flag from step 1 above alongside the port mechanism:
 1. A `PORT` environment variable on the spawned command (covers Next.js, CRA, Nuxt, Remix).
 2. If the readiness probe still doesn't see anything on the chosen port within the timeout, `serve start` kills that attempt's process group and retries once with `-- --port <n>` appended to the dev command (covers Vite, Astro).
 
 If neither mechanism yields a listener, `serve start` reports a clear failure naming both mechanisms tried and exits `0` — it never assumes success and never blocks the caller.
 
-**Ownership check:** once the readiness probe succeeds, `serve start` resolves the pid actually holding the listening socket on the chosen port and compares its process group to the process it just spawned. A mismatch (a stale process from a prior run, or an unrelated foreign service already on that port) is reported clearly and never adopted as the worktree's dev server.
+**Ownership check:** once the readiness probe succeeds, `serve start` resolves the pid actually holding the listening socket on the chosen port and compares its process group to the process it just spawned. A mismatch (a stale process from a prior run, or an unrelated foreign service already on that port) is reported clearly and never adopted as the worktree's dev server. This runs before, and is independent of, the bind-address verification above.
 
 **State:** `.aimi/state/dev-server.json`, keyed by worktree/branch name, each entry holding `port`, `pid` (the process-group leader pid, used for teardown), and `startedAt`. Written exclusively through a Bash-level atomic (mktemp-then-move, `flock`-protected) write inside `worktree-manager.sh` — **never** through the Write or Edit tool, which `guard-runtime-state.py` blocks unconditionally for any path under `.aimi/state/`. The `.aimi/` directory is located by walking upward from the current directory (not via this script's own `GIT_ROOT`), since a nested phase/story container's `GIT_ROOT` resolves to its own worktree root, not necessarily where `.aimi/` lives.
 
 **No package.json, or no `dev` script:** a clean skip — exits `0`, writes no state, and is never reported as an error.
 
-**Every other failure degrades gracefully too:** port exhaustion, readiness timeout, ownership mismatch, and kill failure never produce a non-zero exit or abort the caller. Only a missing `<worktree-name>` argument is a usage error.
+**Every other failure degrades gracefully too:** port exhaustion, readiness timeout, ownership mismatch, a confirmed non-loopback bind, and kill failure never produce a non-zero exit or abort the caller. Only a missing `<worktree-name>` argument is a usage error.
 
 **Example:**
 ```bash
