@@ -1462,17 +1462,19 @@ serve_status() {
 
   # Single jq call reading pid and port together, bound to the resolved
   # dev_server_key (never the raw worktree name — see _dev_server_key).
-  # Tolerates a missing file, invalid JSON, or a non-object root: all fall
-  # through to an empty line via `2>/dev/null` plus the `type == "object"`
-  # guard, same as an absent entry. Comma-separated, not space-separated:
+  # Reads through _dev_server_read_all, which guards file existence and JSON
+  # validity and emits `{}` otherwise. Calling jq directly on $state_file was
+  # a defect: `2>/dev/null` hides stderr but NOT jq's non-zero exit, so under
+  # `set -e` a missing file killed the script before this function could reach
+  # its own not-running fallback -- violating the exit-0-always contract. Comma-separated, not space-separated:
   # `read` with a space/tab IFS collapses an empty leading field (e.g. a
   # corrupt entry with no port) into the wrong variable — verified that
   # `read -r a b <<<" 4100"` yields a=4100, b empty, when pid should be
   # empty and port 4100.
   local line pid port
-  line=$(jq -r --arg key "$dev_server_key" \
+  line=$(_dev_server_read_all "$state_file" | jq -r --arg key "$dev_server_key" \
     'if type == "object" then (.[$key] // {}) else {} end | "\(.pid // ""),\(.port // "")"' \
-    "$state_file" 2>/dev/null)
+    2>/dev/null)
   IFS=',' read -r pid port <<<"$line"
 
   if [[ -n "$pid" ]] && _is_pid_alive "$pid"; then
