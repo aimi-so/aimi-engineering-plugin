@@ -1140,6 +1140,104 @@ Pular — seguir direto para a Fase 4
 
 A prototype produced by this gate lands in `prototype_entries` through the exact same Visual Variant Rendering Step 7 persistence path a Phase 2 Aesthetic Direction/Differentiation question uses. Phase 4 therefore emits it into the `prototype:` frontmatter via the existing "`prototype:` frontmatter rules" below with no new Phase 4 plumbing required.
 
+## Phase 3.7: Foundation Synthesis
+
+This is a **gate**, not a roadmap phase. It produces at most one artifact under `.aimi/research/` — a synthesized foundation proposal, authored inline from the Foundation-category answers Phase 2 already gathered — and it never spawns `aimi-foundation-architect` or any other sub-agent. Brainstorm's own reasoning does the synthesis; the agent stays reserved for `/aimi:plan`'s Phase 1.9 Greenfield Foundation Gate.
+
+### Step 1: Fire-Condition Check
+
+The gate fires only when **both** of the following hold:
+
+1. **Phase 1.8 (Greenfield Foundation Detection) marked the session greenfield-relevant.** If Structural Signals did not classify the repository as greenfield, this condition is false.
+2. **Phase 2 gathered at least one answered Foundation-category question.** "Answered" means the user (or agent-mode auto-pick) actually selected an option — including an "Other: ..." free-text pick — for at least one of the four Foundation sub-topics (stack/runtime, architecture pattern, folder/convention structure, lint/format tooling). Merely being eligible for the category is not enough; if Adaptive Rounds never reached a Foundation question this session, this condition is false.
+
+If either condition is false, skip this entire phase silently: no log line, no artifact, no AskUserQuestion. Proceed straight to Phase 4 exactly as if this phase did not exist.
+
+*(Optional debug: if `AIMI_BRAINSTORM_DEBUG=1`, emit `[brainstorm-debug] phase-3.7: <fired|skipped> (reason: <not-greenfield|no-foundation-answers|fire>)` to chat.)*
+
+### Step 2: Reuse Check
+
+Before doing any synthesis work, check whether a fresh foundation artifact already exists for this project — architecture decisions describe the repository as a whole, not one feature, so this check is deliberately **project-level, not topic-scoped** (unlike `researchPaths` freshness checks elsewhere in this pipeline).
+
+Glob `.aimi/research/*-foundation.md` at `AIMI_ROOT` (no topic-slug segment in the pattern). A match is **fresh** when its mtime is within 14 days of the current run. When more than one match is fresh, the most recently modified file wins — mirroring the same tie-break `/aimi:plan`'s Phase 1.9 uses for its own (topic-scoped) reuse check.
+
+#### Non-Interactive Fast Path
+
+When `INTERACTIVE_MODE=agent`, skip AskUserQuestion entirely and auto-resolve:
+
+- **A fresh match exists:** treat it as already validated, set `foundationProposalPath` to the matched path, and skip Step 3 (Sanitization) through Step 6 (Write) entirely. Log exactly one line to the brainstorm document's working memory: `agent-mode: foundation-synthesis reusing existing proposal (<matched-path>)`.
+- **No fresh match exists:** proceed to Step 3. Log exactly one line to the brainstorm document's working memory: `agent-mode: foundation-synthesis no fresh proposal found — proceeding to synthesis`.
+
+Either way, exactly one line is logged for this check — never both.
+
+#### Interactive Offer
+
+When a fresh match exists, present it via **AskUserQuestion** (picker mode) with exactly two options:
+
+```
+Um foundation proposal recente já existe (<matched-path>, modificado há <N> dias) — quer reaproveitá-lo?
+
+Reuse existing — usar o arquivo encontrado sem gerar um novo
+Create new — ignorar o arquivo encontrado e sintetizar um novo
+```
+
+- **[Reuse existing]:** skip sanitization (Step 3), synthesis (Step 4), and the validation gate (Step 5) entirely. Treat the existing file as already validated. Set `foundationProposalPath` to that existing path. Proceed to Phase 4.
+- **[Create new]:** proceed to Step 3. The existing file is left untouched on disk; Step 6 writes a new file under a new `RUN_TS`-qualified name, it never overwrites the match found here.
+
+When **no** fresh match exists, skip this offer entirely — do not present AskUserQuestion — and proceed unprompted to Step 3.
+
+### Step 3: Authoring-Time Sanitization
+
+Before any raw Foundation-category answer (including "Other: ..." free text) is composed into a section in Step 4, sanitize it: apply the three base rules in `commands/references/sanitization.md` (strip code fences/backtick content, HTML/XML tags, instruction-override patterns), then apply that same file's new **Foundation-Synthesis Extension** (newline-to-space replacement, `$(...)` command-substitution stripping, truncation to a stated per-answer max length). Read `commands/references/sanitization.md` and apply both the base rules and the Foundation-Synthesis Extension as written — do not restate them here. Only sanitized text may enter any of the four sections Step 4 synthesizes.
+
+### Step 4: Synthesize the 4 Sections
+
+Compose the sanitized Foundation answers into exactly these four `##` sections, in this order and no others:
+
+- `## CLAUDE.md Draft`
+- `## AGENTS.md Draft`
+- `## Folder Layout`
+- `## Lint and Format Config`
+
+These headings are verbatim matches (case and punctuation) of 4 of the 9 `## Output Contract` sections defined in `agents/research/aimi-foundation-architect.md`, so `aimi-story-expander.md`'s `foundationEntry` special case (~L145) can consume either authoring path's artifact interchangeably. Do not add a `## Stack`, `## Layering`, `## Module Template`, `## Naming Conventions`, or `## Open Questions` section here — those five belong to the architect agent's own nine-section contract and have no consumer on this path.
+
+Draft each section from the sanitized answers to the four Foundation sub-topics (stack/runtime, architecture pattern, folder/convention structure, lint/format tooling) gathered in Phase 2:
+
+- **`## CLAUDE.md Draft`** — human-facing project conventions: the chosen stack, architecture pattern, and folder/convention structure, stated as decisions the way `aimi-foundation-architect.md`'s own `## CLAUDE.md Draft` section does.
+- **`## AGENTS.md Draft`** — the same conventions restated for a spawned-agent audience, distinct from CLAUDE.md's human-facing scope, exactly as `aimi-foundation-architect.md`'s Output Contract distinguishes the two.
+- **`## Folder Layout`** — a concrete, real directory tree reflecting the chosen folder/convention structure — not a description of one.
+- **`## Lint and Format Config`** — the specific linter/formatter the user picked (or its "Other" free-text equivalent), naming a real tool or config filename.
+
+For the architectural reasoning behind `## CLAUDE.md Draft` and `## Folder Layout`, cite `agents/research/aimi-foundation-architect.md`'s `## Decision Rules` subsections — **Layering**, **Module Boundaries**, **Naming** — by reference (e.g., "per Layering: dependencies point inward") to keep this authoring path aligned with the architect agent's. Do not restate those rules' text here. This step never spawns `aimi-foundation-architect` or any other sub-agent — the synthesis is inline reasoning by `/aimi:brainstorm` itself, using only the sanitized Foundation answers already in hand.
+
+### Step 5: Validation Gate
+
+Before the artifact is considered usable, check all of the following:
+
+1. **Presence:** all 4 sections from Step 4 are present.
+2. **Non-empty and concrete:** none of the 4 sections is empty or reduces to placeholder/hedge text (e.g., "not sure yet", "TBD", "to be decided", "n/a", "undecided" — case-insensitive).
+3. **Real folder tree:** `## Folder Layout` renders a multi-line directory tree (a fenced code block with at least 3 lines, at least 2 of which contain a path-like entry), not a one-line description.
+4. **Real lint/config identifier:** `## Lint and Format Config` names at least one concrete tool (e.g., ESLint, Prettier, Biome, RuboCop, Black) or config filename (e.g., `.eslintrc`, `pyproject.toml`, `.rubocop.yml`) — a bare, generic mention ("some linter") does not satisfy this check.
+
+- **All checks pass:** proceed to Step 6.
+- **Any check fails:** do NOT write the artifact. Leave `foundationProposalPath` unset. Emit exactly one warning line: `warning: foundation-synthesis validation failed (<reason>) — foundationProposalPath left unset.` Proceed to Phase 4 exactly as if this phase had never fired. This degrades gracefully: `/aimi:plan`'s Phase 1.9 Greenfield Foundation Gate finds no fresh proposal on its own (topic-scoped) reuse check and falls back to its normal `aimi-foundation-architect` spawn path.
+
+### Step 6: Write the Artifact
+
+Once Step 5 passes, write the artifact using the exact filename convention `agents/research/aimi-foundation-architect.md` uses for its `outputPath`:
+
+```bash
+mkdir -p .aimi/research
+```
+
+**Filename:** `.aimi/research/YYYY-MM-DD-<topic-slug>-<RUN_TS>-foundation.md` (same `date`/`topic-slug`/`RUN_TS` values already established for this session in Phase 1).
+
+Write the 4 synthesized sections, in the order given in Step 4, to that path. Set the `foundationProposalPath` working-memory variable to the written path. Do not introduce a companion boolean flag (e.g., `foundationAccepted`) — the single variable's presence is the only signal a downstream consumer needs that a validated artifact exists.
+
+### Cross-Reference: Foundation Proposal Handoff
+
+This story adds no frontmatter emission of its own. Phase 4 — implemented separately (`outline:03`) — is the sole writer of the `foundationProposalPath:` frontmatter key, and reads this working-memory variable verbatim to do so, the same way Phase 4's `prototype:` frontmatter reads `prototype_entries` per the Cross-Reference above.
+
 ## Phase 4: Capture the Design
 
 ### Derive Filename

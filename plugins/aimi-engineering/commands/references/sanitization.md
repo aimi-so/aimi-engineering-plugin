@@ -23,3 +23,18 @@ When sanitizing a file-path token extracted from user input (see the
 
 Tokens that survive all four rules are safe to pass to research agents as
 `paths:` hints.
+
+## Foundation-Synthesis Extension
+
+When sanitizing a raw Foundation-category answer (see `/aimi:brainstorm`
+Phase 3.7 Step 3, "Authoring-Time Sanitization"), apply the base rules above
+and then:
+
+4. Replace every newline with a single space.
+5. Strip any `$(...)` command-substitution sequence entirely — from the
+   opening `$(` through its matching closing `)`.
+6. Truncate the result to 500 characters.
+
+Answers that pass all six rules are safe to compose into the `## CLAUDE.md
+Draft`, `## AGENTS.md Draft`, `## Folder Layout`, and `## Lint and Format
+Config` sections Phase 3.7 synthesizes.
