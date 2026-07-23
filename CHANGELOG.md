@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.106.0] - 2026-07-23
+
+### Added
+
+- **Proactive Prototype Offer Gate in `/aimi:brainstorm` (Phase 3.6, issue #55).** Brainstorm now checks whether the drafted roadmap ships a frontend by inspecting **structural** roadmap deliverables — phase `creates` entries, `areas`, and the feature `goal` — rather than relying on the free-text description alone. This closes the gap where a backend-worded description ("add an endpoint for X") still ships a UI and previously skipped prototyping silently. When a frontend deliverable is detected and no prototype exists yet, brainstorm offers a three-option gate: **[Prototipar]** (launch guided prototype creation), **[Tenho uma referência]** (Reference Intake — see below), or **[Pular]** (skip, proceeding without a prototype). The gate only fires once per brainstorm session and never blocks progress.
+- **Reference Intake flow.** When the user has an existing reference instead of wanting a prototype built from scratch, brainstorm accepts a local image, HTML/CSS file, a URL, or free-text description of the look-and-feel, and feeds the extracted visual tokens (colors, spacing, component shapes, copy tone) into the design pipeline as **Probe #0** — a seed probe that subsequent design exploration builds on rather than starting from a blank slate.
+- **`plugins/aimi-engineering/commands/references/ui-signals.md`.** A new shared reference unifying the vocabulary used to detect "this feature has a UI" across commands: the keyword list (visual/UI-bearing terms) and the structural markers (roadmap `creates`/`areas`/`goal` patterns that imply a frontend). Both `/aimi:brainstorm` and `/aimi:plan` now source their frontend detection from this single file instead of maintaining separate, drifting keyword lists.
+
+### Changed
+
+- **`/aimi:brainstorm` Phase 1.7** now sources its keyword list from `ui-signals.md` instead of an inline list. The keyword scan is kept as an additive signal alongside the new structural check, and its vocabulary was extended with `frontend` and common framework names (React, Vue, Next.js, etc.) so more real-world descriptions are caught.
+- **`/aimi:plan`** now emits a non-blocking warning when a frontend-bearing feature reaches the end of planning with no prototype on record, surfacing the same structural signal used by the brainstorm gate so features planned without going through `/aimi:brainstorm` first still get a nudge — the warning never stops or fails planning.
+
 ## [1.105.0] - 2026-07-21
 
 ### Added
