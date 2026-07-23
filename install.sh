@@ -106,7 +106,10 @@ backup_file() {
       log "[dry-run] Would backup $path -> $bak"
     else
       cp "$path" "$bak"
-      [ "$VERBOSE" -eq 1 ] && log "Backed up $path -> $bak"
+      # Use an explicit if (not `[ ... ] && log`): as the function's last
+      # statement, a bare `&&` test returns 1 when VERBOSE=0, which aborts the
+      # caller under `set -euo pipefail`. An if returns 0 when the test is false.
+      if [ "$VERBOSE" -eq 1 ]; then log "Backed up $path -> $bak"; fi
     fi
   fi
 }
@@ -213,6 +216,12 @@ translate_command_body() {
   # The aimi-cli story-merge invocation (Phase 3e) uses the standard per-call
   # AIMI_CLI resolution and requires no additional translation — the CLI-path
   # rewrite above handles the path, and the subcommand name is preserved verbatim.
+  #
+  # Coverage re-verified (US-006): brainstorm.md's Phase 3.6 Prototype Offer
+  # Gate picker ("Present via **AskUserQuestion** (picker mode)" / "Skip
+  # AskUserQuestion entirely") is fully covered by the existing four rules
+  # below — no new rule was needed. Any future picker phrased the same way is
+  # covered automatically by the bare-token catch-all (last rule below).
   body="${body//Use \*\*AskUserQuestion\*\*/Use the **question** tool}"
   body="${body//Use AskUserQuestion/Use the question tool}"
   body="${body//via AskUserQuestion/via the question tool}"
@@ -421,6 +430,11 @@ install_plugin_source() {
 
   mkdir -p "$plugin_dst"
   # Copy everything except .git
+  # This is a whole-tree copy, not a per-file allowlist: commands/references/*.md
+  # (cli-path-resolution.md, scope-contexts.md, ui-signals.md, visual-variants.md, ...)
+  # is carried verbatim by this cp -R with no code change needed when new reference
+  # files are added — install_commands' subdirectory loops deliberately skip
+  # "references" (see below) because this copy already delivers them (verified US-006).
   cp -R "$src/." "$plugin_dst/"
 
   # Ensure scripts are executable

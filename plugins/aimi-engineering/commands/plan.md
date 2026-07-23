@@ -596,6 +596,24 @@ After the brainstorm check, determine the implementation scope:
 
 3. **Store the result** as `implementationScope: "frontend-only" | "full-stack"` for use in Phase 4 metadata.
 
+### Frontend-Without-Prototype Warning (Advisory)
+
+Runs once, immediately after `implementationScope` is stored above. Purely advisory — it never blocks, aborts, or spawns any Task/agent; the rest of the pipeline continues unchanged regardless of outcome.
+
+**Determine `frontendBearing`:**
+
+- `true` when `implementationScope` is `"frontend-only"` or `"full-stack"`.
+- Otherwise, when `ROADMAP_MODE=true`: read `${CLAUDE_PLUGIN_ROOT}/commands/references/ui-signals.md` (the `${CLAUDE_PLUGIN_ROOT}` prefix is required — it is the only form `install.sh` rewrites to `${AIMI_PLUGIN_DIR}` for OpenCode) and apply its Structural Signals section to `SELECTED_PHASE_JSON`'s `creates`, `PHASE_AREAS_JSON` (`areas`), and `PHASE_GOAL` (`goal`) — a match against any of the three sets `frontendBearing = true`.
+- Otherwise: `false`.
+
+**Emit the warning.** When `frontendBearing` is `true` AND `resolvedPrototypePaths` is empty, emit exactly one chat line and continue:
+
+```
+warning: feature ships a frontend but no prototype exists — run /aimi:brainstorm to create one, or proceed without a visual acceptance target.
+```
+
+Otherwise, emit no line.
+
 ### Scope-Context Classification (Inline Fallback)
 
 **Trigger.** Runs when EITHER no brainstorm was loaded in Phase 0, OR a brainstorm was loaded but its YAML frontmatter has no `phases:` key (legacy brainstorm). When the loaded brainstorm's frontmatter DOES contain a `phases:` key, skip this subsection entirely, with no log line — that feature's phase cut was already produced by `/aimi:brainstorm`'s Phase 3.5 roadmap-definition gate and is materialized by Roadmap Materialization above; it is never reclassified here.
