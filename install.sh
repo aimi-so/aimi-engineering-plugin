@@ -106,7 +106,10 @@ backup_file() {
       log "[dry-run] Would backup $path -> $bak"
     else
       cp "$path" "$bak"
-      [ "$VERBOSE" -eq 1 ] && log "Backed up $path -> $bak"
+      # Use an explicit if (not `[ ... ] && log`): as the function's last
+      # statement, a bare `&&` test returns 1 when VERBOSE=0, which aborts the
+      # caller under `set -euo pipefail`. An if returns 0 when the test is false.
+      if [ "$VERBOSE" -eq 1 ]; then log "Backed up $path -> $bak"; fi
     fi
   fi
 }
