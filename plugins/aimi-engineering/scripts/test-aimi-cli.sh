@@ -9624,6 +9624,215 @@ EOF
   rm -rf "$stg"
 }
 
+# TC13: --foundation injects the foundation US-ID into every non-foundation
+# story's dependsOn and waves are recomputed against the augmented graph
+# (foundation wave 1, direct dependents wave 2, transitive dependents wave 3+)
+test_story_merge_foundation_injection() {
+  echo ""
+  echo "=== TC13: story-merge --foundation injection + wave recompute ==="
+
+  local stg=".aimi/.tasks-staging-tc13"
+  local out_file=".aimi/tasks/sm-tc13-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  # 01 = foundation (empty dependsOn); 02 = no prior dep; 03 = depends on 02
+  _sm_make_story "$stg/01-foundation.json" "Foundation story"
+  _sm_make_story "$stg/02-second.json"     "Second story"
+  _sm_make_story "$stg/03-third.json"      "Third story"   '["outline:02"]'
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --foundation 01 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC13: --foundation injection exits 0"
+
+  if [ -f "$out_file" ]; then
+    local dep1_len dep2 dep3_has1 dep3_has2
+    dep1_len=$(jq -r '.userStories[] | select(.id == "US-001") | .dependsOn | length' "$out_file")
+    assert_eq "0" "$dep1_len" "TC13: foundation's own dependsOn stays empty"
+
+    dep2=$(jq -r '.userStories[] | select(.id == "US-002") | .dependsOn | join(",")' "$out_file")
+    assert_eq "US-001" "$dep2" "TC13: story with no prior dep gets foundation injected"
+
+    dep3_has1=$(jq -r '.userStories[] | select(.id == "US-003") | (.dependsOn | index("US-001") != null)' "$out_file")
+    dep3_has2=$(jq -r '.userStories[] | select(.id == "US-003") | (.dependsOn | index("US-002") != null)' "$out_file")
+    assert_eq "true" "$dep3_has1" "TC13: transitive dependent also gets foundation injected"
+    assert_eq "true" "$dep3_has2" "TC13: transitive dependent keeps its pre-existing dependency"
+
+    local wave1 wave2 wave3
+    wave1=$(jq -r '.userStories[] | select(.id == "US-001") | .wave' "$out_file")
+    wave2=$(jq -r '.userStories[] | select(.id == "US-002") | .wave' "$out_file")
+    wave3=$(jq -r '.userStories[] | select(.id == "US-003") | .wave' "$out_file")
+    assert_eq "1" "$wave1" "TC13: foundation is wave 1"
+    assert_eq "2" "$wave2" "TC13: direct dependent is wave 2"
+    assert_eq "3" "$wave3" "TC13: transitive dependent is wave 3 (max(dep waves)+1 on augmented graph)"
+  else
+    echo -e "${RED}✗${NC} TC13: output file missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -f "$out_file"
+  rm -rf "$stg"
+}
+
+# TC14: --foundation omitted is a true no-op — no injection, no wave changes,
+# no foundation-related stderr, for the same staging inputs as TC13.
+test_story_merge_foundation_omitted_noop() {
+  echo ""
+  echo "=== TC14: story-merge --foundation omitted is a no-op ==="
+
+  local stg=".aimi/.tasks-staging-tc14"
+  local out_file=".aimi/tasks/sm-tc14-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  _sm_make_story "$stg/01-foundation.json" "Foundation story"
+  _sm_make_story "$stg/02-second.json"     "Second story"
+  _sm_make_story "$stg/03-third.json"      "Third story"   '["outline:02"]'
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC14: story-merge without --foundation exits 0"
+
+  if [ -f "$out_file" ]; then
+    local dep1 dep2 dep3 wave1 wave2 wave3
+    dep1=$(jq -r '.userStories[] | select(.id == "US-001") | .dependsOn | join(",")' "$out_file")
+    dep2=$(jq -r '.userStories[] | select(.id == "US-002") | .dependsOn | join(",")' "$out_file")
+    dep3=$(jq -r '.userStories[] | select(.id == "US-003") | .dependsOn | join(",")' "$out_file")
+    assert_eq "" "$dep1" "TC14: US-001 dependsOn untouched (empty)"
+    assert_eq "" "$dep2" "TC14: US-002 dependsOn untouched (empty, no injection)"
+    assert_eq "US-002" "$dep3" "TC14: US-003 dependsOn untouched (only its original reference)"
+
+    wave1=$(jq -r '.userStories[] | select(.id == "US-001") | .wave' "$out_file")
+    wave2=$(jq -r '.userStories[] | select(.id == "US-002") | .wave' "$out_file")
+    wave3=$(jq -r '.userStories[] | select(.id == "US-003") | .wave' "$out_file")
+    assert_eq "1" "$wave1" "TC14: US-001 wave unchanged (1)"
+    assert_eq "1" "$wave2" "TC14: US-002 wave unchanged (1, no injected dependency)"
+    assert_eq "2" "$wave3" "TC14: US-003 wave unchanged (2)"
+  else
+    echo -e "${RED}✗${NC} TC14: output file missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  if echo "$output" | grep -qi "foundation"; then
+    echo -e "${RED}✗${NC} TC14: unexpected foundation-related stderr when flag omitted"
+    echo "  output: $output"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} TC14: no foundation-related stderr when flag omitted"
+    ((TESTS_PASSED++))
+  fi
+
+  rm -f "$out_file"
+  rm -rf "$stg"
+}
+
+# TC15: a story that already depends on the foundation via its own outline:NN
+# token gets no duplicate entry (dedup on pre-existing reference).
+test_story_merge_foundation_dedup() {
+  echo ""
+  echo "=== TC15: story-merge --foundation dedup on pre-existing reference ==="
+
+  local stg=".aimi/.tasks-staging-tc15"
+  local out_file=".aimi/tasks/sm-tc15-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  _sm_make_story "$stg/01-foundation.json" "Foundation story"
+  _sm_make_story "$stg/02-explicit.json"   "Explicit dependent" '["outline:01"]'
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --foundation 01 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC15: --foundation dedup case exits 0"
+
+  if [ -f "$out_file" ]; then
+    local dep_len dep_val
+    dep_len=$(jq -r '.userStories[] | select(.id == "US-002") | .dependsOn | length' "$out_file")
+    dep_val=$(jq -r '.userStories[] | select(.id == "US-002") | .dependsOn | join(",")' "$out_file")
+    assert_eq "1" "$dep_len" "TC15: dependsOn length unchanged (no duplicate entry)"
+    assert_eq "US-001" "$dep_val" "TC15: dependsOn still contains exactly one foundation reference"
+  else
+    echo -e "${RED}✗${NC} TC15: output file missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -f "$out_file"
+  rm -rf "$stg"
+}
+
+# TC16: a malformed --foundation value and a well-formed-but-nonexistent one
+# each exit non-zero and leave no output file.
+test_story_merge_foundation_invalid_idx() {
+  echo ""
+  echo "=== TC16: story-merge --foundation malformed / nonexistent index ==="
+
+  local stg=".aimi/.tasks-staging-tc16"
+  local out_file=".aimi/tasks/sm-tc16-tasks.json"
+  rm -rf "$stg" "$out_file"
+  mkdir -p "$stg"
+
+  _sm_make_story "$stg/01-foundation.json" "Foundation story"
+  _sm_make_story "$stg/02-second.json"     "Second story"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --foundation 1 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC16: malformed --foundation value exits 1"
+  assert_contains "must be a two-digit index" "$output" "TC16: error mentions 'must be a two-digit index'"
+  if [ ! -f "$out_file" ]; then
+    echo -e "${GREEN}✓${NC} TC16: no output file written for malformed index"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC16: output file written despite malformed index"
+    ((TESTS_FAILED++))
+  fi
+
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --foundation 99 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC16: well-formed-but-nonexistent --foundation value exits 1"
+  assert_contains "not present among staging files" "$output" "TC16: error mentions 'not present among staging files'"
+  if [ ! -f "$out_file" ]; then
+    echo -e "${GREEN}✓${NC} TC16: no output file written for nonexistent index"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC16: output file written despite nonexistent index"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg" "$out_file"
+}
+
+# TC17: a foundation staging file with a non-empty dependsOn exits non-zero
+# and leaves no output file.
+test_story_merge_foundation_nonempty_dependson() {
+  echo ""
+  echo "=== TC17: story-merge --foundation rejects non-empty foundation dependsOn ==="
+
+  local stg=".aimi/.tasks-staging-tc17"
+  local out_file=".aimi/tasks/sm-tc17-tasks.json"
+  rm -rf "$stg" "$out_file"
+  mkdir -p "$stg"
+
+  _sm_make_story "$stg/01-foundation.json" "Foundation story" '["outline:02"]'
+  _sm_make_story "$stg/02-other.json"      "Other story"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --foundation 01 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC17: foundation with non-empty dependsOn exits 1"
+  assert_contains "non-empty dependsOn" "$output" "TC17: error mentions 'non-empty dependsOn'"
+  assert_contains "US-001" "$output" "TC17: error identifies the foundation story's assigned id"
+
+  if [ ! -f "$out_file" ]; then
+    echo -e "${GREEN}✓${NC} TC17: no output file written"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC17: output file written despite non-empty foundation dependsOn"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg" "$out_file"
+}
+
 # ============================================================================
 # ============================================================================
 # Roadmap Lifecycle Tests (US-002)
@@ -11866,6 +12075,11 @@ main() {
   test_story_merge_outline_sidecar_ignored
   test_story_merge_dead_code_positive
   test_story_merge_dead_code_negative
+  test_story_merge_foundation_injection
+  test_story_merge_foundation_omitted_noop
+  test_story_merge_foundation_dedup
+  test_story_merge_foundation_invalid_idx
+  test_story_merge_foundation_nonempty_dependson
 
   # Roadmap lifecycle tests (US-002)
   echo ""
