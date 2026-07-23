@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.109.0] - 2026-07-23
+
+### Added
+
+- **Greenfield detection and a Foundation question category in `/aimi:brainstorm` (Phase 1.8, issue #56 phase 2).** Brainstorm now runs its own Structural Signals check (`commands/references/foundation-signals.md`, shared with `/aimi:plan`'s Phase 1.9 gate) early in the session. When the target repository is greenfield, Phase 2's batched questions gain a conditional Foundation category — stack/runtime, architecture pattern, folder/convention structure, and lint/format tooling — alongside the standard topic categories, so these decisions are captured once, in the user's own words, instead of only at planning time.
+- **Phase 3.7 Foundation Synthesis in `/aimi:brainstorm`.** When Foundation questions were answered, a new phase sanitizes and synthesizes the four sections `/aimi:plan`'s foundation flow actually consumes (CLAUDE.md Draft, AGENTS.md Draft, Folder Layout, Lint and Format Config) into a single artifact under `.aimi/research/`, gated by a validation check (all four sections present and concrete) before the pointer is ever emitted — a failed check degrades silently to `/aimi:plan`'s existing `aimi-foundation-architect` spawn path. A project-scoped reuse check (glob by topic slug, 14-day freshness) offers reusing an existing fresh proposal instead of re-synthesizing on every run.
+- **`foundationProposalPath` frontmatter key and its plan-reuse contract.** `/aimi:brainstorm` emits this single relative-path string in a brainstorm document's frontmatter only when Phase 3.7 validated its artifact (fresh reuse counts); the key is omitted entirely — no placeholder, no companion boolean — otherwise. `/aimi:plan`'s Phase 0 reads it under the same strict path-confinement regime as its Prototype Context handling (absolute resolve, `AIMI_ROOT` prefix check, reject traversal/symlinks), checks existence and 14-day freshness, and on success feeds the validated path into Phase 1.9's Greenfield Foundation Gate as a second reuse source alongside the existing topic-slug glob.
+- **`/aimi:plan` Phase 0 reuse wiring and Phase 1.9 hardening.** Phase 1.9's fire-condition and reuse-source logic now account for a Phase 0-populated `foundationProposalPath`, applying the same mtime tie-break the topic-slug glob already used when both sources resolve and differ. The gate's mature-repo, multi-repo, and roadmap-continuation skip branches now consistently reset any Phase 0-populated `foundationAccepted`/`foundationProposalPath` pair to unset/false before skipping, closing a gap where those branches previously left a stale pointer in place.
+- **`research-gc` third orphan-check source.** The orphan garbage collector now also treats any `.aimi/brainstorms/*.md` frontmatter `foundationProposalPath` as a live reference, alongside the existing `metadata.researchPaths` and frontmatter `researchPaths` sources, so a synthesized foundation proposal with a live pointer is never swept as an orphan.
+
 ## [1.108.0] - 2026-07-23
 
 ### Added
