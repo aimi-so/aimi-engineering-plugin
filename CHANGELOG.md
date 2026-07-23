@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.107.0] - 2026-07-23
+
+### Changed
+
+- **`/aimi:plan` now defaults freshly generated flat `tasks.json` files to `metadata.execution: "container"`** (previously `"inline"`). This is backward-compatible: existing files with the field absent still resolve to `"inline"` via the read fail-safe, and `--inline` can still be passed to `/aimi:execute` or `/aimi:next` to run a single invocation inline.
+
 ## [1.106.0] - 2026-07-23
 
 ### Added
