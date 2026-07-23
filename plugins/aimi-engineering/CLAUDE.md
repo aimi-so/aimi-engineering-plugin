@@ -94,7 +94,7 @@ Two CLI subcommands manage the research lifecycle. Both are internal — consume
 
 - **`research-lookup <path>`** — Content-aware freshness check. Reads the `## File References` h2 bullet section of the given research `.md` file, compares its mtime against the newest mtime of every cited source path, and exits 0 (fresh) or 1 (stale). Cited paths that are missing or outside the project root are treated as stale. Used by `plan`/`deepen` before deciding whether to spawn a researcher.
 
-- **`research-gc`** — Orphan garbage collector. Deletes `.aimi/research/*.md` files older than 30 days that are not referenced by any active `.aimi/tasks/*.json` `metadata.researchPaths` or any `.aimi/brainstorms/*.md` frontmatter `researchPaths`. Called opportunistically once per `plan`/`deepen` session. Silent when nothing is removed.
+- **`research-gc`** — Orphan garbage collector. Deletes `.aimi/research/*.md` files older than 30 days that are not referenced by any active `.aimi/tasks/*.json` `metadata.researchPaths`, any `.aimi/brainstorms/*.md` frontmatter `researchPaths`, or any `.aimi/brainstorms/*.md` frontmatter `foundationProposalPath`. Called opportunistically once per `plan`/`deepen` session. Silent when nothing is removed.
 
 ## aimi-cli.sh Story Lifecycle Subcommands
 
