@@ -17,7 +17,10 @@ tasks.json, and branch per the rule below. This file does not modify
 Valid values are exactly `"container"` or `"inline"`. Any tasks.json written
 before this field existed has no `execution` key at all — that absence must
 keep behaving exactly as `"inline"` always has, so no pre-existing tasks.json
-changes behavior from this field's introduction.
+changes behavior from this field's introduction. `/aimi:plan` now writes the
+literal `"container"` into every freshly generated flat tasks.json (the
+plan-time write default); the read contract below is unchanged by that —
+absence still resolves to inline.
 
 ## Flat Files Only
 
