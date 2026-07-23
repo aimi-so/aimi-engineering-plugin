@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.108.0] - 2026-07-23
+
+### Added
+
+- **Greenfield Foundation Gate in `/aimi:plan` (Phase 1.9, issue #56 phase 1).** When planning targets a repository with no established architecture (structural absence signals plus additive keyword signals, mirroring `ui-signals.md`'s detection pattern), `/aimi:plan` now inserts a gate after research and before spec-flow analysis that proposes a prescriptive architecture foundation before story decomposition begins. The gate loops on **[Ajustar]** (re-spawn the architect with accumulated adjustment text) until a terminal choice — **[Aceitar]** or **[Pular]** — is reached, pattern-parity with the Phase 3c Outline Gate's edit loop. `plugins/aimi-engineering/commands/references/foundation-signals.md` centralizes the detection vocabulary (structural absence markers, additive keywords) the gate uses to decide whether to fire.
+- **`aimi-foundation-architect` agent.** A new prescriptive architecture agent (distinct from the descriptive `aimi-codebase-researcher`) that proposes a stack-appropriate Clean Architecture/DDD-inspired foundation — layering, module boundaries, and conventions — writing a single `FOUNDATION.md`-style proposal file under `.aimi/research/` for the gate to present.
+- **`story-merge --foundation <idx>` flag.** When the Greenfield Foundation Gate is accepted, the foundation story becomes outline entry `01` (immutable through the Phase 3c Outline Gate) and its assigned `US-NNN` id is injected into every other story's `dependsOn` via a deterministic post-merge sweep — the foundation always lands in wave 1, and every other story's wave reflects the added dependency.
+- **`story-expander` `foundation_proposal` support.** Sub-agents expanding non-foundation outline entries now receive the accepted foundation proposal's content (capped, HTML-entity-escaped) as additional context, so every generated story is consistent with the accepted architecture.
+- **`metadata.decisions[].anchor` form `foundation:<topicSlug>` and `metadata.decisions[].source` value `"foundation"`**, documented in `plugins/aimi-engineering/CLAUDE.md`'s Tasks File Schema section, covering the Aceitar/Ajustar/Pular decisions the Phase 1.9 gate records in `oqDecisions[]`.
+
 ## [1.107.0] - 2026-07-23
 
 ### Changed

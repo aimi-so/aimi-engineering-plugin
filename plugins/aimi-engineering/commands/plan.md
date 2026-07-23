@@ -9,7 +9,7 @@ allowed-tools: Read, Write, Edit, Bash(git:*), Bash(mkdir:*), Bash(AIMI_CLI=*), 
 
 Generate `.aimi/tasks/YYYY-MM-DD-[feature]-tasks.json` directly from a feature description. Full pipeline: research, spec analysis, story decomposition, JSON output. No intermediate markdown plan.
 
-By default, `/aimi:plan` runs in interactive mode — Open Question gates (Phase 0.5, Phase 1.8, Phase 2.5) present `AskUserQuestion` prompts. Pass `--non-interactive` to skip all prompts and auto-defer every Open Question (agent/CI mode).
+By default, `/aimi:plan` runs in interactive mode — Open Question gates (Phase 0.5, Phase 1.8, Phase 1.9, Phase 2.5) present `AskUserQuestion` prompts. Pass `--non-interactive` to skip all prompts and auto-defer every Open Question (agent/CI mode).
 
 ## Feature Description
 
@@ -115,7 +115,7 @@ esac
 INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity $NON_INTERACTIVE_FLAG)
 ```
 
-Store `INTERACTIVE_MODE` for use by Phase 0.5, Phase 1.8, Phase 2.5, and Phase 3c to decide whether to present AskUserQuestion prompts or auto-defer open questions. Use `FEATURE_DESCRIPTION` (not `$ARGUMENTS` or `$ARGUMENTS_STRIPPED`) everywhere a feature description string is needed from this point forward.
+Store `INTERACTIVE_MODE` for use by Phase 0.5, Phase 1.8, Phase 1.9, Phase 2.5, and Phase 3c to decide whether to present AskUserQuestion prompts or auto-defer open questions. Use `FEATURE_DESCRIPTION` (not `$ARGUMENTS` or `$ARGUMENTS_STRIPPED`) everywhere a feature description string is needed from this point forward.
 
 ### Resolve Agent Models
 

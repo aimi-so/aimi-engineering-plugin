@@ -280,7 +280,7 @@ Used internally by commands — not user-invocable.
 
 30 aimi-native agents organized into 4 categories.
 
-### Research (6)
+### Research (7)
 
 | Agent | Description |
 |-------|-------------|
@@ -290,6 +290,7 @@ Used internally by commands — not user-invocable.
 | `aimi-framework-docs-researcher` | Framework documentation and version-specific guidance |
 | `aimi-bundle-prototype-author` | Generate self-contained bundle prototype HTML from design bundle context |
 | `aimi-design-bundle-researcher` | Structured passthrough reader for BusinessSpec and DesignSpec bundles |
+| `aimi-foundation-architect` | Propose a stack-adaptive, Clean Architecture/DDD-informed foundation for greenfield repositories (Phase 1.9 Greenfield Foundation Gate) |
 
 ### Review (15)
 
@@ -625,7 +626,7 @@ For the full version history, see [CHANGELOG.md](CHANGELOG.md).
 |------|-------|-------------|
 | Commands | 15 | Slash commands for workflow stages |
 | Skills | 17 | 3 core, 8 development/style, 4 tooling/automation, 2 disabled/reference |
-| Agents | 29 | 6 research, 15 review, 2 design, 6 workflow |
+| Agents | 30 | 7 research, 15 review, 2 design, 6 workflow |
 | Tools | 1 | OpenCode custom tool: `aimi-task` (per-spawn model selection for OpenCode) |
 
 ## License
