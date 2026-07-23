@@ -443,6 +443,21 @@ If the feature description contains UI keywords, Phase 2 generates additional qu
 
 When no keywords match, brainstorm proceeds unchanged — Phase 2 covers only the standard topic categories with no mention of design categories.
 
+## Phase 1.8: Greenfield Foundation Detection
+
+Determine whether the target repository is greenfield using the "Structural Signals" section of `${CLAUDE_PLUGIN_ROOT}/commands/references/foundation-signals.md` — read that file and apply its detection rules as written; they are defined there and must not be restated inline here. Apply the Structural Signals only (not the file's Keyword Signals section, which serves a different consumer — `/aimi:plan`'s Phase 1.9 Greenfield Foundation Gate).
+
+| Bucket | Signals | Action |
+|--------|---------|--------|
+| **Detect** | Structural Signals classify the repository as greenfield | Mark the session as greenfield-relevant; Phase 2 includes the conditional Foundation question category |
+| **Skip** | Structural Signals do not classify the repository as greenfield | Proceed unchanged — no Foundation category injected into Phase 2 |
+
+Brainstorm does **not** spawn any dedicated foundation-synthesis agent to perform this detection or to act on it — that stays exclusive to `/aimi:plan`'s Phase 1.9 Greenfield Foundation Gate. When this phase detects greenfield structural signals, brainstorm captures the user's stack, architecture, folder-convention, and lint/format decisions through its own batched-question machinery instead (Phase 2's Foundation category, below).
+
+If the repository is greenfield-relevant, Phase 2 generates additional questions targeting the Foundation category (stack/runtime, architecture pattern, folder/convention structure, lint/format tooling) alongside the standard topic categories. These Foundation questions follow the same format rules: 3-4 options, under 20 words question text, under 15 words per option, "Other" escape hatch.
+
+When structural signals do not classify the repository as greenfield, brainstorm proceeds unchanged — Phase 2 covers only the standard topic categories (plus any UI categories from Phase 1.7) with no mention of Foundation.
+
 ## Phase 2: Batched Questions
 
 Using the user's feature description and consolidated research findings (from Step 1c), generate **3-5 batched multiple-choice questions**. Include any conflict-based questions surfaced during consolidation.
@@ -451,7 +466,7 @@ Using the user's feature description and consolidated research findings (from St
 
 - Questions are informed by research findings when available (contextual options)
 - Fall back to generic topic-based questions when research is empty
-- Cover topic categories: Purpose, Users, Constraints, Success, Edge Cases, Existing Patterns, Approach (and when UI features detected: Aesthetic Direction, Differentiation)
+- Cover topic categories: Purpose, Users, Constraints, Success, Edge Cases, Existing Patterns, Approach (and when UI features detected: Aesthetic Direction, Differentiation; and when greenfield structural signals detected in Phase 1.8: Foundation)
 - 3-4 options per question (not more)
 - Question text under 20 words
 - Option text under 15 words
@@ -491,6 +506,50 @@ N. What should make this interface memorable?
    A. Distinctive animation or motion
    B. Bold typography choices
    C. Unique layout composition
+   D. Other: [please specify]
+```
+
+#### Foundation Questions (When Greenfield Structural Signals Detected in Phase 1.8)
+
+When Phase 1.8 detected greenfield structural signals, include Foundation-category questions in the batch alongside standard topic questions. These follow the same format rules. Foundation spans up to four sub-topics — ask one question per sub-topic that is still relevant, but treat Foundation as a single topic category for coverage-tracking purposes (see Adaptive Rounds below), not four separate categories.
+
+**Example stack/runtime question:**
+
+```
+N. What stack or runtime should this project use?
+   A. Node.js + TypeScript — familiar, strong ecosystem
+   B. Python — fast to prototype, rich libraries
+   C. Go — simple deploys, strong concurrency
+   D. Other: [please specify]
+```
+
+**Example architecture pattern question:**
+
+```
+N. What architecture pattern should the project follow?
+   A. Monolith — single deployable, simplest to start
+   B. Modular monolith — separated domains, one deploy
+   C. Microservices — independent services, more ops overhead
+   D. Other: [please specify]
+```
+
+**Example folder/convention question:**
+
+```
+N. How should the project's folders be organized?
+   A. Feature-based — group by domain/feature
+   B. Layer-based — group by technical layer (routes, models)
+   C. Monorepo packages — split into independent packages
+   D. Other: [please specify]
+```
+
+**Example lint/format tooling question:**
+
+```
+N. What lint and format tooling should the project use?
+   A. ESLint + Prettier — widely adopted, strong defaults
+   B. Biome — single fast tool, less config
+   C. None yet — decide later
    D. Other: [please specify]
 ```
 
@@ -796,8 +855,9 @@ After each response, assess which topic categories remain unaddressed:
 | Approach | At least one approach preference expressed by user via selection or free-form response |
 | Aesthetic Direction | User expresses an aesthetic preference, tone, or visual direction |
 | Differentiation | User identifies a memorable or distinguishing visual aspect |
+| Foundation | User expresses a stack/runtime, architecture, folder-convention, or lint/tooling preference |
 
-- **If all key topics covered (7 standard, or 9 when UI features detected)** OR **user says "proceed"/"let's move on"** → advance to Phase 3
+- **If all key topics covered (7 standard, plus 2 when UI features detected, plus 1 when Foundation detected in Phase 1.8)** OR **user says "proceed"/"let's move on"** → advance to Phase 3
 - **If topics remain uncovered** AND **under 4 rounds** → generate follow-up batch targeting uncovered topics
 - **If 4 rounds completed** → advance to Phase 3 regardless
 
@@ -1013,7 +1073,7 @@ Loop until the user selects **Approve** and the coverage check passes with zero 
 
 Before Approve can be accepted, verify that every accumulated session decision or requirement is covered by the current `phases` array.
 
-**Session requirements set:** every distinct requirement or decision the user has stated so far this session — the per-topic-category answers gathered across Phase 2 rounds (Purpose, Users, Constraints, Success, Edge Cases, Existing Patterns, Approach, and Aesthetic Direction/Differentiation when Phase 1.7 detected UI features), the Phase 3 approach resolution (if it ran), and any explicit Key Decision already accumulated in working memory.
+**Session requirements set:** every distinct requirement or decision the user has stated so far this session — the per-topic-category answers gathered across Phase 2 rounds (Purpose, Users, Constraints, Success, Edge Cases, Existing Patterns, Approach, and Aesthetic Direction/Differentiation when Phase 1.7 detected UI features), the Phase 3 approach resolution (if it ran), and any explicit Key Decision already accumulated in working memory. **Foundation answers are EXEMPT** from this set and from the orphan hard-block below: stack, architecture, folder-convention, and lint/format decisions captured when Phase 1.8 detected greenfield structural signals describe the repository itself, not a slice of feature work, so they never belong in any phase's `goal`, `successCriteria`, `creates`, `needs`, or `areas` fields — Foundation answers are therefore never checked for orphans in this step.
 
 For each item in the session requirements set, check whether it is referenced — verbatim or as a clear restatement — in some phase's `goal`, `successCriteria`, `creates`, `needs`, or `areas` fields, across the **whole current `phases` array**. An item with no match in any phase is an **orphan**.
 
@@ -1186,6 +1246,8 @@ phases:
 ## Key Decisions
 - [Decision 1]: [Rationale]
 - [Decision 2]: [Rationale]
+
+When Phase 1.8 detected greenfield structural signals and Foundation questions were answered, add at least one further bullet per answered sub-topic (stack/runtime, architecture pattern, folder/convention structure, lint/format tooling) here, naming the user's choice and the rationale — this lightweight trace lives in the document body itself and is distinct from the full synthesized foundation proposal artifact written separately.
 
 When UI features were detected in Phase 1.7, include this section:
 
