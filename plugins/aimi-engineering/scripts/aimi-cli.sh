@@ -4439,7 +4439,7 @@ $rp_entry"
 # Returns the array with id fields populated.
 
 cmd_story_merge() {
-  local staging_dir="" output_path="" split_mode="legacy" agent_mode=false phase_aware=false
+  local staging_dir="" output_path="" split_mode="legacy" agent_mode=false phase_aware=false foundation_idx=""
 
   # --- Parse flags ---
   while [ $# -gt 0 ]; do
@@ -4462,6 +4462,10 @@ cmd_story_merge() {
       --phase-aware)
         phase_aware=true
         ;;
+      --foundation)
+        shift
+        foundation_idx="${1:-}"
+        ;;
       *)
         echo "Error: story-merge: unknown flag: $1" >&2
         exit 1
@@ -4481,6 +4485,10 @@ cmd_story_merge() {
   fi
   if [ "$split_mode" != "legacy" ] && [ "$split_mode" != "full-stack" ]; then
     echo "Error: story-merge: --split must be 'legacy' or 'full-stack', got: $split_mode" >&2
+    exit 1
+  fi
+  if [ -n "$foundation_idx" ] && ! [[ "$foundation_idx" =~ ^[0-9]{2}$ ]]; then
+    echo "Error: story-merge: --foundation must be a two-digit index (e.g. 01), got: $foundation_idx" >&2
     exit 1
   fi
 
@@ -4647,6 +4655,49 @@ cmd_story_merge() {
 
   # --- Remove synthetic _srcIdx field before further processing ---
   merged_array=$(printf '%s' "$merged_array" | jq '[.[] | del(._srcIdx)]')
+
+  # --- Foundation dependsOn injection sweep (--foundation NN) ---
+  # Runs after the outline:NN remap and _srcIdx strip, and before both the
+  # Kahn's-algorithm cycle detection and wave computation below, so injected
+  # edges are naturally included in both without touching either block.
+  # foundation_idx is an outline position (1-based, same convention as
+  # outline:NN tokens) — resolved against the array's own position, not
+  # against a literal staging-filename digit.
+  # Cycle-safe by construction: the foundation's own dependsOn is asserted
+  # empty before any edge is added, and injection only ever adds edges
+  # pointing toward the foundation (never away from it), so no new cycle can
+  # be introduced; the Kahn's-algorithm check below still runs unmodified.
+  if [ -n "$foundation_idx" ]; then
+    local foundation_id
+    foundation_id=$(printf '%s' "$merged_array" | jq -r --arg nn "$foundation_idx" '
+      (to_entries | map({key: (.key + 1 | tostring | if length == 1 then "0" + . else . end), value: .value.id}) | from_entries) as $outline_map |
+      $outline_map[$nn] // ""
+    ')
+    if [ -z "$foundation_id" ]; then
+      echo "Error: story-merge: --foundation $foundation_idx not present among staging files" >&2
+      exit 1
+    fi
+
+    local foundation_depends_on
+    foundation_depends_on=$(printf '%s' "$merged_array" | jq -c --arg fid "$foundation_id" '[.[] | select(.id == $fid)][0].dependsOn // []')
+    if [ "$foundation_depends_on" != "[]" ]; then
+      echo "Error: story-merge: foundation story $foundation_id has non-empty dependsOn" >&2
+      exit 1
+    fi
+
+    merged_array=$(printf '%s' "$merged_array" | jq --arg fid "$foundation_id" '
+      map(
+        if .id == $fid then
+          .
+        else
+          .dependsOn = (
+            (.dependsOn // []) as $d |
+            if ($d | index($fid)) != null then $d else $d + [$fid] end
+          )
+        end
+      )
+    ')
+  fi
 
   # --- DAG cycle detection via topological sort (Kahn's algorithm in jq) ---
   local cycle_result
