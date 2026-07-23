@@ -1280,6 +1280,10 @@ researchPaths:
   - .aimi/research/YYYY-MM-DD-<topic-slug>-<RUN_TS>-best-practices.md
   - .aimi/research/YYYY-MM-DD-<topic-slug>-<RUN_TS>-framework-docs.md
   - .aimi/research/YYYY-MM-DD-<topic-slug>-<RUN_TS>-learnings.md
+# foundationProposalPath: emitted only when Phase 3.7's validation gate passed (or the
+# reuse offer was accepted). Single relative path string — not a list, unlike researchPaths
+# above, since one repository has one foundation proposal.
+foundationProposalPath: .aimi/research/YYYY-MM-DD-<topic-slug>-<RUN_TS>-foundation.md
 prototype:
   - path: .aimi/brainstorms/prototypes/<topic-slug>-<variant-label>.html
     question_category: Aesthetic Direction
@@ -1451,6 +1455,14 @@ If neither variant prototypes were saved nor bundle prototypes are available (ne
 - **Deduplicate:** If the same path was collected more than once, include it only once.
 - **Validate before emission:** Confirm each path exists on disk under AIMI_ROOT. Drop entries that fail this check with one warning line each: `warning: researchPaths entry not found on disk — dropping: <path>`. If validation drops all entries, omit the key entirely.
 - **Backward compatibility:** Brainstorm documents that do not have the `researchPaths` key (written before this feature) are still valid. When `/aimi:plan` reads such a legacy brainstorm, it silently disables research reuse for that session — no error or warning is emitted. New brainstorms always emit this key when at least one researcher succeeds.
+
+### foundationProposalPath frontmatter rules
+
+- **Emit only when validated:** Include the `foundationProposalPath:` key in frontmatter only when Phase 3.7 (Foundation Synthesis) reports that the foundation artifact was written and passed its validation gate — including the case where an existing fresh proposal was reused instead of freshly synthesized. When Phase 3.7 did not fire, or its validation gate failed, omit the key entirely: no placeholder value, and no companion boolean flag (explicitly: no `foundationAccepted` key is introduced). The key's bare presence is the only signal a downstream consumer needs.
+- **Single path, not a list:** Unlike `researchPaths` above — a list because it tracks four distinct research kinds — `foundationProposalPath` is a single relative path string. One repository has at most one active foundation proposal, so a list shape would be misleading here.
+- **Relative paths:** The value is a path relative to AIMI_ROOT. Use no leading `./` and no `..` components — the same normalization already documented for each `researchPaths` entry above.
+- **Reuse contract for plan:** `/aimi:plan`'s Phase 1.9 Greenfield Foundation Gate reads this key when present and reuses the referenced artifact instead of spawning `aimi-foundation-architect`. It falls back silently — no error, no warning — to its own architect-spawn path when the key is absent, the referenced file is missing on disk, or the file is stale.
+- **Backward compatibility:** Brainstorm documents written before this feature (lacking `foundationProposalPath`) remain valid. When `/aimi:plan` reads such a legacy brainstorm, it silently disables foundation-proposal reuse for that session and degrades to its existing Phase 1.9 behavior — no error or warning is emitted, mirroring the legacy-brainstorm-without-`researchPaths` precedent above.
 
 ### Resolve Open Questions
 
