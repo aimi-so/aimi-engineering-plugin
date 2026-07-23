@@ -430,9 +430,7 @@ Before generating questions, review the research output from Phase 1.
 
 ## Phase 1.7: UI Feature Detection
 
-Scan the feature description for visual/UI keywords using case-insensitive whole-word matching (regex word boundaries `\b`).
-
-**Keyword list:** page, modal, dashboard, form, component, layout, ui, design
+Scan the feature description for visual/UI keywords using the "Keyword Signals" section of `${CLAUDE_PLUGIN_ROOT}/commands/references/ui-signals.md` — read that file and apply its keyword list and case-insensitive whole-word matching rule (regex word boundaries `\b`) as written; the keyword vocabulary is defined there and should not be restated inline here.
 
 **Co-occurrence rule:** The keyword "design" alone does not trigger detection — it requires co-occurrence with at least one other keyword from the list. This prevents false positives from phrases like "system design" or "API design."
 
