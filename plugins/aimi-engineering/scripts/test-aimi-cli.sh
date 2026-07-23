@@ -6521,15 +6521,20 @@ test_research_gc() {
   local ref_by_task="$gc_dir/.aimi/research/ref-by-task.md"
   local ref_by_brainstorm="$gc_dir/.aimi/research/ref-by-brainstorm.md"
   local ref_by_archive="$gc_dir/.aimi/research/ref-by-archive.md"
+  local ref_by_foundation_path="$gc_dir/.aimi/research/ref-by-foundation-path-foundation.md"
+  local orphan_foundation_named="$gc_dir/.aimi/research/unreferenced-foundation.md"
 
   printf '# Orphan old\n' > "$orphan_old"
   printf '# Orphan recent\n' > "$orphan_recent"
   printf '# Referenced by task\n' > "$ref_by_task"
   printf '# Referenced by brainstorm\n' > "$ref_by_brainstorm"
   printf '# Referenced by archive (ignored)\n' > "$ref_by_archive"
+  printf '# Referenced only via foundationProposalPath\n' > "$ref_by_foundation_path"
+  printf '# Unreferenced but foundation-named\n' > "$orphan_foundation_named"
 
   # Set mtimes: all old except orphan_recent
-  touch -t "$old_time" "$orphan_old" "$ref_by_task" "$ref_by_brainstorm" "$ref_by_archive"
+  touch -t "$old_time" "$orphan_old" "$ref_by_task" "$ref_by_brainstorm" "$ref_by_archive" \
+    "$ref_by_foundation_path" "$orphan_foundation_named"
   touch -t "$recent_time" "$orphan_recent"
 
   # Active task file referencing ref_by_task
@@ -6553,12 +6558,17 @@ test_research_gc() {
 }
 TASKEOF
 
-  # Brainstorm file with frontmatter referencing ref_by_brainstorm
+  # Brainstorm file with frontmatter referencing ref_by_brainstorm via researchPaths:
+  # (a list) and ref_by_foundation_path via foundationProposalPath: (a scalar),
+  # with the scalar positioned AFTER the list to exercise the key-ordering
+  # interaction: encountering foundationProposalPath: must exit the in-progress
+  # researchPaths: list scan rather than being misread as a list item.
   local brainstorm_file="$gc_dir/.aimi/brainstorms/2020-01-01-gc-brainstorm.md"
   cat > "$brainstorm_file" << 'BSEOF'
 ---
 researchPaths:
   - .aimi/research/ref-by-brainstorm.md
+foundationProposalPath: .aimi/research/ref-by-foundation-path-foundation.md
 ---
 
 # GC test brainstorm
@@ -6620,10 +6630,24 @@ ARCHEOF
   [ -e "$ref_by_archive" ] || ref_archive_exists="no"
   assert_eq "no" "$ref_archive_exists" "research-gc: archive-referenced (but not active) file deleted"
 
-  # --- Case 6: stdout contains cleaned count (1 old orphan + 1 archive-ref = 2) ---
-  assert_contains "Cleaned 2 orphaned research files (>30 days)" "$stdout" "research-gc: prints cleaned count"
+  # --- Case 6: referenced ONLY via brainstorm foundationProposalPath: scalar should be
+  #     preserved (even though old) -- this is the regression this story fixes ---
+  local ref_foundation_path_exists="no"
+  [ -e "$ref_by_foundation_path" ] && ref_foundation_path_exists="yes"
+  assert_eq "yes" "$ref_foundation_path_exists" "research-gc: referenced-by-foundationProposalPath preserved"
 
-  # --- Case 7: running again on empty dir is silent (N=0) ---
+  # --- Case 7: unreferenced file whose name merely CONTAINS "foundation" (old, no
+  #     referencing key of any kind) must still be deleted -- proves the new source
+  #     is a real reference check, not a filename heuristic ---
+  local orphan_foundation_named_exists="yes"
+  [ -e "$orphan_foundation_named" ] || orphan_foundation_named_exists="no"
+  assert_eq "no" "$orphan_foundation_named_exists" "research-gc: unreferenced foundation-named file deleted"
+
+  # --- Case 8: stdout contains cleaned count
+  #     (1 old orphan + 1 archive-ref + 1 unreferenced foundation-named = 3) ---
+  assert_contains "Cleaned 3 orphaned research files (>30 days)" "$stdout" "research-gc: prints cleaned count"
+
+  # --- Case 9: running again on empty dir is silent (N=0) ---
   pushd "$gc_dir" >/dev/null
   stdout=$("$CLI" research-gc 2>/dev/null) && exit_code=0 || exit_code=$?
   popd >/dev/null
