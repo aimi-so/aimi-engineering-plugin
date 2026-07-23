@@ -297,6 +297,21 @@ After reading the brainstorm (if one was found), parse its YAML frontmatter for 
 
 If no brainstorm was found, or the brainstorm has no `researchPaths` key, `reusedResearch` remains unset and behaviour is unchanged (backward-compatible with legacy brainstorms).
 
+### Reuse Brainstorm Foundation Proposal
+
+After reading the brainstorm (if one was found), parse its YAML frontmatter for a `foundationProposalPath` key — gated on the **same condition** as `### Reuse Brainstorm Research` above (a brainstorm must have been loaded this session):
+
+1. **Parse `foundationProposalPath`** from the brainstorm frontmatter — the value is a single path string (relative to `AIMI_ROOT`, no leading `./` or `..` components, per the brainstorm-side contract in `commands/brainstorm.md`'s "foundationProposalPath frontmatter rules"). If no brainstorm was loaded this session, or the loaded brainstorm's frontmatter has no `foundationProposalPath` key, skip this entire subsection with no error and leave the working-memory `foundationProposalPath` variable unset — mirroring exactly how step 1 above treats a missing `researchPaths` key.
+2. **Resolve and confine the path.** Resolve the absolute path with `realpath` — the same mechanism already used by the `### Bundle Prototype Auto-Generation` and `### Prototype Context` subsections above — accounting for `../` traversal and symlink targets, and verify the resolved result starts with `AIMI_ROOT`. This is the same **STRICT** confinement regime those subsections apply, not the weaker join-and-check-exists regime `researchPaths` uses in step 2 above.
+   - **Why STRICT here, not the `researchPaths` regime:** the Phase 1 review of this same feature (commit `9e7208d`) already hardened this exact `foundationProposalPath` variable once — pinning it to the orchestrator-supplied deterministic `outputPath` instead of the `aimi-foundation-architect` agent's returned `research_file` string, because trusting an agent-controlled value there could redirect the variable to an arbitrary readable file that Phase 3d then inlines into every sub-agent prompt. A brainstorm-authored frontmatter value is a **different input vector** into that same variable — validating it the weaker `researchPaths` way (join-and-check-exists, no traversal/symlink accounting) would reopen a materially similar gap, so this subsection applies the stricter `### Prototype Context` regime instead.
+   - **On confinement failure:** emit exactly one warning line — `foundationProposalPath <path> rejected — path outside project root` — treat the pointer as absent (working-memory `foundationProposalPath` remains unset), and continue without aborting the plan, mirroring `### Prototype Context`'s non-fatal treatment.
+3. **Validate existence and freshness** (only when confinement passed): verify the file exists on disk and check its mtime is within the last **14 days** — the same threshold `### Reuse Brainstorm Research` above uses. A missing or stale file simply disables reuse (no error):
+   - Missing file: log `foundationProposalPath reuse: <path> skipped — file not found` and leave `foundationProposalPath` unset.
+   - Stale file (mtime older than 14 days): log `foundationProposalPath reuse: <path> skipped — older than 14 days` and leave `foundationProposalPath` unset.
+4. **When confinement, existence, and freshness all pass**, populate the working-memory `foundationProposalPath` variable with the validated path and log `foundationProposalPath reuse: <path> (mtime OK)`. This is the **same** working-memory variable that Phase 1.9 below reads, confirms, or resets — not a parallel variable — so a value populated here already counts toward satisfying Phase 1.9 Step 1 condition (d) before that gate runs (see below).
+
+If no brainstorm was found, or the loaded brainstorm has no `foundationProposalPath` key, this subsection is a no-op and Phase 1.9's fire-condition check behaves exactly as it did before this feature.
+
 ### Roadmap Materialization
 
 Only runs when a brainstorm was loaded above — a `phases:` frontmatter key can exist only on a brainstorm document, so when no brainstorm was found this entire section is skipped with no log line. This step turns `/aimi:brainstorm`'s Phase 3.5 roadmap-gate output (the `phases:` frontmatter block — see `commands/brainstorm.md` "phases frontmatter rules") into durable, guard-protected state via `aimi-cli.sh`. `/aimi:brainstorm` never writes `.aimi/tasks/<feature-slug>/roadmap.json` itself; this is the only place that does. The "Sanitize every phase field," "Derive and validate each phase's directory segment," and "Detect existing roadmap.json and materialize" steps below are also reused, by name, by the Scope-Context Classification (Inline Fallback) subsection further down this phase — the fallback proposes a `phases` array itself, from a classification pass rather than brainstorm frontmatter, and re-enters this section's steps to sanitize and materialize it rather than reimplementing them.
@@ -1170,24 +1185,30 @@ The gate fires only when **all four** of the following hold:
 
 (c) **Flat mode, or roadmap mode with no completed phase yet.** `ROADMAP_MODE=false`, **or** (`ROADMAP_MODE=true` **and** no phase in the already-loaded `roadmap.json` has `status: completed`).
 
-(d) **No fresh foundation proposal already exists.** Glob `.aimi/research/*-<topicSlug>-*-foundation.md`. A match is **fresh** when its mtime is within 14 days of the current run. When more than one match is fresh, use the most recently modified.
+(d) **No fresh foundation proposal already exists from either source.** Two independent sources feed this condition, and **either** one resolving to a fresh file makes this condition **not** hold — i.e., a fresh proposal is considered to already exist:
+   - **Glob source:** `.aimi/research/*-<topicSlug>-*-foundation.md`. A match is **fresh** when its mtime is within 14 days of the current run. When more than one glob match is fresh, use the most recently modified.
+   - **Phase 0 pointer source:** the `foundationProposalPath` working-memory variable, when Phase 0's `### Reuse Brainstorm Foundation Proposal` subsection above already validated it this session (confinement, existence, and 14-day freshness all passed there).
+
+   Both sources funnel into the **same** branch 4 reuse path below — neither is a parallel bypass of this gate. When **both** sources resolve to fresh files and the files **differ**, use the more recently modified of the two (mais recentemente modificado) — the same tie-break rule already used above for multiple glob matches.
+
+   Conditions (a), (b), and (c) above are unaffected by any of this: they still evaluate the **current** repository state on every run, and a Phase 0-populated pointer never short-circuits any of them — the mature-repo, multi-repo, and roadmap-continuation protections apply exactly as before even when Phase 0 already populated `foundationProposalPath`.
 
 **Why (d) does not call `research-lookup`:** `aimi-cli.sh`'s `cmd_research_lookup` (the `research-lookup` CLI subcommand normally used for research-file freshness elsewhere in this pipeline) marks a file stale whenever its `## File References` section is absent or empty. That is the *expected* shape for a from-scratch foundation proposal describing a greenfield repo — there is no existing source to cite yet. Using `research-lookup` here would misclassify every fresh proposal as stale and defeat condition (d) entirely, so this gate uses a plain glob-plus-mtime check instead.
 
 **When the fire-condition does not hold**, apply the first matching branch below:
 
-1. **(a) fails — mature repo.** Structural signals absent. Skip this entire phase silently: zero log output to chat, proceed straight to Phase 2. (The optional debug line below is a separate, explicitly opt-in channel — it still fires when `AIMI_PLAN_DEBUG=1` is set, but nothing else does, not even on this branch.)
+1. **(a) fails — mature repo.** Structural signals absent. If Phase 0's `### Reuse Brainstorm Foundation Proposal` subsection had already populated `foundationAccepted`/`foundationProposalPath` this session, reset both to unset/false before proceeding — silently; the reset itself emits no line. Skip this entire phase silently: zero log output to chat, proceed straight to Phase 2. (The optional debug line below is a separate, explicitly opt-in channel — it still fires when `AIMI_PLAN_DEBUG=1` is set, but nothing else does, not even on this branch.)
 2. **(b) fails — multi-repo layout.** Emit exactly one advisory chat line, verbatim:
    ```
    foundation gate skipped — multi-repo layout (per-repo foundations not yet supported)
    ```
-   Proceed straight to Phase 2. `foundationAccepted` stays unset/false.
-3. **(c) fails — roadmap continuation.** A later phase of an already-underway roadmap is being planned; this is not a first-time greenfield decision. Apply the same silent treatment as branch 1 above — zero log output, proceed straight to Phase 2.
+   Proceed straight to Phase 2. `foundationAccepted` stays unset/false — and so does `foundationProposalPath`, reset to unset when Phase 0 had already populated it. The multi-repo layout disqualifies reuse regardless of which source populated the pointer.
+3. **(c) fails — roadmap continuation.** A later phase of an already-underway roadmap is being planned; this is not a first-time greenfield decision. Apply the same silent treatment as branch 1 above — zero log output, proceed straight to Phase 2, resetting `foundationAccepted`/`foundationProposalPath` to unset/false first when Phase 0 had pre-populated them (same silent reset as branch 1; it emits no line).
 4. **(d) fails — fresh proposal exists (reuse, not skip).** Do **not** re-spawn the architect and do **not** re-prompt the user. Emit exactly one log line:
    ```
    [plan] foundation gate: reusing existing proposal (<matched-path>)
    ```
-   Set `foundationAccepted = true` and `foundationProposalPath = <matched-path>`. Proceed to Phase 2. (Steps 2–5 below do not run this session — see Step 5's scope note.)
+   Set `foundationAccepted = true` and `foundationProposalPath = <matched-path>`. `<matched-path>` may originate from **either** source in the rewritten condition (d) above — the topicSlug glob or the Phase 0-validated `foundationProposalPath` pointer — applying the same mtime tie-break when both resolve and differ. Proceed to Phase 2. (Steps 2–5 below do not run this session — see Step 5's scope note.)
 
 **When all four hold**, the gate fires — continue to Step 2.
 
