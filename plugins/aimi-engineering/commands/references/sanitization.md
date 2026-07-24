@@ -31,10 +31,18 @@ Phase 3.7 Step 3, "Authoring-Time Sanitization"), apply the base rules above
 and then:
 
 4. Replace every newline with a single space.
-5. Strip any `$(...)` command-substitution sequence entirely — from the
-   opening `$(` through its matching closing `)`.
+5. Remove every `$(` sequence — unconditionally, whether or not a matching
+   closing `)` exists (an unbalanced `$(cat ~/.ssh/id_rsa` must not survive) —
+   and remove every backtick character, matching the regime `/aimi:brainstorm`'s
+   `phases:` frontmatter sanitization already applies.
 6. Truncate the result to 500 characters.
+7. Strip markdown heading markers: remove any run of 1–6 `#` characters that
+   is followed by a space and sits at the start of the answer or after
+   whitespace. Without this, an answer beginning `## Folder Layout ...` would
+   inject a duplicate section heading the moment Step 4 composes it at column
+   0 — a steering vector over which files `aimi-story-expander`'s
+   `foundationEntry` handling creates.
 
-Answers that pass all six rules are safe to compose into the `## CLAUDE.md
+Answers that pass all seven rules are safe to compose into the `## CLAUDE.md
 Draft`, `## AGENTS.md Draft`, `## Folder Layout`, and `## Lint and Format
 Config` sections Phase 3.7 synthesizes.

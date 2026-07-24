@@ -5,10 +5,11 @@ near-empty project with no established stack, structure, or conventions yet.
 Apply the rules in this file wherever the caller says "scan for foundation
 signals" or "check whether this repo is greenfield."
 
-**Consumed by:** plan.md's Phase 1.9 (Greenfield Foundation Gate) is the
-active consumer. brainstorm.md and the brownfield-sem-convencoes second-degree
-consumer described below are not wired to this file yet — both arrive in a
-later roadmap phase.
+**Consumed by:** plan.md's Phase 1.9 (Greenfield Foundation Gate) and
+brainstorm.md's Phase 1.8 (Greenfield Foundation Detection — Structural
+Signals only) are the active consumers. The brownfield-sem-convencoes
+second-degree consumer described below is not wired to this file yet — it
+arrives in a later roadmap phase.
 
 ## Keyword Signals
 

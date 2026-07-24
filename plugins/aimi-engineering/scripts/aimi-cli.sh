@@ -4358,12 +4358,23 @@ $rpath"
           in_rp=1
           continue
         fi
-        if printf '%s\n' "$line" | grep -qE '^foundationProposalPath\s*:'; then
+        if printf '%s\n' "$line" | grep -qE '^foundationProposalPath[[:space:]]*:'; then
           # New top-level key: exit any in-progress researchPaths list scan first,
           # regardless of whether foundationProposalPath appears before or after it.
           in_rp=0
           local fp_entry
-          fp_entry=$(printf '%s\n' "$line" | sed 's/^foundationProposalPath\s*:\s*//')
+          # POSIX [[:space:]] (not \s — GNU-only in sed); then normalize the
+          # extracted scalar so a YAML-quoted value or a trailing comment cannot
+          # defeat the referenced-set match (which would delete a live artifact):
+          #   1. strip a trailing " #comment" (space-hash onward)
+          #   2. strip one pair of surrounding double or single quotes
+          #   3. strip a leading ./
+          fp_entry=$(printf '%s\n' "$line" | sed 's/^foundationProposalPath[[:space:]]*:[[:space:]]*//')
+          fp_entry=$(printf '%s\n' "$fp_entry" | sed 's/[[:space:]]#.*$//; s/[[:space:]]*$//')
+          case "$fp_entry" in
+            \"*\") fp_entry="${fp_entry#\"}"; fp_entry="${fp_entry%\"}" ;;
+            \'*\') fp_entry="${fp_entry#\'}"; fp_entry="${fp_entry%\'}" ;;
+          esac
           fp_entry="${fp_entry#./}"
           referenced_set="$referenced_set
 $fp_entry"
