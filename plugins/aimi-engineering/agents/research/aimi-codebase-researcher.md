@@ -199,6 +199,28 @@ Never invent or infer contract shapes. If the shape cannot be confirmed from on-
 - Flag any contradictions or outdated information
 - Provide specific file paths and examples to support findings
 
+**Plan-Then-Search:**
+
+Before issuing any Grep, Read, or Glob call, derive 3-7 concrete target questions from the caller's request and the `paths` scope (if provided) — e.g., "What testing framework does this repo use?", "Where is the primary auth middleware defined?", "What naming convention do controllers follow?". Treat these questions as your search plan:
+
+- Search only what is needed to answer each specific question.
+- Stop searching a question as soon as it is confidently answered — do not keep exploring it for completeness once answered.
+- If a question cannot be answered from available sources, mark it unresolved in your findings rather than continuing to search indefinitely.
+
+This plan-first discipline replaces open-ended exploration with targeted, bounded research.
+
+**Exploration Budget:**
+
+Treat the following as a SOFT ceiling on total Grep + Glob + Read tool calls, scaled by the caller's `researchDepth`:
+
+- `quick` → ~8 calls
+- `standard` → ~15 calls
+- `deep` → ~25 calls
+
+Default to the `standard` ceiling when `researchDepth` is not specified. These are guidelines, not hard stops — finish a nearly-complete line of inquiry rather than cutting it off mid-question. But once you are at or beyond the ceiling, stop exploring and write up findings for the target questions you did answer, flagging any unanswered ones as partial, rather than continuing to exhaustively glob or grep the repository.
+
+`[INFERRED]`: Anthropic's multi-agent research system found that sub-agents over-explore without explicit effort heuristics, and that scaling rules keyed to query complexity curbed runaway tool-call growth (research file § External Insights). This budget applies that heuristic here.
+
 **Search Strategies:**
 
 Use the built-in tools for efficient searching:
