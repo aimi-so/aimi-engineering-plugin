@@ -70,15 +70,11 @@ Research agent findings-body claims (the on-disk file the pointer block points t
 return above) follow a claim -> verbatim-quote -> citation-or-`[INFERRED]` structure: every factual
 claim is either a short verbatim quote of the cited text plus a locatable citation (`file:line`,
 `path:Lstart-Lend`, or the most specific doc/URL pointer available), or is tagged `[INFERRED]` when
-no source exists. No bare assertions in the findings body.
+no source exists. No bare assertions in the findings body. (A `verify-citations` CLI pass to check
+this mechanically is planned but not yet implemented.)
 
-This composes with issue #64's `verify-citations` CLI pass and its cite-or-mark discipline — the
-claim/citation/quote structure is what that pass mechanically checks for. This rule is additive: it
-extends <preservation_rules> and <research_return_contract> above (the findings body already carries
-verbatim contract quotes and file:line citations; this generalizes that to every claim) and does not
-override or weaken <safety_escapes> or <preservation_rules> — see <precedence> above. The
-pointer-block Task return itself (`research_file`, `summary`, `sections`) is unaffected and remains
-exempt from this per-claim requirement; it is a handoff pointer, not a findings claim.
+Each research agent spec restates this rule in full rather than pointing here, since AGENTS.md is
+never copied into the OpenCode translation (`install.sh`) and would be unreachable for those users.
 </research_findings_format>
 
 <examples>

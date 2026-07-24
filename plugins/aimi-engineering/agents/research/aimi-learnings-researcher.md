@@ -26,11 +26,9 @@ Before running any Grep or Read call, derive 3-7 concrete target questions from 
 
 ## Exploration Budget
 
-Treat total tool calls (Grep + Read combined) as a SOFT ceiling of **~10 calls**, regardless of `researchDepth` — the Grep-first filtering strategy below already bounds the input set (typically 5-20 candidate files instead of hundreds), so a fixed small ceiling is sufficient rather than a researchDepth-scaled one.
+Treat total tool calls (Grep + Read combined) as a SOFT ceiling of **~10 calls**, regardless of `researchDepth` — the Grep-first filtering below already bounds candidates to ~5-20 files.
 
-This is a guideline, not a hard stop — finish reading a nearly-complete candidate file rather than cutting it off mid-read. But once at or beyond the ceiling, stop searching and return distilled summaries for the candidates already read, noting any remaining candidate files as unexamined, rather than continuing to grep and read exhaustively.
-
-`[INFERRED]`: Anthropic's multi-agent research system found that sub-agents over-explore without explicit effort heuristics, and that scaling rules keyed to query complexity curbed runaway tool-call growth (research file § External Insights). This budget applies that heuristic here.
+Soft ceiling — finish a nearly-complete candidate read; past the ceiling, write up distilled summaries for candidates read and flag the rest as unexamined.
 
 ## Search Strategy (Grep-First Filtering)
 
@@ -284,13 +282,11 @@ Structure your findings as:
 
 ## Structured Findings Format
 
-Generalize the `**File**:` citation already present in the Relevant Learnings format above into a machine-parseable claim structure for every factual claim in the findings body (not the pointer-block return in the Output Contract above, which stays exactly 3 summary bullets + `sections`). Every claim — Key Insight, Relevance, Recommendation, or Critical Pattern — resolves to one of exactly two forms; no bare assertions:
+Every claim — Key Insight, Relevance, Recommendation, or Critical Pattern — in the findings body (not the pointer-block return in the Output Contract above, which stays exactly 3 summary bullets + `sections`) resolves to one of exactly two forms; no bare assertions:
 
 1. **Cited claim** — state the claim, then attach a short verbatim quote (the exact cited text from the solution file, kept brief) plus a locatable citation:
    > "<verbatim quoted text>" — `file:line` (e.g. `.aimi/solutions/performance-issues/n-plus-one-fix.md:42`)
 2. **Inferred claim** — when the insight is your own generalization across multiple solution files rather than something one file states, tag it inline with `[INFERRED]` immediately after the claim.
-
-This composes with issue #64's `verify-citations` CLI pass and its cite-or-mark discipline: a mechanical pass over this file can confirm every claim resolves to a real quoted `file:line` citation or an explicit `[INFERRED]` tag, with no third case.
 
 ## Efficiency Guidelines
 

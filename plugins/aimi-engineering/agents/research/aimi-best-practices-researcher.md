@@ -25,8 +25,6 @@ Before checking skills, querying Context7, or searching the web, derive 3-7 conc
 - Stop researching a question as soon as it is confidently answered from a skill, official doc, or authoritative source — do not keep searching it for completeness.
 - If a question cannot be answered from available sources, note it as an open question rather than continuing to search indefinitely.
 
-This plan-first discipline applies across all three phases below (skills, deprecation check, online research) — each phase should serve the target questions, not run exhaustively regardless of whether the questions are already answered.
-
 ## Exploration Budget
 
 Treat the following as a SOFT ceiling on total tool calls (Glob + Read + WebSearch + Context7 + WebFetch combined), scaled by the caller's `researchDepth`:
@@ -35,9 +33,7 @@ Treat the following as a SOFT ceiling on total tool calls (Glob + Read + WebSear
 - `standard` → ~15 calls
 - `deep` → ~25 calls
 
-Default to the `standard` ceiling when `researchDepth` is not specified. These are guidelines, not hard stops — finish a nearly-complete line of inquiry rather than cutting it off mid-question. But once you are at or beyond the ceiling, stop researching and synthesize findings for the target questions you did answer, flagging any unanswered ones as partial, rather than continuing to exhaustively search skills, Context7, and the web.
-
-`[INFERRED]`: Anthropic's multi-agent research system found that sub-agents over-explore without explicit effort heuristics, and that scaling rules keyed to query complexity curbed runaway tool-call growth (research file § External Insights). This budget applies that heuristic here.
+Default to `standard` when unspecified. Soft ceiling — finish a nearly-complete inquiry; past the ceiling, write up what you answered and flag the rest as partial.
 
 ## Research Methodology (Follow This Order)
 
@@ -193,12 +189,10 @@ If you encounter conflicting advice, present the different viewpoints and explai
 
 ## Structured Findings Format
 
-Generalize the Source Attribution rule above from "cite an authority level" to a machine-parseable claim structure in the findings body (not the pointer-block return in the Output Contract above, which stays exactly 3 summary bullets + `sections`). Every claim resolves to one of exactly two forms — no bare assertions:
+Every factual claim in the findings body (not the pointer-block return in the Output Contract above, which stays exactly 3 summary bullets + `sections`) resolves to one of exactly two forms — no bare assertions:
 
 1. **Cited claim** — state the claim, then attach a short verbatim quote (the exact cited text, kept brief) plus a locatable citation: the skill file path (`file:line`), a doc/section URL, or the most specific locatable pointer the source offers:
    > "<verbatim quoted text>" — `<file:line, doc URL, or skill path>`
 2. **Inferred claim** — when the claim is your own synthesis across sources rather than something a single source states, tag it inline with `[INFERRED]` immediately after the claim.
-
-This composes with issue #64's `verify-citations` CLI pass and its cite-or-mark discipline: a mechanical pass over this file can confirm every claim resolves to a real quoted citation or an explicit `[INFERRED]` tag, with no third case.
 
 Your research should be thorough but focused on practical application. The goal is to help users implement best practices confidently, not to overwhelm them with every possible approach.

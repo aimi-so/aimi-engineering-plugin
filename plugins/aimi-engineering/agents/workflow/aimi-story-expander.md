@@ -22,7 +22,7 @@ Every invocation includes:
 
 ## Research excerpts are section-scoped — read on demand when insufficient
 
-Input 4's `<research_file>` blocks are **not** the full research corpus — the orchestrator slices only the sections it judged relevant to your outline entry, to keep your prompt lean. This is a lazy-loading optimization, not a hard cap on what you may consult: when the supplied excerpt lacks a detail you need to author a precise, detail-grounded acceptance criterion (a schema field, a specific convention, an exact file path), use the Read tool to open the full file yourself from the path list accompanying input 4 — do not guess, and do not treat the excerpt's absence of a detail as evidence the detail doesn't exist in the underlying research. Reading a full file this way is within your existing tool access; it is not a new file-write permission and does not change the single-`outputPath`-write contract in "What you do NOT do" below.
+Input 4's `<research_file>` blocks are sliced excerpts, not the full corpus. This is lazy-loading, not a hard cap: when an excerpt lacks a detail you need for a precise, detail-grounded acceptance criterion (a schema field, a specific convention, an exact file path), Read the full file yourself from the research file paths provided in your prompt — do not guess, or treat an excerpt's silence as evidence the detail doesn't exist.
 
 ## Inputs you must NOT invent
 
@@ -186,7 +186,7 @@ When AC cites exactly one distinct prototype path, set `implementation.prototype
 
 - You do NOT call `story-merge`.
 - You do NOT spawn other sub-agents.
-- You do NOT write any file besides the single `outputPath`. Reading is narrowly permitted for one purpose only: Read a full research file from the paths accompanying input 4 when its section-scoped excerpt is insufficient (see "Research excerpts are section-scoped" above) — this is the sole read-on-demand exception; you still write to nothing but `outputPath`.
+- You do NOT write any file besides the single `outputPath`. Reading is narrowly permitted for one purpose only: opening a full research file when its section-scoped excerpt is insufficient (see "Research excerpts are section-scoped" above).
 - You do NOT update `tasks.json`, the brainstorm, the research files, or any spec.
 - You do NOT assign `US-NNN` IDs or compute `wave` numbers.
 - You do NOT validate that other outline entries' staging files exist — they are written in parallel by sibling sub-agents.

@@ -4304,15 +4304,19 @@ cmd_research_lookup() {
   fi
 }
 
-# Usage: extract-sections <file> --anchors "<heading titles, comma- or newline-separated>"
+# Usage: extract-sections <file> --anchors "<heading titles, newline-separated>"
 # Print only the requested '## '/'### ' sections of a research .md file, concatenated
 # verbatim in the order the anchors were requested.
 # Each section spans from its matching heading line up to (but not including) the next
 # heading of the same-or-higher level, or EOF -- so an h2 anchor includes its nested h3s
 # and stops at the next h2 (or h1); an h3 anchor stops at the next h3/h2 (or h1).
 # Anchor text is matched case-insensitively against the heading text (leading #s and
-# surrounding whitespace stripped). An anchor with no matching heading is silently
-# skipped (not an error); a run whose anchors match nothing prints empty output, exit 0.
+# surrounding whitespace stripped). An anchor with no matching heading is skipped (not
+# a fatal error) but is named in a "no section matched anchor" warning on stderr; a run
+# whose anchors match nothing prints empty output, still exit 0.
+# Anchors containing shell metacharacters ($ ` " \) are rejected with a warning on
+# stderr and skipped -- defense in depth, since anchor text originates from untrusted
+# research-file heading content.
 # Path confinement mirrors research-lookup: resolve_path + validate_path_in_project.
 # Missing file -> error + exit 1. Missing <file>/--anchors arg -> usage + exit 1.
 cmd_extract_sections() {
@@ -4355,19 +4359,36 @@ cmd_extract_sections() {
   resolved_file=$(resolve_path "$file_path")
   validate_path_in_project "$resolved_file"
 
-  # Split --anchors on commas and newlines; trim and lowercase each entry; skip blanks.
+  # Split --anchors on newlines only (comma is valid heading-text punctuation and must
+  # NOT be treated as a delimiter); trim and lowercase each entry; skip blanks.
   # Extract each anchor's section (first matching heading only) in request order.
-  local anchor anchor_lc
+  local anchor anchor_lc unmatched_anchors=""
   while IFS= read -r anchor; do
     anchor=$(printf '%s' "$anchor" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
     [ -z "$anchor" ] && continue
+
+    # Defense in depth: anchors originate from untrusted research-file heading text.
+    # The orchestrator sanitizes before interpolating, but this CLI must not rely on
+    # that. Reject only characters dangerous inside a double-quoted shell argument --
+    # &, comma, parens, colon, slash, hyphen, underscore, period, and single-quote are
+    # all legitimate heading punctuation and MUST keep working.
+    case "$anchor" in
+      *'$'*|*'`'*|*'"'*|*'\'*)
+        echo "Warning: anchor rejected (shell metacharacter): $anchor" >&2
+        continue ;;
+    esac
+
     anchor_lc=$(printf '%s' "$anchor" | tr '[:upper:]' '[:lower:]')
 
-    awk -v target="$anchor_lc" '
-      BEGIN { in_section = 0; match_level = 0; matched_done = 0 }
+    # awk streams matched section lines straight to stdout (byte-for-byte, blank
+    # lines and all) and reports match status via its own exit code -- this avoids
+    # a $(...) capture, which would silently swallow trailing blank lines.
+    if awk -v target="$anchor_lc" '
+      BEGIN { in_section = 0; match_level = 0; matched_done = 0; in_fence = 0 }
       {
+        if ($0 ~ /^[[:space:]]*(```|~~~)/) { in_fence = !in_fence }
         level = 0
-        if ($0 ~ /^#+[[:space:]]/) {
+        if (!in_fence && $0 ~ /^#+[[:space:]]/) {
           line_copy = $0
           while (substr(line_copy, 1, 1) == "#") {
             level++
@@ -4397,8 +4418,23 @@ cmd_extract_sections() {
           print
         }
       }
-    ' "$resolved_file"
-  done < <(printf '%s\n' "$anchors_raw" | tr ',' '\n')
+      END { exit (matched_done ? 0 : 1) }
+    ' "$resolved_file"; then
+      :
+    else
+      unmatched_anchors="$unmatched_anchors
+$anchor"
+    fi
+  done < <(printf '%s\n' "$anchors_raw")
+
+  if [ -n "$unmatched_anchors" ]; then
+    while IFS= read -r anchor; do
+      [ -z "$anchor" ] && continue
+      echo "Warning: no section matched anchor: $anchor" >&2
+    done <<< "$unmatched_anchors"
+  fi
+
+  return 0
 }
 
 # Usage: research-gc

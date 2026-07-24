@@ -28,11 +28,9 @@ Before reading any bundle artifact, derive 3-7 concrete target questions from th
 
 ## Exploration Budget
 
-Treat total tool calls (Read + Grep + Glob combined) as a SOFT ceiling of **~12 calls**, regardless of `researchDepth` — the bundle is a bounded input set (a handful of spec files, chat transcripts, and prototype files under `.aimi/design/`), so a fixed small ceiling is sufficient rather than a researchDepth-scaled one.
+Treat total tool calls (Read + Grep + Glob combined) as a SOFT ceiling of **~12 calls**, regardless of `researchDepth` — the bundle is a bounded input set (a handful of spec, chat, and prototype files under `.aimi/design/`).
 
-This is a guideline, not a hard stop — finish reading a nearly-complete artifact rather than cutting it off mid-file. But once at or beyond the ceiling, stop reading and emit the 16-section document with the sections you could complete, marking any unreached sections `_(no source material found)_` or noting them in Open Questions, rather than continuing to exhaustively read every chat and prototype file.
-
-`[INFERRED]`: Anthropic's multi-agent research system found that sub-agents over-explore without explicit effort heuristics, and that scaling rules keyed to query complexity curbed runaway tool-call growth (research file § External Insights). This budget applies that heuristic here.
+Soft ceiling — finish a nearly-complete artifact read; past the ceiling, emit the 16-section document with the sections you could complete, marking unreached sections `_(no source material found)_` or noting them in Open Questions.
 
 ## Method: Read Order (Strict Priority)
 
@@ -77,13 +75,11 @@ Include provenance on the first line of each section (or inline with each rule/i
 
 ## Structured Findings Format
 
-Generalize the Provenance Notation above from a section-level citation into a per-claim claim structure for every factual claim in the findings body (not the pointer-block return in the Output Contract below, which stays exactly 3 summary bullets + `sections`). Every claim resolves to one of exactly two forms — no bare assertions:
+Every factual claim in the findings body (not the pointer-block return in the Output Contract below, which stays exactly 3 summary bullets + `sections`) resolves to one of exactly two forms — no bare assertions:
 
 1. **Cited claim** — state the claim, then attach a short verbatim quote (the exact cited text, kept brief) plus its provenance citation:
    > "<verbatim quoted text>" — `BusinessSpec § 4.1 L152-174` (or `DesignSpec § 1 L3-40`, a chat transcript path:line, or a prototype `file:line`)
 2. **Inferred claim** — when no bundle artifact states it (e.g. a design-token default read from prototype CSS per the Read Order fallback, or a gap noted under Spec-Prototype Coverage Gaps), tag it inline with `[INFERRED]` immediately after the claim. This is distinct from, and composes with, the existing chat-fallback annotation `(source: chats — spec absent)` — a chat-sourced claim still needs a verbatim quote + citation; `[INFERRED]` is reserved for claims with no bundle source at all.
-
-This composes with issue #64's `verify-citations` CLI pass and its cite-or-mark discipline: a mechanical pass over this file can confirm every claim resolves to a real quoted citation or an explicit `[INFERRED]` tag, with no third case.
 
 ## Output Contract
 
