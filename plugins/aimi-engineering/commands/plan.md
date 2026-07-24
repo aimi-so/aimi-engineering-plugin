@@ -1740,6 +1740,40 @@ Where `<idx>` is the zero-padded outline index (`01`, `02`, …) and `<slug>` is
 
 When `foundationAccepted` (Phase 1.9), read the file at `foundationProposalPath` **once** for this Phase 3d invocation (not once per sub-agent — reuse the same read across every spawn this run). Escape any literal `</foundation_proposal` or `<foundation_proposal` sequences in its contents to their HTML-entity forms (`&lt;/foundation_proposal`, `&lt;foundation_proposal`), mirroring the `research_file`/`prototype_html` wrapper-escape pattern used elsewhere in this command. Cap the wrapped content at **50 KB**; when the file exceeds the cap, truncate to the first 50 KB and append `\n…[truncated; original is intact on disk]`. Store the result as `foundationProposalBlock` (empty string when `foundationAccepted` is false). Include it in **every** sub-agent prompt this run when `foundationAccepted` — omit the block entirely when not accepted.
 
+### Per-Entry Section-Scoped Research Block Preparation
+
+Replaces the full-corpus `researchFileBlocks` broadcast (previously inlined verbatim into every sub-agent spawn — see the old `[If researchFileBlocks is non-empty]` block this template used to carry) with a per-outline-entry slice, so token cost scales with what each entry actually needs rather than with the size of the entire research corpus. Wires in the `extract-sections` verb (`scripts/aimi-cli.sh` `cmd_extract_sections`, delivered by story outline:01) as the slicing mechanism. Phase 1.7's on-disk ingestion (above) is unchanged and remains the fallback source this step slices from — `researchFileBlocks` itself is untouched and keeps feeding Phase 3b (outline generation) and the Phase 3d.5 auditor exactly as before; only the per-expander broadcast below is replaced.
+
+**Trigger:** only when Phase 1.7 collected at least one research file this run (its file-collection list, Phase 1.7 step 1–3 above, is non-empty). When that list is empty, skip this entire step — every sub-agent's section-scoped block is simply empty, the same outcome an empty `researchFileBlocks` produced before.
+
+**Step 1 — Build the sections index.** For each file Phase 1.7 collected, determine its available `## `/`### ` heading anchors (bare heading text, `#` markers and surrounding whitespace stripped):
+- **Freshly spawned this run**, with its researcher's pointer-block return still in working memory from Phase 1 / Phase 1.5b: use that return's `sections` list directly — it already enumerates every h2/h3 anchor in document order (`agents/research/aimi-codebase-researcher.md:117-130`). Strip each entry's leading `#`/`##`/`###` markdown prefix before use — the pointer block carries it (e.g. `"## Architecture & Structure"`), but `extract-sections --anchors` matches against bare heading text.
+- **Reused, or the pointer block is no longer in context** (Phase 1.6's "Reused research files" path has no Task summary to draw on): derive the same list by scanning the file's own `## ` / `### ` heading lines directly — structurally identical output to what the pointer's `sections` field would contain, since that field is defined as exactly this enumeration.
+
+Store the result as `researchSectionsIndex`, a map of `<file path> → [<bare anchor text>, ...]`.
+
+**Step 2 — Select anchors per outline entry.** For each entry in `outline.json`, and for each file in `researchSectionsIndex`, compare the entry's `title` + `summary` against that file's anchor list and select the anchors whose heading text (or, when the heading text alone is ambiguous, the section's known subject from the Phase 1.6 consolidated summary) relates to the entry's subject matter. Favor precision but do not starve the story: when relevance is genuinely unclear for a candidate anchor, include it — the read-on-demand fallback (Step 4 below) exists precisely to cover whatever this heuristic selection misses, so mild over-inclusion here is a soft token cost, not a correctness risk. Typical selections run 2–5 anchors per file per entry; there is no hard cap.
+
+**Step 3 — Slice via `extract-sections`.** For each outline entry, for each file with ≥1 selected anchor:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+"$AIMI_CLI" extract-sections "<file path>" --anchors "<comma-joined selected anchors for this file+entry>"
+```
+
+Wrap the returned excerpt exactly as Phase 1.7 wraps a full file — same tag, same escaping:
+
+```
+<research_file path="<relative-path-from-project-root>">
+…sanitized excerpt…
+</research_file>
+```
+
+Apply the identical sanitization Phase 1.7 already applies (escape any literal `</research_file` sequence to `&lt;/research_file`, and any literal `<research_file` sequence to `&lt;research_file`, before wrapping — the same rule at plan.md:1038, applied here to a slice instead of the whole file). Concatenate all of an entry's file excerpts (in `researchSectionsIndex` order) into that entry's `researchSectionBlock` variable. An entry whose every file yields zero selected anchors gets an empty `researchSectionBlock` — a normal, non-error outcome (the entry's subject matter may simply not be covered by any research file); Step 4's read-on-demand path remains available regardless. `extract-sections` itself is silent-skip on a miss (an anchor with no matching heading is dropped, not an error — see the CLI helper's own doc comment above `cmd_extract_sections`), so a zero-anchor result never aborts this step.
+
+**Step 4 — Read-on-demand fallback.** Regardless of whether `researchSectionBlock` is empty or populated, every sub-agent also receives the full `metadata.researchPaths` list plus an explicit instruction to Read any of those files in full when the section excerpt is insufficient for a needed acceptance-criterion detail. This is the "no hard information loss" guarantee required of this design: the excerpt is a lazy-loading optimization, never a hard cap on what the expander can see — Phase 1.7's on-disk ingestion remains the durable fallback source, exactly as before this change.
+
 ### Sub-Agent Prompt Template
 
 Spawn each sub-agent with:
@@ -1749,12 +1783,11 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
   [model: <AGENT_MODELS.workflow when not "inherit">]
   prompt: "Expand outline entry <idx> into a full story JSON object.
 
-  Outline entry:
-    idx: <idx>
-    title: <title>
-    summary: <summary>
-    [If foundationAccepted (Phase 1.9)]: foundationEntry: <true when this is outline entry 01, false otherwise>
-    [If foundationAccepted (Phase 1.9)]: foundationMode: <the outline entry's foundationMode field — 'greenfield' or 'brownfield'>
+  [Shared context below — byte-identical across all N parallel expander
+  spawns this run. Placed ahead of this story's own delta (further down) so
+  the shared portion forms a stable prefix; see the Prompt-Prefix Caching
+  Note after this template for what that ordering does and does not
+  guarantee.]
 
   Full outline context (for dependsOn reasoning):
   <full outline.json array rendered as numbered list: idx. title — summary>
@@ -1762,9 +1795,12 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
   Research context:
   [consolidated research summary from Phase 1.6]
 
-  [If researchFileBlocks is non-empty]:
-  Full research file contents — use to author precise, detail-grounded acceptance criteria:
-  [researchFileBlocks]
+  [If metadata.researchPaths is non-empty]:
+  Research file paths available for on-demand reading — Read the full file
+  via the Read tool whenever the section-scoped excerpt in this story's own
+  delta below is insufficient for a needed acceptance-criterion detail; the
+  excerpt is a lazy-loading optimization, never a hard information cap:
+  [metadata.researchPaths, comma-joined]
 
   [If foundationAccepted (Phase 1.9) AND foundationEntry is false]:
   Foundation architecture proposal — this story's implementation.approach MUST
@@ -1807,6 +1843,27 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
   [If designSpecContent is non-null]:
   Design spec content:
   [designSpecContent]
+
+  [End shared context.]
+
+  This story's own delta — the one piece of the prompt above the schema
+  instructions that differs across the N parallel spawns this run:
+
+  Outline entry:
+    idx: <idx>
+    title: <title>
+    summary: <summary>
+    [If foundationAccepted (Phase 1.9)]: foundationEntry: <true when this is outline entry 01, false otherwise>
+    [If foundationAccepted (Phase 1.9)]: foundationMode: <the outline entry's foundationMode field — 'greenfield' or 'brownfield'>
+
+  [If this entry's researchSectionBlock (Per-Entry Section-Scoped Research
+  Block Preparation above) is non-empty]:
+  Section-scoped research excerpts for this outline entry — sliced by
+  extract-sections from the research file paths listed above to match this
+  entry's subject matter; use these to author precise, detail-grounded
+  acceptance criteria. When a needed detail is missing from these excerpts,
+  Read the full file from the paths above instead of guessing:
+  [researchSectionBlock]
 
   Output: write a single JSON object to outputPath.
 
@@ -1925,6 +1982,11 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
   as post-merge sweeps, after DAG validation and before the atomic write to
   tasks.json. They are NOT performed by individual sub-agents."
 ```
+
+**Prompt-Prefix Caching Note (Advisory):** the shared context now precedes each story's own delta so that, when the underlying model provider supports prompt-prefix caching, the N parallel expander spawns this run share an identical prefix that a cache hit can discount. This is advisory only — a request-shaping change, not a correctness or capability change — and its benefit is unmeasured. Two caveats apply and must not be overclaimed:
+
+- **Parallel-spawn cache-write race:** all N sub-agents are dispatched together in the same wave. The first spawn to complete its prefix is what populates the provider-side cache; sibling spawns issued before that write lands see no hit even though their prefix is byte-identical. A cache benefit, when it occurs, is more likely on subsequent `/aimi:plan` runs or re-spawn/retry passes within the same run than on the very first parallel dispatch.
+- **OpenCode provider variance:** prompt-prefix caching support and pricing are provider-dependent. This ordering costs nothing when caching is unsupported (the prompt is functionally identical either way), but it should not be presented to users as a guaranteed savings under every OpenCode-configured provider.
 
 ### Schema Validation and Retry
 
