@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **`/aimi:open-pr` now derives a feature-level PR title.** The title previously came from the first commit subject verbatim, which — under the phase/story execute flow — carries an internal `US-NNN` story tag and describes only the first story's slice rather than the whole change. Title derivation now prefers the tasks file's `metadata.title` (the human-authored feature title), falling back to the first commit subject with any trailing/leading `US-NNN` (or `Story US-NNN`) tag stripped, then to the branch name. The PR body is unchanged (still git-derived).
+- **`/aimi:open-pr` no longer leaks internal `US-NNN` story tags into the PR title or body.** Under the phase/story execute flow each story is its own commit whose subject carries a `US-NNN` tag, and the title also described only the first story's slice. Title derivation now prefers the tasks file's `metadata.title` (the human-authored feature title), falling back to the first commit subject with any trailing/leading `US-NNN` (or `Story US-NNN`) tag stripped, then to the branch name. The body's **Changes** bullets and the **Summary** subject-fallback now apply the same story-tag strip to every commit subject they render; commit bodies (the Summary's primary source) are still used verbatim, and the diff/Files-Changed section is unchanged.
 
 ## [1.109.0] - 2026-07-23
 
