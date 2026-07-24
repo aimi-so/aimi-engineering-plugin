@@ -890,9 +890,10 @@ Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
            [SELECTED_PHASE_ID] ([PHASE_NAME]): goal: [PHASE_GOAL].
            Look for: gotchas, patterns, past solutions, lessons learned.
            outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-learnings.md
-           [If prototypeBlocks is non-empty]:
-           Prototype designs chosen for this feature (use as implementation reference):
-           [prototypeBlocks]"
+           [If resolvedPrototypePaths is non-empty]:
+           Prototype paths for this feature: [resolvedPrototypePaths]. Read these
+           files yourself, on demand, ONLY if a .aimi/solutions/ match you find is
+           prototype-relevant."
 ```
 
 **If `reusedResearch.learnings` is set**: skip the learnings researcher Task entirely. The existing file at `reusedResearch.learnings` will be read directly in Phase 1.6.
