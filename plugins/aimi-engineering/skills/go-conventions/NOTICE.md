@@ -42,9 +42,8 @@ and reorganized for this plugin's skill-file format — this constitutes the
 modification CC-BY 4.0 requires be indicated.
 
 **Correction to source research**: the internal research note that seeded
-this skill (`.aimi/research/2026-07-24-stack-conventions-skills-112211-best-practices.md`)
-characterized go.dev's content license as CC-BY **3.0**, based on older,
-indirect corroboration. A direct fetch of https://go.dev/doc/copyright
+this skill characterized go.dev's content license as CC-BY **3.0**, based on
+older, indirect corroboration. A direct fetch of https://go.dev/doc/copyright
 performed while authoring this skill confirms the site's current, live
 copyright statement reads: *"Except as noted, the contents of this site are
 licensed under the Creative Commons Attribution 4.0 License, and code is
@@ -116,7 +115,6 @@ skill.
 | 2 | Uber Go Style Guide | Uber Technologies, Inc. | Apache-2.0 | Comma-ok type assertions, succinct error wrapping |
 | 3 | Google Go Style Guide | Google Inc. | CC-BY 3.0 | Consumer-defined interfaces framing |
 
-All three sources permit adaptation with attribution. This NOTICE is
-intentionally defensive: where this skill's authoring process found a
-conflict between prior research and a source's current, directly-fetched
-license statement, the current statement is what is recorded here.
+All three sources permit adaptation with attribution. Where prior research
+conflicted with a source's current, directly-fetched license statement, the
+current statement is what is recorded here.

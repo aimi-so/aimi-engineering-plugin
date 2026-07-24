@@ -30,8 +30,7 @@ make a Rust convention decision without reading further.
 > [Clippy](https://github.com/rust-lang/rust-clippy)'s own documentation —
 > all three dual-licensed MIT OR Apache-2.0. Every claim in this file was
 > cross-checked against those sources' current documentation via the
-> Context7 MCP before being finalized; see `references/context7-verification.md`
-> for what was confirmed and what was refined. See `NOTICE.md` for full
+> Context7 MCP before being finalized. See `NOTICE.md` for full
 > attribution and license text.
 
 ## When to Use
@@ -215,5 +214,3 @@ on demand (not auto-loaded):
 - `references/clippy-ci.md` — CI snippets (GitHub Actions, GitLab CI,
   Travis), clippy lint groups (`pedantic`, `restriction`, `nursery`) and
   configuration.
-- `references/context7-verification.md` — what the Context7 cross-check
-  against current Rust docs confirmed or refined from the initial research.

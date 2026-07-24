@@ -28,8 +28,8 @@ review TypeScript/Node/Bun code without reading further.
 > prose) and the official Node.js documentation (nodejs/nodejs.org, MIT).
 > Nothing here is reproduced verbatim — conventions are restated in original
 > wording as agent-facing rules. Cross-checked against current TypeScript and
-> Node.js documentation via Context7 (see "Context7 Verification Notes"
-> below). See `NOTICE.md` for full attribution and license text.
+> Node.js documentation via Context7. See `NOTICE.md` for full attribution
+> and license text.
 
 ## When to Use
 
@@ -209,30 +209,6 @@ Before accepting TypeScript/Node/Bun code as convention-compliant, confirm:
   `package.json`, not implied by file layout.
 - Runtime-specific Bun/Node APIs are isolated behind a named adapter module,
   not scattered through business logic.
-
-## Context7 Verification Notes
-
-Every convention above was cross-checked against current TypeScript
-(`/microsoft/typescript-website`) and Node.js (`/nodejs/nodejs.org`)
-documentation via Context7 before finalizing:
-
-- **Confirmed**: `strict: true` as the `tsc --init` default since TS 2.3;
-  `unknown` as the type-safe top type for narrowing since TS 3.0; catch
-  variables defaulting to `unknown` under `strict` since TS 4.4;
-  `verbatimModuleSyntax` paired with `"module": "nodenext"` for Node targets
-  per the official "Choosing Compiler Options" guide.
-- **Corrected/extended beyond the original research snapshot**: TypeScript
-  5.9's `tsc --init` now layers `noUncheckedIndexedAccess` and
-  `exactOptionalPropertyTypes` on top of `strict` as its current recommended
-  starting point (noted above as "the rule that matters most," rather than
-  presenting `strict: true` alone as the ceiling); a `"module": "preserve"` +
-  `"moduleResolution": "bundler"` pairing (TS 5.4+) is the current official
-  guidance for bundler/Bun-style resolution, distinct from the
-  `nodenext` pairing recommended for Node/library targets; and Node.js now
-  supports `require()` of synchronous ESM graphs natively (stabilizing
-  across Node 22.12+/23+, with a `"module-sync"` `exports` condition added
-  in Node 22.10) — both added to the ESM/CJS and exports-map sections above
-  as current-state nuances the original research file did not capture.
 
 ## Deep Reference
 

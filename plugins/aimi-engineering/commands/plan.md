@@ -1870,9 +1870,10 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
     receives BOTH skills — generic hygiene (typescript-node-conventions) and
     framework structure (nestjs-conventions) are complementary, not
     deduplicated. The 10-entry cap above still governs the final list. The
-    five stack-mapping lines above are appended last deliberately: under the
-    100KB get-story-context payload cap, which evicts last-inserted skills
-    first, the generic skills evict before the more-specific framework ones.
+    emitted skills[] order is not pinned, so under the 100KB
+    get-story-context payload cap the eviction order is not guaranteed to
+    favor any particular skill — keep each SKILL.md well under budget so the
+    cap does not fire in practice.
   - Plugin-self-build default: when current repo is aimi-engineering-plugin
     (top-level CLAUDE.md contains 'This repo builds the aimi-engineering plugin'),
     override inference for stories touching plugins/aimi-engineering/skills/ or

@@ -101,9 +101,14 @@ app/javascript/**, *.tsx (non-test), *.jsx → react-best-practices
 *tailwind*, *.css, *design-token*          → frontend-design
 *.rake, db/migrate/**                      → dhh-rails-style
 .aimi/solutions/*.md                       → every-style-editor
+*.ts (non-test, non-.tsx), bunfig.toml, bun.lock, bun.lockb → typescript-node-conventions
+*.module.ts, *.controller.ts, *.service.ts, nest-cli.json → nestjs-conventions
+app/**/*.tsx, app/**/*.ts (non-test), next.config.*, *tanstack* → nextjs-tanstack-conventions
+*.go, go.mod → go-conventions
+*.rs, Cargo.toml → rust-conventions
 ```
 
-Names must satisfy `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`. Omit `skills` entirely when no patterns match (do NOT emit `"skills": []`).
+Names must satisfy `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`. Omit `skills` entirely when no patterns match (do NOT emit `"skills": []`). Cross-skill stacking is intentional — a file matching both a generic pattern (e.g. `*.ts`) and a framework-specific pattern (e.g. `*.service.ts`) receives BOTH skills; the 10-entry cap still governs the final list.
 
 **Plugin-self-build override** — when the current repo is the `aimi-engineering-plugin` itself (detected by top-level `CLAUDE.md` containing `This repo builds the aimi-engineering plugin`), set `skills: ["create-agent-skills"]` for any story whose `implementation.files` touches `plugins/aimi-engineering/skills/` or `plugins/aimi-engineering/commands/` — this override takes precedence over the file-pattern mapping above.
 
