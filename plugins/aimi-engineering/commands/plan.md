@@ -1493,7 +1493,8 @@ Each entry:
   "idx": "01",
   "title": "Story title (≤ 200 chars, imperative)",
   "summary": "One-line description of what this story delivers (≤ 120 chars)",
-  "foundationEntry": false
+  "foundationEntry": false,
+  "foundationMode": "greenfield"
 }
 ```
 
@@ -1504,8 +1505,9 @@ Rules for outline authoring:
 - Do not assign `US-NNN` IDs yet — IDs are assigned by `story-merge` after approval.
 - Target 3–15 entries. Entries beyond 15 are allowed but surface a warning at the outline gate.
 - `foundationEntry` is `false` on every entry except the one designated by the Foundation-first rule below (present only when `foundationAccepted`, Phase 1.9) — it tells Phase 3d's sub-agent which entry is the foundation story itself versus a consumer of the accepted proposal.
+- `foundationMode` is `"greenfield"` (the default) on every entry except the one designated by the Foundation-first rule below, which instead carries whatever value Phase 1.9's gate resolved (`"greenfield"` or `"brownfield"`) — it tells Phase 3d's sub-agent, and in turn `aimi-story-expander`, whether the foundation entry should scaffold a fresh skeleton or document an existing repo in place.
 
-**Foundation-first rule (when `foundationAccepted`, Phase 1.9):** the first outline entry (`idx: "01"`) MUST be the foundation story — this overrides normal outline-authoring order. Set its `foundationEntry` field to `true` (every other entry keeps `false`). Derive its `title` and `summary` from the file at `foundationProposalPath`, using the sections **both** artifact kinds are guaranteed to carry: condense the summary from `## Folder Layout` and `## CLAUDE.md Draft` (a brainstorm-authored artifact — see `commands/brainstorm.md` Phase 3.7 — carries exactly the 4 shared sections and deliberately has no `## Stack`/`## Layering`); when the artifact additionally carries `## Stack` and `## Layering` (architect-authored, 9-section contract), prefer those two for a richer title/summary (e.g. "Establish <stack> architecture foundation"). Every other entry is numbered starting at `"02"`. Because entry `01` has nothing preceding it in the outline, normal dependency reasoning already yields `dependsOn: []` for it when Phase 3d expands it — no extra instruction is needed there. **If `foundationProposalPath` is unreadable at this point:** treat `foundationAccepted` as `false` for the rest of this run, emit one warning line, and generate the outline unmodified — exactly as if the gate had never fired (see Error Handling).
+**Foundation-first rule (when `foundationAccepted`, Phase 1.9):** the first outline entry (`idx: "01"`) MUST be the foundation story — this overrides normal outline-authoring order. Set its `foundationEntry` field to `true` (every other entry keeps `false`) and its `foundationMode` field to the same `foundationMode` value Phase 1.9's gate resolution set in working memory (`"greenfield"` or `"brownfield"`; every other entry keeps the `"greenfield"` default). Derive its `title` and `summary` from the file at `foundationProposalPath`, using the sections **both** artifact kinds are guaranteed to carry: condense the summary from `## Folder Layout` and `## CLAUDE.md Draft` (a brainstorm-authored artifact — see `commands/brainstorm.md` Phase 3.7 — carries exactly the 4 shared sections and deliberately has no `## Stack`/`## Layering`); when the artifact additionally carries `## Stack` and `## Layering` (architect-authored, 9-section contract), prefer those two for a richer title/summary (e.g. "Establish <stack> architecture foundation"). Every other entry is numbered starting at `"02"`. Because entry `01` has nothing preceding it in the outline, normal dependency reasoning already yields `dependsOn: []` for it when Phase 3d expands it — no extra instruction is needed there. **If `foundationProposalPath` is unreadable at this point:** treat `foundationAccepted` as `false` for the rest of this run, emit one warning line, and generate the outline unmodified — exactly as if the gate had never fired (see Error Handling).
 
 Persist the outline immediately after generation:
 
@@ -1749,6 +1751,7 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
     title: <title>
     summary: <summary>
     [If foundationAccepted (Phase 1.9)]: foundationEntry: <true when this is outline entry 01, false otherwise>
+    [If foundationAccepted (Phase 1.9)]: foundationMode: <the outline entry's foundationMode field — 'greenfield' or 'brownfield'>
 
   Full outline context (for dependsOn reasoning):
   <full outline.json array rendered as numbered list: idx. title — summary>
@@ -1859,6 +1862,13 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
     (top-level CLAUDE.md contains 'This repo builds the aimi-engineering plugin'),
     override inference for stories touching plugins/aimi-engineering/skills/ or
     plugins/aimi-engineering/commands/ — set skills: ['create-agent-skills'].
+  - Foundation-entry skill attach: when foundationAccepted (Phase 1.9) AND this
+    outline entry is the foundation entry (idx '01', foundationEntry: true) —
+    and ONLY that entry, never any other outline entry — include
+    'architecture-foundation' in skills[] in addition to (not instead of)
+    whatever the file-pattern mapping and the Plugin-self-build default above
+    already produced (e.g. skills: ['create-agent-skills', 'architecture-foundation']
+    when both rules apply on this repo).
   - tasks[] (3-15 entries): creation/scaffolding first, integration wiring
     second, local verification last. Integration steps are mandatory when
     implementation.files lists a path shared with another story.

@@ -10,7 +10,7 @@ You are a precise story-decomposition author. Your sole job is to expand **one**
 
 Every invocation includes:
 
-1. The outline entry you must expand: `{ idx, title, summary, foundationEntry (optional bool) }`. The `idx` is a zero-padded numeric string from outline order (`01`, `02`, ...). When `foundationEntry` is `true`, this entry is the Phase 1.9 Greenfield Foundation Gate's own story — see "Foundation proposal handling" below for its distinct rules.
+1. The outline entry you must expand: `{ idx, title, summary, foundationEntry (optional bool), foundationMode (optional string: 'greenfield'|'brownfield') }`. The `idx` is a zero-padded numeric string from outline order (`01`, `02`, ...). When `foundationEntry` is `true`, this entry is the Phase 1.9 Greenfield Foundation Gate's own story — see "Foundation proposal handling" below for its distinct rules. `foundationMode` accompanies `foundationEntry: true` and selects which of that section's two branches applies; when absent, treat it as `'greenfield'`.
 2. The full outline rendered as a numbered list (titles + summaries). Use it to reason about which other outline entries this story depends on — but reference them only by `outline:NN` tokens, never by titles or invented IDs.
 3. The consolidated research summary from Phase 1.6 of the plan command.
 4. (Optional) Full research file contents wrapped as `<research_file>` blocks.
@@ -142,12 +142,19 @@ When a `<foundation_proposal>` block is present (Phase 1.9's Greenfield Foundati
 
 - **Layout-alignment rule**: every path in `implementation.files` must fit under one of the proposal's `## Folder Layout` roots (e.g. `src/app`, `src/lib`) — read the proposed tree before authoring paths, do not invent a parallel structure. When a path cannot reasonably be made to fit, keep it but append a one-line justification to `notes` explaining the deviation.
 - Cite the proposal's section by name in `implementation.approach` (e.g. "per Layering") instead of re-deriving the structure yourself.
-- **`foundationEntry: true` special case**: when the outline entry you are expanding (input 1) carries `foundationEntry: true`, this story IS the foundation itself, not a consumer of it. Derive `implementation.files` exclusively from the proposal's own sections:
-  - `CLAUDE.md` and `AGENTS.md` (from `## CLAUDE.md Draft` / `## AGENTS.md Draft`)
-  - One folder-skeleton `.gitkeep` per leaf directory in `## Folder Layout`
-  - The lint/format config file(s) named in `## Lint and Format Config`
-- Foundation-entry acceptance criteria must be mechanically verifiable, not aspirational: each listed file exists on disk, the lint command runs successfully (exit 0), the on-disk folder tree matches `## Folder Layout`, and `CLAUDE.md` covers the convention sections the proposal names.
-- A foundation entry always emits `dependsOn: []`, `verification.strategy: "test"`, and `implementation.verify` set to one executable command (typically the lint command itself).
+- **`foundationEntry: true` special case**: when the outline entry you are expanding (input 1) carries `foundationEntry: true`, this story IS the foundation itself, not a consumer of it. Its `foundationMode` (default `'greenfield'` when absent) selects one of the two branches below — never both.
+
+  - **`foundationMode: 'greenfield'` (default, unchanged from before this branch existed)**: derive `implementation.files` exclusively from the proposal's own sections:
+    - `CLAUDE.md` and `AGENTS.md` (from `## CLAUDE.md Draft` / `## AGENTS.md Draft`)
+    - One folder-skeleton `.gitkeep` per leaf directory in `## Folder Layout`
+    - The lint/format config file(s) named in `## Lint and Format Config`
+
+    Foundation-entry acceptance criteria must be mechanically verifiable, not aspirational: each listed file exists on disk, the lint command runs successfully (exit 0), the on-disk folder tree matches `## Folder Layout`, and `CLAUDE.md` covers the convention sections the proposal names. This story always emits `dependsOn: []`, `verification.strategy: "test"`, and `implementation.verify` set to one executable command (typically the lint command itself).
+
+  - **`foundationMode: 'brownfield'` — DOCUMENT-IN-PLACE**: this is an already-populated repository being documented, not scaffolded. Derive `implementation.files` **exclusively** from `## CLAUDE.md Draft` and `## AGENTS.md Draft` — i.e. `implementation.files` MUST contain only `CLAUDE.md` and `AGENTS.md` (create-or-update as needed; do not assume either is new). You MUST NOT emit the `.gitkeep`-per-leaf-directory step: the folders in `## Folder Layout` already exist and are already populated with real files, so a `.gitkeep` skeleton would be both unnecessary and misleading. You MUST NOT emit the `## Lint and Format Config` file as an `implementation.files` entry, and you MUST NOT instruct that config file be created or overwritten — it already exists and already governs CI; overwriting it would clobber a pre-existing, working configuration.
+
+    Foundation-entry acceptance criteria in brownfield mode: `CLAUDE.md` and `AGENTS.md` exist and cover the convention sections the proposal names, AND a mechanically verifiable AC asserts the pre-existing lint/format config file's content is unchanged — e.g. "Diff (or checksum-compare) `<lint/format config path named in the proposal's '## Lint and Format Config' section>` against its pre-change on-disk content and confirm zero difference; the foundation story must never overwrite it." This story always emits `dependsOn: []` and `verification.strategy: "test"`; set `implementation.verify` to the diff/checksum command above (not a lint-run command — the lint config's *content* is what is being asserted unchanged here, not that lint passes).
+
 - **Not your job**: injecting the foundation's assigned `US-NNN` into every *other* story's `dependsOn` is `story-merge --foundation`'s post-merge sweep responsibility, not yours. You may still emit the ordinary `outline:NN` token for the foundation entry when your own dependency reasoning points to it (e.g. a later story building on it) — `story-merge` dedups it against its own injected edge.
 
 ## Prototype citations (when prototypePaths non-empty and verification.strategy == "visual")
