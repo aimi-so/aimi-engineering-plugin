@@ -4295,8 +4295,9 @@ cmd_research_lookup() {
 # Usage: research-gc
 # Garbage-collect orphaned research files from .aimi/research/*.md.
 # A file is deleted only when BOTH conditions are true:
-#   1. It is NOT referenced by any active .aimi/tasks/*.json metadata.researchPaths
-#      AND is NOT referenced by any .aimi/brainstorms/*.md frontmatter researchPaths.
+#   1. It is NOT referenced by any active .aimi/tasks/*.json metadata.researchPaths,
+#      AND is NOT referenced by any .aimi/brainstorms/*.md frontmatter researchPaths,
+#      AND is NOT referenced by any .aimi/brainstorms/*.md frontmatter foundationProposalPath.
 #   2. Its mtime is older than 30 days.
 # .aimi/archive is ignored entirely.
 # Prints "Cleaned <N> orphaned research files (>30 days)" when N>0; silent when N=0.
@@ -4330,12 +4331,14 @@ $rpath"
   fi
 
   # --- Source 2: .aimi/brainstorms/*.md frontmatter researchPaths ---
+  # --- Source 3: .aimi/brainstorms/*.md frontmatter foundationProposalPath (scalar) ---
   local brainstorms_dir="$AIMI_DIR/brainstorms"
   if [ -d "$brainstorms_dir" ]; then
     for bfile in "$brainstorms_dir"/*.md; do
       [ -f "$bfile" ] || continue
       # Extract YAML frontmatter (lines between opening and closing ---)
       # Parse researchPaths: list entries (lines starting with - under that key)
+      # and foundationProposalPath: as a single scalar value, independent of order.
       local in_front=0 past_open=0 in_rp=0
       while IFS= read -r line; do
         if [ "$past_open" -eq 0 ] && [ "$line" = "---" ]; then
@@ -4353,6 +4356,28 @@ $rpath"
         # Inside frontmatter
         if printf '%s\n' "$line" | grep -qE '^researchPaths\s*:'; then
           in_rp=1
+          continue
+        fi
+        if printf '%s\n' "$line" | grep -qE '^foundationProposalPath[[:space:]]*:'; then
+          # New top-level key: exit any in-progress researchPaths list scan first,
+          # regardless of whether foundationProposalPath appears before or after it.
+          in_rp=0
+          local fp_entry
+          # POSIX [[:space:]] (not \s — GNU-only in sed); then normalize the
+          # extracted scalar so a YAML-quoted value or a trailing comment cannot
+          # defeat the referenced-set match (which would delete a live artifact):
+          #   1. strip a trailing " #comment" (space-hash onward)
+          #   2. strip one pair of surrounding double or single quotes
+          #   3. strip a leading ./
+          fp_entry=$(printf '%s\n' "$line" | sed 's/^foundationProposalPath[[:space:]]*:[[:space:]]*//')
+          fp_entry=$(printf '%s\n' "$fp_entry" | sed 's/[[:space:]]#.*$//; s/[[:space:]]*$//')
+          case "$fp_entry" in
+            \"*\") fp_entry="${fp_entry#\"}"; fp_entry="${fp_entry%\"}" ;;
+            \'*\') fp_entry="${fp_entry#\'}"; fp_entry="${fp_entry%\'}" ;;
+          esac
+          fp_entry="${fp_entry#./}"
+          referenced_set="$referenced_set
+$fp_entry"
           continue
         fi
         if [ "$in_rp" -eq 1 ]; then

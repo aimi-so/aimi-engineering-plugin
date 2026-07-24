@@ -2190,10 +2190,35 @@ test_init_session_writes_global_cache() {
   "$CLI" clear-state > /dev/null 2>&1 || true
   "$CLI" init-session > /dev/null
 
-  # The global cache file should now exist
   local cache_file
   cache_file=$(_global_cache_path)
 
+  # write_global_cli_cache deliberately no-ops for any CLI path under
+  # */.worktrees/* (it refuses to cache a worktree-local copy globally —
+  # see the case guard at the top of that function). So the correct
+  # expectation depends on where THIS suite's CLI resides: a worktree-resident
+  # CLI must NOT produce a global cache file (the guard's contract), while a
+  # normal checkout must (the original contract). Assert whichever applies —
+  # this is an environment-aware assertion, not a skip.
+  local resolved_cli
+  resolved_cli=$(realpath "$CLI" 2>/dev/null || printf '%s' "$CLI")
+
+  case "$resolved_cli" in
+    */.worktrees/*)
+      if [ ! -f "$cache_file" ]; then
+        echo -e "${GREEN}✓${NC} init-session: global cache write skipped for worktree-resident CLI (guard behavior)"
+        ((TESTS_PASSED++))
+      else
+        echo -e "${RED}✗${NC} init-session: global cache write skipped for worktree-resident CLI (guard behavior)"
+        echo "  Guard should have refused to cache worktree path, but file exists at: $cache_file"
+        ((TESTS_FAILED++))
+      fi
+      teardown_global_cache_env
+      return
+      ;;
+  esac
+
+  # Non-worktree CLI: the global cache file should now exist
   if [ -f "$cache_file" ]; then
     echo -e "${GREEN}✓${NC} init-session: global CLI cache file created"
     ((TESTS_PASSED++))
@@ -6521,15 +6546,29 @@ test_research_gc() {
   local ref_by_task="$gc_dir/.aimi/research/ref-by-task.md"
   local ref_by_brainstorm="$gc_dir/.aimi/research/ref-by-brainstorm.md"
   local ref_by_archive="$gc_dir/.aimi/research/ref-by-archive.md"
+  local ref_by_foundation_path="$gc_dir/.aimi/research/ref-by-foundation-path-foundation.md"
+  local orphan_foundation_named="$gc_dir/.aimi/research/unreferenced-foundation.md"
+  local ref_by_quoted="$gc_dir/.aimi/research/ref-by-quoted-foundation.md"
+  local ref_by_comment="$gc_dir/.aimi/research/ref-by-comment-foundation.md"
+  local ref_by_prekey="$gc_dir/.aimi/research/ref-by-prekey-foundation.md"
+  local ref_by_postlist="$gc_dir/.aimi/research/ref-by-postlist.md"
 
   printf '# Orphan old\n' > "$orphan_old"
   printf '# Orphan recent\n' > "$orphan_recent"
   printf '# Referenced by task\n' > "$ref_by_task"
   printf '# Referenced by brainstorm\n' > "$ref_by_brainstorm"
   printf '# Referenced by archive (ignored)\n' > "$ref_by_archive"
+  printf '# Referenced only via foundationProposalPath\n' > "$ref_by_foundation_path"
+  printf '# Unreferenced but foundation-named\n' > "$orphan_foundation_named"
+  printf '# Referenced via double-quoted foundationProposalPath\n' > "$ref_by_quoted"
+  printf '# Referenced via single-quoted foundationProposalPath with trailing comment\n' > "$ref_by_comment"
+  printf '# Referenced via foundationProposalPath placed BEFORE researchPaths\n' > "$ref_by_prekey"
+  printf '# Referenced via researchPaths list that FOLLOWS the scalar key\n' > "$ref_by_postlist"
 
   # Set mtimes: all old except orphan_recent
-  touch -t "$old_time" "$orphan_old" "$ref_by_task" "$ref_by_brainstorm" "$ref_by_archive"
+  touch -t "$old_time" "$orphan_old" "$ref_by_task" "$ref_by_brainstorm" "$ref_by_archive" \
+    "$ref_by_foundation_path" "$orphan_foundation_named" \
+    "$ref_by_quoted" "$ref_by_comment" "$ref_by_prekey" "$ref_by_postlist"
   touch -t "$recent_time" "$orphan_recent"
 
   # Active task file referencing ref_by_task
@@ -6553,15 +6592,57 @@ test_research_gc() {
 }
 TASKEOF
 
-  # Brainstorm file with frontmatter referencing ref_by_brainstorm
+  # Brainstorm file with frontmatter referencing ref_by_brainstorm via researchPaths:
+  # (a list) and ref_by_foundation_path via foundationProposalPath: (a scalar),
+  # with the scalar positioned AFTER the list to exercise the key-ordering
+  # interaction: encountering foundationProposalPath: must exit the in-progress
+  # researchPaths: list scan rather than being misread as a list item.
   local brainstorm_file="$gc_dir/.aimi/brainstorms/2020-01-01-gc-brainstorm.md"
   cat > "$brainstorm_file" << 'BSEOF'
 ---
 researchPaths:
   - .aimi/research/ref-by-brainstorm.md
+foundationProposalPath: .aimi/research/ref-by-foundation-path-foundation.md
 ---
 
 # GC test brainstorm
+BSEOF
+
+  # Second brainstorm: YAML double-quoted scalar value. The quotes must be
+  # stripped during extraction or the referenced-set match fails and the LIVE
+  # artifact gets deleted (the data-loss regression found in review).
+  cat > "$gc_dir/.aimi/brainstorms/2020-01-02-gc-quoted.md" << 'BSEOF'
+---
+topic: gc-quoted
+foundationProposalPath: ".aimi/research/ref-by-quoted-foundation.md"
+---
+
+# GC quoted-value brainstorm
+BSEOF
+
+  # Third brainstorm: single-quoted scalar WITH a trailing comment. Both the
+  # quotes and the " #..." tail must be stripped for the match to hold.
+  cat > "$gc_dir/.aimi/brainstorms/2020-01-03-gc-comment.md" << 'BSEOF'
+---
+topic: gc-comment
+foundationProposalPath: '.aimi/research/ref-by-comment-foundation.md' # authored by Phase 3.7
+---
+
+# GC comment-value brainstorm
+BSEOF
+
+  # Fourth brainstorm: foundationProposalPath BEFORE researchPaths — the
+  # opposite ordering from the first brainstorm above. Both keys must still be
+  # extracted (the scalar must not swallow the list that follows it).
+  cat > "$gc_dir/.aimi/brainstorms/2020-01-04-gc-prekey.md" << 'BSEOF'
+---
+topic: gc-prekey
+foundationProposalPath: .aimi/research/ref-by-prekey-foundation.md
+researchPaths:
+  - .aimi/research/ref-by-postlist.md
+---
+
+# GC prekey-ordering brainstorm
 BSEOF
 
   # Archive task referencing ref_by_archive (should be IGNORED)
@@ -6620,10 +6701,44 @@ ARCHEOF
   [ -e "$ref_by_archive" ] || ref_archive_exists="no"
   assert_eq "no" "$ref_archive_exists" "research-gc: archive-referenced (but not active) file deleted"
 
-  # --- Case 6: stdout contains cleaned count (1 old orphan + 1 archive-ref = 2) ---
-  assert_contains "Cleaned 2 orphaned research files (>30 days)" "$stdout" "research-gc: prints cleaned count"
+  # --- Case 6: referenced ONLY via brainstorm foundationProposalPath: scalar should be
+  #     preserved (even though old) -- this is the regression this story fixes ---
+  local ref_foundation_path_exists="no"
+  [ -e "$ref_by_foundation_path" ] && ref_foundation_path_exists="yes"
+  assert_eq "yes" "$ref_foundation_path_exists" "research-gc: referenced-by-foundationProposalPath preserved"
 
-  # --- Case 7: running again on empty dir is silent (N=0) ---
+  # --- Case 7: unreferenced file whose name merely CONTAINS "foundation" (old, no
+  #     referencing key of any kind) must still be deleted -- proves the new source
+  #     is a real reference check, not a filename heuristic ---
+  local orphan_foundation_named_exists="yes"
+  [ -e "$orphan_foundation_named" ] || orphan_foundation_named_exists="no"
+  assert_eq "no" "$orphan_foundation_named_exists" "research-gc: unreferenced foundation-named file deleted"
+
+  # --- Case 7b: double-quoted scalar value -- quotes stripped, file preserved ---
+  local ref_quoted_exists="no"
+  [ -e "$ref_by_quoted" ] && ref_quoted_exists="yes"
+  assert_eq "yes" "$ref_quoted_exists" "research-gc: double-quoted foundationProposalPath value preserved"
+
+  # --- Case 7c: single-quoted scalar with trailing comment -- both stripped, preserved ---
+  local ref_comment_exists="no"
+  [ -e "$ref_by_comment" ] && ref_comment_exists="yes"
+  assert_eq "yes" "$ref_comment_exists" "research-gc: quoted+commented foundationProposalPath value preserved"
+
+  # --- Case 7d: foundationProposalPath BEFORE researchPaths -- scalar extracted ---
+  local ref_prekey_exists="no"
+  [ -e "$ref_by_prekey" ] && ref_prekey_exists="yes"
+  assert_eq "yes" "$ref_prekey_exists" "research-gc: foundationProposalPath-before-researchPaths scalar preserved"
+
+  # --- Case 7e: the researchPaths list FOLLOWING the scalar key still parses ---
+  local ref_postlist_exists="no"
+  [ -e "$ref_by_postlist" ] && ref_postlist_exists="yes"
+  assert_eq "yes" "$ref_postlist_exists" "research-gc: researchPaths list after scalar key still parsed"
+
+  # --- Case 8: stdout contains cleaned count
+  #     (1 old orphan + 1 archive-ref + 1 unreferenced foundation-named = 3) ---
+  assert_contains "Cleaned 3 orphaned research files (>30 days)" "$stdout" "research-gc: prints cleaned count"
+
+  # --- Case 9: running again on empty dir is silent (N=0) ---
   pushd "$gc_dir" >/dev/null
   stdout=$("$CLI" research-gc 2>/dev/null) && exit_code=0 || exit_code=$?
   popd >/dev/null
