@@ -191,6 +191,16 @@ Source: README.md:N (no code definition found)
 
 Never invent or infer contract shapes. If the shape cannot be confirmed from on-disk sources, state it is unresolved.
 
+## Structured Findings Format
+
+Generalize the verbatim-quote rule above from contracts to every factual claim in the findings body (not the pointer-block return in step 5 above, which stays exactly 3 summary bullets + `sections`). Every claim resolves to one of exactly two forms — no bare assertions:
+
+1. **Cited claim** — state the claim, then attach a short verbatim quote (the exact cited text, kept brief) plus a locatable citation:
+   > "<verbatim quoted text>" — `file:line` (or `path:Lstart-Lend` for a multi-line span)
+2. **Inferred claim** — when no on-disk source exists (a synthesis, pattern observation, or educated guess), tag it inline with `[INFERRED]` immediately after the claim.
+
+This composes with issue #64's `verify-citations` CLI pass and its cite-or-mark discipline: a mechanical pass over this file can confirm every claim resolves to a real quoted `file:line`/`path:Lstart-Lend` citation or an explicit `[INFERRED]` tag, with no third case.
+
 **Quality Assurance:**
 
 - Verify findings by checking multiple sources

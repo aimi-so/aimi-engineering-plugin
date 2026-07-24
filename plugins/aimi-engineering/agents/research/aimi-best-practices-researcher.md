@@ -191,4 +191,14 @@ Always cite your sources and indicate the authority level:
 
 If you encounter conflicting advice, present the different viewpoints and explain the trade-offs.
 
+## Structured Findings Format
+
+Generalize the Source Attribution rule above from "cite an authority level" to a machine-parseable claim structure in the findings body (not the pointer-block return in the Output Contract above, which stays exactly 3 summary bullets + `sections`). Every claim resolves to one of exactly two forms — no bare assertions:
+
+1. **Cited claim** — state the claim, then attach a short verbatim quote (the exact cited text, kept brief) plus a locatable citation: the skill file path (`file:line`), a doc/section URL, or the most specific locatable pointer the source offers:
+   > "<verbatim quoted text>" — `<file:line, doc URL, or skill path>`
+2. **Inferred claim** — when the claim is your own synthesis across sources rather than something a single source states, tag it inline with `[INFERRED]` immediately after the claim.
+
+This composes with issue #64's `verify-citations` CLI pass and its cite-or-mark discipline: a mechanical pass over this file can confirm every claim resolves to a real quoted citation or an explicit `[INFERRED]` tag, with no third case.
+
 Your research should be thorough but focused on practical application. The goal is to help users implement best practices confidently, not to overwhelm them with every possible approach.
