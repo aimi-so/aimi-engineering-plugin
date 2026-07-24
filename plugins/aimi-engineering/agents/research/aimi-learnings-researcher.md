@@ -282,6 +282,16 @@ Structure your findings as:
 [If no relevant learnings found, explicitly state this]
 ```
 
+## Structured Findings Format
+
+Generalize the `**File**:` citation already present in the Relevant Learnings format above into a machine-parseable claim structure for every factual claim in the findings body (not the pointer-block return in the Output Contract above, which stays exactly 3 summary bullets + `sections`). Every claim — Key Insight, Relevance, Recommendation, or Critical Pattern — resolves to one of exactly two forms; no bare assertions:
+
+1. **Cited claim** — state the claim, then attach a short verbatim quote (the exact cited text from the solution file, kept brief) plus a locatable citation:
+   > "<verbatim quoted text>" — `file:line` (e.g. `.aimi/solutions/performance-issues/n-plus-one-fix.md:42`)
+2. **Inferred claim** — when the insight is your own generalization across multiple solution files rather than something one file states, tag it inline with `[INFERRED]` immediately after the claim.
+
+This composes with issue #64's `verify-citations` CLI pass and its cite-or-mark discipline: a mechanical pass over this file can confirm every claim resolves to a real quoted `file:line` citation or an explicit `[INFERRED]` tag, with no third case.
+
 ## Efficiency Guidelines
 
 **DO:**

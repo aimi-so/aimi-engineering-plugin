@@ -75,6 +75,16 @@ Every spec-sourced section must record where the content was drawn from, using t
 
 Include provenance on the first line of each section (or inline with each rule/item when a section mixes sources).
 
+## Structured Findings Format
+
+Generalize the Provenance Notation above from a section-level citation into a per-claim claim structure for every factual claim in the findings body (not the pointer-block return in the Output Contract below, which stays exactly 3 summary bullets + `sections`). Every claim resolves to one of exactly two forms — no bare assertions:
+
+1. **Cited claim** — state the claim, then attach a short verbatim quote (the exact cited text, kept brief) plus its provenance citation:
+   > "<verbatim quoted text>" — `BusinessSpec § 4.1 L152-174` (or `DesignSpec § 1 L3-40`, a chat transcript path:line, or a prototype `file:line`)
+2. **Inferred claim** — when no bundle artifact states it (e.g. a design-token default read from prototype CSS per the Read Order fallback, or a gap noted under Spec-Prototype Coverage Gaps), tag it inline with `[INFERRED]` immediately after the claim. This is distinct from, and composes with, the existing chat-fallback annotation `(source: chats — spec absent)` — a chat-sourced claim still needs a verbatim quote + citation; `[INFERRED]` is reserved for claims with no bundle source at all.
+
+This composes with issue #64's `verify-citations` CLI pass and its cite-or-mark discipline: a mechanical pass over this file can confirm every claim resolves to a real quoted citation or an explicit `[INFERRED]` tag, with no third case.
+
 ## Output Contract
 
 1. **Caller-specified path takes precedence:** If the caller's prompt includes an explicit `outputPath`, write to that exact path and skip slug/timestamp derivation.
