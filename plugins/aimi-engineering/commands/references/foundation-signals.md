@@ -5,11 +5,10 @@ near-empty project with no established stack, structure, or conventions yet.
 Apply the rules in this file wherever the caller says "scan for foundation
 signals" or "check whether this repo is greenfield."
 
-**Consumed by:** plan.md's Phase 1.9 (Greenfield Foundation Gate) and
-brainstorm.md's Phase 1.8 (Greenfield Foundation Detection — Structural
-Signals only) are the active consumers. The brownfield-sem-convencoes
-second-degree consumer described below is not wired to this file yet — it
-arrives in a later roadmap phase.
+**Consumed by:** plan.md's Phase 1.9 (Greenfield Foundation Gate) consumes
+both the greenfield (degree 1) and brownfield-sem-convencoes (degree 2)
+classifications below. brainstorm.md's Phase 1.8 (Greenfield Foundation
+Detection — Structural Signals only) remains a degree-1-only consumer.
 
 ## Keyword Signals
 
@@ -65,18 +64,26 @@ Both use the same fewer-than-5 threshold.
 `AIMI_ROOT`.
 
 **Ancestor-manifest lookup (monorepo false-positive suppression):** before
-accepting a greenfield classification, walk parent directories starting at
-`AIMI_ROOT` up to the git toplevel (`git rev-parse --show-toplevel`) or 5
-levels, whichever comes first. If any ancestor directory contains one of the
-nine manifests above, or a `CLAUDE.md`, the classification is disqualified —
-the repo is a package inside an established monorepo, not a greenfield root.
+accepting either a greenfield (degree 1) or a brownfield-sem-convencoes
+(degree 2) classification, walk parent directories starting at `AIMI_ROOT`
+up to the git toplevel (`git rev-parse --show-toplevel`) or 5 levels,
+whichever comes first. If any ancestor directory contains one of the nine
+manifests above, or a `CLAUDE.md`, the classification is disqualified — the
+repo is a package inside an established monorepo, not a greenfield root. For
+degree 2 specifically, this suppresses the monorepo-package false positive
+where the root already carries a `CLAUDE.md` but a subfolder has 5+ tracked
+source files and no local `CLAUDE.md`/`AGENTS.md` of its own — that subfolder
+inherits the root's conventions and must not be misclassified as
+brownfield-sem-convencoes.
 
 **Second degree — brownfield-sem-convencoes:** a repo with 5 or more tracked
 source files (or find-fallback matches) AND no `CLAUDE.md`/`AGENTS.md` at
 `AIMI_ROOT` classifies as brownfield-sem-convencoes rather than greenfield —
-established code with no captured conventions. This degree is defined here
-for vocabulary consistency but has no consumer until a later roadmap phase;
-do not wire it into plan.md yet.
+established code with no captured conventions. plan.md's Phase 1.9 condition
+(a) is this degree's consumer: it fires on this classification exactly as it
+does on greenfield, filtered through the same (now dual-scoped)
+ancestor-manifest lookup above, and sets working-memory `foundationMode` to
+`brownfield` when this degree — rather than greenfield — is what held.
 
 ## How to Combine
 
