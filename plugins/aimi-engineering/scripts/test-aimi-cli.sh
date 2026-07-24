@@ -6591,6 +6591,131 @@ RESEOF
   rm -rf "$rl_dir"
 }
 
+test_extract_sections() {
+  echo ""
+  echo "=== Testing extract-sections subcommand ==="
+
+  local es_dir
+  es_dir=$(mktemp -d)
+  mkdir -p "$es_dir/.aimi"
+
+  local research_file="$es_dir/.aimi/research.md"
+  cat > "$research_file" << 'RESEOF'
+# My Research
+
+## Repository Research Summary
+Top-level summary text.
+More summary detail.
+
+## File References
+- src/foo.sh
+
+### Nested Detail
+Nested h3 content under File References.
+
+## Open Questions
+- Q1
+- Q2
+RESEOF
+
+  local stdout exit_code
+
+  # --- Test 1: single-anchor match ---
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$research_file" --anchors "Open Questions" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "extract-sections: single anchor exits 0"
+  assert_contains "## Open Questions" "$stdout" "extract-sections: single anchor includes heading"
+  assert_contains "- Q1" "$stdout" "extract-sections: single anchor includes body"
+  local single_bleed="yes"
+  [[ "$stdout" == *"Repository Research Summary"* ]] || single_bleed="no"
+  assert_eq "no" "$single_bleed" "extract-sections: single anchor excludes unrelated sections"
+
+  # --- Test 2: multi-anchor match, concatenated in request order ---
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$research_file" --anchors "Open Questions,Repository Research Summary" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "extract-sections: multi-anchor exits 0"
+  local oq_pos summary_pos
+  oq_pos=$(printf '%s' "$stdout" | grep -n '^## Open Questions' | head -1 | cut -d: -f1)
+  summary_pos=$(printf '%s' "$stdout" | grep -n '^## Repository Research Summary' | head -1 | cut -d: -f1)
+  assert_contains "## Open Questions" "$stdout" "extract-sections: multi-anchor includes first requested section"
+  assert_contains "## Repository Research Summary" "$stdout" "extract-sections: multi-anchor includes second requested section"
+  local order_ok="no"
+  [ -n "$oq_pos" ] && [ -n "$summary_pos" ] && [ "$oq_pos" -lt "$summary_pos" ] && order_ok="yes"
+  assert_eq "yes" "$order_ok" "extract-sections: multi-anchor preserves request order"
+
+  # --- Test 3: anchor not found -> skipped, empty output, exit 0 ---
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$research_file" --anchors "Nonexistent Heading" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "extract-sections: anchor not found exits 0"
+  assert_eq "" "$stdout" "extract-sections: anchor not found produces empty stdout"
+
+  # --- Test 4: missing file -> error on stderr, exit non-zero ---
+  local stderr_out
+  pushd "$es_dir" >/dev/null
+  stderr_out=$("$CLI" extract-sections "$es_dir/.aimi/does-not-exist.md" --anchors "X" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "extract-sections: missing file exits non-zero"
+  assert_contains "not found" "$stderr_out" "extract-sections: missing file logs error on stderr"
+
+  # --- Test 5: traversal path (../x) rejected ---
+  local parent_dir="$(dirname "$es_dir")"
+  local outside_file="$parent_dir/es-outside-$$.md"
+  cat > "$outside_file" << 'RESEOF'
+## Outside Section
+Outside content.
+RESEOF
+
+  pushd "$es_dir" >/dev/null
+  stderr_out=$("$CLI" extract-sections "../$(basename "$outside_file")" --anchors "Outside Section" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "extract-sections: traversal path rejected (exit non-zero)"
+  assert_contains "escapes project root" "$stderr_out" "extract-sections: traversal path error on stderr"
+  rm -f "$outside_file"
+
+  # --- Test 6: heading-boundary correctness ---
+  # h2 anchor: includes nested h3 (Nested Detail), stops before the next h2 (Open Questions)
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$research_file" --anchors "File References" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "extract-sections: h2-boundary anchor exits 0"
+  assert_contains "## File References" "$stdout" "extract-sections: h2 anchor includes its own heading"
+  assert_contains "### Nested Detail" "$stdout" "extract-sections: h2 anchor includes nested h3"
+  local h2_bleed="yes"
+  [[ "$stdout" == *"Open Questions"* ]] || h2_bleed="no"
+  assert_eq "no" "$h2_bleed" "extract-sections: h2 anchor stops before the next h2"
+
+  # h3 anchor: returns only that subsection, not the parent h2's other content
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$research_file" --anchors "Nested Detail" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "extract-sections: h3 anchor exits 0"
+  assert_contains "### Nested Detail" "$stdout" "extract-sections: h3 anchor includes its own heading"
+  assert_contains "Nested h3 content" "$stdout" "extract-sections: h3 anchor includes its body"
+  local h3_bleed="yes"
+  [[ "$stdout" == *"src/foo.sh"* ]] || h3_bleed="no"
+  assert_eq "no" "$h3_bleed" "extract-sections: h3 anchor excludes the parent h2's other content"
+
+  # --- Test 7: case-insensitive anchor matching ---
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$research_file" --anchors "open questions" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "extract-sections: case-insensitive anchor exits 0"
+  assert_contains "## Open Questions" "$stdout" "extract-sections: case-insensitive anchor matches heading"
+
+  rm -rf "$es_dir"
+}
+
 test_research_gc() {
   echo ""
   echo "=== Testing research-gc subcommand ==="
@@ -12160,6 +12285,11 @@ main() {
   echo ""
   echo "--- Research Lookup Tests ---"
   test_research_lookup
+
+  # Extract-sections tests — each creates its own isolated temp dir
+  echo ""
+  echo "--- Extract Sections Tests ---"
+  test_extract_sections
 
   # Research-gc tests — each creates its own isolated temp dir
   echo ""

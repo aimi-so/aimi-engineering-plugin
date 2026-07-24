@@ -4304,6 +4304,103 @@ cmd_research_lookup() {
   fi
 }
 
+# Usage: extract-sections <file> --anchors "<heading titles, comma- or newline-separated>"
+# Print only the requested '## '/'### ' sections of a research .md file, concatenated
+# verbatim in the order the anchors were requested.
+# Each section spans from its matching heading line up to (but not including) the next
+# heading of the same-or-higher level, or EOF -- so an h2 anchor includes its nested h3s
+# and stops at the next h2 (or h1); an h3 anchor stops at the next h3/h2 (or h1).
+# Anchor text is matched case-insensitively against the heading text (leading #s and
+# surrounding whitespace stripped). An anchor with no matching heading is silently
+# skipped (not an error); a run whose anchors match nothing prints empty output, exit 0.
+# Path confinement mirrors research-lookup: resolve_path + validate_path_in_project.
+# Missing file -> error + exit 1. Missing <file>/--anchors arg -> usage + exit 1.
+cmd_extract_sections() {
+  local file_path=""
+  local anchors_raw=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --anchors)
+        if [ $# -lt 2 ]; then
+          echo "Usage: aimi-cli.sh extract-sections <file> --anchors \"<heading titles>\"" >&2
+          exit 1
+        fi
+        anchors_raw="$2"
+        shift 2
+        ;;
+      -*)
+        echo "Usage: aimi-cli.sh extract-sections <file> --anchors \"<heading titles>\"" >&2
+        exit 1
+        ;;
+      *)
+        file_path="$1"
+        shift
+        ;;
+    esac
+  done
+
+  if [ -z "$file_path" ] || [ -z "$anchors_raw" ]; then
+    echo "Usage: aimi-cli.sh extract-sections <file> --anchors \"<heading titles>\"" >&2
+    exit 1
+  fi
+
+  if [ ! -f "$file_path" ]; then
+    echo "Error: File not found: $file_path" >&2
+    exit 1
+  fi
+
+  # Resolve and validate the target file path
+  local resolved_file
+  resolved_file=$(resolve_path "$file_path")
+  validate_path_in_project "$resolved_file"
+
+  # Split --anchors on commas and newlines; trim and lowercase each entry; skip blanks.
+  # Extract each anchor's section (first matching heading only) in request order.
+  local anchor anchor_lc
+  while IFS= read -r anchor; do
+    anchor=$(printf '%s' "$anchor" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    [ -z "$anchor" ] && continue
+    anchor_lc=$(printf '%s' "$anchor" | tr '[:upper:]' '[:lower:]')
+
+    awk -v target="$anchor_lc" '
+      BEGIN { in_section = 0; match_level = 0; matched_done = 0 }
+      {
+        level = 0
+        if ($0 ~ /^#+[[:space:]]/) {
+          line_copy = $0
+          while (substr(line_copy, 1, 1) == "#") {
+            level++
+            line_copy = substr(line_copy, 2)
+          }
+        }
+
+        # Close the active section at the next heading of same-or-higher level
+        # (a lower heading level number outranks a higher one, e.g. h2 outranks h3).
+        if (in_section && level > 0 && level <= match_level) {
+          in_section = 0
+        }
+
+        # Only ## / ### headings are matchable anchors; first match wins.
+        if (!in_section && !matched_done && (level == 2 || level == 3)) {
+          heading_text = substr($0, level + 1)
+          gsub(/^[[:space:]]+/, "", heading_text)
+          gsub(/[[:space:]]+$/, "", heading_text)
+          if (tolower(heading_text) == target) {
+            in_section = 1
+            matched_done = 1
+            match_level = level
+          }
+        }
+
+        if (in_section) {
+          print
+        }
+      }
+    ' "$resolved_file"
+  done < <(printf '%s\n' "$anchors_raw" | tr ',' '\n')
+}
+
 # Usage: research-gc
 # Garbage-collect orphaned research files from .aimi/research/*.md.
 # A file is deleted only when BOTH conditions are true:
@@ -6943,6 +7040,20 @@ COMMANDS:
                                 Use when cited sources include to-be-created files.
                               Absolute or outside-root path -> rejected (exit 1).
                               Flag accepted in either position relative to the path arg.
+    extract-sections <file> --anchors "<titles>"
+                              Print only the requested '## '/'### ' sections of a
+                              research .md file, concatenated verbatim in request order.
+                              Each section spans its matching heading up to the next
+                              heading of the same-or-higher level (or EOF) -- an h2
+                              anchor includes nested h3s and stops at the next h2/h1;
+                              an h3 anchor stops at the next h3/h2/h1.
+                              --anchors accepts comma- or newline-separated heading
+                              titles; matching is case-insensitive on heading text.
+                              An anchor with no matching heading is skipped (not an
+                              error); anchors matching nothing -> empty output, exit 0.
+                              Path confinement mirrors research-lookup (resolve_path +
+                              validate_path_in_project); missing file or missing
+                              <file>/--anchors arg -> error/usage on stderr, exit 1.
     research-gc               Delete orphaned .aimi/research/*.md files not referenced by any
                               active .aimi/tasks/*.json metadata.researchPaths or any
                               .aimi/brainstorms/*.md frontmatter researchPaths, AND older than
@@ -7236,6 +7347,7 @@ main() {
     archive-task)      cmd_archive_task "${2:-}" ;;
     research-lookup)   shift; cmd_research_lookup "$@" ;;
     research-gc)       cmd_research_gc ;;
+    extract-sections)  shift; cmd_extract_sections "$@" ;;
     detect-design-bundle) shift; cmd_detect_design_bundle "$@" ;;
     bundle-prototype-status)   shift; cmd_bundle_prototype_status "$@" ;;
     bundle-prototype-finalize) shift; cmd_bundle_prototype_finalize "$@" ;;
