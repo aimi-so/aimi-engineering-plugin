@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.111.0] - 2026-07-24
+
+### Added
+
+- **Five stack-convention skills**: `typescript-node-conventions`, `nestjs-conventions`, `nextjs-tanstack-conventions`, `go-conventions`, and `rust-conventions`. Each follows the `architecture-foundation` template — a self-sufficient `SKILL.md` (<300 lines) covering evergreen, version-independent conventions for that stack, deeper `references/` tiers for on-demand depth, and a `NOTICE.md` attributing its upstream source under the applicable license (MIT, CC-BY-4.0, or dual MIT OR Apache-2.0), with a matching `license: ... (NOTICE.md)` pointer in the frontmatter.
+- **`/aimi:plan`'s file-pattern-to-skill mapping wired for all 5 new skills.** Story-expansion now attaches `typescript-node-conventions` for `*.ts` (non-test, non-`.tsx`), `bunfig.toml`, `bun.lock`/`bun.lockb`; `nestjs-conventions` for `*.module.ts`, `*.controller.ts`, `*.service.ts`, `nest-cli.json`; `nextjs-tanstack-conventions` for `app/**/*.tsx`, `app/**/*.ts` (non-test), `next.config.*`, `*tanstack*`; `go-conventions` for `*.go`, `go.mod`; and `rust-conventions` for `*.rs`, `Cargo.toml`. Matching is glob-scoped by extension (not a bare `app/**`) so the Next.js/TanStack mapping never collides with Rails' own `app/` directory. Stories whose files match both a generic and a framework-specific pattern (e.g. a NestJS `*.service.ts`) intentionally receive both skills — generic hygiene and framework structure are complementary.
+
+### Fixed
+
+- **`react-best-practices` NOTICE backfill.** The skill (`name: vercel-react-best-practices`, "from Vercel Engineering") shipped with no `NOTICE.md` despite incorporating MIT-licensed Vercel content. Added `plugins/aimi-engineering/skills/react-best-practices/NOTICE.md` naming Vercel Engineering as the source under the MIT License, and a `license: MIT (NOTICE.md)` pointer in the `SKILL.md` frontmatter, matching the `architecture-foundation/NOTICE.md` shape.
+- **README.md skill count correction.** The `aimi-learnings` skill has shipped with a `SKILL.md` since its introduction but was never given a row in the Skills table, leaving the stated count permanently one short of the actual directory count. It now has a row in the Core (Internal) table, and the headline count is recounted from disk (`find plugins/aimi-engineering/skills -maxdepth 1 -mindepth 1 -type d | wc -l`) to 24, matching the enumerated table rows exactly.
+- **Review remediation for the stack-convention skills.** Synced the file-pattern-to-skill mapping into `agents/workflow/aimi-story-expander.md` so the five new skills actually attach under both hosts — the agent-definition copy of the mapping table (the one OpenCode installs as the story-expander's system prompt) had not been updated alongside `commands/plan.md`, so stack stories risked hydrating no convention skill at all. Corrected the skill-eviction rationale in `plan.md`'s composition note: the emitted `skills[]` order is not pinned, so the 100KB `get-story-context` hydration cap makes no generic-vs-framework eviction guarantee (the note previously claimed the reverse of the actual drop-last-inserted behavior). Trimmed authoring-process narration that had leaked into shipped files — removed the hydrated "Context7 Verification Notes" section from `typescript-node-conventions/SKILL.md`; deleted `rust-conventions/references/context7-verification.md` (a process log citing a now-absent `.aimi/research/` path) and its two `SKILL.md` references; condensed `rust-conventions/NOTICE.md` from reproducing the full Apache-2.0 license text to a link (the MIT body and every per-source attribution retained); and removed a dangling `.aimi/research/` citation plus a defensive-writing meta-note from `go-conventions/NOTICE.md` (the substantive CC-BY 3.0→4.0 correction retained).
+
 ## [1.110.0] - 2026-07-24
 
 ### Added
