@@ -1179,15 +1179,17 @@ This is a **gate**, not a user story. It produces at most one reviewable archite
 
 The gate fires only when **all four** of the following hold:
 
-(a) **Greenfield structural signals are present.** Read `${CLAUDE_PLUGIN_ROOT}/commands/references/foundation-signals.md` and apply its Structural Signals section (filtered through its ancestor-manifest lookup) at `AIMI_ROOT`. Apply that file's rules as written — do not restate them here.
+(a) **Greenfield structural signals (degree 1) OR brownfield-sem-convencoes signals (degree 2) are present.** Read `${CLAUDE_PLUGIN_ROOT}/commands/references/foundation-signals.md` and apply its Structural Signals section (filtered through its ancestor-manifest lookup, now scoped to both degrees) at `AIMI_ROOT`. Apply that file's rules as written — do not restate them here. Set working-memory `foundationMode` to `greenfield` when the degree-1 (greenfield) classification held, or to `brownfield` when the degree-2 (brownfield-sem-convencoes) classification held instead. When condition (a) fails outright — neither degree's signals held — leave `foundationMode` unset.
 
 (b) **Single-repo layout.** `AIMI_ROOT_IS_GIT_REPO=true` (captured in Step 0) **and** the Phase 1 "Auto-Scan for Git Repos" step found **zero** child repos.
 
 (c) **Flat mode, or roadmap mode with no completed phase yet.** `ROADMAP_MODE=false`, **or** (`ROADMAP_MODE=true` **and** no phase in the already-loaded `roadmap.json` has `status: completed`).
 
 (d) **No fresh foundation proposal already exists from either source.** Two independent sources feed this condition, and **either** one resolving to a fresh file makes this condition **not** hold — i.e., a fresh proposal is considered to already exist:
-   - **Glob source:** `.aimi/research/*-<topicSlug>-*-foundation.md`. A match is **fresh** when its mtime is within 14 days of the current run. When more than one glob match is fresh, use the most recently modified.
+   - **Glob source:** the glob pattern branches by `foundationMode`. When `foundationMode=greenfield`, use the topicSlug-scoped `.aimi/research/*-<topicSlug>-*-foundation.md`. When `foundationMode=brownfield`, use the repo-wide `.aimi/research/*-foundation.md` (no topicSlug filter) — this considers ANY fresh `-foundation.md` proposal already in the repo, not just the current topicSlug's, so an old greenfield proposal and a new brownfield one can't silently coexist and contradict. A match is **fresh** when its mtime is within 14 days of the current run. When more than one glob match is fresh, use the most recently modified.
    - **Phase 0 pointer source:** the `foundationProposalPath` working-memory variable, when Phase 0's `### Reuse Brainstorm Foundation Proposal` subsection above already validated it this session (confinement, existence, and 14-day freshness all passed there).
+
+   > **Symlink note (both glob branches):** unlike the Phase 0 pointer source — which resolves with `realpath` and rejects symlink targets that escape `.aimi/research/` — the glob source matches by filename only and does not `realpath`-resolve its hits, so a symlink named `*-foundation.md` inside `.aimi/research/` pointing outside the directory would be followed when its content is later inlined at Phase 3d. This is a pre-existing property of the glob source (it predates the brownfield branch and applies to the greenfield glob too); the brownfield branch only broadens which filenames the glob considers, never the resolution regime. Callers that need symlink-safe reuse must route through the pointer source. Not changed here to avoid touching the confinement logic hardened in the Phase 2 remediation; flagged for maintainers.
 
    Both sources funnel into the **same** branch 4 reuse path below — neither is a parallel bypass of this gate. When **both** sources resolve to fresh files and the files **differ**, use the more recently modified of the two (mais recentemente modificado) — the same tie-break rule already used above for multiple glob matches.
 
@@ -1197,7 +1199,7 @@ The gate fires only when **all four** of the following hold:
 
 **When the fire-condition does not hold**, apply the first matching branch below:
 
-1. **(a) fails — mature repo.** Structural signals absent. If Phase 0's `### Reuse Brainstorm Foundation Proposal` subsection had already populated `foundationProposalPath` this session, reset it to unset before proceeding — silently; the reset itself emits no line. (`foundationAccepted` is never set by Phase 0 — see that subsection's Ownership note — and stays unset/false on this branch.) Skip this entire phase silently: zero log output to chat, proceed straight to Phase 2. (The optional debug line below is a separate, explicitly opt-in channel — it still fires when `AIMI_PLAN_DEBUG=1` is set, but nothing else does, not even on this branch.)
+1. **(a) fails — mature repo.** Neither degree's structural signals held — no greenfield signals and no brownfield-sem-convencoes signals. `foundationMode` stays unset on this branch. If Phase 0's `### Reuse Brainstorm Foundation Proposal` subsection had already populated `foundationProposalPath` this session, reset it to unset before proceeding — silently; the reset itself emits no line. (`foundationAccepted` is never set by Phase 0 — see that subsection's Ownership note — and stays unset/false on this branch.) Skip this entire phase silently: zero log output to chat, proceed straight to Phase 2. (The optional debug line below is a separate, explicitly opt-in channel — it still fires when `AIMI_PLAN_DEBUG=1` is set, but nothing else does, not even on this branch.)
 2. **(b) fails — multi-repo layout.** Emit exactly one advisory chat line, verbatim:
    ```
    foundation gate skipped — multi-repo layout (per-repo foundations not yet supported)
@@ -1212,11 +1214,11 @@ The gate fires only when **all four** of the following hold:
 
 **When all four hold**, the gate fires — continue to Step 2.
 
-*(Optional debug: if `AIMI_PLAN_DEBUG=1`, emit `[plan-debug] phase-1.9: <fired|skipped> (reason: <greenfield-detected|mature-repo|multi-repo|roadmap-continuation|fresh-proposal-reused>)` to chat. This mirrors brainstorm.md Phase 3.6's `[brainstorm-debug]` convention.)*
+*(Optional debug: if `AIMI_PLAN_DEBUG=1`, emit `[plan-debug] phase-1.9: <fired|skipped> (reason: <greenfield-detected|brownfield-detected|mature-repo|multi-repo|roadmap-continuation|fresh-proposal-reused>)` to chat — the reason is `greenfield-detected` or `brownfield-detected` depending on which value `foundationMode` resolved to when the gate fires. This mirrors brainstorm.md Phase 3.6's `[brainstorm-debug]` convention.)*
 
 ### Step 2: Architect Spawn
 
-Sanitize inputs before interpolation using the same threat model as every other Task spawn in this command (Pass 2 staging, the Scope-Pruning gates): `researchSummary` and `resolvedDecisions` are already-sanitized working memory by this point in the pipeline; any `stackHints` derived directly from the raw feature description are passed through the base sanitization rules (`commands/references/sanitization.md`) first.
+Sanitize inputs before interpolation using the same threat model as every other Task spawn in this command (Pass 2 staging, the Scope-Pruning gates): `researchSummary` and `resolvedDecisions` are already-sanitized working memory by this point in the pipeline; any `stackHints` derived directly from the raw feature description are passed through the base sanitization rules (`commands/references/sanitization.md`) first. The spawn also threads the gate's degree classification into the agent via a `mode: <foundationMode>` line placed immediately before `outputPath` — consumed by `aimi-foundation-architect`'s mode-aware behavior (the mandatory brownfield repo-inspection step and the Brownfield Divergence Decision Rules) when `foundationMode=brownfield`.
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-foundation-architect"
@@ -1227,6 +1229,7 @@ Task subagent_type="aimi-engineering:research:aimi-foundation-architect"
   researchSummary: <consolidated research summary from Phase 1.6>
   resolvedDecisions: <oqDecisions[] serialized as key: resolution pairs>
   stackHints: <any stack named or implied by the feature description or research, or empty>
+  mode: <foundationMode>
   outputPath: .aimi/research/YYYY-MM-DD-<topicSlug>-<RUN_TS>-foundation.md
 
   [When this is an Ajustar re-spawn round (Step 4), append:]
@@ -1266,15 +1269,16 @@ When `INTERACTIVE_MODE=agent`:
 
 Sanitize the 3 pointer-block summary bullets before display: strip newlines, strip backticks, strip command-substitution (`$(`) sequences, cap each at 500 characters.
 
-Present via **AskUserQuestion** with exactly three options, verbatim:
+Present via **AskUserQuestion** with exactly three options, verbatim. The first option's copy depends on `foundationMode` — everything else about the three-option set is identical across modes:
 
 ```
-Aceitar — usar a arquitetura proposta
+[foundationMode=greenfield] Aceitar — usar a arquitetura proposta
+[foundationMode=brownfield] Aceitar — capturar as convencoes existentes
 Ajustar — descrever mudancas
 Pular — planejar sem foundation
 ```
 
-- **[Aceitar]:** `foundationAccepted = true`, `foundationProposalPath` = `FOUNDATION_OUTPUT_PATH` (the orchestrator-supplied `outputPath` from Step 2 — **never** the agent's returned `research_file` string). **Confinement rationale:** the architect's return value is agent-controlled data; trusting it verbatim would let a subverted or malfunctioning agent point `foundationProposalPath` at an arbitrary readable file (e.g. `.env`, `~/.ssh/id_rsa`), which Phase 3d would then inline into every sub-agent prompt this run. Since `FOUNDATION_OUTPUT_PATH` is deterministic — the same templated path is dictated to the agent in every spawn and re-spawn this session — pinning to it costs nothing and closes that path. The existence check in Step 2's failure handling still applies (an unreadable file is caught there, before this step runs). Record the decision per Step 5 with `resolution: "accepted"` when zero Ajustar rounds preceded this choice this session, or `resolution: "adjusted-N-rounds"` (N = the number of Ajustar rounds taken) otherwise. Proceed to Phase 2.
+- **[Aceitar]:** `foundationAccepted = true`, `foundationProposalPath` = `FOUNDATION_OUTPUT_PATH` (the orchestrator-supplied `outputPath` from Step 2 — **never** the agent's returned `research_file` string). **Confinement rationale:** the architect's return value is agent-controlled data; trusting it verbatim would let a subverted or malfunctioning agent point `foundationProposalPath` at an arbitrary readable file (e.g. `.env`, `~/.ssh/id_rsa`), which Phase 3d would then inline into every sub-agent prompt this run. Since `FOUNDATION_OUTPUT_PATH` is deterministic — the same templated path is dictated to the agent in every spawn and re-spawn this session — pinning to it costs nothing and closes that path. The existence check in Step 2's failure handling still applies (an unreadable file is caught there, before this step runs). **Deferred write:** selecting Aceitar — in either `foundationMode` — does NOT write `CLAUDE.md`/`AGENTS.md` to disk now; it only records the decision and pins `foundationProposalPath` to the reviewed proposal file. The actual write happens later, when `/aimi:execute` runs the foundation story that Phase 3b/3c thread this proposal into. Record the decision per Step 5 with `resolution: "accepted"` when zero Ajustar rounds preceded this choice this session, or `resolution: "adjusted-N-rounds"` (N = the number of Ajustar rounds taken) otherwise. Proceed to Phase 2.
 
 - **[Pular]:** `foundationAccepted = false`, `foundationProposalPath` unset. Record the decision per Step 5 with `resolution: "skipped"` when zero Ajustar rounds preceded this choice, or `resolution: "adjusted-N-rounds"` otherwise. Proceed to Phase 2.
 
@@ -1299,7 +1303,7 @@ Append one entry to `oqDecisions[]`:
 
 All five `resolution` values are mutually exclusive and exhaustive: `accepted` (Aceitar chosen with zero Ajustar rounds), `adjusted-N-rounds` (any number N ≥ 1 of Ajustar rounds preceded the terminal Aceitar or Pular choice), `skipped` (Pular chosen with zero Ajustar rounds), `auto-accepted` (Step 3's non-interactive fast path), `auto-skipped-architect-failure` (Step 2's second architect failure).
 
-Set working-memory `foundationProposalPath` and `foundationAccepted` as established above — both are consumed by Phase 3b, Phase 3c, Phase 3d, Phase 3e, and Phase 4 below.
+Set working-memory `foundationProposalPath`, `foundationAccepted`, and `foundationMode` as established above — all three are consumed by Phase 3b, Phase 3c, Phase 3d, Phase 3e, and Phase 4 below.
 
 ## Phase 2: Spec Analysis
 
@@ -1491,7 +1495,8 @@ Each entry:
   "idx": "01",
   "title": "Story title (≤ 200 chars, imperative)",
   "summary": "One-line description of what this story delivers (≤ 120 chars)",
-  "foundationEntry": false
+  "foundationEntry": false,
+  "foundationMode": "greenfield"
 }
 ```
 
@@ -1502,8 +1507,9 @@ Rules for outline authoring:
 - Do not assign `US-NNN` IDs yet — IDs are assigned by `story-merge` after approval.
 - Target 3–15 entries. Entries beyond 15 are allowed but surface a warning at the outline gate.
 - `foundationEntry` is `false` on every entry except the one designated by the Foundation-first rule below (present only when `foundationAccepted`, Phase 1.9) — it tells Phase 3d's sub-agent which entry is the foundation story itself versus a consumer of the accepted proposal.
+- `foundationMode` is `"greenfield"` (the default) on every entry except the one designated by the Foundation-first rule below, which instead carries whatever value Phase 1.9's gate resolved (`"greenfield"` or `"brownfield"`) — it tells Phase 3d's sub-agent, and in turn `aimi-story-expander`, whether the foundation entry should scaffold a fresh skeleton or document an existing repo in place.
 
-**Foundation-first rule (when `foundationAccepted`, Phase 1.9):** the first outline entry (`idx: "01"`) MUST be the foundation story — this overrides normal outline-authoring order. Set its `foundationEntry` field to `true` (every other entry keeps `false`). Derive its `title` and `summary` from the file at `foundationProposalPath`, using the sections **both** artifact kinds are guaranteed to carry: condense the summary from `## Folder Layout` and `## CLAUDE.md Draft` (a brainstorm-authored artifact — see `commands/brainstorm.md` Phase 3.7 — carries exactly the 4 shared sections and deliberately has no `## Stack`/`## Layering`); when the artifact additionally carries `## Stack` and `## Layering` (architect-authored, 9-section contract), prefer those two for a richer title/summary (e.g. "Establish <stack> architecture foundation"). Every other entry is numbered starting at `"02"`. Because entry `01` has nothing preceding it in the outline, normal dependency reasoning already yields `dependsOn: []` for it when Phase 3d expands it — no extra instruction is needed there. **If `foundationProposalPath` is unreadable at this point:** treat `foundationAccepted` as `false` for the rest of this run, emit one warning line, and generate the outline unmodified — exactly as if the gate had never fired (see Error Handling).
+**Foundation-first rule (when `foundationAccepted`, Phase 1.9):** the first outline entry (`idx: "01"`) MUST be the foundation story — this overrides normal outline-authoring order. Set its `foundationEntry` field to `true` (every other entry keeps `false`) and its `foundationMode` field to the same `foundationMode` value Phase 1.9's gate resolution set in working memory (`"greenfield"` or `"brownfield"`; every other entry keeps the `"greenfield"` default). Derive its `title` and `summary` from the file at `foundationProposalPath`, using the sections **both** artifact kinds are guaranteed to carry: condense the summary from `## Folder Layout` and `## CLAUDE.md Draft` (a brainstorm-authored artifact — see `commands/brainstorm.md` Phase 3.7 — carries exactly the 4 shared sections and deliberately has no `## Stack`/`## Layering`); when the artifact additionally carries `## Stack` and `## Layering` (architect-authored, 9-section contract), prefer those two for a richer title/summary (e.g. "Establish <stack> architecture foundation"). Every other entry is numbered starting at `"02"`. Because entry `01` has nothing preceding it in the outline, normal dependency reasoning already yields `dependsOn: []` for it when Phase 3d expands it — no extra instruction is needed there. **If `foundationProposalPath` is unreadable at this point:** treat `foundationAccepted` as `false` for the rest of this run, emit one warning line, and generate the outline unmodified — exactly as if the gate had never fired (see Error Handling).
 
 Persist the outline immediately after generation:
 
@@ -1747,6 +1753,7 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
     title: <title>
     summary: <summary>
     [If foundationAccepted (Phase 1.9)]: foundationEntry: <true when this is outline entry 01, false otherwise>
+    [If foundationAccepted (Phase 1.9)]: foundationMode: <the outline entry's foundationMode field — 'greenfield' or 'brownfield'>
 
   Full outline context (for dependsOn reasoning):
   <full outline.json array rendered as numbered list: idx. title — summary>
@@ -1857,6 +1864,13 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
     (top-level CLAUDE.md contains 'This repo builds the aimi-engineering plugin'),
     override inference for stories touching plugins/aimi-engineering/skills/ or
     plugins/aimi-engineering/commands/ — set skills: ['create-agent-skills'].
+  - Foundation-entry skill attach: when foundationAccepted (Phase 1.9) AND this
+    outline entry is the foundation entry (idx '01', foundationEntry: true) —
+    and ONLY that entry, never any other outline entry — include
+    'architecture-foundation' in skills[] in addition to (not instead of)
+    whatever the file-pattern mapping and the Plugin-self-build default above
+    already produced (e.g. skills: ['create-agent-skills', 'architecture-foundation']
+    when both rules apply on this repo).
   - tasks[] (3-15 entries): creation/scaffolding first, integration wiring
     second, local verification last. Integration steps are mandatory when
     implementation.files lists a path shared with another story.

@@ -641,6 +641,7 @@ install_skills() {
       [ -d "$skill_parent/references" ] && log "[dry-run]     + references/"
       [ -d "$skill_parent/scripts" ]    && log "[dry-run]     + scripts/"
       [ -d "$skill_parent/templates" ]  && log "[dry-run]     + templates/"
+      [ -f "$skill_parent/NOTICE.md" ]  && log "[dry-run]     + NOTICE.md"
     done
     return 0
   fi
@@ -676,6 +677,12 @@ install_skills() {
     if [ -d "$skill_parent/templates" ]; then
       cp -R "$skill_parent/templates" "$dst/"
       [ "$VERBOSE" -eq 1 ] && log "    + templates/"
+    fi
+
+    # Copy skill-root NOTICE.md if present (attribution/license notice)
+    if [ -f "$skill_parent/NOTICE.md" ]; then
+      cp "$skill_parent/NOTICE.md" "$dst/NOTICE.md"
+      [ "$VERBOSE" -eq 1 ] && log "    + NOTICE.md"
     fi
 
     count=$((count + 1))

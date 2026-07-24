@@ -235,7 +235,7 @@ Multi-agent code review using aimi-native review agents. Runs parallel agents (a
 
 ## Skills
 
-17 skills providing domain expertise and reusable workflows.
+18 skills providing domain expertise and reusable workflows.
 
 ### Core (Internal)
 
@@ -257,6 +257,7 @@ Used internally by commands — not user-invocable.
 | `frontend-design` | Create distinctive, production-grade frontend interfaces |
 | `every-style-editor` | Review and edit copy for Every's editorial style compliance |
 | `agent-native-architecture` | Build apps where agents are first-class citizens |
+| `architecture-foundation` | Propose and review Clean Architecture/DDD foundations for greenfield and brownfield repositories |
 | `react-best-practices` | React and Next.js performance optimization guidelines from Vercel Engineering |
 | `react-native-skills` | React Native and Expo best practices for performant mobile apps |
 
