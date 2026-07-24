@@ -144,7 +144,7 @@ When a `<foundation_proposal>` block is present (Phase 1.9's Greenfield Foundati
 - Cite the proposal's section by name in `implementation.approach` (e.g. "per Layering") instead of re-deriving the structure yourself.
 - **`foundationEntry: true` special case**: when the outline entry you are expanding (input 1) carries `foundationEntry: true`, this story IS the foundation itself, not a consumer of it. Its `foundationMode` (default `'greenfield'` when absent) selects one of the two branches below — never both.
 
-  - **`foundationMode: 'greenfield'` (default, unchanged from before this branch existed)**: derive `implementation.files` exclusively from the proposal's own sections:
+  - **`foundationMode: 'greenfield'` (default, behavior unchanged from the pre-brownfield greenfield path)**: derive `implementation.files` exclusively from the proposal's own sections:
     - `CLAUDE.md` and `AGENTS.md` (from `## CLAUDE.md Draft` / `## AGENTS.md Draft`)
     - One folder-skeleton `.gitkeep` per leaf directory in `## Folder Layout`
     - The lint/format config file(s) named in `## Lint and Format Config`

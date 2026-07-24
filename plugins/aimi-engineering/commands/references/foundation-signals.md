@@ -1,9 +1,13 @@
 # Foundation Signals
 
-Shared reference for detecting greenfield repositories — an empty or
-near-empty project with no established stack, structure, or conventions yet.
-Apply the rules in this file wherever the caller says "scan for foundation
-signals" or "check whether this repo is greenfield."
+Shared reference for detecting foundation-relevant repositories — both a
+greenfield (degree 1) repo (empty or near-empty, no established stack,
+structure, or conventions yet) and a brownfield-sem-convencoes (degree 2) repo
+(established code with no captured `CLAUDE.md`/`AGENTS.md` conventions). Apply
+the rules in this file wherever the caller says "scan for foundation signals",
+"check whether this repo is greenfield", or "classify the repo's foundation
+degree." plan.md's Phase 1.9 Greenfield Foundation Gate is the consumer of both
+degrees (see "Consumed by" and "How to Combine" below).
 
 **Consumed by:** plan.md's Phase 1.9 (Greenfield Foundation Gate) consumes
 both the greenfield (degree 1) and brownfield-sem-convencoes (degree 2)
@@ -87,11 +91,27 @@ ancestor-manifest lookup above, and sets working-memory `foundationMode` to
 
 ## How to Combine
 
-Structural signals are authoritative: manifest absence, the tracked
-source-file threshold, and convention-file absence — filtered through the
-ancestor-manifest lookup — determine the classification regardless of what
-the keyword scan finds. Keyword signals are additive only: they can flag a
-plain-text feature description as greenfield-relevant before any repository
-exists to inspect structurally, but they never override a structural
-disqualification. Keywords alone, with structural signals absent or
-disqualified, never trigger the gate.
+Structural signals are authoritative, and they classify into **two degrees** —
+apply the branch that matches, not a single manifest-absence recipe:
+
+- **Degree 1 — greenfield:** manifest absence **and** the tracked source-file
+  count below the fewer-than-5 threshold **and** convention-file absence, all
+  filtered through the ancestor-manifest lookup. Manifest absence is a
+  determinant **only for this degree** (a from-scratch repo has no manifest
+  yet).
+- **Degree 2 — brownfield-sem-convencoes:** the tracked source-file count at or
+  above 5 (`>= 5`) **and** convention-file absence, filtered through the same
+  ancestor-manifest lookup. **Manifest presence does NOT disqualify degree 2** —
+  an established repo normally *has* a `package.json`/`pyproject.toml`/etc.; only
+  the ancestor-manifest lookup (a `CLAUDE.md` or manifest in an *ancestor*
+  directory, i.e. a monorepo-package false positive) disqualifies it. Do not
+  require manifest absence here — doing so would silently never fire the gate on
+  exactly the manifest-bearing repos this degree exists to serve.
+
+The two degrees are mutually exclusive by the source-file threshold (`< 5` vs
+`>= 5`); convention-file absence is required by both. Keyword signals are
+additive only: they can flag a plain-text feature description as
+greenfield-relevant before any repository exists to inspect structurally, but
+they never override a structural disqualification, and they never bear on degree
+2 (which is repo-structural by definition). Keywords alone, with structural
+signals absent or disqualified, never trigger the gate.

@@ -235,7 +235,7 @@ Multi-agent code review using aimi-native review agents. Runs parallel agents (a
 
 ## Skills
 
-19 skills providing domain expertise and reusable workflows.
+18 skills providing domain expertise and reusable workflows.
 
 ### Core (Internal)
 

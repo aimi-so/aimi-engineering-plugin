@@ -1,5 +1,6 @@
 ---
 name: architecture-foundation
+version: "1.0.0"
 description: >
   Use when proposing, reviewing, or laying down the initial architecture for a
   repository — greenfield layering decisions, brownfield convention inference,
