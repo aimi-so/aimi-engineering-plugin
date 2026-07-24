@@ -235,7 +235,7 @@ Multi-agent code review using aimi-native review agents. Runs parallel agents (a
 
 ## Skills
 
-18 skills providing domain expertise and reusable workflows.
+24 skills providing domain expertise and reusable workflows.
 
 ### Core (Internal)
 
@@ -246,6 +246,7 @@ Used internally by commands — not user-invocable.
 | `brainstorm` | Brainstorming process knowledge (batched questions, adaptive exit, design capture) |
 | `task-planner` | Pipeline for generating tasks.json (research, spec analysis, story decomposition) |
 | `story-executor` | Canonical prompt template for Task-spawned agents executing stories |
+| `aimi-learnings` | Triage friction events captured by aimi hooks; groups by scope and drafts promotion proposals for human review |
 
 ### Development & Code Style
 
@@ -260,6 +261,11 @@ Used internally by commands — not user-invocable.
 | `architecture-foundation` | Propose and review Clean Architecture/DDD foundations for greenfield and brownfield repositories |
 | `react-best-practices` | React and Next.js performance optimization guidelines from Vercel Engineering |
 | `react-native-skills` | React Native and Expo best practices for performant mobile apps |
+| `typescript-node-conventions` | Strict TypeScript conventions for Node.js and Bun — typing discipline, ESM/CJS interop, error handling, async hygiene |
+| `nestjs-conventions` | NestJS module boundaries, dependency injection, controller/service/repository layering, and DTO validation |
+| `nextjs-tanstack-conventions` | Next.js App Router structure and TanStack Query data-fetching conventions |
+| `go-conventions` | Evergreen Go conventions — package layout, error wrapping, interfaces, context propagation, concurrency, table-driven tests |
+| `rust-conventions` | Evergreen Rust conventions — ownership/borrowing, Result/Option error handling, thiserror vs. anyhow, clippy/rustfmt CI gates |
 
 ### Tooling & Automation
 
