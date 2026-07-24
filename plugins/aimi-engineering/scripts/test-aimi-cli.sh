@@ -6591,6 +6591,225 @@ RESEOF
   rm -rf "$rl_dir"
 }
 
+test_extract_sections() {
+  echo ""
+  echo "=== Testing extract-sections subcommand ==="
+
+  local es_dir
+  es_dir=$(mktemp -d)
+  mkdir -p "$es_dir/.aimi"
+
+  local research_file="$es_dir/.aimi/research.md"
+  cat > "$research_file" << 'RESEOF'
+# My Research
+
+## Repository Research Summary
+Top-level summary text.
+More summary detail.
+
+## File References
+- src/foo.sh
+
+### Nested Detail
+Nested h3 content under File References.
+
+## Open Questions
+- Q1
+- Q2
+
+## Testing, Linting, and CI
+Comma heading body line.
+
+## Fenced Section
+Intro line before fence.
+
+```bash
+# This looks like a heading but is inside a fence
+echo "still in section"
+```
+
+Content after the fence, still part of the same section.
+RESEOF
+
+  local stdout exit_code
+
+  # --- Test 1: single-anchor match ---
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$research_file" --anchors "Open Questions" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "extract-sections: single anchor exits 0"
+  assert_contains "## Open Questions" "$stdout" "extract-sections: single anchor includes heading"
+  assert_contains "- Q1" "$stdout" "extract-sections: single anchor includes body"
+  local single_bleed="yes"
+  [[ "$stdout" == *"Repository Research Summary"* ]] || single_bleed="no"
+  assert_eq "no" "$single_bleed" "extract-sections: single anchor excludes unrelated sections"
+
+  # --- Test 2: multi-anchor match, concatenated in request order ---
+  # Anchors are newline-separated (not comma-separated -- commas are valid heading
+  # punctuation, see Test 8 below).
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$research_file" --anchors "$(printf 'Open Questions\nRepository Research Summary')" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "extract-sections: multi-anchor exits 0"
+  local oq_pos summary_pos
+  oq_pos=$(printf '%s' "$stdout" | grep -n '^## Open Questions' | head -1 | cut -d: -f1)
+  summary_pos=$(printf '%s' "$stdout" | grep -n '^## Repository Research Summary' | head -1 | cut -d: -f1)
+  assert_contains "## Open Questions" "$stdout" "extract-sections: multi-anchor includes first requested section"
+  assert_contains "## Repository Research Summary" "$stdout" "extract-sections: multi-anchor includes second requested section"
+  local order_ok="no"
+  [ -n "$oq_pos" ] && [ -n "$summary_pos" ] && [ "$oq_pos" -lt "$summary_pos" ] && order_ok="yes"
+  assert_eq "yes" "$order_ok" "extract-sections: multi-anchor preserves request order"
+
+  # --- Test 3: anchor not found -> skipped, empty output, exit 0 ---
+  local stderr_out
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$research_file" --anchors "Nonexistent Heading" 2>"$es_dir/.aimi/stderr3.out") && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  stderr_out=$(cat "$es_dir/.aimi/stderr3.out"); rm -f "$es_dir/.aimi/stderr3.out"
+
+  assert_exit_code "0" "$exit_code" "extract-sections: anchor not found exits 0"
+  assert_eq "" "$stdout" "extract-sections: anchor not found produces empty stdout"
+  assert_contains "no section matched anchor: Nonexistent Heading" "$stderr_out" "extract-sections: anchor not found warns on stderr naming the anchor"
+
+  # --- Test 4: missing file -> error on stderr, exit non-zero ---
+  pushd "$es_dir" >/dev/null
+  stderr_out=$("$CLI" extract-sections "$es_dir/.aimi/does-not-exist.md" --anchors "X" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "extract-sections: missing file exits non-zero"
+  assert_contains "not found" "$stderr_out" "extract-sections: missing file logs error on stderr"
+
+  # --- Test 5: traversal path (../x) rejected ---
+  local parent_dir="$(dirname "$es_dir")"
+  local outside_file="$parent_dir/es-outside-$$.md"
+  cat > "$outside_file" << 'RESEOF'
+## Outside Section
+Outside content.
+RESEOF
+
+  pushd "$es_dir" >/dev/null
+  stderr_out=$("$CLI" extract-sections "../$(basename "$outside_file")" --anchors "Outside Section" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "extract-sections: traversal path rejected (exit non-zero)"
+  assert_contains "escapes project root" "$stderr_out" "extract-sections: traversal path error on stderr"
+  rm -f "$outside_file"
+
+  # --- Test 6: heading-boundary correctness ---
+  # h2 anchor: includes nested h3 (Nested Detail), stops before the next h2 (Open Questions)
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$research_file" --anchors "File References" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "extract-sections: h2-boundary anchor exits 0"
+  assert_contains "## File References" "$stdout" "extract-sections: h2 anchor includes its own heading"
+  assert_contains "### Nested Detail" "$stdout" "extract-sections: h2 anchor includes nested h3"
+  local h2_bleed="yes"
+  [[ "$stdout" == *"Open Questions"* ]] || h2_bleed="no"
+  assert_eq "no" "$h2_bleed" "extract-sections: h2 anchor stops before the next h2"
+
+  # h3 anchor: returns only that subsection, not the parent h2's other content
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$research_file" --anchors "Nested Detail" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "extract-sections: h3 anchor exits 0"
+  assert_contains "### Nested Detail" "$stdout" "extract-sections: h3 anchor includes its own heading"
+  assert_contains "Nested h3 content" "$stdout" "extract-sections: h3 anchor includes its body"
+  local h3_bleed="yes"
+  [[ "$stdout" == *"src/foo.sh"* ]] || h3_bleed="no"
+  assert_eq "no" "$h3_bleed" "extract-sections: h3 anchor excludes the parent h2's other content"
+
+  # --- Test 7: case-insensitive anchor matching ---
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$research_file" --anchors "open questions" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "extract-sections: case-insensitive anchor exits 0"
+  assert_contains "## Open Questions" "$stdout" "extract-sections: case-insensitive anchor matches heading"
+
+  # --- Test 8: fence-aware heading detection (FIX 2 regression) ---
+  # A '#' comment inside a fenced code block must NOT be parsed as a heading -- the
+  # bug closed the section early and emitted an unterminated fence.
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$research_file" --anchors "Fenced Section" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "extract-sections: fenced section exits 0"
+  assert_contains "## Fenced Section" "$stdout" "extract-sections: fenced section includes its own heading"
+  assert_contains "# This looks like a heading but is inside a fence" "$stdout" "extract-sections: fenced section includes the in-fence comment line verbatim"
+  assert_contains "Content after the fence, still part of the same section." "$stdout" "extract-sections: fenced section survives past the in-fence comment"
+  local fence_marker_count
+  fence_marker_count=$(printf '%s\n' "$stdout" | grep -c '^```')
+  assert_eq "2" "$fence_marker_count" "extract-sections: fenced section emits a balanced open+close fence, not an unterminated one"
+
+  # --- Test 9: heading containing commas matches and returns its content (FIX 3) ---
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$research_file" --anchors "Testing, Linting, and CI" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "extract-sections: comma-containing heading exits 0"
+  assert_contains "## Testing, Linting, and CI" "$stdout" "extract-sections: comma-containing heading matches its full text as a single anchor"
+  assert_contains "Comma heading body line." "$stdout" "extract-sections: comma-containing heading includes its body"
+
+  # --- Test 10: anchors with shell metacharacters are rejected; other anchors in the
+  # same run still process (FIX 1 regression) ---
+  local metachar_anchors metachar_stderr_file
+  metachar_anchors=$(printf 'Open Questions\n$(evil)\nbad`tick\nbad"quote\nbad\\slash')
+  metachar_stderr_file="$es_dir/.aimi/stderr10.out"
+
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$research_file" --anchors "$metachar_anchors" 2>"$metachar_stderr_file") && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  stderr_out=$(cat "$metachar_stderr_file"); rm -f "$metachar_stderr_file"
+
+  assert_exit_code "0" "$exit_code" "extract-sections: run with rejected metachar anchors still exits 0"
+  assert_contains "## Open Questions" "$stdout" "extract-sections: valid anchor still processed alongside rejected ones"
+  local rejected_count
+  rejected_count=$(printf '%s' "$stderr_out" | grep -c "anchor rejected (shell metacharacter)")
+  assert_eq "4" "$rejected_count" "extract-sections: all four dangerous-metacharacter anchors rejected with a warning"
+  assert_contains '$(evil)' "$stderr_out" "extract-sections: rejected-anchor warning names the \$( anchor"
+  assert_contains 'bad`tick' "$stderr_out" "extract-sections: rejected-anchor warning names the backtick anchor"
+  assert_contains 'bad"quote' "$stderr_out" "extract-sections: rejected-anchor warning names the double-quote anchor"
+  assert_contains 'bad\slash' "$stderr_out" "extract-sections: rejected-anchor warning names the backslash anchor"
+
+  # --- Test 11: absolute path outside project root rejected ---
+  local abs_outside_file="$parent_dir/es-abs-outside-$$.md"
+  cat > "$abs_outside_file" << 'RESEOF'
+## Abs Outside Section
+Abs outside content.
+RESEOF
+
+  pushd "$es_dir" >/dev/null
+  stderr_out=$("$CLI" extract-sections "$abs_outside_file" --anchors "Abs Outside Section" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "extract-sections: absolute path outside project root rejected (exit non-zero)"
+  assert_contains "escapes project root" "$stderr_out" "extract-sections: absolute path outside project root error on stderr"
+  rm -f "$abs_outside_file"
+
+  # --- Test 12: symlink inside the project pointing outside is rejected ---
+  local symlink_target="$parent_dir/es-symlink-target-$$.md"
+  cat > "$symlink_target" << 'RESEOF'
+## Symlink Target Section
+Symlink target content.
+RESEOF
+  local symlink_path="$es_dir/.aimi/escape-link.md"
+  ln -s "$symlink_target" "$symlink_path"
+
+  pushd "$es_dir" >/dev/null
+  stderr_out=$("$CLI" extract-sections "$symlink_path" --anchors "Symlink Target Section" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "extract-sections: symlink inside project pointing outside rejected (exit non-zero)"
+  assert_contains "escapes project root" "$stderr_out" "extract-sections: symlink escape error on stderr"
+  rm -f "$symlink_target" "$symlink_path"
+
+  rm -rf "$es_dir"
+}
+
 test_research_gc() {
   echo ""
   echo "=== Testing research-gc subcommand ==="
@@ -12160,6 +12379,11 @@ main() {
   echo ""
   echo "--- Research Lookup Tests ---"
   test_research_lookup
+
+  # Extract-sections tests — each creates its own isolated temp dir
+  echo ""
+  echo "--- Extract Sections Tests ---"
+  test_extract_sections
 
   # Research-gc tests — each creates its own isolated temp dir
   echo ""

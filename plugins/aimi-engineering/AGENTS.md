@@ -65,6 +65,18 @@ The on-disk research FILE is exempt from compression and word caps (see <preserv
 above); only the Task return follows the pointer-block contract.
 </research_return_contract>
 
+<research_findings_format>
+Research agent findings-body claims (the on-disk file the pointer block points to, not the Task
+return above) follow a claim -> verbatim-quote -> citation-or-`[INFERRED]` structure: every factual
+claim is either a short verbatim quote of the cited text plus a locatable citation (`file:line`,
+`path:Lstart-Lend`, or the most specific doc/URL pointer available), or is tagged `[INFERRED]` when
+no source exists. No bare assertions in the findings body. (A `verify-citations` CLI pass to check
+this mechanically is planned but not yet implemented.)
+
+Each research agent spec restates this rule in full rather than pointing here, since AGENTS.md is
+never copied into the OpenCode translation (`install.sh`) and would be unreachable for those users.
+</research_findings_format>
+
 <examples>
 
 ## Status update
