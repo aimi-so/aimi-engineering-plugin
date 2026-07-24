@@ -12,13 +12,13 @@ Automatically detect the parent branch, build the PR title and description from 
 
 ## Project Conventions
 
-This command does not read the working project's `CLAUDE.md` or `AGENTS.md`. PR title and body are derived purely from git commits and the diff against the base branch (see Steps 2–4).
+This command does not read the working project's `CLAUDE.md` or `AGENTS.md`. The PR **body** is derived purely from git commits and the diff against the base branch (see Steps 2–4). The PR **title** prefers the tasks file's feature-level `metadata.title` when one is available, falling back to the git-derived first-commit subject (see Step 4a) — this keeps the title describing the whole feature rather than the first story's slice, and strips the internal `US-NNN` story tags `/aimi:execute` writes per commit.
 
 For project-specific PR structure (e.g., required Test Plan section, issue-link footer, checklists), use GitHub's standard mechanism:
 
 - **`.github/pull_request_template.md`** — `gh pr create` honors this file automatically. Any template content is prepended to the body we build in Step 4b.
 
-Commit-message conventions (Conventional Commits, etc.) are preserved automatically because Step 4a derives the PR title from the first commit subject.
+Commit-message conventions (Conventional Commits, etc.) are preserved automatically: the `metadata.title` source is itself authored in `type: description` form, and the first-commit-subject fallback preserves the subject verbatim apart from stripping the internal `US-NNN` story tag.
 
 ## Step 0: Resolve CLI Path
 
@@ -173,12 +173,34 @@ Store as `$DIFF_STAT` and `$FILES_CHANGED`.
 
 ### 4a. PR Title
 
-Derive the PR title from the first commit subject on the branch (preserving conventional-commit form). When the branch has zero commits ahead of base, fall back to `$CURRENT_BRANCH`:
+Derive a **feature-level** PR title — one that describes the whole change, not just the first story's slice, and that never leaks an internal `US-NNN` story tag from the per-story commits `/aimi:execute` produces. Three sources, in order of preference:
+
+1. **Tasks metadata title.** When a tasks file exists for this session, `metadata.title` is the human-authored feature title (e.g. `feat: brownfield foundation gate + architecture-foundation skill (issue #56 phase 3)`) — the best PR title, since it summarizes the entire feature rather than whichever story happened to commit first. Read it with the same guarded `$AIMI_CLI metadata` call Step 4c uses; any failure (no tasks file, CLI error) falls through to source 2.
+2. **First commit subject, story-tag stripped.** Fall back to the first commit subject on the branch (preserving conventional-commit form), then strip any trailing aimi story tag the execute flow appends per story (e.g. a trailing ` — US-001` / ` - Story US-012a`, or a leading `US-001 `), so the internal id never reaches the public title.
+3. **Branch name.** When the branch has zero commits ahead of base, fall back to `$CURRENT_BRANCH`.
 
 ```bash
-PR_TITLE=$(git log "$BASE_BRANCH".."$CURRENT_BRANCH" --reverse --pretty=format:'%s' --no-merges | head -1)
-if [ -z "$PR_TITLE" ]; then
-  PR_TITLE="$CURRENT_BRANCH"
+# Source 1: feature-level metadata title (guarded, like Step 4c). The
+# `metadata` subcommand emits the metadata object itself, so the title is at
+# the top level (`.title`), not nested under `.metadata`.
+METADATA_TITLE=$($AIMI_CLI metadata 2>/dev/null | jq -r '.title // empty' 2>/dev/null)
+# Ignore story-merge's pre-patch skeleton placeholder — never a real title.
+if [ "$METADATA_TITLE" = "feat: merged tasks" ]; then
+  METADATA_TITLE=""
+fi
+
+if [ -n "$METADATA_TITLE" ]; then
+  PR_TITLE="$METADATA_TITLE"
+else
+  # Source 2: first commit subject, with any internal story tag stripped.
+  PR_TITLE=$(git log "$BASE_BRANCH".."$CURRENT_BRANCH" --reverse --pretty=format:'%s' --no-merges | head -1)
+  PR_TITLE=$(printf '%s' "$PR_TITLE" | sed -E \
+    -e 's/[[:space:]]*(—|–|-)[[:space:]]*(Story[[:space:]]+)?US-[0-9]{3}[a-z]?[[:space:]]*$//' \
+    -e 's/^(Story[[:space:]]+)?US-[0-9]{3}[a-z]?[[:space:]:—–-]+//')
+  # Source 3: branch name when there are no commits ahead of base.
+  if [ -z "$PR_TITLE" ]; then
+    PR_TITLE="$CURRENT_BRANCH"
+  fi
 fi
 ```
 

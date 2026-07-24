@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`install.sh`'s `install_skills` now copies skill-root `NOTICE.md` files to the OpenCode install target.** Previously only `SKILL.md` and `references/` were copied, silently dropping any skill-root `NOTICE.md` — this had already been losing `frontend-design/NOTICE.md` on every OpenCode install, and would have done the same to the new `architecture-foundation/NOTICE.md`. Both skills' MIT attribution now survives the OpenCode translation.
 - **`get-story-context` now resolves `aimi-` prefixed skills under OpenCode.** Skill hydration built the path from the bare skill name a story declares (`skills/<name>/SKILL.md`), but `install.sh` installs OpenCode skills under an `aimi-` prefix (`skills/aimi-<name>/SKILL.md`) — so every story-declared skill silently failed to hydrate under OpenCode (pre-existing, affecting all skills, surfaced while wiring the new `architecture-foundation` attach). The lookup now falls back to the `aimi-`prefixed directory when the bare path is absent; Claude Code's unprefixed cache is unaffected.
 
+### Changed
+
+- **`/aimi:open-pr` now derives a feature-level PR title.** The title previously came from the first commit subject verbatim, which — under the phase/story execute flow — carries an internal `US-NNN` story tag and describes only the first story's slice rather than the whole change. Title derivation now prefers the tasks file's `metadata.title` (the human-authored feature title), falling back to the first commit subject with any trailing/leading `US-NNN` (or `Story US-NNN`) tag stripped, then to the branch name. The PR body is unchanged (still git-derived).
+
 ## [1.109.0] - 2026-07-23
 
 ### Added
