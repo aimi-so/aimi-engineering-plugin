@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.110.0] - 2026-07-24
+
+### Added
+
+- **brownfield-sem-convencoes as the second degree of the Phase 1.9 Greenfield Foundation Gate (issue #56 phase 3).** `/aimi:plan`'s gate no longer only fires on empty greenfield repositories — a repository with 5 or more tracked source files (or find-fallback matches) but no `CLAUDE.md`/`AGENTS.md` at `AIMI_ROOT` now classifies as brownfield-sem-convencoes ("established code with no captured conventions") and fires the same gate through condition (a), filtered through the shared ancestor-manifest lookup that now covers both degrees. `commands/references/foundation-signals.md` documents the classification and names `plan.md`'s Phase 1.9 as the consumer for both degrees; working-memory `foundationMode` is set to `brownfield` when this degree — rather than greenfield — is what held.
+- **`aimi-foundation-architect` brownfield mode with repo-inspection.** The agent now accepts a `mode` input (`greenfield` | `brownfield`). In brownfield mode it runs a direct repository-inspection step (Grep/Glob against real source) before proposing conventions, so its output reflects the codebase as it actually is — verbatim lint config, a Module Template drawn from a real existing module — rather than a generic prescription; anywhere a coherent existing pattern can't be inferred, the gap is routed to the proposal's Open Questions section instead of guessed at. It still writes the same `-foundation.md` artifact shape (`foundationProposalPath`, 14-day freshness, path confinement, `research-gc` coverage, Foundation-first ordering) regardless of mode.
+- **`architecture-foundation` skill.** A new self-sufficient (~200-280 line) `SKILL.md` skill packages condensed, actionable Clean Architecture (dependency direction, layers, ports/adapters) and Domain-Driven Design (Ubiquitous Language, Bounded Contexts, Entities, Value Objects, Aggregates, Repositories) guidance for both greenfield layering decisions and brownfield convention inference, with fuller tiers under `references/` for on-demand depth. Content is MIT-attributed via a `NOTICE.md` following the existing `frontend-design` pattern, and is attached only to the foundation-entry story (`foundationEntry: true`) rather than every story.
+- **`foundationMode` threading through `story-expander`.** The brownfield branch of story expansion now receives and honors `foundationMode`, documenting conventions in-place (`CLAUDE.md`/`AGENTS.md` only) instead of scaffolding a greenfield-style folder layout — no `.gitkeep` placeholders, no overwriting an existing lint config.
+
+### Fixed
+
+- **`install.sh`'s `install_skills` now copies skill-root `NOTICE.md` files to the OpenCode install target.** Previously only `SKILL.md` and `references/` were copied, silently dropping any skill-root `NOTICE.md` — this had already been losing `frontend-design/NOTICE.md` on every OpenCode install, and would have done the same to the new `architecture-foundation/NOTICE.md`. Both skills' MIT attribution now survives the OpenCode translation.
+
 ## [1.109.0] - 2026-07-23
 
 ### Added
