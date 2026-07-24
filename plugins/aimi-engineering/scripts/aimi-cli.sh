@@ -864,8 +864,20 @@ cmd_get_story_context() {
     fi
     local skill_abs_path="${skills_base_dir}/${skill_name}/SKILL.md"
     if [ ! -f "$skill_abs_path" ]; then
-      echo "skill ${skill_name} not found at ${skill_rel_path} — skipped" >&2
-      continue
+      # OpenCode installs skills under an `aimi-` prefix (install.sh install_skills:
+      # dst="$skill_dir/aimi-$skillname"), while stories declare the bare skill
+      # name. Claude Code's cache dir is unprefixed, so the bare path already
+      # resolved above there. Fall back to the prefixed dir so OpenCode hydration
+      # is not silently skipped. Host-agnostic: on Claude Code this fallback path
+      # simply does not exist and the warning below still fires for a genuinely
+      # missing skill.
+      local skill_prefixed_path="${skills_base_dir}/aimi-${skill_name}/SKILL.md"
+      if [ -f "$skill_prefixed_path" ]; then
+        skill_abs_path="$skill_prefixed_path"
+      else
+        echo "skill ${skill_name} not found at ${skill_rel_path} — skipped" >&2
+        continue
+      fi
     fi
     # Read content and apply tag-breakout escapes before jq ingestion
     local skill_content

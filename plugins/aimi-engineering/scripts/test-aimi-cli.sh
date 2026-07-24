@@ -893,6 +893,71 @@ TASKSEOF
   rm -rf "$tmp_dir"
 }
 
+test_get_story_context_skills_opencode_prefix() {
+  echo ""
+  echo "=== Testing get-story-context resolves aimi- prefixed skills (OpenCode layout) ==="
+
+  # OpenCode's install.sh installs skills under an `aimi-` prefix, while stories
+  # declare the bare name. get-story-context must fall back to the prefixed dir.
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  mkdir -p "$tmp_dir/.aimi/tasks"
+
+  # Skills base has ONLY the prefixed dir (aimi-architecture-foundation) — no
+  # bare architecture-foundation dir — exactly the OpenCode on-disk shape.
+  local fake_skills_base="$tmp_dir/skills"
+  mkdir -p "$fake_skills_base/aimi-architecture-foundation"
+  printf 'Prefixed skill content resolves.\n' > "$fake_skills_base/aimi-architecture-foundation/SKILL.md"
+
+  cat > "$tmp_dir/.aimi/tasks/9999-99-99-prefix-test-tasks.json" << 'TASKSEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: prefix test",
+    "type": "feat",
+    "branchName": "feat/prefix-test",
+    "createdAt": "2026-07-24",
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 1
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story with a bare skill name installed under aimi- prefix",
+      "description": "Test story",
+      "acceptanceCriteria": ["Prefixed skill hydrates"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "skills": ["architecture-foundation"],
+      "notes": ""
+    }
+  ]
+}
+TASKSEOF
+
+  local output exit_code
+  output=$(cd "$tmp_dir" && unset CLAUDECODE; AIMI_PLUGIN_DIR="$tmp_dir" "$CLI" get-story-context US-001 2>&1)
+  exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "skills_opencode_prefix: exits 0"
+
+  local skills_len
+  skills_len=$(echo "$output" | jq '.skills | length')
+  assert_eq "1" "$skills_len" "skills_opencode_prefix: skill resolved via aimi- prefix fallback (not skipped)"
+
+  local sk_name sk_path sk_content
+  sk_name=$(echo "$output" | jq -r '.skills[0].name')
+  sk_path=$(echo "$output" | jq -r '.skills[0].path')
+  sk_content=$(echo "$output" | jq -r '.skills[0].content')
+  assert_eq "architecture-foundation" "$sk_name" "skills_opencode_prefix: name is the bare declared name"
+  assert_eq "skills/architecture-foundation/SKILL.md" "$sk_path" "skills_opencode_prefix: path is the bare plugin-relative form"
+  assert_contains "Prefixed skill content resolves" "$sk_content" "skills_opencode_prefix: content came from the aimi- prefixed dir"
+
+  rm -rf "$tmp_dir"
+}
+
 test_get_story_context_skills_absent() {
   echo ""
   echo "=== Testing get-story-context emits skills:[] when story has no skills ==="
@@ -11894,6 +11959,7 @@ main() {
   test_story_id_not_found
   test_get_story_context
   test_get_story_context_skills_present
+  test_get_story_context_skills_opencode_prefix
   test_get_story_context_skills_absent
   test_get_story_context_skills_cap_drop
   test_get_story_context_design_context
