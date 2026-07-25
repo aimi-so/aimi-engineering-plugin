@@ -5299,56 +5299,65 @@ _story_merge_write_split() {
   local smell_warnings="${4:-[]}"
   local phase_aware="${5:-false}"
 
-  # Partition by layer:
-  # - UI stories → frontend (stories whose title/description contains UI/Frontend/React/Vue/component keywords,
-  #   or implementation.files match frontend patterns)
-  # - schema + backend + aggregation → backend
-
-  # Partition stories
-  local frontend_stories backend_stories
-  frontend_stories=$(printf '%s' "$merged_array" | jq '
-    [.[] | select(
-      ((.implementation.files // []) | any(
-        test("\\.(tsx|jsx)$") or test("components?/") or test("pages?/") or test("views?/") or
-        test("frontend") or test("ui/") or test("client/") or test("app/") or
-        test("\\.(css|scss)$") or test("tailwind")
-      )) or
-      ((.title + " " + (.description // "")) | test("UI|Frontend|Component|Page|View|React|Vue|Tailwind|CSS|modal|form|screen|dashboard"; "i"))
-    )]
-  ')
-  backend_stories=$(printf '%s' "$merged_array" | jq '
-    [.[] | select(
-      ((.implementation.files // []) | any(
-        test("schema|migration|model|backend|api|endpoint|server|database|db/") or
-        test("\\.(rb|py|go|java|kt|rs)$") or
-        test("controllers?/") or test("services?/") or test("repositories?/")
-      )) or
-      ((.title + " " + (.description // "")) | test("Schema|Migration|Backend|API|Endpoint|Model|Database|Service|Repository"; "i")) or
-      # Any story not clearly frontend goes to backend
-      (((.implementation.files // []) | any(
-        test("\\.(tsx|jsx)$") or test("components?/") or test("pages?/") or test("views?/") or
-        test("frontend") or test("ui/") or test("client/") or test("app/")
-      )) | not)
-    )]
-  ')
-
-  # Deduplicate: if a story appears in both, prefer frontend for UI stories
-  # Actually re-assign: stories explicitly UI → frontend, all others → backend
-  # Simpler and more deterministic: frontend = stories matching UI patterns; backend = the rest
-  frontend_stories=$(printf '%s' "$merged_array" | jq '
-    [.[] | select(
+  # Partition by project-aware majority vote, with a monorepo guard:
+  # 1. Tag every story with its own heuristic frontend verdict (_fe) using the
+  #    same file-pattern/title predicate that decided the split before this
+  #    change (implementation.files matching tsx/jsx/components//pages//
+  #    frontend//ui//client/, OR title+description matching the UI/Frontend/
+  #    Component/Page/View/React/Tailwind keyword set).
+  # 2. Normalize .project for grouping/counting only (trim whitespace, strip
+  #    one trailing slash, blank/whitespace-only treated as absent) -- never
+  #    write the normalized form back onto the story; .project must survive
+  #    verbatim into the output files.
+  # 3. When >= 2 distinct normalized projects are present across the merged
+  #    array, decide each project group's side by strict majority of its
+  #    members' own _fe verdicts (ties go to backend, preserving the old
+  #    "not clearly frontend goes to backend" bias). This is what lets a
+  #    project-tagged docs-only story that fails the heuristic alone still
+  #    ride into frontend-tasks.json with its web-app siblings.
+  # 4. Below that threshold -- including "no story has .project" -- every
+  #    story falls back to its own _fe verdict, so a single-project (or
+  #    project-less) merge produces byte-identical output to pure per-story
+  #    heuristic classification (monorepo guard; keeps TC8/TC12 unchanged).
+  local tagged_stories
+  tagged_stories=$(printf '%s' "$merged_array" | jq '
+    def norm_project:
+      if . == null then null
+      else
+        (. | gsub("^\\s+|\\s+$"; "")) as $t |
+        if $t == "" then null
+        elif ($t | endswith("/")) then $t[0:-1]
+        else $t
+        end
+      end;
+    def fe_heuristic:
       ((.implementation.files // []) | any(
         test("\\.(tsx|jsx)$") or test("components?/") or test("pages?/") or
         test("frontend/") or test("ui/") or test("client/")
       )) or
-      ((.title + " " + (.description // "")) | test("\\b(UI|Frontend|Component|Page|View|React|Tailwind)\\b"; "i"))
-    )]
+      ((.title + " " + (.description // "")) | test("\\b(UI|Frontend|Component|Page|View|React|Tailwind)\\b"; "i"));
+    [.[] | . + {_fe: fe_heuristic}] as $tagged |
+    ([$tagged[] | (.project | norm_project)] | map(select(. != null)) | unique) as $distinct_projects |
+    if ($distinct_projects | length) >= 2 then
+      ($tagged
+        | map(select((.project | norm_project) != null))
+        | group_by(.project | norm_project)
+        | map({key: (.[0].project | norm_project), value: ((map(select(._fe)) | length) * 2 > length)})
+        | from_entries
+      ) as $side_by_project |
+      [$tagged[] | . as $s | ($s.project | norm_project) as $p |
+        $s + {_side: (if $p == null then $s._fe else $side_by_project[$p] end)}]
+    else
+      [$tagged[] | . + {_side: ._fe}]
+    end
   ')
-  backend_stories=$(printf '%s' "$merged_array" | jq '
-    (map(.id)) as $all_ids |
-    '"$(printf '%s' "$frontend_stories" | jq '[.[] | .id]')"' as $frontend_ids |
-    [.[] | select((.id as $id | $frontend_ids | index($id)) == null)]
-  ')
+
+  # Bipartition: two select() passes over the single tagged-and-sided array,
+  # so every story id structurally lands in exactly one output (never lost,
+  # never duplicated) rather than incidentally so.
+  local frontend_stories backend_stories
+  frontend_stories=$(printf '%s' "$tagged_stories" | jq '[.[] | select(._side == true)]')
+  backend_stories=$(printf '%s' "$tagged_stories" | jq '[.[] | select(._side == false)]')
 
   # Re-assign unique IDs: frontend US-001 ... US-N, backend US-(N+1) ... US-M
   local fe_count be_count
@@ -5468,7 +5477,7 @@ _story_merge_write_split() {
         } +
         (if ($smells | length) > 0 then {smellWarnings: $smells} else {} end)
       ),
-      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors) | (.status //= "pending")]
+      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors) | del(._fe) | del(._side) | (.status //= "pending")]
     }
   ')
   local tmp_fe
@@ -5501,7 +5510,7 @@ _story_merge_write_split() {
         } +
         (if ($smells | length) > 0 then {smellWarnings: $smells} else {} end)
       ),
-      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors) | (.status //= "pending")]
+      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors) | del(._fe) | del(._side) | (.status //= "pending")]
     }
   ')
   local tmp_be
@@ -7141,7 +7150,14 @@ COMMANDS:
                               --split full-stack writes two output files:
                               <base>-frontend-tasks.json and
                               <base>-backend-tasks.json with unique IDs, rebuilt
-                              dependsOn, and independent wave numbers.
+                              dependsOn, and independent wave numbers. Partition:
+                              group stories by normalized .project, decide each
+                              group's side by strict majority vote of its
+                              members' own file-pattern/title heuristic verdict
+                              (ties go to backend); below 2 distinct normalized
+                              projects (monorepo guard, incl. no .project at
+                              all) every story falls back to its own heuristic
+                              verdict instead.
                               --phase-aware (only meaningful with --split
                               full-stack): the --output basename already ends in
                               "-tasks" (phase-scoped output, e.g.
