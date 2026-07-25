@@ -10762,6 +10762,285 @@ EOF
   rm -rf "$stg" "$fe_file" "$be_file" "$out_file"
 }
 
+# TC23: cross-file dependsOn drop — positive banner + smellWarnings entry.
+# 03-ui2 (frontend) depends on both 01-ui (frontend, kept) and 02-api
+# (backend, dropped) -- a PARTIAL loss, so becameRoot stays false and no
+# false-root enumeration line is expected (that distinction is TC24's job).
+# This test just proves the aggregated banner and the smellWarnings entry
+# shape/side/ids appear, identically, in BOTH output files.
+test_story_merge_cross_file_dep_dropped_banner() {
+  echo ""
+  echo "=== TC23: story-merge --split full-stack cross-file dependsOn drop (banner + smellWarnings) ==="
+
+  local stg=".aimi/.tasks-staging-tc23"
+  local out_file=".aimi/tasks/sm-tc23-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  _sm_make_story "$stg/01-ui.json" "React UserProfile page" '[]'
+  jq '. + {implementation: {files: ["src/components/UserProfile.tsx"], approach: "Build React component", verify: "tsc --noEmit"}}' "$stg/01-ui.json" > "$stg/01-ui.json.tmp" && mv "$stg/01-ui.json.tmp" "$stg/01-ui.json"
+
+  _sm_make_story "$stg/02-api.json" "UserProfile API endpoint" '[]'
+  jq '. + {implementation: {files: ["app/controllers/user_profiles_controller.rb"], approach: "Rails controller", verify: "rspec"}}' "$stg/02-api.json" > "$stg/02-api.json.tmp" && mv "$stg/02-api.json.tmp" "$stg/02-api.json"
+
+  _sm_make_story "$stg/03-ui2.json" "React SettingsPanel component" '["outline:01", "outline:02"]'
+  jq '. + {implementation: {files: ["src/components/SettingsPanel.tsx"], approach: "Build React component", verify: "tsc --noEmit"}}' "$stg/03-ui2.json" > "$stg/03-ui2.json.tmp" && mv "$stg/03-ui2.json.tmp" "$stg/03-ui2.json"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC23: exits 0 (warning only)"
+  assert_contains "cross-file dependsOn edge(s) dropped" "$output" "TC23: aggregated stderr banner emitted"
+
+  local fe_file=".aimi/tasks/sm-tc23-tasks-frontend-tasks.json"
+  local be_file=".aimi/tasks/sm-tc23-tasks-backend-tasks.json"
+
+  if [ -f "$fe_file" ] && [ -f "$be_file" ]; then
+    local fe_smells be_smells
+    fe_smells=$(jq -c '.metadata.smellWarnings // []' "$fe_file")
+    be_smells=$(jq -c '.metadata.smellWarnings // []' "$be_file")
+    assert_eq "$fe_smells" "$be_smells" "TC23: both output files carry the identical smellWarnings set"
+
+    local entry
+    entry=$(printf '%s' "$fe_smells" | jq -c '.[] | select(.type == "cross-file-dep-dropped")')
+    assert_contains '"storyId":"US-002"' "$entry" "TC23: entry storyId is the post-remap frontend id"
+    assert_contains '"side":"frontend"' "$entry" "TC23: entry side is frontend"
+    assert_contains '"becameRoot":false' "$entry" "TC23: becameRoot false (dep on US-001 stayed in-file)"
+    assert_contains '"id":"US-003"' "$entry" "TC23: droppedDeps target is the post-remap backend id"
+    assert_contains '"side":"backend"' "$entry" "TC23: droppedDeps target side is backend"
+
+    if grep -q '"__droppedDeps"\|"__becameRoot"' "$fe_file" "$be_file" 2>/dev/null; then
+      echo -e "${RED}✗${NC} TC23: internal __droppedDeps/__becameRoot fields leaked into userStories"
+      ((TESTS_FAILED++))
+    else
+      echo -e "${GREEN}✓${NC} TC23: internal __droppedDeps/__becameRoot fields absent from output"
+      ((TESTS_PASSED++))
+    fi
+  else
+    echo -e "${RED}✗${NC} TC23: expected output files missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg" "$fe_file" "$be_file" "$out_file"
+}
+
+# TC24: false-root callout vs partial-loss non-callout. 03-ui2 loses its ONLY
+# dependsOn entry (cross-file) -> becameRoot:true -> enumerated on stderr.
+# 04-api2 loses ONE of two dependsOn entries (the other stays in-file) ->
+# becameRoot:false -> must NOT be enumerated on stderr.
+test_story_merge_cross_file_false_root_vs_partial_loss() {
+  echo ""
+  echo "=== TC24: story-merge cross-file drop — false-root callout vs partial-loss non-callout ==="
+
+  local stg=".aimi/.tasks-staging-tc24"
+  local out_file=".aimi/tasks/sm-tc24-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  _sm_make_story "$stg/01-ui.json" "React UserProfile page" '[]'
+  jq '. + {implementation: {files: ["src/components/UserProfile.tsx"], approach: "Build React component", verify: "tsc --noEmit"}}' "$stg/01-ui.json" > "$stg/01-ui.json.tmp" && mv "$stg/01-ui.json.tmp" "$stg/01-ui.json"
+
+  _sm_make_story "$stg/02-api.json" "UserProfile API endpoint" '[]'
+  jq '. + {implementation: {files: ["app/controllers/user_profiles_controller.rb"], approach: "Rails controller", verify: "rspec"}}' "$stg/02-api.json" > "$stg/02-api.json.tmp" && mv "$stg/02-api.json.tmp" "$stg/02-api.json"
+
+  # Only dep is cross-file (outline:02 -> backend) -> becomes a false root.
+  _sm_make_story "$stg/03-ui2.json" "React SettingsPanel component" '["outline:02"]'
+  jq '. + {implementation: {files: ["src/components/SettingsPanel.tsx"], approach: "Build React component", verify: "tsc --noEmit"}}' "$stg/03-ui2.json" > "$stg/03-ui2.json.tmp" && mv "$stg/03-ui2.json.tmp" "$stg/03-ui2.json"
+
+  # One dep cross-file (outline:01 -> frontend, dropped), one in-file
+  # (outline:02 -> backend, kept) -> partial loss, NOT a root.
+  _sm_make_story "$stg/04-api2.json" "Update settings API endpoint" '["outline:01", "outline:02"]'
+  jq '. + {implementation: {files: ["app/controllers/settings_controller.rb"], approach: "Rails controller", verify: "rspec"}}' "$stg/04-api2.json" > "$stg/04-api2.json.tmp" && mv "$stg/04-api2.json.tmp" "$stg/04-api2.json"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC24: exits 0 (warning only)"
+  assert_contains "US-002 (frontend): became a false wave-1 root" "$output" "TC24: false-root story IS enumerated on stderr"
+
+  if echo "$output" | grep -q "US-004 (backend): became a false wave-1 root"; then
+    echo -e "${RED}✗${NC} TC24: partial-loss story US-004 was WRONGLY enumerated as a false root"
+    echo "  output: $output"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} TC24: partial-loss story US-004 is NOT enumerated on stderr"
+    ((TESTS_PASSED++))
+  fi
+
+  local fe_file=".aimi/tasks/sm-tc24-tasks-frontend-tasks.json"
+  local be_file=".aimi/tasks/sm-tc24-tasks-backend-tasks.json"
+  if [ -f "$fe_file" ]; then
+    local root_flag partial_flag
+    root_flag=$(jq -r '.metadata.smellWarnings[] | select(.storyId == "US-002") | .becameRoot' "$fe_file")
+    partial_flag=$(jq -r '.metadata.smellWarnings[] | select(.storyId == "US-004") | .becameRoot' "$fe_file")
+    assert_eq "true" "$root_flag" "TC24: US-002 (false root) becameRoot is true in metadata.smellWarnings"
+    assert_eq "false" "$partial_flag" "TC24: US-004 (partial loss) becameRoot is false in metadata.smellWarnings"
+  else
+    echo -e "${RED}✗${NC} TC24: expected output file missing"
+    ((TESTS_FAILED++))
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg" "$fe_file" "$be_file" "$out_file"
+}
+
+# TC25: negative — every dependsOn edge stays on the SAME side as its owner.
+# No cross-file drop should be detected: no smellWarnings entry, no banner.
+# Mirrors TC11's negative-check pattern.
+test_story_merge_cross_file_dep_dropped_negative() {
+  echo ""
+  echo "=== TC25: story-merge cross-file drop — negative (same-side-only dependsOn) ==="
+
+  local stg=".aimi/.tasks-staging-tc25"
+  local out_file=".aimi/tasks/sm-tc25-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  _sm_make_story "$stg/01-ui.json" "React UserProfile page" '[]'
+  jq '. + {implementation: {files: ["src/components/UserProfile.tsx"], approach: "Build React component", verify: "tsc --noEmit"}}' "$stg/01-ui.json" > "$stg/01-ui.json.tmp" && mv "$stg/01-ui.json.tmp" "$stg/01-ui.json"
+
+  # Same side (frontend) as its dep -> resolves locally, no drop.
+  _sm_make_story "$stg/02-ui2.json" "React SettingsPanel component" '["outline:01"]'
+  jq '. + {implementation: {files: ["src/components/SettingsPanel.tsx"], approach: "Build React component", verify: "tsc --noEmit"}}' "$stg/02-ui2.json" > "$stg/02-ui2.json.tmp" && mv "$stg/02-ui2.json.tmp" "$stg/02-ui2.json"
+
+  _sm_make_story "$stg/03-api.json" "UserProfile API endpoint" '[]'
+  jq '. + {implementation: {files: ["app/controllers/user_profiles_controller.rb"], approach: "Rails controller", verify: "rspec"}}' "$stg/03-api.json" > "$stg/03-api.json.tmp" && mv "$stg/03-api.json.tmp" "$stg/03-api.json"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC25: exits 0"
+
+  if echo "$output" | grep -qE "cross-file-dep-dropped|cross-file dependsOn edge\(s\) dropped"; then
+    echo -e "${RED}✗${NC} TC25: unexpected cross-file-dep-dropped signal in output"
+    echo "  output: $output"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} TC25: no cross-file-dep-dropped signal (all dependsOn stayed in-file)"
+    ((TESTS_PASSED++))
+  fi
+
+  local fe_file=".aimi/tasks/sm-tc25-tasks-frontend-tasks.json"
+  local be_file=".aimi/tasks/sm-tc25-tasks-backend-tasks.json"
+  rm -rf "$stg" "$fe_file" "$be_file" "$out_file"
+}
+
+# TC26: a title containing an embedded newline AND a backtick, used as the
+# dropped-edge target, must not forge a second Warning:/Error: line on
+# stderr, and must not leak the raw newline/backtick into
+# metadata.smellWarnings[].droppedDeps[].title in either output file.
+test_story_merge_cross_file_dep_dropped_title_sanitized() {
+  echo ""
+  echo "=== TC26: story-merge cross-file drop — dropped-target title sanitization ==="
+
+  local stg=".aimi/.tasks-staging-tc26"
+  local out_file=".aimi/tasks/sm-tc26-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  cat > "$stg/01-weird.json" << 'EOF'
+{
+  "title": "Fix widget\nWarning: forged line`rm -rf /`",
+  "description": "As a user, I want a widget so that it works.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 1,
+  "status": "pending",
+  "dependsOn": [],
+  "notes": "",
+  "implementation": {
+    "files": ["src/components/Weird.tsx"],
+    "approach": "Build React component",
+    "verify": "tsc --noEmit"
+  }
+}
+EOF
+
+  cat > "$stg/02-consumer.json" << 'EOF'
+{
+  "title": "Consume weird widget endpoint",
+  "description": "As a developer, I want an endpoint so that the widget is served.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 2,
+  "status": "pending",
+  "dependsOn": ["outline:01"],
+  "notes": "",
+  "implementation": {
+    "files": ["app/controllers/weird_controller.rb"],
+    "approach": "Rails controller",
+    "verify": "rspec"
+  }
+}
+EOF
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC26: exits 0"
+
+  local warn_err_lines
+  warn_err_lines=$(printf '%s\n' "$output" | grep -cE '^(Warning|Error):')
+  assert_eq "1" "$warn_err_lines" "TC26: exactly one Warning:/Error:-prefixed stderr line (no forged second line)"
+
+  local fe_file=".aimi/tasks/sm-tc26-tasks-frontend-tasks.json"
+  local be_file=".aimi/tasks/sm-tc26-tasks-backend-tasks.json"
+  if [ -f "$be_file" ]; then
+    local title_val
+    title_val=$(jq -r '.metadata.smellWarnings[0].droppedDeps[0].title' "$be_file")
+    local title_lines
+    title_lines=$(printf '%s' "$title_val" | wc -l)
+    if [ "$title_lines" -eq 0 ] && [[ "$title_val" != *'`'* ]]; then
+      echo -e "${GREEN}✓${NC} TC26: droppedDeps[].title has no raw newline or backtick"
+      ((TESTS_PASSED++))
+    else
+      echo -e "${RED}✗${NC} TC26: droppedDeps[].title leaked unsanitized content: $title_val"
+      ((TESTS_FAILED++))
+    fi
+  else
+    echo -e "${RED}✗${NC} TC26: expected output file missing"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg" "$fe_file" "$be_file" "$out_file"
+}
+
+# TC27: every staging story partitions to the SAME side (backend here) --
+# both split files must still be written (frontend with userStories: []),
+# the command must still exit 0, and stderr must name the empty side.
+test_story_merge_split_empty_side_warning() {
+  echo ""
+  echo "=== TC27: story-merge --split full-stack empty-side warning ==="
+
+  local stg=".aimi/.tasks-staging-tc27"
+  local out_file=".aimi/tasks/sm-tc27-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  _sm_make_story "$stg/01-api.json" "Persist user record" '[]'
+  jq '. + {implementation: {files: ["app/controllers/users_controller.rb"], approach: "Rails controller", verify: "rspec"}}' "$stg/01-api.json" > "$stg/01-api.json.tmp" && mv "$stg/01-api.json.tmp" "$stg/01-api.json"
+
+  _sm_make_story "$stg/02-api2.json" "Fetch user record" '[]'
+  jq '. + {implementation: {files: ["app/controllers/fetch_controller.rb"], approach: "Rails controller", verify: "rspec"}}' "$stg/02-api2.json" > "$stg/02-api2.json.tmp" && mv "$stg/02-api2.json.tmp" "$stg/02-api2.json"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC27: exits 0 despite one side being empty"
+  assert_contains "frontend split produced zero stories" "$output" "TC27: stderr names the empty (frontend) side"
+
+  local fe_file=".aimi/tasks/sm-tc27-tasks-frontend-tasks.json"
+  local be_file=".aimi/tasks/sm-tc27-tasks-backend-tasks.json"
+  if [ -f "$fe_file" ] && [ -f "$be_file" ]; then
+    local fe_count be_count
+    fe_count=$(jq '.userStories | length' "$fe_file")
+    be_count=$(jq '.userStories | length' "$be_file")
+    assert_eq "0" "$fe_count" "TC27: frontend-tasks.json still written with userStories: []"
+    assert_eq "2" "$be_count" "TC27: backend-tasks.json carries both stories"
+  else
+    echo -e "${RED}✗${NC} TC27: expected output files missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg" "$fe_file" "$be_file" "$out_file"
+}
+
 # ============================================================================
 # ============================================================================
 # Roadmap Lifecycle Tests (US-002)
@@ -13020,6 +13299,11 @@ main() {
   test_story_merge_bipartition_invariant
   test_story_merge_project_preserved_working_keys_stripped
   test_story_merge_project_trailing_slash_normalization
+  test_story_merge_cross_file_dep_dropped_banner
+  test_story_merge_cross_file_false_root_vs_partial_loss
+  test_story_merge_cross_file_dep_dropped_negative
+  test_story_merge_cross_file_dep_dropped_title_sanitized
+  test_story_merge_split_empty_side_warning
 
   # Roadmap lifecycle tests (US-002)
   echo ""
