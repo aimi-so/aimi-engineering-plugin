@@ -116,11 +116,37 @@ Build the PR from git state directly — commits and diff against the base branc
 
 **Skip this step entirely when `$CURRENT_BRANCH` is already set (from `--branch`)** — reuse that value instead of resolving HEAD.
 
+A bare HEAD read is not reliable here: after a container-mode `/aimi:execute` run, the **Main Working Tree Untouched Invariant** (`commands/references/container-execution.md:57`) means the main working tree was never checked out onto the feature branch, and Step 5's teardown (`container-execution.md:198`) removes the container with `--keep-branch`, leaving the feature branch checked out nowhere. HEAD stays parked on the base branch for the whole run — trusting it as-is would open a PR of the base branch against its own grandparent. Resolve both HEAD and the repository's default branch up front, then decide which one is actually the feature branch:
+
 ```bash
-git rev-parse --abbrev-ref HEAD
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+DEFAULT_BRANCH=$($AIMI_CLI detect-default-branch 2>/dev/null)
 ```
 
-Store as `$CURRENT_BRANCH`.
+**Case A — HEAD is already on a real feature branch.** When `$CURRENT_BRANCH` is non-empty, is not the literal string `HEAD` (detached), and differs from `$DEFAULT_BRANCH`, reuse it unchanged — no behavior change from before:
+
+```bash
+: # CURRENT_BRANCH already holds the right value; nothing to do
+```
+
+**Case B — HEAD is on `$DEFAULT_BRANCH` (or detached).** This is the normal container-mode end state. Resolve the feature branch from the active tasks file's `metadata.branchName` instead of trusting HEAD:
+
+```bash
+CANDIDATE_BRANCH=$($AIMI_CLI metadata 2>/dev/null | jq -r '.branchName // empty' 2>/dev/null)
+if [ -n "$CANDIDATE_BRANCH" ] && echo "$CANDIDATE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'; then
+  CURRENT_BRANCH="$CANDIDATE_BRANCH"
+else
+  echo "Warning: No active tasks file found (or its branchName is missing/invalid) and HEAD is on $DEFAULT_BRANCH — proceeding with the checked-out branch, which may be the base branch itself." >&2
+fi
+```
+
+This reuses the single guarded `$AIMI_CLI metadata` call already established at Step 4a for `.title`, rather than `commands/review.md`'s two-step `find-tasks` + separate `jq -r '.metadata.branchName'`. That is safe for the same reason `find-tasks` is safe: `cmd_metadata`'s `get_tasks_file` (`aimi-cli.sh:507`) never calls `init-session`, so it satisfies `commands/review.md:63`'s concurrent-session-safety rationale — it never repoints a live `/aimi:execute` session's tracked tasks file. Its only state write is the narrow self-heal path (`aimi-cli.sh:511-521`) that fires only when the recorded state pointer already points to a deleted file, correcting a broken pointer rather than clobbering a valid one.
+
+Store the resolved value as `$CURRENT_BRANCH`.
+
+**Why Step 1c's skip condition is not widened to cover this case:** at Step 1c's point in the flow, neither `$DEFAULT_BRANCH` nor the Case A/Case B outcome exist yet — both are computed here in Step 2a, which runs after 1c. Widening 1c's skip condition would require moving branch detection earlier, out of this story's scope. The check is also advisory-only (it warns, never stops) and vacuously harmless in container mode, since the Main Working Tree Untouched Invariant keeps the CWD clean throughout the run regardless.
 
 ### 2b. Detect parent branch via `detect-parent-branch`
 
