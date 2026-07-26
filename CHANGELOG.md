@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.114.0] - 2026-07-26
+
+### Added
+
+- **`detect-parent-branch` aimi-cli.sh verb.** New `aimi-cli.sh detect-parent-branch <branch>` resolves a branch's parent by walking `git log --first-parent` ref decorations as individual tokens — never as whole lines or substrings — matching candidates against the current branch by exact token equality, then verifies the surviving candidate via `git merge-base` before returning it. Falls back to the default branch (`verified:false, source:"default-branch"`) when no candidate survives verification. Output shape: `{branch, base, verified, source}`. Extracted `_resolve_default_branch` as a shared private helper reused by the new verb, and covered by 29 new `test-aimi-cli.sh` assertions spanning all six defect/design cases.
+
+### Fixed
+
+- **`/aimi:open-pr` resolved the wrong base branch, and under container mode the wrong feature branch too (resolves issue #69, `aimi-so/aimi-engineering-plugin`).** Two independent defects failed silently. First, Step 2b's parent-branch detection piped `git log --first-parent --pretty=format:'%D'` through `grep -v "HEAD"` and `grep -v "$CURRENT_BRANCH"` (`commands/open-pr.md:128`) — line and substring filters where token filters were required, since `%D` packs every ref decorating a commit onto one comma-separated line. A parent decorated `HEAD -> <parent>` — exactly what git writes when the parent branch is the one checked out — lost its entire line to the first filter, and the second filter dropped any parent branch that merely contained the current branch's name as a substring (`feat/auth-base` vanishing when the current branch was `feat/auth`). Verified live in this repo: the old pipeline returned a branch 125 commits behind the true base, and because the result was non-empty it silently suppressed the default-branch fallback that would otherwise have caught the failure. Second, Step 2a resolved the feature branch via `git rev-parse --abbrev-ref HEAD`, which is wrong under container execution mode — the Main Working Tree Untouched Invariant plus `--keep-branch` teardown leave the feature branch checked out nowhere and HEAD parked on the base branch. Since `/aimi:plan` writes `"container"` by default for fresh flat tasks files, this was the default execution path, not an edge case; verified live, the old read resolved the base branch where the new one resolves the feature branch.
+- **`/aimi:open-pr` now reuses the plugin's shared detection primitives instead of maintaining its own.** Step 2b/2c/2d call the new `detect-parent-branch` verb (reading `.base`, warning when `verified` is `false`) instead of the in-markdown grep pipeline; Step 2c uses the shared cached `$AIMI_CLI detect-default-branch` instead of a `gh repo view --json defaultBranchRef` network round-trip — `open-pr.md` was the only command in the repo still doing its own network round-trip for the default branch. Step 2a now resolves the branch from `metadata.branchName` via a guarded `$AIMI_CLI metadata` call (Case A: HEAD is already a real feature branch, reuse it; Case B: HEAD is on the default branch or detached, read the tasks file), mirroring the Case A/Case B pattern `commands/review.md` already uses for the identical problem.
+
 ## [1.113.0] - 2026-07-26
 
 ### Changed

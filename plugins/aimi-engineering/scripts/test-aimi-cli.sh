@@ -6002,6 +6002,236 @@ test_setup_branch() {
 }
 
 # ============================================================================
+# Detect Parent Branch Fixture Helper
+# ============================================================================
+
+# Creates a minimal bare remote + local clone with a single commit on main,
+# with the bare remote's HEAD pointed at refs/heads/main so `git remote show
+# origin` can resolve a default branch (a fresh --bare init defaults to
+# master, which is never pushed here, leaving "HEAD branch: (unknown)"
+# otherwise). Reuses setup_git_fixture's globals (GIT_FIXTURE_REMOTE /
+# GIT_FIXTURE_LOCAL) so the existing teardown_git_fixture applies unchanged.
+# Kept separate from setup_git_fixture because detect-parent-branch tests
+# need precise, uncluttered control over decoration history --
+# setup_git_fixture's merged/unmerged branches would add unrelated decorated
+# commits to every ancestry chain.
+setup_parent_branch_fixture() {
+  GIT_FIXTURE_REMOTE=$(mktemp -d)
+  GIT_FIXTURE_LOCAL=$(mktemp -d)
+
+  git init --bare "$GIT_FIXTURE_REMOTE" >/dev/null 2>&1
+  git --git-dir="$GIT_FIXTURE_REMOTE" symbolic-ref HEAD refs/heads/main
+
+  git clone "$GIT_FIXTURE_REMOTE" "$GIT_FIXTURE_LOCAL" >/dev/null 2>&1
+
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout -b main >/dev/null 2>&1
+  echo "init" > README.md
+  git add README.md
+  git commit -m "Initial commit" >/dev/null 2>&1
+  git push -u origin main >/dev/null 2>&1
+
+  # Create .aimi/ directory so find_aimi_root succeeds
+  mkdir -p .aimi/tasks
+
+  popd >/dev/null
+}
+
+# ============================================================================
+# Detect Parent Branch Tests
+# ============================================================================
+
+test_detect_parent_branch() {
+  echo ""
+  echo "=== Testing detect-parent-branch command ==="
+
+  local stdout stderr_file stderr_output exit_code
+  local base_out verified_out source_out branch_out
+
+  # --- Case (a): DEFECT 1 fix — parent is the currently checked-out branch,
+  #     decorated "HEAD -> <parent>, origin/<parent>" on the first ancestor
+  #     commit. Must resolve to the parent, not some further ancestor. ---
+  setup_parent_branch_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+
+  git checkout -b feat/parent >/dev/null 2>&1
+  echo "p" > p.txt && git add p.txt && git commit -m "parent work" >/dev/null 2>&1
+  git push origin feat/parent >/dev/null 2>&1
+  git checkout -b feat/child >/dev/null 2>&1
+  echo "c" > c.txt && git add c.txt && git commit -m "child work" >/dev/null 2>&1
+  git checkout feat/parent >/dev/null 2>&1
+
+  stdout=$("$CLI" detect-parent-branch feat/child) && exit_code=0 || exit_code=$?
+  branch_out=$(echo "$stdout" | jq -r '.branch')
+  base_out=$(echo "$stdout" | jq -r '.base')
+  verified_out=$(echo "$stdout" | jq -r '.verified')
+  source_out=$(echo "$stdout" | jq -r '.source')
+  assert_exit_code "0" "$exit_code" "detect-parent-branch (a) checked-out-parent decoration: exit code"
+  assert_eq "feat/child" "$branch_out" "detect-parent-branch (a): branch echoed"
+  assert_eq "feat/parent" "$base_out" "detect-parent-branch (a): base is the checked-out parent, not a further ancestor"
+  assert_eq "true" "$verified_out" "detect-parent-branch (a): verified true"
+  assert_eq "decoration" "$source_out" "detect-parent-branch (a): source is decoration"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Case (b): DEFECT 3 fix — parent branch name (feat/auth-base)
+  #     contains the current branch name (feat/auth) as a substring. The old
+  #     unanchored grep -v "feat/auth" would have dropped this line. ---
+  setup_parent_branch_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+
+  git checkout -b feat/auth-base >/dev/null 2>&1
+  echo "b" > b.txt && git add b.txt && git commit -m "auth base work" >/dev/null 2>&1
+  git checkout -b feat/auth >/dev/null 2>&1
+  echo "a" > a.txt && git add a.txt && git commit -m "auth work" >/dev/null 2>&1
+  git checkout feat/auth-base >/dev/null 2>&1
+
+  stdout=$("$CLI" detect-parent-branch feat/auth) && exit_code=0 || exit_code=$?
+  base_out=$(echo "$stdout" | jq -r '.base')
+  verified_out=$(echo "$stdout" | jq -r '.verified')
+  source_out=$(echo "$stdout" | jq -r '.source')
+  assert_exit_code "0" "$exit_code" "detect-parent-branch (b) substring-alike sibling: exit code"
+  assert_eq "feat/auth-base" "$base_out" "detect-parent-branch (b): base survives despite containing branch name as substring"
+  assert_eq "true" "$verified_out" "detect-parent-branch (b): verified true"
+  assert_eq "decoration" "$source_out" "detect-parent-branch (b): source is decoration"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Case (c): detached-HEAD decoration — token list is exactly
+  #     "HEAD, feat/foo" (bare HEAD token, no arrow). The bare HEAD token
+  #     must be skipped and the real branch token used. ---
+  setup_parent_branch_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+
+  git checkout -b feat/foo >/dev/null 2>&1
+  echo "f" > f.txt && git add f.txt && git commit -m "foo work" >/dev/null 2>&1
+  git checkout -b feat/target >/dev/null 2>&1
+  echo "t" > t.txt && git add t.txt && git commit -m "target work" >/dev/null 2>&1
+  git checkout "$(git rev-parse feat/foo)" >/dev/null 2>&1
+
+  stdout=$("$CLI" detect-parent-branch feat/target) && exit_code=0 || exit_code=$?
+  base_out=$(echo "$stdout" | jq -r '.base')
+  verified_out=$(echo "$stdout" | jq -r '.verified')
+  source_out=$(echo "$stdout" | jq -r '.source')
+  assert_exit_code "0" "$exit_code" "detect-parent-branch (c) detached-HEAD decoration: exit code"
+  assert_eq "feat/foo" "$base_out" "detect-parent-branch (c): bare HEAD token skipped, real branch token used"
+  assert_eq "true" "$verified_out" "detect-parent-branch (c): verified true"
+  assert_eq "decoration" "$source_out" "detect-parent-branch (c): source is decoration"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Case (d): own-tip decoration is skipped — target's own tip commit is
+  #     decorated "origin/<branch>, <branch>"; both tokens must drop (exact
+  #     match, never substring) and the walk continues to the next ancestor
+  #     rather than returning the branch as its own parent. ---
+  setup_parent_branch_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+
+  git checkout -b feat/lonely >/dev/null 2>&1
+  echo "l" > l.txt && git add l.txt && git commit -m "lonely work" >/dev/null 2>&1
+  git push origin feat/lonely >/dev/null 2>&1
+  git checkout main >/dev/null 2>&1
+
+  stdout=$("$CLI" detect-parent-branch feat/lonely) && exit_code=0 || exit_code=$?
+  base_out=$(echo "$stdout" | jq -r '.base')
+  verified_out=$(echo "$stdout" | jq -r '.verified')
+  source_out=$(echo "$stdout" | jq -r '.source')
+  assert_exit_code "0" "$exit_code" "detect-parent-branch (d) own-tip decoration skip: exit code"
+  assert_eq "main" "$base_out" "detect-parent-branch (d): never returns branch as its own parent -- walk continues to real ancestor"
+  assert_eq "true" "$verified_out" "detect-parent-branch (d): verified true"
+  assert_eq "decoration" "$source_out" "detect-parent-branch (d): source is decoration"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Case (e): no-decoration fallback — an orphan branch whose entire
+  #     first-parent history has zero non-empty/non-HEAD/non-tag/non-self
+  #     decoration tokens anywhere. Must fall back to the default branch,
+  #     unverified. ---
+  setup_parent_branch_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+
+  git checkout --orphan feat/no-decoration >/dev/null 2>&1
+  echo "o1" > o1.txt && git add o1.txt && git commit -m "orphan commit 1" >/dev/null 2>&1
+  echo "o2" > o2.txt && git add o2.txt && git commit -m "orphan commit 2" >/dev/null 2>&1
+
+  stdout=$("$CLI" detect-parent-branch feat/no-decoration) && exit_code=0 || exit_code=$?
+  base_out=$(echo "$stdout" | jq -r '.base')
+  verified_out=$(echo "$stdout" | jq -r '.verified')
+  source_out=$(echo "$stdout" | jq -r '.source')
+  assert_exit_code "0" "$exit_code" "detect-parent-branch (e) no-decoration fallback: exit code"
+  assert_eq "main" "$base_out" "detect-parent-branch (e): falls back to the shared default-branch resolution"
+  assert_eq "false" "$verified_out" "detect-parent-branch (e): verified false on fallback"
+  assert_eq "default-branch" "$source_out" "detect-parent-branch (e): source is default-branch"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Case (f): merge-base rejection — a decoration token survives
+  #     normalization (origin/feat/sibling -> feat/sibling) but a LOCAL
+  #     branch of that same normalized name points to an unrelated,
+  #     divergent commit not on the target's first-parent lineage.
+  #     merge-base must reject it and fall back to the default branch. ---
+  setup_parent_branch_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+
+  git checkout -b feat/sibling >/dev/null 2>&1
+  echo "s" > s.txt && git add s.txt && git commit -m "sibling original work" >/dev/null 2>&1
+  git push origin feat/sibling >/dev/null 2>&1
+  git checkout -b feat/fbranch >/dev/null 2>&1
+  echo "fb" > fb.txt && git add fb.txt && git commit -m "fbranch work" >/dev/null 2>&1
+  # Delete the local feat/sibling (origin/feat/sibling still decorates the
+  # ancestor commit) and recreate it pointing at unrelated, divergent work.
+  git branch -D feat/sibling >/dev/null 2>&1
+  git checkout main >/dev/null 2>&1
+  git checkout -b feat/sibling >/dev/null 2>&1
+  echo "unrelated" > unrelated.txt && git add unrelated.txt && git commit -m "unrelated sibling work" >/dev/null 2>&1
+  git checkout main >/dev/null 2>&1
+
+  stdout=$("$CLI" detect-parent-branch feat/fbranch) && exit_code=0 || exit_code=$?
+  base_out=$(echo "$stdout" | jq -r '.base')
+  verified_out=$(echo "$stdout" | jq -r '.verified')
+  source_out=$(echo "$stdout" | jq -r '.source')
+  assert_exit_code "0" "$exit_code" "detect-parent-branch (f) merge-base rejection: exit code"
+  assert_eq "main" "$base_out" "detect-parent-branch (f): rejected candidate falls back to default branch"
+  assert_eq "false" "$verified_out" "detect-parent-branch (f): verified false on merge-base rejection"
+  assert_eq "default-branch" "$source_out" "detect-parent-branch (f): source is default-branch"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Error path: invalid branch argument ---
+  setup_parent_branch_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" detect-parent-branch '../bad' 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_output=$(cat "$stderr_file")
+  assert_exit_code "1" "$exit_code" "detect-parent-branch: invalid branch name — exit code"
+  assert_stderr_contains "Invalid branch name" "$stderr_output" "detect-parent-branch: invalid branch name — stderr message"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Error path: not a git repository ---
+  local non_git_dir
+  non_git_dir=$(mktemp -d)
+  mkdir -p "$non_git_dir/.aimi"
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" detect-parent-branch feat/test --project "$non_git_dir" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_output=$(cat "$stderr_file")
+  assert_exit_code "1" "$exit_code" "detect-parent-branch: not a git repo — exit code"
+  assert_stderr_contains "Not a git repository" "$stderr_output" "detect-parent-branch: not a git repo — stderr message"
+  rm -f "$stderr_file"
+  rm -rf "$non_git_dir"
+}
+
+# ============================================================================
 # Archive Task Tests
 # ============================================================================
 
@@ -13172,6 +13402,11 @@ main() {
   echo ""
   echo "--- Setup Branch Tests ---"
   test_setup_branch
+
+  # Detect-parent-branch tests — uses own git fixture (independent of TEST_DIR)
+  echo ""
+  echo "--- Detect Parent Branch Tests ---"
+  test_detect_parent_branch
 
   # Archive-task tests — each creates its own isolated temp dir
   echo ""
