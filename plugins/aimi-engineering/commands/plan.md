@@ -2370,7 +2370,7 @@ Use the Write tool to patch the output tasks.json with these fields merged into 
     "maxConcurrency": "number (optional, default 20)",
     "execution": "container|inline (optional; flat files only — /aimi:plan writes 'container' explicitly into every freshly generated flat file and omits the key entirely on phase-scoped files; /aimi:execute --container/--inline and /aimi:next --container/--inline can override and persist a flat file's value later — see commands/references/execution-mode.md for the full read/override contract)",
     "frontendOnly": "boolean (optional, true when frontend-only scope)",
-    "smellWarnings": "array (optional, written by story-merge Phase 4.2; each entry {type, storyId, symbols, message}; absent when no orphan-symbol smells detected)",
+    "smellWarnings": "array (optional; two entry shapes: {type: \"orphan-symbol\", storyId, symbols, message} written by story-merge Phase 4.2; and {type: \"cross-file-dep-dropped\", storyId, side, becameRoot, droppedDeps: [{id, side, title}], message} written by story-merge's _story_merge_write_split when --split full-stack drops a cross-file dependsOn edge — see Step 5 renderer below for both cases; absent when neither smell is detected)",
     "backendSpec": {
       "endpoints": [
         {
@@ -2544,7 +2544,7 @@ Specific obligations:
 - [ ] Full-stack: two files generated (`*-frontend-tasks.json` and `*-backend-tasks.json`) — produced by story-merge `--split full-stack`
 - [ ] Full-stack: each file has its own `branchName` (`type/[feature]-frontend`, `type/[feature]-backend`, or their `ROADMAP_MODE=true` phase-suffixed equivalents) — patched in Phase 4
 - [ ] Full-stack: story IDs are unique across both files (no ID collisions) — enforced by story-merge
-- [ ] Full-stack: no cross-file `dependsOn` references — each file's graph is self-contained — enforced by story-merge
+- [ ] Full-stack: no cross-file `dependsOn` references — each file's graph is self-contained (this invariant is unchanged) — enforced by story-merge; cross-file edges are still dropped, but are now surfaced (not silent) via one aggregated stderr banner plus a `cross-file-dep-dropped` entry in `metadata.smellWarnings` for every affected story
 - [ ] Full-stack: wave numbers computed independently per file (roots = wave 1 within each file) — enforced by story-merge
 - [ ] Frontend-only: single `*-frontend-tasks.json` with `metadata.frontendOnly: true`
 - [ ] Frontend-only: `metadata.backendSpec` contains `endpoints`, `dataModels`, `businessRules`, `businessContext`
@@ -2671,7 +2671,7 @@ Outline: [N] stories (edits: [M])
 [If prototypePaths non-empty]: Prototypes: [N] variant file(s) registered
 [If gaps found]: Gaps identified: [N] (captured as criteria/notes)
 [If audit unresolved non-empty]: Audit warnings: [N] cross-story issues
-[If metadata.smellWarnings non-empty]: Smell warnings: [N] orphan-symbol finding(s)
+[If metadata.smellWarnings non-empty]: Smell warnings: [N] finding(s)
 [If 10+ stories]: Warning: [N] stories generated. Consider splitting into smaller feature sets.
 [If parallel stories detected]: Parallel groups: [N] stories can run concurrently (max concurrency: [maxConcurrency])
 
@@ -2697,10 +2697,12 @@ Next steps:
 
 The `storyIdx` field is already constrained by the schema (`^[0-9]{2}$` or the `_audit` sentinel) and requires no sanitization. When `unresolved[]` is empty or Phase 3d.5 was skipped (fewer than 2 stories), omit the `Audit warnings` line and bullet list entirely — do not render an empty section.
 
-**Smell warnings line:** present only when the merged tasks.json has a non-empty `metadata.smellWarnings` array. This field is written by `story-merge` Phase 4.2 (orphan-symbol smell) when one or more stories introduce a named symbol that no sibling story references. `N` is the count of entries. Render each item as a bullet immediately after the `Smell warnings` line:
-- `[storyId] [type]: [symbols joined by comma] — [message]` — fields come from the `smellWarnings[]` entry schema `{type, storyId, symbols, message}`.
+**Smell warnings line:** present only when the merged tasks.json has a non-empty `metadata.smellWarnings` array. `N` is the count of entries. Render each item as a bullet immediately after the `Smell warnings` line, choosing the case that matches its `type`:
 
-No sanitization required: `type` and `message` are CLI-emitted literals (not derived from sub-agent output), and `storyId`/`symbols` are already filtered through the Phase 4.2 regex (`^[A-Za-z][A-Za-z0-9_]*$` for symbols, `^US-[0-9]{3}[a-z]?$` for storyId). When `metadata.smellWarnings` is absent or empty, omit the section entirely.
+- `type == "orphan-symbol"` — written by `story-merge` Phase 4.2 when one or more stories introduce a named symbol that no sibling story references: `[storyId] [type]: [symbols joined by comma] — [message]` — fields come from the entry schema `{type, storyId, symbols, message}`.
+- `type == "cross-file-dep-dropped"` — written by `story-merge`'s `_story_merge_write_split` (the `--split full-stack` cross-file dependsOn drop surfacing) when a story's `dependsOn` edge crosses the frontend/backend boundary and is dropped: `[storyId] ([side]): [message]` — fields come from the entry schema `{type, storyId, side, becameRoot, droppedDeps[], message}`. `droppedDeps[]` (each `{id, side, title}`) may optionally be rendered as a nested sub-bullet listing the dropped target(s); it is not required in the one-line form.
+
+Sanitization differs by type. For `orphan-symbol`: no sanitization required — `type` and `message` are CLI-emitted literals (not derived from sub-agent output), and `storyId`/`symbols` are already filtered through the Phase 4.2 regex (`^[A-Za-z][A-Za-z0-9_]*$` for symbols, `^US-[0-9]{3}[a-z]?$` for storyId). For `cross-file-dep-dropped`: `message` and `droppedDeps[].title` embed a sub-agent-authored story title, so this variant is NOT literal-safe the way `orphan-symbol` is — however, the CLI already runs both through `_rm_sanitize` (200-char cap) before write, so render them as-is without re-sanitizing. When `metadata.smellWarnings` is absent or empty, omit the section entirely.
 
 For split-file output (`--split full-stack`), `metadata.smellWarnings` is written to BOTH frontend and backend files; render once per file in Step 5 to keep the per-file summary self-contained.
 

@@ -39,10 +39,13 @@ Apply before writing tasks.json.
 - [ ] Gates only attached when heuristics clearly match; most stories have no gate
 
 ## Split-File Validations (when `implementationScope` is set)
+
+Full-stack split is executed by `aimi-cli.sh story-merge --split full-stack` (function `_story_merge_write_split`), invoked by `/aimi:plan` Phase 3e; the checks below describe what that command's output must satisfy, not an independently derivable split algorithm.
+
 - [ ] Full-stack: two files generated (`*-frontend-tasks.json` and `*-backend-tasks.json`)
 - [ ] Full-stack: each file has its own `branchName` (`type/[feature]-frontend`, `type/[feature]-backend`)
 - [ ] Full-stack: story IDs are unique across both files (no ID collisions)
-- [ ] Full-stack: no cross-file `dependsOn` references — each file's graph is self-contained
+- [ ] Full-stack: cross-file `dependsOn` references are removed (each file's graph is self-contained) — but not silently: story-merge emits an aggregated stderr banner (dropped-edge count + affected-story count) and records one `cross-file-dep-dropped` entry per affected story in `metadata.smellWarnings` of both output files
 - [ ] Full-stack: wave numbers computed independently per file (roots = wave 1 within each file)
 - [ ] Frontend-only: single `*-frontend-tasks.json` with `metadata.frontendOnly: true`
 - [ ] Frontend-only: `metadata.backendSpec` contains `endpoints`, `dataModels`, `businessRules`, `businessContext`

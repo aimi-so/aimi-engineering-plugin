@@ -5299,61 +5299,80 @@ _story_merge_write_split() {
   local smell_warnings="${4:-[]}"
   local phase_aware="${5:-false}"
 
-  # Partition by layer:
-  # - UI stories → frontend (stories whose title/description contains UI/Frontend/React/Vue/component keywords,
-  #   or implementation.files match frontend patterns)
-  # - schema + backend + aggregation → backend
-
-  # Partition stories
-  local frontend_stories backend_stories
-  frontend_stories=$(printf '%s' "$merged_array" | jq '
-    [.[] | select(
-      ((.implementation.files // []) | any(
-        test("\\.(tsx|jsx)$") or test("components?/") or test("pages?/") or test("views?/") or
-        test("frontend") or test("ui/") or test("client/") or test("app/") or
-        test("\\.(css|scss)$") or test("tailwind")
-      )) or
-      ((.title + " " + (.description // "")) | test("UI|Frontend|Component|Page|View|React|Vue|Tailwind|CSS|modal|form|screen|dashboard"; "i"))
-    )]
-  ')
-  backend_stories=$(printf '%s' "$merged_array" | jq '
-    [.[] | select(
-      ((.implementation.files // []) | any(
-        test("schema|migration|model|backend|api|endpoint|server|database|db/") or
-        test("\\.(rb|py|go|java|kt|rs)$") or
-        test("controllers?/") or test("services?/") or test("repositories?/")
-      )) or
-      ((.title + " " + (.description // "")) | test("Schema|Migration|Backend|API|Endpoint|Model|Database|Service|Repository"; "i")) or
-      # Any story not clearly frontend goes to backend
-      (((.implementation.files // []) | any(
-        test("\\.(tsx|jsx)$") or test("components?/") or test("pages?/") or test("views?/") or
-        test("frontend") or test("ui/") or test("client/") or test("app/")
-      )) | not)
-    )]
-  ')
-
-  # Deduplicate: if a story appears in both, prefer frontend for UI stories
-  # Actually re-assign: stories explicitly UI → frontend, all others → backend
-  # Simpler and more deterministic: frontend = stories matching UI patterns; backend = the rest
-  frontend_stories=$(printf '%s' "$merged_array" | jq '
-    [.[] | select(
+  # Partition by project-aware majority vote, with a monorepo guard:
+  # 1. Tag every story with its own heuristic frontend verdict (_fe) using the
+  #    same file-pattern/title predicate that decided the split before this
+  #    change (implementation.files matching tsx/jsx/components//pages//
+  #    frontend//ui//client/, OR title+description matching the UI/Frontend/
+  #    Component/Page/View/React/Tailwind keyword set).
+  # 2. Normalize .project for grouping/counting only (trim whitespace, strip
+  #    one trailing slash, blank/whitespace-only treated as absent) -- never
+  #    write the normalized form back onto the story; .project must survive
+  #    verbatim into the output files.
+  # 3. When >= 2 distinct normalized projects are present across the merged
+  #    array, decide each project group's side by strict majority of its
+  #    members' own _fe verdicts (ties go to backend, preserving the old
+  #    "not clearly frontend goes to backend" bias). This is what lets a
+  #    project-tagged docs-only story that fails the heuristic alone still
+  #    ride into frontend-tasks.json with its web-app siblings.
+  # 4. Below that threshold -- including "no story has .project" -- every
+  #    story falls back to its own _fe verdict, so a single-project (or
+  #    project-less) merge produces byte-identical output to pure per-story
+  #    heuristic classification (monorepo guard; keeps TC8/TC12 unchanged).
+  local tagged_stories
+  tagged_stories=$(printf '%s' "$merged_array" | jq '
+    def norm_project:
+      if . == null then null
+      else
+        (. | gsub("^\\s+|\\s+$"; "")) as $t |
+        if $t == "" then null
+        elif ($t | endswith("/")) then $t[0:-1]
+        else $t
+        end
+      end;
+    def fe_heuristic:
       ((.implementation.files // []) | any(
         test("\\.(tsx|jsx)$") or test("components?/") or test("pages?/") or
         test("frontend/") or test("ui/") or test("client/")
       )) or
-      ((.title + " " + (.description // "")) | test("\\b(UI|Frontend|Component|Page|View|React|Tailwind)\\b"; "i"))
-    )]
+      ((.title + " " + (.description // "")) | test("\\b(UI|Frontend|Component|Page|View|React|Tailwind)\\b"; "i"));
+    [.[] | . + {_fe: fe_heuristic}] as $tagged |
+    ([$tagged[] | (.project | norm_project)] | map(select(. != null)) | unique) as $distinct_projects |
+    if ($distinct_projects | length) >= 2 then
+      ($tagged
+        | map(select((.project | norm_project) != null))
+        | group_by(.project | norm_project)
+        | map({key: (.[0].project | norm_project), value: ((map(select(._fe)) | length) * 2 > length)})
+        | from_entries
+      ) as $side_by_project |
+      [$tagged[] | . as $s | ($s.project | norm_project) as $p |
+        $s + {_side: (if $p == null then $s._fe else $side_by_project[$p] end)}]
+    else
+      [$tagged[] | . + {_side: ._fe}]
+    end
   ')
-  backend_stories=$(printf '%s' "$merged_array" | jq '
-    (map(.id)) as $all_ids |
-    '"$(printf '%s' "$frontend_stories" | jq '[.[] | .id]')"' as $frontend_ids |
-    [.[] | select((.id as $id | $frontend_ids | index($id)) == null)]
-  ')
+
+  # Bipartition: two select() passes over the single tagged-and-sided array,
+  # so every story id structurally lands in exactly one output (never lost,
+  # never duplicated) rather than incidentally so.
+  local frontend_stories backend_stories
+  frontend_stories=$(printf '%s' "$tagged_stories" | jq '[.[] | select(._side == true)]')
+  backend_stories=$(printf '%s' "$tagged_stories" | jq '[.[] | select(._side == false)]')
 
   # Re-assign unique IDs: frontend US-001 ... US-N, backend US-(N+1) ... US-M
   local fe_count be_count
   fe_count=$(printf '%s' "$frontend_stories" | jq 'length')
   be_count=$(printf '%s' "$backend_stories" | jq 'length')
+
+  # An empty split side still writes its (empty userStories) file below --
+  # traced, does not crash downstream -- but is surfaced with a named warning
+  # rather than failing silently.
+  if [ "$fe_count" -eq 0 ]; then
+    echo "Warning: story-merge: frontend split produced zero stories" >&2
+  fi
+  if [ "$be_count" -eq 0 ]; then
+    echo "Warning: story-merge: backend split produced zero stories" >&2
+  fi
 
   # Build ID remapping for frontend
   local fe_id_map="{}"
@@ -5369,23 +5388,118 @@ _story_merge_write_split() {
     --argjson offset "$fe_count_n" \
     'to_entries | map({key: .value.id, value: ("US-" + ((.key + $offset + 1) | tostring | if length == 1 then "00" + . elif length == 2 then "0" + . else . end))}) | from_entries')
 
-  # Apply ID remap and rebuild dependsOn (remove cross-file refs) for frontend
+  # Global pre-remap-id -> {newId, side, title} lookup map, built from BOTH
+  # sides' stories + id maps BEFORE either dependsOn-remap block below runs.
+  # A pre-remap id would exist in neither output file, so naming a dropped
+  # cross-file target usefully requires resolving it against this map now.
+  local global_id_map
+  global_id_map=$(printf '%s\n%s\n%s\n%s' "$frontend_stories" "$fe_id_map" "$backend_stories" "$be_id_map" | jq -s '
+    .[0] as $fe | .[1] as $fe_map | .[2] as $be | .[3] as $be_map |
+    ([$fe[] | {key: .id, value: {newId: ($fe_map[.id] // .id), side: "frontend", title: .title}}]
+     + [$be[] | {key: .id, value: {newId: ($be_map[.id] // .id), side: "backend", title: .title}}])
+    | from_entries
+  ')
+
+  # Apply ID remap and rebuild dependsOn (remove cross-file refs) for frontend.
+  # Alongside the existing remap, capture the pre-remap dep ids that did NOT
+  # resolve against the LOCAL id_map (i.e. cross-file) as __droppedDeps, and
+  # flag __becameRoot when the story had a non-empty dependsOn that is now
+  # entirely gone as a direct result of the drop.
   frontend_stories=$(printf '%s\n%s' "$frontend_stories" "$fe_id_map" | jq -s '
     .[0] as $stories | .[1] as $id_map |
     $stories | map(
-      .id = ($id_map[.id] // .id) |
-      .dependsOn = [(.dependsOn // [])[] | . as $dep | ($id_map[$dep] // null) | select(. != null)]
+      . as $story |
+      ($story.dependsOn // []) as $pre |
+      ($pre | length > 0) as $had_deps |
+      ([$pre[] | select(($id_map[.] // null) == null)]) as $dropped_ids |
+      $story
+      | .id = ($id_map[.id] // .id)
+      | .dependsOn = [$pre[] | . as $dep | ($id_map[$dep] // null) | select(. != null)]
+      | .__droppedDeps = $dropped_ids
+      | .__becameRoot = ($had_deps and (.dependsOn == []))
     )
   ')
 
-  # Apply ID remap and rebuild dependsOn for backend
+  # Apply ID remap and rebuild dependsOn for backend (same cross-file capture).
   backend_stories=$(printf '%s\n%s' "$backend_stories" "$be_id_map" | jq -s '
     .[0] as $stories | .[1] as $id_map |
     $stories | map(
-      .id = ($id_map[.id] // .id) |
-      .dependsOn = [(.dependsOn // [])[] | . as $dep | ($id_map[$dep] // null) | select(. != null)]
+      . as $story |
+      ($story.dependsOn // []) as $pre |
+      ($pre | length > 0) as $had_deps |
+      ([$pre[] | select(($id_map[.] // null) == null)]) as $dropped_ids |
+      $story
+      | .id = ($id_map[.id] // .id)
+      | .dependsOn = [$pre[] | . as $dep | ($id_map[$dep] // null) | select(. != null)]
+      | .__droppedDeps = $dropped_ids
+      | .__becameRoot = ($had_deps and (.dependsOn == []))
     )
   ')
+
+  # ============================================================
+  # Cross-file dependsOn: audible drop surfacing
+  # ============================================================
+  # Every dependsOn entry that failed local resolution above is, by
+  # construction, resolvable in the OTHER side's global_id_map -- the
+  # earlier outline:NN remap + unresolved-outline check (before this
+  # function runs) guarantees every dependsOn entry reaching this point
+  # names a real story somewhere in the merged array. Build one
+  # smellWarnings entry per affected story (both sides combined), with
+  # every title sanitized via _rm_sanitize before it enters JSON or stderr.
+  local cross_file_warnings
+  cross_file_warnings=$(printf '%s\n%s\n%s' "$frontend_stories" "$backend_stories" "$global_id_map" | jq -s "$_ROADMAP_SANITIZE_JQ"'
+    .[0] as $fe | .[1] as $be | .[2] as $gmap |
+    ( [$fe[] | . + {__side: "frontend"}] + [$be[] | . + {__side: "backend"}] ) as $all |
+    [
+      $all[] | select((.__droppedDeps // []) | length > 0) |
+      . as $story |
+      (
+        [
+          ($story.__droppedDeps // [])[] | . as $old |
+          ($gmap[$old] // {newId: $old, side: "unknown", title: ""}) |
+          {id: .newId, side: .side, title: (.title | _rm_sanitize(200))}
+        ]
+      ) as $dd |
+      {
+        type: "cross-file-dep-dropped",
+        storyId: $story.id,
+        side: $story.__side,
+        becameRoot: $story.__becameRoot,
+        droppedDeps: $dd,
+        message: (
+          ($dd | length | tostring) + " cross-file dependsOn edge(s) dropped targeting: " +
+          ($dd | map(.title) | join("; ")) +
+          (if $story.__becameRoot then " (story became a false wave-1 root)" else "" end)
+        )
+      }
+    ]
+  ')
+
+  # Merge into the Phase 4.2 smell_warnings param BEFORE it is threaded into
+  # either output file build below, so both files carry the same combined set.
+  local combined_smell_warnings
+  combined_smell_warnings=$(printf '%s\n%s' "$smell_warnings" "$cross_file_warnings" | jq -s '.[0] + .[1]')
+
+  # Aggregated stderr banner (never per-edge -- legitimate FE<->API edges and
+  # --foundation's one-injected-edge-per-story would otherwise flood every
+  # normal full-stack plan). One summary line with total dropped-edge count
+  # and distinct-affected-story count (both sides combined), followed by one
+  # enumeration line per FALSE-ROOT story only.
+  local total_dropped affected_count
+  total_dropped=$(printf '%s' "$cross_file_warnings" | jq '[.[].droppedDeps | length] | add // 0')
+  affected_count=$(printf '%s' "$cross_file_warnings" | jq 'length')
+  if [ "$affected_count" -gt 0 ]; then
+    echo "Warning: story-merge: ${total_dropped} cross-file dependsOn edge(s) dropped across ${affected_count} affected stories (--split full-stack; see metadata.smellWarnings)" >&2
+    local false_root_lines
+    false_root_lines=$(printf '%s' "$cross_file_warnings" | jq -r '
+      .[] | select(.becameRoot == true) |
+      (.storyId + " (" + .side + "): became a false wave-1 root -- its cross-file dependsOn target(s) " +
+       ([.droppedDeps[] | (.id + " (" + .side + ")")] | join(", ")) + " were dropped")
+    ')
+    if [ -n "$false_root_lines" ]; then
+      printf '%s\n' "$false_root_lines" >&2
+    fi
+  fi
 
   # Recompute waves independently per file
   frontend_stories=$(printf '%s' "$frontend_stories" | jq '
@@ -5451,10 +5565,11 @@ _story_merge_write_split() {
 
   # Build and write frontend tasks.json atomically
   # smellWarnings is injected only when non-empty; written to BOTH split files
-  # so reviewers see the same orphan-symbol surface regardless of which file
-  # they inspect first.
+  # (combined_smell_warnings = Phase 4.2 orphan-symbol + cross-file-dep-dropped)
+  # so reviewers see the same full smell surface regardless of which file they
+  # inspect first.
   local fe_json
-  fe_json=$(printf '%s\n%s' "$frontend_stories" "$smell_warnings" | jq -s '
+  fe_json=$(printf '%s\n%s' "$frontend_stories" "$combined_smell_warnings" | jq -s '
     .[0] as $stories | .[1] as $smells |
     {
       schemaVersion: "3.3",
@@ -5468,7 +5583,7 @@ _story_merge_write_split() {
         } +
         (if ($smells | length) > 0 then {smellWarnings: $smells} else {} end)
       ),
-      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors) | (.status //= "pending")]
+      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors) | del(._fe) | del(._side) | del(.__droppedDeps) | del(.__becameRoot) | (.status //= "pending")]
     }
   ')
   local tmp_fe
@@ -5487,7 +5602,7 @@ _story_merge_write_split() {
 
   # Build and write backend tasks.json atomically
   local be_json
-  be_json=$(printf '%s\n%s' "$backend_stories" "$smell_warnings" | jq -s '
+  be_json=$(printf '%s\n%s' "$backend_stories" "$combined_smell_warnings" | jq -s '
     .[0] as $stories | .[1] as $smells |
     {
       schemaVersion: "3.3",
@@ -5501,7 +5616,7 @@ _story_merge_write_split() {
         } +
         (if ($smells | length) > 0 then {smellWarnings: $smells} else {} end)
       ),
-      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors) | (.status //= "pending")]
+      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors) | del(._fe) | del(._side) | del(.__droppedDeps) | del(.__becameRoot) | (.status //= "pending")]
     }
   ')
   local tmp_be
@@ -7136,12 +7251,27 @@ COMMANDS:
                               that no other story references; not codebase
                               dead-code detection — always a warning, never a
                               hard block; skipped for single-story merges).
+                              --split full-stack additionally detects
+                              cross-file-dep-dropped smells: a dependsOn edge
+                              that crosses the frontend/backend boundary is
+                              still dropped (each file's graph stays
+                              self-contained) but is now surfaced via one
+                              aggregated stderr banner plus a
+                              metadata.smellWarnings entry per affected story
+                              in BOTH output files.
                               Writes atomically via _lock (tmp+mv). Deletes
                               staging dir on success; preserves on error.
                               --split full-stack writes two output files:
                               <base>-frontend-tasks.json and
                               <base>-backend-tasks.json with unique IDs, rebuilt
-                              dependsOn, and independent wave numbers.
+                              dependsOn, and independent wave numbers. Partition:
+                              group stories by normalized .project, decide each
+                              group's side by strict majority vote of its
+                              members' own file-pattern/title heuristic verdict
+                              (ties go to backend); below 2 distinct normalized
+                              projects (monorepo guard, incl. no .project at
+                              all) every story falls back to its own heuristic
+                              verdict instead.
                               --phase-aware (only meaningful with --split
                               full-stack): the --output basename already ends in
                               "-tasks" (phase-scoped output, e.g.

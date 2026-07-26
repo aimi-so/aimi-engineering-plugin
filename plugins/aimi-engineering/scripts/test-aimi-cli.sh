@@ -10232,6 +10232,815 @@ test_story_merge_foundation_nonempty_dependson() {
   rm -rf "$stg" "$out_file"
 }
 
+# TC18: project-aware majority-vote partition — a docs-only story shares
+# .project with two frontend siblings and rides their majority into
+# frontend-tasks.json even though its own implementation.files (AGENTS.md,
+# CLAUDE.md, docs/*) fail the frontend file-pattern/title heuristic alone.
+# A single api-service story is the lone member of the other project group.
+test_story_merge_project_majority_vote() {
+  echo ""
+  echo "=== TC18: story-merge --split full-stack project-aware majority vote ==="
+
+  local stg=".aimi/.tasks-staging-tc18"
+  local out_file=".aimi/tasks/sm-tc18-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  cat > "$stg/01-ui.json" << 'EOF'
+{
+  "title": "React UserProfile page",
+  "description": "As a user, I want a React page so that I can view data.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 1,
+  "status": "pending",
+  "dependsOn": [],
+  "project": "web-app",
+  "notes": "",
+  "implementation": {
+    "files": ["src/components/UserProfile.tsx"],
+    "approach": "Build React component",
+    "verify": "tsc --noEmit"
+  }
+}
+EOF
+
+  cat > "$stg/02-docs.json" << 'EOF'
+{
+  "title": "Update project documentation",
+  "description": "As a maintainer, I want documentation updated so that contributors stay informed.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 2,
+  "status": "pending",
+  "dependsOn": [],
+  "project": "web-app",
+  "notes": "",
+  "implementation": {
+    "files": ["AGENTS.md", "CLAUDE.md", "docs/setup.md"],
+    "approach": "Edit docs",
+    "verify": "manual review"
+  }
+}
+EOF
+
+  cat > "$stg/03-ui2.json" << 'EOF'
+{
+  "title": "React SettingsPanel component",
+  "description": "As a user, I want a settings panel so that I can adjust preferences.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 3,
+  "status": "pending",
+  "dependsOn": [],
+  "project": "web-app",
+  "notes": "",
+  "implementation": {
+    "files": ["src/components/SettingsPanel.tsx"],
+    "approach": "Build React component",
+    "verify": "tsc --noEmit"
+  }
+}
+EOF
+
+  cat > "$stg/04-api.json" << 'EOF'
+{
+  "title": "UserProfile API endpoint",
+  "description": "As a developer, I want a backend endpoint so that data is served.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 4,
+  "status": "pending",
+  "dependsOn": [],
+  "project": "api-service",
+  "notes": "",
+  "implementation": {
+    "files": ["app/controllers/user_profiles_controller.rb"],
+    "approach": "Rails controller",
+    "verify": "rspec"
+  }
+}
+EOF
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC18: full-stack split exits 0"
+
+  local fe_file=".aimi/tasks/sm-tc18-tasks-frontend-tasks.json"
+  local be_file=".aimi/tasks/sm-tc18-tasks-backend-tasks.json"
+
+  if [ -f "$fe_file" ] && [ -f "$be_file" ]; then
+    local fe_count be_count
+    fe_count=$(jq '.userStories | length' "$fe_file" 2>/dev/null)
+    be_count=$(jq '.userStories | length' "$be_file" 2>/dev/null)
+    assert_eq "3" "$fe_count" "TC18: frontend-tasks.json has 3 userStories (majority carries the docs-only sibling)"
+    assert_eq "1" "$be_count" "TC18: backend-tasks.json has 1 userStory"
+  else
+    echo -e "${RED}✗${NC} TC18: expected output files missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg" "$fe_file" "$be_file" "$out_file"
+}
+
+# TC19: monorepo guard — every story shares the same normalized .project
+# value, so the split falls back to pure per-story heuristic classification
+# (unchanged from pre-fix behavior) rather than a per-group majority vote.
+test_story_merge_project_monorepo_guard() {
+  echo ""
+  echo "=== TC19: story-merge --split full-stack monorepo guard (single project) ==="
+
+  local stg=".aimi/.tasks-staging-tc19"
+  local out_file=".aimi/tasks/sm-tc19-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  cat > "$stg/01-ui.json" << 'EOF'
+{
+  "title": "React UserProfile page",
+  "description": "As a user, I want a React page so that I can view data.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 1,
+  "status": "pending",
+  "dependsOn": [],
+  "project": ".",
+  "notes": "",
+  "implementation": {
+    "files": ["src/components/UserProfile.tsx"],
+    "approach": "Build React component",
+    "verify": "tsc --noEmit"
+  }
+}
+EOF
+
+  cat > "$stg/02-api.json" << 'EOF'
+{
+  "title": "UserProfile API endpoint",
+  "description": "As a developer, I want a backend endpoint so that data is served.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 2,
+  "status": "pending",
+  "dependsOn": [],
+  "project": ".",
+  "notes": "",
+  "implementation": {
+    "files": ["app/controllers/user_profiles_controller.rb"],
+    "approach": "Rails controller",
+    "verify": "rspec"
+  }
+}
+EOF
+
+  cat > "$stg/03-migration.json" << 'EOF'
+{
+  "title": "Database migration for user profiles",
+  "description": "As a developer, I want a migration so that the schema supports profiles.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 3,
+  "status": "pending",
+  "dependsOn": [],
+  "project": ".",
+  "notes": "",
+  "implementation": {
+    "files": ["db/migrate/001_add_profiles.rb"],
+    "approach": "Add migration",
+    "verify": "rspec"
+  }
+}
+EOF
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC19: full-stack split exits 0"
+
+  local fe_file=".aimi/tasks/sm-tc19-tasks-frontend-tasks.json"
+  local be_file=".aimi/tasks/sm-tc19-tasks-backend-tasks.json"
+
+  if [ -f "$fe_file" ] && [ -f "$be_file" ]; then
+    local fe_count be_count
+    fe_count=$(jq '.userStories | length' "$fe_file" 2>/dev/null)
+    be_count=$(jq '.userStories | length' "$be_file" 2>/dev/null)
+    # A single shared .project value is below the 2-distinct-projects
+    # threshold, so majority voting never engages: the React story lands
+    # frontend and both backend-shaped stories land backend, exactly as
+    # pure per-story heuristic classification would (not majority-voted
+    # into a single group, which would have sent all 3 to backend).
+    assert_eq "1" "$fe_count" "TC19: frontend-tasks.json has 1 userStory (per-story heuristic fallback)"
+    assert_eq "2" "$be_count" "TC19: backend-tasks.json has 2 userStories (per-story heuristic fallback)"
+  else
+    echo -e "${RED}✗${NC} TC19: expected output files missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg" "$fe_file" "$be_file" "$out_file"
+}
+
+# TC20: bipartition invariant — every input story's title appears exactly
+# once across the union of frontend-tasks.json and backend-tasks.json, and
+# the two userStories counts sum to the full input count (no id lost, no id
+# duplicated in both outputs).
+test_story_merge_bipartition_invariant() {
+  echo ""
+  echo "=== TC20: story-merge --split full-stack bipartition invariant ==="
+
+  local stg=".aimi/.tasks-staging-tc20"
+  local out_file=".aimi/tasks/sm-tc20-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  cat > "$stg/01-ui.json" << 'EOF'
+{
+  "title": "React UserProfile page",
+  "description": "As a user, I want a React page so that I can view data.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 1,
+  "status": "pending",
+  "dependsOn": [],
+  "project": "web-app",
+  "notes": "",
+  "implementation": {
+    "files": ["src/components/UserProfile.tsx"],
+    "approach": "Build React component",
+    "verify": "tsc --noEmit"
+  }
+}
+EOF
+
+  cat > "$stg/02-docs.json" << 'EOF'
+{
+  "title": "Update project documentation",
+  "description": "As a maintainer, I want documentation updated so that contributors stay informed.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 2,
+  "status": "pending",
+  "dependsOn": [],
+  "project": "web-app",
+  "notes": "",
+  "implementation": {
+    "files": ["AGENTS.md", "CLAUDE.md", "docs/setup.md"],
+    "approach": "Edit docs",
+    "verify": "manual review"
+  }
+}
+EOF
+
+  cat > "$stg/03-ui2.json" << 'EOF'
+{
+  "title": "React SettingsPanel component",
+  "description": "As a user, I want a settings panel so that I can adjust preferences.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 3,
+  "status": "pending",
+  "dependsOn": [],
+  "project": "web-app",
+  "notes": "",
+  "implementation": {
+    "files": ["src/components/SettingsPanel.tsx"],
+    "approach": "Build React component",
+    "verify": "tsc --noEmit"
+  }
+}
+EOF
+
+  cat > "$stg/04-api.json" << 'EOF'
+{
+  "title": "UserProfile API endpoint",
+  "description": "As a developer, I want a backend endpoint so that data is served.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 4,
+  "status": "pending",
+  "dependsOn": [],
+  "project": "api-service",
+  "notes": "",
+  "implementation": {
+    "files": ["app/controllers/user_profiles_controller.rb"],
+    "approach": "Rails controller",
+    "verify": "rspec"
+  }
+}
+EOF
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC20: full-stack split exits 0"
+
+  local fe_file=".aimi/tasks/sm-tc20-tasks-frontend-tasks.json"
+  local be_file=".aimi/tasks/sm-tc20-tasks-backend-tasks.json"
+
+  if [ -f "$fe_file" ] && [ -f "$be_file" ]; then
+    local fe_count be_count total
+    fe_count=$(jq '.userStories | length' "$fe_file" 2>/dev/null)
+    be_count=$(jq '.userStories | length' "$be_file" 2>/dev/null)
+    total=$((fe_count + be_count))
+    assert_eq "4" "$total" "TC20: frontend + backend userStories counts sum to the full input count"
+
+    local expected_titles all_titles dup_titles missing_titles
+    expected_titles=$(printf '%s\n' \
+      "React UserProfile page" \
+      "Update project documentation" \
+      "React SettingsPanel component" \
+      "UserProfile API endpoint" | sort)
+    all_titles=$(printf '%s\n%s\n' \
+      "$(jq -r '.userStories[].title' "$fe_file" 2>/dev/null)" \
+      "$(jq -r '.userStories[].title' "$be_file" 2>/dev/null)" | sort)
+    dup_titles=$(printf '%s\n' "$all_titles" | uniq -d)
+    missing_titles=$(comm -23 <(printf '%s\n' "$expected_titles") <(printf '%s\n' "$all_titles" | sort -u))
+
+    if [ -z "$dup_titles" ] && [ -z "$missing_titles" ]; then
+      echo -e "${GREEN}✓${NC} TC20: every input story title appears exactly once across both outputs"
+      ((TESTS_PASSED++))
+    else
+      echo -e "${RED}✗${NC} TC20: bipartition invariant violated (dup: '$dup_titles' missing: '$missing_titles')"
+      ((TESTS_FAILED++))
+    fi
+  else
+    echo -e "${RED}✗${NC} TC20: expected output files missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg" "$fe_file" "$be_file" "$out_file"
+}
+
+# TC21: .project is preserved verbatim on every userStory object in both
+# output files, while the internal working keys _fe and _side never leak
+# into either file.
+test_story_merge_project_preserved_working_keys_stripped() {
+  echo ""
+  echo "=== TC21: story-merge --split full-stack preserves .project, strips _fe/_side ==="
+
+  local stg=".aimi/.tasks-staging-tc21"
+  local out_file=".aimi/tasks/sm-tc21-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  cat > "$stg/01-ui.json" << 'EOF'
+{
+  "title": "React UserProfile page",
+  "description": "As a user, I want a React page so that I can view data.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 1,
+  "status": "pending",
+  "dependsOn": [],
+  "project": "web-app",
+  "notes": "",
+  "implementation": {
+    "files": ["src/components/UserProfile.tsx"],
+    "approach": "Build React component",
+    "verify": "tsc --noEmit"
+  }
+}
+EOF
+
+  cat > "$stg/02-api.json" << 'EOF'
+{
+  "title": "UserProfile API endpoint",
+  "description": "As a developer, I want a backend endpoint so that data is served.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 2,
+  "status": "pending",
+  "dependsOn": [],
+  "project": "api-service",
+  "notes": "",
+  "implementation": {
+    "files": ["app/controllers/user_profiles_controller.rb"],
+    "approach": "Rails controller",
+    "verify": "rspec"
+  }
+}
+EOF
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC21: full-stack split exits 0"
+
+  local fe_file=".aimi/tasks/sm-tc21-tasks-frontend-tasks.json"
+  local be_file=".aimi/tasks/sm-tc21-tasks-backend-tasks.json"
+
+  if [ -f "$fe_file" ] && [ -f "$be_file" ]; then
+    local fe_project be_project
+    fe_project=$(jq -r '.userStories[0].project' "$fe_file" 2>/dev/null)
+    be_project=$(jq -r '.userStories[0].project' "$be_file" 2>/dev/null)
+    assert_eq "web-app" "$fe_project" "TC21: frontend userStory .project preserved verbatim"
+    assert_eq "api-service" "$be_project" "TC21: backend userStory .project preserved verbatim"
+
+    if grep -q '"_fe"' "$fe_file" "$be_file" 2>/dev/null; then
+      echo -e "${RED}✗${NC} TC21: _fe leaked into output files"
+      ((TESTS_FAILED++))
+    else
+      echo -e "${GREEN}✓${NC} TC21: _fe absent from both output files"
+      ((TESTS_PASSED++))
+    fi
+
+    if grep -q '"_side"' "$fe_file" "$be_file" 2>/dev/null; then
+      echo -e "${RED}✗${NC} TC21: _side leaked into output files"
+      ((TESTS_FAILED++))
+    else
+      echo -e "${GREEN}✓${NC} TC21: _side absent from both output files"
+      ((TESTS_PASSED++))
+    fi
+  else
+    echo -e "${RED}✗${NC} TC21: expected output files missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+    ((TESTS_FAILED++))
+    ((TESTS_FAILED++))
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg" "$fe_file" "$be_file" "$out_file"
+}
+
+# TC22: .project normalization — "apps/web" and "apps/web/" (trailing slash)
+# are treated as the SAME project group. Two Pass-2 sub-agents authoring the
+# same logical project with/without a trailing slash must not spuriously
+# split into two single-member groups (which would each independently mirror
+# their own story's _fe verdict) instead of one two-member group decided by
+# majority vote (tie -> backend).
+test_story_merge_project_trailing_slash_normalization() {
+  echo ""
+  echo "=== TC22: story-merge --split full-stack .project trailing-slash normalization ==="
+
+  local stg=".aimi/.tasks-staging-tc22"
+  local out_file=".aimi/tasks/sm-tc22-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  # Frontend-heuristic-passing story tagged "apps/web" (no trailing slash)
+  cat > "$stg/01-ui.json" << 'EOF'
+{
+  "title": "React UserProfile page",
+  "description": "As a user, I want a React page so that I can view data.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 1,
+  "status": "pending",
+  "dependsOn": [],
+  "project": "apps/web",
+  "notes": "",
+  "implementation": {
+    "files": ["src/components/UserProfile.tsx"],
+    "approach": "Build React component",
+    "verify": "tsc --noEmit"
+  }
+}
+EOF
+
+  # Docs-only story (fails the heuristic alone) tagged "apps/web/" (trailing
+  # slash) by a different Pass-2 sub-agent authoring the same logical project.
+  cat > "$stg/02-docs.json" << 'EOF'
+{
+  "title": "Update project documentation",
+  "description": "As a maintainer, I want documentation updated so that contributors stay informed.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 2,
+  "status": "pending",
+  "dependsOn": [],
+  "project": "apps/web/",
+  "notes": "",
+  "implementation": {
+    "files": ["AGENTS.md", "CLAUDE.md", "docs/setup.md"],
+    "approach": "Edit docs",
+    "verify": "manual review"
+  }
+}
+EOF
+
+  # Distinct second project so the merge crosses the 2-distinct-project
+  # majority-vote threshold (isolates the group_by normalization behavior
+  # from the monorepo-guard fallback path exercised by TC19).
+  cat > "$stg/03-api.json" << 'EOF'
+{
+  "title": "UserProfile API endpoint",
+  "description": "As a developer, I want a backend endpoint so that data is served.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 3,
+  "status": "pending",
+  "dependsOn": [],
+  "project": "api-service",
+  "notes": "",
+  "implementation": {
+    "files": ["app/controllers/user_profiles_controller.rb"],
+    "approach": "Rails controller",
+    "verify": "rspec"
+  }
+}
+EOF
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC22: full-stack split exits 0"
+
+  local fe_file=".aimi/tasks/sm-tc22-tasks-frontend-tasks.json"
+  local be_file=".aimi/tasks/sm-tc22-tasks-backend-tasks.json"
+
+  if [ -f "$fe_file" ] && [ -f "$be_file" ]; then
+    local fe_count be_count
+    fe_count=$(jq '.userStories | length' "$fe_file" 2>/dev/null)
+    be_count=$(jq '.userStories | length' "$be_file" 2>/dev/null)
+    # apps/web (1 fe-passing member) + apps/web/ (1 fe-failing member) must
+    # group as ONE 2-member project: fe_count=1, 1*2=2 is not > 2, so the
+    # tie goes to backend for BOTH -- proving they were grouped together.
+    # If normalization failed and they were treated as two separate
+    # single-member groups, the React story would independently win its own
+    # 1-member "majority" and land frontend instead (FE=1/BE=2).
+    assert_eq "0" "$fe_count" "TC22: frontend-tasks.json has 0 userStories (grouped tie -> backend)"
+    assert_eq "3" "$be_count" "TC22: backend-tasks.json has 3 userStories (apps/web pair + api-service, all backend)"
+
+    local react_side docs_side
+    react_side=$(jq -r '.userStories[] | select(.title == "React UserProfile page") | .project' "$be_file" 2>/dev/null)
+    docs_side=$(jq -r '.userStories[] | select(.title == "Update project documentation") | .project' "$be_file" 2>/dev/null)
+    assert_eq "apps/web" "$react_side" "TC22: apps/web story landed backend alongside its apps/web/ sibling"
+    assert_eq "apps/web/" "$docs_side" "TC22: apps/web/ story landed backend alongside its apps/web sibling"
+  else
+    echo -e "${RED}✗${NC} TC22: expected output files missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg" "$fe_file" "$be_file" "$out_file"
+}
+
+# TC23: cross-file dependsOn drop — positive banner + smellWarnings entry.
+# 03-ui2 (frontend) depends on both 01-ui (frontend, kept) and 02-api
+# (backend, dropped) -- a PARTIAL loss, so becameRoot stays false and no
+# false-root enumeration line is expected (that distinction is TC24's job).
+# This test just proves the aggregated banner and the smellWarnings entry
+# shape/side/ids appear, identically, in BOTH output files.
+test_story_merge_cross_file_dep_dropped_banner() {
+  echo ""
+  echo "=== TC23: story-merge --split full-stack cross-file dependsOn drop (banner + smellWarnings) ==="
+
+  local stg=".aimi/.tasks-staging-tc23"
+  local out_file=".aimi/tasks/sm-tc23-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  _sm_make_story "$stg/01-ui.json" "React UserProfile page" '[]'
+  jq '. + {implementation: {files: ["src/components/UserProfile.tsx"], approach: "Build React component", verify: "tsc --noEmit"}}' "$stg/01-ui.json" > "$stg/01-ui.json.tmp" && mv "$stg/01-ui.json.tmp" "$stg/01-ui.json"
+
+  _sm_make_story "$stg/02-api.json" "UserProfile API endpoint" '[]'
+  jq '. + {implementation: {files: ["app/controllers/user_profiles_controller.rb"], approach: "Rails controller", verify: "rspec"}}' "$stg/02-api.json" > "$stg/02-api.json.tmp" && mv "$stg/02-api.json.tmp" "$stg/02-api.json"
+
+  _sm_make_story "$stg/03-ui2.json" "React SettingsPanel component" '["outline:01", "outline:02"]'
+  jq '. + {implementation: {files: ["src/components/SettingsPanel.tsx"], approach: "Build React component", verify: "tsc --noEmit"}}' "$stg/03-ui2.json" > "$stg/03-ui2.json.tmp" && mv "$stg/03-ui2.json.tmp" "$stg/03-ui2.json"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC23: exits 0 (warning only)"
+  assert_contains "cross-file dependsOn edge(s) dropped" "$output" "TC23: aggregated stderr banner emitted"
+
+  local fe_file=".aimi/tasks/sm-tc23-tasks-frontend-tasks.json"
+  local be_file=".aimi/tasks/sm-tc23-tasks-backend-tasks.json"
+
+  if [ -f "$fe_file" ] && [ -f "$be_file" ]; then
+    local fe_smells be_smells
+    fe_smells=$(jq -c '.metadata.smellWarnings // []' "$fe_file")
+    be_smells=$(jq -c '.metadata.smellWarnings // []' "$be_file")
+    assert_eq "$fe_smells" "$be_smells" "TC23: both output files carry the identical smellWarnings set"
+
+    local entry
+    entry=$(printf '%s' "$fe_smells" | jq -c '.[] | select(.type == "cross-file-dep-dropped")')
+    assert_contains '"storyId":"US-002"' "$entry" "TC23: entry storyId is the post-remap frontend id"
+    assert_contains '"side":"frontend"' "$entry" "TC23: entry side is frontend"
+    assert_contains '"becameRoot":false' "$entry" "TC23: becameRoot false (dep on US-001 stayed in-file)"
+    assert_contains '"id":"US-003"' "$entry" "TC23: droppedDeps target is the post-remap backend id"
+    assert_contains '"side":"backend"' "$entry" "TC23: droppedDeps target side is backend"
+
+    if grep -q '"__droppedDeps"\|"__becameRoot"' "$fe_file" "$be_file" 2>/dev/null; then
+      echo -e "${RED}✗${NC} TC23: internal __droppedDeps/__becameRoot fields leaked into userStories"
+      ((TESTS_FAILED++))
+    else
+      echo -e "${GREEN}✓${NC} TC23: internal __droppedDeps/__becameRoot fields absent from output"
+      ((TESTS_PASSED++))
+    fi
+  else
+    echo -e "${RED}✗${NC} TC23: expected output files missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg" "$fe_file" "$be_file" "$out_file"
+}
+
+# TC24: false-root callout vs partial-loss non-callout. 03-ui2 loses its ONLY
+# dependsOn entry (cross-file) -> becameRoot:true -> enumerated on stderr.
+# 04-api2 loses ONE of two dependsOn entries (the other stays in-file) ->
+# becameRoot:false -> must NOT be enumerated on stderr.
+test_story_merge_cross_file_false_root_vs_partial_loss() {
+  echo ""
+  echo "=== TC24: story-merge cross-file drop — false-root callout vs partial-loss non-callout ==="
+
+  local stg=".aimi/.tasks-staging-tc24"
+  local out_file=".aimi/tasks/sm-tc24-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  _sm_make_story "$stg/01-ui.json" "React UserProfile page" '[]'
+  jq '. + {implementation: {files: ["src/components/UserProfile.tsx"], approach: "Build React component", verify: "tsc --noEmit"}}' "$stg/01-ui.json" > "$stg/01-ui.json.tmp" && mv "$stg/01-ui.json.tmp" "$stg/01-ui.json"
+
+  _sm_make_story "$stg/02-api.json" "UserProfile API endpoint" '[]'
+  jq '. + {implementation: {files: ["app/controllers/user_profiles_controller.rb"], approach: "Rails controller", verify: "rspec"}}' "$stg/02-api.json" > "$stg/02-api.json.tmp" && mv "$stg/02-api.json.tmp" "$stg/02-api.json"
+
+  # Only dep is cross-file (outline:02 -> backend) -> becomes a false root.
+  _sm_make_story "$stg/03-ui2.json" "React SettingsPanel component" '["outline:02"]'
+  jq '. + {implementation: {files: ["src/components/SettingsPanel.tsx"], approach: "Build React component", verify: "tsc --noEmit"}}' "$stg/03-ui2.json" > "$stg/03-ui2.json.tmp" && mv "$stg/03-ui2.json.tmp" "$stg/03-ui2.json"
+
+  # One dep cross-file (outline:01 -> frontend, dropped), one in-file
+  # (outline:02 -> backend, kept) -> partial loss, NOT a root.
+  _sm_make_story "$stg/04-api2.json" "Update settings API endpoint" '["outline:01", "outline:02"]'
+  jq '. + {implementation: {files: ["app/controllers/settings_controller.rb"], approach: "Rails controller", verify: "rspec"}}' "$stg/04-api2.json" > "$stg/04-api2.json.tmp" && mv "$stg/04-api2.json.tmp" "$stg/04-api2.json"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC24: exits 0 (warning only)"
+  assert_contains "US-002 (frontend): became a false wave-1 root" "$output" "TC24: false-root story IS enumerated on stderr"
+
+  if echo "$output" | grep -q "US-004 (backend): became a false wave-1 root"; then
+    echo -e "${RED}✗${NC} TC24: partial-loss story US-004 was WRONGLY enumerated as a false root"
+    echo "  output: $output"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} TC24: partial-loss story US-004 is NOT enumerated on stderr"
+    ((TESTS_PASSED++))
+  fi
+
+  local fe_file=".aimi/tasks/sm-tc24-tasks-frontend-tasks.json"
+  local be_file=".aimi/tasks/sm-tc24-tasks-backend-tasks.json"
+  if [ -f "$fe_file" ]; then
+    local root_flag partial_flag
+    root_flag=$(jq -r '.metadata.smellWarnings[] | select(.storyId == "US-002") | .becameRoot' "$fe_file")
+    partial_flag=$(jq -r '.metadata.smellWarnings[] | select(.storyId == "US-004") | .becameRoot' "$fe_file")
+    assert_eq "true" "$root_flag" "TC24: US-002 (false root) becameRoot is true in metadata.smellWarnings"
+    assert_eq "false" "$partial_flag" "TC24: US-004 (partial loss) becameRoot is false in metadata.smellWarnings"
+  else
+    echo -e "${RED}✗${NC} TC24: expected output file missing"
+    ((TESTS_FAILED++))
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg" "$fe_file" "$be_file" "$out_file"
+}
+
+# TC25: negative — every dependsOn edge stays on the SAME side as its owner.
+# No cross-file drop should be detected: no smellWarnings entry, no banner.
+# Mirrors TC11's negative-check pattern.
+test_story_merge_cross_file_dep_dropped_negative() {
+  echo ""
+  echo "=== TC25: story-merge cross-file drop — negative (same-side-only dependsOn) ==="
+
+  local stg=".aimi/.tasks-staging-tc25"
+  local out_file=".aimi/tasks/sm-tc25-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  _sm_make_story "$stg/01-ui.json" "React UserProfile page" '[]'
+  jq '. + {implementation: {files: ["src/components/UserProfile.tsx"], approach: "Build React component", verify: "tsc --noEmit"}}' "$stg/01-ui.json" > "$stg/01-ui.json.tmp" && mv "$stg/01-ui.json.tmp" "$stg/01-ui.json"
+
+  # Same side (frontend) as its dep -> resolves locally, no drop.
+  _sm_make_story "$stg/02-ui2.json" "React SettingsPanel component" '["outline:01"]'
+  jq '. + {implementation: {files: ["src/components/SettingsPanel.tsx"], approach: "Build React component", verify: "tsc --noEmit"}}' "$stg/02-ui2.json" > "$stg/02-ui2.json.tmp" && mv "$stg/02-ui2.json.tmp" "$stg/02-ui2.json"
+
+  _sm_make_story "$stg/03-api.json" "UserProfile API endpoint" '[]'
+  jq '. + {implementation: {files: ["app/controllers/user_profiles_controller.rb"], approach: "Rails controller", verify: "rspec"}}' "$stg/03-api.json" > "$stg/03-api.json.tmp" && mv "$stg/03-api.json.tmp" "$stg/03-api.json"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC25: exits 0"
+
+  if echo "$output" | grep -qE "cross-file-dep-dropped|cross-file dependsOn edge\(s\) dropped"; then
+    echo -e "${RED}✗${NC} TC25: unexpected cross-file-dep-dropped signal in output"
+    echo "  output: $output"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} TC25: no cross-file-dep-dropped signal (all dependsOn stayed in-file)"
+    ((TESTS_PASSED++))
+  fi
+
+  local fe_file=".aimi/tasks/sm-tc25-tasks-frontend-tasks.json"
+  local be_file=".aimi/tasks/sm-tc25-tasks-backend-tasks.json"
+  rm -rf "$stg" "$fe_file" "$be_file" "$out_file"
+}
+
+# TC26: a title containing an embedded newline AND a backtick, used as the
+# dropped-edge target, must not forge a second Warning:/Error: line on
+# stderr, and must not leak the raw newline/backtick into
+# metadata.smellWarnings[].droppedDeps[].title in either output file.
+test_story_merge_cross_file_dep_dropped_title_sanitized() {
+  echo ""
+  echo "=== TC26: story-merge cross-file drop — dropped-target title sanitization ==="
+
+  local stg=".aimi/.tasks-staging-tc26"
+  local out_file=".aimi/tasks/sm-tc26-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  cat > "$stg/01-weird.json" << 'EOF'
+{
+  "title": "Fix widget\nWarning: forged line`rm -rf /`",
+  "description": "As a user, I want a widget so that it works.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 1,
+  "status": "pending",
+  "dependsOn": [],
+  "notes": "",
+  "implementation": {
+    "files": ["src/components/Weird.tsx"],
+    "approach": "Build React component",
+    "verify": "tsc --noEmit"
+  }
+}
+EOF
+
+  cat > "$stg/02-consumer.json" << 'EOF'
+{
+  "title": "Consume weird widget endpoint",
+  "description": "As a developer, I want an endpoint so that the widget is served.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 2,
+  "status": "pending",
+  "dependsOn": ["outline:01"],
+  "notes": "",
+  "implementation": {
+    "files": ["app/controllers/weird_controller.rb"],
+    "approach": "Rails controller",
+    "verify": "rspec"
+  }
+}
+EOF
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC26: exits 0"
+
+  local warn_err_lines
+  warn_err_lines=$(printf '%s\n' "$output" | grep -cE '^(Warning|Error):')
+  assert_eq "1" "$warn_err_lines" "TC26: exactly one Warning:/Error:-prefixed stderr line (no forged second line)"
+
+  local fe_file=".aimi/tasks/sm-tc26-tasks-frontend-tasks.json"
+  local be_file=".aimi/tasks/sm-tc26-tasks-backend-tasks.json"
+  if [ -f "$be_file" ]; then
+    local title_val
+    title_val=$(jq -r '.metadata.smellWarnings[0].droppedDeps[0].title' "$be_file")
+    local title_lines
+    title_lines=$(printf '%s' "$title_val" | wc -l)
+    if [ "$title_lines" -eq 0 ] && [[ "$title_val" != *'`'* ]]; then
+      echo -e "${GREEN}✓${NC} TC26: droppedDeps[].title has no raw newline or backtick"
+      ((TESTS_PASSED++))
+    else
+      echo -e "${RED}✗${NC} TC26: droppedDeps[].title leaked unsanitized content: $title_val"
+      ((TESTS_FAILED++))
+    fi
+  else
+    echo -e "${RED}✗${NC} TC26: expected output file missing"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg" "$fe_file" "$be_file" "$out_file"
+}
+
+# TC27: every staging story partitions to the SAME side (backend here) --
+# both split files must still be written (frontend with userStories: []),
+# the command must still exit 0, and stderr must name the empty side.
+test_story_merge_split_empty_side_warning() {
+  echo ""
+  echo "=== TC27: story-merge --split full-stack empty-side warning ==="
+
+  local stg=".aimi/.tasks-staging-tc27"
+  local out_file=".aimi/tasks/sm-tc27-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  _sm_make_story "$stg/01-api.json" "Persist user record" '[]'
+  jq '. + {implementation: {files: ["app/controllers/users_controller.rb"], approach: "Rails controller", verify: "rspec"}}' "$stg/01-api.json" > "$stg/01-api.json.tmp" && mv "$stg/01-api.json.tmp" "$stg/01-api.json"
+
+  _sm_make_story "$stg/02-api2.json" "Fetch user record" '[]'
+  jq '. + {implementation: {files: ["app/controllers/fetch_controller.rb"], approach: "Rails controller", verify: "rspec"}}' "$stg/02-api2.json" > "$stg/02-api2.json.tmp" && mv "$stg/02-api2.json.tmp" "$stg/02-api2.json"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC27: exits 0 despite one side being empty"
+  assert_contains "frontend split produced zero stories" "$output" "TC27: stderr names the empty (frontend) side"
+
+  local fe_file=".aimi/tasks/sm-tc27-tasks-frontend-tasks.json"
+  local be_file=".aimi/tasks/sm-tc27-tasks-backend-tasks.json"
+  if [ -f "$fe_file" ] && [ -f "$be_file" ]; then
+    local fe_count be_count
+    fe_count=$(jq '.userStories | length' "$fe_file")
+    be_count=$(jq '.userStories | length' "$be_file")
+    assert_eq "0" "$fe_count" "TC27: frontend-tasks.json still written with userStories: []"
+    assert_eq "2" "$be_count" "TC27: backend-tasks.json carries both stories"
+  else
+    echo -e "${RED}✗${NC} TC27: expected output files missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg" "$fe_file" "$be_file" "$out_file"
+}
+
 # ============================================================================
 # ============================================================================
 # Roadmap Lifecycle Tests (US-002)
@@ -12485,6 +13294,16 @@ main() {
   test_story_merge_foundation_dedup
   test_story_merge_foundation_invalid_idx
   test_story_merge_foundation_nonempty_dependson
+  test_story_merge_project_majority_vote
+  test_story_merge_project_monorepo_guard
+  test_story_merge_bipartition_invariant
+  test_story_merge_project_preserved_working_keys_stripped
+  test_story_merge_project_trailing_slash_normalization
+  test_story_merge_cross_file_dep_dropped_banner
+  test_story_merge_cross_file_false_root_vs_partial_loss
+  test_story_merge_cross_file_dep_dropped_negative
+  test_story_merge_cross_file_dep_dropped_title_sanitized
+  test_story_merge_split_empty_side_warning
 
   # Roadmap lifecycle tests (US-002)
   echo ""

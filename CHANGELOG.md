@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.113.0] - 2026-07-26
+
+### Changed
+
+- **`story-merge --split full-stack` now partitions by `project` instead of classifying every story independently, fixing documentation-only stories landing in the wrong split file (resolves issue #67, `aimi-so/aimi-engineering-plugin`).** Stories are first grouped by their normalized `.project` field (trim whitespace, strip one trailing slash, blank treated as absent), then each group is assigned to the frontend or backend output file by a strict majority vote of its members' own file-pattern/keyword verdicts, ties going to backend. Stories with no `project`, and any staging set where fewer than 2 distinct `project` values are present — including the monorepo case where no story sets `project` at all — keep the previous per-story heuristic unchanged, so single-repo and monorepo plans stay byte-identical to before. This fixes the concrete defect where a documentation-only story (files like `AGENTS.md`, `CLAUDE.md`, `docs/`) matched no frontend path pattern and landed in the backend split file even when its `project` field placed it alongside frontend siblings — after which it silently lost its cross-file `dependsOn` edges and became eligible for wave 1, schedulable before the stories it documents.
+- **Cross-file `dependsOn` removal in the split is no longer silent.** Each split file must stay self-contained since the two files execute as independent sessions, so cross-file `dependsOn` edges are still dropped — but `story-merge` now emits one aggregated stderr banner reporting dropped-edge and affected-story counts, enumerates the stories that lost every dependency and therefore became wave-1 roots ("false roots"), and records one `cross-file-dep-dropped` entry per affected story in `metadata.smellWarnings` of both output files. Exit code is unchanged (still 0). No README.md edit accompanies this release — the fix adds no new command, skill, or agent, so the component-count tables are unaffected.
+
 ## [1.112.0] - 2026-07-24
 
 ### Added
