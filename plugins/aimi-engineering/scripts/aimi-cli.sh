@@ -1561,6 +1561,41 @@ cmd_get_state() {
     }'
 }
 
+# Shared default-branch resolution logic: cache read, primary git remote
+# show origin parse, offline symbolic-ref fallback, cache write. Assumes the
+# caller has already cd'd into the target repo and verified it is a git
+# repository (both cmd_detect_default_branch and cmd_detect_parent_branch
+# do this themselves before calling here). Returns the branch name on
+# stdout; exits 1 on total failure.
+_resolve_default_branch() {
+  # Return cached value if available
+  local cached
+  cached=$(read_state "default-branch")
+  if [ -n "$cached" ]; then
+    echo "$cached"
+    return 0
+  fi
+
+  local branch=""
+
+  # Primary: parse HEAD branch from remote
+  branch=$(git remote show origin 2>/dev/null | sed -n 's/.*HEAD branch: //p')
+
+  # Fallback: symbolic-ref (works offline)
+  if [ -z "$branch" ]; then
+    branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||')
+  fi
+
+  if [ -z "$branch" ]; then
+    echo "Error: Could not detect default branch" >&2
+    exit 1
+  fi
+
+  # Cache for session reuse
+  write_state "default-branch" "$branch"
+  echo "$branch"
+}
+
 # Detect the repository's default branch
 # Primary: git remote show origin (requires network)
 # Fallback: git symbolic-ref refs/remotes/origin/HEAD (offline)
@@ -1594,32 +1629,198 @@ cmd_detect_default_branch() {
     exit 1
   fi
 
-  # Return cached value if available
-  local cached
-  cached=$(read_state "default-branch")
-  if [ -n "$cached" ]; then
-    echo "$cached"
+  _resolve_default_branch
+}
+
+# Normalize a single %D decoration token for parent-branch detection.
+# Pipeline: (1) strip an "X -> Y" arrow decoration, keeping the right-hand
+# side (covers "HEAD -> <branch>" and, defensively, "origin/HEAD ->
+# origin/<branch>"); (2) drop a bare HEAD token; (3) drop a tag: -prefixed
+# token; (4) strip a leading origin/ remote-tracking prefix; (5) re-check
+# for a bare HEAD token now that origin/ has been stripped (catches
+# "origin/HEAD" -> "HEAD"); (6) drop the token if it is now empty or equals
+# the branch being examined exactly -- exact match only, never a substring
+# match (this is the DEFECT 3 fix for the old grep -v "$CURRENT_BRANCH").
+# Prints the surviving token, or nothing when the token was dropped.
+_normalize_decoration_token() {
+  local token="$1" branch="$2"
+
+  # (1) Arrow decoration: keep the right-hand side.
+  if [[ "$token" == *" -> "* ]]; then
+    token="${token#*" -> "}"
+  fi
+
+  # (2) Bare HEAD (detached-HEAD marker, or the left side of an
+  #     already-stripped arrow that somehow left just HEAD).
+  if [ "$token" = "HEAD" ]; then
     return 0
   fi
 
-  local branch=""
-
-  # Primary: parse HEAD branch from remote
-  branch=$(git remote show origin 2>/dev/null | sed -n 's/.*HEAD branch: //p')
-
-  # Fallback: symbolic-ref (works offline)
-  if [ -z "$branch" ]; then
-    branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||')
+  # (3) Tag refs are never a parent-branch candidate.
+  if [[ "$token" == "tag: "* ]]; then
+    return 0
   fi
 
+  # (4) Strip the remote-tracking prefix.
+  if [[ "$token" == "origin/"* ]]; then
+    token="${token#origin/}"
+  fi
+
+  # (5) Re-check for HEAD now that origin/ has been stripped.
+  if [ "$token" = "HEAD" ]; then
+    return 0
+  fi
+
+  # (6) Exact-match-only drop: empty token, or the token IS the branch
+  #     we're examining (its own tip decoration). Never a substring check.
+  if [ -z "$token" ] || [ "$token" = "$branch" ]; then
+    return 0
+  fi
+
+  printf '%s' "$token"
+}
+
+# Walk branch's --first-parent decoration history (git log --pretty=format:'%D')
+# token-by-token, nearest ancestor first, and return the first surviving
+# candidate parent-branch name after _normalize_decoration_token. Prints
+# nothing when no candidate survives across the whole history.
+_detect_parent_branch_candidate() {
+  local branch="$1"
+  local log_output
+  log_output=$(git log "$branch" --pretty=format:'%D' --first-parent 2>/dev/null) || true
+
+  local line raw_token normalized candidate=""
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+
+    local -a tokens
+    local old_ifs="$IFS"
+    IFS=','
+    read -ra tokens <<< "$line"
+    IFS="$old_ifs"
+
+    for raw_token in "${tokens[@]}"; do
+      # Decoration tokens are separated by ", " -- trim the leading space.
+      raw_token="${raw_token# }"
+      normalized=$(_normalize_decoration_token "$raw_token" "$branch")
+      if [ -n "$normalized" ]; then
+        candidate="$normalized"
+        break 2
+      fi
+    done
+  done <<< "$log_output"
+
+  printf '%s' "$candidate"
+}
+
+# Verify a decoration candidate is a genuine ancestor of branch via
+# git merge-base, rejecting a divergent sibling whose ref happens to share
+# the candidate's (post-normalization) name. Resolves the candidate against
+# a local branch first, falling back to an origin-prefixed remote-tracking
+# ref only when no local branch of that name exists.
+_verify_parent_candidate() {
+  local branch="$1" candidate="$2"
+  local candidate_ref candidate_commit branch_commit merge_base
+
+  if candidate_commit=$(git rev-parse --verify "${candidate}^{commit}" 2>/dev/null); then
+    candidate_ref="$candidate"
+  elif candidate_commit=$(git rev-parse --verify "origin/${candidate}^{commit}" 2>/dev/null); then
+    candidate_ref="origin/${candidate}"
+  else
+    return 1
+  fi
+
+  branch_commit=$(git rev-parse --verify "${branch}^{commit}" 2>/dev/null) || return 1
+
+  # The candidate must not be the branch's own tip commit.
+  if [ "$candidate_commit" = "$branch_commit" ]; then
+    return 1
+  fi
+
+  # The candidate must be a genuine ancestor of branch (its own commit is
+  # the merge base), not a divergent sibling.
+  merge_base=$(git merge-base "$branch" "$candidate_ref" 2>/dev/null) || return 1
+
+  [ "$merge_base" = "$candidate_commit" ]
+}
+
+# Detect a branch's parent (base) branch by parsing its --first-parent git
+# log decorations token-by-token (replacing the old grep -v line-filtering
+# pipeline in commands/open-pr.md, which mishandled "HEAD -> <parent>" and
+# substring-alike branch names) and confirming the candidate with
+# git merge-base. Falls back to the repository's default branch (unverified)
+# when no decoration candidate survives normalization or merge-base
+# verification.
+# Usage: aimi-cli.sh detect-parent-branch <branch> [--project <path>]
+# Output: {"branch":<input>,"base":<resolved>,"verified":<bool>,"source":"decoration"|"default-branch"}
+cmd_detect_parent_branch() {
+  local branch="" project_dir=""
+
+  # Parse positional branch arg + --project flag
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project)
+        shift
+        project_dir="${1:-}"
+        ;;
+      *)
+        if [ -z "$branch" ]; then
+          branch="$1"
+        else
+          echo "Error: Unexpected argument: $1" >&2
+          echo "Usage: aimi-cli.sh detect-parent-branch <branch> [--project <path>]" >&2
+          exit 1
+        fi
+        ;;
+    esac
+    shift
+  done
+
   if [ -z "$branch" ]; then
-    echo "Error: Could not detect default branch" >&2
+    echo "Usage: aimi-cli.sh detect-parent-branch <branch> [--project <path>]" >&2
     exit 1
   fi
 
-  # Cache for session reuse
-  write_state "default-branch" "$branch"
-  echo "$branch"
+  # cd into project dir if specified (supports multi-repo layouts where AIMI root is not a git repo)
+  if [ -n "$project_dir" ]; then
+    if [ ! -d "$project_dir" ]; then
+      echo "Error: Project directory does not exist: $project_dir" >&2
+      exit 1
+    fi
+    cd "$project_dir"
+  fi
+
+  # Guard: must be inside a git repository
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
+    exit 1
+  fi
+
+  # Validate branch name (security) — before any git command uses it
+  if ! [[ "$branch" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: Invalid branch name: $branch" >&2
+    exit 1
+  fi
+
+  local raw_candidate
+  raw_candidate=$(_detect_parent_branch_candidate "$branch")
+
+  local base="" verified="false" source="default-branch"
+
+  if [ -n "$raw_candidate" ] && _verify_parent_candidate "$branch" "$raw_candidate"; then
+    base="$raw_candidate"
+    verified="true"
+    source="decoration"
+  else
+    base=$(_resolve_default_branch)
+  fi
+
+  jq -nc \
+    --arg branch "$branch" \
+    --arg base "$base" \
+    --argjson verified "$verified" \
+    --arg source "$source" \
+    '{branch: $branch, base: $base, verified: $verified, source: $source}'
 }
 
 # Detect a Claude Design handoff bundle under a given root (defaults to CWD).
@@ -7107,6 +7308,13 @@ COMMANDS:
     get-state                 Get all state files as JSON
     detect-default-branch [--project <path>]
                               Detect and cache the repository's default branch
+    detect-parent-branch <branch> [--project <path>]
+                              Detect branch's parent (base) branch by token-aware
+                              git log decoration parsing + git merge-base verification.
+                              Output: {branch, base, verified, source
+                              ("decoration"|"default-branch")}. Falls back to the
+                              default branch (unverified) when no decoration
+                              candidate survives normalization or merge-base check.
     detect-interactivity [--non-interactive]
                               Print resolved interactivity mode (picker|agent)
                               Returns picker by default; returns agent only when
@@ -7503,6 +7711,7 @@ main() {
     get-story-context) cmd_get_story_context "${2:-}" ;;
     get-state)         cmd_get_state ;;
     detect-default-branch) shift; cmd_detect_default_branch "$@" ;;
+    detect-parent-branch) shift; cmd_detect_parent_branch "$@" ;;
     setup-branch)      shift; cmd_setup_branch "$@" ;;
     clear-state)       cmd_clear_state ;;
     version)           cmd_version ;;
