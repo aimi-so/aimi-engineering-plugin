@@ -489,9 +489,11 @@ Branch on `implementationScope` from Phase 0:
 
 ### When `implementationScope` is `"full-stack"`:
 
-1. **Partition stories by layer**: UI stories → frontend file; schema + backend + aggregation stories → backend file
+This prose predates `aimi-cli.sh story-merge`; `/aimi:plan` Phase 3e now delegates the actual full-stack split to `story-merge --split full-stack` (function `_story_merge_write_split`) as the implementation of record — the steps below describe what that command does, not an algorithm to hand-run independently.
+
+1. **Partition stories**: group staging stories by their normalized `project` field (trim, strip one trailing slash, blank treated as absent — `project` itself is never mutated in the output), then decide each group's output file by strict majority vote of the group's members' own file-pattern/keyword heuristic verdict, ties going to backend; a story with no `project`, and every story whenever the staging set contains fewer than 2 distinct `project` values (the monorepo guard), falls back to its own per-story heuristic verdict instead of the group vote — `project` is an N-ary sub-project repo path, not a binary frontend/backend tag, which is why the rule is a per-group majority vote rather than "project decides".
 2. **Assign unique IDs across both files**: frontend gets `US-001` to `US-N`, backend gets `US-(N+1)` to `US-M` — no ID collisions
-3. **Rebuild `dependsOn` independently per file**: remove all cross-file references; within each file, only reference IDs that exist in that file
+3. **Rebuild `dependsOn` independently per file**: cross-file references are still removed — each file's graph must stay self-contained because the two files execute as independent sessions — but the drop is no longer silent: story-merge emits one aggregated stderr banner reporting the dropped-edge and affected-story counts, enumerates only the resulting false-root stories (those that lost every dependency and thereby became wave-1 eligible), and records one `cross-file-dep-dropped` entry per affected story in `metadata.smellWarnings` of both output files.
 4. **Recompute `wave` numbers per file**: roots (`dependsOn: []`) are wave 1 within each file, independently
 5. **Derive separate `branchName` per file**: `type/[feature]-frontend` and `type/[feature]-backend` (e.g., `feat/add-user-auth-frontend`, `feat/add-user-auth-backend`)
 6. Derive shared metadata: title, type, createdAt, `schemaVersion: "3.3"`, `planPath: null`, `brainstormPath`, `researchDepth`, `maxConcurrency`
@@ -566,7 +568,14 @@ Use the Write tool to save the JSON file(s). Validate JSON is well-formed before
 
 After writing the tasks.json file(s), validate each generated output independently.
 
-**For split files (full-stack):** run validation on each file separately using `init-session --file`:
+**Step 0 — Resolve CLI Path** (see [cli-path-resolution.md](../../commands/references/cli-path-resolution.md) for full Layer 0–3 strategy). Each Bash call is an isolated shell — `$AIMI_CLI` is never inherited; re-read from cache at the top of every Bash call that needs it:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+```
+
+**For split files (full-stack):** run validation on each file separately using `init-session --file` (repeat the Step 0 resolve above at the top of each Bash call; omitted from the snippets below for brevity):
 
 ```bash
 $AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
