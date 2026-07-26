@@ -122,20 +122,38 @@ git rev-parse --abbrev-ref HEAD
 
 Store as `$CURRENT_BRANCH`.
 
-### 2b. Detect parent branch via decorated ancestor
+### 2b. Detect parent branch via `detect-parent-branch`
+
+Call the tested CLI verb instead of parsing decorations by hand — it already handles decoration parsing, `origin/` prefix normalization, and `git merge-base` verification internally, and owns the "no verified candidate" fallback (it returns the repository's default branch itself in that case).
 
 ```bash
-git log "$CURRENT_BRANCH" --pretty=format:'%D' --first-parent | grep -v '^$' | grep -v "HEAD" | grep -v "$CURRENT_BRANCH" | head -1
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+PARENT_RESULT=$($AIMI_CLI detect-parent-branch "$CURRENT_BRANCH")
+BASE_BRANCH=$(printf '%s' "$PARENT_RESULT" | jq -r '.base // empty')
+PARENT_VERIFIED=$(printf '%s' "$PARENT_RESULT" | jq -r '.verified // false')
 ```
 
-Parse the output to extract a branch name. The output may contain multiple refs separated by commas (e.g., `origin/main, main`). Extract the first local branch name (without `origin/` prefix). If the output contains `origin/branch-name`, strip the `origin/` prefix.
+Store as `$BASE_BRANCH` and `$PARENT_VERIFIED`. Note `.base` is the resolved parent branch — `.branch` in the response is merely an echo of the input `$CURRENT_BRANCH` and must never be read here.
 
-### 2c. Fallback to default branch
+When `$PARENT_VERIFIED` is not `true` (the candidate could not be confirmed via `git merge-base`, or no decoration candidate existed and the verb fell back to the default branch), print an explicit warning naming the unverified candidate before continuing — do not silently proceed as if the value were trustworthy:
 
-If no parent branch was detected in 2b, use the repository's default branch:
+```
+Warning: could not verify "$BASE_BRANCH" as the true parent branch of "$CURRENT_BRANCH" (git merge-base check failed or no candidate found). Proceeding with this value as the PR base — double-check it before merging.
+```
+
+Execution continues regardless of `$PARENT_VERIFIED`; Step 2d's regex validation is the only hard STOP gate on `$BASE_BRANCH`.
+
+### 2c. Fallback when the CLI call itself failed
+
+`detect-parent-branch` already owns the "no verified candidate" case internally (see 2b) — this step is **not** a second "no parent found" handler. It exists only as defense-in-depth for the narrower case where the CLI call in 2b itself failed or produced no output (e.g., `$AIMI_CLI` resolution broke, the process exited non-zero, or the JSON could not be parsed) and `$BASE_BRANCH` is still empty here:
 
 ```bash
-gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name'
+if [ -z "$BASE_BRANCH" ]; then
+  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+  BASE_BRANCH=$($AIMI_CLI detect-default-branch)
+fi
 ```
 
 Store the result as `$BASE_BRANCH`.
