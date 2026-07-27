@@ -11271,6 +11271,408 @@ test_story_merge_split_empty_side_warning() {
   rm -rf "$stg" "$fe_file" "$be_file" "$out_file"
 }
 
+# ----------------------------------------------------------------------------
+# Project-axis split (N files, one per repo) — TC28..TC33
+#
+# These pin the multi-repo path: >= 2 distinct normalized .project values route
+# to _story_merge_write_project_split, which writes one file per project rather
+# than force-fitting every repo into two frontend/backend files.
+# ----------------------------------------------------------------------------
+
+# Helper: staging story carrying an explicit .project (multi-repo fixtures)
+_sm_make_project_story() {
+  local path="$1"
+  local title="$2"
+  local project="$3"
+  local files="$4"
+  local depends="${5:-[]}"
+  cat > "$path" << EOF
+{
+  "title": "$title",
+  "description": "As a developer, I want $title so that it works.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 1,
+  "status": "pending",
+  "dependsOn": $depends,
+  "project": "$project",
+  "notes": "",
+  "implementation": {
+    "files": ["$files"],
+    "approach": "Implement $title",
+    "verify": "test"
+  }
+}
+EOF
+}
+
+# TC28: three distinct projects produce three files, in lexicographic order by
+# normalized project path, each with its own branchName and a self-describing
+# metadata.splitGroup marker. No frontend/backend file is produced at all, and
+# every input story lands exactly once across the N files.
+test_story_merge_project_split_three_projects() {
+  echo ""
+  echo "=== TC28: story-merge --split full-stack project axis (3 distinct projects) ==="
+
+  local stg=".aimi/.tasks-staging-tc28"
+  local out_file=".aimi/tasks/sm-tc28-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  # Deliberately NOT in lexicographic order on disk: services/api sorts last
+  # but is staged first, so glob order and group order disagree.
+  _sm_make_project_story "$stg/01-api.json"    "UserProfile API endpoint"  "services/api" "app/controllers/u.rb"
+  _sm_make_project_story "$stg/02-web.json"    "React UserProfile page"    "apps/web"     "src/components/UserProfile.tsx"
+  _sm_make_project_story "$stg/03-mobile.json" "Mobile profile screen"     "apps/mobile"  "lib/profile.dart"
+  _sm_make_project_story "$stg/04-web2.json"   "React SettingsPanel"       "apps/web/"    "src/components/Settings.tsx"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC28: project-axis split exits 0"
+
+  local mobile_file=".aimi/tasks/sm-tc28-tasks-apps-mobile-tasks.json"
+  local web_file=".aimi/tasks/sm-tc28-tasks-apps-web-tasks.json"
+  local api_file=".aimi/tasks/sm-tc28-tasks-services-api-tasks.json"
+  local fe_file=".aimi/tasks/sm-tc28-tasks-frontend-tasks.json"
+  local be_file=".aimi/tasks/sm-tc28-tasks-backend-tasks.json"
+
+  if [ -f "$mobile_file" ] && [ -f "$web_file" ] && [ -f "$api_file" ]; then
+    echo -e "${GREEN}✓${NC} TC28: one tasks file written per distinct project"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC28: expected per-project output files missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  if [ ! -f "$fe_file" ] && [ ! -f "$be_file" ]; then
+    echo -e "${GREEN}✓${NC} TC28: no frontend/backend side files produced on the project axis"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC28: side-axis files were written on a multi-repo layout"
+    ((TESTS_FAILED++))
+  fi
+
+  # Return value: N-element array of {path, project, branchName, storyCount},
+  # ordered lexicographically by normalized project path.
+  local ret_projects ret_len ret_branches ret_counts
+  ret_len=$(printf '%s' "$output" | jq 'length' 2>/dev/null)
+  ret_projects=$(printf '%s' "$output" | jq -r '[.[].project] | join(",")' 2>/dev/null)
+  ret_branches=$(printf '%s' "$output" | jq -r '[.[].branchName] | join(",")' 2>/dev/null)
+  ret_counts=$(printf '%s' "$output" | jq -r '[.[].storyCount] | join(",")' 2>/dev/null)
+  assert_eq "3" "$ret_len" "TC28: return value is a 3-element array"
+  assert_eq "apps/mobile,apps/web,services/api" "$ret_projects" "TC28: groups ordered lexicographically by normalized project"
+  assert_eq "feat/merged-apps-mobile,feat/merged-apps-web,feat/merged-services-api" "$ret_branches" "TC28: each group carries its own derived branchName"
+  assert_eq "1,2,1" "$ret_counts" "TC28: trailing-slash project normalizes into the apps/web group (2 stories)"
+
+  # No story lost, no story duplicated, ids unique and contiguous across files.
+  local all_ids all_titles
+  all_ids=$(jq -r '.userStories[].id' "$mobile_file" "$web_file" "$api_file" 2>/dev/null | sort | tr '\n' ',' | sed 's/,$//')
+  all_titles=$(jq -r '.userStories[].title' "$mobile_file" "$web_file" "$api_file" 2>/dev/null | sort -u | wc -l | tr -d ' ')
+  assert_eq "US-001,US-002,US-003,US-004" "$all_ids" "TC28: ids unique and contiguous across the whole N-file set"
+  assert_eq "4" "$all_titles" "TC28: all 4 input stories land exactly once across the split"
+
+  # .project survives verbatim (the trailing-slash form is NOT rewritten).
+  local raw_projects
+  raw_projects=$(jq -r '.userStories[].project' "$web_file" 2>/dev/null | sort | tr '\n' ',' | sed 's/,$//')
+  assert_eq "apps/web,apps/web/" "$raw_projects" "TC28: .project preserved verbatim (normalization is grouping-only)"
+
+  # metadata.splitGroup marker: own project, 1-based index, total, sibling paths.
+  local sg_project sg_index sg_total sg_siblings sg_branch
+  sg_project=$(jq -r '.metadata.splitGroup.project' "$web_file" 2>/dev/null)
+  sg_index=$(jq -r '.metadata.splitGroup.index' "$web_file" 2>/dev/null)
+  sg_total=$(jq -r '.metadata.splitGroup.total' "$web_file" 2>/dev/null)
+  sg_siblings=$(jq -r '[.metadata.splitGroup.siblings[]] | sort | join(",")' "$web_file" 2>/dev/null)
+  sg_branch=$(jq -r '.metadata.branchName' "$web_file" 2>/dev/null)
+  assert_eq "apps/web" "$sg_project" "TC28: splitGroup.project names the file's own project"
+  assert_eq "2" "$sg_index" "TC28: splitGroup.index is the 1-based lexicographic position"
+  assert_eq "3" "$sg_total" "TC28: splitGroup.total is the N-way split size"
+  assert_eq "$mobile_file,$api_file" "$sg_siblings" "TC28: splitGroup.siblings lists the other files' paths"
+  assert_eq "feat/merged-apps-web" "$sg_branch" "TC28: file's metadata.branchName matches its group"
+
+  # Working keys stripped from every output story.
+  local leaked
+  leaked=$(jq -r '[.userStories[] | select(has("_fe") or has("_side") or has("__droppedDeps") or has("__becameRoot"))] | length' "$web_file" "$api_file" "$mobile_file" 2>/dev/null | paste -sd+ - | bc 2>/dev/null)
+  assert_eq "0" "$leaked" "TC28: _fe/_side/__droppedDeps/__becameRoot stripped from output"
+
+  if [ ! -d "$stg" ]; then
+    echo -e "${GREEN}✓${NC} TC28: staging dir deleted after all N writes succeeded"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC28: staging dir NOT deleted"
+    ((TESTS_FAILED++))
+    rm -rf "$stg"
+  fi
+
+  rm -f "$mobile_file" "$web_file" "$api_file" "$out_file" .aimi/tasks/sm-tc28-*.lock
+}
+
+# TC29: a project-less story in a multi-repo merge gets its own root group
+# ("." — the AIMI_ROOT-relative spelling execute.md uses) rather than being
+# dropped, and no group is written empty, so the zero-story warning stays
+# silent. Also pins that every planned group's file exists with exactly the
+# story count the return value advertises.
+test_story_merge_project_split_root_group() {
+  echo ""
+  echo "=== TC29: story-merge project axis — untagged stories form the root group ==="
+
+  local stg=".aimi/.tasks-staging-tc29"
+  local out_file=".aimi/tasks/sm-tc29-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  _sm_make_project_story "$stg/01-web.json" "React dashboard page" "apps/web"     "src/pages/Dashboard.tsx"
+  _sm_make_project_story "$stg/02-api.json" "Dashboard API"        "services/api" "app/controllers/d.rb"
+  # No .project at all — _sm_make_story emits no project key.
+  _sm_make_story "$stg/03-root.json" "Repo-wide tooling update" '[]'
+
+  # stdout (the N-element result array) and stderr (warnings) are captured from
+  # a single run, so the assertions below describe one merge, not two.
+  local output exit_code stderr_out stderr_file
+  stderr_file=$(mktemp)
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_out=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+  assert_exit_code "0" "$exit_code" "TC29: untagged-story merge exits 0"
+
+  local root_file=".aimi/tasks/sm-tc29-tasks-root-tasks.json"
+  local web_file=".aimi/tasks/sm-tc29-tasks-apps-web-tasks.json"
+  local api_file=".aimi/tasks/sm-tc29-tasks-services-api-tasks.json"
+
+  local ret_projects
+  ret_projects=$(printf '%s' "$output" | jq -r '[.[].project] | join(",")' 2>/dev/null)
+  assert_eq ".,apps/web,services/api" "$ret_projects" "TC29: project-less stories routed to the '.' root group"
+
+  if [ -f "$root_file" ]; then
+    local root_count root_slugged_branch
+    root_count=$(jq '.userStories | length' "$root_file" 2>/dev/null)
+    root_slugged_branch=$(jq -r '.metadata.branchName' "$root_file" 2>/dev/null)
+    assert_eq "1" "$root_count" "TC29: root group file carries the untagged story"
+    assert_eq "feat/merged-root" "$root_slugged_branch" "TC29: '.' slugs to a filesystem-safe 'root' basename"
+  else
+    echo -e "${RED}✗${NC} TC29: root group file missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+    ((TESTS_FAILED++))
+  fi
+
+  # Every planned group's file exists and matches its advertised storyCount --
+  # the empty-group guard writes a file for any zero-story group, so a missing
+  # file (rather than an empty one) would be the real regression here.
+  local mismatch=0 i=0 total
+  total=$(printf '%s' "$output" | jq 'length' 2>/dev/null)
+  while [ "$i" -lt "${total:-0}" ]; do
+    local p c actual
+    p=$(printf '%s' "$output" | jq -r --argjson i "$i" '.[$i].path')
+    c=$(printf '%s' "$output" | jq -r --argjson i "$i" '.[$i].storyCount')
+    actual=$(jq '.userStories | length' "$p" 2>/dev/null || echo "MISSING")
+    [ "$actual" = "$c" ] || mismatch=1
+    i=$((i + 1))
+  done
+  assert_eq "0" "$mismatch" "TC29: every group's file exists with exactly its advertised storyCount"
+
+  # No group was empty here, so the empty-group warning must stay silent.
+  if [[ "$stderr_out" != *"project split produced zero stories"* ]]; then
+    echo -e "${GREEN}✓${NC} TC29: no spurious empty-project-group warning"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC29: empty-project-group warning fired with no empty group"
+    echo "  stderr: $stderr_out"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg"
+  rm -f "$root_file" "$web_file" "$api_file" "$out_file" .aimi/tasks/sm-tc29-*.lock
+}
+
+# TC30: a singleton project group (exactly one story) still gets its own file
+# instead of being folded into a larger neighbour by any majority rule.
+test_story_merge_project_split_singleton_group() {
+  echo ""
+  echo "=== TC30: story-merge project axis — singleton project group ==="
+
+  local stg=".aimi/.tasks-staging-tc30"
+  local out_file=".aimi/tasks/sm-tc30-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  # web-app is the 3-story majority; the lone api-service story is exactly the
+  # shape the old majority vote swallowed (issue #72).
+  _sm_make_project_story "$stg/01-ui.json"   "React UserProfile page"      "web-app"     "src/components/UserProfile.tsx"
+  _sm_make_project_story "$stg/02-docs.json" "Update documentation"        "web-app"     "docs/setup.md"
+  _sm_make_project_story "$stg/03-ui2.json"  "React SettingsPanel"         "web-app"     "src/components/Settings.tsx"
+  _sm_make_project_story "$stg/04-api.json"  "UserProfile API endpoint"    "api-service" "app/controllers/u.rb"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC30: singleton-group merge exits 0"
+
+  local api_file=".aimi/tasks/sm-tc30-tasks-api-service-tasks.json"
+  local web_file=".aimi/tasks/sm-tc30-tasks-web-app-tasks.json"
+
+  if [ -f "$api_file" ] && [ -f "$web_file" ]; then
+    local api_count web_count api_title
+    api_count=$(jq '.userStories | length' "$api_file" 2>/dev/null)
+    web_count=$(jq '.userStories | length' "$web_file" 2>/dev/null)
+    api_title=$(jq -r '.userStories[0].title' "$api_file" 2>/dev/null)
+    assert_eq "1" "$api_count" "TC30: singleton group keeps its own file (never absorbed by the majority)"
+    assert_eq "3" "$web_count" "TC30: majority group keeps all 3 of its stories"
+    assert_eq "UserProfile API endpoint" "$api_title" "TC30: the singleton story is the api-service one"
+  else
+    echo -e "${RED}✗${NC} TC30: expected per-project files missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+    ((TESTS_FAILED++))
+    ((TESTS_FAILED++))
+  fi
+
+  # The docs-only story rides its project, not a heuristic side verdict.
+  local docs_home
+  docs_home=$(jq -r '[.userStories[] | select(.title == "Update documentation")] | length' "$web_file" 2>/dev/null)
+  assert_eq "1" "$docs_home" "TC30: docs-only story stays with its own project group"
+
+  rm -rf "$stg"
+  rm -f "$api_file" "$web_file" "$out_file" .aimi/tasks/sm-tc30-*.lock
+}
+
+# TC31: a project value containing "/" is transliterated into a filesystem-safe
+# basename slug — never passed through raw — and its derived branchName still
+# satisfies the ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ invariant.
+test_story_merge_project_split_slash_project_slug() {
+  echo ""
+  echo "=== TC31: story-merge project axis — project value containing '/' ==="
+
+  local stg=".aimi/.tasks-staging-tc31"
+  local out_file=".aimi/tasks/sm-tc31-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  _sm_make_project_story "$stg/01-ui.json"  "Shared UI kit"  "packages/ui/components" "packages/ui/components/Button.tsx"
+  _sm_make_project_story "$stg/02-api.json" "Billing API"    "services/billing"       "app/controllers/b.rb"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC31: slash-bearing project merge exits 0"
+
+  local ui_file=".aimi/tasks/sm-tc31-tasks-packages-ui-components-tasks.json"
+  local billing_file=".aimi/tasks/sm-tc31-tasks-services-billing-tasks.json"
+
+  if [ -f "$ui_file" ]; then
+    echo -e "${GREEN}✓${NC} TC31: 'packages/ui/components' flattened to a single-component basename"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC31: slash-flattened output file missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  # No nested directory was created from the raw project path.
+  if [ ! -d ".aimi/tasks/packages" ]; then
+    echo -e "${GREEN}✓${NC} TC31: raw project path never used as a directory component"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC31: raw project path leaked into the output directory tree"
+    ((TESTS_FAILED++))
+    rm -rf ".aimi/tasks/packages"
+  fi
+
+  local ui_branch verbatim_project
+  ui_branch=$(jq -r '.metadata.branchName' "$ui_file" 2>/dev/null)
+  verbatim_project=$(jq -r '.metadata.splitGroup.project' "$ui_file" 2>/dev/null)
+  assert_eq "feat/merged-packages-ui-components" "$ui_branch" "TC31: branchName derived from the slug, not the raw path"
+  assert_eq "packages/ui/components" "$verbatim_project" "TC31: splitGroup.project keeps the routing key verbatim"
+
+  if [[ "$ui_branch" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo -e "${GREEN}✓${NC} TC31: derived branchName satisfies the branch-name invariant"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC31: derived branchName violates the branch-name invariant: $ui_branch"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg"
+  rm -f "$ui_file" "$billing_file" "$out_file" .aimi/tasks/sm-tc31-*.lock
+}
+
+# TC32: a project value containing "." is transliterated too, so nothing can
+# inject an extra extension segment or a ".." component into the output path.
+test_story_merge_project_split_dot_project_slug() {
+  echo ""
+  echo "=== TC32: story-merge project axis — project value containing '.' ==="
+
+  local stg=".aimi/.tasks-staging-tc32"
+  local out_file=".aimi/tasks/sm-tc32-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  _sm_make_project_story "$stg/01-core.json" "Core utils refactor" "libs/core.utils" "libs/core.utils/index.ts"
+  _sm_make_project_story "$stg/02-api.json"  "Reports API"         "services/reports" "app/controllers/r.rb"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC32: dot-bearing project merge exits 0"
+
+  local core_file=".aimi/tasks/sm-tc32-tasks-libs-core-utils-tasks.json"
+  local reports_file=".aimi/tasks/sm-tc32-tasks-services-reports-tasks.json"
+
+  if [ -f "$core_file" ]; then
+    echo -e "${GREEN}✓${NC} TC32: 'libs/core.utils' dot transliterated into the basename slug"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC32: dot-transliterated output file missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  local ret_path core_branch
+  ret_path=$(printf '%s' "$output" | jq -r '.[] | select(.project == "libs/core.utils") | .path' 2>/dev/null)
+  core_branch=$(jq -r '.metadata.branchName' "$core_file" 2>/dev/null)
+  assert_eq "$core_file" "$ret_path" "TC32: return value reports the slugged path"
+  assert_eq "feat/merged-libs-core-utils" "$core_branch" "TC32: dots never reach the derived branchName"
+
+  rm -rf "$stg"
+  rm -f "$core_file" "$reports_file" "$out_file" .aimi/tasks/sm-tc32-*.lock
+}
+
+# TC33: two distinct project values that flatten to the same basename slug are
+# a hard failure BEFORE any write — zero output files land and the error names
+# both colliding project values.
+test_story_merge_project_split_basename_collision() {
+  echo ""
+  echo "=== TC33: story-merge project axis — colliding basename slugs hard-fail ==="
+
+  local stg=".aimi/.tasks-staging-tc33"
+  local out_file=".aimi/tasks/sm-tc33-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+  rm -f .aimi/tasks/sm-tc33-*
+
+  # "apps/web" and "apps.web" both slugify to "apps-web".
+  _sm_make_project_story "$stg/01-a.json" "Slash flavored"  "apps/web" "src/a.ts"
+  _sm_make_project_story "$stg/02-b.json" "Dot flavored"    "apps.web" "src/b.ts"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC33: basename collision exits 1"
+  assert_contains "collide on the same output basename" "$output" "TC33: error names the collision"
+  assert_contains "apps/web" "$output" "TC33: error names the first colliding project value"
+  assert_contains "apps.web" "$output" "TC33: error names the second colliding project value"
+
+  local written
+  written=$(find .aimi/tasks -maxdepth 1 -name 'sm-tc33-*' 2>/dev/null | wc -l | tr -d ' ')
+  assert_eq "0" "$written" "TC33: zero output files land when the collision is detected"
+
+  if [ -d "$stg" ]; then
+    echo -e "${GREEN}✓${NC} TC33: staging dir preserved for an unambiguous retry"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC33: staging dir deleted despite the merge failing"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg"
+  rm -f .aimi/tasks/sm-tc33-*
+}
+
 # ============================================================================
 # ============================================================================
 # Roadmap Lifecycle Tests (US-002)
@@ -13539,6 +13941,12 @@ main() {
   test_story_merge_cross_file_dep_dropped_negative
   test_story_merge_cross_file_dep_dropped_title_sanitized
   test_story_merge_split_empty_side_warning
+  test_story_merge_project_split_three_projects
+  test_story_merge_project_split_root_group
+  test_story_merge_project_split_singleton_group
+  test_story_merge_project_split_slash_project_slug
+  test_story_merge_project_split_dot_project_slug
+  test_story_merge_project_split_basename_collision
 
   # Roadmap lifecycle tests (US-002)
   echo ""

@@ -5425,12 +5425,50 @@ cmd_story_merge() {
   # ============================================================
   # Branch on split mode
   # ============================================================
+  # The split AXIS decision is made here, before either writer runs, so the
+  # two write strategies stay independent instead of one of them branching
+  # internally on a partition rule it does not own:
+  #   >= 2 distinct normalized .project values  -> multi-repo layout. Split by
+  #     PROJECT: one output file per distinct project (N files, no
+  #     frontend/backend side decision at all).
+  #   <  2 distinct normalized .project values  -> single-repo/monorepo layout
+  #     (including "no story has .project" and "every story shares exactly one
+  #     project"). Split by SIDE: the unchanged two-file frontend/backend
+  #     writer, whose partition is the pure per-story heuristic.
   if [ "$split_mode" = "full-stack" ]; then
-    _story_merge_write_split "$merged_array" "$output_path" "$staging_dir" "$smell_warnings" "$phase_aware"
+    local distinct_project_count
+    distinct_project_count=$(printf '%s' "$merged_array" | jq "$_STORY_MERGE_NORM_PROJECT_JQ"'
+      [.[] | . as $s | ($s.project | norm_project)] | map(select(. != null)) | unique | length
+    ')
+    if [ "${distinct_project_count:-0}" -ge 2 ]; then
+      _story_merge_write_project_split "$merged_array" "$output_path" "$staging_dir" "$smell_warnings" "$phase_aware"
+    else
+      _story_merge_write_split "$merged_array" "$output_path" "$staging_dir" "$smell_warnings" "$phase_aware"
+    fi
   else
     _story_merge_write_legacy "$merged_array" "$output_path" "$staging_dir" "$smell_warnings"
   fi
 }
+
+# jq `def` spliced into every program that needs a story's .project reduced to
+# a stable grouping key: trims surrounding whitespace, strips one trailing
+# slash, and treats blank/whitespace-only (and absent) as null. Shared by
+# cmd_story_merge's split-axis test and _story_merge_write_project_split's
+# grouping so the two can never drift apart.
+#
+# Grouping/counting ONLY -- the normalized form is never written back onto a
+# story; .project must survive verbatim into the output files.
+_STORY_MERGE_NORM_PROJECT_JQ='
+def norm_project:
+  if . == null then null
+  else
+    (. | gsub("^\\s+|\\s+$"; "")) as $t |
+    if $t == "" then null
+    elif ($t | endswith("/")) then $t[0:-1]
+    else $t
+    end
+  end;
+'
 
 # Write a single merged tasks.json (legacy mode)
 _story_merge_write_legacy() {
@@ -5492,7 +5530,9 @@ _story_merge_write_legacy() {
     '{merged: $output, stories: $stories}'
 }
 
-# Write two split tasks files (full-stack mode)
+# Write two split tasks files (full-stack mode, SIDE axis: frontend/backend).
+# Chosen by cmd_story_merge for single-repo/monorepo layouts only -- fewer than
+# 2 distinct normalized .project values across the merged array.
 _story_merge_write_split() {
   local merged_array="$1"
   local output_path="$2"
@@ -5500,57 +5540,26 @@ _story_merge_write_split() {
   local smell_warnings="${4:-[]}"
   local phase_aware="${5:-false}"
 
-  # Partition by project-aware majority vote, with a monorepo guard:
-  # 1. Tag every story with its own heuristic frontend verdict (_fe) using the
-  #    same file-pattern/title predicate that decided the split before this
-  #    change (implementation.files matching tsx/jsx/components//pages//
-  #    frontend//ui//client/, OR title+description matching the UI/Frontend/
-  #    Component/Page/View/React/Tailwind keyword set).
-  # 2. Normalize .project for grouping/counting only (trim whitespace, strip
-  #    one trailing slash, blank/whitespace-only treated as absent) -- never
-  #    write the normalized form back onto the story; .project must survive
-  #    verbatim into the output files.
-  # 3. When >= 2 distinct normalized projects are present across the merged
-  #    array, decide each project group's side by strict majority of its
-  #    members' own _fe verdicts (ties go to backend, preserving the old
-  #    "not clearly frontend goes to backend" bias). This is what lets a
-  #    project-tagged docs-only story that fails the heuristic alone still
-  #    ride into frontend-tasks.json with its web-app siblings.
-  # 4. Below that threshold -- including "no story has .project" -- every
-  #    story falls back to its own _fe verdict, so a single-project (or
-  #    project-less) merge produces byte-identical output to pure per-story
-  #    heuristic classification (monorepo guard; keeps TC8/TC12 unchanged).
+  # Partition by the per-story frontend heuristic, unconditionally.
+  #
+  # This writer only ever sees a single-repo/monorepo merge: cmd_story_merge
+  # routes every layout carrying >= 2 distinct normalized .project values to
+  # _story_merge_write_project_split instead, so there is no project group to
+  # vote on here and no project-aware branch. Every story is classified by its
+  # own file-pattern/title verdict (implementation.files matching tsx/jsx/
+  # components//pages//frontend//ui//client/, OR title+description matching the
+  # UI/Frontend/Component/Page/View/React/Tailwind keyword set) -- byte-
+  # identical to what the old monorepo-guard fallback produced, which covers
+  # both "no story has .project" and "every story shares exactly one project".
   local tagged_stories
   tagged_stories=$(printf '%s' "$merged_array" | jq '
-    def norm_project:
-      if . == null then null
-      else
-        (. | gsub("^\\s+|\\s+$"; "")) as $t |
-        if $t == "" then null
-        elif ($t | endswith("/")) then $t[0:-1]
-        else $t
-        end
-      end;
     def fe_heuristic:
       ((.implementation.files // []) | any(
         test("\\.(tsx|jsx)$") or test("components?/") or test("pages?/") or
         test("frontend/") or test("ui/") or test("client/")
       )) or
       ((.title + " " + (.description // "")) | test("\\b(UI|Frontend|Component|Page|View|React|Tailwind)\\b"; "i"));
-    [.[] | . + {_fe: fe_heuristic}] as $tagged |
-    ([$tagged[] | (.project | norm_project)] | map(select(. != null)) | unique) as $distinct_projects |
-    if ($distinct_projects | length) >= 2 then
-      ($tagged
-        | map(select((.project | norm_project) != null))
-        | group_by(.project | norm_project)
-        | map({key: (.[0].project | norm_project), value: ((map(select(._fe)) | length) * 2 > length)})
-        | from_entries
-      ) as $side_by_project |
-      [$tagged[] | . as $s | ($s.project | norm_project) as $p |
-        $s + {_side: (if $p == null then $s._fe else $side_by_project[$p] end)}]
-    else
-      [$tagged[] | . + {_side: ._fe}]
-    end
+    [.[] | . + {_fe: fe_heuristic}] | map(. + {_side: ._fe})
   ')
 
   # Bipartition: two select() passes over the single tagged-and-sided array,
@@ -5846,6 +5855,319 @@ _story_merge_write_split() {
     --argjson fe_count "$fe_count_out" \
     --argjson be_count "$be_count_out" \
     '{frontend: $fe, backend: $be, frontend_stories: $fe_count, backend_stories: $be_count}'
+}
+
+# Write N split tasks files (full-stack mode, PROJECT axis: one file per repo).
+#
+# Chosen by cmd_story_merge when the merged array carries >= 2 distinct
+# normalized .project values -- a multi-repo layout. There is no
+# frontend/backend side decision on this path at all: the split axis IS the
+# project, so every repo named by a story gets its own valid, non-colliding
+# tasks file instead of being force-fit into two side files.
+#
+# All-or-nothing contract: every output path, slug, and branchName is derived
+# and validated BEFORE the first write, so a collision or an invalid branch
+# name lands zero files. Once the write loop starts, a mid-loop failure names
+# the files already on disk and keeps the staging dir so a retry is unambiguous.
+_story_merge_write_project_split() {
+  local merged_array="$1"
+  local output_path="$2"
+  local staging_dir="$3"
+  local smell_warnings="${4:-[]}"
+  local phase_aware="${5:-false}"
+
+  # ============================================================
+  # 1. Route every story to a project group
+  # ============================================================
+  # Group key = normalized .project, with project-less stories (absent, null,
+  # or blank/whitespace-only) routed to "." -- the AIMI_ROOT-relative spelling
+  # execute.md already uses for "the root repo", so an untagged story in a
+  # multi-repo merge still lands somewhere traceable instead of being dropped.
+  # Groups are emitted in lexicographic order by normalized project path
+  # (jq's `unique` sorts by codepoint), never staging-glob or first-encountered
+  # order.
+  local group_keys
+  group_keys=$(printf '%s' "$merged_array" | jq -c "$_STORY_MERGE_NORM_PROJECT_JQ"'
+    [.[] | . as $s | (($s.project | norm_project) // ".")] | unique
+  ')
+
+  # ============================================================
+  # 2. Per-group id assignment + cross-group dependsOn sweep
+  # ============================================================
+  # Ids are reassigned US-001..US-M in group order, each group taking a
+  # contiguous block (mirrors the frontend-then-backend offset scheme of
+  # _story_merge_write_split), so ids stay unique across the whole N-file set.
+  # A dependsOn edge that crosses a group boundary cannot survive -- its target
+  # lives in another file -- so it is dropped and captured as __droppedDeps,
+  # with __becameRoot flagging a story whose entire dependsOn list vanished.
+  #
+  # Every select()/map() pass binds its story via `. as $s` first: piping a
+  # story into map/has() rebinds `.` away from the story object, which has
+  # already broken a prior fix to this function.
+  local prepared
+  prepared=$(printf '%s\n%s' "$merged_array" "$group_keys" | jq -s "$_STORY_MERGE_NORM_PROJECT_JQ$_ROADMAP_SANITIZE_JQ"'
+    def group_key: (norm_project) // ".";
+    def pad3: tostring | if length == 1 then "00" + . elif length == 2 then "0" + . else . end;
+    def recompute_waves:
+      reduce range(length) as $_ (
+        map(. + {wave: (if (.dependsOn // []) == [] then 1 else 0 end)});
+        . as $current |
+        map(
+          if .wave > 0 then .
+          else
+            . as $story |
+            ([$story.dependsOn[] | . as $dep_id | ($current[] | select(.id == $dep_id) | .wave)] | if length == 0 then [0] else . end) as $dep_waves |
+            if ($dep_waves | all(. > 0)) then
+              . + {wave: (($dep_waves | max) + 1)}
+            else
+              .
+            end
+          end
+        )
+      );
+    .[0] as $stories | .[1] as $keys |
+    # Stories bucketed per group, preserving merged (outline) order inside
+    # each bucket.
+    [ $keys[] | . as $g |
+      {project: $g, stories: [$stories[] | . as $s | select(($s.project | group_key) == $g)]}
+    ] as $buckets |
+    # Running offset -> contiguous US-NNN block per group, in group order.
+    (reduce range($buckets | length) as $i ({offset: 0, out: []};
+      .offset as $off |
+      ($buckets[$i].stories) as $bs |
+      {
+        offset: ($off + ($bs | length)),
+        out: (.out + [{
+          project: $buckets[$i].project,
+          idmap: ([$bs | to_entries[] | . as $e | {key: $e.value.id, value: ("US-" + (($off + $e.key + 1) | pad3))}] | from_entries),
+          stories: $bs
+        }])
+      }
+    ) | .out) as $blocks |
+    # Global pre-remap-id -> {newId, project, title} map, built across EVERY
+    # group before any dependsOn remap runs, so a dropped cross-group target
+    # can still be named usefully (it exists in no single output file).
+    ([$blocks[] | . as $b | ($b.stories[] | . as $s |
+       {key: $s.id, value: {newId: ($b.idmap[$s.id] // $s.id), project: $b.project, title: $s.title}})]
+     | from_entries) as $gmap |
+    [$blocks[] | . as $b |
+      {
+        project: $b.project,
+        stories: ([$b.stories[] | . as $s |
+          ($s.dependsOn // []) as $pre |
+          (($pre | length) > 0) as $had_deps |
+          ([$pre[] | . as $d | select(($b.idmap[$d] // null) == null)]) as $dropped_ids |
+          $s
+          | .id = ($b.idmap[$s.id] // $s.id)
+          | .dependsOn = [$pre[] | . as $dep | ($b.idmap[$dep] // null) | select(. != null)]
+          | .__droppedDeps = $dropped_ids
+          | .__becameRoot = ($had_deps and (.dependsOn == []))
+        ] | recompute_waves)
+      }
+    ] as $remapped |
+    # One cross-group dependsOn smellWarnings entry per affected story, every
+    # title sanitized before it enters JSON or stderr. The `side` key carries
+    # the group key for this axis (the project path) rather than a
+    # frontend/backend literal -- renaming that field is owned by a follow-up
+    # story, so the shape stays compatible with the Step 5 renderer for now.
+    [$remapped[] | . as $b | ($b.stories[] | . as $s |
+      select(($s.__droppedDeps // []) | length > 0) |
+      ([($s.__droppedDeps // [])[] | . as $old |
+         ($gmap[$old] // {newId: $old, project: "unknown", title: ""}) |
+         {id: .newId, side: .project, title: (.title | _rm_sanitize(200))}]) as $dd |
+      {
+        type: "cross-file-dep-dropped",
+        storyId: $s.id,
+        side: $b.project,
+        becameRoot: $s.__becameRoot,
+        droppedDeps: $dd,
+        message: (
+          ($dd | length | tostring) + " cross-file dependsOn edge(s) dropped targeting: " +
+          ($dd | map(.title) | join("; ")) +
+          (if $s.__becameRoot then " (story became a false wave-1 root)" else "" end)
+        )
+      })
+    ] as $cross_warnings |
+    {blocks: $remapped, crossWarnings: $cross_warnings}
+  ')
+
+  # Merge into the Phase 4.2 smell_warnings param BEFORE any file is built, so
+  # every one of the N files carries the same combined set.
+  local cross_file_warnings combined_smell_warnings
+  cross_file_warnings=$(printf '%s' "$prepared" | jq -c '.crossWarnings')
+  combined_smell_warnings=$(printf '%s\n%s' "$smell_warnings" "$cross_file_warnings" | jq -s '.[0] + .[1]')
+
+  # Aggregated stderr banner (never per-edge), mirroring the SIDE writer: one
+  # summary line, then one enumeration line per FALSE-ROOT story only.
+  local total_dropped affected_count
+  total_dropped=$(printf '%s' "$cross_file_warnings" | jq '[.[].droppedDeps | length] | add // 0')
+  affected_count=$(printf '%s' "$cross_file_warnings" | jq 'length')
+  if [ "$affected_count" -gt 0 ]; then
+    echo "Warning: story-merge: ${total_dropped} cross-project dependsOn edge(s) dropped across ${affected_count} affected stories (--split full-stack, project axis; see metadata.smellWarnings)" >&2
+    local false_root_lines
+    false_root_lines=$(printf '%s' "$cross_file_warnings" | jq -r '
+      .[] | select(.becameRoot == true) |
+      (.storyId + " (" + .side + "): became a false wave-1 root -- its cross-project dependsOn target(s) " +
+       ([.droppedDeps[] | (.id + " (" + .side + ")")] | join(", ")) + " were dropped")
+    ')
+    if [ -n "$false_root_lines" ]; then
+      printf '%s\n' "$false_root_lines" >&2
+    fi
+  fi
+
+  # ============================================================
+  # 3. Derive every output path / slug / branchName up front
+  # ============================================================
+  local base_name ext base_no_ext dir_part
+  base_name=$(basename "$output_path")
+  ext="${base_name##*.}"
+  base_no_ext="${base_name%.$ext}"
+  # --phase-aware: identical single-"tasks"-segment collapse the SIDE writer
+  # applies. Pure string manipulation on the --output basename, independent of
+  # the split axis, so it composes unchanged at any N.
+  if [ "$phase_aware" = true ]; then
+    base_no_ext="${base_no_ext%-tasks}"
+  fi
+  dir_part=$(dirname "$output_path")
+
+  # slugify: a project path is NEVER interpolated raw into a filename. Every
+  # character outside [A-Za-z0-9_-] (notably "/" and ".") becomes "-", runs
+  # collapse, and leading/trailing "-" are trimmed; a value that flattens to
+  # nothing (e.g. ".") becomes "root".
+  local plan
+  plan=$(printf '%s' "$prepared" | jq -c \
+    --arg dir "$dir_part" \
+    --arg base "$base_no_ext" '
+    def slugify:
+      (gsub("[^A-Za-z0-9_-]"; "-") | gsub("-+"; "-") | gsub("^-+|-+$"; "")) as $s |
+      if $s == "" then "root" else $s end;
+    .blocks | to_entries | map(
+      . as $e | $e.value as $b | ($b.project | slugify) as $slug |
+      {
+        index: ($e.key + 1),
+        project: $b.project,
+        slug: $slug,
+        path: ($dir + "/" + $base + "-" + $slug + "-tasks.json"),
+        branchName: ("feat/merged-" + $slug),
+        storyCount: ($b.stories | length)
+      }
+    )
+  ')
+
+  # Basename collision: two distinct project values that flatten to the same
+  # slug would silently overwrite each other. Hard-fail the WHOLE merge here,
+  # before the first write, so zero output files land.
+  local slug_collisions
+  slug_collisions=$(printf '%s' "$plan" | jq -r '
+    group_by(.slug) | map(select(length > 1)) | .[] |
+    "  basename slug \"" + .[0].slug + "\" is shared by projects: " + (map(.project) | join(", "))
+  ')
+  if [ -n "$slug_collisions" ]; then
+    echo "Error: story-merge: --split full-stack: distinct project values collide on the same output basename; no files were written:" >&2
+    printf '%s\n' "$slug_collisions" >&2
+    exit 1
+  fi
+
+  # branchName validation, same invariant the plan command enforces before any
+  # git operation. Abort the whole merge on the first failure -- no partial
+  # write, no mangled fallback name.
+  local bad_branches
+  bad_branches=$(printf '%s' "$plan" | jq -r --arg re "$_ROADMAP_BRANCH_REGEX" '
+    .[] | select((.branchName | test($re)) | not) |
+    "  project \"" + .project + "\" derived invalid branchName: " + .branchName
+  ')
+  if [ -n "$bad_branches" ]; then
+    echo "Error: story-merge: --split full-stack: derived branchName failed validation against ${_ROADMAP_BRANCH_REGEX}; no files were written:" >&2
+    printf '%s\n' "$bad_branches" >&2
+    exit 1
+  fi
+
+  # An empty project group still writes its (empty userStories) file -- traced,
+  # does not crash downstream -- but is surfaced with a named warning rather
+  # than failing silently. Mirrors the SIDE writer's empty-side behavior.
+  local empty_group_projects
+  empty_group_projects=$(printf '%s' "$plan" | jq -r '.[] | select(.storyCount == 0) | .project')
+  if [ -n "$empty_group_projects" ]; then
+    while IFS= read -r empty_project; do
+      [ -n "$empty_project" ] || continue
+      echo "Warning: story-merge: project split produced zero stories for project: $empty_project" >&2
+    done <<< "$empty_group_projects"
+  fi
+
+  # ============================================================
+  # 4. Write every group's file atomically
+  # ============================================================
+  mkdir -p "$dir_part"
+
+  local group_total
+  group_total=$(printf '%s' "$plan" | jq 'length')
+
+  local written_paths=""
+  local idx=0
+  while [ "$idx" -lt "$group_total" ]; do
+    local group_path group_json tmp_group write_exit
+    group_path=$(printf '%s' "$plan" | jq -r --argjson i "$idx" '.[$i].path')
+
+    # metadata.splitGroup is the self-describing marker for this file's place
+    # in the N-way split: its own project, its 1-based index, the total, and
+    # every sibling file's path. Downstream consumers discover the full set
+    # from it instead of re-deriving it from filename string conventions.
+    group_json=$(printf '%s\n%s\n%s' "$prepared" "$plan" "$combined_smell_warnings" | jq -s --argjson i "$idx" '
+      .[0] as $prep | .[1] as $plan | .[2] as $smells |
+      $plan[$i] as $g |
+      $prep.blocks[$i] as $b |
+      {
+        schemaVersion: "3.3",
+        metadata: (
+          {
+            title: ("feat: merged tasks (" + $g.slug + ")"),
+            type: "feat",
+            branchName: $g.branchName,
+            createdAt: (now | strftime("%Y-%m-%d")),
+            planPath: null,
+            splitGroup: {
+              project: $g.project,
+              index: $g.index,
+              total: ($plan | length),
+              siblings: [$plan[] | . as $sib | select($sib.index != $g.index) | $sib.path]
+            }
+          } +
+          (if ($smells | length) > 0 then {smellWarnings: $smells} else {} end)
+        ),
+        userStories: [$b.stories[] | del(.referenceInventory) | del(.ac_anchors) | del(._fe) | del(._side) | del(.__droppedDeps) | del(.__becameRoot) | (.status //= "pending")]
+      }
+    ')
+
+    tmp_group=$(mktemp "${group_path}.XXXXXX")
+    (
+      _lock "${group_path}.lock"
+      printf '%s\n' "$group_json" > "$tmp_group"
+      mv "$tmp_group" "$group_path"
+    ) 200>"${group_path}.lock"
+    write_exit=$?
+    rm -f "$tmp_group" 2>/dev/null
+    if [ $write_exit -ne 0 ]; then
+      echo "Error: story-merge: failed to write project split output: $group_path" >&2
+      if [ -n "$written_paths" ]; then
+        echo "  Already written before this failure (staging dir kept for retry):" >&2
+        printf '%s\n' "$written_paths" >&2
+      else
+        echo "  No output files were written before this failure (staging dir kept for retry)." >&2
+      fi
+      exit 1
+    fi
+    if [ -n "$written_paths" ]; then
+      written_paths="${written_paths}"$'\n'"  ${group_path}"
+    else
+      written_paths="  ${group_path}"
+    fi
+    idx=$((idx + 1))
+  done
+
+  # On success (all N writes landed): delete the staging dir
+  rm -rf "$staging_dir"
+
+  printf '%s' "$plan" | jq '[.[] | {path, project, branchName, storyCount}]'
 }
 
 # ============================================================================
