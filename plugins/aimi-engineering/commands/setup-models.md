@@ -18,7 +18,7 @@ Interactive (re)configuration of per-category model assignments for `~/.config/a
 
 ## Step 0: Resolve CLI Path
 
-Read `/home/stanleytakamatsu/Projetos/Aimi/EgineerPlugin/aimi-engineering-plugin/plugins/aimi-engineering/commands/references/cli-path-resolution.md` and follow the **Resolve CLI Path** and **Version Check** sections to set `$AIMI_CLI`. Each layer is a separate Bash call.
+Read `${CLAUDE_PLUGIN_ROOT}/commands/references/cli-path-resolution.md` and follow the **Resolve CLI Path** and **Version Check** sections to set `$AIMI_CLI`. Each layer is a separate Bash call.
 
 If resolution fails, report the error and STOP.
 
