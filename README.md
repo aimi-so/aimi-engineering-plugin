@@ -111,6 +111,26 @@ Full behavior, teardown, and limitations: [docs/commands.md](docs/commands.md#co
 
 ---
 
+## Work too big for one plan
+
+When `/aimi:brainstorm` finds that what you described is more than one capability — say checkout *and* subscriptions — it proposes a **roadmap**: the feature cut into phases, each one demoable on its own.
+
+You then plan and run one phase at a time, so phase 2 is planned with phase 1's actual outcome in hand rather than guessed at months earlier.
+
+```bash
+/aimi:plan --phase 1
+/aimi:execute
+/aimi:plan --phase 2
+```
+
+Phases declare what they will produce and what they need from earlier ones. A phase does not close until those promised artifacts are found in the code — so "done" means delivered, not merely finished.
+
+Single-capability features never see any of this.
+
+How the cut is decided, and what happens between phases: [docs/roadmaps.md](docs/roadmaps.md).
+
+---
+
 ## Commands
 
 | Command | What it does |
@@ -154,6 +174,7 @@ You can route each agent category to a different Claude model — research on on
 | [Agents and skills](docs/agents-and-skills.md) | What each one does |
 | [Task schema](docs/task-schema.md) | The tasks file format |
 | [Architecture](docs/architecture.md) | Parallel execution, context handling, security |
+| [Roadmaps](docs/roadmaps.md) | Phasing large features, and the contracts between phases |
 | [OpenCode](docs/opencode.md) | Installing and running on OpenCode |
 | [Troubleshooting](docs/troubleshooting.md) | When something goes wrong |
 
