@@ -64,6 +64,7 @@ aimi-engineering-plugin/
 - Wrapper commands should pass `$ARGUMENTS` to wrapped commands
 - Document allowed-tools in frontmatter with specific Bash prefixes
 - Validate inputs before passing to external commands
+- See `commands/references/user-communication.md` for the wording/tone rules governing text written to the human reader (completion reports, chat explanations, `AskUserQuestion` prompts); this file references them (no duplication)
 
 ## Skill Conventions
 

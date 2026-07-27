@@ -95,3 +95,5 @@ instead. (Escape hatches are `Other` and `None — show again / revise`.)
 3. Add a one-sentence agent-mode fallback immediately below the picker call:
    > *Agent-mode fallback: if `INTERACTIVE_MODE=agent`, auto-[action]. Log:
    > `agent-mode: [site] auto-[action]`.*
+4. For the wording of the question and option text (not their format — that's
+   this file), see `commands/references/user-communication.md`.
