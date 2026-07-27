@@ -40,7 +40,7 @@ Examples: "false root," "bipartition invariant," "token-aware." If a term like t
 
 Being real code doesn't put an ALL-CAPS symbol in Bucket 1 — the test is whether a person outside this codebase would recognize it or search for it, not whether it exists in the source.
 
-- `PHASE_SPLIT_MODE`, `CONTAINER_MODE` — **Bucket 2.** Internal state flags meaningful only to the orchestrating command's own control flow, not names a person would recognize or search for. A completion report should say "frontend and backend ran as separate splits," never surface the variable name.
+- `PHASE_SPLIT_MODE`, `CONTAINER_MODE` — **Bucket 2.** Internal state flags meaningful only to the orchestrating command's own control flow, not names a person would recognize or search for. A completion report should say "the stories ran as separate splits, one per output file," never surface the variable name.
 - `--split full-stack` — **Bucket 1**, even though it is also a literal CLI flag: it is documented in `aimi-cli.sh`'s own help output and in `plugins/aimi-engineering/CLAUDE.md`, so a person can search and find it.
 
 The dividing question for any ALL-CAPS symbol: would a person outside this codebase recognize it or successfully search for it? If yes, Bucket 1. If it only means something inside this plugin's own control flow, Bucket 2 — gloss it or cut it before it reaches the human.
@@ -126,27 +126,30 @@ Checkable: grep the block for `outline:|File References|path token` — zero mat
 
 ### 4. Density — merge-conflict report
 
-Source: `execute.md:1142-1153`.
+Source: `execute.md:1491-1503`.
 
 Before:
 ```
 MERGE CONFLICT while merging phase [PHASE_ID]'s split branches into [PHASE_BRANCH].
+Split branches merged: [one line per active split branch]
 Conflicting files:
 [conflict output from merge-all]
 
 Resolve the conflict on branch [PHASE_BRANCH] in [PHASE_CONTAINER_PATH] and re-run
-`/aimi:execute` to continue. Both split files' stories are already marked complete —
+`/aimi:execute` to continue. Every split file's stories are already marked complete —
 re-running will not re-execute them, only retry this merge and the phase-completion
 checks that follow it.
 
 The phase container [PHASE_CONTAINER_PATH] itself — and any live dev server running
-inside it — is left untouched by this failure; only the two split worktrees above are
+inside it — is left untouched by this failure; only the split worktrees above are
 removed.
 ```
 
 After:
 ```
-Merge conflict — phase [PHASE_ID]'s two split branches don't merge cleanly into [PHASE_BRANCH].
+Merge conflict — phase [PHASE_ID]'s split branches don't merge cleanly into [PHASE_BRANCH].
+
+Split branches merged: [one line per active split branch]
 
 Conflicting files:
 [conflict output from merge-all]
