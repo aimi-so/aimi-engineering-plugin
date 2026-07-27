@@ -1170,27 +1170,40 @@ if [ -n "$PHASE_ANCHOR_FILE" ]; then
 fi
 ```
 
-A group that fails validation degrades to single-file phase execution rather than running a partial split.
+A group that fails validation degrades to single-file phase execution rather than running a partial split — and it does **not** fall through to Pass 2. Emptying `PHASE_SPLIT_FILES` above records only "no usable group here"; `PHASE_ANCHOR_FILE` stays set and is what the dispatch below reads, precisely so a failed group cannot resurrect a stale legacy pair that happens to sit in the same directory.
 
 #### Pass 2 — Legacy Paired Split (fallback)
 
-**Only reached when Pass 1 found no marker-carrying candidate** — i.e. this phase's files predate the project-split writer. The legacy rule is unchanged: two files sharing the `<feature>-phase-<N>` prefix, one ending `-frontend-tasks.json` and the other `-backend-tasks.json`. It terminates by feeding the pair into the same N-aware member list as its two-member case:
+**Only reached when Pass 1 found no marker-carrying candidate at all** — i.e. this phase's files predate the project-split writer. The legacy rule is unchanged: two files sharing the `<feature>-phase-<N>` prefix, one ending `-frontend-tasks.json` and the other `-backend-tasks.json`. It terminates by feeding the pair into the same N-aware member list as its two-member case.
+
+Pass 1 and Pass 2 run in the **same** Bash call, so `PHASE_ANCHOR_FILE` from Pass 1 is in scope here. The dispatch has exactly three arms, and the discriminator is `PHASE_ANCHOR_FILE` — never `PHASE_SPLIT_FILES`, which Pass 1 empties for *two* different reasons (no marker found, and marker found but group invalid) that must not be treated alike:
 
 ```bash
-if [ -z "$PHASE_SPLIT_FILES" ]; then
+if [ -n "$PHASE_ANCHOR_FILE" ] && [ -n "$PHASE_SPLIT_FILES" ]; then
+  # Arm 1 — Pass 1 found a marker and its group validated. Run the project split.
+  PHASE_SPLIT_MODE=true
+elif [ -n "$PHASE_ANCHOR_FILE" ]; then
+  # Arm 2 — a marker was found but its group failed validation. Degrade to
+  # single-file phase execution. The legacy pair is NOT considered: this phase
+  # was planned by the project-split writer, so any -frontend-/-backend-tasks.json
+  # sitting beside it is stale, and running it would execute the wrong work.
+  echo "Phase split group failed validation — degrading to single-file phase execution (legacy frontend/backend pair not considered: this phase carries a project-split marker)" >&2
+  PHASE_SPLIT_FILES=""
+  PHASE_SPLIT_MODE=false
+else
+  # Arm 3 — no candidate carries the marker. Legacy pair fallback.
   LEGACY_FE_TASKS="$PHASE_DIR_PATH/$FEATURE-phase-$PHASE_ID-frontend-tasks.json"
   LEGACY_BE_TASKS="$PHASE_DIR_PATH/$FEATURE-phase-$PHASE_ID-backend-tasks.json"
   if [ -f "$LEGACY_FE_TASKS" ] && [ -f "$LEGACY_BE_TASKS" ]; then
     PHASE_SPLIT_FILES="$LEGACY_FE_TASKS"$'\n'"$LEGACY_BE_TASKS"
+    PHASE_SPLIT_MODE=true
+  else
+    PHASE_SPLIT_MODE=false
   fi
 fi
-
-if [ -n "$PHASE_SPLIT_FILES" ]; then
-  PHASE_SPLIT_MODE=true
-else
-  PHASE_SPLIT_MODE=false
-fi
 ```
+
+This mirrors the flat side, whose Project-Split Detection likewise dispatches on `ANCHOR_FILE` ("When `ANCHOR_FILE` is empty… fall through to Paired Split Detection"; "When the group failed validation… the run degrades to Single-File Fallback"). Arm 2 is the case a `PHASE_SPLIT_FILES` gate silently mishandles: it announces the degradation and then runs the stale pair anyway.
 
 Legacy pair files carry no `metadata.splitGroup`, so every step below derives their slugs from their own basenames (`frontend`, `backend`) and reproduces exactly today's `<PHASE_BRANCH>-frontend` / `<PHASE_BRANCH>-backend` branch pair — byte-for-byte the same worktree creation, spawn, report, merge, and cleanup behavior as before, now expressed as the two-iteration case of one loop.
 
@@ -1287,6 +1300,7 @@ One branch per **active** split file, derived from that file's own project (or, 
 
 ```bash
 SPLIT_BRANCHES=""
+SPLIT_PLAN=""
 while IFS= read -r split_file; do
   [ -n "$split_file" ] || continue
   SPLIT_PROJECT=$(jq -r '.metadata.splitGroup.project // ""' "$split_file")
@@ -1298,7 +1312,15 @@ while IFS= read -r split_file; do
     .)
       SPLIT_SLUG="root"
       ;;
+    /*|..|../*|*/..|*/../*)
+      echo "Invalid splitGroup.project in $split_file: $SPLIT_PROJECT" >&2
+      exit 1
+      ;;
     *)
+      if ! [[ "$SPLIT_PROJECT" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$ ]]; then
+        echo "Invalid splitGroup.project in $split_file: $SPLIT_PROJECT" >&2
+        exit 1
+      fi
       SPLIT_SLUG=$(printf '%s' "$SPLIT_PROJECT" | tr -c 'A-Za-z0-9_-' '-' | tr -s '-' | sed 's/^-//; s/-$//')
       ;;
   esac
@@ -1308,6 +1330,7 @@ while IFS= read -r split_file; do
     exit 1
   fi
   SPLIT_BRANCHES="${SPLIT_BRANCHES}${SPLIT_BRANCH}"$'\n'
+  SPLIT_PLAN="${SPLIT_PLAN}${split_file}"$'\t'"${SPLIT_BRANCH}"$'\n'
 done <<< "$PHASE_ACTIVE_SPLIT_FILES"
 
 SPLIT_BRANCH_TOTAL=$(printf '%s' "$SPLIT_BRANCHES" | grep -c .)
@@ -1320,6 +1343,8 @@ fi
 
 Every derived name is validated against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` — the same regex Step 1.7 already validated `PHASE_BRANCH` against — **before any worktree is created**, and the whole set is checked for collisions (two members whose slugs coincide would otherwise share one branch and silently interleave their commits). On any failure: release the claim (see Release the Claim on Abort), report the offending file and branch name, and STOP — create no worktree.
 
+`SPLIT_PROJECT` itself is rejected on traversal shapes and on any character outside `^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$` — the same two guards, in the same order, that Step 0.9's flat per-repo loop applies to the same field, so the two sides stay diffable. The reason is **not** branch safety: `slugify` above maps every character outside `[A-Za-z0-9_-]` to `-`, so the derived branch already satisfies its own regex no matter what `SPLIT_PROJECT` holds. The reason is that `SPLIT_PROJECT` is echoed **verbatim** — never through the slug — into the Aggregated Completion Report's `Project:` line and into each spawned Task's `description`, so an unvalidated value reaches both the human reader and a sub-agent prompt unfiltered. Unlike the flat side, `SPLIT_PROJECT` is never joined onto a filesystem path here (every split worktree nests under `$PHASE_CONTAINER_PATH`), which is why this guard is about what the value can *say*, not where it can point.
+
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
@@ -1328,7 +1353,7 @@ $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
 
 For a legacy pair the two basenames yield the slugs `frontend` and `backend`, so the derived branches are exactly `${PHASE_BRANCH}-frontend` and `${PHASE_BRANCH}-backend` — unchanged from before. For a project split, `apps/web` yields `${PHASE_BRANCH}-apps-web` and the root group (`project` = `.`) yields `${PHASE_BRANCH}-root`.
 
-Carry each active member's resolved `(split_file, SPLIT_PROJECT, SPLIT_SLUG, SPLIT_BRANCH, SPLIT_WORKTREE_PATH)` tuple forward — the worktree, dev-server, spawn, report, merge, and cleanup passes below all iterate that same ordered list.
+Carry each active member's resolved `(split_file, SPLIT_PROJECT, SPLIT_SLUG, SPLIT_BRANCH, SPLIT_WORKTREE_PATH)` tuple forward — the worktree, dev-server, spawn, report, merge, and cleanup passes below all iterate that same ordered list. `SPLIT_PLAN` is that list materialized for the shell: one tab-separated `<split_file>\t<SPLIT_BRANCH>` line per active member, in the same order as `SPLIT_BRANCHES`. A pass that needs both halves of a member's tuple reads `SPLIT_PLAN`; a pass that needs only the branch reads `SPLIT_BRANCHES`. **No per-member value is ever left in a bare scalar for a later step to read** — a scalar assigned inside a loop holds only the last member's value by the time the loop ends, which silently applies one member's decision to every other member.
 
 ### Create Split Worktrees
 
@@ -1354,8 +1379,11 @@ SPLIT_WORKTREE_PATH="$PHASE_CONTAINER_PATH/.worktrees/$SPLIT_BRANCH"
 
 Independently for each active split — never against `PHASE_CONTAINER_PATH` itself, since no story ever lands directly on the un-merged phase branch — gate on that split's **own** tasks file having at least one visual story, mirroring Phase Container Dev Server Bootstrap's gate above exactly, scoped one level deeper. Each member computes its own gate; no member's count ever gates another's:
 
+This block **computes** the gates; it starts no server. It emits one plan line per active member — `<SPLIT_BRANCH>\t<true|false>` — because the delegation that consumes the gate happens after the loop, and a bare `HAS_VISUAL_STORY` would by then hold only the *last* member's value:
+
 ```bash
-while IFS= read -r split_file; do
+SPLIT_SERVER_PLAN=""
+while IFS=$'\t' read -r split_file split_branch; do
   [ -n "$split_file" ] || continue
   SPLIT_VISUAL_STORIES=$(jq '[.userStories[]? | select(.verification | type == "object" and .strategy == "visual")] | length' "$split_file" 2>/dev/null)
   if [ "${SPLIT_VISUAL_STORIES:-0}" -gt 0 ]; then
@@ -1363,10 +1391,11 @@ while IFS= read -r split_file; do
   else
     HAS_VISUAL_STORY=false
   fi
-done <<< "$PHASE_ACTIVE_SPLIT_FILES"
+  SPLIT_SERVER_PLAN="${SPLIT_SERVER_PLAN}${split_branch}"$'\t'"${HAS_VISUAL_STORY}"$'\n'
+done <<< "$SPLIT_PLAN"
 ```
 
-For each active split, delegate to **Bootstrap a Container Dev Server** with `EXEC_ROOT="$PHASE_CONTAINER_PATH"` (the same CWD Create Split Worktrees above already used to create every worktree), `EXEC_BRANCH` set to that member's own derived split branch, and `HAS_VISUAL_STORY` as just computed for that same member.
+Then iterate `$SPLIT_SERVER_PLAN` — one delegation per line, never one delegation reading a leftover scalar. For each line, delegate to **Bootstrap a Container Dev Server** with `EXEC_ROOT="$PHASE_CONTAINER_PATH"` (the same CWD Create Split Worktrees above already used to create every worktree), `EXEC_BRANCH` set to **that line's** first field, and `HAS_VISUAL_STORY` set to **that line's** second field. Read `HAS_VISUAL_STORY` only from the plan line being processed; its value after the loop above belongs to whichever member happened to be last and is meaningless for every other member. Getting this wrong fails in both directions: a pure-API split inherits a visual sibling's `true` and gets a server it must never get, or a visual split inherits an API sibling's `false`, gets no server, and cannot run the visual verification its stories require.
 
 A split with no visual story (e.g. a pure-API service) never gets nor blocks on a server — its gate simply fails, exactly like the single-file bootstrap above. Every port is discarded here too — re-resolved fresh via `serve url` at the point each split sub-orchestrator's own Step 3.3 / Step 4 call sites need it. A split sub-orchestrator's spawn prompt pre-sets `PHASE_MODE=true`, `PHASE_BRANCH=[its own split branch]`, and `PHASE_CONTAINER_PATH=[its own split worktree path]` (see Spawn Split Sub-Orchestrators below), so its own copies of Open Visual Follow Session and Step 4's post-merge visual verification apply unmodified — no split-specific code path is needed at either call site. Two members never collide on a `dev-server.json` entry either: `serve start` keys state by the container's absolute resolved path, which is unique per split branch.
 
@@ -1453,11 +1482,17 @@ One `merge-all` call listing **every** active split branch:
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
 cd "$PHASE_CONTAINER_PATH"
-mapfile -t SPLIT_BRANCH_ARGS < <(printf '%s' "$SPLIT_BRANCHES" | grep .)
-if [ "${#SPLIT_BRANCH_ARGS[@]}" -gt 0 ]; then
-  $WORKTREE_MGR merge-all "${SPLIT_BRANCH_ARGS[@]}" --into "$PHASE_BRANCH"
+set --
+while IFS= read -r split_branch; do
+  [ -n "$split_branch" ] || continue
+  set -- "$@" "$split_branch"
+done <<< "$SPLIT_BRANCHES"
+if [ "$#" -gt 0 ]; then
+  $WORKTREE_MGR merge-all "$@" --into "$PHASE_BRANCH"
 fi
 ```
+
+The argv is built with positional parameters and the same `while IFS= read -r ... done <<<` pattern every other loop in this file uses. **Do not substitute bash 4's read-into-array builtin here.** It is a bash-only builtin: it does not exist in zsh, and it does not exist in the bash 3.2 that ships as `/bin/bash` on macOS. Where it is missing the read fails, the array stays empty, and the arity guard turns that failure into a **silent no-op** — every split branch stays unmerged, `$PHASE_BRANCH` keeps none of the work, and the flow proceeds to Creates Verification, which inspects `$PHASE_CONTAINER_PATH`'s tracked files and can only pass because this merge landed. A no-op here is therefore not a degraded merge, it is a phase that reports success having landed nothing. Verified: under zsh the array read fails, the guard swallows it, and the block exits 0 having merged nothing; the positional-parameter form above builds the identical argv under both bash and zsh.
 
 This is the same `merge-all ... --into` primitive Step 4's own wave loop already uses for individual story branches, reused here for the split branches: the merge target is `$PHASE_BRANCH`, executed with CWD inside the phase container's own worktree (`$PHASE_CONTAINER_PATH`) — never `$DEFAULT_BRANCH`, never `AIMI_ROOT`. Centralizing every merge in this parent step (rather than having each sub-orchestrator merge into `$PHASE_BRANCH` itself, mid-flight, from its own worktree) avoids N parallel Tasks racing a `git checkout`/`git merge` against the same `$PHASE_CONTAINER_PATH` working directory at once; running them sequentially here, after every Task has already returned, is safe by construction. This step is also what makes Phase Completion's Creates Verification (below) meaningful: it inspects `$PHASE_CONTAINER_PATH`'s actual tracked files, which only reflect every split's work once this merge has landed.
 
@@ -1516,6 +1551,8 @@ done <<< "$SPLIT_BRANCHES"
 `serve stop` exits 0 and reports "No dev server registered" when no server was ever started for a split (its own gate in Split Container Dev Server Bootstrap never passed) — so every call above is always safe to issue, identical to container-execution.md's Container Mode: Stop the Dev Server contract (invoked from Step 5).
 
 Removes only the split worktrees this run created. `$PHASE_CONTAINER_PATH` itself is left intact — its removal is a separate, later-timed operation owned entirely by Phase Completion's own lifecycle (the phase container is only ever torn down once the *phase* — not just this split — is fully done), never by this section.
+
+**Why no `--keep-branch` here, unlike Step 0.9's Aggregated Completion (Split Mode).** The flat flow passes `--keep-branch` when it cleans up *its* split worktrees; this section deliberately does not, so `remove` also runs `git branch -D` on each split branch. The difference is what the branch still owes: a flat split branch is the run's final deliverable that the user is told to open a PR from, whereas a phase split branch is an intermediate that Merge Split Branches Into the Phase Branch — which this section only runs *after* — has already merged into `$PHASE_BRANCH`. Its commits are reachable from the phase branch, so the branch ref itself has no remaining consumer and keeping it would only accumulate one dead ref per member per phase. `$PHASE_BRANCH` is what carries the work forward from here, and nothing deletes it.
 
 ### Continue to Phase Completion
 
@@ -2555,12 +2592,12 @@ This is ADDITIVE to the existing `Wave [wave] complete: ...` line — does not r
 Runs once, and before Step 5. Its trigger point depends on whether this phase used a full-stack split:
 
 - **Single-file phase (`PHASE_SPLIT_MODE=false`, unchanged):** immediately after Post-Loop Cleanup and the Visual Follow Session note above.
-- **Full-stack split phase (`PHASE_SPLIT_MODE=true`):** from Phase-Mode Paired Split's **Continue to Phase Completion** step, after both split sub-orchestrators have returned, their branches have been merged into `$PHASE_BRANCH`, and their worktrees have been cleaned up.
+- **Full-stack split phase (`PHASE_SPLIT_MODE=true`):** from Phase-Mode Paired Split's **Continue to Phase Completion** step, after **every** split sub-orchestrator has returned (`PHASE_ACTIVE_COUNT` of them, for any N — not a fixed two), all their branches have been merged into `$PHASE_BRANCH` in the single `merge-all` call, and all their worktrees have been cleaned up.
 
 It fires only when **both** are true:
 
 - `PHASE_MODE == true` (see Phase Mode Detection in Step 1)
-- the phase's own pending count is zero — see **Multi-File Pending Count** immediately below for how this is computed; when it is greater than 0, the wave loop (or, in split mode, one or both sub-orchestrators) broke on deadlock or a gate-blocked wave, not true completion — release the claim (see Release the Claim on Abort; this section runs only in the top-level orchestrator that itself claimed the phase, so `$PHASE_ID` is always set here) and skip this entire section, going straight to Step 5 (single-file) or the Aggregated Completion Report (split mode, already produced by Phase-Mode Paired Split before this section was reached):
+- the phase's own pending count is zero — see **Multi-File Pending Count** immediately below for how this is computed; when it is greater than 0, the wave loop (or, in split mode, one or more of the sub-orchestrators) broke on deadlock or a gate-blocked wave, not true completion — release the claim (see Release the Claim on Abort; this section runs only in the top-level orchestrator that itself claimed the phase, so `$PHASE_ID` is always set here) and skip this entire section, going straight to Step 5 (single-file) or the Aggregated Completion Report (split mode, already produced by Phase-Mode Paired Split before this section was reached):
 
   ```bash
   AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -2583,11 +2620,13 @@ $AIMI_CLI count-pending
 PHASE_PENDING=0
 while IFS= read -r split_file; do
   [ -n "$split_file" ] || continue
-  SPLIT_FILE_PENDING=$(jq '[.userStories[]? | select(.status == "pending")] | length' "$split_file")
+  SPLIT_FILE_PENDING=$(jq '[.userStories[]? | select((.status // "pending") != "completed")] | length' "$split_file")
   PHASE_PENDING=$((PHASE_PENDING + ${SPLIT_FILE_PENDING:-0}))
 done <<< "$PHASE_SPLIT_FILES"
 ```
-The phase's split work only counts as complete when `PHASE_PENDING` is `0` — i.e. **every** member reports zero pending stories, not just the first two. Summing over the full member list rather than `$PHASE_ACTIVE_SPLIT_FILES` is deliberate: a member skipped as inactive contributes `0` either way, but reading the full list keeps this count correct even if a sibling session touched a member between Step 1.7's filter and now.
+The phase's split work only counts as complete when `PHASE_PENDING` is `0` — i.e. **every** member reports zero outstanding stories, not just the first two. Summing over the full member list rather than `$PHASE_ACTIVE_SPLIT_FILES` is deliberate: a member skipped as inactive contributes `0` either way, but reading the full list keeps this count correct even if a sibling session touched a member between Step 1.7's filter and now.
+
+The predicate is `(.status // "pending") != "completed"` — **not** `.status == "pending"` — so that this count and Step 1.7's **Active Split Files** filter answer the same question over the same file. The two must agree: Active Split Files decides which members get spawned, and this count decides whether the phase may close. Counting only `"pending"` here would treat `in_progress` (and any status a future story adds, and a story with no `status` field at all) as finished, letting a phase reach `roadmap-set-status --status completed` with a story still mid-flight — while Active Split Files, using `!= "completed"`, would have kept that same member active. `completed` is the only terminal status, so testing against it directly is what makes both sites correct by the same rule instead of by two lists of non-terminal statuses that can drift apart.
 
 **For legacy flat v3.3 tasks.json files (`PHASE_MODE=false`): skip this entire section.** Step 5 runs completely unchanged only for inline-mode executions (`CONTAINER_MODE=false`, the default) — exactly as it does today. Container-mode flat executions (`CONTAINER_MODE=true`, still `PHASE_MODE=false`) also skip this Phase Completion section — a claimed phase's own container is a separate concept from a flat container-mode container — but Step 5 itself runs an additional completion path for them; see the CONTAINER_MODE scope note under Step 5: Completion below.
 
