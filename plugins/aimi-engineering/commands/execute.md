@@ -34,7 +34,18 @@ This section is the single source of truth for multi-repo layout detection and p
 
 ### AIMI_ROOT_IS_GIT_REPO Branching Rule
 
-Set in Step 1.5 by running `git -C [AIMI_ROOT] rev-parse --git-dir`. When **true**, AIMI_ROOT is itself a git repository — all inline logic (default-branch detection, fetch, branch setup, worktree creation) runs directly against AIMI_ROOT. When **false**, this is a **multi-repo layout**: Claude Code runs from a parent folder containing multiple git repos as subfolders. In this layout:
+`AIMI_ROOT_IS_GIT_REPO` is a **per-block derived value**, never a variable carried between Bash calls — each Bash tool call is an isolated shell, so nothing assigned in one block survives into the next. Every block that branches on it derives it first, exactly like `$AIMI_CLI` and `$AIMI_ROOT` are re-derived per call. This is the canonical form; embed it verbatim (the git check needs `AIMI_ROOT` in scope, so the upward walk comes first):
+
+```bash
+AIMI_ROOT="$PWD"
+while [ "$AIMI_ROOT" != "/" ] && [ ! -d "$AIMI_ROOT/.aimi" ]; do AIMI_ROOT=$(dirname "$AIMI_ROOT"); done
+[ -d "$AIMI_ROOT/.aimi" ] || AIMI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+if git -C "$AIMI_ROOT" rev-parse --git-dir >/dev/null 2>&1; then AIMI_ROOT_IS_GIT_REPO=true; else AIMI_ROOT_IS_GIT_REPO=false; fi
+```
+
+Two shell consumers embed it: Step 1.5's **Detect Git Repo Layout** (which echoes the value so the agent can read it) and the phase container's **Unsupported Combination Guard: Phase Mode + Multi-Repo**. Every other consumer below — Step 1.6's Early-Skip Guard, Step 2's container/branch-setup skips, Step 4's per-group commit counting — is an agent-level branch that references this rule by name and reads the value Step 1.5 echoed; no shell is involved, so none of them needs its own derivation.
+
+When **true**, AIMI_ROOT is itself a git repository — all inline logic (default-branch detection, fetch, branch setup, worktree creation) runs directly against AIMI_ROOT. When **false**, this is a **multi-repo layout**: Claude Code runs from a parent folder containing multiple git repos as subfolders. In this layout:
 
 - Default-branch detection and `git fetch origin` are skipped at the AIMI_ROOT level and happen per-project instead.
 - Step 1.6 (Branch Base Selection) is skipped entirely; `BASE_BRANCH` is left unset.
@@ -710,13 +721,17 @@ Detect the default branch and fetch the latest from origin before branch setup.
 
 ### Detect Git Repo Layout
 
-Check if AIMI_ROOT (directory containing `.aimi/`) is itself a git repository:
+Check whether AIMI_ROOT (the directory containing `.aimi/`) is itself a git repository. This is the canonical derivation from the **AIMI_ROOT_IS_GIT_REPO Branching Rule** in Multi-Repo Handling, embedded verbatim — each Bash call is an isolated shell, so `AIMI_ROOT` is re-derived here first:
 
 ```bash
-git -C [AIMI_ROOT] rev-parse --git-dir >/dev/null 2>&1
+AIMI_ROOT="$PWD"
+while [ "$AIMI_ROOT" != "/" ] && [ ! -d "$AIMI_ROOT/.aimi" ]; do AIMI_ROOT=$(dirname "$AIMI_ROOT"); done
+[ -d "$AIMI_ROOT/.aimi" ] || AIMI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+if git -C "$AIMI_ROOT" rev-parse --git-dir >/dev/null 2>&1; then AIMI_ROOT_IS_GIT_REPO=true; else AIMI_ROOT_IS_GIT_REPO=false; fi
+echo "AIMI_ROOT_IS_GIT_REPO=$AIMI_ROOT_IS_GIT_REPO"
 ```
 
-Store exit code as `AIMI_ROOT_IS_GIT_REPO` (true if exit 0, false otherwise). See the **Multi-Repo Handling** section above for the full contract.
+The echoed line is what every agent-level branch below reads — this block's only output, and the only place the value becomes observable outside a shell. See the **Multi-Repo Handling** section above for the full contract.
 
 ### Default Branch and Origin Fetch
 
@@ -1034,26 +1049,26 @@ Do **not** swallow this call's exit status. Every state a claim can hand back �
 
 **This guard runs first — before the `cd "$AIMI_ROOT"` below, before any `$WORKTREE_MGR create`, and before any split detection.** Every phase-mode container and worktree in this file is created downstream of this point: the phase container itself, and every split worktree **Phase-Mode Paired Split** later nests inside it. One check here therefore covers all of them, including the case where a project split converges to a single distinct project (`story-merge`'s SIDE axis, by design) and lands as a two-file frontend/backend split under a root that is not a repository.
 
-`AIMI_ROOT_IS_GIT_REPO` was already resolved in Step 1.5's **Detect Git Repo Layout** (see the **AIMI_ROOT_IS_GIT_REPO Branching Rule** in Multi-Repo Handling). When it is **false**, `AIMI_ROOT` is a plain parent folder holding one git repository per subfolder, not a repository itself — `cd "$AIMI_ROOT"` followed by `$WORKTREE_MGR create` exits **128** with a bare `fatal: not a git repository` (nothing is created, so no state is corrupted — but the message names neither the phase, nor the layout, nor the fix). That opaque failure is issue #73. Refuse here instead, with a message that says what was detected and what to do about it:
+`AIMI_ROOT_IS_GIT_REPO` is re-derived here rather than carried over from Step 1.5's **Detect Git Repo Layout** — each Bash call is an isolated shell, so the canonical derivation from the **AIMI_ROOT_IS_GIT_REPO Branching Rule** (Multi-Repo Handling) is embedded verbatim below, `AIMI_ROOT` walk included. When the value is **false**, `AIMI_ROOT` is a plain parent folder holding one git repository per subfolder, not a repository itself — `cd "$AIMI_ROOT"` followed by `$WORKTREE_MGR create` exits **128** with a bare `fatal: not a git repository` (nothing is created, so no state is corrupted — but the message names neither the phase, nor the layout, nor the fix). That opaque failure is issue #73. Refuse here instead.
 
-```bash
-if [ "$AIMI_ROOT_IS_GIT_REPO" != "true" ]; then
-  echo "Phase mode needs a git repository at $AIMI_ROOT; multi-repo layout detected." >&2
-  PHASE_MULTI_REPO_UNSUPPORTED=true
-else
-  PHASE_MULTI_REPO_UNSUPPORTED=false
-fi
-```
-
-When the guard fires, release the claim first (see **Release the Claim on Abort** — this session ran Step 1.7's **Claim the Phase** itself, so `$PHASE_ID` is set and this call is the top-level orchestrator's to make):
+The decision and its consequence live in the same block: the claim release (see **Release the Claim on Abort** — this session ran Step 1.7's **Claim the Phase** itself, so `$PHASE_ID` is set and this call is the top-level orchestrator's to make) runs inside the failing branch, so a single-repo layout never touches it and a multi-repo layout can never skip it.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-$AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+AIMI_ROOT="$PWD"
+while [ "$AIMI_ROOT" != "/" ] && [ ! -d "$AIMI_ROOT/.aimi" ]; do AIMI_ROOT=$(dirname "$AIMI_ROOT"); done
+[ -d "$AIMI_ROOT/.aimi" ] || AIMI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+if git -C "$AIMI_ROOT" rev-parse --git-dir >/dev/null 2>&1; then AIMI_ROOT_IS_GIT_REPO=true; else AIMI_ROOT_IS_GIT_REPO=false; fi
+
+if [ "$AIMI_ROOT_IS_GIT_REPO" != "true" ]; then
+  echo "Phase mode needs a git repository at $AIMI_ROOT; multi-repo layout detected." >&2
+  $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+  exit 1
+fi
 ```
 
-Then report and **STOP** — without `cd`-ing to `AIMI_ROOT`, without computing `PHASE_CONTAINER_PATH`, and without creating any container, worktree, or branch:
+Exit 0 means the guard passed and this subsection continues below. **When the block exits non-zero,** the claim is already released — report and **STOP** without `cd`-ing to `AIMI_ROOT`, without computing `PHASE_CONTAINER_PATH`, and without creating any container, worktree, or branch:
 
 ```
 Phase mode is not supported in a multi-repo layout.
