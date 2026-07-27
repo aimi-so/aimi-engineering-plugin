@@ -524,7 +524,7 @@ Standard single-file output to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json
 
 - **title**: Conventional format — `<type>: <Descriptive Name>`
 - **type**: `feat`, `ref`, `bug`, or `chore`
-- **branchName**: Kebab-case, prefixed with type. For split files: `type/[feature]-frontend` and `type/[feature]-backend`
+- **branchName**: Kebab-case, prefixed with type. For split files, one per output file: `type/[feature]-frontend` and `type/[feature]-backend` on the SIDE axis; `type/[feature]-<project-slug>` per project on the PROJECT axis
 - **createdAt**: Today's date (YYYY-MM-DD)
 - **planPath**: Always `null`
 - **brainstormPath**: Path to brainstorm if one was used, otherwise omit
@@ -550,11 +550,12 @@ Agent-mode fallback: compute the deficit (`floor(proto_elements * 0.6) - ac_anch
 
 ### Derive Filename
 
-- Full-stack: `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json` and `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`
+- Full-stack, PROJECT axis (2 or more distinct story `project` values — multi-repo): one file per project, `.aimi/tasks/YYYY-MM-DD-[feature-name]-<project-slug>-tasks.json`
+- Full-stack, SIDE axis (fewer than 2 distinct `project` values — single-repo/monorepo): `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json` and `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`
 - Frontend-only: `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
 - Legacy (no scope): `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 
-Strip type prefix, kebab-case the descriptive name, add date prefix and appropriate suffix.
+Strip type prefix, kebab-case the descriptive name, add date prefix and appropriate suffix. On the full-stack paths story-merge derives these names itself and returns them on stdout — read the list off that return value rather than rebuilding it here, since the PROJECT axis's surviving projects and slugs are only known at merge time.
 
 ### Write File
 
@@ -575,28 +576,28 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 ```
 
-**For split files (full-stack):** run validation on each file separately using `init-session --file` (repeat the Step 0 resolve above at the top of each Bash call; omitted from the snippets below for brevity):
+**Step 1 — Resolve the file list.** Every file validated below comes from `MERGE_RETURN`, the stdout `/aimi:plan` Phase 3e captured from `story-merge`. **Never rebuild a filename by concatenating the output base** — on the PROJECT axis the surviving projects and their basename slugs are computed inside `story-merge` and are unknowable here any other way, and even on the SIDE axis the returned paths already account for `--phase-aware`'s basename collapse:
 
 ```bash
-$AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
-$AIMI_CLI validate-ids
-$AIMI_CLI validate-deps
-$AIMI_CLI validate-stories
-
-$AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json
-$AIMI_CLI validate-ids
-$AIMI_CLI validate-deps
-$AIMI_CLI validate-stories
+VALIDATE_FILES=$(printf '%s' "$MERGE_RETURN" | jq -r 'if type == "array" then .[].path elif has("frontend") then .frontend, .backend else .merged end')
 ```
 
-**For single file (frontend-only or legacy):**
+The array test comes first and that ordering is load-bearing — `has()` errors on an array. `VALIDATE_FILES` is a newline-separated list covering every case with one shape: exactly 1 entry on the legacy / frontend-only path, exactly 2 on the SIDE axis, N on the PROJECT axis.
+
+**Step 2 — Validate every file.** Run this loop once, on every axis — there is no separate single-file branch, because the legacy and frontend-only cases are just `VALIDATE_FILES` with one entry (repeat the Step 0 resolve above at the top of each Bash call):
 
 ```bash
-$AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
-$AIMI_CLI validate-ids
-$AIMI_CLI validate-deps
-$AIMI_CLI validate-stories
+while IFS= read -r VALIDATE_FILE; do
+  [ -n "$VALIDATE_FILE" ] || continue
+  echo "Validating $VALIDATE_FILE"
+  $AIMI_CLI init-session --file "$VALIDATE_FILE" || exit 1
+  $AIMI_CLI validate-ids || exit 1
+  $AIMI_CLI validate-deps || exit 1
+  $AIMI_CLI validate-stories || exit 1
+done <<< "$VALIDATE_FILES"
 ```
+
+`init-session --file` rebinds the session's active tasks file, so the three `validate-*` calls always target the file bound immediately above them — keep them inside the same iteration and never reorder them. A non-zero exit anywhere aborts the loop: fix that file and re-run from the top rather than validating the remaining files against a half-fixed set. `/aimi:plan`'s own Phase 4.5 runs the same loop with two extra normalizers ahead of the validators — see `commands/plan.md`.
 
 **If any validation fails (non-zero exit):**
 1. Read the error output to identify the issues
@@ -613,9 +614,10 @@ After writing, report:
 ```
 Tasks generated successfully!
 
-Tasks: .aimi/tasks/[filename(s)].json
-Stories: [N] total ([X] frontend, [Y] backend — if split)
-Schema: 3.2
+Tasks: .aimi/tasks/[filename].json
+[one Tasks: line per file returned by story-merge — 1 legacy, 2 on the SIDE axis, N on the PROJECT axis; suffix each PROJECT-axis line with its project and story count, e.g. "(apps/web, 4 stories)"]
+Stories: [N] total ([per-file breakdown when split: "[X] frontend, [Y] backend" on the SIDE axis, one "[N] <project>" entry per file on the PROJECT axis])
+Schema: 3.3
 [If brainstorm used]: Context: .aimi/brainstorms/[brainstorm-file]
 [If gaps found]: Gaps identified: [N] (captured as criteria/notes)
 [If 10+ stories]: Warning: [N] stories generated. Consider splitting for parallel work.

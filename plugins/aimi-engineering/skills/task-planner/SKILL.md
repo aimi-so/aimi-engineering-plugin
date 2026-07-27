@@ -19,11 +19,14 @@ Take a feature description through research, spec analysis, and story decomposit
 ## Output Format
 
 **Filename convention:**
-- Full-stack: `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json` and `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`
+- Full-stack, PROJECT axis (2 or more distinct story `project` values — multi-repo): one file per project, `.aimi/tasks/YYYY-MM-DD-[feature-name]-<project-slug>-tasks.json`
+- Full-stack, SIDE axis (fewer than 2 distinct `project` values — single-repo/monorepo): `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json` and `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`
 - Frontend-only: `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
 - Legacy (no scope): `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 
-> Key fields: `schemaVersion` ("3.3"), `metadata{title,type,branchName,createdAt,planPath(null),researchDepth(optional),maxConcurrency(20),frontendOnly(optional),backendSpec(optional:{endpoints[{method,path,description}],dataModels[{name,fields}],businessRules[string],businessContext(string)})}`, `userStories[]{id(US-NNN),title(≤200),description(≤500),acceptanceCriteria(each≤5000),priority,status("pending"),dependsOn([]),notes,project(optional),wave(computed),tasks[](optional,max50,each≤5000chars),implementation(optional),verification(optional),gate(optional)}`
+> The full-stack names above are derived inside `story-merge` and returned on its stdout — read them from that return value, never re-derive them by concatenating the output base. See the `implementationScope` is `"full-stack"` steps in Phase 4 below.
+
+> Key fields: `schemaVersion` ("3.3"), `metadata{title,type,branchName,createdAt,planPath(null),researchDepth(optional),maxConcurrency(20),frontendOnly(optional),splitGroup(optional:{project,index,total,siblings[]} — PROJECT-axis split files only),smellWarnings[](optional),backendSpec(optional:{endpoints[{method,path,description}],dataModels[{name,fields}],businessRules[string],businessContext(string)})}`, `userStories[]{id(US-NNN),title(≤200),description(≤500),acceptanceCriteria(each≤5000),priority,status("pending"),dependsOn([]),notes,project(optional),wave(computed),tasks[](optional,max50,each≤5000chars),implementation(optional),verification(optional),gate(optional)}`
 
 **Notes:** `planPath` is always `null` (this skill generates tasks.json directly). All stories initialize with `status: "pending"`. `dependsOn` is a string array of story IDs. `maxConcurrency` defaults to `20`.
 
@@ -263,7 +266,7 @@ This prose predates `aimi-cli.sh story-merge`; `/aimi:plan` Phase 3e now delegat
 
 ### Phase 4.5: Post-Generation Validation
 
-After writing the tasks.json file(s), validate each generated output independently: resolve `$AIMI_CLI` per [cli-path-resolution.md](../../commands/references/cli-path-resolution.md) Layer 0–3 (each Bash call is an isolated shell — re-resolve at the top of every call), then for each output file run `init-session --file <path>` → `validate-ids` → `validate-deps` → `validate-stories` — twice, once per file, for full-stack splits. Full command sequence: [pipeline-phases.md](references/pipeline-phases.md#phase-45-post-generation-validation).
+After writing the tasks.json file(s), validate each generated output independently: resolve `$AIMI_CLI` per [cli-path-resolution.md](../../commands/references/cli-path-resolution.md) Layer 0–3 (each Bash call is an isolated shell — re-resolve at the top of every call), then for each output file run `init-session --file <path>` → `validate-ids` → `validate-deps` → `validate-stories` — once per file named by story-merge's return value, which is N files on the PROJECT axis and exactly two on the SIDE axis for full-stack splits. Drive the repetition off that returned list's length, never off a fixed count of two. Full command sequence: [pipeline-phases.md](references/pipeline-phases.md#phase-45-post-generation-validation).
 
 **If any validation fails (non-zero exit):** read the error output, fix the offending story IDs, `dependsOn` references, dependency cycles, or `project` fields, re-write the tasks.json file with the Write tool, and re-run all validations until they pass. Do not proceed to the report step until all validations succeed.
 
