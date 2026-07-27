@@ -5031,6 +5031,15 @@ cmd_story_merge() {
   # --- Remove synthetic _srcIdx field before further processing ---
   merged_array=$(printf '%s' "$merged_array" | jq '[.[] | del(._srcIdx)]')
 
+  # --- Resolve the split axis (and refuse unrouteable .project values) ---
+  # Earliest point at which every story carries its final US-NNN id, and still
+  # ahead of --foundation, cycle detection, and the Phase 3.1/4.1/4.2 sweeps:
+  # a refusal here costs nothing and cannot emit a warning about a plan that
+  # was never going to be written. The axis is decided ONCE, here, and the
+  # writers below only read the answer.
+  local split_axis
+  split_axis=$(_story_merge_resolve_axis "$merged_array" "$split_mode") || exit 1
+
   # --- Foundation dependsOn injection sweep (--foundation NN) ---
   # Runs after the outline:NN remap and _srcIdx strip, and before both the
   # Kahn's-algorithm cycle detection and wave computation below, so injected
@@ -5428,22 +5437,12 @@ cmd_story_merge() {
   # ============================================================
   # Branch on split mode
   # ============================================================
-  # The split AXIS decision is made here, before either writer runs, so the
-  # two write strategies stay independent instead of one of them branching
-  # internally on a partition rule it does not own:
-  #   >= 2 distinct normalized .project values  -> multi-repo layout. Split by
-  #     PROJECT: one output file per distinct project (N files, no
-  #     frontend/backend side decision at all).
-  #   <  2 distinct normalized .project values  -> single-repo/monorepo layout
-  #     (including "no story has .project" and "every story shares exactly one
-  #     project"). Split by SIDE: the unchanged two-file frontend/backend
-  #     writer, whose partition is the pure per-story heuristic.
+  # The split AXIS was decided by _story_merge_resolve_axis immediately after
+  # id assignment, before any of the sweeps above ran. Nothing is recomputed
+  # here -- this block only dispatches on the answer, so there is no second
+  # partition rule that could disagree with the one the writer groups by.
   if [ "$split_mode" = "full-stack" ]; then
-    local distinct_project_count
-    distinct_project_count=$(printf '%s' "$merged_array" | jq "$_STORY_MERGE_NORM_PROJECT_JQ"'
-      [.[] | . as $s | ($s.project | norm_project)] | map(select(. != null)) | unique | length
-    ')
-    if [ "${distinct_project_count:-0}" -ge 2 ]; then
+    if [ "$split_axis" = "project" ]; then
       # foundation_id is threaded into the PROJECT writer ONLY. --foundation
       # injects one edge onto the foundation story from every other story; in
       # a multi-repo split every group that does not host the foundation loses
@@ -5458,14 +5457,27 @@ cmd_story_merge() {
   fi
 }
 
-# jq `def` spliced into every program that needs a story's .project reduced to
-# a stable grouping key: trims surrounding whitespace, strips one trailing
-# slash, and treats blank/whitespace-only (and absent) as null. Shared by
-# cmd_story_merge's split-axis test and _story_merge_write_project_split's
-# grouping so the two can never drift apart.
+# jq `def`s spliced into every program that needs a story's .project either
+# classified or reduced to a stable grouping key. Shared by
+# _story_merge_resolve_axis and _story_merge_write_project_split so the two can
+# never drift apart -- an axis chosen from one rule and a group built from
+# another is exactly how issue #72 came back (one branch, two repositories).
 #
-# Grouping/counting ONLY -- the normalized form is never written back onto a
-# story; .project must survive verbatim into the output files.
+# Grouping/counting/classification ONLY -- neither the normalized nor the
+# classified form is ever written back onto a story; .project must survive
+# verbatim into the output files.
+#
+#   norm_project  -- trims surrounding whitespace, strips one trailing slash,
+#                    and treats blank/whitespace-only (and absent) as null.
+#   project_state -- validates the RAW value against the grammar execute.md
+#                    publishes for .project, returning exactly one of
+#                    "untagged" / "tagged" / "invalid". Deliberately inspects
+#                    the raw string, not the trimmed one: " apps/web " is
+#                    invalid rather than being quietly trimmed into a value
+#                    whose raw form is what a downstream command would cd into.
+#                    Only a fully blank string counts as untagged.
+#   group_key     -- the single routing key. Both the axis decision and the
+#                    grouping pass go through this and nothing else.
 _STORY_MERGE_NORM_PROJECT_JQ='
 def norm_project:
   if . == null then null
@@ -5476,7 +5488,96 @@ def norm_project:
     else $t
     end
   end;
+
+def project_state:
+  if . == null then "untagged"
+  elif (type != "string") then "invalid"
+  elif ((. | gsub("^\\s+|\\s+$"; "")) == "") then "untagged"
+  elif . == "." then "tagged"
+  elif (test("^[a-zA-Z0-9_][a-zA-Z0-9_./@-]*$")
+        and ((split("/") | index("..")) == null)
+        and ((test("//")) | not)) then "tagged"
+  else "invalid"
+  end;
+
+def group_key: norm_project;
 '
+
+# Resolve the split AXIS from the merged array, refusing anything the axis
+# cannot route unambiguously. Echoes exactly "project" or "side"; returns 1
+# after printing a named refusal otherwise.
+#
+# Called once, early -- before --foundation, cycle detection, and the Phase
+# 3.1/4.1/4.2 sweeps -- so a refusal costs nothing and emits no warnings about
+# a plan that was never going to be written.
+#
+# Decision table (counts computed here, ONCE, and nowhere else):
+#   any story with an invalid .project     -> refuse, in EVERY --split mode
+#   distinct >= 1 AND untagged > 0         -> refuse (--split full-stack only)
+#   distinct >= 2                          -> "project"  (multi-repo)
+#   otherwise                              -> "side"     (single-repo/monorepo)
+#
+# The untagged rule tests distinct >= 1, not >= 2, deliberately: the failure
+# this exists to stop is ONE tagged repo plus untagged stories, which counts as
+# a single distinct project and would otherwise take the SIDE axis -- one file,
+# one branch, two repositories.
+#
+# _rm_sanitize is applied HERE and only here. These lines print values that
+# already failed validation and are therefore unbounded; on every success path
+# .project is a routing key that must stay byte-identical between the key that
+# groups and the key that is written.
+_story_merge_resolve_axis() {
+  local merged_array="$1"
+  local split_mode="$2"
+
+  # Malformed .project is refused in EVERY --split mode, legacy included: the
+  # value is a repository path a downstream command will cd into, so
+  # "../sibling-repo" must not reach a tasks file by any route.
+  local invalid_stories
+  invalid_stories=$(printf '%s' "$merged_array" | jq -r "$_STORY_MERGE_NORM_PROJECT_JQ$_ROADMAP_SANITIZE_JQ"'
+    [.[] | . as $s | select(($s.project | project_state) == "invalid")] | .[] |
+    "  " + .id + " (" + (.title | _rm_sanitize(200)) + "): invalid project " + (.project | tostring | _rm_sanitize(120))
+  ')
+  if [ -n "$invalid_stories" ]; then
+    echo "Error: story-merge: story .project must match ^[a-zA-Z0-9_][a-zA-Z0-9_./@-]*\$ with no \"..\" component, no \"//\", no surrounding whitespace, and no leading \"./\" (use \".\" for the root repository); no files were written:" >&2
+    printf '%s\n' "$invalid_stories" >&2
+    return 1
+  fi
+
+  if [ "$split_mode" != "full-stack" ]; then
+    printf '%s' "side"
+    return 0
+  fi
+
+  local axis_counts distinct_count untagged_count
+  axis_counts=$(printf '%s' "$merged_array" | jq -c "$_STORY_MERGE_NORM_PROJECT_JQ"'
+    [.[] | . as $s | {state: ($s.project | project_state), key: ($s.project | group_key)}] as $st |
+    {
+      distinct: ([$st[] | select(.state == "tagged") | .key] | unique | length),
+      untagged: ([$st[] | select(.state == "untagged")] | length)
+    }
+  ')
+  distinct_count=$(printf '%s' "$axis_counts" | jq -r '.distinct')
+  untagged_count=$(printf '%s' "$axis_counts" | jq -r '.untagged')
+
+  if [ "${distinct_count:-0}" -ge 1 ] && [ "${untagged_count:-0}" -gt 0 ]; then
+    local untagged_stories
+    untagged_stories=$(printf '%s' "$merged_array" | jq -r "$_STORY_MERGE_NORM_PROJECT_JQ$_ROADMAP_SANITIZE_JQ"'
+      [.[] | . as $s | select(($s.project | project_state) == "untagged")] | .[] |
+      "  " + .id + " (" + (.title | _rm_sanitize(200)) + "): no project"
+    ')
+    echo "Error: story-merge: --split full-stack: this plan tags $distinct_count project(s), so it is a multi-repo plan and EVERY story needs a project. A story that belongs to the root repository must say so explicitly with \".\" -- an absent project is not the root, it is unrouteable. No files were written; the staging dir was kept. Stories missing a project:" >&2
+    printf '%s\n' "$untagged_stories" >&2
+    return 1
+  fi
+
+  if [ "${distinct_count:-0}" -ge 2 ]; then
+    printf '%s' "project"
+  else
+    printf '%s' "side"
+  fi
+  return 0
+}
 
 # Write a single merged tasks.json (legacy mode)
 _story_merge_write_legacy() {
@@ -5891,16 +5992,19 @@ _story_merge_write_project_split() {
   # ============================================================
   # 1. Route every story to a project group
   # ============================================================
-  # Group key = normalized .project, with project-less stories (absent, null,
-  # or blank/whitespace-only) routed to "." -- the AIMI_ROOT-relative spelling
-  # execute.md already uses for "the root repo", so an untagged story in a
-  # multi-repo merge still lands somewhere traceable instead of being dropped.
+  # Group key = group_key, the same def _story_merge_resolve_axis chose the
+  # axis with. There is no fallback for a null key and there must not be one:
+  # this writer is only ever reached on the PROJECT axis, which the resolver
+  # enters only when every story is tagged, so group_key is non-null by
+  # construction. A `// "."` here would be a second normalization rule one
+  # function away from the first -- exactly the divergence that produced one
+  # file and one branch for two repositories (issue #72).
   # Groups are emitted in lexicographic order by normalized project path
   # (jq's `unique` sorts by codepoint), never staging-glob or first-encountered
   # order.
   local group_keys
   group_keys=$(printf '%s' "$merged_array" | jq -c "$_STORY_MERGE_NORM_PROJECT_JQ"'
-    [.[] | . as $s | (($s.project | norm_project) // ".")] | unique
+    [.[] | . as $s | ($s.project | group_key)] | unique
   ')
 
   # ============================================================
@@ -5920,7 +6024,6 @@ _story_merge_write_project_split() {
   prepared=$(printf '%s\n%s' "$merged_array" "$group_keys" | jq -s \
     --arg foundation_id "$foundation_id" \
     "$_STORY_MERGE_NORM_PROJECT_JQ$_ROADMAP_SANITIZE_JQ"'
-    def group_key: (norm_project) // ".";
     def pad3: tostring | if length == 1 then "00" + . elif length == 2 then "0" + . else . end;
     def recompute_waves:
       reduce range(length) as $_ (
@@ -6091,6 +6194,10 @@ _story_merge_write_project_split() {
       . as $e | $e.value as $b | ($b.project | slugify) as $slug |
       {
         index: ($e.key + 1),
+        # .project is carried through verbatim, never sanitized: it is the
+        # routing key, and a lossy transform would make the key that groups
+        # differ from the key that is written. Malformed values are refused
+        # outright by _story_merge_resolve_axis, before this writer is reached.
         project: $b.project,
         slug: $slug,
         path: ($dir + "/" + $base + "-" + $slug + "-tasks.json"),
@@ -6126,18 +6233,6 @@ _story_merge_write_project_split() {
     echo "Error: story-merge: --split full-stack: derived branchName failed validation against ${_ROADMAP_BRANCH_REGEX}; no files were written:" >&2
     printf '%s\n' "$bad_branches" >&2
     exit 1
-  fi
-
-  # An empty project group still writes its (empty userStories) file -- traced,
-  # does not crash downstream -- but is surfaced with a named warning rather
-  # than failing silently. Mirrors the SIDE writer's empty-side behavior.
-  local empty_group_projects
-  empty_group_projects=$(printf '%s' "$plan" | jq -r '.[] | select(.storyCount == 0) | .project')
-  if [ -n "$empty_group_projects" ]; then
-    while IFS= read -r empty_project; do
-      [ -n "$empty_project" ] || continue
-      echo "Warning: story-merge: project split produced zero stories for project: $empty_project" >&2
-    done <<< "$empty_group_projects"
   fi
 
   # ============================================================
