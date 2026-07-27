@@ -11961,6 +11961,480 @@ test_story_merge_project_split_foundation_edge() {
 }
 
 # ============================================================================
+# split-detect Tests (TC36-TC46)
+# ============================================================================
+# The read side of metadata.splitGroup. Every rule here used to live only in
+# execute.md's executable prose — twice, in two already-divergent copies — where
+# no Bash suite could reach it.
+#
+# Each case builds its OWN isolated project directory. split-detect's flat scope
+# is every *-tasks.json sitting directly in .aimi/tasks, so the shared TEST_DIR
+# fixture would otherwise join the candidate pool and change the answer.
+#
+# Relative mtimes are set with `touch -t` rather than `sleep`, because "newest
+# wins" is the rule under test and it must be pinned exactly, not raced.
+
+_SD_OLD_MTIME="202001010000"
+_SD_NEW_MTIME="202601010000"
+
+# _sd_stories <status>... -> JSON array of minimal user stories, one per status.
+# Zero arguments yields [], the empty-group file the N-file writer legitimately
+# emits for a project that ended up with no stories.
+_sd_stories() {
+  local out="[]" i=1 st
+  for st in "$@"; do
+    out=$(printf '%s' "$out" | jq -c \
+      --arg id "US-$(printf '%03d' "$i")" --arg s "$st" \
+      '. + [{id: $id, title: "s", description: "d", acceptanceCriteria: [],
+             status: $s, dependsOn: [],
+             implementation: {files: [], approach: "a", verify: "v"}}]')
+    i=$((i + 1))
+  done
+  printf '%s' "$out"
+}
+
+# _sd_write <path> <branchName> <stories-json> [<splitGroup-json>]
+_sd_write() {
+  local path="$1" branch="$2" stories="$3" marker="${4:-}"
+  local meta
+  if [ -n "$marker" ]; then
+    meta=$(jq -nc --arg b "$branch" --argjson sg "$marker" \
+      '{title: "feat: t", type: "feat", branchName: $b, splitGroup: $sg}')
+  else
+    meta=$(jq -nc --arg b "$branch" '{title: "feat: t", type: "feat", branchName: $b}')
+  fi
+  jq -nc --argjson m "$meta" --argjson s "$stories" \
+    '{schemaVersion: "3.3", metadata: $m, userStories: $s}' > "$path"
+}
+
+# _sd_run <project-dir> [args...] -> split-detect stdout, stderr discarded
+_sd_run() {
+  local dir="$1"; shift
+  ( cd "$dir" && "$CLI" split-detect "$@" 2>/dev/null )
+}
+
+# Basenames of the reported members, in reported order, comma-joined.
+_sd_member_names() {
+  printf '%s' "$1" | jq -r '[.members[].path | split("/") | last] | join(",")'
+}
+
+# TC36: the happy path — a 3-member project split whose members are all active
+# is reported whole, anchor first, siblings in the anchor's declared order.
+test_split_detect_project_split_three_members() {
+  echo ""
+  echo "=== TC36: split-detect — 3-member project split, all active ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  _sd_write "$t/2026-07-27-billing-apps-web-tasks.json" "feat/billing-apps-web" \
+    "$(_sd_stories pending)" \
+    '{"project":"apps/web","index":1,"total":3,"siblings":[".aimi/tasks/2026-07-27-billing-services-api-tasks.json",".aimi/tasks/2026-07-27-billing-packages-core-tasks.json"]}'
+  _sd_write "$t/2026-07-27-billing-services-api-tasks.json" "feat/billing-services-api" \
+    "$(_sd_stories pending pending)" \
+    '{"project":"services/api","index":2,"total":3,"siblings":[".aimi/tasks/2026-07-27-billing-apps-web-tasks.json",".aimi/tasks/2026-07-27-billing-packages-core-tasks.json"]}'
+  _sd_write "$t/2026-07-27-billing-packages-core-tasks.json" "feat/billing-packages-core" \
+    "$(_sd_stories pending)" \
+    '{"project":"packages/core","index":3,"total":3,"siblings":[".aimi/tasks/2026-07-27-billing-apps-web-tasks.json",".aimi/tasks/2026-07-27-billing-services-api-tasks.json"]}'
+  touch -t "$_SD_OLD_MTIME" "$t"/*.json
+  touch -t "$_SD_NEW_MTIME" "$t/2026-07-27-billing-apps-web-tasks.json"
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC36: split-detect exits 0"
+  assert_eq "project-split" "$(printf '%s' "$out" | jq -r '.mode')" "TC36: mode is project-split"
+  assert_eq "3" "$(printf '%s' "$out" | jq -r '.total')" "TC36: total is the declared 3"
+  assert_eq "3" "$(printf '%s' "$out" | jq -r '.activeCount')" "TC36: all three members are active"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.degradedReason')" "TC36: nothing degraded"
+  assert_contains "2026-07-27-billing-apps-web-tasks.json" \
+    "$(printf '%s' "$out" | jq -r '.anchor')" "TC36: the newest file is the anchor"
+  assert_eq \
+    "2026-07-27-billing-apps-web-tasks.json,2026-07-27-billing-services-api-tasks.json,2026-07-27-billing-packages-core-tasks.json" \
+    "$(_sd_member_names "$out")" "TC36: anchor first, then siblings in declared order"
+  assert_eq "apps/web,services/api,packages/core" \
+    "$(printf '%s' "$out" | jq -r '[.members[].project] | join(",")')" \
+    "TC36: each member reports its own splitGroup.project"
+  assert_eq "feat/billing-apps-web,feat/billing-services-api,feat/billing-packages-core" \
+    "$(printf '%s' "$out" | jq -r '[.members[].branchName] | join(",")')" \
+    "TC36: each member reports its own metadata.branchName"
+  assert_eq "1,2,1" "$(printf '%s' "$out" | jq -r '[.members[].storyCount] | join(",")')" \
+    "TC36: per-member storyCount"
+  assert_eq "1,2,1" "$(printf '%s' "$out" | jq -r '[.members[].pendingCount] | join(",")')" \
+    "TC36: per-member pendingCount"
+
+  rm -rf "$d"
+}
+
+# TC37: THE DEFECT THIS VERB EXISTS TO CLOSE. find-tasks-all globs depth 1-3,
+# which includes phase directories — so a PROJECT-axis phase's split files were
+# captured by the flat flow and executed as a flat split, leaving the phase
+# unclaimed and nothing merged into the phase branch. Flat scope is depth 1.
+test_split_detect_flat_scope_excludes_phase_dir() {
+  echo ""
+  echo "=== TC37: split-detect — a phase directory's split is NOT visible to the flat scope ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks/myfeat/phase-2-auth"
+  local p="$d/.aimi/tasks/myfeat/phase-2-auth"
+
+  _sd_write "$p/myfeat-phase-2-tasks.json" "feat/myfeat-phase-2" "$(_sd_stories pending)"
+  _sd_write "$p/myfeat-phase-2-apps-web-tasks.json" "feat/myfeat-phase-2-apps-web" \
+    "$(_sd_stories pending)" \
+    '{"project":"apps/web","index":1,"total":2,"siblings":["myfeat-phase-2-services-api-tasks.json"]}'
+  _sd_write "$p/myfeat-phase-2-services-api-tasks.json" "feat/myfeat-phase-2-services-api" \
+    "$(_sd_stories pending)" \
+    '{"project":"services/api","index":2,"total":2,"siblings":["myfeat-phase-2-apps-web-tasks.json"]}'
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC37: flat query over a phase-only layout still exits 0"
+  assert_eq "none" "$(printf '%s' "$out" | jq -r '.mode')" \
+    "TC37: the phase's split is not matched by the flat scope"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.members | length')" \
+    "TC37: no phase file leaks into the flat member list"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.total')" "TC37: total is 0"
+
+  rm -rf "$d"
+}
+
+# TC38: the same directory, queried with --dir, IS matched — and the phase's own
+# governing <feature>-phase-<N>-tasks.json is excluded from the candidate pool.
+test_split_detect_dir_scope_matches_phase_split() {
+  echo ""
+  echo "=== TC38: split-detect --dir — the same phase split IS matched ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks/myfeat/phase-2-auth"
+  local p="$d/.aimi/tasks/myfeat/phase-2-auth"
+
+  _sd_write "$p/myfeat-phase-2-tasks.json" "feat/myfeat-phase-2" "$(_sd_stories pending)"
+  _sd_write "$p/myfeat-phase-2-apps-web-tasks.json" "feat/myfeat-phase-2-apps-web" \
+    "$(_sd_stories pending)" \
+    '{"project":"apps/web","index":1,"total":2,"siblings":["myfeat-phase-2-services-api-tasks.json"]}'
+  _sd_write "$p/myfeat-phase-2-services-api-tasks.json" "feat/myfeat-phase-2-services-api" \
+    "$(_sd_stories pending)" \
+    '{"project":"services/api","index":2,"total":2,"siblings":["myfeat-phase-2-apps-web-tasks.json"]}'
+  # Make the phase's own governing file the newest, so an anchor picked without
+  # the exclusion would land on it.
+  touch -t "$_SD_OLD_MTIME" "$p"/*.json
+  touch -t "$_SD_NEW_MTIME" "$p/myfeat-phase-2-tasks.json"
+
+  local out exit_code
+  out=$(_sd_run "$d" --dir "$p") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC38: --dir query exits 0"
+  assert_eq "project-split" "$(printf '%s' "$out" | jq -r '.mode')" \
+    "TC38: --dir scope matches the phase's project split"
+  assert_eq "2" "$(printf '%s' "$out" | jq -r '.total')" "TC38: total is 2"
+  assert_eq "2" "$(printf '%s' "$out" | jq -r '.activeCount')" "TC38: both members active"
+  local names; names=$(_sd_member_names "$out")
+  assert_contains "myfeat-phase-2-apps-web-tasks.json" "$names" "TC38: web member present"
+  assert_contains "myfeat-phase-2-services-api-tasks.json" "$names" "TC38: api member present"
+  assert_eq "0" \
+    "$(printf '%s' "$out" | jq -r '[.members[] | select((.path | split("/") | last) == "myfeat-phase-2-tasks.json")] | length')" \
+    "TC38: the phase's own governing tasks file is excluded from the pool"
+
+  rm -rf "$d"
+}
+
+# TC39: a completed stale split must not route today's real work to a
+# single-file fallback. Its members are dropped whole and the search repeats,
+# so the fresh legacy pair beside it wins.
+test_split_detect_completed_stale_group_yields_to_fresh_pair() {
+  echo ""
+  echo "=== TC39: split-detect — a fully completed stale split yields to the fresh legacy pair ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  _sd_write "$t/2026-01-01-old-a-tasks.json" "feat/old-a" "$(_sd_stories completed)" \
+    '{"project":"a","index":1,"total":2,"siblings":["2026-01-01-old-b-tasks.json"]}'
+  _sd_write "$t/2026-01-01-old-b-tasks.json" "feat/old-b" "$(_sd_stories completed)" \
+    '{"project":"b","index":2,"total":2,"siblings":["2026-01-01-old-a-tasks.json"]}'
+  _sd_write "$t/2026-07-27-live-frontend-tasks.json" "feat/live-frontend" "$(_sd_stories pending)"
+  _sd_write "$t/2026-07-27-live-backend-tasks.json" "feat/live-backend" "$(_sd_stories pending)"
+  # The STALE group is the newest on disk — without the drop-and-repeat rule
+  # "newest wins" would hand back the finished split.
+  touch -t "$_SD_OLD_MTIME" "$t"/2026-07-27-live-*.json
+  touch -t "$_SD_NEW_MTIME" "$t"/2026-01-01-old-*.json
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC39: exits 0"
+  assert_eq "paired-split" "$(printf '%s' "$out" | jq -r '.mode')" \
+    "TC39: the fresh legacy pair wins, not the completed stale group"
+  assert_eq "2" "$(printf '%s' "$out" | jq -r '.activeCount')" "TC39: both pair members active"
+  assert_eq "2026-07-27-live-frontend-tasks.json,2026-07-27-live-backend-tasks.json" \
+    "$(_sd_member_names "$out")" "TC39: frontend first, backend second"
+  assert_eq "0" \
+    "$(printf '%s' "$out" | jq -r '[.members[] | select(.path | test("old-"))] | length')" \
+    "TC39: no member of the stale group survives into the answer"
+
+  rm -rf "$d"
+}
+
+# TC40: "newest wins" replaces "first marker-carrying file in mtime order".
+# A stale marked split with PENDING members must not preempt today's plan just
+# because today's files carry no marker of their own.
+test_split_detect_newest_wins_over_older_marked_group() {
+  echo ""
+  echo "=== TC40: split-detect — a newer unmarked pair beats an older marked group with pending work ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  _sd_write "$t/2026-01-01-old-a-tasks.json" "feat/old-a" "$(_sd_stories pending)" \
+    '{"project":"a","index":1,"total":2,"siblings":["2026-01-01-old-b-tasks.json"]}'
+  _sd_write "$t/2026-01-01-old-b-tasks.json" "feat/old-b" "$(_sd_stories pending)" \
+    '{"project":"b","index":2,"total":2,"siblings":["2026-01-01-old-a-tasks.json"]}'
+  _sd_write "$t/2026-07-27-live-frontend-tasks.json" "feat/live-frontend" "$(_sd_stories pending)"
+  _sd_write "$t/2026-07-27-live-backend-tasks.json" "feat/live-backend" "$(_sd_stories pending)"
+  touch -t "$_SD_OLD_MTIME" "$t"/2026-01-01-old-*.json
+  touch -t "$_SD_NEW_MTIME" "$t"/2026-07-27-live-*.json
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC40: exits 0"
+  assert_eq "paired-split" "$(printf '%s' "$out" | jq -r '.mode')" \
+    "TC40: the newest candidate decides, so the unmarked pair wins"
+  assert_eq "2026-07-27-live-frontend-tasks.json,2026-07-27-live-backend-tasks.json" \
+    "$(_sd_member_names "$out")" "TC40: the pair is the reported group"
+  assert_eq "0" \
+    "$(printf '%s' "$out" | jq -r '[.members[] | select(.path | test("old-"))] | length')" \
+    "TC40: the older marked group does not preempt today's plan"
+
+  rm -rf "$d"
+}
+
+# TC41: a marker whose declared total disagrees with the resolved count degrades
+# to single-file — and the degradation is TERMINAL. Falling through to the
+# legacy pair would run stale work: this scope was planned by the project-split
+# writer, so any -frontend-/-backend-tasks.json beside it predates the plan.
+test_split_detect_total_mismatch_degrades_terminally() {
+  echo ""
+  echo "=== TC41: split-detect — total mismatch degrades and does not fall through to the legacy pair ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  # The anchor is itself named -frontend-tasks.json and a real -backend sibling
+  # sits beside it, so a fall-through would visibly produce paired-split.
+  _sd_write "$t/2026-07-27-x-frontend-tasks.json" "feat/x-fe" "$(_sd_stories pending)" \
+    '{"project":"a","index":1,"total":3,"siblings":["2026-07-27-x-backend-tasks.json"]}'
+  _sd_write "$t/2026-07-27-x-backend-tasks.json" "feat/x-be" "$(_sd_stories pending)"
+  touch -t "$_SD_OLD_MTIME" "$t"/*.json
+  touch -t "$_SD_NEW_MTIME" "$t/2026-07-27-x-frontend-tasks.json"
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC41: a degraded group is still a query, not a gate — exits 0"
+  assert_eq "single" "$(printf '%s' "$out" | jq -r '.mode')" "TC41: degrades to single"
+  assert_eq "1" "$(printf '%s' "$out" | jq -r '.total')" "TC41: total collapses to 1"
+  assert_eq "2026-07-27-x-frontend-tasks.json" "$(_sd_member_names "$out")" \
+    "TC41: only the anchor is reported"
+  local reason; reason=$(printf '%s' "$out" | jq -r '.degradedReason')
+  assert_contains "declared total 3, resolved 2" "$reason" \
+    "TC41: degradedReason carries both counts so the caller need not re-derive them"
+  assert_contains "legacy pair not considered" "$reason" \
+    "TC41: degradedReason says the legacy pair was deliberately skipped"
+
+  rm -rf "$d"
+}
+
+# TC42: a traversal-shaped sibling entry is inert. Siblings resolve BY BASENAME
+# against the anchor's own directory, so "../../etc/passwd" becomes
+# "<anchor-dir>/passwd", which does not exist — and the group is voided rather
+# than silently executed one member short.
+test_split_detect_traversal_sibling_is_inert() {
+  echo ""
+  echo "=== TC42: split-detect — a traversal-shaped sibling resolves by basename and voids the group ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  _sd_write "$t/2026-07-27-y-tasks.json" "feat/y" "$(_sd_stories pending)" \
+    '{"project":"a","index":1,"total":2,"siblings":["../../etc/passwd"]}'
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC42: exits 0"
+  assert_eq "single" "$(printf '%s' "$out" | jq -r '.mode')" "TC42: the group is voided"
+  assert_eq "1" "$(printf '%s' "$out" | jq -r '.members | length')" "TC42: only the anchor remains"
+  local reason; reason=$(printf '%s' "$out" | jq -r '.degradedReason')
+  assert_contains "$t/passwd" "$reason" \
+    "TC42: the sibling was looked up by basename inside the anchor's own directory"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '[.members[] | select(.path | test("/etc/passwd"))] | length')" \
+    "TC42: nothing outside the anchor directory reaches the member list"
+
+  rm -rf "$d"
+}
+
+# TC43: pending is (.status // "pending") != "completed" — ONE definition for
+# every count reported. execute.md carried two that disagreed: the active
+# filter used != "completed" while the phase completion count used
+# == "pending", so an in_progress story was counted by one and not the other,
+# letting a phase close with work still in flight.
+test_split_detect_in_progress_counts_as_pending() {
+  echo ""
+  echo "=== TC43: split-detect — an in_progress story counts as pending ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  _sd_write "$t/2026-07-27-z-a-tasks.json" "feat/z-a" "$(_sd_stories in_progress)" \
+    '{"project":"a","index":1,"total":2,"siblings":["2026-07-27-z-b-tasks.json"]}'
+  _sd_write "$t/2026-07-27-z-b-tasks.json" "feat/z-b" "$(_sd_stories completed)" \
+    '{"project":"b","index":2,"total":2,"siblings":["2026-07-27-z-a-tasks.json"]}'
+  touch -t "$_SD_OLD_MTIME" "$t"/*.json
+  touch -t "$_SD_NEW_MTIME" "$t/2026-07-27-z-a-tasks.json"
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC43: exits 0"
+  assert_eq "project-split" "$(printf '%s' "$out" | jq -r '.mode')" \
+    "TC43: the group is not dropped — in_progress keeps it alive"
+  assert_eq "1" "$(printf '%s' "$out" | jq -r '.activeCount')" \
+    "TC43: exactly the in_progress member is active"
+  assert_eq "1" \
+    "$(printf '%s' "$out" | jq -r '[.members[] | select(.path | test("z-a"))] | .[0].pendingCount')" \
+    "TC43: the in_progress story is counted as pending"
+  assert_eq "true" \
+    "$(printf '%s' "$out" | jq -r '[.members[] | select(.path | test("z-a"))] | .[0].active')" \
+    "TC43: the in_progress member is active"
+  assert_eq "false" \
+    "$(printf '%s' "$out" | jq -r '[.members[] | select(.path | test("z-b"))] | .[0].active')" \
+    "TC43: the completed member is not active"
+
+  rm -rf "$d"
+}
+
+# TC44: files predating the project-split writer carry no marker, so the legacy
+# -frontend-tasks.json/-backend-tasks.json pair rule is what groups them. They
+# resolve to project "." — the flat flow's execution root.
+test_split_detect_legacy_pair_without_marker() {
+  echo ""
+  echo "=== TC44: split-detect — an unmarked frontend/backend pair is a paired-split ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  _sd_write "$t/2026-04-10-live-preview-frontend-tasks.json" "feat/live-preview-frontend" \
+    "$(_sd_stories pending pending)"
+  _sd_write "$t/2026-04-10-live-preview-backend-tasks.json" "feat/live-preview-backend" \
+    "$(_sd_stories pending)"
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC44: exits 0"
+  assert_eq "paired-split" "$(printf '%s' "$out" | jq -r '.mode')" "TC44: mode is paired-split"
+  assert_eq "2" "$(printf '%s' "$out" | jq -r '.total')" "TC44: total is 2"
+  assert_eq "2026-04-10-live-preview-frontend-tasks.json,2026-04-10-live-preview-backend-tasks.json" \
+    "$(_sd_member_names "$out")" "TC44: frontend first, backend second"
+  assert_eq ".,." "$(printf '%s' "$out" | jq -r '[.members[].project] | join(",")')" \
+    "TC44: unmarked pair members resolve to the root project"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.degradedReason')" "TC44: nothing degraded"
+
+  # A lone half of the pair is not a pair.
+  rm -f "$t/2026-04-10-live-preview-backend-tasks.json"
+  local solo; solo=$(_sd_run "$d")
+  assert_eq "single" "$(printf '%s' "$solo" | jq -r '.mode')" \
+    "TC44: a frontend file with no backend counterpart is not a pair"
+
+  rm -rf "$d"
+}
+
+# TC45: one file, no marker — the single-file flow, named explicitly so the
+# caller can pass it to init-session instead of re-running mtime auto-discovery.
+test_split_detect_single_file() {
+  echo ""
+  echo "=== TC45: split-detect — a single unmarked file ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  _sd_write "$t/2026-07-27-solo-tasks.json" "feat/solo" "$(_sd_stories pending completed)"
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC45: single is an outcome, not a failure — exits 0"
+  assert_eq "single" "$(printf '%s' "$out" | jq -r '.mode')" "TC45: mode is single"
+  assert_eq "1" "$(printf '%s' "$out" | jq -r '.total')" "TC45: total is 1"
+  assert_eq "1" "$(printf '%s' "$out" | jq -r '.activeCount')" "TC45: activeCount is 1"
+  assert_contains "2026-07-27-solo-tasks.json" "$(printf '%s' "$out" | jq -r '.anchor')" \
+    "TC45: the anchor names the file to execute"
+  assert_eq "2" "$(printf '%s' "$out" | jq -r '.members[0].storyCount')" "TC45: storyCount is 2"
+  assert_eq "1" "$(printf '%s' "$out" | jq -r '.members[0].pendingCount')" "TC45: pendingCount is 1"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.degradedReason')" "TC45: nothing degraded"
+
+  rm -rf "$d"
+}
+
+# TC46: exit-code discipline. Every detection outcome is 0; non-zero is reserved
+# for real errors. Also pins that a malformed candidate is inert rather than
+# fatal — one corrupt file must not take detection down for every other feature.
+test_split_detect_exit_codes_and_bad_input() {
+  echo ""
+  echo "=== TC46: split-detect — query exit codes, argument errors, malformed candidates ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  # Empty .aimi/tasks -> none, exit 0
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC46: an empty tasks dir exits 0"
+  assert_eq "none" "$(printf '%s' "$out" | jq -r '.mode')" "TC46: mode is none"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.anchor')" "TC46: anchor is null"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.activeCount')" "TC46: activeCount is 0"
+
+  # A fully completed group with nothing behind it -> none, with a reason
+  _sd_write "$t/2026-07-27-done-a-tasks.json" "feat/done-a" "$(_sd_stories completed)" \
+    '{"project":"a","index":1,"total":2,"siblings":["2026-07-27-done-b-tasks.json"]}'
+  _sd_write "$t/2026-07-27-done-b-tasks.json" "feat/done-b" "$(_sd_stories completed)" \
+    '{"project":"b","index":2,"total":2,"siblings":["2026-07-27-done-a-tasks.json"]}'
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC46: an exhausted pool exits 0"
+  assert_eq "none" "$(printf '%s' "$out" | jq -r '.mode')" "TC46: exhausted pool reports none"
+  assert_contains "fully completed" "$(printf '%s' "$out" | jq -r '.degradedReason')" \
+    "TC46: degradedReason distinguishes 'exhausted' from 'nothing was ever here'"
+  rm -f "$t"/2026-07-27-done-*.json
+
+  # Malformed JSON beside a healthy file is inert, not fatal
+  printf '{not json' > "$t/2026-07-27-broken-tasks.json"
+  _sd_write "$t/2026-07-27-healthy-tasks.json" "feat/healthy" "$(_sd_stories pending)"
+  touch -t "$_SD_OLD_MTIME" "$t/2026-07-27-broken-tasks.json"
+  touch -t "$_SD_NEW_MTIME" "$t/2026-07-27-healthy-tasks.json"
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC46: a malformed candidate does not abort detection"
+  assert_eq "single" "$(printf '%s' "$out" | jq -r '.mode')" "TC46: the healthy file still resolves"
+  rm -f "$t"/2026-07-27-*.json
+
+  # Argument errors are real errors
+  ( cd "$d" && "$CLI" split-detect --dir >/dev/null 2>&1 ) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC46: --dir with no value exits 1"
+
+  ( cd "$d" && "$CLI" split-detect --bogus >/dev/null 2>&1 ) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC46: an unknown argument exits 1"
+
+  ( cd "$d" && "$CLI" split-detect --dir "$d/nope" >/dev/null 2>&1 ) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC46: --dir pointing at a nonexistent directory exits 1"
+
+  local err
+  err=$( cd "$d" && "$CLI" split-detect --dir /etc 2>&1 >/dev/null ) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC46: --dir escaping the project root exits 1"
+  assert_contains "escapes project root" "$err" "TC46: --dir is path-confined by validate_path_in_project"
+
+  rm -rf "$d"
+}
+
+# ============================================================================
 # ============================================================================
 # Roadmap Lifecycle Tests (US-002)
 # ============================================================================
@@ -14236,6 +14710,21 @@ main() {
   test_story_merge_project_split_basename_collision
   test_story_merge_project_split_project_keyed_warnings
   test_story_merge_project_split_foundation_edge
+
+  # split-detect tests (TC36-TC46) — each builds its own isolated project dir
+  echo ""
+  echo "--- split-detect Tests (TC36-TC46) ---"
+  test_split_detect_project_split_three_members
+  test_split_detect_flat_scope_excludes_phase_dir
+  test_split_detect_dir_scope_matches_phase_split
+  test_split_detect_completed_stale_group_yields_to_fresh_pair
+  test_split_detect_newest_wins_over_older_marked_group
+  test_split_detect_total_mismatch_degrades_terminally
+  test_split_detect_traversal_sibling_is_inert
+  test_split_detect_in_progress_counts_as_pending
+  test_split_detect_legacy_pair_without_marker
+  test_split_detect_single_file
+  test_split_detect_exit_codes_and_bad_input
 
   # Roadmap lifecycle tests (US-002)
   echo ""

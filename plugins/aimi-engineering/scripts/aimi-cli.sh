@@ -6426,6 +6426,350 @@ _story_merge_write_project_split() {
 }
 
 # ============================================================================
+# split-detect — the read side of metadata.splitGroup
+# ============================================================================
+#
+# _story_merge_write_project_split (above) stamps every file it emits with a
+# self-describing metadata.splitGroup marker. This is the consumer: given a
+# scope, it answers "do the tasks files here form ONE group that must execute
+# together, and which members still have work?".
+#
+# It lives here rather than in /aimi:execute's markdown because every rule it
+# encodes -- anchor selection, sibling resolution, total validation, active
+# filtering, legacy-pair fallback -- is pure, deterministic, file-only logic.
+# Written as executable prose it was unreachable by both Bash test suites, and
+# it drifted into two divergent copies (flat flow vs. phase mode). Here one
+# copy serves both scopes and every rule is a test case.
+#
+# It is a QUERY, not a gate: every outcome, including "single" and "none",
+# exits 0. Non-zero is reserved for real errors (bad argument, unreadable dir).
+
+# A story is pending when its status is anything other than "completed".
+# Exactly one definition, used for every count this verb reports. The prose
+# it replaces had two that disagreed -- `!= "completed"` for the active filter
+# and `== "pending"` for the phase completion count -- so an in_progress story
+# was counted by one and not the other, which let a phase close with work
+# still in flight.
+_SPLIT_DETECT_DESCRIBE_JQ='
+  (if type == "object" then . else {} end) as $doc
+| (if ($doc.metadata | type) == "object" then $doc.metadata else {} end) as $m
+| (if ($m.splitGroup | type) == "object" then $m.splitGroup else {} end) as $sg
+| {
+    path: $path,
+    project: (if ($sg.project | type) == "string" then $sg.project else "." end),
+    branchName: (if ($m.branchName | type) == "string" then $m.branchName else null end),
+    storyCount: (if ($doc.userStories | type) == "array"
+                 then ($doc.userStories | length) else 0 end),
+    pendingCount: (if ($doc.userStories | type) == "array"
+                   then ([$doc.userStories[]
+                          | select((.status? // "pending") != "completed")] | length)
+                   else 0 end),
+    hasMarker: (($sg.total | type) == "number" and ($sg.siblings | type) == "array"),
+    declaredTotal: (if ($sg.total | type) == "number" then ($sg.total | tostring) else "" end),
+    siblings: (if ($sg.siblings | type) == "array"
+               then [$sg.siblings[] | tostring] else [] end)
+  }
+| . + {active: (.pendingCount > 0)}
+'
+
+# Emit one compact JSON descriptor for a candidate tasks file.
+# A file that is unreadable or not valid JSON yields an inert descriptor
+# (no marker, no stories) instead of aborting: one corrupt file sitting in
+# .aimi/tasks/ must not take detection down for every other feature.
+_split_detect_describe() {
+  local file="$1"
+  local desc=""
+  desc=$(jq -c --arg path "$file" "$_SPLIT_DETECT_DESCRIBE_JQ" "$file" 2>/dev/null) || desc=""
+  if [ -z "$desc" ]; then
+    desc=$(jq -nc --arg path "$file" '{path: $path, project: ".", branchName: null,
+      storyCount: 0, pendingCount: 0, hasMarker: false, declaredTotal: "",
+      siblings: [], active: false}')
+  fi
+  printf '%s' "$desc"
+}
+
+# List *-tasks.json files directly inside <dir> (depth 1 only), newest mtime
+# first. NUL-delimited find -> xargs -0 keeps paths containing spaces intact,
+# the same hardening _find_tasks_files_all carries; a newline-delimited
+# `xargs ls -t` word-splits them and silently returns nothing.
+_split_detect_list_dir() {
+  local dir="$1"
+  [ -d "$dir" ] || return 0
+  find "$dir" -mindepth 1 -maxdepth 1 -type f -name '*-tasks.json' -print0 2>/dev/null \
+    | xargs -0 ls -t 2>/dev/null || true
+}
+
+# Derive the phase's own governing tasks file from a phase directory, so it can
+# be excluded from the split candidate pool. Layout is
+# .aimi/tasks/<feature>/phase-<N>[.<M>][-<slug>]/<feature>-phase-<N>-tasks.json.
+# Prints nothing when <dir> is not shaped like a phase directory (nothing to
+# exclude then, which is the safe direction: an extra candidate is still
+# filtered by the marker and pair rules below).
+_split_detect_phase_main_file() {
+  local dir="$1"
+  local dir_base feature phase_id
+  dir_base=$(basename "$dir")
+  case "$dir_base" in
+    phase-[0-9]*) ;;
+    *) return 0 ;;
+  esac
+  phase_id=${dir_base#phase-}
+  phase_id=${phase_id%%-*}
+  case "$phase_id" in
+    ''|*[!0-9.]*) return 0 ;;
+  esac
+  feature=$(basename "$(dirname "$dir")")
+  [ -n "$feature" ] || return 0
+  printf '%s/%s-phase-%s-tasks.json' "$dir" "$feature" "$phase_id"
+}
+
+cmd_split_detect() {
+  local scope_dir=""
+  local dir_mode=false
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dir)
+        if [ $# -lt 2 ] || [ -z "${2:-}" ]; then
+          echo "Error: split-detect: --dir requires a directory path" >&2
+          exit 1
+        fi
+        scope_dir="$2"
+        dir_mode=true
+        shift 2
+        ;;
+      *)
+        echo "Error: split-detect: unknown argument: $1" >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  # ------------------------------------------------------------------
+  # 1. Build the candidate pool, newest mtime first
+  # ------------------------------------------------------------------
+  local candidates=""
+  local exclude_file=""
+  if [ "$dir_mode" = true ]; then
+    if [ ! -d "$scope_dir" ]; then
+      echo "Error: split-detect: --dir is not a directory: $scope_dir" >&2
+      exit 1
+    fi
+    scope_dir=$(resolve_path "$scope_dir")
+    validate_path_in_project "$scope_dir"
+    exclude_file=$(_split_detect_phase_main_file "$scope_dir")
+    candidates=$(_split_detect_list_dir "$scope_dir")
+  else
+    # Flat scope is depth 1 ONLY: candidates are the *-tasks.json files whose
+    # parent directory is $TASKS_DIR itself. _find_tasks_files_all globs depth
+    # 1-3, which includes every phase directory -- and that is exactly how a
+    # phase's split files used to be captured by the flat flow and executed as
+    # a flat split, leaving the phase unclaimed and nothing merged into the
+    # phase branch. The filter below is the fix, and it is load-bearing.
+    local all_files=""
+    all_files=$(_find_tasks_files_all)
+    if [ -n "$all_files" ]; then
+      while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        [ "$(dirname "$f")" = "$TASKS_DIR" ] || continue
+        candidates="${candidates}${f}"$'\n'
+      done <<< "$all_files"
+    fi
+  fi
+
+  local pool="[]"
+  if [ -n "$candidates" ]; then
+    local cand desc
+    while IFS= read -r cand; do
+      [ -n "$cand" ] || continue
+      [ -n "$exclude_file" ] && [ "$cand" = "$exclude_file" ] && continue
+      desc=$(_split_detect_describe "$cand")
+      pool=$(printf '%s' "$pool" | jq -c --argjson d "$desc" '. + [$d]')
+    done <<< "$candidates"
+  fi
+
+  local started_empty=false
+  [ "$(printf '%s' "$pool" | jq 'length')" -eq 0 ] && started_empty=true
+
+  # ------------------------------------------------------------------
+  # 2. Resolve the group
+  # ------------------------------------------------------------------
+  # "Newest wins": the anchor is the newest candidate, not the first
+  # marker-carrying file in mtime order. The old rule let a stale marked split
+  # from a past feature preempt today's plan whenever today's files carried no
+  # marker of their own.
+  local mode="none"
+  local anchor="null"
+  local members="[]"
+  local declared_total="0"
+  local degraded_reason=""
+
+  while :; do
+    local pool_len=0
+    pool_len=$(printf '%s' "$pool" | jq 'length')
+    if [ "$pool_len" -eq 0 ]; then
+      mode="none"
+      if [ "$started_empty" != true ] && [ -z "$degraded_reason" ]; then
+        degraded_reason="every candidate group is already fully completed"
+      fi
+      break
+    fi
+
+    local newest newest_path newest_dir newest_marker
+    newest=$(printf '%s' "$pool" | jq -c '.[0]')
+    newest_path=$(printf '%s' "$newest" | jq -r '.path')
+    newest_dir=$(dirname "$newest_path")
+    newest_marker=$(printf '%s' "$newest" | jq -r '.hasMarker')
+
+    local group="[]"
+    local group_mode=""
+    local group_total="0"
+
+    if [ "$newest_marker" = "true" ]; then
+      # -- Marked group: the members are the anchor plus its OWN declared
+      #    siblings. Nothing else in the pool participates, however similar
+      #    its basename. Each sibling resolves BY BASENAME against the
+      #    anchor's own directory, which is what renders a traversal-shaped
+      #    sibling entry inert: "../../etc/passwd" becomes "<anchor-dir>/passwd",
+      #    which does not exist, and the group is voided.
+      local anchor_total="" resolve_ok=true bad_detail=""
+      anchor_total=$(printf '%s' "$newest" | jq -r '.declaredTotal')
+      group="[$newest]"
+
+      case "$anchor_total" in
+        ''|*[!0-9]*)
+          resolve_ok=false
+          bad_detail="declared total is not a whole number: \"${anchor_total}\""
+          ;;
+      esac
+
+      if [ "$resolve_ok" = true ]; then
+        local sib sib_path sib_desc dup
+        while IFS= read -r sib; do
+          [ -n "$sib" ] || continue
+          sib_path="$newest_dir/$(basename "$sib")"
+          if [ ! -f "$sib_path" ]; then
+            resolve_ok=false
+            bad_detail="declared sibling not found in the anchor's directory: $sib_path"
+            break
+          fi
+          dup=$(printf '%s' "$group" | jq -r --arg p "$sib_path" '[.[] | select(.path == $p)] | length')
+          if [ "$dup" -ne 0 ]; then
+            resolve_ok=false
+            bad_detail="declared sibling resolves to a member already in the group: $sib_path"
+            break
+          fi
+          sib_desc=$(_split_detect_describe "$sib_path")
+          group=$(printf '%s' "$group" | jq -c --argjson d "$sib_desc" '. + [$d]')
+        done <<< "$(printf '%s' "$newest" | jq -r '.siblings[]')"
+      fi
+
+      local resolved=0
+      resolved=$(printf '%s' "$group" | jq 'length')
+      if [ "$resolve_ok" != true ] || [ "$resolved" -ne "$anchor_total" ] || [ "$resolved" -lt 2 ]; then
+        # A group that fails validation degrades to single-file execution and
+        # is TERMINAL -- it deliberately does not fall through to the legacy
+        # pair rule. This scope was planned by the project-split writer, so any
+        # -frontend-/-backend-tasks.json sitting beside it is stale, and running
+        # it would execute the wrong work.
+        mode="single"
+        anchor=$(printf '%s' "$newest" | jq -c '.path')
+        members="[$newest]"
+        declared_total="1"
+        degraded_reason="split group anchored at ${newest_path} is unusable (declared total ${anchor_total:-?}, resolved ${resolved}"
+        if [ -n "$bad_detail" ]; then
+          degraded_reason="${degraded_reason}; ${bad_detail}"
+        fi
+        degraded_reason="${degraded_reason}) — degraded to single-file execution, legacy pair not considered"
+        break
+      fi
+
+      group_mode="project-split"
+      group_total="$anchor_total"
+    else
+      # -- No marker on the newest candidate: try the legacy
+      #    -frontend-tasks.json / -backend-tasks.json pair rule over the pool.
+      #    The counterpart must be in the pool, not merely on disk, so the
+      #    scope (flat depth 1, or this one phase directory) still bounds it.
+      local newest_base prefix fe_path be_path
+      newest_base=$(basename "$newest_path")
+      prefix=""
+      fe_path=""
+      be_path=""
+      case "$newest_base" in
+        *-frontend-tasks.json)
+          prefix="${newest_base%-frontend-tasks.json}"
+          fe_path="$newest_path"
+          be_path="$newest_dir/${prefix}-backend-tasks.json"
+          ;;
+        *-backend-tasks.json)
+          prefix="${newest_base%-backend-tasks.json}"
+          be_path="$newest_path"
+          fe_path="$newest_dir/${prefix}-frontend-tasks.json"
+          ;;
+      esac
+
+      local counterpart=""
+      if [ -n "$prefix" ]; then
+        if [ "$fe_path" = "$newest_path" ]; then counterpart="$be_path"; else counterpart="$fe_path"; fi
+        local in_pool
+        in_pool=$(printf '%s' "$pool" | jq -r --arg p "$counterpart" '[.[] | select(.path == $p)] | length')
+        [ "$in_pool" -eq 0 ] && counterpart=""
+      fi
+
+      if [ -n "$counterpart" ]; then
+        # Frontend first, backend second — the order the two-file writer and
+        # every downstream report already assume.
+        group=$(printf '%s' "$pool" | jq -c --arg fe "$fe_path" --arg be "$be_path" \
+          '[(.[] | select(.path == $fe)), (.[] | select(.path == $be))]')
+        group_mode="paired-split"
+        group_total="2"
+      else
+        mode="single"
+        anchor=$(printf '%s' "$newest" | jq -c '.path')
+        members="[$newest]"
+        declared_total="1"
+        break
+      fi
+    fi
+
+    # A group with nothing left to do is not this run's work. Drop ALL of its
+    # members from the pool and look again, rather than letting a completed
+    # stale split route today's real work to a single-file fallback.
+    local group_active=0
+    group_active=$(printf '%s' "$group" | jq '[.[] | select(.active)] | length')
+    if [ "$group_active" -eq 0 ]; then
+      pool=$(printf '%s\n%s' "$pool" "$group" | jq -sc '
+        .[1] as $g | [.[0][] | select(.path as $p | ($g | map(.path) | index($p)) == null)]')
+      continue
+    fi
+
+    mode="$group_mode"
+    anchor=$(printf '%s' "$newest" | jq -c '.path')
+    members="$group"
+    declared_total="$group_total"
+    break
+  done
+
+  # ------------------------------------------------------------------
+  # 3. Emit
+  # ------------------------------------------------------------------
+  printf '%s' "$members" | jq \
+    --arg mode "$mode" \
+    --argjson anchor "$anchor" \
+    --argjson total "$declared_total" \
+    --arg reason "$degraded_reason" \
+    '{
+      mode: $mode,
+      anchor: $anchor,
+      members: [.[] | {path, project, branchName, storyCount, pendingCount, active}],
+      activeCount: ([.[] | select(.active)] | length),
+      total: $total,
+      degradedReason: (if ($reason | length) > 0 then $reason else null end)
+    }'
+}
+
+# ============================================================================
 # Roadmap Lifecycle Subcommands (Phase/Milestone layer for large-scope features)
 # ============================================================================
 #
@@ -8112,6 +8456,55 @@ COMMANDS:
                               no foundationEdge field.
                               --agent-mode demotes Phase 3.1 and Phase 4.1
                               hard rejects to warnings and proceeds.
+    split-detect [--dir <phase-dir>]
+                              Read side of metadata.splitGroup: decide whether
+                              the tasks files in scope form ONE split group that
+                              must execute together, and report which members
+                              still have pending work. A query, never a gate —
+                              every outcome, including "single" and "none",
+                              exits 0; non-zero is a real error (bad argument,
+                              unreadable --dir).
+                              Scope. Without --dir: FLAT — *-tasks.json whose
+                              parent directory is .aimi/tasks itself, depth 1
+                              only. The depth restriction is load-bearing:
+                              find-tasks-all globs depth 1-3, which includes
+                              phase directories, so without it a phase's split
+                              files are captured by the flat flow and run as a
+                              flat split — the phase never gets claimed and
+                              nothing merges into the phase branch. With --dir:
+                              that directory's *-tasks.json, minus the phase's
+                              own <feature>-phase-<N>-tasks.json.
+                              Algorithm. The anchor is the NEWEST candidate by
+                              mtime, not the first marker-carrying file in mtime
+                              order — the latter let a stale marked split from a
+                              past feature preempt today's plan whenever today's
+                              files carried no marker. If the anchor carries a
+                              well-formed metadata.splitGroup (total a number,
+                              siblings an array), siblings resolve BY BASENAME
+                              against the anchor's own directory (which renders
+                              a traversal-shaped sibling entry inert) and the
+                              resolved count must equal total and be >= 2.
+                              A group whose members are ALL completed is dropped
+                              whole from the pool and the search repeats, so a
+                              finished stale split cannot route today's real work
+                              to a single-file fallback. A marker present but
+                              failing validation degrades and is terminal — it
+                              does NOT fall through to the legacy pair, because
+                              any -frontend-/-backend-tasks.json beside a
+                              project-split marker is stale work. When the newest
+                              candidate carries no marker, the legacy
+                              -frontend-tasks.json/-backend-tasks.json pair rule
+                              is tried over the pool (counterpart must be in the
+                              pool, not merely on disk). Otherwise: single.
+                              Pending is (.status // "pending") != "completed" —
+                              one definition for every count reported, so an
+                              in_progress story is pending everywhere.
+                              Output. One JSON object: {mode: "project-split"|
+                              "paired-split"|"single"|"none", anchor, members:
+                              [{path,project,branchName,storyCount,pendingCount,
+                              active}], activeCount, total, degradedReason}.
+                              degradedReason explains any fall-back so the caller
+                              can report it without re-deriving why.
     roadmap-init --feature <slug> [--file <path>] [--sync] [--brainstorm-path <path>]
                               Read a sanitized phases array (stdin or --file) and
                               atomically create/append to .aimi/tasks/<slug>/roadmap.json.
@@ -8348,6 +8741,7 @@ main() {
     bundle-prototype-status)   shift; cmd_bundle_prototype_status "$@" ;;
     bundle-prototype-finalize) shift; cmd_bundle_prototype_finalize "$@" ;;
     story-merge)       shift; cmd_story_merge "$@" ;;
+    split-detect)      shift; cmd_split_detect "$@" ;;
     roadmap-init)          shift; cmd_roadmap_init "$@" ;;
     roadmap-get)           shift; cmd_roadmap_get "$@" ;;
     roadmap-set-status)    shift; cmd_roadmap_set_status "$@" ;;
