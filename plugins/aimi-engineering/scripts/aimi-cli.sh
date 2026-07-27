@@ -7829,25 +7829,33 @@ COMMANDS:
                               hard block; skipped for single-story merges).
                               --split full-stack additionally detects
                               cross-file-dep-dropped smells: a dependsOn edge
-                              that crosses the frontend/backend boundary is
+                              that crosses an output-file boundary (a repo
+                              boundary on the PROJECT axis, the
+                              frontend/backend boundary on the SIDE axis) is
                               still dropped (each file's graph stays
                               self-contained) but is now surfaced via one
                               aggregated stderr banner plus a
                               metadata.smellWarnings entry per affected story
-                              in BOTH output files.
+                              in EVERY output file the split produced (keyed by
+                              .project on the PROJECT axis, .side on the SIDE
+                              axis).
                               Writes atomically via _lock (tmp+mv). Deletes
                               staging dir on success; preserves on error.
-                              --split full-stack writes two output files:
+                              --split full-stack picks its axis by counting
+                              distinct normalized .project values (trim, strip
+                              one trailing slash, blank/absent = null).
+                              >= 2 -> PROJECT axis (multi-repo): one output
+                              file per project, <base>-<project-slug>-tasks.json,
+                              no frontend/backend decision at all; project-less
+                              stories route to the "." root group and each file
+                              carries metadata.splitGroup + its own branchName.
+                              < 2 -> SIDE axis (single-repo/monorepo, incl. no
+                              .project at all): two output files,
                               <base>-frontend-tasks.json and
-                              <base>-backend-tasks.json with unique IDs, rebuilt
-                              dependsOn, and independent wave numbers. Partition:
-                              group stories by normalized .project, decide each
-                              group's side by strict majority vote of its
-                              members' own file-pattern/title heuristic verdict
-                              (ties go to backend); below 2 distinct normalized
-                              projects (monorepo guard, incl. no .project at
-                              all) every story falls back to its own heuristic
-                              verdict instead.
+                              <base>-backend-tasks.json, each story classified
+                              by its own file-pattern/title heuristic verdict.
+                              Both axes assign unique IDs, rebuild dependsOn,
+                              and recompute wave numbers per file.
                               --phase-aware (only meaningful with --split
                               full-stack): the --output basename already ends in
                               "-tasks" (phase-scoped output, e.g.
