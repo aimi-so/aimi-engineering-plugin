@@ -206,10 +206,10 @@ _aimi_prompt_check=$($AIMI_CLI models-prompt-check)
 
 **Only** when `detect-interactivity` returns `picker` AND `models-prompt-check` returns `prompt`, show the user exactly this question via `AskUserQuestion`:
 
-> Question: "Nenhuma configuração de modelo de subagente encontrada — os agentes herdam o modelo da thread principal. Quer configurar a seleção de modelo por categoria?"
-> Options: A — "Configurar agora" ; B — "Manter o padrão (inherit)"
+> Question: "No subagent model configuration found — agents inherit the main thread's model. Configure model selection per category?"
+> Options: A — "Configure now" ; B — "Keep the default (inherit)"
 
-**Option A — "Configurar agora":**
+**Option A — "Configure now":**
 
 The model SELECTION must happen at the LLM-orchestrator layer using the interactive picker (`AskUserQuestion`), NOT inside a bash subprocess. The bash layer's job is only to list available models and write the config from explicit choices.
 
@@ -221,17 +221,17 @@ The model SELECTION must happen at the LLM-orchestrator layer using the interact
 
 2. Use `AskUserQuestion` with **five questions in one call** — one per category — letting the user pick a model for each. Each question's options are the models returned by `list-models` (plus the picker's automatic "Other" for free-form input):
 
-   - "Modelo para tarefas de pesquisa/leitura (research)?" — suggested default: Claude Code → `haiku`, OpenCode → an Anthropic Haiku model id from `opencode models`
-   - "Modelo para revisão e análise (review)?" — suggested default: Claude Code → `opus`, OpenCode → an Anthropic Opus model id
-   - "Modelo para tarefas de design (design)?" — suggested default: Claude Code → `sonnet`, OpenCode → an Anthropic Sonnet model id
-   - "Modelo para tarefas de workflow (workflow)?" — suggested default: Claude Code → `sonnet`, OpenCode → an Anthropic Sonnet model id
-   - "Modelo para sub-orquestradores de execução (executor)?" — suggested default: Claude Code → `sonnet`, OpenCode → an Anthropic Sonnet model id
+   - "Model for research/reading tasks (research)?" — suggested default: Claude Code → `haiku`, OpenCode → an Anthropic Haiku model id from `opencode models`
+   - "Model for review and analysis (review)?" — suggested default: Claude Code → `opus`, OpenCode → an Anthropic Opus model id
+   - "Model for design tasks (design)?" — suggested default: Claude Code → `sonnet`, OpenCode → an Anthropic Sonnet model id
+   - "Model for workflow tasks (workflow)?" — suggested default: Claude Code → `sonnet`, OpenCode → an Anthropic Sonnet model id
+   - "Model for execution sub-orchestrators (executor)?" — suggested default: Claude Code → `sonnet`, OpenCode → an Anthropic Sonnet model id
 
 3. Run `$AIMI_CLI detect-models --research <chosen_research> --review <chosen_review> --design <chosen_design> --workflow <chosen_workflow> --executor <chosen_executor>` with the user's picks to write the config.
 
 4. Re-run `$AIMI_CLI resolve-models` to refresh `AGENT_MODELS`.
 
-**Option B — "Manter o padrão (inherit)":** no action needed beyond dismissal.
+**Option B — "Keep the default (inherit)":** no action needed beyond dismissal.
 
 - Regardless of the choice (A or B): always run `$AIMI_CLI models-prompt-dismiss` so the prompt is never shown again.
 

@@ -284,7 +284,7 @@ _aimi_models_config_path() {
 # Return the path to the models first-run prompt marker file for the active host.
 # The marker is per-host: `models-prompt-seen-claudeCode` or `models-prompt-seen-opencode`.
 # This lets a user dismiss the prompt independently on each host — picking
-# "Manter o padrão (inherit)" on Claude Code does not silence the prompt on OpenCode.
+# "Keep the default (inherit)" on Claude Code does not silence the prompt on OpenCode.
 # The legacy global `models-prompt-seen` file (no host suffix) is no longer read.
 _aimi_models_prompt_marker_path() {
   local host

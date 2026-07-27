@@ -8559,7 +8559,7 @@ test_models_prompt_dismiss_then_check_skips_when_file_present() {
 
   local tmpdir
   tmpdir=$(mktemp -d)
-  # Simulate: user already configured opencode; opens Claude Code; picks "Manter o padrão";
+  # Simulate: user already configured opencode; opens Claude Code; picks "Keep the default";
   # next session on same host should not re-prompt.
   printf '{"schemaVersion":"2.0","categories":{"opencode":{"research":"x"}}}\n' > "$tmpdir/models.json"
 
@@ -8568,7 +8568,7 @@ test_models_prompt_dismiss_then_check_skips_when_file_present() {
   before=$(AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-check)
   assert_eq "prompt" "$before" "dismiss-flow: pre-dismiss check returns 'prompt' (host unconfigured, no marker)"
 
-  # User picks "Manter o padrão" → models-prompt-dismiss
+  # User picks "Keep the default" → models-prompt-dismiss
   AIMI_CONFIG_DIR="$tmpdir" CLAUDECODE=1 "$CLI" models-prompt-dismiss > /dev/null
 
   # Subsequent check: skip (dismissal honored)
