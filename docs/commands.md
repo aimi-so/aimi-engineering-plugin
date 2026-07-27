@@ -72,7 +72,7 @@ Runs the next pending story, one at a time. Extracts only that story so the cont
 - Retries once automatically on failure
 - Asks whether to skip, retry, or stop when a story keeps failing
 
-### Container mode
+### Container mode (single story)
 
 When the tasks file has `metadata.execution` set to `"container"`, the story runs inside a git worktree at `.worktrees/<branchName>` instead of your current working tree. The container is created on first use and reused afterward. The story commits there, on the feature branch.
 
@@ -102,7 +102,7 @@ Runs every pending story autonomously. Reads the schema version, the shape of th
 
 Falls back to running stories one after another through `/aimi:next`, handling skip/retry/stop decisions along the way.
 
-### Container mode
+### Container mode (full run)
 
 With `metadata.execution: "container"`, the whole run happens inside a git worktree at `.worktrees/<branchName>` rather than on your current checkout.
 

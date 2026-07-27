@@ -17,6 +17,7 @@ This plugin changes the shape of that work:
 - A feature becomes a **plan** — a set of stories, each small enough to finish in one context window.
 - Stories that don't depend on each other run **in parallel**, each in its own git worktree.
 - Each story gets a **fresh agent** that sees only that story. No leftovers from the last one.
+- The whole run happens **outside your working tree**, so your checkout stays where you left it.
 - Results merge back branch by branch, so a failure blocks only what depended on it.
 
 You stay out of the loop until there is something to review.
@@ -95,6 +96,36 @@ A plan is a graph, not a list. Stories with no unmet dependencies can start imme
 ```
 
 Full detail in [docs/architecture.md](docs/architecture.md).
+
+---
+
+## Where the work happens
+
+By default, `/aimi:execute` does not touch your working tree. It creates a **container** — a git worktree at `.worktrees/<branch>` — and runs everything in there.
+
+That means you can keep editing, switching branches, and running things while a plan executes. Your checkout is exactly where you left it when the run finishes.
+
+When it's done, the container is removed and the branch is kept. Nothing is checked out locally, so the run suggests:
+
+```bash
+/aimi:open-pr --branch feat/your-feature
+/aimi:review feat/your-feature
+```
+
+New plans get this automatically — `/aimi:plan` writes `execution: "container"` into every tasks file it generates.
+
+To run against your working tree instead, for one invocation:
+
+```bash
+/aimi:execute --inline
+```
+
+Two things worth knowing before you rely on it:
+
+- **Commit first.** A container branches from committed history, so uncommitted edits in your working tree do not reach it.
+- **Dependencies install once** inside the container, using whichever package manager your lockfile indicates.
+
+Details and the known limitations: [docs/commands.md](docs/commands.md#container-mode-full-run).
 
 ---
 
