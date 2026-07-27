@@ -1,0 +1,96 @@
+# command-blocks-baseline.txt — known findings for test-command-blocks.sh
+#
+# Format, tab-separated:  <check>  <command file>  <key>
+#   check : syntax | portability | loop-scope | unassigned
+#   key   : the block's enclosing heading (syntax, portability)
+#           the variable name             (loop-scope, unassigned)
+#
+# Blocks are keyed by heading rather than by a marker in the markdown because
+# install.sh translates command bodies for OpenCode by pure string
+# substitution — anything embedded in the file itself would ship to users.
+#
+# A line here is a promise that someone looked. The suite fails when a listed
+# finding stops firing, so this file shrinks as things are fixed; it cannot
+# quietly accumulate. Delete the line when you fix the thing.
+
+# --- syntax -----------------------------------------------------------------
+# Not defects. Three blocks use the <angle-bracket> placeholder convention,
+# which bash parses as a redirection to a filename it cannot resolve. One is a
+# ```bash block whose heredoc body itself contains ``` fences, so extraction
+# truncates it mid-command-substitution. ([BRACKET] placeholders, the far more
+# common convention in these files, parse fine and need no entry here.)
+syntax	deepen.md	Step 2b: Read Research Depth (block 1)
+syntax	deepen.md	3b: Freshness Check (block 1)
+syntax	deepen.md	Step 5.5: Post-Enrichment Validation (block 1)
+syntax	open-pr.md	5b. Create the PR (block 1)
+
+# --- loop-scope -------------------------------------------------------------
+# SUSPECTED LIVE DEFECTS, not accepted noise. Both are the exact shape of
+# blocking finding B3 (execute.md Step 0.9 read $split_file with no loop to
+# set it), which shipped and had to be found by hand:
+#
+#   execute.md  SPLIT_BRANCH   — "Create Split Worktrees" follows the loop with
+#       a standalone one-line block computing SPLIT_WORKTREE_PATH from
+#       $SPLIT_BRANCH. Every assignment to SPLIT_BRANCH in that file is inside
+#       a loop; the loop just above this block binds `split_branch` (lowercase).
+#   plan.md     PROJECT_PATH   — the per-entry base-branch block under "Derive
+#       and Patch Metadata Fields" reads $PROJECT_PATH, which only the Phase 3e
+#       validation loop ~100 lines earlier ever assigns. Note this variable
+#       moved here from the `unassigned` list when that loop was added: making
+#       a block a real loop makes its outputs loop-scoped, so loop-less
+#       downstream consumers start failing too.
+#
+# These are listed so the suite can be green and enforcing today. They should
+# be fixed and deleted, not renewed.
+loop-scope	execute.md	SPLIT_BRANCH
+loop-scope	plan.md	PROJECT_PATH
+
+# --- unassigned -------------------------------------------------------------
+# Names read by a block that nothing in the same file ever assigns. Most are
+# values the surrounding prose tells the agent to substitute, or single letters
+# from pseudo-code; a handful ($AIMI_CLI in the files that document resolution
+# rather than perform it) are legitimately caller-supplied. Process-environment
+# names (HOME, XDG_CONFIG_HOME, CLAUDE_CONFIG_DIR, ...) are filtered in the
+# script itself and never appear here.
+#
+# On the pre-fix tree this same check listed AIMI_ROOT_IS_GIT_REPO
+# (execute.md:1040, blocking finding B10 — assigned only by an English
+# sentence) and SPLIT_BRANCH_ARGS (the variable the `mapfile` failed to fill).
+# Both are gone. That is what this list is for: a NEW name means a new one.
+unassigned	brainstorm.md	renderBundlePending
+unassigned	execute.md	ARTIFACTS_JSON
+unassigned	execute.md	BASE_BRANCH
+unassigned	execute.md	CONTRACTS_JSON
+unassigned	execute.md	DECISIONS_JSON
+unassigned	execute.md	DEFERRED_JSON
+unassigned	execute.md	DEVIATIONS_JSON
+unassigned	execute.md	identity
+unassigned	execute.md	SERVE_URL
+unassigned	init.md	AIMI_CLI
+unassigned	next.md	CONTAINER_ROOT
+unassigned	next.md	PROJECT_PATH
+unassigned	open-pr.md	INCLUDE_BACKEND_SPEC
+unassigned	open-pr.md	PR_BODY
+unassigned	open-pr.md	PR_URL
+unassigned	open-pr.md	s
+unassigned	plan.md	BUNDLE_OVERRIDE
+unassigned	plan.md	d
+unassigned	plan.md	entry
+unassigned	plan.md	overflow
+unassigned	plan.md	p
+unassigned	plan.md	ROOT
+unassigned	plan.md	status_by_id
+unassigned	plan.md	token
+unassigned	plan.md	topicSlug
+unassigned	plan.md	unmet
+unassigned	references/container-execution.md	AIMI_ROOT
+unassigned	references/container-execution.md	CONTAINER_BASE
+unassigned	references/container-execution.md	EXEC_BRANCH
+unassigned	references/container-execution.md	EXEC_ROOT
+unassigned	references/container-execution.md	PUSH_FLAG
+unassigned	references/container-execution.md	RAW_URL
+unassigned	references/container-execution.md	TASKS_PATH
+unassigned	references/execution-mode.md	TASKS_FILE
+unassigned	references/interactivity.md	AIMI_CLI
+unassigned	review.md	AIMI_CLI
+unassigned	status.md	AIMI_CLI
