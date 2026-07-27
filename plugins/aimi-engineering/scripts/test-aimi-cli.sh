@@ -10462,14 +10462,29 @@ test_story_merge_foundation_nonempty_dependson() {
   rm -rf "$stg" "$out_file"
 }
 
-# TC18: project-aware majority-vote partition — a docs-only story shares
-# .project with two frontend siblings and rides their majority into
-# frontend-tasks.json even though its own implementation.files (AGENTS.md,
-# CLAUDE.md, docs/*) fail the frontend file-pattern/title heuristic alone.
-# A single api-service story is the lone member of the other project group.
-test_story_merge_project_majority_vote() {
+# TC18: per-project partition — the 2-distinct-project fixture (web-app: React
+# UserProfile page + docs-only story + React SettingsPanel = 3 stories;
+# api-service: UserProfile API endpoint = 1 story) produces ONE output file per
+# project under the N-file PROJECT-axis writer. The web-app file carries all 3
+# of its repo's stories (the docs-only one included, because it names that
+# repo — not because anything voted for it) and the api-service file carries 1.
+# No frontend/backend heuristic verdict is consulted anywhere on this path.
+#
+# SUPERSEDED, NOT BROKEN — do not read this diff as a regression being papered
+# over. This case used to assert the "project-aware majority vote": the group's
+# output file was chosen by strict majority vote of its members' own
+# file-pattern/keyword heuristic verdicts (ties going to backend), so the
+# docs-only story rode its two frontend siblings' majority into
+# frontend-tasks.json (FE=3 / BE=1) despite failing the heuristic on its own.
+# US-001 deleted that majority vote outright — a merge carrying >= 2 distinct
+# normalized .project values now routes to _story_merge_write_project_split,
+# which splits by project with no side decision at all, so there is no vote
+# left to pin. Removal is recorded in CHANGELOG 1.116.0. The staging fixture
+# below is byte-for-byte the old one; only the expected output shape moved from
+# two side-named files to one file per project.
+test_story_merge_project_axis_partition() {
   echo ""
-  echo "=== TC18: story-merge --split full-stack project-aware majority vote ==="
+  echo "=== TC18: story-merge --split full-stack per-project partition ==="
 
   local stg=".aimi/.tasks-staging-tc18"
   local out_file=".aimi/tasks/sm-tc18-tasks.json"
@@ -10552,23 +10567,42 @@ EOF
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC18: full-stack split exits 0"
 
+  # One file per distinct normalized project; basenames are the slugified
+  # project values, not side names.
+  local web_file=".aimi/tasks/sm-tc18-tasks-web-app-tasks.json"
+  local api_file=".aimi/tasks/sm-tc18-tasks-api-service-tasks.json"
   local fe_file=".aimi/tasks/sm-tc18-tasks-frontend-tasks.json"
   local be_file=".aimi/tasks/sm-tc18-tasks-backend-tasks.json"
 
-  if [ -f "$fe_file" ] && [ -f "$be_file" ]; then
-    local fe_count be_count
-    fe_count=$(jq '.userStories | length' "$fe_file" 2>/dev/null)
-    be_count=$(jq '.userStories | length' "$be_file" 2>/dev/null)
-    assert_eq "3" "$fe_count" "TC18: frontend-tasks.json has 3 userStories (majority carries the docs-only sibling)"
-    assert_eq "1" "$be_count" "TC18: backend-tasks.json has 1 userStory"
+  if [ -f "$web_file" ] && [ -f "$api_file" ]; then
+    local web_count api_count
+    web_count=$(jq '.userStories | length' "$web_file" 2>/dev/null)
+    api_count=$(jq '.userStories | length' "$api_file" 2>/dev/null)
+    assert_eq "3" "$web_count" "TC18: web-app file has exactly 3 userStories (every story naming that repo)"
+    assert_eq "1" "$api_count" "TC18: api-service file has exactly 1 userStory"
   else
-    echo -e "${RED}✗${NC} TC18: expected output files missing"
+    echo -e "${RED}✗${NC} TC18: expected per-project output files missing"
     echo "  CLI output: $output"
     ((TESTS_FAILED++))
     ((TESTS_FAILED++))
   fi
 
-  rm -rf "$stg" "$fe_file" "$be_file" "$out_file"
+  # The docs-only story stays with its own repo because of its .project value
+  # alone — no heuristic verdict, no group decision, nothing to override.
+  local docs_home
+  docs_home=$(jq -r '[.userStories[] | select(.title == "Update project documentation")] | length' "$web_file" 2>/dev/null)
+  assert_eq "1" "$docs_home" "TC18: docs-only story lands in its own project's file on .project alone"
+
+  if [ ! -f "$fe_file" ] && [ ! -f "$be_file" ]; then
+    echo -e "${GREEN}✓${NC} TC18: no frontend/backend side file produced on the project axis"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC18: side-axis files were written on a multi-repo layout"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg" "$web_file" "$api_file" "$fe_file" "$be_file" "$out_file"
+  rm -f .aimi/tasks/sm-tc18-*.lock
 }
 
 # TC19: monorepo guard — every story shares the same normalized .project
@@ -10665,13 +10699,27 @@ EOF
   rm -rf "$stg" "$fe_file" "$be_file" "$out_file"
 }
 
-# TC20: bipartition invariant — every input story's title appears exactly
-# once across the union of frontend-tasks.json and backend-tasks.json, and
-# the two userStories counts sum to the full input count (no id lost, no id
-# duplicated in both outputs).
-test_story_merge_bipartition_invariant() {
+# TC20: N-way partition invariant — every one of the 4 input story titles
+# appears exactly once across the union of ALL per-project output files, and
+# the per-file userStories counts sum to the full input count (no story lost,
+# no story duplicated across repos). Same 2-distinct-project fixture as TC18.
+# The union is read back off the writer's own return value so the exactly-once
+# check is arity-agnostic, but the ARITY ITSELF is pinned separately, by name:
+# at N=1 (every story forced into one group) exactly-once coverage is trivially
+# true, and a return value read in a circle would confirm it.
+#
+# SUPERSEDED, NOT BROKEN — do not read this diff as a regression being papered
+# over. This case used to assert a two-file BIPARTITION over
+# frontend-tasks.json + backend-tasks.json, the fixed pair of files the deleted
+# project-group majority vote (strict majority of the group's members'
+# heuristic verdicts, ties going to backend) always produced. US-001 deleted
+# that majority vote and replaced the two-file writer with a per-project N-file
+# one, so the same property — exactly-once coverage of every input story — is
+# now generalized from 2 files to N. Only the arity changed; the invariant is
+# the same one. Removal is recorded in CHANGELOG 1.116.0. Fixture unchanged.
+test_story_merge_nway_partition_invariant() {
   echo ""
-  echo "=== TC20: story-merge --split full-stack bipartition invariant ==="
+  echo "=== TC20: story-merge --split full-stack N-way partition invariant ==="
 
   local stg=".aimi/.tasks-staging-tc20"
   local out_file=".aimi/tasks/sm-tc20-tasks.json"
@@ -10751,18 +10799,48 @@ EOF
 EOF
 
   local output exit_code
-  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>/dev/null) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC20: full-stack split exits 0"
 
-  local fe_file=".aimi/tasks/sm-tc20-tasks-frontend-tasks.json"
-  local be_file=".aimi/tasks/sm-tc20-tasks-backend-tasks.json"
+  # Discover the N output paths from the writer's own return value
+  # ([{path, project, branchName, storyCount}, ...]) instead of hardcoding a
+  # file count, so the invariant is arity-agnostic.
+  local split_paths
+  split_paths=$(printf '%s' "$output" | jq -r '.[].path' 2>/dev/null)
 
-  if [ -f "$fe_file" ] && [ -f "$be_file" ]; then
-    local fe_count be_count total
-    fe_count=$(jq '.userStories | length' "$fe_file" 2>/dev/null)
-    be_count=$(jq '.userStories | length' "$be_file" 2>/dev/null)
-    total=$((fe_count + be_count))
-    assert_eq "4" "$total" "TC20: frontend + backend userStories counts sum to the full input count"
+  local -a split_files=()
+  local p
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    split_files+=("$p")
+  done <<< "$split_paths"
+
+  local missing_files=""
+  local f
+  for f in ${split_files[@]+"${split_files[@]}"}; do
+    [ -f "$f" ] || missing_files="$missing_files $f"
+  done
+
+  # Arity floor. The fixture holds exactly 2 distinct projects, so exactly 2
+  # files must exist and they must be THESE two — named here rather than
+  # inherited from the return value, which is the same source the union below
+  # is built from and therefore cannot contradict it.
+  local web_file=".aimi/tasks/sm-tc20-tasks-web-app-tasks.json"
+  local api_file=".aimi/tasks/sm-tc20-tasks-api-service-tasks.json"
+  assert_eq "2" "${#split_files[@]}" "TC20: 2 distinct projects produce exactly 2 split files"
+  if [ -f "$web_file" ] && [ -f "$api_file" ]; then
+    echo -e "${GREEN}✓${NC} TC20: both expected per-project files exist by name"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC20: expected per-project files missing by name ($web_file / $api_file)"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  if [ "${#split_files[@]}" -gt 0 ] && [ -z "$missing_files" ]; then
+    local total
+    total=$(jq -r '.userStories | length' "${split_files[@]}" 2>/dev/null | awk '{s += $1} END {print s + 0}')
+    assert_eq "4" "$total" "TC20: per-project userStories counts sum to the full input count"
 
     local expected_titles all_titles dup_titles missing_titles
     expected_titles=$(printf '%s\n' \
@@ -10770,35 +10848,50 @@ EOF
       "Update project documentation" \
       "React SettingsPanel component" \
       "UserProfile API endpoint" | sort)
-    all_titles=$(printf '%s\n%s\n' \
-      "$(jq -r '.userStories[].title' "$fe_file" 2>/dev/null)" \
-      "$(jq -r '.userStories[].title' "$be_file" 2>/dev/null)" | sort)
+    all_titles=$(jq -r '.userStories[].title' "${split_files[@]}" 2>/dev/null | sort)
     dup_titles=$(printf '%s\n' "$all_titles" | uniq -d)
     missing_titles=$(comm -23 <(printf '%s\n' "$expected_titles") <(printf '%s\n' "$all_titles" | sort -u))
 
     if [ -z "$dup_titles" ] && [ -z "$missing_titles" ]; then
-      echo -e "${GREEN}✓${NC} TC20: every input story title appears exactly once across both outputs"
+      echo -e "${GREEN}✓${NC} TC20: every input story title appears exactly once across all per-project outputs"
       ((TESTS_PASSED++))
     else
-      echo -e "${RED}✗${NC} TC20: bipartition invariant violated (dup: '$dup_titles' missing: '$missing_titles')"
+      echo -e "${RED}✗${NC} TC20: N-way partition invariant violated (dup: '$dup_titles' missing: '$missing_titles')"
       ((TESTS_FAILED++))
     fi
   else
-    echo -e "${RED}✗${NC} TC20: expected output files missing"
+    echo -e "${RED}✗${NC} TC20: expected per-project output files missing:$missing_files"
     echo "  CLI output: $output"
     ((TESTS_FAILED++))
     ((TESTS_FAILED++))
   fi
 
-  rm -rf "$stg" "$fe_file" "$be_file" "$out_file"
+  rm -rf "$stg" "$out_file"
+  rm -f .aimi/tasks/sm-tc20-*.json .aimi/tasks/sm-tc20-*.lock
 }
 
-# TC21: .project is preserved verbatim on every userStory object in both
-# output files, while the internal working keys _fe and _side never leak
-# into either file.
+# TC21: .project is preserved verbatim on every userStory object in every
+# per-project output file, while the working keys this axis actually computes —
+# __droppedDeps and __becameRoot, added by _story_merge_write_project_split's
+# cross-group dependsOn sweep and del()'d in the same writer's userStories
+# projection — never leak into any of them.
+#
+# SUPERSEDED, NOT BROKEN — do not read this diff as a regression being papered
+# over. This case used to check .project survival and _fe/_side stripping on
+# frontend-tasks.json + backend-tasks.json, the two files the deleted
+# project-group majority vote (strict majority of members' heuristic verdicts,
+# ties going to backend) produced. US-001 deleted that majority vote and its
+# two-file output. Removal is recorded in CHANGELOG 1.116.0. Fixture unchanged;
+# only the files the assertions read moved from side-named to project-named.
+#
+# The _fe / _side leak legs are gone rather than retargeted at the new files.
+# Neither key is computed anywhere on the PROJECT path — the fe_heuristic that
+# produces them lives in _story_merge_write_split, which a multi-repo merge
+# never reaches — so asserting their absence here could not fail for any edit
+# to this writer. Their SIDE-axis home still covers them where they exist.
 test_story_merge_project_preserved_working_keys_stripped() {
   echo ""
-  echo "=== TC21: story-merge --split full-stack preserves .project, strips _fe/_side ==="
+  echo "=== TC21: story-merge --split full-stack preserves .project, strips working keys ==="
 
   local stg=".aimi/.tasks-staging-tc21"
   local out_file=".aimi/tasks/sm-tc21-tasks.json"
@@ -10845,49 +10938,58 @@ EOF
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC21: full-stack split exits 0"
 
-  local fe_file=".aimi/tasks/sm-tc21-tasks-frontend-tasks.json"
-  local be_file=".aimi/tasks/sm-tc21-tasks-backend-tasks.json"
+  local web_file=".aimi/tasks/sm-tc21-tasks-web-app-tasks.json"
+  local api_file=".aimi/tasks/sm-tc21-tasks-api-service-tasks.json"
 
-  if [ -f "$fe_file" ] && [ -f "$be_file" ]; then
-    local fe_project be_project
-    fe_project=$(jq -r '.userStories[0].project' "$fe_file" 2>/dev/null)
-    be_project=$(jq -r '.userStories[0].project' "$be_file" 2>/dev/null)
-    assert_eq "web-app" "$fe_project" "TC21: frontend userStory .project preserved verbatim"
-    assert_eq "api-service" "$be_project" "TC21: backend userStory .project preserved verbatim"
+  if [ -f "$web_file" ] && [ -f "$api_file" ]; then
+    # .project verbatim on EVERY userStory of EVERY per-project file — the
+    # normalized grouping key is never written back onto a story.
+    local web_projects api_projects
+    web_projects=$(jq -r '[.userStories[].project] | join(",")' "$web_file" 2>/dev/null)
+    api_projects=$(jq -r '[.userStories[].project] | join(",")' "$api_file" 2>/dev/null)
+    assert_eq "web-app" "$web_projects" "TC21: web-app file preserves .project verbatim on every userStory"
+    assert_eq "api-service" "$api_projects" "TC21: api-service file preserves .project verbatim on every userStory"
 
-    if grep -q '"_fe"' "$fe_file" "$be_file" 2>/dev/null; then
-      echo -e "${RED}✗${NC} TC21: _fe leaked into output files"
-      ((TESTS_FAILED++))
-    else
-      echo -e "${GREEN}✓${NC} TC21: _fe absent from both output files"
-      ((TESTS_PASSED++))
-    fi
-
-    if grep -q '"_side"' "$fe_file" "$be_file" 2>/dev/null; then
-      echo -e "${RED}✗${NC} TC21: _side leaked into output files"
-      ((TESTS_FAILED++))
-    else
-      echo -e "${GREEN}✓${NC} TC21: _side absent from both output files"
-      ((TESTS_PASSED++))
-    fi
+    # Working keys the per-project axis itself introduces (cross-group
+    # dependsOn sweep), read off _story_merge_write_project_split rather than
+    # guessed at.
+    local axis_key_leaks
+    axis_key_leaks=$(jq -r '[.userStories[] | select(has("__droppedDeps") or has("__becameRoot"))] | length' "$web_file" "$api_file" 2>/dev/null | awk '{s += $1} END {print s + 0}')
+    assert_eq "0" "$axis_key_leaks" "TC21: __droppedDeps/__becameRoot never leak into any per-project output file"
   else
-    echo -e "${RED}✗${NC} TC21: expected output files missing"
+    echo -e "${RED}✗${NC} TC21: expected per-project output files missing"
     echo "  CLI output: $output"
-    ((TESTS_FAILED++))
     ((TESTS_FAILED++))
     ((TESTS_FAILED++))
     ((TESTS_FAILED++))
   fi
 
-  rm -rf "$stg" "$fe_file" "$be_file" "$out_file"
+  rm -rf "$stg" "$web_file" "$api_file" "$out_file"
+  rm -f .aimi/tasks/sm-tc21-*.lock
 }
 
-# TC22: .project normalization — "apps/web" and "apps/web/" (trailing slash)
-# are treated as the SAME project group. Two Pass-2 sub-agents authoring the
-# same logical project with/without a trailing slash must not spuriously
-# split into two single-member groups (which would each independently mirror
-# their own story's _fe verdict) instead of one two-member group decided by
-# majority vote (tie -> backend).
+# TC22: .project normalization boundary — "apps/web" and "apps/web/" (trailing
+# slash) are treated as the SAME project group. Two Pass-2 sub-agents authoring
+# the same logical repo with/without a trailing slash must land in ONE
+# per-project output file (2 userStories), each story keeping its own verbatim
+# .project spelling, with a separate api-service group alongside it so the
+# merge is genuinely on the multi-repo PROJECT axis and not the monorepo
+# fallback TC19 pins.
+#
+# SUPERSEDED, NOT BROKEN — do not read this diff as a regression being papered
+# over. This case used to assert "tie -> backend": the two-member apps/web
+# group produced a 1-1 split of member heuristic verdicts, the deleted majority
+# vote found no strict majority, and its tie-goes-to-backend bias sent BOTH
+# stories to backend-tasks.json (FE=0 / BE=3). US-001 deleted that majority
+# vote and its tie-break, so a tie is no longer a thing that can happen — there
+# is no vote to tie. Removal is recorded in CHANGELOG 1.116.0.
+#
+# The FIXTURE is deliberately kept rather than discarded: mis-grouping
+# trailing-slash variants is a real failure the new axis can still commit
+# (two groups would collide on the same "apps-web" output basename and hard-
+# fail the whole merge), unlike the tie-break, which has no equivalent left to
+# test. So the tie assertion is replaced by a normalization-boundary assertion
+# on the same inputs.
 test_story_merge_project_trailing_slash_normalization() {
   echo ""
   echo "=== TC22: story-merge --split full-stack .project trailing-slash normalization ==="
@@ -10937,8 +11039,8 @@ EOF
 EOF
 
   # Distinct second project so the merge crosses the 2-distinct-project
-  # majority-vote threshold (isolates the group_by normalization behavior
-  # from the monorepo-guard fallback path exercised by TC19).
+  # threshold that selects the PROJECT axis (isolates the grouping
+  # normalization behavior from the monorepo SIDE fallback exercised by TC19).
   cat > "$stg/03-api.json" << 'EOF'
 {
   "title": "UserProfile API endpoint",
@@ -10958,38 +11060,47 @@ EOF
 EOF
 
   local output exit_code
-  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>/dev/null) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC22: full-stack split exits 0"
 
-  local fe_file=".aimi/tasks/sm-tc22-tasks-frontend-tasks.json"
-  local be_file=".aimi/tasks/sm-tc22-tasks-backend-tasks.json"
+  # Both spellings normalize to "apps/web", so exactly TWO groups exist and the
+  # apps/web one owns both stories. Had normalization failed, "apps/web" and
+  # "apps/web/" would have become two groups sharing the "apps-web" basename
+  # slug and the merge would have hard-failed on the collision guard instead of
+  # exiting 0.
+  local group_count group_projects
+  group_count=$(printf '%s' "$output" | jq 'length' 2>/dev/null)
+  group_projects=$(printf '%s' "$output" | jq -r '[.[].project] | join(",")' 2>/dev/null)
+  assert_eq "2" "$group_count" "TC22: trailing-slash variant does NOT open a third project group"
+  assert_eq "api-service,apps/web" "$group_projects" "TC22: both spellings collapse to the single normalized 'apps/web' routing key"
 
-  if [ -f "$fe_file" ] && [ -f "$be_file" ]; then
-    local fe_count be_count
-    fe_count=$(jq '.userStories | length' "$fe_file" 2>/dev/null)
-    be_count=$(jq '.userStories | length' "$be_file" 2>/dev/null)
-    # apps/web (1 fe-passing member) + apps/web/ (1 fe-failing member) must
-    # group as ONE 2-member project: fe_count=1, 1*2=2 is not > 2, so the
-    # tie goes to backend for BOTH -- proving they were grouped together.
-    # If normalization failed and they were treated as two separate
-    # single-member groups, the React story would independently win its own
-    # 1-member "majority" and land frontend instead (FE=1/BE=2).
-    assert_eq "0" "$fe_count" "TC22: frontend-tasks.json has 0 userStories (grouped tie -> backend)"
-    assert_eq "3" "$be_count" "TC22: backend-tasks.json has 3 userStories (apps/web pair + api-service, all backend)"
+  local web_file=".aimi/tasks/sm-tc22-tasks-apps-web-tasks.json"
+  local api_file=".aimi/tasks/sm-tc22-tasks-api-service-tasks.json"
 
-    local react_side docs_side
-    react_side=$(jq -r '.userStories[] | select(.title == "React UserProfile page") | .project' "$be_file" 2>/dev/null)
-    docs_side=$(jq -r '.userStories[] | select(.title == "Update project documentation") | .project' "$be_file" 2>/dev/null)
-    assert_eq "apps/web" "$react_side" "TC22: apps/web story landed backend alongside its apps/web/ sibling"
-    assert_eq "apps/web/" "$docs_side" "TC22: apps/web/ story landed backend alongside its apps/web sibling"
+  if [ -f "$web_file" ] && [ -f "$api_file" ]; then
+    local web_count api_count
+    web_count=$(jq '.userStories | length' "$web_file" 2>/dev/null)
+    api_count=$(jq '.userStories | length' "$api_file" 2>/dev/null)
+    assert_eq "2" "$web_count" "TC22: the apps/web group file holds BOTH trailing-slash variants"
+    assert_eq "1" "$api_count" "TC22: the api-service group file holds its single story"
+
+    # Grouping is normalization-only: each story keeps its own raw spelling.
+    local react_project docs_project
+    react_project=$(jq -r '.userStories[] | select(.title == "React UserProfile page") | .project' "$web_file" 2>/dev/null)
+    docs_project=$(jq -r '.userStories[] | select(.title == "Update project documentation") | .project' "$web_file" 2>/dev/null)
+    assert_eq "apps/web" "$react_project" "TC22: 'apps/web' story kept its verbatim .project inside the shared group"
+    assert_eq "apps/web/" "$docs_project" "TC22: 'apps/web/' story kept its verbatim .project inside the shared group"
   else
-    echo -e "${RED}✗${NC} TC22: expected output files missing"
+    echo -e "${RED}✗${NC} TC22: expected per-project output files missing"
     echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+    ((TESTS_FAILED++))
     ((TESTS_FAILED++))
     ((TESTS_FAILED++))
   fi
 
-  rm -rf "$stg" "$fe_file" "$be_file" "$out_file"
+  rm -rf "$stg" "$web_file" "$api_file" "$out_file"
+  rm -f .aimi/tasks/sm-tc22-*.lock
 }
 
 # TC23: cross-file dependsOn drop — positive banner + smellWarnings entry.
@@ -11269,6 +11380,1361 @@ test_story_merge_split_empty_side_warning() {
   fi
 
   rm -rf "$stg" "$fe_file" "$be_file" "$out_file"
+}
+
+# ----------------------------------------------------------------------------
+# Project-axis split (N files, one per repo) — TC28..TC33
+#
+# These pin the multi-repo path: >= 2 distinct normalized .project values route
+# to _story_merge_write_project_split, which writes one file per project rather
+# than force-fitting every repo into two frontend/backend files.
+# ----------------------------------------------------------------------------
+
+# Helper: staging story carrying an explicit .project (multi-repo fixtures)
+_sm_make_project_story() {
+  local path="$1"
+  local title="$2"
+  local project="$3"
+  local files="$4"
+  local depends="${5:-[]}"
+  cat > "$path" << EOF
+{
+  "title": "$title",
+  "description": "As a developer, I want $title so that it works.",
+  "acceptanceCriteria": ["Typecheck passes"],
+  "priority": 1,
+  "status": "pending",
+  "dependsOn": $depends,
+  "project": "$project",
+  "notes": "",
+  "implementation": {
+    "files": ["$files"],
+    "approach": "Implement $title",
+    "verify": "test"
+  }
+}
+EOF
+}
+
+# TC28: three distinct projects produce three files, in lexicographic order by
+# normalized project path, each with its own branchName and a self-describing
+# metadata.splitGroup marker. No frontend/backend file is produced at all, and
+# every input story lands exactly once across the N files.
+test_story_merge_project_split_three_projects() {
+  echo ""
+  echo "=== TC28: story-merge --split full-stack project axis (3 distinct projects) ==="
+
+  local stg=".aimi/.tasks-staging-tc28"
+  local out_file=".aimi/tasks/sm-tc28-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  # Deliberately NOT in lexicographic order on disk: services/api sorts last
+  # but is staged first, so glob order and group order disagree.
+  _sm_make_project_story "$stg/01-api.json"    "UserProfile API endpoint"  "services/api" "app/controllers/u.rb"
+  _sm_make_project_story "$stg/02-web.json"    "React UserProfile page"    "apps/web"     "src/components/UserProfile.tsx"
+  _sm_make_project_story "$stg/03-mobile.json" "Mobile profile screen"     "apps/mobile"  "lib/profile.dart"
+  _sm_make_project_story "$stg/04-web2.json"   "React SettingsPanel"       "apps/web/"    "src/components/Settings.tsx"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC28: project-axis split exits 0"
+
+  local mobile_file=".aimi/tasks/sm-tc28-tasks-apps-mobile-tasks.json"
+  local web_file=".aimi/tasks/sm-tc28-tasks-apps-web-tasks.json"
+  local api_file=".aimi/tasks/sm-tc28-tasks-services-api-tasks.json"
+  local fe_file=".aimi/tasks/sm-tc28-tasks-frontend-tasks.json"
+  local be_file=".aimi/tasks/sm-tc28-tasks-backend-tasks.json"
+
+  if [ -f "$mobile_file" ] && [ -f "$web_file" ] && [ -f "$api_file" ]; then
+    echo -e "${GREEN}✓${NC} TC28: one tasks file written per distinct project"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC28: expected per-project output files missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  if [ ! -f "$fe_file" ] && [ ! -f "$be_file" ]; then
+    echo -e "${GREEN}✓${NC} TC28: no frontend/backend side files produced on the project axis"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC28: side-axis files were written on a multi-repo layout"
+    ((TESTS_FAILED++))
+  fi
+
+  # Return value: N-element array of {path, project, branchName, storyCount},
+  # ordered lexicographically by normalized project path.
+  local ret_projects ret_len ret_branches ret_counts
+  ret_len=$(printf '%s' "$output" | jq 'length' 2>/dev/null)
+  ret_projects=$(printf '%s' "$output" | jq -r '[.[].project] | join(",")' 2>/dev/null)
+  ret_branches=$(printf '%s' "$output" | jq -r '[.[].branchName] | join(",")' 2>/dev/null)
+  ret_counts=$(printf '%s' "$output" | jq -r '[.[].storyCount] | join(",")' 2>/dev/null)
+  assert_eq "3" "$ret_len" "TC28: return value is a 3-element array"
+  assert_eq "apps/mobile,apps/web,services/api" "$ret_projects" "TC28: groups ordered lexicographically by normalized project"
+  assert_eq "feat/merged-apps-mobile,feat/merged-apps-web,feat/merged-services-api" "$ret_branches" "TC28: each group carries its own derived branchName"
+  assert_eq "1,2,1" "$ret_counts" "TC28: trailing-slash project normalizes into the apps/web group (2 stories)"
+
+  # No story lost, no story duplicated, ids unique and contiguous across files.
+  local all_ids
+  all_ids=$(jq -r '.userStories[].id' "$mobile_file" "$web_file" "$api_file" 2>/dev/null | sort | tr '\n' ',' | sed 's/,$//')
+  assert_eq "US-001,US-002,US-003,US-004" "$all_ids" "TC28: ids unique and contiguous across the whole N-file set"
+
+  # Exactly once, not merely "all four are present somewhere". A distinct-title
+  # count collapses duplicates -- it reads 4 whether a title appears once or
+  # five times -- so duplicates are detected with `uniq -d` on the un-deduped
+  # union and absences with `comm`, the way TC20 does it.
+  local expected_titles all_titles dup_titles missing_titles
+  expected_titles=$(printf '%s\n' \
+    "UserProfile API endpoint" \
+    "React UserProfile page" \
+    "Mobile profile screen" \
+    "React SettingsPanel" | sort)
+  all_titles=$(jq -r '.userStories[].title' "$mobile_file" "$web_file" "$api_file" 2>/dev/null | sort)
+  dup_titles=$(printf '%s\n' "$all_titles" | uniq -d)
+  missing_titles=$(comm -23 <(printf '%s\n' "$expected_titles") <(printf '%s\n' "$all_titles" | sort -u))
+  if [ -z "$dup_titles" ] && [ -z "$missing_titles" ]; then
+    echo -e "${GREEN}✓${NC} TC28: all 4 input stories land exactly once across the split"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC28: exactly-once coverage violated (dup: '$dup_titles' missing: '$missing_titles')"
+    ((TESTS_FAILED++))
+  fi
+
+  # .project survives verbatim (the trailing-slash form is NOT rewritten).
+  local raw_projects
+  raw_projects=$(jq -r '.userStories[].project' "$web_file" 2>/dev/null | sort | tr '\n' ',' | sed 's/,$//')
+  assert_eq "apps/web,apps/web/" "$raw_projects" "TC28: .project preserved verbatim (normalization is grouping-only)"
+
+  # metadata.splitGroup marker: own project, 1-based index, total, sibling paths.
+  local sg_project sg_index sg_total sg_siblings sg_branch
+  sg_project=$(jq -r '.metadata.splitGroup.project' "$web_file" 2>/dev/null)
+  sg_index=$(jq -r '.metadata.splitGroup.index' "$web_file" 2>/dev/null)
+  sg_total=$(jq -r '.metadata.splitGroup.total' "$web_file" 2>/dev/null)
+  sg_siblings=$(jq -r '[.metadata.splitGroup.siblings[]] | sort | join(",")' "$web_file" 2>/dev/null)
+  sg_branch=$(jq -r '.metadata.branchName' "$web_file" 2>/dev/null)
+  assert_eq "apps/web" "$sg_project" "TC28: splitGroup.project names the file's own project"
+  assert_eq "2" "$sg_index" "TC28: splitGroup.index is the 1-based lexicographic position"
+  assert_eq "3" "$sg_total" "TC28: splitGroup.total is the N-way split size"
+  assert_eq "$mobile_file,$api_file" "$sg_siblings" "TC28: splitGroup.siblings lists the other files' paths"
+  assert_eq "feat/merged-apps-web" "$sg_branch" "TC28: file's metadata.branchName matches its group"
+
+  # Working keys stripped from every output story. Only the two this axis
+  # actually computes are checked: _fe/_side come from the SIDE writer's
+  # fe_heuristic, which a multi-repo merge never runs, so watching for them
+  # here would be a check no edit to this writer could fail.
+  local leaked
+  leaked=$(jq -r '[.userStories[] | select(has("__droppedDeps") or has("__becameRoot"))] | length' "$web_file" "$api_file" "$mobile_file" 2>/dev/null | paste -sd+ - | bc 2>/dev/null)
+  assert_eq "0" "$leaked" "TC28: __droppedDeps/__becameRoot stripped from output"
+
+  # Every story here is a dependency-free root, so every one of them must carry
+  # wave 1 -- the split files are what the executor schedules from, and a story
+  # it never reaches in wave 1 is a story it never runs.
+  local waves
+  waves=$(jq -r '.userStories[].wave' "$mobile_file" "$web_file" "$api_file" 2>/dev/null | sort -u | tr '\n' ',' | sed 's/,$//')
+  assert_eq "1" "$waves" "TC28: every dependency-free story carries wave 1 in its project file"
+
+  if [ ! -d "$stg" ]; then
+    echo -e "${GREEN}✓${NC} TC28: staging dir deleted after all N writes succeeded"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC28: staging dir NOT deleted"
+    ((TESTS_FAILED++))
+    rm -rf "$stg"
+  fi
+
+  rm -f "$mobile_file" "$web_file" "$api_file" "$out_file" .aimi/tasks/sm-tc28-*.lock
+}
+
+# TC29: a story with no .project at all in a multi-repo merge is REFUSED, not
+# routed. Once a plan tags a repository, "absent" stops being a defaultable
+# value: there is no safe home to invent for a story that named none, so the
+# whole merge aborts before any writer runs — zero files, staging dir kept.
+#
+# SUPERSEDED, NOT BROKEN — do not read this diff as a regression being papered
+# over. This case used to assert the exact opposite outcome on this same
+# fixture: two tagged repos plus one untagged story were expected to exit 0,
+# with the untagged story collected into an IMPLICIT "." root group, producing
+# three files. The axis resolver now refuses that shape, because the implicit
+# root group was unexecutable in the very layout that created it — execute.md
+# maps "." to AIMI_ROOT, and in a multi-repo checkout AIMI_ROOT is not a git
+# repository, so the group could never be branched or merged. The "." group
+# itself survives as a contract; it just has to be asked for by name now, which
+# is what TC47 pins. The staging fixture below is byte-for-byte the old one;
+# only the expected outcome inverted, from three files to none.
+#
+# The old "no spurious empty-project-group warning" leg is dropped rather than
+# adapted: the zero-story-group guard it watched was deleted as unreachable
+# (group_keys is `unique` over the keys of stories that exist, so no group can
+# come out empty), and a merge that refuses before the writer emits no
+# per-group warning of any kind.
+test_story_merge_project_split_untagged_story_refused() {
+  echo ""
+  echo "=== TC29: story-merge project axis — an untagged story refuses the merge ==="
+
+  local stg=".aimi/.tasks-staging-tc29"
+  local out_file=".aimi/tasks/sm-tc29-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+  rm -f .aimi/tasks/sm-tc29-*
+
+  _sm_make_project_story "$stg/01-web.json" "React dashboard page" "apps/web"     "src/pages/Dashboard.tsx"
+  _sm_make_project_story "$stg/02-api.json" "Dashboard API"        "services/api" "app/controllers/d.rb"
+  # No .project at all — _sm_make_story emits no project key.
+  _sm_make_story "$stg/03-root.json" "Repo-wide tooling update" '[]'
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC29: an untagged story in a multi-repo plan exits 1"
+
+  # The offending story is named individually — a reader has to know WHICH
+  # story to tag, not merely that one of them is untagged.
+  assert_contains "US-003 (Repo-wide tooling update): no project" "$output" \
+    "TC29: the untagged story is named on stderr"
+  assert_contains "EVERY story needs a project" "$output" \
+    "TC29: the refusal states the multi-repo rule it is enforcing"
+  assert_contains "must say so explicitly with \".\"" "$output" \
+    "TC29: the refusal points at the explicit root spelling as the fix"
+
+  # Refusal is total: the resolver runs before either writer, so not one of the
+  # three groups it would have produced reaches disk.
+  local written
+  written=$(find .aimi/tasks -maxdepth 1 -name 'sm-tc29-*' 2>/dev/null | wc -l | tr -d ' ')
+  assert_eq "0" "$written" "TC29: zero output files land when a story is untagged"
+
+  if [ -d "$stg" ]; then
+    echo -e "${GREEN}✓${NC} TC29: staging dir preserved so the tag can be added and the merge retried"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC29: staging dir deleted despite the merge being refused"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg"
+  rm -f .aimi/tasks/sm-tc29-*
+}
+
+# TC47: the contract TC29's refusal leaves standing. "." is a legitimate
+# project value — the root repository, spelled the way execute.md spells it —
+# and a story that asks for it by name gets its own root group alongside the
+# other repos. Three groups, three files, the root one slugged to "root"
+# because "." carries no [A-Za-z0-9_-] character to keep.
+#
+# This is the half of the old TC29 that survives the inversion: after TC29
+# flipped to asserting a refusal, nothing else covered an explicit "." group at
+# all, and "." is the one project value whose slug comes from the fallback
+# branch rather than from its own characters.
+test_story_merge_project_split_explicit_root_group() {
+  echo ""
+  echo "=== TC47: story-merge project axis — an explicit '.' forms the root group ==="
+
+  local stg=".aimi/.tasks-staging-tc47"
+  local out_file=".aimi/tasks/sm-tc47-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+  rm -f .aimi/tasks/sm-tc47-*
+
+  _sm_make_project_story "$stg/01-web.json"  "React dashboard page"     "apps/web"     "src/pages/Dashboard.tsx"
+  _sm_make_project_story "$stg/02-api.json"  "Dashboard API"            "services/api" "app/controllers/d.rb"
+  _sm_make_project_story "$stg/03-root.json" "Repo-wide tooling update" "."            "Makefile"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC47: an explicitly-rooted story merges cleanly"
+
+  local root_file=".aimi/tasks/sm-tc47-tasks-root-tasks.json"
+  local web_file=".aimi/tasks/sm-tc47-tasks-apps-web-tasks.json"
+  local api_file=".aimi/tasks/sm-tc47-tasks-services-api-tasks.json"
+
+  local ret_projects
+  ret_projects=$(printf '%s' "$output" | jq -r '[.[].project] | join(",")' 2>/dev/null)
+  assert_eq ".,apps/web,services/api" "$ret_projects" "TC47: '.' is a group of its own, sorted first"
+
+  if [ -f "$root_file" ] && [ -f "$web_file" ] && [ -f "$api_file" ]; then
+    echo -e "${GREEN}✓${NC} TC47: one file per group, root group included"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC47: expected per-project output files missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  local root_count root_branch root_project root_title
+  root_count=$(jq '.userStories | length' "$root_file" 2>/dev/null)
+  root_branch=$(jq -r '.metadata.branchName' "$root_file" 2>/dev/null)
+  root_project=$(jq -r '.metadata.splitGroup.project' "$root_file" 2>/dev/null)
+  root_title=$(jq -r '.userStories[0].title' "$root_file" 2>/dev/null)
+  assert_eq "1" "$root_count" "TC47: the root group file carries its one story"
+  assert_eq "Repo-wide tooling update" "$root_title" "TC47: the root group holds the story that asked for '.'"
+  assert_eq "feat/merged-root" "$root_branch" "TC47: '.' slugs to a filesystem-safe 'root' branch"
+  assert_eq "." "$root_project" "TC47: splitGroup.project keeps the routing key verbatim as '.'"
+
+  # .project survives verbatim on the story too — "." is never rewritten into
+  # the "root" slug anywhere but the derived filename and branch.
+  local root_story_project
+  root_story_project=$(jq -r '[.userStories[].project] | join(",")' "$root_file" 2>/dev/null)
+  assert_eq "." "$root_story_project" "TC47: the story keeps .project as '.', not as its slug"
+
+  # Every planned group's file exists and holds exactly the story count the
+  # return value advertises — the return value is the plan the executor reads.
+  local mismatch=0 i=0 total
+  total=$(printf '%s' "$output" | jq 'length' 2>/dev/null)
+  while [ "$i" -lt "${total:-0}" ]; do
+    local p c actual
+    p=$(printf '%s' "$output" | jq -r --argjson i "$i" '.[$i].path')
+    c=$(printf '%s' "$output" | jq -r --argjson i "$i" '.[$i].storyCount')
+    actual=$(jq '.userStories | length' "$p" 2>/dev/null || echo "MISSING")
+    [ "$actual" = "$c" ] || mismatch=1
+    i=$((i + 1))
+  done
+  assert_eq "0" "$mismatch" "TC47: every group's file exists with exactly its advertised storyCount"
+
+  rm -rf "$stg"
+  rm -f .aimi/tasks/sm-tc47-*
+}
+
+# TC30: a singleton project group (exactly one story) still gets its own file
+# instead of being folded into a larger neighbour by any majority rule.
+test_story_merge_project_split_singleton_group() {
+  echo ""
+  echo "=== TC30: story-merge project axis — singleton project group ==="
+
+  local stg=".aimi/.tasks-staging-tc30"
+  local out_file=".aimi/tasks/sm-tc30-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  # web-app is the 3-story majority and api-service the lone singleton.
+  #
+  # This singleton was NOT swallowed before the change -- verified by running
+  # the pre-change CLI (3f26992) on this exact fixture: the vote sent web-app's
+  # three stories to frontend-tasks.json and the api-service story to
+  # backend-tasks.json, one story to itself. What was broken was the FILE SET,
+  # not the grouping: two repositories were force-fitted into two side-named
+  # files, and it only looked right here because N happened to be 2 and the two
+  # groups' majorities happened to disagree. A third repo, or two repos whose
+  # majorities agreed, collapsed distinct repositories into one file and one
+  # branch -- issue #72. So what this case pins is that a singleton group gets
+  # a file of its OWN, named for its project, at any N.
+  _sm_make_project_story "$stg/01-ui.json"   "React UserProfile page"      "web-app"     "src/components/UserProfile.tsx"
+  _sm_make_project_story "$stg/02-docs.json" "Update documentation"        "web-app"     "docs/setup.md"
+  _sm_make_project_story "$stg/03-ui2.json"  "React SettingsPanel"         "web-app"     "src/components/Settings.tsx"
+  _sm_make_project_story "$stg/04-api.json"  "UserProfile API endpoint"    "api-service" "app/controllers/u.rb"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC30: singleton-group merge exits 0"
+
+  local api_file=".aimi/tasks/sm-tc30-tasks-api-service-tasks.json"
+  local web_file=".aimi/tasks/sm-tc30-tasks-web-app-tasks.json"
+
+  if [ -f "$api_file" ] && [ -f "$web_file" ]; then
+    local api_count web_count api_title
+    api_count=$(jq '.userStories | length' "$api_file" 2>/dev/null)
+    web_count=$(jq '.userStories | length' "$web_file" 2>/dev/null)
+    api_title=$(jq -r '.userStories[0].title' "$api_file" 2>/dev/null)
+    assert_eq "1" "$api_count" "TC30: singleton group keeps its own file (never absorbed by the majority)"
+    assert_eq "3" "$web_count" "TC30: majority group keeps all 3 of its stories"
+    assert_eq "UserProfile API endpoint" "$api_title" "TC30: the singleton story is the api-service one"
+  else
+    echo -e "${RED}✗${NC} TC30: expected per-project files missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+    ((TESTS_FAILED++))
+    ((TESTS_FAILED++))
+  fi
+
+  # The docs-only story rides its project, not a heuristic side verdict.
+  local docs_home
+  docs_home=$(jq -r '[.userStories[] | select(.title == "Update documentation")] | length' "$web_file" 2>/dev/null)
+  assert_eq "1" "$docs_home" "TC30: docs-only story stays with its own project group"
+
+  rm -rf "$stg"
+  rm -f "$api_file" "$web_file" "$out_file" .aimi/tasks/sm-tc30-*.lock
+}
+
+# TC31: a project value containing "/" is transliterated into a filesystem-safe
+# basename slug — never passed through raw — and its derived branchName still
+# satisfies the ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ invariant.
+test_story_merge_project_split_slash_project_slug() {
+  echo ""
+  echo "=== TC31: story-merge project axis — project value containing '/' ==="
+
+  local stg=".aimi/.tasks-staging-tc31"
+  local out_file=".aimi/tasks/sm-tc31-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  _sm_make_project_story "$stg/01-ui.json"  "Shared UI kit"  "packages/ui/components" "packages/ui/components/Button.tsx"
+  _sm_make_project_story "$stg/02-api.json" "Billing API"    "services/billing"       "app/controllers/b.rb"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC31: slash-bearing project merge exits 0"
+
+  local ui_file=".aimi/tasks/sm-tc31-tasks-packages-ui-components-tasks.json"
+  local billing_file=".aimi/tasks/sm-tc31-tasks-services-billing-tasks.json"
+
+  if [ -f "$ui_file" ]; then
+    echo -e "${GREEN}✓${NC} TC31: 'packages/ui/components' flattened to a single-component basename"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC31: slash-flattened output file missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  # The "no .aimi/tasks/packages directory was created" leg is deliberately
+  # absent. mkdir -p is called on dirname($output_path) and on nothing else, so
+  # no project value -- raw or slugged -- can reach a directory component; the
+  # check could not fail for any edit to this writer. The property it was
+  # reaching for is the one the file-by-name assertion above already carries:
+  # the slug lands as a single basename component, not as a path.
+
+  local ui_branch verbatim_project
+  ui_branch=$(jq -r '.metadata.branchName' "$ui_file" 2>/dev/null)
+  verbatim_project=$(jq -r '.metadata.splitGroup.project' "$ui_file" 2>/dev/null)
+  assert_eq "feat/merged-packages-ui-components" "$ui_branch" "TC31: branchName derived from the slug, not the raw path"
+  assert_eq "packages/ui/components" "$verbatim_project" "TC31: splitGroup.project keeps the routing key verbatim"
+
+  if [[ "$ui_branch" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo -e "${GREEN}✓${NC} TC31: derived branchName satisfies the branch-name invariant"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC31: derived branchName violates the branch-name invariant: $ui_branch"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg"
+  rm -f "$ui_file" "$billing_file" "$out_file" .aimi/tasks/sm-tc31-*.lock
+}
+
+# TC32: a project value containing "." is transliterated too, so nothing can
+# inject an extra extension segment or a ".." component into the output path.
+test_story_merge_project_split_dot_project_slug() {
+  echo ""
+  echo "=== TC32: story-merge project axis — project value containing '.' ==="
+
+  local stg=".aimi/.tasks-staging-tc32"
+  local out_file=".aimi/tasks/sm-tc32-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+
+  _sm_make_project_story "$stg/01-core.json" "Core utils refactor" "libs/core.utils" "libs/core.utils/index.ts"
+  _sm_make_project_story "$stg/02-api.json"  "Reports API"         "services/reports" "app/controllers/r.rb"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC32: dot-bearing project merge exits 0"
+
+  local core_file=".aimi/tasks/sm-tc32-tasks-libs-core-utils-tasks.json"
+  local reports_file=".aimi/tasks/sm-tc32-tasks-services-reports-tasks.json"
+
+  if [ -f "$core_file" ]; then
+    echo -e "${GREEN}✓${NC} TC32: 'libs/core.utils' dot transliterated into the basename slug"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC32: dot-transliterated output file missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  local ret_path core_branch
+  ret_path=$(printf '%s' "$output" | jq -r '.[] | select(.project == "libs/core.utils") | .path' 2>/dev/null)
+  core_branch=$(jq -r '.metadata.branchName' "$core_file" 2>/dev/null)
+  assert_eq "$core_file" "$ret_path" "TC32: return value reports the slugged path"
+  assert_eq "feat/merged-libs-core-utils" "$core_branch" "TC32: dots never reach the derived branchName"
+
+  rm -rf "$stg"
+  rm -f "$core_file" "$reports_file" "$out_file" .aimi/tasks/sm-tc32-*.lock
+}
+
+# TC33: two distinct project values that flatten to the same basename slug are
+# a hard failure BEFORE any write — zero output files land and the error names
+# both colliding project values.
+test_story_merge_project_split_basename_collision() {
+  echo ""
+  echo "=== TC33: story-merge project axis — colliding basename slugs hard-fail ==="
+
+  local stg=".aimi/.tasks-staging-tc33"
+  local out_file=".aimi/tasks/sm-tc33-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+  rm -f .aimi/tasks/sm-tc33-*
+
+  # "apps/web" and "apps.web" both slugify to "apps-web".
+  _sm_make_project_story "$stg/01-a.json" "Slash flavored"  "apps/web" "src/a.ts"
+  _sm_make_project_story "$stg/02-b.json" "Dot flavored"    "apps.web" "src/b.ts"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC33: basename collision exits 1"
+  assert_contains "collide on the same output basename" "$output" "TC33: error names the collision"
+  assert_contains "apps/web" "$output" "TC33: error names the first colliding project value"
+  assert_contains "apps.web" "$output" "TC33: error names the second colliding project value"
+
+  local written
+  written=$(find .aimi/tasks -maxdepth 1 -name 'sm-tc33-*' 2>/dev/null | wc -l | tr -d ' ')
+  assert_eq "0" "$written" "TC33: zero output files land when the collision is detected"
+
+  if [ -d "$stg" ]; then
+    echo -e "${GREEN}✓${NC} TC33: staging dir preserved for an unambiguous retry"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC33: staging dir deleted despite the merge failing"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg"
+  rm -f .aimi/tasks/sm-tc33-*
+}
+
+# TC34: on the PROJECT axis, every cross-file-dep-dropped smellWarnings entry is
+# keyed by `project` (the owning group's routing key) at BOTH the top level and
+# inside every droppedDeps[] entry — never by `side`, which stays exclusive to
+# the SIDE-axis writer. The combined set spans all 3 project groups and is
+# written identically into all 3 output files. Without --foundation, every
+# droppedDeps[].foundationEdge is false and the foundation note line is silent.
+test_story_merge_project_split_project_keyed_warnings() {
+  echo ""
+  echo "=== TC34: story-merge project axis — cross-group drops keyed by project, not side ==="
+
+  local stg=".aimi/.tasks-staging-tc34"
+  local out_file=".aimi/tasks/sm-tc34-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+  rm -f .aimi/tasks/sm-tc34-*
+
+  # 3 distinct projects. Two cross-group edges (both onto the api story) and
+  # one same-group edge that must survive untouched.
+  _sm_make_project_story "$stg/01-api.json"    "UserProfile API endpoint" "services/api" "app/controllers/u.rb"
+  _sm_make_project_story "$stg/02-web.json"    "React UserProfile page"   "apps/web"     "src/components/UserProfile.tsx" '["outline:01"]'
+  _sm_make_project_story "$stg/03-mobile.json" "Mobile profile screen"    "apps/mobile"  "lib/profile.dart"               '["outline:01"]'
+  _sm_make_project_story "$stg/04-web2.json"   "React SettingsPanel"      "apps/web"     "src/components/Settings.tsx"    '["outline:02"]'
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC34: project-axis cross-group drop exits 0 (warning only)"
+  assert_contains "cross-project dependsOn edge(s) dropped" "$output" "TC34: aggregated stderr banner emitted"
+
+  local mobile_file=".aimi/tasks/sm-tc34-tasks-apps-mobile-tasks.json"
+  local web_file=".aimi/tasks/sm-tc34-tasks-apps-web-tasks.json"
+  local api_file=".aimi/tasks/sm-tc34-tasks-services-api-tasks.json"
+
+  # File existence is ONE assertion, and the body below runs unconditionally.
+  # Holding the body inside a guard whose else recorded a single failure made a
+  # missing file cost one reported failure instead of one per assertion it
+  # actually skipped. Every read below goes through jq with stderr discarded,
+  # so a missing file surfaces as an empty value and each assertion fails on
+  # its own terms.
+  if [ -f "$mobile_file" ] && [ -f "$web_file" ] && [ -f "$api_file" ]; then
+    echo -e "${GREEN}✓${NC} TC34: one tasks file written per distinct project"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC34: expected per-project output files missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  # The same combined set lands in every one of the N files. Each set's SIZE is
+  # pinned first: comparing two values pulled from one run says nothing when
+  # both are [], and an empty set is exactly what a writer that stopped
+  # recording drops would produce. 3 entries, not 2 -- the combined set is the
+  # Phase 4.2 array plus the cross-group drops, so this also pins that the two
+  # sources really are merged into every file rather than one replacing the
+  # other.
+  local mobile_smells web_smells api_smells
+  mobile_smells=$(jq -c '.metadata.smellWarnings // []' "$mobile_file" 2>/dev/null)
+  web_smells=$(jq -c '.metadata.smellWarnings // []' "$web_file" 2>/dev/null)
+  api_smells=$(jq -c '.metadata.smellWarnings // []' "$api_file" 2>/dev/null)
+  assert_eq "3" "$(printf '%s' "$mobile_smells" | jq 'length' 2>/dev/null)" "TC34: the mobile file carries all 3 combined smellWarnings entries"
+  assert_eq "3" "$(printf '%s' "$web_smells" | jq 'length' 2>/dev/null)" "TC34: the web file carries all 3 combined smellWarnings entries"
+  assert_eq "3" "$(printf '%s' "$api_smells" | jq 'length' 2>/dev/null)" "TC34: the api file carries all 3 combined smellWarnings entries"
+  assert_eq "$mobile_smells" "$web_smells" "TC34: mobile and web files carry the identical smellWarnings set"
+  assert_eq "$web_smells" "$api_smells" "TC34: web and api files carry the identical smellWarnings set"
+
+  # The union spans all N groups, not just two: one entry per affected story,
+  # and the affected stories live in two different project groups.
+  local entry_count entry_projects
+  entry_count=$(jq '[.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped")] | length' "$web_file" 2>/dev/null)
+  entry_projects=$(jq -r '[.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | .project] | sort | join(",")' "$web_file" 2>/dev/null)
+  assert_eq "2" "$entry_count" "TC34: one cross-file-dep-dropped entry per affected story"
+  assert_eq "apps/mobile,apps/web" "$entry_projects" "TC34: entries keyed by their own project group across the N-way union"
+
+  # `project` replaces `side` at BOTH levels — `side` must not appear at all.
+  local top_side_count dep_side_count dep_project_count
+  top_side_count=$(jq '[.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | select(has("side"))] | length' "$web_file" 2>/dev/null)
+  dep_side_count=$(jq '[.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | .droppedDeps[] | select(has("side"))] | length' "$web_file" 2>/dev/null)
+  dep_project_count=$(jq '[.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | .droppedDeps[] | select(has("project"))] | length' "$web_file" 2>/dev/null)
+  assert_eq "0" "$top_side_count" "TC34: no entry carries a top-level side key on the project axis"
+  assert_eq "0" "$dep_side_count" "TC34: no droppedDeps entry carries a side key on the project axis"
+  assert_eq "2" "$dep_project_count" "TC34: every droppedDeps entry carries a project key"
+
+  # The dropped target resolves to its post-remap id in its OWN project group.
+  local web_entry
+  web_entry=$(jq -c '.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | select(.project == "apps/web")' "$web_file" 2>/dev/null)
+  assert_contains '"storyId":"US-002"' "$web_entry" "TC34: entry storyId is the post-remap id in its own group"
+  assert_contains '"becameRoot":true' "$web_entry" "TC34: the story lost its only dependsOn edge and became a false root"
+  assert_contains '"id":"US-004"' "$web_entry" "TC34: droppedDeps target is the post-remap id in the api group"
+  assert_contains '"project":"services/api"' "$web_entry" "TC34: droppedDeps target is keyed by the target's project"
+
+  # No --foundation on this run: every edge is an ordinary drop.
+  local foundation_true_count
+  foundation_true_count=$(jq '[.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | .droppedDeps[] | select(.foundationEdge == true)] | length' "$web_file" 2>/dev/null)
+  assert_eq "0" "$foundation_true_count" "TC34: no foundationEdge is true when --foundation was not passed"
+
+  # The same-group edge survived: US-003 still depends on US-002 in-file.
+  local kept_dep
+  kept_dep=$(jq -r '.userStories[] | select(.id == "US-003") | .dependsOn | join(",")' "$web_file" 2>/dev/null)
+  assert_eq "US-002" "$kept_dep" "TC34: the same-group dependsOn edge is untouched"
+
+  # Waves are recomputed PER GROUP, after the cross-group edges are dropped.
+  # This is the scenario that makes it matter: US-002 and US-001 were wave 2 in
+  # the whole-plan graph purely because they depended on the api story, and
+  # that dependency is gone from their files. Shipping them at wave 2 leaves
+  # the executor's first wave with nothing to schedule in either repo, and
+  # US-003 -- which really does wait on an in-file sibling -- must still land
+  # one wave behind it rather than at the plan-wide 3.
+  local web_wave_002 web_wave_003 mobile_wave api_wave
+  web_wave_002=$(jq -r '.userStories[] | select(.id == "US-002") | .wave' "$web_file" 2>/dev/null)
+  web_wave_003=$(jq -r '.userStories[] | select(.id == "US-003") | .wave' "$web_file" 2>/dev/null)
+  mobile_wave=$(jq -r '.userStories[] | select(.id == "US-001") | .wave' "$mobile_file" 2>/dev/null)
+  api_wave=$(jq -r '.userStories[] | select(.id == "US-004") | .wave' "$api_file" 2>/dev/null)
+  assert_eq "1" "$web_wave_002" "TC34: the false-root story is rebased to wave 1 in its own file"
+  assert_eq "1" "$mobile_wave" "TC34: the mobile false root is rebased to wave 1 too"
+  assert_eq "2" "$web_wave_003" "TC34: the story depending on that false root follows at wave 2"
+  assert_eq "1" "$api_wave" "TC34: the untouched api root stays at wave 1"
+
+  # The false-root enumeration lines name the project, not a side literal.
+  assert_contains "US-002 (apps/web): became a false wave-1 root" "$output" "TC34: false-root stderr line names the owning project"
+
+  if echo "$output" | grep -q "shared --foundation story"; then
+    echo -e "${RED}✗${NC} TC34: foundation note line fired without --foundation"
+    echo "  output: $output"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} TC34: foundation note line silent without --foundation"
+    ((TESTS_PASSED++))
+  fi
+
+  rm -rf "$stg"
+  rm -f .aimi/tasks/sm-tc34-*
+}
+
+# TC35: --foundation combined with a multi-repo split. The foundation story
+# lives in exactly one project group, so every OTHER group's injected edge onto
+# it is dropped — recorded with foundationEdge:true, a message that names the
+# shared foundation story, and one stderr note line distinct from the ordinary
+# drop-count banner.
+test_story_merge_project_split_foundation_edge() {
+  echo ""
+  echo "=== TC35: story-merge project axis — --foundation cross-group edges flagged distinctly ==="
+
+  local stg=".aimi/.tasks-staging-tc35"
+  local out_file=".aimi/tasks/sm-tc35-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+  rm -f .aimi/tasks/sm-tc35-*
+
+  # outline:01 is the foundation and lives in packages/core; the other two
+  # stories live in different repos and carry no hand-authored dependency.
+  _sm_make_project_story "$stg/01-core.json" "Shared core contracts" "packages/core" "src/contracts.ts"
+  _sm_make_project_story "$stg/02-web.json"  "React UserProfile page" "apps/web"     "src/components/UserProfile.tsx"
+  _sm_make_project_story "$stg/03-api.json"  "UserProfile API endpoint" "services/api" "app/controllers/u.rb"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack --foundation 01 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC35: --foundation + multi-repo split exits 0 (warning only)"
+
+  # Two lines, not one: the ordinary drop-count banner AND a separate note.
+  assert_contains "cross-project dependsOn edge(s) dropped" "$output" "TC35: ordinary drop-count banner still emitted"
+  assert_contains "target the shared --foundation story" "$output" "TC35: distinct foundation note line emitted"
+
+  local note_line banner_line
+  note_line=$(printf '%s\n' "$output" | grep -c "target the shared --foundation story" || true)
+  banner_line=$(printf '%s\n' "$output" | grep -c "cross-project dependsOn edge(s) dropped across" || true)
+  assert_eq "1" "$note_line" "TC35: exactly one foundation note line"
+  assert_eq "1" "$banner_line" "TC35: the note is separate from the single drop-count banner"
+
+  if printf '%s\n' "$output" | grep "cross-project dependsOn edge(s) dropped across" | grep -q -- "--foundation"; then
+    echo -e "${RED}✗${NC} TC35: foundation wording leaked into the ordinary drop-count banner"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} TC35: the drop-count banner stays free of foundation wording"
+    ((TESTS_PASSED++))
+  fi
+
+  local web_file=".aimi/tasks/sm-tc35-tasks-apps-web-tasks.json"
+  local core_file=".aimi/tasks/sm-tc35-tasks-packages-core-tasks.json"
+  local api_file=".aimi/tasks/sm-tc35-tasks-services-api-tasks.json"
+
+  # File existence is ONE assertion, and the body below runs unconditionally,
+  # so a missing file costs one reported failure per assertion it skips rather
+  # than one for all of them. Every read discards jq's stderr, so a missing
+  # file yields an empty value and each assertion fails on its own terms.
+  if [ -f "$web_file" ] && [ -f "$core_file" ] && [ -f "$api_file" ]; then
+    echo -e "${GREEN}✓${NC} TC35: one tasks file written per distinct project"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC35: expected per-project output files missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  local foundation_true_count total_dep_count
+  foundation_true_count=$(jq '[.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | .droppedDeps[] | select(.foundationEdge == true)] | length' "$web_file" 2>/dev/null)
+  total_dep_count=$(jq '[.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | .droppedDeps[]] | length' "$web_file" 2>/dev/null)
+  assert_eq "2" "$foundation_true_count" "TC35: both non-foundation groups record a foundationEdge:true entry"
+  assert_eq "2" "$total_dep_count" "TC35: every dropped edge on this run is a foundation edge"
+
+  local web_entry
+  web_entry=$(jq -c '.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | select(.project == "apps/web")' "$web_file" 2>/dev/null)
+  assert_contains '"foundationEdge":true' "$web_entry" "TC35: the web group's dropped edge is flagged as a foundation edge"
+  assert_contains '"project":"packages/core"' "$web_entry" "TC35: the dropped target is attributed to the foundation's own project"
+  assert_contains "shared --foundation story" "$web_entry" "TC35: the story-level message names the shared foundation story"
+  assert_contains '"becameRoot":true' "$web_entry" "TC35: the injected edge loss makes the story a false wave-1 root"
+
+  # The foundation's own group has no dropped edge at all.
+  local core_entry_count
+  core_entry_count=$(jq '[.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | select(.project == "packages/core")] | length' "$core_file" 2>/dev/null)
+  assert_eq "0" "$core_entry_count" "TC35: the group hosting the foundation records no dropped edge"
+
+  # Internal working keys never leak.
+  local leaked
+  leaked=$(jq '[.userStories[] | select(has("__droppedDeps") or has("__becameRoot"))] | length' "$web_file" 2>/dev/null)
+  assert_eq "0" "$leaked" "TC35: internal __droppedDeps/__becameRoot absent from output"
+
+  # --foundation put every non-foundation story one wave behind the foundation
+  # plan-wide; each of them then lost that edge to the split. Their files must
+  # say wave 1, not the plan-wide 2 -- otherwise the executor opens on an empty
+  # wave in both of the two repos that have no foundation story to run.
+  local web_wave core_wave api_wave
+  web_wave=$(jq -r '.userStories[0].wave' "$web_file" 2>/dev/null)
+  core_wave=$(jq -r '.userStories[0].wave' "$core_file" 2>/dev/null)
+  api_wave=$(jq -r '.userStories[0].wave' "$api_file" 2>/dev/null)
+  assert_eq "1" "$web_wave" "TC35: the web story is rebased to wave 1 after losing the foundation edge"
+  assert_eq "1" "$api_wave" "TC35: the api story is rebased to wave 1 after losing the foundation edge"
+  assert_eq "1" "$core_wave" "TC35: the foundation story itself stays at wave 1"
+
+  rm -rf "$stg"
+  rm -f .aimi/tasks/sm-tc35-*
+}
+
+# TC48: --phase-aware crossed with the PROJECT axis. Both writers strip one
+# trailing "-tasks" segment from the --output basename, but only the SIDE one
+# was ever covered: TC12's fixture carries no .project at all, so it can only
+# reach _story_merge_write_split. The PROJECT writer's own copy of the strip
+# went unexercised, and deleting it produced exactly the double-"tasks"
+# basename TC12 forbids -- on files no case looked at.
+#
+# A phase-scoped output path must collapse here too:
+#   <feature>-phase-N-<slug>-tasks.json, never <feature>-phase-N-tasks-<slug>-tasks.json
+test_story_merge_project_split_phase_aware() {
+  echo ""
+  echo "=== TC48: story-merge project axis + --phase-aware ==="
+
+  local stg=".aimi/.tasks-staging-tc48"
+  local phase_dir=".aimi/tasks/tc48-feature/phase-3-slug"
+  local out_file="${phase_dir}/tc48-feature-phase-3-tasks.json"
+  rm -rf "$stg" ".aimi/tasks/tc48-feature"
+  mkdir -p "$stg" "$phase_dir"
+
+  _sm_make_project_story "$stg/01-web.json" "React UserProfile page"   "apps/web"     "src/components/UserProfile.tsx"
+  _sm_make_project_story "$stg/02-api.json" "UserProfile API endpoint" "services/api" "app/controllers/u.rb"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack --phase-aware 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC48: project-axis split --phase-aware exits 0"
+
+  local web_file="${phase_dir}/tc48-feature-phase-3-apps-web-tasks.json"
+  local api_file="${phase_dir}/tc48-feature-phase-3-services-api-tasks.json"
+  local web_double="${phase_dir}/tc48-feature-phase-3-tasks-apps-web-tasks.json"
+  local api_double="${phase_dir}/tc48-feature-phase-3-tasks-services-api-tasks.json"
+
+  if [ -f "$web_file" ] && [ -f "$api_file" ]; then
+    echo -e "${GREEN}✓${NC} TC48: per-project files written with single-'tasks' basenames"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC48: single-'tasks' per-project basenames missing ($web_file / $api_file)"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  if [ ! -f "$web_double" ] && [ ! -f "$api_double" ]; then
+    echo -e "${GREEN}✓${NC} TC48: --phase-aware suppresses the double-'tasks' basename on the project axis"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC48: double-'tasks' basename produced despite --phase-aware ($web_double)"
+    ((TESTS_FAILED++))
+  fi
+
+  # The return value and the splitGroup marker must name the same collapsed
+  # paths the files actually landed at -- a marker pointing at the double-tasks
+  # spelling would send every downstream consumer to a file that is not there.
+  local ret_paths sibling_of_web
+  ret_paths=$(printf '%s' "$output" | jq -r '[.[].path] | sort | join(",")' 2>/dev/null)
+  sibling_of_web=$(jq -r '[.metadata.splitGroup.siblings[]] | join(",")' "$web_file" 2>/dev/null)
+  assert_eq "$web_file,$api_file" "$ret_paths" "TC48: the return value reports the collapsed paths"
+  assert_eq "$api_file" "$sibling_of_web" "TC48: splitGroup.siblings points at the collapsed sibling path"
+
+  rm -rf "$stg" ".aimi/tasks/tc48-feature"
+}
+
+# TC49: a mid-loop write failure. The N-file writer is not atomic across the
+# set -- it writes group by group -- so when group k fails, groups 1..k-1 are
+# already on disk, each advertising a splitGroup.total and a siblings[] list
+# describing a complete split that does not exist. The handler's whole job is
+# to name all three sets so the reader knows which of those advertised siblings
+# landed and which never will.
+#
+# Until recently this was dead code: `set -euo pipefail` killed the script at
+# the failing write, before the `write_exit` check could run, leaving exactly
+# that half-written set with no message at all. Nothing exercised it.
+#
+# The failure is induced by putting a DIRECTORY where the middle group's lock
+# file goes, which makes the `200>` redirect fail without touching anything
+# else -- the earlier group still writes normally and the later one is never
+# reached.
+test_story_merge_project_split_partial_write_failure() {
+  echo ""
+  echo "=== TC49: story-merge project axis — mid-loop write failure names all three sets ==="
+
+  local stg=".aimi/.tasks-staging-tc49"
+  local out_file=".aimi/tasks/sm-tc49-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+  rm -rf .aimi/tasks/sm-tc49-*
+
+  # Three groups, lexicographic: apps/mobile (writes), apps/web (fails),
+  # services/api (never attempted).
+  _sm_make_project_story "$stg/01-mobile.json" "Mobile profile screen"    "apps/mobile"  "lib/profile.dart"
+  _sm_make_project_story "$stg/02-web.json"    "React UserProfile page"   "apps/web"     "src/components/UserProfile.tsx"
+  _sm_make_project_story "$stg/03-api.json"    "UserProfile API endpoint" "services/api" "app/controllers/u.rb"
+
+  local mobile_file=".aimi/tasks/sm-tc49-tasks-apps-mobile-tasks.json"
+  local web_file=".aimi/tasks/sm-tc49-tasks-apps-web-tasks.json"
+  local api_file=".aimi/tasks/sm-tc49-tasks-services-api-tasks.json"
+
+  mkdir -p "${web_file}.lock"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC49: a failed group write exits 1"
+
+  # All three sets, each named explicitly.
+  assert_contains "failed to write project split output: $web_file" "$output" "TC49: the failing path is named"
+  assert_contains "Written before this failure (1):" "$output" "TC49: the written set is counted"
+  assert_contains "    $mobile_file" "$output" "TC49: the written set names the group already on disk"
+  assert_contains "Not attempted (1):" "$output" "TC49: the not-attempted set is counted"
+  assert_contains "    $api_file" "$output" "TC49: the not-attempted set names the group never reached"
+  assert_contains "Staging dir preserved for retry:" "$output" "TC49: the report points at the preserved staging dir"
+
+  # The report has to match the disk, or it is worse than no report.
+  if [ -f "$mobile_file" ]; then
+    echo -e "${GREEN}✓${NC} TC49: the group written before the failure is still on disk"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC49: the earlier group is reported as written but is not on disk"
+    ((TESTS_FAILED++))
+  fi
+
+  if [ ! -f "$web_file" ] && [ ! -f "$api_file" ]; then
+    echo -e "${GREEN}✓${NC} TC49: neither the failed nor the not-attempted group left a file"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC49: a group reported as failed or not attempted has a file on disk"
+    ((TESTS_FAILED++))
+  fi
+
+  # The mktemp scratch file for the failed group is cleaned up on the way out.
+  local orphans
+  orphans=$(find .aimi/tasks -maxdepth 1 -name 'sm-tc49-*.json.??????' 2>/dev/null | wc -l | tr -d ' ')
+  assert_eq "0" "$orphans" "TC49: no orphaned mktemp file survives the failed write"
+
+  if [ -d "$stg" ]; then
+    echo -e "${GREEN}✓${NC} TC49: staging dir preserved so the write can be retried"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC49: staging dir deleted despite a group failing to write"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg"
+  rm -rf .aimi/tasks/sm-tc49-*
+}
+
+# ============================================================================
+# split-detect Tests (TC36-TC46)
+# ============================================================================
+# The read side of metadata.splitGroup. Every rule here used to live only in
+# execute.md's executable prose — twice, in two already-divergent copies — where
+# no Bash suite could reach it.
+#
+# Each case builds its OWN isolated project directory. split-detect's flat scope
+# is every *-tasks.json sitting directly in .aimi/tasks, so the shared TEST_DIR
+# fixture would otherwise join the candidate pool and change the answer.
+#
+# Relative mtimes are set with `touch -t` rather than `sleep`, because "newest
+# wins" is the rule under test and it must be pinned exactly, not raced.
+
+_SD_OLD_MTIME="202001010000"
+_SD_NEW_MTIME="202601010000"
+
+# _sd_stories <status>... -> JSON array of minimal user stories, one per status.
+# Zero arguments yields [], the empty-group file the N-file writer legitimately
+# emits for a project that ended up with no stories.
+_sd_stories() {
+  local out="[]" i=1 st
+  for st in "$@"; do
+    out=$(printf '%s' "$out" | jq -c \
+      --arg id "US-$(printf '%03d' "$i")" --arg s "$st" \
+      '. + [{id: $id, title: "s", description: "d", acceptanceCriteria: [],
+             status: $s, dependsOn: [],
+             implementation: {files: [], approach: "a", verify: "v"}}]')
+    i=$((i + 1))
+  done
+  printf '%s' "$out"
+}
+
+# _sd_write <path> <branchName> <stories-json> [<splitGroup-json>]
+_sd_write() {
+  local path="$1" branch="$2" stories="$3" marker="${4:-}"
+  local meta
+  if [ -n "$marker" ]; then
+    meta=$(jq -nc --arg b "$branch" --argjson sg "$marker" \
+      '{title: "feat: t", type: "feat", branchName: $b, splitGroup: $sg}')
+  else
+    meta=$(jq -nc --arg b "$branch" '{title: "feat: t", type: "feat", branchName: $b}')
+  fi
+  jq -nc --argjson m "$meta" --argjson s "$stories" \
+    '{schemaVersion: "3.3", metadata: $m, userStories: $s}' > "$path"
+}
+
+# _sd_run <project-dir> [args...] -> split-detect stdout, stderr discarded
+_sd_run() {
+  local dir="$1"; shift
+  ( cd "$dir" && "$CLI" split-detect "$@" 2>/dev/null )
+}
+
+# Basenames of the reported members, in reported order, comma-joined.
+_sd_member_names() {
+  printf '%s' "$1" | jq -r '[.members[].path | split("/") | last] | join(",")'
+}
+
+# TC36: the happy path — a 3-member project split whose members are all active
+# is reported whole, anchor first, siblings in the anchor's declared order.
+test_split_detect_project_split_three_members() {
+  echo ""
+  echo "=== TC36: split-detect — 3-member project split, all active ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  _sd_write "$t/2026-07-27-billing-apps-web-tasks.json" "feat/billing-apps-web" \
+    "$(_sd_stories pending)" \
+    '{"project":"apps/web","index":1,"total":3,"siblings":[".aimi/tasks/2026-07-27-billing-services-api-tasks.json",".aimi/tasks/2026-07-27-billing-packages-core-tasks.json"]}'
+  _sd_write "$t/2026-07-27-billing-services-api-tasks.json" "feat/billing-services-api" \
+    "$(_sd_stories pending pending)" \
+    '{"project":"services/api","index":2,"total":3,"siblings":[".aimi/tasks/2026-07-27-billing-apps-web-tasks.json",".aimi/tasks/2026-07-27-billing-packages-core-tasks.json"]}'
+  _sd_write "$t/2026-07-27-billing-packages-core-tasks.json" "feat/billing-packages-core" \
+    "$(_sd_stories pending)" \
+    '{"project":"packages/core","index":3,"total":3,"siblings":[".aimi/tasks/2026-07-27-billing-apps-web-tasks.json",".aimi/tasks/2026-07-27-billing-services-api-tasks.json"]}'
+  touch -t "$_SD_OLD_MTIME" "$t"/*.json
+  touch -t "$_SD_NEW_MTIME" "$t/2026-07-27-billing-apps-web-tasks.json"
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC36: split-detect exits 0"
+  assert_eq "project-split" "$(printf '%s' "$out" | jq -r '.mode')" "TC36: mode is project-split"
+  assert_eq "3" "$(printf '%s' "$out" | jq -r '.total')" "TC36: total is the declared 3"
+  assert_eq "3" "$(printf '%s' "$out" | jq -r '.activeCount')" "TC36: all three members are active"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.degradedReason')" "TC36: nothing degraded"
+  assert_contains "2026-07-27-billing-apps-web-tasks.json" \
+    "$(printf '%s' "$out" | jq -r '.anchor')" "TC36: the newest file is the anchor"
+  assert_eq \
+    "2026-07-27-billing-apps-web-tasks.json,2026-07-27-billing-services-api-tasks.json,2026-07-27-billing-packages-core-tasks.json" \
+    "$(_sd_member_names "$out")" "TC36: anchor first, then siblings in declared order"
+  assert_eq "apps/web,services/api,packages/core" \
+    "$(printf '%s' "$out" | jq -r '[.members[].project] | join(",")')" \
+    "TC36: each member reports its own splitGroup.project"
+  assert_eq "feat/billing-apps-web,feat/billing-services-api,feat/billing-packages-core" \
+    "$(printf '%s' "$out" | jq -r '[.members[].branchName] | join(",")')" \
+    "TC36: each member reports its own metadata.branchName"
+  assert_eq "1,2,1" "$(printf '%s' "$out" | jq -r '[.members[].storyCount] | join(",")')" \
+    "TC36: per-member storyCount"
+  assert_eq "1,2,1" "$(printf '%s' "$out" | jq -r '[.members[].pendingCount] | join(",")')" \
+    "TC36: per-member pendingCount"
+
+  rm -rf "$d"
+}
+
+# TC37: THE DEFECT THIS VERB EXISTS TO CLOSE. find-tasks-all globs depth 1-3,
+# which includes phase directories — so a PROJECT-axis phase's split files were
+# captured by the flat flow and executed as a flat split, leaving the phase
+# unclaimed and nothing merged into the phase branch. Flat scope is depth 1.
+test_split_detect_flat_scope_excludes_phase_dir() {
+  echo ""
+  echo "=== TC37: split-detect — a phase directory's split is NOT visible to the flat scope ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks/myfeat/phase-2-auth"
+  local p="$d/.aimi/tasks/myfeat/phase-2-auth"
+
+  _sd_write "$p/myfeat-phase-2-tasks.json" "feat/myfeat-phase-2" "$(_sd_stories pending)"
+  _sd_write "$p/myfeat-phase-2-apps-web-tasks.json" "feat/myfeat-phase-2-apps-web" \
+    "$(_sd_stories pending)" \
+    '{"project":"apps/web","index":1,"total":2,"siblings":["myfeat-phase-2-services-api-tasks.json"]}'
+  _sd_write "$p/myfeat-phase-2-services-api-tasks.json" "feat/myfeat-phase-2-services-api" \
+    "$(_sd_stories pending)" \
+    '{"project":"services/api","index":2,"total":2,"siblings":["myfeat-phase-2-apps-web-tasks.json"]}'
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC37: flat query over a phase-only layout still exits 0"
+  assert_eq "none" "$(printf '%s' "$out" | jq -r '.mode')" \
+    "TC37: the phase's split is not matched by the flat scope"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.members | length')" \
+    "TC37: no phase file leaks into the flat member list"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.total')" "TC37: total is 0"
+
+  rm -rf "$d"
+}
+
+# TC38: the same directory, queried with --dir, IS matched — and the phase's own
+# governing <feature>-phase-<N>-tasks.json is excluded from the candidate pool.
+test_split_detect_dir_scope_matches_phase_split() {
+  echo ""
+  echo "=== TC38: split-detect --dir — the same phase split IS matched ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks/myfeat/phase-2-auth"
+  local p="$d/.aimi/tasks/myfeat/phase-2-auth"
+
+  _sd_write "$p/myfeat-phase-2-tasks.json" "feat/myfeat-phase-2" "$(_sd_stories pending)"
+  _sd_write "$p/myfeat-phase-2-apps-web-tasks.json" "feat/myfeat-phase-2-apps-web" \
+    "$(_sd_stories pending)" \
+    '{"project":"apps/web","index":1,"total":2,"siblings":["myfeat-phase-2-services-api-tasks.json"]}'
+  _sd_write "$p/myfeat-phase-2-services-api-tasks.json" "feat/myfeat-phase-2-services-api" \
+    "$(_sd_stories pending)" \
+    '{"project":"services/api","index":2,"total":2,"siblings":["myfeat-phase-2-apps-web-tasks.json"]}'
+  # Make the phase's own governing file the newest, so an anchor picked without
+  # the exclusion would land on it.
+  touch -t "$_SD_OLD_MTIME" "$p"/*.json
+  touch -t "$_SD_NEW_MTIME" "$p/myfeat-phase-2-tasks.json"
+
+  local out exit_code
+  out=$(_sd_run "$d" --dir "$p") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC38: --dir query exits 0"
+  assert_eq "project-split" "$(printf '%s' "$out" | jq -r '.mode')" \
+    "TC38: --dir scope matches the phase's project split"
+  assert_eq "2" "$(printf '%s' "$out" | jq -r '.total')" "TC38: total is 2"
+  assert_eq "2" "$(printf '%s' "$out" | jq -r '.activeCount')" "TC38: both members active"
+  local names; names=$(_sd_member_names "$out")
+  assert_contains "myfeat-phase-2-apps-web-tasks.json" "$names" "TC38: web member present"
+  assert_contains "myfeat-phase-2-services-api-tasks.json" "$names" "TC38: api member present"
+  assert_eq "0" \
+    "$(printf '%s' "$out" | jq -r '[.members[] | select((.path | split("/") | last) == "myfeat-phase-2-tasks.json")] | length')" \
+    "TC38: the phase's own governing tasks file is excluded from the pool"
+
+  rm -rf "$d"
+}
+
+# TC39: a completed stale split must not route today's real work to a
+# single-file fallback. Its members are dropped whole and the search repeats,
+# so the fresh legacy pair beside it wins.
+test_split_detect_completed_stale_group_yields_to_fresh_pair() {
+  echo ""
+  echo "=== TC39: split-detect — a fully completed stale split yields to the fresh legacy pair ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  _sd_write "$t/2026-01-01-old-a-tasks.json" "feat/old-a" "$(_sd_stories completed)" \
+    '{"project":"a","index":1,"total":2,"siblings":["2026-01-01-old-b-tasks.json"]}'
+  _sd_write "$t/2026-01-01-old-b-tasks.json" "feat/old-b" "$(_sd_stories completed)" \
+    '{"project":"b","index":2,"total":2,"siblings":["2026-01-01-old-a-tasks.json"]}'
+  _sd_write "$t/2026-07-27-live-frontend-tasks.json" "feat/live-frontend" "$(_sd_stories pending)"
+  _sd_write "$t/2026-07-27-live-backend-tasks.json" "feat/live-backend" "$(_sd_stories pending)"
+  # The STALE group is the newest on disk — without the drop-and-repeat rule
+  # "newest wins" would hand back the finished split.
+  touch -t "$_SD_OLD_MTIME" "$t"/2026-07-27-live-*.json
+  touch -t "$_SD_NEW_MTIME" "$t"/2026-01-01-old-*.json
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC39: exits 0"
+  assert_eq "paired-split" "$(printf '%s' "$out" | jq -r '.mode')" \
+    "TC39: the fresh legacy pair wins, not the completed stale group"
+  assert_eq "2" "$(printf '%s' "$out" | jq -r '.activeCount')" "TC39: both pair members active"
+  assert_eq "2026-07-27-live-frontend-tasks.json,2026-07-27-live-backend-tasks.json" \
+    "$(_sd_member_names "$out")" "TC39: frontend first, backend second"
+  assert_eq "0" \
+    "$(printf '%s' "$out" | jq -r '[.members[] | select(.path | test("old-"))] | length')" \
+    "TC39: no member of the stale group survives into the answer"
+
+  rm -rf "$d"
+}
+
+# TC40: "newest wins" replaces "first marker-carrying file in mtime order".
+# A stale marked split with PENDING members must not preempt today's plan just
+# because today's files carry no marker of their own.
+test_split_detect_newest_wins_over_older_marked_group() {
+  echo ""
+  echo "=== TC40: split-detect — a newer unmarked pair beats an older marked group with pending work ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  _sd_write "$t/2026-01-01-old-a-tasks.json" "feat/old-a" "$(_sd_stories pending)" \
+    '{"project":"a","index":1,"total":2,"siblings":["2026-01-01-old-b-tasks.json"]}'
+  _sd_write "$t/2026-01-01-old-b-tasks.json" "feat/old-b" "$(_sd_stories pending)" \
+    '{"project":"b","index":2,"total":2,"siblings":["2026-01-01-old-a-tasks.json"]}'
+  _sd_write "$t/2026-07-27-live-frontend-tasks.json" "feat/live-frontend" "$(_sd_stories pending)"
+  _sd_write "$t/2026-07-27-live-backend-tasks.json" "feat/live-backend" "$(_sd_stories pending)"
+  touch -t "$_SD_OLD_MTIME" "$t"/2026-01-01-old-*.json
+  touch -t "$_SD_NEW_MTIME" "$t"/2026-07-27-live-*.json
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC40: exits 0"
+  assert_eq "paired-split" "$(printf '%s' "$out" | jq -r '.mode')" \
+    "TC40: the newest candidate decides, so the unmarked pair wins"
+  assert_eq "2026-07-27-live-frontend-tasks.json,2026-07-27-live-backend-tasks.json" \
+    "$(_sd_member_names "$out")" "TC40: the pair is the reported group"
+  assert_eq "0" \
+    "$(printf '%s' "$out" | jq -r '[.members[] | select(.path | test("old-"))] | length')" \
+    "TC40: the older marked group does not preempt today's plan"
+
+  rm -rf "$d"
+}
+
+# TC41: a marker whose declared total disagrees with the resolved count degrades
+# to single-file — and the degradation is TERMINAL. Falling through to the
+# legacy pair would run stale work: this scope was planned by the project-split
+# writer, so any -frontend-/-backend-tasks.json beside it predates the plan.
+test_split_detect_total_mismatch_degrades_terminally() {
+  echo ""
+  echo "=== TC41: split-detect — total mismatch degrades and does not fall through to the legacy pair ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  # The anchor is itself named -frontend-tasks.json and a real -backend sibling
+  # sits beside it, so a fall-through would visibly produce paired-split.
+  _sd_write "$t/2026-07-27-x-frontend-tasks.json" "feat/x-fe" "$(_sd_stories pending)" \
+    '{"project":"a","index":1,"total":3,"siblings":["2026-07-27-x-backend-tasks.json"]}'
+  _sd_write "$t/2026-07-27-x-backend-tasks.json" "feat/x-be" "$(_sd_stories pending)"
+  touch -t "$_SD_OLD_MTIME" "$t"/*.json
+  touch -t "$_SD_NEW_MTIME" "$t/2026-07-27-x-frontend-tasks.json"
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC41: a degraded group is still a query, not a gate — exits 0"
+  assert_eq "single" "$(printf '%s' "$out" | jq -r '.mode')" "TC41: degrades to single"
+  assert_eq "1" "$(printf '%s' "$out" | jq -r '.total')" "TC41: total collapses to 1"
+  assert_eq "2026-07-27-x-frontend-tasks.json" "$(_sd_member_names "$out")" \
+    "TC41: only the anchor is reported"
+  local reason; reason=$(printf '%s' "$out" | jq -r '.degradedReason')
+  assert_contains "declared total 3, resolved 2" "$reason" \
+    "TC41: degradedReason carries both counts so the caller need not re-derive them"
+  assert_contains "legacy pair not considered" "$reason" \
+    "TC41: degradedReason says the legacy pair was deliberately skipped"
+
+  rm -rf "$d"
+}
+
+# TC42: a traversal-shaped sibling entry is inert. Siblings resolve BY BASENAME
+# against the anchor's own directory, so "../../etc/passwd" becomes
+# "<anchor-dir>/passwd", which does not exist — and the group is voided rather
+# than silently executed one member short.
+test_split_detect_traversal_sibling_is_inert() {
+  echo ""
+  echo "=== TC42: split-detect — a traversal-shaped sibling resolves by basename and voids the group ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  _sd_write "$t/2026-07-27-y-tasks.json" "feat/y" "$(_sd_stories pending)" \
+    '{"project":"a","index":1,"total":2,"siblings":["../../etc/passwd"]}'
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC42: exits 0"
+  assert_eq "single" "$(printf '%s' "$out" | jq -r '.mode')" "TC42: the group is voided"
+  assert_eq "1" "$(printf '%s' "$out" | jq -r '.members | length')" "TC42: only the anchor remains"
+  local reason; reason=$(printf '%s' "$out" | jq -r '.degradedReason')
+  assert_contains "$t/passwd" "$reason" \
+    "TC42: the sibling was looked up by basename inside the anchor's own directory"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '[.members[] | select(.path | test("/etc/passwd"))] | length')" \
+    "TC42: nothing outside the anchor directory reaches the member list"
+
+  rm -rf "$d"
+}
+
+# TC43: pending is (.status // "pending") != "completed" — ONE definition for
+# every count reported. execute.md carried two that disagreed: the active
+# filter used != "completed" while the phase completion count used
+# == "pending", so an in_progress story was counted by one and not the other,
+# letting a phase close with work still in flight.
+test_split_detect_in_progress_counts_as_pending() {
+  echo ""
+  echo "=== TC43: split-detect — an in_progress story counts as pending ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  _sd_write "$t/2026-07-27-z-a-tasks.json" "feat/z-a" "$(_sd_stories in_progress)" \
+    '{"project":"a","index":1,"total":2,"siblings":["2026-07-27-z-b-tasks.json"]}'
+  _sd_write "$t/2026-07-27-z-b-tasks.json" "feat/z-b" "$(_sd_stories completed)" \
+    '{"project":"b","index":2,"total":2,"siblings":["2026-07-27-z-a-tasks.json"]}'
+  touch -t "$_SD_OLD_MTIME" "$t"/*.json
+  touch -t "$_SD_NEW_MTIME" "$t/2026-07-27-z-a-tasks.json"
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC43: exits 0"
+  assert_eq "project-split" "$(printf '%s' "$out" | jq -r '.mode')" \
+    "TC43: the group is not dropped — in_progress keeps it alive"
+  assert_eq "1" "$(printf '%s' "$out" | jq -r '.activeCount')" \
+    "TC43: exactly the in_progress member is active"
+  assert_eq "1" \
+    "$(printf '%s' "$out" | jq -r '[.members[] | select(.path | test("z-a"))] | .[0].pendingCount')" \
+    "TC43: the in_progress story is counted as pending"
+  assert_eq "true" \
+    "$(printf '%s' "$out" | jq -r '[.members[] | select(.path | test("z-a"))] | .[0].active')" \
+    "TC43: the in_progress member is active"
+  assert_eq "false" \
+    "$(printf '%s' "$out" | jq -r '[.members[] | select(.path | test("z-b"))] | .[0].active')" \
+    "TC43: the completed member is not active"
+
+  rm -rf "$d"
+}
+
+# TC44: files predating the project-split writer carry no marker, so the legacy
+# -frontend-tasks.json/-backend-tasks.json pair rule is what groups them. They
+# resolve to project "." — the flat flow's execution root.
+test_split_detect_legacy_pair_without_marker() {
+  echo ""
+  echo "=== TC44: split-detect — an unmarked frontend/backend pair is a paired-split ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  _sd_write "$t/2026-04-10-live-preview-frontend-tasks.json" "feat/live-preview-frontend" \
+    "$(_sd_stories pending pending)"
+  _sd_write "$t/2026-04-10-live-preview-backend-tasks.json" "feat/live-preview-backend" \
+    "$(_sd_stories pending)"
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC44: exits 0"
+  assert_eq "paired-split" "$(printf '%s' "$out" | jq -r '.mode')" "TC44: mode is paired-split"
+  assert_eq "2" "$(printf '%s' "$out" | jq -r '.total')" "TC44: total is 2"
+  assert_eq "2026-04-10-live-preview-frontend-tasks.json,2026-04-10-live-preview-backend-tasks.json" \
+    "$(_sd_member_names "$out")" "TC44: frontend first, backend second"
+  assert_eq ".,." "$(printf '%s' "$out" | jq -r '[.members[].project] | join(",")')" \
+    "TC44: unmarked pair members resolve to the root project"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.degradedReason')" "TC44: nothing degraded"
+
+  # A lone half of the pair is not a pair.
+  rm -f "$t/2026-04-10-live-preview-backend-tasks.json"
+  local solo; solo=$(_sd_run "$d")
+  assert_eq "single" "$(printf '%s' "$solo" | jq -r '.mode')" \
+    "TC44: a frontend file with no backend counterpart is not a pair"
+
+  rm -rf "$d"
+}
+
+# TC45: one file, no marker — the single-file flow, named explicitly so the
+# caller can pass it to init-session instead of re-running mtime auto-discovery.
+test_split_detect_single_file() {
+  echo ""
+  echo "=== TC45: split-detect — a single unmarked file ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  _sd_write "$t/2026-07-27-solo-tasks.json" "feat/solo" "$(_sd_stories pending completed)"
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC45: single is an outcome, not a failure — exits 0"
+  assert_eq "single" "$(printf '%s' "$out" | jq -r '.mode')" "TC45: mode is single"
+  assert_eq "1" "$(printf '%s' "$out" | jq -r '.total')" "TC45: total is 1"
+  assert_eq "1" "$(printf '%s' "$out" | jq -r '.activeCount')" "TC45: activeCount is 1"
+  assert_contains "2026-07-27-solo-tasks.json" "$(printf '%s' "$out" | jq -r '.anchor')" \
+    "TC45: the anchor names the file to execute"
+  assert_eq "2" "$(printf '%s' "$out" | jq -r '.members[0].storyCount')" "TC45: storyCount is 2"
+  assert_eq "1" "$(printf '%s' "$out" | jq -r '.members[0].pendingCount')" "TC45: pendingCount is 1"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.degradedReason')" "TC45: nothing degraded"
+
+  rm -rf "$d"
+}
+
+# TC46: exit-code discipline. Every detection outcome is 0; non-zero is reserved
+# for real errors. Also pins that a malformed candidate is inert rather than
+# fatal — one corrupt file must not take detection down for every other feature.
+test_split_detect_exit_codes_and_bad_input() {
+  echo ""
+  echo "=== TC46: split-detect — query exit codes, argument errors, malformed candidates ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  # Empty .aimi/tasks -> none, exit 0
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC46: an empty tasks dir exits 0"
+  assert_eq "none" "$(printf '%s' "$out" | jq -r '.mode')" "TC46: mode is none"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.anchor')" "TC46: anchor is null"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.activeCount')" "TC46: activeCount is 0"
+
+  # A fully completed group with nothing behind it -> none, with a reason
+  _sd_write "$t/2026-07-27-done-a-tasks.json" "feat/done-a" "$(_sd_stories completed)" \
+    '{"project":"a","index":1,"total":2,"siblings":["2026-07-27-done-b-tasks.json"]}'
+  _sd_write "$t/2026-07-27-done-b-tasks.json" "feat/done-b" "$(_sd_stories completed)" \
+    '{"project":"b","index":2,"total":2,"siblings":["2026-07-27-done-a-tasks.json"]}'
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC46: an exhausted pool exits 0"
+  assert_eq "none" "$(printf '%s' "$out" | jq -r '.mode')" "TC46: exhausted pool reports none"
+  assert_contains "fully completed" "$(printf '%s' "$out" | jq -r '.degradedReason')" \
+    "TC46: degradedReason distinguishes 'exhausted' from 'nothing was ever here'"
+  rm -f "$t"/2026-07-27-done-*.json
+
+  # Malformed JSON beside a healthy file is inert, not fatal
+  printf '{not json' > "$t/2026-07-27-broken-tasks.json"
+  _sd_write "$t/2026-07-27-healthy-tasks.json" "feat/healthy" "$(_sd_stories pending)"
+  touch -t "$_SD_OLD_MTIME" "$t/2026-07-27-broken-tasks.json"
+  touch -t "$_SD_NEW_MTIME" "$t/2026-07-27-healthy-tasks.json"
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC46: a malformed candidate does not abort detection"
+  assert_eq "single" "$(printf '%s' "$out" | jq -r '.mode')" "TC46: the healthy file still resolves"
+  rm -f "$t"/2026-07-27-*.json
+
+  # Argument errors are real errors
+  ( cd "$d" && "$CLI" split-detect --dir >/dev/null 2>&1 ) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC46: --dir with no value exits 1"
+
+  ( cd "$d" && "$CLI" split-detect --bogus >/dev/null 2>&1 ) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC46: an unknown argument exits 1"
+
+  ( cd "$d" && "$CLI" split-detect --dir "$d/nope" >/dev/null 2>&1 ) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC46: --dir pointing at a nonexistent directory exits 1"
+
+  local err
+  err=$( cd "$d" && "$CLI" split-detect --dir /etc 2>&1 >/dev/null ) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC46: --dir escaping the project root exits 1"
+  assert_contains "escapes project root" "$err" "TC46: --dir is path-confined by validate_path_in_project"
+
+  rm -rf "$d"
 }
 
 # ============================================================================
@@ -13529,9 +14995,9 @@ main() {
   test_story_merge_foundation_dedup
   test_story_merge_foundation_invalid_idx
   test_story_merge_foundation_nonempty_dependson
-  test_story_merge_project_majority_vote
+  test_story_merge_project_axis_partition
   test_story_merge_project_monorepo_guard
-  test_story_merge_bipartition_invariant
+  test_story_merge_nway_partition_invariant
   test_story_merge_project_preserved_working_keys_stripped
   test_story_merge_project_trailing_slash_normalization
   test_story_merge_cross_file_dep_dropped_banner
@@ -13539,6 +15005,32 @@ main() {
   test_story_merge_cross_file_dep_dropped_negative
   test_story_merge_cross_file_dep_dropped_title_sanitized
   test_story_merge_split_empty_side_warning
+  test_story_merge_project_split_three_projects
+  test_story_merge_project_split_untagged_story_refused
+  test_story_merge_project_split_explicit_root_group
+  test_story_merge_project_split_singleton_group
+  test_story_merge_project_split_slash_project_slug
+  test_story_merge_project_split_dot_project_slug
+  test_story_merge_project_split_basename_collision
+  test_story_merge_project_split_project_keyed_warnings
+  test_story_merge_project_split_foundation_edge
+  test_story_merge_project_split_phase_aware
+  test_story_merge_project_split_partial_write_failure
+
+  # split-detect tests (TC36-TC46) — each builds its own isolated project dir
+  echo ""
+  echo "--- split-detect Tests (TC36-TC46) ---"
+  test_split_detect_project_split_three_members
+  test_split_detect_flat_scope_excludes_phase_dir
+  test_split_detect_dir_scope_matches_phase_split
+  test_split_detect_completed_stale_group_yields_to_fresh_pair
+  test_split_detect_newest_wins_over_older_marked_group
+  test_split_detect_total_mismatch_degrades_terminally
+  test_split_detect_traversal_sibling_is_inert
+  test_split_detect_in_progress_counts_as_pending
+  test_split_detect_legacy_pair_without_marker
+  test_split_detect_single_file
+  test_split_detect_exit_codes_and_bad_input
 
   # Roadmap lifecycle tests (US-002)
   echo ""

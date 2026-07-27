@@ -34,7 +34,18 @@ This section is the single source of truth for multi-repo layout detection and p
 
 ### AIMI_ROOT_IS_GIT_REPO Branching Rule
 
-Set in Step 1.5 by running `git -C [AIMI_ROOT] rev-parse --git-dir`. When **true**, AIMI_ROOT is itself a git repository — all inline logic (default-branch detection, fetch, branch setup, worktree creation) runs directly against AIMI_ROOT. When **false**, this is a **multi-repo layout**: Claude Code runs from a parent folder containing multiple git repos as subfolders. In this layout:
+`AIMI_ROOT_IS_GIT_REPO` is a **per-block derived value**, never a variable carried between Bash calls — each Bash tool call is an isolated shell, so nothing assigned in one block survives into the next. Every block that branches on it derives it first, exactly like `$AIMI_CLI` and `$AIMI_ROOT` are re-derived per call. This is the canonical form; embed it verbatim (the git check needs `AIMI_ROOT` in scope, so the upward walk comes first):
+
+```bash
+AIMI_ROOT="$PWD"
+while [ "$AIMI_ROOT" != "/" ] && [ ! -d "$AIMI_ROOT/.aimi" ]; do AIMI_ROOT=$(dirname "$AIMI_ROOT"); done
+[ -d "$AIMI_ROOT/.aimi" ] || AIMI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+if git -C "$AIMI_ROOT" rev-parse --git-dir >/dev/null 2>&1; then AIMI_ROOT_IS_GIT_REPO=true; else AIMI_ROOT_IS_GIT_REPO=false; fi
+```
+
+Two shell consumers embed it: Step 1.5's **Detect Git Repo Layout** (which echoes the value so the agent can read it) and the phase container's **Unsupported Combination Guard: Phase Mode + Multi-Repo**. Every other consumer below — Step 1.6's Early-Skip Guard, Step 2's container/branch-setup skips, Step 4's per-group commit counting — is an agent-level branch that references this rule by name and reads the value Step 1.5 echoed; no shell is involved, so none of them needs its own derivation.
+
+When **true**, AIMI_ROOT is itself a git repository — all inline logic (default-branch detection, fetch, branch setup, worktree creation) runs directly against AIMI_ROOT. When **false**, this is a **multi-repo layout**: Claude Code runs from a parent folder containing multiple git repos as subfolders. In this layout:
 
 - Default-branch detection and `git fetch origin` are skipped at the AIMI_ROOT level and happen per-project instead.
 - Step 1.6 (Branch Base Selection) is skipped entirely; `BASE_BRANCH` is left unset.
@@ -230,128 +241,212 @@ Proceed to Step 1.
 
 ## Step 0.9: Multi-File Auto-Detection
 
-Discover all task files and check for paired frontend/backend splits:
+Discover whether the tasks files on disk form a **split group** — a set of sibling task files planned together in one `story-merge` run that must all execute in this single invocation. Detection is owned entirely by one CLI verb; this step reads its answer and never re-derives it:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-ALL_TASKS=$($AIMI_CLI find-tasks-all)
+$AIMI_CLI split-detect | jq -r '
+  "mode=\(.mode) activeCount=\(.activeCount) total=\(.total)",
+  "anchor=\(.anchor // "-")",
+  (if .degradedReason == null then empty else "degraded: \(.degradedReason)" end),
+  (.members[] | "  \(if .active then "active " else "skipped" end)  \(.project)  \(.branchName // "-")  \(.path)")
+'
 ```
 
-If `find-tasks-all` returns no files or fails, skip this step (Step 1 will handle the error via `init-session`).
+### Split Detection
 
-Count the number of task files:
-```bash
-TASK_COUNT=$(echo "$ALL_TASKS" | wc -l)
-```
+`split-detect` is a **query, not a gate**: every detection outcome — including `single` and `none` — exits 0. A non-zero exit means a real error (bad argument, unreadable directory); report its stderr verbatim and STOP.
 
-### Paired Split Detection
+It owns every rule this step used to spell out as prose, and each of those rules is now a test case in `test-aimi-cli.sh` (TC36–TC46):
 
-If exactly **two** files are found, check whether they form a paired frontend+backend split:
+- **Project-Split Detection** — reads the `metadata.splitGroup` marker `{project, index, total, siblings[]}` that `story-merge`'s N-file PROJECT-axis writer stamps on every file it emits, resolves the anchor's declared siblings **by basename** against the anchor's own directory (which renders a traversal-shaped sibling entry inert), and validates the declared `total` against the resolved count. Nothing outside the anchor's own declared sibling list ever joins the group, however similar its basename.
+- **Paired Split Detection** — the legacy `-frontend-tasks.json`/`-backend-tasks.json` suffix-and-shared-prefix rule, reached only when the newest candidate carries no marker. Unmarked pair members report `project` as `"."`.
+- **Active Split Files** — a member is *active* when it has at least one story whose status is not `completed`. A file whose `userStories` array is empty (the N-file writer legitimately emits one for a project group that ended up with zero stories) is never active, and an inactive member produces no worktree, no branch, no container, no spawned Task, no report block, and no cleanup call. The predicate is `(.status // "pending") != "completed"` — one definition behind every count the verb reports.
 
-1. Extract the basenames and check for matching `*-frontend-tasks.json` and `*-backend-tasks.json` patterns:
-   - Both files must share the same date+feature prefix (e.g., `2026-04-10-live-preview`)
-   - One must end with `-frontend-tasks.json`, the other with `-backend-tasks.json`
+Two of its properties are load-bearing for this step:
 
-```
-Example match:
-  .aimi/tasks/2026-04-10-live-preview-frontend-tasks.json
-  .aimi/tasks/2026-04-10-live-preview-backend-tasks.json
+- **Its flat scope is depth 1 only** — the `*-tasks.json` files sitting directly in `.aimi/tasks/`, never a phase directory's own files. Step 0.9 runs before phase mode is resolved, so without that bound a PROJECT-axis phase would be picked up and executed here as a flat split, with the phase never claimed and nothing merged into the phase branch. A phase's own split is matched instead by Step 1.7's **Detect a Full-Stack Split Inside This Phase**, which detects against that one phase's directory; `split-detect --dir <phase-dir>` is the same verb narrowed to exactly that scope.
+- **Newest wins.** The anchor is the newest candidate by mtime — not the first marker-carrying file in mtime order. A group with no active member is dropped from the candidate pool and the next-newest candidate is considered, so a stale split can neither preempt today's plan nor divert it to a single-file fallback.
 
-  Shared prefix: "2026-04-10-live-preview"
-  → Paired split detected
-```
+Branch on `mode` and `activeCount`:
 
-**Generalized rule (composes with phase mode):** the shared prefix is not limited to the flat date+feature form above. When the two files instead live inside a claimed phase's own directory (`.aimi/tasks/<feature>/phase-<N>-<slug>/`) and share the `<feature>-phase-<N>` prefix — e.g. `<feature>-phase-<N>-frontend-tasks.json` / `-backend-tasks.json` — this is the same paired-split match, just phase-qualified. This flat-mode detection pass (driven by `find-tasks-all`, which runs before Step 1's Phase Mode Detection has resolved a phase branch) never itself matches that phase-prefixed form in practice, since a live phase's two split files are the *only* pair sharing that prefix and phase-qualified worktree/branch naming additionally requires `PHASE_BRANCH` — not yet known this early. The phase-prefixed case is therefore matched and executed by **Phase-Mode Paired Split** (Step 1.7, after the phase branch is claimed and the container exists), which reuses this exact matching rule — same "two files, one `-frontend-tasks.json`, one `-backend-tasks.json`, shared prefix" test — scoped to just that phase's own directory. This subsection's own flat-prefix detection and everything below it (worktree creation from `$DEFAULT_BRANCH`, sub-orchestrator spawn, merge target, Aggregated Completion report, cleanup) is unaffected and runs byte-for-byte as before.
+| `mode` | `activeCount` | Continue with |
+|---|---|---|
+| `none` | `0` | Skip the rest of Step 0.9 — Step 1's `init-session` reports the missing-file error. |
+| `single` | `1` | **Single-File Fallback**, passing `.anchor` explicitly. |
+| `project-split` / `paired-split` | `1` | Nothing left to parallelize — **Single-File Fallback**, passing the one active member's `.path` explicitly. |
+| `project-split` / `paired-split` | `≥ 2` | The split flow: **Per-Repo Branch and Container Setup for the Split** onward. |
 
-2. If the two files match the paired pattern:
-   - Extract `metadata.branchName` from each file using jq:
-     ```bash
-     FRONTEND_BRANCH=$(jq -r '.metadata.branchName' <frontend-file>)
-     BACKEND_BRANCH=$(jq -r '.metadata.branchName' <backend-file>)
-     ```
-   - Verify both branches are different (they target separate branches — no conflicts)
+When `degradedReason` is non-null, report it verbatim; do not re-derive *why* the group was rejected, since the verb already computed both counts and the specific defect. A degraded group is terminal — it deliberately does not fall through to the legacy pair rule, because a scope planned by the project-split writer makes any `-frontend-tasks.json`/`-backend-tasks.json` sitting beside it stale, and running it would execute the wrong work.
 
-### Parallel Execution for Paired Files
+### Per-Repo Branch and Container Setup for the Split
 
-When a paired split is detected, spawn **two foreground Tasks in a single tool-call turn**. Each Task runs the full execute.md flow (Steps 1–5) scoped to its own file:
+**Each active split file owns exactly one repo, so its worktree/container is rooted at that repo's own resolved path — never at `$AIMI_ROOT`.** In a multi-repo layout `$AIMI_ROOT` is a plain parent folder holding several repos, not a repository itself; rooting the split's worktree there is what produces `fatal: not a git repository` (issue #73).
 
-```
-Report:
-"Paired frontend+backend task files detected:"
-"  Frontend: [frontend-file] (branch: [FRONTEND_BRANCH])"
-"  Backend:  [backend-file] (branch: [BACKEND_BRANCH])"
-""
-"Spawning parallel execution flows..."
-```
+Four passes follow, each one a real loop over the same ordered member list: derive, create, report, clean up.
 
-Create worktrees for isolation. `EXECUTION_MODE` (Step 1's mode detection) is not yet in scope this early in the document, so read `metadata.execution` directly from the frontend split file via jq:
+**Each Bash tool call is an isolated shell**, so Pass 1 serializes its result into `SPLIT_PLAN` — one JSON object per line — and prints it, and every later pass opens by re-assigning `SPLIT_PLAN` from that printed stdout verbatim. Passes 2–4 must **not** re-run `split-detect` to rebuild the list: by the time Pass 3 runs, every member's stories are `completed`, so the verb's active filter would correctly return nothing and the report and cleanup passes would iterate an empty list.
 
-```bash
-SPLIT_EXECUTION_MODE=$(jq -r '.metadata.execution // "inline"' <frontend-file>)
-```
+Each record is **one JSON object per line**, never tab-delimited fields. A tasks-file path may contain spaces — `_find_tasks_files_all` is NUL-delimited specifically so it survives them — and a `read -r file project root branch` split would undo that hardening at the first such path.
 
-**When `SPLIT_EXECUTION_MODE` is `inline` or absent (the fail-safe default — see `commands/references/execution-mode.md`): unchanged.**
-```bash
-WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-$WORKTREE_MGR create [FRONTEND_BRANCH] --from $DEFAULT_BRANCH
-$WORKTREE_MGR create [BACKEND_BRANCH] --from $DEFAULT_BRANCH
-```
+#### Pass 1 — Derive and Validate Per-Repo Roots and Branches
 
-**When `SPLIT_EXECUTION_MODE` is `container`:** replace the unconditional pair above with two independently checkout-conflict-checked containers — one per split branch, mirroring the phase-mode split pattern (Create Split Worktrees) of giving each split its own dedicated container rather than nesting one inside the other.
+Nothing is created in this pass. It reads the verb's active members, validates each one, resolves where that member's worktree will actually land, and emits the plan:
 
-Resolve `INTERACTIVE_MODE` first — this early in the document (before Step 1.6), it has never been set:
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-if [ -z "$INTERACTIVE_MODE" ]; then
-  INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
+AIMI_ROOT="$PWD"
+while [ "$AIMI_ROOT" != "/" ] && [ ! -d "$AIMI_ROOT/.aimi" ]; do AIMI_ROOT=$(dirname "$AIMI_ROOT"); done
+[ -d "$AIMI_ROOT/.aimi" ] || AIMI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+if git -C "$AIMI_ROOT" rev-parse --git-dir >/dev/null 2>&1; then AIMI_ROOT_IS_GIT_REPO=true; else AIMI_ROOT_IS_GIT_REPO=false; fi
+
+SPLIT_PLAN=""
+SPLIT_KEYS=""
+while IFS= read -r member; do
+  [ -n "$member" ] || continue
+  split_file=$(printf '%s' "$member" | jq -r '.path')
+  SPLIT_BRANCH=$(printf '%s' "$member" | jq -r '.branchName // ""')
+  SPLIT_PROJECT=$(printf '%s' "$member" | jq -r '.project // "."')
+
+  if ! [[ "$SPLIT_BRANCH" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Invalid branchName in $split_file: $SPLIT_BRANCH" >&2
+    exit 1
+  fi
+
+  case "$SPLIT_PROJECT" in
+    ""|null|.)
+      if [ "$AIMI_ROOT_IS_GIT_REPO" != true ]; then
+        echo "Root group (project \".\") in $split_file, but AIMI_ROOT is not a git repository: $AIMI_ROOT" >&2
+        echo "This is a multi-repo layout — AIMI_ROOT is a parent folder holding several repos, so the root group has no repository to execute in. Give every story its own project path and re-plan, or run /aimi:execute from inside the repo that owns this work." >&2
+        exit 1
+      fi
+      SPLIT_ROOT="$AIMI_ROOT"
+      ;;
+    /*|..|../*|*/..|*/../*)
+      echo "Invalid splitGroup.project in $split_file: $SPLIT_PROJECT" >&2
+      exit 1
+      ;;
+    *)
+      if ! [[ "$SPLIT_PROJECT" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$ ]]; then
+        echo "Invalid splitGroup.project in $split_file: $SPLIT_PROJECT" >&2
+        exit 1
+      fi
+      SPLIT_ROOT="$AIMI_ROOT/$SPLIT_PROJECT"
+      ;;
+  esac
+
+  SPLIT_TOPLEVEL=$(git -C "$SPLIT_ROOT" rev-parse --show-toplevel 2>/dev/null) || SPLIT_TOPLEVEL=""
+  if [ -z "$SPLIT_TOPLEVEL" ]; then
+    echo "Not a git repository: $SPLIT_ROOT (splitGroup.project \"$SPLIT_PROJECT\" in $split_file)" >&2
+    exit 1
+  fi
+
+  SPLIT_DEFAULT=$($AIMI_CLI detect-default-branch --project "$SPLIT_ROOT") || SPLIT_DEFAULT=""
+  if [ -z "$SPLIT_DEFAULT" ]; then
+    echo "Could not detect a default branch for $SPLIT_ROOT (splitGroup.project \"$SPLIT_PROJECT\" in $split_file)" >&2
+    exit 1
+  fi
+  SPLIT_WORKTREE_PATH="$SPLIT_TOPLEVEL/.worktrees/$SPLIT_BRANCH"
+
+  SPLIT_PLAN="${SPLIT_PLAN}$(jq -nc \
+    --arg file "$split_file" --arg project "$SPLIT_PROJECT" --arg root "$SPLIT_ROOT" \
+    --arg branch "$SPLIT_BRANCH" --arg default "$SPLIT_DEFAULT" --arg worktree "$SPLIT_WORKTREE_PATH" \
+    '{file: $file, project: $project, root: $root, branch: $branch, default: $default, worktree: $worktree}')"$'\n'
+  SPLIT_KEYS="${SPLIT_KEYS}${SPLIT_TOPLEVEL}"$'\t'"${SPLIT_BRANCH}"$'\n'
+done <<< "$($AIMI_CLI split-detect | jq -c '.members[] | select(.active)')"
+
+SPLIT_KEY_TOTAL=$(printf '%s' "$SPLIT_KEYS" | grep -c .)
+SPLIT_KEY_UNIQUE=$(printf '%s' "$SPLIT_KEYS" | sort -u | grep -c .)
+if [ "$SPLIT_KEY_TOTAL" -ne "$SPLIT_KEY_UNIQUE" ]; then
+  echo "Two split members contend for the same branch inside one repository:" >&2
+  printf '%s' "$SPLIT_KEYS" | sort | uniq -d >&2
+  exit 1
 fi
+
+printf '%s' "$SPLIT_PLAN"
 ```
 
-For each of `[FRONTEND_BRANCH]` and `[BACKEND_BRANCH]` in turn, call `$WORKTREE_MGR create` and handle its exit code exactly as Flat Container Mode's **Create or Reuse the Container** does (see Step 2) — no pre-flight checkout check is needed; `$WORKTREE_MGR create` is branch-aware and, on non-zero exit, its stderr already names the worktree holding the branch. Report that stderr verbatim and STOP without attempting remediation. Once both `$WORKTREE_MGR create` calls succeed, both containers are ready, built from the same `CONTAINER_BASE` (`BASE_BRANCH` when Step 1.6 already set one — never true this early except when a sibling split's own Step 1.6 already ran in this session — otherwise `$DEFAULT_BRANCH`):
+`branchName` is validated against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` — the same regex `init-session` enforces in Step 1 — before it can reach any git command. `splitGroup.project` is rejected first on traversal shapes and then on any character outside `^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$`; that `case` list and that regex are byte-identical to the pair `commands/plan.md` applies to the same field in its Phase 3e staging check, so the two sites stay diffable. Here the guard is not only about what the value can *say* (it is echoed verbatim into the report below and into each spawned Task's `description`) but about where it can *point* — this is the one site that joins it onto a filesystem path.
+
+**Where the worktree actually lands.** `SPLIT_ROOT` is the *project* path; `SPLIT_WORKTREE_PATH` is built from `git -C "$SPLIT_ROOT" rev-parse --show-toplevel`, because `worktree-manager.sh` resolves its worktree-name argument against `$(git rev-parse --show-toplevel)/.worktrees/<name>` — the repository's toplevel, not its own CWD. For three sibling repos the two coincide. For a monorepo subdirectory (`project` = `apps/web`) they do not: the worktree lands at `<repo-toplevel>/.worktrees/<branch>`, so computing `$SPLIT_ROOT/.worktrees/$SPLIT_BRANCH` instead would hand every downstream consumer a path that never exists. That same `rev-parse` call doubles as the "is this a git repository at all" check, so no separate probe is needed.
+
+**The `"."` root group.** `story-merge` now refuses untagged stories, so a `"."` group exists only when an author wrote it explicitly. It is still handled — but only where it can run: when `AIMI_ROOT` is not a git repository there is no repo for it to execute in, so this refuses by name and says which layout it found, rather than letting `detect-default-branch` or `$WORKTREE_MGR create` fail obscurely a pass or two later. `AIMI_ROOT_IS_GIT_REPO` is derived inside this block using the canonical form from **AIMI_ROOT_IS_GIT_REPO Branching Rule** above — never read from a prior block, which is a different shell.
+
+**An undetectable default branch stops the pass.** `detect-default-branch` exits non-zero when it can resolve neither `origin`'s HEAD nor `refs/remotes/origin/HEAD`; an unchecked capture would leave `SPLIT_DEFAULT` empty, and empty reaches `$WORKTREE_MGR create --from ""` in Pass 2 and an empty `git log ""..branch` range in Pass 3. A project whose default branch cannot be detected is not a usable repo — report it and STOP rather than falling back to some other repo's branch, exactly as `commands/plan.md` requires at its own call site of the same verb.
+
+**The collision check** keys on `(repo toplevel, branch)`, not on the branch alone. Two separate repos may legitimately carry the same branch name; two monorepo subdirectories share one toplevel and would contend for the same `.worktrees/<branch>` directory, silently interleaving their commits onto one branch. On collision, report the offending pairs and STOP — nothing has been created yet.
+
+Report, one line per active member:
+
+```
+Split task files detected ([activeCount] members):
+  [1/activeCount] [file] → project: [project] (branch: [branch], repo: [root])
+  [2/activeCount] [file] → project: [project] (branch: [branch], repo: [root])
+  ...
+
+Spawning parallel execution flows...
+```
+
+`project` / `root` / `default` are exactly the values Step 2's **Per-Project Branch Setup** computes per project group (`detect-default-branch --project [resolved_project_path]`, keyed generically by project path) — this pass reuses that machinery rather than adding a second per-repo worktree/container mechanism. For a legacy pair every `project` is `.`, every `root` is `$AIMI_ROOT`, and every `default` equals the `$DEFAULT_BRANCH` Step 1.5 would detect.
+
+#### Pass 2 — Create Worktrees or Containers
+
+One iteration per plan record. `EXECUTION_MODE` (Step 1's mode detection) is not yet in scope this early, so `metadata.execution` is read directly from the first plan record's file — every member of a group is written by the same `story-merge` run and carries the same value:
 
 ```bash
-WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-cd "$AIMI_ROOT"
-if [ -n "$BASE_BRANCH" ]; then
-  CONTAINER_BASE="$BASE_BRANCH"
-else
-  CONTAINER_BASE="$DEFAULT_BRANCH"
-fi
-$WORKTREE_MGR create [FRONTEND_BRANCH] --from "$CONTAINER_BASE"
-$WORKTREE_MGR create [BACKEND_BRANCH] --from "$CONTAINER_BASE"
-```
-
-Both containers land as siblings directly under `$AIMI_ROOT/.worktrees/` — `$AIMI_ROOT/.worktrees/[FRONTEND_BRANCH]` and `$AIMI_ROOT/.worktrees/[BACKEND_BRANCH]` — exactly the worktree paths the Parallel Execution section below already refers to as `[frontend worktree path]`/`[backend worktree path]`.
-
-In a **single tool-call turn**, emit two foreground Tasks:
-
-```
-Task(
-    subagent_type: "general-purpose",
-    model: <AGENT_MODELS.executor when not "inherit">,
-    description: "Execute frontend tasks: [frontend-file]",
-    prompt: [Full execute.md flow (Steps 1–5) with:
-        - WORKTREE_PATH = [frontend worktree path]
-        - $AIMI_CLI init-session --file [frontend-file]
-        - All subsequent steps (reset-orphaned, validate, wave loop, completion)
-        - Scoped to the frontend tasks file only
-        - PROJECT_GUIDELINES = PROJECT_GUIDELINES
-    ]
+SPLIT_PLAN=$(cat <<'SPLIT_PLAN_EOF'
+[paste Pass 1's printed SPLIT_PLAN here, verbatim — one JSON record per line]
+SPLIT_PLAN_EOF
 )
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+
+SPLIT_EXECUTION_MODE=$(jq -r '.metadata.execution // "inline"' \
+  "$(printf '%s\n' "$SPLIT_PLAN" | head -1 | jq -r '.file')")
+echo "Split execution mode: $SPLIT_EXECUTION_MODE"
+
+while IFS= read -r record; do
+  [ -n "$record" ] || continue
+  SPLIT_ROOT=$(printf '%s' "$record" | jq -r '.root')
+  SPLIT_BRANCH=$(printf '%s' "$record" | jq -r '.branch')
+  SPLIT_DEFAULT=$(printf '%s' "$record" | jq -r '.default')
+  # BASE_BRANCH is a Step 1.6 value and Step 1.6 has not run this early, so this
+  # always resolves to that repo's own default branch. Written as a default
+  # expansion rather than an `if [ -n "$BASE_BRANCH" ]` whose true branch is
+  # unreachable here.
+  CONTAINER_BASE="${BASE_BRANCH:-$SPLIT_DEFAULT}"
+  cd "$SPLIT_ROOT"
+  if ! $WORKTREE_MGR create "$SPLIT_BRANCH" --from "$CONTAINER_BASE"; then
+    echo "Worktree creation failed for $SPLIT_BRANCH in $SPLIT_ROOT — see the error above." >&2
+    exit 1
+  fi
+done <<< "$SPLIT_PLAN"
+```
+
+**When `SPLIT_EXECUTION_MODE` is `inline` or absent** (the fail-safe default — see `commands/references/execution-mode.md`), that loop is the whole pass: one worktree per active split file, each branched from its own repo's default branch.
+
+**When `SPLIT_EXECUTION_MODE` is `container`,** the loop body is instead one delegation per record to **Create or Reuse a Container** (`${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md`), with `EXEC_ROOT` set to that record's `root`, `EXEC_BRANCH` to its `branch`, and `CONTAINER_BASE` as computed above — giving each member its own independently checkout-conflict-checked container rather than nesting one inside another, mirroring the phase-mode split's Create Split Worktrees. That reference's body is the same `cd "$EXEC_ROOT"` + `$WORKTREE_MGR create "$EXEC_BRANCH" --from "$CONTAINER_BASE"` pair the loop already runs, so the shape above is unchanged; what the delegation adds is the single source of truth for the reuse/idempotency and error contract. Handle its exit code exactly as Step 2's Per-Project Branch Setup does — no pre-flight checkout check is needed, since `$WORKTREE_MGR create` is branch-aware and its stderr already names the worktree holding the branch. Report that stderr verbatim and STOP without attempting remediation.
+
+Either way, every worktree or container lands at that record's `worktree` value — under its **own repo's** `.worktrees/`, which is the path the next section passes to each Task as `WORKTREE_PATH`. For a legacy pair every root is `$AIMI_ROOT` and every worktree lands as a sibling under `$AIMI_ROOT/.worktrees/`, unchanged.
+
+### Parallel Execution for Split Files
+
+In a **single tool-call turn**, emit one foreground Task per plan record — `activeCount` Tasks in total (two for a legacy pair, three for a three-repo project split, N for N). Never one turn per record; that would serialize them. Each Task runs the full execute.md flow (Steps 1–5) scoped to its own file:
+
+```
+For each record in SPLIT_PLAN, all Task( calls in one turn:
 
 Task(
     subagent_type: "general-purpose",
     model: <AGENT_MODELS.executor when not "inherit">,
-    description: "Execute backend tasks: [backend-file]",
+    description: "Execute split tasks: [that record's file basename]",
     prompt: [Full execute.md flow (Steps 1–5) with:
-        - WORKTREE_PATH = [backend worktree path]
-        - $AIMI_CLI init-session --file [backend-file]
+        - WORKTREE_PATH = [that record's worktree]
+        - $AIMI_CLI init-session --file [that record's file]
         - All subsequent steps (reset-orphaned, validate, wave loop, completion)
-        - Scoped to the backend tasks file only
+        - Scoped to that split file only
         - PROJECT_GUIDELINES = PROJECT_GUIDELINES
     ]
 )
@@ -362,49 +457,86 @@ Each parallel Task receives the full execute.md flow:
 - **reset-orphaned** to recover any stuck stories in that file
 - **validate-stories** for content validation
 - **wave loop** (Step 4) executing all stories from its file
-- Each flow commits to its own branch (`metadata.branchName` from its file) — no branch conflicts
+- Each flow commits to its own branch (`metadata.branchName` from its file) inside its own repo — no branch conflicts
 - Prototype files are read by each subagent independently via `$AIMI_CLI get-story-context` (pointer-only handoff)
 
-After both Tasks return, collect results and proceed to **Step 5 (Aggregated Completion)**.
+After all Tasks return, collect results and proceed to **Aggregated Completion (Split Mode)**.
 
 ### Single-File Fallback
 
-If only **one** file is found, or the two files do **not** match the paired frontend/backend pattern, proceed with the standard single-file execution flow (Step 1 onward) unchanged. The `init-session` call in Step 1 will auto-detect the most recent file.
+When `split-detect` reports `mode` = `single`, or reports a split whose `activeCount` is `1`, proceed with the standard single-file execution flow (Step 1 onward) unchanged — but pass that one file explicitly (`$AIMI_CLI init-session --file [the anchor, or the one active member's path]`) instead of letting Step 1's mtime auto-discovery pick a sibling that has nothing pending. When `mode` is `none`, run Step 1 with no `--file` and let `init-session` report the error.
 
-### Aggregated Completion (Paired Mode)
+### Aggregated Completion (Split Mode)
 
-When both parallel Tasks complete, skip the normal Step 5 and report aggregated results:
+When all parallel Tasks complete, skip the normal Step 5 and report aggregated results. The report contains exactly one block per plan record — a member the verb never reported as active contributes no block and no "0 stories completed" line anywhere.
+
+#### Pass 3 — Aggregated Completion Report
+
+Each commit count is scoped with `git -C` against that repo's own default branch: a single global `git log $DEFAULT_BRANCH..` is wrong in a multi-repo layout, where `$AIMI_ROOT` is not a repo and no global `$DEFAULT_BRANCH` was ever detected.
+
+```bash
+SPLIT_PLAN=$(cat <<'SPLIT_PLAN_EOF'
+[paste Pass 1's printed SPLIT_PLAN here, verbatim — one JSON record per line]
+SPLIT_PLAN_EOF
+)
+SPLIT_TOTAL_COMMITS=0
+while IFS= read -r record; do
+  [ -n "$record" ] || continue
+  SPLIT_FILE=$(printf '%s' "$record" | jq -r '.file')
+  SPLIT_PROJECT=$(printf '%s' "$record" | jq -r '.project')
+  SPLIT_ROOT=$(printf '%s' "$record" | jq -r '.root')
+  SPLIT_BRANCH=$(printf '%s' "$record" | jq -r '.branch')
+  SPLIT_DEFAULT=$(printf '%s' "$record" | jq -r '.default')
+  SPLIT_COMMITS=$(git -C "$SPLIT_ROOT" log --oneline "$SPLIT_DEFAULT".."$SPLIT_BRANCH" 2>/dev/null | grep -c .)
+  SPLIT_TOTAL_COMMITS=$((SPLIT_TOTAL_COMMITS + SPLIT_COMMITS))
+  printf '%s\t%s\t%s\t%s\t%s\n' "$SPLIT_FILE" "$SPLIT_PROJECT" "$SPLIT_BRANCH" "$SPLIT_DEFAULT" "$SPLIT_COMMITS"
+done <<< "$SPLIT_PLAN"
+printf 'TOTAL_COMMITS\t%s\n' "$SPLIT_TOTAL_COMMITS"
+```
+
+Render one block per line of that output, filling **Stories completed** from that member's own Task result:
 
 ```
-## Execution Complete (Paired Mode)
+## Execution Complete (Split Mode)
 
-Frontend file: [frontend-file]
-  Branch: [FRONTEND_BRANCH]
-  Stories completed: [count from frontend Task result]
-  Commits: git log --oneline $DEFAULT_BRANCH..[FRONTEND_BRANCH] | wc -l
+For each plan record, one block:
 
-Backend file: [backend-file]
-  Branch: [BACKEND_BRANCH]
-  Stories completed: [count from backend Task result]
-  Commits: git log --oneline $DEFAULT_BRANCH..[BACKEND_BRANCH] | wc -l
+[file]
+  Project: [project]
+  Branch: [branch]
+  Stories completed: [count from that file's Task result]
+  Commits: [that line's commit count]
 
-Total stories: [frontend_count + backend_count]
-Total commits: [frontend_commits + backend_commits]
+Total stories: [sum of every record's completed count]
+Total commits: [TOTAL_COMMITS from the loop above]
 
 ### Next Steps
 
-- Review frontend commits: git log --oneline $DEFAULT_BRANCH..[FRONTEND_BRANCH]
-- Review backend commits: git log --oneline $DEFAULT_BRANCH..[BACKEND_BRANCH]
+- Review [branch] commits: git -C [root] log --oneline [default]..[branch]   (one line per plan record)
 - Run /aimi:review for code review
 - Create PRs when ready: gh pr create
 ```
 
-Clean up worktrees after reporting. Both branches are the deliverable the report above just pointed the user at for review and PR creation — not throwaway per-story worktrees — so `--keep-branch` is required here to avoid deleting the very branches the user was told to open PRs against:
+Both `Total` lines are sums across **all** plan records, not two named Frontend/Backend slots. For a legacy pair every root is `$AIMI_ROOT` and every default is that repo's own default branch, so the two blocks render the same lines the paired-mode report produced before.
+
+#### Pass 4 — Clean Up Split Worktrees
+
+Clean up after reporting — once per plan record's own branch, in its own repo, never a fixed pair of calls. Every branch is a deliverable the report above just pointed the user at for review and PR creation — not a throwaway per-story worktree — so `--keep-branch` is required here to avoid deleting the very branches the user was told to open PRs against:
+
 ```bash
+SPLIT_PLAN=$(cat <<'SPLIT_PLAN_EOF'
+[paste Pass 1's printed SPLIT_PLAN here, verbatim — one JSON record per line]
+SPLIT_PLAN_EOF
+)
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-$WORKTREE_MGR remove [FRONTEND_BRANCH] --keep-branch
-$WORKTREE_MGR remove [BACKEND_BRANCH] --keep-branch
+while IFS= read -r record; do
+  [ -n "$record" ] || continue
+  SPLIT_ROOT=$(printf '%s' "$record" | jq -r '.root')
+  SPLIT_BRANCH=$(printf '%s' "$record" | jq -r '.branch')
+  cd "$SPLIT_ROOT"
+  $WORKTREE_MGR remove "$SPLIT_BRANCH" --keep-branch
+done <<< "$SPLIT_PLAN"
 ```
 
 STOP execution (aggregated report replaces normal Step 5).
@@ -578,13 +710,17 @@ Detect the default branch and fetch the latest from origin before branch setup.
 
 ### Detect Git Repo Layout
 
-Check if AIMI_ROOT (directory containing `.aimi/`) is itself a git repository:
+Check whether AIMI_ROOT (the directory containing `.aimi/`) is itself a git repository. This is the canonical derivation from the **AIMI_ROOT_IS_GIT_REPO Branching Rule** in Multi-Repo Handling, embedded verbatim — each Bash call is an isolated shell, so `AIMI_ROOT` is re-derived here first:
 
 ```bash
-git -C [AIMI_ROOT] rev-parse --git-dir >/dev/null 2>&1
+AIMI_ROOT="$PWD"
+while [ "$AIMI_ROOT" != "/" ] && [ ! -d "$AIMI_ROOT/.aimi" ]; do AIMI_ROOT=$(dirname "$AIMI_ROOT"); done
+[ -d "$AIMI_ROOT/.aimi" ] || AIMI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+if git -C "$AIMI_ROOT" rev-parse --git-dir >/dev/null 2>&1; then AIMI_ROOT_IS_GIT_REPO=true; else AIMI_ROOT_IS_GIT_REPO=false; fi
+echo "AIMI_ROOT_IS_GIT_REPO=$AIMI_ROOT_IS_GIT_REPO"
 ```
 
-Store exit code as `AIMI_ROOT_IS_GIT_REPO` (true if exit 0, false otherwise). See the **Multi-Repo Handling** section above for the full contract.
+The echoed line is what every agent-level branch below reads — this block's only output, and the only place the value becomes observable outside a shell. See the **Multi-Repo Handling** section above for the full contract.
 
 ### Default Branch and Origin Fetch
 
@@ -898,6 +1034,58 @@ Do **not** swallow this call's exit status. Every state a claim can hand back �
 
 ### Create or Reuse the Phase Container
 
+#### Unsupported Combination Guard: Phase Mode + Multi-Repo
+
+**This guard runs first — before the `cd "$AIMI_ROOT"` below, before any `$WORKTREE_MGR create`, and before any split detection.** Every phase-mode container and worktree in this file is created downstream of this point: the phase container itself, and every split worktree **Phase-Mode Paired Split** later nests inside it. One check here therefore covers all of them, including the case where a project split converges to a single distinct project (`story-merge`'s SIDE axis, by design) and lands as a two-file frontend/backend split under a root that is not a repository.
+
+`AIMI_ROOT_IS_GIT_REPO` is re-derived here rather than carried over from Step 1.5's **Detect Git Repo Layout** — each Bash call is an isolated shell, so the canonical derivation from the **AIMI_ROOT_IS_GIT_REPO Branching Rule** (Multi-Repo Handling) is embedded verbatim below, `AIMI_ROOT` walk included. When the value is **false**, `AIMI_ROOT` is a plain parent folder holding one git repository per subfolder, not a repository itself — `cd "$AIMI_ROOT"` followed by `$WORKTREE_MGR create` exits **128** with a bare `fatal: not a git repository` (nothing is created, so no state is corrupted — but the message names neither the phase, nor the layout, nor the fix). That opaque failure is issue #73. Refuse here instead.
+
+The decision and its consequence live in the same block: the claim release (see **Release the Claim on Abort** — this session ran Step 1.7's **Claim the Phase** itself, so `$PHASE_ID` is set and this call is the top-level orchestrator's to make) runs inside the failing branch, so a single-repo layout never touches it and a multi-repo layout can never skip it.
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+AIMI_ROOT="$PWD"
+while [ "$AIMI_ROOT" != "/" ] && [ ! -d "$AIMI_ROOT/.aimi" ]; do AIMI_ROOT=$(dirname "$AIMI_ROOT"); done
+[ -d "$AIMI_ROOT/.aimi" ] || AIMI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+if git -C "$AIMI_ROOT" rev-parse --git-dir >/dev/null 2>&1; then AIMI_ROOT_IS_GIT_REPO=true; else AIMI_ROOT_IS_GIT_REPO=false; fi
+
+if [ "$AIMI_ROOT_IS_GIT_REPO" != "true" ]; then
+  echo "Phase mode needs a git repository at $AIMI_ROOT; multi-repo layout detected." >&2
+  $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+  exit 1
+fi
+```
+
+Exit 0 means the guard passed and this subsection continues below. **When the block exits non-zero,** the claim is already released — report and **STOP** without `cd`-ing to `AIMI_ROOT`, without computing `PHASE_CONTAINER_PATH`, and without creating any container, worktree, or branch:
+
+```
+Phase mode is not supported in a multi-repo layout.
+
+Detected layout: multi-repo — [AIMI_ROOT] is not a git repository. It is a parent
+folder holding one repository per subfolder (see Multi-Repo Handling), so every
+story carries its own `project` path and each repo is branched independently.
+
+Phase [PHASE_ID] of [FEATURE] would need a phase container at
+[AIMI_ROOT]/.worktrees/[PHASE_BRANCH], and a worktree cannot be created from a
+directory that is not a repository — git would exit 128 with
+"fatal: not a git repository".
+
+Phase mode plus multi-repo is a combination this command does not support yet.
+
+What you can do instead:
+  - Run /aimi:execute without --phase. The flat flow (Step 0.9 onward) is
+    multi-repo aware: it creates one worktree per repository, rooted at that
+    repository's own path, and runs them in parallel.
+  - Or run /aimi:execute from inside a single repository that has its own
+    .aimi/ directory, so AIMI_ROOT is that repository and phase mode applies
+    to it alone.
+
+Phase [PHASE_ID]'s claim has been released. Nothing was created.
+```
+
+**Only when `AIMI_ROOT_IS_GIT_REPO` is true does the rest of this subsection run.** From here on, `AIMI_ROOT` is guaranteed to be a repository — which is also why every split worktree in **Phase-Mode Paired Split** below nests under `$PHASE_CONTAINER_PATH` rather than resolving a per-repo root of its own: in phase mode there is exactly one repository, and a split member's `metadata.splitGroup.project` (when present) is a monorepo subdirectory used for naming and reporting, never a separate git root.
+
 ```bash
 cd "$AIMI_ROOT"
 if [ -n "$BASE_BRANCH" ]; then
@@ -915,20 +1103,126 @@ PHASE_CONTAINER_PATH="$AIMI_ROOT/.worktrees/$PHASE_BRANCH"
 
 ### Detect a Full-Stack Split Inside This Phase
 
-Before pointing the session at a single governing tasks file, check whether this phase's own directory instead holds a full-stack paired split — the phase-prefixed generalization of Step 0.9's Paired Split Detection matching rule (see above), scoped to just this phase's own directory:
+Before pointing the session at a single governing tasks file, check whether this phase's own directory instead holds a **split** — a set of sibling tasks files planned together for this one phase that must all execute in this single invocation. Detection mirrors Step 0.9's fixed two-pass order (project-split marker first, legacy `-frontend-tasks.json`/`-backend-tasks.json` suffix pair only as the fallback), scoped to just this phase's own directory. `PHASE_SPLIT_MODE` stays a plain boolean — *is this phase split at all* — and never becomes a count; the member list is what carries N.
+
+Enumerate this phase's own candidate files:
 
 ```bash
 PHASE_DIR_PATH="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR"
-PHASE_FE_TASKS="$PHASE_DIR_PATH/$FEATURE-phase-$PHASE_ID-frontend-tasks.json"
-PHASE_BE_TASKS="$PHASE_DIR_PATH/$FEATURE-phase-$PHASE_ID-backend-tasks.json"
-if [ -f "$PHASE_FE_TASKS" ] && [ -f "$PHASE_BE_TASKS" ]; then
-  PHASE_SPLIT_MODE=true
-else
-  PHASE_SPLIT_MODE=false
+PHASE_MAIN_TASKS="$PHASE_DIR_PATH/$FEATURE-phase-$PHASE_ID-tasks.json"
+PHASE_SPLIT_CANDIDATES=""
+for candidate in "$PHASE_DIR_PATH"/*-tasks.json; do
+  [ -f "$candidate" ] || continue
+  [ "$candidate" = "$PHASE_MAIN_TASKS" ] && continue
+  PHASE_SPLIT_CANDIDATES="${PHASE_SPLIT_CANDIDATES}${candidate}"$'\n'
+done
+```
+
+**Why a directory glob is safe here and is forbidden in Step 0.9.** `PHASE_DIR_PATH` contains exactly one phase's own files. Step 0.9's `find-tasks-all` returns every `*-tasks.json` under the flat `.aimi/tasks/` root, across every feature ever planned, which is why it must never derive a group from a filename scan. The asymmetry is deliberate and load-bearing: the glob above only enumerates *candidates* local to this phase, and the group itself is still decided by the marker (Pass 1) or by the legacy pair rule (Pass 2), never by the glob alone.
+
+#### Pass 1 — Project-Split Detection (`metadata.splitGroup`)
+
+Read the same self-describing marker Step 0.9's **Project-Split Detection** reads — `metadata.splitGroup` = `{project, index, total, siblings[]}`, where `project` is the normalized project path (`"."` meaning the root group) and `siblings` lists every *other* member — with the same anchor-plus-declared-siblings rule and the same `total`-versus-resolved-count validation. The anchor is the first candidate carrying a well-formed marker; the group is exactly the anchor plus its own declared siblings, each resolved **by basename** against `$PHASE_DIR_PATH` (which renders a traversal-shaped sibling entry inert):
+
+```bash
+PHASE_ANCHOR_FILE=""
+while IFS= read -r candidate; do
+  [ -n "$candidate" ] || continue
+  if jq -e '(.metadata.splitGroup | type) == "object"
+            and (.metadata.splitGroup.total | type) == "number"
+            and (.metadata.splitGroup.siblings | type) == "array"' "$candidate" >/dev/null 2>&1; then
+    PHASE_ANCHOR_FILE="$candidate"
+    break
+  fi
+done <<< "$PHASE_SPLIT_CANDIDATES"
+
+PHASE_SPLIT_FILES=""
+if [ -n "$PHASE_ANCHOR_FILE" ]; then
+  PHASE_SPLIT_TOTAL=$(jq -r '.metadata.splitGroup.total' "$PHASE_ANCHOR_FILE")
+  PHASE_SPLIT_FILES="$PHASE_ANCHOR_FILE"
+  PHASE_SPLIT_OK=true
+  while IFS= read -r sibling; do
+    [ -n "$sibling" ] || continue
+    SIBLING_PATH="$PHASE_DIR_PATH/$(basename "$sibling")"
+    if [ ! -f "$SIBLING_PATH" ]; then
+      echo "Warning: declared split sibling missing on disk: $SIBLING_PATH" >&2
+      PHASE_SPLIT_OK=false
+      break
+    fi
+    PHASE_SPLIT_FILES="${PHASE_SPLIT_FILES}"$'\n'"${SIBLING_PATH}"
+  done < <(jq -r '.metadata.splitGroup.siblings[]?' "$PHASE_ANCHOR_FILE")
+  PHASE_SPLIT_COUNT=$(printf '%s\n' "$PHASE_SPLIT_FILES" | grep -c .)
+  if [ "$PHASE_SPLIT_OK" != true ] || [ "$PHASE_SPLIT_COUNT" -ne "$PHASE_SPLIT_TOTAL" ] || [ "$PHASE_SPLIT_COUNT" -lt 2 ]; then
+    echo "Warning: phase split group is incomplete (declared total ${PHASE_SPLIT_TOTAL}, resolved ${PHASE_SPLIT_COUNT}) — falling back to single-file phase execution" >&2
+    PHASE_SPLIT_FILES=""
+  fi
 fi
 ```
 
-**When `PHASE_SPLIT_MODE=true`:** skip **Point the session at this phase's own tasks file** below entirely — a split phase has no single governing tasks file for this session to point at — and, after Path and State Notes immediately below, proceed to **Phase-Mode Paired Split** instead of Step 2.
+A group that fails validation degrades to single-file phase execution rather than running a partial split — and it does **not** fall through to Pass 2. Emptying `PHASE_SPLIT_FILES` above records only "no usable group here"; `PHASE_ANCHOR_FILE` stays set and is what the dispatch below reads, precisely so a failed group cannot resurrect a stale legacy pair that happens to sit in the same directory.
+
+#### Pass 2 — Legacy Paired Split (fallback)
+
+**Only reached when Pass 1 found no marker-carrying candidate at all** — i.e. this phase's files predate the project-split writer. The legacy rule is unchanged: two files sharing the `<feature>-phase-<N>` prefix, one ending `-frontend-tasks.json` and the other `-backend-tasks.json`. It terminates by feeding the pair into the same N-aware member list as its two-member case.
+
+Pass 1 and Pass 2 run in the **same** Bash call, so `PHASE_ANCHOR_FILE` from Pass 1 is in scope here. The dispatch has exactly three arms, and the discriminator is `PHASE_ANCHOR_FILE` — never `PHASE_SPLIT_FILES`, which Pass 1 empties for *two* different reasons (no marker found, and marker found but group invalid) that must not be treated alike:
+
+```bash
+if [ -n "$PHASE_ANCHOR_FILE" ] && [ -n "$PHASE_SPLIT_FILES" ]; then
+  # Arm 1 — Pass 1 found a marker and its group validated. Run the project split.
+  PHASE_SPLIT_MODE=true
+elif [ -n "$PHASE_ANCHOR_FILE" ]; then
+  # Arm 2 — a marker was found but its group failed validation. Degrade to
+  # single-file phase execution. The legacy pair is NOT considered: this phase
+  # was planned by the project-split writer, so any -frontend-/-backend-tasks.json
+  # sitting beside it is stale, and running it would execute the wrong work.
+  echo "Phase split group failed validation — degrading to single-file phase execution (legacy frontend/backend pair not considered: this phase carries a project-split marker)" >&2
+  PHASE_SPLIT_FILES=""
+  PHASE_SPLIT_MODE=false
+else
+  # Arm 3 — no candidate carries the marker. Legacy pair fallback.
+  LEGACY_FE_TASKS="$PHASE_DIR_PATH/$FEATURE-phase-$PHASE_ID-frontend-tasks.json"
+  LEGACY_BE_TASKS="$PHASE_DIR_PATH/$FEATURE-phase-$PHASE_ID-backend-tasks.json"
+  if [ -f "$LEGACY_FE_TASKS" ] && [ -f "$LEGACY_BE_TASKS" ]; then
+    PHASE_SPLIT_FILES="$LEGACY_FE_TASKS"$'\n'"$LEGACY_BE_TASKS"
+    PHASE_SPLIT_MODE=true
+  else
+    PHASE_SPLIT_MODE=false
+  fi
+fi
+```
+
+This mirrors the flat side, whose Project-Split Detection likewise dispatches on `ANCHOR_FILE` ("When `ANCHOR_FILE` is empty… fall through to Paired Split Detection"; "When the group failed validation… the run degrades to Single-File Fallback"). Arm 2 is the case a `PHASE_SPLIT_FILES` gate silently mishandles: it announces the degradation and then runs the stale pair anyway.
+
+Legacy pair files carry no `metadata.splitGroup`, so every step below derives their slugs from their own basenames (`frontend`, `backend`) and reproduces exactly today's `<PHASE_BRANCH>-frontend` / `<PHASE_BRANCH>-backend` branch pair — byte-for-byte the same worktree creation, spawn, report, merge, and cleanup behavior as before, now expressed as the two-iteration case of one loop.
+
+#### Active Split Files
+
+A member with nothing left to do takes no part in execution. Before any branch, worktree, dev server, or Task exists, filter the member list down to its **active** entries — those with at least one story that is not already `completed`. A file whose `userStories` array is empty (the N-file writer legitimately emits a file for a project group that ended up with zero stories) drops out here and produces no worktree, no branch, no spawned Task, no dev-server bootstrap, no report block, and no cleanup call. This is the identical skip rule Step 0.9's **Active Split Files** applies in the flat flow:
+
+```bash
+PHASE_ACTIVE_SPLIT_FILES=""
+if [ "$PHASE_SPLIT_MODE" = true ]; then
+  while IFS= read -r split_file; do
+    [ -n "$split_file" ] || continue
+    SPLIT_PENDING=$(jq '[.userStories[]? | select((.status // "pending") != "completed")] | length' "$split_file")
+    if [ "${SPLIT_PENDING:-0}" -gt 0 ]; then
+      if [ -n "$PHASE_ACTIVE_SPLIT_FILES" ]; then
+        PHASE_ACTIVE_SPLIT_FILES="${PHASE_ACTIVE_SPLIT_FILES}"$'\n'"${split_file}"
+      else
+        PHASE_ACTIVE_SPLIT_FILES="$split_file"
+      fi
+    else
+      echo "Skipping split file with no pending stories: $split_file" >&2
+    fi
+  done <<< "$PHASE_SPLIT_FILES"
+fi
+PHASE_ACTIVE_COUNT=$(printf '%s\n' "$PHASE_ACTIVE_SPLIT_FILES" | grep -c .)
+```
+
+`PHASE_SPLIT_FILES` (every member) and `PHASE_ACTIVE_SPLIT_FILES` (the members that still have work) are both carried forward. Everything that *creates* something loops over the active list; **Multi-File Pending Count** in Phase Completion sums over the full member list.
+
+**When `PHASE_SPLIT_MODE=true`:** skip **Point the session at this phase's own tasks file** below entirely — a split phase has no single governing tasks file for this session to point at — and, after Path and State Notes immediately below, proceed to **Phase-Mode Paired Split** instead of Step 2. `PHASE_ACTIVE_COUNT` of `0` is legal (every member already completed, e.g. on a resume after a merge conflict): that case creates nothing and spawns nothing, and Phase-Mode Paired Split routes it straight to **Continue to Phase Completion**.
 
 **When `PHASE_SPLIT_MODE=false` (unchanged):** continue with **Point the session at this phase's own tasks file** below exactly as before.
 
@@ -981,18 +1275,64 @@ From this point forward, for the remainder of this phase's execution:
 
 ## Phase-Mode Paired Split
 
-**Skip this entire section if `PHASE_SPLIT_MODE` is false** — proceed straight to Step 2 (the unchanged, single-file phase-mode flow described everywhere above). The rest of this section assumes `PHASE_SPLIT_MODE=true`: this phase's own directory holds a full-stack paired split (`$PHASE_FE_TASKS` / `$PHASE_BE_TASKS`), and this section composes that split with the phase container `Step 1.7` already claimed and created — per the binding brainstorm decision that full-stack split and phase mode nest rather than being mutually exclusive.
+**Skip this entire section if `PHASE_SPLIT_MODE` is false** — proceed straight to Step 2 (the unchanged, single-file phase-mode flow described everywhere above). The rest of this section assumes `PHASE_SPLIT_MODE=true`: this phase's own directory holds a split of **N ≥ 2** sibling tasks files (`$PHASE_SPLIT_FILES`, with `$PHASE_ACTIVE_SPLIT_FILES` its still-has-work subset — both resolved by **Detect a Full-Stack Split Inside This Phase** above), and this section composes that split with the phase container `Step 1.7` already claimed and created — per the binding brainstorm decision that full-stack split and phase mode nest rather than being mutually exclusive.
 
-Every Bash call in this section passes `$PHASE_CONTAINER_PATH` explicitly, exactly like the rest of phase mode (see Path and State Notes above) — never a bare relative path, never `AIMI_ROOT`.
+The section heading and its subsection names keep the word "Paired" for stability — they are cross-referenced by name from **Detect a Full-Stack Split Inside This Phase**, from Phase Completion, and from `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md`'s `EXEC_ROOT`/`EXEC_BRANCH` table — but nothing below is limited to two members. A legacy frontend/backend pair is simply the N = 2 case of every loop here.
+
+**When `PHASE_ACTIVE_COUNT` is `0`** (every member already completed — e.g. a resume after a merge conflict), skip every subsection below and go straight to **Continue to Phase Completion** at the end of this section: there is nothing left to branch, serve, spawn, merge, or clean up, and Phase Completion is what re-runs the pending-count and creates-verification checks.
+
+Every Bash call in this section passes `$PHASE_CONTAINER_PATH` explicitly, exactly like the rest of phase mode (see Path and State Notes above) — never a bare relative path, never `AIMI_ROOT`. `AIMI_ROOT` is guaranteed to be a git repository here: **Create or Reuse the Phase Container**'s Unsupported Combination Guard already refused the multi-repo layout before this section could be reached. Every split worktree below therefore nests under `$PHASE_CONTAINER_PATH`, and a member's `metadata.splitGroup.project` is a monorepo subdirectory used only to name and label it — never a separate git root.
 
 ### Derive and Validate Split Branch Names
 
+One branch per **active** split file, derived from that file's own project (or, for a legacy pair member, from its own basename) and qualified by `$PHASE_BRANCH`. Iterate `$PHASE_ACTIVE_SPLIT_FILES` in order, with `$split_file` as the loop variable:
+
 ```bash
-FRONTEND_BRANCH="${PHASE_BRANCH}-frontend"
-BACKEND_BRANCH="${PHASE_BRANCH}-backend"
+SPLIT_BRANCHES=""
+SPLIT_PLAN=""
+while IFS= read -r split_file; do
+  [ -n "$split_file" ] || continue
+  SPLIT_PROJECT=$(jq -r '.metadata.splitGroup.project // ""' "$split_file")
+  case "$SPLIT_PROJECT" in
+    ""|null)
+      SPLIT_SLUG=$(basename "$split_file" -tasks.json)
+      SPLIT_SLUG=${SPLIT_SLUG#"$FEATURE-phase-$PHASE_ID-"}
+      ;;
+    .)
+      SPLIT_SLUG="root"
+      ;;
+    /*|..|../*|*/..|*/../*)
+      echo "Invalid splitGroup.project in $split_file: $SPLIT_PROJECT" >&2
+      exit 1
+      ;;
+    *)
+      if ! [[ "$SPLIT_PROJECT" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$ ]]; then
+        echo "Invalid splitGroup.project in $split_file: $SPLIT_PROJECT" >&2
+        exit 1
+      fi
+      SPLIT_SLUG=$(printf '%s' "$SPLIT_PROJECT" | tr -c 'A-Za-z0-9_-' '-' | tr -s '-' | sed 's/^-//; s/-$//')
+      ;;
+  esac
+  SPLIT_BRANCH="${PHASE_BRANCH}-${SPLIT_SLUG}"
+  if ! [[ "$SPLIT_BRANCH" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Invalid split branch derived from $split_file: $SPLIT_BRANCH" >&2
+    exit 1
+  fi
+  SPLIT_BRANCHES="${SPLIT_BRANCHES}${SPLIT_BRANCH}"$'\n'
+  SPLIT_PLAN="${SPLIT_PLAN}${split_file}"$'\t'"${SPLIT_BRANCH}"$'\n'
+done <<< "$PHASE_ACTIVE_SPLIT_FILES"
+
+SPLIT_BRANCH_TOTAL=$(printf '%s' "$SPLIT_BRANCHES" | grep -c .)
+SPLIT_BRANCH_UNIQUE=$(printf '%s' "$SPLIT_BRANCHES" | sort -u | grep -c .)
+if [ "$SPLIT_BRANCH_TOTAL" -ne "$SPLIT_BRANCH_UNIQUE" ]; then
+  echo "Split branch names collide across this phase's split files" >&2
+  exit 1
+fi
 ```
 
-Validate both against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` (the same regex Step 1.7 already validated `PHASE_BRANCH` against). If either fails, release the claim (see Release the Claim on Abort), report the invalid branch name, and STOP — do not create any worktree. (In practice this can only fail if `PHASE_BRANCH` itself changed since Step 1.7's own validation; the check is defense-in-depth, not expected to trigger.)
+Every derived name is validated against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` — the same regex Step 1.7 already validated `PHASE_BRANCH` against — **before any worktree is created**, and the whole set is checked for collisions (two members whose slugs coincide would otherwise share one branch and silently interleave their commits). On any failure: release the claim (see Release the Claim on Abort), report the offending file and branch name, and STOP — create no worktree.
+
+`SPLIT_PROJECT` itself is rejected on traversal shapes and on any character outside `^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$` — the same two guards, in the same order, that Step 0.9's flat per-repo loop applies to the same field, so the two sides stay diffable. The reason is **not** branch safety: `slugify` above maps every character outside `[A-Za-z0-9_-]` to `-`, so the derived branch already satisfies its own regex no matter what `SPLIT_PROJECT` holds. The reason is that `SPLIT_PROJECT` is echoed **verbatim** — never through the slug — into the Aggregated Completion Report's `Project:` line and into each spawned Task's `description`, so an unvalidated value reaches both the human reader and a sub-agent prompt unfiltered. Unlike the flat side, `SPLIT_PROJECT` is never joined onto a filesystem path here (every split worktree nests under `$PHASE_CONTAINER_PATH`), which is why this guard is about what the value can *say*, not where it can point.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -1000,167 +1340,180 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
 ```
 
+For a legacy pair the two basenames yield the slugs `frontend` and `backend`, so the derived branches are exactly `${PHASE_BRANCH}-frontend` and `${PHASE_BRANCH}-backend` — unchanged from before. For a project split, `apps/web` yields `${PHASE_BRANCH}-apps-web` and the root group (`project` = `.`) yields `${PHASE_BRANCH}-root`.
+
+Carry each active member's resolved `(split_file, SPLIT_PROJECT, SPLIT_SLUG, SPLIT_BRANCH, SPLIT_WORKTREE_PATH)` tuple forward — the worktree, dev-server, spawn, report, merge, and cleanup passes below all iterate that same ordered list. `SPLIT_PLAN` is that list materialized for the shell: one tab-separated `<split_file>\t<SPLIT_BRANCH>` line per active member, in the same order as `SPLIT_BRANCHES`. A pass that needs both halves of a member's tuple reads `SPLIT_PLAN`; a pass that needs only the branch reads `SPLIT_BRANCHES`. **No per-member value is ever left in a bare scalar for a later step to read** — a scalar assigned inside a loop holds only the last member's value by the time the loop ends, which silently applies one member's decision to every other member.
+
 ### Create Split Worktrees
+
+One worktree per active split file, each branched from `$PHASE_BRANCH`:
 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
 cd "$PHASE_CONTAINER_PATH"
-$WORKTREE_MGR create "$FRONTEND_BRANCH" --from "$PHASE_BRANCH"
-$WORKTREE_MGR create "$BACKEND_BRANCH" --from "$PHASE_BRANCH"
+while IFS= read -r split_branch; do
+  [ -n "$split_branch" ] || continue
+  $WORKTREE_MGR create "$split_branch" --from "$PHASE_BRANCH"
+done <<< "$SPLIT_BRANCHES"
 ```
 
-CWD is `$PHASE_CONTAINER_PATH` — never `$DEFAULT_BRANCH`'s checkout, never `AIMI_ROOT` — so, mirroring the CWD rule `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Mode: Worktree Naming and CWD already establishes for individual story worktrees, both split worktrees nest at `$PHASE_CONTAINER_PATH/.worktrees/$FRONTEND_BRANCH` and `$PHASE_CONTAINER_PATH/.worktrees/$BACKEND_BRANCH` — inside the phase container's own worktree tree, not a sibling of it under `AIMI_ROOT/.worktrees/`, and branched from `$PHASE_BRANCH`, not `$DEFAULT_BRANCH`.
+CWD is `$PHASE_CONTAINER_PATH` — never `$DEFAULT_BRANCH`'s checkout, never `AIMI_ROOT` — so, mirroring the CWD rule `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Mode: Worktree Naming and CWD already establishes for individual story worktrees, every split worktree nests at `$PHASE_CONTAINER_PATH/.worktrees/<its own split branch>` — inside the phase container's own worktree tree, not a sibling of it under `AIMI_ROOT/.worktrees/`, and branched from `$PHASE_BRANCH`, not `$DEFAULT_BRANCH`. Each member's path is therefore deterministic:
 
 ```bash
-FRONTEND_WORKTREE_PATH="$PHASE_CONTAINER_PATH/.worktrees/$FRONTEND_BRANCH"
-BACKEND_WORKTREE_PATH="$PHASE_CONTAINER_PATH/.worktrees/$BACKEND_BRANCH"
+SPLIT_WORKTREE_PATH="$PHASE_CONTAINER_PATH/.worktrees/$SPLIT_BRANCH"
 ```
 
 ### Split Container Dev Server Bootstrap
 
-Independently for each split — never against `PHASE_CONTAINER_PATH` itself, since no story ever lands directly on the un-merged phase branch — gate on that split's own tasks file having at least one visual story, mirroring Phase Container Dev Server Bootstrap's gate above exactly, scoped one level deeper:
+Independently for each active split — never against `PHASE_CONTAINER_PATH` itself, since no story ever lands directly on the un-merged phase branch — gate on that split's **own** tasks file having at least one visual story, mirroring Phase Container Dev Server Bootstrap's gate above exactly, scoped one level deeper. Each member computes its own gate; no member's count ever gates another's:
+
+This block **computes** the gates; it starts no server. It emits one plan line per active member — `<SPLIT_BRANCH>\t<true|false>` — because the delegation that consumes the gate happens after the loop, and a bare `HAS_VISUAL_STORY` would by then hold only the *last* member's value:
 
 ```bash
-FE_VISUAL_STORIES=$(jq '[.userStories[] | select(.verification | type == "object" and .strategy == "visual")] | length' "$PHASE_FE_TASKS" 2>/dev/null)
-BE_VISUAL_STORIES=$(jq '[.userStories[] | select(.verification | type == "object" and .strategy == "visual")] | length' "$PHASE_BE_TASKS" 2>/dev/null)
+SPLIT_SERVER_PLAN=""
+while IFS=$'\t' read -r split_file split_branch; do
+  [ -n "$split_file" ] || continue
+  SPLIT_VISUAL_STORIES=$(jq '[.userStories[]? | select(.verification | type == "object" and .strategy == "visual")] | length' "$split_file" 2>/dev/null)
+  if [ "${SPLIT_VISUAL_STORIES:-0}" -gt 0 ]; then
+    HAS_VISUAL_STORY=true
+  else
+    HAS_VISUAL_STORY=false
+  fi
+  SPLIT_SERVER_PLAN="${SPLIT_SERVER_PLAN}${split_branch}"$'\t'"${HAS_VISUAL_STORY}"$'\n'
+done <<< "$SPLIT_PLAN"
 ```
 
-For each split, delegate to **Bootstrap a Container Dev Server** with `EXEC_ROOT="$PHASE_CONTAINER_PATH"` (the same CWD Create Split Worktrees above already used to create both worktrees) and `HAS_VISUAL_STORY` derived from that split's own count above: `EXEC_BRANCH="$FRONTEND_BRANCH"` with `HAS_VISUAL_STORY` true when `FE_VISUAL_STORIES > 0` for the frontend, `EXEC_BRANCH="$BACKEND_BRANCH"` with `HAS_VISUAL_STORY` true when `BE_VISUAL_STORIES > 0` for the backend.
+Then iterate `$SPLIT_SERVER_PLAN` — one delegation per line, never one delegation reading a leftover scalar. For each line, delegate to **Bootstrap a Container Dev Server** with `EXEC_ROOT="$PHASE_CONTAINER_PATH"` (the same CWD Create Split Worktrees above already used to create every worktree), `EXEC_BRANCH` set to **that line's** first field, and `HAS_VISUAL_STORY` set to **that line's** second field. Read `HAS_VISUAL_STORY` only from the plan line being processed; its value after the loop above belongs to whichever member happened to be last and is meaningless for every other member. Getting this wrong fails in both directions: a pure-API split inherits a visual sibling's `true` and gets a server it must never get, or a visual split inherits an API sibling's `false`, gets no server, and cannot run the visual verification its stories require.
 
-A split with no visual story (e.g. a pure-API backend) never gets nor blocks on a server — its gate simply fails, exactly like the single-file bootstrap above. Every port is discarded here too — re-resolved fresh via `serve url` at the point each split sub-orchestrator's own Step 3.3 / Step 4 call sites need it. A split sub-orchestrator's spawn prompt pre-sets `PHASE_MODE=true`, `PHASE_BRANCH=[its own split branch]`, and `PHASE_CONTAINER_PATH=[its own split worktree path]` (see Spawn Split Sub-Orchestrators below), so its own copies of Open Visual Follow Session and Step 4's post-merge visual verification apply unmodified — no split-specific code path is needed at either call site.
+A split with no visual story (e.g. a pure-API service) never gets nor blocks on a server — its gate simply fails, exactly like the single-file bootstrap above. Every port is discarded here too — re-resolved fresh via `serve url` at the point each split sub-orchestrator's own Step 3.3 / Step 4 call sites need it. A split sub-orchestrator's spawn prompt pre-sets `PHASE_MODE=true`, `PHASE_BRANCH=[its own split branch]`, and `PHASE_CONTAINER_PATH=[its own split worktree path]` (see Spawn Split Sub-Orchestrators below), so its own copies of Open Visual Follow Session and Step 4's post-merge visual verification apply unmodified — no split-specific code path is needed at either call site. Two members never collide on a `dev-server.json` entry either: `serve start` keys state by the container's absolute resolved path, which is unique per split branch.
 
-**Documented limitation — no proxy between split servers:** when a story's page depends on an API served by the sibling split's container, its visual verification runs only against its own split's server; there is no proxy between the two. A broken API call or failed visual check caused solely by this is expected, not a bug — it must never block the wave and never trigger a retry.
+**Documented limitation — no proxy between split servers:** when a story's page depends on an API served by a sibling split's container, its visual verification runs only against its own split's server; there is no proxy between them, for any N. A broken API call or failed visual check caused solely by this is expected, not a bug — it must never block the wave and never trigger a retry.
 
 ### Spawn Split Sub-Orchestrators
 
-Report:
+Report — one line per active split file, never a fixed two-slot Frontend/Backend list:
+
 ```
-Phase [PHASE_ID] full-stack split detected:
-  Frontend: [PHASE_FE_TASKS] (branch: [FRONTEND_BRANCH])
-  Backend:  [PHASE_BE_TASKS] (branch: [BACKEND_BRANCH])
+Phase [PHASE_ID] split detected ([PHASE_ACTIVE_COUNT] members):
+  [1/PHASE_ACTIVE_COUNT] [split_file] → project: [SPLIT_PROJECT] (branch: [SPLIT_BRANCH])
+  [2/PHASE_ACTIVE_COUNT] [split_file] → project: [SPLIT_PROJECT] (branch: [SPLIT_BRANCH])
+  ...
 
 Spawning parallel execution flows inside the phase container...
 ```
 
-In a **single tool-call turn**, emit two foreground Tasks. Each runs execute.md's **Steps 2–5 only** — never Step 1's Phase Mode Detection and never Step 1.7's Phase Claim, both of which are already resolved by this parent session; a sub-orchestrator that re-derived or re-claimed the phase itself would either double-claim it or (since it has a different session identity than the parent) fail the claim outright:
+In a **single tool-call turn**, emit one foreground Task per active split file — `PHASE_ACTIVE_COUNT` Tasks in total (two for a legacy pair, three for a three-way project split, N for N). Never one turn per member; that would serialize them. Each Task runs execute.md's **Steps 2–5 only** — never Step 1's Phase Mode Detection and never Step 1.7's Phase Claim, both of which are already resolved by this parent session; a sub-orchestrator that re-derived or re-claimed the phase itself would either double-claim it or (since it has a different session identity than the parent) fail the claim outright:
 
 ```
+For each active split file (loop over PHASE_ACTIVE_SPLIT_FILES, all Task( calls in one turn):
+
 Task(
     subagent_type: "general-purpose",
     model: <AGENT_MODELS.executor when not "inherit">,
-    description: "Execute frontend split for phase [PHASE_ID]: [PHASE_FE_TASKS]",
+    description: "Execute split for phase [PHASE_ID]: [split_file basename]",
     prompt: [execute.md Steps 2–5, with the following pre-set — do not re-derive:
         - PHASE_MODE = true
-        - PHASE_BRANCH = [FRONTEND_BRANCH]
-        - PHASE_CONTAINER_PATH = [FRONTEND_WORKTREE_PATH]
-        - PHASE_TASKS_PATH = [PHASE_FE_TASKS]   (Step 3.2 reads maxConcurrency from this)
-        - $AIMI_CLI init-session --file [PHASE_FE_TASKS]
+        - PHASE_BRANCH = [that member's SPLIT_BRANCH]
+        - PHASE_CONTAINER_PATH = [that member's SPLIT_WORKTREE_PATH]
+        - PHASE_TASKS_PATH = [that split_file]   (Step 3.2 reads maxConcurrency from this)
+        - $AIMI_CLI init-session --file [that split_file]
         - Skip Step 2's Main Repo Branch Setup (PHASE_MODE=true skips it exactly as
           the single-file case already does) and skip Step 1.7 entirely
         - Run Step 3 onward (reset-orphaned, validate-stories, wave loop, Post-Loop
           Cleanup) using the container-execution.md § Phase Mode: Worktree Naming
           and CWD Execution Context contract exactly as written, with the pre-set
-          PHASE_BRANCH/PHASE_CONTAINER_PATH
-          above standing in for the outer phase's own values — so this
-          sub-orchestrator's own story worktrees are named
-          "[FRONTEND_BRANCH]-[story.id]", created --from [FRONTEND_BRANCH], and
-          merged via merge-all --into [FRONTEND_BRANCH] with CWD inside
-          [FRONTEND_WORKTREE_PATH]
+          PHASE_BRANCH/PHASE_CONTAINER_PATH above standing in for the outer phase's
+          own values — so this sub-orchestrator's own story worktrees are named
+          "[SPLIT_BRANCH]-[story.id]", created --from [SPLIT_BRANCH], and merged
+          via merge-all --into [SPLIT_BRANCH] with CWD inside [SPLIT_WORKTREE_PATH]
         - Skip this file's own Phase Completion section and Step 5 entirely — the
-          parent aggregates completion after both Tasks return (see below)
-        - PROJECT_GUIDELINES = PROJECT_GUIDELINES
-    ]
-)
-
-Task(
-    subagent_type: "general-purpose",
-    model: <AGENT_MODELS.executor when not "inherit">,
-    description: "Execute backend split for phase [PHASE_ID]: [PHASE_BE_TASKS]",
-    prompt: [execute.md Steps 2–5, with the following pre-set — do not re-derive:
-        - PHASE_MODE = true
-        - PHASE_BRANCH = [BACKEND_BRANCH]
-        - PHASE_CONTAINER_PATH = [BACKEND_WORKTREE_PATH]
-        - PHASE_TASKS_PATH = [PHASE_BE_TASKS]
-        - $AIMI_CLI init-session --file [PHASE_BE_TASKS]
-        - Same substitutions as the frontend Task above, scoped to the backend
-          split: story worktrees "[BACKEND_BRANCH]-[story.id]", created --from
-          [BACKEND_BRANCH], merged via merge-all --into [BACKEND_BRANCH] with CWD
-          inside [BACKEND_WORKTREE_PATH]
-        - Skip this file's own Phase Completion section and Step 5, exactly as the
-          frontend Task
+          parent aggregates completion after every Task returns (see below)
         - PROJECT_GUIDELINES = PROJECT_GUIDELINES
     ]
 )
 ```
 
-Each sub-orchestrator's individual story-level merges therefore land on its **own** split branch (`[FRONTEND_BRANCH]` / `[BACKEND_BRANCH]`) — never `$DEFAULT_BRANCH`, never `AIMI_ROOT`, and never the sibling split's worktree or branch. This reuses the existing phase-mode Step 4 wave-loop machinery unmodified, one level deeper, with the split worktree standing in for the outer `PHASE_CONTAINER_PATH` and the split branch standing in for the outer `PHASE_BRANCH`.
+Each sub-orchestrator's individual story-level merges therefore land on its **own** split branch — never `$DEFAULT_BRANCH`, never `AIMI_ROOT`, and never any sibling split's worktree or branch. This reuses the existing phase-mode Step 4 wave-loop machinery unmodified, one level deeper, with the split worktree standing in for the outer `PHASE_CONTAINER_PATH` and the split branch standing in for the outer `PHASE_BRANCH`.
 
-After both Tasks return, collect each one's completed-story count and failure list.
+After every Task returns, collect each one's completed-story count and failure list.
 
 #### Nested Concurrency
 
-Each split's own `metadata.maxConcurrency` governs only its own sub-orchestrator's wave loop — the frontend split's limit never governs the backend split's worktree creation, or vice versa, and neither is governed by the phase's `roadmap.json` or by any single phase-level tasks file (there is none, in split mode). This falls out of the existing worktree-budget pre-bash-dispatcher hook with **no code change**: `_select_governing_tasks_file` (`hooks/pre-bash-dispatcher.py`) picks the candidate tasks file among every `.aimi/tasks/**/*-tasks.json` whose `metadata.branchName` exactly matches the git branch checked out at the `git worktree add` command's CWD. A story worktree created inside the frontend sub-orchestrator's wave loop runs with CWD inside `$FRONTEND_WORKTREE_PATH` (branch `$FRONTEND_BRANCH`); `plan.md`'s Phase 4 metadata patch writes the frontend split file's `metadata.branchName` as exactly that same value (see Phase 3e/Phase 4's `--phase-aware` composition), so the hook's branch-match resolves to the frontend split's own file uniquely — the backend file's `metadata.branchName` differs (`...-backend`), so it never matches.
+Each split's own `metadata.maxConcurrency` governs only its own sub-orchestrator's wave loop. **No split's limit ever governs any other split's worktree creation or wave loop, for any N** — and none of them is governed by the phase's `roadmap.json` or by any single phase-level tasks file (there is none, in split mode). This falls out of the existing worktree-budget pre-bash-dispatcher hook with **no code change**: `_select_governing_tasks_file` (`hooks/pre-bash-dispatcher.py`) picks the candidate tasks file among every `.aimi/tasks/**/*-tasks.json` whose `metadata.branchName` exactly matches the git branch checked out at the `git worktree add` command's CWD. A story worktree created inside a given sub-orchestrator's wave loop runs with CWD inside that member's own split worktree (branch = that member's own split branch); `plan.md`'s Phase 4 metadata patch writes each split file's `metadata.branchName` as exactly that same value (see Phase 3e/Phase 4's `--phase-aware` composition), so the hook's branch-match resolves to that member's own file uniquely — every sibling's `metadata.branchName` differs (the branch names are collision-checked in Derive and Validate Split Branch Names above), so none of them ever matches.
 
 ### Aggregated Completion Report (Phase-Mode Paired Split)
 
-Report — computed against `$PHASE_BRANCH`, never `$DEFAULT_BRANCH`:
+Report — computed against `$PHASE_BRANCH`, never `$DEFAULT_BRANCH`. Exactly one block per **active** split file; a member skipped for having no pending stories contributes no block and no "0 stories completed" line anywhere:
 
 ```
-## Execution Complete (Phase [PHASE_ID] — Paired Mode)
+## Execution Complete (Phase [PHASE_ID] — Split Mode)
 
-Frontend file: [PHASE_FE_TASKS]
-  Branch: [FRONTEND_BRANCH]
-  Stories completed: [count from frontend Task result]
-  Commits: git -C "$PHASE_CONTAINER_PATH" log --oneline [PHASE_BRANCH]..[FRONTEND_BRANCH] | wc -l
+For each active split file, one block:
 
-Backend file: [PHASE_BE_TASKS]
-  Branch: [BACKEND_BRANCH]
-  Stories completed: [count from backend Task result]
-  Commits: git -C "$PHASE_CONTAINER_PATH" log --oneline [PHASE_BRANCH]..[BACKEND_BRANCH] | wc -l
+[split_file]
+  Project: [SPLIT_PROJECT]
+  Branch: [SPLIT_BRANCH]
+  Stories completed: [count from that member's Task result]
+  Commits: git -C "$PHASE_CONTAINER_PATH" log --oneline [PHASE_BRANCH]..[SPLIT_BRANCH] | wc -l
 
-Total stories: [frontend_count + backend_count]
-Total commits: [frontend_commits + backend_commits]
+Total stories: [sum of every active split file's completed count]
+Total commits: [sum of every active split file's commit count]
 ```
 
-This report is computed **before** the merge below, while `[FRONTEND_BRANCH]`/`[BACKEND_BRANCH]` are still ahead of `$PHASE_BRANCH` — after the merge the same `git log` range would read zero and the counts would no longer be informative.
+Both `Total` lines are sums across **all** active split files, not two named Frontend/Backend slots. This report is computed **before** the merge below, while every split branch is still ahead of `$PHASE_BRANCH` — after the merge the same `git log` ranges would all read zero and the counts would no longer be informative.
 
 ### Merge Split Branches Into the Phase Branch
+
+One `merge-all` call listing **every** active split branch:
 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
 cd "$PHASE_CONTAINER_PATH"
-$WORKTREE_MGR merge-all "$FRONTEND_BRANCH" "$BACKEND_BRANCH" --into "$PHASE_BRANCH"
+set --
+while IFS= read -r split_branch; do
+  [ -n "$split_branch" ] || continue
+  set -- "$@" "$split_branch"
+done <<< "$SPLIT_BRANCHES"
+if [ "$#" -gt 0 ]; then
+  $WORKTREE_MGR merge-all "$@" --into "$PHASE_BRANCH"
+fi
 ```
 
-This is the same `merge-all ... --into` primitive Step 4's own wave loop already uses for individual story branches, reused here for the two split branches: the merge target is `$PHASE_BRANCH`, executed with CWD inside the phase container's own worktree (`$PHASE_CONTAINER_PATH`) — never `$DEFAULT_BRANCH`, never `AIMI_ROOT`. Centralizing both merges in this parent step (rather than having each sub-orchestrator merge into `$PHASE_BRANCH` itself, mid-flight, from its own worktree) avoids two parallel Tasks racing a `git checkout`/`git merge` against the same `$PHASE_CONTAINER_PATH` working directory at once; running them sequentially here, after both Tasks have already returned, is safe by construction. This step is also what makes Phase Completion's Creates Verification (below) meaningful: it inspects `$PHASE_CONTAINER_PATH`'s actual tracked files, which only reflect both splits' work once this merge has landed.
+The argv is built with positional parameters and the same `while IFS= read -r ... done <<<` pattern every other loop in this file uses. **Do not substitute bash 4's read-into-array builtin here.** It is a bash-only builtin: it does not exist in zsh, and it does not exist in the bash 3.2 that ships as `/bin/bash` on macOS. Where it is missing the read fails, the array stays empty, and the arity guard turns that failure into a **silent no-op** — every split branch stays unmerged, `$PHASE_BRANCH` keeps none of the work, and the flow proceeds to Creates Verification, which inspects `$PHASE_CONTAINER_PATH`'s tracked files and can only pass because this merge landed. A no-op here is therefore not a degraded merge, it is a phase that reports success having landed nothing. Verified: under zsh the array read fails, the guard swallows it, and the block exits 0 having merged nothing; the positional-parameter form above builds the identical argv under both bash and zsh.
 
-**On merge conflict:** mirrors the existing per-wave conflict handling (Step 4) exactly — report the conflicting files, clean up both split worktrees (the conflict lives in `$PHASE_CONTAINER_PATH`'s own working directory, not in the source worktrees, so removing them is safe), release the claim (see Release the Claim on Abort), and STOP:
+This is the same `merge-all ... --into` primitive Step 4's own wave loop already uses for individual story branches, reused here for the split branches: the merge target is `$PHASE_BRANCH`, executed with CWD inside the phase container's own worktree (`$PHASE_CONTAINER_PATH`) — never `$DEFAULT_BRANCH`, never `AIMI_ROOT`. Centralizing every merge in this parent step (rather than having each sub-orchestrator merge into `$PHASE_BRANCH` itself, mid-flight, from its own worktree) avoids N parallel Tasks racing a `git checkout`/`git merge` against the same `$PHASE_CONTAINER_PATH` working directory at once; running them sequentially here, after every Task has already returned, is safe by construction. This step is also what makes Phase Completion's Creates Verification (below) meaningful: it inspects `$PHASE_CONTAINER_PATH`'s actual tracked files, which only reflect every split's work once this merge has landed.
+
+**On merge conflict:** mirrors the existing per-wave conflict handling (Step 4) exactly — report the conflicting files, clean up every split worktree (the conflict lives in `$PHASE_CONTAINER_PATH`'s own working directory, not in the source worktrees, so removing them is safe), release the claim (see Release the Claim on Abort), and STOP:
 
 ```
 MERGE CONFLICT while merging phase [PHASE_ID]'s split branches into [PHASE_BRANCH].
+Split branches merged: [one line per active split branch]
 Conflicting files:
 [conflict output from merge-all]
 
 Resolve the conflict on branch [PHASE_BRANCH] in [PHASE_CONTAINER_PATH] and re-run
-`/aimi:execute` to continue. Both split files' stories are already marked complete —
+`/aimi:execute` to continue. Every split file's stories are already marked complete —
 re-running will not re-execute them, only retry this merge and the phase-completion
 checks that follow it.
 
 The phase container [PHASE_CONTAINER_PATH] itself — and any live dev server running
-inside it — is left untouched by this failure; only the two split worktrees above are
+inside it — is left untouched by this failure; only the split worktrees above are
 removed.
 ```
 
-Before cleaning up both split worktrees, stop each split's own dev server — an orphaned server would otherwise keep holding its port after its worktree is gone:
+Before cleaning up the split worktrees, stop each split's own dev server — an orphaned server would otherwise keep holding its port after its worktree is gone. One iteration per active split branch, never a fixed pair of calls:
 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
 cd "$PHASE_CONTAINER_PATH"
-$WORKTREE_MGR serve stop "$FRONTEND_BRANCH"
-$WORKTREE_MGR serve stop "$BACKEND_BRANCH"
+while IFS= read -r split_branch; do
+  [ -n "$split_branch" ] || continue
+  $WORKTREE_MGR serve stop "$split_branch"
+  $WORKTREE_MGR remove "$split_branch"
+done <<< "$SPLIT_BRANCHES"
 ```
 
 ```bash
@@ -1171,25 +1524,28 @@ $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
 
 ### Clean Up Split Worktrees
 
-Only reached once the merge above succeeds. Stop each split's own dev server first — same ordering rule as the merge-conflict path above, so neither split's server outlives its own worktree:
+Only reached once the merge above succeeds. Stop each split's own dev server first — same ordering rule as the merge-conflict path above, so no split's server outlives its own worktree. One iteration per active split branch:
 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
 cd "$PHASE_CONTAINER_PATH"
-$WORKTREE_MGR serve stop "$FRONTEND_BRANCH"
-$WORKTREE_MGR serve stop "$BACKEND_BRANCH"
-$WORKTREE_MGR remove "$FRONTEND_BRANCH"
-$WORKTREE_MGR remove "$BACKEND_BRANCH"
+while IFS= read -r split_branch; do
+  [ -n "$split_branch" ] || continue
+  $WORKTREE_MGR serve stop "$split_branch"
+  $WORKTREE_MGR remove "$split_branch"
+done <<< "$SPLIT_BRANCHES"
 ```
 
-`serve stop` exits 0 and reports "No dev server registered" when no server was ever started for a split (its own gate in Split Container Dev Server Bootstrap never passed) — so both calls above are always safe to issue, identical to container-execution.md's Container Mode: Stop the Dev Server contract (invoked from Step 5).
+`serve stop` exits 0 and reports "No dev server registered" when no server was ever started for a split (its own gate in Split Container Dev Server Bootstrap never passed) — so every call above is always safe to issue, identical to container-execution.md's Container Mode: Stop the Dev Server contract (invoked from Step 5).
 
-Removes only the two split worktrees. `$PHASE_CONTAINER_PATH` itself is left intact — its removal is a separate, later-timed operation owned entirely by Phase Completion's own lifecycle (the phase container is only ever torn down once the *phase* — not just this split — is fully done), never by this section.
+Removes only the split worktrees this run created. `$PHASE_CONTAINER_PATH` itself is left intact — its removal is a separate, later-timed operation owned entirely by Phase Completion's own lifecycle (the phase container is only ever torn down once the *phase* — not just this split — is fully done), never by this section.
+
+**Why no `--keep-branch` here, unlike Step 0.9's Aggregated Completion (Split Mode).** The flat flow passes `--keep-branch` when it cleans up *its* split worktrees; this section deliberately does not, so `remove` also runs `git branch -D` on each split branch. The difference is what the branch still owes: a flat split branch is the run's final deliverable that the user is told to open a PR from, whereas a phase split branch is an intermediate that Merge Split Branches Into the Phase Branch — which this section only runs *after* — has already merged into `$PHASE_BRANCH`. Its commits are reachable from the phase branch, so the branch ref itself has no remaining consumer and keeping it would only accumulate one dead ref per member per phase. `$PHASE_BRANCH` is what carries the work forward from here, and nothing deletes it.
 
 ### Continue to Phase Completion
 
-Proceed to the **Phase Completion** section below with `PHASE_SPLIT_MODE=true` still in scope. Its "phase's own pending count is zero" gate and Creates Verification step both branch on `PHASE_SPLIT_MODE` — see **Multi-File Pending Count** in Phase Completion. Once Phase Completion (if it ran) has produced its own report, the **Aggregated Completion Report** above is what replaces this file's normal Step 5 — do not additionally run Step 5's single-file reporting for either split file.
+Proceed to the **Phase Completion** section below with `PHASE_SPLIT_MODE=true` and `$PHASE_SPLIT_FILES` still in scope. Its "phase's own pending count is zero" gate and Creates Verification step both branch on `PHASE_SPLIT_MODE` — see **Multi-File Pending Count** in Phase Completion, which sums over every member of `$PHASE_SPLIT_FILES`, not a fixed pair. Once Phase Completion (if it ran) has produced its own report, the **Aggregated Completion Report** above is what replaces this file's normal Step 5 — do not additionally run Step 5's single-file reporting for any split file.
 
 ## Step 2: Branch Setup
 
@@ -2225,12 +2581,12 @@ This is ADDITIVE to the existing `Wave [wave] complete: ...` line — does not r
 Runs once, and before Step 5. Its trigger point depends on whether this phase used a full-stack split:
 
 - **Single-file phase (`PHASE_SPLIT_MODE=false`, unchanged):** immediately after Post-Loop Cleanup and the Visual Follow Session note above.
-- **Full-stack split phase (`PHASE_SPLIT_MODE=true`):** from Phase-Mode Paired Split's **Continue to Phase Completion** step, after both split sub-orchestrators have returned, their branches have been merged into `$PHASE_BRANCH`, and their worktrees have been cleaned up.
+- **Full-stack split phase (`PHASE_SPLIT_MODE=true`):** from Phase-Mode Paired Split's **Continue to Phase Completion** step, after **every** split sub-orchestrator has returned (`PHASE_ACTIVE_COUNT` of them, for any N — not a fixed two), all their branches have been merged into `$PHASE_BRANCH` in the single `merge-all` call, and all their worktrees have been cleaned up.
 
 It fires only when **both** are true:
 
 - `PHASE_MODE == true` (see Phase Mode Detection in Step 1)
-- the phase's own pending count is zero — see **Multi-File Pending Count** immediately below for how this is computed; when it is greater than 0, the wave loop (or, in split mode, one or both sub-orchestrators) broke on deadlock or a gate-blocked wave, not true completion — release the claim (see Release the Claim on Abort; this section runs only in the top-level orchestrator that itself claimed the phase, so `$PHASE_ID` is always set here) and skip this entire section, going straight to Step 5 (single-file) or the Aggregated Completion Report (split mode, already produced by Phase-Mode Paired Split before this section was reached):
+- the phase's own pending count is zero — see **Multi-File Pending Count** immediately below for how this is computed; when it is greater than 0, the wave loop (or, in split mode, one or more of the sub-orchestrators) broke on deadlock or a gate-blocked wave, not true completion — release the claim (see Release the Claim on Abort; this section runs only in the top-level orchestrator that itself claimed the phase, so `$PHASE_ID` is always set here) and skip this entire section, going straight to Step 5 (single-file) or the Aggregated Completion Report (split mode, already produced by Phase-Mode Paired Split before this section was reached):
 
   ```bash
   AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -2248,13 +2604,18 @@ $AIMI_CLI count-pending
 ```
 (`count-pending` reads the session's tracked tasks file, which Step 1.7 already repointed at `PHASE_TASKS_PATH`.)
 
-**When `PHASE_SPLIT_MODE=true`:** `count-pending`'s session-state read does not apply — Step 1.7's Detect a Full-Stack Split Inside This Phase step never pointed this session's state at a single governing file, because a split phase has none. Sum pending stories across both split files directly, by path, instead:
+**When `PHASE_SPLIT_MODE=true`:** `count-pending`'s session-state read does not apply — Step 1.7's Detect a Full-Stack Split Inside This Phase step never pointed this session's state at a single governing file, because a split phase has none. Sum pending stories across **every** member of the split directly, by path, instead — a loop over `$PHASE_SPLIT_FILES` (the full member list resolved in Step 1.7, not just the active subset), never a fixed pair of named variables:
 ```bash
-FRONTEND_PENDING=$(jq '[.userStories[] | select(.status == "pending")] | length' "$PHASE_FE_TASKS")
-BACKEND_PENDING=$(jq '[.userStories[] | select(.status == "pending")] | length' "$PHASE_BE_TASKS")
-PHASE_PENDING=$((FRONTEND_PENDING + BACKEND_PENDING))
+PHASE_PENDING=0
+while IFS= read -r split_file; do
+  [ -n "$split_file" ] || continue
+  SPLIT_FILE_PENDING=$(jq '[.userStories[]? | select((.status // "pending") != "completed")] | length' "$split_file")
+  PHASE_PENDING=$((PHASE_PENDING + ${SPLIT_FILE_PENDING:-0}))
+done <<< "$PHASE_SPLIT_FILES"
 ```
-The phase's split work only counts as complete when `PHASE_PENDING` is `0` — i.e. **both** files report zero pending stories, not just one.
+The phase's split work only counts as complete when `PHASE_PENDING` is `0` — i.e. **every** member reports zero outstanding stories, not just the first two. Summing over the full member list rather than `$PHASE_ACTIVE_SPLIT_FILES` is deliberate: a member skipped as inactive contributes `0` either way, but reading the full list keeps this count correct even if a sibling session touched a member between Step 1.7's filter and now.
+
+The predicate is `(.status // "pending") != "completed"` — **not** `.status == "pending"` — so that this count and Step 1.7's **Active Split Files** filter answer the same question over the same file. The two must agree: Active Split Files decides which members get spawned, and this count decides whether the phase may close. Counting only `"pending"` here would treat `in_progress` (and any status a future story adds, and a story with no `status` field at all) as finished, letting a phase reach `roadmap-set-status --status completed` with a story still mid-flight — while Active Split Files, using `!= "completed"`, would have kept that same member active. `completed` is the only terminal status, so testing against it directly is what makes both sites correct by the same rule instead of by two lists of non-terminal statuses that can drift apart.
 
 **For legacy flat v3.3 tasks.json files (`PHASE_MODE=false`): skip this entire section.** Step 5 runs completely unchanged only for inline-mode executions (`CONTAINER_MODE=false`, the default) — exactly as it does today. Container-mode flat executions (`CONTAINER_MODE=true`, still `PHASE_MODE=false`) also skip this Phase Completion section — a claimed phase's own container is a separate concept from a flat container-mode container — but Step 5 itself runs an additional completion path for them; see the CONTAINER_MODE scope note under Step 5: Completion below.
 
@@ -2273,7 +2634,7 @@ PHASE_NAME=$(printf '%s' "$PHASE_JSON" | jq -r '.name')
 
 For every entry the phase declared in `roadmap.json`'s `creates[]`, confirm the artifact is actually present in the phase branch's code — not merely that some other phase's `needs` resolved against it. This is a distinct, stricter check than `validate-contracts`: `validate-contracts` (outline 03) answers "does a `needs` entry have a completed, handoff-documented provider," using `roadmap.json` and `handoff.md` as its only inputs, and never inspects source code. This check answers "does this phase's own promised artifact exist," by inspecting the phase container's actual tracked files.
 
-**Split-mode timing (`PHASE_SPLIT_MODE=true`):** this check always runs against `$PHASE_CONTAINER_PATH`'s tracked files, unchanged — but by the time this section is reached in split mode, Phase-Mode Paired Split's Merge Split Branches Into the Phase Branch step has already landed both `$FRONTEND_BRANCH` and `$BACKEND_BRANCH` onto `$PHASE_BRANCH`, so `$PHASE_CONTAINER_PATH`'s checkout already reflects both splits' combined work. This check therefore verifies the merged phase branch state as a natural consequence of running after that merge — never either split branch in isolation — with no special-casing needed in the procedure below.
+**Split-mode timing (`PHASE_SPLIT_MODE=true`):** this check always runs against `$PHASE_CONTAINER_PATH`'s tracked files, unchanged — but by the time this section is reached in split mode, Phase-Mode Paired Split's Merge Split Branches Into the Phase Branch step has already landed **all N** of this phase's active split branches onto `$PHASE_BRANCH` in a single `merge-all` call, so `$PHASE_CONTAINER_PATH`'s checkout already reflects every split's combined work. This check therefore verifies the merged phase branch state as a natural consequence of running after that merge — never any one split branch in isolation — with no special-casing needed in the procedure below, and no dependence on how many splits there were.
 
 > **Cross-story flag for the auditor:** this story's brief describes creates verification as invoking "the outline:03 contract-validation CLI surface... in its phase-closure mode" (e.g. `validate-contracts <phase-id> --root <path>`) as an illustrative example. The landed `validate-contracts` (outline 03) has no `--root` flag or code-existence mode, and its own notes scope it exclusively to needs-vs-creates delivery resolution ("wiring validate-contracts and roadmap-sweep into plan.md and execute.md is owned by outline 08 and outline 11" — this story). Extending `validate-contracts`'s jq-only, roadmap.json-only logic to also grep real source files would be new scope outline 03 never claimed. This section therefore implements creates verification as its own orchestrator-side procedure below — the same pattern Console Error Attribution (above) already uses for judgment-requiring checks that need no new CLI call. Reconcile if a future story wants to fold this into `validate-contracts` instead.
 
@@ -2689,7 +3050,7 @@ The tasks file preserves all state. Re-running `/aimi:execute` will:
 
 **Phase mode:** re-running `/aimi:execute` for a phase this session already claimed and left `in_progress` does not error. `roadmap-claim`'s self-reclaim path (Step 1.7) reports the same phase again instead of a contention failure, and `$WORKTREE_MGR create "$PHASE_BRANCH" --from "$CONTAINER_BASE"` reuses the existing container directory silently since the target already exists — no separate reuse-detection logic is needed beyond calling both idempotently on every claim.
 
-**Phase mode with a full-stack split (`PHASE_SPLIT_MODE=true`):** the same idempotency extends to Phase-Mode Paired Split — `$WORKTREE_MGR create "$FRONTEND_BRANCH"/"$BACKEND_BRANCH" --from "$PHASE_BRANCH"` reuses each split worktree silently if a prior run left one in place, and re-spawning both sub-orchestrators is harmless: each one's own `init-session --file` points at a split file whose already-completed stories are skipped automatically (points 1–4 above), so a sub-orchestrator with nothing left pending returns immediately. This is also what makes retrying after a Merge Split Branches Into the Phase Branch conflict safe — re-running does not re-execute any story, only retries the merge and the Multi-File Pending Count / Creates Verification checks that follow it.
+**Phase mode with a split (`PHASE_SPLIT_MODE=true`):** the same idempotency extends to Phase-Mode Paired Split — `$WORKTREE_MGR create "$split_branch" --from "$PHASE_BRANCH"`, run once per active split branch, reuses each split worktree silently if a prior run left one in place, and re-spawning the sub-orchestrators is harmless: each one's own `init-session --file` points at a split file whose already-completed stories are skipped automatically (points 1–4 above), so a sub-orchestrator with nothing left pending returns immediately. A member that completed entirely on the prior run is dropped by Step 1.7's Active Split Files filter and never re-spawned at all. This is also what makes retrying after a Merge Split Branches Into the Phase Branch conflict safe — re-running does not re-execute any story, only retries the merge and the Multi-File Pending Count / Creates Verification checks that follow it.
 
 ### After /clear
 

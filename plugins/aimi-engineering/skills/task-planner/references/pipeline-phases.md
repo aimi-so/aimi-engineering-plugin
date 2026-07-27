@@ -489,16 +489,16 @@ Branch on `implementationScope` from Phase 0:
 
 ### When `implementationScope` is `"full-stack"`:
 
-This prose predates `aimi-cli.sh story-merge`; `/aimi:plan` Phase 3e now delegates the actual full-stack split to `story-merge --split full-stack` (function `_story_merge_write_split`) as the implementation of record — the steps below describe what that command does, not an algorithm to hand-run independently.
+This prose predates `aimi-cli.sh story-merge`; `/aimi:plan` Phase 3e now delegates the actual full-stack split to `story-merge --split full-stack` (functions `_story_merge_write_project_split` and `_story_merge_write_split`) as the implementation of record — the steps below describe what that command does, not an algorithm to hand-run independently.
 
-1. **Partition stories**: group staging stories by their normalized `project` field (trim, strip one trailing slash, blank treated as absent — `project` itself is never mutated in the output), then decide each group's output file by strict majority vote of the group's members' own file-pattern/keyword heuristic verdict, ties going to backend; a story with no `project`, and every story whenever the staging set contains fewer than 2 distinct `project` values (the monorepo guard), falls back to its own per-story heuristic verdict instead of the group vote — `project` is an N-ary sub-project repo path, not a binary frontend/backend tag, which is why the rule is a per-group majority vote rather than "project decides".
-2. **Assign unique IDs across both files**: frontend gets `US-001` to `US-N`, backend gets `US-(N+1)` to `US-M` — no ID collisions
-3. **Rebuild `dependsOn` independently per file**: cross-file references are still removed — each file's graph must stay self-contained because the two files execute as independent sessions — but the drop is no longer silent: story-merge emits one aggregated stderr banner reporting the dropped-edge and affected-story counts, enumerates only the resulting false-root stories (those that lost every dependency and thereby became wave-1 eligible), and records one `cross-file-dep-dropped` entry per affected story in `metadata.smellWarnings` of both output files.
-4. **Recompute `wave` numbers per file**: roots (`dependsOn: []`) are wave 1 within each file, independently
-5. **Derive separate `branchName` per file**: `type/[feature]-frontend` and `type/[feature]-backend` (e.g., `feat/add-user-auth-frontend`, `feat/add-user-auth-backend`)
-6. Derive shared metadata: title, type, createdAt, `schemaVersion: "3.3"`, `planPath: null`, `brainstormPath`, `researchDepth`, `maxConcurrency`
-7. Write frontend file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
-8. Write backend file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`
+1. **Pick the split axis first**: count distinct normalized `project` values across the merged set (trim, strip one trailing slash, blank/absent treated as null). **2 or more → PROJECT axis** (multi-repo): split by project, N output files, one per repo, with no frontend/backend decision anywhere on that path. **Fewer than 2 → SIDE axis** (single-repo/monorepo, including "no story has `project`" and "every story shares exactly one project"): the two-file frontend/backend split. `project` is an N-ary sub-project repo path, not a binary frontend/backend tag, so a multi-repo plan gets one file per repo instead of being force-fit into two side files.
+2. **Partition stories on the chosen axis**: on the PROJECT axis, group by normalized `project` — one file per group, groups ordered lexicographically by normalized path, project-less stories routed to the `"."` root group; normalization is grouping-only, so `project` itself is never mutated in the output. On the SIDE axis, classify each story by its own file-pattern/keyword heuristic verdict, unconditionally and per story.
+3. **Assign unique IDs across the whole output set**: contiguous `US-001` to `US-M`, in per-group blocks on the PROJECT axis (each repo's stories taking one contiguous run) or frontend `US-001` to `US-N` then backend `US-(N+1)` to `US-M` on the SIDE axis — no ID collisions across files.
+4. **Rebuild `dependsOn` independently per file**: cross-file references are still removed — each file's graph must stay self-contained because the files execute as independent sessions — but the drop is no longer silent: story-merge emits one aggregated stderr banner reporting the dropped-edge and affected-story counts, enumerates only the resulting false-root stories (those that lost every dependency and thereby became wave-1 eligible), and records one `cross-file-dep-dropped` entry per affected story in `metadata.smellWarnings` of every output file. Each entry is keyed by `project` on the PROJECT axis and by `side` on the SIDE axis (mutually exclusive).
+5. **Recompute `wave` numbers per file**: roots (`dependsOn: []`) are wave 1 within each file, independently
+6. **Derive a separate `branchName` per file**: on the PROJECT axis, one per repo derived from that group's slugified project path (e.g. `apps/web` → `feat/merged-apps-web`); on the SIDE axis, `type/[feature]-frontend` and `type/[feature]-backend` (e.g., `feat/add-user-auth-frontend`, `feat/add-user-auth-backend`).
+7. Derive shared metadata: title, type, createdAt, `schemaVersion: "3.3"`, `planPath: null`, `brainstormPath`, `researchDepth`, `maxConcurrency`
+8. **Write the output files**: PROJECT axis writes `.aimi/tasks/YYYY-MM-DD-[feature-name]-<project-slug>-tasks.json` per group, each carrying a self-describing `metadata.splitGroup` = `{project, index, total, siblings[]}`; two distinct projects that collide on the same slug hard-fail the merge before any file is written. SIDE axis writes `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json` and `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`.
 
 ### When `implementationScope` is `"frontend-only"`:
 
@@ -524,7 +524,7 @@ Standard single-file output to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json
 
 - **title**: Conventional format — `<type>: <Descriptive Name>`
 - **type**: `feat`, `ref`, `bug`, or `chore`
-- **branchName**: Kebab-case, prefixed with type. For split files: `type/[feature]-frontend` and `type/[feature]-backend`
+- **branchName**: Kebab-case, prefixed with type. For split files, one per output file: `type/[feature]-frontend` and `type/[feature]-backend` on the SIDE axis; `type/[feature]-<project-slug>` per project on the PROJECT axis
 - **createdAt**: Today's date (YYYY-MM-DD)
 - **planPath**: Always `null`
 - **brainstormPath**: Path to brainstorm if one was used, otherwise omit
@@ -550,11 +550,12 @@ Agent-mode fallback: compute the deficit (`floor(proto_elements * 0.6) - ac_anch
 
 ### Derive Filename
 
-- Full-stack: `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json` and `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`
+- Full-stack, PROJECT axis (2 or more distinct story `project` values — multi-repo): one file per project, `.aimi/tasks/YYYY-MM-DD-[feature-name]-<project-slug>-tasks.json`
+- Full-stack, SIDE axis (fewer than 2 distinct `project` values — single-repo/monorepo): `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json` and `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`
 - Frontend-only: `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
 - Legacy (no scope): `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 
-Strip type prefix, kebab-case the descriptive name, add date prefix and appropriate suffix.
+Strip type prefix, kebab-case the descriptive name, add date prefix and appropriate suffix. On the full-stack paths story-merge derives these names itself and returns them on stdout — read the list off that return value rather than rebuilding it here, since the PROJECT axis's surviving projects and slugs are only known at merge time.
 
 ### Write File
 
@@ -575,28 +576,28 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 ```
 
-**For split files (full-stack):** run validation on each file separately using `init-session --file` (repeat the Step 0 resolve above at the top of each Bash call; omitted from the snippets below for brevity):
+**Step 1 — Resolve the file list.** Every file validated below comes from `MERGE_RETURN`, the stdout `/aimi:plan` Phase 3e captured from `story-merge`. **Never rebuild a filename by concatenating the output base** — on the PROJECT axis the surviving projects and their basename slugs are computed inside `story-merge` and are unknowable here any other way, and even on the SIDE axis the returned paths already account for `--phase-aware`'s basename collapse:
 
 ```bash
-$AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
-$AIMI_CLI validate-ids
-$AIMI_CLI validate-deps
-$AIMI_CLI validate-stories
-
-$AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json
-$AIMI_CLI validate-ids
-$AIMI_CLI validate-deps
-$AIMI_CLI validate-stories
+VALIDATE_FILES=$(printf '%s' "$MERGE_RETURN" | jq -r 'if type == "array" then .[].path elif has("frontend") then .frontend, .backend else .merged end')
 ```
 
-**For single file (frontend-only or legacy):**
+The array test comes first and that ordering is load-bearing — `has()` errors on an array. `VALIDATE_FILES` is a newline-separated list covering every case with one shape: exactly 1 entry on the legacy / frontend-only path, exactly 2 on the SIDE axis, N on the PROJECT axis.
+
+**Step 2 — Validate every file.** Run this loop once, on every axis — there is no separate single-file branch, because the legacy and frontend-only cases are just `VALIDATE_FILES` with one entry (repeat the Step 0 resolve above at the top of each Bash call):
 
 ```bash
-$AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
-$AIMI_CLI validate-ids
-$AIMI_CLI validate-deps
-$AIMI_CLI validate-stories
+while IFS= read -r VALIDATE_FILE; do
+  [ -n "$VALIDATE_FILE" ] || continue
+  echo "Validating $VALIDATE_FILE"
+  $AIMI_CLI init-session --file "$VALIDATE_FILE" || exit 1
+  $AIMI_CLI validate-ids || exit 1
+  $AIMI_CLI validate-deps || exit 1
+  $AIMI_CLI validate-stories || exit 1
+done <<< "$VALIDATE_FILES"
 ```
+
+`init-session --file` rebinds the session's active tasks file, so the three `validate-*` calls always target the file bound immediately above them — keep them inside the same iteration and never reorder them. A non-zero exit anywhere aborts the loop: fix that file and re-run from the top rather than validating the remaining files against a half-fixed set. `/aimi:plan`'s own Phase 4.5 runs the same loop with two extra normalizers ahead of the validators — see `commands/plan.md`.
 
 **If any validation fails (non-zero exit):**
 1. Read the error output to identify the issues
@@ -613,9 +614,10 @@ After writing, report:
 ```
 Tasks generated successfully!
 
-Tasks: .aimi/tasks/[filename(s)].json
-Stories: [N] total ([X] frontend, [Y] backend — if split)
-Schema: 3.2
+Tasks: .aimi/tasks/[filename].json
+[one Tasks: line per file returned by story-merge — 1 legacy, 2 on the SIDE axis, N on the PROJECT axis; suffix each PROJECT-axis line with its project and story count, e.g. "(apps/web, 4 stories)"]
+Stories: [N] total ([per-file breakdown when split: "[X] frontend, [Y] backend" on the SIDE axis, one "[N] <project>" entry per file on the PROJECT axis])
+Schema: 3.3
 [If brainstorm used]: Context: .aimi/brainstorms/[brainstorm-file]
 [If gaps found]: Gaps identified: [N] (captured as criteria/notes)
 [If 10+ stories]: Warning: [N] stories generated. Consider splitting for parallel work.

@@ -1476,7 +1476,7 @@ TASKS_PATH=".aimi/tasks/${featureSlug}/${PHASE_DIR}/${featureSlug}-phase-${SELEC
 mkdir -p "$AIMI_ROOT/.aimi/tasks/${featureSlug}/${PHASE_DIR}"
 ```
 
-The `*-tasks.json` basename convention is preserved — only the directory and the date-vs-phase discriminator in the filename differ from the flat form. `--split full-stack` composes on top of this: story-merge derives its `-frontend-tasks.json`/`-backend-tasks.json` output paths from whatever `--output` base it is given (directory plus basename). The one piece of special-casing needed is basename shape: this `--output` base already ends in `-tasks` (`${featureSlug}-phase-${SELECTED_PHASE_ID}-tasks.json`), so appending directly would double that segment (`...-tasks-frontend-tasks.json`, matching the flat/legacy shape). Phase 3e passes story-merge's `--phase-aware` flag whenever `ROADMAP_MODE=true` and `implementationScope == "full-stack"` so it strips the trailing `-tasks` once first, producing single-`tasks`-segment split basenames (`${featureSlug}-phase-${SELECTED_PHASE_ID}-frontend-tasks.json` / `-backend-tasks.json`) instead — see Phase 3e below.
+The `*-tasks.json` basename convention is preserved — only the directory and the date-vs-phase discriminator in the filename differ from the flat form. `--split full-stack` composes on top of this: story-merge derives every split output path from whatever `--output` base it is given (directory plus basename) — `-frontend-tasks.json`/`-backend-tasks.json` on the SIDE axis, one `-<project-slug>-tasks.json` per project on the PROJECT axis. Which set it produced is reported back on stdout (see Phase 3e's Return Contract); this command never re-derives those names itself. The one piece of special-casing needed is basename shape: this `--output` base already ends in `-tasks` (`${featureSlug}-phase-${SELECTED_PHASE_ID}-tasks.json`), so appending directly would double that segment (`...-tasks-frontend-tasks.json`, matching the flat/legacy shape). Phase 3e passes story-merge's `--phase-aware` flag whenever `ROADMAP_MODE=true` and `implementationScope == "full-stack"` so it strips the trailing `-tasks` once first, producing single-`tasks`-segment split basenames (`${featureSlug}-phase-${SELECTED_PHASE_ID}-frontend-tasks.json` / `-backend-tasks.json`) instead — see Phase 3e below.
 
 **When `ROADMAP_MODE=false` (unchanged):**
 
@@ -2219,26 +2219,87 @@ The working-memory `unresolved[]` list (schema: `{storyIdx: string, message: str
 
 Invoke `aimi-cli story-merge` to consolidate all staging files into a single validated tasks.json. story-merge performs DAG validation, `outline:NN` → `US-NNN` remapping, Rule 22 (mock-sync AC routing), Phase 3.1 (Reference Element Inventory), and Phase 4.1 (Coverage Self-Check) as post-merge sweeps.
 
+### Project Path Gate (runs first — before `story-merge`)
+
+Every `.project` value in `RUN_DIR` is sub-agent-authored free text, and Phase 4 hands it to `detect-default-branch --project`, which `cd`s into `$AIMI_ROOT/$PROJECT_PATH`. Validate the whole set **here**, before `story-merge` is invoked: this is the last point at which `RUN_DIR` still exists and nothing has been written. A refusal raised later — in Phase 4 — fires after `story-merge` has already deleted the staging directory, so the run dies with its Pass 2 expansion work destroyed and no way to retry.
+
+Run this gate on every path, split or not. It reads the staging files directly rather than trusting `story-merge`'s output, so it does not depend on the CLI's internals.
+
+```bash
+BAD_PROJECTS=0
+STAGED_PROJECTS=$(find "$RUN_DIR" -maxdepth 1 -type f -name '*.json' \
+  ! -name '*outline*.json' ! -name 'metadata.json' ! -name 'audit-result.json' \
+  | sort \
+  | while IFS= read -r f; do
+      jq -r 'if type == "array" then .[] else . end | .project // empty' "$f"
+    done \
+  | sort -u)
+while IFS= read -r PROJECT_PATH; do
+  [ -n "$PROJECT_PATH" ] || continue
+  [ "$PROJECT_PATH" = "." ] && continue
+  case "$PROJECT_PATH" in
+    /*|..|../*|*/..|*/../*)
+      echo "Invalid project in staging: $PROJECT_PATH" >&2
+      BAD_PROJECTS=1
+      continue
+      ;;
+  esac
+  if ! [[ "$PROJECT_PATH" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$ ]]; then
+    echo "Invalid project in staging: $PROJECT_PATH" >&2
+    BAD_PROJECTS=1
+  fi
+done <<< "$STAGED_PROJECTS"
+[ "$BAD_PROJECTS" -eq 0 ] || exit 1
+```
+
+The `case` list and the regex are the same two checks `commands/execute.md` applies to `metadata.splitGroup.project` in its Step 0.9 split loop (`execute.md`, Invalid splitGroup.project) — keep them byte-identical so the two sites stay diffable. `"."` is the root group's own routing key and is always allowed; a blank or absent `.project` never reaches the loop.
+
+**On failure:** report every offending value and **STOP**. Do not invoke `story-merge`, do not call `roadmap-set-status`, and do not delete `RUN_DIR` — the staging files are intact and the run is retryable once the offending `project` values are corrected.
+
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-$AIMI_CLI story-merge \
+MERGE_RETURN=$($AIMI_CLI story-merge \
   --staging-dir "$RUN_DIR" \
   --output "$TASKS_PATH" \
   [--split full-stack  when implementationScope == "full-stack"] \
   [--phase-aware        when ROADMAP_MODE == true AND implementationScope == "full-stack"] \
   [--agent-mode        when INTERACTIVE_MODE == "agent"] \
-  [--foundation <foundation-idx>  when foundationAccepted]
+  [--foundation <foundation-idx>  when foundationAccepted])
+MERGE_EXIT=$?
 ```
 
+**Capture the stdout — never discard it.** `MERGE_RETURN` is story-merge's **return contract**: the authoritative list of the file(s) it actually wrote. Phase 4 and Phase 4.5 read their file list from this value; they never re-derive output filenames by string-concatenating `$TASKS_PATH`. On the PROJECT axis the surviving projects, their basename slugs, and their order are runtime data computed inside story-merge from the merged stories — Phase 3e cannot know them at call time, so the returned payload is the only correct source. Store `MERGE_RETURN` in working memory alongside `TASKS_PATH`.
+
 **Flag rules:**
-- `--split full-stack`: pass when `implementationScope == "full-stack"`. Causes story-merge to produce two output files (`*-frontend-tasks.json` and `*-backend-tasks.json`) instead of one.
-- `--phase-aware`: pass when **both** `ROADMAP_MODE == true` and `implementationScope == "full-stack"` — the composed phase+split case (see outline 13). `$TASKS_PATH` in that case already ends in `-tasks.json` (the phase-scoped form derived above), so story-merge strips the trailing `-tasks` segment once before appending `-frontend-tasks.json`/`-backend-tasks.json`, keeping a single `tasks` segment in each split basename. Never pass this flag when `--split full-stack` is absent, or when `ROADMAP_MODE == false` (flat full-stack split keeps its existing double-`tasks` basename unchanged).
+- `--split full-stack`: pass when `implementationScope == "full-stack"`. story-merge then picks its split **axis** from the merged array itself (see `plugins/aimi-engineering/CLAUDE.md`'s aimi-cli.sh Story Lifecycle Subcommands section) by counting distinct normalized `.project` values: **2 or more → PROJECT axis**, one output file per project (N files, no frontend/backend decision at all); **fewer than 2 → SIDE axis**, the unchanged two-file `*-frontend-tasks.json` / `*-backend-tasks.json` writer for single-repo and monorepo layouts. Which axis ran is not knowable before the call — read it off `MERGE_RETURN` (see the return contract below).
+- `--phase-aware`: pass when **both** `ROADMAP_MODE == true` and `implementationScope == "full-stack"` — the composed phase+split case (see outline 13). `$TASKS_PATH` in that case already ends in `-tasks.json` (the phase-scoped form derived above), so story-merge strips the trailing `-tasks` segment once before appending its per-file suffix, keeping a single `tasks` segment in each split basename (`-frontend-tasks.json`/`-backend-tasks.json` on the SIDE axis, `-<project-slug>-tasks.json` on the PROJECT axis). The strip is pure basename manipulation, independent of the axis, so it composes at any N. Never pass this flag when `--split full-stack` is absent, or when `ROADMAP_MODE == false` (flat full-stack split keeps its existing double-`tasks` basename unchanged).
 - `--agent-mode`: pass when `INTERACTIVE_MODE == "agent"`. Demotes Phase 3.1 and Phase 4.1 hard blocks to warnings inside story-merge.
 - `--foundation <foundation-idx>`: pass when `foundationAccepted` (Phase 1.9). `<foundation-idx>` is always `"01"` — Phase 3b guarantees the foundation story is the first outline entry, and Phase 3c's carve-out keeps it pinned to that position through the outline gate. This flag was added to `story-merge` by outline entry 03 (deterministic `dependsOn` injection — see `plugins/aimi-engineering/CLAUDE.md`'s aimi-cli.sh Story Lifecycle Subcommands section); story-merge aborts before any write if the resolved foundation story's own `dependsOn` is non-empty.
 - `--split legacy` (default): no flag needed; story-merge uses legacy mode when `--split` is omitted.
 
-On **success**: story-merge writes the output file(s), deletes `RUN_DIR`, and exits 0.
+On **success**: story-merge writes the output file(s), deletes `RUN_DIR`, exits 0, and prints one JSON object or array on stdout — captured above as `MERGE_RETURN`.
+
+### Return Contract (`MERGE_RETURN`)
+
+Three shapes, discriminated by JSON type and (for objects) by which keys are present:
+
+| Case | Shape | Meaning |
+|------|-------|---------|
+| Legacy (no `--split`) | `{merged, stories}` | `merged` is the single written path; `stories` is its story count. |
+| `--split full-stack`, **SIDE axis** (fewer than 2 distinct `.project` values) | `{frontend, backend, frontend_stories, backend_stories}` | `frontend`/`backend` are the two written paths — unchanged from today. |
+| `--split full-stack`, **PROJECT axis** (2 or more distinct `.project` values) | `[{path, project, branchName, storyCount}, ...]` | One element per written file, in the same lexicographic-by-project order story-merge assigned its `US-NNN` blocks. `branchName` is story-merge's placeholder (`feat/merged-<slug>`), overwritten in Phase 4. |
+
+Derive the axis and the file list once, and reuse both in Phase 4 and Phase 4.5:
+
+```bash
+SPLIT_AXIS=$(printf '%s' "$MERGE_RETURN" | jq -r 'if type == "array" then "project" elif has("frontend") then "side" else "legacy" end')
+SPLIT_FILES=$(printf '%s' "$MERGE_RETURN" | jq -r 'if type == "array" then .[].path elif has("frontend") then .frontend, .backend else .merged end')
+```
+
+`SPLIT_FILES` is a newline-separated list of every file story-merge wrote — exactly 1 on the legacy path, exactly 2 on the SIDE axis, N on the PROJECT axis. Every downstream per-file step iterates this list; none of them reconstructs a filename from `$TASKS_PATH`.
+
+Each PROJECT-axis file also carries a self-describing marker written by story-merge itself: `metadata.splitGroup` = `{project, index, total, siblings[]}` — its own project routing key, its 1-based position, the total file count, and every sibling file's path. `/aimi:execute` Step 0.9 reads `metadata.splitGroup.project` to root each split's worktree/container at the right repo, so Phase 4 must preserve it verbatim (see Phase 4 below). SIDE-axis and legacy files have no `splitGroup` key.
 
 **When `ROADMAP_MODE=true`, immediately after confirming story-merge's exit 0** (never before — a failed expansion must leave the phase's roadmap status unchanged):
 
@@ -2273,7 +2334,33 @@ Read the tasks.json file written by story-merge and patch the `metadata` object 
 
 - **title**: `<type>: <Descriptive Name>`
 - **type**: `feat`, `ref`, `bug`, or `chore`
-- **branchName**: Kebab-case, prefixed with type. For split files: `type/[feature]-frontend` and `type/[feature]-backend`. **When `ROADMAP_MODE=true` and not split:** `type/${featureSlug}-phase-${SELECTED_PHASE_ID}-${PHASE_SLUG}` instead (matches the container branch `/aimi:execute` creates for this phase). **When `ROADMAP_MODE=true` and split (`implementationScope == "full-stack"`, composed phase+split case — outline 13):** the phase-branch value from the rule above, suffixed the same way the flat split case suffixes its own branchName — `type/${featureSlug}-phase-${SELECTED_PHASE_ID}-${PHASE_SLUG}-frontend` and `-backend` — so each split worktree/branch `/aimi:execute` creates (`<phase-branch>-frontend` / `<phase-branch>-backend`) matches this file's own `metadata.branchName` exactly; this exact-match is what lets the worktree-budget hook's governing-file resolution (`_select_governing_tasks_file`) pick the right split file for each sub-orchestrator's own concurrency limit. Validate against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` before writing — refuse the write (report the invalid computed branch name and STOP; do not fall back to a mangled variant) if it fails, exactly as the flat-mode branchName derivation already requires.
+- **branchName**: Kebab-case, prefixed with type. For SIDE-axis split files: `type/[feature]-frontend` and `type/[feature]-backend`. **For PROJECT-axis split files** (`MERGE_RETURN` is an array): `type/[feature]-<project-slug>`, one per returned entry, where `<project-slug>` is the slugified project story-merge already used for that entry's basename — read it from the entry rather than re-slugifying (`printf '%s' "$MERGE_RETURN" | jq -r '.[].branchName' | sed 's|^feat/merged-||'` yields one slug per entry, in returned order — equivalently, the segment each entry's `path` basename carries before `-tasks.json`). Its `ROADMAP_MODE=true` equivalent is the phase-branch value suffixed the same way: `type/${featureSlug}-phase-${SELECTED_PHASE_ID}-${PHASE_SLUG}-<project-slug>`. **Per-project base branch:** the branch each PROJECT-axis branch is cut from is resolved per repo, not globally — this is the detection Phase 0 defers when `AIMI_ROOT_IS_GIT_REPO` is false:
+
+  ```bash
+  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+  # PROJECT_PATH is the entry's own .project ("." for the root group)
+  if [ "$PROJECT_PATH" = "." ] || [ -z "$PROJECT_PATH" ] || [ "$PROJECT_PATH" = "null" ]; then
+    PROJECT_ROOT="$AIMI_ROOT"
+  else
+    case "$PROJECT_PATH" in
+      /*|..|../*|*/..|*/../*)
+        echo "Invalid project in MERGE_RETURN entry: $PROJECT_PATH" >&2
+        exit 1
+        ;;
+    esac
+    if ! [[ "$PROJECT_PATH" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$ ]]; then
+      echo "Invalid project in MERGE_RETURN entry: $PROJECT_PATH" >&2
+      exit 1
+    fi
+    PROJECT_ROOT="$AIMI_ROOT/$PROJECT_PATH"
+  fi
+  PROJECT_DEFAULT=$($AIMI_CLI detect-default-branch --project "$PROJECT_ROOT")
+  ```
+
+  The two guards above are defense in depth, not the primary check — `detect-default-branch --project` does a bare `cd` into whatever it is handed, so no unvalidated value may reach it. The primary refusal is the **Project Path Gate** at the top of Phase 3e, which runs while `RUN_DIR` still exists; by the time this block executes, `story-merge` has already deleted the staging dir and a STOP here loses the run's expansion work. Keep both — this one is byte-identical to `execute.md`'s Step 0.9 check so the two stay diffable.
+
+  This is the same CLI verb `commands/execute.md` uses for its own per-project branch setup (`detect-default-branch --project [resolved_project_path]`, Step 0.9 and Per-Project Branch Setup) and `commands/next.md` uses for a container root — reuse it; never add a second per-repo detection mechanism here. A project whose `detect-default-branch` fails is not a usable repo: report it and STOP rather than falling back to `$AIMI_ROOT`'s branch. **When `ROADMAP_MODE=true` and not split:** `type/${featureSlug}-phase-${SELECTED_PHASE_ID}-${PHASE_SLUG}` instead (matches the container branch `/aimi:execute` creates for this phase). **When `ROADMAP_MODE=true` and split (`implementationScope == "full-stack"`, composed phase+split case — outline 13):** the phase-branch value from the rule above, suffixed the same way the flat split case suffixes its own branchName — `type/${featureSlug}-phase-${SELECTED_PHASE_ID}-${PHASE_SLUG}-frontend` / `-backend` on the SIDE axis, `type/${featureSlug}-phase-${SELECTED_PHASE_ID}-${PHASE_SLUG}-<project-slug>` per returned entry on the PROJECT axis — so each split worktree/branch `/aimi:execute` creates matches that file's own `metadata.branchName` exactly; this exact-match is what lets the worktree-budget hook's governing-file resolution (`_select_governing_tasks_file`) pick the right split file for each sub-orchestrator's own concurrency limit. Validate **every** computed branchName — one per file in `SPLIT_FILES`, not just the first — against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` before writing; refuse the write (report the invalid computed branch name and STOP; do not fall back to a mangled variant) if any fails, exactly as the flat-mode branchName derivation already requires.
 - **createdAt**: Today's date (YYYY-MM-DD)
 - **planPath**: Always `null`
 - **roadmapPath** (when `ROADMAP_MODE=true`): `.aimi/tasks/${featureSlug}/roadmap.json`, relative to `AIMI_ROOT`. Omit the key entirely when `ROADMAP_MODE=false`.
@@ -2296,7 +2383,20 @@ Read the tasks.json file written by story-merge and patch the `metadata` object 
 
 Use the Write tool to patch the output tasks.json with these fields merged into the `metadata` object.
 
-**For split files (full-stack):** patch both `*-frontend-tasks.json` and `*-backend-tasks.json` independently. Assign separate `branchName` values (`type/[feature]-frontend` and `type/[feature]-backend`, or their `ROADMAP_MODE=true` phase-suffixed equivalents — `type/${featureSlug}-phase-${SELECTED_PHASE_ID}-${PHASE_SLUG}-frontend`/`-backend` — per the branchName rule above). Write the same `prototypePaths`, `designBundle`, `designTokens`, `roadmapPath`, and `phase` to both files. When `ROADMAP_MODE=true`, these are the two `--phase-aware`-derived files at `.aimi/tasks/${featureSlug}/${PHASE_DIR}/${featureSlug}-phase-${SELECTED_PHASE_ID}-frontend-tasks.json` and `-backend-tasks.json` (single `tasks` segment — see Phase 3e).
+**For split files (full-stack):** the set of files to patch comes from `MERGE_RETURN` — the value Phase 3e captured from story-merge's stdout. **Never reconstruct split filenames by concatenating `$TASKS_PATH` with `-frontend-tasks.json`/`-backend-tasks.json`**: on the PROJECT axis the surviving projects, their basename slugs, and their count are computed inside story-merge and are unknowable to this command any other way, and even on the SIDE axis the returned paths already account for `--phase-aware`'s basename collapse.
+
+Recompute the axis and file list (or reuse the `SPLIT_AXIS` / `SPLIT_FILES` values derived in Phase 3e — each Bash call is an isolated shell):
+
+```bash
+SPLIT_AXIS=$(printf '%s' "$MERGE_RETURN" | jq -r 'if type == "array" then "project" elif has("frontend") then "side" else "legacy" end')
+SPLIT_FILES=$(printf '%s' "$MERGE_RETURN" | jq -r 'if type == "array" then .[].path elif has("frontend") then .frontend, .backend else .merged end')
+```
+
+Patch **every** file in `SPLIT_FILES` independently, with the same `title`, `type`, `createdAt`, `planPath`, `researchPaths`, `prototypePaths`, `designBundle`, `designTokens`, `roadmapPath`, `phase`, `decisions`, `maxConcurrency`, and `execution` values the single-file case writes. Only `branchName` differs per file:
+
+- **SIDE axis** (`MERGE_RETURN` is the `{frontend, backend, frontend_stories, backend_stories}` object — fewer than 2 distinct `.project` values, i.e. single-repo/monorepo): exactly two files, read from its own `.frontend` and `.backend` keys. Assign `type/[feature]-frontend` and `type/[feature]-backend`, or their `ROADMAP_MODE=true` phase-suffixed equivalents (`type/${featureSlug}-phase-${SELECTED_PHASE_ID}-${PHASE_SLUG}-frontend`/`-backend`) — per the branchName rule above. When `ROADMAP_MODE=true` these are the two `--phase-aware`-derived files under `.aimi/tasks/${featureSlug}/${PHASE_DIR}/` carrying a single `tasks` segment (see Phase 3e). Behavior here is unchanged from before; only the source of the two paths is.
+- **PROJECT axis** (`MERGE_RETURN` is the `[{path, project, branchName, storyCount}, ...]` array — 2 or more distinct `.project` values, i.e. multi-repo): iterate every entry. Patch the file at `.path`, assigning the per-project `branchName` derived by the rule above from that entry's own `.project` / slug, validated against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` before the write. An entry whose `.storyCount` is `0` is still a real written file — patch it like any other.
+- **Preserve `metadata.splitGroup` verbatim.** story-merge already wrote the self-describing sibling marker into each PROJECT-axis file: `metadata.splitGroup` = `{project, index, total, siblings[]}` — the file's own project routing key, its 1-based `index`, the `total` file count, and `siblings[]`, the paths of the other N−1 files. Merge the patch fields **into** the existing `metadata` object; do not replace the object wholesale and do not re-derive, rename, or drop `splitGroup`. `/aimi:execute` Step 0.9 reads `metadata.splitGroup.project` to root each split's worktree/container at that project's own repo — losing it reintroduces the `fatal: not a git repository` failure in multi-repo layouts. SIDE-axis and legacy files have no `splitGroup` key and none should be invented for them.
 
 ### Derive `metadata.backendSpec` (frontend-only mode only)
 
@@ -2370,7 +2470,13 @@ Use the Write tool to patch the output tasks.json with these fields merged into 
     "maxConcurrency": "number (optional, default 20)",
     "execution": "container|inline (optional; flat files only — /aimi:plan writes 'container' explicitly into every freshly generated flat file and omits the key entirely on phase-scoped files; /aimi:execute --container/--inline and /aimi:next --container/--inline can override and persist a flat file's value later — see commands/references/execution-mode.md for the full read/override contract)",
     "frontendOnly": "boolean (optional, true when frontend-only scope)",
-    "smellWarnings": "array (optional; two entry shapes: {type: \"orphan-symbol\", storyId, symbols, message} written by story-merge Phase 4.2; and {type: \"cross-file-dep-dropped\", storyId, side, becameRoot, droppedDeps: [{id, side, title}], message} written by story-merge's _story_merge_write_split when --split full-stack drops a cross-file dependsOn edge — see Step 5 renderer below for both cases; absent when neither smell is detected)",
+    "splitGroup": {
+      "project": "string (optional object, PROJECT-axis split files only — written by story-merge, preserved verbatim by Phase 4; this file's own project routing key, e.g. 'apps/web', or '.' for the root group)",
+      "index": "number (1-based position of this file among the split's output files)",
+      "total": "number (count of files the PROJECT-axis split produced)",
+      "siblings": ["string (paths of the other total−1 files in the same split)"]
+    },
+    "smellWarnings": "array (optional; three entry shapes: {type: \"orphan-symbol\", storyId, symbols, message} written by story-merge Phase 4.2; {type: \"cross-file-dep-dropped\", storyId, side, becameRoot, droppedDeps: [{id, side, title}], message} — SIDE axis, written by _story_merge_write_split when --split full-stack drops an edge across the frontend/backend boundary (single-repo/monorepo layouts); and {type: \"cross-file-dep-dropped\", storyId, project, becameRoot, droppedDeps: [{id, project, title, foundationEdge}], message} — PROJECT axis, written by _story_merge_write_project_split when --split full-stack drops an edge across a repo boundary (2+ distinct .project values), where project is the owning group's routing key and foundationEdge marks an edge --foundation injected onto the shared foundation story. side and project are mutually exclusive per entry — see Step 5 renderer below for all cases; absent when no smell is detected)",
     "backendSpec": {
       "endpoints": [
         {
@@ -2471,7 +2577,7 @@ The `metadata.backendSpec.endpoints[].responseShape` field follows a strict flat
 }
 ```
 
-**Notes:** `implementation`, `verification`, `gate`, `skills`, and `tasks` are optional per story. `wave` is required on all stories.
+**Notes:** `implementation`, `verification`, `gate`, `skills`, and `tasks` are optional per story. `wave` is required on all stories. `metadata.splitGroup` is written by `story-merge` on the **PROJECT axis only** and preserved verbatim by Phase 4 — SIDE-axis, legacy, and frontend-only files have no `splitGroup` key and none should be invented for them. `/aimi:execute` Step 0.9 reads `metadata.splitGroup.project` to root each split's worktree/container at that project's own repo.
 
 **`metadata.decisions[].source` field:** each entry records where the Open Question or outline edit originated. Twelve valid source values:
 - `<brainstorm-path>:L<line>` — an OQ line from the brainstorm doc (Phase 0.5)
@@ -2538,98 +2644,57 @@ Specific obligations:
 - [ ] Every story with `verification.strategy == "visual"` and non-empty `metadata.prototypePaths` has at least one `(prototype: ...)` citation in its acceptance criteria (either `(prototype: <path> §<heading>)` or `(prototype: <path>:L<start>-L<end>)`)
 - [ ] Rule 19a compliance (when `designSpecContent` is non-null): every visual story's `acceptanceCriteria` wraps each visible-text literal in double quotes followed by a `(DesignSpec § N.N L<line>)` anchor; no paraphrasing, translation, abbreviation, or reordering of the cited text
 - [ ] Rolling-wave (when `ROADMAP_MODE=true`, not split): `metadata.roadmapPath` and `metadata.phase.{id,dir}` are present and match the selected phase; `metadata.branchName` matches `type/${featureSlug}-phase-${SELECTED_PHASE_ID}-${PHASE_SLUG}` and passes `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$`; the output file lives at `.aimi/tasks/${featureSlug}/${PHASE_DIR}/${featureSlug}-phase-${SELECTED_PHASE_ID}-tasks.json`; `roadmap.json`'s phase `${SELECTED_PHASE_ID}` status is `planned` only after this checklist and Phase 4.5 both pass
-- [ ] Rolling-wave + full-stack split (when `ROADMAP_MODE=true` and `implementationScope == "full-stack"` — outline 13): story-merge was invoked with both `--split full-stack` and `--phase-aware`; the two output files live at `.aimi/tasks/${featureSlug}/${PHASE_DIR}/${featureSlug}-phase-${SELECTED_PHASE_ID}-frontend-tasks.json` and `-backend-tasks.json` (single `tasks` segment — not the flat split's double-`tasks` shape); each file's `metadata.branchName` is `type/${featureSlug}-phase-${SELECTED_PHASE_ID}-${PHASE_SLUG}-frontend` / `-backend` and passes `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$`; `roadmap.json`'s phase `${SELECTED_PHASE_ID}` status is `planned` only after this checklist and Phase 4.5 both pass
+- [ ] Rolling-wave + full-stack split (when `ROADMAP_MODE=true` and `implementationScope == "full-stack"` — outline 13): story-merge was invoked with both `--split full-stack` and `--phase-aware`; every file named by `MERGE_RETURN` lives under `.aimi/tasks/${featureSlug}/${PHASE_DIR}/` with a single `tasks` segment in its basename — not the flat split's double-`tasks` shape (SIDE axis: `${featureSlug}-phase-${SELECTED_PHASE_ID}-frontend-tasks.json` / `-backend-tasks.json`; PROJECT axis: `${featureSlug}-phase-${SELECTED_PHASE_ID}-<project-slug>-tasks.json` per project); each file's `metadata.branchName` is its phase-suffixed per-file value (`...-${PHASE_SLUG}-frontend` / `-backend`, or `...-${PHASE_SLUG}-<project-slug>`) and passes `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$`; `roadmap.json`'s phase `${SELECTED_PHASE_ID}` status is `planned` only after this checklist and Phase 4.5 both pass
 
 ### Split-File Checks (when `implementationScope` is set)
-- [ ] Full-stack: two files generated (`*-frontend-tasks.json` and `*-backend-tasks.json`) — produced by story-merge `--split full-stack`
-- [ ] Full-stack: each file has its own `branchName` (`type/[feature]-frontend`, `type/[feature]-backend`, or their `ROADMAP_MODE=true` phase-suffixed equivalents) — patched in Phase 4
-- [ ] Full-stack: story IDs are unique across both files (no ID collisions) — enforced by story-merge
+- [ ] Full-stack: every file named by `MERGE_RETURN` exists on disk, and the count of files patched and validated equals the length of that returned list — N on the PROJECT axis (one per project, 2 or more distinct `.project` values), exactly two (`*-frontend-tasks.json` and `*-backend-tasks.json`) on the SIDE axis (single-repo/monorepo, fewer than 2 distinct `.project` values — the one case that still always yields exactly two files). Never assert a count derived from anything other than the returned list.
+- [ ] Full-stack: each returned file has its own `branchName`, distinct from every sibling's and valid against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` (SIDE axis: `type/[feature]-frontend` / `-backend`; PROJECT axis: `type/[feature]-<project-slug>` per entry; or their `ROADMAP_MODE=true` phase-suffixed equivalents) — patched in Phase 4
+- [ ] Full-stack, PROJECT axis only: each file's `metadata.splitGroup` survived the Phase 4 patch intact — `{project, index, total, siblings[]}`, with `total` equal to the returned list's length and `siblings[]` naming the other N−1 returned paths
+- [ ] Full-stack: story IDs are unique across all returned files (no ID collisions) — enforced by story-merge
 - [ ] Full-stack: no cross-file `dependsOn` references — each file's graph is self-contained (this invariant is unchanged) — enforced by story-merge; cross-file edges are still dropped, but are now surfaced (not silent) via one aggregated stderr banner plus a `cross-file-dep-dropped` entry in `metadata.smellWarnings` for every affected story
 - [ ] Full-stack: wave numbers computed independently per file (roots = wave 1 within each file) — enforced by story-merge
 - [ ] Frontend-only: single `*-frontend-tasks.json` with `metadata.frontendOnly: true`
 - [ ] Frontend-only: `metadata.backendSpec` contains `endpoints`, `dataModels`, `businessRules`, `businessContext`
-- [ ] Full-stack: `metadata.designBundle` (if set) and `metadata.designTokens` (if set) are written to both frontend and backend files
-- [ ] Full-stack + `ROADMAP_MODE=true`: `--phase-aware` was passed to story-merge and both split basenames carry a single `tasks` segment (`${featureSlug}-phase-${SELECTED_PHASE_ID}-frontend-tasks.json`, not `${featureSlug}-phase-${SELECTED_PHASE_ID}-tasks-frontend-tasks.json`)
-- [ ] Phase 4.5 validation runs on each file independently using `$AIMI_CLI init-session --file <path>`
+- [ ] Full-stack: `metadata.designBundle` (if set) and `metadata.designTokens` (if set) are written to every returned file
+- [ ] Full-stack + `ROADMAP_MODE=true`: `--phase-aware` was passed to story-merge and every returned split basename carries a single `tasks` segment (SIDE axis: `${featureSlug}-phase-${SELECTED_PHASE_ID}-frontend-tasks.json`, not `...-tasks-frontend-tasks.json`; PROJECT axis: `${featureSlug}-phase-${SELECTED_PHASE_ID}-<project-slug>-tasks.json`)
+- [ ] Phase 4.5 validation runs on each returned file independently using `$AIMI_CLI init-session --file <path>`
 
 ## Phase 4.5: Post-Generation Validation
 
 After writing the tasks.json file(s), validate each generated output independently.
 
-**Step 1 — Normalize verifications (run before any validator):**
+**Step 1 — Resolve the file list (run before any validator):**
 
-For each generated tasks file, run `normalize-verification` first. This auto-migrates any string-typed `verification` values emitted by the planner into the required object shape, preventing `validate-stories` from rejecting them.
+Every file validated below comes from `MERGE_RETURN` — the value Phase 3e captured from `story-merge`'s stdout, and the same value Phase 4 patched from. **Never rebuild a filename by concatenating `$TASKS_PATH`**: on the PROJECT axis the surviving projects and their basename slugs are computed inside `story-merge` and are unknowable here any other way, and even on the SIDE axis the returned paths already account for `--phase-aware`'s basename collapse.
+
+```bash
+VALIDATE_FILES=$(printf '%s' "$MERGE_RETURN" | jq -r 'if type == "array" then .[].path elif has("frontend") then .frontend, .backend else .merged end')
+```
+
+The array test comes first and that ordering is load-bearing — `has()` errors on an array. `VALIDATE_FILES` is a newline-separated list covering every case with one shape: exactly 1 entry on the legacy / frontend-only path, exactly 2 on the SIDE axis, N on the PROJECT axis.
+
+**Step 2 — Normalize and validate every file (the only validation path):**
+
+Run the loop below once, on every axis — there is no separate single-file branch, because the legacy and frontend-only cases are just `VALIDATE_FILES` with one entry. `normalize-verification` auto-migrates any string-typed `verification` value emitted by the planner into the required object shape, and `normalize-status` defaults any story missing `status` to `"pending"`; both must run against a file **before** that file's validators, or `validate-stories` rejects rows it could have healed.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-TASKS_PATH=".aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json"
-$AIMI_CLI normalize-verification "$TASKS_PATH"
-NORMALIZE_EXIT=$?
-if [ $NORMALIZE_EXIT -ne 0 ]; then
-  echo "ERROR: normalize-verification failed (exit $NORMALIZE_EXIT)."
-  echo "Inspect $TASKS_PATH for malformed verification fields and fix them before re-running."
-  # Halt — do not proceed to validate-ids/deps/stories/tasks
-fi
+VALIDATE_FILES=$(printf '%s' "$MERGE_RETURN" | jq -r 'if type == "array" then .[].path elif has("frontend") then .frontend, .backend else .merged end')
+while IFS= read -r VALIDATE_FILE; do
+  [ -n "$VALIDATE_FILE" ] || continue
+  echo "Validating $VALIDATE_FILE"
+  $AIMI_CLI normalize-verification "$VALIDATE_FILE" || exit 1
+  $AIMI_CLI normalize-status "$VALIDATE_FILE" || exit 1
+  $AIMI_CLI init-session --file "$VALIDATE_FILE" || exit 1
+  $AIMI_CLI validate-ids || exit 1
+  $AIMI_CLI validate-deps || exit 1
+  $AIMI_CLI validate-stories || exit 1
+  $AIMI_CLI validate-tasks || exit 1
+done <<< "$VALIDATE_FILES"
 ```
 
-If `normalize-verification` exits non-zero, **stop here** — do not run any further validators. Fix the tasks file and retry Phase 4.5 from the top.
-
-**Step 1b — Normalize status fields (run immediately after normalize-verification succeeds):**
-
-Run `normalize-status` to default any story missing the `status` field to `"pending"`. This auto-heals pre-fix tasks files written before the `status` field was added to the schema, preventing `validate-stories` from rejecting them.
-
-```bash
-AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-$AIMI_CLI normalize-status "$TASKS_PATH"
-NORMALIZE_STATUS_EXIT=$?
-if [ $NORMALIZE_STATUS_EXIT -ne 0 ]; then
-  echo "ERROR: normalize-status failed (exit $NORMALIZE_STATUS_EXIT)."
-  echo "Inspect $TASKS_PATH for malformed status fields and fix them before re-running."
-  # Halt — do not proceed to validate-ids/deps/stories/tasks
-fi
-```
-
-If `normalize-status` exits non-zero, **stop here** — do not run any further validators. Fix the tasks file and retry Phase 4.5 from the top.
-
-**Step 2 — Run validators (after normalize-verification and normalize-status succeed):**
-
-**For split files (full-stack):** run validation on each file separately using `init-session --file`:
-
-```bash
-AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-$AIMI_CLI normalize-verification .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
-$AIMI_CLI normalize-status .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
-$AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
-$AIMI_CLI validate-ids
-$AIMI_CLI validate-deps
-$AIMI_CLI validate-stories
-$AIMI_CLI validate-tasks
-
-$AIMI_CLI normalize-verification .aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json
-$AIMI_CLI normalize-status .aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json
-$AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json
-$AIMI_CLI validate-ids
-$AIMI_CLI validate-deps
-$AIMI_CLI validate-stories
-$AIMI_CLI validate-tasks
-```
-
-**For single file (frontend-only or legacy):**
-
-```bash
-AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-$AIMI_CLI normalize-verification .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
-$AIMI_CLI normalize-status .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
-$AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
-$AIMI_CLI validate-ids
-$AIMI_CLI validate-deps
-$AIMI_CLI validate-stories
-$AIMI_CLI validate-tasks
-```
+`init-session --file` rebinds the session's active tasks file, so the four `validate-*` calls always target the file bound immediately above them — keep them inside the same iteration and never reorder them. A non-zero exit anywhere aborts the loop: fix that file and re-run Phase 4.5 from the top rather than validating the remaining files against a half-fixed set. When the failure came from `normalize-verification` or `normalize-status`, inspect that file for malformed `verification` / `status` fields before retrying.
 
 **If any validation fails (non-zero exit):**
 1. Read the error output to identify the issues
@@ -2682,6 +2747,8 @@ Next steps:
 4. **Run `/aimi:execute`** - Begin autonomous execution
 ```
 
+**Tasks line:** render one `Tasks:` line per file in `MERGE_RETURN` (Phase 3e), in the returned order — one line on the legacy path, two on the SIDE axis, N on the PROJECT axis. On the PROJECT axis, suffix each line with its entry's own `project` and `storyCount` (e.g. `Tasks: .aimi/tasks/2026-07-27-checkout-apps-web-tasks.json (apps/web, 4 stories)`) so the reader can tell which repo each file drives. Never print a filename that is not in the returned list.
+
 **Outline line:** `Outline: N stories (edits: M)` where `N` is the number of stories in the approved outline (from `outline.json`) and `M` is `outlineEditCount` (the number of edits applied during the Phase 3c gate — rename, add, remove, and reorder each count as one edit).
 
 **IMPORTANT:** Output the "Next steps" block EXACTLY as shown above — use `/aimi:` prefix (e.g., `/aimi:deepen`), NOT the fully-qualified plugin name (e.g., `/aimi-engineering:deepen`). Copy the block verbatim.
@@ -2700,11 +2767,24 @@ The `storyIdx` field is already constrained by the schema (`^[0-9]{2}$` or the `
 **Smell warnings line:** present only when the merged tasks.json has a non-empty `metadata.smellWarnings` array. `N` is the count of entries. Render each item as a bullet immediately after the `Smell warnings` line, choosing the case that matches its `type`:
 
 - `type == "orphan-symbol"` — written by `story-merge` Phase 4.2 when one or more stories introduce a named symbol that no sibling story references: `[storyId] [type]: [symbols joined by comma] — [message]` — fields come from the entry schema `{type, storyId, symbols, message}`.
-- `type == "cross-file-dep-dropped"` — written by `story-merge`'s `_story_merge_write_split` (the `--split full-stack` cross-file dependsOn drop surfacing) when a story's `dependsOn` edge crosses the frontend/backend boundary and is dropped: `[storyId] ([side]): [message]` — fields come from the entry schema `{type, storyId, side, becameRoot, droppedDeps[], message}`. `droppedDeps[]` (each `{id, side, title}`) may optionally be rendered as a nested sub-bullet listing the dropped target(s); it is not required in the one-line form.
+- `type == "cross-file-dep-dropped"` — written when `--split full-stack` drops a `dependsOn` edge that crosses an output-file boundary. The split axis decides which key names the owning group, and the two keys are mutually exclusive per entry:
+  - **SIDE axis** (`_story_merge_write_split`, the single-repo/monorepo fallback — fewer than 2 distinct normalized `.project` values): entry schema `{type, storyId, side, becameRoot, droppedDeps[], message}`, where `side` is `"frontend"`/`"backend"` (and `"unknown"` for an unresolvable target) and each `droppedDeps[]` element is `{id, side, title}`.
+  - **PROJECT axis** (`_story_merge_write_project_split`, the multi-repo N-file writer — 2 or more distinct normalized `.project` values): entry schema `{type, storyId, project, becameRoot, droppedDeps[], message}`, where `project` is the owning group's routing key (e.g. `"apps/web"`, `"services/api"`, `"."` for the root group) and each `droppedDeps[]` element is `{id, project, title, foundationEdge}`. `foundationEdge` is `true` only for an edge that `--foundation` itself injected onto the shared foundation story, which lives in exactly one project group — every other group loses that edge as expected fallout of combining `--foundation` with a multi-repo split, not as a hand-authored dependency that went missing. It is `false` on every other edge, and on every edge of a run without `--foundation`.
 
-Sanitization differs by type. For `orphan-symbol`: no sanitization required — `type` and `message` are CLI-emitted literals (not derived from sub-agent output), and `storyId`/`symbols` are already filtered through the Phase 4.2 regex (`^[A-Za-z][A-Za-z0-9_]*$` for symbols, `^US-[0-9]{3}[a-z]?$` for storyId). For `cross-file-dep-dropped`: `message` and `droppedDeps[].title` embed a sub-agent-authored story title, so this variant is NOT literal-safe the way `orphan-symbol` is — however, the CLI already runs both through `_rm_sanitize` (200-char cap) before write, so render them as-is without re-sanitizing. When `metadata.smellWarnings` is absent or empty, omit the section entirely.
+  Render either shape as `[storyId] ([side-or-project value]): [message]` — read whichever of `.side`/`.project` the entry actually carries (never both). `droppedDeps[]` may optionally be rendered as a nested sub-bullet listing the dropped target(s), using that same key; it is not required in the one-line form.
 
-For split-file output (`--split full-stack`), `metadata.smellWarnings` is written to BOTH frontend and backend files; render once per file in Step 5 to keep the per-file summary self-contained.
+Sanitization differs by type. For `orphan-symbol`: no sanitization required — `type` and `message` are CLI-emitted literals (not derived from sub-agent output), and `storyId`/`symbols` are already filtered through the Phase 4.2 regex (`^[A-Za-z][A-Za-z0-9_]*$` for symbols, `^US-[0-9]{3}[a-z]?$` for storyId).
+
+For `cross-file-dep-dropped`: **nothing in this variant is literal-safe.** `message` and `droppedDeps[].title` embed a sub-agent-authored story title, and `project` / `droppedDeps[].project` carry a sub-agent-authored `.project` value — free text, not a closed-set CLI literal. The CLI's `_rm_sanitize` pass is a 200-char cap applied to titles before write, not a rendering guard, and it covers neither the project keys nor the shell metacharacters this renderer's output can reach. Before rendering a bullet, apply the same four steps the `Audit warnings` bullets use above, in order, to **each** of `message`, `droppedDeps[].title`, `project`, `side`, and `droppedDeps[].project`:
+
+1. Replace newlines and carriage returns with single spaces.
+2. Strip any `$(` sequences.
+3. Remove backtick characters.
+4. Truncate to 200 characters; append `…` when truncation fires.
+
+This holds identically on both axes. When `metadata.smellWarnings` is absent or empty, omit the section entirely.
+
+For split-file output (`--split full-stack`), `metadata.smellWarnings` is written to EVERY file the split produces — both frontend and backend on the SIDE axis, all N project files on the PROJECT axis. Render it once per file in the `MERGE_RETURN` list (Phase 3e), alongside that file's own `Tasks:` line, so each per-file summary stays self-contained. Drive the repetition off the returned list's length — never off a fixed count of two.
 
 ## Error Handling
 

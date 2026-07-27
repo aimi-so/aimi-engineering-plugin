@@ -4802,6 +4802,7 @@ $rp_entry"
 # story-merge: Consolidate staging files into a validated tasks.json
 # Usage: aimi-cli.sh story-merge --staging-dir <dir> --output <path>
 #           [--split legacy|full-stack] [--agent-mode] [--phase-aware]
+#           [--foundation <NN>]
 # ============================================================================
 
 # _story_merge_assign_ids: given a JSON array of story objects (already loaded),
@@ -4811,6 +4812,10 @@ $rp_entry"
 
 cmd_story_merge() {
   local staging_dir="" output_path="" split_mode="legacy" agent_mode=false phase_aware=false foundation_idx=""
+  # Resolved by the --foundation injection sweep below and consumed (only) by
+  # the PROJECT-axis writer, which flags cross-group edges onto it distinctly.
+  # Stays "" whenever --foundation was omitted, so no real id can match it.
+  local foundation_id=""
 
   # --- Parse flags ---
   while [ $# -gt 0 ]; do
@@ -4861,6 +4866,33 @@ cmd_story_merge() {
   if [ -n "$foundation_idx" ] && ! [[ "$foundation_idx" =~ ^[0-9]{2}$ ]]; then
     echo "Error: story-merge: --foundation must be a two-digit index (e.g. 01), got: $foundation_idx" >&2
     exit 1
+  fi
+  # --phase-aware strips ONE trailing "-tasks" segment from the --output
+  # basename. Both writers do that strip with the same `${base_no_ext%-tasks}`
+  # expansion, and on a basename that is exactly "tasks" the strip is a no-op
+  # while on "-tasks" it collapses to the empty string -- either way the
+  # derived name degenerates (".../-frontend-tasks.json", ".../-<slug>-tasks.json":
+  # a basename starting with "-", which every downstream tool reads as a flag).
+  # Guarding inside the writers would mean either fixing one axis and leaving
+  # the other, or changing SIDE-axis behavior; refusing the input here leaves
+  # both strips byte-identical and costs the caller one well-named error.
+  # The derivation below mirrors the writers' exactly (basename, strip the
+  # extension after the LAST dot) so the precondition can never drift from the
+  # expansion it protects.
+  if [ "$phase_aware" = true ]; then
+    local pa_base pa_ext pa_no_ext
+    pa_base=$(basename "$output_path")
+    pa_ext="${pa_base##*.}"
+    pa_no_ext="${pa_base%.$pa_ext}"
+    case "$pa_no_ext" in
+      # ?* before "-tasks": at least one character must survive the strip.
+      ?*-tasks) ;;
+      *)
+        echo "Error: story-merge: --phase-aware requires an --output basename ending in \"-tasks\"" >&2
+        echo "(phase-scoped form, e.g. <feature>-phase-<N>-tasks.json); got: $pa_base" >&2
+        exit 1
+        ;;
+    esac
   fi
 
   # --- Validate paths are inside project ---
@@ -5027,6 +5059,15 @@ cmd_story_merge() {
   # --- Remove synthetic _srcIdx field before further processing ---
   merged_array=$(printf '%s' "$merged_array" | jq '[.[] | del(._srcIdx)]')
 
+  # --- Resolve the split axis (and refuse unrouteable .project values) ---
+  # Earliest point at which every story carries its final US-NNN id, and still
+  # ahead of --foundation, cycle detection, and the Phase 3.1/4.1/4.2 sweeps:
+  # a refusal here costs nothing and cannot emit a warning about a plan that
+  # was never going to be written. The axis is decided ONCE, here, and the
+  # writers below only read the answer.
+  local split_axis
+  split_axis=$(_story_merge_resolve_axis "$merged_array" "$split_mode") || exit 1
+
   # --- Foundation dependsOn injection sweep (--foundation NN) ---
   # Runs after the outline:NN remap and _srcIdx strip, and before both the
   # Kahn's-algorithm cycle detection and wave computation below, so injected
@@ -5039,7 +5080,6 @@ cmd_story_merge() {
   # pointing toward the foundation (never away from it), so no new cycle can
   # be introduced; the Kahn's-algorithm check below still runs unmodified.
   if [ -n "$foundation_idx" ]; then
-    local foundation_id
     foundation_id=$(printf '%s' "$merged_array" | jq -r --arg nn "$foundation_idx" '
       (to_entries | map({key: (.key + 1 | tostring | if length == 1 then "0" + . else . end), value: .value.id}) | from_entries) as $outline_map |
       $outline_map[$nn] // ""
@@ -5425,11 +5465,146 @@ cmd_story_merge() {
   # ============================================================
   # Branch on split mode
   # ============================================================
+  # The split AXIS was decided by _story_merge_resolve_axis immediately after
+  # id assignment, before any of the sweeps above ran. Nothing is recomputed
+  # here -- this block only dispatches on the answer, so there is no second
+  # partition rule that could disagree with the one the writer groups by.
   if [ "$split_mode" = "full-stack" ]; then
-    _story_merge_write_split "$merged_array" "$output_path" "$staging_dir" "$smell_warnings" "$phase_aware"
+    if [ "$split_axis" = "project" ]; then
+      # foundation_id is threaded into the PROJECT writer ONLY. --foundation
+      # injects one edge onto the foundation story from every other story; in
+      # a multi-repo split every group that does not host the foundation loses
+      # that edge and would otherwise look like an ordinary hand-authored
+      # missing dependency. The SIDE writer keeps its byte-identical signature.
+      _story_merge_write_project_split "$merged_array" "$output_path" "$staging_dir" "$smell_warnings" "$phase_aware" "$foundation_id"
+    else
+      _story_merge_write_split "$merged_array" "$output_path" "$staging_dir" "$smell_warnings" "$phase_aware"
+    fi
   else
     _story_merge_write_legacy "$merged_array" "$output_path" "$staging_dir" "$smell_warnings"
   fi
+}
+
+# jq `def`s spliced into every program that needs a story's .project either
+# classified or reduced to a stable grouping key. Shared by
+# _story_merge_resolve_axis and _story_merge_write_project_split so the two can
+# never drift apart -- an axis chosen from one rule and a group built from
+# another is exactly how issue #72 came back (one branch, two repositories).
+#
+# Grouping/counting/classification ONLY -- neither the normalized nor the
+# classified form is ever written back onto a story; .project must survive
+# verbatim into the output files.
+#
+#   norm_project  -- trims surrounding whitespace, strips one trailing slash,
+#                    and treats blank/whitespace-only (and absent) as null.
+#   project_state -- validates the RAW value against the grammar execute.md
+#                    publishes for .project, returning exactly one of
+#                    "untagged" / "tagged" / "invalid". Deliberately inspects
+#                    the raw string, not the trimmed one: " apps/web " is
+#                    invalid rather than being quietly trimmed into a value
+#                    whose raw form is what a downstream command would cd into.
+#                    Only a fully blank string counts as untagged.
+#   group_key     -- the single routing key. Both the axis decision and the
+#                    grouping pass go through this and nothing else.
+_STORY_MERGE_NORM_PROJECT_JQ='
+def norm_project:
+  if . == null then null
+  else
+    (. | gsub("^\\s+|\\s+$"; "")) as $t |
+    if $t == "" then null
+    elif ($t | endswith("/")) then $t[0:-1]
+    else $t
+    end
+  end;
+
+def project_state:
+  if . == null then "untagged"
+  elif (type != "string") then "invalid"
+  elif ((. | gsub("^\\s+|\\s+$"; "")) == "") then "untagged"
+  elif . == "." then "tagged"
+  elif (test("^[a-zA-Z0-9_][a-zA-Z0-9_./@-]*$")
+        and ((split("/") | index("..")) == null)
+        and ((test("//")) | not)) then "tagged"
+  else "invalid"
+  end;
+
+def group_key: norm_project;
+'
+
+# Resolve the split AXIS from the merged array, refusing anything the axis
+# cannot route unambiguously. Echoes exactly "project" or "side"; returns 1
+# after printing a named refusal otherwise.
+#
+# Called once, early -- before --foundation, cycle detection, and the Phase
+# 3.1/4.1/4.2 sweeps -- so a refusal costs nothing and emits no warnings about
+# a plan that was never going to be written.
+#
+# Decision table (counts computed here, ONCE, and nowhere else):
+#   any story with an invalid .project     -> refuse, in EVERY --split mode
+#   distinct >= 1 AND untagged > 0         -> refuse (--split full-stack only)
+#   distinct >= 2                          -> "project"  (multi-repo)
+#   otherwise                              -> "side"     (single-repo/monorepo)
+#
+# The untagged rule tests distinct >= 1, not >= 2, deliberately: the failure
+# this exists to stop is ONE tagged repo plus untagged stories, which counts as
+# a single distinct project and would otherwise take the SIDE axis -- one file,
+# one branch, two repositories.
+#
+# _rm_sanitize is applied HERE and only here. These lines print values that
+# already failed validation and are therefore unbounded; on every success path
+# .project is a routing key that must stay byte-identical between the key that
+# groups and the key that is written.
+_story_merge_resolve_axis() {
+  local merged_array="$1"
+  local split_mode="$2"
+
+  # Malformed .project is refused in EVERY --split mode, legacy included: the
+  # value is a repository path a downstream command will cd into, so
+  # "../sibling-repo" must not reach a tasks file by any route.
+  local invalid_stories
+  invalid_stories=$(printf '%s' "$merged_array" | jq -r "$_STORY_MERGE_NORM_PROJECT_JQ$_ROADMAP_SANITIZE_JQ"'
+    [.[] | . as $s | select(($s.project | project_state) == "invalid")] | .[] |
+    "  " + .id + " (" + (.title | _rm_sanitize(200)) + "): invalid project " + (.project | tostring | _rm_sanitize(120))
+  ')
+  if [ -n "$invalid_stories" ]; then
+    echo "Error: story-merge: story .project must match ^[a-zA-Z0-9_][a-zA-Z0-9_./@-]*\$ with no \"..\" component, no \"//\", no surrounding whitespace, and no leading \"./\" (use \".\" for the root repository); no files were written:" >&2
+    printf '%s\n' "$invalid_stories" >&2
+    return 1
+  fi
+
+  if [ "$split_mode" != "full-stack" ]; then
+    printf '%s' "side"
+    return 0
+  fi
+
+  local axis_counts distinct_count untagged_count
+  axis_counts=$(printf '%s' "$merged_array" | jq -c "$_STORY_MERGE_NORM_PROJECT_JQ"'
+    [.[] | . as $s | {state: ($s.project | project_state), key: ($s.project | group_key)}] as $st |
+    {
+      distinct: ([$st[] | select(.state == "tagged") | .key] | unique | length),
+      untagged: ([$st[] | select(.state == "untagged")] | length)
+    }
+  ')
+  distinct_count=$(printf '%s' "$axis_counts" | jq -r '.distinct')
+  untagged_count=$(printf '%s' "$axis_counts" | jq -r '.untagged')
+
+  if [ "${distinct_count:-0}" -ge 1 ] && [ "${untagged_count:-0}" -gt 0 ]; then
+    local untagged_stories
+    untagged_stories=$(printf '%s' "$merged_array" | jq -r "$_STORY_MERGE_NORM_PROJECT_JQ$_ROADMAP_SANITIZE_JQ"'
+      [.[] | . as $s | select(($s.project | project_state) == "untagged")] | .[] |
+      "  " + .id + " (" + (.title | _rm_sanitize(200)) + "): no project"
+    ')
+    echo "Error: story-merge: --split full-stack: this plan tags $distinct_count project(s), so it is a multi-repo plan and EVERY story needs a project. A story that belongs to the root repository must say so explicitly with \".\" -- an absent project is not the root, it is unrouteable. No files were written; the staging dir was kept. Stories missing a project:" >&2
+    printf '%s\n' "$untagged_stories" >&2
+    return 1
+  fi
+
+  if [ "${distinct_count:-0}" -ge 2 ]; then
+    printf '%s' "project"
+  else
+    printf '%s' "side"
+  fi
+  return 0
 }
 
 # Write a single merged tasks.json (legacy mode)
@@ -5492,7 +5667,9 @@ _story_merge_write_legacy() {
     '{merged: $output, stories: $stories}'
 }
 
-# Write two split tasks files (full-stack mode)
+# Write two split tasks files (full-stack mode, SIDE axis: frontend/backend).
+# Chosen by cmd_story_merge for single-repo/monorepo layouts only -- fewer than
+# 2 distinct normalized .project values across the merged array.
 _story_merge_write_split() {
   local merged_array="$1"
   local output_path="$2"
@@ -5500,57 +5677,26 @@ _story_merge_write_split() {
   local smell_warnings="${4:-[]}"
   local phase_aware="${5:-false}"
 
-  # Partition by project-aware majority vote, with a monorepo guard:
-  # 1. Tag every story with its own heuristic frontend verdict (_fe) using the
-  #    same file-pattern/title predicate that decided the split before this
-  #    change (implementation.files matching tsx/jsx/components//pages//
-  #    frontend//ui//client/, OR title+description matching the UI/Frontend/
-  #    Component/Page/View/React/Tailwind keyword set).
-  # 2. Normalize .project for grouping/counting only (trim whitespace, strip
-  #    one trailing slash, blank/whitespace-only treated as absent) -- never
-  #    write the normalized form back onto the story; .project must survive
-  #    verbatim into the output files.
-  # 3. When >= 2 distinct normalized projects are present across the merged
-  #    array, decide each project group's side by strict majority of its
-  #    members' own _fe verdicts (ties go to backend, preserving the old
-  #    "not clearly frontend goes to backend" bias). This is what lets a
-  #    project-tagged docs-only story that fails the heuristic alone still
-  #    ride into frontend-tasks.json with its web-app siblings.
-  # 4. Below that threshold -- including "no story has .project" -- every
-  #    story falls back to its own _fe verdict, so a single-project (or
-  #    project-less) merge produces byte-identical output to pure per-story
-  #    heuristic classification (monorepo guard; keeps TC8/TC12 unchanged).
+  # Partition by the per-story frontend heuristic, unconditionally.
+  #
+  # This writer only ever sees a single-repo/monorepo merge: cmd_story_merge
+  # routes every layout carrying >= 2 distinct normalized .project values to
+  # _story_merge_write_project_split instead, so there is no project group to
+  # vote on here and no project-aware branch. Every story is classified by its
+  # own file-pattern/title verdict (implementation.files matching tsx/jsx/
+  # components//pages//frontend//ui//client/, OR title+description matching the
+  # UI/Frontend/Component/Page/View/React/Tailwind keyword set) -- byte-
+  # identical to what the old monorepo-guard fallback produced, which covers
+  # both "no story has .project" and "every story shares exactly one project".
   local tagged_stories
   tagged_stories=$(printf '%s' "$merged_array" | jq '
-    def norm_project:
-      if . == null then null
-      else
-        (. | gsub("^\\s+|\\s+$"; "")) as $t |
-        if $t == "" then null
-        elif ($t | endswith("/")) then $t[0:-1]
-        else $t
-        end
-      end;
     def fe_heuristic:
       ((.implementation.files // []) | any(
         test("\\.(tsx|jsx)$") or test("components?/") or test("pages?/") or
         test("frontend/") or test("ui/") or test("client/")
       )) or
       ((.title + " " + (.description // "")) | test("\\b(UI|Frontend|Component|Page|View|React|Tailwind)\\b"; "i"));
-    [.[] | . + {_fe: fe_heuristic}] as $tagged |
-    ([$tagged[] | (.project | norm_project)] | map(select(. != null)) | unique) as $distinct_projects |
-    if ($distinct_projects | length) >= 2 then
-      ($tagged
-        | map(select((.project | norm_project) != null))
-        | group_by(.project | norm_project)
-        | map({key: (.[0].project | norm_project), value: ((map(select(._fe)) | length) * 2 > length)})
-        | from_entries
-      ) as $side_by_project |
-      [$tagged[] | . as $s | ($s.project | norm_project) as $p |
-        $s + {_side: (if $p == null then $s._fe else $side_by_project[$p] end)}]
-    else
-      [$tagged[] | . + {_side: ._fe}]
-    end
+    [.[] | . + {_fe: fe_heuristic}] | map(. + {_side: ._fe})
   ')
 
   # Bipartition: two select() passes over the single tagged-and-sided array,
@@ -5846,6 +5992,781 @@ _story_merge_write_split() {
     --argjson fe_count "$fe_count_out" \
     --argjson be_count "$be_count_out" \
     '{frontend: $fe, backend: $be, frontend_stories: $fe_count, backend_stories: $be_count}'
+}
+
+# Write N split tasks files (full-stack mode, PROJECT axis: one file per repo).
+#
+# Chosen by cmd_story_merge when the merged array carries >= 2 distinct
+# normalized .project values -- a multi-repo layout. There is no
+# frontend/backend side decision on this path at all: the split axis IS the
+# project, so every repo named by a story gets its own valid, non-colliding
+# tasks file instead of being force-fit into two side files.
+#
+# All-or-nothing contract: every output path, slug, and branchName is derived
+# and validated BEFORE the first write, so a collision or an invalid branch
+# name lands zero files. Once the write loop starts, a mid-loop failure names
+# the files already on disk and keeps the staging dir so a retry is unambiguous.
+_story_merge_write_project_split() {
+  local merged_array="$1"
+  local output_path="$2"
+  local staging_dir="$3"
+  local smell_warnings="${4:-[]}"
+  local phase_aware="${5:-false}"
+  # Pre-remap id of the --foundation story, or "" when the flag was omitted.
+  # Compared against the PRE-remap dropped-dep ids below (the same namespace),
+  # so an empty value can never match a real story.
+  local foundation_id="${6:-}"
+
+  # ============================================================
+  # 1. Route every story to a project group
+  # ============================================================
+  # Group key = group_key, the same def _story_merge_resolve_axis chose the
+  # axis with. There is no fallback for a null key and there must not be one:
+  # this writer is only ever reached on the PROJECT axis, which the resolver
+  # enters only when every story is tagged, so group_key is non-null by
+  # construction. A `// "."` here would be a second normalization rule one
+  # function away from the first -- exactly the divergence that produced one
+  # file and one branch for two repositories (issue #72).
+  # Groups are emitted in lexicographic order by normalized project path
+  # (jq's `unique` sorts by codepoint), never staging-glob or first-encountered
+  # order.
+  local group_keys
+  group_keys=$(printf '%s' "$merged_array" | jq -c "$_STORY_MERGE_NORM_PROJECT_JQ"'
+    [.[] | . as $s | ($s.project | group_key)] | unique
+  ')
+
+  # ============================================================
+  # 2. Per-group id assignment + cross-group dependsOn sweep
+  # ============================================================
+  # Ids are reassigned US-001..US-M in group order, each group taking a
+  # contiguous block (mirrors the frontend-then-backend offset scheme of
+  # _story_merge_write_split), so ids stay unique across the whole N-file set.
+  # A dependsOn edge that crosses a group boundary cannot survive -- its target
+  # lives in another file -- so it is dropped and captured as __droppedDeps,
+  # with __becameRoot flagging a story whose entire dependsOn list vanished.
+  #
+  # Every select()/map() pass binds its story via `. as $s` first: piping a
+  # story into map/has() rebinds `.` away from the story object, which has
+  # already broken a prior fix to this function.
+  local prepared
+  prepared=$(printf '%s\n%s' "$merged_array" "$group_keys" | jq -s \
+    --arg foundation_id "$foundation_id" \
+    "$_STORY_MERGE_NORM_PROJECT_JQ$_ROADMAP_SANITIZE_JQ"'
+    def pad3: tostring | if length == 1 then "00" + . elif length == 2 then "0" + . else . end;
+    def recompute_waves:
+      reduce range(length) as $_ (
+        map(. + {wave: (if (.dependsOn // []) == [] then 1 else 0 end)});
+        . as $current |
+        map(
+          if .wave > 0 then .
+          else
+            . as $story |
+            ([$story.dependsOn[] | . as $dep_id | ($current[] | select(.id == $dep_id) | .wave)] | if length == 0 then [0] else . end) as $dep_waves |
+            if ($dep_waves | all(. > 0)) then
+              . + {wave: (($dep_waves | max) + 1)}
+            else
+              .
+            end
+          end
+        )
+      );
+    .[0] as $stories | .[1] as $keys |
+    # Stories bucketed per group, preserving merged (outline) order inside
+    # each bucket.
+    [ $keys[] | . as $g |
+      {project: $g, stories: [$stories[] | . as $s | select(($s.project | group_key) == $g)]}
+    ] as $buckets |
+    # Running offset -> contiguous US-NNN block per group, in group order.
+    (reduce range($buckets | length) as $i ({offset: 0, out: []};
+      .offset as $off |
+      ($buckets[$i].stories) as $bs |
+      {
+        offset: ($off + ($bs | length)),
+        out: (.out + [{
+          project: $buckets[$i].project,
+          idmap: ([$bs | to_entries[] | . as $e | {key: $e.value.id, value: ("US-" + (($off + $e.key + 1) | pad3))}] | from_entries),
+          stories: $bs
+        }])
+      }
+    ) | .out) as $blocks |
+    # Global pre-remap-id -> {newId, project, title} map, built across EVERY
+    # group before any dependsOn remap runs, so a dropped cross-group target
+    # can still be named usefully (it exists in no single output file).
+    ([$blocks[] | . as $b | ($b.stories[] | . as $s |
+       {key: $s.id, value: {newId: ($b.idmap[$s.id] // $s.id), project: $b.project, title: $s.title}})]
+     | from_entries) as $gmap |
+    [$blocks[] | . as $b |
+      {
+        project: $b.project,
+        stories: ([$b.stories[] | . as $s |
+          ($s.dependsOn // []) as $pre |
+          (($pre | length) > 0) as $had_deps |
+          ([$pre[] | . as $d | select(($b.idmap[$d] // null) == null)]) as $dropped_ids |
+          $s
+          | .id = ($b.idmap[$s.id] // $s.id)
+          | .dependsOn = [$pre[] | . as $dep | ($b.idmap[$dep] // null) | select(. != null)]
+          | .__droppedDeps = $dropped_ids
+          | .__becameRoot = ($had_deps and (.dependsOn == []))
+        ] | recompute_waves)
+      }
+    ] as $remapped |
+    # One cross-group dependsOn smellWarnings entry per affected story, every
+    # title sanitized before it enters JSON or stderr.
+    #
+    # This axis keys every entry by `project` -- the routing key of the group
+    # that owns it -- at BOTH the top level and in every droppedDeps[]. There is
+    # no frontend/backend verdict on this path, so there is no `side` field to
+    # emit; `side` remains exclusive to _story_merge_write_split. The two keys
+    # are mutually exclusive per axis, which is what lets the Step 5 renderer
+    # pick whichever one an entry actually carries.
+    #
+    # foundationEdge marks a dropped edge that --foundation itself injected
+    # into every non-foundation story. In a multi-repo split the foundation
+    # lives in exactly one group, so every OTHER group loses that edge and
+    # would otherwise be indistinguishable from a hand-authored missing
+    # dependency. $foundation_id is the PRE-remap id (same namespace as
+    # $old), and is "" when --foundation was omitted -- no real id matches it.
+    [$remapped[] | . as $b | ($b.stories[] | . as $s |
+      select(($s.__droppedDeps // []) | length > 0) |
+      ([($s.__droppedDeps // [])[] | . as $old |
+         ($gmap[$old] // {newId: $old, project: "unknown", title: ""}) |
+         {id: .newId, project: .project, title: (.title | _rm_sanitize(200)),
+          foundationEdge: (($foundation_id != "") and ($old == $foundation_id))}]) as $dd |
+      ($dd | map(select(.foundationEdge == true)) | length) as $fcount |
+      {
+        type: "cross-file-dep-dropped",
+        storyId: $s.id,
+        project: $b.project,
+        becameRoot: $s.__becameRoot,
+        droppedDeps: $dd,
+        message: (
+          ($dd | length | tostring) + " cross-file dependsOn edge(s) dropped targeting: " +
+          ($dd | map(.title) | join("; ")) +
+          (if $fcount > 0 then
+             " -- " + ($fcount | tostring) + " of these targets the shared --foundation story (" +
+             ($dd | map(select(.foundationEdge == true))
+                  | map(.id + " in project \"" + .project + "\"") | join(", ")) +
+             "), an edge --foundation injected into every story rather than a hand-authored dependency"
+           else "" end) +
+          (if $s.__becameRoot then " (story became a false wave-1 root)" else "" end)
+        )
+      })
+    ] as $cross_warnings |
+    {blocks: $remapped, crossWarnings: $cross_warnings}
+  ')
+
+  # Merge into the Phase 4.2 smell_warnings param BEFORE any file is built, so
+  # every one of the N files carries the same combined set.
+  local cross_file_warnings combined_smell_warnings
+  cross_file_warnings=$(printf '%s' "$prepared" | jq -c '.crossWarnings')
+  combined_smell_warnings=$(printf '%s\n%s' "$smell_warnings" "$cross_file_warnings" | jq -s '.[0] + .[1]')
+
+  # Aggregated stderr banner (never per-edge), mirroring the SIDE writer: one
+  # summary line, then one enumeration line per FALSE-ROOT story only.
+  local total_dropped affected_count
+  total_dropped=$(printf '%s' "$cross_file_warnings" | jq '[.[].droppedDeps | length] | add // 0')
+  affected_count=$(printf '%s' "$cross_file_warnings" | jq 'length')
+  if [ "$affected_count" -gt 0 ]; then
+    echo "Warning: story-merge: ${total_dropped} cross-project dependsOn edge(s) dropped across ${affected_count} affected stories (--split full-stack, project axis; see metadata.smellWarnings)" >&2
+
+    # --foundation note: separate from the drop-count banner above, because
+    # these edges are structurally different -- the merge itself injected
+    # them, so every non-foundation project group losing one is expected
+    # fallout of combining --foundation with a multi-repo split, not a sign of
+    # a hand-authored dependency that went missing.
+    local foundation_edge_count foundation_story_count
+    foundation_edge_count=$(printf '%s' "$cross_file_warnings" | jq '[.[].droppedDeps[] | select(.foundationEdge == true)] | length')
+    foundation_story_count=$(printf '%s' "$cross_file_warnings" | jq '[.[] | select((.droppedDeps // []) | any(.foundationEdge == true))] | length')
+    if [ "${foundation_edge_count:-0}" -gt 0 ]; then
+      echo "Note: story-merge: ${foundation_edge_count} of those edge(s), across ${foundation_story_count} stories, target the shared --foundation story, which lives in only one project group; --foundation injected them, so their loss is expected on a multi-repo split (see droppedDeps[].foundationEdge)" >&2
+    fi
+
+    local false_root_lines
+    false_root_lines=$(printf '%s' "$cross_file_warnings" | jq -r '
+      .[] | select(.becameRoot == true) |
+      (.storyId + " (" + .project + "): became a false wave-1 root -- its cross-project dependsOn target(s) " +
+       ([.droppedDeps[] | (.id + " (" + .project + ")")] | join(", ")) + " were dropped")
+    ')
+    if [ -n "$false_root_lines" ]; then
+      printf '%s\n' "$false_root_lines" >&2
+    fi
+  fi
+
+  # ============================================================
+  # 3. Derive every output path / slug / branchName up front
+  # ============================================================
+  local base_name ext base_no_ext dir_part
+  base_name=$(basename "$output_path")
+  ext="${base_name##*.}"
+  base_no_ext="${base_name%.$ext}"
+  # --phase-aware: identical single-"tasks"-segment collapse the SIDE writer
+  # applies. Pure string manipulation on the --output basename, independent of
+  # the split axis, so it composes unchanged at any N.
+  if [ "$phase_aware" = true ]; then
+    base_no_ext="${base_no_ext%-tasks}"
+  fi
+  dir_part=$(dirname "$output_path")
+
+  # slugify: a project path is NEVER interpolated raw into a filename. Every
+  # character outside [A-Za-z0-9_-] (notably "/" and ".") becomes "-", runs
+  # collapse, and leading/trailing "-" are trimmed; a value that flattens to
+  # nothing (e.g. ".") becomes "root".
+  local plan
+  plan=$(printf '%s' "$prepared" | jq -c \
+    --arg dir "$dir_part" \
+    --arg base "$base_no_ext" '
+    def slugify:
+      (gsub("[^A-Za-z0-9_-]"; "-") | gsub("-+"; "-") | gsub("^-+|-+$"; "")) as $s |
+      if $s == "" then "root" else $s end;
+    .blocks | to_entries | map(
+      . as $e | $e.value as $b | ($b.project | slugify) as $slug |
+      {
+        index: ($e.key + 1),
+        # .project is carried through verbatim, never sanitized: it is the
+        # routing key, and a lossy transform would make the key that groups
+        # differ from the key that is written. Malformed values are refused
+        # outright by _story_merge_resolve_axis, before this writer is reached.
+        project: $b.project,
+        slug: $slug,
+        path: ($dir + "/" + $base + "-" + $slug + "-tasks.json"),
+        branchName: ("feat/merged-" + $slug),
+        storyCount: ($b.stories | length)
+      }
+    )
+  ')
+
+  # Basename collision: two distinct project values that flatten to the same
+  # slug would silently overwrite each other. Hard-fail the WHOLE merge here,
+  # before the first write, so zero output files land.
+  local slug_collisions
+  slug_collisions=$(printf '%s' "$plan" | jq -r '
+    group_by(.slug) | map(select(length > 1)) | .[] |
+    "  basename slug \"" + .[0].slug + "\" is shared by projects: " + (map(.project) | join(", "))
+  ')
+  if [ -n "$slug_collisions" ]; then
+    echo "Error: story-merge: --split full-stack: distinct project values collide on the same output basename; no files were written:" >&2
+    printf '%s\n' "$slug_collisions" >&2
+    exit 1
+  fi
+
+  # Derived-name validation: every invariant the derived slug / path /
+  # branchName must satisfy before a single file is opened. Abort the whole
+  # merge on the first failure -- no partial write, no mangled fallback name.
+  #
+  # REFUSE, never truncate. Truncating two long project values to a common
+  # prefix manufactures a slug collision, which the guard above would then
+  # report as a basename conflict between projects that do not actually
+  # conflict -- a wrong diagnosis for a limit the caller can fix directly.
+  #
+  # Legs, and why each limit is where it is:
+  #   branchName regex  -- the invariant plan.md enforces before any git
+  #                        operation. Currently unreachable given slugify's
+  #                        output; kept because it costs one test() and is the
+  #                        only thing standing between a future slugify edit
+  #                        and a branch name handed to git unchecked.
+  #   slug <= 64        -- plan.md rewrites branchName to a ~87-char prefix in
+  #                        phase mode; 87 + 64 stays inside every downstream
+  #                        limit.
+  #   basename <= 248   -- NAME_MAX (255) minus the 7 bytes mktemp appends for
+  #                        ".XXXXXX". This is the leg that actually prevents a
+  #                        mid-loop mktemp death, and it has to be checked on
+  #                        the basename rather than the slug because most of
+  #                        that basename comes from --output, not from .project.
+  #   path <= 4000      -- PATH_MAX (4096) with headroom for the lock/tmp
+  #                        suffixes appended to it.
+  #   branchName <= 100 -- worktree-manager places a worktree as a single
+  #                        directory component, so branchName feeds a
+  #                        NAME_MAX-bounded name downstream.
+  local bad_derived
+  bad_derived=$(printf '%s' "$plan" | jq -r --arg re "$_ROADMAP_BRANCH_REGEX" '
+    .[] | . as $g |
+    ($g.path | split("/") | last) as $base |
+    [
+      (if ($g.branchName | test($re)) then empty
+       else "derived branchName failed validation against " + $re + ": " + $g.branchName end),
+      (if ($g.slug | length) > 64 then
+         "derived basename slug is " + (($g.slug | length) | tostring) + " chars (limit 64): " + $g.slug
+       else empty end),
+      (if ($base | length) > 248 then
+         "derived output basename is " + (($base | length) | tostring) +
+         " chars (limit 248 = NAME_MAX 255 minus the 7-char mktemp suffix): " + $base
+       else empty end),
+      (if ($g.path | length) > 4000 then
+         "derived output path is " + (($g.path | length) | tostring) + " chars (limit 4000)"
+       else empty end),
+      (if ($g.branchName | length) > 100 then
+         "derived branchName is " + (($g.branchName | length) | tostring) + " chars (limit 100): " + $g.branchName
+       else empty end)
+    ] | .[] | "  project \"" + $g.project + "\": " + .
+  ')
+  if [ -n "$bad_derived" ]; then
+    echo "Error: story-merge: --split full-stack: derived output name(s) failed validation; no files were written (shorten the offending project value -- names are refused, never truncated, because truncation would manufacture a basename collision between two distinct projects):" >&2
+    printf '%s\n' "$bad_derived" >&2
+    exit 1
+  fi
+
+  # ============================================================
+  # 4. Write every group's file atomically
+  # ============================================================
+  mkdir -p "$dir_part"
+
+  local group_total
+  group_total=$(printf '%s' "$plan" | jq 'length')
+
+  local written_paths=""
+  local idx=0
+  while [ "$idx" -lt "$group_total" ]; do
+    # tmp_group and write_exit are declared at their use site below, where the
+    # initialization they need is part of the same statement.
+    local group_path group_json
+    group_path=$(printf '%s' "$plan" | jq -r --argjson i "$idx" '.[$i].path')
+
+    # metadata.splitGroup is the self-describing marker for this file's place
+    # in the N-way split: its own project, its 1-based index, the total, and
+    # every sibling file's path. Downstream consumers discover the full set
+    # from it instead of re-deriving it from filename string conventions.
+    group_json=$(printf '%s\n%s\n%s' "$prepared" "$plan" "$combined_smell_warnings" | jq -s --argjson i "$idx" '
+      .[0] as $prep | .[1] as $plan | .[2] as $smells |
+      $plan[$i] as $g |
+      $prep.blocks[$i] as $b |
+      {
+        schemaVersion: "3.3",
+        metadata: (
+          {
+            title: ("feat: merged tasks (" + $g.slug + ")"),
+            type: "feat",
+            branchName: $g.branchName,
+            createdAt: (now | strftime("%Y-%m-%d")),
+            planPath: null,
+            splitGroup: {
+              project: $g.project,
+              index: $g.index,
+              total: ($plan | length),
+              siblings: [$plan[] | . as $sib | select($sib.index != $g.index) | $sib.path]
+            }
+          } +
+          (if ($smells | length) > 0 then {smellWarnings: $smells} else {} end)
+        ),
+        userStories: [$b.stories[] | del(.referenceInventory) | del(.ac_anchors) | del(._fe) | del(._side) | del(.__droppedDeps) | del(.__becameRoot) | (.status //= "pending")]
+      }
+    ')
+
+    # This script runs `set -euo pipefail`. A bare failing compound command
+    # exits the shell immediately, so a `write_exit=$?` on the NEXT line is
+    # unreachable and the whole error branch below with it -- which is exactly
+    # how a failed group write used to leave one file on disk advertising
+    # `total: 3` with two siblings that do not exist, an orphaned mktemp file,
+    # and no message at all.
+    #
+    # Three details keep this reachable, and all three are load-bearing:
+    #   1. `write_exit=0` is a real initialization. `-u` is on, and a bare
+    #      `local write_exit` leaves it declared-but-unset, which makes
+    #      `[ "$write_exit" -ne 0 ]` an unbound-variable error rather than a
+    #      false. It is also never `local write_exit=$?`: `local` is a builtin
+    #      and its own exit status overwrites `$?` before the assignment reads it.
+    #   2. The `|| write_exit=$?` makes the subshell the left side of an AND-OR
+    #      list, the one construct `set -e` is defined to exempt. The `200>`
+    #      redirect stays attached to the subshell, BEFORE the `||`, so a lock
+    #      path that cannot be opened (e.g. a directory) is a failure of the
+    #      exempted command rather than of the list.
+    #   3. mktemp gets the same treatment. It fails on ENOSPC/EACCES, and a
+    #      bare failing assignment is just as fatal under `set -e`.
+    local tmp_group=""
+    tmp_group=$(mktemp "${group_path}.XXXXXX" 2>/dev/null) || tmp_group=""
+    local write_exit=0
+    if [ -z "$tmp_group" ]; then
+      write_exit=1
+    else
+      (
+        _lock "${group_path}.lock"
+        printf '%s\n' "$group_json" > "$tmp_group"
+        mv "$tmp_group" "$group_path"
+      ) 200>"${group_path}.lock" || write_exit=$?
+      [ -n "$tmp_group" ] && rm -f "$tmp_group" 2>/dev/null || true
+    fi
+    if [ "$write_exit" -ne 0 ]; then
+      # Enumerate all THREE sets. The surviving files are the actionable part:
+      # each one advertises a splitGroup.total and a siblings[] list describing
+      # a complete N-way split that does not exist on disk, so the reader needs
+      # to know precisely which of those siblings landed and which never will.
+      local not_attempted remaining
+      remaining=$((group_total - idx - 1))
+      echo "Error: story-merge: failed to write project split output: $group_path" >&2
+      echo "  Written before this failure (${idx}):" >&2
+      if [ -n "$written_paths" ]; then
+        printf '%s\n' "$written_paths" >&2
+      else
+        echo "    (none)" >&2
+      fi
+      echo "  Failed:" >&2
+      echo "    $group_path" >&2
+      echo "  Not attempted (${remaining}):" >&2
+      if [ "$remaining" -gt 0 ]; then
+        not_attempted=$(printf '%s' "$plan" | jq -r --argjson i "$idx" '.[($i + 1):][] | "    " + .path')
+        printf '%s\n' "$not_attempted" >&2
+      else
+        echo "    (none)" >&2
+      fi
+      echo "  Staging dir preserved for retry:" >&2
+      echo "    $staging_dir" >&2
+      exit 1
+    fi
+    if [ -n "$written_paths" ]; then
+      written_paths="${written_paths}"$'\n'"    ${group_path}"
+    else
+      written_paths="    ${group_path}"
+    fi
+    idx=$((idx + 1))
+  done
+
+  # On success (all N writes landed): delete the staging dir
+  rm -rf "$staging_dir"
+
+  printf '%s' "$plan" | jq '[.[] | {path, project, branchName, storyCount}]'
+}
+
+# ============================================================================
+# split-detect — the read side of metadata.splitGroup
+# ============================================================================
+#
+# _story_merge_write_project_split (above) stamps every file it emits with a
+# self-describing metadata.splitGroup marker. This is the consumer: given a
+# scope, it answers "do the tasks files here form ONE group that must execute
+# together, and which members still have work?".
+#
+# It lives here rather than in /aimi:execute's markdown because every rule it
+# encodes -- anchor selection, sibling resolution, total validation, active
+# filtering, legacy-pair fallback -- is pure, deterministic, file-only logic.
+# Written as executable prose it was unreachable by both Bash test suites, and
+# it drifted into two divergent copies (flat flow vs. phase mode). Here one
+# copy serves both scopes and every rule is a test case.
+#
+# It is a QUERY, not a gate: every outcome, including "single" and "none",
+# exits 0. Non-zero is reserved for real errors (bad argument, unreadable dir).
+
+# A story is pending when its status is anything other than "completed".
+# Exactly one definition, used for every count this verb reports. The prose
+# it replaces had two that disagreed -- `!= "completed"` for the active filter
+# and `== "pending"` for the phase completion count -- so an in_progress story
+# was counted by one and not the other, which let a phase close with work
+# still in flight.
+_SPLIT_DETECT_DESCRIBE_JQ='
+  (if type == "object" then . else {} end) as $doc
+| (if ($doc.metadata | type) == "object" then $doc.metadata else {} end) as $m
+| (if ($m.splitGroup | type) == "object" then $m.splitGroup else {} end) as $sg
+| {
+    path: $path,
+    project: (if ($sg.project | type) == "string" then $sg.project else "." end),
+    branchName: (if ($m.branchName | type) == "string" then $m.branchName else null end),
+    storyCount: (if ($doc.userStories | type) == "array"
+                 then ($doc.userStories | length) else 0 end),
+    pendingCount: (if ($doc.userStories | type) == "array"
+                   then ([$doc.userStories[]
+                          | select((.status? // "pending") != "completed")] | length)
+                   else 0 end),
+    hasMarker: (($sg.total | type) == "number" and ($sg.siblings | type) == "array"),
+    declaredTotal: (if ($sg.total | type) == "number" then ($sg.total | tostring) else "" end),
+    siblings: (if ($sg.siblings | type) == "array"
+               then [$sg.siblings[] | tostring] else [] end)
+  }
+| . + {active: (.pendingCount > 0)}
+'
+
+# Emit one compact JSON descriptor for a candidate tasks file.
+# A file that is unreadable or not valid JSON yields an inert descriptor
+# (no marker, no stories) instead of aborting: one corrupt file sitting in
+# .aimi/tasks/ must not take detection down for every other feature.
+_split_detect_describe() {
+  local file="$1"
+  local desc=""
+  desc=$(jq -c --arg path "$file" "$_SPLIT_DETECT_DESCRIBE_JQ" "$file" 2>/dev/null) || desc=""
+  if [ -z "$desc" ]; then
+    desc=$(jq -nc --arg path "$file" '{path: $path, project: ".", branchName: null,
+      storyCount: 0, pendingCount: 0, hasMarker: false, declaredTotal: "",
+      siblings: [], active: false}')
+  fi
+  printf '%s' "$desc"
+}
+
+# List *-tasks.json files directly inside <dir> (depth 1 only), newest mtime
+# first. NUL-delimited find -> xargs -0 keeps paths containing spaces intact,
+# the same hardening _find_tasks_files_all carries; a newline-delimited
+# `xargs ls -t` word-splits them and silently returns nothing.
+_split_detect_list_dir() {
+  local dir="$1"
+  [ -d "$dir" ] || return 0
+  find "$dir" -mindepth 1 -maxdepth 1 -type f -name '*-tasks.json' -print0 2>/dev/null \
+    | xargs -0 ls -t 2>/dev/null || true
+}
+
+# Derive the phase's own governing tasks file from a phase directory, so it can
+# be excluded from the split candidate pool. Layout is
+# .aimi/tasks/<feature>/phase-<N>[.<M>][-<slug>]/<feature>-phase-<N>-tasks.json.
+# Prints nothing when <dir> is not shaped like a phase directory (nothing to
+# exclude then, which is the safe direction: an extra candidate is still
+# filtered by the marker and pair rules below).
+_split_detect_phase_main_file() {
+  local dir="$1"
+  local dir_base feature phase_id
+  dir_base=$(basename "$dir")
+  case "$dir_base" in
+    phase-[0-9]*) ;;
+    *) return 0 ;;
+  esac
+  phase_id=${dir_base#phase-}
+  phase_id=${phase_id%%-*}
+  case "$phase_id" in
+    ''|*[!0-9.]*) return 0 ;;
+  esac
+  feature=$(basename "$(dirname "$dir")")
+  [ -n "$feature" ] || return 0
+  printf '%s/%s-phase-%s-tasks.json' "$dir" "$feature" "$phase_id"
+}
+
+cmd_split_detect() {
+  local scope_dir=""
+  local dir_mode=false
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dir)
+        if [ $# -lt 2 ] || [ -z "${2:-}" ]; then
+          echo "Error: split-detect: --dir requires a directory path" >&2
+          exit 1
+        fi
+        scope_dir="$2"
+        dir_mode=true
+        shift 2
+        ;;
+      *)
+        echo "Error: split-detect: unknown argument: $1" >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  # ------------------------------------------------------------------
+  # 1. Build the candidate pool, newest mtime first
+  # ------------------------------------------------------------------
+  local candidates=""
+  local exclude_file=""
+  if [ "$dir_mode" = true ]; then
+    if [ ! -d "$scope_dir" ]; then
+      echo "Error: split-detect: --dir is not a directory: $scope_dir" >&2
+      exit 1
+    fi
+    scope_dir=$(resolve_path "$scope_dir")
+    validate_path_in_project "$scope_dir"
+    exclude_file=$(_split_detect_phase_main_file "$scope_dir")
+    candidates=$(_split_detect_list_dir "$scope_dir")
+  else
+    # Flat scope is depth 1 ONLY: candidates are the *-tasks.json files whose
+    # parent directory is $TASKS_DIR itself. _find_tasks_files_all globs depth
+    # 1-3, which includes every phase directory -- and that is exactly how a
+    # phase's split files used to be captured by the flat flow and executed as
+    # a flat split, leaving the phase unclaimed and nothing merged into the
+    # phase branch. The filter below is the fix, and it is load-bearing.
+    local all_files=""
+    all_files=$(_find_tasks_files_all)
+    if [ -n "$all_files" ]; then
+      while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        [ "$(dirname "$f")" = "$TASKS_DIR" ] || continue
+        candidates="${candidates}${f}"$'\n'
+      done <<< "$all_files"
+    fi
+  fi
+
+  local pool="[]"
+  if [ -n "$candidates" ]; then
+    local cand desc
+    while IFS= read -r cand; do
+      [ -n "$cand" ] || continue
+      [ -n "$exclude_file" ] && [ "$cand" = "$exclude_file" ] && continue
+      desc=$(_split_detect_describe "$cand")
+      pool=$(printf '%s' "$pool" | jq -c --argjson d "$desc" '. + [$d]')
+    done <<< "$candidates"
+  fi
+
+  local started_empty=false
+  [ "$(printf '%s' "$pool" | jq 'length')" -eq 0 ] && started_empty=true
+
+  # ------------------------------------------------------------------
+  # 2. Resolve the group
+  # ------------------------------------------------------------------
+  # "Newest wins": the anchor is the newest candidate, not the first
+  # marker-carrying file in mtime order. The old rule let a stale marked split
+  # from a past feature preempt today's plan whenever today's files carried no
+  # marker of their own.
+  local mode="none"
+  local anchor="null"
+  local members="[]"
+  local declared_total="0"
+  local degraded_reason=""
+
+  while :; do
+    local pool_len=0
+    pool_len=$(printf '%s' "$pool" | jq 'length')
+    if [ "$pool_len" -eq 0 ]; then
+      mode="none"
+      if [ "$started_empty" != true ] && [ -z "$degraded_reason" ]; then
+        degraded_reason="every candidate group is already fully completed"
+      fi
+      break
+    fi
+
+    local newest newest_path newest_dir newest_marker
+    newest=$(printf '%s' "$pool" | jq -c '.[0]')
+    newest_path=$(printf '%s' "$newest" | jq -r '.path')
+    newest_dir=$(dirname "$newest_path")
+    newest_marker=$(printf '%s' "$newest" | jq -r '.hasMarker')
+
+    local group="[]"
+    local group_mode=""
+    local group_total="0"
+
+    if [ "$newest_marker" = "true" ]; then
+      # -- Marked group: the members are the anchor plus its OWN declared
+      #    siblings. Nothing else in the pool participates, however similar
+      #    its basename. Each sibling resolves BY BASENAME against the
+      #    anchor's own directory, which is what renders a traversal-shaped
+      #    sibling entry inert: "../../etc/passwd" becomes "<anchor-dir>/passwd",
+      #    which does not exist, and the group is voided.
+      local anchor_total="" resolve_ok=true bad_detail=""
+      anchor_total=$(printf '%s' "$newest" | jq -r '.declaredTotal')
+      group="[$newest]"
+
+      case "$anchor_total" in
+        ''|*[!0-9]*)
+          resolve_ok=false
+          bad_detail="declared total is not a whole number: \"${anchor_total}\""
+          ;;
+      esac
+
+      if [ "$resolve_ok" = true ]; then
+        local sib sib_path sib_desc dup
+        while IFS= read -r sib; do
+          [ -n "$sib" ] || continue
+          sib_path="$newest_dir/$(basename "$sib")"
+          if [ ! -f "$sib_path" ]; then
+            resolve_ok=false
+            bad_detail="declared sibling not found in the anchor's directory: $sib_path"
+            break
+          fi
+          dup=$(printf '%s' "$group" | jq -r --arg p "$sib_path" '[.[] | select(.path == $p)] | length')
+          if [ "$dup" -ne 0 ]; then
+            resolve_ok=false
+            bad_detail="declared sibling resolves to a member already in the group: $sib_path"
+            break
+          fi
+          sib_desc=$(_split_detect_describe "$sib_path")
+          group=$(printf '%s' "$group" | jq -c --argjson d "$sib_desc" '. + [$d]')
+        done <<< "$(printf '%s' "$newest" | jq -r '.siblings[]')"
+      fi
+
+      local resolved=0
+      resolved=$(printf '%s' "$group" | jq 'length')
+      if [ "$resolve_ok" != true ] || [ "$resolved" -ne "$anchor_total" ] || [ "$resolved" -lt 2 ]; then
+        # A group that fails validation degrades to single-file execution and
+        # is TERMINAL -- it deliberately does not fall through to the legacy
+        # pair rule. This scope was planned by the project-split writer, so any
+        # -frontend-/-backend-tasks.json sitting beside it is stale, and running
+        # it would execute the wrong work.
+        mode="single"
+        anchor=$(printf '%s' "$newest" | jq -c '.path')
+        members="[$newest]"
+        declared_total="1"
+        degraded_reason="split group anchored at ${newest_path} is unusable (declared total ${anchor_total:-?}, resolved ${resolved}"
+        if [ -n "$bad_detail" ]; then
+          degraded_reason="${degraded_reason}; ${bad_detail}"
+        fi
+        degraded_reason="${degraded_reason}) — degraded to single-file execution, legacy pair not considered"
+        break
+      fi
+
+      group_mode="project-split"
+      group_total="$anchor_total"
+    else
+      # -- No marker on the newest candidate: try the legacy
+      #    -frontend-tasks.json / -backend-tasks.json pair rule over the pool.
+      #    The counterpart must be in the pool, not merely on disk, so the
+      #    scope (flat depth 1, or this one phase directory) still bounds it.
+      local newest_base prefix fe_path be_path
+      newest_base=$(basename "$newest_path")
+      prefix=""
+      fe_path=""
+      be_path=""
+      case "$newest_base" in
+        *-frontend-tasks.json)
+          prefix="${newest_base%-frontend-tasks.json}"
+          fe_path="$newest_path"
+          be_path="$newest_dir/${prefix}-backend-tasks.json"
+          ;;
+        *-backend-tasks.json)
+          prefix="${newest_base%-backend-tasks.json}"
+          be_path="$newest_path"
+          fe_path="$newest_dir/${prefix}-frontend-tasks.json"
+          ;;
+      esac
+
+      local counterpart=""
+      if [ -n "$prefix" ]; then
+        if [ "$fe_path" = "$newest_path" ]; then counterpart="$be_path"; else counterpart="$fe_path"; fi
+        local in_pool
+        in_pool=$(printf '%s' "$pool" | jq -r --arg p "$counterpart" '[.[] | select(.path == $p)] | length')
+        [ "$in_pool" -eq 0 ] && counterpart=""
+      fi
+
+      if [ -n "$counterpart" ]; then
+        # Frontend first, backend second — the order the two-file writer and
+        # every downstream report already assume.
+        group=$(printf '%s' "$pool" | jq -c --arg fe "$fe_path" --arg be "$be_path" \
+          '[(.[] | select(.path == $fe)), (.[] | select(.path == $be))]')
+        group_mode="paired-split"
+        group_total="2"
+      else
+        mode="single"
+        anchor=$(printf '%s' "$newest" | jq -c '.path')
+        members="[$newest]"
+        declared_total="1"
+        break
+      fi
+    fi
+
+    # A group with nothing left to do is not this run's work. Drop ALL of its
+    # members from the pool and look again, rather than letting a completed
+    # stale split route today's real work to a single-file fallback.
+    local group_active=0
+    group_active=$(printf '%s' "$group" | jq '[.[] | select(.active)] | length')
+    if [ "$group_active" -eq 0 ]; then
+      pool=$(printf '%s\n%s' "$pool" "$group" | jq -sc '
+        .[1] as $g | [.[0][] | select(.path as $p | ($g | map(.path) | index($p)) == null)]')
+      continue
+    fi
+
+    mode="$group_mode"
+    anchor=$(printf '%s' "$newest" | jq -c '.path')
+    members="$group"
+    declared_total="$group_total"
+    break
+  done
+
+  # ------------------------------------------------------------------
+  # 3. Emit
+  # ------------------------------------------------------------------
+  printf '%s' "$members" | jq \
+    --arg mode "$mode" \
+    --argjson anchor "$anchor" \
+    --argjson total "$declared_total" \
+    --arg reason "$degraded_reason" \
+    '{
+      mode: $mode,
+      anchor: $anchor,
+      members: [.[] | {path, project, branchName, storyCount, pendingCount, active}],
+      activeCount: ([.[] | select(.active)] | length),
+      total: $total,
+      degradedReason: (if ($reason | length) > 0 then $reason else null end)
+    }'
 }
 
 # ============================================================================
@@ -7446,7 +8367,7 @@ COMMANDS:
                               --source-command must be exactly 'brainstorm' or 'plan'.
     story-merge --staging-dir <dir> --output <path>
                               [--split legacy|full-stack] [--agent-mode]
-                              [--phase-aware]
+                              [--phase-aware] [--foundation <NN>]
                               Consolidate per-story staging *.json files into a
                               validated tasks.json. Steps: glob+validate JSON,
                               assign US-NNN IDs by lex order, remap outline:NN
@@ -7461,36 +8382,129 @@ COMMANDS:
                               hard block; skipped for single-story merges).
                               --split full-stack additionally detects
                               cross-file-dep-dropped smells: a dependsOn edge
-                              that crosses the frontend/backend boundary is
+                              that crosses an output-file boundary (a repo
+                              boundary on the PROJECT axis, the
+                              frontend/backend boundary on the SIDE axis) is
                               still dropped (each file's graph stays
                               self-contained) but is now surfaced via one
                               aggregated stderr banner plus a
                               metadata.smellWarnings entry per affected story
-                              in BOTH output files.
+                              in EVERY output file the split produced (keyed by
+                              .project on the PROJECT axis, .side on the SIDE
+                              axis).
                               Writes atomically via _lock (tmp+mv). Deletes
                               staging dir on success; preserves on error.
-                              --split full-stack writes two output files:
+                              --split full-stack picks its axis by counting
+                              distinct normalized .project values (trim, strip
+                              one trailing slash, blank/absent = null).
+                              >= 2 -> PROJECT axis (multi-repo): one output
+                              file per project, <base>-<project-slug>-tasks.json,
+                              no frontend/backend decision at all; each file
+                              carries metadata.splitGroup + its own branchName.
+                              A multi-repo plan requires EVERY story to carry a
+                              project: once any story is tagged, a project-less
+                              story is refused (no files written) rather than
+                              routed anywhere. A story belonging to the root
+                              repository says so explicitly with "." — an absent
+                              project is not the root, it is unrouteable.
+                              < 2 -> SIDE axis (single-repo/monorepo, incl. no
+                              .project at all): two output files,
                               <base>-frontend-tasks.json and
-                              <base>-backend-tasks.json with unique IDs, rebuilt
-                              dependsOn, and independent wave numbers. Partition:
-                              group stories by normalized .project, decide each
-                              group's side by strict majority vote of its
-                              members' own file-pattern/title heuristic verdict
-                              (ties go to backend); below 2 distinct normalized
-                              projects (monorepo guard, incl. no .project at
-                              all) every story falls back to its own heuristic
-                              verdict instead.
+                              <base>-backend-tasks.json, each story classified
+                              by its own file-pattern/title heuristic verdict.
+                              Both axes assign unique IDs, rebuild dependsOn,
+                              and recompute wave numbers per file.
+                              Derived slugs/paths/branch names are length-bounded
+                              and REFUSED (never truncated) when over: slug 64,
+                              output basename 248, full path 4000, branchName
+                              100. Truncation would manufacture a basename
+                              collision between two distinct long project values.
                               --phase-aware (only meaningful with --split
-                              full-stack): the --output basename already ends in
-                              "-tasks" (phase-scoped output, e.g.
-                              "<feature>-phase-<N>-tasks.json") — strip that
-                              trailing "-tasks" segment once before appending
-                              "-frontend-tasks.json"/"-backend-tasks.json" so the
-                              split basenames keep a single "tasks" segment
-                              instead of doubling it. Omitted: unchanged legacy
+                              full-stack): strip one trailing "-tasks" segment
+                              from the --output basename before deriving the
+                              split basenames. Pure string manipulation on the
+                              basename, independent of the axis: on SIDE it
+                              yields <base>-frontend-tasks.json /
+                              <base>-backend-tasks.json, on PROJECT it yields
+                              <base>-<project-slug>-tasks.json — in both cases
+                              with a single "tasks" segment instead of the
+                              doubled legacy form. Requires an --output basename
+                              ending in "-tasks" with at least one character
+                              before it (the phase-scoped form, e.g.
+                              "<feature>-phase-<N>-tasks.json"); anything else
+                              (e.g. "tasks.json") is refused up front, because
+                              the strip would otherwise leave an empty or
+                              "-"-leading basename. Omitted: unchanged legacy
                               derivation (double "-tasks-frontend-tasks.json").
+                              --foundation <NN> two-digit 1-based outline
+                              position of the shared foundation story (resolved
+                              against the same outline-position map as
+                              outline:NN, not a literal staging-filename digit).
+                              Appends the foundation's assigned US-NNN to every
+                              OTHER story's dependsOn, deduplicated, after the
+                              outline:NN remap and before cycle detection and
+                              wave computation, so injected edges participate in
+                              both. Refuses the whole merge when the foundation
+                              story's own dependsOn is non-empty. On the PROJECT
+                              axis the foundation lives in exactly one group, so
+                              every other group's injected edge is dropped and
+                              flagged droppedDeps[].foundationEdge: true, with
+                              its own stderr note separate from the ordinary
+                              drop-count banner — that loss is expected fallout
+                              of --foundation + multi-repo, not a hand-authored
+                              dependency that went missing. The SIDE axis emits
+                              no foundationEdge field.
                               --agent-mode demotes Phase 3.1 and Phase 4.1
                               hard rejects to warnings and proceeds.
+    split-detect [--dir <phase-dir>]
+                              Read side of metadata.splitGroup: decide whether
+                              the tasks files in scope form ONE split group that
+                              must execute together, and report which members
+                              still have pending work. A query, never a gate —
+                              every outcome, including "single" and "none",
+                              exits 0; non-zero is a real error (bad argument,
+                              unreadable --dir).
+                              Scope. Without --dir: FLAT — *-tasks.json whose
+                              parent directory is .aimi/tasks itself, depth 1
+                              only. The depth restriction is load-bearing:
+                              find-tasks-all globs depth 1-3, which includes
+                              phase directories, so without it a phase's split
+                              files are captured by the flat flow and run as a
+                              flat split — the phase never gets claimed and
+                              nothing merges into the phase branch. With --dir:
+                              that directory's *-tasks.json, minus the phase's
+                              own <feature>-phase-<N>-tasks.json.
+                              Algorithm. The anchor is the NEWEST candidate by
+                              mtime, not the first marker-carrying file in mtime
+                              order — the latter let a stale marked split from a
+                              past feature preempt today's plan whenever today's
+                              files carried no marker. If the anchor carries a
+                              well-formed metadata.splitGroup (total a number,
+                              siblings an array), siblings resolve BY BASENAME
+                              against the anchor's own directory (which renders
+                              a traversal-shaped sibling entry inert) and the
+                              resolved count must equal total and be >= 2.
+                              A group whose members are ALL completed is dropped
+                              whole from the pool and the search repeats, so a
+                              finished stale split cannot route today's real work
+                              to a single-file fallback. A marker present but
+                              failing validation degrades and is terminal — it
+                              does NOT fall through to the legacy pair, because
+                              any -frontend-/-backend-tasks.json beside a
+                              project-split marker is stale work. When the newest
+                              candidate carries no marker, the legacy
+                              -frontend-tasks.json/-backend-tasks.json pair rule
+                              is tried over the pool (counterpart must be in the
+                              pool, not merely on disk). Otherwise: single.
+                              Pending is (.status // "pending") != "completed" —
+                              one definition for every count reported, so an
+                              in_progress story is pending everywhere.
+                              Output. One JSON object: {mode: "project-split"|
+                              "paired-split"|"single"|"none", anchor, members:
+                              [{path,project,branchName,storyCount,pendingCount,
+                              active}], activeCount, total, degradedReason}.
+                              degradedReason explains any fall-back so the caller
+                              can report it without re-deriving why.
     roadmap-init --feature <slug> [--file <path>] [--sync] [--brainstorm-path <path>]
                               Read a sanitized phases array (stdin or --file) and
                               atomically create/append to .aimi/tasks/<slug>/roadmap.json.
@@ -7727,6 +8741,7 @@ main() {
     bundle-prototype-status)   shift; cmd_bundle_prototype_status "$@" ;;
     bundle-prototype-finalize) shift; cmd_bundle_prototype_finalize "$@" ;;
     story-merge)       shift; cmd_story_merge "$@" ;;
+    split-detect)      shift; cmd_split_detect "$@" ;;
     roadmap-init)          shift; cmd_roadmap_init "$@" ;;
     roadmap-get)           shift; cmd_roadmap_get "$@" ;;
     roadmap-set-status)    shift; cmd_roadmap_set_status "$@" ;;
