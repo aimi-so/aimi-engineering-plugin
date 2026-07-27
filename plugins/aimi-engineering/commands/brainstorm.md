@@ -1123,18 +1123,18 @@ When `INTERACTIVE_MODE=agent`:
 Name the concrete UI surface the signal matched — the matched phase's `name` for the Structural Signal case, or the feature itself for the Phase 1.7 fallback case. Present via **AskUserQuestion** (picker mode) with exactly three options:
 
 ```
-A fase "<name>" entrega telas que operadores usam — quer prototipar antes de seguirmos para a Fase 4?
+Phase "<name>" delivers screens operators use — want to prototype before moving to Phase 4?
 
-Prototipar — gerar variantes visuais agora
-Tenho uma referência — quero indicar um estilo ou exemplo antes
-Pular — seguir direto para a Fase 4
+Prototype — generate visual variants now
+I have a reference — point to a style or example first
+Skip — go straight to Phase 4
 ```
 
-- **[Pular]:** Proceed to Phase 4 unchanged. `prototype_entries` remains exactly as it was (still empty, per the fire condition). No artifact is produced.
+- **[Skip]:** Proceed to Phase 4 unchanged. `prototype_entries` remains exactly as it was (still empty, per the fire condition). No artifact is produced.
 
-- **[Prototipar]:** Set `visualOverridePending = true` and present one Aesthetic Direction question (same format as the "Design Questions" example above, e.g. "What visual tone fits this interface best?"). Because `visualOverridePending = true`, the existing **#### Visual Variant Rendering** machinery's override check (Phase 2 above, "`show variants` override check") treats this question as Aesthetic Direction and runs Steps 0a through 7 completely unchanged — authoring variants, opening the preview, and persisting the chosen variant into `prototype_entries` via Step 7. No part of that machinery is re-implemented here.
+- **[Prototype]:** Set `visualOverridePending = true` and present one Aesthetic Direction question (same format as the "Design Questions" example above, e.g. "What visual tone fits this interface best?"). Because `visualOverridePending = true`, the existing **#### Visual Variant Rendering** machinery's override check (Phase 2 above, "`show variants` override check") treats this question as Aesthetic Direction and runs Steps 0a through 7 completely unchanged — authoring variants, opening the preview, and persisting the chosen variant into `prototype_entries` via Step 7. No part of that machinery is re-implemented here.
 
-- **[Tenho uma referência]:** First run the Reference Intake flow defined in `${CLAUDE_PLUGIN_ROOT}/commands/references/visual-variants.md` under `## Reference Intake` (accepts a local path, a URL, or a free-text style directive; sanitizes it; establishes it as Probe #0 ahead of every project-source probe in Token Extraction). Apply that section's rules as written — do not restate them here. Then proceed identically to the [Prototipar] branch above: set `visualOverridePending = true`, present one Aesthetic Direction question, and let Visual Variant Rendering run unchanged. A Reference Intake failure does not abort this gate — it degrades to the plain [Prototipar] flow with that section's single warning line (`⚠ Reference intake: ...`) and continues from there.
+- **[I have a reference]:** First run the Reference Intake flow defined in `${CLAUDE_PLUGIN_ROOT}/commands/references/visual-variants.md` under `## Reference Intake` (accepts a local path, a URL, or a free-text style directive; sanitizes it; establishes it as Probe #0 ahead of every project-source probe in Token Extraction). Apply that section's rules as written — do not restate them here. Then proceed identically to the [Prototype] branch above: set `visualOverridePending = true`, present one Aesthetic Direction question, and let Visual Variant Rendering run unchanged. A Reference Intake failure does not abort this gate — it degrades to the plain [Prototype] flow with that section's single warning line (`⚠ Reference intake: ...`) and continues from there.
 
 ### Cross-Reference: Prototype Persistence
 
@@ -1178,14 +1178,14 @@ Either way, exactly one line is logged for this check — never both (the reject
 When a fresh match exists **and passes pre-acceptance validation**, present it via **AskUserQuestion** (picker mode) with exactly two options:
 
 ```
-Um foundation proposal recente já existe (<matched-path>, modificado há <N> dias) — quer reaproveitá-lo?
+A recent foundation proposal already exists (<matched-path>, modified <N> days ago) — want to reuse it?
 
-Reaproveitar existente — usar o arquivo encontrado sem gerar um novo
-Criar novo — ignorar o arquivo encontrado e sintetizar um novo
+Reuse existing — use the file found, without generating a new one
+Create new — ignore the file found and synthesize a new one
 ```
 
-- **[Reaproveitar existente]:** skip sanitization (Step 3), synthesis (Step 4), and a second validation pass (Step 5) — pre-acceptance validation above already ran Step 5's checks against this file. Set `foundationProposalPath` to that existing path. Proceed to Phase 4.
-- **[Criar novo]:** proceed to Step 3. The existing file is left untouched on disk; Step 6 writes a new file under a new `RUN_TS`-qualified name, it never overwrites the match found here.
+- **[Reuse existing]:** skip sanitization (Step 3), synthesis (Step 4), and a second validation pass (Step 5) — pre-acceptance validation above already ran Step 5's checks against this file. Set `foundationProposalPath` to that existing path. Proceed to Phase 4.
+- **[Create new]:** proceed to Step 3. The existing file is left untouched on disk; Step 6 writes a new file under a new `RUN_TS`-qualified name, it never overwrites the match found here.
 
 When **no** fresh match exists (or the candidate failed pre-acceptance validation), skip this offer entirely — present no picker prompt — and proceed unprompted to Step 3.
 

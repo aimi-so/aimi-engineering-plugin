@@ -32,7 +32,7 @@ The spawn prompt (from the `/aimi:plan`/`/aimi:brainstorm` foundation gate) supp
 | `researchSummary` | yes | Consolidated Phase 1.6-equivalent research summary (codebase + learnings findings) gathered so far. |
 | `resolvedDecisions` | yes | Array of `{anchor, source, text, resolution}` decisions already locked in for this session — never re-litigate these. |
 | `stackHints` | no | Free-text or array of named languages/frameworks the user already mentioned or the caller inferred structurally. |
-| `adjustmentText` | no | Accumulated free-form revision request from a prior Ajustar round, pre-sanitized by the caller. |
+| `adjustmentText` | no | Accumulated free-form revision request from a prior Adjust round, pre-sanitized by the caller. |
 | `mode` | no | `greenfield` or `brownfield` — selects the proposal derivation strategy. Defaults to `greenfield` when absent, so existing callers are unaffected. |
 | `outputPath` | yes | Exact `.aimi/research/YYYY-MM-DD-<topicSlug>-<RUN_TS>-foundation.md` path to write to — never derive your own. |
 

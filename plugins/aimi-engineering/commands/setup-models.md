@@ -80,11 +80,11 @@ Place the recommended/default option **first** in the option list for each quest
 
 Question text (one per category, exactly as shown):
 
-- "Modelo para tarefas de pesquisa/leitura (research)?"
-- "Modelo para revisão e análise (review)?"
-- "Modelo para tarefas de design (design)?"
-- "Modelo para tarefas de workflow (workflow)?"
-- "Modelo para sub-orquestradores de execução (executor)?"
+- "Model for research/reading tasks (research)?"
+- "Model for review and analysis (review)?"
+- "Model for design tasks (design)?"
+- "Model for workflow tasks (workflow)?"
+- "Model for execution sub-orchestrators (executor)?"
 
 Cap each question at four options (the top-4 most likely picks). The picker's auto-appended "Other" lets the user type any model id from `AVAILABLE_MODELS_JSON` that did not make the top-4 — accept any string the user provides without further validation (the CLI's `detect-models` will validate against the available-model list before writing).
 
