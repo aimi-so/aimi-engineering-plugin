@@ -11673,6 +11673,183 @@ test_story_merge_project_split_basename_collision() {
   rm -f .aimi/tasks/sm-tc33-*
 }
 
+# TC34: on the PROJECT axis, every cross-file-dep-dropped smellWarnings entry is
+# keyed by `project` (the owning group's routing key) at BOTH the top level and
+# inside every droppedDeps[] entry — never by `side`, which stays exclusive to
+# the SIDE-axis writer. The combined set spans all 3 project groups and is
+# written identically into all 3 output files. Without --foundation, every
+# droppedDeps[].foundationEdge is false and the foundation note line is silent.
+test_story_merge_project_split_project_keyed_warnings() {
+  echo ""
+  echo "=== TC34: story-merge project axis — cross-group drops keyed by project, not side ==="
+
+  local stg=".aimi/.tasks-staging-tc34"
+  local out_file=".aimi/tasks/sm-tc34-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+  rm -f .aimi/tasks/sm-tc34-*
+
+  # 3 distinct projects. Two cross-group edges (both onto the api story) and
+  # one same-group edge that must survive untouched.
+  _sm_make_project_story "$stg/01-api.json"    "UserProfile API endpoint" "services/api" "app/controllers/u.rb"
+  _sm_make_project_story "$stg/02-web.json"    "React UserProfile page"   "apps/web"     "src/components/UserProfile.tsx" '["outline:01"]'
+  _sm_make_project_story "$stg/03-mobile.json" "Mobile profile screen"    "apps/mobile"  "lib/profile.dart"               '["outline:01"]'
+  _sm_make_project_story "$stg/04-web2.json"   "React SettingsPanel"      "apps/web"     "src/components/Settings.tsx"    '["outline:02"]'
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC34: project-axis cross-group drop exits 0 (warning only)"
+  assert_contains "cross-project dependsOn edge(s) dropped" "$output" "TC34: aggregated stderr banner emitted"
+
+  local mobile_file=".aimi/tasks/sm-tc34-tasks-apps-mobile-tasks.json"
+  local web_file=".aimi/tasks/sm-tc34-tasks-apps-web-tasks.json"
+  local api_file=".aimi/tasks/sm-tc34-tasks-services-api-tasks.json"
+
+  if [ -f "$mobile_file" ] && [ -f "$web_file" ] && [ -f "$api_file" ]; then
+    # The same combined set lands in every one of the N files.
+    local mobile_smells web_smells api_smells
+    mobile_smells=$(jq -c '.metadata.smellWarnings // []' "$mobile_file")
+    web_smells=$(jq -c '.metadata.smellWarnings // []' "$web_file")
+    api_smells=$(jq -c '.metadata.smellWarnings // []' "$api_file")
+    assert_eq "$mobile_smells" "$web_smells" "TC34: mobile and web files carry the identical smellWarnings set"
+    assert_eq "$web_smells" "$api_smells" "TC34: web and api files carry the identical smellWarnings set"
+
+    # The union spans all N groups, not just two: one entry per affected story,
+    # and the affected stories live in two different project groups.
+    local entry_count entry_projects
+    entry_count=$(jq '[.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped")] | length' "$web_file")
+    entry_projects=$(jq -r '[.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | .project] | sort | join(",")' "$web_file")
+    assert_eq "2" "$entry_count" "TC34: one cross-file-dep-dropped entry per affected story"
+    assert_eq "apps/mobile,apps/web" "$entry_projects" "TC34: entries keyed by their own project group across the N-way union"
+
+    # `project` replaces `side` at BOTH levels — `side` must not appear at all.
+    local top_side_count dep_side_count dep_project_count
+    top_side_count=$(jq '[.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | select(has("side"))] | length' "$web_file")
+    dep_side_count=$(jq '[.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | .droppedDeps[] | select(has("side"))] | length' "$web_file")
+    dep_project_count=$(jq '[.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | .droppedDeps[] | select(has("project"))] | length' "$web_file")
+    assert_eq "0" "$top_side_count" "TC34: no entry carries a top-level side key on the project axis"
+    assert_eq "0" "$dep_side_count" "TC34: no droppedDeps entry carries a side key on the project axis"
+    assert_eq "2" "$dep_project_count" "TC34: every droppedDeps entry carries a project key"
+
+    # The dropped target resolves to its post-remap id in its OWN project group.
+    local web_entry
+    web_entry=$(jq -c '.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | select(.project == "apps/web")' "$web_file")
+    assert_contains '"storyId":"US-002"' "$web_entry" "TC34: entry storyId is the post-remap id in its own group"
+    assert_contains '"becameRoot":true' "$web_entry" "TC34: the story lost its only dependsOn edge and became a false root"
+    assert_contains '"id":"US-004"' "$web_entry" "TC34: droppedDeps target is the post-remap id in the api group"
+    assert_contains '"project":"services/api"' "$web_entry" "TC34: droppedDeps target is keyed by the target's project"
+
+    # No --foundation on this run: every edge is an ordinary drop.
+    local foundation_true_count
+    foundation_true_count=$(jq '[.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | .droppedDeps[] | select(.foundationEdge == true)] | length' "$web_file")
+    assert_eq "0" "$foundation_true_count" "TC34: no foundationEdge is true when --foundation was not passed"
+
+    # The same-group edge survived: US-003 still depends on US-002 in-file.
+    local kept_dep
+    kept_dep=$(jq -r '.userStories[] | select(.id == "US-003") | .dependsOn | join(",")' "$web_file")
+    assert_eq "US-002" "$kept_dep" "TC34: the same-group dependsOn edge is untouched"
+  else
+    echo -e "${RED}✗${NC} TC34: expected per-project output files missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  # The false-root enumeration lines name the project, not a side literal.
+  assert_contains "US-002 (apps/web): became a false wave-1 root" "$output" "TC34: false-root stderr line names the owning project"
+
+  if echo "$output" | grep -q "shared --foundation story"; then
+    echo -e "${RED}✗${NC} TC34: foundation note line fired without --foundation"
+    echo "  output: $output"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} TC34: foundation note line silent without --foundation"
+    ((TESTS_PASSED++))
+  fi
+
+  rm -rf "$stg"
+  rm -f .aimi/tasks/sm-tc34-*
+}
+
+# TC35: --foundation combined with a multi-repo split. The foundation story
+# lives in exactly one project group, so every OTHER group's injected edge onto
+# it is dropped — recorded with foundationEdge:true, a message that names the
+# shared foundation story, and one stderr note line distinct from the ordinary
+# drop-count banner.
+test_story_merge_project_split_foundation_edge() {
+  echo ""
+  echo "=== TC35: story-merge project axis — --foundation cross-group edges flagged distinctly ==="
+
+  local stg=".aimi/.tasks-staging-tc35"
+  local out_file=".aimi/tasks/sm-tc35-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+  rm -f .aimi/tasks/sm-tc35-*
+
+  # outline:01 is the foundation and lives in packages/core; the other two
+  # stories live in different repos and carry no hand-authored dependency.
+  _sm_make_project_story "$stg/01-core.json" "Shared core contracts" "packages/core" "src/contracts.ts"
+  _sm_make_project_story "$stg/02-web.json"  "React UserProfile page" "apps/web"     "src/components/UserProfile.tsx"
+  _sm_make_project_story "$stg/03-api.json"  "UserProfile API endpoint" "services/api" "app/controllers/u.rb"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack --foundation 01 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC35: --foundation + multi-repo split exits 0 (warning only)"
+
+  # Two lines, not one: the ordinary drop-count banner AND a separate note.
+  assert_contains "cross-project dependsOn edge(s) dropped" "$output" "TC35: ordinary drop-count banner still emitted"
+  assert_contains "target the shared --foundation story" "$output" "TC35: distinct foundation note line emitted"
+
+  local note_line banner_line
+  note_line=$(printf '%s\n' "$output" | grep -c "target the shared --foundation story" || true)
+  banner_line=$(printf '%s\n' "$output" | grep -c "cross-project dependsOn edge(s) dropped across" || true)
+  assert_eq "1" "$note_line" "TC35: exactly one foundation note line"
+  assert_eq "1" "$banner_line" "TC35: the note is separate from the single drop-count banner"
+
+  if printf '%s\n' "$output" | grep "cross-project dependsOn edge(s) dropped across" | grep -q -- "--foundation"; then
+    echo -e "${RED}✗${NC} TC35: foundation wording leaked into the ordinary drop-count banner"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} TC35: the drop-count banner stays free of foundation wording"
+    ((TESTS_PASSED++))
+  fi
+
+  local web_file=".aimi/tasks/sm-tc35-tasks-apps-web-tasks.json"
+  local core_file=".aimi/tasks/sm-tc35-tasks-packages-core-tasks.json"
+  local api_file=".aimi/tasks/sm-tc35-tasks-services-api-tasks.json"
+
+  if [ -f "$web_file" ] && [ -f "$core_file" ] && [ -f "$api_file" ]; then
+    local foundation_true_count total_dep_count
+    foundation_true_count=$(jq '[.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | .droppedDeps[] | select(.foundationEdge == true)] | length' "$web_file")
+    total_dep_count=$(jq '[.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | .droppedDeps[]] | length' "$web_file")
+    assert_eq "2" "$foundation_true_count" "TC35: both non-foundation groups record a foundationEdge:true entry"
+    assert_eq "2" "$total_dep_count" "TC35: every dropped edge on this run is a foundation edge"
+
+    local web_entry
+    web_entry=$(jq -c '.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | select(.project == "apps/web")' "$web_file")
+    assert_contains '"foundationEdge":true' "$web_entry" "TC35: the web group's dropped edge is flagged as a foundation edge"
+    assert_contains '"project":"packages/core"' "$web_entry" "TC35: the dropped target is attributed to the foundation's own project"
+    assert_contains "shared --foundation story" "$web_entry" "TC35: the story-level message names the shared foundation story"
+    assert_contains '"becameRoot":true' "$web_entry" "TC35: the injected edge loss makes the story a false wave-1 root"
+
+    # The foundation's own group has no dropped edge at all.
+    local core_entry_count
+    core_entry_count=$(jq '[.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | select(.project == "packages/core")] | length' "$core_file")
+    assert_eq "0" "$core_entry_count" "TC35: the group hosting the foundation records no dropped edge"
+
+    # Internal working keys never leak.
+    local leaked
+    leaked=$(jq '[.userStories[] | select(has("__droppedDeps") or has("__becameRoot"))] | length' "$web_file")
+    assert_eq "0" "$leaked" "TC35: internal __droppedDeps/__becameRoot absent from output"
+  else
+    echo -e "${RED}✗${NC} TC35: expected per-project output files missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf "$stg"
+  rm -f .aimi/tasks/sm-tc35-*
+}
+
 # ============================================================================
 # ============================================================================
 # Roadmap Lifecycle Tests (US-002)
@@ -13947,6 +14124,8 @@ main() {
   test_story_merge_project_split_slash_project_slug
   test_story_merge_project_split_dot_project_slug
   test_story_merge_project_split_basename_collision
+  test_story_merge_project_split_project_keyed_warnings
+  test_story_merge_project_split_foundation_edge
 
   # Roadmap lifecycle tests (US-002)
   echo ""

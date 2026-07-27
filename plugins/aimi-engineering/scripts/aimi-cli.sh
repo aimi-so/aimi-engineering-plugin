@@ -4811,6 +4811,10 @@ $rp_entry"
 
 cmd_story_merge() {
   local staging_dir="" output_path="" split_mode="legacy" agent_mode=false phase_aware=false foundation_idx=""
+  # Resolved by the --foundation injection sweep below and consumed (only) by
+  # the PROJECT-axis writer, which flags cross-group edges onto it distinctly.
+  # Stays "" whenever --foundation was omitted, so no real id can match it.
+  local foundation_id=""
 
   # --- Parse flags ---
   while [ $# -gt 0 ]; do
@@ -5039,7 +5043,6 @@ cmd_story_merge() {
   # pointing toward the foundation (never away from it), so no new cycle can
   # be introduced; the Kahn's-algorithm check below still runs unmodified.
   if [ -n "$foundation_idx" ]; then
-    local foundation_id
     foundation_id=$(printf '%s' "$merged_array" | jq -r --arg nn "$foundation_idx" '
       (to_entries | map({key: (.key + 1 | tostring | if length == 1 then "0" + . else . end), value: .value.id}) | from_entries) as $outline_map |
       $outline_map[$nn] // ""
@@ -5441,7 +5444,12 @@ cmd_story_merge() {
       [.[] | . as $s | ($s.project | norm_project)] | map(select(. != null)) | unique | length
     ')
     if [ "${distinct_project_count:-0}" -ge 2 ]; then
-      _story_merge_write_project_split "$merged_array" "$output_path" "$staging_dir" "$smell_warnings" "$phase_aware"
+      # foundation_id is threaded into the PROJECT writer ONLY. --foundation
+      # injects one edge onto the foundation story from every other story; in
+      # a multi-repo split every group that does not host the foundation loses
+      # that edge and would otherwise look like an ordinary hand-authored
+      # missing dependency. The SIDE writer keeps its byte-identical signature.
+      _story_merge_write_project_split "$merged_array" "$output_path" "$staging_dir" "$smell_warnings" "$phase_aware" "$foundation_id"
     else
       _story_merge_write_split "$merged_array" "$output_path" "$staging_dir" "$smell_warnings" "$phase_aware"
     fi
@@ -5875,6 +5883,10 @@ _story_merge_write_project_split() {
   local staging_dir="$3"
   local smell_warnings="${4:-[]}"
   local phase_aware="${5:-false}"
+  # Pre-remap id of the --foundation story, or "" when the flag was omitted.
+  # Compared against the PRE-remap dropped-dep ids below (the same namespace),
+  # so an empty value can never match a real story.
+  local foundation_id="${6:-}"
 
   # ============================================================
   # 1. Route every story to a project group
@@ -5905,7 +5917,9 @@ _story_merge_write_project_split() {
   # story into map/has() rebinds `.` away from the story object, which has
   # already broken a prior fix to this function.
   local prepared
-  prepared=$(printf '%s\n%s' "$merged_array" "$group_keys" | jq -s "$_STORY_MERGE_NORM_PROJECT_JQ$_ROADMAP_SANITIZE_JQ"'
+  prepared=$(printf '%s\n%s' "$merged_array" "$group_keys" | jq -s \
+    --arg foundation_id "$foundation_id" \
+    "$_STORY_MERGE_NORM_PROJECT_JQ$_ROADMAP_SANITIZE_JQ"'
     def group_key: (norm_project) // ".";
     def pad3: tostring | if length == 1 then "00" + . elif length == 2 then "0" + . else . end;
     def recompute_waves:
@@ -5966,24 +5980,43 @@ _story_merge_write_project_split() {
       }
     ] as $remapped |
     # One cross-group dependsOn smellWarnings entry per affected story, every
-    # title sanitized before it enters JSON or stderr. The `side` key carries
-    # the group key for this axis (the project path) rather than a
-    # frontend/backend literal -- renaming that field is owned by a follow-up
-    # story, so the shape stays compatible with the Step 5 renderer for now.
+    # title sanitized before it enters JSON or stderr.
+    #
+    # This axis keys every entry by `project` -- the routing key of the group
+    # that owns it -- at BOTH the top level and in every droppedDeps[]. There is
+    # no frontend/backend verdict on this path, so there is no `side` field to
+    # emit; `side` remains exclusive to _story_merge_write_split. The two keys
+    # are mutually exclusive per axis, which is what lets the Step 5 renderer
+    # pick whichever one an entry actually carries.
+    #
+    # foundationEdge marks a dropped edge that --foundation itself injected
+    # into every non-foundation story. In a multi-repo split the foundation
+    # lives in exactly one group, so every OTHER group loses that edge and
+    # would otherwise be indistinguishable from a hand-authored missing
+    # dependency. $foundation_id is the PRE-remap id (same namespace as
+    # $old), and is "" when --foundation was omitted -- no real id matches it.
     [$remapped[] | . as $b | ($b.stories[] | . as $s |
       select(($s.__droppedDeps // []) | length > 0) |
       ([($s.__droppedDeps // [])[] | . as $old |
          ($gmap[$old] // {newId: $old, project: "unknown", title: ""}) |
-         {id: .newId, side: .project, title: (.title | _rm_sanitize(200))}]) as $dd |
+         {id: .newId, project: .project, title: (.title | _rm_sanitize(200)),
+          foundationEdge: (($foundation_id != "") and ($old == $foundation_id))}]) as $dd |
+      ($dd | map(select(.foundationEdge == true)) | length) as $fcount |
       {
         type: "cross-file-dep-dropped",
         storyId: $s.id,
-        side: $b.project,
+        project: $b.project,
         becameRoot: $s.__becameRoot,
         droppedDeps: $dd,
         message: (
           ($dd | length | tostring) + " cross-file dependsOn edge(s) dropped targeting: " +
           ($dd | map(.title) | join("; ")) +
+          (if $fcount > 0 then
+             " -- " + ($fcount | tostring) + " of these targets the shared --foundation story (" +
+             ($dd | map(select(.foundationEdge == true))
+                  | map(.id + " in project \"" + .project + "\"") | join(", ")) +
+             "), an edge --foundation injected into every story rather than a hand-authored dependency"
+           else "" end) +
           (if $s.__becameRoot then " (story became a false wave-1 root)" else "" end)
         )
       })
@@ -6004,11 +6037,24 @@ _story_merge_write_project_split() {
   affected_count=$(printf '%s' "$cross_file_warnings" | jq 'length')
   if [ "$affected_count" -gt 0 ]; then
     echo "Warning: story-merge: ${total_dropped} cross-project dependsOn edge(s) dropped across ${affected_count} affected stories (--split full-stack, project axis; see metadata.smellWarnings)" >&2
+
+    # --foundation note: separate from the drop-count banner above, because
+    # these edges are structurally different -- the merge itself injected
+    # them, so every non-foundation project group losing one is expected
+    # fallout of combining --foundation with a multi-repo split, not a sign of
+    # a hand-authored dependency that went missing.
+    local foundation_edge_count foundation_story_count
+    foundation_edge_count=$(printf '%s' "$cross_file_warnings" | jq '[.[].droppedDeps[] | select(.foundationEdge == true)] | length')
+    foundation_story_count=$(printf '%s' "$cross_file_warnings" | jq '[.[] | select((.droppedDeps // []) | any(.foundationEdge == true))] | length')
+    if [ "${foundation_edge_count:-0}" -gt 0 ]; then
+      echo "Note: story-merge: ${foundation_edge_count} of those edge(s), across ${foundation_story_count} stories, target the shared --foundation story, which lives in only one project group; --foundation injected them, so their loss is expected on a multi-repo split (see droppedDeps[].foundationEdge)" >&2
+    fi
+
     local false_root_lines
     false_root_lines=$(printf '%s' "$cross_file_warnings" | jq -r '
       .[] | select(.becameRoot == true) |
-      (.storyId + " (" + .side + "): became a false wave-1 root -- its cross-project dependsOn target(s) " +
-       ([.droppedDeps[] | (.id + " (" + .side + ")")] | join(", ")) + " were dropped")
+      (.storyId + " (" + .project + "): became a false wave-1 root -- its cross-project dependsOn target(s) " +
+       ([.droppedDeps[] | (.id + " (" + .project + ")")] | join(", ")) + " were dropped")
     ')
     if [ -n "$false_root_lines" ]; then
       printf '%s\n' "$false_root_lines" >&2
