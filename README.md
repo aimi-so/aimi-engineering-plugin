@@ -101,31 +101,13 @@ Full detail in [docs/architecture.md](docs/architecture.md).
 
 ## Where the work happens
 
-By default, `/aimi:execute` does not touch your working tree. It creates a **container** — a git worktree at `.worktrees/<branch>` — and runs everything in there.
+By default, `/aimi:execute` does not touch your working tree. It runs in a git worktree at `.worktrees/<branch>`, so your checkout stays where you left it and you can keep working while a plan runs.
 
-That means you can keep editing, switching branches, and running things while a plan executes. Your checkout is exactly where you left it when the run finishes.
+One consequence to know before your first run: a worktree branches from committed history, so **commit first** — uncommitted edits do not reach it.
 
-When it's done, the container is removed and the branch is kept. Nothing is checked out locally, so the run suggests:
+Use `/aimi:execute --inline` to run against your working tree instead.
 
-```bash
-/aimi:open-pr --branch feat/your-feature
-/aimi:review feat/your-feature
-```
-
-New plans get this automatically — `/aimi:plan` writes `execution: "container"` into every tasks file it generates.
-
-To run against your working tree instead, for one invocation:
-
-```bash
-/aimi:execute --inline
-```
-
-Two things worth knowing before you rely on it:
-
-- **Commit first.** A container branches from committed history, so uncommitted edits in your working tree do not reach it.
-- **Dependencies install once** inside the container, using whichever package manager your lockfile indicates.
-
-Details and the known limitations: [docs/commands.md](docs/commands.md#container-mode-full-run).
+Full behavior, teardown, and limitations: [docs/commands.md](docs/commands.md#container-mode-full-run).
 
 ---
 
