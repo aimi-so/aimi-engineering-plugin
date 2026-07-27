@@ -4802,6 +4802,7 @@ $rp_entry"
 # story-merge: Consolidate staging files into a validated tasks.json
 # Usage: aimi-cli.sh story-merge --staging-dir <dir> --output <path>
 #           [--split legacy|full-stack] [--agent-mode] [--phase-aware]
+#           [--foundation <NN>]
 # ============================================================================
 
 # _story_merge_assign_ids: given a JSON array of story objects (already loaded),
@@ -4865,6 +4866,33 @@ cmd_story_merge() {
   if [ -n "$foundation_idx" ] && ! [[ "$foundation_idx" =~ ^[0-9]{2}$ ]]; then
     echo "Error: story-merge: --foundation must be a two-digit index (e.g. 01), got: $foundation_idx" >&2
     exit 1
+  fi
+  # --phase-aware strips ONE trailing "-tasks" segment from the --output
+  # basename. Both writers do that strip with the same `${base_no_ext%-tasks}`
+  # expansion, and on a basename that is exactly "tasks" the strip is a no-op
+  # while on "-tasks" it collapses to the empty string -- either way the
+  # derived name degenerates (".../-frontend-tasks.json", ".../-<slug>-tasks.json":
+  # a basename starting with "-", which every downstream tool reads as a flag).
+  # Guarding inside the writers would mean either fixing one axis and leaving
+  # the other, or changing SIDE-axis behavior; refusing the input here leaves
+  # both strips byte-identical and costs the caller one well-named error.
+  # The derivation below mirrors the writers' exactly (basename, strip the
+  # extension after the LAST dot) so the precondition can never drift from the
+  # expansion it protects.
+  if [ "$phase_aware" = true ]; then
+    local pa_base pa_ext pa_no_ext
+    pa_base=$(basename "$output_path")
+    pa_ext="${pa_base##*.}"
+    pa_no_ext="${pa_base%.$pa_ext}"
+    case "$pa_no_ext" in
+      # ?* before "-tasks": at least one character must survive the strip.
+      ?*-tasks) ;;
+      *)
+        echo "Error: story-merge: --phase-aware requires an --output basename ending in \"-tasks\"" >&2
+        echo "(phase-scoped form, e.g. <feature>-phase-<N>-tasks.json); got: $pa_base" >&2
+        exit 1
+        ;;
+    esac
   fi
 
   # --- Validate paths are inside project ---
@@ -6221,17 +6249,59 @@ _story_merge_write_project_split() {
     exit 1
   fi
 
-  # branchName validation, same invariant the plan command enforces before any
-  # git operation. Abort the whole merge on the first failure -- no partial
-  # write, no mangled fallback name.
-  local bad_branches
-  bad_branches=$(printf '%s' "$plan" | jq -r --arg re "$_ROADMAP_BRANCH_REGEX" '
-    .[] | select((.branchName | test($re)) | not) |
-    "  project \"" + .project + "\" derived invalid branchName: " + .branchName
+  # Derived-name validation: every invariant the derived slug / path /
+  # branchName must satisfy before a single file is opened. Abort the whole
+  # merge on the first failure -- no partial write, no mangled fallback name.
+  #
+  # REFUSE, never truncate. Truncating two long project values to a common
+  # prefix manufactures a slug collision, which the guard above would then
+  # report as a basename conflict between projects that do not actually
+  # conflict -- a wrong diagnosis for a limit the caller can fix directly.
+  #
+  # Legs, and why each limit is where it is:
+  #   branchName regex  -- the invariant plan.md enforces before any git
+  #                        operation. Currently unreachable given slugify's
+  #                        output; kept because it costs one test() and is the
+  #                        only thing standing between a future slugify edit
+  #                        and a branch name handed to git unchecked.
+  #   slug <= 64        -- plan.md rewrites branchName to a ~87-char prefix in
+  #                        phase mode; 87 + 64 stays inside every downstream
+  #                        limit.
+  #   basename <= 248   -- NAME_MAX (255) minus the 7 bytes mktemp appends for
+  #                        ".XXXXXX". This is the leg that actually prevents a
+  #                        mid-loop mktemp death, and it has to be checked on
+  #                        the basename rather than the slug because most of
+  #                        that basename comes from --output, not from .project.
+  #   path <= 4000      -- PATH_MAX (4096) with headroom for the lock/tmp
+  #                        suffixes appended to it.
+  #   branchName <= 100 -- worktree-manager places a worktree as a single
+  #                        directory component, so branchName feeds a
+  #                        NAME_MAX-bounded name downstream.
+  local bad_derived
+  bad_derived=$(printf '%s' "$plan" | jq -r --arg re "$_ROADMAP_BRANCH_REGEX" '
+    .[] | . as $g |
+    ($g.path | split("/") | last) as $base |
+    [
+      (if ($g.branchName | test($re)) then empty
+       else "derived branchName failed validation against " + $re + ": " + $g.branchName end),
+      (if ($g.slug | length) > 64 then
+         "derived basename slug is " + (($g.slug | length) | tostring) + " chars (limit 64): " + $g.slug
+       else empty end),
+      (if ($base | length) > 248 then
+         "derived output basename is " + (($base | length) | tostring) +
+         " chars (limit 248 = NAME_MAX 255 minus the 7-char mktemp suffix): " + $base
+       else empty end),
+      (if ($g.path | length) > 4000 then
+         "derived output path is " + (($g.path | length) | tostring) + " chars (limit 4000)"
+       else empty end),
+      (if ($g.branchName | length) > 100 then
+         "derived branchName is " + (($g.branchName | length) | tostring) + " chars (limit 100): " + $g.branchName
+       else empty end)
+    ] | .[] | "  project \"" + $g.project + "\": " + .
   ')
-  if [ -n "$bad_branches" ]; then
-    echo "Error: story-merge: --split full-stack: derived branchName failed validation against ${_ROADMAP_BRANCH_REGEX}; no files were written:" >&2
-    printf '%s\n' "$bad_branches" >&2
+  if [ -n "$bad_derived" ]; then
+    echo "Error: story-merge: --split full-stack: derived output name(s) failed validation; no files were written (shorten the offending project value -- names are refused, never truncated, because truncation would manufacture a basename collision between two distinct projects):" >&2
+    printf '%s\n' "$bad_derived" >&2
     exit 1
   fi
 
@@ -6246,7 +6316,9 @@ _story_merge_write_project_split() {
   local written_paths=""
   local idx=0
   while [ "$idx" -lt "$group_total" ]; do
-    local group_path group_json tmp_group write_exit
+    # tmp_group and write_exit are declared at their use site below, where the
+    # initialization they need is part of the same statement.
+    local group_path group_json
     group_path=$(printf '%s' "$plan" | jq -r --argjson i "$idx" '.[$i].path')
 
     # metadata.splitGroup is the self-describing marker for this file's place
@@ -6279,28 +6351,70 @@ _story_merge_write_project_split() {
       }
     ')
 
-    tmp_group=$(mktemp "${group_path}.XXXXXX")
-    (
-      _lock "${group_path}.lock"
-      printf '%s\n' "$group_json" > "$tmp_group"
-      mv "$tmp_group" "$group_path"
-    ) 200>"${group_path}.lock"
-    write_exit=$?
-    rm -f "$tmp_group" 2>/dev/null
-    if [ $write_exit -ne 0 ]; then
+    # This script runs `set -euo pipefail`. A bare failing compound command
+    # exits the shell immediately, so a `write_exit=$?` on the NEXT line is
+    # unreachable and the whole error branch below with it -- which is exactly
+    # how a failed group write used to leave one file on disk advertising
+    # `total: 3` with two siblings that do not exist, an orphaned mktemp file,
+    # and no message at all.
+    #
+    # Three details keep this reachable, and all three are load-bearing:
+    #   1. `write_exit=0` is a real initialization. `-u` is on, and a bare
+    #      `local write_exit` leaves it declared-but-unset, which makes
+    #      `[ "$write_exit" -ne 0 ]` an unbound-variable error rather than a
+    #      false. It is also never `local write_exit=$?`: `local` is a builtin
+    #      and its own exit status overwrites `$?` before the assignment reads it.
+    #   2. The `|| write_exit=$?` makes the subshell the left side of an AND-OR
+    #      list, the one construct `set -e` is defined to exempt. The `200>`
+    #      redirect stays attached to the subshell, BEFORE the `||`, so a lock
+    #      path that cannot be opened (e.g. a directory) is a failure of the
+    #      exempted command rather than of the list.
+    #   3. mktemp gets the same treatment. It fails on ENOSPC/EACCES, and a
+    #      bare failing assignment is just as fatal under `set -e`.
+    local tmp_group=""
+    tmp_group=$(mktemp "${group_path}.XXXXXX" 2>/dev/null) || tmp_group=""
+    local write_exit=0
+    if [ -z "$tmp_group" ]; then
+      write_exit=1
+    else
+      (
+        _lock "${group_path}.lock"
+        printf '%s\n' "$group_json" > "$tmp_group"
+        mv "$tmp_group" "$group_path"
+      ) 200>"${group_path}.lock" || write_exit=$?
+      [ -n "$tmp_group" ] && rm -f "$tmp_group" 2>/dev/null || true
+    fi
+    if [ "$write_exit" -ne 0 ]; then
+      # Enumerate all THREE sets. The surviving files are the actionable part:
+      # each one advertises a splitGroup.total and a siblings[] list describing
+      # a complete N-way split that does not exist on disk, so the reader needs
+      # to know precisely which of those siblings landed and which never will.
+      local not_attempted remaining
+      remaining=$((group_total - idx - 1))
       echo "Error: story-merge: failed to write project split output: $group_path" >&2
+      echo "  Written before this failure (${idx}):" >&2
       if [ -n "$written_paths" ]; then
-        echo "  Already written before this failure (staging dir kept for retry):" >&2
         printf '%s\n' "$written_paths" >&2
       else
-        echo "  No output files were written before this failure (staging dir kept for retry)." >&2
+        echo "    (none)" >&2
       fi
+      echo "  Failed:" >&2
+      echo "    $group_path" >&2
+      echo "  Not attempted (${remaining}):" >&2
+      if [ "$remaining" -gt 0 ]; then
+        not_attempted=$(printf '%s' "$plan" | jq -r --argjson i "$idx" '.[($i + 1):][] | "    " + .path')
+        printf '%s\n' "$not_attempted" >&2
+      else
+        echo "    (none)" >&2
+      fi
+      echo "  Staging dir preserved for retry:" >&2
+      echo "    $staging_dir" >&2
       exit 1
     fi
     if [ -n "$written_paths" ]; then
-      written_paths="${written_paths}"$'\n'"  ${group_path}"
+      written_paths="${written_paths}"$'\n'"    ${group_path}"
     else
-      written_paths="  ${group_path}"
+      written_paths="    ${group_path}"
     fi
     idx=$((idx + 1))
   done
@@ -7909,7 +8023,7 @@ COMMANDS:
                               --source-command must be exactly 'brainstorm' or 'plan'.
     story-merge --staging-dir <dir> --output <path>
                               [--split legacy|full-stack] [--agent-mode]
-                              [--phase-aware]
+                              [--phase-aware] [--foundation <NN>]
                               Consolidate per-story staging *.json files into a
                               validated tasks.json. Steps: glob+validate JSON,
                               assign US-NNN IDs by lex order, remap outline:NN
@@ -7941,9 +8055,14 @@ COMMANDS:
                               one trailing slash, blank/absent = null).
                               >= 2 -> PROJECT axis (multi-repo): one output
                               file per project, <base>-<project-slug>-tasks.json,
-                              no frontend/backend decision at all; project-less
-                              stories route to the "." root group and each file
+                              no frontend/backend decision at all; each file
                               carries metadata.splitGroup + its own branchName.
+                              A multi-repo plan requires EVERY story to carry a
+                              project: once any story is tagged, a project-less
+                              story is refused (no files written) rather than
+                              routed anywhere. A story belonging to the root
+                              repository says so explicitly with "." — an absent
+                              project is not the root, it is unrouteable.
                               < 2 -> SIDE axis (single-repo/monorepo, incl. no
                               .project at all): two output files,
                               <base>-frontend-tasks.json and
@@ -7951,15 +8070,46 @@ COMMANDS:
                               by its own file-pattern/title heuristic verdict.
                               Both axes assign unique IDs, rebuild dependsOn,
                               and recompute wave numbers per file.
+                              Derived slugs/paths/branch names are length-bounded
+                              and REFUSED (never truncated) when over: slug 64,
+                              output basename 248, full path 4000, branchName
+                              100. Truncation would manufacture a basename
+                              collision between two distinct long project values.
                               --phase-aware (only meaningful with --split
-                              full-stack): the --output basename already ends in
-                              "-tasks" (phase-scoped output, e.g.
-                              "<feature>-phase-<N>-tasks.json") — strip that
-                              trailing "-tasks" segment once before appending
-                              "-frontend-tasks.json"/"-backend-tasks.json" so the
-                              split basenames keep a single "tasks" segment
-                              instead of doubling it. Omitted: unchanged legacy
+                              full-stack): strip one trailing "-tasks" segment
+                              from the --output basename before deriving the
+                              split basenames. Pure string manipulation on the
+                              basename, independent of the axis: on SIDE it
+                              yields <base>-frontend-tasks.json /
+                              <base>-backend-tasks.json, on PROJECT it yields
+                              <base>-<project-slug>-tasks.json — in both cases
+                              with a single "tasks" segment instead of the
+                              doubled legacy form. Requires an --output basename
+                              ending in "-tasks" with at least one character
+                              before it (the phase-scoped form, e.g.
+                              "<feature>-phase-<N>-tasks.json"); anything else
+                              (e.g. "tasks.json") is refused up front, because
+                              the strip would otherwise leave an empty or
+                              "-"-leading basename. Omitted: unchanged legacy
                               derivation (double "-tasks-frontend-tasks.json").
+                              --foundation <NN> two-digit 1-based outline
+                              position of the shared foundation story (resolved
+                              against the same outline-position map as
+                              outline:NN, not a literal staging-filename digit).
+                              Appends the foundation's assigned US-NNN to every
+                              OTHER story's dependsOn, deduplicated, after the
+                              outline:NN remap and before cycle detection and
+                              wave computation, so injected edges participate in
+                              both. Refuses the whole merge when the foundation
+                              story's own dependsOn is non-empty. On the PROJECT
+                              axis the foundation lives in exactly one group, so
+                              every other group's injected edge is dropped and
+                              flagged droppedDeps[].foundationEdge: true, with
+                              its own stderr note separate from the ordinary
+                              drop-count banner — that loss is expected fallout
+                              of --foundation + multi-repo, not a hand-authored
+                              dependency that went missing. The SIDE axis emits
+                              no foundationEdge field.
                               --agent-mode demotes Phase 3.1 and Phase 4.1
                               hard rejects to warnings and proceeds.
     roadmap-init --feature <slug> [--file <path>] [--sync] [--brainstorm-path <path>]
