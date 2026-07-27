@@ -186,7 +186,7 @@ You can route each agent category to a different Claude model — research on on
 |---|---|
 | **Aimi** ([@aimieacc](https://github.com/aimieacc)) | Core architecture, command pipeline, agent system |
 | **Stanley Yoshinori Takamatsu** ([@stanleytakamatsu](https://github.com/stanleytakamatsu)) | Plugin design, execution model, review workflow |
-| **Alex Chastinet** | Tooling fixes |
+| **Alex Chastinet** ([@alexchastinet](https://github.com/alexchastinet)) | Tooling fixes |
 
 Full history on the [contributors graph](https://github.com/aimi-so/aimi-engineering-plugin/graphs/contributors).
 
