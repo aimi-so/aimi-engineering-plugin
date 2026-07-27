@@ -39,9 +39,9 @@ The four bindings:
 | Inline (`PHASE_MODE=false`, `CONTAINER_MODE=false`) | `project_roots[group_key]` | `branchName` |
 | Container, flat or per-project (`PHASE_MODE=false`, `CONTAINER_MODE=true`) | `CONTAINER_PATHS[group_key]` | `branchName` |
 | Phase (`PHASE_MODE=true`) | `PHASE_CONTAINER_PATH` | `PHASE_BRANCH` |
-| Split (a Phase-Mode Paired Split sub-orchestrator; `PHASE_MODE=true` with pre-set values — see Spawn Split Sub-Orchestrators) | `FRONTEND_WORKTREE_PATH` or `BACKEND_WORKTREE_PATH` | `FRONTEND_BRANCH` or `BACKEND_BRANCH` |
+| Split (one Phase-Mode Paired Split sub-orchestrator out of N; `PHASE_MODE=true` with pre-set values — see Spawn Split Sub-Orchestrators) | that member's own `SPLIT_WORKTREE_PATH` (one per split file, keyed by its project or slug) | that member's own `SPLIT_BRANCH` (one per split file, keyed by its project or slug) |
 
-The split row is not a new derivation — it is exactly what `commands/execute.md`'s Phase-Mode Paired Split section (Create Split Worktrees and Spawn Split Sub-Orchestrators) already pre-assigns to `PHASE_CONTAINER_PATH`/`PHASE_BRANCH` before a split sub-orchestrator starts; the sub-orchestrator's own Step 4 then derives `EXEC_ROOT`/`EXEC_BRANCH` from the Phase row using those pre-set values, with no split-specific code path.
+The split row is not a new derivation — it is exactly what `commands/execute.md`'s Phase-Mode Paired Split section (Derive and Validate Split Branch Names, Create Split Worktrees, and Spawn Split Sub-Orchestrators) already pre-assigns to `PHASE_CONTAINER_PATH`/`PHASE_BRANCH` before each split sub-orchestrator starts. There is one such pair per active split file — N of them, not two: each is derived from that file's own `metadata.splitGroup.project` (or, for a legacy frontend/backend pair, from its own basename slug) and qualified by the outer `PHASE_BRANCH`, landing at `$PHASE_CONTAINER_PATH/.worktrees/<that member's split branch>`. Each sub-orchestrator's own Step 4 then derives `EXEC_ROOT`/`EXEC_BRANCH` from the Phase row using its own pre-set values, with no split-specific code path.
 
 `EXEC_OWNS_ROOT = PHASE_MODE or CONTAINER_MODE` (true for phase, container, and split; false for inline). `EXEC_KEEPS_BRANCH = true` unconditionally, in every mode, today.
 
@@ -77,7 +77,7 @@ $WORKTREE_MGR create "$EXEC_BRANCH" --from "$CONTAINER_BASE"
 
 ## Bootstrap a Container Dev Server
 
-This section is the single source of truth for starting (or reusing) a container's dev server, once a caller has already computed its own `HAS_VISUAL_STORY` gate against its own tasks source (a phase's `PHASE_TASKS_PATH`, a split's `PHASE_FE_TASKS`/`PHASE_BE_TASKS`, or the flat/multi-repo `VISUAL_GROUP_KEYS` loop) — that jq query is legitimately site-specific and stays at each call site; only what happens once the gate passes is written here.
+This section is the single source of truth for starting (or reusing) a container's dev server, once a caller has already computed its own `HAS_VISUAL_STORY` gate against its own tasks source (a phase's `PHASE_TASKS_PATH`, one split member's own file out of `PHASE_ACTIVE_SPLIT_FILES`, or the flat/multi-repo `VISUAL_GROUP_KEYS` loop) — that jq query is legitimately site-specific and stays at each call site; only what happens once the gate passes is written here.
 
 **When `HAS_VISUAL_STORY` is false:** skip entirely — no server is started, no `WORKTREE_MGR` resolution needed.
 
