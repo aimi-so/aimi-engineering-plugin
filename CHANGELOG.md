@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.115.0] - 2026-07-26
+
+### Added
+
+- **`commands/references/user-communication.md`.** New human-facing writing-style reference governing the wording, tone, and density of text a plugin command sends directly to the person running it — completion reports, chat explanations, and `AskUserQuestion` prompts — formatted as five before/after pairs, each with a checkable rule caption (e.g. "grep the block for ... — zero matches") so a rewrite's compliance is verifiable, not just asserted. Scope is human-facing text only: it explicitly excludes text sent to subagents (Task spawn prompts), whose objective — sufficiency to a fresh-context agent, not human readability — is the opposite of this file's density and jargon rules. Introduces the Adaptive Language Rule: user-facing output follows whatever language the person is writing in, so a command that hardcodes a single language into a completion report or prompt is a defect under this rule regardless of which language is hardcoded. Wired into three call sites: `plugins/aimi-engineering/CLAUDE.md`'s Command Conventions, `AGENTS.md`'s `<scope>` block, and `commands/references/interactivity.md`'s "Adding a New Question Site" checklist.
+
+### Changed
+
+- **Four interactive gates normalized from Portuguese to English**, the first application of the new Adaptive Language Rule rather than a plain translation: `brainstorm.md`'s Prototype Offer Gate (`Prototipar`/`Tenho uma referência`/`Pular` → `Prototype`/`I have a reference`/`Skip`) and its foundation-proposal-reuse offer (`Reaproveitar existente`/`Criar novo` → `Reuse existing`/`Create new`); `plan.md`'s Phase 1.9 Greenfield Foundation Gate (`Aceitar`/`Ajustar`/`Pular` → `Accept`/`Adjust`/`Skip`, plus the derived resolution language and the outline-gate rejection message); and `setup-models.md`'s five model-category questions and `cli-path-resolution.md`'s matching first-run model-config prompt (question and option wording only — picker format is unchanged).
+
+### Fixed
+
+- **`setup-models.md` Step 0 CLI path resolution.** Replaced a hardcoded developer-machine absolute path (one contributor's local checkout of `cli-path-resolution.md`) with `${CLAUDE_PLUGIN_ROOT}`, which `install.sh` already translates for OpenCode installs — the command now resolves correctly on any machine and under either host.
+
 ## [1.114.0] - 2026-07-26
 
 ### Added

@@ -231,7 +231,7 @@ Intake failure never aborts the brainstorm — mirroring "### Error Handling" be
 ⚠ Reference intake: <kind> reference unavailable (<reason>) — using project tokens.
 ```
 
-and degrades to the plain [Prototipar] flow — project-source probes only (Probe #1 onward, then Tailwind CDN defaults) — as if no reference had been supplied.
+and degrades to the plain [Prototype] flow — project-source probes only (Probe #1 onward, then Tailwind CDN defaults) — as if no reference had been supplied.
 
 ## Token Extraction
 

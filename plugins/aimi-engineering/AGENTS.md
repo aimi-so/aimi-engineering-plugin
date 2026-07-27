@@ -25,6 +25,7 @@ utilize→use, in order to→to, at this point in time→now, implement→add, a
 <scope>
 Compression applies to: spawned-agent status updates, summary returns, progress reports, task confirmations.
 Compression does NOT apply to: CHANGELOG.md, README.md, commit messages, PR descriptions, user-facing chat to the human running /aimi:execute.
+For the last of those — user-facing chat to the human running /aimi:execute — see `commands/references/user-communication.md` for what to write instead.
 </scope>
 
 <safety_escapes>
