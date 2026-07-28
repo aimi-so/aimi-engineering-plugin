@@ -12400,7 +12400,7 @@ test_story_merge_project_split_partial_write_failure() {
 }
 
 # ============================================================================
-# split-detect Tests (TC36-TC46)
+# split-detect Tests (TC36-TC46, TC50-TC52)
 # ============================================================================
 # The read side of metadata.splitGroup. Every rule here used to live only in
 # execute.md's executable prose — twice, in two already-divergent copies — where
@@ -12584,6 +12584,7 @@ test_split_detect_completed_stale_group_yields_to_fresh_pair() {
   echo "=== TC39: split-detect — a fully completed stale split yields to the fresh legacy pair ==="
 
   local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  git init -q "$d" >/dev/null 2>&1
   local t="$d/.aimi/tasks"
 
   _sd_write "$t/2026-01-01-old-a-tasks.json" "feat/old-a" "$(_sd_stories completed)" \
@@ -12621,6 +12622,7 @@ test_split_detect_newest_wins_over_older_marked_group() {
   echo "=== TC40: split-detect — a newer unmarked pair beats an older marked group with pending work ==="
 
   local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  git init -q "$d" >/dev/null 2>&1
   local t="$d/.aimi/tasks"
 
   _sd_write "$t/2026-01-01-old-a-tasks.json" "feat/old-a" "$(_sd_stories pending)" \
@@ -12760,6 +12762,7 @@ test_split_detect_legacy_pair_without_marker() {
   echo "=== TC44: split-detect — an unmarked frontend/backend pair is a paired-split ==="
 
   local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  git init -q "$d" >/dev/null 2>&1
   local t="$d/.aimi/tasks"
 
   _sd_write "$t/2026-04-10-live-preview-frontend-tasks.json" "feat/live-preview-frontend" \
@@ -12869,6 +12872,109 @@ test_split_detect_exit_codes_and_bad_input() {
   err=$( cd "$d" && "$CLI" split-detect --dir /etc 2>&1 >/dev/null ) && exit_code=0 || exit_code=$?
   assert_exit_code "1" "$exit_code" "TC46: --dir escaping the project root exits 1"
   assert_contains "escapes project root" "$err" "TC46: --dir is path-confined by validate_path_in_project"
+
+  rm -rf "$d"
+}
+
+# TC50: an unmarked frontend/backend pair resolves to project "." (the root
+# routing key) -- fine when AIMI_ROOT is a git repository (TC44), but AIMI_ROOT
+# here is a bare, non-git mktemp -d: a multi-repo layout with no repository
+# underneath "." to execute in. split-detect must refuse the pair rather than
+# binding to a parent folder with nothing to run, while staying a query: exit
+# 0, mode "none", empty pool shape, and a degradedReason naming the condition
+# and the --split full-stack re-plan instruction.
+# Numbered TC50 (not TC47) to stay globally unique -- TC47-TC49 are already
+# used by the story-merge project-axis tests earlier in this file.
+test_split_detect_refuses_unrooted_pair_in_non_git_aimi_root() {
+  echo ""
+  echo "=== TC50: split-detect — an unmarked pair is refused when AIMI_ROOT is not a git repository ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  _sd_write "$t/2026-07-27-live-frontend-tasks.json" "feat/live-frontend" "$(_sd_stories pending)"
+  _sd_write "$t/2026-07-27-live-backend-tasks.json" "feat/live-backend" "$(_sd_stories pending)"
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC50: refusal is still a query, not a gate — exits 0"
+  assert_eq "none" "$(printf '%s' "$out" | jq -r '.mode')" "TC50: mode degrades to none, not single"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.anchor')" "TC50: anchor is null"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.members | length')" "TC50: members is empty"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.activeCount')" "TC50: activeCount is 0"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.total')" "TC50: total is 0"
+  local reason; reason=$(printf '%s' "$out" | jq -r '.degradedReason')
+  assert_contains "git repository" "$reason" \
+    "TC50: degradedReason names the non-git AIMI_ROOT condition"
+  assert_contains "--split full-stack" "$reason" \
+    "TC50: degradedReason instructs the reader to re-plan with --split full-stack"
+
+  rm -rf "$d"
+}
+
+# TC51: the refusal in TC50 is scoped to the unmarked/legacy resolution branch
+# only. A group carrying a real metadata.splitGroup marker must resolve
+# UNCHANGED to project-split, with its declared per-member project values
+# intact and degradedReason null, regardless of AIMI_ROOT's git status.
+test_split_detect_marked_group_unaffected_by_non_git_aimi_root() {
+  echo ""
+  echo "=== TC51: split-detect — a marked project-split group is unaffected by a non-git AIMI_ROOT ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  _sd_write "$t/2026-07-27-app-frontend-repo-tasks.json" "feat/app-frontend-repo" \
+    "$(_sd_stories pending)" \
+    '{"project":"frontend-repo","index":1,"total":2,"siblings":["2026-07-27-app-backend-repo-tasks.json"]}'
+  _sd_write "$t/2026-07-27-app-backend-repo-tasks.json" "feat/app-backend-repo" \
+    "$(_sd_stories pending)" \
+    '{"project":"backend-repo","index":2,"total":2,"siblings":["2026-07-27-app-frontend-repo-tasks.json"]}'
+  touch -t "$_SD_OLD_MTIME" "$t"/*.json
+  touch -t "$_SD_NEW_MTIME" "$t/2026-07-27-app-frontend-repo-tasks.json"
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC51: exits 0"
+  assert_eq "project-split" "$(printf '%s' "$out" | jq -r '.mode')" \
+    "TC51: a marked group still resolves to project-split under a non-git AIMI_ROOT"
+  assert_eq "frontend-repo,backend-repo" \
+    "$(printf '%s' "$out" | jq -r '[.members[].project] | join(",")')" \
+    "TC51: per-member project values are preserved"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.degradedReason')" "TC51: nothing degraded"
+
+  rm -rf "$d"
+}
+
+# TC52: the AIMI_ROOT-is-a-git-repository check reads the process's own
+# working directory, not the --dir scope -- --dir only narrows the candidate
+# pool (aimi-cli.sh's _split_detect_list_dir/_split_detect_phase_main_file).
+# The same refusal from TC50 must fire identically when queried through --dir
+# against a phase directory holding the same unmarked pair.
+test_split_detect_dir_scope_refusal_matches_flat_scope() {
+  echo ""
+  echo "=== TC52: split-detect --dir — the non-git AIMI_ROOT refusal matches flat scope ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks/myfeat/phase-2-auth"
+  local p="$d/.aimi/tasks/myfeat/phase-2-auth"
+
+  _sd_write "$p/myfeat-phase-2-frontend-tasks.json" "feat/myfeat-phase-2-frontend" \
+    "$(_sd_stories pending)"
+  _sd_write "$p/myfeat-phase-2-backend-tasks.json" "feat/myfeat-phase-2-backend" \
+    "$(_sd_stories pending)"
+
+  local out exit_code
+  out=$(_sd_run "$d" --dir "$p") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC52: --dir query exits 0"
+  assert_eq "none" "$(printf '%s' "$out" | jq -r '.mode')" \
+    "TC52: --dir scope reports the identical refused mode"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.members | length')" "TC52: members is empty"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.activeCount')" "TC52: activeCount is 0"
+  local reason; reason=$(printf '%s' "$out" | jq -r '.degradedReason')
+  assert_contains "git repository" "$reason" "TC52: degradedReason names the condition under --dir too"
+  assert_contains "--split full-stack" "$reason" "TC52: degradedReason instructs re-plan under --dir too"
 
   rm -rf "$d"
 }
@@ -15870,9 +15976,11 @@ main() {
   test_story_merge_project_split_phase_aware
   test_story_merge_project_split_partial_write_failure
 
-  # split-detect tests (TC36-TC46) — each builds its own isolated project dir
+  # split-detect tests (TC36-TC46, TC50-TC52) — each builds its own isolated
+  # project dir. TC47-TC49 are used by the story-merge project-axis tests
+  # above, not by split-detect.
   echo ""
-  echo "--- split-detect Tests (TC36-TC46) ---"
+  echo "--- split-detect Tests (TC36-TC46, TC50-TC52) ---"
   test_split_detect_project_split_three_members
   test_split_detect_flat_scope_excludes_phase_dir
   test_split_detect_dir_scope_matches_phase_split
@@ -15884,6 +15992,9 @@ main() {
   test_split_detect_legacy_pair_without_marker
   test_split_detect_single_file
   test_split_detect_exit_codes_and_bad_input
+  test_split_detect_refuses_unrooted_pair_in_non_git_aimi_root
+  test_split_detect_marked_group_unaffected_by_non_git_aimi_root
+  test_split_detect_dir_scope_refusal_matches_flat_scope
 
   # Roadmap lifecycle tests (US-002)
   echo ""

@@ -6604,6 +6604,15 @@ cmd_split_detect() {
   local declared_total="0"
   local degraded_reason=""
 
+  # AIMI_ROOT-is-a-git-repo check, computed once. find_aimi_root() already cd'd
+  # the process to AIMI_ROOT before cmd_split_detect ever runs (dispatch at
+  # line ~9167 happens after the find_aimi_root call at ~9116), and --dir only
+  # narrows the candidate pool below -- it never changes CWD. So $PWD here is
+  # AIMI_ROOT in both flat and --dir scope, and this is the identical check
+  # commands/execute.md documents as the canonical AIMI_ROOT_IS_GIT_REPO rule.
+  local aimi_root_is_git=true
+  git -C "$PWD" rev-parse --git-dir >/dev/null 2>&1 || aimi_root_is_git=false
+
   while :; do
     local pool_len=0
     pool_len=$(printf '%s' "$pool" | jq 'length')
@@ -6718,6 +6727,22 @@ cmd_split_detect() {
       fi
 
       if [ -n "$counterpart" ]; then
+        if [ "$aimi_root_is_git" != true ]; then
+          # A legacy frontend/backend pair with no metadata.splitGroup marker
+          # resolves to the root routing key "." (_SPLIT_DETECT_DESCRIBE_JQ's
+          # default at 6459) -- fine in a single-repo layout, but AIMI_ROOT
+          # here is not a git repository at all: a parent folder holding
+          # multiple git repos as subfolders, with no repository underneath
+          # "." to execute in. Refuse instead of binding to it. Reuses the
+          # same mode=none-plus-degradedReason shape as the exhausted-pool
+          # case above -- no new mode value, no new emitted field.
+          mode="none"
+          anchor="null"
+          members="[]"
+          declared_total="0"
+          degraded_reason="AIMI_ROOT (${PWD}) is not a git repository — this is a multi-repo layout, a parent folder holding multiple git repositories as subfolders. The legacy pair ${fe_path} / ${be_path} has no metadata.splitGroup marker and would route to the root group \".\", which has no repository to execute in. Re-plan with --split full-stack so every story carries its own project, then re-run."
+          break
+        fi
         # Frontend first, backend second — the order the two-file writer and
         # every downstream report already assume.
         group=$(printf '%s' "$pool" | jq -c --arg fe "$fe_path" --arg be "$be_path" \
