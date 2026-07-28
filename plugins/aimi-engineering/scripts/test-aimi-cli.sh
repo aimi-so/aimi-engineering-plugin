@@ -6138,6 +6138,161 @@ test_detect_default_branch() {
 }
 
 # ============================================================================
+# Per-Repo Default-Branch Cache Scoping Fixture
+# ============================================================================
+
+# Creates a non-git AIMI_ROOT directory (own temp dir, with .aimi/tasks so
+# find_aimi_root succeeds) containing two sibling child git repos: repo-a
+# (bare remote HEAD -> refs/heads/main) and repo-b (bare remote HEAD ->
+# refs/heads/master). Mirrors setup_parent_branch_fixture's bare-remote +
+# local-clone technique (a fresh --bare init defaults to master, which is
+# never pushed, leaving "HEAD branch: (unknown)" otherwise) so `git remote
+# show origin` resolves a real default branch for each repo without any
+# network access. Exercises _resolve_default_branch's per-repo cache-key
+# scoping (aimi-cli.sh:1570+) across --project calls that share one AIMI_DIR.
+setup_multi_repo_default_branch_fixture() {
+  MULTI_REPO_FIXTURE_ROOT=$(mktemp -d)
+  mkdir -p "$MULTI_REPO_FIXTURE_ROOT/.aimi/tasks"
+
+  MULTI_REPO_FIXTURE_REMOTE_A=$(mktemp -d)
+  MULTI_REPO_FIXTURE_REMOTE_B=$(mktemp -d)
+  MULTI_REPO_FIXTURE_A="$MULTI_REPO_FIXTURE_ROOT/repo-a"
+  MULTI_REPO_FIXTURE_B="$MULTI_REPO_FIXTURE_ROOT/repo-b"
+
+  git init --bare "$MULTI_REPO_FIXTURE_REMOTE_A" >/dev/null 2>&1
+  git --git-dir="$MULTI_REPO_FIXTURE_REMOTE_A" symbolic-ref HEAD refs/heads/main
+  git init --bare "$MULTI_REPO_FIXTURE_REMOTE_B" >/dev/null 2>&1
+  git --git-dir="$MULTI_REPO_FIXTURE_REMOTE_B" symbolic-ref HEAD refs/heads/master
+
+  git clone "$MULTI_REPO_FIXTURE_REMOTE_A" "$MULTI_REPO_FIXTURE_A" >/dev/null 2>&1
+  pushd "$MULTI_REPO_FIXTURE_A" >/dev/null
+  git checkout -b main >/dev/null 2>&1
+  echo "a" > README.md && git add README.md && git commit -m "repo-a initial commit" >/dev/null 2>&1
+  git push -u origin main >/dev/null 2>&1
+  popd >/dev/null
+
+  git clone "$MULTI_REPO_FIXTURE_REMOTE_B" "$MULTI_REPO_FIXTURE_B" >/dev/null 2>&1
+  pushd "$MULTI_REPO_FIXTURE_B" >/dev/null
+  git checkout -b master >/dev/null 2>&1
+  echo "b" > README.md && git add README.md && git commit -m "repo-b initial commit" >/dev/null 2>&1
+  git push -u origin master >/dev/null 2>&1
+  popd >/dev/null
+}
+
+# Removes the temp directories created by setup_multi_repo_default_branch_fixture
+teardown_multi_repo_default_branch_fixture() {
+  rm -rf "$MULTI_REPO_FIXTURE_ROOT" "$MULTI_REPO_FIXTURE_REMOTE_A" "$MULTI_REPO_FIXTURE_REMOTE_B"
+  unset MULTI_REPO_FIXTURE_ROOT MULTI_REPO_FIXTURE_A MULTI_REPO_FIXTURE_B MULTI_REPO_FIXTURE_REMOTE_A MULTI_REPO_FIXTURE_REMOTE_B
+}
+
+test_detect_default_branch_per_repo_scoping() {
+  echo ""
+  echo "=== Testing detect-default-branch: per-repo cache scoping ==="
+
+  local stdout1 stdout2 stdout3 stdout4 exit_code
+
+  # Invoked from inside MULTI_REPO_FIXTURE_ROOT (which owns the .aimi/ dir)
+  # so find_aimi_root's cwd-based auto-discovery lands on this fixture's own
+  # isolated AIMI_DIR, matching the documented repro command shape where the
+  # orchestrator's cwd is the multi-repo AIMI_ROOT.
+  setup_multi_repo_default_branch_fixture
+  pushd "$MULTI_REPO_FIXTURE_ROOT" >/dev/null
+
+  stdout1=$("$CLI" detect-default-branch --project "$MULTI_REPO_FIXTURE_A") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "detect-default-branch per-repo scoping: repo-a first call -- exit code"
+  assert_eq "main" "$stdout1" "detect-default-branch per-repo scoping: repo-a first call resolves main"
+
+  stdout2=$("$CLI" detect-default-branch --project "$MULTI_REPO_FIXTURE_B") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "detect-default-branch per-repo scoping: repo-b call -- exit code"
+  assert_eq "master" "$stdout2" "detect-default-branch per-repo scoping: repo-b resolves master, not contaminated by repo-a's cached main"
+
+  stdout3=$("$CLI" detect-default-branch --project "$MULTI_REPO_FIXTURE_A") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "detect-default-branch per-repo scoping: repo-a second call -- exit code"
+  assert_eq "main" "$stdout3" "detect-default-branch per-repo scoping: repo-a second call still resolves main"
+
+  # Reproduces the downstream failure the old contamination caused: repo-b's
+  # resolved branch (master) must genuinely exist there, and repo-b must NOT
+  # have a "main" branch -- the exact mismatch that made
+  # `worktree-manager.sh create feat/x-backend --from main` abort with
+  # "fatal: Not a valid object name: 'main'" when the stale cached value
+  # leaked into the master repo.
+  local verify_master_rc verify_main_rc
+  (cd "$MULTI_REPO_FIXTURE_B" && git rev-parse --verify master >/dev/null 2>&1) && verify_master_rc=0 || verify_master_rc=$?
+  (cd "$MULTI_REPO_FIXTURE_B" && git rev-parse --verify main >/dev/null 2>&1) && verify_main_rc=0 || verify_main_rc=$?
+  assert_exit_code "0" "$verify_master_rc" "detect-default-branch per-repo scoping: repo-b's resolved branch (master) verifies inside repo-b"
+  [ "$verify_main_rc" != "0" ] && assert_eq "1" "1" "detect-default-branch per-repo scoping: main does NOT exist in repo-b (contamination would have hidden this)" || assert_eq "1" "0" "detect-default-branch per-repo scoping: main does NOT exist in repo-b (contamination would have hidden this)"
+
+  # The per-repo cache is a real cache, not merely correct: remove repo-b's
+  # origin remote and confirm the second repo-b call still returns master
+  # from the cached per-repo file instead of erroring.
+  (cd "$MULTI_REPO_FIXTURE_B" && git remote remove origin)
+  stdout4=$("$CLI" detect-default-branch --project "$MULTI_REPO_FIXTURE_B") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "detect-default-branch per-repo scoping: repo-b cached call survives origin removal -- exit code"
+  assert_eq "master" "$stdout4" "detect-default-branch per-repo scoping: repo-b cached call survives origin removal -- stdout"
+
+  # The derived cache key never introduces a subdirectory under .aimi/: two
+  # flat default-branch-* files exist directly inside AIMI_DIR.
+  local cache_file_count
+  cache_file_count=$(find "$MULTI_REPO_FIXTURE_ROOT/.aimi" -maxdepth 1 -type f -name "default-branch-*" | wc -l | tr -d ' ')
+  assert_eq "2" "$cache_file_count" "detect-default-branch per-repo scoping: two flat per-repo cache files exist directly inside .aimi/"
+
+  popd >/dev/null
+  teardown_multi_repo_default_branch_fixture
+}
+
+test_clear_state_removes_per_repo_default_branch_cache() {
+  echo ""
+  echo "=== Testing clear-state: removes per-repo default-branch cache files ==="
+
+  setup_multi_repo_default_branch_fixture
+  pushd "$MULTI_REPO_FIXTURE_ROOT" >/dev/null
+
+  "$CLI" detect-default-branch --project "$MULTI_REPO_FIXTURE_A" >/dev/null
+  "$CLI" detect-default-branch --project "$MULTI_REPO_FIXTURE_B" >/dev/null
+
+  local before_count
+  before_count=$(find "$MULTI_REPO_FIXTURE_ROOT/.aimi" -maxdepth 1 -name "default-branch-*" | wc -l | tr -d ' ')
+  assert_eq "2" "$before_count" "clear-state per-repo cache: two per-repo default-branch cache files exist before clear-state"
+
+  local output
+  output=$("$CLI" clear-state)
+  assert_contains "State cleared" "$output" "clear-state per-repo cache: reports success"
+
+  local after_count
+  after_count=$(find "$MULTI_REPO_FIXTURE_ROOT/.aimi" -maxdepth 1 -name "default-branch-*" | wc -l | tr -d ' ')
+  assert_eq "0" "$after_count" "clear-state per-repo cache: zero default-branch-* files remain after clear-state"
+
+  popd >/dev/null
+  teardown_multi_repo_default_branch_fixture
+}
+
+test_detect_default_branch_classic_single_repo_regression() {
+  echo ""
+  echo "=== Testing detect-default-branch: classic single-repo layout regression ==="
+
+  local stdout1 stdout2 exit_code
+
+  # Classic layout: AIMI_ROOT IS the git repository, no --project passed.
+  setup_parent_branch_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+
+  stdout1=$("$CLI" detect-default-branch) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "detect-default-branch classic single-repo: first call -- exit code"
+  assert_eq "main" "$stdout1" "detect-default-branch classic single-repo: first call resolves main"
+
+  # Remove origin between calls -- the second call must still succeed,
+  # proving it was served from cache rather than hitting git again.
+  git remote remove origin
+
+  stdout2=$("$CLI" detect-default-branch) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "detect-default-branch classic single-repo: second call after origin removal -- exit code"
+  assert_eq "main" "$stdout2" "detect-default-branch classic single-repo: second call served from cache after origin removal"
+
+  popd >/dev/null
+  teardown_git_fixture
+}
+
+# ============================================================================
 # Detect Parent Branch Fixture Helper
 # ============================================================================
 
@@ -6365,6 +6520,39 @@ test_detect_parent_branch() {
   assert_stderr_contains "Not a git repository" "$stderr_output" "detect-parent-branch: not a git repo — stderr message"
   rm -f "$stderr_file"
   rm -rf "$non_git_dir"
+}
+
+test_detect_parent_branch_per_repo_scoping() {
+  echo ""
+  echo "=== Testing detect-parent-branch: per-repo default-branch fallback scoping ==="
+
+  local stdout base_out source_out exit_code
+
+  setup_multi_repo_default_branch_fixture
+  pushd "$MULTI_REPO_FIXTURE_ROOT" >/dev/null
+
+  # Prime the per-repo cache for repo-a first (resolves main) in the same
+  # session, proving repo-b's fallback below doesn't inherit it.
+  "$CLI" detect-default-branch --project "$MULTI_REPO_FIXTURE_A" >/dev/null
+
+  # Orphan branch on repo-b with zero decoration candidates anywhere in its
+  # --first-parent history forces cmd_detect_parent_branch's fallback at
+  # aimi-cli.sh:1815 through the same _resolve_default_branch this story
+  # re-keys.
+  pushd "$MULTI_REPO_FIXTURE_B" >/dev/null
+  git checkout --orphan feat/no-decoration >/dev/null 2>&1
+  echo "o1" > o1.txt && git add o1.txt && git commit -m "orphan commit" >/dev/null 2>&1
+  popd >/dev/null
+
+  stdout=$("$CLI" detect-parent-branch feat/no-decoration --project "$MULTI_REPO_FIXTURE_B") && exit_code=0 || exit_code=$?
+  base_out=$(echo "$stdout" | jq -r '.base')
+  source_out=$(echo "$stdout" | jq -r '.source')
+  assert_exit_code "0" "$exit_code" "detect-parent-branch per-repo scoping: repo-b fallback -- exit code"
+  assert_eq "master" "$base_out" "detect-parent-branch per-repo scoping: repo-b fallback resolves master, not repo-a's cached main"
+  assert_eq "default-branch" "$source_out" "detect-parent-branch per-repo scoping: repo-b fallback source is default-branch"
+
+  popd >/dev/null
+  teardown_multi_repo_default_branch_fixture
 }
 
 # ============================================================================
@@ -15827,11 +16015,15 @@ main() {
   echo ""
   echo "--- Detect Default Branch Tests ---"
   test_detect_default_branch
+  test_detect_default_branch_per_repo_scoping
+  test_detect_default_branch_classic_single_repo_regression
+  test_clear_state_removes_per_repo_default_branch_cache
 
   # Detect-parent-branch tests — uses own git fixture (independent of TEST_DIR)
   echo ""
   echo "--- Detect Parent Branch Tests ---"
   test_detect_parent_branch
+  test_detect_parent_branch_per_repo_scoping
 
   # Archive-task tests — each creates its own isolated temp dir
   echo ""

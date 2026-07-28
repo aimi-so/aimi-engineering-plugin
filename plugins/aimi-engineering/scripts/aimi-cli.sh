@@ -1561,16 +1561,45 @@ cmd_get_state() {
     }'
 }
 
+# Derive a filesystem-safe cache-key suffix for a repository toplevel path,
+# so _resolve_default_branch's cache is scoped per repository instead of a
+# single shared file under AIMI_ROOT/.aimi/ (which silently leaked one
+# repo's resolved branch into every sibling --project call). Mirrors the
+# sha256sum/shasum branch shape of _hash_file (aimi-cli.sh:2035-2042) but
+# adds an explicit `command -v shasum` probe that helper lacks, and falls
+# back to a portable non-sha256 slugification when neither hashing tool is
+# available -- the slugification never introduces a `/`, so the returned
+# suffix is always safe to use as a flat filename directly inside .aimi/.
+# Usage: _default_branch_cache_key <repo-toplevel-path>
+# Prints: a filesystem-safe string containing no `/`
+_default_branch_cache_key() {
+  local toplevel="$1"
+  if [ "$_HAS_SHA256SUM" -eq 1 ]; then
+    printf '%s' "$toplevel" | sha256sum | awk '{print $1}'
+  elif command -v shasum &>/dev/null; then
+    printf '%s' "$toplevel" | shasum -a 256 | awk '{print $1}'
+  else
+    printf '%s' "$toplevel" | tr -c 'A-Za-z0-9' '-'
+  fi
+}
+
 # Shared default-branch resolution logic: cache read, primary git remote
 # show origin parse, offline symbolic-ref fallback, cache write. Assumes the
 # caller has already cd'd into the target repo and verified it is a git
 # repository (both cmd_detect_default_branch and cmd_detect_parent_branch
-# do this themselves before calling here). Returns the branch name on
-# stdout; exits 1 on total failure.
+# do this themselves before calling here). The cache is keyed per repository
+# toplevel (default-branch-<hash>) rather than a single shared
+# "default-branch" file, so a sibling repo's --project call cannot inherit
+# another repo's cached branch. Returns the branch name on stdout; exits 1
+# on total failure.
 _resolve_default_branch() {
+  local repo_toplevel cache_key
+  repo_toplevel=$(git rev-parse --show-toplevel 2>/dev/null) || repo_toplevel=""
+  cache_key="default-branch-$(_default_branch_cache_key "$repo_toplevel")"
+
   # Return cached value if available
   local cached
-  cached=$(read_state "default-branch")
+  cached=$(read_state "$cache_key")
   if [ -n "$cached" ]; then
     echo "$cached"
     return 0
@@ -1592,7 +1621,7 @@ _resolve_default_branch() {
   fi
 
   # Cache for session reuse
-  write_state "default-branch" "$branch"
+  write_state "$cache_key" "$branch"
   echo "$branch"
 }
 
@@ -3242,7 +3271,8 @@ cmd_setup_branch() {
 
 # Clear all state files (preserves tasks directory)
 cmd_clear_state() {
-  rm -f "$AIMI_DIR/current-tasks" "$AIMI_DIR/current-branch" "$AIMI_DIR/current-story" "$AIMI_DIR/last-result" "$AIMI_DIR/cli-path" "$AIMI_DIR/default-branch"
+  rm -f "$AIMI_DIR/current-tasks" "$AIMI_DIR/current-branch" "$AIMI_DIR/current-story" "$AIMI_DIR/last-result" "$AIMI_DIR/cli-path"
+  rm -f "$AIMI_DIR"/default-branch-* 2>/dev/null
   rm -f "$AIMI_DIR"/.state.lock "$AIMI_DIR"/*.lock 2>/dev/null
   rmdir "$AIMI_DIR"/*.lock.d 2>/dev/null || true
   echo "State cleared."
