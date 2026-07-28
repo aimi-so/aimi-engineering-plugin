@@ -6889,6 +6889,49 @@ _roadmap_validate_phase_id() {
   fi
 }
 
+# Read a phases JSON array on stdin; print one human-readable error line per
+# creates[]/needs[] entry whose *identity* can never name a real artifact.
+#
+# The rule is deliberately narrow -- exactly three shapes are rejected, judged
+# over the identity (text before the first "(", trimmed) and nothing else:
+#   (a) empty after _cv_identity
+#   (b) a ".." PATH SEGMENT, i.e. (^|/)\.\.($|/) -- not any byte pair "..",
+#       so an identity like services/foo..bar is untouched
+#   (c) a leading "/" anchored at position 0 -- the Endpoint kind
+#       ("POST /api/notifications") contains a slash but does not begin with
+#       one, so anchoring matters or every endpoint phase becomes unwritable
+# Identity *strength* is explicitly not judged: at declaration time research has
+# not run, so a bare Table name ("notifications") or a bare directory
+# ("db/migrations") must pass -- guessing a path here fails at phase close for a
+# reason nobody can debug.
+#
+# creates[] and needs[] go through the same predicate in the same pass on
+# purpose: _cv_creates_in_scope matches a need against a provider's creates by
+# exact byte equality, so a rule applied to one list alone lets a roadmap hold
+# two shapes at once -- validate-contracts then reports a permanently unmet
+# need, which halts /aimi:plan, and agent mode never demotes an unmet need.
+#
+# Reuses $_CONTRACT_JQ_DEFS so the guard and validate-contracts agree on what an
+# identity is; a second copy of _cv_identity would drift.
+_roadmap_identity_errors() {
+  jq -r "$_CONTRACT_JQ_DEFS"'
+    [ .[]
+      | . as $p
+      | (["creates", "needs"][]) as $list
+      | (($p[$list] // [])[]) as $raw
+      | ($raw | if type == "string" then . else "" end) as $entry
+      | ($entry | _cv_identity) as $ident
+      | (
+          if ($ident | length) == 0 then "empty once the description is stripped"
+          elif ($ident | test("(^|/)\\.\\.($|/)")) then "contains a \"..\" path segment"
+          elif ($ident | test("^/")) then "begins with \"/\""
+          else empty end
+        ) as $reason
+      | "phase " + ($p.id|tostring) + ": " + $list + " entry \"" + $entry + "\" is not a usable artifact identity: " + $reason
+    ] | .[]
+  '
+}
+
 cmd_roadmap_init() {
   local feature="" file="" sync_mode=false brainstorm_path=""
 
@@ -7030,6 +7073,19 @@ cmd_roadmap_init() {
           exit 1
         fi
 
+        # Identity well-formedness, over filtered_new ONLY -- the phases this
+        # call actually writes. Never over the whole payload: plan.md always
+        # submits the full phase array and both call sites downgrade a
+        # roadmap-init failure to a warning, so a check that fired on a legacy
+        # phase would silently drop the new one instead of reporting anything.
+        identity_errors=""
+        identity_errors=$(printf '%s' "$filtered_new" | _roadmap_identity_errors)
+        if [ -n "$identity_errors" ]; then
+          echo "Error: roadmap-init: malformed creates/needs identity in new phase(s):" >&2
+          printf '%s\n' "$identity_errors" >&2
+          exit 1
+        fi
+
         merged_phases=$(jq --argjson add "$filtered_new" '
           (.phases + $add) | sort_by(.id)
         ' "$roadmap_path")
@@ -7043,6 +7099,16 @@ cmd_roadmap_init() {
         if [ -n "$dangling" ]; then
           echo "Error: roadmap-init: dangling dependsOn reference(s):" >&2
           printf '%s\n' "$dangling" >&2
+          exit 1
+        fi
+
+        # Creation mode: every phase in new_phases is by definition new, so the
+        # same guard applies to the whole array here.
+        identity_errors=""
+        identity_errors=$(printf '%s' "$new_phases" | _roadmap_identity_errors)
+        if [ -n "$identity_errors" ]; then
+          echo "Error: roadmap-init: malformed creates/needs identity in new phase(s):" >&2
+          printf '%s\n' "$identity_errors" >&2
           exit 1
         fi
 
