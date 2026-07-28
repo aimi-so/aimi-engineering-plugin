@@ -1084,22 +1084,7 @@ What you can do instead:
 Phase [PHASE_ID]'s claim has been released. Nothing was created.
 ```
 
-**Only when `AIMI_ROOT_IS_GIT_REPO` is true does the rest of this subsection run.** From here on, `AIMI_ROOT` is guaranteed to be a repository — which is also why every split worktree in **Phase-Mode Paired Split** below nests under `$PHASE_CONTAINER_PATH` rather than resolving a per-repo root of its own: in phase mode there is exactly one repository, and a split member's `metadata.splitGroup.project` (when present) is a monorepo subdirectory used for naming and reporting, never a separate git root.
-
-```bash
-cd "$AIMI_ROOT"
-if [ -n "$BASE_BRANCH" ]; then
-  CONTAINER_BASE="$BASE_BRANCH"
-else
-  CONTAINER_BASE="$DEFAULT_BRANCH"
-fi
-```
-
-`CONTAINER_BASE` is `BASE_BRANCH` when Step 1.6 set one, otherwise `DEFAULT_BRANCH` — reusing the exact default-branch/base-selection values Steps 1.5–1.6 already computed against the main root. Delegate to **Create or Reuse a Container** with `EXEC_ROOT="$AIMI_ROOT"`, `EXEC_BRANCH="$PHASE_BRANCH"`, and `CONTAINER_BASE` as just computed. The resulting path is deterministic given `AIMI_ROOT` and `PHASE_BRANCH`:
-
-```bash
-PHASE_CONTAINER_PATH="$AIMI_ROOT/.worktrees/$PHASE_BRANCH"
-```
+**Only when `AIMI_ROOT_IS_GIT_REPO` is true does the rest of Step 1.7 run.** From here on, `AIMI_ROOT` is guaranteed to be a repository — but that does not mean every participating story (or, once a split is detected, every split member) shares that same repository as its own toplevel: a `project` field can still resolve to a nested repository whose own `git rev-parse --show-toplevel` differs from `AIMI_ROOT`'s own. This phase's participating project groups cannot be derived until its split status is known, so **Detect a Full-Stack Split Inside This Phase** runs next; the phase container itself — one per participating repository — is created afterward, in **Create Phase Containers Per Project Group**, once that detection's result is available. **Phase-Mode Paired Split** below (untouched by this story) still nests every split worktree under the single scalar `$PHASE_CONTAINER_PATH`, so it fully works today only when this phase's split members resolve to exactly one repository; a phase split spanning more than one repository is a known gap left for the story that roots each split member's own worktree at its own repository (outline 07/08).
 
 ### Detect a Full-Stack Split Inside This Phase
 
@@ -1247,24 +1232,182 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
 ```
 
-### Phase Container Dev Server Bootstrap
+### Create Phase Containers Per Project Group
 
-**Skip this subsection entirely when `PHASE_SPLIT_MODE` is true** — a split phase never lands a story directly on `PHASE_CONTAINER_PATH` itself, so there is nothing to serve here; each split gets its own independently-bootstrapped server instead (see Split Container Dev Server Bootstrap in Phase-Mode Paired Split below). The rest of this subsection assumes `PHASE_SPLIT_MODE=false`.
+This phase's participating project groups cannot be known until **Detect a Full-Stack Split Inside This Phase** above has run: `PHASE_SPLIT_MODE`, and — when true — `PHASE_ACTIVE_SPLIT_FILES`, are its inputs here. This subsection creates (or reuses) one phase container per participating repository, never a single container rooted at `AIMI_ROOT` regardless of where a story's or split member's own `project` field resolves — mirroring Step 0.9 Pass 1's own per-repo resolution (`git -C ... rev-parse --show-toplevel`, `$AIMI_CLI detect-default-branch --project`, collision-checked on `(repo toplevel, branch)`) rather than inventing a second mechanism. It populates `project_roots[group_key]` and `PHASE_CONTAINER_PATHS[group_key]` (`${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Container Paths Per Project Group) — every later consumer of a phase's container path in this document reads one of the two.
 
-When it applies, this MUST complete before Step 3.3's Open Visual Follow Session computes `VISUAL_URL` — the same hard ordering rule Container Dev Server Bootstrap (Step 3.3) already enforces for flat container mode: install-deps → serve start → compute VISUAL_URL → open the visual-follow session.
+#### Derive Participating Project Groups
 
-Gate on the phase's own tasks file having at least one visual story — the same jq shape Step 0.7 already uses:
+**When `PHASE_SPLIT_MODE=true`,** groups come from every *active* split member's own `metadata.splitGroup.project` — never from this phase's single governing tasks file, which does not exist on disk for a split phase. A legacy frontend/backend pair (no `splitGroup` marker, both members implicitly rooted at `.`) collapses to the single `.` group, preserving today's single-container behavior for that case. **When `PHASE_SPLIT_MODE=false`,** groups come from the phase's own governing tasks file's `userStories[].project`, exactly the Per-Story Project-Grouping Pattern (Multi-Repo Handling) applied to this one file — a project-less story's `null` collapses to the same `.` group.
 
 ```bash
-PHASE_VISUAL_STORIES=$(jq '[.userStories[] | select(.verification | type == "object" and .strategy == "visual")] | length' "$PHASE_TASKS_PATH" 2>/dev/null)
-if [ -n "$PHASE_VISUAL_STORIES" ] && [ "$PHASE_VISUAL_STORIES" -gt 0 ]; then
-  HAS_VISUAL_STORY=true
+PHASE_MAIN_TASKS="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR/$FEATURE-phase-$PHASE_ID-tasks.json"
+
+if [ "$PHASE_SPLIT_MODE" = true ]; then
+  PHASE_GROUP_RAW=""
+  while IFS= read -r split_file; do
+    [ -n "$split_file" ] || continue
+    GROUP_PROJECT=$(jq -r '.metadata.splitGroup.project // "."' "$split_file")
+    PHASE_GROUP_RAW="${PHASE_GROUP_RAW}${GROUP_PROJECT}"$'\n'
+  done <<< "$PHASE_ACTIVE_SPLIT_FILES"
 else
-  HAS_VISUAL_STORY=false
+  PHASE_GROUP_RAW=$(jq -r '.userStories[] | (.project // ".")' "$PHASE_MAIN_TASKS")
+fi
+PHASE_GROUP_PROJECTS=$(printf '%s\n' "$PHASE_GROUP_RAW" | grep -v '^$' | sort -u)
+[ -n "$PHASE_GROUP_PROJECTS" ] || PHASE_GROUP_PROJECTS="."
+```
+
+An empty result (a phase, or an active split file, whose `userStories` array is empty — legal, see Active Split Files above) falls back to exactly one `.` group, preserving today's single-container behavior rather than creating zero containers.
+
+#### Resolve and Create Each Group's Container
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+cd "$AIMI_ROOT"
+
+PHASE_GROUP_TOPLEVELS_SEEN=""
+PHASE_LAST_GROUP_TOPLEVEL=""
+while IFS= read -r GROUP_PROJECT; do
+  [ -n "$GROUP_PROJECT" ] || continue
+  case "$GROUP_PROJECT" in
+    .)
+      GROUP_KEY="DEFAULT"
+      GROUP_ROOT="$AIMI_ROOT"
+      ;;
+    /*|..|../*|*/..|*/../*)
+      echo "Invalid project \"$GROUP_PROJECT\" for phase $PHASE_ID" >&2
+      $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+      exit 1
+      ;;
+    *)
+      if ! [[ "$GROUP_PROJECT" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$ ]]; then
+        echo "Invalid project \"$GROUP_PROJECT\" for phase $PHASE_ID" >&2
+        $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+        exit 1
+      fi
+      GROUP_KEY="$GROUP_PROJECT"
+      GROUP_ROOT="$AIMI_ROOT/$GROUP_PROJECT"
+      ;;
+  esac
+
+  GROUP_TOPLEVEL=$(git -C "$GROUP_ROOT" rev-parse --show-toplevel 2>/dev/null) || GROUP_TOPLEVEL=""
+  if [ -z "$GROUP_TOPLEVEL" ]; then
+    echo "Not a git repository: $GROUP_ROOT (project \"$GROUP_PROJECT\" for phase $PHASE_ID)" >&2
+    $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+    exit 1
+  fi
+  PHASE_LAST_GROUP_TOPLEVEL="$GROUP_TOPLEVEL"
+
+  # Two group_keys sharing one toplevel collapse into one container — the
+  # (repo toplevel, PHASE_BRANCH) collision rule Step 0.9 Pass 1 applies
+  # (execute.md:379) — never a duplicate creation attempt.
+  case "$PHASE_GROUP_TOPLEVELS_SEEN" in
+    *"${GROUP_TOPLEVEL}"$'\n'*)
+      project_roots["$GROUP_KEY"]="$GROUP_TOPLEVEL"
+      PHASE_CONTAINER_PATHS["$GROUP_KEY"]="$GROUP_TOPLEVEL/.worktrees/$PHASE_BRANCH"
+      continue
+      ;;
+  esac
+  PHASE_GROUP_TOPLEVELS_SEEN="${PHASE_GROUP_TOPLEVELS_SEEN}${GROUP_TOPLEVEL}"$'\n'
+
+  GROUP_DEFAULT=$($AIMI_CLI detect-default-branch --project "$GROUP_ROOT") || GROUP_DEFAULT=""
+  if [ -z "$GROUP_DEFAULT" ]; then
+    echo "Could not detect a default branch for $GROUP_ROOT (project \"$GROUP_PROJECT\" for phase $PHASE_ID)" >&2
+    $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+    exit 1
+  fi
+
+  if [ -n "$BASE_BRANCH" ]; then
+    CONTAINER_BASE="$BASE_BRANCH"
+  else
+    CONTAINER_BASE="$GROUP_DEFAULT"
+  fi
+
+  EXEC_ROOT="$GROUP_TOPLEVEL"
+  EXEC_BRANCH="$PHASE_BRANCH"
+  cd "$EXEC_ROOT"
+  $WORKTREE_MGR create "$EXEC_BRANCH" --from "$CONTAINER_BASE"
+
+  project_roots["$GROUP_KEY"]="$GROUP_TOPLEVEL"
+  PHASE_CONTAINER_PATHS["$GROUP_KEY"]="$GROUP_TOPLEVEL/.worktrees/$PHASE_BRANCH"
+  echo "Phase container ready in project: $GROUP_KEY (${GROUP_TOPLEVEL}/.worktrees/${PHASE_BRANCH})"
+done <<< "$PHASE_GROUP_PROJECTS"
+cd "$AIMI_ROOT"
+```
+
+Delegates to **Create or Reuse a Container** (`${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md`) exactly as before — `EXEC_ROOT`/`EXEC_BRANCH`/`CONTAINER_BASE` set per group, `$WORKTREE_MGR create` called once per unique toplevel. `CONTAINER_BASE` generalizes yesterday's single `BASE_BRANCH`-or-`DEFAULT_BRANCH` selection so its `else` branch reads *this group's own* freshly-detected default branch (`GROUP_DEFAULT`) instead of the single main-root `$DEFAULT_BRANCH`. A per-group `detect-default-branch` failure is fatal for that group only — the claim is released and the run stops, exactly as Step 0.9 Pass 1 does at its own call site (execute.md:346-350/:377) — never falling back to another group's already-resolved branch.
+
+**With exactly one group** — today's single-repo, non-split, every-story-project-less case — also alias the scalar for byte-identical backward compatibility with **Phase-Mode Paired Split** and any other unmigrated scalar consumer:
+
+```bash
+PHASE_GROUP_COUNT=$(printf '%s\n' "$PHASE_GROUP_PROJECTS" | grep -c .)
+if [ "$PHASE_GROUP_COUNT" -eq 1 ]; then
+  PHASE_CONTAINER_PATH="$PHASE_LAST_GROUP_TOPLEVEL/.worktrees/$PHASE_BRANCH"
 fi
 ```
 
-Delegate to **Bootstrap a Container Dev Server** with `EXEC_ROOT="$AIMI_ROOT"` (the project root, never inside the container itself — the same reason Create or Reuse the Phase Container above `cd`s to the project root before calling `$WORKTREE_MGR create`), `EXEC_BRANCH="$PHASE_BRANCH"`, and `HAS_VISUAL_STORY` as just computed. Its captured URL is discarded here — every later consumer (Step 3.3's Open Visual Follow Session, and Step 4's post-merge visual verification) re-queries the server fresh via `serve url` at the point it needs it.
+With `PHASE_SPLIT_MODE=false` and every story project-less — today's byte-for-byte-unchanged case — `PHASE_GROUP_PROJECTS` is exactly `.`, the loop runs once with `GROUP_KEY="DEFAULT"` and `GROUP_ROOT="$AIMI_ROOT"`, `GROUP_TOPLEVEL` resolves to `$AIMI_ROOT` itself (the same repository the guard above already confirmed), and `PHASE_CONTAINER_PATH` ends up `"$AIMI_ROOT/.worktrees/$PHASE_BRANCH"` — identical to today's unconditional assignment. When more than one group resolves, the scalar is deliberately left unset: **Phase-Mode Paired Split** and Step 4's wave loop do not yet consume `PHASE_CONTAINER_PATHS[group_key]` (that migration is outline 07/08's), so a genuinely multi-repo, non-split phase is a known, visible gap here — an unset `PHASE_CONTAINER_PATH` fails closed downstream rather than silently operating against the wrong repository.
+
+### Phase Container Dev Server Bootstrap
+
+**Skip this subsection entirely when `PHASE_SPLIT_MODE` is true** — a split phase never lands a story directly on `PHASE_CONTAINER_PATH` itself, so there is nothing to serve here; each split gets its own independently-bootstrapped server instead (see Split Container Dev Server Bootstrap in Phase-Mode Paired Split below). The rest of this subsection assumes `PHASE_SPLIT_MODE=false`, and therefore that every group came from `PHASE_MAIN_TASKS` (Create Phase Containers Per Project Group above never reads a split file's own tasks source in this branch).
+
+When it applies, this MUST complete before Step 3.3's Open Visual Follow Session computes `VISUAL_URL` — the same hard ordering rule Container Dev Server Bootstrap (Step 3.3) already enforces for flat container mode: install-deps → serve start → compute VISUAL_URL → open the visual-follow session.
+
+Gate on the phase's own tasks file having at least one visual story at all — the same jq shape Step 0.7 already uses — before doing any per-group work:
+
+```bash
+PHASE_VISUAL_STORIES=$(jq '[.userStories[] | select(.verification | type == "object" and .strategy == "visual")] | length' "$PHASE_TASKS_PATH" 2>/dev/null)
+```
+
+**When `PHASE_VISUAL_STORIES` is 0 or empty:** skip the rest of this subsection entirely — no group needs a server, so no `WORKTREE_MGR` resolution happens.
+
+**Otherwise**, compute each group's *own* `HAS_VISUAL_STORY` gate — filtering `PHASE_MAIN_TASKS`'s visual stories by that group's own `.project` value, never the whole-file count just computed above — into a `<toplevel>\t<true|false>` plan-line list, mirroring Split Container Dev Server Bootstrap's plan-line technique (Phase-Mode Paired Split, below) so a bare `HAS_VISUAL_STORY` scalar is never read after being reassigned across groups in a loop:
+
+```bash
+PHASE_GROUP_PROJECTS=$(jq -r '.userStories[] | (.project // ".")' "$PHASE_MAIN_TASKS" | sort -u)
+[ -n "$PHASE_GROUP_PROJECTS" ] || PHASE_GROUP_PROJECTS="."
+
+PHASE_SERVER_PLAN=""
+while IFS= read -r GROUP_PROJECT; do
+  [ -n "$GROUP_PROJECT" ] || continue
+  if [ "$GROUP_PROJECT" = "." ]; then
+    GROUP_ROOT="$AIMI_ROOT"
+  else
+    GROUP_ROOT="$AIMI_ROOT/$GROUP_PROJECT"
+  fi
+  GROUP_TOPLEVEL=$(git -C "$GROUP_ROOT" rev-parse --show-toplevel 2>/dev/null) || GROUP_TOPLEVEL="$GROUP_ROOT"
+  PHASE_GROUP_VISUAL=$(jq --arg p "$GROUP_PROJECT" \
+    '[.userStories[] | select((.project // ".") == $p) | select(.verification | type == "object" and .strategy == "visual")] | length' \
+    "$PHASE_MAIN_TASKS")
+  if [ "${PHASE_GROUP_VISUAL:-0}" -gt 0 ]; then
+    PHASE_SERVER_PLAN="${PHASE_SERVER_PLAN}${GROUP_TOPLEVEL}"$'\t'"true"$'\n'
+  else
+    PHASE_SERVER_PLAN="${PHASE_SERVER_PLAN}${GROUP_TOPLEVEL}"$'\t'"false"$'\n'
+  fi
+done <<< "$PHASE_GROUP_PROJECTS"
+```
+
+Then, for each plan line whose second field is `true`, delegate to **Bootstrap a Container Dev Server** with `EXEC_ROOT` = that line's first field (that group's own resolved toplevel — the project root, never inside the container itself, the same `EXEC_ROOT` Create Phase Containers Per Project Group above `cd`s to before calling `$WORKTREE_MGR create`) and `EXEC_BRANCH="$PHASE_BRANCH"`:
+
+```bash
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+while IFS=$'\t' read -r GROUP_TOPLEVEL GROUP_HAS_VISUAL; do
+  [ -n "$GROUP_TOPLEVEL" ] || continue
+  [ "$GROUP_HAS_VISUAL" = "true" ] || continue
+  EXEC_ROOT="$GROUP_TOPLEVEL"
+  EXEC_BRANCH="$PHASE_BRANCH"
+  cd "$EXEC_ROOT"
+  $WORKTREE_MGR install-deps "$EXEC_BRANCH"
+  $WORKTREE_MGR serve start "$EXEC_BRANCH" >/dev/null
+done <<< "$PHASE_SERVER_PLAN"
+```
+
+Its captured URL is discarded here — every later consumer (Step 3.3's Open Visual Follow Session, and Step 4's post-merge visual verification) re-queries the server fresh via `serve url` at the point it needs it. With exactly one group (today's unchanged case), `GROUP_TOPLEVEL` resolves to `$AIMI_ROOT` and this reduces to exactly one `install-deps`/`serve start` pair against `$AIMI_ROOT`, `$PHASE_BRANCH` — the same call this subsection made before.
 
 ### Path and State Notes
 
@@ -1575,7 +1718,7 @@ else
 fi
 ```
 
-Delegate to **Create or Reuse a Container** with `EXEC_ROOT="$AIMI_ROOT"`, `EXEC_BRANCH="$BRANCH_NAME"`, and `CONTAINER_BASE` as just computed (`BASE_BRANCH` when Step 1.6 set one, otherwise `DEFAULT_BRANCH` — the exact same base-selection rule the phase container already uses; see Create or Reuse the Phase Container). The path is deterministic given `AIMI_ROOT` and `[branchName]`:
+Delegate to **Create or Reuse a Container** with `EXEC_ROOT="$AIMI_ROOT"`, `EXEC_BRANCH="$BRANCH_NAME"`, and `CONTAINER_BASE` as just computed (`BASE_BRANCH` when Step 1.6 set one, otherwise `DEFAULT_BRANCH` — the exact same base-selection rule each phase container's own group uses; see Create Phase Containers Per Project Group). The path is deterministic given `AIMI_ROOT` and `[branchName]`:
 
 ```bash
 FEATURE_CONTAINER_PATH="$AIMI_ROOT/.worktrees/$BRANCH_NAME"
@@ -1851,12 +1994,18 @@ command -v agent-browser
   VISUAL_GROUP_KEY=$(printf '%s' "$FIRST_VISUAL" | jq -r '.project // "DEFAULT"')
   ```
 
-  **When `PHASE_MODE` is true** (the top-level single-file phase orchestrator, or a Phase-Mode Paired Split sub-orchestrator whose spawn prompt pre-set `PHASE_BRANCH`/`PHASE_CONTAINER_PATH` to its own split — see Spawn Split Sub-Orchestrators — so this branch applies unmodified in either case, keyed by whichever branch this session owns): read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Rewrite a Verification URL Origin and apply it with `EXEC_ROOT="$AIMI_ROOT"` (the same CWD Phase Container Dev Server Bootstrap used for its own `serve start`), `EXEC_BRANCH="$PHASE_BRANCH"`, and `RAW_URL="$VISUAL_URL"` — never a value cached from Phase Container Dev Server Bootstrap or Split Container Dev Server Bootstrap earlier in this run, since each Bash call is an isolated shell (Step 0):
+  **When `PHASE_MODE` is true** (the top-level single-file phase orchestrator, or a Phase-Mode Paired Split sub-orchestrator whose spawn prompt pre-set `PHASE_BRANCH`/`PHASE_CONTAINER_PATH` to its own split — see Spawn Split Sub-Orchestrators — so this branch applies unmodified in either case, keyed by whichever branch this session owns): resolve `EXEC_ROOT` from `VISUAL_GROUP_KEY` just computed above — never the unconditional `$AIMI_ROOT` — since a visual story's own `project` field may resolve to a repository distinct from `AIMI_ROOT`'s own (see Create Phase Containers Per Project Group). This CWD must exactly match whichever group's dev server Phase Container Dev Server Bootstrap started for that same `VISUAL_GROUP_KEY` (container-execution.md:100/:111/:134's CWD-must-match requirement — a mismatched CWD silently misses the registered entry). Read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Rewrite a Verification URL Origin and apply it with `EXEC_ROOT` resolved as follows, `EXEC_BRANCH="$PHASE_BRANCH"`, and `RAW_URL="$VISUAL_URL"` — never a value cached from Phase Container Dev Server Bootstrap or Split Container Dev Server Bootstrap earlier in this run, since each Bash call is an isolated shell (Step 0):
 
   ```bash
   WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
   : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-  cd "$AIMI_ROOT"
+  if [ "$VISUAL_GROUP_KEY" = "DEFAULT" ]; then
+    VISUAL_GROUP_ROOT="$AIMI_ROOT"
+  else
+    VISUAL_GROUP_ROOT="$AIMI_ROOT/$VISUAL_GROUP_KEY"
+  fi
+  EXEC_ROOT=$(git -C "$VISUAL_GROUP_ROOT" rev-parse --show-toplevel 2>/dev/null) || EXEC_ROOT="$VISUAL_GROUP_ROOT"
+  cd "$EXEC_ROOT"
   SERVE_URL_JSON=$($WORKTREE_MGR serve url "$PHASE_BRANCH" "$VISUAL_URL")
   VISUAL_URL=$(printf '%s' "$SERVE_URL_JSON" | jq -r '.url')
   ```
