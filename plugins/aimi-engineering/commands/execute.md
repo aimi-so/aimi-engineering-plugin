@@ -1424,15 +1424,21 @@ The section heading and its subsection names keep the word "Paired" for stabilit
 
 **When `PHASE_ACTIVE_COUNT` is `0`** (every member already completed — e.g. a resume after a merge conflict), skip every subsection below and go straight to **Continue to Phase Completion** at the end of this section: there is nothing left to branch, serve, spawn, merge, or clean up, and Phase Completion is what re-runs the pending-count and creates-verification checks.
 
-Every Bash call in this section passes `$PHASE_CONTAINER_PATH` explicitly, exactly like the rest of phase mode (see Path and State Notes above) — never a bare relative path, never `AIMI_ROOT`. `AIMI_ROOT` is guaranteed to be a git repository here: **Create or Reuse the Phase Container**'s Unsupported Combination Guard already refused the multi-repo layout before this section could be reached. Every split worktree below therefore nests under `$PHASE_CONTAINER_PATH`, and a member's `metadata.splitGroup.project` is a monorepo subdirectory used only to name and label it — never a separate git root.
+Every Bash call in this section passes each active member's own resolved root or toplevel explicitly (see Derive and Validate Split Branch Names below), mirroring the rest of phase mode's Path and State Notes discipline — never a bare relative path, never an assumed-persisted CWD. `AIMI_ROOT` is **not** guaranteed to be a git repository here: whether a member's `metadata.splitGroup.project` names a monorepo subdirectory of one shared repository, or a separate sibling repository of its own, is discriminated by AIMI_ROOT_IS_GIT_REPO — re-derived per block using the canonical form in **AIMI_ROOT_IS_GIT_REPO Branching Rule** (Multi-Repo Handling), never assumed. When it is **true** (today's only previously-supported combination), every split worktree below nests under `$PHASE_CONTAINER_PATH`, and `SPLIT_PROJECT` is a monorepo subdirectory used to name and label it. When it is **false**, `SPLIT_PROJECT` instead names a separate sibling repository under `$AIMI_ROOT`, and that member's split worktree nests under its own resolved toplevel instead — never under a `$PHASE_CONTAINER_PATH` that does not exist in that layout.
 
 ### Derive and Validate Split Branch Names
 
 One branch per **active** split file, derived from that file's own project (or, for a legacy pair member, from its own basename) and qualified by `$PHASE_BRANCH`. Iterate `$PHASE_ACTIVE_SPLIT_FILES` in order, with `$split_file` as the loop variable:
 
 ```bash
+AIMI_ROOT="$PWD"
+while [ "$AIMI_ROOT" != "/" ] && [ ! -d "$AIMI_ROOT/.aimi" ]; do AIMI_ROOT=$(dirname "$AIMI_ROOT"); done
+[ -d "$AIMI_ROOT/.aimi" ] || AIMI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+if git -C "$AIMI_ROOT" rev-parse --git-dir >/dev/null 2>&1; then AIMI_ROOT_IS_GIT_REPO=true; else AIMI_ROOT_IS_GIT_REPO=false; fi
+
 SPLIT_BRANCHES=""
 SPLIT_PLAN=""
+SPLIT_KEYS=""
 while IFS= read -r split_file; do
   [ -n "$split_file" ] || continue
   SPLIT_PROJECT=$(jq -r '.metadata.splitGroup.project // ""' "$split_file")
@@ -1440,6 +1446,7 @@ while IFS= read -r split_file; do
     ""|null)
       SPLIT_SLUG=$(basename "$split_file" -tasks.json)
       SPLIT_SLUG=${SPLIT_SLUG#"$FEATURE-phase-$PHASE_ID-"}
+      SPLIT_PROJECT="."
       ;;
     .)
       SPLIT_SLUG="root"
@@ -1461,21 +1468,50 @@ while IFS= read -r split_file; do
     echo "Invalid split branch derived from $split_file: $SPLIT_BRANCH" >&2
     exit 1
   fi
+
+  if [ "$AIMI_ROOT_IS_GIT_REPO" = true ]; then
+    if [ "$SPLIT_PROJECT" = "." ]; then
+      SPLIT_ROOT="$PHASE_CONTAINER_PATH"
+    else
+      SPLIT_ROOT="$PHASE_CONTAINER_PATH/$SPLIT_PROJECT"
+    fi
+  else
+    if [ "$SPLIT_PROJECT" = "." ]; then
+      SPLIT_ROOT="$AIMI_ROOT"
+    else
+      SPLIT_ROOT="$AIMI_ROOT/$SPLIT_PROJECT"
+    fi
+  fi
+
+  SPLIT_TOPLEVEL=$(git -C "$SPLIT_ROOT" rev-parse --show-toplevel 2>/dev/null) || SPLIT_TOPLEVEL=""
+  if [ -z "$SPLIT_TOPLEVEL" ]; then
+    echo "Not a git repository: $SPLIT_ROOT (splitGroup.project \"$SPLIT_PROJECT\" in $split_file)" >&2
+    exit 1
+  fi
+  SPLIT_WORKTREE_PATH="$SPLIT_TOPLEVEL/.worktrees/$SPLIT_BRANCH"
+
   SPLIT_BRANCHES="${SPLIT_BRANCHES}${SPLIT_BRANCH}"$'\n'
-  SPLIT_PLAN="${SPLIT_PLAN}${split_file}"$'\t'"${SPLIT_BRANCH}"$'\n'
+  SPLIT_PLAN="${SPLIT_PLAN}$(jq -nc \
+    --arg file "$split_file" --arg project "$SPLIT_PROJECT" --arg root "$SPLIT_ROOT" \
+    --arg toplevel "$SPLIT_TOPLEVEL" --arg branch "$SPLIT_BRANCH" --arg worktree "$SPLIT_WORKTREE_PATH" \
+    '{file: $file, project: $project, root: $root, toplevel: $toplevel, branch: $branch, worktree: $worktree}')"$'\n'
+  SPLIT_KEYS="${SPLIT_KEYS}${SPLIT_TOPLEVEL}"$'\t'"${SPLIT_BRANCH}"$'\n'
 done <<< "$PHASE_ACTIVE_SPLIT_FILES"
 
-SPLIT_BRANCH_TOTAL=$(printf '%s' "$SPLIT_BRANCHES" | grep -c .)
-SPLIT_BRANCH_UNIQUE=$(printf '%s' "$SPLIT_BRANCHES" | sort -u | grep -c .)
-if [ "$SPLIT_BRANCH_TOTAL" -ne "$SPLIT_BRANCH_UNIQUE" ]; then
-  echo "Split branch names collide across this phase's split files" >&2
+SPLIT_KEY_TOTAL=$(printf '%s' "$SPLIT_KEYS" | grep -c .)
+SPLIT_KEY_UNIQUE=$(printf '%s' "$SPLIT_KEYS" | sort -u | grep -c .)
+if [ "$SPLIT_KEY_TOTAL" -ne "$SPLIT_KEY_UNIQUE" ]; then
+  echo "Two split members contend for the same branch inside one repository:" >&2
+  printf '%s' "$SPLIT_KEYS" | sort | uniq -d >&2
   exit 1
 fi
+
+printf '%s' "$SPLIT_PLAN"
 ```
 
-Every derived name is validated against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` — the same regex Step 1.7 already validated `PHASE_BRANCH` against — **before any worktree is created**, and the whole set is checked for collisions (two members whose slugs coincide would otherwise share one branch and silently interleave their commits). On any failure: release the claim (see Release the Claim on Abort), report the offending file and branch name, and STOP — create no worktree.
+Every derived name is validated against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` — the same regex Step 1.7 already validated `PHASE_BRANCH` against — **before `SPLIT_ROOT`/`SPLIT_TOPLEVEL` are resolved and before any worktree is created**. The whole set is then checked for collisions keyed on `(SPLIT_TOPLEVEL, SPLIT_BRANCH)`, mirroring Step 0.9 Pass 1's `SPLIT_KEYS` check (execute.md:357-366) rather than the branch name alone: two members resolving to different repository toplevels may legitimately share a branch name, but two resolving to the same toplevel (two monorepo subdirectories of one repository, or two `SPLIT_PROJECT` values normalizing to the same sibling repo) must not, since they would otherwise both create `.worktrees/<same-branch>` and silently interleave commits. On any failure — an invalid project, an invalid branch, a collision, or a `SPLIT_ROOT` that resolves to no git repository at all — release the claim (see Release the Claim on Abort), report the offending file, and STOP — create no worktree.
 
-`SPLIT_PROJECT` itself is rejected on traversal shapes and on any character outside `^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$` — the same two guards, in the same order, that Step 0.9's flat per-repo loop applies to the same field, so the two sides stay diffable. The reason is **not** branch safety: `slugify` above maps every character outside `[A-Za-z0-9_-]` to `-`, so the derived branch already satisfies its own regex no matter what `SPLIT_PROJECT` holds. The reason is that `SPLIT_PROJECT` is echoed **verbatim** — never through the slug — into the Aggregated Completion Report's `Project:` line and into each spawned Task's `description`, so an unvalidated value reaches both the human reader and a sub-agent prompt unfiltered. Unlike the flat side, `SPLIT_PROJECT` is never joined onto a filesystem path here (every split worktree nests under `$PHASE_CONTAINER_PATH`), which is why this guard is about what the value can *say*, not where it can point.
+`SPLIT_PROJECT` itself is rejected on traversal shapes and on any character outside `^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$` — the same two guards, in the same order, that Step 0.9's flat per-repo loop applies to the same field, so the two sides stay diffable. The reason is **not** branch safety: `slugify` above maps every character outside `[A-Za-z0-9_-]` to `-`, so the derived branch already satisfies its own regex no matter what `SPLIT_PROJECT` holds. The reason is that `SPLIT_PROJECT` is echoed **verbatim** — never through the slug — into the Aggregated Completion Report's `Project:` line and into each spawned Task's `description`, so an unvalidated value reaches both the human reader and a sub-agent prompt unfiltered. `SPLIT_PROJECT` is now also joined onto a filesystem path — `$PHASE_CONTAINER_PATH/$SPLIT_PROJECT` or `$AIMI_ROOT/$SPLIT_PROJECT` above, depending on `AIMI_ROOT_IS_GIT_REPO` — so this guard is no longer only about what the value can *say*: exactly like Step 0.9 Pass 1's own explanation of the same two-guard validation (execute.md:371), it is also about where it can *point*.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -1485,49 +1521,74 @@ $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
 
 For a legacy pair the two basenames yield the slugs `frontend` and `backend`, so the derived branches are exactly `${PHASE_BRANCH}-frontend` and `${PHASE_BRANCH}-backend` — unchanged from before. For a project split, `apps/web` yields `${PHASE_BRANCH}-apps-web` and the root group (`project` = `.`) yields `${PHASE_BRANCH}-root`.
 
-Carry each active member's resolved `(split_file, SPLIT_PROJECT, SPLIT_SLUG, SPLIT_BRANCH, SPLIT_WORKTREE_PATH)` tuple forward — the worktree, dev-server, spawn, report, merge, and cleanup passes below all iterate that same ordered list. `SPLIT_PLAN` is that list materialized for the shell: one tab-separated `<split_file>\t<SPLIT_BRANCH>` line per active member, in the same order as `SPLIT_BRANCHES`. A pass that needs both halves of a member's tuple reads `SPLIT_PLAN`; a pass that needs only the branch reads `SPLIT_BRANCHES`. **No per-member value is ever left in a bare scalar for a later step to read** — a scalar assigned inside a loop holds only the last member's value by the time the loop ends, which silently applies one member's decision to every other member.
+Carry each active member's resolved `(split_file, SPLIT_PROJECT, SPLIT_ROOT, SPLIT_TOPLEVEL, SPLIT_BRANCH, SPLIT_WORKTREE_PATH)` tuple forward — the worktree, dev-server, and spawn passes below all iterate that same ordered list; the still-unmigrated merge and cleanup passes (outline 08's territory, untouched here) keep reading `SPLIT_BRANCHES` alone. `SPLIT_PLAN` is that list materialized for the shell as **one JSON object per line** (fields `file`, `project`, `root`, `toplevel`, `branch`, `worktree`), never tab-delimited — a tasks-file path may contain spaces, exactly why Step 0.9's own `SPLIT_PLAN` uses this shape (execute.md:289-291). Because each Bash tool call is an isolated shell, every later pass in this section re-assigns `SPLIT_PLAN` from this block's own printed stdout, pasted back verbatim, rather than assuming it persists. A pass that needs a member's full tuple reads `SPLIT_PLAN`; a pass that needs only the branch reads `SPLIT_BRANCHES`. **No per-member value is ever left in a bare scalar for a later step to read** — a scalar assigned inside a loop holds only the last member's value by the time the loop ends, which silently applies one member's decision to every other member.
 
 ### Create Split Worktrees
 
-One worktree per active split file, each branched from `$PHASE_BRANCH`:
+One worktree per active split file, each created at **that member's own** resolved toplevel and branched `--from "$PHASE_BRANCH"` — that member's own repository's own already-established phase branch (**Create Phase Containers Per Project Group** above creates one `$PHASE_BRANCH` ref per participating repository before this section ever runs). Re-assign `SPLIT_PLAN` from **Derive and Validate Split Branch Names**' own printed stdout, pasted back verbatim — each Bash tool call is an isolated shell (Step 0):
 
 ```bash
+SPLIT_PLAN=$(cat <<'SPLIT_PLAN_EOF'
+[paste Derive and Validate Split Branch Names' printed SPLIT_PLAN here, verbatim — one JSON record per line]
+SPLIT_PLAN_EOF
+)
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-cd "$PHASE_CONTAINER_PATH"
-while IFS= read -r split_branch; do
-  [ -n "$split_branch" ] || continue
-  $WORKTREE_MGR create "$split_branch" --from "$PHASE_BRANCH"
-done <<< "$SPLIT_BRANCHES"
+while IFS= read -r member; do
+  [ -n "$member" ] || continue
+  SPLIT_TOPLEVEL=$(printf '%s' "$member" | jq -r '.toplevel')
+  SPLIT_BRANCH=$(printf '%s' "$member" | jq -r '.branch')
+  cd "$SPLIT_TOPLEVEL"
+  $WORKTREE_MGR create "$SPLIT_BRANCH" --from "$PHASE_BRANCH"
+done <<< "$SPLIT_PLAN"
 ```
 
-CWD is `$PHASE_CONTAINER_PATH` — never `$DEFAULT_BRANCH`'s checkout, never `AIMI_ROOT` — so, mirroring the CWD rule `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Mode: Worktree Naming and CWD already establishes for individual story worktrees, every split worktree nests at `$PHASE_CONTAINER_PATH/.worktrees/<its own split branch>` — inside the phase container's own worktree tree, not a sibling of it under `AIMI_ROOT/.worktrees/`, and branched from `$PHASE_BRANCH`, not `$DEFAULT_BRANCH`. Each member's path is therefore deterministic:
+CWD is **that member's own** `SPLIT_TOPLEVEL` — `$PHASE_CONTAINER_PATH` itself in today's single-repo case, a sibling repository's own toplevel in the multi-repo case — never a bare relative path, never `AIMI_ROOT`, and never another member's toplevel. Mirroring the CWD rule `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Mode: Worktree Naming and CWD already establishes for individual story worktrees, every split worktree nests at `$SPLIT_TOPLEVEL/.worktrees/<its own split branch>` — inside that member's own repository's worktree tree — and branched from `$PHASE_BRANCH`, not `$DEFAULT_BRANCH`. Each member's path is exactly the `worktree` field **Derive and Validate Split Branch Names** already resolved and printed; it is never recomputed here, since `worktree-manager.sh` resolves its worktree-name argument against the repository's own toplevel — the same "Where the worktree actually lands" rule Step 0.9 Pass 1 documents at execute.md:373 — and a second, independent computation could drift from it.
 
-```bash
-SPLIT_WORKTREE_PATH="$PHASE_CONTAINER_PATH/.worktrees/$SPLIT_BRANCH"
-```
+With exactly one participating repository — today's single-repo, non-split-across-repos case, the only one previously supported — every member's `SPLIT_TOPLEVEL` is `$PHASE_CONTAINER_PATH` itself (a linked worktree's own `git rev-parse --show-toplevel` returns its own path, container-execution.md:23), so every `$WORKTREE_MGR create` call above runs with the same CWD today's single `cd "$PHASE_CONTAINER_PATH"` did, byte-identical.
 
 ### Split Container Dev Server Bootstrap
 
 Independently for each active split — never against `PHASE_CONTAINER_PATH` itself, since no story ever lands directly on the un-merged phase branch — gate on that split's **own** tasks file having at least one visual story, mirroring Phase Container Dev Server Bootstrap's gate above exactly, scoped one level deeper. Each member computes its own gate; no member's count ever gates another's:
 
-This block **computes** the gates; it starts no server. It emits one plan line per active member — `<SPLIT_BRANCH>\t<true|false>` — because the delegation that consumes the gate happens after the loop, and a bare `HAS_VISUAL_STORY` would by then hold only the *last* member's value:
+This block **computes** the gates; it starts no server. It re-assigns `SPLIT_PLAN` from **Derive and Validate Split Branch Names**' own printed stdout (pasted back verbatim, same isolated-shell rule as above) and emits one plan line per active member — `<SPLIT_TOPLEVEL>\t<SPLIT_BRANCH>\t<true|false>` — because the delegation that consumes the gate happens after the loop, and a bare `HAS_VISUAL_STORY` (or `SPLIT_TOPLEVEL`) would by then hold only the *last* member's value:
 
 ```bash
+SPLIT_PLAN=$(cat <<'SPLIT_PLAN_EOF'
+[paste Derive and Validate Split Branch Names' printed SPLIT_PLAN here, verbatim — one JSON record per line]
+SPLIT_PLAN_EOF
+)
 SPLIT_SERVER_PLAN=""
-while IFS=$'\t' read -r split_file split_branch; do
-  [ -n "$split_file" ] || continue
+while IFS= read -r member; do
+  [ -n "$member" ] || continue
+  split_file=$(printf '%s' "$member" | jq -r '.file')
+  SPLIT_TOPLEVEL=$(printf '%s' "$member" | jq -r '.toplevel')
+  SPLIT_BRANCH=$(printf '%s' "$member" | jq -r '.branch')
   SPLIT_VISUAL_STORIES=$(jq '[.userStories[]? | select(.verification | type == "object" and .strategy == "visual")] | length' "$split_file" 2>/dev/null)
   if [ "${SPLIT_VISUAL_STORIES:-0}" -gt 0 ]; then
     HAS_VISUAL_STORY=true
   else
     HAS_VISUAL_STORY=false
   fi
-  SPLIT_SERVER_PLAN="${SPLIT_SERVER_PLAN}${split_branch}"$'\t'"${HAS_VISUAL_STORY}"$'\n'
+  SPLIT_SERVER_PLAN="${SPLIT_SERVER_PLAN}${SPLIT_TOPLEVEL}"$'\t'"${SPLIT_BRANCH}"$'\t'"${HAS_VISUAL_STORY}"$'\n'
 done <<< "$SPLIT_PLAN"
 ```
 
-Then iterate `$SPLIT_SERVER_PLAN` — one delegation per line, never one delegation reading a leftover scalar. For each line, delegate to **Bootstrap a Container Dev Server** with `EXEC_ROOT="$PHASE_CONTAINER_PATH"` (the same CWD Create Split Worktrees above already used to create every worktree), `EXEC_BRANCH` set to **that line's** first field, and `HAS_VISUAL_STORY` set to **that line's** second field. Read `HAS_VISUAL_STORY` only from the plan line being processed; its value after the loop above belongs to whichever member happened to be last and is meaningless for every other member. Getting this wrong fails in both directions: a pure-API split inherits a visual sibling's `true` and gets a server it must never get, or a visual split inherits an API sibling's `false`, gets no server, and cannot run the visual verification its stories require.
+Then iterate `$SPLIT_SERVER_PLAN` — one delegation per line, never one delegation reading a leftover scalar:
+
+```bash
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+while IFS=$'\t' read -r EXEC_ROOT EXEC_BRANCH GROUP_HAS_VISUAL; do
+  [ -n "$EXEC_ROOT" ] || continue
+  [ "$GROUP_HAS_VISUAL" = "true" ] || continue
+  cd "$EXEC_ROOT"
+  $WORKTREE_MGR install-deps "$EXEC_BRANCH"
+  $WORKTREE_MGR serve start "$EXEC_BRANCH" >/dev/null
+done <<< "$SPLIT_SERVER_PLAN"
+```
+
+Each delegation to **Bootstrap a Container Dev Server** reads `EXEC_ROOT` from that line's first field (that member's own `SPLIT_TOPLEVEL` — `$PHASE_CONTAINER_PATH` in today's single-repo case, a sibling repository's own toplevel in the multi-repo case, and the same CWD Create Split Worktrees above already used to create that member's own worktree), `EXEC_BRANCH` from its second field, and `HAS_VISUAL_STORY` from its third. Read `HAS_VISUAL_STORY` (and `EXEC_ROOT`) only from the plan line being processed; their value after the loop above belongs to whichever member happened to be last and is meaningless for every other member. Getting this wrong fails in both directions: a pure-API split inherits a visual sibling's `true` and gets a server it must never get, or a visual split inherits an API sibling's `false`, gets no server, and cannot run the visual verification its stories require.
 
 A split with no visual story (e.g. a pure-API service) never gets nor blocks on a server — its gate simply fails, exactly like the single-file bootstrap above. Every port is discarded here too — re-resolved fresh via `serve url` at the point each split sub-orchestrator's own Step 3.3 / Step 4 call sites need it. A split sub-orchestrator's spawn prompt pre-sets `PHASE_MODE=true`, `PHASE_BRANCH=[its own split branch]`, and `PHASE_CONTAINER_PATH=[its own split worktree path]` (see Spawn Split Sub-Orchestrators below), so its own copies of Open Visual Follow Session and Step 4's post-merge visual verification apply unmodified — no split-specific code path is needed at either call site. Two members never collide on a `dev-server.json` entry either: `serve start` keys state by the container's absolute resolved path, which is unique per split branch.
 
@@ -1539,12 +1600,14 @@ Report — one line per active split file, never a fixed two-slot Frontend/Backe
 
 ```
 Phase [PHASE_ID] split detected ([PHASE_ACTIVE_COUNT] members):
-  [1/PHASE_ACTIVE_COUNT] [split_file] → project: [SPLIT_PROJECT] (branch: [SPLIT_BRANCH])
-  [2/PHASE_ACTIVE_COUNT] [split_file] → project: [SPLIT_PROJECT] (branch: [SPLIT_BRANCH])
+  [1/PHASE_ACTIVE_COUNT] [split_file] → project: [SPLIT_PROJECT] (branch: [SPLIT_BRANCH], repo: [SPLIT_TOPLEVEL])
+  [2/PHASE_ACTIVE_COUNT] [split_file] → project: [SPLIT_PROJECT] (branch: [SPLIT_BRANCH], repo: [SPLIT_TOPLEVEL])
   ...
 
-Spawning parallel execution flows inside the phase container...
+Spawning parallel execution flows...
 ```
+
+Each line's `project`/`branch`/`repo` are read straight from that member's own `SPLIT_PLAN` record (fields `project`, `branch`, `toplevel`) — never re-derived. With exactly one participating repository (today's unchanged case), every `repo` value is the same `$PHASE_CONTAINER_PATH`, and the report reads exactly as before except for the added `repo:` field.
 
 In a **single tool-call turn**, emit one foreground Task per active split file — `PHASE_ACTIVE_COUNT` Tasks in total (two for a legacy pair, three for a three-way project split, N for N). Never one turn per member; that would serialize them. Each Task runs execute.md's **Steps 2–5 only** — never Step 1's Phase Mode Detection and never Step 1.7's Phase Claim, both of which are already resolved by this parent session; a sub-orchestrator that re-derived or re-claimed the phase itself would either double-claim it or (since it has a different session identity than the parent) fail the claim outright:
 
@@ -1557,8 +1620,10 @@ Task(
     description: "Execute split for phase [PHASE_ID]: [split_file basename]",
     prompt: [execute.md Steps 2–5, with the following pre-set — do not re-derive:
         - PHASE_MODE = true
-        - PHASE_BRANCH = [that member's SPLIT_BRANCH]
-        - PHASE_CONTAINER_PATH = [that member's SPLIT_WORKTREE_PATH]
+        - PHASE_BRANCH = [that member's SPLIT_PLAN record: .branch]
+        - PHASE_CONTAINER_PATH = [that member's SPLIT_PLAN record: .worktree — that member's
+          own SPLIT_WORKTREE_PATH, landing inside that member's own repository when it
+          differs from the phase's own]
         - PHASE_TASKS_PATH = [that split_file]   (Step 3.2 reads maxConcurrency from this)
         - $AIMI_CLI init-session --file [that split_file]
         - Skip Step 2's Main Repo Branch Setup (PHASE_MODE=true skips it exactly as
@@ -1584,6 +1649,8 @@ After every Task returns, collect each one's completed-story count and failure l
 #### Nested Concurrency
 
 Each split's own `metadata.maxConcurrency` governs only its own sub-orchestrator's wave loop. **No split's limit ever governs any other split's worktree creation or wave loop, for any N** — and none of them is governed by the phase's `roadmap.json` or by any single phase-level tasks file (there is none, in split mode). This falls out of the existing worktree-budget pre-bash-dispatcher hook with **no code change**: `_select_governing_tasks_file` (`hooks/pre-bash-dispatcher.py`) picks the candidate tasks file among every `.aimi/tasks/**/*-tasks.json` whose `metadata.branchName` exactly matches the git branch checked out at the `git worktree add` command's CWD. A story worktree created inside a given sub-orchestrator's wave loop runs with CWD inside that member's own split worktree (branch = that member's own split branch); `plan.md`'s Phase 4 metadata patch writes each split file's `metadata.branchName` as exactly that same value (see Phase 3e/Phase 4's `--phase-aware` composition), so the hook's branch-match resolves to that member's own file uniquely — every sibling's `metadata.branchName` differs (the branch names are collision-checked in Derive and Validate Split Branch Names above), so none of them ever matches.
+
+This scoping is per-repository, not merely per-branch: `_select_governing_tasks_file`'s branch-match resolves against whichever repository the `git worktree add` command's own CWD belongs to (that member's own `SPLIT_TOPLEVEL`), so N members split across N different repositories each get independent, unshared worktree-budget accounting — none of them summed or governed across repositories — exactly as each split's own `metadata.maxConcurrency` already governs only its own sub-orchestrator's wave loop.
 
 ### Aggregated Completion Report (Phase-Mode Paired Split)
 
