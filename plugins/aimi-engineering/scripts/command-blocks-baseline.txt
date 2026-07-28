@@ -64,7 +64,6 @@ unassigned	execute.md	CONTRACTS_JSON
 unassigned	execute.md	DECISIONS_JSON
 unassigned	execute.md	DEFERRED_JSON
 unassigned	execute.md	DEVIATIONS_JSON
-unassigned	execute.md	identity
 unassigned	execute.md	SERVE_URL
 unassigned	init.md	AIMI_CLI
 unassigned	next.md	CONTAINER_ROOT

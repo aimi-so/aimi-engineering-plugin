@@ -222,6 +222,13 @@ translate_command_body() {
   # AskUserQuestion entirely") is fully covered by the existing four rules
   # below — no new rule was needed. Any future picker phrased the same way is
   # covered automatically by the bare-token catch-all (last rule below).
+  #
+  # Coverage re-verified (US-005): execute.md's Creates Verification call
+  # `$AIMI_CLI verify-creates --feature … --phase … --dir …` needs no new rule —
+  # this function was sourced in isolation, fed that literal invocation, and
+  # returned it byte-identical. None of the substitutions above or below can
+  # match a subcommand name, so verify-creates survives translation verbatim
+  # exactly as story-merge does; only the CLI-path rewrite applies.
   body="${body//Use \*\*AskUserQuestion\*\*/Use the **question** tool}"
   body="${body//Use AskUserQuestion/Use the question tool}"
   body="${body//via AskUserQuestion/via the question tool}"

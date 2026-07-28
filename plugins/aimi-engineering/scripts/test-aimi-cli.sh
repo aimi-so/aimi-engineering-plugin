@@ -12882,6 +12882,192 @@ test_roadmap_init_rejects_invalid_dir_slug() {
   rm -rf ".aimi/tasks/$feature"
 }
 
+# Assert one creates/needs payload is rejected in creation mode and leaves no
+# roadmap.json behind. $1 = feature slug, $2 = phases JSON, $3 = label,
+# $4 = substring the error must contain.
+_assert_roadmap_identity_rejected() {
+  local feature="$1" payload="$2" label="$3" reason="$4"
+  rm -rf ".aimi/tasks/$feature"
+
+  local output exit_code
+  output=$(printf '%s' "$payload" | "$CLI" roadmap-init --feature "$feature" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-init identity guard: $label exits 1"
+  assert_contains "is not a usable artifact identity" "$output" "roadmap-init identity guard: $label names the failure"
+  assert_contains "$reason" "$output" "roadmap-init identity guard: $label reports the reason"
+
+  if [ -f ".aimi/tasks/$feature/roadmap.json" ]; then
+    echo -e "${RED}✗${NC} roadmap-init identity guard: $label must not write roadmap.json"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} roadmap-init identity guard: $label wrote no roadmap.json"
+    ((TESTS_PASSED++))
+  fi
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_init_rejects_malformed_identity() {
+  echo ""
+  echo "=== roadmap-init: rejects indefensible creates/needs identities ==="
+
+  local feature="rm-identity"
+
+  _assert_roadmap_identity_rejected "$feature" \
+    "$(jq -n '[{id: 1, name: "Bad", goal: "g", slug: "bad", creates: ["/etc/passwd (absolute path)"], needs: []}]')" \
+    "creates leading slash" 'begins with "/"'
+
+  _assert_roadmap_identity_rejected "$feature" \
+    "$(jq -n '[{id: 1, name: "Bad", goal: "g", slug: "bad", creates: ["../outside/thing.ts (escapes the repo)"], needs: []}]')" \
+    "creates .. segment" 'contains a ".." path segment'
+
+  _assert_roadmap_identity_rejected "$feature" \
+    "$(jq -n '[{id: 1, name: "Bad", goal: "g", slug: "bad", creates: ["src/../../etc/passwd (traversal mid-path)"], needs: []}]')" \
+    "creates mid-path .. segment" 'contains a ".." path segment'
+
+  _assert_roadmap_identity_rejected "$feature" \
+    "$(jq -n '[{id: 1, name: "Bad", goal: "g", slug: "bad", creates: ["   (description only, no artifact name)"], needs: []}]')" \
+    "creates empty after identity" "empty once the description is stripped"
+
+  # Symmetry: the same predicate must fire on needs[]. _cv_creates_in_scope
+  # matches needs against creates by exact byte equality, so a rule on one list
+  # alone would let a roadmap hold two shapes and deadlock validate-contracts.
+  _assert_roadmap_identity_rejected "$feature" \
+    "$(jq -n '[{id: 1, name: "Bad", goal: "g", slug: "bad", creates: [], needs: ["/var/lib/thing (absolute path)"]}]')" \
+    "needs leading slash" 'begins with "/"'
+
+  _assert_roadmap_identity_rejected "$feature" \
+    "$(jq -n '[{id: 1, name: "Bad", goal: "g", slug: "bad", creates: [], needs: ["../x (traversal)"]}]')" \
+    "needs .. segment" 'contains a ".." path segment'
+
+  # The error must name the phase id and which list the entry came from.
+  rm -rf ".aimi/tasks/$feature"
+  local output exit_code
+  output=$(jq -n '[{id: 7, name: "Bad", goal: "g", slug: "bad", creates: [], needs: ["/abs (bad)"]}]' | "$CLI" roadmap-init --feature "$feature" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-init identity guard: message case exits 1"
+  assert_contains "phase 7: needs entry \"/abs (bad)\"" "$output" "roadmap-init identity guard: error names phase id, list and entry text"
+  rm -rf ".aimi/tasks/$feature"
+
+  # Weak-but-legal identities are NOT judged: research has not run at
+  # declaration time, so a bare table name or a bare directory must pass.
+  local ok_payload ok_exit
+  ok_payload=$(jq -n '[{id: 1, name: "Weak", goal: "g", slug: "weak", creates: ["notifications (stores per-user notification rows)", "db/migrations"], needs: ["services/foo..bar (dots that are not a path segment)"]}]')
+  rm -rf ".aimi/tasks/$feature"
+  printf '%s' "$ok_payload" | "$CLI" roadmap-init --feature "$feature" >/dev/null 2>&1 && ok_exit=0 || ok_exit=$?
+  assert_exit_code "0" "$ok_exit" "roadmap-init identity guard: weak-but-legal identities accepted (bare table, bare dir, foo..bar)"
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_init_sync_ignores_legacy_identities() {
+  echo ""
+  echo "=== roadmap-init --sync: legacy rejectable identities do not block a new phase ==="
+
+  local feature="rm-identity-sync"
+  rm -rf ".aimi/tasks/$feature"
+  mkdir -p ".aimi/tasks/$feature"
+
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+
+  # Pre-seed a roadmap whose EXISTING phase carries identities the new rule
+  # would reject. Written directly (roadmap-init would now refuse to create it),
+  # which is exactly the on-disk state a pre-guard run could have left behind.
+  cat > "$roadmap_file" <<'LEGACY_EOF'
+{
+  "roadmapVersion": "1.0",
+  "feature": "rm-identity-sync",
+  "createdAt": "2026-01-01T00:00:00Z",
+  "brainstormPath": null,
+  "phases": [
+    {
+      "id": 1,
+      "name": "Legacy",
+      "goal": "legacy goal",
+      "slug": "legacy",
+      "dir": "phase-1-legacy",
+      "status": "pending",
+      "dependsOn": [],
+      "branch": null,
+      "notes": null,
+      "successCriteria": [],
+      "creates": ["/etc/passwd (legacy absolute path)"],
+      "needs": ["../outside (legacy traversal)"],
+      "areas": [],
+      "claim": null
+    }
+  ]
+}
+LEGACY_EOF
+
+  local phase1_before
+  phase1_before=$(jq -c '.phases[] | select(.id == 1)' "$roadmap_file")
+
+  local output exit_code
+  output=$(jq -n '[{id: 2, name: "New", goal: "g", slug: "new", dependsOn: [1], creates: ["services/notifications.NotificationService (sends notifications)"], needs: []}]' \
+    | "$CLI" roadmap-init --feature "$feature" --sync 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-init identity sync: --sync over legacy bad identities exits 0"
+
+  local ids
+  ids=$(jq -c '[.phases[].id]' "$roadmap_file")
+  assert_eq "[1,2]" "$ids" "roadmap-init identity sync: new phase landed on disk beside the legacy one"
+
+  local phase1_after
+  phase1_after=$(jq -c '.phases[] | select(.id == 1)' "$roadmap_file")
+  assert_eq "$phase1_before" "$phase1_after" "roadmap-init identity sync: pre-existing phase byte-for-byte unchanged"
+
+  # The guard still applies to the phases --sync is actually writing.
+  output=$(jq -n '[{id: 3, name: "AlsoBad", goal: "g", slug: "also-bad", creates: ["/tmp/evil (absolute)"], needs: []}]' \
+    | "$CLI" roadmap-init --feature "$feature" --sync 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-init identity sync: malformed NEW phase still rejected under --sync"
+  assert_contains "phase 3" "$output" "roadmap-init identity sync: rejection names the new phase, not the legacy one"
+
+  ids=$(jq -c '[.phases[].id]' "$roadmap_file")
+  assert_eq "[1,2]" "$ids" "roadmap-init identity sync: rejected --sync left the roadmap untouched"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_init_accepts_documented_identity_kinds() {
+  echo ""
+  echo "=== roadmap-init: accepts every documented identity kind, all non-suspicious ==="
+
+  local feature="rm-identity-kinds"
+  rm -rf ".aimi/tasks/$feature"
+
+  # The four kinds from commands/references/scope-contexts.md (Endpoint, Table,
+  # Service, File). The Endpoint form contains a slash but does not BEGIN with
+  # one -- the leading-slash rule must anchor at position 0 of the identity.
+  local endpoint_entry="POST /api/notifications (creates a notification for a user)"
+  local table_entry="notifications (stores per-user notification rows)"
+  local service_entry="services/notifications.NotificationService (sends and lists notifications)"
+  local file_entry="components/NotificationBell.tsx (header bell icon with unread badge)"
+
+  local payload output exit_code
+  payload=$(jq -n --arg e "$endpoint_entry" --arg t "$table_entry" --arg s "$service_entry" --arg f "$file_entry" '[
+    {id: 1, name: "Kinds", goal: "g", slug: "kinds", dependsOn: [], creates: [$e, $t], needs: []},
+    {id: 2, name: "Kinds Two", goal: "g", slug: "kinds-two", dependsOn: [1], creates: [$s, $f], needs: [$e, $t]}
+  ]')
+  output=$(printf '%s' "$payload" | "$CLI" roadmap-init --feature "$feature" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-init identity kinds: all four documented kinds accepted"
+
+  local written
+  written=$(jq -c '[.phases[].creates[]] | sort' ".aimi/tasks/$feature/roadmap.json")
+  local expected
+  expected=$(jq -cn --arg e "$endpoint_entry" --arg t "$table_entry" --arg s "$service_entry" --arg f "$file_entry" '[$e, $t, $s, $f] | sort')
+  assert_eq "$expected" "$written" "roadmap-init identity kinds: entries written verbatim"
+
+  # Cross-check: anything roadmap-init accepts must also survive
+  # validate-contracts' _cv_suspicious, which is never demoted by agent mode.
+  # Reuse the CLI's own shared defs rather than a second copy.
+  eval "$(sed -n "/^_CONTRACT_JQ_DEFS='/,/^'\$/p" "$CLI")"
+
+  local entry verdict
+  for entry in "$endpoint_entry" "$table_entry" "$service_entry" "$file_entry"; do
+    verdict=$(jq -rn --arg e "$entry" "$_CONTRACT_JQ_DEFS"'if ($e | _cv_suspicious) then "suspicious" else "clean" end')
+    assert_eq "clean" "$verdict" "roadmap-init identity kinds: _cv_suspicious clean for \"$entry\""
+  done
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
 test_roadmap_init_sanitizes_fields() {
   echo ""
   echo "=== roadmap-init: sanitizes free-text fields before write ==="
@@ -14135,6 +14321,532 @@ test_validate_contracts_rejects_suspicious_contract_strings() {
 }
 
 # ============================================================================
+# verify-creates Tests (US-001)
+# ============================================================================
+# One isolated git repository per row of the measured nine-scenario matrix.
+# Every repo commits its files, because git ls-files and git grep see tracked
+# files only — a fixture that forgets to commit reports "missing" for reasons
+# that have nothing to do with the rule under test.
+#
+# Every assertion checks BOTH status and method, so a correct verdict reached
+# through the wrong step (a directory "verified" by text search, an endpoint
+# "verified" by its documentation) still fails.
+
+# Build an empty git repo at $TEST_DIR/$1 and print its absolute path.
+_vc_repo() {
+  local dir="$TEST_DIR/$1"
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  git init -q "$dir" >/dev/null 2>&1
+  git -C "$dir" config user.email "test@example.com" >/dev/null 2>&1
+  git -C "$dir" config user.name "Test" >/dev/null 2>&1
+  git -C "$dir" config commit.gpgsign false >/dev/null 2>&1
+  printf '%s' "$dir"
+}
+
+_vc_commit() {
+  git -C "$1" add -A >/dev/null 2>&1
+  git -C "$1" commit -q -m "fixture" >/dev/null 2>&1
+}
+
+# Create a one-phase roadmap whose phase 1 declares $2 (a JSON array) as creates.
+_vc_roadmap() {
+  local feature="$1" creates_json="$2"
+  rm -rf ".aimi/tasks/$feature"
+  jq -n --argjson c "$creates_json" \
+    '[{id: 1, name: "P", goal: "g", slug: "p", dependsOn: [], creates: $c, needs: []}]' \
+    | "$CLI" roadmap-init --feature "$feature" >/dev/null
+}
+
+# Run the verb against phase 1 and publish the result through globals.
+# Deliberately NOT a command substitution: the assertion helpers write to
+# stdout and increment TESTS_PASSED, both of which are lost inside a subshell.
+VC_OUT=""
+VC_RC=0
+_vc_run() {
+  local feature="$1" dir="$2" label="$3"
+  VC_RC=0
+  VC_OUT=$("$CLI" verify-creates --feature "$feature" --phase 1 --dir "$dir" 2>&1) || VC_RC=$?
+  assert_exit_code "0" "$VC_RC" "$label: verb exits 0 (query, not gate)"
+}
+
+test_verify_creates_row_a_table_in_source_verified_by_text() {
+  echo ""
+  echo "=== verify-creates row A: table identity present in real source -> verified/text ==="
+
+  # The table really exists: migration + model + a doc that also mentions it.
+  # The doc must not be what verifies it — the evidence has to name source.
+  local dir out
+  dir=$(_vc_repo "vc-row-a")
+  mkdir -p "$dir/db" "$dir/models" "$dir/docs"
+  echo "CREATE TABLE notifications (id serial primary key);" > "$dir/db/schema.sql"
+  echo "export const notifications = table('notifications');" > "$dir/models/notification.ts"
+  echo "a tabela notifications guarda as notificacoes" > "$dir/docs/plano.md"
+  _vc_commit "$dir"
+
+  _vc_roadmap "vc-row-a" '["notifications (stores per-user notification rows)"]'
+  _vc_run "vc-row-a" "$dir" "row A"
+  out="$VC_OUT"
+
+  assert_eq "1" "$(printf '%s' "$out" | jq 'length')" "row A: one object per creates entry"
+  assert_eq "notifications" "$(printf '%s' "$out" | jq -r '.[0].identity')" "row A: identity is the substring before the first ("
+  assert_eq "verified" "$(printf '%s' "$out" | jq -r '.[0].status')" "row A: status is verified"
+  assert_eq "text" "$(printf '%s' "$out" | jq -r '.[0].method')" "row A: method is text"
+  assert_contains "db/schema.sql" "$(printf '%s' "$out" | jq -r '.[0].evidence')" "row A: evidence names the matched source file"
+  if printf '%s' "$out" | jq -r '.[0].evidence' | grep -q "docs/plano.md"; then
+    echo -e "${RED}✗${NC} row A: evidence must come from source, not the doc that also mentions it"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} row A: evidence comes from source, not the doc mention"
+    ((TESTS_PASSED++))
+  fi
+
+  rm -rf ".aimi/tasks/vc-row-a" "$dir"
+}
+
+test_verify_creates_row_b_docs_only_is_missing() {
+  echo ""
+  echo "=== verify-creates row B: identity only in docs/plano.md -> missing (today's procedure says verified) ==="
+
+  local dir out evidence
+  dir=$(_vc_repo "vc-row-b")
+  mkdir -p "$dir/docs" "$dir/src"
+  echo "vamos criar notifications numa fase futura" > "$dir/docs/plano.md"
+  echo "export const unrelated = 1;" > "$dir/src/index.ts"
+  _vc_commit "$dir"
+
+  _vc_roadmap "vc-row-b" '["notifications (stores per-user notification rows)"]'
+  _vc_run "vc-row-b" "$dir" "row B"
+  out="$VC_OUT"
+
+  assert_eq "missing" "$(printf '%s' "$out" | jq -r '.[0].status')" "row B: status is missing"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.[0].method')" "row B: method is null (nothing verified it)"
+
+  evidence=$(printf '%s' "$out" | jq -r '.[0].evidence')
+  assert_contains "docs/plano.md:1" "$evidence" "row B: evidence names the rejected location and line"
+  assert_contains "excluded from the source search" "$evidence" "row B: evidence says why the location was rejected"
+  assert_contains "uncommitted work reads as missing" "$evidence" "row B: evidence states the tracked-files limitation"
+
+  rm -rf ".aimi/tasks/vc-row-b" "$dir"
+}
+
+test_verify_creates_row_c_endpoint_path_extraction() {
+  echo ""
+  echo "=== verify-creates row C: 'POST /api/notifications' matches the route, not the doc ==="
+
+  local dir out evidence
+  dir=$(_vc_repo "vc-row-c")
+  mkdir -p "$dir/docs" "$dir/src"
+  printf "%s\n" "router.post('/api/notifications', createNotification);" > "$dir/src/routes.ts"
+  printf "%s\n" "POST /api/notifications creates a notification for a user" > "$dir/docs/api.md"
+  _vc_commit "$dir"
+
+  _vc_roadmap "vc-row-c" '["POST /api/notifications (creates a notification for a user)"]'
+  _vc_run "vc-row-c" "$dir" "row C"
+  out="$VC_OUT"
+
+  assert_eq "verified" "$(printf '%s' "$out" | jq -r '.[0].status')" "row C: status is verified"
+  assert_eq "text" "$(printf '%s' "$out" | jq -r '.[0].method')" "row C: method is text"
+
+  evidence=$(printf '%s' "$out" | jq -r '.[0].evidence')
+  assert_contains "src/routes.ts" "$evidence" "row C: evidence names the route file, not the doc"
+  assert_contains "/api/notifications" "$evidence" "row C: evidence records the method-stripped search string"
+
+  rm -rf ".aimi/tasks/vc-row-c" "$dir"
+}
+
+test_verify_creates_only_http_method_token_is_stripped() {
+  echo ""
+  echo "=== verify-creates: only a leading HTTP method token is stripped; other identities pass through ==="
+
+  local dir out
+  dir=$(_vc_repo "vc-strip")
+  mkdir -p "$dir/src"
+  # "SELECT /api/x" is NOT an HTTP method, so the whole string must be searched
+  # verbatim -- stripping the first word would make this verify off "/api/x".
+  # "DELETE user_sessions" IS an HTTP method token, but names a table rather
+  # than a route: with no "/" after the space nothing is stripped, so it must
+  # not verify off the unrelated "user_sessions" occurrence.
+  printf "%s\n" "const route = '/api/x';" > "$dir/src/app.ts"
+  printf "%s\n" "const t = 'user_sessions';" > "$dir/src/db.ts"
+  _vc_commit "$dir"
+
+  _vc_roadmap "vc-strip" '["SELECT /api/x (not an http method)", "OPTIONS /api/x (preflight handler)", "DELETE user_sessions (table, not a route)"]'
+  _vc_run "vc-strip" "$dir" "method-strip"
+  out="$VC_OUT"
+
+  assert_eq "3" "$(printf '%s' "$out" | jq 'length')" "method-strip: one object per creates entry"
+  assert_eq "missing" "$(printf '%s' "$out" | jq -r '.[0].status')" "method-strip: non-HTTP leading token is not stripped"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.[0].method')" "method-strip: unstripped identity has null method"
+  assert_eq "verified" "$(printf '%s' "$out" | jq -r '.[1].status')" "method-strip: OPTIONS + space + slash is a stripped HTTP method"
+  assert_eq "text" "$(printf '%s' "$out" | jq -r '.[1].method')" "method-strip: OPTIONS identity verifies by text"
+  assert_eq "missing" "$(printf '%s' "$out" | jq -r '.[2].status')" "method-strip: method token without a following slash is not stripped"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.[2].method')" "method-strip: unstripped table-shaped identity has null method"
+
+  rm -rf ".aimi/tasks/vc-strip" "$dir"
+}
+
+test_verify_creates_row_d_directory_verified_by_path() {
+  echo ""
+  echo "=== verify-creates row D: directory identity 'db/migrations' -> verified/path (the [ -f ] check is false here) ==="
+
+  local dir out
+  dir=$(_vc_repo "vc-row-d")
+  mkdir -p "$dir/db/migrations"
+  echo "-- create notifications" > "$dir/db/migrations/001_init.sql"
+  _vc_commit "$dir"
+
+  _vc_roadmap "vc-row-d" '["db/migrations (versioned schema migrations)"]'
+  _vc_run "vc-row-d" "$dir" "row D"
+  out="$VC_OUT"
+
+  assert_eq "verified" "$(printf '%s' "$out" | jq -r '.[0].status')" "row D: status is verified"
+  assert_eq "path" "$(printf '%s' "$out" | jq -r '.[0].method')" "row D: method is path (tracked-path check matched a directory)"
+  assert_contains "db/migrations/001_init.sql" "$(printf '%s' "$out" | jq -r '.[0].evidence')" "row D: evidence names a tracked file under the directory"
+
+  rm -rf ".aimi/tasks/vc-row-d" "$dir"
+}
+
+test_verify_creates_row_h_tests_only_is_missing_and_git_never_128() {
+  echo ""
+  echo "=== verify-creates row H: identity only under __tests__/ -> missing, and git exits 0 or 1, never 128 ==="
+
+  local dir out git_status
+  dir=$(_vc_repo "vc-row-h")
+  mkdir -p "$dir/__tests__" "$dir/src"
+  echo "expect(notifications).toHaveLength(0);" > "$dir/__tests__/bell.test.ts"
+  echo "export const unrelated = 1;" > "$dir/src/index.ts"
+  _vc_commit "$dir"
+
+  _vc_roadmap "vc-row-h" '["notifications (stores per-user notification rows)"]'
+  _vc_run "vc-row-h" "$dir" "row H"
+  out="$VC_OUT"
+
+  assert_eq "missing" "$(printf '%s' "$out" | jq -r '.[0].status')" "row H: status is missing"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.[0].method')" "row H: method is null"
+  assert_contains "__tests__/bell.test.ts:1" "$(printf '%s' "$out" | jq -r '.[0].evidence')" "row H: evidence names the rejected test location"
+
+  # The regression this pins: the short ':!__tests__/*' pathspec form aborts
+  # git with "Unimplemented pathspec magic '_'" and exit 128, which would mark
+  # every artifact missing for a reason that has nothing to do with delivery.
+  # Only the long ':(exclude)' form keeps this at 0 or 1.
+  git_status=$(printf '%s' "$out" | jq -r '.[0].gitStatus')
+  if [ "$git_status" -le 1 ]; then
+    echo -e "${GREEN}✓${NC} row H: git exit status is $git_status (<= 1), never 128"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} row H: git exit status is $git_status — expected 0 or 1 (128 means the short pathspec form leaked back in)"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf ".aimi/tasks/vc-row-h" "$dir"
+}
+
+test_verify_creates_exclusions_use_long_form_only() {
+  echo ""
+  echo "=== verify-creates: every exclusion pattern uses the long :(exclude) form ==="
+
+  local block pattern_lines short_form_count long_form_count
+  block=$(sed -n '/^_VERIFY_CREATES_EXCLUDES=(/,/^)/p' "$CLI")
+
+  pattern_lines=$(printf '%s\n' "$block" | grep -c "^[[:space:]]*':" || true)
+  short_form_count=$(printf '%s\n' "$block" | grep -c "':!" || true)
+  long_form_count=$(printf '%s\n' "$block" | grep -c "':(exclude)" || true)
+
+  assert_eq "0" "$short_form_count" "exclusions: no short ':!' pathspec form in the exclusion list"
+  assert_eq "$pattern_lines" "$long_form_count" "exclusions: every pattern in the list uses the long ':(exclude)' form"
+  if [ "$long_form_count" -ge 1 ]; then
+    echo -e "${GREEN}✓${NC} exclusions: $long_form_count patterns declared, all long form"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} exclusions: expected at least one ':(exclude)' pattern, found $long_form_count"
+    ((TESTS_FAILED++))
+  fi
+}
+
+test_verify_creates_row_f_doc_file_verified_by_path() {
+  echo ""
+  echo "=== verify-creates row F: doc file identity that exists -> verified/path ==="
+
+  local dir out
+  dir=$(_vc_repo "vc-row-f")
+  mkdir -p "$dir/docs/api"
+  echo "# Notifications API" > "$dir/docs/api/notifications.md"
+  _vc_commit "$dir"
+
+  _vc_roadmap "vc-row-f" '["docs/api/notifications.md (public notifications API reference)"]'
+  _vc_run "vc-row-f" "$dir" "row F"
+  out="$VC_OUT"
+
+  assert_eq "verified" "$(printf '%s' "$out" | jq -r '.[0].status')" "row F: status is verified"
+  assert_eq "path" "$(printf '%s' "$out" | jq -r '.[0].method')" "row F: method is path"
+  assert_contains "docs/api/notifications.md" "$(printf '%s' "$out" | jq -r '.[0].evidence')" "row F: evidence names the doc file"
+
+  rm -rf ".aimi/tasks/vc-row-f" "$dir"
+}
+
+test_verify_creates_doc_identity_bypasses_exclusions() {
+  echo ""
+  echo "=== verify-creates: a documentation identity searches docs too (exclusions bypassed for that entry) ==="
+
+  local dir out
+  dir=$(_vc_repo "vc-doc-bypass")
+  mkdir -p "$dir/docs" "$dir/src"
+  echo "consulte README.md antes de rodar" > "$dir/docs/plano.md"
+  echo "export const unrelated = 1;" > "$dir/src/index.ts"
+  _vc_commit "$dir"
+
+  _vc_roadmap "vc-doc-bypass" '["README.md (project readme)"]'
+  _vc_run "vc-doc-bypass" "$dir" "doc bypass"
+  out="$VC_OUT"
+
+  assert_eq "verified" "$(printf '%s' "$out" | jq -r '.[0].status')" "doc bypass: doc identity verifies from a docs hit"
+  assert_eq "text" "$(printf '%s' "$out" | jq -r '.[0].method')" "doc bypass: method is text"
+  assert_contains "docs/plano.md" "$(printf '%s' "$out" | jq -r '.[0].evidence')" "doc bypass: evidence names the docs hit"
+
+  rm -rf ".aimi/tasks/vc-doc-bypass" "$dir"
+}
+
+test_verify_creates_row_g_file_verified_by_path() {
+  echo ""
+  echo "=== verify-creates row G: file identity 'components/NotificationBell.tsx' -> verified/path ==="
+
+  local dir out
+  dir=$(_vc_repo "vc-row-g")
+  mkdir -p "$dir/components"
+  echo "export function NotificationBell() { return null; }" > "$dir/components/NotificationBell.tsx"
+  _vc_commit "$dir"
+
+  _vc_roadmap "vc-row-g" '["components/NotificationBell.tsx (header bell icon with unread badge)"]'
+  _vc_run "vc-row-g" "$dir" "row G"
+  out="$VC_OUT"
+
+  assert_eq "verified" "$(printf '%s' "$out" | jq -r '.[0].status')" "row G: status is verified"
+  assert_eq "path" "$(printf '%s' "$out" | jq -r '.[0].method')" "row G: method is path"
+  assert_contains "components/NotificationBell.tsx" "$(printf '%s' "$out" | jq -r '.[0].evidence')" "row G: evidence names the tracked file"
+
+  rm -rf ".aimi/tasks/vc-row-g" "$dir"
+}
+
+test_verify_creates_row_e_todo_marker_only_is_missing() {
+  echo ""
+  echo "=== verify-creates row E: identity only inside a TODO comment -> missing ==="
+
+  local dir out evidence
+  dir=$(_vc_repo "vc-row-e")
+  mkdir -p "$dir/src"
+  printf "%s\n" "// TODO: create the notifications table" > "$dir/src/todo.ts"
+  _vc_commit "$dir"
+
+  _vc_roadmap "vc-row-e" '["notifications (stores per-user notification rows)"]'
+  _vc_run "vc-row-e" "$dir" "row E"
+  out="$VC_OUT"
+
+  assert_eq "missing" "$(printf '%s' "$out" | jq -r '.[0].status')" "row E: status is missing"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.[0].method')" "row E: method is null"
+
+  evidence=$(printf '%s' "$out" | jq -r '.[0].evidence')
+  assert_contains "src/todo.ts:1" "$evidence" "row E: evidence names the rejected marker location and line"
+  assert_contains "TODO/FIXME marker comment" "$evidence" "row E: evidence says the hit was a marker comment"
+
+  rm -rf ".aimi/tasks/vc-row-e" "$dir"
+}
+
+test_verify_creates_absent_everywhere_is_missing() {
+  echo ""
+  echo "=== verify-creates: identity nowhere in the tree -> missing, with no rejected location ==="
+
+  local dir out evidence
+  dir=$(_vc_repo "vc-absent")
+  mkdir -p "$dir/src"
+  echo "export const unrelated = 1;" > "$dir/src/index.ts"
+  _vc_commit "$dir"
+
+  _vc_roadmap "vc-absent" '["notifications (stores per-user notification rows)"]'
+  _vc_run "vc-absent" "$dir" "absent"
+  out="$VC_OUT"
+
+  assert_eq "missing" "$(printf '%s' "$out" | jq -r '.[0].status')" "absent: status is missing"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.[0].method')" "absent: method is null"
+
+  evidence=$(printf '%s' "$out" | jq -r '.[0].evidence')
+  assert_contains "uncommitted work reads as missing" "$evidence" "absent: evidence states the tracked-files limitation"
+  if printf '%s' "$evidence" | grep -q "Found and rejected"; then
+    echo -e "${RED}✗${NC} absent: evidence must not claim a rejected location when nothing was found"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} absent: evidence claims no rejected location"
+    ((TESTS_PASSED++))
+  fi
+
+  rm -rf ".aimi/tasks/vc-absent" "$dir"
+}
+
+test_verify_creates_row_i_committed_aimi_does_not_self_verify() {
+  echo ""
+  echo "=== verify-creates row I: a committed .aimi/ must not let a phase verify off its own creates[] declaration ==="
+
+  local dir out evidence
+  dir=$(_vc_repo "vc-row-i")
+  mkdir -p "$dir/.aimi/tasks/some-feature" "$dir/src"
+  # The phase's own roadmap.json, committed by the project. Today's unanchored
+  # search finds the identity inside the very file that declared it and
+  # verifies unconditionally -- the worst row of the matrix.
+  jq -n '{roadmapVersion: "1.0", feature: "some-feature",
+          phases: [{id: 1, name: "P", creates: ["notifications (stores per-user notification rows)"]}]}' \
+    > "$dir/.aimi/tasks/some-feature/roadmap.json"
+  echo "export const unrelated = 1;" > "$dir/src/index.ts"
+  _vc_commit "$dir"
+
+  _vc_roadmap "vc-row-i" '["notifications (stores per-user notification rows)"]'
+  _vc_run "vc-row-i" "$dir" "row I"
+  out="$VC_OUT"
+
+  assert_eq "missing" "$(printf '%s' "$out" | jq -r '.[0].status')" "row I: status is missing (no self-verification off roadmap.json)"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.[0].method')" "row I: method is null"
+
+  evidence=$(printf '%s' "$out" | jq -r '.[0].evidence')
+  assert_contains ".aimi/tasks/some-feature/roadmap.json" "$evidence" "row I: evidence names the rejected .aimi/ location"
+  assert_contains "excluded from the source search" "$evidence" "row I: evidence says the declaration file was excluded"
+
+  rm -rf ".aimi/tasks/vc-row-i" "$dir"
+}
+
+test_verify_creates_git_failure_is_error_not_missing() {
+  echo ""
+  echo "=== verify-creates: git exiting above 1 is status error carrying the code, never missing ==="
+
+  local dir out evidence
+  dir="$TEST_DIR/vc-not-a-repo"
+  rm -rf "$dir"
+  mkdir -p "$dir/src"
+  echo "export const unrelated = 1;" > "$dir/src/index.ts"
+
+  _vc_roadmap "vc-git-error" '["notifications (stores per-user notification rows)"]'
+  _vc_run "vc-git-error" "$dir" "git error"
+  out="$VC_OUT"
+
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.[0].status')" "git error: status is error, not missing"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.[0].method')" "git error: method is null"
+  assert_eq "128" "$(printf '%s' "$out" | jq -r '.[0].gitStatus')" "git error: gitStatus carries git's exit code"
+
+  evidence=$(printf '%s' "$out" | jq -r '.[0].evidence')
+  assert_contains "128" "$evidence" "git error: evidence carries the git exit code"
+  assert_contains "tool failure" "$evidence" "git error: evidence says a tool failure is not an absent artifact"
+
+  rm -rf ".aimi/tasks/vc-git-error" "$dir"
+}
+
+test_verify_creates_all_missing_still_exits_zero() {
+  echo ""
+  echo "=== verify-creates: an all-missing verdict array still exits 0 (query, not gate) ==="
+
+  local dir out exit_code
+  dir=$(_vc_repo "vc-all-missing")
+  mkdir -p "$dir/src"
+  echo "export const unrelated = 1;" > "$dir/src/index.ts"
+  _vc_commit "$dir"
+
+  _vc_roadmap "vc-all-missing" '["alpha (one)", "beta (two)", "gamma (three)"]'
+
+  out=$("$CLI" verify-creates --feature "vc-all-missing" --phase 1 --dir "$dir" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "all-missing: exits 0 even though every entry is missing"
+  assert_eq "3" "$(printf '%s' "$out" | jq 'length')" "all-missing: one object per creates entry"
+  assert_eq "3" "$(printf '%s' "$out" | jq '[.[] | select(.status == "missing")] | length')" "all-missing: every entry is missing"
+
+  rm -rf ".aimi/tasks/vc-all-missing" "$dir"
+}
+
+test_verify_creates_empty_creates_yields_empty_array() {
+  echo ""
+  echo "=== verify-creates: a phase with no creates entries yields [] and exits 0 ==="
+
+  local dir out exit_code
+  dir=$(_vc_repo "vc-empty")
+  echo "x" > "$dir/a.txt"
+  _vc_commit "$dir"
+
+  _vc_roadmap "vc-empty" '[]'
+
+  out=$("$CLI" verify-creates --feature "vc-empty" --phase 1 --dir "$dir" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "empty creates: exits 0"
+  assert_eq "0" "$(printf '%s' "$out" | jq 'length')" "empty creates: array is empty (no phantom entry from the read loop)"
+
+  rm -rf ".aimi/tasks/vc-empty" "$dir"
+}
+
+test_verify_creates_error_exit_codes() {
+  echo ""
+  echo "=== verify-creates: non-zero is reserved for real errors ==="
+
+  local dir exit_code
+  dir=$(_vc_repo "vc-errors")
+  echo "x" > "$dir/a.txt"
+  _vc_commit "$dir"
+  _vc_roadmap "vc-errors" '["alpha (one)"]'
+
+  "$CLI" verify-creates --feature "vc-errors" --phase 1 --bogus x >/dev/null 2>&1 && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "errors: unknown flag exits 1"
+
+  "$CLI" verify-creates --feature "vc-errors" --phase "abc" >/dev/null 2>&1 && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "errors: non-numeric --phase exits 1"
+
+  "$CLI" verify-creates --feature "vc-errors" >/dev/null 2>&1 && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "errors: missing --phase exits 1"
+
+  "$CLI" verify-creates --feature "vc-no-such-feature" --phase 1 >/dev/null 2>&1 && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "errors: absent roadmap.json exits 1"
+
+  "$CLI" verify-creates --feature "vc-errors" --phase 1 --dir "$TEST_DIR/vc-no-such-dir" >/dev/null 2>&1 && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "errors: --dir that is not a directory exits 1"
+
+  "$CLI" verify-creates --feature "vc-errors" --phase 99 --dir "$dir" >/dev/null 2>&1 && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "errors: unknown phase id exits 1"
+
+  rm -rf ".aimi/tasks/vc-errors" "$dir"
+}
+
+test_verify_creates_registered_in_help_and_dispatcher() {
+  echo ""
+  echo "=== verify-creates: listed in help with its flags and routed by the dispatcher ==="
+
+  local help_out exit_code
+  help_out=$("$CLI" help 2>&1)
+  assert_contains "verify-creates" "$help_out" "help: lists verify-creates"
+  assert_contains "verify-creates --feature <slug> --phase <id>" "$help_out" "help: documents --feature and --phase"
+  assert_contains "--dir <container-path>" "$help_out" "help: documents --dir"
+
+  # The dispatcher must route it: an unrouted verb answers "Unknown command".
+  local dispatch_out
+  dispatch_out=$("$CLI" verify-creates --feature "vc-no-such-feature" --phase 1 2>&1) && exit_code=0 || exit_code=$?
+  if printf '%s' "$dispatch_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: verify-creates is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: verify-creates is routed"
+    ((TESTS_PASSED++))
+  fi
+}
+
+test_verify_creates_reuses_existing_identity_definition() {
+  echo ""
+  echo "=== verify-creates: consumes the existing _cv_identity def, never a second copy ==="
+
+  local identity_defs
+  identity_defs=$(grep -c 'def _cv_identity:' "$CLI" || true)
+  assert_eq "1" "$identity_defs" "identity: exactly one _cv_identity definition in aimi-cli.sh"
+
+  # The verb must read creates[] through those shared defs.
+  if grep -q '_CONTRACT_JQ_DEFS' <(sed -n '/^cmd_verify_creates()/,/^}/p' "$CLI"); then
+    echo -e "${GREEN}✓${NC} identity: cmd_verify_creates reads creates[] through _CONTRACT_JQ_DEFS"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} identity: cmd_verify_creates must reuse _CONTRACT_JQ_DEFS/_cv_identity"
+    ((TESTS_FAILED++))
+  fi
+}
+
+# ============================================================================
 # Phase Folder Discovery Tests (US-004)
 # ============================================================================
 # Each test creates its own isolated temp dir (pushd/popd) so the nested
@@ -15038,6 +15750,9 @@ main() {
   test_roadmap_init_get_roundtrip
   test_roadmap_init_additive_sync
   test_roadmap_init_rejects_invalid_dir_slug
+  test_roadmap_init_rejects_malformed_identity
+  test_roadmap_init_sync_ignores_legacy_identities
+  test_roadmap_init_accepts_documented_identity_kinds
   test_roadmap_init_sanitizes_fields
   test_roadmap_decimal_sort
   test_roadmap_claim_dependency_not_done
@@ -15122,6 +15837,30 @@ main() {
   test_roadmap_sweep_reports_orphan_creates
   test_roadmap_sweep_reports_deferred_needs
   test_validate_contracts_rejects_suspicious_contract_strings
+
+  # verify-creates Tests (US-001) — the measured nine-scenario matrix, one
+  # isolated git repository per row, each asserting status AND method
+  echo ""
+  echo "--- verify-creates Tests (US-001) ---"
+  test_verify_creates_row_a_table_in_source_verified_by_text
+  test_verify_creates_row_b_docs_only_is_missing
+  test_verify_creates_row_c_endpoint_path_extraction
+  test_verify_creates_only_http_method_token_is_stripped
+  test_verify_creates_row_d_directory_verified_by_path
+  test_verify_creates_row_e_todo_marker_only_is_missing
+  test_verify_creates_row_f_doc_file_verified_by_path
+  test_verify_creates_doc_identity_bypasses_exclusions
+  test_verify_creates_row_g_file_verified_by_path
+  test_verify_creates_row_h_tests_only_is_missing_and_git_never_128
+  test_verify_creates_exclusions_use_long_form_only
+  test_verify_creates_row_i_committed_aimi_does_not_self_verify
+  test_verify_creates_absent_everywhere_is_missing
+  test_verify_creates_git_failure_is_error_not_missing
+  test_verify_creates_all_missing_still_exits_zero
+  test_verify_creates_empty_creates_yields_empty_array
+  test_verify_creates_error_exit_codes
+  test_verify_creates_registered_in_help_and_dispatcher
+  test_verify_creates_reuses_existing_identity_definition
 
   # Phase Completion Tests: completed-requires-handoff, verification_failed,
   # atomic claim release, roadmap-write-handoff (US-011)

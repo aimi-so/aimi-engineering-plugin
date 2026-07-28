@@ -102,7 +102,9 @@ Each phase runs in its own **phase container** — a git worktree on the phase's
 
 A phase does not close just because its stories finished. Three things happen first.
 
-**Creates verification.** Every artifact the phase declared in `creates` must be found in the phase branch's actual code — either as a file at that path, or as a string in tracked source. This is stricter than checking that a later phase's `needs` resolved: it asks whether the promise was kept.
+**Creates verification.** Every artifact the phase declared in `creates` must be found in the code the phase branch committed. The check looks for it among the files git tracks. First it looks for a file or a folder at that exact path. If there is none, it searches the tracked source for the name. For an endpoint it drops the leading method and searches only the path, because working code writes the route itself, never the words `POST /api/notifications`. Documentation, tests and to-do comments are left out of that search: a name that appears only there says the work was described or planned, not that it was built, so it does not count as delivery. The one exception is a phase whose artifact *is* documentation — then the docs page is the thing, and finding it counts. This is stricter than checking that a later phase's `needs` resolved: it asks whether the promise was kept.
+
+One limit is worth knowing: only committed work is visible. Anything still uncommitted on the phase branch reads as missing, so commit before you close.
 
 If anything is missing, the phase is marked `verification_failed` and the next phase stays blocked. Fix the gap on the phase branch and re-run — verification runs again from scratch.
 

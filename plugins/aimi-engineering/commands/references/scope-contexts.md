@@ -101,6 +101,48 @@ Contracts are checked deterministically, never by LLM judgment alone: a phase's
 phase's `needs` entries are checked against prior phases' fulfilled `creates` at
 next-phase planning time.
 
+### What verification looks for
+
+At a phase's close, `aimi-cli.sh verify-creates` reduces each `creates` entry to
+its identity — the text before the first `(` — and looks for that identity among
+the files git tracks on the phase branch. It is not kind-aware: every identity
+runs the same steps in the same order, whatever its kind column says, and the
+first step that finds the artifact ends the search.
+
+1. **Tracked path.** If the identity names a file *or* a directory that git
+   tracks, that alone verifies it. A `File` identity such as
+   `components/NotificationBell.tsx` and a directory such as `db/migrations`
+   both resolve here. An identity that starts with `/` or traverses with `..`
+   skips this step and falls through to the text search.
+2. **Endpoint path extraction.** A leading HTTP method followed by a space and a
+   `/` — the `METHOD /path` form in the table above — is stripped, so
+   `POST /api/notifications` is searched as `/api/notifications`. Real code
+   writes `router.post('/api/notifications', …)` and never the method-plus-path
+   literal. Nothing else is stripped: `DELETE user_sessions` is a table-shaped
+   identity and is searched whole.
+3. **Text in source.** Whatever is left is matched as a literal string across
+   tracked files, with documentation (`*.md`, `docs/`, `README*`), tests
+   (`*_test.*`, `tests/`, `__tests__/`) and `.aimi/` excluded, and with lines
+   that are nothing but a `TODO`/`FIXME`/`XXX`/`HACK` comment discarded. A
+   `Table` identity such as `notifications` resolves here. When the identity is
+   itself documentation (`docs/api/notifications.md`), the documentation
+   exclusions are bypassed for that entry — there the docs page *is* the
+   artifact.
+
+This is guidance about verification strength, not a naming rule. `roadmap-init`
+accepts a bare name such as `notifications` exactly as the table above
+prescribes, and the close check verifies it — via step 3 rather than step 1.
+Knowing which step an identity will take tells you how much a pass proves: a
+tracked path is direct evidence the artifact exists at that location, while a
+bare name is evidence that the name appears in non-documentation, non-test
+source. Neither `roadmap-init` nor the close check prefers one shape over
+another, and at declaration time an author often cannot know the eventual path —
+a wrong guessed path fails at close for a reason nobody can debug.
+
+One limit applies to every step: git sees tracked files only, so work that is
+not committed on the phase branch reads as missing. Every `missing` verdict says
+so in its evidence string.
+
 ## Coarse File-Area Declaration
 
 Before any story exists, each phase declares a short list of top-level directories

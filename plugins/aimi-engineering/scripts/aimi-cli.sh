@@ -6889,6 +6889,49 @@ _roadmap_validate_phase_id() {
   fi
 }
 
+# Read a phases JSON array on stdin; print one human-readable error line per
+# creates[]/needs[] entry whose *identity* can never name a real artifact.
+#
+# The rule is deliberately narrow -- exactly three shapes are rejected, judged
+# over the identity (text before the first "(", trimmed) and nothing else:
+#   (a) empty after _cv_identity
+#   (b) a ".." PATH SEGMENT, i.e. (^|/)\.\.($|/) -- not any byte pair "..",
+#       so an identity like services/foo..bar is untouched
+#   (c) a leading "/" anchored at position 0 -- the Endpoint kind
+#       ("POST /api/notifications") contains a slash but does not begin with
+#       one, so anchoring matters or every endpoint phase becomes unwritable
+# Identity *strength* is explicitly not judged: at declaration time research has
+# not run, so a bare Table name ("notifications") or a bare directory
+# ("db/migrations") must pass -- guessing a path here fails at phase close for a
+# reason nobody can debug.
+#
+# creates[] and needs[] go through the same predicate in the same pass on
+# purpose: _cv_creates_in_scope matches a need against a provider's creates by
+# exact byte equality, so a rule applied to one list alone lets a roadmap hold
+# two shapes at once -- validate-contracts then reports a permanently unmet
+# need, which halts /aimi:plan, and agent mode never demotes an unmet need.
+#
+# Reuses $_CONTRACT_JQ_DEFS so the guard and validate-contracts agree on what an
+# identity is; a second copy of _cv_identity would drift.
+_roadmap_identity_errors() {
+  jq -r "$_CONTRACT_JQ_DEFS"'
+    [ .[]
+      | . as $p
+      | (["creates", "needs"][]) as $list
+      | (($p[$list] // [])[]) as $raw
+      | ($raw | if type == "string" then . else "" end) as $entry
+      | ($entry | _cv_identity) as $ident
+      | (
+          if ($ident | length) == 0 then "empty once the description is stripped"
+          elif ($ident | test("(^|/)\\.\\.($|/)")) then "contains a \"..\" path segment"
+          elif ($ident | test("^/")) then "begins with \"/\""
+          else empty end
+        ) as $reason
+      | "phase " + ($p.id|tostring) + ": " + $list + " entry \"" + $entry + "\" is not a usable artifact identity: " + $reason
+    ] | .[]
+  '
+}
+
 cmd_roadmap_init() {
   local feature="" file="" sync_mode=false brainstorm_path=""
 
@@ -7030,6 +7073,19 @@ cmd_roadmap_init() {
           exit 1
         fi
 
+        # Identity well-formedness, over filtered_new ONLY -- the phases this
+        # call actually writes. Never over the whole payload: plan.md always
+        # submits the full phase array and both call sites downgrade a
+        # roadmap-init failure to a warning, so a check that fired on a legacy
+        # phase would silently drop the new one instead of reporting anything.
+        identity_errors=""
+        identity_errors=$(printf '%s' "$filtered_new" | _roadmap_identity_errors)
+        if [ -n "$identity_errors" ]; then
+          echo "Error: roadmap-init: malformed creates/needs identity in new phase(s):" >&2
+          printf '%s\n' "$identity_errors" >&2
+          exit 1
+        fi
+
         merged_phases=$(jq --argjson add "$filtered_new" '
           (.phases + $add) | sort_by(.id)
         ' "$roadmap_path")
@@ -7043,6 +7099,16 @@ cmd_roadmap_init() {
         if [ -n "$dangling" ]; then
           echo "Error: roadmap-init: dangling dependsOn reference(s):" >&2
           printf '%s\n' "$dangling" >&2
+          exit 1
+        fi
+
+        # Creation mode: every phase in new_phases is by definition new, so the
+        # same guard applies to the whole array here.
+        identity_errors=""
+        identity_errors=$(printf '%s' "$new_phases" | _roadmap_identity_errors)
+        if [ -n "$identity_errors" ]; then
+          echo "Error: roadmap-init: malformed creates/needs identity in new phase(s):" >&2
+          printf '%s\n' "$identity_errors" >&2
           exit 1
         fi
 
@@ -7732,6 +7798,335 @@ _cv_handoff_lists_artifact() {
     /^#+[ \t]/ { flag=0 }
     flag { print }
   ' "$handoff_path" | grep -qF -- "$identity"
+}
+
+# ============================================================================
+# verify-creates — prove a phase's creates[] exist in code, not in prose
+# ============================================================================
+#
+# Creates verification used to live as executable prose in /aimi:execute's
+# "Creates Verification" section: an orchestrator read a numbered procedure and
+# ran `[ -f "$PHASE_CONTAINER_PATH/$identity" ]`, then a bare `git grep -l -F`.
+# No Bash suite could reach it, and the procedure was wrong in three ways a
+# test would have caught the day it shipped:
+#
+#   * `[ -f ]` is false for a directory, so a creates entry naming one
+#     ("db/migrations") could never verify by path.
+#   * The text search carried no exclusions, so an identity mentioned once in
+#     docs/plano.md, in a test file, or in a `// TODO:` comment closed the
+#     phase — a phase could pass on a mention of the work instead of the work.
+#   * An endpoint identity is written "POST /api/notifications" (see the
+#     Creates/Needs Contracts table in commands/references/scope-contexts.md),
+#     but source code holds the path, not the method-plus-path literal, so a
+#     delivered endpoint read as missing while its documentation read as done.
+#
+# This is the move split-detect already made (see its header above): pure,
+# deterministic, file-only logic belongs where both Bash suites can reach it,
+# in exactly one copy, with every rule a test case.
+#
+# It is a QUERY, not a gate. Producing a verdict array exits 0 — including an
+# array where every entry is "missing". Non-zero is reserved for real errors
+# (unknown flag, absent/non-numeric --phase, absent/malformed roadmap.json,
+# --dir that is not a directory), which is what lets the caller loop over the
+# result instead of branching on the exit status.
+#
+# Deliberately NOT kind-aware: it does not try to map a table identity to a
+# migration file or an endpoint identity to a route file. Every identity runs
+# the same four steps; the kind column in scope-contexts.md stays a naming
+# convention, not a dispatch table.
+
+# Paths whose content is a MENTION of an artifact rather than the artifact:
+# documentation and tests.
+#
+# Every pattern uses the LONG ":(exclude)" form. The short "!" form is not
+# interchangeable — git reads the character after the colon as pathspec magic,
+# so ':!__tests__/*' aborts the whole invocation with
+#   fatal: Unimplemented pathspec magic '_' in ':!__tests__/*'
+# and exit 128, which would turn every artifact of every phase into "missing".
+# Long form only, for all patterns, so no future edit reintroduces the short
+# form by copying a neighbour.
+#
+# Default pathspec matching is fnmatch without FNM_PATHNAME — "*" crosses "/"
+# — so "*.md" excludes .md files at any depth, while "docs/*" is anchored at
+# the search root and needs the "*/docs/*" companion for nested copies.
+#
+# .aimi/* is excluded for a specific reason: roadmap.json holds the creates[]
+# strings themselves, so without it every identity would find itself in the
+# very file that declared it.
+_VERIFY_CREATES_EXCLUDES=(
+  ':(exclude)*.md'
+  ':(exclude)*.mdx'
+  ':(exclude)*.rst'
+  ':(exclude)*.adoc'
+  ':(exclude)*.txt'
+  ':(exclude)docs/*'
+  ':(exclude)doc/*'
+  ':(exclude)documentation/*'
+  ':(exclude)*/docs/*'
+  ':(exclude)*/doc/*'
+  ':(exclude)*/documentation/*'
+  ':(exclude)README*'
+  ':(exclude)CHANGELOG*'
+  ':(exclude)CONTRIBUTING*'
+  ':(exclude).aimi/*'
+  ':(exclude)*_test.*'
+  ':(exclude)*.test.*'
+  ':(exclude)*_spec.*'
+  ':(exclude)*.spec.*'
+  ':(exclude)test/*'
+  ':(exclude)tests/*'
+  ':(exclude)spec/*'
+  ':(exclude)__tests__/*'
+  ':(exclude)*/test/*'
+  ':(exclude)*/tests/*'
+  ':(exclude)*/spec/*'
+  ':(exclude)*/__tests__/*'
+)
+
+# The tracked-files caveat, stated in every "missing" verdict so the caller
+# reports the limit instead of silently owning it.
+_VERIFY_CREATES_TRACKED_NOTE='Note: git ls-files and git grep see tracked (committed) files only, so uncommitted work reads as missing.'
+
+# True (exit 0) when the identity names documentation itself. For those, a hit
+# under docs/ IS the artifact rather than a mention of it, so the exclusion
+# list is bypassed for that one entry.
+_verify_creates_is_doc_identity() {
+  local identity="$1"
+  case "$identity" in
+    docs/*|doc/*|*/docs/*|*/doc/*|*.md|*.rst|*.adoc|*.txt) return 0 ;;
+  esac
+  return 1
+}
+
+# True (exit 0) when a matched line is nothing but a TODO/FIXME/XXX/HACK
+# marker inside a comment — a note that the work is still owed, which must
+# never count as the work being done.
+_verify_creates_is_marker_line() {
+  local content="$1"
+  grep -Eq '^[[:space:]]*(//+|#+|--+|\*+|/\*+|<!--)[[:space:]]*(TODO|FIXME|XXX|HACK)([^A-Za-z0-9_]|$)' <<< "$content"
+}
+
+# Verify ONE creates identity against <dir>'s tracked files.
+# Prints one compact JSON object: {identity, status, method, evidence, gitStatus}.
+#   status    verified | missing | error
+#   method    "path" (step 1) | "text" (step 3) | null (not verified)
+#   gitStatus the highest exit status any git invocation returned for this
+#             entry — 0 or 1 in normal operation, above 1 only on tool failure.
+# Always returns 0: a verdict of "missing" or "error" is data, not failure.
+_verify_creates_one() {
+  local dir="$1" identity="$2"
+  local status="missing" method="" evidence=""
+  local git_max=0 rc=0
+
+  if [ -z "$identity" ]; then
+    _verify_creates_emit "$identity" "missing" "" \
+      "Malformed creates entry: empty artifact identity (expected \"<artifact-name> (<description>)\"). $_VERIFY_CREATES_TRACKED_NOTE" 0
+    return 0
+  fi
+
+  # --- Step 1: tracked path ------------------------------------------------
+  # Matches a FILE and a DIRECTORY alike. `[ -f ]`, which this replaces, is
+  # false on a directory, so a directory identity could only ever verify by
+  # text search — and usually did not verify at all.
+  # An absolute or traversing identity is never handed to git as a pathspec
+  # (same escape-prevention posture validate_path_in_project enforces); it
+  # falls through to the content search instead, which cannot leave the repo.
+  local path_safe=true
+  case "$identity" in
+    /*|../*|*/../*|*/..) path_safe=false ;;
+  esac
+  if [ "$path_safe" = true ]; then
+    local ls_out=""
+    rc=0
+    ls_out=$(git -C "$dir" ls-files -- "$identity" "$identity/*" 2>/dev/null) || rc=$?
+    if [ "$rc" -gt "$git_max" ]; then git_max=$rc; fi
+    if [ "$rc" -gt 1 ]; then
+      _verify_creates_emit "$identity" "error" "" \
+        "git ls-files exited $rc under $dir — tool failure, not an absent artifact." "$git_max"
+      return 0
+    fi
+    if [ -n "$ls_out" ]; then
+      local first_path="${ls_out%%$'\n'*}"
+      _verify_creates_emit "$identity" "verified" "path" \
+        "tracked path: $first_path" "$git_max"
+      return 0
+    fi
+  fi
+
+  # --- Step 2: endpoint path extraction -----------------------------------
+  # Load-bearing, not a nicety. In a repository that genuinely serves the
+  # route, the literal "POST /api/notifications" was found in docs/plano.md
+  # and nowhere else — real code writes router.post('/api/notifications', …).
+  # Excluding documentation without this step turns every endpoint-kind phase
+  # into verification_failed, and the only way to unblock it would be to write
+  # the literal into a comment: exactly the hole this verb closes.
+  #
+  # Only a leading HTTP method token followed by a space and a "/" is
+  # stripped. Every other identity reaches the search untouched — "DELETE
+  # user_sessions" is a table-shaped identity, not an endpoint, and searching
+  # it for "user_sessions" alone would weaken the check.
+  local search="$identity"
+  case "$identity" in
+    'GET /'*|'POST /'*|'PUT /'*|'PATCH /'*|'DELETE /'*|'HEAD /'*|'OPTIONS /'*)
+      search="${identity#* }"
+      ;;
+  esac
+  local searched_note=""
+  if [ "$search" != "$identity" ]; then
+    searched_note=" (searched \"$search\")"
+  fi
+
+  # --- Step 3: text search over tracked source ----------------------------
+  # rc is pre-initialized and captured with `|| rc=$?` because this script
+  # runs under `set -euo pipefail` (line 2) and git grep exits 1 on a
+  # legitimate no-match. `local rc=$?` would mask the status behind local's
+  # own success and is used nowhere here.
+  local grep_out=""
+  rc=0
+  if _verify_creates_is_doc_identity "$identity"; then
+    grep_out=$(git -C "$dir" grep -n -I -F -e "$search" 2>/dev/null) || rc=$?
+  else
+    grep_out=$(git -C "$dir" grep -n -I -F -e "$search" -- "${_VERIFY_CREATES_EXCLUDES[@]}" 2>/dev/null) || rc=$?
+  fi
+  if [ "$rc" -gt "$git_max" ]; then git_max=$rc; fi
+  if [ "$rc" -gt 1 ]; then
+    _verify_creates_emit "$identity" "error" "" \
+      "git grep exited $rc under $dir — tool failure, not an absent artifact." "$git_max"
+    return 0
+  fi
+
+  # --- Step 4: drop marker-only comment lines -----------------------------
+  local kept="" first_marker=""
+  if [ -n "$grep_out" ]; then
+    local gline rest hit_file hit_num hit_content
+    while IFS= read -r gline; do
+      [ -n "$gline" ] || continue
+      hit_file="${gline%%:*}"
+      rest="${gline#*:}"
+      hit_num="${rest%%:*}"
+      hit_content="${rest#*:}"
+      if _verify_creates_is_marker_line "$hit_content"; then
+        if [ -z "$first_marker" ]; then first_marker="$hit_file:$hit_num"; fi
+        continue
+      fi
+      kept="$hit_file:$hit_num"
+      break
+    done <<< "$grep_out"
+  fi
+
+  if [ -n "$kept" ]; then
+    _verify_creates_emit "$identity" "verified" "text" \
+      "tracked source: ${kept}${searched_note}" "$git_max"
+    return 0
+  fi
+
+  # --- Missing: name what was found and rejected, not just "not found" ----
+  local rejected=""
+  if [ -n "$first_marker" ]; then
+    rejected=" Found and rejected at $first_marker: TODO/FIXME marker comment, not an implementation."
+  else
+    local all_out=""
+    rc=0
+    all_out=$(git -C "$dir" grep -n -I -F -e "$search" 2>/dev/null) || rc=$?
+    if [ "$rc" -gt "$git_max" ]; then git_max=$rc; fi
+    if [ "$rc" -gt 1 ]; then
+      _verify_creates_emit "$identity" "error" "" \
+        "git grep exited $rc under $dir — tool failure, not an absent artifact." "$git_max"
+      return 0
+    fi
+    if [ -n "$all_out" ]; then
+      local aline afile arest anum acontent
+      aline="${all_out%%$'\n'*}"
+      afile="${aline%%:*}"
+      arest="${aline#*:}"
+      anum="${arest%%:*}"
+      acontent="${arest#*:}"
+      if _verify_creates_is_marker_line "$acontent"; then
+        rejected=" Found and rejected at $afile:$anum: TODO/FIXME marker comment, not an implementation."
+      else
+        rejected=" Found and rejected at $afile:$anum: documentation or test path, excluded from the source search."
+      fi
+    fi
+  fi
+
+  status="missing"
+  method=""
+  evidence="No tracked artifact for \"$identity\" under ${dir}${searched_note}.${rejected} $_VERIFY_CREATES_TRACKED_NOTE"
+  _verify_creates_emit "$identity" "$status" "$method" "$evidence" "$git_max"
+  return 0
+}
+
+# Emit one verdict object. jq builds it so an identity carrying quotes,
+# spaces or backslashes cannot break the array.
+_verify_creates_emit() {
+  jq -nc \
+    --arg identity "$1" \
+    --arg status "$2" \
+    --arg method "$3" \
+    --arg evidence "$4" \
+    --argjson gitStatus "$5" \
+    '{identity: $identity, status: $status,
+      method: (if $method == "" then null else $method end),
+      evidence: $evidence, gitStatus: $gitStatus}'
+}
+
+cmd_verify_creates() {
+  local feature="" phase_id="" dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      --phase)   shift; phase_id="${1:-}" ;;
+      --dir)     shift; dir="${1:-}" ;;
+      *)
+        echo "Error: verify-creates: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature"
+  _roadmap_validate_phase_id "$phase_id" "verify-creates"
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_require "verify-creates" "$feature")
+
+  if ! jq -e --argjson pid "$phase_id" '.phases[] | select(.id == $pid)' "$roadmap_path" >/dev/null 2>&1; then
+    echo "Error: verify-creates: phase $phase_id not found in $roadmap_path" >&2
+    exit 1
+  fi
+
+  # --dir is the phase container's absolute path. It defaults to PROJECT_ROOT
+  # rather than erroring, so the only --dir failure is a path that is not a
+  # directory (or escapes the project).
+  if [ -z "$dir" ]; then
+    dir="$PROJECT_ROOT"
+  fi
+  if [ ! -d "$dir" ]; then
+    echo "Error: verify-creates: --dir is not a directory: $dir" >&2
+    exit 1
+  fi
+  dir=$(resolve_path "$dir")
+  validate_path_in_project "$dir"
+
+  # Identities come from the one existing definition (_cv_identity), never a
+  # second copy: the substring before the first "(", trimmed.
+  local creates_raw
+  creates_raw=$(jq -r --argjson pid "$phase_id" "$_CONTRACT_JQ_DEFS"'
+    .phases[] | select(.id == $pid) | (.creates // [])[] | _cv_identity
+  ' "$roadmap_path")
+
+  local result='[]'
+  if [ -n "$creates_raw" ]; then
+    local identity entry
+    while IFS= read -r identity; do
+      entry=$(_verify_creates_one "$dir" "$identity")
+      result=$(printf '%s' "$result" | jq -c --argjson e "$entry" '. + [$e]')
+    done <<< "$creates_raw"
+  fi
+
+  printf '%s' "$result" | jq '.'
 }
 
 cmd_validate_contracts() {
@@ -8505,6 +8900,34 @@ COMMANDS:
                               active}], activeCount, total, degradedReason}.
                               degradedReason explains any fall-back so the caller
                               can report it without re-deriving why.
+    verify-creates --feature <slug> --phase <id> [--dir <container-path>]
+                              Prove a phase's declared creates[] exist in code.
+                              Prints a JSON array, one object per creates[]
+                              entry: {identity, status, method, evidence,
+                              gitStatus}. status is verified|missing|error;
+                              method is "path" (matched a tracked path),
+                              "text" (matched tracked source) or null.
+                              --dir is the phase container's absolute path;
+                              it defaults to the project root.
+                              A query, never a gate — producing a verdict array
+                              exits 0, including one where every entry is
+                              missing. Non-zero is a real error only: unknown
+                              flag, absent/non-numeric --phase, absent or
+                              malformed roadmap.json, --dir not a directory.
+                              Four steps per identity: (1) tracked path via
+                              git ls-files, matching a directory as well as a
+                              file; (2) strip a leading GET/POST/PUT/PATCH/
+                              DELETE/HEAD/OPTIONS token so "POST /api/x" is
+                              searched as "/api/x"; (3) git grep -F over
+                              tracked source excluding docs and tests, bypassed
+                              when the identity is itself documentation;
+                              (4) drop hits that are only a TODO/FIXME/XXX/HACK
+                              comment. A missing entry's evidence names the
+                              rejected location and line, and states that git
+                              sees tracked files only. git exiting above 1 is
+                              status "error" carrying the code — never
+                              "missing": a tool failure is not an absent
+                              artifact.
     roadmap-init --feature <slug> [--file <path>] [--sync] [--brainstorm-path <path>]
                               Read a sanitized phases array (stdin or --file) and
                               atomically create/append to .aimi/tasks/<slug>/roadmap.json.
@@ -8750,6 +9173,7 @@ main() {
     roadmap-reconcile)     shift; cmd_roadmap_reconcile "$@" ;;
     roadmap-write-handoff) shift; cmd_roadmap_write_handoff "$@" ;;
     validate-contracts)    shift; cmd_validate_contracts "$@" ;;
+    verify-creates)        shift; cmd_verify_creates "$@" ;;
     phase-overlap)         shift; cmd_phase_overlap "$@" ;;
     roadmap-sweep)         shift; cmd_roadmap_sweep "$@" ;;
     estimate-payload)      shift; cmd_estimate_payload "$@" ;;

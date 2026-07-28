@@ -2636,36 +2636,90 @@ For every entry the phase declared in `roadmap.json`'s `creates[]`, confirm the 
 
 **Split-mode timing (`PHASE_SPLIT_MODE=true`):** this check always runs against `$PHASE_CONTAINER_PATH`'s tracked files, unchanged — but by the time this section is reached in split mode, Phase-Mode Paired Split's Merge Split Branches Into the Phase Branch step has already landed **all N** of this phase's active split branches onto `$PHASE_BRANCH` in a single `merge-all` call, so `$PHASE_CONTAINER_PATH`'s checkout already reflects every split's combined work. This check therefore verifies the merged phase branch state as a natural consequence of running after that merge — never any one split branch in isolation — with no special-casing needed in the procedure below, and no dependence on how many splits there were.
 
-> **Cross-story flag for the auditor:** this story's brief describes creates verification as invoking "the outline:03 contract-validation CLI surface... in its phase-closure mode" (e.g. `validate-contracts <phase-id> --root <path>`) as an illustrative example. The landed `validate-contracts` (outline 03) has no `--root` flag or code-existence mode, and its own notes scope it exclusively to needs-vs-creates delivery resolution ("wiring validate-contracts and roadmap-sweep into plan.md and execute.md is owned by outline 08 and outline 11" — this story). Extending `validate-contracts`'s jq-only, roadmap.json-only logic to also grep real source files would be new scope outline 03 never claimed. This section therefore implements creates verification as its own orchestrator-side procedure below — the same pattern Console Error Attribution (above) already uses for judgment-requiring checks that need no new CLI call. Reconcile if a future story wants to fold this into `validate-contracts` instead.
+> **Cross-story flag for the auditor:** this story's brief describes creates verification as invoking "the outline:03 contract-validation CLI surface... in its phase-closure mode" (e.g. `validate-contracts <phase-id> --root <path>`) as an illustrative example. The landed `validate-contracts` (outline 03) has no `--root` flag or code-existence mode, and its own notes scope it exclusively to needs-vs-creates delivery resolution ("wiring validate-contracts and roadmap-sweep into plan.md and execute.md is owned by outline 08 and outline 11" — this story). Extending `validate-contracts`'s jq-only, roadmap.json-only logic to also grep real source files would be new scope outline 03 never claimed. Creates verification therefore ships as **its own CLI verb, `verify-creates`** — not as an extension of `validate-contracts`, and no longer as executable prose here. It was prose until this section was rewritten: five hand-written steps built on `[ -f ]` and a bare `git grep -l -F`, which no Bash suite could reach and which was wrong in five of nine measured scenarios (a docs-only mention, a `TODO` comment and a test-file mention each closed a phase; a directory identity could never verify, because `[ -f ]` is false on a directory; and a project that committed its own `.aimi/` found the identity inside the very `roadmap.json` that declared it). Reconcile if a future story wants to fold `verify-creates` into `validate-contracts` instead.
 
 #### Inputs
 
-- `CREATES_RAW` — one line per `creates[]` entry:
-  ```bash
-  CREATES_RAW=$(printf '%s' "$PHASE_JSON" | jq -r '(.creates // [])[]')
-  ```
-  Each line is a `"<identity> (<description>)"` string (see the Creates/Needs Contracts format in `${CLAUDE_PLUGIN_ROOT}/commands/references/scope-contexts.md`).
-- `PHASE_CONTAINER_PATH` — from Step 1.7, absolute, never CWD-derived.
+- `FEATURE` and `PHASE_ID` — the claimed phase. The verb reads that phase's `creates[]` out of `roadmap.json` itself, applying the one existing identity definition (`_cv_identity`: the substring before the first `(`, trimmed), so no `creates` array is extracted here and no second copy of that rule exists in this file.
+- `PHASE_CONTAINER_PATH` — from Step 1.7, absolute, never CWD-derived. Passed as `--dir`; it is the checkout whose **tracked** files are searched.
 
 #### Procedure
 
-For each line of `CREATES_RAW`:
+Exactly one call. `verify-creates` (`cmd_verify_creates` in `aimi-cli.sh`) runs four deterministic steps per `creates[]` entry — a tracked-path match via `git ls-files`, which matches a **directory** as well as a file; leading-HTTP-method extraction, so `POST /api/notifications` is searched as `/api/notifications`, which is what route code actually contains; a `git grep -n -I -F` over tracked source that excludes documentation, tests and `.aimi/`; and a filter that drops hits which are only a `TODO`/`FIXME`/`XXX`/`HACK` comment. Identity kinds are not dispatched on: every identity runs the same four steps.
 
-1. **Compute identity**: the substring before the first `(`, trimmed of surrounding whitespace (mirrors `_cv_identity` in aimi-cli.sh). Empty identity → missing, reason `"malformed creates entry"`.
-2. **Reject unsafe identities before touching the filesystem**: if identity contains a `..` path segment or starts with `/`, do not resolve it against `PHASE_CONTAINER_PATH` — record it as missing with reason `"unsafe creates identity"` and move on. Mirrors the escape-prevention posture `validate_path_in_project` already enforces inside aimi-cli.sh.
-3. **Direct file check** (covers the `creates` "file" identity kind — a relative path):
-   ```bash
-   [ -f "$PHASE_CONTAINER_PATH/$identity" ]
-   ```
-   Success → verified, `location = identity`.
-4. **Tracked-source search** (covers `creates` "endpoint"/"table"/"service" identity kinds, and files whose identity string differs from their literal path) — only when step 3 did not verify:
-   ```bash
-   MATCH=$(git -C "$PHASE_CONTAINER_PATH" grep -l -F -- "$identity" 2>/dev/null | head -1)
-   ```
-   Non-empty `MATCH` → verified, `location = $MATCH`. `-F` is fixed-string (never regex); `--` stops identity from ever being parsed as a flag even if it starts with `-`.
-5. Neither check succeeds → **missing**, recorded as `{identity, description, entry}`.
+It is a **query, not a gate** — any verdict array exits `0`, including one where every entry is `missing` — so branch on the JSON below, never on a `missing` verdict having "failed". A non-zero exit means the verb could not run at all (unknown flag, absent or malformed `roadmap.json`, a `--dir` that is not a directory) and its stderr says which.
 
-Accumulate two lists: `VERIFIED_ARTIFACTS` (`"<identity> — <location>"` strings, in `creates[]` order) and `MISSING_CREATES` (`{identity, description}` objects).
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+CREATES_REPORT=$($AIMI_CLI verify-creates --feature "$FEATURE" --phase "$PHASE_ID" --dir "$PHASE_CONTAINER_PATH")
+CREATES_EXIT=$?
+if [ "$CREATES_EXIT" -ne 0 ]; then CREATES_REPORT='[]'; fi
+VERIFIED_ARTIFACTS=$(printf '%s' "$CREATES_REPORT" | jq -r '.[] | select(.status == "verified") | "\(.identity) — \(.evidence)"')
+MISSING_CREATES=$(printf '%s' "$CREATES_REPORT" | jq -r '.[] | select(.status == "missing") | "\(.identity) — \(.evidence)"')
+ERROR_CREATES=$(printf '%s' "$CREATES_REPORT" | jq -r '.[] | select(.status == "error") | "\(.identity) — \(.evidence) [git exit \(.gitStatus)]"')
+MISSING_COUNT=$(printf '%s' "$CREATES_REPORT" | jq '[.[] | select(.status == "missing")] | length')
+ERROR_COUNT=$(printf '%s' "$CREATES_REPORT" | jq '[.[] | select(.status == "error")] | length')
+printf 'verify-creates exit=%s missing=%s error=%s\n' "$CREATES_EXIT" "$MISSING_COUNT" "$ERROR_COUNT"
+printf -- '--- verified ---\n%s\n--- missing ---\n%s\n--- tooling errors ---\n%s\n' "$VERIFIED_ARTIFACTS" "$MISSING_CREATES" "$ERROR_CREATES"
+```
+
+Every list is derived from that one result with a `jq` select on `.status`, inside the same block that assigns it — jq is the loop, deliberately instead of a shell `while` that accumulates a variable read after the loop has closed (`test-command-blocks.sh` check 3 catches exactly that shape). Each verdict object is `{identity, status, method, evidence, gitStatus}`: `status` is `verified` | `missing` | `error`, `method` is `"path"` | `"text"` | `null`, and `evidence` names the tracked path or `file:line` that decided it — or, on a `missing`, what was found and rejected.
+
+`VERIFIED_ARTIFACTS` keeps its line shape `"<identity> — <location>"`, identity verbatim and first, one line per verified entry in `creates[]` order, with the verb's `evidence` string as the location (`tracked path: db/migrations`, `tracked source: src/routes/notifications.ts:14`). Identity-first is load-bearing, not cosmetic: this list becomes handoff.md's `## Artifacts Created`, which `_cv_handoff_lists_artifact` substring-matches with `grep -qF` to resolve a downstream phase's `needs`.
+
+#### Which branch to take
+
+`status: "error"` is **git failing**, not an artifact failing to exist — and a non-zero `CREATES_EXIT` is the same class one level up: the verb never ran. Both decide the branch **before** `MISSING_COUNT` does:
+
+- `CREATES_EXIT` non-zero **or** `ERROR_COUNT > 0` → **Verification tooling failed** below. No status transition.
+- otherwise `MISSING_COUNT > 0` → **On any missing entry** below. `verification_failed`.
+- otherwise → **Write Handoff**.
+
+Error entries are already absent from `MISSING_CREATES` and from `MISSING_COUNT` — both select on `.status == "missing"` — so a tool failure can never be counted or reported as an undelivered artifact.
+
+#### Verification tooling failed
+
+The phase's status is left exactly where it already was (`in_progress`) — do **not** call `roadmap-set-status`. Release the claim only (see Release the Claim on Abort), the same shape the handoff-write-failure path below uses, because `in_progress` is re-claimable once unclaimed:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+```
+
+Transitioning to `verification_failed` here would tell the user their phase failed to deliver when the tool is what failed — and would block next-phase planning on evidence that was never gathered.
+
+Report:
+```
+## Phase [PHASE_ID] Creates Verification Could Not Run
+
+Verification tooling failed: git broke. This is NOT a finding that the phase
+failed to deliver — nothing was proven either way.
+
+[if CREATES_EXIT != 0:]
+verify-creates itself exited [CREATES_EXIT] and produced no verdicts. Its stderr
+above names the cause (unknown flag, absent or malformed roadmap.json, or a
+--dir that is not a directory).
+
+[if ERROR_COUNT > 0:]
+[ERROR_COUNT] creates entr(y|ies) could not be checked because git exited above 1:
+
+[for each line of ERROR_CREATES:]
+  - [line]
+
+Phase status is unchanged (in_progress) and the claim is released. Nothing was
+marked verification_failed, because a broken tool is not a missing artifact.
+Fix git in [PHASE_CONTAINER_PATH], then re-run /aimi:execute — creates
+verification re-runs from scratch on the next pass.
+
+[if MISSING_COUNT > 0:]
+[MISSING_COUNT] further entr(y|ies) came back missing on this same run. They are
+reported as unconfirmed rather than failed, because a run in which git broke is
+not a run whose other verdicts can be trusted, and they are re-checked next pass.
+```
+
+Do **not** write `handoff.md`, do **not** offer a PR, do **not** run the Next Phase step below. Skip directly to Step 5.
 
 #### On any missing entry
 
@@ -2678,14 +2732,25 @@ $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
 
 Release the claim (see Release the Claim on Abort) right after the status transition above — `verification_failed` is one of the statuses `roadmap-claim`'s auto-mode branch treats as re-claimable once unclaimed, so releasing here is what lets "re-run `/aimi:execute` to re-verify" below actually work on the next attempt, self-session or otherwise.
 
-Report:
+Report — print each missing line **with the evidence `verify-creates` returned for it**, verbatim. That evidence is the difference between "this name appears nowhere" and "this name appears only in prose", and the user cannot tell those apart from a bare "not found under [PHASE_CONTAINER_PATH]":
 ```
 ## Phase [PHASE_ID] Verification Failed
 
-[len(MISSING_CREATES)] declared creates entr(y|ies) could not be confirmed in the phase branch:
+[MISSING_COUNT] declared creates entr(y|ies) could not be confirmed in the phase branch:
 
-[for each entry in MISSING_CREATES:]
-  - [entry.identity] ([entry.description]) — not found under [PHASE_CONTAINER_PATH]
+[for each line of MISSING_CREATES:]
+  - [line]
+
+Each line carries what was searched and, when something was found, the file and
+line that was found and rejected. "Found and rejected ... documentation or test
+path" means the name exists only in prose or in a test — a mention of the work,
+not the work. "Found and rejected ... TODO/FIXME marker comment" means the code
+says the work is still owed.
+
+git ls-files and git grep see tracked (committed) files only, so work that is
+written but committed nowhere reads as missing here. If that is what happened,
+commit it on branch [PHASE_BRANCH] and re-run to re-verify — nothing else is
+needed.
 
 Phase status set to verification_failed. Fix the missing artifact(s) on branch
 [PHASE_BRANCH], then re-run /aimi:execute to re-verify — creates verification
@@ -2698,7 +2763,7 @@ Do **not** write `handoff.md`, do **not** offer a PR, do **not** run the Next Ph
 
 ### Write Handoff
 
-Only reached when every `creates` entry verified. Build the five-section payload:
+Only reached when `verify-creates` exited 0 and returned neither a `missing` nor an `error` entry — i.e. every `creates` entry verified. Build the five-section payload:
 
 - **Decisions Made** — one bullet per notable implementation decision surfaced by this phase's stories (their `implementation.approach` text, gate resolutions, or explicit deviations the story-executor agents reported). Empty array if nothing stood out.
 - **Artifacts Created** — exactly `VERIFIED_ARTIFACTS` from Creates Verification above, unmodified. This is the section `validate-contracts`'s `_cv_handoff_lists_artifact` searches when a downstream phase's `needs` references this phase — every identity must appear verbatim.
