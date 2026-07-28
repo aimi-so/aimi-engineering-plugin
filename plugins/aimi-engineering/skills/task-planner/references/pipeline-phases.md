@@ -47,7 +47,7 @@ Only runs when a brainstorm was loaded above — a `phases:` frontmatter key can
 Apply the base rules in `commands/references/sanitization.md` (strip code fences/backtick content, HTML/XML tags, instruction-override patterns) plus the newline/`$(`-stripping extension used elsewhere in this pipeline, to every free-text field, before it is used in any directory-segment derivation, CLI argument, or downstream prompt:
 
 - Replace newlines/carriage returns with spaces; strip `$(` sequences and backtick characters.
-- Truncate: `name` 200 chars, `goal` 2000 chars, each `successCriteria`/`creates`/`needs`/`areas` entry 2000 chars (matches the server-side `_ROADMAP_SANITIZE_JQ` caps `aimi-cli.sh` re-applies).
+- Truncate: `name` 200 chars, `goal` 2000 chars, each `successCriteria` entry 2000 chars, each `creates`/`needs`/`areas` entry 500 chars (matches the server-side `_ROADMAP_SANITIZE_JQ` caps `aimi-cli.sh` re-applies: 2000 for `successCriteria`, 500 for the three contract lists — they do not share one cap).
 - `successCriteria`, `dependsOn`, `creates`, `needs`, `areas` default to `[]` when absent.
 - `id` and each `dependsOn` entry are numbers — validate `id` is present and numeric; drop (with a warning) any entry that fails.
 - **Discard the frontmatter's own `slug` value entirely.** It is never trusted — the next step derives a fresh one from the sanitized `name`.

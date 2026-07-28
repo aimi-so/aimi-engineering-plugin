@@ -328,7 +328,7 @@ For each remaining phase entry, apply the base rules in `commands/references/san
 
 - Replace newlines/carriage returns with spaces.
 - Strip `$(` sequences and backtick characters.
-- Truncate: `name` 200 chars, `goal` 2000 chars, each `successCriteria`/`creates`/`needs`/`areas` entry 2000 chars (these caps match the server-side `_ROADMAP_SANITIZE_JQ` truncation `aimi-cli.sh` re-applies, so nothing added here is silently re-truncated a second time downstream).
+- Truncate: `name` 200 chars, `goal` 2000 chars, each `successCriteria` entry 2000 chars, each `creates`/`needs`/`areas` entry 500 chars (each cap matches the server-side `_ROADMAP_SANITIZE_JQ` truncation `aimi-cli.sh` re-applies — 2000 for `successCriteria`, 500 for `creates`/`needs`/`areas` — so nothing added here is silently re-truncated a second time downstream. The three contract lists do **not** share `successCriteria`'s cap; using 2000 for them clips looser than the CLI does and loses the tail of a long entry at the CLI boundary instead of here).
 - Each of `successCriteria`, `dependsOn`, `creates`, `needs`, `areas` defaults to an empty list `[]` when absent from the entry.
 - `id` and each `dependsOn` entry are numbers, not text — do not run them through string sanitization. Instead validate `id` is present and numeric; drop (with a warning `phase <n>: dropped — id missing or non-numeric`) any entry that fails.
 - **Discard the frontmatter's own `slug` value entirely — never trust it.** The next step derives a fresh one from the sanitized `name`.
