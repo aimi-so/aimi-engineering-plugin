@@ -12882,6 +12882,192 @@ test_roadmap_init_rejects_invalid_dir_slug() {
   rm -rf ".aimi/tasks/$feature"
 }
 
+# Assert one creates/needs payload is rejected in creation mode and leaves no
+# roadmap.json behind. $1 = feature slug, $2 = phases JSON, $3 = label,
+# $4 = substring the error must contain.
+_assert_roadmap_identity_rejected() {
+  local feature="$1" payload="$2" label="$3" reason="$4"
+  rm -rf ".aimi/tasks/$feature"
+
+  local output exit_code
+  output=$(printf '%s' "$payload" | "$CLI" roadmap-init --feature "$feature" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-init identity guard: $label exits 1"
+  assert_contains "is not a usable artifact identity" "$output" "roadmap-init identity guard: $label names the failure"
+  assert_contains "$reason" "$output" "roadmap-init identity guard: $label reports the reason"
+
+  if [ -f ".aimi/tasks/$feature/roadmap.json" ]; then
+    echo -e "${RED}✗${NC} roadmap-init identity guard: $label must not write roadmap.json"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} roadmap-init identity guard: $label wrote no roadmap.json"
+    ((TESTS_PASSED++))
+  fi
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_init_rejects_malformed_identity() {
+  echo ""
+  echo "=== roadmap-init: rejects indefensible creates/needs identities ==="
+
+  local feature="rm-identity"
+
+  _assert_roadmap_identity_rejected "$feature" \
+    "$(jq -n '[{id: 1, name: "Bad", goal: "g", slug: "bad", creates: ["/etc/passwd (absolute path)"], needs: []}]')" \
+    "creates leading slash" 'begins with "/"'
+
+  _assert_roadmap_identity_rejected "$feature" \
+    "$(jq -n '[{id: 1, name: "Bad", goal: "g", slug: "bad", creates: ["../outside/thing.ts (escapes the repo)"], needs: []}]')" \
+    "creates .. segment" 'contains a ".." path segment'
+
+  _assert_roadmap_identity_rejected "$feature" \
+    "$(jq -n '[{id: 1, name: "Bad", goal: "g", slug: "bad", creates: ["src/../../etc/passwd (traversal mid-path)"], needs: []}]')" \
+    "creates mid-path .. segment" 'contains a ".." path segment'
+
+  _assert_roadmap_identity_rejected "$feature" \
+    "$(jq -n '[{id: 1, name: "Bad", goal: "g", slug: "bad", creates: ["   (description only, no artifact name)"], needs: []}]')" \
+    "creates empty after identity" "empty once the description is stripped"
+
+  # Symmetry: the same predicate must fire on needs[]. _cv_creates_in_scope
+  # matches needs against creates by exact byte equality, so a rule on one list
+  # alone would let a roadmap hold two shapes and deadlock validate-contracts.
+  _assert_roadmap_identity_rejected "$feature" \
+    "$(jq -n '[{id: 1, name: "Bad", goal: "g", slug: "bad", creates: [], needs: ["/var/lib/thing (absolute path)"]}]')" \
+    "needs leading slash" 'begins with "/"'
+
+  _assert_roadmap_identity_rejected "$feature" \
+    "$(jq -n '[{id: 1, name: "Bad", goal: "g", slug: "bad", creates: [], needs: ["../x (traversal)"]}]')" \
+    "needs .. segment" 'contains a ".." path segment'
+
+  # The error must name the phase id and which list the entry came from.
+  rm -rf ".aimi/tasks/$feature"
+  local output exit_code
+  output=$(jq -n '[{id: 7, name: "Bad", goal: "g", slug: "bad", creates: [], needs: ["/abs (bad)"]}]' | "$CLI" roadmap-init --feature "$feature" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-init identity guard: message case exits 1"
+  assert_contains "phase 7: needs entry \"/abs (bad)\"" "$output" "roadmap-init identity guard: error names phase id, list and entry text"
+  rm -rf ".aimi/tasks/$feature"
+
+  # Weak-but-legal identities are NOT judged: research has not run at
+  # declaration time, so a bare table name or a bare directory must pass.
+  local ok_payload ok_exit
+  ok_payload=$(jq -n '[{id: 1, name: "Weak", goal: "g", slug: "weak", creates: ["notifications (stores per-user notification rows)", "db/migrations"], needs: ["services/foo..bar (dots that are not a path segment)"]}]')
+  rm -rf ".aimi/tasks/$feature"
+  printf '%s' "$ok_payload" | "$CLI" roadmap-init --feature "$feature" >/dev/null 2>&1 && ok_exit=0 || ok_exit=$?
+  assert_exit_code "0" "$ok_exit" "roadmap-init identity guard: weak-but-legal identities accepted (bare table, bare dir, foo..bar)"
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_init_sync_ignores_legacy_identities() {
+  echo ""
+  echo "=== roadmap-init --sync: legacy rejectable identities do not block a new phase ==="
+
+  local feature="rm-identity-sync"
+  rm -rf ".aimi/tasks/$feature"
+  mkdir -p ".aimi/tasks/$feature"
+
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+
+  # Pre-seed a roadmap whose EXISTING phase carries identities the new rule
+  # would reject. Written directly (roadmap-init would now refuse to create it),
+  # which is exactly the on-disk state a pre-guard run could have left behind.
+  cat > "$roadmap_file" <<'LEGACY_EOF'
+{
+  "roadmapVersion": "1.0",
+  "feature": "rm-identity-sync",
+  "createdAt": "2026-01-01T00:00:00Z",
+  "brainstormPath": null,
+  "phases": [
+    {
+      "id": 1,
+      "name": "Legacy",
+      "goal": "legacy goal",
+      "slug": "legacy",
+      "dir": "phase-1-legacy",
+      "status": "pending",
+      "dependsOn": [],
+      "branch": null,
+      "notes": null,
+      "successCriteria": [],
+      "creates": ["/etc/passwd (legacy absolute path)"],
+      "needs": ["../outside (legacy traversal)"],
+      "areas": [],
+      "claim": null
+    }
+  ]
+}
+LEGACY_EOF
+
+  local phase1_before
+  phase1_before=$(jq -c '.phases[] | select(.id == 1)' "$roadmap_file")
+
+  local output exit_code
+  output=$(jq -n '[{id: 2, name: "New", goal: "g", slug: "new", dependsOn: [1], creates: ["services/notifications.NotificationService (sends notifications)"], needs: []}]' \
+    | "$CLI" roadmap-init --feature "$feature" --sync 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-init identity sync: --sync over legacy bad identities exits 0"
+
+  local ids
+  ids=$(jq -c '[.phases[].id]' "$roadmap_file")
+  assert_eq "[1,2]" "$ids" "roadmap-init identity sync: new phase landed on disk beside the legacy one"
+
+  local phase1_after
+  phase1_after=$(jq -c '.phases[] | select(.id == 1)' "$roadmap_file")
+  assert_eq "$phase1_before" "$phase1_after" "roadmap-init identity sync: pre-existing phase byte-for-byte unchanged"
+
+  # The guard still applies to the phases --sync is actually writing.
+  output=$(jq -n '[{id: 3, name: "AlsoBad", goal: "g", slug: "also-bad", creates: ["/tmp/evil (absolute)"], needs: []}]' \
+    | "$CLI" roadmap-init --feature "$feature" --sync 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-init identity sync: malformed NEW phase still rejected under --sync"
+  assert_contains "phase 3" "$output" "roadmap-init identity sync: rejection names the new phase, not the legacy one"
+
+  ids=$(jq -c '[.phases[].id]' "$roadmap_file")
+  assert_eq "[1,2]" "$ids" "roadmap-init identity sync: rejected --sync left the roadmap untouched"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_init_accepts_documented_identity_kinds() {
+  echo ""
+  echo "=== roadmap-init: accepts every documented identity kind, all non-suspicious ==="
+
+  local feature="rm-identity-kinds"
+  rm -rf ".aimi/tasks/$feature"
+
+  # The four kinds from commands/references/scope-contexts.md (Endpoint, Table,
+  # Service, File). The Endpoint form contains a slash but does not BEGIN with
+  # one -- the leading-slash rule must anchor at position 0 of the identity.
+  local endpoint_entry="POST /api/notifications (creates a notification for a user)"
+  local table_entry="notifications (stores per-user notification rows)"
+  local service_entry="services/notifications.NotificationService (sends and lists notifications)"
+  local file_entry="components/NotificationBell.tsx (header bell icon with unread badge)"
+
+  local payload output exit_code
+  payload=$(jq -n --arg e "$endpoint_entry" --arg t "$table_entry" --arg s "$service_entry" --arg f "$file_entry" '[
+    {id: 1, name: "Kinds", goal: "g", slug: "kinds", dependsOn: [], creates: [$e, $t], needs: []},
+    {id: 2, name: "Kinds Two", goal: "g", slug: "kinds-two", dependsOn: [1], creates: [$s, $f], needs: [$e, $t]}
+  ]')
+  output=$(printf '%s' "$payload" | "$CLI" roadmap-init --feature "$feature" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-init identity kinds: all four documented kinds accepted"
+
+  local written
+  written=$(jq -c '[.phases[].creates[]] | sort' ".aimi/tasks/$feature/roadmap.json")
+  local expected
+  expected=$(jq -cn --arg e "$endpoint_entry" --arg t "$table_entry" --arg s "$service_entry" --arg f "$file_entry" '[$e, $t, $s, $f] | sort')
+  assert_eq "$expected" "$written" "roadmap-init identity kinds: entries written verbatim"
+
+  # Cross-check: anything roadmap-init accepts must also survive
+  # validate-contracts' _cv_suspicious, which is never demoted by agent mode.
+  # Reuse the CLI's own shared defs rather than a second copy.
+  eval "$(sed -n "/^_CONTRACT_JQ_DEFS='/,/^'\$/p" "$CLI")"
+
+  local entry verdict
+  for entry in "$endpoint_entry" "$table_entry" "$service_entry" "$file_entry"; do
+    verdict=$(jq -rn --arg e "$entry" "$_CONTRACT_JQ_DEFS"'if ($e | _cv_suspicious) then "suspicious" else "clean" end')
+    assert_eq "clean" "$verdict" "roadmap-init identity kinds: _cv_suspicious clean for \"$entry\""
+  done
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
 test_roadmap_init_sanitizes_fields() {
   echo ""
   echo "=== roadmap-init: sanitizes free-text fields before write ==="
@@ -15038,6 +15224,9 @@ main() {
   test_roadmap_init_get_roundtrip
   test_roadmap_init_additive_sync
   test_roadmap_init_rejects_invalid_dir_slug
+  test_roadmap_init_rejects_malformed_identity
+  test_roadmap_init_sync_ignores_legacy_identities
+  test_roadmap_init_accepts_documented_identity_kinds
   test_roadmap_init_sanitizes_fields
   test_roadmap_decimal_sort
   test_roadmap_claim_dependency_not_done
