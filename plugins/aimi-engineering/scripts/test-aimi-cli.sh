@@ -6002,6 +6002,142 @@ test_setup_branch() {
 }
 
 # ============================================================================
+# Detect Default Branch Fixture Helpers
+# ============================================================================
+
+# Creates an isolated git repo (own temp dir) with a single commit, an origin
+# remote pointing at a nonexistent local path, and refs/remotes/origin/HEAD
+# manually set via update-ref + symbolic-ref -- simulating a real clone whose
+# remote later became unreachable. `git remote show origin` against a
+# nonexistent local path exits 128 in ~0.004s (no network wait), so this
+# fixture is fast and offline-safe. Exercises _resolve_default_branch's
+# offline symbolic-ref fallback (aimi-cli.sh:1586).
+setup_default_branch_offline_fixture() {
+  DEFAULT_BRANCH_FIXTURE_DIR=$(mktemp -d)
+
+  pushd "$DEFAULT_BRANCH_FIXTURE_DIR" >/dev/null
+  git init >/dev/null 2>&1
+  git checkout -b main >/dev/null 2>&1
+  echo "init" > README.md
+  git add README.md
+  git commit -m "Initial commit" >/dev/null 2>&1
+
+  git remote add origin /nonexistent/path/that/does/not/exist
+  local sha
+  sha=$(git rev-parse HEAD)
+  git update-ref refs/remotes/origin/main "$sha"
+  git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+
+  # Create .aimi/ directory so find_aimi_root succeeds
+  mkdir -p .aimi/tasks
+
+  popd >/dev/null
+}
+
+# Creates an isolated git repo (own temp dir) with a single commit and NO
+# origin remote at all (and thus no refs/remotes/origin/HEAD) -- exercises
+# _resolve_default_branch's error path (aimi-cli.sh:1589-1592).
+setup_default_branch_no_origin_fixture() {
+  DEFAULT_BRANCH_FIXTURE_DIR=$(mktemp -d)
+
+  pushd "$DEFAULT_BRANCH_FIXTURE_DIR" >/dev/null
+  git init >/dev/null 2>&1
+  git checkout -b main >/dev/null 2>&1
+  echo "init" > README.md
+  git add README.md
+  git commit -m "Initial commit" >/dev/null 2>&1
+
+  # Create .aimi/ directory so find_aimi_root succeeds
+  mkdir -p .aimi/tasks
+
+  popd >/dev/null
+}
+
+# Removes the temp directory created by either default-branch fixture helper
+teardown_default_branch_fixture() {
+  rm -rf "$DEFAULT_BRANCH_FIXTURE_DIR"
+  unset DEFAULT_BRANCH_FIXTURE_DIR
+}
+
+# ============================================================================
+# Detect Default Branch Tests
+# ============================================================================
+
+test_detect_default_branch() {
+  echo ""
+  echo "=== Testing detect-default-branch command ==="
+
+  local stdout stderr_file stderr_output exit_code
+
+  # --- Offline fallback: origin unreachable, refs/remotes/origin/HEAD
+  #     present -- must reach the symbolic-ref fallback at aimi-cli.sh:1586
+  #     instead of dying under set -euo pipefail at line 1582.
+  #     Invoked from inside the fixture (like setup_parent_branch_fixture's
+  #     callers) so find_aimi_root's cwd-based auto-discovery lands on the
+  #     fixture's own isolated .aimi/ instead of the enclosing real repo's --
+  #     otherwise the cached default-branch state used by _resolve_default_
+  #     branch's cache read (aimi-cli.sh:1573) would be the enclosing repo's
+  #     shared cache, not this fixture's, defeating isolation between test
+  #     cases. --project is still passed to match the documented repro
+  #     command shape; it is a same-directory no-op here. ---
+  setup_default_branch_offline_fixture
+  pushd "$DEFAULT_BRANCH_FIXTURE_DIR" >/dev/null
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" detect-default-branch --project "$DEFAULT_BRANCH_FIXTURE_DIR" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_output=$(cat "$stderr_file")
+  assert_exit_code "0" "$exit_code" "detect-default-branch: offline fallback -- exit code"
+  assert_eq "main" "$stdout" "detect-default-branch: offline fallback -- stdout is main"
+  assert_eq "" "$stderr_output" "detect-default-branch: offline fallback -- stderr empty"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_default_branch_fixture
+
+  # --- No-origin error path: no remote, no refs/remotes/origin/HEAD -- both
+  #     pipelines return empty, must reach the documented error at
+  #     aimi-cli.sh:1589-1592 (exit 1) instead of dying under pipefail.
+  #     Invoked from inside this (separate, freshly-created) fixture for the
+  #     same cache-isolation reason as above. ---
+  setup_default_branch_no_origin_fixture
+  pushd "$DEFAULT_BRANCH_FIXTURE_DIR" >/dev/null
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" detect-default-branch --project "$DEFAULT_BRANCH_FIXTURE_DIR" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_output=$(cat "$stderr_file")
+  assert_exit_code "1" "$exit_code" "detect-default-branch: no-origin error path -- exit code"
+  assert_stderr_contains "Error: Could not detect default branch" "$stderr_output" "detect-default-branch: no-origin error path -- stderr message"
+  assert_eq "" "$stdout" "detect-default-branch: no-origin error path -- stdout empty"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_default_branch_fixture
+
+  # --- detect-parent-branch inherits the fix: an orphan branch (zero
+  #     decoration candidates anywhere in its --first-parent history) forces
+  #     cmd_detect_parent_branch (aimi-cli.sh:1815) to fall back through
+  #     _resolve_default_branch against the offline-fallback fixture. Must
+  #     complete (base = default branch, source = default-branch) instead of
+  #     aborting with exit 128 the way it does today. Stays pushd'd into the
+  #     fixture for the CLI invocation for the same isolation reason. ---
+  setup_default_branch_offline_fixture
+  pushd "$DEFAULT_BRANCH_FIXTURE_DIR" >/dev/null
+  git checkout --orphan feat/no-decoration >/dev/null 2>&1
+  echo "o1" > o1.txt && git add o1.txt && git commit -m "orphan commit" >/dev/null 2>&1
+
+  local base_out source_out
+  stdout=$("$CLI" detect-parent-branch feat/no-decoration) && exit_code=0 || exit_code=$?
+  base_out=$(echo "$stdout" | jq -r '.base')
+  source_out=$(echo "$stdout" | jq -r '.source')
+  assert_exit_code "0" "$exit_code" "detect-parent-branch: offline fallback inherited -- exit code (no abort)"
+  assert_eq "main" "$base_out" "detect-parent-branch: offline fallback inherited -- base falls back to default branch"
+  assert_eq "default-branch" "$source_out" "detect-parent-branch: offline fallback inherited -- source is default-branch"
+
+  popd >/dev/null
+  teardown_default_branch_fixture
+}
+
+# ============================================================================
 # Detect Parent Branch Fixture Helper
 # ============================================================================
 
@@ -15580,6 +15716,11 @@ main() {
   echo ""
   echo "--- Setup Branch Tests ---"
   test_setup_branch
+
+  # Detect-default-branch tests — uses own git fixture (independent of TEST_DIR)
+  echo ""
+  echo "--- Detect Default Branch Tests ---"
+  test_detect_default_branch
 
   # Detect-parent-branch tests — uses own git fixture (independent of TEST_DIR)
   echo ""

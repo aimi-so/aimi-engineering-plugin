@@ -1579,11 +1579,11 @@ _resolve_default_branch() {
   local branch=""
 
   # Primary: parse HEAD branch from remote
-  branch=$(git remote show origin 2>/dev/null | sed -n 's/.*HEAD branch: //p')
+  branch=$(git remote show origin 2>/dev/null | sed -n 's/.*HEAD branch: //p') || branch=""
 
   # Fallback: symbolic-ref (works offline)
   if [ -z "$branch" ]; then
-    branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||')
+    branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||') || branch=""
   fi
 
   if [ -z "$branch" ]; then
