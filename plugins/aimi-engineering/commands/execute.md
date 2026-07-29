@@ -3357,20 +3357,66 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 $AIMI_CLI roadmap-set-status --feature "$FEATURE" --phase "$PHASE_ID" --status completed
 ```
 
-Report: `"Phase [PHASE_ID] ([PHASE_SLUG]) completed. Claim released."`
+`roadmap-set-status` and `roadmap-write-handoff` (Write Handoff above) are otherwise unchanged by this story: each is exactly one call, each makes zero git calls, and each operates on `$AIMI_ROOT/.aimi/` regardless of single-repo or multi-repo layout. The claim, this phase's `status`, and `handoff.md` all stay singular for the phase — one status, one handoff file — no matter how many repositories participated. What multiplies per repository below is only the dev-server stop and the completion report's branch listing, never roadmap state.
 
-Stop this phase's own dev server, if one is still running, before the branch is offered for a PR below — an orphaned server would otherwise keep holding its port after the phase's container is later removed by some future step. This call is unconditional (never gated on `PHASE_SPLIT_MODE`): a single-file phase's server, if any, was started against `PHASE_BRANCH` by Phase Container Dev Server Bootstrap in Step 1.7; a split phase's own two split servers were already stopped earlier, immediately before their worktrees were removed (see Merge Split Branches Into the Phase Branch's Clean Up Split Worktrees and its merge-conflict path) — `PHASE_BRANCH` itself never had a server running against it in split mode, so this call is a harmless no-op there:
+Stop every participating repository's own phase dev server before the report below is composed — never just `$AIMI_ROOT`'s — so no server is left orphaned, still holding its port: phase mode's own container is never removed anywhere in this document (see Step 5's Container removal is completion-path-only note), so an un-stopped server here would stay alive indefinitely, not just until some later cleanup step. Derive this phase's participating project groups the same way **Create Phase Containers Per Project Group**'s Derive Participating Project Groups above already did when this phase's containers were created — `$PHASE_TASKS_PATH`'s own `userStories[].project` in single-file mode, or every member of `$PHASE_SPLIT_FILES`'s own `metadata.splitGroup.project` in split mode. Reading the **full** `$PHASE_SPLIT_FILES` member list, not just this run's active subset, mirrors Multi-File Pending Count's own reasoning above: a repository whose split member completed in an earlier session still had its own phase container and must still be named and stopped here, even though this run never touched it:
+
+```bash
+if [ "$PHASE_SPLIT_MODE" = true ]; then
+  PHASE_GROUP_RAW=""
+  while IFS= read -r split_file; do
+    [ -n "$split_file" ] || continue
+    GROUP_PROJECT=$(jq -r '.metadata.splitGroup.project // "."' "$split_file")
+    PHASE_GROUP_RAW="${PHASE_GROUP_RAW}${GROUP_PROJECT}"$'\n'
+  done <<< "$PHASE_SPLIT_FILES"
+else
+  PHASE_GROUP_RAW=$(jq -r '.userStories[] | (.project // ".")' "$PHASE_TASKS_PATH")
+fi
+PHASE_GROUP_PROJECTS=$(printf '%s\n' "$PHASE_GROUP_RAW" | grep -v '^$' | sort -u)
+[ -n "$PHASE_GROUP_PROJECTS" ] || PHASE_GROUP_PROJECTS="."
+PHASE_GROUP_COUNT=$(printf '%s\n' "$PHASE_GROUP_PROJECTS" | grep -c .)
+```
+
+**The pairing rule:** for each participating group, `serve stop` must run with the exact same CWD that same group's own `serve start "$PHASE_BRANCH"` used in **Phase Container Dev Server Bootstrap** (Step 1.7) — bootstrap CWD and stop CWD must match, per repository. The `DEFAULT` group (project `.`) uses `$AIMI_ROOT`; a named group uses `$AIMI_ROOT/[group]` — because `serve stop` resolves its `dev-server.json` key from CWD (see `_dev_server_key` in `worktree-manager.sh`), the identical "CWD must exactly match the CWD used for that branch's own `serve start` call" reasoning `container-execution.md`'s Bootstrap a Container Dev Server and Container Mode: Stop the Dev Server sections both state; a mismatched CWD here would silently miss the registered entry instead of stopping it. The call is issued unconditionally for every group, with no per-repo existence gate: `serve stop`'s documented contract (below) already exits 0 and reports "No dev server registered" when no server was ever started for that repository, so the loop needs no branching beyond iterating the group set:
 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+PHASE_REPORT_LINES=""
+while IFS= read -r GROUP_PROJECT; do
+  [ -n "$GROUP_PROJECT" ] || continue
+  if [ "$GROUP_PROJECT" = "." ]; then
+    GROUP_KEY="DEFAULT"
+    GROUP_ROOT="$AIMI_ROOT"
+    GROUP_LABEL="$AIMI_ROOT"
+  else
+    GROUP_KEY="$GROUP_PROJECT"
+    GROUP_ROOT="$AIMI_ROOT/$GROUP_PROJECT"
+    GROUP_LABEL="$GROUP_PROJECT"
+  fi
+  cd "$GROUP_ROOT"
+  $WORKTREE_MGR serve stop "$PHASE_BRANCH"
+  PHASE_REPORT_LINES="${PHASE_REPORT_LINES}${GROUP_LABEL}: ${PHASE_BRANCH}"$'\n'
+done <<< "$PHASE_GROUP_PROJECTS"
 cd "$AIMI_ROOT"
-$WORKTREE_MGR serve stop "$PHASE_BRANCH"
 ```
 
-CWD is `$AIMI_ROOT`, the same CWD Phase Container Dev Server Bootstrap used for its own `serve start "$PHASE_BRANCH"` in Step 1.7 — never `$PHASE_CONTAINER_PATH` — since `serve stop` resolves its dev-server.json key from CWD (see `_dev_server_key` in `worktree-manager.sh`); a mismatched CWD here would silently miss the registered entry instead of stopping it.
+`serve stop` kills the dev server's full process group and clears its state entry — identical to container-execution.md's Container Mode: Stop the Dev Server contract (invoked from Step 5). For a phase that ran **Phase-Mode Paired Split**, each participating repository's own split servers were already stopped by that repository's own **Clean Up Split Worktrees** step, immediately before its split worktree was removed — and that repository's own `$PHASE_BRANCH` ref never had a server started directly against it in split mode, since Phase Container Dev Server Bootstrap skips entirely when `PHASE_SPLIT_MODE=true` — so this loop's call is a harmless, correctly-idempotent no-op for every participating repository in split mode, the same reasoning that already held once, globally, for today's single-repo split case, now verified to hold independently per repository rather than just once. This only runs on the `completed` path reached here: every non-completion exit above it in Phase Completion (the pending-count guard, Creates Verification's `verification_failed` branch, and Write Handoff's failure branch) returns before this subsection, so a phase that ends on deadlock, a gate-blocked wave, or `verification_failed` never calls `serve stop` — its dev server(s) stay alive between waves and across a paused session, resumable via `serve status` on the next `/aimi:execute` run against the same phase, exactly like the flat container's own resumable contract.
 
-`serve stop` kills the dev server's full process group and clears its state entry; it exits 0 and reports "No dev server registered" when no server was ever started — identical to container-execution.md's Container Mode: Stop the Dev Server contract (invoked from Step 5). This only runs on the `completed` path reached here: every non-completion exit above it in Phase Completion (the pending-count guard, Creates Verification's `verification_failed` branch, and Write Handoff's failure branch) returns before this subsection, so a phase that ends on deadlock, a gate-blocked wave, or `verification_failed` never calls `serve stop` — its dev server stays alive between waves and across a paused session, resumable via `serve status` on the next `/aimi:execute` run against the same phase, exactly like the flat container's own resumable contract.
+This stop loop runs — and completes — before the completion report below is composed, and before **Offer a Pull Request** further down: a server must never outlive its container, and neither of those next two steps removes or touches `PHASE_CONTAINER_PATH` (phase mode's own container is never removed anywhere in this document — see Step 5's Container removal is completion-path-only note), so stopping first here keeps that invariant reading consistently top-to-bottom.
+
+Report:
+```
+Phase [PHASE_ID] ([PHASE_SLUG]) completed. Claim released.
+
+[if PHASE_GROUP_COUNT > 1:]
+[PHASE_GROUP_COUNT] repositories participated in this phase — open one pull request per repository, each from its own [PHASE_BRANCH]:
+
+[for each line of PHASE_REPORT_LINES:]
+  - [line]
+```
+
+With exactly one participating group — today's only supported case — `PHASE_GROUP_PROJECTS` resolves to exactly `.`, `PHASE_GROUP_COUNT` is `1`, the conditional block above never fires, and the report is exactly `Phase [PHASE_ID] ([PHASE_SLUG]) completed. Claim released.` — byte-for-byte identical to today's text — with the single `serve stop` call above run with CWD `$AIMI_ROOT`, identical to today's unconditional `cd "$AIMI_ROOT"`. When more than one group participates, each additional line names that repository (its project root for the `DEFAULT` group, its `project` value for a named group) and the one `$PHASE_BRANCH` name every group shares (see container-execution.md's Phase Container Paths Per Project Group: `EXEC_BRANCH[group_key]` is not a per-group map — it is the same `PHASE_BRANCH` scalar, reused by every group), so a human reading the report knows to open one pull request per repository.
 
 ### Offer a Pull Request
 
