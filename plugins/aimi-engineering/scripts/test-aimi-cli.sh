@@ -6217,6 +6217,87 @@ test_resolve_base_branch() {
 }
 
 # ============================================================================
+# Setup-Branch / Resolve-Base-Branch Agreement Tests
+# ============================================================================
+
+# Regression test for US-002: asserts that for the same repository state,
+# resolve-base-branch's reason and setup-branch's action agree per the
+# total mapping _resolve_branch_base's callers share: explicit-base ->
+# created-from-base, default-branch -> created-from-default, and
+# stacked-on-current -> created-from-current. resolve-base-branch performs
+# no git mutation, so calling it before setup-branch on the same fixture
+# instance observes the identical repository state both commands decide from.
+test_setup_branch_resolve_agreement() {
+  echo ""
+  echo "=== Testing setup-branch / resolve-base-branch agreement ==="
+
+  local stdout stderr_file reason action
+
+  # --- Agreement: current branch IS default -> default-branch / created-from-default ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout main >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/agree-default --default-branch main 2>"$stderr_file")
+  reason=$(echo "$stdout" | jq -r '.reason')
+  rm -f "$stderr_file"
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" setup-branch feat/agree-default --default-branch main 2>"$stderr_file")
+  action=$(echo "$stdout" | jq -r '.action')
+  rm -f "$stderr_file"
+
+  assert_eq "default-branch" "$reason" "agreement: current is default — resolve-base-branch reason"
+  assert_eq "created-from-default" "$action" "agreement: current is default — setup-branch action"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Agreement: explicit --base -> explicit-base / created-from-base ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout feat/unmerged-branch >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/agree-base --default-branch main --base main 2>"$stderr_file")
+  reason=$(echo "$stdout" | jq -r '.reason')
+  rm -f "$stderr_file"
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" setup-branch feat/agree-base --default-branch main --base main 2>"$stderr_file")
+  action=$(echo "$stdout" | jq -r '.action')
+  rm -f "$stderr_file"
+
+  assert_eq "explicit-base" "$reason" "agreement: explicit --base — resolve-base-branch reason"
+  assert_eq "created-from-base" "$action" "agreement: explicit --base — setup-branch action"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Agreement: unmerged current branch -> stacked-on-current / created-from-current ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout feat/unmerged-branch >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/agree-current --default-branch main 2>"$stderr_file")
+  reason=$(echo "$stdout" | jq -r '.reason')
+  rm -f "$stderr_file"
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" setup-branch feat/agree-current --default-branch main 2>"$stderr_file")
+  action=$(echo "$stdout" | jq -r '.action')
+  rm -f "$stderr_file"
+
+  assert_eq "stacked-on-current" "$reason" "agreement: unmerged current — resolve-base-branch reason"
+  assert_eq "created-from-current" "$action" "agreement: unmerged current — setup-branch action"
+
+  popd >/dev/null
+  teardown_git_fixture
+}
+
+# ============================================================================
 # Detect Parent Branch Fixture Helper
 # ============================================================================
 
@@ -15800,6 +15881,11 @@ main() {
   echo ""
   echo "--- Resolve Base Branch Tests ---"
   test_resolve_base_branch
+
+  # Setup-branch / resolve-base-branch agreement — uses own git fixture (independent of TEST_DIR)
+  echo ""
+  echo "--- Setup-Branch / Resolve-Base-Branch Agreement Tests ---"
+  test_setup_branch_resolve_agreement
 
   # Detect-parent-branch tests — uses own git fixture (independent of TEST_DIR)
   echo ""

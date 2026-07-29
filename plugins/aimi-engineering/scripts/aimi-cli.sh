@@ -3201,42 +3201,50 @@ cmd_setup_branch() {
     return 0
   fi
 
-  # Case --base override: Branch is new and caller provided an explicit base
+  # Case --base override: Branch is new and caller provided an explicit base.
+  # The existence check stays here rather than in the shared resolver so this
+  # hard failure keeps its exact stderr text and exit code regardless of how
+  # the resolver's own "explicit-base" resolution behaves.
   if [ -n "$base_override" ]; then
-    local resolved_base
-    if git ls-remote --heads origin "$base_override" 2>/dev/null | grep -q "$base_override"; then
-      resolved_base="origin/$base_override"
-    elif git branch --list "$base_override" | grep -q "$base_override"; then
-      resolved_base="$base_override"
-    else
+    if ! git ls-remote --heads origin "$base_override" 2>/dev/null | grep -q "$base_override" && \
+       ! git branch --list "$base_override" | grep -q "$base_override"; then
       echo "Error: Base branch does not exist: $base_override" >&2
       exit 1
     fi
-    git checkout -b "$branch_name" "$resolved_base" >/dev/null 2>&1
-    printf '{"branch":"%s","action":"created-from-base","base":"%s"}\n' "$branch_name" "$base_override"
-    return 0
   fi
 
-  # Case 4/5: Branch is new — decide base
-  # Detached HEAD is treated as 'not merged'
-  if [ -z "$current_branch" ]; then
-    # Detached HEAD — create from current HEAD
-    git checkout -b "$branch_name" >/dev/null 2>&1
-    printf '{"branch":"%s","action":"created-from-current"}\n' "$branch_name"
-    return 0
-  fi
+  # Case 4/5: Branch is new — delegate the base decision to the shared
+  # resolver (_resolve_branch_base) so this path can never drift from the
+  # container path's resolve-base-branch. The mapping from reason to action
+  # is total: explicit-base -> created-from-base, default-branch ->
+  # created-from-default, detached-head and stacked-on-current both ->
+  # created-from-current. target-exists is unreachable here — Case 1-3 above
+  # already short-circuited on an existing target before the resolver runs.
+  local resolution reason base
+  resolution=$(_resolve_branch_base "$branch_name" "$default_branch" "$base_override")
+  reason=$(echo "$resolution" | jq -r '.reason')
+  base=$(echo "$resolution" | jq -r '.base')
 
-  # Check if current branch IS the default branch OR is fully merged into default
-  if [ "$current_branch" = "$default_branch" ] || \
-     git branch --merged "origin/$default_branch" 2>/dev/null | grep -q "^[* ] *${current_branch}$"; then
-    git checkout -b "$branch_name" "origin/$default_branch" >/dev/null 2>&1
-    printf '{"branch":"%s","action":"created-from-default"}\n' "$branch_name"
-    return 0
-  fi
-
-  # Current branch has unmerged work — create from current HEAD (stacking intent)
-  git checkout -b "$branch_name" >/dev/null 2>&1
-  printf '{"branch":"%s","action":"created-from-current"}\n' "$branch_name"
+  case "$reason" in
+    explicit-base)
+      git checkout -b "$branch_name" "$base" >/dev/null 2>&1
+      printf '{"branch":"%s","action":"created-from-base","base":"%s"}\n' "$branch_name" "$base_override"
+      ;;
+    default-branch)
+      git checkout -b "$branch_name" "$base" >/dev/null 2>&1
+      printf '{"branch":"%s","action":"created-from-default"}\n' "$branch_name"
+      ;;
+    detached-head|stacked-on-current)
+      # Create from current HEAD (detached or carrying unmerged work) without
+      # an explicit ref, matching the pre-existing behavior exactly.
+      git checkout -b "$branch_name" >/dev/null 2>&1
+      printf '{"branch":"%s","action":"created-from-current"}\n' "$branch_name"
+      ;;
+    *)
+      echo "Error: Unexpected base-resolution reason: $reason" >&2
+      exit 1
+      ;;
+  esac
   return 0
 }
 
