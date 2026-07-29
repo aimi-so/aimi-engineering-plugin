@@ -76,7 +76,7 @@ $WORKTREE_MGR list
 $WORKTREE_MGR remove [worktree_name]
 ```
 
-This rule is unchanged, but does not apply in phase mode — see `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Mode: Worktree Naming and CWD, which supersedes `project_root` with `PHASE_CONTAINER_PATH` for the duration of a claimed phase's execution — nor does it apply, in the same way, to container mode (`PHASE_MODE=false`, `CONTAINER_MODE=true`; see Execution Mode Detection in Step 1), which supersedes `project_root` with `CONTAINER_PATHS[group_key]` for the duration of that project group's container-mode execution. See that same reference's Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH subsection for the contract that replaces this per-consumer branching.
+This rule is unchanged, but does not apply in phase mode — see `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Mode: Worktree Naming and CWD, which supersedes `project_root` with that claimed phase's own container and branch for the duration of its execution — one phase container and one phase branch per participating repository, never a single pair for the whole phase regardless of how many repositories it spans — nor does it apply, in the same way, to container mode (`PHASE_MODE=false`, `CONTAINER_MODE=true`; see Execution Mode Detection in Step 1), which supersedes `project_root` with `CONTAINER_PATHS[group_key]` for the duration of that project group's container-mode execution. See that same reference's Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH subsection for the contract that replaces this per-consumer branching.
 
 ### Container Paths Per Project Group (Container Mode)
 
@@ -2042,7 +2042,9 @@ Run the following sub-steps when any story has a non-null `project` field, or wh
    fi
    ```
 
-   **When `CONTAINER_MODE` is false** (`EXECUTION_MODE` inline or absent): set up the branch directly — unchanged for an inline-mode run. `CONTAINER_MODE` is forced false whenever `PHASE_MODE` is true (see Execution Mode Detection in Step 1), so a phase-mode run with a project-scoped story falls into this same branch today; unlike Main Repo Branch Setup above, this subsection has no `PHASE_MODE` skip condition of its own. Phase mode pairing with per-story `project` fields is not yet a validated combination — running `setup-branch` here would check out `[branchName]` directly onto that project's own working tree, the same operation the Main Working Tree Untouched Invariant forbids for a claimed phase. Treat this as a known gap, not as "unchanged," until phase mode grows its own per-project container handling:
+   **When `PHASE_MODE` is true:** skip this project's branch setup entirely and move on to the next unique project path (or past this whole numbered sub-step once every project path has been visited). `CONTAINER_MODE` is forced false whenever `PHASE_MODE` is true (see Execution Mode Detection in Step 1), so without this skip a phase-mode run with a project-scoped story would fall into the inline branch below and run `setup-branch` directly against that project's own working tree — the same operation the Main Working Tree Untouched Invariant forbids for a claimed phase. It needs none of that: Step 1.7's **Create Phase Containers Per Project Group** already created (or reused) this same project's own phase container, keyed by the identical `project_path`/`group_key`, before Step 2 ever runs. This mirrors Main Repo Branch Setup's own `PHASE_MODE` skip above, generalized to the per-project case.
+
+   **When `PHASE_MODE` is false and `CONTAINER_MODE` is false** (`EXECUTION_MODE` inline or absent): set up the branch directly — unchanged for an inline-mode run:
    ```bash
    if [ -n "$BASE_BRANCH" ]; then
      PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch "$BRANCH_NAME" --default-branch $PROJECT_DEFAULT --project [resolved_project_path] --base $BASE_BRANCH)
@@ -3420,23 +3422,63 @@ With exactly one participating group — today's only supported case — `PHASE_
 
 ### Offer a Pull Request
 
-Best-effort only — never reverts or changes the already-`completed` status on failure or refusal.
+Best-effort only — never reverts or changes the already-`completed` status on failure or refusal. Runs once per participating repository — the same project groups **Mark Phase Completed**'s report above already derived. Re-derived fresh in this block, since each Bash call is an isolated shell and nothing from that earlier block persists here:
 
 ```bash
-if command -v gh >/dev/null 2>&1; then
-  cd "$PHASE_CONTAINER_PATH"
-  git push -u origin "$PHASE_BRANCH"
-  gh pr create --base "$DEFAULT_BRANCH" --head "$PHASE_BRANCH" \
-    --title "Phase [PHASE_ID]: [PHASE_NAME]" \
-    --body "Completes phase [PHASE_ID] of [FEATURE]. See [PHASE_DIR]/handoff.md for details."
+if [ "$PHASE_SPLIT_MODE" = true ]; then
+  PHASE_GROUP_RAW=""
+  while IFS= read -r split_file; do
+    [ -n "$split_file" ] || continue
+    GROUP_PROJECT=$(jq -r '.metadata.splitGroup.project // "."' "$split_file")
+    PHASE_GROUP_RAW="${PHASE_GROUP_RAW}${GROUP_PROJECT}"$'\n'
+  done <<< "$PHASE_SPLIT_FILES"
 else
-  echo "gh not found — create the PR manually:"
-  echo "  git -C \"$PHASE_CONTAINER_PATH\" push -u origin $PHASE_BRANCH"
-  echo "  Then open a PR: $DEFAULT_BRANCH...$PHASE_BRANCH"
+  PHASE_GROUP_RAW=$(jq -r '.userStories[] | (.project // ".")' "$PHASE_TASKS_PATH")
 fi
+PHASE_GROUP_PROJECTS=$(printf '%s\n' "$PHASE_GROUP_RAW" | grep -v '^$' | sort -u)
+[ -n "$PHASE_GROUP_PROJECTS" ] || PHASE_GROUP_PROJECTS="."
 ```
 
-If `git push` or `gh pr create` fails (no permissions, offline, branch already has an open PR, etc.), report the failure verbatim and continue — do not retry, do not prompt interactively, and never revert the phase's `completed` status.
+For each group, resolve its own repository root, container, and default branch, then push and open a PR against that repository — never a value assumed to survive from Step 1.7 or from Mark Phase Completed above:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+while IFS= read -r GROUP_PROJECT; do
+  [ -n "$GROUP_PROJECT" ] || continue
+  if [ "$GROUP_PROJECT" = "." ]; then
+    GROUP_ROOT="$AIMI_ROOT"
+    GROUP_LABEL="$AIMI_ROOT"
+  else
+    GROUP_ROOT="$AIMI_ROOT/$GROUP_PROJECT"
+    GROUP_LABEL="$GROUP_PROJECT"
+  fi
+  GROUP_TOPLEVEL=$(git -C "$GROUP_ROOT" rev-parse --show-toplevel 2>/dev/null) || GROUP_TOPLEVEL=""
+  if [ -z "$GROUP_TOPLEVEL" ]; then
+    echo "Skipping PR for $GROUP_LABEL — not a git repository at $GROUP_ROOT."
+    continue
+  fi
+  GROUP_CONTAINER="$GROUP_TOPLEVEL/.worktrees/$PHASE_BRANCH"
+  GROUP_DEFAULT=$($AIMI_CLI detect-default-branch --project "$GROUP_TOPLEVEL") || GROUP_DEFAULT=""
+
+  if command -v gh >/dev/null 2>&1; then
+    cd "$GROUP_CONTAINER"
+    git push -u origin "$PHASE_BRANCH"
+    gh pr create --base "$GROUP_DEFAULT" --head "$PHASE_BRANCH" \
+      --title "Phase [PHASE_ID]: [PHASE_NAME]" \
+      --body "Completes phase [PHASE_ID] of [FEATURE]. See [PHASE_DIR]/handoff.md for details."
+  else
+    echo "gh not found — create the PR manually for $GROUP_LABEL:"
+    echo "  git -C \"$GROUP_CONTAINER\" push -u origin $PHASE_BRANCH"
+    echo "  Then open a PR: $GROUP_DEFAULT...$PHASE_BRANCH"
+  fi
+done <<< "$PHASE_GROUP_PROJECTS"
+cd "$AIMI_ROOT"
+```
+
+If `git push` or `gh pr create` fails for a given repository (no permissions, offline, branch already has an open PR, etc.), report that repository's failure verbatim and continue on to the next repository — do not retry, do not prompt interactively, and never revert the phase's `completed` status.
+
+With exactly one participating group — today's only previously-supported case — `PHASE_GROUP_PROJECTS` resolves to exactly `.`, `GROUP_TOPLEVEL` resolves to the same repository `$PHASE_CONTAINER_PATH` was built from, so `GROUP_CONTAINER` equals `$PHASE_CONTAINER_PATH` exactly, and `GROUP_DEFAULT` — detected fresh via the identical `--project`-scoped call Step 1.5's own `$DEFAULT_BRANCH` detection uses — equals `$DEFAULT_BRANCH`. The commands issued are therefore byte-identical to before. When more than one group participates, the loop runs once per repository, each against its own container, its own default branch, and its own pull request.
 
 ### Next Phase
 
