@@ -59,7 +59,6 @@ loop-scope	plan.md	PROJECT_PATH
 # Both are gone. That is what this list is for: a NEW name means a new one.
 unassigned	brainstorm.md	renderBundlePending
 unassigned	execute.md	ARTIFACTS_JSON
-unassigned	execute.md	BASE_BRANCH
 unassigned	execute.md	CONTRACTS_JSON
 unassigned	execute.md	DECISIONS_JSON
 unassigned	execute.md	DEFERRED_JSON

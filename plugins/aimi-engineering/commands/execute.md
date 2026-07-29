@@ -1,7 +1,7 @@
 ---
 name: aimi:execute
 description: Execute all pending stories autonomously with wave-based parallelism
-argument-hint: "[--phase <N>] [--container|--inline] [--push]"
+argument-hint: "[--phase <N>] [--base <branch>] [--container|--inline] [--push]"
 disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Bash(git:*), Bash(mkdir:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Bash(WORKTREE_MGR=*), Bash($WORKTREE_MGR:*), Task
 ---
@@ -27,6 +27,33 @@ If resolution fails, report error and STOP.
 ### Resolve Agent Models
 
 Read and follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS`. When resolution fails, treat every category as `"inherit"` and continue.
+
+### Parse --base Override
+
+Scan `$ARGUMENTS` for an explicit `--base <branch>` token (mirrors the `--phase <N>` extraction style used by Step 1.7's Parse --phase Override, and the `--base` extraction `/aimi:next` already uses):
+
+```bash
+case " $ARGUMENTS " in
+  *" --base "*)
+    BASE_BRANCH=$(echo "$ARGUMENTS" | sed -n 's/.*--base[[:space:]]\+\([^ ]*\).*/\1/p')
+    ;;
+  *)
+    BASE_BRANCH=""
+    ;;
+esac
+```
+
+If `$BASE_BRANCH` is non-empty, validate it before any other git, worktree, or CLI call that consumes it:
+
+```bash
+echo "$BASE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'
+```
+
+If validation fails, report `Invalid --base value: $BASE_BRANCH` and STOP.
+
+When `--base` was not passed, `$BASE_BRANCH` stays empty and every `resolve-base-branch`/`setup-branch` call below omits `--base`, falling back to that verb's own resolution order — identical to the behavior stories 03 and 04 already establish. When it was passed, this runs in Step 0 — before Step 0.9's split loop and Step 1.6's picker, both of which read `$BASE_BRANCH` — so the explicit value is already in scope for every call site that threads it, including the multi-repo split path that has no other opportunity to learn it before its own worktrees are created. An explicit `--base` set here also short-circuits Step 1.6's own gating and any per-repo picker Step 2 would otherwise run: `resolve-base-branch` reports `reason: "explicit-base"` and `promptNeeded: false` whenever `--base` is supplied, so no `AskUserQuestion` fires on top of a choice the user already made — see Step 1.6 below.
+
+`--base` is matched on its own literal token, independently of `--phase`'s (numeric-only) and `--container`/`--inline`/`--push`'s (bare-token) extractions above and below — passing several of these flags in one invocation is unaffected, exactly as `--container`/`--inline`/`--push` already coexist without either stripping the raw `$ARGUMENTS` string.
 
 ## Multi-Repo Handling
 
@@ -414,7 +441,11 @@ while IFS= read -r record; do
   SPLIT_ROOT=$(printf '%s' "$record" | jq -r '.root')
   SPLIT_BRANCH=$(printf '%s' "$record" | jq -r '.branch')
   SPLIT_DEFAULT=$(printf '%s' "$record" | jq -r '.default')
-  SPLIT_BASE_JSON=$($AIMI_CLI resolve-base-branch "$SPLIT_BRANCH" --project "$SPLIT_ROOT" --default-branch "$SPLIT_DEFAULT")
+  if [ -n "$BASE_BRANCH" ]; then
+    SPLIT_BASE_JSON=$($AIMI_CLI resolve-base-branch "$SPLIT_BRANCH" --project "$SPLIT_ROOT" --default-branch "$SPLIT_DEFAULT" --base "$BASE_BRANCH")
+  else
+    SPLIT_BASE_JSON=$($AIMI_CLI resolve-base-branch "$SPLIT_BRANCH" --project "$SPLIT_ROOT" --default-branch "$SPLIT_DEFAULT")
+  fi
   CONTAINER_BASE=$(printf '%s' "$SPLIT_BASE_JSON" | jq -r '.base')
   cd "$SPLIT_ROOT"
   if ! $WORKTREE_MGR create "$SPLIT_BRANCH" --from "$CONTAINER_BASE"; then
@@ -424,7 +455,7 @@ while IFS= read -r record; do
 done <<< "$SPLIT_PLAN"
 ```
 
-**When `SPLIT_EXECUTION_MODE` is `inline` or absent** (the fail-safe default — see `commands/references/execution-mode.md`), that loop is the whole pass: one worktree per active split file, each cut from its own repo's own `resolve-base-branch` resolution — its default branch, unless that repo's own current checkout carries unmerged work worth stacking on, exactly as Step 1.6's picker would decide for a single repo.
+**When `SPLIT_EXECUTION_MODE` is `inline` or absent** (the fail-safe default — see `commands/references/execution-mode.md`), that loop is the whole pass: one worktree per active split file, each cut from its own repo's own `resolve-base-branch` resolution — its default branch, unless that repo's own current checkout carries unmerged work worth stacking on, exactly as Step 1.6's picker would decide for a single repo. `BASE_BRANCH` is passed through as `--base` on every iteration when Step 0 parsed one, applying the same explicit choice uniformly across every active repo in the split rather than re-deriving it per member.
 
 **When `SPLIT_EXECUTION_MODE` is `container`,** the loop body is instead one delegation per record to **Create or Reuse a Container** (`${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md`), with `EXEC_ROOT` set to that record's `root`, `EXEC_BRANCH` to its `branch`, and `CONTAINER_BASE` as computed above — giving each member its own independently checkout-conflict-checked container rather than nesting one inside another, mirroring the phase-mode split's Create Split Worktrees. That reference's body is the same `cd "$EXEC_ROOT"` + `$WORKTREE_MGR create "$EXEC_BRANCH" --from "$CONTAINER_BASE"` pair the loop already runs, so the shape above is unchanged; what the delegation adds is the single source of truth for the reuse/idempotency and error contract. Handle its exit code exactly as Step 2's Per-Project Branch Setup does — no pre-flight checkout check is needed, since `$WORKTREE_MGR create` is branch-aware and its stderr already names the worktree holding the branch. Report that stderr verbatim and STOP without attempting remediation.
 
@@ -748,7 +779,9 @@ Before creating the task branch, when the current branch has unmerged work relat
 
 This step resolves the base for AIMI_ROOT itself. In a multi-repo layout (`AIMI_ROOT_IS_GIT_REPO=false`) AIMI_ROOT is not a git repository, so the four gating conditions below have nothing to evaluate — `CURRENT_BRANCH` and `DEFAULT_BRANCH` both resolve empty, condition 3 (`CURRENT_BRANCH` != `DEFAULT_BRANCH`) is trivially false, and the step falls through to **When Prompt Is Not Needed** below without a dedicated early return. Each project group resolves its own base independently in Step 2's Per-Project Branch Setup instead — see Multi-Repo Handling above.
 
-`BASE_BRANCH` starts unset. It is set only when the user explicitly chooses a base; Step 2 threads it via `--base` only when set.
+**Skip this step's gating and prompt entirely when `$BASE_BRANCH` is already non-empty** — Step 0's Parse --base Override already ran and the user supplied an explicit base on the command line. Re-asking on top of an explicit answer would prompt twice for the same decision. Proceed straight to Step 1.7 with `BASE_BRANCH` unchanged; Step 2 and the phase container thread it exactly as if this step's picker had chosen it, and `resolve-base-branch` reports `explicit-base`/`promptNeeded: false` for it downstream.
+
+`BASE_BRANCH` otherwise starts unset entering this step. It is set only when the user explicitly chooses a base via the picker below; Step 2 threads it via `--base` only when set, either way.
 
 ### Resolve Interactivity Mode
 
