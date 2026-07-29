@@ -208,6 +208,13 @@ CONTAINER_PATH="$CONTAINER_ROOT/.worktrees/$BRANCH_NAME"
 CONTAINER_MODE=true
 ```
 
+Report:
+```
+Container for [BRANCH_NAME] ready in [CONTAINER_ROOT] — branched from [CONTAINER_BASE] ([CONTAINER_BASE_REASON])
+```
+
+This line is emitted here, by the caller, on every call — fresh-create and reuse alike — rather than relying on `worktree-manager.sh`'s own output: `create_worktree()` only prints its own `From: <base>` line on the branch that creates a worktree fresh, and returns early, printing nothing, on the branch that finds one already there (see Create or Reuse a Container in `container-execution.md`). `CONTAINER_BASE_REASON` is rendered verbatim from `resolve-base-branch`'s own `reason` field, never paraphrased.
+
 `$WORKTREE_MGR create` reuses an existing target directory silently instead of recreating it, so calling it on every invocation is idempotent — a second `/aimi:next` run against the same branch reuses `$CONTAINER_PATH` unchanged instead of recreating it. No per-story worktree is created; the story executes and commits directly inside this container, on `$BRANCH_NAME`.
 
 6. **Install dependencies on every create-or-reuse call, unconditionally** — never gated on whether the container directory already existed:

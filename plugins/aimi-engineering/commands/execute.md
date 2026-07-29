@@ -447,13 +447,17 @@ while IFS= read -r record; do
     SPLIT_BASE_JSON=$($AIMI_CLI resolve-base-branch "$SPLIT_BRANCH" --project "$SPLIT_ROOT" --default-branch "$SPLIT_DEFAULT")
   fi
   CONTAINER_BASE=$(printf '%s' "$SPLIT_BASE_JSON" | jq -r '.base')
+  SPLIT_BASE_REASON=$(printf '%s' "$SPLIT_BASE_JSON" | jq -r '.reason')
   cd "$SPLIT_ROOT"
   if ! $WORKTREE_MGR create "$SPLIT_BRANCH" --from "$CONTAINER_BASE"; then
     echo "Worktree creation failed for $SPLIT_BRANCH in $SPLIT_ROOT — see the error above." >&2
     exit 1
   fi
+  echo "Worktree for $SPLIT_BRANCH ready in $SPLIT_ROOT — branched from $CONTAINER_BASE ($SPLIT_BASE_REASON)"
 done <<< "$SPLIT_PLAN"
 ```
+
+Each iteration's last line reports its own resolved base immediately once `create` above exits zero — fresh-create and reuse alike, since the echo runs unconditionally after that check rather than depending on which internal branch `$WORKTREE_MGR create` took. `$SPLIT_BASE_REASON` is rendered verbatim from `resolve-base-branch`'s own `reason` field, never paraphrased.
 
 **When `SPLIT_EXECUTION_MODE` is `inline` or absent** (the fail-safe default — see `commands/references/execution-mode.md`), that loop is the whole pass: one worktree per active split file, each cut from its own repo's own `resolve-base-branch` resolution — its default branch, unless that repo's own current checkout carries unmerged work worth stacking on, exactly as Step 1.6's picker would decide for a single repo. `BASE_BRANCH` is passed through as `--base` on every iteration when Step 0 parsed one, applying the same explicit choice uniformly across every active repo in the split rather than re-deriving it per member.
 
@@ -1624,6 +1628,11 @@ CONTAINER_BASE_REASON_MAP["DEFAULT"]="$CONTAINER_BASE_REASON"
 
 `CONTAINER_PATHS["DEFAULT"]` aliases the single-repo container into the same map Per-Project Branch Setup populates below, under the `"DEFAULT"` key Multi-Repo Handling's grouping pattern already uses for stories without a `project` field — so Step 4's wave loop can look up `CONTAINER_PATHS[group_key]` uniformly regardless of single-repo or multi-repo layout. `CONTAINER_BASE_MAP["DEFAULT"]`/`CONTAINER_BASE_REASON_MAP["DEFAULT"]` mirror it for the resolved base and its reason, keyed identically, so anything downstream that needs to report or reuse the base a project group's container was actually cut from can look it up the same way.
 
+Report — on the create call above returning zero, whether it created `$FEATURE_CONTAINER_PATH` fresh or reused it silently (see Create or Reuse a Container's reuse contract):
+```
+Container for [branchName] ready — branched from [CONTAINER_BASE] ([CONTAINER_BASE_REASON])
+```
+
 Because this subsection's own `$WORKTREE_MGR create` call is the branch-creating operation for this run, `### Main Repo Branch Setup` below is skipped whenever this subsection applies — see its skip condition.
 
 ### Main Repo Branch Setup
@@ -1746,7 +1755,7 @@ Run the following sub-steps when any story has a non-null `project` field, or wh
 
    Report:
    ```
-   Container for [branchName] ready in project: [project_path] (CONTAINER_PATHS[project_path])
+   Container for [branchName] ready in project: [project_path] (CONTAINER_PATHS[project_path]) — branched from [CONTAINER_BASE] ([CONTAINER_BASE_REASON])
    ```
 
 ## Step 3: Check for Pending Stories
