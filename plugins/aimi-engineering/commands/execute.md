@@ -76,7 +76,7 @@ $WORKTREE_MGR list
 $WORKTREE_MGR remove [worktree_name]
 ```
 
-This rule is unchanged, but does not apply in phase mode — see `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Mode: Worktree Naming and CWD, which supersedes `project_root` with `PHASE_CONTAINER_PATH` for the duration of a claimed phase's execution — nor does it apply, in the same way, to container mode (`PHASE_MODE=false`, `CONTAINER_MODE=true`; see Execution Mode Detection in Step 1), which supersedes `project_root` with `CONTAINER_PATHS[group_key]` for the duration of that project group's container-mode execution. See that same reference's Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH subsection for the contract that replaces this per-consumer branching.
+This rule is unchanged, but does not apply in phase mode — see `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Mode: Worktree Naming and CWD, which supersedes `project_root` with that claimed phase's own container and branch for the duration of its execution — one phase container and one phase branch per participating repository, never a single pair for the whole phase regardless of how many repositories it spans — nor does it apply, in the same way, to container mode (`PHASE_MODE=false`, `CONTAINER_MODE=true`; see Execution Mode Detection in Step 1), which supersedes `project_root` with `CONTAINER_PATHS[group_key]` for the duration of that project group's container-mode execution. See that same reference's Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH subsection for the contract that replaces this per-consumer branching.
 
 ### Container Paths Per Project Group (Container Mode)
 
@@ -1038,9 +1038,9 @@ Do **not** swallow this call's exit status. Every state a claim can hand back �
 
 **This guard runs first — before the `cd "$AIMI_ROOT"` below, before any `$WORKTREE_MGR create`, and before any split detection.** Every phase-mode container and worktree in this file is created downstream of this point: the phase container itself, and every split worktree **Phase-Mode Paired Split** later nests inside it. One check here therefore covers all of them, including the case where a project split converges to a single distinct project (`story-merge`'s SIDE axis, by design) and lands as a two-file frontend/backend split under a root that is not a repository.
 
-`AIMI_ROOT_IS_GIT_REPO` is re-derived here rather than carried over from Step 1.5's **Detect Git Repo Layout** — each Bash call is an isolated shell, so the canonical derivation from the **AIMI_ROOT_IS_GIT_REPO Branching Rule** (Multi-Repo Handling) is embedded verbatim below, `AIMI_ROOT` walk included. When the value is **false**, `AIMI_ROOT` is a plain parent folder holding one git repository per subfolder, not a repository itself — `cd "$AIMI_ROOT"` followed by `$WORKTREE_MGR create` exits **128** with a bare `fatal: not a git repository` (nothing is created, so no state is corrupted — but the message names neither the phase, nor the layout, nor the fix). That opaque failure is issue #73. Refuse here instead.
+`AIMI_ROOT_IS_GIT_REPO` is re-derived here rather than carried over from Step 1.5's **Detect Git Repo Layout** — each Bash call is an isolated shell, so the canonical derivation from the **AIMI_ROOT_IS_GIT_REPO Branching Rule** (Multi-Repo Handling) is embedded verbatim below, `AIMI_ROOT` walk included. When the value is **true**, the guard passes trivially. When the value is **false**, `AIMI_ROOT` is a plain parent folder holding one git repository per subfolder, not a repository itself — but that no longer makes every non-git-root phase unroutable: **Create Phase Containers Per Project Group** below resolves each participating repository independently from its own `project` field, so a phase whose stories are properly project-tagged (or whose own directory holds a routable project-marked split) has somewhere to route every group and needs no refusal here. What remains genuinely unroutable is narrower: a story with no `project` field resolves to the root group (`.`), and there is no repository under `.` to execute in when `AIMI_ROOT` itself is not one — `cd` there followed by `$WORKTREE_MGR create` would exit **128** with a bare `fatal: not a git repository` (nothing is created, so no state is corrupted — but the message names neither the phase, nor the layout, nor the fix). That opaque failure is issue #73. The two checks below narrow refusal to exactly that residue: read-only reconnaissance via `$AIMI_CLI split-detect` (consuming its `degradedReason` rather than re-deriving the legacy-pair/marker resolution logic inline — that logic lives in `aimi-cli.sh` alone), then, only when `split-detect` did not already name the condition, a single count against this phase's own governing tasks file.
 
-The decision and its consequence live in the same block: the claim release (see **Release the Claim on Abort** — this session ran Step 1.7's **Claim the Phase** itself, so `$PHASE_ID` is set and this call is the top-level orchestrator's to make) runs inside the failing branch, so a single-repo layout never touches it and a multi-repo layout can never skip it.
+The decision and its consequence live in the same block: the claim release (see **Release the Claim on Abort** — this session ran Step 1.7's **Claim the Phase** itself, so `$PHASE_ID` is set and this call is the top-level orchestrator's to make) runs inside the failing branch, so a routable layout (single-repo, or a properly project-tagged multi-repo phase) never touches it and an unroutable one can never skip it.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -1050,56 +1050,98 @@ while [ "$AIMI_ROOT" != "/" ] && [ ! -d "$AIMI_ROOT/.aimi" ]; do AIMI_ROOT=$(dir
 [ -d "$AIMI_ROOT/.aimi" ] || AIMI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 if git -C "$AIMI_ROOT" rev-parse --git-dir >/dev/null 2>&1; then AIMI_ROOT_IS_GIT_REPO=true; else AIMI_ROOT_IS_GIT_REPO=false; fi
 
+GUARD_REFUSAL=""
 if [ "$AIMI_ROOT_IS_GIT_REPO" != "true" ]; then
-  echo "Phase mode needs a git repository at $AIMI_ROOT; multi-repo layout detected." >&2
-  $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
-  exit 1
+  PHASE_DIR_PATH="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR"
+  GUARD_SPLIT_JSON=$($AIMI_CLI split-detect --dir "$PHASE_DIR_PATH")
+  GUARD_DEGRADED_REASON=$(printf '%s' "$GUARD_SPLIT_JSON" | jq -r '.degradedReason // ""')
+
+  case "$GUARD_DEGRADED_REASON" in
+    *"is not a git repository"*)
+      # split-detect itself named the condition: an unmarked legacy
+      # frontend/backend pair in this phase's own directory would resolve to
+      # the root group "." with nothing under "." to execute in.
+      GUARD_REFUSAL="unroutable-pair"
+      ;;
+    *)
+      # No pair-level refusal. Fall back to this phase's own governing tasks
+      # file (same formula the split-detection block below uses) — "when
+      # present on disk" is load-bearing: a phase fully routed by a project
+      # split has no single governing file, and that is not a refusal case.
+      PHASE_MAIN_TASKS="$PHASE_DIR_PATH/$FEATURE-phase-$PHASE_ID-tasks.json"
+      if [ -f "$PHASE_MAIN_TASKS" ]; then
+        GUARD_PROJECT_STORIES=$(jq '[.userStories[]? | select((.project // null) != null)] | length' "$PHASE_MAIN_TASKS")
+        [ "${GUARD_PROJECT_STORIES:-0}" -eq 0 ] && GUARD_REFUSAL="no-project-anywhere"
+      fi
+      ;;
+  esac
+
+  if [ -n "$GUARD_REFUSAL" ]; then
+    echo "Phase $PHASE_ID of $FEATURE is not routable under a non-git AIMI_ROOT ($AIMI_ROOT) — $GUARD_REFUSAL" >&2
+    $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+    exit 1
+  fi
 fi
 ```
 
-Exit 0 means the guard passed and this subsection continues below. **When the block exits non-zero,** the claim is already released — report and **STOP** without `cd`-ing to `AIMI_ROOT`, without computing `PHASE_CONTAINER_PATH`, and without creating any container, worktree, or branch:
+Exit 0 means the guard passed and this subsection continues below — true unconditionally when `AIMI_ROOT_IS_GIT_REPO=true`, and also when it is `false` but neither check above set `GUARD_REFUSAL`. **When the block exits non-zero,** the claim is already released — report and **STOP** without `cd`-ing to `AIMI_ROOT`, without computing `PHASE_CONTAINER_PATH`, and without creating any container, worktree, or branch. `$GUARD_REFUSAL` selects which message below to show:
+
+**`GUARD_REFUSAL=unroutable-pair`** — split-detect itself named the git-repository condition:
 
 ```
-Phase mode is not supported in a multi-repo layout.
+Phase [PHASE_ID] of [FEATURE] cannot be routed to a repository under a
+non-git AIMI_ROOT.
 
-Detected layout: multi-repo — [AIMI_ROOT] is not a git repository. It is a parent
-folder holding one repository per subfolder (see Multi-Repo Handling), so every
-story carries its own `project` path and each repo is branched independently.
+Detected layout: multi-repo — [AIMI_ROOT] is not a git repository. It is a
+parent folder holding one repository per subfolder (see Multi-Repo Handling).
 
-Phase [PHASE_ID] of [FEATURE] would need a phase container at
-[AIMI_ROOT]/.worktrees/[PHASE_BRANCH], and a worktree cannot be created from a
-directory that is not a repository — git would exit 128 with
-"fatal: not a git repository".
+This phase's own directory holds an unmarked legacy frontend/backend pair —
+neither file carries a `metadata.splitGroup` marker, so split-detect resolved
+both to the root group (project "."), and there is no repository under "."
+to execute in.
 
-Phase mode plus multi-repo is a combination this command does not support yet.
-
-What you can do instead:
-  - Run /aimi:execute without --phase. The flat flow (Step 0.9 onward) is
-    multi-repo aware: it creates one worktree per repository, rooted at that
-    repository's own path, and runs them in parallel.
+What you can do:
+  - Re-plan this phase with a full-stack implementation scope
+    (`/aimi:plan --phase [PHASE_ID]`, choosing full-stack when asked for
+    implementation scope — internally `--split full-stack`) so every story
+    carries its own `project` path and routes to the repository that owns it.
   - Or run /aimi:execute from inside a single repository that has its own
     .aimi/ directory, so AIMI_ROOT is that repository and phase mode applies
-    to it alone.
+    to it alone. This forfeits the shared `roadmap.json` and the single phase
+    lifecycle spanning every other repository under [AIMI_ROOT] — each repo
+    would then need to plan and track this work under its own separate
+    roadmap.
 
 Phase [PHASE_ID]'s claim has been released. Nothing was created.
 ```
 
-**Only when `AIMI_ROOT_IS_GIT_REPO` is true does the rest of this subsection run.** From here on, `AIMI_ROOT` is guaranteed to be a repository — which is also why every split worktree in **Phase-Mode Paired Split** below nests under `$PHASE_CONTAINER_PATH` rather than resolving a per-repo root of its own: in phase mode there is exactly one repository, and a split member's `metadata.splitGroup.project` (when present) is a monorepo subdirectory used for naming and reporting, never a separate git root.
+**`GUARD_REFUSAL=no-project-anywhere`** — split-detect found no pair-level refusal, but this phase's own governing tasks file has zero stories with a `project` field:
 
-```bash
-cd "$AIMI_ROOT"
-if [ -n "$BASE_BRANCH" ]; then
-  CONTAINER_BASE="$BASE_BRANCH"
-else
-  CONTAINER_BASE="$DEFAULT_BRANCH"
-fi
+```
+Phase [PHASE_ID] of [FEATURE] has no story with a `project` field, but
+AIMI_ROOT is not a git repository: [AIMI_ROOT].
+
+This is a multi-repo layout — AIMI_ROOT is a parent folder holding several
+repos, so the root group (project ".") has no repository to execute this
+phase in. A bare "." group is a legitimate routing key only when AIMI_ROOT is
+itself a git repository (see `.aimi/known-gaps/2026-07-27-US-001.md`) — it is
+not one here.
+
+What you can do:
+  - Give every story its own `project` path and re-plan
+    (`/aimi:plan --phase [PHASE_ID]`), so each one routes to the repository
+    that owns it.
+  - Or run /aimi:execute from inside a single repository that has its own
+    .aimi/ directory, so AIMI_ROOT is that repository and phase mode applies
+    to it alone. This forfeits the shared `roadmap.json` and the single phase
+    lifecycle spanning every other repository under [AIMI_ROOT] — each repo
+    would then need to plan and track this work under its own separate
+    roadmap.
+
+Phase [PHASE_ID]'s claim has been released. Nothing was created.
 ```
 
-`CONTAINER_BASE` is `BASE_BRANCH` when Step 1.6 set one, otherwise `DEFAULT_BRANCH` — reusing the exact default-branch/base-selection values Steps 1.5–1.6 already computed against the main root. Delegate to **Create or Reuse a Container** with `EXEC_ROOT="$AIMI_ROOT"`, `EXEC_BRANCH="$PHASE_BRANCH"`, and `CONTAINER_BASE` as just computed. The resulting path is deterministic given `AIMI_ROOT` and `PHASE_BRANCH`:
-
-```bash
-PHASE_CONTAINER_PATH="$AIMI_ROOT/.worktrees/$PHASE_BRANCH"
-```
+**Reaching this point means the guard above passed — not that `AIMI_ROOT` itself is a repository.** When `AIMI_ROOT_IS_GIT_REPO` is true, `AIMI_ROOT` is guaranteed to be a repository, exactly as before. When it is false, passing means the guard already confirmed this phase is routable — either every active split member carries its own `metadata.splitGroup.project`, or at least one story in this phase's governing tasks file carries a `project` field — so every participating group resolves to its own repository even though `AIMI_ROOT` does not. Either way, that does not mean every participating story (or, once a split is detected, every split member) shares one common repository as its own toplevel: a `project` field can resolve to a nested repository whose own `git rev-parse --show-toplevel` differs from `AIMI_ROOT`'s own — and in a multi-repo layout it necessarily does for every non-root group. This phase's participating project groups cannot be derived until its split status is known, so **Detect a Full-Stack Split Inside This Phase** runs next; the phase container itself — one per participating repository — is created afterward, in **Create Phase Containers Per Project Group**, once that detection's result is available. **Phase-Mode Paired Split** below (untouched by this story) resolves each split member's own repository independently — through its own `SPLIT_ROOT`/`SPLIT_TOPLEVEL` derivation, not the single scalar `$PHASE_CONTAINER_PATH` — so a phase split spanning more than one repository is fully supported: each active member's worktree lands at its own repository's own toplevel, created from that repository's own phase branch, and merge and cleanup afterward run once per repository too (outline 07/08, landed).
 
 ### Detect a Full-Stack Split Inside This Phase
 
@@ -1247,24 +1289,182 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
 ```
 
-### Phase Container Dev Server Bootstrap
+### Create Phase Containers Per Project Group
 
-**Skip this subsection entirely when `PHASE_SPLIT_MODE` is true** — a split phase never lands a story directly on `PHASE_CONTAINER_PATH` itself, so there is nothing to serve here; each split gets its own independently-bootstrapped server instead (see Split Container Dev Server Bootstrap in Phase-Mode Paired Split below). The rest of this subsection assumes `PHASE_SPLIT_MODE=false`.
+This phase's participating project groups cannot be known until **Detect a Full-Stack Split Inside This Phase** above has run: `PHASE_SPLIT_MODE`, and — when true — `PHASE_ACTIVE_SPLIT_FILES`, are its inputs here. This subsection creates (or reuses) one phase container per participating repository, never a single container rooted at `AIMI_ROOT` regardless of where a story's or split member's own `project` field resolves — mirroring Step 0.9 Pass 1's own per-repo resolution (`git -C ... rev-parse --show-toplevel`, `$AIMI_CLI detect-default-branch --project`, collision-checked on `(repo toplevel, branch)`) rather than inventing a second mechanism. It populates `project_roots[group_key]` and `PHASE_CONTAINER_PATHS[group_key]` (`${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Container Paths Per Project Group) — every later consumer of a phase's container path in this document reads one of the two.
 
-When it applies, this MUST complete before Step 3.3's Open Visual Follow Session computes `VISUAL_URL` — the same hard ordering rule Container Dev Server Bootstrap (Step 3.3) already enforces for flat container mode: install-deps → serve start → compute VISUAL_URL → open the visual-follow session.
+#### Derive Participating Project Groups
 
-Gate on the phase's own tasks file having at least one visual story — the same jq shape Step 0.7 already uses:
+**When `PHASE_SPLIT_MODE=true`,** groups come from every *active* split member's own `metadata.splitGroup.project` — never from this phase's single governing tasks file, which does not exist on disk for a split phase. A legacy frontend/backend pair (no `splitGroup` marker, both members implicitly rooted at `.`) collapses to the single `.` group, preserving today's single-container behavior for that case. **When `PHASE_SPLIT_MODE=false`,** groups come from the phase's own governing tasks file's `userStories[].project`, exactly the Per-Story Project-Grouping Pattern (Multi-Repo Handling) applied to this one file — a project-less story's `null` collapses to the same `.` group.
 
 ```bash
-PHASE_VISUAL_STORIES=$(jq '[.userStories[] | select(.verification | type == "object" and .strategy == "visual")] | length' "$PHASE_TASKS_PATH" 2>/dev/null)
-if [ -n "$PHASE_VISUAL_STORIES" ] && [ "$PHASE_VISUAL_STORIES" -gt 0 ]; then
-  HAS_VISUAL_STORY=true
+PHASE_MAIN_TASKS="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR/$FEATURE-phase-$PHASE_ID-tasks.json"
+
+if [ "$PHASE_SPLIT_MODE" = true ]; then
+  PHASE_GROUP_RAW=""
+  while IFS= read -r split_file; do
+    [ -n "$split_file" ] || continue
+    GROUP_PROJECT=$(jq -r '.metadata.splitGroup.project // "."' "$split_file")
+    PHASE_GROUP_RAW="${PHASE_GROUP_RAW}${GROUP_PROJECT}"$'\n'
+  done <<< "$PHASE_ACTIVE_SPLIT_FILES"
 else
-  HAS_VISUAL_STORY=false
+  PHASE_GROUP_RAW=$(jq -r '.userStories[] | (.project // ".")' "$PHASE_MAIN_TASKS")
+fi
+PHASE_GROUP_PROJECTS=$(printf '%s\n' "$PHASE_GROUP_RAW" | grep -v '^$' | sort -u)
+[ -n "$PHASE_GROUP_PROJECTS" ] || PHASE_GROUP_PROJECTS="."
+```
+
+An empty result (a phase, or an active split file, whose `userStories` array is empty — legal, see Active Split Files above) falls back to exactly one `.` group, preserving today's single-container behavior rather than creating zero containers.
+
+#### Resolve and Create Each Group's Container
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+cd "$AIMI_ROOT"
+
+PHASE_GROUP_TOPLEVELS_SEEN=""
+PHASE_LAST_GROUP_TOPLEVEL=""
+while IFS= read -r GROUP_PROJECT; do
+  [ -n "$GROUP_PROJECT" ] || continue
+  case "$GROUP_PROJECT" in
+    .)
+      GROUP_KEY="DEFAULT"
+      GROUP_ROOT="$AIMI_ROOT"
+      ;;
+    /*|..|../*|*/..|*/../*)
+      echo "Invalid project \"$GROUP_PROJECT\" for phase $PHASE_ID" >&2
+      $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+      exit 1
+      ;;
+    *)
+      if ! [[ "$GROUP_PROJECT" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$ ]]; then
+        echo "Invalid project \"$GROUP_PROJECT\" for phase $PHASE_ID" >&2
+        $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+        exit 1
+      fi
+      GROUP_KEY="$GROUP_PROJECT"
+      GROUP_ROOT="$AIMI_ROOT/$GROUP_PROJECT"
+      ;;
+  esac
+
+  GROUP_TOPLEVEL=$(git -C "$GROUP_ROOT" rev-parse --show-toplevel 2>/dev/null) || GROUP_TOPLEVEL=""
+  if [ -z "$GROUP_TOPLEVEL" ]; then
+    echo "Not a git repository: $GROUP_ROOT (project \"$GROUP_PROJECT\" for phase $PHASE_ID)" >&2
+    $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+    exit 1
+  fi
+  PHASE_LAST_GROUP_TOPLEVEL="$GROUP_TOPLEVEL"
+
+  # Two group_keys sharing one toplevel collapse into one container — the
+  # (repo toplevel, PHASE_BRANCH) collision rule Step 0.9 Pass 1 applies
+  # (execute.md:379) — never a duplicate creation attempt.
+  case "$PHASE_GROUP_TOPLEVELS_SEEN" in
+    *"${GROUP_TOPLEVEL}"$'\n'*)
+      project_roots["$GROUP_KEY"]="$GROUP_TOPLEVEL"
+      PHASE_CONTAINER_PATHS["$GROUP_KEY"]="$GROUP_TOPLEVEL/.worktrees/$PHASE_BRANCH"
+      continue
+      ;;
+  esac
+  PHASE_GROUP_TOPLEVELS_SEEN="${PHASE_GROUP_TOPLEVELS_SEEN}${GROUP_TOPLEVEL}"$'\n'
+
+  GROUP_DEFAULT=$($AIMI_CLI detect-default-branch --project "$GROUP_ROOT") || GROUP_DEFAULT=""
+  if [ -z "$GROUP_DEFAULT" ]; then
+    echo "Could not detect a default branch for $GROUP_ROOT (project \"$GROUP_PROJECT\" for phase $PHASE_ID)" >&2
+    $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+    exit 1
+  fi
+
+  if [ -n "$BASE_BRANCH" ]; then
+    CONTAINER_BASE="$BASE_BRANCH"
+  else
+    CONTAINER_BASE="$GROUP_DEFAULT"
+  fi
+
+  EXEC_ROOT="$GROUP_TOPLEVEL"
+  EXEC_BRANCH="$PHASE_BRANCH"
+  cd "$EXEC_ROOT"
+  $WORKTREE_MGR create "$EXEC_BRANCH" --from "$CONTAINER_BASE"
+
+  project_roots["$GROUP_KEY"]="$GROUP_TOPLEVEL"
+  PHASE_CONTAINER_PATHS["$GROUP_KEY"]="$GROUP_TOPLEVEL/.worktrees/$PHASE_BRANCH"
+  echo "Phase container ready in project: $GROUP_KEY (${GROUP_TOPLEVEL}/.worktrees/${PHASE_BRANCH})"
+done <<< "$PHASE_GROUP_PROJECTS"
+cd "$AIMI_ROOT"
+```
+
+Delegates to **Create or Reuse a Container** (`${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md`) exactly as before — `EXEC_ROOT`/`EXEC_BRANCH`/`CONTAINER_BASE` set per group, `$WORKTREE_MGR create` called once per unique toplevel. `CONTAINER_BASE` generalizes yesterday's single `BASE_BRANCH`-or-`DEFAULT_BRANCH` selection so its `else` branch reads *this group's own* freshly-detected default branch (`GROUP_DEFAULT`) instead of the single main-root `$DEFAULT_BRANCH`. A per-group `detect-default-branch` failure is fatal for that group only — the claim is released and the run stops, exactly as Step 0.9 Pass 1 does at its own call site (execute.md:346-350/:377) — never falling back to another group's already-resolved branch.
+
+**With exactly one group** — today's single-repo, non-split, every-story-project-less case — also alias the scalar for byte-identical backward compatibility with **Phase-Mode Paired Split** and any other unmigrated scalar consumer:
+
+```bash
+PHASE_GROUP_COUNT=$(printf '%s\n' "$PHASE_GROUP_PROJECTS" | grep -c .)
+if [ "$PHASE_GROUP_COUNT" -eq 1 ]; then
+  PHASE_CONTAINER_PATH="$PHASE_LAST_GROUP_TOPLEVEL/.worktrees/$PHASE_BRANCH"
 fi
 ```
 
-Delegate to **Bootstrap a Container Dev Server** with `EXEC_ROOT="$AIMI_ROOT"` (the project root, never inside the container itself — the same reason Create or Reuse the Phase Container above `cd`s to the project root before calling `$WORKTREE_MGR create`), `EXEC_BRANCH="$PHASE_BRANCH"`, and `HAS_VISUAL_STORY` as just computed. Its captured URL is discarded here — every later consumer (Step 3.3's Open Visual Follow Session, and Step 4's post-merge visual verification) re-queries the server fresh via `serve url` at the point it needs it.
+With `PHASE_SPLIT_MODE=false` and every story project-less — today's byte-for-byte-unchanged case — `PHASE_GROUP_PROJECTS` is exactly `.`, the loop runs once with `GROUP_KEY="DEFAULT"` and `GROUP_ROOT="$AIMI_ROOT"`, `GROUP_TOPLEVEL` resolves to `$AIMI_ROOT` itself (the same repository the guard above already confirmed), and `PHASE_CONTAINER_PATH` ends up `"$AIMI_ROOT/.worktrees/$PHASE_BRANCH"` — identical to today's unconditional assignment. When more than one group resolves, the scalar is deliberately left unset: **Phase-Mode Paired Split** resolves each split member's own repository independently, through its own `SPLIT_TOPLEVEL` derivation (outline 07/08, landed), so it needs no `PHASE_CONTAINER_PATHS[group_key]` consumption to work correctly across repositories. Step 4's wave loop, below, reads the per-group `PHASE_CONTAINER_PATHS[group_key]` map directly rather than this scalar (see its `EXEC_ROOT`/`EXEC_BRANCH` derivation and the Execution Context table's Phase row in `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md`), so a genuinely multi-repo, non-split phase — one tasks file whose own stories carry more than one distinct `project` — routes each group to its own container correctly; the scalar being left unset in that case is harmless, since nothing downstream still reads it.
+
+### Phase Container Dev Server Bootstrap
+
+**Skip this subsection entirely when `PHASE_SPLIT_MODE` is true** — a split phase never lands a story directly on `PHASE_CONTAINER_PATH` itself, so there is nothing to serve here; each split gets its own independently-bootstrapped server instead (see Split Container Dev Server Bootstrap in Phase-Mode Paired Split below). The rest of this subsection assumes `PHASE_SPLIT_MODE=false`, and therefore that every group came from `PHASE_MAIN_TASKS` (Create Phase Containers Per Project Group above never reads a split file's own tasks source in this branch).
+
+When it applies, this MUST complete before Step 3.3's Open Visual Follow Session computes `VISUAL_URL` — the same hard ordering rule Container Dev Server Bootstrap (Step 3.3) already enforces for flat container mode: install-deps → serve start → compute VISUAL_URL → open the visual-follow session.
+
+Gate on the phase's own tasks file having at least one visual story at all — the same jq shape Step 0.7 already uses — before doing any per-group work:
+
+```bash
+PHASE_VISUAL_STORIES=$(jq '[.userStories[] | select(.verification | type == "object" and .strategy == "visual")] | length' "$PHASE_TASKS_PATH" 2>/dev/null)
+```
+
+**When `PHASE_VISUAL_STORIES` is 0 or empty:** skip the rest of this subsection entirely — no group needs a server, so no `WORKTREE_MGR` resolution happens.
+
+**Otherwise**, compute each group's *own* `HAS_VISUAL_STORY` gate — filtering `PHASE_MAIN_TASKS`'s visual stories by that group's own `.project` value, never the whole-file count just computed above — into a `<toplevel>\t<true|false>` plan-line list, mirroring Split Container Dev Server Bootstrap's plan-line technique (Phase-Mode Paired Split, below) so a bare `HAS_VISUAL_STORY` scalar is never read after being reassigned across groups in a loop:
+
+```bash
+PHASE_GROUP_PROJECTS=$(jq -r '.userStories[] | (.project // ".")' "$PHASE_MAIN_TASKS" | sort -u)
+[ -n "$PHASE_GROUP_PROJECTS" ] || PHASE_GROUP_PROJECTS="."
+
+PHASE_SERVER_PLAN=""
+while IFS= read -r GROUP_PROJECT; do
+  [ -n "$GROUP_PROJECT" ] || continue
+  if [ "$GROUP_PROJECT" = "." ]; then
+    GROUP_ROOT="$AIMI_ROOT"
+  else
+    GROUP_ROOT="$AIMI_ROOT/$GROUP_PROJECT"
+  fi
+  GROUP_TOPLEVEL=$(git -C "$GROUP_ROOT" rev-parse --show-toplevel 2>/dev/null) || GROUP_TOPLEVEL="$GROUP_ROOT"
+  PHASE_GROUP_VISUAL=$(jq --arg p "$GROUP_PROJECT" \
+    '[.userStories[] | select((.project // ".") == $p) | select(.verification | type == "object" and .strategy == "visual")] | length' \
+    "$PHASE_MAIN_TASKS")
+  if [ "${PHASE_GROUP_VISUAL:-0}" -gt 0 ]; then
+    PHASE_SERVER_PLAN="${PHASE_SERVER_PLAN}${GROUP_TOPLEVEL}"$'\t'"true"$'\n'
+  else
+    PHASE_SERVER_PLAN="${PHASE_SERVER_PLAN}${GROUP_TOPLEVEL}"$'\t'"false"$'\n'
+  fi
+done <<< "$PHASE_GROUP_PROJECTS"
+```
+
+Then, for each plan line whose second field is `true`, delegate to **Bootstrap a Container Dev Server** with `EXEC_ROOT` = that line's first field (that group's own resolved toplevel — the project root, never inside the container itself, the same `EXEC_ROOT` Create Phase Containers Per Project Group above `cd`s to before calling `$WORKTREE_MGR create`) and `EXEC_BRANCH="$PHASE_BRANCH"`:
+
+```bash
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+while IFS=$'\t' read -r GROUP_TOPLEVEL GROUP_HAS_VISUAL; do
+  [ -n "$GROUP_TOPLEVEL" ] || continue
+  [ "$GROUP_HAS_VISUAL" = "true" ] || continue
+  EXEC_ROOT="$GROUP_TOPLEVEL"
+  EXEC_BRANCH="$PHASE_BRANCH"
+  cd "$EXEC_ROOT"
+  $WORKTREE_MGR install-deps "$EXEC_BRANCH"
+  $WORKTREE_MGR serve start "$EXEC_BRANCH" >/dev/null
+done <<< "$PHASE_SERVER_PLAN"
+```
+
+Its captured URL is discarded here — every later consumer (Step 3.3's Open Visual Follow Session, and Step 4's post-merge visual verification) re-queries the server fresh via `serve url` at the point it needs it. With exactly one group (today's unchanged case), `GROUP_TOPLEVEL` resolves to `$AIMI_ROOT` and this reduces to exactly one `install-deps`/`serve start` pair against `$AIMI_ROOT`, `$PHASE_BRANCH` — the same call this subsection made before.
 
 ### Path and State Notes
 
@@ -1281,15 +1481,21 @@ The section heading and its subsection names keep the word "Paired" for stabilit
 
 **When `PHASE_ACTIVE_COUNT` is `0`** (every member already completed — e.g. a resume after a merge conflict), skip every subsection below and go straight to **Continue to Phase Completion** at the end of this section: there is nothing left to branch, serve, spawn, merge, or clean up, and Phase Completion is what re-runs the pending-count and creates-verification checks.
 
-Every Bash call in this section passes `$PHASE_CONTAINER_PATH` explicitly, exactly like the rest of phase mode (see Path and State Notes above) — never a bare relative path, never `AIMI_ROOT`. `AIMI_ROOT` is guaranteed to be a git repository here: **Create or Reuse the Phase Container**'s Unsupported Combination Guard already refused the multi-repo layout before this section could be reached. Every split worktree below therefore nests under `$PHASE_CONTAINER_PATH`, and a member's `metadata.splitGroup.project` is a monorepo subdirectory used only to name and label it — never a separate git root.
+Every Bash call in this section passes each active member's own resolved root or toplevel explicitly (see Derive and Validate Split Branch Names below), mirroring the rest of phase mode's Path and State Notes discipline — never a bare relative path, never an assumed-persisted CWD. `AIMI_ROOT` is **not** guaranteed to be a git repository here: whether a member's `metadata.splitGroup.project` names a monorepo subdirectory of one shared repository, or a separate sibling repository of its own, is discriminated by AIMI_ROOT_IS_GIT_REPO — re-derived per block using the canonical form in **AIMI_ROOT_IS_GIT_REPO Branching Rule** (Multi-Repo Handling), never assumed. When it is **true** (today's only previously-supported combination), every split worktree below nests under `$PHASE_CONTAINER_PATH`, and `SPLIT_PROJECT` is a monorepo subdirectory used to name and label it. When it is **false**, `SPLIT_PROJECT` instead names a separate sibling repository under `$AIMI_ROOT`, and that member's split worktree nests under its own resolved toplevel instead — never under a `$PHASE_CONTAINER_PATH` that does not exist in that layout.
 
 ### Derive and Validate Split Branch Names
 
 One branch per **active** split file, derived from that file's own project (or, for a legacy pair member, from its own basename) and qualified by `$PHASE_BRANCH`. Iterate `$PHASE_ACTIVE_SPLIT_FILES` in order, with `$split_file` as the loop variable:
 
 ```bash
+AIMI_ROOT="$PWD"
+while [ "$AIMI_ROOT" != "/" ] && [ ! -d "$AIMI_ROOT/.aimi" ]; do AIMI_ROOT=$(dirname "$AIMI_ROOT"); done
+[ -d "$AIMI_ROOT/.aimi" ] || AIMI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+if git -C "$AIMI_ROOT" rev-parse --git-dir >/dev/null 2>&1; then AIMI_ROOT_IS_GIT_REPO=true; else AIMI_ROOT_IS_GIT_REPO=false; fi
+
 SPLIT_BRANCHES=""
 SPLIT_PLAN=""
+SPLIT_KEYS=""
 while IFS= read -r split_file; do
   [ -n "$split_file" ] || continue
   SPLIT_PROJECT=$(jq -r '.metadata.splitGroup.project // ""' "$split_file")
@@ -1297,6 +1503,7 @@ while IFS= read -r split_file; do
     ""|null)
       SPLIT_SLUG=$(basename "$split_file" -tasks.json)
       SPLIT_SLUG=${SPLIT_SLUG#"$FEATURE-phase-$PHASE_ID-"}
+      SPLIT_PROJECT="."
       ;;
     .)
       SPLIT_SLUG="root"
@@ -1318,21 +1525,50 @@ while IFS= read -r split_file; do
     echo "Invalid split branch derived from $split_file: $SPLIT_BRANCH" >&2
     exit 1
   fi
+
+  if [ "$AIMI_ROOT_IS_GIT_REPO" = true ]; then
+    if [ "$SPLIT_PROJECT" = "." ]; then
+      SPLIT_ROOT="$PHASE_CONTAINER_PATH"
+    else
+      SPLIT_ROOT="$PHASE_CONTAINER_PATH/$SPLIT_PROJECT"
+    fi
+  else
+    if [ "$SPLIT_PROJECT" = "." ]; then
+      SPLIT_ROOT="$AIMI_ROOT"
+    else
+      SPLIT_ROOT="$AIMI_ROOT/$SPLIT_PROJECT"
+    fi
+  fi
+
+  SPLIT_TOPLEVEL=$(git -C "$SPLIT_ROOT" rev-parse --show-toplevel 2>/dev/null) || SPLIT_TOPLEVEL=""
+  if [ -z "$SPLIT_TOPLEVEL" ]; then
+    echo "Not a git repository: $SPLIT_ROOT (splitGroup.project \"$SPLIT_PROJECT\" in $split_file)" >&2
+    exit 1
+  fi
+  SPLIT_WORKTREE_PATH="$SPLIT_TOPLEVEL/.worktrees/$SPLIT_BRANCH"
+
   SPLIT_BRANCHES="${SPLIT_BRANCHES}${SPLIT_BRANCH}"$'\n'
-  SPLIT_PLAN="${SPLIT_PLAN}${split_file}"$'\t'"${SPLIT_BRANCH}"$'\n'
+  SPLIT_PLAN="${SPLIT_PLAN}$(jq -nc \
+    --arg file "$split_file" --arg project "$SPLIT_PROJECT" --arg root "$SPLIT_ROOT" \
+    --arg toplevel "$SPLIT_TOPLEVEL" --arg branch "$SPLIT_BRANCH" --arg worktree "$SPLIT_WORKTREE_PATH" \
+    '{file: $file, project: $project, root: $root, toplevel: $toplevel, branch: $branch, worktree: $worktree}')"$'\n'
+  SPLIT_KEYS="${SPLIT_KEYS}${SPLIT_TOPLEVEL}"$'\t'"${SPLIT_BRANCH}"$'\n'
 done <<< "$PHASE_ACTIVE_SPLIT_FILES"
 
-SPLIT_BRANCH_TOTAL=$(printf '%s' "$SPLIT_BRANCHES" | grep -c .)
-SPLIT_BRANCH_UNIQUE=$(printf '%s' "$SPLIT_BRANCHES" | sort -u | grep -c .)
-if [ "$SPLIT_BRANCH_TOTAL" -ne "$SPLIT_BRANCH_UNIQUE" ]; then
-  echo "Split branch names collide across this phase's split files" >&2
+SPLIT_KEY_TOTAL=$(printf '%s' "$SPLIT_KEYS" | grep -c .)
+SPLIT_KEY_UNIQUE=$(printf '%s' "$SPLIT_KEYS" | sort -u | grep -c .)
+if [ "$SPLIT_KEY_TOTAL" -ne "$SPLIT_KEY_UNIQUE" ]; then
+  echo "Two split members contend for the same branch inside one repository:" >&2
+  printf '%s' "$SPLIT_KEYS" | sort | uniq -d >&2
   exit 1
 fi
+
+printf '%s' "$SPLIT_PLAN"
 ```
 
-Every derived name is validated against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` — the same regex Step 1.7 already validated `PHASE_BRANCH` against — **before any worktree is created**, and the whole set is checked for collisions (two members whose slugs coincide would otherwise share one branch and silently interleave their commits). On any failure: release the claim (see Release the Claim on Abort), report the offending file and branch name, and STOP — create no worktree.
+Every derived name is validated against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` — the same regex Step 1.7 already validated `PHASE_BRANCH` against — **before `SPLIT_ROOT`/`SPLIT_TOPLEVEL` are resolved and before any worktree is created**. The whole set is then checked for collisions keyed on `(SPLIT_TOPLEVEL, SPLIT_BRANCH)`, mirroring Step 0.9 Pass 1's `SPLIT_KEYS` check (execute.md:357-366) rather than the branch name alone: two members resolving to different repository toplevels may legitimately share a branch name, but two resolving to the same toplevel (two monorepo subdirectories of one repository, or two `SPLIT_PROJECT` values normalizing to the same sibling repo) must not, since they would otherwise both create `.worktrees/<same-branch>` and silently interleave commits. On any failure — an invalid project, an invalid branch, a collision, or a `SPLIT_ROOT` that resolves to no git repository at all — release the claim (see Release the Claim on Abort), report the offending file, and STOP — create no worktree.
 
-`SPLIT_PROJECT` itself is rejected on traversal shapes and on any character outside `^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$` — the same two guards, in the same order, that Step 0.9's flat per-repo loop applies to the same field, so the two sides stay diffable. The reason is **not** branch safety: `slugify` above maps every character outside `[A-Za-z0-9_-]` to `-`, so the derived branch already satisfies its own regex no matter what `SPLIT_PROJECT` holds. The reason is that `SPLIT_PROJECT` is echoed **verbatim** — never through the slug — into the Aggregated Completion Report's `Project:` line and into each spawned Task's `description`, so an unvalidated value reaches both the human reader and a sub-agent prompt unfiltered. Unlike the flat side, `SPLIT_PROJECT` is never joined onto a filesystem path here (every split worktree nests under `$PHASE_CONTAINER_PATH`), which is why this guard is about what the value can *say*, not where it can point.
+`SPLIT_PROJECT` itself is rejected on traversal shapes and on any character outside `^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$` — the same two guards, in the same order, that Step 0.9's flat per-repo loop applies to the same field, so the two sides stay diffable. The reason is **not** branch safety: `slugify` above maps every character outside `[A-Za-z0-9_-]` to `-`, so the derived branch already satisfies its own regex no matter what `SPLIT_PROJECT` holds. The reason is that `SPLIT_PROJECT` is echoed **verbatim** — never through the slug — into the Aggregated Completion Report's `Project:` line and into each spawned Task's `description`, so an unvalidated value reaches both the human reader and a sub-agent prompt unfiltered. `SPLIT_PROJECT` is now also joined onto a filesystem path — `$PHASE_CONTAINER_PATH/$SPLIT_PROJECT` or `$AIMI_ROOT/$SPLIT_PROJECT` above, depending on `AIMI_ROOT_IS_GIT_REPO` — so this guard is no longer only about what the value can *say*: exactly like Step 0.9 Pass 1's own explanation of the same two-guard validation (execute.md:371), it is also about where it can *point*.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -1342,49 +1578,74 @@ $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
 
 For a legacy pair the two basenames yield the slugs `frontend` and `backend`, so the derived branches are exactly `${PHASE_BRANCH}-frontend` and `${PHASE_BRANCH}-backend` — unchanged from before. For a project split, `apps/web` yields `${PHASE_BRANCH}-apps-web` and the root group (`project` = `.`) yields `${PHASE_BRANCH}-root`.
 
-Carry each active member's resolved `(split_file, SPLIT_PROJECT, SPLIT_SLUG, SPLIT_BRANCH, SPLIT_WORKTREE_PATH)` tuple forward — the worktree, dev-server, spawn, report, merge, and cleanup passes below all iterate that same ordered list. `SPLIT_PLAN` is that list materialized for the shell: one tab-separated `<split_file>\t<SPLIT_BRANCH>` line per active member, in the same order as `SPLIT_BRANCHES`. A pass that needs both halves of a member's tuple reads `SPLIT_PLAN`; a pass that needs only the branch reads `SPLIT_BRANCHES`. **No per-member value is ever left in a bare scalar for a later step to read** — a scalar assigned inside a loop holds only the last member's value by the time the loop ends, which silently applies one member's decision to every other member.
+Carry each active member's resolved `(split_file, SPLIT_PROJECT, SPLIT_ROOT, SPLIT_TOPLEVEL, SPLIT_BRANCH, SPLIT_WORKTREE_PATH)` tuple forward — the worktree, dev-server, spawn, merge, and cleanup passes below all iterate that same ordered list; outline 08 migrated the merge and cleanup passes off the flat `SPLIT_BRANCHES` scalar and onto this same tuple. `SPLIT_PLAN` is that list materialized for the shell as **one JSON object per line** (fields `file`, `project`, `root`, `toplevel`, `branch`, `worktree`), never tab-delimited — a tasks-file path may contain spaces, exactly why Step 0.9's own `SPLIT_PLAN` uses this shape (execute.md:289-291). Because each Bash tool call is an isolated shell, every later pass in this section re-assigns `SPLIT_PLAN` from this block's own printed stdout, pasted back verbatim, rather than assuming it persists. Every pass below reads a member's full tuple from `SPLIT_PLAN`; `SPLIT_BRANCHES` itself is no longer read downstream of this block. **No per-member value is ever left in a bare scalar for a later step to read** — a scalar assigned inside a loop holds only the last member's value by the time the loop ends, which silently applies one member's decision to every other member.
 
 ### Create Split Worktrees
 
-One worktree per active split file, each branched from `$PHASE_BRANCH`:
+One worktree per active split file, each created at **that member's own** resolved toplevel and branched `--from "$PHASE_BRANCH"` — that member's own repository's own already-established phase branch (**Create Phase Containers Per Project Group** above creates one `$PHASE_BRANCH` ref per participating repository before this section ever runs). Re-assign `SPLIT_PLAN` from **Derive and Validate Split Branch Names**' own printed stdout, pasted back verbatim — each Bash tool call is an isolated shell (Step 0):
 
 ```bash
+SPLIT_PLAN=$(cat <<'SPLIT_PLAN_EOF'
+[paste Derive and Validate Split Branch Names' printed SPLIT_PLAN here, verbatim — one JSON record per line]
+SPLIT_PLAN_EOF
+)
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-cd "$PHASE_CONTAINER_PATH"
-while IFS= read -r split_branch; do
-  [ -n "$split_branch" ] || continue
-  $WORKTREE_MGR create "$split_branch" --from "$PHASE_BRANCH"
-done <<< "$SPLIT_BRANCHES"
+while IFS= read -r member; do
+  [ -n "$member" ] || continue
+  SPLIT_TOPLEVEL=$(printf '%s' "$member" | jq -r '.toplevel')
+  SPLIT_BRANCH=$(printf '%s' "$member" | jq -r '.branch')
+  cd "$SPLIT_TOPLEVEL"
+  $WORKTREE_MGR create "$SPLIT_BRANCH" --from "$PHASE_BRANCH"
+done <<< "$SPLIT_PLAN"
 ```
 
-CWD is `$PHASE_CONTAINER_PATH` — never `$DEFAULT_BRANCH`'s checkout, never `AIMI_ROOT` — so, mirroring the CWD rule `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Mode: Worktree Naming and CWD already establishes for individual story worktrees, every split worktree nests at `$PHASE_CONTAINER_PATH/.worktrees/<its own split branch>` — inside the phase container's own worktree tree, not a sibling of it under `AIMI_ROOT/.worktrees/`, and branched from `$PHASE_BRANCH`, not `$DEFAULT_BRANCH`. Each member's path is therefore deterministic:
+CWD is **that member's own** `SPLIT_TOPLEVEL` — `$PHASE_CONTAINER_PATH` itself in today's single-repo case, a sibling repository's own toplevel in the multi-repo case — never a bare relative path, never `AIMI_ROOT`, and never another member's toplevel. Mirroring the CWD rule `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Mode: Worktree Naming and CWD already establishes for individual story worktrees, every split worktree nests at `$SPLIT_TOPLEVEL/.worktrees/<its own split branch>` — inside that member's own repository's worktree tree — and branched from `$PHASE_BRANCH`, not `$DEFAULT_BRANCH`. Each member's path is exactly the `worktree` field **Derive and Validate Split Branch Names** already resolved and printed; it is never recomputed here, since `worktree-manager.sh` resolves its worktree-name argument against the repository's own toplevel — the same "Where the worktree actually lands" rule Step 0.9 Pass 1 documents at execute.md:373 — and a second, independent computation could drift from it.
 
-```bash
-SPLIT_WORKTREE_PATH="$PHASE_CONTAINER_PATH/.worktrees/$SPLIT_BRANCH"
-```
+With exactly one participating repository — today's single-repo, non-split-across-repos case, the only one previously supported — every member's `SPLIT_TOPLEVEL` is `$PHASE_CONTAINER_PATH` itself (a linked worktree's own `git rev-parse --show-toplevel` returns its own path, container-execution.md:23), so every `$WORKTREE_MGR create` call above runs with the same CWD today's single `cd "$PHASE_CONTAINER_PATH"` did, byte-identical.
 
 ### Split Container Dev Server Bootstrap
 
 Independently for each active split — never against `PHASE_CONTAINER_PATH` itself, since no story ever lands directly on the un-merged phase branch — gate on that split's **own** tasks file having at least one visual story, mirroring Phase Container Dev Server Bootstrap's gate above exactly, scoped one level deeper. Each member computes its own gate; no member's count ever gates another's:
 
-This block **computes** the gates; it starts no server. It emits one plan line per active member — `<SPLIT_BRANCH>\t<true|false>` — because the delegation that consumes the gate happens after the loop, and a bare `HAS_VISUAL_STORY` would by then hold only the *last* member's value:
+This block **computes** the gates; it starts no server. It re-assigns `SPLIT_PLAN` from **Derive and Validate Split Branch Names**' own printed stdout (pasted back verbatim, same isolated-shell rule as above) and emits one plan line per active member — `<SPLIT_TOPLEVEL>\t<SPLIT_BRANCH>\t<true|false>` — because the delegation that consumes the gate happens after the loop, and a bare `HAS_VISUAL_STORY` (or `SPLIT_TOPLEVEL`) would by then hold only the *last* member's value:
 
 ```bash
+SPLIT_PLAN=$(cat <<'SPLIT_PLAN_EOF'
+[paste Derive and Validate Split Branch Names' printed SPLIT_PLAN here, verbatim — one JSON record per line]
+SPLIT_PLAN_EOF
+)
 SPLIT_SERVER_PLAN=""
-while IFS=$'\t' read -r split_file split_branch; do
-  [ -n "$split_file" ] || continue
+while IFS= read -r member; do
+  [ -n "$member" ] || continue
+  split_file=$(printf '%s' "$member" | jq -r '.file')
+  SPLIT_TOPLEVEL=$(printf '%s' "$member" | jq -r '.toplevel')
+  SPLIT_BRANCH=$(printf '%s' "$member" | jq -r '.branch')
   SPLIT_VISUAL_STORIES=$(jq '[.userStories[]? | select(.verification | type == "object" and .strategy == "visual")] | length' "$split_file" 2>/dev/null)
   if [ "${SPLIT_VISUAL_STORIES:-0}" -gt 0 ]; then
     HAS_VISUAL_STORY=true
   else
     HAS_VISUAL_STORY=false
   fi
-  SPLIT_SERVER_PLAN="${SPLIT_SERVER_PLAN}${split_branch}"$'\t'"${HAS_VISUAL_STORY}"$'\n'
+  SPLIT_SERVER_PLAN="${SPLIT_SERVER_PLAN}${SPLIT_TOPLEVEL}"$'\t'"${SPLIT_BRANCH}"$'\t'"${HAS_VISUAL_STORY}"$'\n'
 done <<< "$SPLIT_PLAN"
 ```
 
-Then iterate `$SPLIT_SERVER_PLAN` — one delegation per line, never one delegation reading a leftover scalar. For each line, delegate to **Bootstrap a Container Dev Server** with `EXEC_ROOT="$PHASE_CONTAINER_PATH"` (the same CWD Create Split Worktrees above already used to create every worktree), `EXEC_BRANCH` set to **that line's** first field, and `HAS_VISUAL_STORY` set to **that line's** second field. Read `HAS_VISUAL_STORY` only from the plan line being processed; its value after the loop above belongs to whichever member happened to be last and is meaningless for every other member. Getting this wrong fails in both directions: a pure-API split inherits a visual sibling's `true` and gets a server it must never get, or a visual split inherits an API sibling's `false`, gets no server, and cannot run the visual verification its stories require.
+Then iterate `$SPLIT_SERVER_PLAN` — one delegation per line, never one delegation reading a leftover scalar:
+
+```bash
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+while IFS=$'\t' read -r EXEC_ROOT EXEC_BRANCH GROUP_HAS_VISUAL; do
+  [ -n "$EXEC_ROOT" ] || continue
+  [ "$GROUP_HAS_VISUAL" = "true" ] || continue
+  cd "$EXEC_ROOT"
+  $WORKTREE_MGR install-deps "$EXEC_BRANCH"
+  $WORKTREE_MGR serve start "$EXEC_BRANCH" >/dev/null
+done <<< "$SPLIT_SERVER_PLAN"
+```
+
+Each delegation to **Bootstrap a Container Dev Server** reads `EXEC_ROOT` from that line's first field (that member's own `SPLIT_TOPLEVEL` — `$PHASE_CONTAINER_PATH` in today's single-repo case, a sibling repository's own toplevel in the multi-repo case, and the same CWD Create Split Worktrees above already used to create that member's own worktree), `EXEC_BRANCH` from its second field, and `HAS_VISUAL_STORY` from its third. Read `HAS_VISUAL_STORY` (and `EXEC_ROOT`) only from the plan line being processed; their value after the loop above belongs to whichever member happened to be last and is meaningless for every other member. Getting this wrong fails in both directions: a pure-API split inherits a visual sibling's `true` and gets a server it must never get, or a visual split inherits an API sibling's `false`, gets no server, and cannot run the visual verification its stories require.
 
 A split with no visual story (e.g. a pure-API service) never gets nor blocks on a server — its gate simply fails, exactly like the single-file bootstrap above. Every port is discarded here too — re-resolved fresh via `serve url` at the point each split sub-orchestrator's own Step 3.3 / Step 4 call sites need it. A split sub-orchestrator's spawn prompt pre-sets `PHASE_MODE=true`, `PHASE_BRANCH=[its own split branch]`, and `PHASE_CONTAINER_PATH=[its own split worktree path]` (see Spawn Split Sub-Orchestrators below), so its own copies of Open Visual Follow Session and Step 4's post-merge visual verification apply unmodified — no split-specific code path is needed at either call site. Two members never collide on a `dev-server.json` entry either: `serve start` keys state by the container's absolute resolved path, which is unique per split branch.
 
@@ -1396,12 +1657,14 @@ Report — one line per active split file, never a fixed two-slot Frontend/Backe
 
 ```
 Phase [PHASE_ID] split detected ([PHASE_ACTIVE_COUNT] members):
-  [1/PHASE_ACTIVE_COUNT] [split_file] → project: [SPLIT_PROJECT] (branch: [SPLIT_BRANCH])
-  [2/PHASE_ACTIVE_COUNT] [split_file] → project: [SPLIT_PROJECT] (branch: [SPLIT_BRANCH])
+  [1/PHASE_ACTIVE_COUNT] [split_file] → project: [SPLIT_PROJECT] (branch: [SPLIT_BRANCH], repo: [SPLIT_TOPLEVEL])
+  [2/PHASE_ACTIVE_COUNT] [split_file] → project: [SPLIT_PROJECT] (branch: [SPLIT_BRANCH], repo: [SPLIT_TOPLEVEL])
   ...
 
-Spawning parallel execution flows inside the phase container...
+Spawning parallel execution flows...
 ```
+
+Each line's `project`/`branch`/`repo` are read straight from that member's own `SPLIT_PLAN` record (fields `project`, `branch`, `toplevel`) — never re-derived. With exactly one participating repository (today's unchanged case), every `repo` value is the same `$PHASE_CONTAINER_PATH`, and the report reads exactly as before except for the added `repo:` field.
 
 In a **single tool-call turn**, emit one foreground Task per active split file — `PHASE_ACTIVE_COUNT` Tasks in total (two for a legacy pair, three for a three-way project split, N for N). Never one turn per member; that would serialize them. Each Task runs execute.md's **Steps 2–5 only** — never Step 1's Phase Mode Detection and never Step 1.7's Phase Claim, both of which are already resolved by this parent session; a sub-orchestrator that re-derived or re-claimed the phase itself would either double-claim it or (since it has a different session identity than the parent) fail the claim outright:
 
@@ -1414,8 +1677,10 @@ Task(
     description: "Execute split for phase [PHASE_ID]: [split_file basename]",
     prompt: [execute.md Steps 2–5, with the following pre-set — do not re-derive:
         - PHASE_MODE = true
-        - PHASE_BRANCH = [that member's SPLIT_BRANCH]
-        - PHASE_CONTAINER_PATH = [that member's SPLIT_WORKTREE_PATH]
+        - PHASE_BRANCH = [that member's SPLIT_PLAN record: .branch]
+        - PHASE_CONTAINER_PATH = [that member's SPLIT_PLAN record: .worktree — that member's
+          own SPLIT_WORKTREE_PATH, landing inside that member's own repository when it
+          differs from the phase's own]
         - PHASE_TASKS_PATH = [that split_file]   (Step 3.2 reads maxConcurrency from this)
         - $AIMI_CLI init-session --file [that split_file]
         - Skip Step 2's Main Repo Branch Setup (PHASE_MODE=true skips it exactly as
@@ -1442,6 +1707,8 @@ After every Task returns, collect each one's completed-story count and failure l
 
 Each split's own `metadata.maxConcurrency` governs only its own sub-orchestrator's wave loop. **No split's limit ever governs any other split's worktree creation or wave loop, for any N** — and none of them is governed by the phase's `roadmap.json` or by any single phase-level tasks file (there is none, in split mode). This falls out of the existing worktree-budget pre-bash-dispatcher hook with **no code change**: `_select_governing_tasks_file` (`hooks/pre-bash-dispatcher.py`) picks the candidate tasks file among every `.aimi/tasks/**/*-tasks.json` whose `metadata.branchName` exactly matches the git branch checked out at the `git worktree add` command's CWD. A story worktree created inside a given sub-orchestrator's wave loop runs with CWD inside that member's own split worktree (branch = that member's own split branch); `plan.md`'s Phase 4 metadata patch writes each split file's `metadata.branchName` as exactly that same value (see Phase 3e/Phase 4's `--phase-aware` composition), so the hook's branch-match resolves to that member's own file uniquely — every sibling's `metadata.branchName` differs (the branch names are collision-checked in Derive and Validate Split Branch Names above), so none of them ever matches.
 
+This scoping is per-repository, not merely per-branch: `_select_governing_tasks_file`'s branch-match resolves against whichever repository the `git worktree add` command's own CWD belongs to (that member's own `SPLIT_TOPLEVEL`), so N members split across N different repositories each get independent, unshared worktree-budget accounting — none of them summed or governed across repositories — exactly as each split's own `metadata.maxConcurrency` already governs only its own sub-orchestrator's wave loop.
+
 ### Aggregated Completion Report (Phase-Mode Paired Split)
 
 Report — computed against `$PHASE_BRANCH`, never `$DEFAULT_BRANCH`. Exactly one block per **active** split file; a member skipped for having no pending stories contributes no block and no "0 stories completed" line anywhere:
@@ -1454,8 +1721,9 @@ For each active split file, one block:
 [split_file]
   Project: [SPLIT_PROJECT]
   Branch: [SPLIT_BRANCH]
+  Repo: [SPLIT_TOPLEVEL]
   Stories completed: [count from that member's Task result]
-  Commits: git -C "$PHASE_CONTAINER_PATH" log --oneline [PHASE_BRANCH]..[SPLIT_BRANCH] | wc -l
+  Commits: git -C "[SPLIT_TOPLEVEL]" log --oneline [PHASE_BRANCH]..[SPLIT_BRANCH] | wc -l
 
 Total stories: [sum of every active split file's completed count]
 Total commits: [sum of every active split file's commit count]
@@ -1463,58 +1731,184 @@ Total commits: [sum of every active split file's commit count]
 
 Both `Total` lines are sums across **all** active split files, not two named Frontend/Backend slots. This report is computed **before** the merge below, while every split branch is still ahead of `$PHASE_BRANCH` — after the merge the same `git log` ranges would all read zero and the counts would no longer be informative.
 
+`Commits` is read from that member's own resolved repository root — `SPLIT_TOPLEVEL`, straight from its own `SPLIT_PLAN` record — rather than the single `$PHASE_CONTAINER_PATH` scalar the single-repo case used to read: **Create Phase Containers Per Project Group** deliberately leaves that scalar unset once more than one repository participates (see that section's own note), so it is not a reliable read here for any N. `git log` only needs to run inside *some* worktree of the branch's own repository — unlike `merge-all`'s own checkout below, it does not need to be the specific worktree `$PHASE_BRANCH` is checked out in — so `SPLIT_TOPLEVEL` is sufficient here even in the cases where it is not the same path **Merge Split Branches Into the Phase Branch**'s own `merge-all` call requires.
+
 ### Merge Split Branches Into the Phase Branch
 
-One `merge-all` call listing **every** active split branch:
+One `merge-all` call **per participating repository** — never one call listing every active split branch regardless of repo, and never a hardcoded two-call special case for the legacy pair. Active split members are grouped by the repository each one already resolved to in **Derive and Validate Split Branch Names** — `SPLIT_PLAN`'s own `toplevel` field, read as one JSON object per line per execute.md:291's rule (a tasks-file path may contain spaces) — never by a second detection mechanism, and never by repo *count*. Re-assign `SPLIT_PLAN` from that section's own printed stdout, pasted back verbatim (each Bash tool call is an isolated shell, Step 0):
 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-cd "$PHASE_CONTAINER_PATH"
-set --
-while IFS= read -r split_branch; do
-  [ -n "$split_branch" ] || continue
-  set -- "$@" "$split_branch"
-done <<< "$SPLIT_BRANCHES"
-if [ "$#" -gt 0 ]; then
-  $WORKTREE_MGR merge-all "$@" --into "$PHASE_BRANCH"
+SPLIT_PLAN=$(cat <<'SPLIT_PLAN_EOF'
+[paste Derive and Validate Split Branch Names' printed SPLIT_PLAN here, verbatim — one JSON record per line]
+SPLIT_PLAN_EOF
+)
+
+ALL_MEMBER_TOPLEVELS=""
+while IFS= read -r member; do
+  [ -n "$member" ] || continue
+  ALL_MEMBER_TOPLEVELS="${ALL_MEMBER_TOPLEVELS}$(printf '%s' "$member" | jq -r '.toplevel')"$'\n'
+done <<< "$SPLIT_PLAN"
+MERGE_REPO_TOPLEVELS=$(printf '%s' "$ALL_MEMBER_TOPLEVELS" | grep -v '^$' | sort -u)
+
+MERGE_CONFLICT_TOPLEVEL=""
+MERGE_CONFLICT_ROOT=""
+MERGE_CONFLICT_LABEL=""
+while IFS= read -r REPO_TOPLEVEL; do
+  [ -n "$REPO_TOPLEVEL" ] || continue
+
+  set --
+  REPO_PROJECTS=""
+  while IFS= read -r member; do
+    [ -n "$member" ] || continue
+    MEMBER_TOPLEVEL=$(printf '%s' "$member" | jq -r '.toplevel')
+    [ "$MEMBER_TOPLEVEL" = "$REPO_TOPLEVEL" ] || continue
+    set -- "$@" "$(printf '%s' "$member" | jq -r '.branch')"
+    REPO_PROJECTS="${REPO_PROJECTS}$(printf '%s' "$member" | jq -r '.project')"$'\n'
+  done <<< "$SPLIT_PLAN"
+  REPO_LABEL=$(printf '%s' "$REPO_PROJECTS" | grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//')
+
+  if [ "$#" -eq 0 ]; then
+    echo "Internal error: repository $REPO_TOPLEVEL ($REPO_LABEL) was selected from SPLIT_PLAN's own distinct toplevels, so it cannot legitimately have zero branches -- the positional-parameter read that builds this repo's argv failed. Not merging (see the portability note below)." >&2
+    exit 1
+  fi
+
+  MERGE_TARGET_ROOT="$REPO_TOPLEVEL/.worktrees/$PHASE_BRANCH"
+  if [ ! -d "$MERGE_TARGET_ROOT" ] || [ ! -e "$MERGE_TARGET_ROOT/.git" ]; then
+    MERGE_TARGET_ROOT="$REPO_TOPLEVEL"
+  fi
+
+  cd "$MERGE_TARGET_ROOT"
+  if ! $WORKTREE_MGR merge-all "$@" --into "$PHASE_BRANCH"; then
+    MERGE_CONFLICT_TOPLEVEL="$REPO_TOPLEVEL"
+    MERGE_CONFLICT_ROOT="$MERGE_TARGET_ROOT"
+    MERGE_CONFLICT_LABEL="$REPO_LABEL"
+    break
+  fi
+done <<< "$MERGE_REPO_TOPLEVELS"
+
+if [ -n "$MERGE_CONFLICT_TOPLEVEL" ]; then
+  echo "MERGE_CONFLICT_TOPLEVEL=$MERGE_CONFLICT_TOPLEVEL"
+  echo "MERGE_CONFLICT_ROOT=$MERGE_CONFLICT_ROOT"
+  echo "MERGE_CONFLICT_LABEL=$MERGE_CONFLICT_LABEL"
+  exit 1
 fi
+echo "Every repository's active split branches are merged onto its own \$PHASE_BRANCH."
 ```
 
-The argv is built with positional parameters and the same `while IFS= read -r ... done <<<` pattern every other loop in this file uses. **Do not substitute bash 4's read-into-array builtin here.** It is a bash-only builtin: it does not exist in zsh, and it does not exist in the bash 3.2 that ships as `/bin/bash` on macOS. Where it is missing the read fails, the array stays empty, and the arity guard turns that failure into a **silent no-op** — every split branch stays unmerged, `$PHASE_BRANCH` keeps none of the work, and the flow proceeds to Creates Verification, which inspects `$PHASE_CONTAINER_PATH`'s tracked files and can only pass because this merge landed. A no-op here is therefore not a degraded merge, it is a phase that reports success having landed nothing. Verified: under zsh the array read fails, the guard swallows it, and the block exits 0 having merged nothing; the positional-parameter form above builds the identical argv under both bash and zsh.
+Both loops are built exclusively with positional parameters (`set --`, `set -- "$@" "$x"`) and the `while IFS= read -r ... done <<<` pattern — **never bash 4's read-into-array builtin (`mapfile`/`readarray`), and never an associative array (`declare -A`)**, in either the outer per-repository grouping loop or the inner per-repository branch-list build. Neither exists in zsh, nor in the bash 3.2 that ships as `/bin/bash` on macOS; where either is missing, the read silently fails and produces an empty result. This story multiplies the number of argv builds from one to N, which multiplies this hazard by exactly as much — which is why the arity guard above treats `$# -eq 0` as a hard failure (stderr message, `exit 1`) rather than a silent `continue` to the next repository: `REPO_TOPLEVEL` on every iteration is drawn from `MERGE_REPO_TOPLEVELS`, itself derived only from toplevels that actually appear in `SPLIT_PLAN`, so a repository reached by the outer loop can never legitimately have zero members. An empty `$@` there is proof the inner read failed, never proof there was nothing to merge for that repository — verified under zsh: substituting either forbidden construct here makes the read fail silently, and without this hard-failure guard the block would exit 0 having merged nothing while every split branch stayed unmerged and the phase went on to report success.
 
-This is the same `merge-all ... --into` primitive Step 4's own wave loop already uses for individual story branches, reused here for the split branches: the merge target is `$PHASE_BRANCH`, executed with CWD inside the phase container's own worktree (`$PHASE_CONTAINER_PATH`) — never `$DEFAULT_BRANCH`, never `AIMI_ROOT`. Centralizing every merge in this parent step (rather than having each sub-orchestrator merge into `$PHASE_BRANCH` itself, mid-flight, from its own worktree) avoids N parallel Tasks racing a `git checkout`/`git merge` against the same `$PHASE_CONTAINER_PATH` working directory at once; running them sequentially here, after every Task has already returned, is safe by construction. This step is also what makes Phase Completion's Creates Verification (below) meaningful: it inspects `$PHASE_CONTAINER_PATH`'s actual tracked files, which only reflect every split's work once this merge has landed.
+**Why `MERGE_TARGET_ROOT` is not simply `$REPO_TOPLEVEL`.** `merge-all` issues a bare `git checkout "$PHASE_BRANCH"`, which fails outright when `$PHASE_BRANCH` is already checked out in a *different* worktree of the same repository — exactly the state **Create Phase Containers Per Project Group** already put every participating repository in during Step 1.7, before this section ever runs. With exactly one participating repository, `REPO_TOPLEVEL` already **is** that container (a linked worktree's own `git rev-parse --show-toplevel` returns its own path, not the main repo's — see container-execution.md's CWD For Every Worktree Operation section), so the existence check above falls through to `MERGE_TARGET_ROOT="$REPO_TOPLEVEL"` and reproduces today's `cd "$PHASE_CONTAINER_PATH"` byte-for-byte. In a genuine multi-repo split, `REPO_TOPLEVEL` is instead that sibling repository's own main root (the value **Derive and Validate Split Branch Names** resolves when `AIMI_ROOT_IS_GIT_REPO=false`), and its phase branch's own container is the child directory Create Phase Containers Per Project Group already created there — `<REPO_TOPLEVEL>/.worktrees/<PHASE_BRANCH>` — which the existence check above detects and uses instead.
 
-**On merge conflict:** mirrors the existing per-wave conflict handling (Step 4) exactly — report the conflicting files, clean up every split worktree (the conflict lives in `$PHASE_CONTAINER_PATH`'s own working directory, not in the source worktrees, so removing them is safe), release the claim (see Release the Claim on Abort), and STOP:
+**Sequential, not concurrent.** Every repository's `merge-all` call fully resolves — success or conflict — before the next repository's call starts, mirroring Step 4's own per-project-group merge loop ("MERGE PER PROJECT GROUP," `for group_key, stories in succeeded_by_project`), which already merges one project group at a time with no parallel dispatch. True concurrency here would need explicit job control (background processes plus `wait`), and its interleaved stdout/stderr would make a conflict report ambiguous about which repository it belongs to — for a negligible wall-clock gain, since every `git merge` here is a local, network-free operation. Concurrent per-repository merges are out of scope for this story.
 
-```
-MERGE CONFLICT while merging phase [PHASE_ID]'s split branches into [PHASE_BRANCH].
-Split branches merged: [one line per active split branch]
-Conflicting files:
-[conflict output from merge-all]
+This is the same `merge-all ... --into` primitive Step 4's own wave loop already uses for individual story branches, now issued once per repository for the split branches: each call's target is that repository's own `$PHASE_BRANCH`, executed with CWD inside that repository's own phase container — never `$DEFAULT_BRANCH`, never `AIMI_ROOT`, and never another repository's container. Centralizing every merge in this parent step (rather than having each sub-orchestrator merge into its own `$PHASE_BRANCH` mid-flight, from its own worktree) avoids N parallel Tasks racing a `git checkout`/`git merge` against the same working directory; running them here, after every Task has already returned, is what makes that safe by construction, for any number of repositories. This step is also what makes Phase Completion's Creates Verification (below) meaningful: it inspects a phase container's actual tracked files, which only reflect a repository's split work once that repository's own merge has landed.
 
-Resolve the conflict on branch [PHASE_BRANCH] in [PHASE_CONTAINER_PATH] and re-run
-`/aimi:execute` to continue. Every split file's stories are already marked complete —
-re-running will not re-execute them, only retry this merge and the phase-completion
-checks that follow it.
-
-The phase container [PHASE_CONTAINER_PATH] itself — and any live dev server running
-inside it — is left untouched by this failure; only the split worktrees above are
-removed.
-```
-
-Before cleaning up the split worktrees, stop each split's own dev server — an orphaned server would otherwise keep holding its port after its worktree is gone. One iteration per active split branch, never a fixed pair of calls:
+**On merge conflict**, the block above exits non-zero having printed `MERGE_CONFLICT_TOPLEVEL`, `MERGE_CONFLICT_ROOT`, and `MERGE_CONFLICT_LABEL` — carry those three values forward into the next block by the same read-and-retype convention `$PHASE_BRANCH`/`$PHASE_ID` already use elsewhere in this file (each is a single-line string, not a multi-record blob, so no heredoc paste is needed). Classify the conflicting repository's own branches, gather every other repository's status, and clean up only what is confirmed merged:
 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-cd "$PHASE_CONTAINER_PATH"
+SPLIT_PLAN=$(cat <<'SPLIT_PLAN_EOF'
+[paste Derive and Validate Split Branch Names' printed SPLIT_PLAN here, verbatim — one JSON record per line]
+SPLIT_PLAN_EOF
+)
+MERGE_CONFLICT_TOPLEVEL="[from the merge block's own stdout above]"
+MERGE_CONFLICT_ROOT="[from the merge block's own stdout above]"
+MERGE_CONFLICT_LABEL="[from the merge block's own stdout above]"
+
+ALL_MEMBER_TOPLEVELS=""
+while IFS= read -r member; do
+  [ -n "$member" ] || continue
+  ALL_MEMBER_TOPLEVELS="${ALL_MEMBER_TOPLEVELS}$(printf '%s' "$member" | jq -r '.toplevel')"$'\n'
+done <<< "$SPLIT_PLAN"
+MERGE_REPO_TOPLEVELS=$(printf '%s' "$ALL_MEMBER_TOPLEVELS" | grep -v '^$' | sort -u)
+
+CONFLICT_LINE=$(printf '%s\n' "$MERGE_REPO_TOPLEVELS" | grep -nxF "$MERGE_CONFLICT_TOPLEVEL" | head -1 | cut -d: -f1)
+PROCESSED_TOPLEVELS=$(printf '%s\n' "$MERGE_REPO_TOPLEVELS" | head -n "$((CONFLICT_LINE - 1))")
+REMAINING_TOPLEVELS=$(printf '%s\n' "$MERGE_REPO_TOPLEVELS" | tail -n "+$((CONFLICT_LINE + 1))")
+
+set --
+while IFS= read -r member; do
+  [ -n "$member" ] || continue
+  MEMBER_TOPLEVEL=$(printf '%s' "$member" | jq -r '.toplevel')
+  [ "$MEMBER_TOPLEVEL" = "$MERGE_CONFLICT_TOPLEVEL" ] || continue
+  set -- "$@" "$(printf '%s' "$member" | jq -r '.branch')"
+done <<< "$SPLIT_PLAN"
+
+CONFLICT_MERGED=""
+CONFLICT_UNMERGED=""
+for split_branch in "$@"; do
+  if git -C "$MERGE_CONFLICT_ROOT" merge-base --is-ancestor "$split_branch" "$PHASE_BRANCH" 2>/dev/null; then
+    CONFLICT_MERGED="${CONFLICT_MERGED}${split_branch}"$'\n'
+  else
+    CONFLICT_UNMERGED="${CONFLICT_UNMERGED}${split_branch}"$'\n'
+  fi
+done
+
+echo "Conflicting repository: $MERGE_CONFLICT_LABEL ($MERGE_CONFLICT_TOPLEVEL)"
+echo "Already merged onto $PHASE_BRANCH: $(printf '%s' "$CONFLICT_MERGED" | grep -v '^$' | tr '\n' ' ')"
+echo "Not yet merged: $(printf '%s' "$CONFLICT_UNMERGED" | grep -v '^$' | tr '\n' ' ')"
+echo "Already-merged sibling repositories, not rolled back:"
+printf '%s\n' "$PROCESSED_TOPLEVELS" | grep -v '^$'
+echo "Untouched-this-run repositories, still pending:"
+printf '%s\n' "$REMAINING_TOPLEVELS" | grep -v '^$'
+
+while IFS= read -r REPO_TOPLEVEL; do
+  [ -n "$REPO_TOPLEVEL" ] || continue
+  cd "$REPO_TOPLEVEL"
+  while IFS= read -r member; do
+    [ -n "$member" ] || continue
+    MEMBER_TOPLEVEL=$(printf '%s' "$member" | jq -r '.toplevel')
+    [ "$MEMBER_TOPLEVEL" = "$REPO_TOPLEVEL" ] || continue
+    MEMBER_BRANCH=$(printf '%s' "$member" | jq -r '.branch')
+    $WORKTREE_MGR serve stop "$MEMBER_BRANCH"
+    $WORKTREE_MGR remove "$MEMBER_BRANCH"
+  done <<< "$SPLIT_PLAN"
+done <<< "$PROCESSED_TOPLEVELS"
+
+cd "$MERGE_CONFLICT_TOPLEVEL"
 while IFS= read -r split_branch; do
   [ -n "$split_branch" ] || continue
   $WORKTREE_MGR serve stop "$split_branch"
   $WORKTREE_MGR remove "$split_branch"
-done <<< "$SPLIT_BRANCHES"
+done <<< "$CONFLICT_MERGED"
 ```
+
+`git -C "$MERGE_CONFLICT_ROOT" merge-base --is-ancestor` recovers exactly what `merge_all_worktrees` did and did not reach: it processes its argv strictly in order and exits on the first conflict without attempting the rest (`worktree-manager.sh:684-689`), so every branch before the conflicting one is already an ancestor of `$PHASE_BRANCH` and every branch from the conflicting one onward is not. Cleanup above stops the dev server for, and removes with branch deletion, only what that check (plus every already-fully-merged sibling repository) confirms is merged — `$MERGE_CONFLICT_TOPLEVEL`'s own unmerged branches (the conflicted one, and anything after it merge-all never attempted) keep both their worktree and their branch ref, so the retry below has something to retry; deleting them would strand their commits with no ref left to name them by. Cleanup runs with CWD at each repository's own `.toplevel` (the same root **Create Split Worktrees** used to create these exact worktrees), never at that repository's phase-branch container: `$WORKTREE_MGR remove`/`serve stop` resolve their target from `$(git rev-parse --show-toplevel)/.worktrees/<name>` computed from CWD (`worktree-manager.sh`'s own `GIT_ROOT`/`WORKTREE_DIR`), and the phase-branch container is a *different* path from `.toplevel` in a genuine multi-repo split (see `MERGE_TARGET_ROOT` above) — using it here would make `remove` silently report the worktree "not found" instead of actually removing it.
+
+Report:
+
+```
+MERGE CONFLICT while merging phase [PHASE_ID]'s split branches into [PHASE_BRANCH].
+
+Repository: [MERGE_CONFLICT_LABEL] ([MERGE_CONFLICT_TOPLEVEL])
+  Already merged onto [PHASE_BRANCH]: [CONFLICT_MERGED, one per line, or "none"]
+  Not yet merged: [CONFLICT_UNMERGED, one per line — the conflicted branch first]
+Conflicting files:
+[conflict output from merge-all]
+
+Other repositories in this split:
+  Already merged, not rolled back: [PROCESSED_TOPLEVELS, each with its own branch list, or "none"]
+  Untouched this run, still pending: [REMAINING_TOPLEVELS, each with its own branch list, or "none"]
+
+Resolve the conflict on branch [PHASE_BRANCH] in [MERGE_CONFLICT_ROOT] and re-run
+`/aimi:execute` to continue. Every split file's stories are already marked complete —
+re-running will not re-execute any of them. It re-issues every repository's own
+merge-all call in full, including the repositories already merged above: that is
+safe because `git merge` is idempotent for a branch already merged ("Already up to
+date", exit 0), whether this run merged it moments ago or a human resolved
+[MERGE_CONFLICT_LABEL]'s conflict by hand inside [MERGE_CONFLICT_ROOT] first.
+
+Every already-merged repository's own [PHASE_BRANCH] — and any live dev server
+running inside its container — is left untouched by this failure; those repositories'
+merges are not rolled back, only not-yet-attempted ones are still pending.
+[MERGE_CONFLICT_LABEL]'s own not-yet-merged branches — worktree and branch ref both
+— are left in place too, so the retry above has something to retry.
+```
+
+Exactly one claim release, since the claim is phase-scoped rather than per-repository — release it once regardless of how many repositories have or have not merged — then STOP, mirroring both Release the Claim on Abort and Step 4's own per-project-group conflict STOP:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -1524,24 +1918,42 @@ $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
 
 ### Clean Up Split Worktrees
 
-Only reached once the merge above succeeds. Stop each split's own dev server first — same ordering rule as the merge-conflict path above, so no split's server outlives its own worktree. One iteration per active split branch:
+Only reached once **every** repository's `merge-all` call above has succeeded. Iterates per repository — stopping each split's own dev server, then removing its worktree — never a single flat loop over every active split branch with CWD fixed at one repository's path:
 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-cd "$PHASE_CONTAINER_PATH"
-while IFS= read -r split_branch; do
-  [ -n "$split_branch" ] || continue
-  $WORKTREE_MGR serve stop "$split_branch"
-  $WORKTREE_MGR remove "$split_branch"
-done <<< "$SPLIT_BRANCHES"
+SPLIT_PLAN=$(cat <<'SPLIT_PLAN_EOF'
+[paste Derive and Validate Split Branch Names' printed SPLIT_PLAN here, verbatim — one JSON record per line]
+SPLIT_PLAN_EOF
+)
+
+ALL_MEMBER_TOPLEVELS=""
+while IFS= read -r member; do
+  [ -n "$member" ] || continue
+  ALL_MEMBER_TOPLEVELS="${ALL_MEMBER_TOPLEVELS}$(printf '%s' "$member" | jq -r '.toplevel')"$'\n'
+done <<< "$SPLIT_PLAN"
+CLEANUP_REPO_TOPLEVELS=$(printf '%s' "$ALL_MEMBER_TOPLEVELS" | grep -v '^$' | sort -u)
+
+while IFS= read -r REPO_TOPLEVEL; do
+  [ -n "$REPO_TOPLEVEL" ] || continue
+  cd "$REPO_TOPLEVEL"
+  while IFS= read -r member; do
+    [ -n "$member" ] || continue
+    MEMBER_TOPLEVEL=$(printf '%s' "$member" | jq -r '.toplevel')
+    [ "$MEMBER_TOPLEVEL" = "$REPO_TOPLEVEL" ] || continue
+    MEMBER_BRANCH=$(printf '%s' "$member" | jq -r '.branch')
+    $WORKTREE_MGR serve stop "$MEMBER_BRANCH"
+    $WORKTREE_MGR remove "$MEMBER_BRANCH"
+  done <<< "$SPLIT_PLAN"
+done <<< "$CLEANUP_REPO_TOPLEVELS"
 ```
 
-`serve stop` exits 0 and reports "No dev server registered" when no server was ever started for a split (its own gate in Split Container Dev Server Bootstrap never passed) — so every call above is always safe to issue, identical to container-execution.md's Container Mode: Stop the Dev Server contract (invoked from Step 5).
+CWD for each repository is that repository's own `.toplevel` — the same root **Create Split Worktrees** used to create these exact worktrees (`$PHASE_CONTAINER_PATH` itself in today's single-repo case, since `.toplevel` and the phase container coincide there; a sibling repository's own main root in a genuine multi-repo split) — never a repository's phase-branch container, for the same CWD-resolution reason **Merge Split Branches Into the Phase Branch** documents above. `serve stop` exits 0 and reports "No dev server registered" when no server was ever started for a split (its own gate in Split Container Dev Server Bootstrap never passed) — so every call above is always safe to issue, identical to container-execution.md's Container Mode: Stop the Dev Server contract (invoked from Step 5).
 
-Removes only the split worktrees this run created. `$PHASE_CONTAINER_PATH` itself is left intact — its removal is a separate, later-timed operation owned entirely by Phase Completion's own lifecycle (the phase container is only ever torn down once the *phase* — not just this split — is fully done), never by this section.
+Removes only the split worktrees this run created. Every repository's own phase-branch container is left intact — its removal is a separate, later-timed operation owned entirely by Phase Completion's own lifecycle (a phase container is only ever torn down once the *phase* — not just this split — is fully done), never by this section.
 
-**Why no `--keep-branch` here, unlike Step 0.9's Aggregated Completion (Split Mode).** The flat flow passes `--keep-branch` when it cleans up *its* split worktrees; this section deliberately does not, so `remove` also runs `git branch -D` on each split branch. The difference is what the branch still owes: a flat split branch is the run's final deliverable that the user is told to open a PR from, whereas a phase split branch is an intermediate that Merge Split Branches Into the Phase Branch — which this section only runs *after* — has already merged into `$PHASE_BRANCH`. Its commits are reachable from the phase branch, so the branch ref itself has no remaining consumer and keeping it would only accumulate one dead ref per member per phase. `$PHASE_BRANCH` is what carries the work forward from here, and nothing deletes it.
+**Why no `--keep-branch` here, unlike Step 0.9's Aggregated Completion (Split Mode).** The flat flow passes `--keep-branch` when it cleans up *its* split worktrees; this section deliberately does not, so `remove` also runs `git branch -D` on each split branch. The difference is what the branch still owes: a flat split branch is the run's final deliverable that the user is told to open a PR from, whereas a phase split branch is an intermediate that Merge Split Branches Into the Phase Branch — which this section only runs *after every repository's own call has succeeded* — has already merged into that repository's own `$PHASE_BRANCH`. Its commits are reachable from that repository's phase branch, so the branch ref itself has no remaining consumer and keeping it would only accumulate one dead ref per member per phase, per repository. Each repository's own `$PHASE_BRANCH` is what carries that repository's work forward from here, and nothing here deletes it.
 
 ### Continue to Phase Completion
 
@@ -1575,7 +1987,7 @@ else
 fi
 ```
 
-Delegate to **Create or Reuse a Container** with `EXEC_ROOT="$AIMI_ROOT"`, `EXEC_BRANCH="$BRANCH_NAME"`, and `CONTAINER_BASE` as just computed (`BASE_BRANCH` when Step 1.6 set one, otherwise `DEFAULT_BRANCH` — the exact same base-selection rule the phase container already uses; see Create or Reuse the Phase Container). The path is deterministic given `AIMI_ROOT` and `[branchName]`:
+Delegate to **Create or Reuse a Container** with `EXEC_ROOT="$AIMI_ROOT"`, `EXEC_BRANCH="$BRANCH_NAME"`, and `CONTAINER_BASE` as just computed (`BASE_BRANCH` when Step 1.6 set one, otherwise `DEFAULT_BRANCH` — the exact same base-selection rule each phase container's own group uses; see Create Phase Containers Per Project Group). The path is deterministic given `AIMI_ROOT` and `[branchName]`:
 
 ```bash
 FEATURE_CONTAINER_PATH="$AIMI_ROOT/.worktrees/$BRANCH_NAME"
@@ -1630,7 +2042,9 @@ Run the following sub-steps when any story has a non-null `project` field, or wh
    fi
    ```
 
-   **When `CONTAINER_MODE` is false** (`EXECUTION_MODE` inline or absent): set up the branch directly — unchanged for an inline-mode run. `CONTAINER_MODE` is forced false whenever `PHASE_MODE` is true (see Execution Mode Detection in Step 1), so a phase-mode run with a project-scoped story falls into this same branch today; unlike Main Repo Branch Setup above, this subsection has no `PHASE_MODE` skip condition of its own. Phase mode pairing with per-story `project` fields is not yet a validated combination — running `setup-branch` here would check out `[branchName]` directly onto that project's own working tree, the same operation the Main Working Tree Untouched Invariant forbids for a claimed phase. Treat this as a known gap, not as "unchanged," until phase mode grows its own per-project container handling:
+   **When `PHASE_MODE` is true:** skip this project's branch setup entirely and move on to the next unique project path (or past this whole numbered sub-step once every project path has been visited). `CONTAINER_MODE` is forced false whenever `PHASE_MODE` is true (see Execution Mode Detection in Step 1), so without this skip a phase-mode run with a project-scoped story would fall into the inline branch below and run `setup-branch` directly against that project's own working tree — the same operation the Main Working Tree Untouched Invariant forbids for a claimed phase. It needs none of that: Step 1.7's **Create Phase Containers Per Project Group** already created (or reused) this same project's own phase container, keyed by the identical `project_path`/`group_key`, before Step 2 ever runs. This mirrors Main Repo Branch Setup's own `PHASE_MODE` skip above, generalized to the per-project case.
+
+   **When `PHASE_MODE` is false and `CONTAINER_MODE` is false** (`EXECUTION_MODE` inline or absent): set up the branch directly — unchanged for an inline-mode run:
    ```bash
    if [ -n "$BASE_BRANCH" ]; then
      PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch "$BRANCH_NAME" --default-branch $PROJECT_DEFAULT --project [resolved_project_path] --base $BASE_BRANCH)
@@ -1851,12 +2265,18 @@ command -v agent-browser
   VISUAL_GROUP_KEY=$(printf '%s' "$FIRST_VISUAL" | jq -r '.project // "DEFAULT"')
   ```
 
-  **When `PHASE_MODE` is true** (the top-level single-file phase orchestrator, or a Phase-Mode Paired Split sub-orchestrator whose spawn prompt pre-set `PHASE_BRANCH`/`PHASE_CONTAINER_PATH` to its own split — see Spawn Split Sub-Orchestrators — so this branch applies unmodified in either case, keyed by whichever branch this session owns): read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Rewrite a Verification URL Origin and apply it with `EXEC_ROOT="$AIMI_ROOT"` (the same CWD Phase Container Dev Server Bootstrap used for its own `serve start`), `EXEC_BRANCH="$PHASE_BRANCH"`, and `RAW_URL="$VISUAL_URL"` — never a value cached from Phase Container Dev Server Bootstrap or Split Container Dev Server Bootstrap earlier in this run, since each Bash call is an isolated shell (Step 0):
+  **When `PHASE_MODE` is true** (the top-level single-file phase orchestrator, or a Phase-Mode Paired Split sub-orchestrator whose spawn prompt pre-set `PHASE_BRANCH`/`PHASE_CONTAINER_PATH` to its own split — see Spawn Split Sub-Orchestrators — so this branch applies unmodified in either case, keyed by whichever branch this session owns): resolve `EXEC_ROOT` from `VISUAL_GROUP_KEY` just computed above — never the unconditional `$AIMI_ROOT` — since a visual story's own `project` field may resolve to a repository distinct from `AIMI_ROOT`'s own (see Create Phase Containers Per Project Group). This CWD must exactly match whichever group's dev server Phase Container Dev Server Bootstrap started for that same `VISUAL_GROUP_KEY` (container-execution.md:100/:111/:134's CWD-must-match requirement — a mismatched CWD silently misses the registered entry). Read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Rewrite a Verification URL Origin and apply it with `EXEC_ROOT` resolved as follows, `EXEC_BRANCH="$PHASE_BRANCH"`, and `RAW_URL="$VISUAL_URL"` — never a value cached from Phase Container Dev Server Bootstrap or Split Container Dev Server Bootstrap earlier in this run, since each Bash call is an isolated shell (Step 0):
 
   ```bash
   WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
   : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-  cd "$AIMI_ROOT"
+  if [ "$VISUAL_GROUP_KEY" = "DEFAULT" ]; then
+    VISUAL_GROUP_ROOT="$AIMI_ROOT"
+  else
+    VISUAL_GROUP_ROOT="$AIMI_ROOT/$VISUAL_GROUP_KEY"
+  fi
+  EXEC_ROOT=$(git -C "$VISUAL_GROUP_ROOT" rev-parse --show-toplevel 2>/dev/null) || EXEC_ROOT="$VISUAL_GROUP_ROOT"
+  cd "$EXEC_ROOT"
   SERVE_URL_JSON=$($WORKTREE_MGR serve url "$PHASE_BRANCH" "$VISUAL_URL")
   VISUAL_URL=$(printf '%s' "$SERVE_URL_JSON" | jq -r '.url')
   ```
@@ -1999,7 +2419,14 @@ while true:
     EXEC_BRANCH = {}  # key: group_key, value: branch every git/worktree op targets
     for group_key in project_groups:
         if PHASE_MODE:
-            EXEC_ROOT[group_key] = PHASE_CONTAINER_PATH
+            # PHASE_CONTAINER_PATHS[group_key] is populated for every
+            # participating group by Create Phase Containers Per Project
+            # Group (Step 1.7) in the top-level orchestrator. A Phase-Mode
+            # Paired Split sub-orchestrator never runs Step 1.7 — its spawn
+            # prompt pre-sets only the scalar PHASE_CONTAINER_PATH to its own
+            # split's worktree (see Spawn Split Sub-Orchestrators), so the map
+            # is empty there and this falls back to that scalar unchanged.
+            EXEC_ROOT[group_key] = PHASE_CONTAINER_PATHS[group_key] if group_key in PHASE_CONTAINER_PATHS else PHASE_CONTAINER_PATH
             EXEC_BRANCH[group_key] = PHASE_BRANCH
         elif CONTAINER_MODE:
             EXEC_ROOT[group_key] = CONTAINER_PATHS[group_key]
@@ -2474,7 +2901,7 @@ Output your full structured review under the heading '## Design Implementation R
 
 After the wave loop ends (all stories processed or deadlock):
 
-**Phase and container mode (`EXEC_OWNS_ROOT=true`):** cleanup runs per project group with CWD = `EXEC_ROOT[group_key]`, matching worktrees named `"[EXEC_BRANCH[group_key]]-US-*"` — the same derivation rule as `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md`'s Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH subsection (`PHASE_CONTAINER_PATH`/`PHASE_BRANCH` in phase mode, `CONTAINER_PATHS[group_key]`/`branchName` in container mode). Step 4's own wave loop rebuilds `EXEC_ROOT`/`EXEC_BRANCH` fresh each wave, scoped to that wave's own stories; Post-Loop Cleanup runs after the loop ends, so it re-derives them here across every unique `group_key` with at least one story scheduled this run, rather than reading a stale, single-wave-scoped copy. In phase mode every `group_key` resolves to the same `PHASE_CONTAINER_PATH`/`PHASE_BRANCH` — in the common case of a single group_key this degenerates to exactly the single iteration today's phase-only cleanup already runs; on the rarer phase-mode wave that grouped stories under more than one `group_key`, the loop below repeats that same pass once per group_key, each an idempotent no-op against the worktrees the first pass already swept, never a different path or branch. The main working tree (`AIMI_ROOT`) is never `cd`'d into by this step.
+**Phase and container mode (`EXEC_OWNS_ROOT=true`):** cleanup runs per project group with CWD = `EXEC_ROOT[group_key]`, matching worktrees named `"[EXEC_BRANCH[group_key]]-US-*"` — the same derivation rule as `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md`'s Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH subsection (`PHASE_CONTAINER_PATHS[group_key]`/`PHASE_BRANCH` in phase mode, `CONTAINER_PATHS[group_key]`/`branchName` in container mode). Step 4's own wave loop rebuilds `EXEC_ROOT`/`EXEC_BRANCH` fresh each wave, scoped to that wave's own stories; Post-Loop Cleanup runs after the loop ends, so it re-derives them here across every unique `group_key` with at least one story scheduled this run, rather than reading a stale, single-wave-scoped copy. In phase mode every `group_key` resolves to its own `PHASE_CONTAINER_PATHS[group_key]` — the same `PHASE_BRANCH` name, but each group's own repository's own container — so in the common case of a single group_key this degenerates to exactly the single iteration today's phase-only cleanup already runs; on a genuinely multi-repo phase that grouped stories under more than one `group_key`, the loop below runs once per group_key against that group's own container, sweeping each participating repository in turn rather than repeating a pass against the one the first iteration already covered. The main working tree (`AIMI_ROOT`) is never `cd`'d into by this step.
 
 ```
 for each unique group_key with at least one story scheduled this run:
@@ -2632,51 +3059,156 @@ PHASE_NAME=$(printf '%s' "$PHASE_JSON" | jq -r '.name')
 
 ### Creates Verification
 
-For every entry the phase declared in `roadmap.json`'s `creates[]`, confirm the artifact is actually present in the phase branch's code — not merely that some other phase's `needs` resolved against it. This is a distinct, stricter check than `validate-contracts`: `validate-contracts` (outline 03) answers "does a `needs` entry have a completed, handoff-documented provider," using `roadmap.json` and `handoff.md` as its only inputs, and never inspects source code. This check answers "does this phase's own promised artifact exist," by inspecting the phase container's actual tracked files.
+For every entry the phase declared in `roadmap.json`'s `creates[]`, confirm the artifact is actually present in at least one participating repository's own phase branch — not merely that some other phase's `needs` resolved against it. This is a distinct, stricter check than `validate-contracts`: `validate-contracts` (outline 03) answers "does a `needs` entry have a completed, handoff-documented provider," using `roadmap.json` and `handoff.md` as its only inputs, and never inspects source code. This check answers "does this phase's own promised artifact exist, somewhere among its participating repositories," by inspecting each repository's own phase container's actual tracked files.
 
-**Split-mode timing (`PHASE_SPLIT_MODE=true`):** this check always runs against `$PHASE_CONTAINER_PATH`'s tracked files, unchanged — but by the time this section is reached in split mode, Phase-Mode Paired Split's Merge Split Branches Into the Phase Branch step has already landed **all N** of this phase's active split branches onto `$PHASE_BRANCH` in a single `merge-all` call, so `$PHASE_CONTAINER_PATH`'s checkout already reflects every split's combined work. This check therefore verifies the merged phase branch state as a natural consequence of running after that merge — never any one split branch in isolation — with no special-casing needed in the procedure below, and no dependence on how many splits there were.
+**Union across repositories, not per-repository attribution.** An identity is `verified` for the phase when **any** participating repository's own call reports it `verified`; it is `missing` only when **every** participating repository reports it `missing`. This is a union, never a per-repository assignment, because a phase's `creates[]` contract is declared once, at the phase level: `scope-contexts.md`'s naming table (§ Creates/Needs Contracts) names every artifact by kind — endpoint, table, service, file — with no repository qualifier, so a phase never declares which repository will deliver a given artifact. There is no per-repository slot to attribute a verdict against; the only question this check can ask of an identity is whether it exists **anywhere** among the phase's own participating repositories, and the answer is the union of every repository's own answer.
+
+**Split-mode timing (`PHASE_SPLIT_MODE=true`):** this check runs once per participating repository, against that repository's own container — and for a given repository, it never runs before **that repository's own merge** has landed. Merge Split Branches Into the Phase Branch (above) issues one `merge-all` call per repository, not one phase-wide call, so a repository's own `$PHASE_BRANCH` reflects that repository's split work only once **its own** `merge-all` call has returned successfully — a sibling repository's merge still being pending, or having conflicted, has no bearing on whether this repository is safe to check. Merge Split Branches Into the Phase Branch already STOPs (and releases the claim) on any repository's merge conflict before Phase Completion is ever reached, so every participating repository's container is guaranteed merged by the time this section runs — this note documents why that guarantee holds per repository, not a new gate this section itself enforces.
 
 > **Cross-story flag for the auditor:** this story's brief describes creates verification as invoking "the outline:03 contract-validation CLI surface... in its phase-closure mode" (e.g. `validate-contracts <phase-id> --root <path>`) as an illustrative example. The landed `validate-contracts` (outline 03) has no `--root` flag or code-existence mode, and its own notes scope it exclusively to needs-vs-creates delivery resolution ("wiring validate-contracts and roadmap-sweep into plan.md and execute.md is owned by outline 08 and outline 11" — this story). Extending `validate-contracts`'s jq-only, roadmap.json-only logic to also grep real source files would be new scope outline 03 never claimed. Creates verification therefore ships as **its own CLI verb, `verify-creates`** — not as an extension of `validate-contracts`, and no longer as executable prose here. It was prose until this section was rewritten: five hand-written steps built on `[ -f ]` and a bare `git grep -l -F`, which no Bash suite could reach and which was wrong in five of nine measured scenarios (a docs-only mention, a `TODO` comment and a test-file mention each closed a phase; a directory identity could never verify, because `[ -f ]` is false on a directory; and a project that committed its own `.aimi/` found the identity inside the very `roadmap.json` that declared it). Reconcile if a future story wants to fold `verify-creates` into `validate-contracts` instead.
 
 #### Inputs
 
-- `FEATURE` and `PHASE_ID` — the claimed phase. The verb reads that phase's `creates[]` out of `roadmap.json` itself, applying the one existing identity definition (`_cv_identity`: the substring before the first `(`, trimmed), so no `creates` array is extracted here and no second copy of that rule exists in this file.
-- `PHASE_CONTAINER_PATH` — from Step 1.7, absolute, never CWD-derived. Passed as `--dir`; it is the checkout whose **tracked** files are searched.
+- `FEATURE` and `PHASE_ID` — the claimed phase. Every repository's own `verify-creates` call reads that phase's `creates[]` out of `roadmap.json` itself, applying the one existing identity definition (`_cv_identity`: the substring before the first `(`, trimmed), so no `creates` array is extracted here and no second copy of that rule exists in this file, in any repository's call. Because every call reads the same phase-level `creates[]`, every repository's own verdict array covers the identical, identically-ordered identity set.
+- `PARTICIPATING_GROUP_KEYS` — every project group with at least one story (non-split phase) or `$PHASE_SPLIT_FILES` member (split phase) scheduled for this phase, derived fresh in this block by the same rule that populated `PHASE_CONTAINER_PATHS[group_key]` for this phase run (Create Phase Containers Per Project Group's Derive Participating Project Groups, above) — branching on `PHASE_SPLIT_MODE` exactly as the adjacent Multi-File Pending Count block already does. Split mode sums over the **full** `$PHASE_SPLIT_FILES` member list, not just this run's active subset — the same reason Multi-File Pending Count does: a repository whose split member already completed on a prior run still delivered artifacts there, and still needs checking. For each participating group, its own container — `<repo toplevel>/.worktrees/$PHASE_BRANCH` (`${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Container Paths Per Project Group), recomputed fresh via `git -C ... rev-parse --show-toplevel`, never read from a value assumed to survive from Step 1.7 — is passed as that repository's own `--dir`; it is the checkout whose **tracked** files are searched there. With exactly one participating group — today's single-repo case — this is exactly today's single `PHASE_CONTAINER_PATH` value, unchanged.
 
 #### Procedure
 
-Exactly one call. `verify-creates` (`cmd_verify_creates` in `aimi-cli.sh`) runs four deterministic steps per `creates[]` entry — a tracked-path match via `git ls-files`, which matches a **directory** as well as a file; leading-HTTP-method extraction, so `POST /api/notifications` is searched as `/api/notifications`, which is what route code actually contains; a `git grep -n -I -F` over tracked source that excludes documentation, tests and `.aimi/`; and a filter that drops hits which are only a `TODO`/`FIXME`/`XXX`/`HACK` comment. Identity kinds are not dispatched on: every identity runs the same four steps.
+One `verify-creates` call **per participating repository** — never a single call regardless of how many repositories are involved, and never a path assumed to survive from Step 1.7 or from a prior loop iteration, since each Bash call is an isolated shell. `verify-creates` (`cmd_verify_creates` in `aimi-cli.sh`, **unmodified by this story** — it already accepts `--dir`, so N calls with N different `--dir` values need no verb change) runs four deterministic steps per `creates[]` entry — a tracked-path match via `git ls-files`, which matches a **directory** as well as a file; leading-HTTP-method extraction, so `POST /api/notifications` is searched as `/api/notifications`, which is what route code actually contains; a `git grep -n -I -F` over tracked source that excludes documentation, tests and `.aimi/`; and a filter that drops hits which are only a `TODO`/`FIXME`/`XXX`/`HACK` comment. Identity kinds are not dispatched on: every identity, in every repository's call, runs the same four steps.
 
-It is a **query, not a gate** — any verdict array exits `0`, including one where every entry is `missing` — so branch on the JSON below, never on a `missing` verdict having "failed". A non-zero exit means the verb could not run at all (unknown flag, absent or malformed `roadmap.json`, a `--dir` that is not a directory) and its stderr says which.
+It is a **query, not a gate**, for each repository's own call — any verdict array exits `0`, including one where every entry is `missing` — so branch on the JSON below, never on a `missing` verdict having "failed". A non-zero exit from any one repository's call means that repository's tooling could not run at all (unknown flag, absent or malformed `roadmap.json`, a `--dir` that is not a directory) and its stderr says which; per the union rule above, one repository's tooling failure fails the whole phase's check, so this is decided before any repository's missing count is ever consulted.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-CREATES_REPORT=$($AIMI_CLI verify-creates --feature "$FEATURE" --phase "$PHASE_ID" --dir "$PHASE_CONTAINER_PATH")
-CREATES_EXIT=$?
-if [ "$CREATES_EXIT" -ne 0 ]; then CREATES_REPORT='[]'; fi
-VERIFIED_ARTIFACTS=$(printf '%s' "$CREATES_REPORT" | jq -r '.[] | select(.status == "verified") | "\(.identity) — \(.evidence)"')
-MISSING_CREATES=$(printf '%s' "$CREATES_REPORT" | jq -r '.[] | select(.status == "missing") | "\(.identity) — \(.evidence)"')
-ERROR_CREATES=$(printf '%s' "$CREATES_REPORT" | jq -r '.[] | select(.status == "error") | "\(.identity) — \(.evidence) [git exit \(.gitStatus)]"')
-MISSING_COUNT=$(printf '%s' "$CREATES_REPORT" | jq '[.[] | select(.status == "missing")] | length')
-ERROR_COUNT=$(printf '%s' "$CREATES_REPORT" | jq '[.[] | select(.status == "error")] | length')
-printf 'verify-creates exit=%s missing=%s error=%s\n' "$CREATES_EXIT" "$MISSING_COUNT" "$ERROR_COUNT"
-printf -- '--- verified ---\n%s\n--- missing ---\n%s\n--- tooling errors ---\n%s\n' "$VERIFIED_ARTIFACTS" "$MISSING_CREATES" "$ERROR_CREATES"
+
+# Derive PARTICIPATING_GROUP_KEYS fresh in this block — Step 1.7's populated
+# PHASE_CONTAINER_PATHS map does not persist across Bash calls. Same rule,
+# same source files, as Create Phase Containers Per Project Group's own
+# Derive Participating Project Groups — except split mode sums over the FULL
+# member list, $PHASE_SPLIT_FILES, exactly like the adjacent Multi-File
+# Pending Count block, not just this run's active subset.
+if [ "$PHASE_SPLIT_MODE" = true ]; then
+  CV_GROUP_RAW=""
+  while IFS= read -r split_file; do
+    [ -n "$split_file" ] || continue
+    CV_PROJECT=$(jq -r '.metadata.splitGroup.project // "."' "$split_file")
+    CV_GROUP_RAW="${CV_GROUP_RAW}${CV_PROJECT}"$'\n'
+  done <<< "$PHASE_SPLIT_FILES"
+else
+  CV_GROUP_RAW=$(jq -r '.userStories[] | (.project // ".")' "$PHASE_TASKS_PATH")
+fi
+PARTICIPATING_GROUP_KEYS=$(printf '%s\n' "$CV_GROUP_RAW" | grep -v '^$' | sort -u)
+[ -n "$PARTICIPATING_GROUP_KEYS" ] || PARTICIPATING_GROUP_KEYS="."
+
+# One verify-creates call per participating repository. Each repository's own
+# container is recomputed fresh here — <repo toplevel>/.worktrees/$PHASE_BRANCH,
+# the identical formula container-execution.md's Phase Container Paths Per
+# Project Group contract uses — never read from a value assumed to survive
+# from Step 1.7. Each call's own exit status is captured with a pre-initialized
+# variable plus an || assignment, never a bare $? read, so one repository's
+# tooling failure can never abort the loop before the remaining repositories
+# are checked.
+PHASE_CV_RESULTS=""
+while IFS= read -r CV_PROJECT; do
+  [ -n "$CV_PROJECT" ] || continue
+  case "$CV_PROJECT" in
+    .)
+      CV_GROUP_KEY="DEFAULT"
+      CV_GROUP_ROOT="$AIMI_ROOT"
+      ;;
+    /*|..|../*|*/..|*/../*)
+      echo "Invalid project \"$CV_PROJECT\" for phase $PHASE_ID" >&2
+      $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+      exit 1
+      ;;
+    *)
+      if ! [[ "$CV_PROJECT" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$ ]]; then
+        echo "Invalid project \"$CV_PROJECT\" for phase $PHASE_ID" >&2
+        $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+        exit 1
+      fi
+      CV_GROUP_KEY="$CV_PROJECT"
+      CV_GROUP_ROOT="$AIMI_ROOT/$CV_PROJECT"
+      ;;
+  esac
+
+  CV_GROUP_TOPLEVEL=$(git -C "$CV_GROUP_ROOT" rev-parse --show-toplevel 2>/dev/null) || CV_GROUP_TOPLEVEL=""
+  if [ -z "$CV_GROUP_TOPLEVEL" ]; then
+    echo "Not a git repository: $CV_GROUP_ROOT (project \"$CV_PROJECT\" for phase $PHASE_ID)" >&2
+    $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+    exit 1
+  fi
+  CV_CONTAINER="$CV_GROUP_TOPLEVEL/.worktrees/$PHASE_BRANCH"
+
+  CV_CALL_EXIT=0
+  CV_CALL_OUTPUT=$($AIMI_CLI verify-creates --feature "$FEATURE" --phase "$PHASE_ID" --dir "$CV_CONTAINER") || CV_CALL_EXIT=$?
+  [ "$CV_CALL_EXIT" -eq 0 ] || CV_CALL_OUTPUT='[]'
+
+  PHASE_CV_RESULTS="${PHASE_CV_RESULTS}$(jq -nc \
+    --arg gk "$CV_GROUP_KEY" --arg dir "$CV_CONTAINER" \
+    --argjson exit "$CV_CALL_EXIT" --argjson verdicts "$CV_CALL_OUTPUT" \
+    '{group_key: $gk, dir: $dir, exit: $exit, verdicts: $verdicts}')"$'\n'
+done <<< "$PARTICIPATING_GROUP_KEYS"
+
+# Tooling-failure tallies — computed unconditionally, from every repository's
+# own RAW verdicts, before any union is attempted. status:"error" is git
+# failing inside one repository's call, not an artifact failing to exist; a
+# non-zero CV_CALL_EXIT is the same class one level up — that repository's
+# call never ran at all. Either one, in ANY repository, dominates the branch
+# decision below, before MISSING_COUNT is ever computed.
+CV_REPO_COUNT=$(printf '%s\n' "$PARTICIPATING_GROUP_KEYS" | grep -c .)
+CV_MULTI=$([ "$CV_REPO_COUNT" -gt 1 ] && echo true || echo false)
+CV_EXIT_FAILURES=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s '[.[] | select(.exit != 0)] | length')
+# Each jq filter below is kept on a single physical line, even though it
+# reads dense. A jq-internal name bound with "as" is easy to misread as an
+# unassigned bash variable once the filter wraps past one source line, so
+# every filter here stays on the line that opens its own quote — a plain
+# formatting constraint, not a logic change.
+CV_EXIT_LINES=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s -r --argjson multi "$CV_MULTI" '.[] | select(.exit != 0) | if $multi then "\(.group_key) (\(.dir)): verify-creates exited \(.exit) and produced no verdicts." else "verify-creates exited \(.exit) and produced no verdicts." end')
+ERROR_COUNT=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s '[.[] | .verdicts[]? | select(.status == "error")] | length')
+ERROR_CREATES=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s -r --argjson multi "$CV_MULTI" '.[] as $r | ($r.verdicts[]? | select(.status == "error")) as $v | if $multi then "\($r.group_key): \($v.identity) — \($v.evidence) [git exit \($v.gitStatus)]" else "\($v.identity) — \($v.evidence) [git exit \($v.gitStatus)]" end')
+CV_RAW_MISSING_COUNT=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s '[.[] | .verdicts[]? | select(.status == "missing")] | length')
+
+if [ "$CV_EXIT_FAILURES" -gt 0 ] || [ "$ERROR_COUNT" -gt 0 ]; then
+  CV_BRANCH="tooling-failed"
+else
+  # Union: an identity is verified for the phase when ANY repository verified
+  # it; missing only when EVERY repository reported it missing. This step
+  # never runs on a set missing a repository's own verdicts — reached only
+  # once every repository's own call is confirmed clean above.
+  CREATES_REPORT=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s --argjson multi "$CV_MULTI" '(.[0].verdicts | map(.identity)) as $order | ([.[] as $r | $r.verdicts[] | {group_key: $r.group_key, identity, status, method, evidence, gitStatus}]) as $flat | [ $order[] | . as $id | ($flat | map(select(.identity == $id))) as $grp | ($grp | map(select(.status == "verified")) | sort_by(.group_key)) as $ver | if ($ver | length) > 0 then {identity: $id, status: "verified", method: $ver[0].method, evidence: $ver[0].evidence, gitStatus: $ver[0].gitStatus} else ($grp | sort_by(.group_key)) as $mis | (if $multi then ($mis | map("\(.group_key): \(.evidence)") | join("; ")) else $mis[0].evidence end) as $ev | {identity: $id, status: "missing", method: $mis[0].method, evidence: $ev, gitStatus: $mis[0].gitStatus} end ]')
+  VERIFIED_ARTIFACTS=$(printf '%s' "$CREATES_REPORT" | jq -r '.[] | select(.status == "verified") | "\(.identity) — \(.evidence)"')
+  MISSING_CREATES=$(printf '%s' "$CREATES_REPORT" | jq -r '.[] | select(.status == "missing") | "\(.identity) — \(.evidence)"')
+  MISSING_COUNT=$(printf '%s' "$CREATES_REPORT" | jq '[.[] | select(.status == "missing")] | length')
+  if [ "$MISSING_COUNT" -gt 0 ]; then
+    CV_BRANCH="missing"
+  else
+    CV_BRANCH="ok"
+  fi
+fi
+
+printf 'creates-verification: branch=%s repos=%s exit_failures=%s error_count=%s missing_count=%s\n' \
+  "$CV_BRANCH" "$CV_REPO_COUNT" "$CV_EXIT_FAILURES" "$ERROR_COUNT" "${MISSING_COUNT:-0}"
+printf -- '--- verified ---\n%s\n--- missing ---\n%s\n--- tooling exit failures ---\n%s\n--- tooling errors ---\n%s\n' \
+  "${VERIFIED_ARTIFACTS:-}" "${MISSING_CREATES:-}" "$CV_EXIT_LINES" "$ERROR_CREATES"
 ```
 
-Every list is derived from that one result with a `jq` select on `.status`, inside the same block that assigns it — jq is the loop, deliberately instead of a shell `while` that accumulates a variable read after the loop has closed (`test-command-blocks.sh` check 3 catches exactly that shape). Each verdict object is `{identity, status, method, evidence, gitStatus}`: `status` is `verified` | `missing` | `error`, `method` is `"path"` | `"text"` | `null`, and `evidence` names the tracked path or `file:line` that decided it — or, on a `missing`, what was found and rejected.
+Every value is still derived with a `jq` select on `.status` — jq is the loop, deliberately instead of a shell `while` that accumulates a variable read after the loop has closed (`test-command-blocks.sh` check 3 catches exactly that shape) — now in two passes: `ERROR_COUNT`/`ERROR_CREATES` are computed from every repository's own **raw**, pre-union verdicts (so a tool failure is visible before any union is attempted), and `CREATES_REPORT`/`VERIFIED_ARTIFACTS`/`MISSING_CREATES`/`MISSING_COUNT` are computed from the **unioned** per-identity array, reached only once every repository's own call is confirmed clean. Each unioned verdict object keeps the existing shape, `{identity, status, method, evidence, gitStatus}`: `status` is `verified` | `missing` (never `error` — an error anywhere already routed the phase to Verification tooling failed before this point), `method` is `"path"` | `"text"` | `null`, and `evidence` names the tracked path or `file:line` that decided it, or, on a `missing`, what was found and rejected.
 
-`VERIFIED_ARTIFACTS` keeps its line shape `"<identity> — <location>"`, identity verbatim and first, one line per verified entry in `creates[]` order, with the verb's `evidence` string as the location (`tracked path: db/migrations`, `tracked source: src/routes/notifications.ts:14`). Identity-first is load-bearing, not cosmetic: this list becomes handoff.md's `## Artifacts Created`, which `_cv_handoff_lists_artifact` substring-matches with `grep -qF` to resolve a downstream phase's `needs`.
+`VERIFIED_ARTIFACTS` keeps its line shape `"<identity> — <location>"`, identity verbatim and first, one line per verified entry in `creates[]` order, with the winning repository's own `evidence` string as the location — never tagged with that repository's `group_key`, and never a concatenation of every repository that verified it: when more than one repository verifies the same identity, the location is the evidence from the first repository, in sorted `group_key` order, that verified it. Identity-first is load-bearing, not cosmetic: this list becomes handoff.md's `## Artifacts Created`, which `_cv_handoff_lists_artifact` substring-matches with `grep -qF` to resolve a downstream phase's `needs`.
+
+`MISSING_CREATES` keeps the same `"<identity> — <evidence>"` shape, but with **more than one** participating repository its `evidence` names every repository that was searched: `"<group_key>: <that repository's own evidence>"`, joined with `"; "` in sorted `group_key` order, so a reader can tell "this name appears nowhere in any repository" from "this name appears only in prose in repository X" instead of one arbitrary repository's evidence standing in for all of them. Both the rejected-location detail and the tracked-files-only limitation `verify-creates` already returns per call (scope-contexts.md § What verification looks for) are preserved, once per repository, inside that combined string. With **exactly one** participating repository the tag is omitted — `MISSING_CREATES`, like `CREATES_REPORT`, `VERIFIED_ARTIFACTS`, `ERROR_CREATES` and `MISSING_COUNT`, is then byte-identical to today's single-call output: the union of one set is that set.
 
 #### Which branch to take
 
-`status: "error"` is **git failing**, not an artifact failing to exist — and a non-zero `CREATES_EXIT` is the same class one level up: the verb never ran. Both decide the branch **before** `MISSING_COUNT` does:
+Read the `creates-verification:` line the Procedure block printed above.
 
-- `CREATES_EXIT` non-zero **or** `ERROR_COUNT > 0` → **Verification tooling failed** below. No status transition.
-- otherwise `MISSING_COUNT > 0` → **On any missing entry** below. `verification_failed`.
-- otherwise → **Write Handoff**.
+- `branch=tooling-failed` → **Verification tooling failed** below. No status transition. This fires when `CV_EXIT_FAILURES > 0` (at least one repository's own `verify-creates` call never ran) or `ERROR_COUNT > 0` (git broke while checking at least one identity in at least one repository) — decided before `MISSING_COUNT` is ever computed, so a single repository's tooling failure can never be silently read as that repository contributing zero verified identities to the union.
+- `branch=missing` → **On any missing entry** below. `verification_failed`.
+- `branch=ok` → **Write Handoff**.
 
-Error entries are already absent from `MISSING_CREATES` and from `MISSING_COUNT` — both select on `.status == "missing"` — so a tool failure can never be counted or reported as an undelivered artifact.
+Error entries are never part of `CREATES_REPORT`: `ERROR_COUNT`/`ERROR_CREATES` are computed from every repository's own raw verdicts, before the union step runs, and the union itself is reached only once `CV_EXIT_FAILURES` and `ERROR_COUNT` are both confirmed zero across every participating repository — so a tool failure in one repository can never be counted or reported as an undelivered artifact, and no repository's data is ever silently dropped from the union because a sibling repository's call failed.
 
 #### Verification tooling failed
 
@@ -2688,19 +3220,18 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
 ```
 
-Transitioning to `verification_failed` here would tell the user their phase failed to deliver when the tool is what failed — and would block next-phase planning on evidence that was never gathered.
+Transitioning to `verification_failed` here would tell the user their phase failed to deliver when the tool is what failed — and would block next-phase planning on evidence that was never gathered for every repository, including the ones whose own call succeeded.
 
 Report:
 ```
 ## Phase [PHASE_ID] Creates Verification Could Not Run
 
-Verification tooling failed: git broke. This is NOT a finding that the phase
-failed to deliver — nothing was proven either way.
+Verification tooling failed in at least one participating repository. This is
+NOT a finding that the phase failed to deliver — nothing was proven either
+way, for any repository, including ones whose own call succeeded cleanly.
 
-[if CREATES_EXIT != 0:]
-verify-creates itself exited [CREATES_EXIT] and produced no verdicts. Its stderr
-above names the cause (unknown flag, absent or malformed roadmap.json, or a
---dir that is not a directory).
+[if CV_EXIT_FAILURES > 0, for each line of CV_EXIT_LINES:]
+  - [line]
 
 [if ERROR_COUNT > 0:]
 [ERROR_COUNT] creates entr(y|ies) could not be checked because git exited above 1:
@@ -2710,13 +3241,17 @@ above names the cause (unknown flag, absent or malformed roadmap.json, or a
 
 Phase status is unchanged (in_progress) and the claim is released. Nothing was
 marked verification_failed, because a broken tool is not a missing artifact.
-Fix git in [PHASE_CONTAINER_PATH], then re-run /aimi:execute — creates
-verification re-runs from scratch on the next pass.
+Fix git in the repositor(y|ies) named above, then re-run /aimi:execute --
+creates verification re-runs from scratch, against every participating
+repository, on the next pass.
 
-[if MISSING_COUNT > 0:]
-[MISSING_COUNT] further entr(y|ies) came back missing on this same run. They are
-reported as unconfirmed rather than failed, because a run in which git broke is
-not a run whose other verdicts can be trusted, and they are re-checked next pass.
+[if CV_RAW_MISSING_COUNT > 0:]
+[CV_RAW_MISSING_COUNT] further entr(y|ies) came back missing, counted across
+every repository's own raw verdicts rather than deduplicated per identity.
+They are reported as unconfirmed rather than failed, because a run in which
+git broke in even one repository is not a run whose other verdicts can be
+trusted — no cross-repository union was computed — and they are re-checked
+next pass.
 ```
 
 Do **not** write `handoff.md`, do **not** offer a PR, do **not** run the Next Phase step below. Skip directly to Step 5.
@@ -2732,31 +3267,43 @@ $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
 
 Release the claim (see Release the Claim on Abort) right after the status transition above — `verification_failed` is one of the statuses `roadmap-claim`'s auto-mode branch treats as re-claimable once unclaimed, so releasing here is what lets "re-run `/aimi:execute` to re-verify" below actually work on the next attempt, self-session or otherwise.
 
-Report — print each missing line **with the evidence `verify-creates` returned for it**, verbatim. That evidence is the difference between "this name appears nowhere" and "this name appears only in prose", and the user cannot tell those apart from a bare "not found under [PHASE_CONTAINER_PATH]":
+Report — print each missing line **with the evidence `verify-creates` returned for it**, verbatim, tagged by every repository that was searched when more than one repository participated in this phase. That evidence is the difference between "this name appears nowhere in any participating repository" and "this name appears only in prose in repository X", and the user cannot tell those apart from a bare "not found":
 ```
 ## Phase [PHASE_ID] Verification Failed
 
-[MISSING_COUNT] declared creates entr(y|ies) could not be confirmed in the phase branch:
+[MISSING_COUNT] declared creates entr(y|ies) could not be confirmed in any
+participating repository's phase branch:
 
 [for each line of MISSING_CREATES:]
   - [line]
 
+[if more than one participating repository:]
+Each line names every repository searched for that identity and what was
+found and rejected there, tagged by that repository's own group_key. An
+identity reads missing here only when every participating repository
+reported it missing — an identity delivered in even one repository verifies
+for the whole phase, so this list is genuinely undelivered everywhere it was
+looked for.
+[otherwise:]
 Each line carries what was searched and, when something was found, the file and
 line that was found and rejected. "Found and rejected ... documentation or test
 path" means the name exists only in prose or in a test — a mention of the work,
 not the work. "Found and rejected ... TODO/FIXME marker comment" means the code
 says the work is still owed.
 
-git ls-files and git grep see tracked (committed) files only, so work that is
-written but committed nowhere reads as missing here. If that is what happened,
-commit it on branch [PHASE_BRANCH] and re-run to re-verify — nothing else is
-needed.
+git ls-files and git grep see tracked (committed) files only, in every
+participating repository, so work that is written but committed nowhere in
+any of them reads as missing here. If that is what happened, commit it on
+the relevant repository's own [PHASE_BRANCH] and re-run to re-verify —
+nothing else is needed.
 
-Phase status set to verification_failed. Fix the missing artifact(s) on branch
-[PHASE_BRANCH], then re-run /aimi:execute to re-verify — creates verification
-re-runs from scratch on the next pass. Next-phase planning stays blocked
-until this phase re-verifies successfully (verification_failed is excluded
-from next-eligible-phase selection, the same way pending/in_progress are).
+Phase status set to verification_failed. Fix the missing artifact(s) on
+branch [PHASE_BRANCH] in whichever repositor(y|ies) should have delivered
+them, then re-run /aimi:execute to re-verify — creates verification re-runs
+from scratch, against every participating repository, on the next pass.
+Next-phase planning stays blocked until this phase re-verifies successfully
+(verification_failed is excluded from next-eligible-phase selection, the same
+way pending/in_progress are).
 ```
 
 Do **not** write `handoff.md`, do **not** offer a PR, do **not** run the Next Phase step below. Skip directly to Step 5 (which still reports this phase's own story-level completion, unaffected by the roadmap-level failure).
@@ -2819,40 +3366,126 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 $AIMI_CLI roadmap-set-status --feature "$FEATURE" --phase "$PHASE_ID" --status completed
 ```
 
-Report: `"Phase [PHASE_ID] ([PHASE_SLUG]) completed. Claim released."`
+`roadmap-set-status` and `roadmap-write-handoff` (Write Handoff above) are otherwise unchanged by this story: each is exactly one call, each makes zero git calls, and each operates on `$AIMI_ROOT/.aimi/` regardless of single-repo or multi-repo layout. The claim, this phase's `status`, and `handoff.md` all stay singular for the phase — one status, one handoff file — no matter how many repositories participated. What multiplies per repository below is only the dev-server stop and the completion report's branch listing, never roadmap state.
 
-Stop this phase's own dev server, if one is still running, before the branch is offered for a PR below — an orphaned server would otherwise keep holding its port after the phase's container is later removed by some future step. This call is unconditional (never gated on `PHASE_SPLIT_MODE`): a single-file phase's server, if any, was started against `PHASE_BRANCH` by Phase Container Dev Server Bootstrap in Step 1.7; a split phase's own two split servers were already stopped earlier, immediately before their worktrees were removed (see Merge Split Branches Into the Phase Branch's Clean Up Split Worktrees and its merge-conflict path) — `PHASE_BRANCH` itself never had a server running against it in split mode, so this call is a harmless no-op there:
+Stop every participating repository's own phase dev server before the report below is composed — never just `$AIMI_ROOT`'s — so no server is left orphaned, still holding its port: phase mode's own container is never removed anywhere in this document (see Step 5's Container removal is completion-path-only note), so an un-stopped server here would stay alive indefinitely, not just until some later cleanup step. Derive this phase's participating project groups the same way **Create Phase Containers Per Project Group**'s Derive Participating Project Groups above already did when this phase's containers were created — `$PHASE_TASKS_PATH`'s own `userStories[].project` in single-file mode, or every member of `$PHASE_SPLIT_FILES`'s own `metadata.splitGroup.project` in split mode. Reading the **full** `$PHASE_SPLIT_FILES` member list, not just this run's active subset, mirrors Multi-File Pending Count's own reasoning above: a repository whose split member completed in an earlier session still had its own phase container and must still be named and stopped here, even though this run never touched it:
+
+```bash
+if [ "$PHASE_SPLIT_MODE" = true ]; then
+  PHASE_GROUP_RAW=""
+  while IFS= read -r split_file; do
+    [ -n "$split_file" ] || continue
+    GROUP_PROJECT=$(jq -r '.metadata.splitGroup.project // "."' "$split_file")
+    PHASE_GROUP_RAW="${PHASE_GROUP_RAW}${GROUP_PROJECT}"$'\n'
+  done <<< "$PHASE_SPLIT_FILES"
+else
+  PHASE_GROUP_RAW=$(jq -r '.userStories[] | (.project // ".")' "$PHASE_TASKS_PATH")
+fi
+PHASE_GROUP_PROJECTS=$(printf '%s\n' "$PHASE_GROUP_RAW" | grep -v '^$' | sort -u)
+[ -n "$PHASE_GROUP_PROJECTS" ] || PHASE_GROUP_PROJECTS="."
+PHASE_GROUP_COUNT=$(printf '%s\n' "$PHASE_GROUP_PROJECTS" | grep -c .)
+```
+
+**The pairing rule:** for each participating group, `serve stop` must run with the exact same CWD that same group's own `serve start "$PHASE_BRANCH"` used in **Phase Container Dev Server Bootstrap** (Step 1.7) — bootstrap CWD and stop CWD must match, per repository. The `DEFAULT` group (project `.`) uses `$AIMI_ROOT`; a named group uses `$AIMI_ROOT/[group]` — because `serve stop` resolves its `dev-server.json` key from CWD (see `_dev_server_key` in `worktree-manager.sh`), the identical "CWD must exactly match the CWD used for that branch's own `serve start` call" reasoning `container-execution.md`'s Bootstrap a Container Dev Server and Container Mode: Stop the Dev Server sections both state; a mismatched CWD here would silently miss the registered entry instead of stopping it. The call is issued unconditionally for every group, with no per-repo existence gate: `serve stop`'s documented contract (below) already exits 0 and reports "No dev server registered" when no server was ever started for that repository, so the loop needs no branching beyond iterating the group set:
 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+PHASE_REPORT_LINES=""
+while IFS= read -r GROUP_PROJECT; do
+  [ -n "$GROUP_PROJECT" ] || continue
+  if [ "$GROUP_PROJECT" = "." ]; then
+    GROUP_KEY="DEFAULT"
+    GROUP_ROOT="$AIMI_ROOT"
+    GROUP_LABEL="$AIMI_ROOT"
+  else
+    GROUP_KEY="$GROUP_PROJECT"
+    GROUP_ROOT="$AIMI_ROOT/$GROUP_PROJECT"
+    GROUP_LABEL="$GROUP_PROJECT"
+  fi
+  cd "$GROUP_ROOT"
+  $WORKTREE_MGR serve stop "$PHASE_BRANCH"
+  PHASE_REPORT_LINES="${PHASE_REPORT_LINES}${GROUP_LABEL}: ${PHASE_BRANCH}"$'\n'
+done <<< "$PHASE_GROUP_PROJECTS"
 cd "$AIMI_ROOT"
-$WORKTREE_MGR serve stop "$PHASE_BRANCH"
 ```
 
-CWD is `$AIMI_ROOT`, the same CWD Phase Container Dev Server Bootstrap used for its own `serve start "$PHASE_BRANCH"` in Step 1.7 — never `$PHASE_CONTAINER_PATH` — since `serve stop` resolves its dev-server.json key from CWD (see `_dev_server_key` in `worktree-manager.sh`); a mismatched CWD here would silently miss the registered entry instead of stopping it.
+`serve stop` kills the dev server's full process group and clears its state entry — identical to container-execution.md's Container Mode: Stop the Dev Server contract (invoked from Step 5). For a phase that ran **Phase-Mode Paired Split**, each participating repository's own split servers were already stopped by that repository's own **Clean Up Split Worktrees** step, immediately before its split worktree was removed — and that repository's own `$PHASE_BRANCH` ref never had a server started directly against it in split mode, since Phase Container Dev Server Bootstrap skips entirely when `PHASE_SPLIT_MODE=true` — so this loop's call is a harmless, correctly-idempotent no-op for every participating repository in split mode, the same reasoning that already held once, globally, for today's single-repo split case, now verified to hold independently per repository rather than just once. This only runs on the `completed` path reached here: every non-completion exit above it in Phase Completion (the pending-count guard, Creates Verification's `verification_failed` branch, and Write Handoff's failure branch) returns before this subsection, so a phase that ends on deadlock, a gate-blocked wave, or `verification_failed` never calls `serve stop` — its dev server(s) stay alive between waves and across a paused session, resumable via `serve status` on the next `/aimi:execute` run against the same phase, exactly like the flat container's own resumable contract.
 
-`serve stop` kills the dev server's full process group and clears its state entry; it exits 0 and reports "No dev server registered" when no server was ever started — identical to container-execution.md's Container Mode: Stop the Dev Server contract (invoked from Step 5). This only runs on the `completed` path reached here: every non-completion exit above it in Phase Completion (the pending-count guard, Creates Verification's `verification_failed` branch, and Write Handoff's failure branch) returns before this subsection, so a phase that ends on deadlock, a gate-blocked wave, or `verification_failed` never calls `serve stop` — its dev server stays alive between waves and across a paused session, resumable via `serve status` on the next `/aimi:execute` run against the same phase, exactly like the flat container's own resumable contract.
+This stop loop runs — and completes — before the completion report below is composed, and before **Offer a Pull Request** further down: a server must never outlive its container, and neither of those next two steps removes or touches `PHASE_CONTAINER_PATH` (phase mode's own container is never removed anywhere in this document — see Step 5's Container removal is completion-path-only note), so stopping first here keeps that invariant reading consistently top-to-bottom.
+
+Report:
+```
+Phase [PHASE_ID] ([PHASE_SLUG]) completed. Claim released.
+
+[if PHASE_GROUP_COUNT > 1:]
+[PHASE_GROUP_COUNT] repositories participated in this phase — open one pull request per repository, each from its own [PHASE_BRANCH]:
+
+[for each line of PHASE_REPORT_LINES:]
+  - [line]
+```
+
+With exactly one participating group — today's only supported case — `PHASE_GROUP_PROJECTS` resolves to exactly `.`, `PHASE_GROUP_COUNT` is `1`, the conditional block above never fires, and the report is exactly `Phase [PHASE_ID] ([PHASE_SLUG]) completed. Claim released.` — byte-for-byte identical to today's text — with the single `serve stop` call above run with CWD `$AIMI_ROOT`, identical to today's unconditional `cd "$AIMI_ROOT"`. When more than one group participates, each additional line names that repository (its project root for the `DEFAULT` group, its `project` value for a named group) and the one `$PHASE_BRANCH` name every group shares (see container-execution.md's Phase Container Paths Per Project Group: `EXEC_BRANCH[group_key]` is not a per-group map — it is the same `PHASE_BRANCH` scalar, reused by every group), so a human reading the report knows to open one pull request per repository.
 
 ### Offer a Pull Request
 
-Best-effort only — never reverts or changes the already-`completed` status on failure or refusal.
+Best-effort only — never reverts or changes the already-`completed` status on failure or refusal. Runs once per participating repository — the same project groups **Mark Phase Completed**'s report above already derived. Re-derived fresh in this block, since each Bash call is an isolated shell and nothing from that earlier block persists here:
 
 ```bash
-if command -v gh >/dev/null 2>&1; then
-  cd "$PHASE_CONTAINER_PATH"
-  git push -u origin "$PHASE_BRANCH"
-  gh pr create --base "$DEFAULT_BRANCH" --head "$PHASE_BRANCH" \
-    --title "Phase [PHASE_ID]: [PHASE_NAME]" \
-    --body "Completes phase [PHASE_ID] of [FEATURE]. See [PHASE_DIR]/handoff.md for details."
+if [ "$PHASE_SPLIT_MODE" = true ]; then
+  PHASE_GROUP_RAW=""
+  while IFS= read -r split_file; do
+    [ -n "$split_file" ] || continue
+    GROUP_PROJECT=$(jq -r '.metadata.splitGroup.project // "."' "$split_file")
+    PHASE_GROUP_RAW="${PHASE_GROUP_RAW}${GROUP_PROJECT}"$'\n'
+  done <<< "$PHASE_SPLIT_FILES"
 else
-  echo "gh not found — create the PR manually:"
-  echo "  git -C \"$PHASE_CONTAINER_PATH\" push -u origin $PHASE_BRANCH"
-  echo "  Then open a PR: $DEFAULT_BRANCH...$PHASE_BRANCH"
+  PHASE_GROUP_RAW=$(jq -r '.userStories[] | (.project // ".")' "$PHASE_TASKS_PATH")
 fi
+PHASE_GROUP_PROJECTS=$(printf '%s\n' "$PHASE_GROUP_RAW" | grep -v '^$' | sort -u)
+[ -n "$PHASE_GROUP_PROJECTS" ] || PHASE_GROUP_PROJECTS="."
 ```
 
-If `git push` or `gh pr create` fails (no permissions, offline, branch already has an open PR, etc.), report the failure verbatim and continue — do not retry, do not prompt interactively, and never revert the phase's `completed` status.
+For each group, resolve its own repository root, container, and default branch, then push and open a PR against that repository — never a value assumed to survive from Step 1.7 or from Mark Phase Completed above:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+while IFS= read -r GROUP_PROJECT; do
+  [ -n "$GROUP_PROJECT" ] || continue
+  if [ "$GROUP_PROJECT" = "." ]; then
+    GROUP_ROOT="$AIMI_ROOT"
+    GROUP_LABEL="$AIMI_ROOT"
+  else
+    GROUP_ROOT="$AIMI_ROOT/$GROUP_PROJECT"
+    GROUP_LABEL="$GROUP_PROJECT"
+  fi
+  GROUP_TOPLEVEL=$(git -C "$GROUP_ROOT" rev-parse --show-toplevel 2>/dev/null) || GROUP_TOPLEVEL=""
+  if [ -z "$GROUP_TOPLEVEL" ]; then
+    echo "Skipping PR for $GROUP_LABEL — not a git repository at $GROUP_ROOT."
+    continue
+  fi
+  GROUP_CONTAINER="$GROUP_TOPLEVEL/.worktrees/$PHASE_BRANCH"
+  GROUP_DEFAULT=$($AIMI_CLI detect-default-branch --project "$GROUP_TOPLEVEL") || GROUP_DEFAULT=""
+
+  if command -v gh >/dev/null 2>&1; then
+    cd "$GROUP_CONTAINER"
+    git push -u origin "$PHASE_BRANCH"
+    gh pr create --base "$GROUP_DEFAULT" --head "$PHASE_BRANCH" \
+      --title "Phase [PHASE_ID]: [PHASE_NAME]" \
+      --body "Completes phase [PHASE_ID] of [FEATURE]. See [PHASE_DIR]/handoff.md for details."
+  else
+    echo "gh not found — create the PR manually for $GROUP_LABEL:"
+    echo "  git -C \"$GROUP_CONTAINER\" push -u origin $PHASE_BRANCH"
+    echo "  Then open a PR: $GROUP_DEFAULT...$PHASE_BRANCH"
+  fi
+done <<< "$PHASE_GROUP_PROJECTS"
+cd "$AIMI_ROOT"
+```
+
+If `git push` or `gh pr create` fails for a given repository (no permissions, offline, branch already has an open PR, etc.), report that repository's failure verbatim and continue on to the next repository — do not retry, do not prompt interactively, and never revert the phase's `completed` status.
+
+With exactly one participating group — today's only previously-supported case — `PHASE_GROUP_PROJECTS` resolves to exactly `.`, `GROUP_TOPLEVEL` resolves to the same repository `$PHASE_CONTAINER_PATH` was built from, so `GROUP_CONTAINER` equals `$PHASE_CONTAINER_PATH` exactly, and `GROUP_DEFAULT` — detected fresh via the identical `--project`-scoped call Step 1.5's own `$DEFAULT_BRANCH` detection uses — equals `$DEFAULT_BRANCH`. The commands issued are therefore byte-identical to before. When more than one group participates, the loop runs once per repository, each against its own container, its own default branch, and its own pull request.
 
 ### Next Phase
 
@@ -3115,7 +3748,7 @@ The tasks file preserves all state. Re-running `/aimi:execute` will:
 
 **Phase mode:** re-running `/aimi:execute` for a phase this session already claimed and left `in_progress` does not error. `roadmap-claim`'s self-reclaim path (Step 1.7) reports the same phase again instead of a contention failure, and `$WORKTREE_MGR create "$PHASE_BRANCH" --from "$CONTAINER_BASE"` reuses the existing container directory silently since the target already exists — no separate reuse-detection logic is needed beyond calling both idempotently on every claim.
 
-**Phase mode with a split (`PHASE_SPLIT_MODE=true`):** the same idempotency extends to Phase-Mode Paired Split — `$WORKTREE_MGR create "$split_branch" --from "$PHASE_BRANCH"`, run once per active split branch, reuses each split worktree silently if a prior run left one in place, and re-spawning the sub-orchestrators is harmless: each one's own `init-session --file` points at a split file whose already-completed stories are skipped automatically (points 1–4 above), so a sub-orchestrator with nothing left pending returns immediately. A member that completed entirely on the prior run is dropped by Step 1.7's Active Split Files filter and never re-spawned at all. This is also what makes retrying after a Merge Split Branches Into the Phase Branch conflict safe — re-running does not re-execute any story, only retries the merge and the Multi-File Pending Count / Creates Verification checks that follow it.
+**Phase mode with a split (`PHASE_SPLIT_MODE=true`):** the same idempotency extends to Phase-Mode Paired Split — `$WORKTREE_MGR create "$split_branch" --from "$PHASE_BRANCH"`, run once per active split branch, reuses each split worktree silently if a prior run left one in place, and re-spawning the sub-orchestrators is harmless: each one's own `init-session --file` points at a split file whose already-completed stories are skipped automatically (points 1–4 above), so a sub-orchestrator with nothing left pending returns immediately. A member that completed entirely on the prior run is dropped by Step 1.7's Active Split Files filter and never re-spawned at all. This is also what makes retrying after a Merge Split Branches Into the Phase Branch conflict safe, for any number N of participating repositories: re-running does not re-execute any story, and it re-issues **every** repository's own `merge-all` call in full — never a partial resume from a saved per-repository position — because a branch already merged onto its own repository's `$PHASE_BRANCH` merges again idempotently ("Already up to date", exit 0), whether this run merged it moments ago or a human resolved a different repository's conflict by hand inside that repository's own phase container first (per that section's own report instruction to do so). Retrying therefore only retries the merge and the Multi-File Pending Count / Creates Verification checks that follow it.
 
 ### After /clear
 

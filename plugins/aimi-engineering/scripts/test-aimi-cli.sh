@@ -6002,6 +6002,297 @@ test_setup_branch() {
 }
 
 # ============================================================================
+# Detect Default Branch Fixture Helpers
+# ============================================================================
+
+# Creates an isolated git repo (own temp dir) with a single commit, an origin
+# remote pointing at a nonexistent local path, and refs/remotes/origin/HEAD
+# manually set via update-ref + symbolic-ref -- simulating a real clone whose
+# remote later became unreachable. `git remote show origin` against a
+# nonexistent local path exits 128 in ~0.004s (no network wait), so this
+# fixture is fast and offline-safe. Exercises _resolve_default_branch's
+# offline symbolic-ref fallback (aimi-cli.sh:1586).
+setup_default_branch_offline_fixture() {
+  DEFAULT_BRANCH_FIXTURE_DIR=$(mktemp -d)
+
+  pushd "$DEFAULT_BRANCH_FIXTURE_DIR" >/dev/null
+  git init >/dev/null 2>&1
+  git checkout -b main >/dev/null 2>&1
+  echo "init" > README.md
+  git add README.md
+  git commit -m "Initial commit" >/dev/null 2>&1
+
+  git remote add origin /nonexistent/path/that/does/not/exist
+  local sha
+  sha=$(git rev-parse HEAD)
+  git update-ref refs/remotes/origin/main "$sha"
+  git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+
+  # Create .aimi/ directory so find_aimi_root succeeds
+  mkdir -p .aimi/tasks
+
+  popd >/dev/null
+}
+
+# Creates an isolated git repo (own temp dir) with a single commit and NO
+# origin remote at all (and thus no refs/remotes/origin/HEAD) -- exercises
+# _resolve_default_branch's error path (aimi-cli.sh:1589-1592).
+setup_default_branch_no_origin_fixture() {
+  DEFAULT_BRANCH_FIXTURE_DIR=$(mktemp -d)
+
+  pushd "$DEFAULT_BRANCH_FIXTURE_DIR" >/dev/null
+  git init >/dev/null 2>&1
+  git checkout -b main >/dev/null 2>&1
+  echo "init" > README.md
+  git add README.md
+  git commit -m "Initial commit" >/dev/null 2>&1
+
+  # Create .aimi/ directory so find_aimi_root succeeds
+  mkdir -p .aimi/tasks
+
+  popd >/dev/null
+}
+
+# Removes the temp directory created by either default-branch fixture helper
+teardown_default_branch_fixture() {
+  rm -rf "$DEFAULT_BRANCH_FIXTURE_DIR"
+  unset DEFAULT_BRANCH_FIXTURE_DIR
+}
+
+# ============================================================================
+# Detect Default Branch Tests
+# ============================================================================
+
+test_detect_default_branch() {
+  echo ""
+  echo "=== Testing detect-default-branch command ==="
+
+  local stdout stderr_file stderr_output exit_code
+
+  # --- Offline fallback: origin unreachable, refs/remotes/origin/HEAD
+  #     present -- must reach the symbolic-ref fallback at aimi-cli.sh:1586
+  #     instead of dying under set -euo pipefail at line 1582.
+  #     Invoked from inside the fixture (like setup_parent_branch_fixture's
+  #     callers) so find_aimi_root's cwd-based auto-discovery lands on the
+  #     fixture's own isolated .aimi/ instead of the enclosing real repo's --
+  #     otherwise the cached default-branch state used by _resolve_default_
+  #     branch's cache read (aimi-cli.sh:1573) would be the enclosing repo's
+  #     shared cache, not this fixture's, defeating isolation between test
+  #     cases. --project is still passed to match the documented repro
+  #     command shape; it is a same-directory no-op here. ---
+  setup_default_branch_offline_fixture
+  pushd "$DEFAULT_BRANCH_FIXTURE_DIR" >/dev/null
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" detect-default-branch --project "$DEFAULT_BRANCH_FIXTURE_DIR" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_output=$(cat "$stderr_file")
+  assert_exit_code "0" "$exit_code" "detect-default-branch: offline fallback -- exit code"
+  assert_eq "main" "$stdout" "detect-default-branch: offline fallback -- stdout is main"
+  assert_eq "" "$stderr_output" "detect-default-branch: offline fallback -- stderr empty"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_default_branch_fixture
+
+  # --- No-origin error path: no remote, no refs/remotes/origin/HEAD -- both
+  #     pipelines return empty, must reach the documented error at
+  #     aimi-cli.sh:1589-1592 (exit 1) instead of dying under pipefail.
+  #     Invoked from inside this (separate, freshly-created) fixture for the
+  #     same cache-isolation reason as above. ---
+  setup_default_branch_no_origin_fixture
+  pushd "$DEFAULT_BRANCH_FIXTURE_DIR" >/dev/null
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" detect-default-branch --project "$DEFAULT_BRANCH_FIXTURE_DIR" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_output=$(cat "$stderr_file")
+  assert_exit_code "1" "$exit_code" "detect-default-branch: no-origin error path -- exit code"
+  assert_stderr_contains "Error: Could not detect default branch" "$stderr_output" "detect-default-branch: no-origin error path -- stderr message"
+  assert_eq "" "$stdout" "detect-default-branch: no-origin error path -- stdout empty"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_default_branch_fixture
+
+  # --- detect-parent-branch inherits the fix: an orphan branch (zero
+  #     decoration candidates anywhere in its --first-parent history) forces
+  #     cmd_detect_parent_branch (aimi-cli.sh:1815) to fall back through
+  #     _resolve_default_branch against the offline-fallback fixture. Must
+  #     complete (base = default branch, source = default-branch) instead of
+  #     aborting with exit 128 the way it does today. Stays pushd'd into the
+  #     fixture for the CLI invocation for the same isolation reason. ---
+  setup_default_branch_offline_fixture
+  pushd "$DEFAULT_BRANCH_FIXTURE_DIR" >/dev/null
+  git checkout --orphan feat/no-decoration >/dev/null 2>&1
+  echo "o1" > o1.txt && git add o1.txt && git commit -m "orphan commit" >/dev/null 2>&1
+
+  local base_out source_out
+  stdout=$("$CLI" detect-parent-branch feat/no-decoration) && exit_code=0 || exit_code=$?
+  base_out=$(echo "$stdout" | jq -r '.base')
+  source_out=$(echo "$stdout" | jq -r '.source')
+  assert_exit_code "0" "$exit_code" "detect-parent-branch: offline fallback inherited -- exit code (no abort)"
+  assert_eq "main" "$base_out" "detect-parent-branch: offline fallback inherited -- base falls back to default branch"
+  assert_eq "default-branch" "$source_out" "detect-parent-branch: offline fallback inherited -- source is default-branch"
+
+  popd >/dev/null
+  teardown_default_branch_fixture
+}
+
+# ============================================================================
+# Per-Repo Default-Branch Cache Scoping Fixture
+# ============================================================================
+
+# Creates a non-git AIMI_ROOT directory (own temp dir, with .aimi/tasks so
+# find_aimi_root succeeds) containing two sibling child git repos: repo-a
+# (bare remote HEAD -> refs/heads/main) and repo-b (bare remote HEAD ->
+# refs/heads/master). Mirrors setup_parent_branch_fixture's bare-remote +
+# local-clone technique (a fresh --bare init defaults to master, which is
+# never pushed, leaving "HEAD branch: (unknown)" otherwise) so `git remote
+# show origin` resolves a real default branch for each repo without any
+# network access. Exercises _resolve_default_branch's per-repo cache-key
+# scoping (aimi-cli.sh:1570+) across --project calls that share one AIMI_DIR.
+setup_multi_repo_default_branch_fixture() {
+  MULTI_REPO_FIXTURE_ROOT=$(mktemp -d)
+  mkdir -p "$MULTI_REPO_FIXTURE_ROOT/.aimi/tasks"
+
+  MULTI_REPO_FIXTURE_REMOTE_A=$(mktemp -d)
+  MULTI_REPO_FIXTURE_REMOTE_B=$(mktemp -d)
+  MULTI_REPO_FIXTURE_A="$MULTI_REPO_FIXTURE_ROOT/repo-a"
+  MULTI_REPO_FIXTURE_B="$MULTI_REPO_FIXTURE_ROOT/repo-b"
+
+  git init --bare "$MULTI_REPO_FIXTURE_REMOTE_A" >/dev/null 2>&1
+  git --git-dir="$MULTI_REPO_FIXTURE_REMOTE_A" symbolic-ref HEAD refs/heads/main
+  git init --bare "$MULTI_REPO_FIXTURE_REMOTE_B" >/dev/null 2>&1
+  git --git-dir="$MULTI_REPO_FIXTURE_REMOTE_B" symbolic-ref HEAD refs/heads/master
+
+  git clone "$MULTI_REPO_FIXTURE_REMOTE_A" "$MULTI_REPO_FIXTURE_A" >/dev/null 2>&1
+  pushd "$MULTI_REPO_FIXTURE_A" >/dev/null
+  git checkout -b main >/dev/null 2>&1
+  echo "a" > README.md && git add README.md && git commit -m "repo-a initial commit" >/dev/null 2>&1
+  git push -u origin main >/dev/null 2>&1
+  popd >/dev/null
+
+  git clone "$MULTI_REPO_FIXTURE_REMOTE_B" "$MULTI_REPO_FIXTURE_B" >/dev/null 2>&1
+  pushd "$MULTI_REPO_FIXTURE_B" >/dev/null
+  git checkout -b master >/dev/null 2>&1
+  echo "b" > README.md && git add README.md && git commit -m "repo-b initial commit" >/dev/null 2>&1
+  git push -u origin master >/dev/null 2>&1
+  popd >/dev/null
+}
+
+# Removes the temp directories created by setup_multi_repo_default_branch_fixture
+teardown_multi_repo_default_branch_fixture() {
+  rm -rf "$MULTI_REPO_FIXTURE_ROOT" "$MULTI_REPO_FIXTURE_REMOTE_A" "$MULTI_REPO_FIXTURE_REMOTE_B"
+  unset MULTI_REPO_FIXTURE_ROOT MULTI_REPO_FIXTURE_A MULTI_REPO_FIXTURE_B MULTI_REPO_FIXTURE_REMOTE_A MULTI_REPO_FIXTURE_REMOTE_B
+}
+
+test_detect_default_branch_per_repo_scoping() {
+  echo ""
+  echo "=== Testing detect-default-branch: per-repo cache scoping ==="
+
+  local stdout1 stdout2 stdout3 stdout4 exit_code
+
+  # Invoked from inside MULTI_REPO_FIXTURE_ROOT (which owns the .aimi/ dir)
+  # so find_aimi_root's cwd-based auto-discovery lands on this fixture's own
+  # isolated AIMI_DIR, matching the documented repro command shape where the
+  # orchestrator's cwd is the multi-repo AIMI_ROOT.
+  setup_multi_repo_default_branch_fixture
+  pushd "$MULTI_REPO_FIXTURE_ROOT" >/dev/null
+
+  stdout1=$("$CLI" detect-default-branch --project "$MULTI_REPO_FIXTURE_A") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "detect-default-branch per-repo scoping: repo-a first call -- exit code"
+  assert_eq "main" "$stdout1" "detect-default-branch per-repo scoping: repo-a first call resolves main"
+
+  stdout2=$("$CLI" detect-default-branch --project "$MULTI_REPO_FIXTURE_B") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "detect-default-branch per-repo scoping: repo-b call -- exit code"
+  assert_eq "master" "$stdout2" "detect-default-branch per-repo scoping: repo-b resolves master, not contaminated by repo-a's cached main"
+
+  stdout3=$("$CLI" detect-default-branch --project "$MULTI_REPO_FIXTURE_A") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "detect-default-branch per-repo scoping: repo-a second call -- exit code"
+  assert_eq "main" "$stdout3" "detect-default-branch per-repo scoping: repo-a second call still resolves main"
+
+  # Reproduces the downstream failure the old contamination caused: repo-b's
+  # resolved branch (master) must genuinely exist there, and repo-b must NOT
+  # have a "main" branch -- the exact mismatch that made
+  # `worktree-manager.sh create feat/x-backend --from main` abort with
+  # "fatal: Not a valid object name: 'main'" when the stale cached value
+  # leaked into the master repo.
+  local verify_master_rc verify_main_rc
+  (cd "$MULTI_REPO_FIXTURE_B" && git rev-parse --verify master >/dev/null 2>&1) && verify_master_rc=0 || verify_master_rc=$?
+  (cd "$MULTI_REPO_FIXTURE_B" && git rev-parse --verify main >/dev/null 2>&1) && verify_main_rc=0 || verify_main_rc=$?
+  assert_exit_code "0" "$verify_master_rc" "detect-default-branch per-repo scoping: repo-b's resolved branch (master) verifies inside repo-b"
+  [ "$verify_main_rc" != "0" ] && assert_eq "1" "1" "detect-default-branch per-repo scoping: main does NOT exist in repo-b (contamination would have hidden this)" || assert_eq "1" "0" "detect-default-branch per-repo scoping: main does NOT exist in repo-b (contamination would have hidden this)"
+
+  # The per-repo cache is a real cache, not merely correct: remove repo-b's
+  # origin remote and confirm the second repo-b call still returns master
+  # from the cached per-repo file instead of erroring.
+  (cd "$MULTI_REPO_FIXTURE_B" && git remote remove origin)
+  stdout4=$("$CLI" detect-default-branch --project "$MULTI_REPO_FIXTURE_B") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "detect-default-branch per-repo scoping: repo-b cached call survives origin removal -- exit code"
+  assert_eq "master" "$stdout4" "detect-default-branch per-repo scoping: repo-b cached call survives origin removal -- stdout"
+
+  # The derived cache key never introduces a subdirectory under .aimi/: two
+  # flat default-branch-* files exist directly inside AIMI_DIR.
+  local cache_file_count
+  cache_file_count=$(find "$MULTI_REPO_FIXTURE_ROOT/.aimi" -maxdepth 1 -type f -name "default-branch-*" | wc -l | tr -d ' ')
+  assert_eq "2" "$cache_file_count" "detect-default-branch per-repo scoping: two flat per-repo cache files exist directly inside .aimi/"
+
+  popd >/dev/null
+  teardown_multi_repo_default_branch_fixture
+}
+
+test_clear_state_removes_per_repo_default_branch_cache() {
+  echo ""
+  echo "=== Testing clear-state: removes per-repo default-branch cache files ==="
+
+  setup_multi_repo_default_branch_fixture
+  pushd "$MULTI_REPO_FIXTURE_ROOT" >/dev/null
+
+  "$CLI" detect-default-branch --project "$MULTI_REPO_FIXTURE_A" >/dev/null
+  "$CLI" detect-default-branch --project "$MULTI_REPO_FIXTURE_B" >/dev/null
+
+  local before_count
+  before_count=$(find "$MULTI_REPO_FIXTURE_ROOT/.aimi" -maxdepth 1 -name "default-branch-*" | wc -l | tr -d ' ')
+  assert_eq "2" "$before_count" "clear-state per-repo cache: two per-repo default-branch cache files exist before clear-state"
+
+  local output
+  output=$("$CLI" clear-state)
+  assert_contains "State cleared" "$output" "clear-state per-repo cache: reports success"
+
+  local after_count
+  after_count=$(find "$MULTI_REPO_FIXTURE_ROOT/.aimi" -maxdepth 1 -name "default-branch-*" | wc -l | tr -d ' ')
+  assert_eq "0" "$after_count" "clear-state per-repo cache: zero default-branch-* files remain after clear-state"
+
+  popd >/dev/null
+  teardown_multi_repo_default_branch_fixture
+}
+
+test_detect_default_branch_classic_single_repo_regression() {
+  echo ""
+  echo "=== Testing detect-default-branch: classic single-repo layout regression ==="
+
+  local stdout1 stdout2 exit_code
+
+  # Classic layout: AIMI_ROOT IS the git repository, no --project passed.
+  setup_parent_branch_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+
+  stdout1=$("$CLI" detect-default-branch) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "detect-default-branch classic single-repo: first call -- exit code"
+  assert_eq "main" "$stdout1" "detect-default-branch classic single-repo: first call resolves main"
+
+  # Remove origin between calls -- the second call must still succeed,
+  # proving it was served from cache rather than hitting git again.
+  git remote remove origin
+
+  stdout2=$("$CLI" detect-default-branch) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "detect-default-branch classic single-repo: second call after origin removal -- exit code"
+  assert_eq "main" "$stdout2" "detect-default-branch classic single-repo: second call served from cache after origin removal"
+
+  popd >/dev/null
+  teardown_git_fixture
+}
+
+# ============================================================================
 # Detect Parent Branch Fixture Helper
 # ============================================================================
 
@@ -6229,6 +6520,39 @@ test_detect_parent_branch() {
   assert_stderr_contains "Not a git repository" "$stderr_output" "detect-parent-branch: not a git repo — stderr message"
   rm -f "$stderr_file"
   rm -rf "$non_git_dir"
+}
+
+test_detect_parent_branch_per_repo_scoping() {
+  echo ""
+  echo "=== Testing detect-parent-branch: per-repo default-branch fallback scoping ==="
+
+  local stdout base_out source_out exit_code
+
+  setup_multi_repo_default_branch_fixture
+  pushd "$MULTI_REPO_FIXTURE_ROOT" >/dev/null
+
+  # Prime the per-repo cache for repo-a first (resolves main) in the same
+  # session, proving repo-b's fallback below doesn't inherit it.
+  "$CLI" detect-default-branch --project "$MULTI_REPO_FIXTURE_A" >/dev/null
+
+  # Orphan branch on repo-b with zero decoration candidates anywhere in its
+  # --first-parent history forces cmd_detect_parent_branch's fallback at
+  # aimi-cli.sh:1815 through the same _resolve_default_branch this story
+  # re-keys.
+  pushd "$MULTI_REPO_FIXTURE_B" >/dev/null
+  git checkout --orphan feat/no-decoration >/dev/null 2>&1
+  echo "o1" > o1.txt && git add o1.txt && git commit -m "orphan commit" >/dev/null 2>&1
+  popd >/dev/null
+
+  stdout=$("$CLI" detect-parent-branch feat/no-decoration --project "$MULTI_REPO_FIXTURE_B") && exit_code=0 || exit_code=$?
+  base_out=$(echo "$stdout" | jq -r '.base')
+  source_out=$(echo "$stdout" | jq -r '.source')
+  assert_exit_code "0" "$exit_code" "detect-parent-branch per-repo scoping: repo-b fallback -- exit code"
+  assert_eq "master" "$base_out" "detect-parent-branch per-repo scoping: repo-b fallback resolves master, not repo-a's cached main"
+  assert_eq "default-branch" "$source_out" "detect-parent-branch per-repo scoping: repo-b fallback source is default-branch"
+
+  popd >/dev/null
+  teardown_multi_repo_default_branch_fixture
 }
 
 # ============================================================================
@@ -12264,7 +12588,7 @@ test_story_merge_project_split_partial_write_failure() {
 }
 
 # ============================================================================
-# split-detect Tests (TC36-TC46)
+# split-detect Tests (TC36-TC46, TC50-TC52)
 # ============================================================================
 # The read side of metadata.splitGroup. Every rule here used to live only in
 # execute.md's executable prose — twice, in two already-divergent copies — where
@@ -12448,6 +12772,7 @@ test_split_detect_completed_stale_group_yields_to_fresh_pair() {
   echo "=== TC39: split-detect — a fully completed stale split yields to the fresh legacy pair ==="
 
   local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  git init -q "$d" >/dev/null 2>&1
   local t="$d/.aimi/tasks"
 
   _sd_write "$t/2026-01-01-old-a-tasks.json" "feat/old-a" "$(_sd_stories completed)" \
@@ -12485,6 +12810,7 @@ test_split_detect_newest_wins_over_older_marked_group() {
   echo "=== TC40: split-detect — a newer unmarked pair beats an older marked group with pending work ==="
 
   local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  git init -q "$d" >/dev/null 2>&1
   local t="$d/.aimi/tasks"
 
   _sd_write "$t/2026-01-01-old-a-tasks.json" "feat/old-a" "$(_sd_stories pending)" \
@@ -12624,6 +12950,7 @@ test_split_detect_legacy_pair_without_marker() {
   echo "=== TC44: split-detect — an unmarked frontend/backend pair is a paired-split ==="
 
   local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  git init -q "$d" >/dev/null 2>&1
   local t="$d/.aimi/tasks"
 
   _sd_write "$t/2026-04-10-live-preview-frontend-tasks.json" "feat/live-preview-frontend" \
@@ -12733,6 +13060,109 @@ test_split_detect_exit_codes_and_bad_input() {
   err=$( cd "$d" && "$CLI" split-detect --dir /etc 2>&1 >/dev/null ) && exit_code=0 || exit_code=$?
   assert_exit_code "1" "$exit_code" "TC46: --dir escaping the project root exits 1"
   assert_contains "escapes project root" "$err" "TC46: --dir is path-confined by validate_path_in_project"
+
+  rm -rf "$d"
+}
+
+# TC50: an unmarked frontend/backend pair resolves to project "." (the root
+# routing key) -- fine when AIMI_ROOT is a git repository (TC44), but AIMI_ROOT
+# here is a bare, non-git mktemp -d: a multi-repo layout with no repository
+# underneath "." to execute in. split-detect must refuse the pair rather than
+# binding to a parent folder with nothing to run, while staying a query: exit
+# 0, mode "none", empty pool shape, and a degradedReason naming the condition
+# and the --split full-stack re-plan instruction.
+# Numbered TC50 (not TC47) to stay globally unique -- TC47-TC49 are already
+# used by the story-merge project-axis tests earlier in this file.
+test_split_detect_refuses_unrooted_pair_in_non_git_aimi_root() {
+  echo ""
+  echo "=== TC50: split-detect — an unmarked pair is refused when AIMI_ROOT is not a git repository ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  _sd_write "$t/2026-07-27-live-frontend-tasks.json" "feat/live-frontend" "$(_sd_stories pending)"
+  _sd_write "$t/2026-07-27-live-backend-tasks.json" "feat/live-backend" "$(_sd_stories pending)"
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC50: refusal is still a query, not a gate — exits 0"
+  assert_eq "none" "$(printf '%s' "$out" | jq -r '.mode')" "TC50: mode degrades to none, not single"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.anchor')" "TC50: anchor is null"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.members | length')" "TC50: members is empty"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.activeCount')" "TC50: activeCount is 0"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.total')" "TC50: total is 0"
+  local reason; reason=$(printf '%s' "$out" | jq -r '.degradedReason')
+  assert_contains "git repository" "$reason" \
+    "TC50: degradedReason names the non-git AIMI_ROOT condition"
+  assert_contains "--split full-stack" "$reason" \
+    "TC50: degradedReason instructs the reader to re-plan with --split full-stack"
+
+  rm -rf "$d"
+}
+
+# TC51: the refusal in TC50 is scoped to the unmarked/legacy resolution branch
+# only. A group carrying a real metadata.splitGroup marker must resolve
+# UNCHANGED to project-split, with its declared per-member project values
+# intact and degradedReason null, regardless of AIMI_ROOT's git status.
+test_split_detect_marked_group_unaffected_by_non_git_aimi_root() {
+  echo ""
+  echo "=== TC51: split-detect — a marked project-split group is unaffected by a non-git AIMI_ROOT ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  _sd_write "$t/2026-07-27-app-frontend-repo-tasks.json" "feat/app-frontend-repo" \
+    "$(_sd_stories pending)" \
+    '{"project":"frontend-repo","index":1,"total":2,"siblings":["2026-07-27-app-backend-repo-tasks.json"]}'
+  _sd_write "$t/2026-07-27-app-backend-repo-tasks.json" "feat/app-backend-repo" \
+    "$(_sd_stories pending)" \
+    '{"project":"backend-repo","index":2,"total":2,"siblings":["2026-07-27-app-frontend-repo-tasks.json"]}'
+  touch -t "$_SD_OLD_MTIME" "$t"/*.json
+  touch -t "$_SD_NEW_MTIME" "$t/2026-07-27-app-frontend-repo-tasks.json"
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC51: exits 0"
+  assert_eq "project-split" "$(printf '%s' "$out" | jq -r '.mode')" \
+    "TC51: a marked group still resolves to project-split under a non-git AIMI_ROOT"
+  assert_eq "frontend-repo,backend-repo" \
+    "$(printf '%s' "$out" | jq -r '[.members[].project] | join(",")')" \
+    "TC51: per-member project values are preserved"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.degradedReason')" "TC51: nothing degraded"
+
+  rm -rf "$d"
+}
+
+# TC52: the AIMI_ROOT-is-a-git-repository check reads the process's own
+# working directory, not the --dir scope -- --dir only narrows the candidate
+# pool (aimi-cli.sh's _split_detect_list_dir/_split_detect_phase_main_file).
+# The same refusal from TC50 must fire identically when queried through --dir
+# against a phase directory holding the same unmarked pair.
+test_split_detect_dir_scope_refusal_matches_flat_scope() {
+  echo ""
+  echo "=== TC52: split-detect --dir — the non-git AIMI_ROOT refusal matches flat scope ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks/myfeat/phase-2-auth"
+  local p="$d/.aimi/tasks/myfeat/phase-2-auth"
+
+  _sd_write "$p/myfeat-phase-2-frontend-tasks.json" "feat/myfeat-phase-2-frontend" \
+    "$(_sd_stories pending)"
+  _sd_write "$p/myfeat-phase-2-backend-tasks.json" "feat/myfeat-phase-2-backend" \
+    "$(_sd_stories pending)"
+
+  local out exit_code
+  out=$(_sd_run "$d" --dir "$p") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC52: --dir query exits 0"
+  assert_eq "none" "$(printf '%s' "$out" | jq -r '.mode')" \
+    "TC52: --dir scope reports the identical refused mode"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.members | length')" "TC52: members is empty"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.activeCount')" "TC52: activeCount is 0"
+  local reason; reason=$(printf '%s' "$out" | jq -r '.degradedReason')
+  assert_contains "git repository" "$reason" "TC52: degradedReason names the condition under --dir too"
+  assert_contains "--split full-stack" "$reason" "TC52: degradedReason instructs re-plan under --dir too"
 
   rm -rf "$d"
 }
@@ -15581,10 +16011,19 @@ main() {
   echo "--- Setup Branch Tests ---"
   test_setup_branch
 
+  # Detect-default-branch tests — uses own git fixture (independent of TEST_DIR)
+  echo ""
+  echo "--- Detect Default Branch Tests ---"
+  test_detect_default_branch
+  test_detect_default_branch_per_repo_scoping
+  test_detect_default_branch_classic_single_repo_regression
+  test_clear_state_removes_per_repo_default_branch_cache
+
   # Detect-parent-branch tests — uses own git fixture (independent of TEST_DIR)
   echo ""
   echo "--- Detect Parent Branch Tests ---"
   test_detect_parent_branch
+  test_detect_parent_branch_per_repo_scoping
 
   # Archive-task tests — each creates its own isolated temp dir
   echo ""
@@ -15729,9 +16168,11 @@ main() {
   test_story_merge_project_split_phase_aware
   test_story_merge_project_split_partial_write_failure
 
-  # split-detect tests (TC36-TC46) — each builds its own isolated project dir
+  # split-detect tests (TC36-TC46, TC50-TC52) — each builds its own isolated
+  # project dir. TC47-TC49 are used by the story-merge project-axis tests
+  # above, not by split-detect.
   echo ""
-  echo "--- split-detect Tests (TC36-TC46) ---"
+  echo "--- split-detect Tests (TC36-TC46, TC50-TC52) ---"
   test_split_detect_project_split_three_members
   test_split_detect_flat_scope_excludes_phase_dir
   test_split_detect_dir_scope_matches_phase_split
@@ -15743,6 +16184,9 @@ main() {
   test_split_detect_legacy_pair_without_marker
   test_split_detect_single_file
   test_split_detect_exit_codes_and_bad_input
+  test_split_detect_refuses_unrooted_pair_in_non_git_aimi_root
+  test_split_detect_marked_group_unaffected_by_non_git_aimi_root
+  test_split_detect_dir_scope_refusal_matches_flat_scope
 
   # Roadmap lifecycle tests (US-002)
   echo ""

@@ -94,7 +94,7 @@ The claim is atomic. Two sessions can work different phases of the same roadmap 
 
 A claim records the session's process id. If a session crashes, the next `/aimi:execute` notices the process is gone, releases the stale claim, and continues. You do not have to clean up by hand.
 
-Each phase runs in its own **phase container** — a git worktree on the phase's branch — so your working tree is untouched here too.
+Each phase runs in its own **phase container** — a git worktree on the phase's branch — so your working tree is untouched here too. When a phase spans more than one repository, each one gets its own phase container, on a branch of the same name (see [Multiple repositories](#multiple-repositories) below).
 
 ---
 
@@ -126,6 +126,18 @@ Then you are offered the next eligible phase.
 
 ---
 
+## Multiple repositories
+
+`AIMI_ROOT` — the folder holding `.aimi/` — does not have to be a git repository. It can be a plain parent folder with one git repository per subfolder instead: this is a **multi-repo** layout.
+
+The roadmap itself does not care. `roadmap-claim`, `roadmap-set-status`, `roadmap-write-handoff`, and `roadmap-reconcile` — the four operations that move a phase through its lifecycle — make no git calls at all. They only read and write `AIMI_ROOT/.aimi/`. So the claim, the phase's status, and its `handoff.md` all stay exactly what they are in a single-repo layout: one claim, one status, one handoff file, no matter how many repositories the phase touches.
+
+The deliverable is different, because it is git-bound. A phase container and its phase branch live inside a repository, and `AIMI_ROOT` itself may not be one. So a phase running across N repositories gets N phase containers and N phase branches — one per participating repository, all sharing the same branch name — and closing time opens one pull request per repository, never a single combined one. Creates verification runs once per repository's own container and takes the union of every repository's result: an artifact counts as delivered the moment any one participating repository has it.
+
+Getting stories routed to the right repository takes one thing: every story needs its own `project` field, naming the path from `AIMI_ROOT` to the repository it belongs to. When `/aimi:plan` splits a full-stack scope across repositories, `metadata.splitGroup.project` is the single source of routing truth both `story-merge` and `/aimi:execute` trust — worth knowing before you plan, not just after `/aimi:execute` refuses to run. A legacy split that predates this — a `-frontend-tasks.json`/`-backend-tasks.json` pair with no `project` routing — carries no repository information at all, so it is refused with an instruction to re-plan, never silently accepted or silently misrouted.
+
+---
+
 ## When the roadmap runs out
 
 When no phase remains eligible, a sweep reports what is left over:
@@ -139,7 +151,5 @@ An empty sweep means every declared contract is consumed and every need is satis
 ---
 
 ## What this does not do
-
-Roadmap mode is not supported in a multi-repo layout — a phase container needs a git repository at the project root, and a multi-repo layout has a plain folder there. `/aimi:execute` refuses with a message naming the layout rather than failing partway through.
 
 Phase-scoped tasks files ignore `--container` and `--inline`. A claimed phase always runs in its own phase container.
