@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.118.0] - 2026-07-29
+
+### Added
+
+- **`aimi-cli.sh resolve-base-branch <name> --default-branch <branch> [--base <branch>] [--project <path>]` — the single source of base-branch selection for both the inline (`setup-branch`) and container-creation paths (issue #78).** Prints `{base, reason, currentBranch, defaultBranch, promptNeeded}` without performing any git mutation, `reason` one of `explicit-base`, `target-exists`, `detached-head`, `default-branch`, `stacked-on-current`. `base` prefers the `origin/<name>` remote-tracking ref over the bare local name whenever `git ls-remote` finds it there, falling back to the local name when offline or local-only. `promptNeeded` is true only for `stacked-on-current`, reusing the same four-condition gate the inline path already computed. `cmd_setup_branch` now delegates its own base-selection logic to this same helper rather than carrying a second copy of it, so the two paths can no longer disagree.
+- **`--base <branch>` on `/aimi:execute`**, parsed out of `$ARGUMENTS` in Step 0 the same way `--phase` already is, bringing it to parity with the flag `/aimi:next` already had. It threads through to `resolve-base-branch` as an explicit override, giving an escape hatch to name the base outright instead of relying on the stacking prompt or reshaping the working tree first.
+
+### Fixed
+
+- **Issue #78: container-mode execution no longer silently branches from the default branch when the checked-out branch carries unmerged work.** An unset base used to mean "stack on the current branch" on the inline path but "use the default branch" in container mode, so the same story could branch from two different commits depending only on which path executed. Flat Container Mode, Per-Project Branch Setup, the paired-split loop, the phase container, and `/aimi:next` all now resolve through `resolve-base-branch` and agree with the inline path — five call sites in total, including the phase container, which the original issue did not name. Separately, in multi-repo layouts the base is now selected per child repository instead of being skipped wholesale: Step 1.6's Early-Skip Guard, which previously left the base unset for every repo in the layout the moment more than one repo was detected, is removed, and each project group resolves and prompts (or logs, under the agent path) independently, naming its own repo.
+- **Containers were also being cut from a stale local default branch even immediately after a successful fetch.** `worktree-manager.sh` resolves its `--from` argument against a local ref, while container creation was comparing against the bare local default branch name — so a fetch that updated `origin/<default>` had no effect on what a freshly created container actually branched from. `resolve-base-branch`'s origin-over-local preference (above) closes this for the container path the same way it does for the inline one.
+
+### Changed
+
+- **Container creation and reuse now report the resolved base branch and the reason it was chosen, at every point a container is created or reused** — Flat Container Mode, Per-Project Branch Setup, the Phase-Mode Paired Split loop (one line per split record naming its root, branch, and resolved base/reason), and `/aimi:next`'s own create-or-reuse call, whose successful path previously reported nothing: only a failure surfaced `create`'s captured output, so the base never reached the reader on a successful create or reuse.
+
 ## [1.117.0] - 2026-07-28
 
 ### Added
