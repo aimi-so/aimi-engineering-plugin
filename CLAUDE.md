@@ -19,6 +19,14 @@ A single source tree serves both hosts. Anything touching CLI path resolution, e
 - **`AIMI_PLUGIN_DIR`** — set by `install.sh` in shell profiles. Only honored when `CLAUDECODE` is unset. Inside Claude Code, Layer 0 resolution skips this entirely so the Claude Code cache always wins.
 - **`install.sh`** — performs heavy translation: rewrites command bodies (Task tool mappings, CLI path glob → `OPENCODE_CONFIG_DIR`), handles missing OpenCode features (`disable-model-invocation`, `AskUserQuestion`, custom `subagent_type`), copies/flattens skills and agents. Before changing command syntax or CLI behavior, check whether `install.sh` needs a matching translation.
 
+## Multi-Repo Execution Layout
+
+`AIMI_ROOT` — the directory holding `.aimi/` — is not required to be a git repository. A **multi-repo** layout is a plain, non-git parent folder holding one git repository per subfolder instead, with `.aimi/` living in that parent. `/aimi:execute`, including phase mode, resolves each story's own `project` field to the repository that owns it and runs one container, one branch, and one PR per participating repository — never a single one spanning the whole layout.
+
+Before touching container, branch, or split-detection logic, read:
+- `plugins/aimi-engineering/commands/execute.md`'s **Multi-Repo Handling** section — the single source of truth for layout detection and per-project story routing.
+- `plugins/aimi-engineering/commands/references/container-execution.md` — the shared container/worktree mechanics every execution mode (flat, container, phase) delegates to.
+
 ## Commit Conventions
 
 **Never add Claude (or any AI assistant) as a co-author on commits.** Do not append `Co-Authored-By: Claude ...` or similar trailers. Commits are authored by the human running the tool.

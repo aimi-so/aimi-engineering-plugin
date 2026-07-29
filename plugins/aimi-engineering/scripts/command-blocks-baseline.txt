@@ -25,14 +25,10 @@ syntax	deepen.md	Step 5.5: Post-Enrichment Validation (block 1)
 syntax	open-pr.md	5b. Create the PR (block 1)
 
 # --- loop-scope -------------------------------------------------------------
-# SUSPECTED LIVE DEFECTS, not accepted noise. Both are the exact shape of
-# blocking finding B3 (execute.md Step 0.9 read $split_file with no loop to
-# set it), which shipped and had to be found by hand:
+# SUSPECTED LIVE DEFECT, not accepted noise. The exact shape of blocking
+# finding B3 (execute.md Step 0.9 read $split_file with no loop to set it),
+# which shipped and had to be found by hand:
 #
-#   execute.md  SPLIT_BRANCH   — "Create Split Worktrees" follows the loop with
-#       a standalone one-line block computing SPLIT_WORKTREE_PATH from
-#       $SPLIT_BRANCH. Every assignment to SPLIT_BRANCH in that file is inside
-#       a loop; the loop just above this block binds `split_branch` (lowercase).
 #   plan.md     PROJECT_PATH   — the per-entry base-branch block under "Derive
 #       and Patch Metadata Fields" reads $PROJECT_PATH, which only the Phase 3e
 #       validation loop ~100 lines earlier ever assigns. Note this variable
@@ -40,9 +36,13 @@ syntax	open-pr.md	5b. Create the PR (block 1)
 #       a block a real loop makes its outputs loop-scoped, so loop-less
 #       downstream consumers start failing too.
 #
-# These are listed so the suite can be green and enforcing today. They should
+# This is listed so the suite can be green and enforcing today. It should
 # be fixed and deleted, not renewed.
-loop-scope	execute.md	SPLIT_BRANCH
+#
+# execute.md SPLIT_BRANCH (Phase-Mode Paired Split's "Create Split Worktrees")
+# was the sibling entry here: it was the exact defect described above, fixed
+# by folding SPLIT_WORKTREE_PATH into the same per-member JSON record that
+# Derive and Validate Split Branch Names assigns inside its own loop.
 loop-scope	plan.md	PROJECT_PATH
 
 # --- unassigned -------------------------------------------------------------

@@ -1561,16 +1561,45 @@ cmd_get_state() {
     }'
 }
 
+# Derive a filesystem-safe cache-key suffix for a repository toplevel path,
+# so _resolve_default_branch's cache is scoped per repository instead of a
+# single shared file under AIMI_ROOT/.aimi/ (which silently leaked one
+# repo's resolved branch into every sibling --project call). Mirrors the
+# sha256sum/shasum branch shape of _hash_file (aimi-cli.sh:2035-2042) but
+# adds an explicit `command -v shasum` probe that helper lacks, and falls
+# back to a portable non-sha256 slugification when neither hashing tool is
+# available -- the slugification never introduces a `/`, so the returned
+# suffix is always safe to use as a flat filename directly inside .aimi/.
+# Usage: _default_branch_cache_key <repo-toplevel-path>
+# Prints: a filesystem-safe string containing no `/`
+_default_branch_cache_key() {
+  local toplevel="$1"
+  if [ "$_HAS_SHA256SUM" -eq 1 ]; then
+    printf '%s' "$toplevel" | sha256sum | awk '{print $1}'
+  elif command -v shasum &>/dev/null; then
+    printf '%s' "$toplevel" | shasum -a 256 | awk '{print $1}'
+  else
+    printf '%s' "$toplevel" | tr -c 'A-Za-z0-9' '-'
+  fi
+}
+
 # Shared default-branch resolution logic: cache read, primary git remote
 # show origin parse, offline symbolic-ref fallback, cache write. Assumes the
 # caller has already cd'd into the target repo and verified it is a git
 # repository (both cmd_detect_default_branch and cmd_detect_parent_branch
-# do this themselves before calling here). Returns the branch name on
-# stdout; exits 1 on total failure.
+# do this themselves before calling here). The cache is keyed per repository
+# toplevel (default-branch-<hash>) rather than a single shared
+# "default-branch" file, so a sibling repo's --project call cannot inherit
+# another repo's cached branch. Returns the branch name on stdout; exits 1
+# on total failure.
 _resolve_default_branch() {
+  local repo_toplevel cache_key
+  repo_toplevel=$(git rev-parse --show-toplevel 2>/dev/null) || repo_toplevel=""
+  cache_key="default-branch-$(_default_branch_cache_key "$repo_toplevel")"
+
   # Return cached value if available
   local cached
-  cached=$(read_state "default-branch")
+  cached=$(read_state "$cache_key")
   if [ -n "$cached" ]; then
     echo "$cached"
     return 0
@@ -1579,11 +1608,11 @@ _resolve_default_branch() {
   local branch=""
 
   # Primary: parse HEAD branch from remote
-  branch=$(git remote show origin 2>/dev/null | sed -n 's/.*HEAD branch: //p')
+  branch=$(git remote show origin 2>/dev/null | sed -n 's/.*HEAD branch: //p') || branch=""
 
   # Fallback: symbolic-ref (works offline)
   if [ -z "$branch" ]; then
-    branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||')
+    branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||') || branch=""
   fi
 
   if [ -z "$branch" ]; then
@@ -1592,7 +1621,7 @@ _resolve_default_branch() {
   fi
 
   # Cache for session reuse
-  write_state "default-branch" "$branch"
+  write_state "$cache_key" "$branch"
   echo "$branch"
 }
 
@@ -3397,7 +3426,8 @@ cmd_resolve_base_branch() {
 
 # Clear all state files (preserves tasks directory)
 cmd_clear_state() {
-  rm -f "$AIMI_DIR/current-tasks" "$AIMI_DIR/current-branch" "$AIMI_DIR/current-story" "$AIMI_DIR/last-result" "$AIMI_DIR/cli-path" "$AIMI_DIR/default-branch"
+  rm -f "$AIMI_DIR/current-tasks" "$AIMI_DIR/current-branch" "$AIMI_DIR/current-story" "$AIMI_DIR/last-result" "$AIMI_DIR/cli-path"
+  rm -f "$AIMI_DIR"/default-branch-* 2>/dev/null
   rm -f "$AIMI_DIR"/.state.lock "$AIMI_DIR"/*.lock 2>/dev/null
   rmdir "$AIMI_DIR"/*.lock.d 2>/dev/null || true
   echo "State cleared."
@@ -6759,6 +6789,15 @@ cmd_split_detect() {
   local declared_total="0"
   local degraded_reason=""
 
+  # AIMI_ROOT-is-a-git-repo check, computed once. find_aimi_root() already cd'd
+  # the process to AIMI_ROOT before cmd_split_detect ever runs (dispatch at
+  # line ~9167 happens after the find_aimi_root call at ~9116), and --dir only
+  # narrows the candidate pool below -- it never changes CWD. So $PWD here is
+  # AIMI_ROOT in both flat and --dir scope, and this is the identical check
+  # commands/execute.md documents as the canonical AIMI_ROOT_IS_GIT_REPO rule.
+  local aimi_root_is_git=true
+  git -C "$PWD" rev-parse --git-dir >/dev/null 2>&1 || aimi_root_is_git=false
+
   while :; do
     local pool_len=0
     pool_len=$(printf '%s' "$pool" | jq 'length')
@@ -6873,6 +6912,22 @@ cmd_split_detect() {
       fi
 
       if [ -n "$counterpart" ]; then
+        if [ "$aimi_root_is_git" != true ]; then
+          # A legacy frontend/backend pair with no metadata.splitGroup marker
+          # resolves to the root routing key "." (_SPLIT_DETECT_DESCRIBE_JQ's
+          # default at 6459) -- fine in a single-repo layout, but AIMI_ROOT
+          # here is not a git repository at all: a parent folder holding
+          # multiple git repos as subfolders, with no repository underneath
+          # "." to execute in. Refuse instead of binding to it. Reuses the
+          # same mode=none-plus-degradedReason shape as the exhausted-pool
+          # case above -- no new mode value, no new emitted field.
+          mode="none"
+          anchor="null"
+          members="[]"
+          declared_total="0"
+          degraded_reason="AIMI_ROOT (${PWD}) is not a git repository — this is a multi-repo layout, a parent folder holding multiple git repositories as subfolders. The legacy pair ${fe_path} / ${be_path} has no metadata.splitGroup marker and would route to the root group \".\", which has no repository to execute in. Re-plan with --split full-stack so every story carries its own project, then re-run."
+          break
+        fi
         # Frontend first, backend second — the order the two-file writer and
         # every downstream report already assume.
         group=$(printf '%s' "$pool" | jq -c --arg fe "$fe_path" --arg be "$be_path" \

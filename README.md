@@ -131,6 +131,16 @@ How the cut is decided, and what happens between phases: [docs/roadmaps.md](docs
 
 ---
 
+## Multiple repositories
+
+`AIMI_ROOT` — the folder holding `.aimi/` — does not have to be a git repository itself. It can be a plain, non-git parent folder holding one git repository per subfolder instead, with `.aimi/` living in that parent rather than in any child repo. This **multi-repo** layout is the one [GitHub issue #73](https://github.com/aimi-so/aimi-engineering-plugin/issues/73) reported as unsupported — it is supported now.
+
+`/aimi:execute`, including phase mode, routes every story by its own `project` field to the repository that owns it. One plan, one roadmap phase, one `handoff.md` — but one container, one branch, and one pull request per participating repository, never a single combined one.
+
+More on the layout, and why the split falls exactly there: [docs/roadmaps.md](docs/roadmaps.md#multiple-repositories).
+
+---
+
 ## Commands
 
 | Command | What it does |
