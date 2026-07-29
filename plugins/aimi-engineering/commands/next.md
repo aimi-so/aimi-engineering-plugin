@@ -144,6 +144,8 @@ fi
 
 2. **Parse `--base` Argument.** Scan `$ARGUMENTS` for an explicit `--base <branch>` token (mirrors the `--phase <N>` extraction style used by `/aimi:execute` and the `--branch <name>` extraction style used by `/aimi:open-pr`):
 
+Parse and validate in the **same** block, and echo the result. A validation fence of its own would run in a different shell, test an unset variable against the regex, and pass vacuously; the echo is what lets step 4's own block re-assign the value:
+
 ```bash
 case " $ARGUMENTS " in
   *" --base "*)
@@ -153,15 +155,14 @@ case " $ARGUMENTS " in
     BASE_BRANCH=""
     ;;
 esac
+if [ -n "$BASE_BRANCH" ] && ! echo "$BASE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'; then
+  echo "Invalid --base value: $BASE_BRANCH" >&2
+  exit 1
+fi
+echo "BASE_BRANCH=$BASE_BRANCH"
 ```
 
-If `$BASE_BRANCH` is non-empty, validate it before any other git/worktree call:
-
-```bash
-echo "$BASE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'
-```
-
-If validation fails, report `Invalid --base value: $BASE_BRANCH` and STOP. When `--base` was not passed, `$BASE_BRANCH` stays empty and the base is resolved by `resolve-base-branch`, which stacks on the current branch when it carries unmerged work relative to `$DEFAULT_BRANCH` rather than always defaulting to it.
+A non-zero exit here stops the run before any git or worktree call consumes the value. Step 4's block below must re-assign `BASE_BRANCH` with the literal value echoed here (`BASE_BRANCH=""` when `--base` was absent) — each Bash call is its own shell, so nothing assigned in this block survives into that one. When `--base` was not passed, the base is resolved by `resolve-base-branch`, which stacks on the current branch when it carries unmerged work relative to `$DEFAULT_BRANCH` rather than always defaulting to it.
 
 3. **Resolve `CONTAINER_ROOT`** — one container per project group, following the same convention execute.md's flat mode uses (context.md decision 3):
    - `CONTAINER_ROOT = PROJECT_PATH` (from Step 1b) when the story has a `project` field
@@ -172,6 +173,7 @@ If validation fails, report `Invalid --base value: $BASE_BRANCH` and STOP. When 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+BASE_BRANCH="[the value step 2's Parse --base Argument echoed, or empty when --base was absent]"
 if [ -n "$PROJECT_PATH" ]; then
   DEFAULT_BRANCH=$($AIMI_CLI detect-default-branch --project "$CONTAINER_ROOT")
 else

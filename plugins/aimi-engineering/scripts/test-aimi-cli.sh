@@ -5703,12 +5703,53 @@ setup_git_fixture() {
   git push origin main >/dev/null 2>&1
   git branch -d feat/merged-branch >/dev/null 2>&1
 
-  # Create an unmerged branch with commits ahead of main
+  # Create an unmerged branch with commits ahead of main.
+  #
+  # The branch is pushed and THEN given one more local commit, so it is
+  # genuinely ahead of its own origin/ ref. That gap is the state a stacking
+  # decision has to get right -- an autonomous run commits locally and pushes
+  # late or never -- and it is what makes the difference between "base is the
+  # local tip" and "base is origin/<branch>" observable at all. With the push
+  # last, local == origin and every such divergence is invisible to the suite.
   git checkout -b feat/unmerged-branch >/dev/null 2>&1
   echo "unmerged" > unmerged.txt
   git add unmerged.txt
   git commit -m "Unmerged branch commit" >/dev/null 2>&1
   git push origin feat/unmerged-branch >/dev/null 2>&1
+  echo "local only" > unmerged-local-only.txt
+  git add unmerged-local-only.txt
+  git commit -m "Local-only commit ahead of origin" >/dev/null 2>&1
+
+  # A merged branch that is deliberately KEPT locally. `git branch --merged`
+  # lists local branches only, so feat/merged-branch above (deleted right
+  # after its merge) never appears in that list and cannot collide with
+  # anything. This one stays, to give the literal-match check below something
+  # real to collide against.
+  git checkout main >/dev/null 2>&1
+  git checkout -b feat/kept-merged >/dev/null 2>&1
+  echo "kept" > kept.txt
+  git add kept.txt
+  git commit -m "Kept merged branch commit" >/dev/null 2>&1
+  git checkout main >/dev/null 2>&1
+  git merge feat/kept-merged >/dev/null 2>&1
+  git push origin main >/dev/null 2>&1
+
+  # A branch whose name differs from feat/kept-merged only at a character that
+  # is a regex metacharacter. `feat.kept-merged` is NOT merged and carries real
+  # work; a merged-check that matches by regex rather than by literal line sees
+  # `feat/kept-merged` in the merged list and wrongly concludes this branch is
+  # merged -- discarding that work with no prompt.
+  git checkout -b feat.kept-merged >/dev/null 2>&1
+  echo "dot" > dot.txt
+  git add dot.txt
+  git commit -m "Unmerged work on a dot-named branch" >/dev/null 2>&1
+
+  # Origin carries team/scoped-name but NOT scoped-name. `git ls-remote --heads
+  # origin scoped-name` matches on trailing path components, so a probe that
+  # is not anchored to the full ref reports a branch that does not exist.
+  git checkout main >/dev/null 2>&1
+  git push origin main:refs/heads/team/scoped-name >/dev/null 2>&1
+  git fetch origin >/dev/null 2>&1
 
   # Go back to main
   git checkout main >/dev/null 2>&1
@@ -6150,8 +6191,57 @@ test_resolve_base_branch() {
   prompt_needed=$(echo "$stdout" | jq -r '.promptNeeded')
   assert_exit_code "0" "$exit_code" "resolve-base-branch: current unmerged — exit code"
   assert_eq "stacked-on-current" "$reason" "resolve-base-branch: current unmerged — reason"
-  assert_eq "origin/feat/unmerged-branch" "$base" "resolve-base-branch: current unmerged — base prefers origin"
+  # Stacking inherits the LOCAL tip, never origin/<branch>. The fixture branch
+  # is deliberately one commit ahead of its own origin ref, so preferring
+  # origin here would silently drop that commit from the container.
+  assert_eq "feat/unmerged-branch" "$base" "resolve-base-branch: current unmerged — base is the local ref, not origin"
   assert_eq "true" "$prompt_needed" "resolve-base-branch: current unmerged — promptNeeded is true"
+  local stacked_base_sha local_tip_sha
+  stacked_base_sha=$(git rev-parse "$base")
+  local_tip_sha=$(git rev-parse HEAD)
+  assert_eq "$local_tip_sha" "$stacked_base_sha" "resolve-base-branch: current unmerged — base resolves to the local tip commit"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: merged check matches literally, not as a regex ---
+  # feat.kept-merged is unmerged; feat/kept-merged is merged and still present
+  # locally. A regex match treats `.` as a wildcard, misreads the branch as
+  # merged, and returns default-branch with promptNeeded false -- silently
+  # discarding real work, which is exactly the failure issue #78 is about.
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout feat.kept-merged >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/new-from-dot --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  reason=$(echo "$stdout" | jq -r '.reason')
+  prompt_needed=$(echo "$stdout" | jq -r '.promptNeeded')
+  assert_exit_code "0" "$exit_code" "resolve-base-branch: dot-named unmerged branch — exit code"
+  assert_eq "stacked-on-current" "$reason" "resolve-base-branch: dot-named unmerged branch — not misread as merged"
+  assert_eq "true" "$prompt_needed" "resolve-base-branch: dot-named unmerged branch — promptNeeded is true"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: origin probe is anchored to the full ref ---
+  # Origin has team/scoped-name but no scoped-name. An unanchored
+  # `ls-remote --heads origin scoped-name` matches the trailing component and
+  # yields base "origin/scoped-name", a ref that does not resolve -- every
+  # container creation in such a repo then dies on `git worktree add`.
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout main >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch scoped-name --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  base=$(echo "$stdout" | jq -r '.base')
+  assert_exit_code "0" "$exit_code" "resolve-base-branch: tail-matching origin ref — exit code"
+  assert_eq "origin/main" "$base" "resolve-base-branch: tail-matching origin ref — target not misdetected via team/scoped-name"
+  git rev-parse --verify --quiet "$base" >/dev/null 2>&1 && rev_ok=0 || rev_ok=1
+  assert_eq "0" "$rev_ok" "resolve-base-branch: tail-matching origin ref — emitted base actually resolves"
   rm -f "$stderr_file"
 
   popd >/dev/null
@@ -6283,6 +6373,7 @@ test_setup_branch_resolve_agreement() {
   stderr_file=$(mktemp)
   stdout=$("$CLI" resolve-base-branch feat/agree-current --default-branch main 2>"$stderr_file")
   reason=$(echo "$stdout" | jq -r '.reason')
+  base=$(echo "$stdout" | jq -r '.base')
   rm -f "$stderr_file"
 
   stderr_file=$(mktemp)
@@ -6292,6 +6383,16 @@ test_setup_branch_resolve_agreement() {
 
   assert_eq "stacked-on-current" "$reason" "agreement: unmerged current — resolve-base-branch reason"
   assert_eq "created-from-current" "$action" "agreement: unmerged current — setup-branch action"
+
+  # Labels agreeing is not the same as the two paths landing on the same
+  # commit. The fixture's current branch is one commit ahead of its own origin
+  # ref, so a base of origin/<branch> would pair the same two labels while the
+  # container came up missing that commit. Compare the commits themselves --
+  # this is the only agreement that matters.
+  local resolved_base_sha inline_head_sha
+  resolved_base_sha=$(git rev-parse "$base")
+  inline_head_sha=$(git rev-parse feat/agree-current)
+  assert_eq "$inline_head_sha" "$resolved_base_sha" "agreement: unmerged current — both paths land on the same commit"
 
   popd >/dev/null
   teardown_git_fixture

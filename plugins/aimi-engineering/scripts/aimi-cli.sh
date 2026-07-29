@@ -3292,16 +3292,49 @@ cmd_setup_branch() {
 #   5. otherwise (current branch carries unmerged work)     -> stacked-on-current
 #
 # The emitted "base" prefers the origin/<name> remote-tracking ref over the
-# bare local name whenever `git ls-remote` finds it there, so a container is
-# never cut from a stale local ref after a successful fetch -- mirroring how
-# cmd_setup_branch already checks out origin/$default_branch for
-# created-from-default. Detached HEAD is the one exception: base is the raw
-# HEAD sha, since there is no branch name to prefer a remote ref for.
+# bare local name, so a container is never cut from a stale local ref after a
+# successful fetch -- mirroring how cmd_setup_branch already checks out
+# origin/$default_branch for created-from-default. Two reasons opt out:
+#
+#   stacked-on-current -- the candidate is the caller's own checkout, and
+#     inheriting its local tip is what stacking means. Preferring origin here
+#     drops every commit made since the last push.
+#   detached-head      -- base is the raw HEAD sha; there is no branch name to
+#     prefer a remote ref for.
 #
 # promptNeeded is true only when reason resolves to stacked-on-current --
 # the same four-condition gate execute.md Step 1.6 computes inline today
 # (target absent locally and on origin, current branch not default, current
 # branch not merged into origin/default), now computed once per repo here.
+# Exact ref predicates. Every one of these answers a yes/no question about a
+# single, fully-qualified ref -- never a pattern plus a substring grep.
+#
+# `git branch --list X | grep -q X` and `git ls-remote --heads origin X` both
+# match loosely: ls-remote patterns match on trailing path components, so a
+# probe for `main` reports refs/heads/team/main and the caller then emits an
+# origin/main that does not resolve, killing worktree creation in any repo
+# that happens to carry a scoped branch of the same leaf name.
+_local_has_branch() {
+  git show-ref --verify --quiet "refs/heads/$1"
+}
+
+_origin_has_branch() {
+  git ls-remote --heads origin "refs/heads/$1" 2>/dev/null \
+    | grep -q "[[:space:]]refs/heads/${1}$"
+}
+
+# Is <branch> already merged into origin/<default>?
+#
+# --format strips the "[* ] " column git normally prints, and -qxF matches the
+# whole line literally. A regex match here is unsafe: git permits `.` in ref
+# names, so a branch named feat.x matches a merged feat/x and its real
+# unmerged work is discarded with no prompt -- the exact failure issue #78 is
+# about, reached through a different door.
+_is_merged_into_default() {
+  git branch --format='%(refname:short)' --merged "origin/$2" 2>/dev/null \
+    | grep -qxF "$1"
+}
+
 _resolve_branch_base() {
   local branch_name="$1" default_branch="$2" base_override="$3"
   local current_branch reason base candidate prompt_needed
@@ -3313,15 +3346,13 @@ _resolve_branch_base() {
   if [ -n "$base_override" ]; then
     reason="explicit-base"
     candidate="$base_override"
-  elif git branch --list "$branch_name" | grep -q "$branch_name" || \
-       git ls-remote --heads origin "$branch_name" 2>/dev/null | grep -q "$branch_name"; then
+  elif _local_has_branch "$branch_name" || _origin_has_branch "$branch_name"; then
     reason="target-exists"
     candidate="$branch_name"
   elif [ -z "$current_branch" ]; then
     reason="detached-head"
-    base=$(git rev-parse HEAD 2>/dev/null)
-  elif [ "$current_branch" = "$default_branch" ] || \
-       git branch --merged "origin/$default_branch" 2>/dev/null | grep -q "^[* ] *${current_branch}$"; then
+    base=$(git rev-parse HEAD 2>/dev/null || echo "")
+  elif [ "$current_branch" = "$default_branch" ] || _is_merged_into_default "$current_branch" "$default_branch"; then
     reason="default-branch"
     candidate="$default_branch"
   else
@@ -3330,10 +3361,18 @@ _resolve_branch_base() {
     prompt_needed=true
   fi
 
-  # Origin preference: resolve the candidate ref name against origin,
-  # falling back to the bare local name when offline or local-only.
+  # Origin preference, scoped by reason: prefer the origin/<name>
+  # remote-tracking ref for a reference point the caller did not author, so a
+  # container is never cut from a stale local ref after a successful fetch.
+  #
+  # stacked-on-current is deliberately excluded. There the candidate IS the
+  # caller's own checkout, and inheriting its local tip is the entire point of
+  # stacking -- preferring origin would silently drop every commit made since
+  # the last push, which is the common state of an autonomous run. That would
+  # also put this path back in disagreement with cmd_setup_branch, whose
+  # stacked-on-current arm checks out from local HEAD.
   if [ -n "$candidate" ]; then
-    if git ls-remote --heads origin "$candidate" 2>/dev/null | grep -q "$candidate"; then
+    if [ "$reason" != "stacked-on-current" ] && _origin_has_branch "$candidate"; then
       base="origin/$candidate"
     else
       base="$candidate"
@@ -8911,7 +8950,11 @@ COMMANDS:
                               reason is exactly one of: explicit-base, target-exists,
                               stacked-on-current, default-branch, detached-head.
                               base prefers the origin/<name> remote-tracking ref when it
-                              exists, falling back to the bare local name otherwise.
+                              exists, falling back to the bare local name otherwise --
+                              except for stacked-on-current, which always keeps the bare
+                              local ref, since stacking exists to inherit the local tip.
+                              --base "" is treated exactly like an omitted --base, so a
+                              caller may pass an unset variable through unconditionally.
                               promptNeeded is true only when the target does not exist
                               (locally or on origin), the current branch is not the
                               default branch, and it is not merged into origin/<default>.

@@ -32,6 +32,8 @@ Read and follow the **Resolve Agent Models** section of `commands/references/cli
 
 Scan `$ARGUMENTS` for an explicit `--base <branch>` token (mirrors the `--phase <N>` extraction style used by Step 1.7's Parse --phase Override, and the `--base` extraction `/aimi:next` already uses):
 
+Parse and validate in the **same** block, and echo the result — the validation cannot run in a fence of its own, because each Bash tool call is an isolated shell and a separate fence would test an unset variable against the regex and pass vacuously. The echo is what makes the value readable to every later step, mirroring Step 1.5's **Detect Git Repo Layout**, which echoes `AIMI_ROOT_IS_GIT_REPO` for exactly this reason:
+
 ```bash
 case " $ARGUMENTS " in
   *" --base "*)
@@ -41,17 +43,18 @@ case " $ARGUMENTS " in
     BASE_BRANCH=""
     ;;
 esac
+if [ -n "$BASE_BRANCH" ] && ! echo "$BASE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'; then
+  echo "Invalid --base value: $BASE_BRANCH" >&2
+  exit 1
+fi
+echo "BASE_BRANCH=$BASE_BRANCH"
 ```
 
-If `$BASE_BRANCH` is non-empty, validate it before any other git, worktree, or CLI call that consumes it:
+A non-zero exit here stops the run before any git, worktree, or CLI call consumes the value.
 
-```bash
-echo "$BASE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'
-```
+**Carrying `$BASE_BRANCH` forward.** The echoed value does not survive into any later Bash call — each one is its own shell. Every block below that reads `$BASE_BRANCH` must re-assign it at the top of that block with the literal value echoed here (`BASE_BRANCH=""` when `--base` was absent), the same way Step 0.9 Pass 2 re-assigns `SPLIT_PLAN` from Pass 1's printed stdout rather than assuming it persisted. The reading blocks are Step 0.9's split loop, Step 1.7's phase-container group loop, Step 2's Flat Container Mode, Main Repo Branch Setup, and Per-Project Branch Setup.
 
-If validation fails, report `Invalid --base value: $BASE_BRANCH` and STOP.
-
-When `--base` was not passed, `$BASE_BRANCH` stays empty and every `resolve-base-branch`/`setup-branch` call below omits `--base`, falling back to that verb's own resolution order — identical to the behavior stories 03 and 04 already establish. When it was passed, this runs in Step 0 — before Step 0.9's split loop and Step 1.6's picker, both of which read `$BASE_BRANCH` — so the explicit value is already in scope for every call site that threads it, including the multi-repo split path that has no other opportunity to learn it before its own worktrees are created. An explicit `--base` set here also short-circuits Step 1.6's own gating and any per-repo picker Step 2 would otherwise run: `resolve-base-branch` reports `reason: "explicit-base"` and `promptNeeded: false` whenever `--base` is supplied, so no `AskUserQuestion` fires on top of a choice the user already made — see Step 1.6 below.
+When `--base` was not passed, `$BASE_BRANCH` stays empty and every `resolve-base-branch`/`setup-branch` call below omits `--base` — or passes it empty, which those verbs treat identically to omission — falling back to the verb's own resolution order. When it was passed, this runs in Step 0, before Step 0.9's split loop and Step 1.6's picker, so the value is available to be carried into every call site that threads it, including the multi-repo split path that has no other opportunity to learn it before its own worktrees are created. An explicit `--base` also short-circuits Step 1.6's own gating and any per-repo picker Step 2 would otherwise run: `resolve-base-branch` reports `reason: "explicit-base"` and `promptNeeded: false` whenever `--base` is supplied, so no `AskUserQuestion` fires on top of a choice the user already made — see Step 1.6 below.
 
 `--base` is matched on its own literal token, independently of `--phase`'s (numeric-only) and `--container`/`--inline`/`--push`'s (bare-token) extractions above and below — passing several of these flags in one invocation is unaffected, exactly as `--container`/`--inline`/`--push` already coexist without either stripping the raw `$ARGUMENTS` string.
 
@@ -431,6 +434,7 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+BASE_BRANCH="[the value Step 0's Parse --base Override echoed, or empty when --base was absent]"
 
 SPLIT_EXECUTION_MODE=$(jq -r '.metadata.execution // "inline"' \
   "$(printf '%s\n' "$SPLIT_PLAN" | head -1 | jq -r '.file')")
@@ -825,7 +829,7 @@ B — Use default branch ([DEFAULT_BRANCH])
 Other — Specify a base branch
 ```
 
-**Option A:** `BASE_BRANCH=$CURRENT_BRANCH`
+**Option A:** leave `BASE_BRANCH` unset. Do **not** set it to `$CURRENT_BRANCH` — that turns the answer into an `explicit-base`, and an explicit base is a reference point the resolver prefers `origin/` for, which would hand the container the last pushed commit instead of the local tip the user just asked to stack on. Unset is exactly right: `resolve-base-branch` resolves this repo to `stacked-on-current` on its own, and that reason deliberately keeps the bare local ref. This mirrors Option A of the per-project picker in Step 2, which likewise keeps the already-resolved value.
 
 **Option B:** `BASE_BRANCH=$DEFAULT_BRANCH`
 
@@ -1358,6 +1362,7 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
 cd "$AIMI_ROOT"
+BASE_BRANCH="[the value Step 0's Parse --base Override echoed, or empty when --base was absent]"
 
 PHASE_GROUP_TOPLEVELS_SEEN=""
 PHASE_LAST_GROUP_TOPLEVEL=""
@@ -2018,6 +2023,7 @@ fi
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+BASE_BRANCH="[the value Step 0's Parse --base Override echoed, or empty when --base was absent]"
 if [ -n "$BASE_BRANCH" ]; then
   BASE_JSON=$($AIMI_CLI resolve-base-branch "$BRANCH_NAME" --default-branch "$DEFAULT_BRANCH" --base "$BASE_BRANCH")
 else
@@ -2052,10 +2058,11 @@ Because this subsection's own `$WORKTREE_MGR create` call is the branch-creating
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+BASE_BRANCH="[the value Step 0's Parse --base Override echoed, or empty when --base was absent]"
 if [ -n "$BASE_BRANCH" ]; then
-  BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $DEFAULT_BRANCH --base $BASE_BRANCH)
+  BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch "$DEFAULT_BRANCH" --base "$BASE_BRANCH")
 else
-  BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $DEFAULT_BRANCH)
+  BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch "$DEFAULT_BRANCH")
 fi
 ```
 
@@ -2093,10 +2100,11 @@ Run the following sub-steps when any story has a non-null `project` field, or wh
 
    **When `PHASE_MODE` is false and `CONTAINER_MODE` is false** (`EXECUTION_MODE` inline or absent): set up the branch directly — unchanged for an inline-mode run:
    ```bash
+   BASE_BRANCH="[the value Step 0's Parse --base Override echoed, or empty when --base was absent]"
    if [ -n "$BASE_BRANCH" ]; then
-     PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch "$BRANCH_NAME" --default-branch $PROJECT_DEFAULT --project [resolved_project_path] --base $BASE_BRANCH)
+     PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch "$BRANCH_NAME" --default-branch "$PROJECT_DEFAULT" --project [resolved_project_path] --base "$BASE_BRANCH")
    else
-     PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch "$BRANCH_NAME" --default-branch $PROJECT_DEFAULT --project [resolved_project_path])
+     PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch "$BRANCH_NAME" --default-branch "$PROJECT_DEFAULT" --project [resolved_project_path])
    fi
    ```
    Extract the action from the JSON output and report:
@@ -2119,6 +2127,7 @@ Run the following sub-steps when any story has a non-null `project` field, or wh
    ```bash
    AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
    : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+   BASE_BRANCH="[the value Step 0's Parse --base Override echoed, or empty when --base was absent]"
    if [ -n "$BASE_BRANCH" ]; then
      PROJECT_BASE_JSON=$($AIMI_CLI resolve-base-branch "$BRANCH_NAME" --project [resolved_project_path] --default-branch "$PROJECT_DEFAULT" --base "$BASE_BRANCH")
    else
