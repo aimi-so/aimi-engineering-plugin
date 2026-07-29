@@ -3240,6 +3240,153 @@ cmd_setup_branch() {
   return 0
 }
 
+# Decide what branch a new branch or container should be cut from, without
+# performing any git mutation. Single source of truth shared by the inline
+# (cmd_setup_branch) and container (execute.md) paths so an empty/unset base
+# can never mean "stack on current" on one path and "use the default branch"
+# on the other. Assumes branch_name/default_branch/base_override are already
+# validated and CWD is inside the target git repository.
+#
+# Resolution order (first match wins):
+#   1. base_override given                                -> explicit-base
+#   2. branch_name already exists locally or on origin     -> target-exists
+#   3. HEAD is detached                                     -> detached-head
+#   4. current branch IS default, or merged into origin/default -> default-branch
+#   5. otherwise (current branch carries unmerged work)     -> stacked-on-current
+#
+# The emitted "base" prefers the origin/<name> remote-tracking ref over the
+# bare local name whenever `git ls-remote` finds it there, so a container is
+# never cut from a stale local ref after a successful fetch -- mirroring how
+# cmd_setup_branch already checks out origin/$default_branch for
+# created-from-default. Detached HEAD is the one exception: base is the raw
+# HEAD sha, since there is no branch name to prefer a remote ref for.
+#
+# promptNeeded is true only when reason resolves to stacked-on-current --
+# the same four-condition gate execute.md Step 1.6 computes inline today
+# (target absent locally and on origin, current branch not default, current
+# branch not merged into origin/default), now computed once per repo here.
+_resolve_branch_base() {
+  local branch_name="$1" default_branch="$2" base_override="$3"
+  local current_branch reason base candidate prompt_needed
+  current_branch=$(git branch --show-current 2>/dev/null || echo "")
+  base=""
+  candidate=""
+  prompt_needed=false
+
+  if [ -n "$base_override" ]; then
+    reason="explicit-base"
+    candidate="$base_override"
+  elif git branch --list "$branch_name" | grep -q "$branch_name" || \
+       git ls-remote --heads origin "$branch_name" 2>/dev/null | grep -q "$branch_name"; then
+    reason="target-exists"
+    candidate="$branch_name"
+  elif [ -z "$current_branch" ]; then
+    reason="detached-head"
+    base=$(git rev-parse HEAD 2>/dev/null)
+  elif [ "$current_branch" = "$default_branch" ] || \
+       git branch --merged "origin/$default_branch" 2>/dev/null | grep -q "^[* ] *${current_branch}$"; then
+    reason="default-branch"
+    candidate="$default_branch"
+  else
+    reason="stacked-on-current"
+    candidate="$current_branch"
+    prompt_needed=true
+  fi
+
+  # Origin preference: resolve the candidate ref name against origin,
+  # falling back to the bare local name when offline or local-only.
+  if [ -n "$candidate" ]; then
+    if git ls-remote --heads origin "$candidate" 2>/dev/null | grep -q "$candidate"; then
+      base="origin/$candidate"
+    else
+      base="$candidate"
+    fi
+  fi
+
+  printf '{"base":"%s","reason":"%s","currentBranch":"%s","defaultBranch":"%s","promptNeeded":%s}\n' \
+    "$base" "$reason" "$current_branch" "$default_branch" "$prompt_needed"
+}
+
+# CLI wrapper for _resolve_branch_base(): arg-parsing, --project cd and the
+# three branch-name validations, mirroring cmd_setup_branch's shape exactly.
+cmd_resolve_base_branch() {
+  local branch_name="" default_branch="" project_dir="" base_override=""
+
+  # Parse arguments (positional + flags)
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --default-branch)
+        shift
+        default_branch="${1:-}"
+        ;;
+      --base)
+        shift
+        base_override="${1:-}"
+        ;;
+      --project)
+        shift
+        project_dir="${1:-}"
+        ;;
+      -*)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh resolve-base-branch <branchName> --default-branch <defaultBranch> [--base <baseBranch>] [--project <path>]" >&2
+        exit 1
+        ;;
+      *)
+        if [ -z "$branch_name" ]; then
+          branch_name="$1"
+        else
+          echo "Error: Unexpected argument: $1" >&2
+          echo "Usage: aimi-cli.sh resolve-base-branch <branchName> --default-branch <defaultBranch> [--base <baseBranch>] [--project <path>]" >&2
+          exit 1
+        fi
+        ;;
+    esac
+    shift
+  done
+
+  # Validate required arguments
+  if [ -z "$branch_name" ] || [ -z "$default_branch" ]; then
+    echo "Usage: aimi-cli.sh resolve-base-branch <branchName> --default-branch <defaultBranch> [--base <baseBranch>] [--project <path>]" >&2
+    exit 1
+  fi
+
+  # cd into project dir if specified (supports multi-repo layouts where AIMI root is not a git repo)
+  if [ -n "$project_dir" ]; then
+    if [ ! -d "$project_dir" ]; then
+      echo "Error: Project directory does not exist: $project_dir" >&2
+      exit 1
+    fi
+    cd "$project_dir"
+  fi
+
+  # Guard: must be inside a git repository
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
+    exit 1
+  fi
+
+  # Validate branch name (security)
+  if ! [[ "$branch_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: Invalid branch name: $branch_name" >&2
+    exit 1
+  fi
+
+  # Validate default branch name (security)
+  if ! [[ "$default_branch" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: Invalid branch name: $default_branch" >&2
+    exit 1
+  fi
+
+  # Validate base override branch name (security)
+  if [ -n "$base_override" ] && ! [[ "$base_override" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: Invalid branch name: $base_override" >&2
+    exit 1
+  fi
+
+  _resolve_branch_base "$branch_name" "$default_branch" "$base_override"
+}
+
 # Clear all state files (preserves tasks directory)
 cmd_clear_state() {
   rm -f "$AIMI_DIR/current-tasks" "$AIMI_DIR/current-branch" "$AIMI_DIR/current-story" "$AIMI_DIR/last-result" "$AIMI_DIR/cli-path" "$AIMI_DIR/default-branch"
@@ -8694,6 +8841,17 @@ COMMANDS:
                               when the file exists but the host has no config.
     setup-branch <name> --default-branch <branch> [--project <path>]
                               Create or checkout branch with deterministic logic
+    resolve-base-branch <name> --default-branch <branch> [--base <branch>] [--project <path>]
+                              Decide what branch a new branch or container should be cut
+                              from -- no checkout is performed. Prints a single JSON object:
+                              {"base","reason","currentBranch","defaultBranch","promptNeeded"}.
+                              reason is exactly one of: explicit-base, target-exists,
+                              stacked-on-current, default-branch, detached-head.
+                              base prefers the origin/<name> remote-tracking ref when it
+                              exists, falling back to the bare local name otherwise.
+                              promptNeeded is true only when the target does not exist
+                              (locally or on origin), the current branch is not the
+                              default branch, and it is not merged into origin/<default>.
     clear-state               Clear all state files
     version                   Print the plugin version
     check-version [--quiet] [--fix]
@@ -9150,6 +9308,7 @@ main() {
     detect-default-branch) shift; cmd_detect_default_branch "$@" ;;
     detect-parent-branch) shift; cmd_detect_parent_branch "$@" ;;
     setup-branch)      shift; cmd_setup_branch "$@" ;;
+    resolve-base-branch) shift; cmd_resolve_base_branch "$@" ;;
     clear-state)       cmd_clear_state ;;
     version)           cmd_version ;;
     check-version)     shift; cmd_check_version "$@" ;;

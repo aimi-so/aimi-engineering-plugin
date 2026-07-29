@@ -6002,6 +6002,221 @@ test_setup_branch() {
 }
 
 # ============================================================================
+# Resolve Base Branch Tests
+# ============================================================================
+
+test_resolve_base_branch() {
+  echo ""
+  echo "=== Testing resolve-base-branch command ==="
+
+  local stdout stderr_file exit_code reason base current_branch prompt_needed
+
+  # --- Subtest: explicit --base ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  # Stay on the default branch itself so promptNeeded's four conditions
+  # cannot coincidentally hold regardless of --base being supplied.
+  git checkout main >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/explicit-base --default-branch main --base main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  reason=$(echo "$stdout" | jq -r '.reason')
+  base=$(echo "$stdout" | jq -r '.base')
+  prompt_needed=$(echo "$stdout" | jq -r '.promptNeeded')
+  assert_exit_code "0" "$exit_code" "resolve-base-branch: explicit --base — exit code"
+  assert_eq "explicit-base" "$reason" "resolve-base-branch: explicit --base — reason"
+  assert_eq "origin/main" "$base" "resolve-base-branch: explicit --base — base prefers origin"
+  assert_eq "false" "$prompt_needed" "resolve-base-branch: explicit --base — promptNeeded"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: target branch already exists locally only ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout main >/dev/null 2>&1
+  git checkout -b feat/local-only >/dev/null 2>&1
+  echo "local" > local.txt && git add local.txt && git commit -m "local" >/dev/null 2>&1
+  git checkout main >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/local-only --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  reason=$(echo "$stdout" | jq -r '.reason')
+  base=$(echo "$stdout" | jq -r '.base')
+  prompt_needed=$(echo "$stdout" | jq -r '.promptNeeded')
+  assert_exit_code "0" "$exit_code" "resolve-base-branch: target exists locally — exit code"
+  assert_eq "target-exists" "$reason" "resolve-base-branch: target exists locally — reason"
+  assert_eq "feat/local-only" "$base" "resolve-base-branch: target exists locally — base is bare local name"
+  assert_eq "false" "$prompt_needed" "resolve-base-branch: target exists locally — promptNeeded"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: target branch exists on remote only ---
+  # feat/merged-branch was deleted locally by setup_git_fixture but remains
+  # pushed to origin — an existing remote-only branch with no fixture setup.
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout main >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/merged-branch --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  reason=$(echo "$stdout" | jq -r '.reason')
+  base=$(echo "$stdout" | jq -r '.base')
+  prompt_needed=$(echo "$stdout" | jq -r '.promptNeeded')
+  assert_exit_code "0" "$exit_code" "resolve-base-branch: target exists on remote only — exit code"
+  assert_eq "target-exists" "$reason" "resolve-base-branch: target exists on remote only — reason"
+  assert_eq "origin/feat/merged-branch" "$base" "resolve-base-branch: target exists on remote only — base prefers origin"
+  assert_eq "false" "$prompt_needed" "resolve-base-branch: target exists on remote only — promptNeeded"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: detached HEAD ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout main >/dev/null 2>&1
+  git checkout --detach main >/dev/null 2>&1
+  local head_sha
+  head_sha=$(git rev-parse HEAD)
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/from-detached --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  reason=$(echo "$stdout" | jq -r '.reason')
+  base=$(echo "$stdout" | jq -r '.base')
+  current_branch=$(echo "$stdout" | jq -r '.currentBranch')
+  prompt_needed=$(echo "$stdout" | jq -r '.promptNeeded')
+  assert_exit_code "0" "$exit_code" "resolve-base-branch: detached HEAD — exit code"
+  assert_eq "detached-head" "$reason" "resolve-base-branch: detached HEAD — reason"
+  assert_eq "$head_sha" "$base" "resolve-base-branch: detached HEAD — base is HEAD sha"
+  assert_eq "" "$current_branch" "resolve-base-branch: detached HEAD — currentBranch is empty"
+  assert_eq "false" "$prompt_needed" "resolve-base-branch: detached HEAD — promptNeeded"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: current branch IS the default branch ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout main >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/from-default --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  reason=$(echo "$stdout" | jq -r '.reason')
+  base=$(echo "$stdout" | jq -r '.base')
+  prompt_needed=$(echo "$stdout" | jq -r '.promptNeeded')
+  assert_exit_code "0" "$exit_code" "resolve-base-branch: current is default — exit code"
+  assert_eq "default-branch" "$reason" "resolve-base-branch: current is default — reason"
+  assert_eq "origin/main" "$base" "resolve-base-branch: current is default — base prefers origin"
+  assert_eq "false" "$prompt_needed" "resolve-base-branch: current is default — promptNeeded"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: current branch merged into default but not ON default ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout main >/dev/null 2>&1
+  git checkout -b feat/merged-branch >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/fresh-work --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  reason=$(echo "$stdout" | jq -r '.reason')
+  base=$(echo "$stdout" | jq -r '.base')
+  prompt_needed=$(echo "$stdout" | jq -r '.promptNeeded')
+  assert_exit_code "0" "$exit_code" "resolve-base-branch: current merged into default — exit code"
+  assert_eq "default-branch" "$reason" "resolve-base-branch: current merged into default — reason"
+  assert_eq "origin/main" "$base" "resolve-base-branch: current merged into default — base prefers origin"
+  assert_eq "false" "$prompt_needed" "resolve-base-branch: current merged into default — promptNeeded"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: current branch carries unmerged work — stacked-on-current, promptNeeded ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout feat/unmerged-branch >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/new-stack --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  reason=$(echo "$stdout" | jq -r '.reason')
+  base=$(echo "$stdout" | jq -r '.base')
+  prompt_needed=$(echo "$stdout" | jq -r '.promptNeeded')
+  assert_exit_code "0" "$exit_code" "resolve-base-branch: current unmerged — exit code"
+  assert_eq "stacked-on-current" "$reason" "resolve-base-branch: current unmerged — reason"
+  assert_eq "origin/feat/unmerged-branch" "$base" "resolve-base-branch: current unmerged — base prefers origin"
+  assert_eq "true" "$prompt_needed" "resolve-base-branch: current unmerged — promptNeeded is true"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: origin preference degrades to bare local name when offline ---
+  echo ""
+  echo "--- resolve-base-branch: origin preference and offline degradation ---"
+
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout main >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/origin-pref-1 --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  base=$(echo "$stdout" | jq -r '.base')
+  assert_eq "origin/main" "$base" "resolve-base-branch: origin present — base is origin/main"
+  rm -f "$stderr_file"
+
+  # Simulate offline: the live `git ls-remote --heads origin` probe can no
+  # longer reach a remote at all, so the origin preference must degrade to
+  # the bare local name rather than failing.
+  git remote remove origin >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/origin-pref-2 --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  base=$(echo "$stdout" | jq -r '.base')
+  assert_exit_code "0" "$exit_code" "resolve-base-branch: origin removed — exit code (does not fail)"
+  assert_eq "main" "$base" "resolve-base-branch: origin removed — base degrades to bare main"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Test: --project flag ---
+  echo ""
+  echo "--- resolve-base-branch --project flag ---"
+
+  setup_git_fixture
+  # Run from the non-git TEST_DIR, pointing --project at the fixture
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/project-flag --default-branch main --project "$GIT_FIXTURE_LOCAL" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  reason=$(echo "$stdout" | jq -r '.reason')
+  assert_exit_code "0" "$exit_code" "resolve-base-branch: --project flag — exit code"
+  assert_eq "default-branch" "$reason" "resolve-base-branch: --project flag — reason"
+  rm -f "$stderr_file"
+  teardown_git_fixture
+
+  # --- Subtest: invalid branch name ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch '../bad' --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  local stderr_output
+  stderr_output=$(cat "$stderr_file")
+  assert_exit_code "1" "$exit_code" "resolve-base-branch: invalid branch name — exit code"
+  assert_stderr_contains "Invalid branch name" "$stderr_output" "resolve-base-branch: invalid branch name — stderr message"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+}
+
+# ============================================================================
 # Detect Parent Branch Fixture Helper
 # ============================================================================
 
@@ -15580,6 +15795,11 @@ main() {
   echo ""
   echo "--- Setup Branch Tests ---"
   test_setup_branch
+
+  # Resolve-base-branch tests — uses own git fixture (independent of TEST_DIR)
+  echo ""
+  echo "--- Resolve Base Branch Tests ---"
+  test_resolve_base_branch
 
   # Detect-parent-branch tests — uses own git fixture (independent of TEST_DIR)
   echo ""
