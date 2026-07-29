@@ -161,13 +161,13 @@ If `$BASE_BRANCH` is non-empty, validate it before any other git/worktree call:
 echo "$BASE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'
 ```
 
-If validation fails, report `Invalid --base value: $BASE_BRANCH` and STOP. When `--base` was not passed, `$BASE_BRANCH` stays empty and the container is created from `$DEFAULT_BRANCH`, exactly as before this story.
+If validation fails, report `Invalid --base value: $BASE_BRANCH` and STOP. When `--base` was not passed, `$BASE_BRANCH` stays empty and the base is resolved by `resolve-base-branch`, which stacks on the current branch when it carries unmerged work relative to `$DEFAULT_BRANCH` rather than always defaulting to it.
 
 3. **Resolve `CONTAINER_ROOT`** — one container per project group, following the same convention execute.md's flat mode uses (context.md decision 3):
    - `CONTAINER_ROOT = PROJECT_PATH` (from Step 1b) when the story has a `project` field
    - `CONTAINER_ROOT = AIMI_ROOT` (i.e. `$PWD`) otherwise
 
-4. **Detect the default branch to create the container from.** Scope detection to `CONTAINER_ROOT` via `--project` only when Step 1b resolved a `PROJECT_PATH` — mirrors execute.md's Main-Repo-vs-Per-Project split. `DEFAULT_BRANCH` is computed unconditionally, regardless of `--base` — Step 5's completion report counts commits against it later:
+4. **Detect the default branch, then resolve the container's base.** Scope detection to `CONTAINER_ROOT` via `--project` only when Step 1b resolved a `PROJECT_PATH` — mirrors execute.md's Main-Repo-vs-Per-Project split. `DEFAULT_BRANCH` is computed unconditionally, regardless of `--base` — Step 5's completion report counts commits against it later. `CONTAINER_BASE` is then resolved by `resolve-base-branch` — the same shared primitive execute.md's Flat Container Mode and phase container use — scoped to `CONTAINER_ROOT` via `--project` the same way `DEFAULT_BRANCH` just was, with `--base "$BASE_BRANCH"` passed through only when the user supplied `--base`; when omitted, the resolver stacks on the current branch when it carries unmerged work, falling back to `$DEFAULT_BRANCH` otherwise — the same rule Step 1.6's own picker would apply for this repo:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -178,10 +178,12 @@ else
   DEFAULT_BRANCH=$($AIMI_CLI detect-default-branch)
 fi
 if [ -n "$BASE_BRANCH" ]; then
-  CONTAINER_BASE="$BASE_BRANCH"
+  BASE_JSON=$($AIMI_CLI resolve-base-branch "$BRANCH_NAME" --project "$CONTAINER_ROOT" --default-branch "$DEFAULT_BRANCH" --base "$BASE_BRANCH")
 else
-  CONTAINER_BASE="$DEFAULT_BRANCH"
+  BASE_JSON=$($AIMI_CLI resolve-base-branch "$BRANCH_NAME" --project "$CONTAINER_ROOT" --default-branch "$DEFAULT_BRANCH")
 fi
+CONTAINER_BASE=$(echo "$BASE_JSON" | jq -r '.base')
+CONTAINER_BASE_REASON=$(echo "$BASE_JSON" | jq -r '.reason')
 ```
 
 5. **Create or reuse the container**, with CWD set to `CONTAINER_ROOT` so `worktree-manager.sh`'s own `git rev-parse --show-toplevel` resolves against the right repo. This is execute.md's **Create or Reuse a Container** with `EXEC_ROOT="$CONTAINER_ROOT"`, `EXEC_BRANCH="$BRANCH_NAME"`, `CONTAINER_BASE` as computed above — see that section for the full reuse/idempotency behavior. `/aimi:next` captures the exit code inline instead of letting the Bash tool call surface it, since its own STOP messaging (below) never uses `AskUserQuestion`:

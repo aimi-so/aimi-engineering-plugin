@@ -400,6 +400,8 @@ SPLIT_PLAN=$(cat <<'SPLIT_PLAN_EOF'
 [paste Pass 1's printed SPLIT_PLAN here, verbatim — one JSON record per line]
 SPLIT_PLAN_EOF
 )
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
 
@@ -412,11 +414,8 @@ while IFS= read -r record; do
   SPLIT_ROOT=$(printf '%s' "$record" | jq -r '.root')
   SPLIT_BRANCH=$(printf '%s' "$record" | jq -r '.branch')
   SPLIT_DEFAULT=$(printf '%s' "$record" | jq -r '.default')
-  # BASE_BRANCH is a Step 1.6 value and Step 1.6 has not run this early, so this
-  # always resolves to that repo's own default branch. Written as a default
-  # expansion rather than an `if [ -n "$BASE_BRANCH" ]` whose true branch is
-  # unreachable here.
-  CONTAINER_BASE="${BASE_BRANCH:-$SPLIT_DEFAULT}"
+  SPLIT_BASE_JSON=$($AIMI_CLI resolve-base-branch "$SPLIT_BRANCH" --project "$SPLIT_ROOT" --default-branch "$SPLIT_DEFAULT")
+  CONTAINER_BASE=$(printf '%s' "$SPLIT_BASE_JSON" | jq -r '.base')
   cd "$SPLIT_ROOT"
   if ! $WORKTREE_MGR create "$SPLIT_BRANCH" --from "$CONTAINER_BASE"; then
     echo "Worktree creation failed for $SPLIT_BRANCH in $SPLIT_ROOT — see the error above." >&2
@@ -425,7 +424,7 @@ while IFS= read -r record; do
 done <<< "$SPLIT_PLAN"
 ```
 
-**When `SPLIT_EXECUTION_MODE` is `inline` or absent** (the fail-safe default — see `commands/references/execution-mode.md`), that loop is the whole pass: one worktree per active split file, each branched from its own repo's default branch.
+**When `SPLIT_EXECUTION_MODE` is `inline` or absent** (the fail-safe default — see `commands/references/execution-mode.md`), that loop is the whole pass: one worktree per active split file, each cut from its own repo's own `resolve-base-branch` resolution — its default branch, unless that repo's own current checkout carries unmerged work worth stacking on, exactly as Step 1.6's picker would decide for a single repo.
 
 **When `SPLIT_EXECUTION_MODE` is `container`,** the loop body is instead one delegation per record to **Create or Reuse a Container** (`${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md`), with `EXEC_ROOT` set to that record's `root`, `EXEC_BRANCH` to its `branch`, and `CONTAINER_BASE` as computed above — giving each member its own independently checkout-conflict-checked container rather than nesting one inside another, mirroring the phase-mode split's Create Split Worktrees. That reference's body is the same `cd "$EXEC_ROOT"` + `$WORKTREE_MGR create "$EXEC_BRANCH" --from "$CONTAINER_BASE"` pair the loop already runs, so the shape above is unchanged; what the delegation adds is the single source of truth for the reuse/idempotency and error contract. Handle its exit code exactly as Step 2's Per-Project Branch Setup does — no pre-flight checkout check is needed, since `$WORKTREE_MGR create` is branch-aware and its stderr already names the worktree holding the branch. Report that stderr verbatim and STOP without attempting remediation.
 
@@ -1086,14 +1085,18 @@ Phase [PHASE_ID]'s claim has been released. Nothing was created.
 
 ```bash
 cd "$AIMI_ROOT"
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 if [ -n "$BASE_BRANCH" ]; then
-  CONTAINER_BASE="$BASE_BRANCH"
+  BASE_JSON=$($AIMI_CLI resolve-base-branch "$PHASE_BRANCH" --default-branch "$DEFAULT_BRANCH" --base "$BASE_BRANCH")
 else
-  CONTAINER_BASE="$DEFAULT_BRANCH"
+  BASE_JSON=$($AIMI_CLI resolve-base-branch "$PHASE_BRANCH" --default-branch "$DEFAULT_BRANCH")
 fi
+CONTAINER_BASE=$(echo "$BASE_JSON" | jq -r '.base')
+CONTAINER_BASE_REASON=$(echo "$BASE_JSON" | jq -r '.reason')
 ```
 
-`CONTAINER_BASE` is `BASE_BRANCH` when Step 1.6 set one, otherwise `DEFAULT_BRANCH` — reusing the exact default-branch/base-selection values Steps 1.5–1.6 already computed against the main root. Delegate to **Create or Reuse a Container** with `EXEC_ROOT="$AIMI_ROOT"`, `EXEC_BRANCH="$PHASE_BRANCH"`, and `CONTAINER_BASE` as just computed. The resulting path is deterministic given `AIMI_ROOT` and `PHASE_BRANCH`:
+`CONTAINER_BASE` is resolved by `resolve-base-branch` — the same shared primitive Flat Container Mode uses above (`_resolve_branch_base` in `aimi-cli.sh`), called here with `--project` omitted because this path already runs with CWD at `AIMI_ROOT`, a git repository (the Unsupported Combination Guard above guarantees this). `BASE_BRANCH` is passed through as `--base` when Step 1.6 set one, so an explicit user choice is honored verbatim; when unset, the resolver applies its own stacked-on-current/default-branch heuristic — the same rule Step 1.6's own picker already applied once for this repo, which is why no second prompt runs here: Step 1.6 ran against `AIMI_ROOT` itself, and phase mode's Unsupported Combination Guard has already confirmed `AIMI_ROOT` is that same repository. Delegate to **Create or Reuse a Container** with `EXEC_ROOT="$AIMI_ROOT"`, `EXEC_BRANCH="$PHASE_BRANCH"`, and `CONTAINER_BASE` as just resolved. The resulting path is deterministic given `AIMI_ROOT` and `PHASE_BRANCH`:
 
 ```bash
 PHASE_CONTAINER_PATH="$AIMI_ROOT/.worktrees/$PHASE_BRANCH"
