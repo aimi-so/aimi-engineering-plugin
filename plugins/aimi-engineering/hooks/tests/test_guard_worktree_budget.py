@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -495,5 +496,192 @@ def test_malformed_sibling_top_level_list_does_not_disable_guard(tmp_path, monke
 
     assert exc_info.value.code == 0
     assert captured, "Expected deny message -- guard must still enforce budget despite malformed sibling"
+    deny_data = json.loads(captured[0])
+    assert "2/2" in deny_data["hookSpecificOutput"]["userMessage"]
+
+
+# ---------------------------------------------------------------------------
+# US-002: command-position anchoring parity for worktree-add (issue #82) --
+# false-positive regressions
+# ---------------------------------------------------------------------------
+
+
+def test_grep_mention_of_worktree_add_allows_silently_no_subprocess_calls():
+    """A grep invocation that mentions the phrase must never be treated as an invocation."""
+    command = 'grep -rn "git worktree add" file.txt'
+    with patch("subprocess.run") as mock_run:
+        with pytest.raises(SystemExit) as exc_info:
+            dispatcher.handle_worktree_budget(command, _tool_input_for(command))
+
+    assert exc_info.value.code == 0
+    assert mock_run.call_count == 0
+
+
+def test_echo_mention_of_worktree_add_allows_silently_no_subprocess_calls():
+    """An echo invocation that mentions the phrase must never be treated as an invocation."""
+    command = 'echo "remember to git worktree add later"'
+    with patch("subprocess.run") as mock_run:
+        with pytest.raises(SystemExit) as exc_info:
+            dispatcher.handle_worktree_budget(command, _tool_input_for(command))
+
+    assert exc_info.value.code == 0
+    assert mock_run.call_count == 0
+
+
+def test_heredoc_body_mention_of_worktree_add_allows_silently_no_subprocess_calls():
+    """A heredoc body that mentions the phrase must never be treated as an invocation."""
+    command = "cat <<EOF\nremember to git worktree add\nEOF"
+    with patch("subprocess.run") as mock_run:
+        with pytest.raises(SystemExit) as exc_info:
+            dispatcher.handle_worktree_budget(command, _tool_input_for(command))
+
+    assert exc_info.value.code == 0
+    assert mock_run.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# US-002: command-position anchoring parity for worktree-add (issue #82) --
+# true-positive regressions (command-start and each separator token)
+# ---------------------------------------------------------------------------
+
+
+def test_denies_command_start_worktree_add_when_budget_exhausted(tmp_path, monkeypatch):
+    """A bare invocation at command-start must still be gated by the budget."""
+    _make_tasks_json(tmp_path, max_concurrency=2)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(subprocess, "run", _fake_run_factory(2, str(tmp_path)))
+    monkeypatch.delenv("AIMI_WORKTREE_BUDGET_GUARD", raising=False)
+
+    captured = []
+    monkeypatch.setattr("builtins.print", lambda msg: captured.append(msg))
+
+    cmd = "git worktree add ../wt-new feat/x"
+    with pytest.raises(SystemExit) as exc_info:
+        dispatcher.handle_worktree_budget(cmd, _tool_input_for(cmd))
+
+    assert exc_info.value.code == 0
+    assert captured, "Expected deny message -- command-start invocation must be gated"
+    deny_data = json.loads(captured[0])
+    assert "2/2" in deny_data["hookSpecificOutput"]["userMessage"]
+
+
+def test_denies_double_ampersand_chained_worktree_add_when_budget_exhausted(tmp_path, monkeypatch):
+    """An invocation immediately after `&&` must still be gated by the budget."""
+    _make_tasks_json(tmp_path, max_concurrency=2)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(subprocess, "run", _fake_run_factory(2, str(tmp_path)))
+    monkeypatch.delenv("AIMI_WORKTREE_BUDGET_GUARD", raising=False)
+
+    captured = []
+    monkeypatch.setattr("builtins.print", lambda msg: captured.append(msg))
+
+    cmd = "git status && git worktree add ../wt-new feat/x"
+    with pytest.raises(SystemExit) as exc_info:
+        dispatcher.handle_worktree_budget(cmd, _tool_input_for(cmd))
+
+    assert exc_info.value.code == 0
+    assert captured, "Expected deny message -- invocation after && must be gated"
+    deny_data = json.loads(captured[0])
+    assert "2/2" in deny_data["hookSpecificOutput"]["userMessage"]
+
+
+def test_denies_semicolon_chained_worktree_add_when_budget_exhausted(tmp_path, monkeypatch):
+    """An invocation immediately after `;` must still be gated by the budget."""
+    _make_tasks_json(tmp_path, max_concurrency=2)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(subprocess, "run", _fake_run_factory(2, str(tmp_path)))
+    monkeypatch.delenv("AIMI_WORKTREE_BUDGET_GUARD", raising=False)
+
+    captured = []
+    monkeypatch.setattr("builtins.print", lambda msg: captured.append(msg))
+
+    cmd = "git worktree list; git worktree add ../wt-new feat/x"
+    with pytest.raises(SystemExit) as exc_info:
+        dispatcher.handle_worktree_budget(cmd, _tool_input_for(cmd))
+
+    assert exc_info.value.code == 0
+    assert captured, "Expected deny message -- invocation after ; must be gated"
+    deny_data = json.loads(captured[0])
+    assert "2/2" in deny_data["hookSpecificOutput"]["userMessage"]
+
+
+def test_denies_pipe_chained_worktree_add_when_budget_exhausted(tmp_path, monkeypatch):
+    """An invocation immediately after `|` must still be gated by the budget."""
+    _make_tasks_json(tmp_path, max_concurrency=2)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(subprocess, "run", _fake_run_factory(2, str(tmp_path)))
+    monkeypatch.delenv("AIMI_WORKTREE_BUDGET_GUARD", raising=False)
+
+    captured = []
+    monkeypatch.setattr("builtins.print", lambda msg: captured.append(msg))
+
+    cmd = "true | git worktree add ../wt-new feat/x"
+    with pytest.raises(SystemExit) as exc_info:
+        dispatcher.handle_worktree_budget(cmd, _tool_input_for(cmd))
+
+    assert exc_info.value.code == 0
+    assert captured, "Expected deny message -- invocation after | must be gated"
+    deny_data = json.loads(captured[0])
+    assert "2/2" in deny_data["hookSpecificOutput"]["userMessage"]
+
+
+# ---------------------------------------------------------------------------
+# US-002: command-position anchoring parity for worktree-add (issue #82) --
+# git -C <path> worktree add regressions
+# ---------------------------------------------------------------------------
+
+
+def test_denies_git_C_bare_path_worktree_add_when_budget_exhausted(tmp_path, monkeypatch):
+    """`git -C <path> worktree add` (no -C variant existed before this story)
+    must reach the budget-counting logic rather than bypass the guard."""
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    _make_tasks_json(project_dir, max_concurrency=2)
+    monkeypatch.chdir(tmp_path)  # NOT the project dir
+    monkeypatch.setattr(subprocess, "run", _fake_run_factory(2, str(project_dir)))
+    monkeypatch.delenv("AIMI_WORKTREE_BUDGET_GUARD", raising=False)
+
+    captured = []
+    monkeypatch.setattr("builtins.print", lambda msg: captured.append(msg))
+
+    cmd = f"git -C {project_dir} worktree add ../wt-new feat/x"
+    with pytest.raises(SystemExit) as exc_info:
+        dispatcher.handle_worktree_budget(cmd, _tool_input_for(cmd))
+
+    assert exc_info.value.code == 0
+    assert captured, "Expected deny message -- git -C <path> worktree add must reach budget-counting logic"
+    deny_data = json.loads(captured[0])
+    assert "2/2" in deny_data["hookSpecificOutput"]["userMessage"]
+
+
+def test_denies_git_C_quoted_path_worktree_add_when_budget_exhausted(tmp_path, monkeypatch):
+    """`git -C "<path with spaces>" worktree add` must reach the
+    budget-counting logic rather than bypass the guard.
+
+    effective_cwd's own git -C path parsing (shared plumbing, pre-existing,
+    out of this story's scope) does not fully resolve a quoted path containing
+    spaces -- its \\S+ capture group stops at the first space inside the
+    quotes. This test isolates that separate, already-existing limitation by
+    stubbing effective_cwd to return the intended project directory directly,
+    so it exercises only the detection regex (_GIT_C_WORKTREE_ADD_RE) and the
+    budget-counting logic that follows, proving the quoted-path invocation is
+    recognized as a real invocation rather than silently allowed.
+    """
+    project_dir = tmp_path / "project with spaces"
+    project_dir.mkdir()
+    _make_tasks_json(project_dir, max_concurrency=2)
+    monkeypatch.setattr(dispatcher, "effective_cwd", lambda command, tool_input: str(project_dir))
+    monkeypatch.setattr(subprocess, "run", _fake_run_factory(2, str(project_dir)))
+    monkeypatch.delenv("AIMI_WORKTREE_BUDGET_GUARD", raising=False)
+
+    captured = []
+    monkeypatch.setattr("builtins.print", lambda msg: captured.append(msg))
+
+    cmd = f'git -C "{project_dir}" worktree add ../wt-new feat/x'
+    with pytest.raises(SystemExit) as exc_info:
+        dispatcher.handle_worktree_budget(cmd, _tool_input_for(cmd))
+
+    assert exc_info.value.code == 0
+    assert captured, "Expected deny message -- quoted git -C path worktree add must reach budget-counting logic"
     deny_data = json.loads(captured[0])
     assert "2/2" in deny_data["hookSpecificOutput"]["userMessage"]

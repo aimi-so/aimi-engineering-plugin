@@ -152,3 +152,101 @@ def test_ast_scan_skips_unparseable_python():
     blob = "def broken(\n    # missing closing paren\n"
     out = _run_handler("git commit -m x", ["broken.py"], {"broken.py": blob})
     assert not out, "Unparseable Python should be skipped, not blocked"
+
+
+# ---------------------------------------------------------------------------
+# US-001: command-position anchoring (issue #82) — false-positive regressions
+# ---------------------------------------------------------------------------
+
+def test_grep_mention_of_git_commit_allows_silently():
+    command = 'grep -rn "git commit" file.txt'
+    with (
+        patch("subprocess.run") as mock_run,
+        patch("builtins.print") as mock_print,
+    ):
+        try:
+            dispatcher.handle_shell_true(command, {"command": command})
+        except SystemExit:
+            pass
+    mock_run.assert_not_called()
+    mock_print.assert_not_called()
+
+
+def test_echo_mention_of_git_commit_allows_silently():
+    command = 'echo "remember to git commit later"'
+    with (
+        patch("subprocess.run") as mock_run,
+        patch("builtins.print") as mock_print,
+    ):
+        try:
+            dispatcher.handle_shell_true(command, {"command": command})
+        except SystemExit:
+            pass
+    mock_run.assert_not_called()
+    mock_print.assert_not_called()
+
+
+def test_heredoc_body_mention_of_git_commit_allows_silently():
+    command = "cat <<EOF\nremember to git commit\nEOF"
+    with (
+        patch("subprocess.run") as mock_run,
+        patch("builtins.print") as mock_print,
+    ):
+        try:
+            dispatcher.handle_shell_true(command, {"command": command})
+        except SystemExit:
+            pass
+    mock_run.assert_not_called()
+    mock_print.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# US-001: command-position anchoring (issue #82) — true-positive regressions
+# ---------------------------------------------------------------------------
+
+def test_denies_cd_chained_commit_with_shell_true_staged():
+    blob = "subprocess.run('ls', shell=True)\n"
+    out = _run_handler("cd /repo && git commit -m x", ["foo.py"], {"foo.py": blob})
+    assert out, "Expected deny output"
+    data = json.loads(out[0])
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_denies_semicolon_chained_commit_with_shell_true_staged():
+    blob = "subprocess.run('ls', shell=True)\n"
+    out = _run_handler("git status; git commit -m x", ["foo.py"], {"foo.py": blob})
+    assert out, "Expected deny output"
+    data = json.loads(out[0])
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_denies_bare_git_C_commit_with_shell_true_staged():
+    blob = "subprocess.run('ls', shell=True)\n"
+    out = _run_handler("git -C /repo commit -m x", ["foo.py"], {"foo.py": blob})
+    assert out, "Expected deny output"
+    data = json.loads(out[0])
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_denies_quoted_path_git_C_commit_with_shell_true_staged():
+    blob = "subprocess.run('ls', shell=True)\n"
+    out = _run_handler('git -C "/path with spaces" commit -m x', ["foo.py"], {"foo.py": blob})
+    assert out, "Expected deny output"
+    data = json.loads(out[0])
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_denies_newline_separated_commit_with_shell_true_staged():
+    blob = "subprocess.run('ls', shell=True)\n"
+    out = _run_handler("cd /repo\ngit add -A\ngit commit -m x", ["foo.py"], {"foo.py": blob})
+    assert out, "Expected deny output"
+    data = json.loads(out[0])
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_denies_leading_whitespace_commit_with_shell_true_staged():
+    blob = "subprocess.run('ls', shell=True)\n"
+    out = _run_handler("   git commit -m x", ["foo.py"], {"foo.py": blob})
+    assert out, "Expected deny output"
+    data = json.loads(out[0])
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"

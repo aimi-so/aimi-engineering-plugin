@@ -104,6 +104,24 @@ def is_quiet_mode() -> bool:
     return bool(load_aimi_config().get("quietMode", False))
 
 
+# Path token shared by both extractors below: a double-quoted path, a
+# single-quoted path, or a bare non-whitespace run. This mirrors the token the
+# detection regexes in pre-bash-dispatcher.py use, so a command shape that is
+# detected as a commit is also one whose target directory can be resolved. A
+# bare `\S+` here would capture the opening quote (and stop at the first space
+# inside it), yielding a path no git invocation can use — which resolves to an
+# empty branch name and silently disables the protected-branch guard.
+_PATH_TOKEN = r"(?:\"([^\"]+)\"|'([^']+)'|(\S+))"
+_GIT_C_PATH_RE = re.compile(r"\bgit\s+-C\s+" + _PATH_TOKEN)
+_CD_PREFIX_RE = re.compile(r"\s*cd\s+" + _PATH_TOKEN + r"\s*&&")
+
+
+def _resolve_path_token(match: re.Match) -> str:
+    """Return the absolute path from a _PATH_TOKEN match, quotes stripped."""
+    path = match.group(1) or match.group(2) or match.group(3)
+    return os.path.abspath(os.path.expanduser(path))
+
+
 def effective_cwd(command: str, tool_input: dict) -> str:
     """Return the effective working directory for a shell command.
 
@@ -115,13 +133,13 @@ def effective_cwd(command: str, tool_input: dict) -> str:
 
     Returns an absolute path string with ~ expanded.
     """
-    m = re.search(r"\bgit\s+-C\s+(\S+)", command)
+    m = _GIT_C_PATH_RE.search(command)
     if m:
-        return os.path.abspath(os.path.expanduser(m.group(1)))
+        return _resolve_path_token(m)
 
-    m = re.match(r"\s*cd\s+(\S+)\s*&&", command)
+    m = _CD_PREFIX_RE.match(command)
     if m:
-        return os.path.abspath(os.path.expanduser(m.group(1)))
+        return _resolve_path_token(m)
 
     cwd = tool_input.get("cwd")
     if cwd:

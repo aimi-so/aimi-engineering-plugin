@@ -144,6 +144,101 @@ def test_bypass_env_allows(monkeypatch):
     assert not out, "Bypass env should allow"
 
 
+
+# ---------------------------------------------------------------------------
+# US-001: command-position anchoring (issue #82) — false-positive regressions
+# ---------------------------------------------------------------------------
+
+def test_grep_mention_of_git_commit_allows_silently():
+    """A grep invocation that mentions the phrase must never be treated as a commit."""
+    with (
+        patch("subprocess.run") as mock_run,
+        patch("builtins.print") as mock_print,
+    ):
+        try:
+            dispatcher.handle_default_branch('grep -rn "git commit" file.txt', {"command": 'grep -rn "git commit" file.txt'})
+        except SystemExit:
+            pass
+    mock_run.assert_not_called()
+    mock_print.assert_not_called()
+
+
+def test_echo_mention_of_git_commit_allows_silently():
+    """An echo invocation that mentions the phrase must never be treated as a commit."""
+    command = 'echo "remember to git commit later"'
+    with (
+        patch("subprocess.run") as mock_run,
+        patch("builtins.print") as mock_print,
+    ):
+        try:
+            dispatcher.handle_default_branch(command, {"command": command})
+        except SystemExit:
+            pass
+    mock_run.assert_not_called()
+    mock_print.assert_not_called()
+
+
+def test_heredoc_body_mention_of_git_commit_allows_silently():
+    """A heredoc body that mentions the phrase must never be treated as a commit."""
+    command = "cat <<EOF\nremember to git commit\nEOF"
+    with (
+        patch("subprocess.run") as mock_run,
+        patch("builtins.print") as mock_print,
+    ):
+        try:
+            dispatcher.handle_default_branch(command, {"command": command})
+        except SystemExit:
+            pass
+    mock_run.assert_not_called()
+    mock_print.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# US-001: command-position anchoring (issue #82) — true-positive regressions
+# ---------------------------------------------------------------------------
+
+def test_denies_cd_chained_commit_on_protected_branch():
+    out = _run_handler("cd /repo && git commit -m x", "main")
+    assert out, "Expected deny output"
+    data = json.loads(out[0])
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_denies_semicolon_chained_commit_on_protected_branch():
+    out = _run_handler("git status; git commit -m x", "main")
+    assert out, "Expected deny output"
+    data = json.loads(out[0])
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_denies_bare_git_C_commit_on_protected_branch():
+    out = _run_handler("git -C /repo commit -m x", "main")
+    assert out, "Expected deny output"
+    data = json.loads(out[0])
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_denies_quoted_path_git_C_commit_on_protected_branch():
+    out = _run_handler('git -C "/path with spaces" commit -m x', "main")
+    assert out, "Expected deny output"
+    data = json.loads(out[0])
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_denies_newline_separated_commit_on_protected_branch():
+    out = _run_handler("cd /repo\ngit add -A\ngit commit -m x", "main")
+    assert out, "Expected deny output"
+    data = json.loads(out[0])
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_denies_leading_whitespace_commit_on_protected_branch():
+    out = _run_handler("   git commit -m x", "main")
+    assert out, "Expected deny output"
+    data = json.loads(out[0])
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
 def test_custom_protected_branches_via_config(tmp_path):
     """tmp_path .aimi/config.json with extra branches in guards.protectedBranches"""
     aimi_dir = tmp_path / ".aimi"

@@ -16,11 +16,122 @@ from hook_utils import safe_hook, effective_cwd, load_aimi_config, deny  # noqa:
 # Module-level pre-compiled regexes — compiled once on import
 # ---------------------------------------------------------------------------
 
-_GIT_COMMIT_RE = re.compile(r"\bgit\s+commit\b")
-_GIT_WORKTREE_ADD_RE = re.compile(r"\bgit\s+worktree\s+add\b")
+# Command-position anchor: a `git commit` (or `git -C ... commit`) token, or a
+# `git worktree add` (or `git -C ... worktree add`) token, must appear at the
+# start of a shell "statement" — string start, or immediately after `;`,
+# `&&`, `||`, `|`, or a newline — rather than matching anywhere in the
+# command text (e.g. inside a grep/echo argument or a heredoc body).
+# Each lookbehind branch below is fixed-width, so it is valid under Python's
+# re module. No re.MULTILINE flag: the newline case is handled as a literal
+# lookbehind alternative, not via `^`/`$` line semantics.
+#
+# Residual risk (accepted, documented here rather than fixed). This list is
+# meant to be exhaustive — a reader should be able to trust that a shape not
+# named here is detected. Undetected:
+#   * nested inside `bash -c '...'`, a subshell `(git commit)`, or command
+#     substitution `$(git commit)`;
+#   * chained with a single `&` (background) rather than `&&`;
+#   * inside an `if`/`then`, `else`, `case`, loop (`do ... done`) or brace-
+#     group body;
+#   * preceded on the same statement by an environment assignment or wrapper
+#     prefix — `GIT_AUTHOR_DATE=... git commit`, `env`, `sudo`, `time`,
+#     `nohup`. `\s*` after the anchor consumes whitespace only, so anything
+#     between the separator and `git` breaks the match;
+#   * option forms other than `-C`: `git -c key=value commit`,
+#     `git --git-dir=... commit`.
+# The old unanchored regexes caught these shapes only "by accident" — while
+# also false-positiving on mere mentions of the phrase. Closing the quote-
+# wrapped cases would require quote/paren-aware shell parsing, which is out of
+# scope here.
+# The trailing run must exclude `\n` specifically. A newline is both an anchor
+# (its own lookbehind branch) and a `\s` character, so `\s*` would let every
+# position inside a whitespace run start a match and then backtrack across the
+# rest of it — quadratic on a long run of blank lines (seconds of CPU on a few
+# thousand, enough to exhaust the hook timeout and stop denying anything).
+# `[^\S\n]*` is "whitespace except newline", which keeps `\r`, `\v` and `\f`
+# matching exactly as `\s*` did; `[ \t]*` would silently stop detecting a
+# command prefixed by a carriage return.
+_CMD_START = r"(?:(?<=^)|(?<=;)|(?<=&&)|(?<=\|\|)|(?<=\|)|(?<=\n))[^\S\n]*"
 
-# Used by handle_default_branch for git -C variant
-_GIT_C_COMMIT_RE = re.compile(r"\bgit\s+-C\s+\S+\s+commit\b")
+_GIT_COMMIT_RE = re.compile(_CMD_START + r"\bgit\s+commit\b")
+_GIT_WORKTREE_ADD_RE = re.compile(_CMD_START + r"git\s+worktree\s+add\b")
+
+# Used by handle_default_branch for git -C variant. Path token accepts a
+# double-quoted path, a single-quoted path, or a bare non-whitespace token so
+# `git -C "/path with spaces" commit` is detected too.
+_GIT_C_COMMIT_RE = re.compile(
+    _CMD_START + r"\bgit\s+-C\s+(?:\"[^\"]+\"|'[^']+'|\S+)\s+commit\b"
+)
+
+# Used by handle_worktree_budget for git -C variant. Same quoted-or-bare path
+# token as _GIT_C_COMMIT_RE, so `git -C "/path with spaces" worktree add` is
+# detected too.
+_GIT_C_WORKTREE_ADD_RE = re.compile(
+    _CMD_START + r"\bgit\s+-C\s+(?:\"[^\"]+\"|'[^']+'|\S+)\s+worktree\s+add\b"
+)
+
+# Heredoc opener: `<<` or `<<-` followed (after optional whitespace) by a
+# bare, single-quoted, or double-quoted tag. The negative lookbehind/lookahead
+# pair excludes `<<<` (here-string redirection) from ever being treated as an
+# opener.
+_HEREDOC_OPEN_RE = re.compile(
+    r"(?<!<)<<(?!<)(-)?\s*(?:'([A-Za-z0-9_]+)'|\"([A-Za-z0-9_]+)\"|([A-Za-z0-9_]+))"
+)
+
+
+def _strip_heredocs(command: str) -> str:
+    """Return a detection-only copy of *command* with heredoc bodies removed.
+
+    Recognizes <<TAG, <<'TAG', <<"TAG", and <<-TAG opener forms. Never
+    misidentifies a `<<<` here-string redirection as a heredoc opener (see
+    _HEREDOC_OPEN_RE). A heredoc-lookalike line inside a real heredoc body is
+    never re-scanned for its own opener — the body-skipping loop only checks
+    each line against the *current* heredoc's closing tag — so it cannot
+    cause a subsequent real statement after the true terminator to be
+    swallowed.
+
+    Fails closed on any internal error (including an unterminated heredoc):
+    returns the original, unmodified command string rather than raising or
+    emitting a partially-stripped result, so a malformed heredoc can never
+    hide a real commit from the caller's detection regexes.
+    """
+    try:
+        lines = command.split("\n")
+        out: list[str] = []
+        i = 0
+        n = len(lines)
+        while i < n:
+            line = lines[i]
+            m = _HEREDOC_OPEN_RE.search(line)
+            if not m:
+                out.append(line)
+                i += 1
+                continue
+
+            dash = m.group(1) is not None
+            tag = m.group(2) or m.group(3) or m.group(4)
+
+            out.append(line)  # keep the opener line itself
+            i += 1
+
+            terminated = False
+            while i < n:
+                body_line = lines[i]
+                i += 1
+                candidate = body_line.strip() if dash else body_line
+                if candidate == tag:
+                    terminated = True
+                    break
+                # body line: intentionally dropped, never re-scanned for its
+                # own heredoc-opener lookalikes
+
+            if not terminated:
+                # Unterminated heredoc — fail closed on the whole command.
+                return command
+
+        return "\n".join(out)
+    except Exception:  # noqa: BLE001
+        return command
 
 
 # ---------------------------------------------------------------------------
@@ -41,8 +152,10 @@ def handle_default_branch(command: str, tool_input: dict) -> None:
     Mirrors guard-default-branch.py logic.  Calls deny() + prints + exits on
     block; returns normally to allow the next handler to run.
     """
-    # Fast-path: must contain a git commit invocation
-    if not (_GIT_COMMIT_RE.search(command) or _GIT_C_COMMIT_RE.search(command)):
+    # Fast-path: must contain a git commit invocation (heredoc bodies are
+    # stripped from the detection copy; the raw `command` below is untouched)
+    detect = _strip_heredocs(command)
+    if not (_GIT_COMMIT_RE.search(detect) or _GIT_C_COMMIT_RE.search(detect)):
         return
 
     # Bypass env
@@ -111,8 +224,10 @@ def handle_shell_true(command: str, tool_input: dict) -> None:
     Mirrors guard-shell-true.py logic.  Calls deny() + prints + exits on
     block; returns normally to continue.
     """
-    # Fast-path: must contain a git commit invocation
-    if not (_GIT_COMMIT_RE.search(command) or _GIT_C_COMMIT_RE.search(command)):
+    # Fast-path: must contain a git commit invocation (heredoc bodies are
+    # stripped from the detection copy; the raw `command` below is untouched)
+    detect = _strip_heredocs(command)
+    if not (_GIT_COMMIT_RE.search(detect) or _GIT_C_COMMIT_RE.search(detect)):
         return
 
     # Bypass env
@@ -265,8 +380,11 @@ def handle_worktree_budget(command: str, tool_input: dict) -> None:
     Mirrors guard-worktree-budget.py logic.  Calls deny() + prints + exits on
     block; calls _allow() (sys.exit(0)) to allow.
     """
-    # Fast-path: only intercept `git worktree add` commands.
-    if not _GIT_WORKTREE_ADD_RE.search(command):
+    # Fast-path: only intercept `git worktree add` commands (heredoc bodies
+    # are stripped from the detection copy; the raw `command` below, passed
+    # to effective_cwd and the rest of this function, is untouched).
+    detect = _strip_heredocs(command)
+    if not (_GIT_WORKTREE_ADD_RE.search(detect) or _GIT_C_WORKTREE_ADD_RE.search(detect)):
         _allow()
 
     # Bypass env var.
@@ -312,12 +430,25 @@ def handle_worktree_budget(command: str, tool_input: dict) -> None:
 def main(tool_input: dict) -> None:
     command = tool_input.get("tool_input", {}).get("command", "")
 
-    if _GIT_COMMIT_RE.search(command):
+    # Literal prefilter. Every detection regex below requires the literal
+    # "git", and _strip_heredocs only ever removes whole lines, so a command
+    # without it cannot match and needs no further work. Anchoring the regexes
+    # cost them their leading literal, which is what CPython's re uses to skip
+    # ahead; without this the 6-branch alternation is evaluated at every offset
+    # of every command the hook ever sees.
+    if "git" not in command:
+        sys.exit(0)
+
+    # Heredoc bodies are stripped from the detection copy only; the raw
+    # `command` passed to the handlers below (and on to effective_cwd/
+    # subprocess.run) is untouched.
+    detect = _strip_heredocs(command)
+    if _GIT_COMMIT_RE.search(detect) or _GIT_C_COMMIT_RE.search(detect):
         handle_default_branch(command, tool_input.get("tool_input", {}))
         handle_shell_true(command, tool_input.get("tool_input", {}))
         sys.exit(0)
 
-    if _GIT_WORKTREE_ADD_RE.search(command):
+    if _GIT_WORKTREE_ADD_RE.search(detect) or _GIT_C_WORKTREE_ADD_RE.search(detect):
         handle_worktree_budget(command, tool_input.get("tool_input", {}))
         sys.exit(0)
 
