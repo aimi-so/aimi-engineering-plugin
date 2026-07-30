@@ -400,3 +400,62 @@ def test_dispatcher_routes_git_C_worktree_add_to_budget_handler(tmp_path, monkey
 def test_neither_worktree_add_regex_has_multiline_flag():
     assert not (dispatcher._GIT_WORKTREE_ADD_RE.flags & re.MULTILINE)
     assert not (dispatcher._GIT_C_WORKTREE_ADD_RE.flags & re.MULTILINE)
+
+
+# ---------------------------------------------------------------------------
+# Review follow-up: _CMD_START trailing-run correctness and cost
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "whitespace",
+    ["\r", "\v", "\f", "\r\n", " ", "\t", "  \t "],
+    ids=["cr", "vtab", "formfeed", "crlf", "space", "tab", "mixed"],
+)
+def test_cmd_start_accepts_every_non_newline_whitespace(whitespace):
+    """Whitespace between the anchor and `git` must not break detection.
+
+    `_CMD_START`'s trailing run excludes `\\n` only, so that a long blank-line
+    run cannot backtrack quadratically. Narrowing it further to `[ \\t]*` would
+    silently stop detecting a command prefixed by a carriage return, vertical
+    tab, or form feed -- a fail-open regression this pins.
+    """
+    assert dispatcher._GIT_COMMIT_RE.search(whitespace + "git commit -m x")
+    assert dispatcher._GIT_WORKTREE_ADD_RE.search(whitespace + "git worktree add /tmp/w")
+
+
+def test_cmd_start_scan_is_linear_in_blank_lines():
+    """A long run of blank lines must not cost quadratic time to reject.
+
+    A `\\n` is both an anchor and a `\\s` character, so a trailing `\\s*` lets
+    every position in a whitespace run start a match and then backtrack over
+    the rest -- seconds of CPU on a few thousand blank lines, enough to blow
+    the hook timeout and stop the guard denying anything at all. Timing is
+    coarse on purpose: the pre-fix cost at n=4000 was over a second, so a
+    generous ceiling still fails loudly on a regression without being flaky.
+    """
+    import time
+
+    payload = " \n" * 4000 + "echo done"
+    start = time.perf_counter()
+    for pattern in (
+        dispatcher._GIT_COMMIT_RE,
+        dispatcher._GIT_C_COMMIT_RE,
+        dispatcher._GIT_WORKTREE_ADD_RE,
+        dispatcher._GIT_C_WORKTREE_ADD_RE,
+    ):
+        assert pattern.search(payload) is None
+    elapsed = time.perf_counter() - start
+    assert elapsed < 0.5, f"anchored scan took {elapsed:.3f}s -- backtracking regression"
+
+
+def test_main_prefilter_allows_command_without_the_git_literal():
+    """The `"git" not in command` prefilter exits 0 without scanning."""
+    out = _run_dispatcher("echo hello && npm run build", branch="main")
+    assert out == [], f"Expected silent allow, got {out}"
+
+
+def test_main_prefilter_does_not_swallow_a_real_commit():
+    """The prefilter must never short-circuit a command it should deny."""
+    out = _run_dispatcher("git commit -m x", branch="main")
+    assert out, "Expected deny -- prefilter wrongly skipped a real invocation"
+    assert json.loads(out[0])["hookSpecificOutput"]["permissionDecision"] == "deny"

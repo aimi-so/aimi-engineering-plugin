@@ -136,6 +136,32 @@ def test_effective_cwd_cd_prefix():
     assert result == os.path.abspath(os.path.expanduser("/tmp/bar"))
 
 
+@pytest.mark.parametrize(
+    "command,expected",
+    [
+        ('git -C "/tmp/foo" commit -m x', "/tmp/foo"),
+        ("git -C '/tmp/foo' commit -m x", "/tmp/foo"),
+        ('git -C "/tmp/with space" commit -m x', "/tmp/with space"),
+        ("git -C '/tmp/with space' commit -m x", "/tmp/with space"),
+        ('git -C "/tmp/foo" worktree add /tmp/w', "/tmp/foo"),
+        ('cd "/tmp/with space" && git commit -m x', "/tmp/with space"),
+        ("cd '/tmp/with space' && git commit -m x", "/tmp/with space"),
+    ],
+)
+def test_effective_cwd_resolves_quoted_paths(command, expected):
+    """Quoted paths resolve to the real directory, quotes stripped.
+
+    A bare `\\S+` capture keeps the opening quote and stops at the first space
+    inside it. The resulting path is one no git invocation can use, so
+    `git rev-parse` fails, the branch reads as empty, and the protected-branch
+    guard allows a commit it was supposed to block. These shapes are all
+    detected by pre-bash-dispatcher's regexes, so they must be resolvable here.
+    """
+    import os
+    result = hook_utils.effective_cwd(command, {})
+    assert result == os.path.abspath(os.path.expanduser(expected))
+
+
 def test_effective_cwd_tool_input_cwd():
     """Falls back to tool_input['cwd'] when no pattern matches."""
     import os

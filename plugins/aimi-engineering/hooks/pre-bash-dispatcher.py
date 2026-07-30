@@ -25,15 +25,33 @@ from hook_utils import safe_hook, effective_cwd, load_aimi_config, deny  # noqa:
 # re module. No re.MULTILINE flag: the newline case is handled as a literal
 # lookbehind alternative, not via `^`/`$` line semantics.
 #
-# Residual risk (accepted, documented here rather than fixed): a real commit
-# or worktree-add invocation nested inside `bash -c '...'`, a subshell like
-# `(git commit)`, command substitution (e.g. `$(git commit)`), a single `&`
-# backgrounding the command, or an `if`/`then` branch containing it is not
-# preceded by any of these anchors and will slip past detection. The old
-# unanchored regexes caught these shapes only "by accident" — while also
-# false-positiving on mere mentions of the phrase. Closing this gap would
-# require quote/paren-aware shell parsing, which is out of scope here.
-_CMD_START = r"(?:(?<=^)|(?<=;)|(?<=&&)|(?<=\|\|)|(?<=\|)|(?<=\n))\s*"
+# Residual risk (accepted, documented here rather than fixed). This list is
+# meant to be exhaustive — a reader should be able to trust that a shape not
+# named here is detected. Undetected:
+#   * nested inside `bash -c '...'`, a subshell `(git commit)`, or command
+#     substitution `$(git commit)`;
+#   * chained with a single `&` (background) rather than `&&`;
+#   * inside an `if`/`then`, `else`, `case`, loop (`do ... done`) or brace-
+#     group body;
+#   * preceded on the same statement by an environment assignment or wrapper
+#     prefix — `GIT_AUTHOR_DATE=... git commit`, `env`, `sudo`, `time`,
+#     `nohup`. `\s*` after the anchor consumes whitespace only, so anything
+#     between the separator and `git` breaks the match;
+#   * option forms other than `-C`: `git -c key=value commit`,
+#     `git --git-dir=... commit`.
+# The old unanchored regexes caught these shapes only "by accident" — while
+# also false-positiving on mere mentions of the phrase. Closing the quote-
+# wrapped cases would require quote/paren-aware shell parsing, which is out of
+# scope here.
+# The trailing run must exclude `\n` specifically. A newline is both an anchor
+# (its own lookbehind branch) and a `\s` character, so `\s*` would let every
+# position inside a whitespace run start a match and then backtrack across the
+# rest of it — quadratic on a long run of blank lines (seconds of CPU on a few
+# thousand, enough to exhaust the hook timeout and stop denying anything).
+# `[^\S\n]*` is "whitespace except newline", which keeps `\r`, `\v` and `\f`
+# matching exactly as `\s*` did; `[ \t]*` would silently stop detecting a
+# command prefixed by a carriage return.
+_CMD_START = r"(?:(?<=^)|(?<=;)|(?<=&&)|(?<=\|\|)|(?<=\|)|(?<=\n))[^\S\n]*"
 
 _GIT_COMMIT_RE = re.compile(_CMD_START + r"\bgit\s+commit\b")
 _GIT_WORKTREE_ADD_RE = re.compile(_CMD_START + r"git\s+worktree\s+add\b")
@@ -411,6 +429,15 @@ def handle_worktree_budget(command: str, tool_input: dict) -> None:
 @safe_hook
 def main(tool_input: dict) -> None:
     command = tool_input.get("tool_input", {}).get("command", "")
+
+    # Literal prefilter. Every detection regex below requires the literal
+    # "git", and _strip_heredocs only ever removes whole lines, so a command
+    # without it cannot match and needs no further work. Anchoring the regexes
+    # cost them their leading literal, which is what CPython's re uses to skip
+    # ahead; without this the 6-branch alternation is evaluated at every offset
+    # of every command the hook ever sees.
+    if "git" not in command:
+        sys.exit(0)
 
     # Heredoc bodies are stripped from the detection copy only; the raw
     # `command` passed to the handlers below (and on to effective_cwd/
