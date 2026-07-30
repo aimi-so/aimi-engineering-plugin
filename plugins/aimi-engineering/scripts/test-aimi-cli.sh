@@ -16743,6 +16743,452 @@ test_forge_contract_header_carries_both_creates_identities() {
 }
 
 # ============================================================================
+# forge-auth-status / forge-repo-info Tests (US-003)
+# ============================================================================
+# Offline test fixtures: a reusable fake-`gh` PATH stub (setup_fake_gh_
+# fixture/teardown_fake_gh_fixture) so every scenario below -- and any
+# sibling forge-* verb story later in this phase that also shells out to gh
+# -- shares ONE stub rather than a private copy per story, per the fake-
+# opencode PATH-stub precedent already used by resolve-models' mtime-cache
+# test (test-aimi-cli.sh:8510-8583). Every git remote used below is local
+# (a bare repo, a nonexistent local path, or a literal remote URL string);
+# no test in this section makes a real network call or depends on real gh
+# credentials.
+
+# Writes a fake `gh` executable to a fresh temp dir and prepends nothing to
+# PATH itself -- callers do `PATH="$FAKE_GH_DIR:$PATH" ...` per invocation,
+# same as the fake-opencode precedent. Behavior is controlled entirely by
+# FAKE_GH_* environment variables so one stub covers every scenario:
+#   FAKE_GH_AUTH_STATUS_MODE   single (default) | multi | none
+#   FAKE_GH_AUTH_HOST          hostname echoed in the fake account block (default github.com)
+#   FAKE_GH_AUTH_ACCOUNT       the (single, or active-in-multi) account login (default octocat)
+#   FAKE_GH_AUTH_OTHER_ACCOUNT the non-active login in multi mode (default monalisa)
+#   FAKE_GH_REPO_OWNER         owner login `gh repo view` reports (default octocat)
+#   FAKE_GH_REPO_NAME          repo name `gh repo view` reports (default hello-world)
+#   FAKE_GH_REPO_VIEW_FAIL     "1" forces `gh repo view` to exit non-zero (simulates
+#                              missing auth / network failure, not absence of gh itself)
+#   FAKE_GH_CALL_COUNTER       optional path to a counter file incremented once per
+#                              `gh repo view` invocation, letting a test prove exactly
+#                              one call was made rather than the old two-call shape
+setup_fake_gh_fixture() {
+  FAKE_GH_DIR=$(mktemp -d)
+  cat > "$FAKE_GH_DIR/gh" << 'FAKE_GH_SCRIPT'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "auth status")
+    case "${FAKE_GH_AUTH_STATUS_MODE:-single}" in
+      single)
+        host="${FAKE_GH_AUTH_HOST:-github.com}"
+        account="${FAKE_GH_AUTH_ACCOUNT:-octocat}"
+        echo "$host"
+        echo "  Logged in to $host account $account (keyring)"
+        echo "  - Active account: true"
+        exit 0
+        ;;
+      multi)
+        host="${FAKE_GH_AUTH_HOST:-github.com}"
+        active="${FAKE_GH_AUTH_ACCOUNT:-octocat}"
+        other="${FAKE_GH_AUTH_OTHER_ACCOUNT:-monalisa}"
+        echo "$host"
+        echo "  Logged in to $host account $other (keyring)"
+        echo "  - Active account: false"
+        echo "  Logged in to $host account $active (keyring)"
+        echo "  - Active account: true"
+        exit 0
+        ;;
+      none)
+        echo "You are not logged into any GitHub hosts." >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  "repo view")
+    if [ -n "${FAKE_GH_CALL_COUNTER:-}" ]; then
+      count=$(cat "$FAKE_GH_CALL_COUNTER" 2>/dev/null || echo 0)
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$FAKE_GH_CALL_COUNTER"
+    fi
+    if [ "${FAKE_GH_REPO_VIEW_FAIL:-0}" = "1" ]; then
+      echo "error: could not determine repository" >&2
+      exit 1
+    fi
+    owner="${FAKE_GH_REPO_OWNER:-octocat}"
+    name="${FAKE_GH_REPO_NAME:-hello-world}"
+    printf '{"owner":{"login":"%s"},"name":"%s"}\n' "$owner" "$name"
+    exit 0
+    ;;
+  *)
+    echo "fake-gh: unhandled invocation: $*" >&2
+    exit 127
+    ;;
+esac
+FAKE_GH_SCRIPT
+  chmod +x "$FAKE_GH_DIR/gh"
+}
+
+# Removes the fake-gh temp dir and every FAKE_GH_* control variable, so a
+# stray export never leaks into an unrelated later test.
+teardown_fake_gh_fixture() {
+  rm -rf "$FAKE_GH_DIR"
+  unset FAKE_GH_DIR FAKE_GH_AUTH_STATUS_MODE FAKE_GH_AUTH_HOST FAKE_GH_AUTH_ACCOUNT \
+    FAKE_GH_AUTH_OTHER_ACCOUNT FAKE_GH_REPO_OWNER FAKE_GH_REPO_NAME FAKE_GH_REPO_VIEW_FAIL \
+    FAKE_GH_CALL_COUNTER
+}
+
+# Prints a PATH value with every occurrence of <binary> made unresolvable,
+# while every OTHER tool aimi-cli.sh depends on remains reachable under its
+# real name. A naive "strip every PATH directory containing <binary>"
+# approach is unsafe here: on a machine where gh happens to live in
+# /usr/bin alongside bash/jq/git/sed/..., stripping that directory would
+# also hide the interpreter and break the whole suite. Instead this mirrors
+# ONLY the fixed set of tools aimi-cli.sh actually shells out to (resolved
+# via `command -v` against the CALLER's real PATH, first match wins) into a
+# fresh directory, deliberately omitting <binary> -- so PATH="$(_path_
+# without_binary gh)" simulates gh being entirely absent, not merely
+# shadowed, without disturbing bash/jq/git/etc. Reusable by name for any
+# later story that needs the same "binary genuinely absent" scenario.
+_path_without_binary() {
+  local exclude="$1" shim_dir tool real
+  shim_dir=$(mktemp -d)
+  local tools=(env bash jq git sed grep awk mktemp wc tr basename dirname stat sha256sum shasum flock date cut find sort xargs cat head tail realpath printf)
+  for tool in "${tools[@]}"; do
+    [ "$tool" = "$exclude" ] && continue
+    real=$(command -v "$tool" 2>/dev/null) || continue
+    ln -s "$real" "$shim_dir/$tool" 2>/dev/null
+  done
+  printf '%s' "$shim_dir"
+}
+
+test_forge_auth_status_single_account_authenticated() {
+  echo ""
+  echo "=== forge-auth-status: single authenticated account -- found, authenticated:true ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  setup_fake_gh_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+  out=$(PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_AUTH_STATUS_MODE=single FAKE_GH_AUTH_ACCOUNT=octocat "$CLI" forge-auth-status)
+
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "auth-status single account: status is found"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.authenticated')" "auth-status single account: authenticated is true"
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.data.account')" "auth-status single account: account is the logged-in login"
+  assert_eq "github" "$(printf '%s' "$out" | jq -r '.data.forge')" "auth-status single account: forge is github"
+  assert_eq "github.com" "$(printf '%s' "$out" | jq -r '.data.host')" "auth-status single account: host is github.com"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.identityRequested')" "auth-status single account: identityRequested null when AIMI_FORGE_IDENTITY unset"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.identityHonored')" "auth-status single account: identityHonored null when AIMI_FORGE_IDENTITY unset"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "auth-status single account: message is null"
+
+  popd >/dev/null
+  teardown_fake_gh_fixture
+  teardown_detect_forge_fixture
+}
+
+test_forge_auth_status_multi_account_exactly_one_active() {
+  echo ""
+  echo "=== forge-auth-status: multi-account session -- exactly one active account wins ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  setup_fake_gh_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+  out=$(PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_AUTH_STATUS_MODE=multi FAKE_GH_AUTH_ACCOUNT=octocat FAKE_GH_AUTH_OTHER_ACCOUNT=monalisa "$CLI" forge-auth-status)
+
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "auth-status multi-account: status is found"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.authenticated')" "auth-status multi-account: authenticated is true"
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.data.account')" "auth-status multi-account: account is the ONE marked active, not the other login"
+
+  popd >/dev/null
+  teardown_fake_gh_fixture
+  teardown_detect_forge_fixture
+}
+
+test_forge_auth_status_not_authenticated_confirmed_negative() {
+  echo ""
+  echo "=== forge-auth-status: no authenticated session -- confirmed negative, not an error ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  setup_fake_gh_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out exit_code
+  out=$(PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_AUTH_STATUS_MODE=none "$CLI" forge-auth-status) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "auth-status not-authenticated: exits 0 (a confirmed check, not a failure)"
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "auth-status not-authenticated: status is still found (the check itself succeeded)"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.data.authenticated')" "auth-status not-authenticated: authenticated is false"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.account')" "auth-status not-authenticated: account is null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "auth-status not-authenticated: message stays null -- confirmed logged-out, not 'could not check'"
+
+  popd >/dev/null
+  teardown_fake_gh_fixture
+  teardown_detect_forge_fixture
+}
+
+test_forge_auth_status_identity_match_mismatch_and_unset() {
+  echo ""
+  echo "=== forge-auth-status: AIMI_FORGE_IDENTITY match / mismatch / unset -- env-var only ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  setup_fake_gh_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+
+  out=$(PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_AUTH_STATUS_MODE=single FAKE_GH_AUTH_ACCOUNT=octocat AIMI_FORGE_IDENTITY=octocat "$CLI" forge-auth-status)
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.data.identityRequested')" "auth-status identity match: identityRequested echoes the env value"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.identityHonored')" "auth-status identity match: identityHonored true when it equals the active account"
+
+  out=$(PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_AUTH_STATUS_MODE=single FAKE_GH_AUTH_ACCOUNT=octocat AIMI_FORGE_IDENTITY=someone-else "$CLI" forge-auth-status)
+  assert_eq "someone-else" "$(printf '%s' "$out" | jq -r '.data.identityRequested')" "auth-status identity mismatch: identityRequested echoes the env value"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.data.identityHonored')" "auth-status identity mismatch: identityHonored false when it differs from the active account"
+
+  out=$(PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_AUTH_STATUS_MODE=single FAKE_GH_AUTH_ACCOUNT=octocat "$CLI" forge-auth-status)
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.identityRequested')" "auth-status identity unset: identityRequested null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.identityHonored')" "auth-status identity unset: identityHonored null"
+
+  popd >/dev/null
+  teardown_fake_gh_fixture
+  teardown_detect_forge_fixture
+}
+
+test_forge_auth_status_no_identity_flag_anywhere() {
+  echo ""
+  echo "=== forge-auth-status: identity is env-var-only -- no --identity flag exists ==="
+
+  local fn_block
+  fn_block=$(sed -n '/^cmd_forge_auth_status()/,/^}/p' "$CLI")
+
+  if printf '%s' "$fn_block" | grep -q -- '--identity'; then
+    echo -e "${RED}✗${NC} cmd_forge_auth_status: must never accept an --identity flag"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} cmd_forge_auth_status: flag-parsing loop has no --identity flag"
+    ((TESTS_PASSED++))
+  fi
+
+  # Excludes comment-only lines (e.g. this very test's own explanatory
+  # header above, which documents the absence of the flag by naming it) --
+  # the guarantee this check enforces is "no --identity flag in actual code
+  # ever parses a value", not "the four characters never appear in prose".
+  if grep -v '^[[:space:]]*#' "$CLI" | grep -q -- '--identity'; then
+    echo -e "${RED}✗${NC} aimi-cli.sh: --identity must never appear in code (a value that may later carry a credential must stay env-var-only)"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} aimi-cli.sh: --identity does not appear in any code line (comments excluded)"
+    ((TESTS_PASSED++))
+  fi
+}
+
+test_forge_auth_status_gh_absent_is_error() {
+  echo ""
+  echo "=== forge-auth-status: gh absent from PATH -- quiet degrade, status=error, exits 0 ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local no_gh_path out exit_code stderr_file="/tmp/forge_auth_status_gh_absent_stderr.$$"
+  no_gh_path=$(_path_without_binary gh)
+
+  out=$(PATH="$no_gh_path" "$CLI" forge-auth-status 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "auth-status gh-absent: exits 0 (query verb's 'no answer available', not a broken invocation)"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "auth-status gh-absent: status is error"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "auth-status gh-absent: data is null"
+  assert_contains "gh" "$(printf '%s' "$out" | jq -r '.message')" "auth-status gh-absent: message names gh as the missing binary"
+  assert_eq "" "$(cat "$stderr_file")" "auth-status gh-absent: quiet mode -- no caller-mandated stderr banner"
+
+  rm -f "$stderr_file"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_auth_status_no_adapter_is_error() {
+  echo ""
+  echo "=== forge-auth-status: resolved forge has no adapter (gitlab) -- status=error, exits 0 ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out exit_code
+  out=$("$CLI" forge-auth-status) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "auth-status no-adapter: exits 0"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "auth-status no-adapter: status is error"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "auth-status no-adapter: data is null"
+  assert_contains "gitlab" "$(printf '%s' "$out" | jq -r '.message')" "auth-status no-adapter: message names the detected forge, not a generic placeholder"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_auth_status_registered_in_help_and_dispatcher() {
+  echo ""
+  echo "=== forge-auth-status: listed in help beside detect-forge, routed by the dispatcher ==="
+
+  local help_out
+  help_out=$("$CLI" help 2>&1)
+  assert_contains "forge-auth-status [--project <path>]" "$help_out" "help: lists forge-auth-status"
+  assert_contains "AIMI_FORGE_IDENTITY=<login>" "$help_out" "help: documents the AIMI_FORGE_IDENTITY env var"
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  setup_fake_gh_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+  local dispatch_out
+  dispatch_out=$(PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-auth-status 2>&1)
+  popd >/dev/null
+  teardown_fake_gh_fixture
+  teardown_detect_forge_fixture
+
+  if printf '%s' "$dispatch_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: forge-auth-status is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: forge-auth-status is routed"
+    ((TESTS_PASSED++))
+  fi
+}
+
+test_forge_repo_info_gh_primary_single_call() {
+  echo ""
+  echo "=== forge-repo-info: gh present -- resolves via ONE gh repo view call ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  setup_fake_gh_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local counter_file="$FAKE_GH_DIR/call_count"
+  printf '0\n' > "$counter_file"
+
+  local out
+  out=$(PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_REPO_OWNER=acme FAKE_GH_REPO_NAME=widgets FAKE_GH_CALL_COUNTER="$counter_file" "$CLI" forge-repo-info)
+
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "repo-info gh-primary: status is found"
+  assert_eq "acme" "$(printf '%s' "$out" | jq -r '.data.owner')" "repo-info gh-primary: owner from gh"
+  assert_eq "widgets" "$(printf '%s' "$out" | jq -r '.data.repo')" "repo-info gh-primary: repo from gh"
+  assert_eq "acme/widgets" "$(printf '%s' "$out" | jq -r '.data.nameWithOwner')" "repo-info gh-primary: nameWithOwner composed correctly"
+  assert_eq "gh" "$(printf '%s' "$out" | jq -r '.data.source')" "repo-info gh-primary: source is gh"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "repo-info gh-primary: message is null"
+
+  local call_count
+  call_count=$(cat "$counter_file")
+  assert_eq "1" "$call_count" "repo-info gh-primary: exactly ONE gh repo view call, never the old two-call shape"
+
+  popd >/dev/null
+  teardown_fake_gh_fixture
+  teardown_detect_forge_fixture
+}
+
+test_forge_repo_info_local_parse_fallback_on_gh_failure() {
+  echo ""
+  echo "=== forge-repo-info: gh repo view fails (e.g. unauthenticated) -- falls back to local URL parse ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  setup_fake_gh_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+  out=$(PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_REPO_VIEW_FAIL=1 "$CLI" forge-repo-info)
+
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "repo-info local-parse fallback: status is still found"
+  assert_eq "owner" "$(printf '%s' "$out" | jq -r '.data.owner')" "repo-info local-parse fallback: owner parsed from remote URL"
+  assert_eq "repo" "$(printf '%s' "$out" | jq -r '.data.repo')" "repo-info local-parse fallback: repo parsed from remote URL"
+  assert_eq "local-parse" "$(printf '%s' "$out" | jq -r '.data.source')" "repo-info local-parse fallback: source names which tier resolved it"
+
+  popd >/dev/null
+  teardown_fake_gh_fixture
+  teardown_detect_forge_fixture
+}
+
+test_forge_repo_info_gh_absent_falls_back_to_local_parse() {
+  echo ""
+  echo "=== forge-repo-info: gh entirely absent from PATH -- falls back to local URL parse ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local no_gh_path out exit_code
+  no_gh_path=$(_path_without_binary gh)
+
+  out=$(PATH="$no_gh_path" "$CLI" forge-repo-info) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "repo-info gh-absent: exits 0"
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "repo-info gh-absent: status is found via fallback"
+  assert_eq "owner" "$(printf '%s' "$out" | jq -r '.data.owner')" "repo-info gh-absent: owner parsed from remote URL"
+  assert_eq "repo" "$(printf '%s' "$out" | jq -r '.data.repo')" "repo-info gh-absent: repo parsed from remote URL"
+  assert_eq "local-parse" "$(printf '%s' "$out" | jq -r '.data.source')" "repo-info gh-absent: source is local-parse"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_repo_info_nested_group_owner() {
+  echo ""
+  echo "=== forge-repo-info: nested group path -- every segment before the last is kept as owner ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/group/subgroup/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+  out=$("$CLI" forge-repo-info)
+
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "repo-info nested-group: status is found (gitlab has no adapter, so this is always local-parse)"
+  assert_eq "group/subgroup" "$(printf '%s' "$out" | jq -r '.data.owner')" "repo-info nested-group: owner keeps every segment before the last"
+  assert_eq "repo" "$(printf '%s' "$out" | jq -r '.data.repo')" "repo-info nested-group: repo is the final segment"
+  assert_eq "group/subgroup/repo" "$(printf '%s' "$out" | jq -r '.data.nameWithOwner')" "repo-info nested-group: nameWithOwner preserves the full nested path"
+  assert_eq "local-parse" "$(printf '%s' "$out" | jq -r '.data.source')" "repo-info nested-group: source is local-parse"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_repo_info_no_origin_is_not_found() {
+  echo ""
+  echo "=== forge-repo-info: no origin remote configured -- not_found, exits 0 ==="
+
+  setup_detect_forge_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out exit_code
+  out=$("$CLI" forge-repo-info) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "repo-info no-origin: exits 0"
+  assert_eq "not_found" "$(printf '%s' "$out" | jq -r '.status')" "repo-info no-origin: status is not_found (a confirmed absence, not a tool error)"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "repo-info no-origin: data is null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "repo-info no-origin: message is null"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_repo_info_registered_in_help_and_dispatcher() {
+  echo ""
+  echo "=== forge-repo-info: listed in help beside detect-forge, routed by the dispatcher ==="
+
+  local help_out
+  help_out=$("$CLI" help 2>&1)
+  assert_contains "forge-repo-info [--project <path>]" "$help_out" "help: lists forge-repo-info"
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  setup_fake_gh_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+  local dispatch_out
+  dispatch_out=$(PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-repo-info 2>&1)
+  popd >/dev/null
+  teardown_fake_gh_fixture
+  teardown_detect_forge_fixture
+
+  if printf '%s' "$dispatch_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: forge-repo-info is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: forge-repo-info is routed"
+    ((TESTS_PASSED++))
+  fi
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -17330,6 +17776,27 @@ main() {
   test_forge_emit_status_three_outcomes
   test_forge_bin_check_quiet_and_mandatory_modes
   test_forge_contract_header_carries_both_creates_identities
+
+  # forge-auth-status / forge-repo-info Tests (US-003) -- both verbs built
+  # on detect-forge (US-001) and the shared three-way status/degradation
+  # contract (US-002); the reusable fake-gh PATH stub introduced here is
+  # available to any later forge-* verb story in this phase
+  echo ""
+  echo "--- forge-auth-status / forge-repo-info Tests (US-003) ---"
+  test_forge_auth_status_single_account_authenticated
+  test_forge_auth_status_multi_account_exactly_one_active
+  test_forge_auth_status_not_authenticated_confirmed_negative
+  test_forge_auth_status_identity_match_mismatch_and_unset
+  test_forge_auth_status_no_identity_flag_anywhere
+  test_forge_auth_status_gh_absent_is_error
+  test_forge_auth_status_no_adapter_is_error
+  test_forge_auth_status_registered_in_help_and_dispatcher
+  test_forge_repo_info_gh_primary_single_call
+  test_forge_repo_info_local_parse_fallback_on_gh_failure
+  test_forge_repo_info_gh_absent_falls_back_to_local_parse
+  test_forge_repo_info_nested_group_owner
+  test_forge_repo_info_no_origin_is_not_found
+  test_forge_repo_info_registered_in_help_and_dispatcher
 
   cleanup
 

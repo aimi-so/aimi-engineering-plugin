@@ -2358,6 +2358,330 @@ _forge_bin_check() {
   return 1
 }
 
+# ============================================================================
+# forge-auth-status / forge-repo-info (US-003)
+# ============================================================================
+# Both verbs are read-only forge lookups built directly on detect-forge
+# (US-001, called here as a function, never as a `$AIMI_CLI detect-forge`
+# subprocess) and the shared PR/issue contract, three-way status envelope,
+# and degradation helper above (US-002, commands/references/forge-
+# contract.md). Every field name and the found/not_found/error vocabulary
+# below comes verbatim from that file -- forge-contract.md is the single
+# arbiter, and this section introduces no camelCase unsupportedFields, no
+# second degraded-reason field alongside status/message, and no gh
+# invocation outside the two private *_github helpers below.
+#
+# forge-auth-status reports whether the active gh session is authenticated
+# AND which account it is acting as -- naming the acting account now is what
+# lets phase 2's per-repository account selection extend this verb instead
+# of retrofitting it. Phase 1 only compares identity (AIMI_FORGE_IDENTITY
+# against whichever account gh already reports active); it does not
+# implement switching (no `gh auth switch`, no GH_TOKEN override -- that is
+# phase 2's job). Identity is read from an environment variable, NEVER a
+# CLI flag -- a value that may later carry a credential must never leak
+# through ps or shell history (forge-contract.md "Credential/Identity
+# Model").
+#
+# "Not authenticated" and "could not check at all" are different facts and
+# must stay distinguishable, the same discipline _verify_creates_one already
+# applies by distinguishing a "missing" identity from a git tool failure
+# before ever calling _verify_creates_emit:
+#   - gh present, ran, reports no active session for this host -> a
+#     CONFIRMED negative. status="found", data.authenticated=false,
+#     data.account=null, message=null -- forge-contract.md's "found" covers
+#     the lookup succeeding and returning real data, and an authenticated-
+#     account check that definitively answers "no" is still a successful
+#     lookup, not a broken one.
+#   - gh absent from PATH, or the resolved forge has no adapter yet
+#     (gitlab/gitea/unknown) -> the check itself could not run.
+#     status="error", data=null, message names why. Callers branch on
+#     status/message first, never on data.authenticated alone.
+# "not_found" is not used by forge-auth-status: there is no "no such auth
+# status" outcome the way there is "no such PR" -- the check either runs to
+# a definitive true/false answer (found) or cannot run at all (error).
+
+# Runs `gh auth status` against one host, tolerating a non-zero exit under
+# `set -e` (gh's own convention: a non-zero exit here IS the confirmed
+# "not authenticated" answer, not a tool failure -- gh auth status has no
+# third outcome the way `gh pr view` conflates no-PR with broken auth).
+# Combines stdout+stderr since gh's own account listing goes to a different
+# stream across versions -- this parser only cares about the text, not
+# which stream carried it.
+# Prints {authenticated, account} -- account is the login of whichever
+# account gh marks "Active account: true" beneath, or the sole account
+# found when gh's output carries no explicit marker line at all.
+_forge_auth_status_github() {
+  local host="$1"
+  local out="" rc=0
+  if [ -n "$host" ]; then
+    out=$(gh auth status --hostname "$host" 2>&1) || rc=$?
+  else
+    out=$(gh auth status 2>&1) || rc=$?
+  fi
+
+  if [ "$rc" -ne 0 ]; then
+    jq -nc '{authenticated: false, account: null}'
+    return 0
+  fi
+
+  local active="" last="" line
+  while IFS= read -r line; do
+    if [[ "$line" =~ account[[:space:]]+([^[:space:]]+) ]]; then
+      last="${BASH_REMATCH[1]}"
+    fi
+    if [[ "$line" == *"Active account: true"* ]]; then
+      active="$last"
+    fi
+  done <<< "$out"
+  [ -n "$active" ] || active="$last"
+
+  jq -nc --arg account "$active" \
+    '{authenticated: true, account: (if $account == "" then null else $account end)}'
+}
+
+# Resolves forge/host via detect-forge's own helper (a direct function call,
+# never a `$AIMI_CLI detect-forge` subprocess), dispatches to the github
+# adapter when the forge is github and gh is present (checked via the
+# shared _forge_bin_check above in its quiet mode -- a missing binary here
+# has no caller-mandated stderr banner; the caller decides whether a
+# degraded result is fatal), and otherwise reports status=error with a
+# message naming why. AIMI_FORGE_IDENTITY, when set, is compared only
+# against the already-active account -- never used to invoke
+# `gh auth switch` or set GH_TOKEN.
+_forge_auth_status() {
+  local forge_info forge host
+  forge_info=$(_detect_forge)
+  forge=$(printf '%s' "$forge_info" | jq -r '.forge')
+  host=$(printf '%s' "$forge_info" | jq -r '.host')
+
+  local status="error" message="" data_json="null"
+
+  if [ "$forge" = "github" ]; then
+    if _forge_bin_check gh quiet github; then
+      local gh_out authenticated_json account identity_requested identity_honored_json
+      gh_out=$(_forge_auth_status_github "$host")
+      authenticated_json=$(printf '%s' "$gh_out" | jq -c '.authenticated')
+      account=$(printf '%s' "$gh_out" | jq -r '.account // empty')
+
+      identity_requested="${AIMI_FORGE_IDENTITY:-}"
+      identity_honored_json="null"
+      if [ -n "$identity_requested" ]; then
+        if [ "$identity_requested" = "$account" ]; then
+          identity_honored_json="true"
+        else
+          identity_honored_json="false"
+        fi
+      fi
+
+      status="found"
+      data_json=$(jq -nc \
+        --arg forge "$forge" \
+        --arg host "$host" \
+        --argjson authenticated "$authenticated_json" \
+        --arg account "$account" \
+        --arg identityRequested "$identity_requested" \
+        --argjson identityHonored "$identity_honored_json" \
+        '{forge: $forge,
+          host: (if $host == "" then null else $host end),
+          authenticated: $authenticated,
+          account: (if $account == "" then null else $account end),
+          identityRequested: (if $identityRequested == "" then null else $identityRequested end),
+          identityHonored: $identityHonored}')
+    else
+      message="gh not found on PATH -- cannot check authentication status"
+    fi
+  else
+    message="no forge adapter for ${forge} -- cannot check authentication status"
+  fi
+
+  _forge_emit_status "$status" "$data_json" "$message"
+}
+
+# Detects whether the session is authenticated with the active forge and
+# which account it is acting as. See the section header above for the full
+# found/error contract and the AIMI_FORGE_IDENTITY comparison rules. No
+# --identity (or similarly named) flag exists anywhere in this parsing loop
+# -- identity selection is env-var-only, by design (see section header).
+cmd_forge_auth_status() {
+  local project_dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project)
+        shift
+        project_dir="${1:-}"
+        ;;
+      *)
+        echo "Error: forge-auth-status: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$project_dir" ]; then
+    if [ ! -d "$project_dir" ]; then
+      echo "Error: Project directory does not exist: $project_dir" >&2
+      exit 1
+    fi
+    cd "$project_dir"
+  fi
+
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
+    exit 1
+  fi
+
+  _forge_auth_status
+}
+
+# Requests owner and name from a single `gh repo view` call -- never the two
+# separate calls skills/resolve-pr-parallel/scripts/get-pr-comments makes
+# today. Prints {owner, repo} on success; returns 1 (no output) on any
+# failure so the caller falls back without needing to know why gh failed
+# (missing auth, network, or anything else -- mirrors _resolve_default_
+# branch's own primary-call-plus-offline-fallback shape, which does not
+# distinguish why the primary failed either).
+_forge_repo_info_github() {
+  local raw="" rc=0
+  raw=$(gh repo view --json owner,name 2>&1) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    return 1
+  fi
+  printf '%s' "$raw" | jq -c '{owner: .owner.login, repo: .name}' 2>/dev/null || return 1
+}
+
+# Parses owner/repo directly out of a git remote URL -- the offline fallback
+# used when gh is absent, unauthenticated, or the forge has no adapter yet.
+# Every path segment before the last becomes owner (not just the
+# second-to-last), so a GitLab-style nested subgroup path
+# (group/subgroup/repo) survives intact for a future GitLab adapter, even
+# though phase 1 ships GitHub only. Prints {owner, repo}, both null when the
+# path never yields at least two segments.
+_forge_repo_info_parse_url() {
+  local url="$1" path=""
+
+  if [[ "$url" == *"://"* ]]; then
+    path="${url#*://}"
+    path="${path#*/}"
+  elif [[ "$url" == *":"* ]]; then
+    path="${url#*:}"
+  else
+    path="$url"
+  fi
+
+  path="${path%.git}"
+  path="${path#/}"
+  path="${path%/}"
+
+  local repo="" owner=""
+  if [ -n "$path" ] && [[ "$path" == */* ]]; then
+    repo="${path##*/}"
+    owner="${path%/*}"
+  fi
+
+  if [ -z "$owner" ] || [ -z "$repo" ]; then
+    jq -nc '{owner: null, repo: null}'
+    return 0
+  fi
+
+  jq -nc --arg owner "$owner" --arg repo "$repo" '{owner: $owner, repo: $repo}'
+}
+
+# Two-tier resolution mirroring _resolve_default_branch's own shape: the
+# github adapter is the primary path when the forge is github and gh is
+# present; parsing owner/repo straight out of the already-resolved remote
+# URL is the offline fallback, used whenever gh is missing, unauthenticated,
+# the forge has no adapter, or the primary call otherwise fails. When even
+# the fallback yields no usable owner/repo (no origin configured, or a path
+# that never splits into two segments), reports status=not_found -- a
+# confirmed absence, not a tool error, per forge-contract.md's Three-Way
+# Status Convention.
+_forge_repo_info() {
+  local forge_info forge host remote_url
+  forge_info=$(_detect_forge)
+  forge=$(printf '%s' "$forge_info" | jq -r '.forge')
+  host=$(printf '%s' "$forge_info" | jq -r '.host')
+  remote_url=$(printf '%s' "$forge_info" | jq -r '.remoteUrl // empty')
+
+  local owner="" repo="" source=""
+
+  if [ "$forge" = "github" ] && _forge_bin_check gh quiet github; then
+    local gh_json=""
+    if gh_json=$(_forge_repo_info_github); then
+      owner=$(printf '%s' "$gh_json" | jq -r '.owner // empty')
+      repo=$(printf '%s' "$gh_json" | jq -r '.repo // empty')
+      if [ -n "$owner" ] && [ -n "$repo" ]; then
+        source="gh"
+      fi
+    fi
+  fi
+
+  if { [ -z "$owner" ] || [ -z "$repo" ]; } && [ -n "$remote_url" ]; then
+    local parsed
+    parsed=$(_forge_repo_info_parse_url "$remote_url")
+    owner=$(printf '%s' "$parsed" | jq -r '.owner // empty')
+    repo=$(printf '%s' "$parsed" | jq -r '.repo // empty')
+    if [ -n "$owner" ] && [ -n "$repo" ]; then
+      source="local-parse"
+    fi
+  fi
+
+  local status="not_found" data_json="null"
+  if [ -n "$owner" ] && [ -n "$repo" ]; then
+    status="found"
+    data_json=$(jq -nc \
+      --arg forge "$forge" \
+      --arg host "$host" \
+      --arg owner "$owner" \
+      --arg repo "$repo" \
+      --arg source "$source" \
+      '{forge: $forge,
+        host: (if $host == "" then null else $host end),
+        owner: $owner,
+        repo: $repo,
+        nameWithOwner: ($owner + "/" + $repo),
+        source: $source}')
+  fi
+
+  _forge_emit_status "$status" "$data_json" ""
+}
+
+# Resolves the active forge's owner/repo for the current git repository. See
+# the section header above for the gh-primary/local-parse-fallback contract.
+cmd_forge_repo_info() {
+  local project_dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project)
+        shift
+        project_dir="${1:-}"
+        ;;
+      *)
+        echo "Error: forge-repo-info: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$project_dir" ]; then
+    if [ ! -d "$project_dir" ]; then
+      echo "Error: Project directory does not exist: $project_dir" >&2
+      exit 1
+    fi
+    cd "$project_dir"
+  fi
+
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
+    exit 1
+  fi
+
+  _forge_repo_info
+}
+
 # Detect a Claude Design handoff bundle under a given root (defaults to CWD).
 # Scans depth-1 subdirectories for a README.md containing the handoff marker.
 # Returns JSON object when found, "null" when not found.
@@ -9396,6 +9720,25 @@ COMMANDS:
                               detection entirely (source=override, no git
                               remote read runs); any other value exits 1.
                               Never cached -- re-derived on every invocation.
+    forge-auth-status [--project <path>]
+                              Report whether the active forge session is authenticated
+                              and which account it is acting as. Output:
+                              {status ("found"|"error"), data, message}. data (when
+                              found) carries {forge, host, authenticated, account,
+                              identityRequested, identityHonored}. authenticated:false
+                              with status="found" is a confirmed logged-out session;
+                              status="error" means the check itself could not run (gh
+                              missing, or the forge has no adapter). Set
+                              AIMI_FORGE_IDENTITY=<login> (env var only, never a flag)
+                              to compare against the active account -- this does not
+                              switch accounts.
+    forge-repo-info [--project <path>]
+                              Resolve the active forge's owner/repo via a single
+                              `gh repo view` call, falling back to parsing the git
+                              remote URL when gh is unavailable. Output:
+                              {status ("found"|"not_found"), data, message}. data
+                              (when found) carries {forge, host, owner, repo,
+                              nameWithOwner, source ("gh"|"local-parse")}.
     detect-interactivity [--non-interactive]
                               Print resolved interactivity mode (picker|agent)
                               Returns picker by default; returns agent only when
@@ -9930,6 +10273,8 @@ main() {
     detect-default-branch) shift; cmd_detect_default_branch "$@" ;;
     detect-parent-branch) shift; cmd_detect_parent_branch "$@" ;;
     detect-forge) shift; cmd_detect_forge "$@" ;;
+    forge-auth-status) shift; cmd_forge_auth_status "$@" ;;
+    forge-repo-info)   shift; cmd_forge_repo_info "$@" ;;
     setup-branch)      shift; cmd_setup_branch "$@" ;;
     resolve-base-branch) shift; cmd_resolve_base_branch "$@" ;;
     clear-state)       cmd_clear_state ;;
