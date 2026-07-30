@@ -16558,6 +16558,191 @@ test_detect_forge_registered_in_help_and_dispatcher() {
 }
 
 # ============================================================================
+# Forge Contract Tests (US-002)
+# ============================================================================
+# _forge_build_pr_json, _forge_build_issue_json,
+# _forge_build_review_envelope_json, _forge_emit_status and _forge_bin_check
+# are pure jq-assembly / presence-check helpers with no cmd_ dispatcher
+# wrapper (this story introduces no forge-pr-view/forge-auth-status verb
+# body -- see commands/references/forge-contract.md), so they are sourced
+# directly for testing, matching the source_cache_functions precedent
+# (test-aimi-cli.sh:2005) rather than exercised via a subprocess call.
+
+# Sources the five Forge Contract functions from aimi-cli.sh via sed
+# extraction for direct, in-process testing.
+source_forge_contract_functions() {
+  eval "$(sed -n '/^_forge_build_pr_json()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_build_issue_json()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_build_review_envelope_json()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_emit_status()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_bin_check()/,/^}/p' "$CLI")"
+}
+
+test_forge_build_pr_json_capability_gating() {
+  echo ""
+  echo "=== _forge_build_pr_json: capability-gating (supplied / omitted / fully-supplied) ==="
+
+  source_forge_contract_functions
+
+  local out
+
+  # Fully supplied -- every capability-gated field passed, unsupported_fields empty.
+  out=$(_forge_build_pr_json --number 123 --url "https://github.com/o/r/pull/123" \
+    --title "T" --body "B" --state open --head-ref-name feat --base-ref-name main \
+    --files '[{"path":"a.txt"}]' --is-draft false --mergeable true --raw '{"x":1}')
+  assert_eq "123" "$(printf '%s' "$out" | jq -r '.number')" "PR fully-supplied: number passes through as int"
+  assert_eq "open" "$(printf '%s' "$out" | jq -r '.state')" "PR fully-supplied: state passes through"
+  assert_eq "feat" "$(printf '%s' "$out" | jq -r '.headRefName')" "PR fully-supplied: headRefName passes through"
+  assert_eq '[{"path":"a.txt"}]' "$(printf '%s' "$out" | jq -c '.files')" "PR fully-supplied: files array passes through"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.isDraft')" "PR fully-supplied: isDraft passes through"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.mergeable')" "PR fully-supplied: mergeable passes through as raw string"
+  assert_eq "[]" "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "PR fully-supplied: unsupported_fields is empty"
+  assert_eq '{"x":1}' "$(printf '%s' "$out" | jq -c '.raw')" "PR fully-supplied: raw passthrough preserved"
+
+  # Omitted capability-gated fields -- come back null AND are named in unsupported_fields.
+  out=$(_forge_build_pr_json --number 5 --url u --title t --body b --state open \
+    --head-ref-name h --base-ref-name m)
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.files')" "PR omitted: files is null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.isDraft')" "PR omitted: isDraft is null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.mergeable')" "PR omitted: mergeable is null"
+  assert_eq '["files","isDraft","mergeable"]' "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "PR omitted: unsupported_fields names all three"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.raw')" "PR omitted: raw defaults to null"
+
+  # A single supplied capability-gated field passes through; the other two remain gated.
+  out=$(_forge_build_pr_json --number 5 --url u --title t --body b --state open \
+    --head-ref-name h --base-ref-name m --is-draft true)
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.isDraft')" "PR single-supplied: isDraft passes through"
+  assert_eq '["files","mergeable"]' "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "PR single-supplied: only the two still-omitted fields are named"
+}
+
+test_forge_build_issue_json_capability_gating() {
+  echo ""
+  echo "=== _forge_build_issue_json: capability-gating (supplied / omitted / fully-supplied) ==="
+
+  source_forge_contract_functions
+
+  local out
+
+  out=$(_forge_build_issue_json --number 9 --url u --title t --body b --state open \
+    --comments 3 --raw '{"y":2}')
+  assert_eq "9" "$(printf '%s' "$out" | jq -r '.number')" "Issue fully-supplied: number passes through as int"
+  assert_eq "3" "$(printf '%s' "$out" | jq -r '.comments')" "Issue fully-supplied: comments passes through"
+  assert_eq "[]" "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "Issue fully-supplied: unsupported_fields is empty"
+  assert_eq '{"y":2}' "$(printf '%s' "$out" | jq -c '.raw')" "Issue fully-supplied: raw passthrough preserved"
+
+  out=$(_forge_build_issue_json --number 9 --url u --title t --body b --state open)
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.comments')" "Issue omitted: comments is null"
+  assert_eq '["comments"]' "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "Issue omitted: unsupported_fields names comments"
+}
+
+test_forge_build_review_envelope_json_capability_gating() {
+  echo ""
+  echo "=== _forge_build_review_envelope_json: capability-gating (supplied / omitted / fully-supplied) ==="
+
+  source_forge_contract_functions
+
+  local out
+
+  out=$(_forge_build_review_envelope_json --approved true --changes-requested false \
+    --approvals-count 2 --raw '{"z":3}')
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.approved')" "Review fully-supplied: approved passes through"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.changes_requested')" "Review fully-supplied: changes_requested passes through"
+  assert_eq "2" "$(printf '%s' "$out" | jq -r '.approvals_count')" "Review fully-supplied: approvals_count passes through"
+  assert_eq "[]" "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "Review fully-supplied: unsupported_fields is empty"
+  assert_eq '{"z":3}' "$(printf '%s' "$out" | jq -c '.raw')" "Review fully-supplied: raw passthrough preserved"
+
+  # All omitted -- e.g. GitLab, which has no changes_requested concept at all.
+  out=$(_forge_build_review_envelope_json)
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.approved')" "Review omitted: approved is null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.changes_requested')" "Review omitted: changes_requested is null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.approvals_count')" "Review omitted: approvals_count is null"
+  assert_eq '["approved","changes_requested","approvals_count"]' "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "Review omitted: unsupported_fields names all three"
+
+  # GitLab-shaped case: approved + approvals_count known, changes_requested has no concept.
+  out=$(_forge_build_review_envelope_json --approved true --approvals-count 1)
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.approved')" "Review GitLab-shaped: approved passes through"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.changes_requested')" "Review GitLab-shaped: changes_requested is null (no concept on GitLab)"
+  assert_eq '["changes_requested"]' "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "Review GitLab-shaped: only changes_requested is gated"
+}
+
+test_forge_emit_status_three_outcomes() {
+  echo ""
+  echo "=== _forge_emit_status: found / not_found / error are three distinct outcomes ==="
+
+  source_forge_contract_functions
+
+  local out exit_code
+
+  out=$(_forge_emit_status found '{"number":1}')
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "status found: status field"
+  assert_eq '{"number":1}' "$(printf '%s' "$out" | jq -c '.data')" "status found: data carries the payload"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "status found: message is null"
+
+  out=$(_forge_emit_status not_found)
+  assert_eq "not_found" "$(printf '%s' "$out" | jq -r '.status')" "status not_found: status field"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "status not_found: data is null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "status not_found: message is null"
+
+  out=$(_forge_emit_status error "" "gh exited 4: authentication required")
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "status error: status field"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "status error: data is null"
+  assert_eq "gh exited 4: authentication required" "$(printf '%s' "$out" | jq -r '.message')" "status error: message carries the failure detail"
+
+  # data supplied alongside a non-found status is discarded, never leaked.
+  out=$(_forge_emit_status not_found '{"should":"not appear"}')
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "status not_found: stray data argument is forced null, never leaked"
+
+  # Unknown status is a caller error, not silently coerced.
+  _forge_emit_status bogus >/dev/null 2>/tmp/forge_status_stderr.$$ && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "status unknown value: exits 1"
+  assert_stderr_contains "found, not_found or error" "$(cat /tmp/forge_status_stderr.$$)" "status unknown value: stderr names the three valid outcomes"
+  rm -f /tmp/forge_status_stderr.$$
+}
+
+test_forge_bin_check_quiet_and_mandatory_modes() {
+  echo ""
+  echo "=== _forge_bin_check: quiet is silent on absence, mandatory names binary+forge on absence ==="
+
+  source_forge_contract_functions
+
+  local exit_code stderr_file="/tmp/forge_bin_check_stderr.$$"
+
+  # Quiet mode, binary present (jq -- always available under this test suite).
+  _forge_bin_check jq quiet github >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "bin_check quiet present: exit 0"
+  assert_eq "" "$(cat "$stderr_file")" "bin_check quiet present: no stderr"
+
+  # Quiet mode, binary absent -- NO stderr output at all.
+  _forge_bin_check aimi-nonexistent-binary-xyz quiet github >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "bin_check quiet absent: exit 1"
+  assert_eq "" "$(cat "$stderr_file")" "bin_check quiet absent: stderr stays completely silent"
+
+  # Mandatory mode, binary present -- exit 0, no warning needed.
+  _forge_bin_check jq mandatory github >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "bin_check mandatory present: exit 0"
+  assert_eq "" "$(cat "$stderr_file")" "bin_check mandatory present: no stderr"
+
+  # Mandatory mode, binary absent -- exactly one stderr warning naming the binary and the forge.
+  _forge_bin_check aimi-nonexistent-binary-xyz mandatory github >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "bin_check mandatory absent: exit 1"
+  assert_stderr_contains "aimi-nonexistent-binary-xyz" "$(cat "$stderr_file")" "bin_check mandatory absent: stderr names the missing binary"
+  assert_stderr_contains "github" "$(cat "$stderr_file")" "bin_check mandatory absent: stderr names the forge"
+
+  rm -f "$stderr_file"
+}
+
+test_forge_contract_header_carries_both_creates_identities() {
+  echo ""
+  echo "=== forge-contract section header: carries both phase creates identities verbatim ==="
+
+  local section_block
+  section_block=$(sed -n '/^# Forge Contract — shared builders and degradation helper (US-002)/,/^_forge_build_pr_json()/p' "$CLI")
+
+  assert_contains "normalized PR and issue field contract" "$section_block" "forge-contract header: names the PR/issue contract identity verbatim"
+  assert_contains "forge degradation contract (missing adapter or missing CLI prints a manual instruction)" "$section_block" "forge-contract header: names the degradation contract identity verbatim"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -17133,6 +17318,18 @@ main() {
   test_detect_forge_project_cross_repo_isolation
   test_detect_forge_never_dials_remote_or_caches
   test_detect_forge_registered_in_help_and_dispatcher
+
+  # Forge Contract Tests (US-002) -- shared PR/issue/review builders, the
+  # three-way status envelope, and the degradation helper every later
+  # forge-* verb in this phase consumes
+  echo ""
+  echo "--- Forge Contract Tests (US-002) ---"
+  test_forge_build_pr_json_capability_gating
+  test_forge_build_issue_json_capability_gating
+  test_forge_build_review_envelope_json_capability_gating
+  test_forge_emit_status_three_outcomes
+  test_forge_bin_check_quiet_and_mandatory_modes
+  test_forge_contract_header_carries_both_creates_identities
 
   cleanup
 

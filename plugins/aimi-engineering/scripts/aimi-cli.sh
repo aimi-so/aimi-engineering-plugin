@@ -2086,6 +2086,278 @@ cmd_detect_parent_branch() {
     '{branch: $branch, base: $base, verified: $verified, source: $source}'
 }
 
+# ============================================================================
+# Forge Contract — shared builders and degradation helper (US-002)
+# ============================================================================
+# This section delivers two artifacts this phase's roadmap declares under
+# creates[], each named here verbatim on its own line so a text search finds
+# the identity intact rather than split across a wrapped comment:
+#
+# normalized PR and issue field contract
+#
+# forge degradation contract (missing adapter or missing CLI prints a manual instruction)
+#
+# Full documentation, including the state-mapping table, capability-gated
+# field tables, the review/approval envelope rationale, the three-way status
+# convention, and the credential/identity model, lives in
+# commands/references/forge-contract.md — this section implements exactly
+# what that document specifies, nothing more.
+#
+# forge-contract.md is the SINGLE ARBITER of the vocabulary below. No later
+# forge-* verb may introduce a variant field-name casing (e.g. camelCase
+# unsupportedFields) or a second degradation signal (e.g. a degradedReason
+# field alongside status) — see that file's opening section for the full
+# statement.
+#
+# This section introduces NO gh/glab/tea invocation, no git-remote parsing,
+# and no forge-pr-view/forge-auth-status/forge-repo-info verb body. Those
+# belong to later stories in this phase, which call the functions below
+# rather than re-deriving the shapes they build.
+
+# Shared jq -nc builder for the normalized PR object (forge-contract.md
+# "Normalized PR Field Set"). Portable-core fields (--number, --url,
+# --title, --body, --state, --head-ref-name, --base-ref-name) are always
+# accepted and null when empty. Capability-gated fields (--files, a JSON
+# array; --is-draft, JSON true/false; --mergeable, a raw string — never
+# forced to boolean, since GitLab's detailed_merge_status is a 16-value
+# enum) are tracked by FLAG PRESENCE, not by value: omitting the flag is
+# what marks a field unsupported, regardless of what value would otherwise
+# have been passed. Every omitted capability-gated field comes back null
+# AND its name is appended to unsupported_fields — never a bare, unmarked
+# null. --raw carries the untouched forge-native object alongside the
+# normalized shape (JSON object/array/literal, defaults to null).
+_forge_build_pr_json() {
+  local number="" url="" title="" body="" state="" head_ref="" base_ref=""
+  local files_json="null" is_draft_json="null" mergeable="" raw="null"
+  local files_set=false is_draft_set=false mergeable_set=false
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --number)         shift; number="${1:-}" ;;
+      --url)            shift; url="${1:-}" ;;
+      --title)          shift; title="${1:-}" ;;
+      --body)           shift; body="${1:-}" ;;
+      --state)          shift; state="${1:-}" ;;
+      --head-ref-name)  shift; head_ref="${1:-}" ;;
+      --base-ref-name)  shift; base_ref="${1:-}" ;;
+      --files)          shift; files_json="${1:-null}"; files_set=true ;;
+      --is-draft)       shift; is_draft_json="${1:-null}"; is_draft_set=true ;;
+      --mergeable)      shift; mergeable="${1:-}"; mergeable_set=true ;;
+      --raw)            shift; raw="${1:-null}" ;;
+      *)
+        echo "Error: _forge_build_pr_json: unknown flag: $1" >&2
+        return 1
+        ;;
+    esac
+    shift
+  done
+
+  local unsupported='[]'
+  [ "$files_set" = true ]     || unsupported=$(printf '%s' "$unsupported" | jq -c '. + ["files"]')
+  [ "$is_draft_set" = true ]  || unsupported=$(printf '%s' "$unsupported" | jq -c '. + ["isDraft"]')
+  [ "$mergeable_set" = true ] || unsupported=$(printf '%s' "$unsupported" | jq -c '. + ["mergeable"]')
+
+  jq -nc \
+    --arg number "$number" \
+    --arg url "$url" \
+    --arg title "$title" \
+    --arg body "$body" \
+    --arg state "$state" \
+    --arg headRefName "$head_ref" \
+    --arg baseRefName "$base_ref" \
+    --argjson files "$files_json" \
+    --argjson isDraft "$is_draft_json" \
+    --arg mergeable "$mergeable" \
+    --argjson mergeableSet "$mergeable_set" \
+    --argjson unsupported "$unsupported" \
+    --argjson raw "$raw" \
+    '{
+      number: (if $number == "" then null else (try ($number | tonumber) catch $number) end),
+      url: (if $url == "" then null else $url end),
+      title: (if $title == "" then null else $title end),
+      body: (if $body == "" then null else $body end),
+      state: (if $state == "" then null else $state end),
+      headRefName: (if $headRefName == "" then null else $headRefName end),
+      baseRefName: (if $baseRefName == "" then null else $baseRefName end),
+      files: $files,
+      isDraft: $isDraft,
+      mergeable: (if $mergeableSet and ($mergeable != "") then $mergeable else null end),
+      unsupported_fields: $unsupported,
+      raw: $raw
+    }'
+}
+
+# Shared jq -nc builder for the normalized issue object (forge-contract.md
+# "Normalized Issue Field Set"). Portable-core fields (--number, --url,
+# --title, --body, --state) are always accepted and null when empty. The
+# one capability-gated field (--comments, a JSON int) is tracked by flag
+# presence exactly like _forge_build_pr_json's capability-gated fields.
+# --raw carries the untouched forge-native object (defaults to null).
+_forge_build_issue_json() {
+  local number="" url="" title="" body="" state="" raw="null"
+  local comments_json="null" comments_set=false
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --number)   shift; number="${1:-}" ;;
+      --url)      shift; url="${1:-}" ;;
+      --title)    shift; title="${1:-}" ;;
+      --body)     shift; body="${1:-}" ;;
+      --state)    shift; state="${1:-}" ;;
+      --comments) shift; comments_json="${1:-null}"; comments_set=true ;;
+      --raw)      shift; raw="${1:-null}" ;;
+      *)
+        echo "Error: _forge_build_issue_json: unknown flag: $1" >&2
+        return 1
+        ;;
+    esac
+    shift
+  done
+
+  local unsupported='[]'
+  [ "$comments_set" = true ] || unsupported='["comments"]'
+
+  jq -nc \
+    --arg number "$number" \
+    --arg url "$url" \
+    --arg title "$title" \
+    --arg body "$body" \
+    --arg state "$state" \
+    --argjson comments "$comments_json" \
+    --argjson unsupported "$unsupported" \
+    --argjson raw "$raw" \
+    '{
+      number: (if $number == "" then null else (try ($number | tonumber) catch $number) end),
+      url: (if $url == "" then null else $url end),
+      title: (if $title == "" then null else $title end),
+      body: (if $body == "" then null else $body end),
+      state: (if $state == "" then null else $state end),
+      comments: $comments,
+      unsupported_fields: $unsupported,
+      raw: $raw
+    }'
+}
+
+# Shared jq -nc builder for the review/approval envelope (forge-contract.md
+# "Review/Approval Envelope"). Unlike the PR/issue objects, all three
+# fields (--approved, --changes-requested JSON true/false; --approvals-
+# count, a JSON int) are capability-gated — any of them can be absent
+# depending on forge and plan tier, most notably GitLab's changes_requested,
+# which has no concept behind it at all. Tracked by flag presence, exactly
+# like the other two builders. --raw carries the untouched forge-native
+# review/approval payload (defaults to null).
+_forge_build_review_envelope_json() {
+  local approved_json="null" changes_requested_json="null" approvals_count_json="null" raw="null"
+  local approved_set=false changes_requested_set=false approvals_count_set=false
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --approved)           shift; approved_json="${1:-null}"; approved_set=true ;;
+      --changes-requested)  shift; changes_requested_json="${1:-null}"; changes_requested_set=true ;;
+      --approvals-count)    shift; approvals_count_json="${1:-null}"; approvals_count_set=true ;;
+      --raw)                shift; raw="${1:-null}" ;;
+      *)
+        echo "Error: _forge_build_review_envelope_json: unknown flag: $1" >&2
+        return 1
+        ;;
+    esac
+    shift
+  done
+
+  local unsupported='[]'
+  [ "$approved_set" = true ]          || unsupported=$(printf '%s' "$unsupported" | jq -c '. + ["approved"]')
+  [ "$changes_requested_set" = true ] || unsupported=$(printf '%s' "$unsupported" | jq -c '. + ["changes_requested"]')
+  [ "$approvals_count_set" = true ]   || unsupported=$(printf '%s' "$unsupported" | jq -c '. + ["approvals_count"]')
+
+  jq -nc \
+    --argjson approved "$approved_json" \
+    --argjson changesRequested "$changes_requested_json" \
+    --argjson approvalsCount "$approvals_count_json" \
+    --argjson unsupported "$unsupported" \
+    --argjson raw "$raw" \
+    '{
+      approved: $approved,
+      changes_requested: $changesRequested,
+      approvals_count: $approvalsCount,
+      unsupported_fields: $unsupported,
+      raw: $raw
+    }'
+}
+
+# Shared three-way status envelope (forge-contract.md "Three-Way Status
+# Convention"), modeled directly on _verify_creates_emit's own
+# verified/missing/error trio: found/not_found/error are three genuinely
+# distinct outcomes and must never be conflated the way `gh pr view --json
+# url` today exits non-zero for both "no PR exists" and "auth/network
+# broken". Every later forge lookup verb constructs its result through this
+# one function instead of hand-rolling the JSON assembly per verb.
+#
+# Usage: _forge_emit_status <status> [data-json] [message]
+#   status   found | not_found | error -- anything else is a caller error
+#            (unknown status, exit 1) rather than silently coerced.
+#   data     JSON value (typically a normalized PR/issue object). Forced to
+#            null unless status == "found", so a caller cannot accidentally
+#            leak a stale value across the wrong branch of the outcome.
+#   message  the one and only degraded-reason field in this contract.
+#            Forced to null unless status == "error".
+_forge_emit_status() {
+  local status="$1" data_json="${2:-null}" message="${3:-}"
+
+  case "$status" in
+    found|not_found|error) ;;
+    *)
+      echo "Error: _forge_emit_status: status must be found, not_found or error (got: $status)" >&2
+      return 1
+      ;;
+  esac
+
+  if [ "$status" != "found" ]; then
+    data_json="null"
+  fi
+  if [ "$status" != "error" ]; then
+    message=""
+  fi
+
+  jq -nc \
+    --arg status "$status" \
+    --argjson data "$data_json" \
+    --arg message "$message" \
+    '{status: $status, data: $data, message: (if $message == "" then null else $message end)}'
+}
+
+# Shared graceful-degradation gate (forge-contract.md "Degradation
+# Contract") for every forge-* verb that shells out to a forge CLI
+# (gh/glab/tea). `command -v` is a portable presence check that never
+# invokes the binary, so it cannot itself hang, prompt, or leak an
+# unguarded 127 -- guarding here is the whole point of this function.
+#
+# Usage: _forge_bin_check <binary> <quiet|mandatory> <forge-label>
+#   Returns 0 when <binary> resolves on PATH, 1 otherwise -- in BOTH modes.
+#   quiet mode:     absence produces NO stderr output at all. For a caller
+#                   that already has its own fallback path and would only
+#                   restate it -- matches review.md's documented row ("gh
+#                   CLI not installed -> Fall back to git diff for branch
+#                   comparison"), which must not gain a spurious warning it
+#                   does not have today.
+#   mandatory mode: absence prints exactly ONE stderr warning naming the
+#                   missing binary, the forge label the caller passed (from
+#                   detect-forge's output -- never a generic placeholder),
+#                   and a manual next step -- matches execute.md's existing
+#                   `command -v gh` gate at the per-repository PR-creation
+#                   step.
+_forge_bin_check() {
+  local binary="$1" mode="$2" forge_label="$3"
+
+  if command -v "$binary" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if [ "$mode" = "mandatory" ]; then
+    echo "Warning: $binary not found -- this $forge_label operation cannot run automatically; install $binary or complete it manually." >&2
+  fi
+  return 1
+}
+
 # Detect a Claude Design handoff bundle under a given root (defaults to CWD).
 # Scans depth-1 subdirectories for a README.md containing the handoff marker.
 # Returns JSON object when found, "null" when not found.
