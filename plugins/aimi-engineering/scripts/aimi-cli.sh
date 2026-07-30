@@ -2918,6 +2918,366 @@ cmd_forge_pr_view() {
   esac
 }
 
+# ============================================================================
+# Forge Issue Verbs — forge-issue-view, forge-issue-create (US-006)
+# ============================================================================
+# The first forge-* verbs in this phase to actually shell out to a forge
+# CLI. Built entirely on US-002's shared builders/degradation gate
+# (_forge_build_issue_json, _forge_emit_status, _forge_bin_check) and
+# US-001's detect-forge -- neither is re-derived here.
+#
+# INVARIANT, stated here and again on cmd_forge_issue_create below because
+# it is the whole reason this pair exists: a failed or degraded issue
+# creation must NEVER be treated by a caller as a reason to block PR
+# creation. open-pr.md:481 already documents this in prose ("a warning is
+# logged but PR creation is NOT affected -- the backend spec still lives in
+# the PR body"); forge-issue-create's JSON `status` field (never its exit
+# code, which stays 0 on every syntactically valid call -- see below) is
+# what lets a future caller preserve that behavior once it migrates off a
+# raw `gh issue create` shell-out.
+#
+# GitHub is the only adapter this phase. A detected forge other than
+# "github" degrades exactly like a missing `gh` binary rather than
+# attempting a call that could only fail.
+
+# Forge-native issue/PR state strings, normalized per forge-contract.md's
+# "State Mapping" table. Case-folded first because GitHub's gh CLI returns
+# OPEN/CLOSED/MERGED in uppercase while GitLab/Gitea's APIs are lowercase.
+# Once case-folded, every cell in that table already agrees across all
+# three forges EXCEPT GitLab's "opened", which has no "open"-spelled
+# sibling anywhere else -- that is the one and only translation this
+# function performs. GitLab's "locked" has no GitHub or Gitea/Forgejo
+# equivalent and passes through unchanged rather than being collapsed into
+# "merged" (collapsing would silently discard a real GitLab-only signal).
+# An unrecognized forge, or a raw value this table does not name, passes
+# through case-folded and otherwise untouched -- this function normalizes
+# spelling, it never invents a value the source data did not provide.
+# Usage: _forge_map_state <forge: github|gitlab|gitea> <raw-state>
+_forge_map_state() {
+  local forge="$1" raw
+  raw=$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')
+
+  if [ "$forge" = "gitlab" ] && [ "$raw" = "opened" ]; then
+    printf 'open'
+    return 0
+  fi
+
+  printf '%s' "$raw"
+}
+
+# Extracts the trailing issue number from a GitHub issue URL
+# (https://github.com/<owner>/<repo>/issues/<n>, optionally followed by a
+# path/query/fragment). Prints empty on a non-matching URL rather than
+# guessing -- cmd_forge_issue_view treats an empty result as a caller-input
+# error, never a silent zero.
+_forge_extract_issue_number_from_url() {
+  local url="$1"
+  if [[ "$url" =~ /issues/([0-9]+)([/?#].*)?$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  fi
+}
+
+# Shells `gh issue view <n> --json number,title,body,labels,state,url,
+# comments`. `comments` is requested in addition to the field list this
+# story's own prose quotes, specifically so unsupported_fields comes back
+# [] on GitHub: forge-contract.md's issue object treats comments as the
+# ONE capability-gated field, and GitHub can supply it cheaply (a comment
+# COUNT, derived here from the length of gh's own comments array) -- only
+# GitLab's noisier discussion model and tea's uncertain counting semantics
+# keep it capability-gated at all. `labels` is not in forge-contract.md's
+# issue field table today -- GitHub/GitLab/Gitea all expose it as a
+# portable-core concept, so it rides alongside _forge_build_issue_json's
+# output via a jq merge rather than waiting on a contract-doc update this
+# story does not own.
+#
+# QUIET degrade mode throughout (forge-contract.md's Degradation
+# Contract): a missing gh, an unauthenticated session, and any other gh
+# failure all resolve to status "error" with NO stderr output --
+# validate-bug.md's free-text-description fallback (the caller this verb
+# was built for) must not gain a spurious warning it does not have today.
+#
+# Not-found is a query result, never a verb failure (mirrors split-detect
+# and verify-creates): gh conflates "no such issue" and "tool is broken"
+# into the same non-zero exit, so gh's own stderr text is pattern-matched
+# here to tell the two apart BEFORE calling _forge_emit_status -- the same
+# discipline _verify_creates_one already applies to git's ambiguous exit
+# codes. (The AC's "found (boolean)" language maps onto this three-way
+# `status` field: status=="found" is the found:true case, status==
+# "not_found" is the found:false case -- forge-contract.md's Three-Way
+# Status Convention is the single arbiter of this vocabulary and already
+# names forge-issue-view as one of its consumers, so no second/variant
+# "found" field is introduced alongside it.)
+#
+# Always returns 0 -- found/not_found/error are three data outcomes, not
+# three exit codes. cmd_forge_issue_view (the public wrapper) is the only
+# layer that can exit non-zero, and only for a caller-side usage error.
+_forge_issue_view() {
+  local number="$1"
+  local forge
+  forge=$(_detect_forge | jq -r '.forge')
+
+  if [ "$forge" != "github" ]; then
+    _forge_emit_status error "" "forge-issue-view: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1."
+    return 0
+  fi
+
+  if ! _forge_bin_check gh quiet "$forge"; then
+    _forge_emit_status error "" "gh not found -- this issue lookup did not run automatically."
+    return 0
+  fi
+
+  local err_file stdout rc=0
+  err_file=$(mktemp)
+  stdout=$(gh issue view "$number" --json number,title,body,labels,state,url,comments 2>"$err_file") || rc=$?
+  local stderr_out
+  stderr_out=$(cat "$err_file" 2>/dev/null || true)
+  rm -f "$err_file"
+
+  if [ "$rc" -eq 0 ]; then
+    local num title_val body_val url_val state_raw state_norm labels_json comments_count data
+    num=$(printf '%s' "$stdout" | jq -r '.number // empty')
+    title_val=$(printf '%s' "$stdout" | jq -r '.title // ""')
+    body_val=$(printf '%s' "$stdout" | jq -r '.body // ""')
+    url_val=$(printf '%s' "$stdout" | jq -r '.url // ""')
+    state_raw=$(printf '%s' "$stdout" | jq -r '.state // ""')
+    state_norm=$(_forge_map_state "$forge" "$state_raw")
+    labels_json=$(printf '%s' "$stdout" | jq -c '[(.labels // [])[].name]')
+    comments_count=$(printf '%s' "$stdout" | jq -c '(.comments // []) | length')
+    data=$(_forge_build_issue_json --number "$num" --url "$url_val" --title "$title_val" \
+      --body "$body_val" --state "$state_norm" --comments "$comments_count" --raw "$stdout")
+    data=$(printf '%s' "$data" | jq -c --argjson labels "$labels_json" '. + {labels: $labels}')
+    _forge_emit_status found "$data"
+    return 0
+  fi
+
+  if printf '%s' "$stderr_out" | grep -qi "Could not resolve to an issue or pull request"; then
+    _forge_emit_status not_found
+    return 0
+  fi
+
+  _forge_emit_status error "" "gh issue view exited $rc: ${stderr_out:-unknown error}"
+  return 0
+}
+
+# Public wrapper: parses --number/--url/--project, validates the numeric
+# identifier BEFORE it is ever interpolated into a gh command (mirroring
+# the branchName-validation posture in plugins/aimi-engineering/CLAUDE.md's
+# Security Requirements), confirms the git-repository guard the same way
+# detect-forge/detect-parent-branch/detect-default-branch already do (gh
+# infers which repo to query from cwd's remote; there is no --repo flag
+# here), then delegates exactly once to _forge_issue_view.
+#
+# Routing note for the later validate-bug.md migration (recorded here so
+# that story does not have to re-derive it): validate-bug.md's plain-
+# issue-number branch and its GitHub-issue-URL branch both route to THIS
+# verb; its PR-URL branch (validate-bug.md:39) routes to forge-pr-view
+# instead, even though it requests an identical field set, because it
+# reads a pull request, not an issue.
+cmd_forge_issue_view() {
+  local number="" url="" project_dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --number)  shift; number="${1:-}" ;;
+      --url)     shift; url="${1:-}" ;;
+      --project) shift; project_dir="${1:-}" ;;
+      *)
+        echo "Error: forge-issue-view: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$project_dir" ]; then
+    if [ ! -d "$project_dir" ]; then
+      echo "Error: Project directory does not exist: $project_dir" >&2
+      exit 1
+    fi
+    cd "$project_dir"
+  fi
+
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
+    exit 1
+  fi
+
+  if [ -z "$number" ] && [ -n "$url" ]; then
+    number=$(_forge_extract_issue_number_from_url "$url")
+    if [ -z "$number" ]; then
+      echo "Error: forge-issue-view: could not extract an issue number from --url: $url" >&2
+      exit 1
+    fi
+  fi
+
+  if [ -z "$number" ]; then
+    echo "Error: forge-issue-view: --number <n> or --url <issue-url> is required" >&2
+    exit 1
+  fi
+
+  if ! [[ "$number" =~ ^[0-9]+$ ]]; then
+    echo "Error: forge-issue-view: --number must be a positive integer (got: $number)" >&2
+    exit 1
+  fi
+
+  _forge_issue_view "$number"
+}
+
+# Prints the MANDATORY manual-fallback instruction (forge-contract.md's
+# Degradation Contract, mandatory mode) for every forge-issue-create
+# failure path -- missing gh, unauthenticated session, or the create call
+# itself failing all funnel through this one function so the instruction
+# is worded identically regardless of WHY automatic creation did not
+# happen. Always stderr, never stdout, so a caller consuming this verb's
+# JSON result on stdout never has to filter prose out of its own data.
+_forge_issue_create_print_manual() {
+  local title="$1" body="$2" forge="$3"
+  {
+    echo "Warning: could not create this $forge issue automatically -- create it yourself with:"
+    echo "  Title: $title"
+    echo "  Body:"
+    printf '%s\n' "$body" | sed 's/^/    /'
+  } >&2
+}
+
+# Shared jq -nc builder for forge-issue-create's own result shape. This is
+# deliberately NOT forge-contract.md's found/not_found/error convention --
+# that trio is explicitly scoped to LOOKUP verbs (forge-auth-status,
+# forge-repo-info, forge-pr-view, forge-issue-view); a write verb has no
+# "not found" outcome, so it uses its own two-value vocabulary
+# (created|degraded) instead of forcing a bad fit. `message` re-uses
+# forge-contract.md's naming exactly -- the one and only degraded-reason
+# field name that contract permits -- rather than inventing a second one.
+_forge_emit_issue_create_status() {
+  local status="$1" url="${2:-}" number="${3:-}" message="${4:-}"
+  jq -nc \
+    --arg status "$status" \
+    --arg url "$url" \
+    --arg number "$number" \
+    --arg message "$message" \
+    '{
+      url: (if $url == "" then null else $url end),
+      number: (if $number == "" then null else ($number | tonumber) end),
+      status: $status,
+      message: (if $message == "" then null else $message end)
+    }'
+}
+
+# Shells `gh issue create --title <t> --body <b>`, capturing stdout as the
+# created issue's URL -- gh issue create has NO --json flag (confirmed:
+# unlike gh issue view/gh pr view, only a plain URL reaches stdout on
+# success) -- and deriving the issue number from that URL itself, the same
+# grep -oE '[0-9]+$' open-pr.md:464 does today, centralized and tested here
+# exactly once so open-pr.md's later migration (story 08) can drop its own
+# copy.
+#
+# MANDATORY-PRINT degrade mode (forge-contract.md's Degradation Contract):
+# unlike forge-issue-view's quiet read, this write verb has no fallback
+# path of its own, so every failure -- missing gh, unauthenticated
+# session, the create call itself failing (permissions denied, issues
+# disabled, rate limit), or an unparseable success response -- prints the
+# manual "create this yourself" instruction via
+# _forge_issue_create_print_manual.
+#
+# CONTRACT INVARIANT: printing that instruction is NEVER a hard failure.
+# This function always returns 0; its JSON result's `status` field
+# ("created" vs "degraded") is what a caller branches on -- see the
+# section header above and cmd_forge_issue_create below for the full
+# statement of why (open-pr.md:481's existing soft-fail behavior must
+# survive this migration unchanged).
+_forge_issue_create() {
+  local title="$1" body="$2"
+  local forge
+  forge=$(_detect_forge | jq -r '.forge')
+
+  if [ "$forge" != "github" ]; then
+    _forge_issue_create_print_manual "$title" "$body" "$forge"
+    _forge_emit_issue_create_status degraded "" "" "forge-issue-create: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1."
+    return 0
+  fi
+
+  if ! _forge_bin_check gh mandatory "$forge"; then
+    _forge_issue_create_print_manual "$title" "$body" "$forge"
+    _forge_emit_issue_create_status degraded "" "" "gh not found -- this issue was not created automatically."
+    return 0
+  fi
+
+  local err_file stdout rc=0
+  err_file=$(mktemp)
+  stdout=$(gh issue create --title "$title" --body "$body" 2>"$err_file") || rc=$?
+  local stderr_out
+  stderr_out=$(cat "$err_file" 2>/dev/null || true)
+  rm -f "$err_file"
+
+  if [ "$rc" -ne 0 ]; then
+    _forge_issue_create_print_manual "$title" "$body" "$forge"
+    _forge_emit_issue_create_status degraded "" "" "gh issue create exited $rc: ${stderr_out:-unknown error}"
+    return 0
+  fi
+
+  local issue_url issue_number
+  issue_url=$(printf '%s' "$stdout" | tail -n1 | tr -d '\r')
+  issue_number=$(printf '%s' "$issue_url" | grep -oE '[0-9]+$' || true)
+
+  if [ -z "$issue_url" ] || [ -z "$issue_number" ]; then
+    _forge_issue_create_print_manual "$title" "$body" "$forge"
+    _forge_emit_issue_create_status degraded "" "" "gh issue create succeeded but its output did not contain a parseable issue URL: ${issue_url:-<empty>}"
+    return 0
+  fi
+
+  _forge_emit_issue_create_status created "$issue_url" "$issue_number" ""
+}
+
+# Public wrapper: parses --title/--body/--project (deliberately no --token
+# or similarly credential-shaped flag -- see forge-contract.md's
+# Credential/Identity Model; any acting-account identity must reach the
+# child gh process only through an environment variable, e.g. GH_TOKEN,
+# which a bash child process inherits automatically with no extra code
+# needed here to pass it along), confirms the git-repository guard, then
+# delegates exactly once to _forge_issue_create.
+#
+# INVARIANT (restated from the section header on purpose, not left
+# implicit): a degraded or failed issue creation from this verb must NEVER
+# be read by a caller as a reason to block PR creation. open-pr.md:481
+# already documents this soft-fail behavior in prose; this verb's `status`
+# field is what lets a future caller preserve it.
+cmd_forge_issue_create() {
+  local title="" body="" project_dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --title)   shift; title="${1:-}" ;;
+      --body)    shift; body="${1:-}" ;;
+      --project) shift; project_dir="${1:-}" ;;
+      *)
+        echo "Error: forge-issue-create: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$project_dir" ]; then
+    if [ ! -d "$project_dir" ]; then
+      echo "Error: Project directory does not exist: $project_dir" >&2
+      exit 1
+    fi
+    cd "$project_dir"
+  fi
+
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
+    exit 1
+  fi
+
+  if [ -z "$title" ]; then
+    echo "Error: forge-issue-create: --title <text> is required" >&2
+    exit 1
+  fi
+
+  _forge_issue_create "$title" "$body"
+}
+
 # Detect a Claude Design handoff bundle under a given root (defaults to CWD).
 # Scans depth-1 subdirectories for a README.md containing the handoff marker.
 # Returns JSON object when found, "null" when not found.
@@ -9989,6 +10349,26 @@ COMMANDS:
                               Only github ships in this phase; gitlab, gitea,
                               unknown, or a missing gh binary degrade to
                               status=error with no stderr output.
+    forge-issue-view (--number <n> | --url <issue-url>) [--project <path>]
+                              Read verb -- shells gh issue view, normalized to
+                              {status: "found"|"not_found"|"error", data, message}
+                              (forge-contract.md's Three-Way Status Convention).
+                              data carries {number, url, title, body, state,
+                              labels, comments, unsupported_fields, raw} on
+                              found. QUIET degrade mode: a missing/unauthenticated
+                              gh yields status "error" with no stderr output.
+                              GitHub only in phase 1.
+    forge-issue-create --title <t> --body <b> [--project <path>]
+                              Write verb -- shells gh issue create (no --json
+                              flag exists on it; the URL/number are captured
+                              and derived here). Output: {url, number,
+                              status: "created"|"degraded", message}. A
+                              degraded/failed create is NEVER a hard failure
+                              (exit stays 0) -- it prints a manual "create
+                              this yourself" instruction to stderr
+                              (MANDATORY-PRINT degrade mode) and lets the
+                              caller branch on status instead. GitHub only
+                              in phase 1.
     detect-interactivity [--non-interactive]
                               Print resolved interactivity mode (picker|agent)
                               Returns picker by default; returns agent only when
@@ -10526,6 +10906,8 @@ main() {
     forge-auth-status) shift; cmd_forge_auth_status "$@" ;;
     forge-repo-info)   shift; cmd_forge_repo_info "$@" ;;
     forge-pr-view) shift; cmd_forge_pr_view "$@" ;;
+    forge-issue-view)   shift; cmd_forge_issue_view "$@" ;;
+    forge-issue-create) shift; cmd_forge_issue_create "$@" ;;
     setup-branch)      shift; cmd_setup_branch "$@" ;;
     resolve-base-branch) shift; cmd_resolve_base_branch "$@" ;;
     clear-state)       cmd_clear_state ;;

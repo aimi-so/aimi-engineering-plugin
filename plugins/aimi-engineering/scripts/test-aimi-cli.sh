@@ -17551,6 +17551,503 @@ test_forge_pr_view_registered_in_help_and_dispatcher() {
 }
 
 # ============================================================================
+# Forge Issue Verb Tests (US-006)
+# ============================================================================
+# forge-issue-view / forge-issue-create are the first forge-* verbs that
+# actually shell out to a forge CLI, so exercising them offline needs a
+# fake `gh` on PATH. setup_forge_cli_sandbox/teardown_forge_cli_sandbox
+# below is that reusable, clearly-named fixture pair -- written for reuse
+# across every forge-* verb's offline tests (forge-pr-view/forge-pr-create,
+# a sibling story in this same wave, need the identical technique), mirror-
+# ing the fake-opencode-binary precedent cmd_detect_models's tests already
+# established (test_resolve_models_opencode_mtime_cache, ~line 8510).
+
+# Sources the pure helper functions this section introduces (no gh
+# shell-out, no cmd_ dispatcher) for direct, in-process testing -- same
+# technique as source_forge_contract_functions above.
+source_forge_issue_functions() {
+  eval "$(sed -n '/^_forge_map_state()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_extract_issue_number_from_url()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_emit_issue_create_status()/,/^}/p' "$CLI")"
+}
+
+# Builds a minimal, hermetic PATH sandbox containing exactly the external
+# binaries this code path needs (bash, so the `#!/usr/bin/env bash`
+# shebang resolves via env; jq; git; mktemp; cat; rm; grep; sed; tr; tail;
+# dirname; basename -- find_aimi_root's resolve_path fallback needs the
+# last two whenever `realpath` is unavailable) -- and deliberately does
+# NOT include `gh`, so `command -v gh` genuinely fails inside the sandbox
+# exactly like a machine that never installed the GitHub CLI. This is
+# stronger than the `PATH="/usr/bin:/bin"` shortcut cmd_detect_models's
+# tests use for opencode absence (test-aimi-cli.sh:8834) -- that shortcut
+# only works because opencode is not preinstalled at /usr/bin on the test
+# machine, whereas `gh` IS very often preinstalled there (this repo's own
+# dev environment has /usr/bin/gh), so hiding it needs an explicit
+# allowlist sandbox instead of hoping the real PATH happens to lack it.
+#
+# A caller that wants a "gh present" scenario writes its own executable
+# <sandbox>/gh script afterward (a plain heredoc -- see the test functions
+# below), then invokes the CLI with `PATH="<sandbox>" "$CLI" ...` -- the
+# sandbox alone, no fallback to the real PATH, is what keeps the real gh
+# hidden for the "gh absent" tests.
+setup_forge_cli_sandbox() {
+  local sandbox
+  sandbox=$(mktemp -d)
+
+  local tool resolved candidate
+  for tool in bash jq git mktemp cat rm grep sed tr tail dirname basename; do
+    resolved=$(command -v "$tool" 2>/dev/null) || resolved=""
+    if [ -z "$resolved" ] || [ ! -x "$resolved" ]; then
+      for candidate in "/usr/bin/$tool" "/bin/$tool"; do
+        if [ -x "$candidate" ]; then
+          resolved="$candidate"
+          break
+        fi
+      done
+    fi
+    if [ -n "$resolved" ] && [ -x "$resolved" ]; then
+      ln -sf "$resolved" "$sandbox/$tool"
+    fi
+  done
+
+  printf '%s' "$sandbox"
+}
+
+# Removes a sandbox directory created by setup_forge_cli_sandbox.
+teardown_forge_cli_sandbox() {
+  rm -rf "$1"
+}
+
+test_forge_map_state_table() {
+  echo ""
+  echo "=== _forge_map_state: normalizes per forge-contract.md's State Mapping table ==="
+
+  source_forge_issue_functions
+
+  assert_eq "open"   "$(_forge_map_state github OPEN)"   "_forge_map_state: github OPEN -> open"
+  assert_eq "closed" "$(_forge_map_state github CLOSED)" "_forge_map_state: github CLOSED -> closed"
+  assert_eq "merged" "$(_forge_map_state github MERGED)" "_forge_map_state: github MERGED -> merged"
+  assert_eq "open"   "$(_forge_map_state gitlab opened)" "_forge_map_state: gitlab opened -> open (the one real divergence in the table)"
+  assert_eq "closed" "$(_forge_map_state gitlab closed)" "_forge_map_state: gitlab closed -> closed"
+  assert_eq "merged" "$(_forge_map_state gitlab merged)" "_forge_map_state: gitlab merged -> merged"
+  assert_eq "locked" "$(_forge_map_state gitlab locked)" "_forge_map_state: gitlab locked passes through unchanged (no GitHub/Gitea equivalent)"
+  assert_eq "open"   "$(_forge_map_state gitea open)"   "_forge_map_state: gitea open -> open"
+  assert_eq "closed" "$(_forge_map_state gitea closed)" "_forge_map_state: gitea closed -> closed"
+}
+
+test_forge_extract_issue_number_from_url() {
+  echo ""
+  echo "=== _forge_extract_issue_number_from_url: extracts trailing number, empty on mismatch ==="
+
+  source_forge_issue_functions
+
+  assert_eq "42" "$(_forge_extract_issue_number_from_url "https://github.com/owner/repo/issues/42")" "extract: plain issue URL"
+  assert_eq "42" "$(_forge_extract_issue_number_from_url "https://github.com/owner/repo/issues/42?tab=comments")" "extract: issue URL with query string"
+  assert_eq "" "$(_forge_extract_issue_number_from_url "https://github.com/owner/repo/pull/42")" "extract: PR URL does not match (no /issues/ segment)"
+  assert_eq "" "$(_forge_extract_issue_number_from_url "not a url")" "extract: non-URL input -> empty"
+}
+
+test_forge_emit_issue_create_status_shape() {
+  echo ""
+  echo "=== _forge_emit_issue_create_status: created vs degraded shape ==="
+
+  source_forge_issue_functions
+
+  local out
+  out=$(_forge_emit_issue_create_status created "https://github.com/o/r/issues/9" "9" "")
+  assert_eq "created" "$(printf '%s' "$out" | jq -r '.status')" "issue-create status: created"
+  assert_eq "9" "$(printf '%s' "$out" | jq -r '.number')" "issue-create status: number is an int"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "issue-create status: message null on success"
+
+  out=$(_forge_emit_issue_create_status degraded "" "" "gh not found -- this issue was not created automatically.")
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "issue-create status: degraded"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.url')" "issue-create status: url null on degraded"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.number')" "issue-create status: number null on degraded"
+  assert_contains "gh not found" "$(printf '%s' "$out" | jq -r '.message')" "issue-create status: message carries the reason"
+}
+
+test_forge_issue_view_found() {
+  echo ""
+  echo "=== forge-issue-view: found -- normalized shape, labels, comments count, state mapping ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  echo '{"number":42,"title":"Bug: thing broke","body":"steps to repro","state":"OPEN","url":"https://github.com/o/r/issues/42","labels":[{"name":"bug"},{"name":"P1"}],"comments":[{"id":1},{"id":2}]}'
+  exit 0
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-issue-view --number 42) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-view found: exit code"
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-view found: status"
+  assert_eq "42" "$(printf '%s' "$out" | jq -r '.data.number')" "forge-issue-view found: number"
+  assert_eq "Bug: thing broke" "$(printf '%s' "$out" | jq -r '.data.title')" "forge-issue-view found: title"
+  assert_eq "steps to repro" "$(printf '%s' "$out" | jq -r '.data.body')" "forge-issue-view found: body"
+  assert_eq "open" "$(printf '%s' "$out" | jq -r '.data.state')" "forge-issue-view found: state normalized (OPEN -> open)"
+  assert_eq "https://github.com/o/r/issues/42" "$(printf '%s' "$out" | jq -r '.data.url')" "forge-issue-view found: url"
+  assert_eq '["bug","P1"]' "$(printf '%s' "$out" | jq -c '.data.labels')" "forge-issue-view found: labels array of names"
+  assert_eq "2" "$(printf '%s' "$out" | jq -r '.data.comments')" "forge-issue-view found: comments count derived from array length"
+  assert_eq "[]" "$(printf '%s' "$out" | jq -c '.data.unsupported_fields')" "forge-issue-view found: unsupported_fields empty on GitHub"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "forge-issue-view found: message null"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_view_not_found() {
+  echo ""
+  echo "=== forge-issue-view: not-found is a query result -- exit 0, status not_found ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  echo "GraphQL: Could not resolve to an issue or pull request with the number of $3. (repository.issue)" >&2
+  exit 1
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-issue-view --number 999999) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-view not-found: exit code stays 0 (query result, not a verb failure)"
+  assert_eq "not_found" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-view not-found: status"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "forge-issue-view not-found: data null"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_view_degraded_missing_gh() {
+  echo ""
+  echo "=== forge-issue-view: gh absent -- QUIET degrade (status error, zero stderr) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # No gh written into the sandbox at all -- simulates "gh not installed".
+
+  local stderr_file="/tmp/forge_issue_view_gh_absent_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-issue-view --number 42 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-view gh-absent: exit code stays 0 (degraded result, not a hard failure)"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-view gh-absent: status error"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "forge-issue-view gh-absent: data null"
+  assert_contains "gh not found" "$(printf '%s' "$out" | jq -r '.message')" "forge-issue-view gh-absent: message names gh"
+  assert_eq "" "$(cat "$stderr_file")" "forge-issue-view gh-absent: QUIET mode -- zero stderr output"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_view_non_github_forge_degrades() {
+  echo ""
+  echo "=== forge-issue-view: non-GitHub forge (GitLab) has no adapter yet -- degrades, does not crash ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-issue-view --number 1) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-view non-github: exit 0"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-view non-github: status error"
+  assert_contains "gitlab" "$(printf '%s' "$out" | jq -r '.message')" "forge-issue-view non-github: message names the detected forge"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_view_input_errors() {
+  echo ""
+  echo "=== forge-issue-view: --url extraction, and caller-input errors exit non-zero ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  echo "{\"number\":$3,\"title\":\"t\",\"body\":\"b\",\"state\":\"OPEN\",\"url\":\"https://github.com/o/r/issues/$3\",\"labels\":[],\"comments\":[]}"
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code stderr_file="/tmp/forge_issue_view_input_stderr.$$"
+
+  # --url extraction routes to the same normalized number path.
+  out=$(PATH="$sandbox" "$CLI" forge-issue-view --url "https://github.com/owner/repo/issues/123") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "forge-issue-view --url: exit code"
+  assert_eq "123" "$(printf '%s' "$out" | jq -r '.data.number')" "forge-issue-view --url: number extracted from URL"
+
+  # Missing both --number and --url.
+  PATH="$sandbox" "$CLI" forge-issue-view >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-issue-view missing identifier: exit 1"
+  assert_stderr_contains "--number <n> or --url" "$(cat "$stderr_file")" "forge-issue-view missing identifier: stderr names both flags"
+
+  # Non-numeric --number.
+  PATH="$sandbox" "$CLI" forge-issue-view --number abc >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-issue-view non-numeric --number: exit 1"
+  assert_stderr_contains "must be a positive integer" "$(cat "$stderr_file")" "forge-issue-view non-numeric --number: stderr names the constraint"
+
+  # Unknown/credential-shaped flag is rejected outright -- no --token exists.
+  PATH="$sandbox" "$CLI" forge-issue-view --token secret >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-issue-view --token: rejected as unknown flag, exit 1"
+  assert_stderr_contains "unknown flag" "$(cat "$stderr_file")" "forge-issue-view --token: stderr names it unknown"
+
+  rm -f "$stderr_file"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_create_success() {
+  echo ""
+  echo "=== forge-issue-create: success -- {url, number, status} derived from gh's own stdout URL ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "issue" ] && [ "$2" = "create" ]; then
+  echo "https://github.com/owner/repo/issues/77"
+  exit 0
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_issue_create_success_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-issue-create --title "Backend: thing" --body "spec here" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-create success: exit code"
+  assert_eq "created" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-create success: status created"
+  assert_eq "https://github.com/owner/repo/issues/77" "$(printf '%s' "$out" | jq -r '.url')" "forge-issue-create success: url captured from gh stdout"
+  assert_eq "77" "$(printf '%s' "$out" | jq -r '.number')" "forge-issue-create success: number derived from the URL (no caller-side regex needed)"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "forge-issue-create success: message null"
+  assert_eq "" "$(cat "$stderr_file")" "forge-issue-create success: no manual instruction printed on success"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_create_degraded_failure_prints_manual() {
+  echo ""
+  echo "=== forge-issue-create: create call fails -- degraded status, exit 0, manual instruction printed (soft-fail contract) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "issue" ] && [ "$2" = "create" ]; then
+  echo "HTTP 403: Resource not accessible by integration" >&2
+  exit 1
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_issue_create_fail_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-issue-create --title "Backend: thing" --body "spec here" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-create degraded: exit code STAYS 0 -- never a hard failure a caller could mistake for a reason to block PR creation"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-create degraded: status"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.url')" "forge-issue-create degraded: url null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.number')" "forge-issue-create degraded: number null"
+  assert_contains "gh issue create exited 1" "$(printf '%s' "$out" | jq -r '.message')" "forge-issue-create degraded: message carries the gh failure detail"
+  assert_stderr_contains "create it yourself" "$(cat "$stderr_file")" "forge-issue-create degraded: manual instruction printed (MANDATORY-PRINT)"
+  assert_stderr_contains "Backend: thing" "$(cat "$stderr_file")" "forge-issue-create degraded: manual instruction includes the title"
+  assert_stderr_contains "spec here" "$(cat "$stderr_file")" "forge-issue-create degraded: manual instruction includes the body"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_create_missing_gh_mandatory_print() {
+  echo ""
+  echo "=== forge-issue-create: gh absent -- MANDATORY-PRINT degrade (bin_check warning + manual instruction) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # No gh in the sandbox -- simulates "gh not installed".
+
+  local stderr_file="/tmp/forge_issue_create_no_gh_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-issue-create --title "T" --body "B" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-create gh-absent: exit 0"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-create gh-absent: status degraded"
+  assert_stderr_contains "gh not found" "$(cat "$stderr_file")" "forge-issue-create gh-absent: _forge_bin_check's mandatory warning names gh"
+  assert_stderr_contains "create it yourself" "$(cat "$stderr_file")" "forge-issue-create gh-absent: manual instruction also printed"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_create_credential_via_env_not_argv() {
+  echo ""
+  echo "=== forge-issue-create: credential reaches gh via inherited env var, never argv ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+# Fails loudly if any argument looks like a credential -- proves
+# cmd_forge_issue_create/_forge_issue_create never interpolate one into argv.
+for arg in "$@"; do
+  case "$arg" in
+    *token*|*TOKEN*|--token|ghp_*|gho_*) echo "credential leaked into argv: $arg" >&2; exit 2 ;;
+  esac
+done
+if [ -z "${GH_TOKEN:-}" ]; then
+  echo "GH_TOKEN not inherited from environment" >&2
+  exit 3
+fi
+if [ "$1" = "issue" ] && [ "$2" = "create" ]; then
+  echo "https://github.com/owner/repo/issues/55"
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(GH_TOKEN="secret-value-xyz" PATH="$sandbox" "$CLI" forge-issue-create --title "T" --body "B") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-create credential: exit 0 (GH_TOKEN inherited correctly, no argv leak)"
+  assert_eq "created" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-create credential: status created"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_create_input_errors() {
+  echo ""
+  echo "=== forge-issue-create: missing --title and unknown/credential-shaped flags are caller errors ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  local stderr_file="/tmp/forge_issue_create_input_stderr.$$" exit_code
+
+  PATH="$sandbox" "$CLI" forge-issue-create --body "B" >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-issue-create missing --title: exit 1"
+  assert_stderr_contains "--title <text> is required" "$(cat "$stderr_file")" "forge-issue-create missing --title: stderr names the missing flag"
+
+  PATH="$sandbox" "$CLI" forge-issue-create --title T --body B --token secret >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-issue-create --token: rejected as unknown flag, exit 1"
+  assert_stderr_contains "unknown flag" "$(cat "$stderr_file")" "forge-issue-create --token: stderr names it unknown"
+
+  rm -f "$stderr_file"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_verbs_registered_in_help_and_dispatcher() {
+  echo ""
+  echo "=== forge-issue-view / forge-issue-create: listed in help and routed by the dispatcher ==="
+
+  local help_out
+  help_out=$("$CLI" help 2>&1)
+  assert_contains "forge-issue-view" "$help_out" "help: lists forge-issue-view"
+  assert_contains "forge-issue-create" "$help_out" "help: lists forge-issue-create"
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  local view_out create_out
+  view_out=$(PATH="$sandbox" "$CLI" forge-issue-view --number 1 2>&1)
+  create_out=$(PATH="$sandbox" "$CLI" forge-issue-create --title t --body b 2>&1)
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+
+  if printf '%s' "$view_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: forge-issue-view is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: forge-issue-view is routed"
+    ((TESTS_PASSED++))
+  fi
+
+  if printf '%s' "$create_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: forge-issue-create is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: forge-issue-create is routed"
+    ((TESTS_PASSED++))
+  fi
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -18175,6 +18672,25 @@ main() {
   test_forge_pr_view_missing_gh_binary_quiet_degrade
   test_forge_pr_view_non_github_forge_quiet_degrade
   test_forge_pr_view_registered_in_help_and_dispatcher
+
+  # Forge Issue Verb Tests (US-006) -- forge-issue-view / forge-issue-create,
+  # the first forge-* verbs that actually shell out to a forge CLI
+  echo ""
+  echo "--- Forge Issue Verb Tests (US-006) ---"
+  test_forge_map_state_table
+  test_forge_extract_issue_number_from_url
+  test_forge_emit_issue_create_status_shape
+  test_forge_issue_view_found
+  test_forge_issue_view_not_found
+  test_forge_issue_view_degraded_missing_gh
+  test_forge_issue_view_non_github_forge_degrades
+  test_forge_issue_view_input_errors
+  test_forge_issue_create_success
+  test_forge_issue_create_degraded_failure_prints_manual
+  test_forge_issue_create_missing_gh_mandatory_print
+  test_forge_issue_create_credential_via_env_not_argv
+  test_forge_issue_create_input_errors
+  test_forge_issue_verbs_registered_in_help_and_dispatcher
 
   cleanup
 
