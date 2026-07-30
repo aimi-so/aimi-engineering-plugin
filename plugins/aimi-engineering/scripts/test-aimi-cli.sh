@@ -16743,6 +16743,381 @@ test_forge_contract_header_carries_both_creates_identities() {
 }
 
 # ============================================================================
+# Forge PR View Tests (US-004)
+# ============================================================================
+# forge-pr-view is the first forge-* verb that actually shells out to a real
+# forge CLI (gh). Every fixture here is fully offline: `setup_detect_forge_
+# fixture` (test-aimi-cli.sh:16179) gives a github-shaped `git remote add`
+# that is never dialed, and a fake `gh` binary prepended to PATH -- mirroring
+# the fake-opencode-binary fixture `test_resolve_models_opencode_mtime_cache`
+# already uses (test-aimi-cli.sh:8518-8535) -- stands in for the real gh so
+# no test ever touches the network.
+
+# Writes a fake `gh` to its own PATH-prependable directory (sets
+# FAKE_GH_DIR). `gh pr view` and `gh pr list` behavior is driven entirely by
+# env vars the caller sets before invoking $CLI, so one fixture serves every
+# found/not_found/error scenario below:
+#   FAKE_GH_VIEW_EXIT / FAKE_GH_VIEW_STDERR -- `gh pr view` exit code + stderr
+#   FAKE_GH_PR_JSON                          -- `gh pr view` stdout on exit 0 (default '{}')
+#   FAKE_GH_LIST_EXIT / FAKE_GH_LIST_STDERR -- `gh pr list` exit code + stderr
+#   FAKE_GH_LIST_JSON                        -- `gh pr list` stdout on exit 0 (default '[]')
+#   FAKE_GH_LOG                              -- optional file; every invocation's args appended, one per line
+setup_fake_gh_fixture() {
+  FAKE_GH_DIR=$(mktemp -d)
+  cat > "$FAKE_GH_DIR/gh" << 'FAKE_GH_SCRIPT'
+#!/usr/bin/env bash
+if [ -n "$FAKE_GH_LOG" ]; then
+  printf '%s\n' "$*" >> "$FAKE_GH_LOG"
+fi
+
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  exit_code="${FAKE_GH_VIEW_EXIT:-0}"
+  if [ "$exit_code" = "0" ]; then
+    body="${FAKE_GH_PR_JSON:-}"
+    [ -z "$body" ] && body='{}'
+    printf '%s' "$body"
+    exit 0
+  fi
+  printf '%s' "${FAKE_GH_VIEW_STDERR:-}" >&2
+  exit "$exit_code"
+fi
+
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  exit_code="${FAKE_GH_LIST_EXIT:-0}"
+  if [ "$exit_code" = "0" ]; then
+    body="${FAKE_GH_LIST_JSON:-}"
+    [ -z "$body" ] && body='[]'
+    printf '%s' "$body"
+    exit 0
+  fi
+  printf '%s' "${FAKE_GH_LIST_STDERR:-}" >&2
+  exit "$exit_code"
+fi
+
+echo "fake gh: unhandled invocation: $*" >&2
+exit 127
+FAKE_GH_SCRIPT
+  chmod +x "$FAKE_GH_DIR/gh"
+}
+
+# Removes the temp directory created by setup_fake_gh_fixture
+teardown_fake_gh_fixture() {
+  rm -rf "$FAKE_GH_DIR"
+  unset FAKE_GH_DIR
+}
+
+# Curates a PATH-prependable directory containing every binary from the
+# real system PATH except `gh` (sets NO_GH_PATH_DIR), so the missing-gh-
+# binary quiet-degrade path can be exercised even though this project's own
+# dev/CI images pre-install gh at /usr/bin/gh. The `PATH="/usr/bin:/bin"`
+# trick that reliably removes opencode for
+# test_detect_models_opencode_absent_fallback works only because opencode is
+# never installed there; gh lives in that very directory alongside git,
+# bash and jq, so the same trick would remove those too. Excluding only the
+# file named `gh` and symlinking everything else keeps the rest of the CLI
+# running normally.
+setup_path_without_gh_fixture() {
+  NO_GH_PATH_DIR=$(mktemp -d)
+  local dir src bin_name
+  for dir in /usr/local/bin /usr/bin /bin; do
+    [ -d "$dir" ] || continue
+    for src in "$dir"/*; do
+      [ -e "$src" ] || continue
+      bin_name=$(basename "$src")
+      [ "$bin_name" = "gh" ] && continue
+      [ -e "$NO_GH_PATH_DIR/$bin_name" ] && continue
+      ln -s "$src" "$NO_GH_PATH_DIR/$bin_name" 2>/dev/null
+    done
+  done
+}
+
+# Removes the temp directory created by setup_path_without_gh_fixture
+teardown_path_without_gh_fixture() {
+  rm -rf "$NO_GH_PATH_DIR"
+  unset NO_GH_PATH_DIR
+}
+
+test_forge_pr_view_found_single_field() {
+  echo ""
+  echo "=== forge-pr-view: found status, single --include field, exact envelope shape (AC1) ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out exit_code
+  out=$(FAKE_GH_PR_JSON='{"url":"https://github.com/o/r/pull/7"}' PATH="$FAKE_GH_DIR:$PATH" \
+    "$CLI" forge-pr-view --pr feat-x --include url) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-view found: exit 0"
+  assert_eq '{"status":"found","pr":{"url":"https://github.com/o/r/pull/7"},"unsupported_fields":null,"evidence":null}' \
+    "$out" "forge-pr-view found: exact envelope shape, literal-for-literal (AC1)"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+test_forge_pr_view_include_field_sets() {
+  echo ""
+  echo "=== forge-pr-view: --include selects exactly the requested keys and no others (AC4) ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+
+  # review.md's five-field call site (review.md:36).
+  out=$(FAKE_GH_PR_JSON='{"title":"T","body":"B","files":[{"path":"a.txt"}],"headRefName":"feat","baseRefName":"main"}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include title,body,files,headRefName,baseRefName)
+  assert_eq '{"status":"found","pr":{"title":"T","body":"B","files":[{"path":"a.txt"}],"headRefName":"feat","baseRefName":"main"},"unsupported_fields":null,"evidence":null}' \
+    "$out" "forge-pr-view include: five-field review.md set returns exactly those keys"
+
+  # review.md's files-only call site (review.md:99).
+  out=$(FAKE_GH_PR_JSON='{"files":[{"path":"b.txt","additions":3,"deletions":1}]}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include files)
+  assert_eq '{"status":"found","pr":{"files":[{"path":"b.txt","additions":3,"deletions":1}]},"unsupported_fields":null,"evidence":null}' \
+    "$out" "forge-pr-view include: files-only returns exactly files"
+
+  # resolve-pr-parallel/SKILL.md's reviews,comments call site.
+  out=$(FAKE_GH_PR_JSON='{"reviews":[{"state":"APPROVED"}],"comments":2}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include reviews,comments)
+  assert_eq '{"status":"found","pr":{"reviews":[{"state":"APPROVED"}],"comments":2},"unsupported_fields":null,"evidence":null}' \
+    "$out" "forge-pr-view include: reviews,comments returns exactly those keys"
+
+  # Omitted --include -- default portable core, excludes files/reviews/comments
+  # (open-pr.md's own two call sites only ever want url).
+  out=$(FAKE_GH_PR_JSON='{"number":1,"url":"u","title":"t","body":"b","state":"open","headRefName":"h","baseRefName":"m"}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x)
+  assert_eq '{"status":"found","pr":{"number":1,"url":"u","title":"t","body":"b","state":"open","headRefName":"h","baseRefName":"m"},"unsupported_fields":null,"evidence":null}' \
+    "$out" "forge-pr-view include: omitted defaults to the seven-field portable core"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+test_forge_pr_view_not_found_and_error_never_conflated() {
+  echo ""
+  echo "=== forge-pr-view: not_found and error are never conflated for the same --pr ref (AC3, highest risk) ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local ref="feat-x"
+
+  # Run 1: no PR exists -- gh pr view fails with its own not-found wording,
+  # gh pr list confirms via the structural [] signal.
+  local not_found_out
+  not_found_out=$(FAKE_GH_VIEW_EXIT=1 FAKE_GH_VIEW_STDERR="no pull requests found for branch \"$ref\"" \
+    FAKE_GH_LIST_EXIT=0 FAKE_GH_LIST_JSON='[]' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr "$ref")
+
+  # Run 2: same ref -- gh itself is broken (authentication-failure-shaped
+  # stderr instead of gh's own no-pull-requests-found wording), and the list
+  # probe fails too -- must resolve to error, never not_found. This is the
+  # exact defect open-pr.md's current `gh pr view --json url` exit-code
+  # check carries today: a broken token reads as "no PR yet".
+  local error_out
+  error_out=$(FAKE_GH_VIEW_EXIT=1 FAKE_GH_VIEW_STDERR="authentication required, please run gh auth login" \
+    FAKE_GH_LIST_EXIT=1 FAKE_GH_LIST_STDERR="authentication required, please run gh auth login" \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr "$ref")
+
+  local not_found_status error_status
+  not_found_status=$(printf '%s' "$not_found_out" | jq -r '.status')
+  error_status=$(printf '%s' "$error_out" | jq -r '.status')
+
+  assert_eq "not_found" "$not_found_status" "forge-pr-view conflation guard: run 1 (no PR) resolves to not_found"
+  assert_eq "error" "$error_status" "forge-pr-view conflation guard: run 2 (broken auth) resolves to error"
+
+  if [ "$not_found_status" != "$error_status" ]; then
+    echo -e "${GREEN}✓${NC} forge-pr-view conflation guard: not_found and error produce different status literals for the same ref"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} forge-pr-view conflation guard: not_found and error produced the SAME status literal ($not_found_status) -- this is exactly the open-pr.md defect this verb exists to fix"
+    ((TESTS_FAILED++))
+  fi
+
+  assert_eq "null" "$(printf '%s' "$not_found_out" | jq -r '.pr')" "forge-pr-view conflation guard: not_found -- pr is null"
+  assert_contains "$ref" "$(printf '%s' "$not_found_out" | jq -r '.evidence')" "forge-pr-view conflation guard: not_found -- evidence names the searched ref"
+  assert_eq "null" "$(printf '%s' "$error_out" | jq -r '.pr')" "forge-pr-view conflation guard: error -- pr is null"
+  assert_contains "authentication required" "$(printf '%s' "$error_out" | jq -r '.evidence')" "forge-pr-view conflation guard: error -- evidence carries gh's own failure text"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+test_forge_pr_view_not_found_prefers_structural_list_probe_over_stderr_text() {
+  echo ""
+  echo "=== forge-pr-view: not_found detection prefers the structural gh-pr-list-returns-[] probe over stderr wording (orchestrator note) ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  # gh pr view's stderr deliberately does NOT contain "no pull requests
+  # found" wording -- simulating a reworded gh release or a non-English
+  # locale -- proving the structural `gh pr list --head <branch> --json
+  # number` returning [] at exit 0 is what actually drives not_found here,
+  # never stderr pattern-matching.
+  local out
+  out=$(FAKE_GH_VIEW_EXIT=1 FAKE_GH_VIEW_STDERR="HTTP 404: no encontro ninguna solicitud" \
+    FAKE_GH_LIST_EXIT=0 FAKE_GH_LIST_JSON='[]' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x)
+
+  assert_eq "not_found" "$(printf '%s' "$out" | jq -r '.status')" \
+    "forge-pr-view structural probe: reworded/non-English stderr still resolves to not_found via the list probe"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+test_forge_pr_view_not_found_secondary_stderr_fallback() {
+  echo ""
+  echo "=== forge-pr-view: falls back to gh's stderr wording only when the structural list probe itself cannot confirm not_found ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+  out=$(FAKE_GH_VIEW_EXIT=1 FAKE_GH_VIEW_STDERR='no pull requests found for branch "feat-x"' \
+    FAKE_GH_LIST_EXIT=1 FAKE_GH_LIST_STDERR="transient failure" \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x)
+
+  assert_eq "not_found" "$(printf '%s' "$out" | jq -r '.status')" \
+    "forge-pr-view stderr fallback: list probe failure falls back to gh's own not-found wording"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+test_forge_pr_view_numeric_ref_skips_list_probe() {
+  echo ""
+  echo "=== forge-pr-view: a numeric --pr (PR number) never invokes gh pr list -- --head takes a branch name, not a number ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local log_file="$FAKE_GH_DIR/call.log"
+  local out
+  out=$(FAKE_GH_LOG="$log_file" FAKE_GH_VIEW_EXIT=1 FAKE_GH_VIEW_STDERR="no pull requests found for PR #42" \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr 42)
+
+  assert_eq "not_found" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-view numeric ref: still resolves to not_found via the stderr fallback"
+  assert_contains "42" "$(printf '%s' "$out" | jq -r '.evidence')" "forge-pr-view numeric ref: evidence names the numeric ref"
+
+  if [ -f "$log_file" ] && grep -q "^pr list" "$log_file"; then
+    echo -e "${RED}✗${NC} forge-pr-view numeric ref: gh pr list was invoked despite a numeric ref"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} forge-pr-view numeric ref: gh pr list was never invoked"
+    ((TESTS_PASSED++))
+  fi
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+test_forge_pr_view_unknown_include_field_rejected() {
+  echo ""
+  echo "=== forge-pr-view: an unrecognized --include field is CLI misuse, exit 1, never a substantive outcome (AC5) ==="
+
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local stderr_file="/tmp/forge_pr_view_bad_include_stderr.$$"
+  local exit_code
+  "$CLI" forge-pr-view --pr feat-x --include bogus >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-view bad --include: exits 1"
+  assert_stderr_contains "Error: forge-pr-view: unknown --include field: bogus" "$(cat "$stderr_file")" "forge-pr-view bad --include: stderr names the bad field"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_view_missing_gh_binary_quiet_degrade() {
+  echo ""
+  echo "=== forge-pr-view: gh absent from PATH degrades to status=error with no stderr banner (quiet mode, AC6) ==="
+
+  setup_path_without_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local stderr_file="/tmp/forge_pr_view_no_gh_stderr.$$"
+  local out exit_code
+  out=$(PATH="$NO_GH_PATH_DIR" "$CLI" forge-pr-view --pr feat-x 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-view gh-absent: exits 0 (never a caller error)"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-view gh-absent: status is error"
+  assert_contains "gh" "$(printf '%s' "$out" | jq -r '.evidence')" "forge-pr-view gh-absent: evidence names the missing binary"
+  assert_eq "" "$(cat "$stderr_file")" "forge-pr-view gh-absent: no stderr banner (quiet degrade mode, matching review.md's undocumented-warning-free fallback)"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_path_without_gh_fixture
+}
+
+test_forge_pr_view_non_github_forge_quiet_degrade() {
+  echo ""
+  echo "=== forge-pr-view: a non-github forge (gitlab/gitea) degrades to status=error with no stderr banner (quiet mode, AC6) ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local stderr_file="/tmp/forge_pr_view_gitlab_stderr.$$"
+  local out exit_code
+  out=$("$CLI" forge-pr-view --pr feat-x 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-view non-github forge: exits 0"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-view non-github forge: status is error"
+  assert_contains "gitlab" "$(printf '%s' "$out" | jq -r '.evidence')" "forge-pr-view non-github forge: evidence names the detected forge"
+  assert_eq "" "$(cat "$stderr_file")" "forge-pr-view non-github forge: no stderr banner (quiet degrade mode)"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_view_registered_in_help_and_dispatcher() {
+  echo ""
+  echo "=== forge-pr-view: listed in help with its flags and routed by the dispatcher (AC7) ==="
+
+  local help_out
+  help_out=$("$CLI" help 2>&1)
+  assert_contains "forge-pr-view --pr <branch-or-number> [--include <fields>] [--project <path>]" "$help_out" "help: lists forge-pr-view with its three flags"
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local dispatch_out
+  dispatch_out=$(FAKE_GH_PR_JSON='{"url":"u"}' PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url 2>&1)
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+
+  if printf '%s' "$dispatch_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: forge-pr-view is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: forge-pr-view is routed"
+    ((TESTS_PASSED++))
+  fi
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -17330,6 +17705,22 @@ main() {
   test_forge_emit_status_three_outcomes
   test_forge_bin_check_quiet_and_mandatory_modes
   test_forge_contract_header_carries_both_creates_identities
+
+  # Forge PR View Tests (US-004) -- field-selectable PR lookup with a
+  # three-way found/not_found/error status, fixing the exit-code conflation
+  # gh pr view --json url carries today
+  echo ""
+  echo "--- Forge PR View Tests (US-004) ---"
+  test_forge_pr_view_found_single_field
+  test_forge_pr_view_include_field_sets
+  test_forge_pr_view_not_found_and_error_never_conflated
+  test_forge_pr_view_not_found_prefers_structural_list_probe_over_stderr_text
+  test_forge_pr_view_not_found_secondary_stderr_fallback
+  test_forge_pr_view_numeric_ref_skips_list_probe
+  test_forge_pr_view_unknown_include_field_rejected
+  test_forge_pr_view_missing_gh_binary_quiet_degrade
+  test_forge_pr_view_non_github_forge_quiet_degrade
+  test_forge_pr_view_registered_in_help_and_dispatcher
 
   cleanup
 

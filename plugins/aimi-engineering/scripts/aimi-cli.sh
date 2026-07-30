@@ -2358,6 +2358,242 @@ _forge_bin_check() {
   return 1
 }
 
+# ============================================================================
+# forge-pr-view (US-004)
+# ============================================================================
+# Fixes the exact defect commands/open-pr.md carries today:
+#   gh pr view "$CURRENT_BRANCH" --json url --jq '.url' 2>/dev/null
+# exits non-zero for BOTH "no PR exists for this branch" AND "gh/auth is
+# broken" -- a broken token reads as "no PR yet" and open-pr.md proceeds to
+# create a duplicate. forge-pr-view adopts the three-way found/not_found/
+# error status forge-contract.md publishes so a caller can finally tell the
+# two apart, and adds a --include field selector so a caller that only wants
+# `url` (open-pr.md's own two call sites) never pays for the expensive
+# `files` field the way every current `gh pr view --json` call site does
+# today regardless of what it actually asked for.
+#
+# This verb's envelope is deliberately its OWN shape --
+# {status, pr, unsupported_fields, evidence} -- rather than the generic
+# three-way envelope _forge_emit_status builds ({status, data, message}):
+# the --include selector requires `pr` to carry exactly the caller's
+# requested keys and no others, never the full fixed superset
+# _forge_build_pr_json always returns, and a not_found outcome here must
+# carry a populated `evidence` (naming the ref that was searched) rather
+# than staying forced-null the way _forge_emit_status's `message` does for
+# every outcome but error. The found/not_found/error status vocabulary
+# still matches forge-contract.md's Three-Way Status Convention exactly --
+# only this envelope's field names and null-forcing rules differ, driven by
+# this verb's own field-selectable contract. Field names inside `pr` are
+# gh's own (number, url, title, body, state, headRefName, baseRefName,
+# files, reviews, comments) rather than invented canonical names, since
+# github is the only adapter shipping in this phase and every current call
+# site's own jq expression (e.g. `.files[].path`) must survive unchanged.
+#
+# Does NOT implement a gitlab or gitea adapter -- both, plus a missing gh
+# binary, degrade through the quiet _forge_bin_check mode, matching
+# review.md's own already-documented git-diff fallback for a missing gh so
+# a later migration onto this verb introduces no new warning banner.
+
+# Emit the forge-pr-view envelope: {status, pr, unsupported_fields, evidence}.
+# status must be found | not_found | error (anything else is a caller error,
+# exit 1 -- never silently coerced). pr and unsupported_fields are forced
+# null unless status=="found"; evidence is forced null only when
+# status=="found" -- not_found and error both carry a populated evidence
+# string (the searched ref, or gh's own failure text, respectively).
+_forge_pr_view_emit() {
+  local status="$1" pr_json="${2:-null}" unsupported_json="${3:-null}" evidence="${4:-}"
+
+  case "$status" in
+    found|not_found|error) ;;
+    *)
+      echo "Error: _forge_pr_view_emit: status must be found, not_found or error (got: $status)" >&2
+      return 1
+      ;;
+  esac
+
+  if [ "$status" != "found" ]; then
+    pr_json="null"
+    unsupported_json="null"
+  fi
+  if [ "$status" = "found" ]; then
+    evidence=""
+  fi
+
+  jq -nc \
+    --arg status "$status" \
+    --argjson pr "$pr_json" \
+    --argjson unsupportedFields "$unsupported_json" \
+    --arg evidence "$evidence" \
+    '{status: $status, pr: $pr, unsupported_fields: $unsupportedFields,
+      evidence: (if $evidence == "" then null else $evidence end)}'
+}
+
+# github adapter for forge-pr-view. <ref> is a PR number or a branch name
+# (already validated by cmd_forge_pr_view before this ever runs); <fields_csv>
+# is the comma-joined --json field list (caller's --include set, or the
+# default cheap set). Captures gh's stdout and stderr on separate variables
+# (this file runs under set -euo pipefail -- rc is pre-initialized and
+# captured with `|| rc=$?`, mirroring _verify_creates_one's own capture
+# pattern) so a legitimate non-zero gh exit never aborts the script.
+_forge_pr_view_github() {
+  local ref="$1" fields_csv="$2"
+  local stdout="" stderr="" rc=0 err_file
+
+  err_file=$(mktemp)
+  stdout=$(gh pr view "$ref" --json "$fields_csv" 2>"$err_file") || rc=$?
+  stderr=$(cat "$err_file")
+  rm -f "$err_file"
+
+  if [ "$rc" -eq 0 ]; then
+    # Re-subset gh's own response to exactly the requested keys -- a no-op
+    # against real gh (which already returns only the requested --json
+    # fields) but guarantees "exactly the requested keys and no others"
+    # regardless of what a given gh version actually returns.
+    local pr_json
+    pr_json=$(printf '%s' "$stdout" | jq -c --arg fields "$fields_csv" '
+      ($fields | split(",")) as $keys
+      | . as $src
+      | reduce $keys[] as $k ({}; . + {($k): $src[$k]})
+    ')
+    _forge_pr_view_emit "found" "$pr_json" "null" ""
+    return 0
+  fi
+
+  # --- not_found detection ---------------------------------------------
+  # Primary signal: `gh pr list --head <branch> --json number` returns `[]`
+  # at exit 0 when no PR exists -- a structural fact in JSON rather than a
+  # string in a message, so it survives a gh release that rewords its own
+  # stderr or a non-English locale. `--state all` so a closed/merged PR
+  # still counts as found (gh pr list defaults to open-only, which would
+  # otherwise misreport a closed PR's branch as not_found). This probe only
+  # applies to a branch ref -- `--head` takes a branch name, not a PR
+  # number -- so a numeric ref skips straight to the stderr fallback below.
+  if ! [[ "$ref" =~ ^[0-9]+$ ]]; then
+    local list_out="" list_rc=0 list_count=""
+    list_out=$(gh pr list --head "$ref" --state all --json number 2>/dev/null) || list_rc=$?
+    if [ "$list_rc" -eq 0 ]; then
+      list_count=$(printf '%s' "$list_out" | jq 'length' 2>/dev/null) || list_count=""
+      if [ "$list_count" = "0" ]; then
+        _forge_pr_view_emit "not_found" "null" "null" "no pull request found for ref: $ref"
+        return 0
+      fi
+    fi
+  fi
+
+  # Secondary fallback: gh's own no-pull-requests-found wording. Kept
+  # strictly as a backstop for when the structural probe above could not
+  # confirm not_found (a numeric ref, or the list probe itself failing) --
+  # never the primary signal, since a translatable/rewordable string is
+  # exactly the fragility this verb exists to avoid.
+  if printf '%s' "$stderr" | grep -qi "no pull requests\? found"; then
+    _forge_pr_view_emit "not_found" "null" "null" "no pull request found for ref: $ref"
+    return 0
+  fi
+
+  # Every other non-zero exit is a genuine tool failure (auth, network,
+  # malformed response) -- never folded into not_found. evidence carries
+  # gh's own stderr text.
+  _forge_pr_view_emit "error" "null" "null" "$stderr"
+  return 0
+}
+
+# Field-selectable, three-way-status PR lookup. See this section's header
+# comment for the defect this fixes and why its envelope differs from the
+# generic forge-contract.md three-way envelope.
+# Usage: aimi-cli.sh forge-pr-view --pr <branch-or-number> [--include <fields>] [--project <path>]
+# --include is a comma-separated subset of: number, url, title, body, state,
+# headRefName, baseRefName, files, reviews, comments. Defaults to the
+# portable core (number,url,title,body,state,headRefName,baseRefName) when
+# omitted -- files/reviews/comments stay opt-in-only so a caller that only
+# wants url never triggers the more expensive per-file/thread lookups.
+cmd_forge_pr_view() {
+  local pr_ref="" include_raw="" project_dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --pr)      shift; pr_ref="${1:-}" ;;
+      --include) shift; include_raw="${1:-}" ;;
+      --project) shift; project_dir="${1:-}" ;;
+      *)
+        echo "Error: forge-pr-view: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  # cd into project dir if specified (supports multi-repo layouts where AIMI root is not a git repo)
+  if [ -n "$project_dir" ]; then
+    if [ ! -d "$project_dir" ]; then
+      echo "Error: Project directory does not exist: $project_dir" >&2
+      exit 1
+    fi
+    cd "$project_dir"
+  fi
+
+  # Guard: must be inside a git repository
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
+    exit 1
+  fi
+
+  if [ -z "$pr_ref" ]; then
+    echo "Usage: aimi-cli.sh forge-pr-view --pr <branch-or-number> [--include <fields>] [--project <path>]" >&2
+    exit 1
+  fi
+
+  # Validate --pr before it is ever interpolated into a gh invocation:
+  # digits-only (a PR number) or the repo-wide branch-name regex.
+  if ! [[ "$pr_ref" =~ ^[0-9]+$ ]] && ! [[ "$pr_ref" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: forge-pr-view: invalid --pr value: $pr_ref" >&2
+    exit 1
+  fi
+
+  # --include: comma-separated field list (IFS=',' split, matching the
+  # decoration-token split at aimi-cli.sh:1727). An unrecognized field name
+  # is CLI misuse (exit 1) -- never folded into the substantive result.
+  local -a requested_fields=()
+  if [ -n "$include_raw" ]; then
+    local old_ifs="$IFS"
+    IFS=','
+    read -ra requested_fields <<< "$include_raw"
+    IFS="$old_ifs"
+  else
+    requested_fields=(number url title body state headRefName baseRefName)
+  fi
+
+  local field known
+  for field in "${requested_fields[@]}"; do
+    known=false
+    case "$field" in
+      number|url|title|body|state|headRefName|baseRefName|files|reviews|comments) known=true ;;
+    esac
+    if [ "$known" = false ]; then
+      echo "Error: forge-pr-view: unknown --include field: $field" >&2
+      exit 1
+    fi
+  done
+
+  local fields_csv
+  fields_csv=$(IFS=','; echo "${requested_fields[*]}")
+
+  local forge
+  forge=$(_detect_forge | jq -r '.forge')
+
+  case "$forge" in
+    github)
+      if _forge_bin_check gh quiet github; then
+        _forge_pr_view_github "$pr_ref" "$fields_csv"
+      else
+        _forge_pr_view_emit "error" "null" "null" "gh not found on PATH -- this github operation cannot run automatically."
+      fi
+      ;;
+    *)
+      _forge_pr_view_emit "error" "null" "null" "no forge-pr-view adapter for the '$forge' forge yet."
+      ;;
+  esac
+}
+
 # Detect a Claude Design handoff bundle under a given root (defaults to CWD).
 # Scans depth-1 subdirectories for a README.md containing the handoff marker.
 # Returns JSON object when found, "null" when not found.
@@ -9396,6 +9632,20 @@ COMMANDS:
                               detection entirely (source=override, no git
                               remote read runs); any other value exits 1.
                               Never cached -- re-derived on every invocation.
+    forge-pr-view --pr <branch-or-number> [--include <fields>] [--project <path>]
+                              Field-selectable PR lookup with a three-way
+                              found|not_found|error status, fixing the
+                              exit-code conflation `gh pr view --json url`
+                              carries today (a broken token reads as "no PR
+                              yet"). Output: {status, pr, unsupported_fields,
+                              evidence}. --include is a comma-separated
+                              subset of: number, url, title, body, state,
+                              headRefName, baseRefName, files, reviews,
+                              comments -- defaults to the portable core
+                              (excludes files/reviews/comments) when omitted.
+                              Only github ships in this phase; gitlab, gitea,
+                              unknown, or a missing gh binary degrade to
+                              status=error with no stderr output.
     detect-interactivity [--non-interactive]
                               Print resolved interactivity mode (picker|agent)
                               Returns picker by default; returns agent only when
@@ -9930,6 +10180,7 @@ main() {
     detect-default-branch) shift; cmd_detect_default_branch "$@" ;;
     detect-parent-branch) shift; cmd_detect_parent_branch "$@" ;;
     detect-forge) shift; cmd_detect_forge "$@" ;;
+    forge-pr-view) shift; cmd_forge_pr_view "$@" ;;
     setup-branch)      shift; cmd_setup_branch "$@" ;;
     resolve-base-branch) shift; cmd_resolve_base_branch "$@" ;;
     clear-state)       cmd_clear_state ;;
