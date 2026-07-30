@@ -106,7 +106,10 @@ backup_file() {
       log "[dry-run] Would backup $path -> $bak"
     else
       cp "$path" "$bak"
-      [ "$VERBOSE" -eq 1 ] && log "Backed up $path -> $bak"
+      # Use an explicit if (not `[ ... ] && log`): as the function's last
+      # statement, a bare `&&` test returns 1 when VERBOSE=0, which aborts the
+      # caller under `set -euo pipefail`. An if returns 0 when the test is false.
+      if [ "$VERBOSE" -eq 1 ]; then log "Backed up $path -> $bak"; fi
     fi
   fi
 }
@@ -213,6 +216,28 @@ translate_command_body() {
   # The aimi-cli story-merge invocation (Phase 3e) uses the standard per-call
   # AIMI_CLI resolution and requires no additional translation — the CLI-path
   # rewrite above handles the path, and the subcommand name is preserved verbatim.
+  #
+  # Coverage re-verified (US-006): brainstorm.md's Phase 3.6 Prototype Offer
+  # Gate picker ("Present via **AskUserQuestion** (picker mode)" / "Skip
+  # AskUserQuestion entirely") is fully covered by the existing four rules
+  # below — no new rule was needed. Any future picker phrased the same way is
+  # covered automatically by the bare-token catch-all (last rule below).
+  #
+  # Coverage re-verified (US-005): execute.md's Creates Verification call
+  # `$AIMI_CLI verify-creates --feature … --phase … --dir …` needs no new rule —
+  # this function was sourced in isolation, fed that literal invocation, and
+  # returned it byte-identical. None of the substitutions above or below can
+  # match a subcommand name, so verify-creates survives translation verbatim
+  # exactly as story-merge does; only the CLI-path rewrite applies.
+  #
+  # Coverage re-verified (bug/container-base-branch-resolution US-005):
+  # execute.md's Step 0 `--base` extraction (a plain `case " $ARGUMENTS " in`
+  # scan + `sed`/`grep` pair, mirroring the pre-existing `--phase`/`--container`/
+  # `--inline`/`--push` extractions) and every `resolve-base-branch`/
+  # `setup-branch --base "$BASE_BRANCH"` call site it threads into need no new
+  # rule — none of the substitutions above rewrite flag parsing or CLI
+  # subcommand/flag names, so `--base` and its call sites survive translation
+  # byte-identical, same as `--phase` already does.
   body="${body//Use \*\*AskUserQuestion\*\*/Use the **question** tool}"
   body="${body//Use AskUserQuestion/Use the question tool}"
   body="${body//via AskUserQuestion/via the question tool}"
@@ -421,6 +446,11 @@ install_plugin_source() {
 
   mkdir -p "$plugin_dst"
   # Copy everything except .git
+  # This is a whole-tree copy, not a per-file allowlist: commands/references/*.md
+  # (cli-path-resolution.md, scope-contexts.md, ui-signals.md, visual-variants.md, ...)
+  # is carried verbatim by this cp -R with no code change needed when new reference
+  # files are added — install_commands' subdirectory loops deliberately skip
+  # "references" (see below) because this copy already delivers them (verified US-006).
   cp -R "$src/." "$plugin_dst/"
 
   # Ensure scripts are executable
@@ -627,6 +657,7 @@ install_skills() {
       [ -d "$skill_parent/references" ] && log "[dry-run]     + references/"
       [ -d "$skill_parent/scripts" ]    && log "[dry-run]     + scripts/"
       [ -d "$skill_parent/templates" ]  && log "[dry-run]     + templates/"
+      [ -f "$skill_parent/NOTICE.md" ]  && log "[dry-run]     + NOTICE.md"
     done
     return 0
   fi
@@ -662,6 +693,12 @@ install_skills() {
     if [ -d "$skill_parent/templates" ]; then
       cp -R "$skill_parent/templates" "$dst/"
       [ "$VERBOSE" -eq 1 ] && log "    + templates/"
+    fi
+
+    # Copy skill-root NOTICE.md if present (attribution/license notice)
+    if [ -f "$skill_parent/NOTICE.md" ]; then
+      cp "$skill_parent/NOTICE.md" "$dst/NOTICE.md"
+      [ "$VERBOSE" -eq 1 ] && log "    + NOTICE.md"
     fi
 
     count=$((count + 1))

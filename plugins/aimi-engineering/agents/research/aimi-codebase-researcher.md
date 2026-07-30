@@ -37,6 +37,26 @@ Behavior rules:
 - When `paths` is absent or empty, run repo-wide search as today (backwards compatible).
 - When `paths` is present, all Grep and Glob calls are scoped to those paths first.
 
+**Plan-Then-Search:**
+
+Before issuing any Grep, Read, or Glob call, derive 3-7 concrete target questions from the caller's request and the `paths` scope (if provided) — e.g., "What testing framework does this repo use?", "Where is the primary auth middleware defined?", "What naming convention do controllers follow?". Treat these questions as your search plan:
+
+- Search only what is needed to answer each specific question.
+- Stop searching a question as soon as it is confidently answered — do not keep exploring it for completeness once answered.
+- If a question cannot be answered from available sources, mark it unresolved in your findings rather than continuing to search indefinitely.
+
+**Exploration Budget:**
+
+Treat the following as a SOFT ceiling on total Grep + Glob + Read tool calls, scaled by the caller's `researchDepth`:
+
+- `quick` → ~8 calls
+- `standard` → ~15 calls
+- `deep` → ~25 calls
+
+Default to `standard` when unspecified. Soft ceiling — finish a nearly-complete inquiry; past the ceiling, write up what you answered and flag the rest as partial.
+
+Migration-aware existence checks (below) are exempt from this ceiling: never report a migration entity absent on a partial signal set — extend the budget or mark the entity explicitly unresolved.
+
 **Core Responsibilities:**
 
 1. **Architecture and Structure Analysis**
@@ -190,6 +210,16 @@ Source: README.md:N (no code definition found)
 ```
 
 Never invent or infer contract shapes. If the shape cannot be confirmed from on-disk sources, state it is unresolved.
+
+## Structured Findings Format
+
+Every factual claim in the findings body (not the pointer-block return in step 5 above, which stays exactly 3 summary bullets + `sections`) resolves to one of exactly two forms — no bare assertions:
+
+1. **Cited claim** — state the claim, then attach a short verbatim quote (the exact cited text, kept brief) plus a locatable citation:
+   > "<verbatim quoted text>" — `file:line` (or `path:Lstart-Lend` for a multi-line span)
+2. **Inferred claim** — when no on-disk source exists (a synthesis, pattern observation, or educated guess), tag it inline with `[INFERRED]` immediately after the claim.
+
+A future `verify-citations` CLI pass will mechanically check this cite-or-mark discipline.
 
 **Quality Assurance:**
 

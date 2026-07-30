@@ -197,6 +197,42 @@ This makes tokens both visible to the user (one block to scan) and trivially tra
 
 If `references/visual-variants.md` is being read from a brainstorm that already performed a component-shell scan (see `brainstorm.md` Phase 2 "Component Shell Scan"), use the extracted structural patterns (wrapper tags, spacing idioms, primary-action class recipes) as additional structural constraints alongside the canonical shape. Component-shell findings *narrow* structural choices; they do not replace the canonical shape selection.
 
+## Reference Intake
+
+At the Phase 3.6 gate, the brainstorm agent may offer the user an optional opportunity to supply an external visual reference before Token Extraction (below) runs. Intake is entirely optional: if the user declines or offers nothing, the agent proceeds straight to Token Extraction using only the project-source probes. When a reference is supplied, it resolves as **Probe #0** — the highest-precedence token source in the whole extraction chain (see "Precedence — Probe #0" below).
+
+### Input Kinds
+
+Exactly three input kinds are accepted:
+
+1. **Local file path** — an image (`.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.svg`), an `.html` file, or a `.css` file, read via the Read tool. This is a **read-only reference path**, and unlike written prototype/output paths governed by "## Output Path Pattern" and "## Topic-Slug Sanitization" above, it MAY resolve **outside AIMI_ROOT** — the user is pointing at an existing design artifact anywhere on disk, not asking the agent to write one. Path traversal into system directories (e.g. `/etc`, `/proc`, `/sys`, or other absolute paths outside any reasonable project or home boundary) is still forbidden, and the file is **never executed** — it is read as plain data only (pixels, markup, or CSS text), identically to every project-source probe below.
+
+2. **URL** — opened via the existing `agent-browser` session described in "## Browser Session Lifecycle" below. The agent takes a screenshot of the rendered page and extracts palette, typography, and spacing cues from what renders. This reuses that lifecycle's open/reload/close/fallback mechanics as-is — intake does not open a second browser or invent a new fetch mechanism; if the Browser Session Lifecycle's own fallback rules are already engaged (e.g. `agent-browser` unavailable), URL intake degrades the same way (see "Sanitization and Failure Degradation" below).
+
+3. **Free-text style directive** — a short natural-language description of a desired look (e.g. "estilo Linear, dark, tipografia densa"). This kind yields no extracted token files at all; it is an **authoring directive** that biases variant generation (Structural Guidance, Step 2) and is recorded as **provenance only** in the token sidecar.
+
+### Precedence — Probe #0
+
+When a reference is supplied, it resolves as **Probe #0**, ahead of every project-source probe in "### Probe Order (fixed precedence)" below. Full precedence, highest to lowest:
+
+```
+Probe #0 (user reference) → Probes #1..#N (project code) → Tailwind CDN defaults
+```
+
+Probe #0 does not necessarily cover every token family — an image reference, for instance, yields color/font/spacing cues but rarely radii or transition timing. Any family the reference does not cover falls through to the existing project-source probes (Probe #1 onward) and, failing those, to Tailwind CDN defaults, exactly as if no reference had been supplied.
+
+### Sanitization and Failure Degradation
+
+The user-supplied path, URL, or free text is sanitized before being stored in working memory or written to the sidecar's `reference.source` field (see "### Token Sidecar JSON" below): apply the base rules in `commands/references/sanitization.md` (strip code fences, HTML/XML tags, instruction-override patterns), plus strip newlines/carriage-returns, remove `$(` sequences and backtick characters, and truncate (path/URL: 500 chars; free text: 280 chars).
+
+Intake failure never aborts the brainstorm — mirroring "### Error Handling" below. On a missing or unreadable local path, a URL that will not open, or any other intake failure, the agent emits **exactly one** warning line, formatted as:
+
+```
+⚠ Reference intake: <kind> reference unavailable (<reason>) — using project tokens.
+```
+
+and degrades to the plain [Prototype] flow — project-source probes only (Probe #1 onward, then Tailwind CDN defaults) — as if no reference had been supplied.
+
 ## Token Extraction
 
 The brainstorm agent attempts to extract design tokens (colors, fonts, radii, spacing, shadows, transitions, screens, dark-mode) from the target project before generating variant HTML. Extraction is **best-effort**: parse errors on any source are silently swallowed and that source is skipped — extraction failures never abort the brainstorm.
@@ -204,6 +240,8 @@ The brainstorm agent attempts to extract design tokens (colors, fonts, radii, sp
 ### Probe Order (fixed precedence)
 
 For each token family, the agent probes sources in this order and stops at the **first source that yields non-empty tokens** for that family. Different families may resolve from different sources (e.g., colors from `tailwind.config`, fonts from `theme.ts`).
+
+When a user reference was supplied via "## Reference Intake" above, it resolves first as **Probe #0**; the numbered probes below run only for families Probe #0 did not already cover.
 
 1. **`tailwind.config.{js,ts,mjs,cjs}`** — Read the file and extract values under `theme.extend` (preferred) or `theme` keys: `colors`, `fontFamily`, `borderRadius`, `spacing`. Pattern: look for object literals following those key names. If the file imports or requires another module for its config, skip and continue to the next source.
 
@@ -271,14 +309,16 @@ Shape:
   "screens": { "sm": "640px", "md": "768px", "...": "..." },
   "darkMode": { "strategy": "class|media|none", "colors": { "background": "#0b0b0b", "...": "..." } },
   "sources": { "colors": "tailwind.config.ts", "fonts": "theme.ts", "...": "..." },
-  "fallbacks": ["shadows", "transitions"]
+  "fallbacks": ["shadows", "transitions"],
+  "reference": { "kind": "image|url|text", "source": "<sanitized path, URL, or truncated text>" }
 }
 ```
 
 - Include only families that were actually resolved or fell back; omit a family entirely if it was neither resolved nor required by the variant.
 - `sources[family]` names the file that won for that family (relative path from project root). Omit the key for families that fell back.
 - `fallbacks[]` lists every family that fell back to Tailwind defaults.
-- `/aimi:plan` reads this sidecar to thread token context into implementation stories. `/aimi:review` reads it to verify generated mockups match the target project's tokens.
+- `reference` is present only when a reference was supplied via "## Reference Intake" above; `kind` is `image`, `url`, or `text`; `source` is the sanitized path, URL, or truncated free text (see "Sanitization and Failure Degradation" in that section). Omit the key entirely when no reference was supplied.
+- `/aimi:plan` reads this sidecar to thread token context into implementation stories. `/aimi:review` reads it to verify generated mockups match the target project's tokens. Both can read `reference` to know the visual target had an external reference.
 
 ### Error Handling
 

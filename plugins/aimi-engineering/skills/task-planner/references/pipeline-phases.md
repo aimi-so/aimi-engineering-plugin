@@ -30,6 +30,66 @@
    - Prefer multiple choice when natural options exist
    - Continue until idea is clear OR user says "proceed"
 
+### Roadmap Materialization
+
+Only runs when a brainstorm was loaded above — a `phases:` frontmatter key can exist only on a brainstorm document written by `/aimi:brainstorm`'s Phase 3.5 roadmap-gate (see `commands/brainstorm.md` "phases frontmatter rules"). When no brainstorm was found, skip this entire section with no log line.
+
+`/aimi:brainstorm` never creates `.aimi/tasks/<feature-slug>/roadmap.json` itself — it only writes the `phases:` frontmatter block. This step is what turns that block into durable, guard-protected state.
+
+**Parse `phases:` frontmatter**
+
+1. Parse the `phases:` key from the already-loaded brainstorm frontmatter. Each entry carries `id, name, slug, goal, successCriteria, dependsOn, creates, needs, areas` in that fixed order.
+2. **Absent** (legacy brainstorm, single scope-context feature, or roadmap gate skipped/collapsed): skip the rest of this section. No `.aimi/tasks/<feature-slug>/` folder is created, no `roadmap.json` is written, and the rest of the pipeline (Phase 1 onward) behaves identically to today's flat, non-phased flow. This is the default path — no log line.
+3. **Present but fewer than 2 entries** (defensive re-check — `/aimi:brainstorm` never emits a single-entry list, but a hand-edited brainstorm might): treat as absent. Emit `phases: frontmatter has fewer than 2 entries — ignoring, falling back to flat flow` and skip.
+
+**Sanitize every phase field**
+
+Apply the base rules in `commands/references/sanitization.md` (strip code fences/backtick content, HTML/XML tags, instruction-override patterns) plus the newline/`$(`-stripping extension used elsewhere in this pipeline, to every free-text field, before it is used in any directory-segment derivation, CLI argument, or downstream prompt:
+
+- Replace newlines/carriage returns with spaces; strip `$(` sequences and backtick characters.
+- Truncate: `name` 200 chars, `goal` 2000 chars, each `successCriteria` entry 2000 chars, each `creates`/`needs`/`areas` entry 500 chars (matches the server-side `_ROADMAP_SANITIZE_JQ` caps `aimi-cli.sh` re-applies: 2000 for `successCriteria`, 500 for the three contract lists — they do not share one cap).
+- `successCriteria`, `dependsOn`, `creates`, `needs`, `areas` default to `[]` when absent.
+- `id` and each `dependsOn` entry are numbers — validate `id` is present and numeric; drop (with a warning) any entry that fails.
+- **Discard the frontmatter's own `slug` value entirely.** It is never trusted — the next step derives a fresh one from the sanitized `name`.
+
+**Derive and validate each phase's directory segment**
+
+For each sanitized phase entry:
+
+1. Derive `candidateSlug` from the sanitized `name` via the five-step algorithm in `commands/references/topic-slug.md`.
+2. Compose `candidateDir = "phase-" + <id> + (candidateSlug non-empty ? "-" + candidateSlug : "")`.
+3. Validate against `^phase-[0-9]+(\.[0-9]+)?(-[a-z0-9][a-z0-9-]*)?$` — the same pattern `aimi-cli.sh` enforces server-side as `_ROADMAP_DIR_REGEX`.
+4. **Match:** use `candidateSlug` as the phase's `slug` in the payload.
+5. **No match:** emit `phase <id>: computed dir segment "<candidateDir>" failed validation — falling back to bare phase-<id>` and use an empty string as `slug` instead, so the CLI computes the bare `phase-<id>` form. Never pass the rejected value to `mkdir`, the `roadmap-init` call, or any Write/Edit tool call.
+
+**Derive the feature slug**
+
+Read the brainstorm's top-level `topic:` frontmatter key as `featureSlug` (already produced by the topic-slug algorithm). Validate against `^[a-zA-Z0-9][a-zA-Z0-9_-]*$` (the `--feature` pattern `aimi-cli.sh` enforces); on mismatch, re-derive via the topic-slug algorithm on the raw `topic:` value. If still invalid, skip with warning `roadmap materialization skipped — could not derive a valid feature slug`.
+
+**Detect existing roadmap.json and materialize**
+
+```bash
+[ -f "$AIMI_ROOT/.aimi/tasks/$featureSlug/roadmap.json" ] && echo exists || echo absent
+```
+
+- **`exists`:** call `roadmap-init --feature "$featureSlug" --sync` with the sanitized phases JSON array piped via stdin. Any phase id already present is left byte-for-byte unchanged (status/claim/branch untouched); any phase id present only in the frontmatter is appended, joining by numeric id (decimal-inserted phases like `2.1` sort between their numeric neighbors). This call is also correct — and a no-op for existing phases — on a byte-for-byte unchanged re-run. Never call `roadmap-init` without `--sync` when the file exists; that is a hard error by design.
+- **`absent`:** call `roadmap-init --feature "$featureSlug" --brainstorm-path "<brainstorm relative path>"` (no `--sync`) with the same JSON array piped via stdin. The CLI creates `.aimi/tasks/<feature-slug>/` itself as part of its locked write — no separate `mkdir`, no Write tool call ever touches `roadmap.json`.
+
+Payload shape (one object per phase, fixed key order):
+
+```json
+[
+  {"id": 1, "name": "Foundation", "slug": "foundation", "goal": "...", "successCriteria": ["..."], "dependsOn": [], "creates": ["..."], "needs": [], "areas": ["..."]},
+  {"id": 2, "name": "Notifications", "slug": "notifications", "goal": "...", "successCriteria": ["..."], "dependsOn": [1], "creates": [], "needs": ["..."], "areas": ["..."]}
+]
+```
+
+If `roadmap-init` exits non-zero for any other reason (e.g. a dangling `dependsOn` reference from a hand-edited brainstorm), surface its stderr as a warning and continue the rest of the plan pipeline unchanged — do not abort the whole run over a roadmap-materialization failure.
+
+### Rolling-Wave Phase Selection
+
+Unlike Roadmap Materialization above, this step runs whether or not a brainstorm loaded this session — it is what lets a bare `/aimi:plan` (or `/aimi:plan --phase <N>`) re-invocation continue an *existing* large-scope feature, auto-selecting and expanding exactly one pending phase per invocation and leaving every other phase outline-only in `roadmap.json`. No `roadmap.json` for the resolved feature → this entire step is a no-op and Phase 1 through Phase 4.5 run byte-for-byte as they do today. Full rules — feature/phase resolution, eligibility filtering, the pre-expansion contract gate, prior-phase handoff ingestion, phase-scoped research, output path/metadata, and the completion transition: `commands/plan.md` "Rolling-Wave Phase Selection".
+
 ### Implementation Scope Detection
 
 After the brainstorm check, determine the implementation scope:
@@ -44,6 +104,10 @@ After the brainstorm check, determine the implementation scope:
    Present the auto-detected default if one was determined.
 
 3. **Store the result** as `implementationScope: "frontend-only" | "full-stack"` for use in Phase 4 metadata.
+
+### Scope-Context Classification (Inline Fallback)
+
+Runs when no brainstorm supplied a `phases:` cut (none loaded, or a legacy brainstorm without one) and no roadmap is already being continued from Rolling-Wave Phase Selection above (that case reclassifies nothing — it is already mid-expansion). Classifies the feature description into scope contexts using the same Cut Criteria, Collapse Rule, and Anti-Patterns in `commands/references/scope-contexts.md` that `/aimi:brainstorm`'s roadmap-gate applies. Zero or one scope context: falls straight through unchanged, no gate, no log line. Two or more: proposes a phase cut, gates it via a compact Approve/Edit picker with a coverage-check hard block, then materializes it through the same `roadmap-init` path Roadmap Materialization above uses and hands off to Rolling-Wave Phase Selection for phase-1-only expansion. Full gate mechanics: `commands/plan.md` "Scope-Context Classification (Inline Fallback)".
 
 ### Pipeline Mode (Non-Interactive)
 
@@ -425,14 +489,16 @@ Branch on `implementationScope` from Phase 0:
 
 ### When `implementationScope` is `"full-stack"`:
 
-1. **Partition stories by layer**: UI stories → frontend file; schema + backend + aggregation stories → backend file
-2. **Assign unique IDs across both files**: frontend gets `US-001` to `US-N`, backend gets `US-(N+1)` to `US-M` — no ID collisions
-3. **Rebuild `dependsOn` independently per file**: remove all cross-file references; within each file, only reference IDs that exist in that file
-4. **Recompute `wave` numbers per file**: roots (`dependsOn: []`) are wave 1 within each file, independently
-5. **Derive separate `branchName` per file**: `type/[feature]-frontend` and `type/[feature]-backend` (e.g., `feat/add-user-auth-frontend`, `feat/add-user-auth-backend`)
-6. Derive shared metadata: title, type, createdAt, `schemaVersion: "3.3"`, `planPath: null`, `brainstormPath`, `researchDepth`, `maxConcurrency`
-7. Write frontend file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
-8. Write backend file to `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`
+This prose predates `aimi-cli.sh story-merge`; `/aimi:plan` Phase 3e now delegates the actual full-stack split to `story-merge --split full-stack` (functions `_story_merge_write_project_split` and `_story_merge_write_split`) as the implementation of record — the steps below describe what that command does, not an algorithm to hand-run independently.
+
+1. **Pick the split axis first**: count distinct normalized `project` values across the merged set (trim, strip one trailing slash, blank/absent treated as null). **2 or more → PROJECT axis** (multi-repo): split by project, N output files, one per repo, with no frontend/backend decision anywhere on that path. **Fewer than 2 → SIDE axis** (single-repo/monorepo, including "no story has `project`" and "every story shares exactly one project"): the two-file frontend/backend split. `project` is an N-ary sub-project repo path, not a binary frontend/backend tag, so a multi-repo plan gets one file per repo instead of being force-fit into two side files.
+2. **Partition stories on the chosen axis**: on the PROJECT axis, group by normalized `project` — one file per group, groups ordered lexicographically by normalized path, project-less stories routed to the `"."` root group; normalization is grouping-only, so `project` itself is never mutated in the output. On the SIDE axis, classify each story by its own file-pattern/keyword heuristic verdict, unconditionally and per story.
+3. **Assign unique IDs across the whole output set**: contiguous `US-001` to `US-M`, in per-group blocks on the PROJECT axis (each repo's stories taking one contiguous run) or frontend `US-001` to `US-N` then backend `US-(N+1)` to `US-M` on the SIDE axis — no ID collisions across files.
+4. **Rebuild `dependsOn` independently per file**: cross-file references are still removed — each file's graph must stay self-contained because the files execute as independent sessions — but the drop is no longer silent: story-merge emits one aggregated stderr banner reporting the dropped-edge and affected-story counts, enumerates only the resulting false-root stories (those that lost every dependency and thereby became wave-1 eligible), and records one `cross-file-dep-dropped` entry per affected story in `metadata.smellWarnings` of every output file. Each entry is keyed by `project` on the PROJECT axis and by `side` on the SIDE axis (mutually exclusive).
+5. **Recompute `wave` numbers per file**: roots (`dependsOn: []`) are wave 1 within each file, independently
+6. **Derive a separate `branchName` per file**: on the PROJECT axis, one per repo derived from that group's slugified project path (e.g. `apps/web` → `feat/merged-apps-web`); on the SIDE axis, `type/[feature]-frontend` and `type/[feature]-backend` (e.g., `feat/add-user-auth-frontend`, `feat/add-user-auth-backend`).
+7. Derive shared metadata: title, type, createdAt, `schemaVersion: "3.3"`, `planPath: null`, `brainstormPath`, `researchDepth`, `maxConcurrency`
+8. **Write the output files**: PROJECT axis writes `.aimi/tasks/YYYY-MM-DD-[feature-name]-<project-slug>-tasks.json` per group, each carrying a self-describing `metadata.splitGroup` = `{project, index, total, siblings[]}`; two distinct projects that collide on the same slug hard-fail the merge before any file is written. SIDE axis writes `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json` and `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`.
 
 ### When `implementationScope` is `"frontend-only"`:
 
@@ -458,7 +524,7 @@ Standard single-file output to `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json
 
 - **title**: Conventional format — `<type>: <Descriptive Name>`
 - **type**: `feat`, `ref`, `bug`, or `chore`
-- **branchName**: Kebab-case, prefixed with type. For split files: `type/[feature]-frontend` and `type/[feature]-backend`
+- **branchName**: Kebab-case, prefixed with type. For split files, one per output file: `type/[feature]-frontend` and `type/[feature]-backend` on the SIDE axis; `type/[feature]-<project-slug>` per project on the PROJECT axis
 - **createdAt**: Today's date (YYYY-MM-DD)
 - **planPath**: Always `null`
 - **brainstormPath**: Path to brainstorm if one was used, otherwise omit
@@ -484,11 +550,12 @@ Agent-mode fallback: compute the deficit (`floor(proto_elements * 0.6) - ac_anch
 
 ### Derive Filename
 
-- Full-stack: `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json` and `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`
+- Full-stack, PROJECT axis (2 or more distinct story `project` values — multi-repo): one file per project, `.aimi/tasks/YYYY-MM-DD-[feature-name]-<project-slug>-tasks.json`
+- Full-stack, SIDE axis (fewer than 2 distinct `project` values — single-repo/monorepo): `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json` and `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`
 - Frontend-only: `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json`
 - Legacy (no scope): `.aimi/tasks/YYYY-MM-DD-[feature-name]-tasks.json`
 
-Strip type prefix, kebab-case the descriptive name, add date prefix and appropriate suffix.
+Strip type prefix, kebab-case the descriptive name, add date prefix and appropriate suffix. On the full-stack paths story-merge derives these names itself and returns them on stdout — read the list off that return value rather than rebuilding it here, since the PROJECT axis's surviving projects and slugs are only known at merge time.
 
 ### Write File
 
@@ -502,28 +569,35 @@ Use the Write tool to save the JSON file(s). Validate JSON is well-formed before
 
 After writing the tasks.json file(s), validate each generated output independently.
 
-**For split files (full-stack):** run validation on each file separately using `init-session --file`:
+**Step 0 — Resolve CLI Path** (see [cli-path-resolution.md](../../commands/references/cli-path-resolution.md) for full Layer 0–3 strategy). Each Bash call is an isolated shell — `$AIMI_CLI` is never inherited; re-read from cache at the top of every Bash call that needs it:
 
 ```bash
-$AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
-$AIMI_CLI validate-ids
-$AIMI_CLI validate-deps
-$AIMI_CLI validate-stories
-
-$AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json
-$AIMI_CLI validate-ids
-$AIMI_CLI validate-deps
-$AIMI_CLI validate-stories
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 ```
 
-**For single file (frontend-only or legacy):**
+**Step 1 — Resolve the file list.** Every file validated below comes from `MERGE_RETURN`, the stdout `/aimi:plan` Phase 3e captured from `story-merge`. **Never rebuild a filename by concatenating the output base** — on the PROJECT axis the surviving projects and their basename slugs are computed inside `story-merge` and are unknowable here any other way, and even on the SIDE axis the returned paths already account for `--phase-aware`'s basename collapse:
 
 ```bash
-$AIMI_CLI init-session --file .aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json
-$AIMI_CLI validate-ids
-$AIMI_CLI validate-deps
-$AIMI_CLI validate-stories
+VALIDATE_FILES=$(printf '%s' "$MERGE_RETURN" | jq -r 'if type == "array" then .[].path elif has("frontend") then .frontend, .backend else .merged end')
 ```
+
+The array test comes first and that ordering is load-bearing — `has()` errors on an array. `VALIDATE_FILES` is a newline-separated list covering every case with one shape: exactly 1 entry on the legacy / frontend-only path, exactly 2 on the SIDE axis, N on the PROJECT axis.
+
+**Step 2 — Validate every file.** Run this loop once, on every axis — there is no separate single-file branch, because the legacy and frontend-only cases are just `VALIDATE_FILES` with one entry (repeat the Step 0 resolve above at the top of each Bash call):
+
+```bash
+while IFS= read -r VALIDATE_FILE; do
+  [ -n "$VALIDATE_FILE" ] || continue
+  echo "Validating $VALIDATE_FILE"
+  $AIMI_CLI init-session --file "$VALIDATE_FILE" || exit 1
+  $AIMI_CLI validate-ids || exit 1
+  $AIMI_CLI validate-deps || exit 1
+  $AIMI_CLI validate-stories || exit 1
+done <<< "$VALIDATE_FILES"
+```
+
+`init-session --file` rebinds the session's active tasks file, so the three `validate-*` calls always target the file bound immediately above them — keep them inside the same iteration and never reorder them. A non-zero exit anywhere aborts the loop: fix that file and re-run from the top rather than validating the remaining files against a half-fixed set. `/aimi:plan`'s own Phase 4.5 runs the same loop with two extra normalizers ahead of the validators — see `commands/plan.md`.
 
 **If any validation fails (non-zero exit):**
 1. Read the error output to identify the issues
@@ -540,9 +614,10 @@ After writing, report:
 ```
 Tasks generated successfully!
 
-Tasks: .aimi/tasks/[filename(s)].json
-Stories: [N] total ([X] frontend, [Y] backend — if split)
-Schema: 3.2
+Tasks: .aimi/tasks/[filename].json
+[one Tasks: line per file returned by story-merge — 1 legacy, 2 on the SIDE axis, N on the PROJECT axis; suffix each PROJECT-axis line with its project and story count, e.g. "(apps/web, 4 stories)"]
+Stories: [N] total ([per-file breakdown when split: "[X] frontend, [Y] backend" on the SIDE axis, one "[N] <project>" entry per file on the PROJECT axis])
+Schema: 3.3
 [If brainstorm used]: Context: .aimi/brainstorms/[brainstorm-file]
 [If gaps found]: Gaps identified: [N] (captured as criteria/notes)
 [If 10+ stories]: Warning: [N] stories generated. Consider splitting for parallel work.

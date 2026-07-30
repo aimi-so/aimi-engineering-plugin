@@ -25,6 +25,7 @@ utilize→use, in order to→to, at this point in time→now, implement→add, a
 <scope>
 Compression applies to: spawned-agent status updates, summary returns, progress reports, task confirmations.
 Compression does NOT apply to: CHANGELOG.md, README.md, commit messages, PR descriptions, user-facing chat to the human running /aimi:execute.
+For the last of those — user-facing chat to the human running /aimi:execute — see `commands/references/user-communication.md` for what to write instead.
 </scope>
 
 <safety_escapes>
@@ -64,6 +65,18 @@ the rules above), and `sections` (list of the file's h2/h3 anchors in document o
 The on-disk research FILE is exempt from compression and word caps (see <preservation_rules>
 above); only the Task return follows the pointer-block contract.
 </research_return_contract>
+
+<research_findings_format>
+Research agent findings-body claims (the on-disk file the pointer block points to, not the Task
+return above) follow a claim -> verbatim-quote -> citation-or-`[INFERRED]` structure: every factual
+claim is either a short verbatim quote of the cited text plus a locatable citation (`file:line`,
+`path:Lstart-Lend`, or the most specific doc/URL pointer available), or is tagged `[INFERRED]` when
+no source exists. No bare assertions in the findings body. (A `verify-citations` CLI pass to check
+this mechanically is planned but not yet implemented.)
+
+Each research agent spec restates this rule in full rather than pointing here, since AGENTS.md is
+never copied into the OpenCode translation (`install.sh`) and would be unreachable for those users.
+</research_findings_format>
 
 <examples>
 

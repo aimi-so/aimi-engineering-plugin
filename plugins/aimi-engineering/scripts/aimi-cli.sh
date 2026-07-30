@@ -284,7 +284,7 @@ _aimi_models_config_path() {
 # Return the path to the models first-run prompt marker file for the active host.
 # The marker is per-host: `models-prompt-seen-claudeCode` or `models-prompt-seen-opencode`.
 # This lets a user dismiss the prompt independently on each host — picking
-# "Manter o padrão (inherit)" on Claude Code does not silence the prompt on OpenCode.
+# "Keep the default (inherit)" on Claude Code does not silence the prompt on OpenCode.
 # The legacy global `models-prompt-seen` file (no host suffix) is no longer read.
 _aimi_models_prompt_marker_path() {
   local host
@@ -484,6 +484,25 @@ validate_story_exists() {
   fi
 }
 
+# Discover tasks files across both the flat layout (.aimi/tasks/*-tasks.json)
+# and the nested phase-folder layout (.aimi/tasks/<feature>/phase-N[.M]-<slug>/
+# <feature>-phase-N-tasks.json), sorted by modification time with the most
+# recent file first. mindepth 1/maxdepth 3 covers flat files (depth 1) and
+# nested phase files (feature dir depth 1, phase dir depth 2, tasks file
+# depth 3) in one pass. Shared by cmd_find_tasks, cmd_find_tasks_all, and
+# get_tasks_file's stale-state fallback so all three see the same combined
+# view instead of a flat-only glob. Prints nothing (not an error) when
+# TASKS_DIR is missing or empty.
+# NUL-delimited find -> xargs -0 keeps paths containing spaces intact. A
+# newline-delimited `xargs ls -t` word-splits them, which silently emptied
+# discovery for any project whose path contains a space (regression vs the
+# pre-phase-layer quoted glob).
+_find_tasks_files_all() {
+  [ -d "$TASKS_DIR" ] || return 0
+  find "$TASKS_DIR" -mindepth 1 -maxdepth 3 -type f -name '*-tasks.json' -print0 2>/dev/null \
+    | xargs -0 ls -t 2>/dev/null || true
+}
+
 # Get the tasks file (from state or discover)
 get_tasks_file() {
   local tasks_file
@@ -491,7 +510,7 @@ get_tasks_file() {
 
   if [ -n "$tasks_file" ] && [ ! -f "$tasks_file" ]; then
     local stale_path="$tasks_file"
-    tasks_file=$(ls -t "$TASKS_DIR"/*-tasks.json 2>/dev/null | head -1)
+    tasks_file=$(_find_tasks_files_all | head -1)
     if [ -z "$tasks_file" ]; then
       echo "No tasks file found in $TASKS_DIR/" >&2
       exit 1
@@ -501,7 +520,7 @@ get_tasks_file() {
     echo "Warning: state file pointed to $stale_path which no longer exists. Using $tasks_file instead." >&2
     write_state "current-tasks" "$tasks_file"
   elif [ -z "$tasks_file" ]; then
-    tasks_file=$(ls -t "$TASKS_DIR"/*-tasks.json 2>/dev/null | head -1)
+    tasks_file=$(_find_tasks_files_all | head -1)
     if [ -z "$tasks_file" ]; then
       echo "No tasks file found in $TASKS_DIR/" >&2
       exit 1
@@ -519,10 +538,10 @@ get_tasks_file() {
 # Commands
 # ============================================================================
 
-# Find the most recent tasks file
+# Find the most recent tasks file (flat or nested phase layout)
 cmd_find_tasks() {
   local tasks_file
-  tasks_file=$(ls -t "$TASKS_DIR"/*-tasks.json 2>/dev/null | head -1)
+  tasks_file=$(_find_tasks_files_all | head -1)
 
   if [ -z "$tasks_file" ]; then
     echo "No tasks file found in $TASKS_DIR/" >&2
@@ -532,10 +551,11 @@ cmd_find_tasks() {
   resolve_path "$tasks_file"
 }
 
-# Find all tasks files sorted by modification time (most recent first)
+# Find all tasks files sorted by modification time (most recent first),
+# across both the flat and nested phase layouts.
 cmd_find_tasks_all() {
   local files
-  files=$(ls -t "$TASKS_DIR"/*-tasks.json 2>/dev/null)
+  files=$(_find_tasks_files_all)
 
   if [ -z "$files" ]; then
     echo "No tasks files found in $TASKS_DIR/" >&2
@@ -844,8 +864,20 @@ cmd_get_story_context() {
     fi
     local skill_abs_path="${skills_base_dir}/${skill_name}/SKILL.md"
     if [ ! -f "$skill_abs_path" ]; then
-      echo "skill ${skill_name} not found at ${skill_rel_path} — skipped" >&2
-      continue
+      # OpenCode installs skills under an `aimi-` prefix (install.sh install_skills:
+      # dst="$skill_dir/aimi-$skillname"), while stories declare the bare skill
+      # name. Claude Code's cache dir is unprefixed, so the bare path already
+      # resolved above there. Fall back to the prefixed dir so OpenCode hydration
+      # is not silently skipped. Host-agnostic: on Claude Code this fallback path
+      # simply does not exist and the warning below still fires for a genuinely
+      # missing skill.
+      local skill_prefixed_path="${skills_base_dir}/aimi-${skill_name}/SKILL.md"
+      if [ -f "$skill_prefixed_path" ]; then
+        skill_abs_path="$skill_prefixed_path"
+      else
+        echo "skill ${skill_name} not found at ${skill_rel_path} — skipped" >&2
+        continue
+      fi
     fi
     # Read content and apply tag-breakout escapes before jq ingestion
     local skill_content
@@ -1076,6 +1108,51 @@ cmd_mark_skipped() {
   write_state "last-result" "skipped"
 
   printf '{"id":"%s","status":"skipped"}\n' "$story_id"
+}
+
+# Persist a --container/--inline override onto metadata.execution.
+# execute.md and next.md call this after resolving a session-level override so
+# a later re-invocation without the flag continues in the same mode instead of
+# silently falling back to the file's original value. Refuses (non-zero exit)
+# on a phase-scoped tasks file (metadata.phase present) — a claimed phase
+# always runs inside its own phase container, so writing metadata.execution
+# there would be the exact dead-data bug this subcommand exists to fix.
+cmd_set_execution_mode() {
+  local mode="$1"
+  local tasks_file
+
+  if [ -z "$mode" ]; then
+    echo "Usage: aimi-cli.sh set-execution-mode <container|inline>" >&2
+    exit 1
+  fi
+
+  if [ "$mode" != "container" ] && [ "$mode" != "inline" ]; then
+    echo "Error: Invalid execution mode: $mode (expected container or inline)" >&2
+    exit 1
+  fi
+
+  tasks_file=$(get_tasks_file)
+
+  local has_phase
+  has_phase=$(jq -r 'if (.metadata.phase // null) != null then "true" else "false" end' "$tasks_file")
+  if [ "$has_phase" = "true" ]; then
+    echo "Error: Cannot set metadata.execution on a phase-scoped tasks file (metadata.phase is present): $tasks_file" >&2
+    exit 1
+  fi
+
+  # Atomic update using flock and unique temp file
+  local tmp_file
+  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  (
+    _lock "${tasks_file}.lock"
+    jq --arg mode "$mode" \
+      '.metadata.execution = $mode' \
+      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+  ) 200>"${tasks_file}.lock"
+  # Cleanup temp file on failure
+  rm -f "$tmp_file" 2>/dev/null
+
+  printf '{"execution":"%s"}\n' "$mode"
 }
 
 # Count pending stories
@@ -1484,6 +1561,70 @@ cmd_get_state() {
     }'
 }
 
+# Derive a filesystem-safe cache-key suffix for a repository toplevel path,
+# so _resolve_default_branch's cache is scoped per repository instead of a
+# single shared file under AIMI_ROOT/.aimi/ (which silently leaked one
+# repo's resolved branch into every sibling --project call). Mirrors the
+# sha256sum/shasum branch shape of _hash_file (aimi-cli.sh:2035-2042) but
+# adds an explicit `command -v shasum` probe that helper lacks, and falls
+# back to a portable non-sha256 slugification when neither hashing tool is
+# available -- the slugification never introduces a `/`, so the returned
+# suffix is always safe to use as a flat filename directly inside .aimi/.
+# Usage: _default_branch_cache_key <repo-toplevel-path>
+# Prints: a filesystem-safe string containing no `/`
+_default_branch_cache_key() {
+  local toplevel="$1"
+  if [ "$_HAS_SHA256SUM" -eq 1 ]; then
+    printf '%s' "$toplevel" | sha256sum | awk '{print $1}'
+  elif command -v shasum &>/dev/null; then
+    printf '%s' "$toplevel" | shasum -a 256 | awk '{print $1}'
+  else
+    printf '%s' "$toplevel" | tr -c 'A-Za-z0-9' '-'
+  fi
+}
+
+# Shared default-branch resolution logic: cache read, primary git remote
+# show origin parse, offline symbolic-ref fallback, cache write. Assumes the
+# caller has already cd'd into the target repo and verified it is a git
+# repository (both cmd_detect_default_branch and cmd_detect_parent_branch
+# do this themselves before calling here). The cache is keyed per repository
+# toplevel (default-branch-<hash>) rather than a single shared
+# "default-branch" file, so a sibling repo's --project call cannot inherit
+# another repo's cached branch. Returns the branch name on stdout; exits 1
+# on total failure.
+_resolve_default_branch() {
+  local repo_toplevel cache_key
+  repo_toplevel=$(git rev-parse --show-toplevel 2>/dev/null) || repo_toplevel=""
+  cache_key="default-branch-$(_default_branch_cache_key "$repo_toplevel")"
+
+  # Return cached value if available
+  local cached
+  cached=$(read_state "$cache_key")
+  if [ -n "$cached" ]; then
+    echo "$cached"
+    return 0
+  fi
+
+  local branch=""
+
+  # Primary: parse HEAD branch from remote
+  branch=$(git remote show origin 2>/dev/null | sed -n 's/.*HEAD branch: //p') || branch=""
+
+  # Fallback: symbolic-ref (works offline)
+  if [ -z "$branch" ]; then
+    branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||') || branch=""
+  fi
+
+  if [ -z "$branch" ]; then
+    echo "Error: Could not detect default branch" >&2
+    exit 1
+  fi
+
+  # Cache for session reuse
+  write_state "$cache_key" "$branch"
+  echo "$branch"
+}
+
 # Detect the repository's default branch
 # Primary: git remote show origin (requires network)
 # Fallback: git symbolic-ref refs/remotes/origin/HEAD (offline)
@@ -1517,32 +1658,198 @@ cmd_detect_default_branch() {
     exit 1
   fi
 
-  # Return cached value if available
-  local cached
-  cached=$(read_state "default-branch")
-  if [ -n "$cached" ]; then
-    echo "$cached"
+  _resolve_default_branch
+}
+
+# Normalize a single %D decoration token for parent-branch detection.
+# Pipeline: (1) strip an "X -> Y" arrow decoration, keeping the right-hand
+# side (covers "HEAD -> <branch>" and, defensively, "origin/HEAD ->
+# origin/<branch>"); (2) drop a bare HEAD token; (3) drop a tag: -prefixed
+# token; (4) strip a leading origin/ remote-tracking prefix; (5) re-check
+# for a bare HEAD token now that origin/ has been stripped (catches
+# "origin/HEAD" -> "HEAD"); (6) drop the token if it is now empty or equals
+# the branch being examined exactly -- exact match only, never a substring
+# match (this is the DEFECT 3 fix for the old grep -v "$CURRENT_BRANCH").
+# Prints the surviving token, or nothing when the token was dropped.
+_normalize_decoration_token() {
+  local token="$1" branch="$2"
+
+  # (1) Arrow decoration: keep the right-hand side.
+  if [[ "$token" == *" -> "* ]]; then
+    token="${token#*" -> "}"
+  fi
+
+  # (2) Bare HEAD (detached-HEAD marker, or the left side of an
+  #     already-stripped arrow that somehow left just HEAD).
+  if [ "$token" = "HEAD" ]; then
     return 0
   fi
 
-  local branch=""
-
-  # Primary: parse HEAD branch from remote
-  branch=$(git remote show origin 2>/dev/null | sed -n 's/.*HEAD branch: //p')
-
-  # Fallback: symbolic-ref (works offline)
-  if [ -z "$branch" ]; then
-    branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||')
+  # (3) Tag refs are never a parent-branch candidate.
+  if [[ "$token" == "tag: "* ]]; then
+    return 0
   fi
 
+  # (4) Strip the remote-tracking prefix.
+  if [[ "$token" == "origin/"* ]]; then
+    token="${token#origin/}"
+  fi
+
+  # (5) Re-check for HEAD now that origin/ has been stripped.
+  if [ "$token" = "HEAD" ]; then
+    return 0
+  fi
+
+  # (6) Exact-match-only drop: empty token, or the token IS the branch
+  #     we're examining (its own tip decoration). Never a substring check.
+  if [ -z "$token" ] || [ "$token" = "$branch" ]; then
+    return 0
+  fi
+
+  printf '%s' "$token"
+}
+
+# Walk branch's --first-parent decoration history (git log --pretty=format:'%D')
+# token-by-token, nearest ancestor first, and return the first surviving
+# candidate parent-branch name after _normalize_decoration_token. Prints
+# nothing when no candidate survives across the whole history.
+_detect_parent_branch_candidate() {
+  local branch="$1"
+  local log_output
+  log_output=$(git log "$branch" --pretty=format:'%D' --first-parent 2>/dev/null) || true
+
+  local line raw_token normalized candidate=""
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+
+    local -a tokens
+    local old_ifs="$IFS"
+    IFS=','
+    read -ra tokens <<< "$line"
+    IFS="$old_ifs"
+
+    for raw_token in "${tokens[@]}"; do
+      # Decoration tokens are separated by ", " -- trim the leading space.
+      raw_token="${raw_token# }"
+      normalized=$(_normalize_decoration_token "$raw_token" "$branch")
+      if [ -n "$normalized" ]; then
+        candidate="$normalized"
+        break 2
+      fi
+    done
+  done <<< "$log_output"
+
+  printf '%s' "$candidate"
+}
+
+# Verify a decoration candidate is a genuine ancestor of branch via
+# git merge-base, rejecting a divergent sibling whose ref happens to share
+# the candidate's (post-normalization) name. Resolves the candidate against
+# a local branch first, falling back to an origin-prefixed remote-tracking
+# ref only when no local branch of that name exists.
+_verify_parent_candidate() {
+  local branch="$1" candidate="$2"
+  local candidate_ref candidate_commit branch_commit merge_base
+
+  if candidate_commit=$(git rev-parse --verify "${candidate}^{commit}" 2>/dev/null); then
+    candidate_ref="$candidate"
+  elif candidate_commit=$(git rev-parse --verify "origin/${candidate}^{commit}" 2>/dev/null); then
+    candidate_ref="origin/${candidate}"
+  else
+    return 1
+  fi
+
+  branch_commit=$(git rev-parse --verify "${branch}^{commit}" 2>/dev/null) || return 1
+
+  # The candidate must not be the branch's own tip commit.
+  if [ "$candidate_commit" = "$branch_commit" ]; then
+    return 1
+  fi
+
+  # The candidate must be a genuine ancestor of branch (its own commit is
+  # the merge base), not a divergent sibling.
+  merge_base=$(git merge-base "$branch" "$candidate_ref" 2>/dev/null) || return 1
+
+  [ "$merge_base" = "$candidate_commit" ]
+}
+
+# Detect a branch's parent (base) branch by parsing its --first-parent git
+# log decorations token-by-token (replacing the old grep -v line-filtering
+# pipeline in commands/open-pr.md, which mishandled "HEAD -> <parent>" and
+# substring-alike branch names) and confirming the candidate with
+# git merge-base. Falls back to the repository's default branch (unverified)
+# when no decoration candidate survives normalization or merge-base
+# verification.
+# Usage: aimi-cli.sh detect-parent-branch <branch> [--project <path>]
+# Output: {"branch":<input>,"base":<resolved>,"verified":<bool>,"source":"decoration"|"default-branch"}
+cmd_detect_parent_branch() {
+  local branch="" project_dir=""
+
+  # Parse positional branch arg + --project flag
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project)
+        shift
+        project_dir="${1:-}"
+        ;;
+      *)
+        if [ -z "$branch" ]; then
+          branch="$1"
+        else
+          echo "Error: Unexpected argument: $1" >&2
+          echo "Usage: aimi-cli.sh detect-parent-branch <branch> [--project <path>]" >&2
+          exit 1
+        fi
+        ;;
+    esac
+    shift
+  done
+
   if [ -z "$branch" ]; then
-    echo "Error: Could not detect default branch" >&2
+    echo "Usage: aimi-cli.sh detect-parent-branch <branch> [--project <path>]" >&2
     exit 1
   fi
 
-  # Cache for session reuse
-  write_state "default-branch" "$branch"
-  echo "$branch"
+  # cd into project dir if specified (supports multi-repo layouts where AIMI root is not a git repo)
+  if [ -n "$project_dir" ]; then
+    if [ ! -d "$project_dir" ]; then
+      echo "Error: Project directory does not exist: $project_dir" >&2
+      exit 1
+    fi
+    cd "$project_dir"
+  fi
+
+  # Guard: must be inside a git repository
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
+    exit 1
+  fi
+
+  # Validate branch name (security) — before any git command uses it
+  if ! [[ "$branch" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: Invalid branch name: $branch" >&2
+    exit 1
+  fi
+
+  local raw_candidate
+  raw_candidate=$(_detect_parent_branch_candidate "$branch")
+
+  local base="" verified="false" source="default-branch"
+
+  if [ -n "$raw_candidate" ] && _verify_parent_candidate "$branch" "$raw_candidate"; then
+    base="$raw_candidate"
+    verified="true"
+    source="decoration"
+  else
+    base=$(_resolve_default_branch)
+  fi
+
+  jq -nc \
+    --arg branch "$branch" \
+    --arg base "$base" \
+    --argjson verified "$verified" \
+    --arg source "$source" \
+    '{branch: $branch, base: $base, verified: $verified, source: $source}'
 }
 
 # Detect a Claude Design handoff bundle under a given root (defaults to CWD).
@@ -2923,48 +3230,243 @@ cmd_setup_branch() {
     return 0
   fi
 
-  # Case --base override: Branch is new and caller provided an explicit base
+  # Case --base override: Branch is new and caller provided an explicit base.
+  # The existence check stays here rather than in the shared resolver so this
+  # hard failure keeps its exact stderr text and exit code regardless of how
+  # the resolver's own "explicit-base" resolution behaves.
   if [ -n "$base_override" ]; then
-    local resolved_base
-    if git ls-remote --heads origin "$base_override" 2>/dev/null | grep -q "$base_override"; then
-      resolved_base="origin/$base_override"
-    elif git branch --list "$base_override" | grep -q "$base_override"; then
-      resolved_base="$base_override"
-    else
+    if ! git ls-remote --heads origin "$base_override" 2>/dev/null | grep -q "$base_override" && \
+       ! git branch --list "$base_override" | grep -q "$base_override"; then
       echo "Error: Base branch does not exist: $base_override" >&2
       exit 1
     fi
-    git checkout -b "$branch_name" "$resolved_base" >/dev/null 2>&1
-    printf '{"branch":"%s","action":"created-from-base","base":"%s"}\n' "$branch_name" "$base_override"
-    return 0
   fi
 
-  # Case 4/5: Branch is new — decide base
-  # Detached HEAD is treated as 'not merged'
-  if [ -z "$current_branch" ]; then
-    # Detached HEAD — create from current HEAD
-    git checkout -b "$branch_name" >/dev/null 2>&1
-    printf '{"branch":"%s","action":"created-from-current"}\n' "$branch_name"
-    return 0
-  fi
+  # Case 4/5: Branch is new — delegate the base decision to the shared
+  # resolver (_resolve_branch_base) so this path can never drift from the
+  # container path's resolve-base-branch. The mapping from reason to action
+  # is total: explicit-base -> created-from-base, default-branch ->
+  # created-from-default, detached-head and stacked-on-current both ->
+  # created-from-current. target-exists is unreachable here — Case 1-3 above
+  # already short-circuited on an existing target before the resolver runs.
+  local resolution reason base
+  resolution=$(_resolve_branch_base "$branch_name" "$default_branch" "$base_override")
+  reason=$(echo "$resolution" | jq -r '.reason')
+  base=$(echo "$resolution" | jq -r '.base')
 
-  # Check if current branch IS the default branch OR is fully merged into default
-  if [ "$current_branch" = "$default_branch" ] || \
-     git branch --merged "origin/$default_branch" 2>/dev/null | grep -q "^[* ] *${current_branch}$"; then
-    git checkout -b "$branch_name" "origin/$default_branch" >/dev/null 2>&1
-    printf '{"branch":"%s","action":"created-from-default"}\n' "$branch_name"
-    return 0
-  fi
-
-  # Current branch has unmerged work — create from current HEAD (stacking intent)
-  git checkout -b "$branch_name" >/dev/null 2>&1
-  printf '{"branch":"%s","action":"created-from-current"}\n' "$branch_name"
+  case "$reason" in
+    explicit-base)
+      git checkout -b "$branch_name" "$base" >/dev/null 2>&1
+      printf '{"branch":"%s","action":"created-from-base","base":"%s"}\n' "$branch_name" "$base_override"
+      ;;
+    default-branch)
+      git checkout -b "$branch_name" "$base" >/dev/null 2>&1
+      printf '{"branch":"%s","action":"created-from-default"}\n' "$branch_name"
+      ;;
+    detached-head|stacked-on-current)
+      # Create from current HEAD (detached or carrying unmerged work) without
+      # an explicit ref, matching the pre-existing behavior exactly.
+      git checkout -b "$branch_name" >/dev/null 2>&1
+      printf '{"branch":"%s","action":"created-from-current"}\n' "$branch_name"
+      ;;
+    *)
+      echo "Error: Unexpected base-resolution reason: $reason" >&2
+      exit 1
+      ;;
+  esac
   return 0
+}
+
+# Decide what branch a new branch or container should be cut from, without
+# performing any git mutation. Single source of truth shared by the inline
+# (cmd_setup_branch) and container (execute.md) paths so an empty/unset base
+# can never mean "stack on current" on one path and "use the default branch"
+# on the other. Assumes branch_name/default_branch/base_override are already
+# validated and CWD is inside the target git repository.
+#
+# Resolution order (first match wins):
+#   1. base_override given                                -> explicit-base
+#   2. branch_name already exists locally or on origin     -> target-exists
+#   3. HEAD is detached                                     -> detached-head
+#   4. current branch IS default, or merged into origin/default -> default-branch
+#   5. otherwise (current branch carries unmerged work)     -> stacked-on-current
+#
+# The emitted "base" prefers the origin/<name> remote-tracking ref over the
+# bare local name, so a container is never cut from a stale local ref after a
+# successful fetch -- mirroring how cmd_setup_branch already checks out
+# origin/$default_branch for created-from-default. Two reasons opt out:
+#
+#   stacked-on-current -- the candidate is the caller's own checkout, and
+#     inheriting its local tip is what stacking means. Preferring origin here
+#     drops every commit made since the last push.
+#   detached-head      -- base is the raw HEAD sha; there is no branch name to
+#     prefer a remote ref for.
+#
+# promptNeeded is true only when reason resolves to stacked-on-current --
+# the same four-condition gate execute.md Step 1.6 computes inline today
+# (target absent locally and on origin, current branch not default, current
+# branch not merged into origin/default), now computed once per repo here.
+# Exact ref predicates. Every one of these answers a yes/no question about a
+# single, fully-qualified ref -- never a pattern plus a substring grep.
+#
+# `git branch --list X | grep -q X` and `git ls-remote --heads origin X` both
+# match loosely: ls-remote patterns match on trailing path components, so a
+# probe for `main` reports refs/heads/team/main and the caller then emits an
+# origin/main that does not resolve, killing worktree creation in any repo
+# that happens to carry a scoped branch of the same leaf name.
+_local_has_branch() {
+  git show-ref --verify --quiet "refs/heads/$1"
+}
+
+_origin_has_branch() {
+  git ls-remote --heads origin "refs/heads/$1" 2>/dev/null \
+    | grep -q "[[:space:]]refs/heads/${1}$"
+}
+
+# Is <branch> already merged into origin/<default>?
+#
+# --format strips the "[* ] " column git normally prints, and -qxF matches the
+# whole line literally. A regex match here is unsafe: git permits `.` in ref
+# names, so a branch named feat.x matches a merged feat/x and its real
+# unmerged work is discarded with no prompt -- the exact failure issue #78 is
+# about, reached through a different door.
+_is_merged_into_default() {
+  git branch --format='%(refname:short)' --merged "origin/$2" 2>/dev/null \
+    | grep -qxF "$1"
+}
+
+_resolve_branch_base() {
+  local branch_name="$1" default_branch="$2" base_override="$3"
+  local current_branch reason base candidate prompt_needed
+  current_branch=$(git branch --show-current 2>/dev/null || echo "")
+  base=""
+  candidate=""
+  prompt_needed=false
+
+  if [ -n "$base_override" ]; then
+    reason="explicit-base"
+    candidate="$base_override"
+  elif _local_has_branch "$branch_name" || _origin_has_branch "$branch_name"; then
+    reason="target-exists"
+    candidate="$branch_name"
+  elif [ -z "$current_branch" ]; then
+    reason="detached-head"
+    base=$(git rev-parse HEAD 2>/dev/null || echo "")
+  elif [ "$current_branch" = "$default_branch" ] || _is_merged_into_default "$current_branch" "$default_branch"; then
+    reason="default-branch"
+    candidate="$default_branch"
+  else
+    reason="stacked-on-current"
+    candidate="$current_branch"
+    prompt_needed=true
+  fi
+
+  # Origin preference, scoped by reason: prefer the origin/<name>
+  # remote-tracking ref for a reference point the caller did not author, so a
+  # container is never cut from a stale local ref after a successful fetch.
+  #
+  # stacked-on-current is deliberately excluded. There the candidate IS the
+  # caller's own checkout, and inheriting its local tip is the entire point of
+  # stacking -- preferring origin would silently drop every commit made since
+  # the last push, which is the common state of an autonomous run. That would
+  # also put this path back in disagreement with cmd_setup_branch, whose
+  # stacked-on-current arm checks out from local HEAD.
+  if [ -n "$candidate" ]; then
+    if [ "$reason" != "stacked-on-current" ] && _origin_has_branch "$candidate"; then
+      base="origin/$candidate"
+    else
+      base="$candidate"
+    fi
+  fi
+
+  printf '{"base":"%s","reason":"%s","currentBranch":"%s","defaultBranch":"%s","promptNeeded":%s}\n' \
+    "$base" "$reason" "$current_branch" "$default_branch" "$prompt_needed"
+}
+
+# CLI wrapper for _resolve_branch_base(): arg-parsing, --project cd and the
+# three branch-name validations, mirroring cmd_setup_branch's shape exactly.
+cmd_resolve_base_branch() {
+  local branch_name="" default_branch="" project_dir="" base_override=""
+
+  # Parse arguments (positional + flags)
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --default-branch)
+        shift
+        default_branch="${1:-}"
+        ;;
+      --base)
+        shift
+        base_override="${1:-}"
+        ;;
+      --project)
+        shift
+        project_dir="${1:-}"
+        ;;
+      -*)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh resolve-base-branch <branchName> --default-branch <defaultBranch> [--base <baseBranch>] [--project <path>]" >&2
+        exit 1
+        ;;
+      *)
+        if [ -z "$branch_name" ]; then
+          branch_name="$1"
+        else
+          echo "Error: Unexpected argument: $1" >&2
+          echo "Usage: aimi-cli.sh resolve-base-branch <branchName> --default-branch <defaultBranch> [--base <baseBranch>] [--project <path>]" >&2
+          exit 1
+        fi
+        ;;
+    esac
+    shift
+  done
+
+  # Validate required arguments
+  if [ -z "$branch_name" ] || [ -z "$default_branch" ]; then
+    echo "Usage: aimi-cli.sh resolve-base-branch <branchName> --default-branch <defaultBranch> [--base <baseBranch>] [--project <path>]" >&2
+    exit 1
+  fi
+
+  # cd into project dir if specified (supports multi-repo layouts where AIMI root is not a git repo)
+  if [ -n "$project_dir" ]; then
+    if [ ! -d "$project_dir" ]; then
+      echo "Error: Project directory does not exist: $project_dir" >&2
+      exit 1
+    fi
+    cd "$project_dir"
+  fi
+
+  # Guard: must be inside a git repository
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
+    exit 1
+  fi
+
+  # Validate branch name (security)
+  if ! [[ "$branch_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: Invalid branch name: $branch_name" >&2
+    exit 1
+  fi
+
+  # Validate default branch name (security)
+  if ! [[ "$default_branch" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: Invalid branch name: $default_branch" >&2
+    exit 1
+  fi
+
+  # Validate base override branch name (security)
+  if [ -n "$base_override" ] && ! [[ "$base_override" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: Invalid branch name: $base_override" >&2
+    exit 1
+  fi
+
+  _resolve_branch_base "$branch_name" "$default_branch" "$base_override"
 }
 
 # Clear all state files (preserves tasks directory)
 cmd_clear_state() {
-  rm -f "$AIMI_DIR/current-tasks" "$AIMI_DIR/current-branch" "$AIMI_DIR/current-story" "$AIMI_DIR/last-result" "$AIMI_DIR/cli-path" "$AIMI_DIR/default-branch"
+  rm -f "$AIMI_DIR/current-tasks" "$AIMI_DIR/current-branch" "$AIMI_DIR/current-story" "$AIMI_DIR/last-result" "$AIMI_DIR/cli-path"
+  rm -f "$AIMI_DIR"/default-branch-* 2>/dev/null
   rm -f "$AIMI_DIR"/.state.lock "$AIMI_DIR"/*.lock 2>/dev/null
   rmdir "$AIMI_DIR"/*.lock.d 2>/dev/null || true
   echo "State cleared."
@@ -3602,6 +4104,66 @@ cmd_validate_tasks() {
     fi
   fi
 
+  # metadata.execution validation: optional discriminator, must be exactly
+  # "container" or "inline" when present. Absent is valid (defaults to inline
+  # for backward compatibility with every tasks.json written before this field
+  # existed) — see commands/references/execution-mode.md for the read contract.
+  local execution_mode
+  execution_mode=$(jq -r '.metadata.execution // empty' "$tasks_file" 2>/dev/null)
+
+  if [ -n "$execution_mode" ] && [ "$execution_mode" != "container" ] && [ "$execution_mode" != "inline" ]; then
+    errors+=("${tasks_file}: metadata.execution has invalid value \"${execution_mode}\" (expected \"container\" or \"inline\")")
+  fi
+
+  # metadata.execution / metadata.phase mutual exclusivity: a phase-scoped
+  # file (metadata.phase present) always executes inside its own phase
+  # container, so metadata.execution would be dead data there — the exact
+  # confusion US-006 corrects. /aimi:plan never writes both; this rule
+  # catches a hand-edited or stale file that carries both anyway.
+  local has_phase
+  has_phase=$(jq -r 'if (.metadata.phase // null) != null then "true" else "false" end' "$tasks_file" 2>/dev/null)
+
+  if [ "$has_phase" = "true" ] && [ -n "$execution_mode" ]; then
+    errors+=("${tasks_file}: metadata.execution and metadata.phase cannot both be present (phase-scoped files never carry metadata.execution)")
+  fi
+
+  # metadata.branchName validation: must match the same mandated pattern
+  # already enforced by cmd_init_session and open-pr.md (see CLAUDE.md's
+  # Security Requirements) — branchName is interpolated into git/gh commands
+  # downstream, so a value outside this charset is a command-injection vector.
+  # An absent/empty value also fails, since the pattern requires a leading
+  # alphanumeric character.
+  local branch_name
+  branch_name=$(jq -r '.metadata.branchName // empty' "$tasks_file" 2>/dev/null)
+
+  if ! [[ "$branch_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    errors+=("${tasks_file}: metadata.branchName \"${branch_name}\" does not match the required pattern ^[a-zA-Z0-9][a-zA-Z0-9/_-]*\$")
+  fi
+
+  # verification.url charset validation: a conservative allowlist (letters,
+  # digits, and :/?#@!&*+,._~%=- , first character alphanumeric or /) that
+  # excludes backtick, $, quotes, ;, |, <, >, and whitespace — the characters
+  # needed for shell command injection when a URL is later interpolated into
+  # a quoted string (see I10 review finding). Stories without a verification
+  # object, or with a null/empty/non-string url, are ignored — same tolerance
+  # the metadata.execution check above gives to an absent field.
+  local url_charset_re='^[A-Za-z0-9/][A-Za-z0-9:/?#@!&*+,._~%=-]*$'
+  local bad_urls
+  bad_urls=$(jq -r --arg re "$url_charset_re" '
+    .userStories[] |
+    select(.verification | type == "object") |
+    select((.verification.url | type == "string") and (.verification.url != "")) |
+    select((.verification.url | test($re)) | not) |
+    [.id, .verification.url] | @tsv
+  ' "$tasks_file" 2>/dev/null)
+
+  if [ -n "$bad_urls" ]; then
+    while IFS=$'\t' read -r story_id bad_url; do
+      [ -z "$story_id" ] && continue
+      errors+=("${tasks_file}: ${story_id} verification.url \"${bad_url}\" contains characters outside the allowed charset")
+    done <<< "$bad_urls"
+  fi
+
   # Emit result JSON
   if [ ${#errors[@]} -eq 0 ]; then
     echo '{"valid": true, "errors": []}'
@@ -3761,38 +4323,127 @@ _validate_businessspec_field() {
   return 1
 }
 
-# List task files where all stories have terminal status (completed or skipped)
-# Returns a JSON array of file paths
+# Check whether a tasks file's stories are ALL terminal (completed or skipped)
+# and non-empty. Echoes nothing; return code only (0 = archivable-as-a-file).
+_archivable_file_is_terminal() {
+  local tasks_file="$1"
+  local non_terminal
+  non_terminal=$(jq '[.userStories[] | select(.status != "completed" and .status != "skipped")] | length' "$tasks_file" 2>/dev/null)
+  [ -z "$non_terminal" ] && return 1
+  [ "$non_terminal" -ne 0 ] && return 1
+
+  local total
+  total=$(jq '.userStories | length' "$tasks_file" 2>/dev/null)
+  [ -z "$total" ] && return 1
+  [ "$total" -eq 0 ] && return 1
+  return 0
+}
+
+# List task files where all stories have terminal status (completed or skipped).
+# Discovers both the flat layout (.aimi/tasks/*-tasks.json) and the nested
+# phase-folder layout (.aimi/tasks/<feature>/phase-N-slug/<feature>-phase-N-
+# tasks.json) via the shared discovery helper. A feature folder's nested
+# phase tasks files surface together as a single unit -- only when every
+# phase tasks file discovered under that feature is all-terminal AND the
+# feature's roadmap.json (read directly via jq, not a roadmap-lifecycle
+# subcommand, to avoid coupling to its still-evolving CLI surface) marks
+# every phase completed -- rather than piecemeal as each phase happens to
+# finish. "completed" is the only terminal phase status (see the roadmap
+# status enum in cmd_roadmap_set_status); there is no "deferred" status. A
+# phase stuck in verification_failed therefore excludes its feature from the
+# result same as any other non-completed status, but is never a *silent*
+# dead end: it's called out on stderr each time, naming the feature and the
+# blocked phase ids, so the block stays discoverable instead of an
+# unexplained permanent absence from the list. A feature folder with no
+# roadmap.json (or a malformed one) falls back to the flat per-file terminal
+# check, so stray nested files created without roadmap-init are still
+# individually archivable.
+# Returns a JSON array of file paths (stdout shape unchanged by the above).
 cmd_list_archivable() {
+  local all_files
+  all_files=$(_find_tasks_files_all)
+
   local result="["
   local first=true
 
-  for tasks_file in "$TASKS_DIR"/*-tasks.json; do
-    # Skip if glob didn't expand
-    [ -f "$tasks_file" ] || continue
-
-    # Check if ALL stories have terminal status (completed or skipped)
-    local non_terminal
-    non_terminal=$(jq '[.userStories[] | select(.status != "completed" and .status != "skipped")] | length' "$tasks_file" 2>/dev/null)
-
-    # Skip files that aren't valid JSON or have non-terminal stories
-    [ -z "$non_terminal" ] && continue
-    [ "$non_terminal" -ne 0 ] && continue
-
-    # Also skip files with zero stories (empty array)
-    local total
-    total=$(jq '.userStories | length' "$tasks_file" 2>/dev/null)
-    [ -z "$total" ] && continue
-    [ "$total" -eq 0 ] && continue
-
+  _archivable_append() {
     local resolved
-    resolved=$(resolve_path "$tasks_file")
+    resolved=$(resolve_path "$1")
     if [ "$first" = true ]; then
       first=false
     else
       result="$result,"
     fi
     result="$result$(printf '"%s"' "$resolved")"
+  }
+
+  # Split discovered files into flat (direct child of TASKS_DIR) vs nested
+  # (feature/phase-slug/file, two directories below TASKS_DIR).
+  local flat_files=() nested_files=()
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    if [ "$(dirname "$f")" = "$TASKS_DIR" ]; then
+      flat_files+=("$f")
+    else
+      nested_files+=("$f")
+    fi
+  done <<< "$all_files"
+
+  for f in "${flat_files[@]+"${flat_files[@]}"}"; do
+    [ -f "$f" ] || continue
+    _archivable_file_is_terminal "$f" && _archivable_append "$f"
+  done
+
+  # Group nested files by feature folder (two directories above each file)
+  # and evaluate the whole feature as a unit.
+  local -A feature_seen
+  for f in "${nested_files[@]+"${nested_files[@]}"}"; do
+    local feature_dir
+    feature_dir=$(dirname "$(dirname "$f")")
+    [ -n "${feature_seen[$feature_dir]:-}" ] && continue
+    feature_seen[$feature_dir]=1
+
+    local feature_files=()
+    local ff
+    for ff in "${nested_files[@]+"${nested_files[@]}"}"; do
+      if [ "$(dirname "$(dirname "$ff")")" = "$feature_dir" ]; then
+        feature_files+=("$ff")
+      fi
+    done
+
+    local all_terminal=true
+    for ff in "${feature_files[@]+"${feature_files[@]}"}"; do
+      if [ ! -f "$ff" ] || ! _archivable_file_is_terminal "$ff"; then
+        all_terminal=false
+        break
+      fi
+    done
+    [ "$all_terminal" = true ] || continue
+
+    local roadmap_path="$feature_dir/roadmap.json"
+    if [ -f "$roadmap_path" ] && jq -e . "$roadmap_path" >/dev/null 2>&1; then
+      local non_terminal_phases
+      non_terminal_phases=$(jq '[.phases[] | select(.status != "completed")] | length' "$roadmap_path" 2>/dev/null)
+      [ -z "$non_terminal_phases" ] && continue
+      if [ "$non_terminal_phases" -ne 0 ]; then
+        # A stuck (verification_failed) phase is excluded the same as any
+        # other non-completed status, but never silently -- name it and the
+        # feature on stderr every run so the block stays visible instead of
+        # becoming an unexplained permanent absence from the result.
+        local stuck_ids
+        stuck_ids=$(jq -r '[.phases[] | select(.status == "verification_failed") | (.id|tostring)] | join(", ")' "$roadmap_path" 2>/dev/null)
+        if [ -n "$stuck_ids" ]; then
+          echo "Warning: list-archivable: $feature_dir not archivable -- phase(s) $stuck_ids stuck in verification_failed (re-verify via roadmap-set-status, or resolve manually)" >&2
+        fi
+        continue
+      fi
+    fi
+    # No roadmap.json (or malformed): every discovered phase file already
+    # passed the per-file terminal check above, so fall back to including them.
+
+    for ff in "${feature_files[@]+"${feature_files[@]}"}"; do
+      _archivable_append "$ff"
+    done
   done
 
   result="$result]"
@@ -4078,11 +4729,145 @@ cmd_research_lookup() {
   fi
 }
 
+# Usage: extract-sections <file> --anchors "<heading titles, newline-separated>"
+# Print only the requested '## '/'### ' sections of a research .md file, concatenated
+# verbatim in the order the anchors were requested.
+# Each section spans from its matching heading line up to (but not including) the next
+# heading of the same-or-higher level, or EOF -- so an h2 anchor includes its nested h3s
+# and stops at the next h2 (or h1); an h3 anchor stops at the next h3/h2 (or h1).
+# Anchor text is matched case-insensitively against the heading text (leading #s and
+# surrounding whitespace stripped). An anchor with no matching heading is skipped (not
+# a fatal error) but is named in a "no section matched anchor" warning on stderr; a run
+# whose anchors match nothing prints empty output, still exit 0.
+# Anchors containing shell metacharacters ($ ` " \) are rejected with a warning on
+# stderr and skipped -- defense in depth, since anchor text originates from untrusted
+# research-file heading content.
+# Path confinement mirrors research-lookup: resolve_path + validate_path_in_project.
+# Missing file -> error + exit 1. Missing <file>/--anchors arg -> usage + exit 1.
+cmd_extract_sections() {
+  local file_path=""
+  local anchors_raw=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --anchors)
+        if [ $# -lt 2 ]; then
+          echo "Usage: aimi-cli.sh extract-sections <file> --anchors \"<heading titles>\"" >&2
+          exit 1
+        fi
+        anchors_raw="$2"
+        shift 2
+        ;;
+      -*)
+        echo "Usage: aimi-cli.sh extract-sections <file> --anchors \"<heading titles>\"" >&2
+        exit 1
+        ;;
+      *)
+        file_path="$1"
+        shift
+        ;;
+    esac
+  done
+
+  if [ -z "$file_path" ] || [ -z "$anchors_raw" ]; then
+    echo "Usage: aimi-cli.sh extract-sections <file> --anchors \"<heading titles>\"" >&2
+    exit 1
+  fi
+
+  if [ ! -f "$file_path" ]; then
+    echo "Error: File not found: $file_path" >&2
+    exit 1
+  fi
+
+  # Resolve and validate the target file path
+  local resolved_file
+  resolved_file=$(resolve_path "$file_path")
+  validate_path_in_project "$resolved_file"
+
+  # Split --anchors on newlines only (comma is valid heading-text punctuation and must
+  # NOT be treated as a delimiter); trim and lowercase each entry; skip blanks.
+  # Extract each anchor's section (first matching heading only) in request order.
+  local anchor anchor_lc unmatched_anchors=""
+  while IFS= read -r anchor; do
+    anchor=$(printf '%s' "$anchor" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    [ -z "$anchor" ] && continue
+
+    # Defense in depth: anchors originate from untrusted research-file heading text.
+    # The orchestrator sanitizes before interpolating, but this CLI must not rely on
+    # that. Reject only characters dangerous inside a double-quoted shell argument --
+    # &, comma, parens, colon, slash, hyphen, underscore, period, and single-quote are
+    # all legitimate heading punctuation and MUST keep working.
+    case "$anchor" in
+      *'$'*|*'`'*|*'"'*|*'\'*)
+        echo "Warning: anchor rejected (shell metacharacter): $anchor" >&2
+        continue ;;
+    esac
+
+    anchor_lc=$(printf '%s' "$anchor" | tr '[:upper:]' '[:lower:]')
+
+    # awk streams matched section lines straight to stdout (byte-for-byte, blank
+    # lines and all) and reports match status via its own exit code -- this avoids
+    # a $(...) capture, which would silently swallow trailing blank lines.
+    if awk -v target="$anchor_lc" '
+      BEGIN { in_section = 0; match_level = 0; matched_done = 0; in_fence = 0 }
+      {
+        if ($0 ~ /^[[:space:]]*(```|~~~)/) { in_fence = !in_fence }
+        level = 0
+        if (!in_fence && $0 ~ /^#+[[:space:]]/) {
+          line_copy = $0
+          while (substr(line_copy, 1, 1) == "#") {
+            level++
+            line_copy = substr(line_copy, 2)
+          }
+        }
+
+        # Close the active section at the next heading of same-or-higher level
+        # (a lower heading level number outranks a higher one, e.g. h2 outranks h3).
+        if (in_section && level > 0 && level <= match_level) {
+          in_section = 0
+        }
+
+        # Only ## / ### headings are matchable anchors; first match wins.
+        if (!in_section && !matched_done && (level == 2 || level == 3)) {
+          heading_text = substr($0, level + 1)
+          gsub(/^[[:space:]]+/, "", heading_text)
+          gsub(/[[:space:]]+$/, "", heading_text)
+          if (tolower(heading_text) == target) {
+            in_section = 1
+            matched_done = 1
+            match_level = level
+          }
+        }
+
+        if (in_section) {
+          print
+        }
+      }
+      END { exit (matched_done ? 0 : 1) }
+    ' "$resolved_file"; then
+      :
+    else
+      unmatched_anchors="$unmatched_anchors
+$anchor"
+    fi
+  done < <(printf '%s\n' "$anchors_raw")
+
+  if [ -n "$unmatched_anchors" ]; then
+    while IFS= read -r anchor; do
+      [ -z "$anchor" ] && continue
+      echo "Warning: no section matched anchor: $anchor" >&2
+    done <<< "$unmatched_anchors"
+  fi
+
+  return 0
+}
+
 # Usage: research-gc
 # Garbage-collect orphaned research files from .aimi/research/*.md.
 # A file is deleted only when BOTH conditions are true:
-#   1. It is NOT referenced by any active .aimi/tasks/*.json metadata.researchPaths
-#      AND is NOT referenced by any .aimi/brainstorms/*.md frontmatter researchPaths.
+#   1. It is NOT referenced by any active .aimi/tasks/*.json metadata.researchPaths,
+#      AND is NOT referenced by any .aimi/brainstorms/*.md frontmatter researchPaths,
+#      AND is NOT referenced by any .aimi/brainstorms/*.md frontmatter foundationProposalPath.
 #   2. Its mtime is older than 30 days.
 # .aimi/archive is ignored entirely.
 # Prints "Cleaned <N> orphaned research files (>30 days)" when N>0; silent when N=0.
@@ -4116,12 +4901,14 @@ $rpath"
   fi
 
   # --- Source 2: .aimi/brainstorms/*.md frontmatter researchPaths ---
+  # --- Source 3: .aimi/brainstorms/*.md frontmatter foundationProposalPath (scalar) ---
   local brainstorms_dir="$AIMI_DIR/brainstorms"
   if [ -d "$brainstorms_dir" ]; then
     for bfile in "$brainstorms_dir"/*.md; do
       [ -f "$bfile" ] || continue
       # Extract YAML frontmatter (lines between opening and closing ---)
       # Parse researchPaths: list entries (lines starting with - under that key)
+      # and foundationProposalPath: as a single scalar value, independent of order.
       local in_front=0 past_open=0 in_rp=0
       while IFS= read -r line; do
         if [ "$past_open" -eq 0 ] && [ "$line" = "---" ]; then
@@ -4139,6 +4926,28 @@ $rpath"
         # Inside frontmatter
         if printf '%s\n' "$line" | grep -qE '^researchPaths\s*:'; then
           in_rp=1
+          continue
+        fi
+        if printf '%s\n' "$line" | grep -qE '^foundationProposalPath[[:space:]]*:'; then
+          # New top-level key: exit any in-progress researchPaths list scan first,
+          # regardless of whether foundationProposalPath appears before or after it.
+          in_rp=0
+          local fp_entry
+          # POSIX [[:space:]] (not \s — GNU-only in sed); then normalize the
+          # extracted scalar so a YAML-quoted value or a trailing comment cannot
+          # defeat the referenced-set match (which would delete a live artifact):
+          #   1. strip a trailing " #comment" (space-hash onward)
+          #   2. strip one pair of surrounding double or single quotes
+          #   3. strip a leading ./
+          fp_entry=$(printf '%s\n' "$line" | sed 's/^foundationProposalPath[[:space:]]*:[[:space:]]*//')
+          fp_entry=$(printf '%s\n' "$fp_entry" | sed 's/[[:space:]]#.*$//; s/[[:space:]]*$//')
+          case "$fp_entry" in
+            \"*\") fp_entry="${fp_entry#\"}"; fp_entry="${fp_entry%\"}" ;;
+            \'*\') fp_entry="${fp_entry#\'}"; fp_entry="${fp_entry%\'}" ;;
+          esac
+          fp_entry="${fp_entry#./}"
+          referenced_set="$referenced_set
+$fp_entry"
           continue
         fi
         if [ "$in_rp" -eq 1 ]; then
@@ -4216,7 +5025,8 @@ $rp_entry"
 # ============================================================================
 # story-merge: Consolidate staging files into a validated tasks.json
 # Usage: aimi-cli.sh story-merge --staging-dir <dir> --output <path>
-#           [--split legacy|full-stack] [--agent-mode]
+#           [--split legacy|full-stack] [--agent-mode] [--phase-aware]
+#           [--foundation <NN>]
 # ============================================================================
 
 # _story_merge_assign_ids: given a JSON array of story objects (already loaded),
@@ -4225,7 +5035,11 @@ $rp_entry"
 # Returns the array with id fields populated.
 
 cmd_story_merge() {
-  local staging_dir="" output_path="" split_mode="legacy" agent_mode=false
+  local staging_dir="" output_path="" split_mode="legacy" agent_mode=false phase_aware=false foundation_idx=""
+  # Resolved by the --foundation injection sweep below and consumed (only) by
+  # the PROJECT-axis writer, which flags cross-group edges onto it distinctly.
+  # Stays "" whenever --foundation was omitted, so no real id can match it.
+  local foundation_id=""
 
   # --- Parse flags ---
   while [ $# -gt 0 ]; do
@@ -4244,6 +5058,13 @@ cmd_story_merge() {
         ;;
       --agent-mode)
         agent_mode=true
+        ;;
+      --phase-aware)
+        phase_aware=true
+        ;;
+      --foundation)
+        shift
+        foundation_idx="${1:-}"
         ;;
       *)
         echo "Error: story-merge: unknown flag: $1" >&2
@@ -4265,6 +5086,37 @@ cmd_story_merge() {
   if [ "$split_mode" != "legacy" ] && [ "$split_mode" != "full-stack" ]; then
     echo "Error: story-merge: --split must be 'legacy' or 'full-stack', got: $split_mode" >&2
     exit 1
+  fi
+  if [ -n "$foundation_idx" ] && ! [[ "$foundation_idx" =~ ^[0-9]{2}$ ]]; then
+    echo "Error: story-merge: --foundation must be a two-digit index (e.g. 01), got: $foundation_idx" >&2
+    exit 1
+  fi
+  # --phase-aware strips ONE trailing "-tasks" segment from the --output
+  # basename. Both writers do that strip with the same `${base_no_ext%-tasks}`
+  # expansion, and on a basename that is exactly "tasks" the strip is a no-op
+  # while on "-tasks" it collapses to the empty string -- either way the
+  # derived name degenerates (".../-frontend-tasks.json", ".../-<slug>-tasks.json":
+  # a basename starting with "-", which every downstream tool reads as a flag).
+  # Guarding inside the writers would mean either fixing one axis and leaving
+  # the other, or changing SIDE-axis behavior; refusing the input here leaves
+  # both strips byte-identical and costs the caller one well-named error.
+  # The derivation below mirrors the writers' exactly (basename, strip the
+  # extension after the LAST dot) so the precondition can never drift from the
+  # expansion it protects.
+  if [ "$phase_aware" = true ]; then
+    local pa_base pa_ext pa_no_ext
+    pa_base=$(basename "$output_path")
+    pa_ext="${pa_base##*.}"
+    pa_no_ext="${pa_base%.$pa_ext}"
+    case "$pa_no_ext" in
+      # ?* before "-tasks": at least one character must survive the strip.
+      ?*-tasks) ;;
+      *)
+        echo "Error: story-merge: --phase-aware requires an --output basename ending in \"-tasks\"" >&2
+        echo "(phase-scoped form, e.g. <feature>-phase-<N>-tasks.json); got: $pa_base" >&2
+        exit 1
+        ;;
+    esac
   fi
 
   # --- Validate paths are inside project ---
@@ -4430,6 +5282,57 @@ cmd_story_merge() {
 
   # --- Remove synthetic _srcIdx field before further processing ---
   merged_array=$(printf '%s' "$merged_array" | jq '[.[] | del(._srcIdx)]')
+
+  # --- Resolve the split axis (and refuse unrouteable .project values) ---
+  # Earliest point at which every story carries its final US-NNN id, and still
+  # ahead of --foundation, cycle detection, and the Phase 3.1/4.1/4.2 sweeps:
+  # a refusal here costs nothing and cannot emit a warning about a plan that
+  # was never going to be written. The axis is decided ONCE, here, and the
+  # writers below only read the answer.
+  local split_axis
+  split_axis=$(_story_merge_resolve_axis "$merged_array" "$split_mode") || exit 1
+
+  # --- Foundation dependsOn injection sweep (--foundation NN) ---
+  # Runs after the outline:NN remap and _srcIdx strip, and before both the
+  # Kahn's-algorithm cycle detection and wave computation below, so injected
+  # edges are naturally included in both without touching either block.
+  # foundation_idx is an outline position (1-based, same convention as
+  # outline:NN tokens) — resolved against the array's own position, not
+  # against a literal staging-filename digit.
+  # Cycle-safe by construction: the foundation's own dependsOn is asserted
+  # empty before any edge is added, and injection only ever adds edges
+  # pointing toward the foundation (never away from it), so no new cycle can
+  # be introduced; the Kahn's-algorithm check below still runs unmodified.
+  if [ -n "$foundation_idx" ]; then
+    foundation_id=$(printf '%s' "$merged_array" | jq -r --arg nn "$foundation_idx" '
+      (to_entries | map({key: (.key + 1 | tostring | if length == 1 then "0" + . else . end), value: .value.id}) | from_entries) as $outline_map |
+      $outline_map[$nn] // ""
+    ')
+    if [ -z "$foundation_id" ]; then
+      echo "Error: story-merge: --foundation $foundation_idx not present among staging files" >&2
+      exit 1
+    fi
+
+    local foundation_depends_on
+    foundation_depends_on=$(printf '%s' "$merged_array" | jq -c --arg fid "$foundation_id" '[.[] | select(.id == $fid)][0].dependsOn // []')
+    if [ "$foundation_depends_on" != "[]" ]; then
+      echo "Error: story-merge: foundation story $foundation_id has non-empty dependsOn" >&2
+      exit 1
+    fi
+
+    merged_array=$(printf '%s' "$merged_array" | jq --arg fid "$foundation_id" '
+      map(
+        if .id == $fid then
+          .
+        else
+          .dependsOn = (
+            (.dependsOn // []) as $d |
+            if ($d | index($fid)) != null then $d else $d + [$fid] end
+          )
+        end
+      )
+    ')
+  fi
 
   # --- DAG cycle detection via topological sort (Kahn's algorithm in jq) ---
   local cycle_result
@@ -4786,11 +5689,146 @@ cmd_story_merge() {
   # ============================================================
   # Branch on split mode
   # ============================================================
+  # The split AXIS was decided by _story_merge_resolve_axis immediately after
+  # id assignment, before any of the sweeps above ran. Nothing is recomputed
+  # here -- this block only dispatches on the answer, so there is no second
+  # partition rule that could disagree with the one the writer groups by.
   if [ "$split_mode" = "full-stack" ]; then
-    _story_merge_write_split "$merged_array" "$output_path" "$staging_dir" "$smell_warnings"
+    if [ "$split_axis" = "project" ]; then
+      # foundation_id is threaded into the PROJECT writer ONLY. --foundation
+      # injects one edge onto the foundation story from every other story; in
+      # a multi-repo split every group that does not host the foundation loses
+      # that edge and would otherwise look like an ordinary hand-authored
+      # missing dependency. The SIDE writer keeps its byte-identical signature.
+      _story_merge_write_project_split "$merged_array" "$output_path" "$staging_dir" "$smell_warnings" "$phase_aware" "$foundation_id"
+    else
+      _story_merge_write_split "$merged_array" "$output_path" "$staging_dir" "$smell_warnings" "$phase_aware"
+    fi
   else
     _story_merge_write_legacy "$merged_array" "$output_path" "$staging_dir" "$smell_warnings"
   fi
+}
+
+# jq `def`s spliced into every program that needs a story's .project either
+# classified or reduced to a stable grouping key. Shared by
+# _story_merge_resolve_axis and _story_merge_write_project_split so the two can
+# never drift apart -- an axis chosen from one rule and a group built from
+# another is exactly how issue #72 came back (one branch, two repositories).
+#
+# Grouping/counting/classification ONLY -- neither the normalized nor the
+# classified form is ever written back onto a story; .project must survive
+# verbatim into the output files.
+#
+#   norm_project  -- trims surrounding whitespace, strips one trailing slash,
+#                    and treats blank/whitespace-only (and absent) as null.
+#   project_state -- validates the RAW value against the grammar execute.md
+#                    publishes for .project, returning exactly one of
+#                    "untagged" / "tagged" / "invalid". Deliberately inspects
+#                    the raw string, not the trimmed one: " apps/web " is
+#                    invalid rather than being quietly trimmed into a value
+#                    whose raw form is what a downstream command would cd into.
+#                    Only a fully blank string counts as untagged.
+#   group_key     -- the single routing key. Both the axis decision and the
+#                    grouping pass go through this and nothing else.
+_STORY_MERGE_NORM_PROJECT_JQ='
+def norm_project:
+  if . == null then null
+  else
+    (. | gsub("^\\s+|\\s+$"; "")) as $t |
+    if $t == "" then null
+    elif ($t | endswith("/")) then $t[0:-1]
+    else $t
+    end
+  end;
+
+def project_state:
+  if . == null then "untagged"
+  elif (type != "string") then "invalid"
+  elif ((. | gsub("^\\s+|\\s+$"; "")) == "") then "untagged"
+  elif . == "." then "tagged"
+  elif (test("^[a-zA-Z0-9_][a-zA-Z0-9_./@-]*$")
+        and ((split("/") | index("..")) == null)
+        and ((test("//")) | not)) then "tagged"
+  else "invalid"
+  end;
+
+def group_key: norm_project;
+'
+
+# Resolve the split AXIS from the merged array, refusing anything the axis
+# cannot route unambiguously. Echoes exactly "project" or "side"; returns 1
+# after printing a named refusal otherwise.
+#
+# Called once, early -- before --foundation, cycle detection, and the Phase
+# 3.1/4.1/4.2 sweeps -- so a refusal costs nothing and emits no warnings about
+# a plan that was never going to be written.
+#
+# Decision table (counts computed here, ONCE, and nowhere else):
+#   any story with an invalid .project     -> refuse, in EVERY --split mode
+#   distinct >= 1 AND untagged > 0         -> refuse (--split full-stack only)
+#   distinct >= 2                          -> "project"  (multi-repo)
+#   otherwise                              -> "side"     (single-repo/monorepo)
+#
+# The untagged rule tests distinct >= 1, not >= 2, deliberately: the failure
+# this exists to stop is ONE tagged repo plus untagged stories, which counts as
+# a single distinct project and would otherwise take the SIDE axis -- one file,
+# one branch, two repositories.
+#
+# _rm_sanitize is applied HERE and only here. These lines print values that
+# already failed validation and are therefore unbounded; on every success path
+# .project is a routing key that must stay byte-identical between the key that
+# groups and the key that is written.
+_story_merge_resolve_axis() {
+  local merged_array="$1"
+  local split_mode="$2"
+
+  # Malformed .project is refused in EVERY --split mode, legacy included: the
+  # value is a repository path a downstream command will cd into, so
+  # "../sibling-repo" must not reach a tasks file by any route.
+  local invalid_stories
+  invalid_stories=$(printf '%s' "$merged_array" | jq -r "$_STORY_MERGE_NORM_PROJECT_JQ$_ROADMAP_SANITIZE_JQ"'
+    [.[] | . as $s | select(($s.project | project_state) == "invalid")] | .[] |
+    "  " + .id + " (" + (.title | _rm_sanitize(200)) + "): invalid project " + (.project | tostring | _rm_sanitize(120))
+  ')
+  if [ -n "$invalid_stories" ]; then
+    echo "Error: story-merge: story .project must match ^[a-zA-Z0-9_][a-zA-Z0-9_./@-]*\$ with no \"..\" component, no \"//\", no surrounding whitespace, and no leading \"./\" (use \".\" for the root repository); no files were written:" >&2
+    printf '%s\n' "$invalid_stories" >&2
+    return 1
+  fi
+
+  if [ "$split_mode" != "full-stack" ]; then
+    printf '%s' "side"
+    return 0
+  fi
+
+  local axis_counts distinct_count untagged_count
+  axis_counts=$(printf '%s' "$merged_array" | jq -c "$_STORY_MERGE_NORM_PROJECT_JQ"'
+    [.[] | . as $s | {state: ($s.project | project_state), key: ($s.project | group_key)}] as $st |
+    {
+      distinct: ([$st[] | select(.state == "tagged") | .key] | unique | length),
+      untagged: ([$st[] | select(.state == "untagged")] | length)
+    }
+  ')
+  distinct_count=$(printf '%s' "$axis_counts" | jq -r '.distinct')
+  untagged_count=$(printf '%s' "$axis_counts" | jq -r '.untagged')
+
+  if [ "${distinct_count:-0}" -ge 1 ] && [ "${untagged_count:-0}" -gt 0 ]; then
+    local untagged_stories
+    untagged_stories=$(printf '%s' "$merged_array" | jq -r "$_STORY_MERGE_NORM_PROJECT_JQ$_ROADMAP_SANITIZE_JQ"'
+      [.[] | . as $s | select(($s.project | project_state) == "untagged")] | .[] |
+      "  " + .id + " (" + (.title | _rm_sanitize(200)) + "): no project"
+    ')
+    echo "Error: story-merge: --split full-stack: this plan tags $distinct_count project(s), so it is a multi-repo plan and EVERY story needs a project. A story that belongs to the root repository must say so explicitly with \".\" -- an absent project is not the root, it is unrouteable. No files were written; the staging dir was kept. Stories missing a project:" >&2
+    printf '%s\n' "$untagged_stories" >&2
+    return 1
+  fi
+
+  if [ "${distinct_count:-0}" -ge 2 ]; then
+    printf '%s' "project"
+  else
+    printf '%s' "side"
+  fi
+  return 0
 }
 
 # Write a single merged tasks.json (legacy mode)
@@ -4853,68 +5891,59 @@ _story_merge_write_legacy() {
     '{merged: $output, stories: $stories}'
 }
 
-# Write two split tasks files (full-stack mode)
+# Write two split tasks files (full-stack mode, SIDE axis: frontend/backend).
+# Chosen by cmd_story_merge for single-repo/monorepo layouts only -- fewer than
+# 2 distinct normalized .project values across the merged array.
 _story_merge_write_split() {
   local merged_array="$1"
   local output_path="$2"
   local staging_dir="$3"
   local smell_warnings="${4:-[]}"
+  local phase_aware="${5:-false}"
 
-  # Partition by layer:
-  # - UI stories → frontend (stories whose title/description contains UI/Frontend/React/Vue/component keywords,
-  #   or implementation.files match frontend patterns)
-  # - schema + backend + aggregation → backend
-
-  # Partition stories
-  local frontend_stories backend_stories
-  frontend_stories=$(printf '%s' "$merged_array" | jq '
-    [.[] | select(
-      ((.implementation.files // []) | any(
-        test("\\.(tsx|jsx)$") or test("components?/") or test("pages?/") or test("views?/") or
-        test("frontend") or test("ui/") or test("client/") or test("app/") or
-        test("\\.(css|scss)$") or test("tailwind")
-      )) or
-      ((.title + " " + (.description // "")) | test("UI|Frontend|Component|Page|View|React|Vue|Tailwind|CSS|modal|form|screen|dashboard"; "i"))
-    )]
-  ')
-  backend_stories=$(printf '%s' "$merged_array" | jq '
-    [.[] | select(
-      ((.implementation.files // []) | any(
-        test("schema|migration|model|backend|api|endpoint|server|database|db/") or
-        test("\\.(rb|py|go|java|kt|rs)$") or
-        test("controllers?/") or test("services?/") or test("repositories?/")
-      )) or
-      ((.title + " " + (.description // "")) | test("Schema|Migration|Backend|API|Endpoint|Model|Database|Service|Repository"; "i")) or
-      # Any story not clearly frontend goes to backend
-      (((.implementation.files // []) | any(
-        test("\\.(tsx|jsx)$") or test("components?/") or test("pages?/") or test("views?/") or
-        test("frontend") or test("ui/") or test("client/") or test("app/")
-      )) | not)
-    )]
-  ')
-
-  # Deduplicate: if a story appears in both, prefer frontend for UI stories
-  # Actually re-assign: stories explicitly UI → frontend, all others → backend
-  # Simpler and more deterministic: frontend = stories matching UI patterns; backend = the rest
-  frontend_stories=$(printf '%s' "$merged_array" | jq '
-    [.[] | select(
+  # Partition by the per-story frontend heuristic, unconditionally.
+  #
+  # This writer only ever sees a single-repo/monorepo merge: cmd_story_merge
+  # routes every layout carrying >= 2 distinct normalized .project values to
+  # _story_merge_write_project_split instead, so there is no project group to
+  # vote on here and no project-aware branch. Every story is classified by its
+  # own file-pattern/title verdict (implementation.files matching tsx/jsx/
+  # components//pages//frontend//ui//client/, OR title+description matching the
+  # UI/Frontend/Component/Page/View/React/Tailwind keyword set) -- byte-
+  # identical to what the old monorepo-guard fallback produced, which covers
+  # both "no story has .project" and "every story shares exactly one project".
+  local tagged_stories
+  tagged_stories=$(printf '%s' "$merged_array" | jq '
+    def fe_heuristic:
       ((.implementation.files // []) | any(
         test("\\.(tsx|jsx)$") or test("components?/") or test("pages?/") or
         test("frontend/") or test("ui/") or test("client/")
       )) or
-      ((.title + " " + (.description // "")) | test("\\b(UI|Frontend|Component|Page|View|React|Tailwind)\\b"; "i"))
-    )]
+      ((.title + " " + (.description // "")) | test("\\b(UI|Frontend|Component|Page|View|React|Tailwind)\\b"; "i"));
+    [.[] | . + {_fe: fe_heuristic}] | map(. + {_side: ._fe})
   ')
-  backend_stories=$(printf '%s' "$merged_array" | jq '
-    (map(.id)) as $all_ids |
-    '"$(printf '%s' "$frontend_stories" | jq '[.[] | .id]')"' as $frontend_ids |
-    [.[] | select((.id as $id | $frontend_ids | index($id)) == null)]
-  ')
+
+  # Bipartition: two select() passes over the single tagged-and-sided array,
+  # so every story id structurally lands in exactly one output (never lost,
+  # never duplicated) rather than incidentally so.
+  local frontend_stories backend_stories
+  frontend_stories=$(printf '%s' "$tagged_stories" | jq '[.[] | select(._side == true)]')
+  backend_stories=$(printf '%s' "$tagged_stories" | jq '[.[] | select(._side == false)]')
 
   # Re-assign unique IDs: frontend US-001 ... US-N, backend US-(N+1) ... US-M
   local fe_count be_count
   fe_count=$(printf '%s' "$frontend_stories" | jq 'length')
   be_count=$(printf '%s' "$backend_stories" | jq 'length')
+
+  # An empty split side still writes its (empty userStories) file below --
+  # traced, does not crash downstream -- but is surfaced with a named warning
+  # rather than failing silently.
+  if [ "$fe_count" -eq 0 ]; then
+    echo "Warning: story-merge: frontend split produced zero stories" >&2
+  fi
+  if [ "$be_count" -eq 0 ]; then
+    echo "Warning: story-merge: backend split produced zero stories" >&2
+  fi
 
   # Build ID remapping for frontend
   local fe_id_map="{}"
@@ -4930,23 +5959,118 @@ _story_merge_write_split() {
     --argjson offset "$fe_count_n" \
     'to_entries | map({key: .value.id, value: ("US-" + ((.key + $offset + 1) | tostring | if length == 1 then "00" + . elif length == 2 then "0" + . else . end))}) | from_entries')
 
-  # Apply ID remap and rebuild dependsOn (remove cross-file refs) for frontend
+  # Global pre-remap-id -> {newId, side, title} lookup map, built from BOTH
+  # sides' stories + id maps BEFORE either dependsOn-remap block below runs.
+  # A pre-remap id would exist in neither output file, so naming a dropped
+  # cross-file target usefully requires resolving it against this map now.
+  local global_id_map
+  global_id_map=$(printf '%s\n%s\n%s\n%s' "$frontend_stories" "$fe_id_map" "$backend_stories" "$be_id_map" | jq -s '
+    .[0] as $fe | .[1] as $fe_map | .[2] as $be | .[3] as $be_map |
+    ([$fe[] | {key: .id, value: {newId: ($fe_map[.id] // .id), side: "frontend", title: .title}}]
+     + [$be[] | {key: .id, value: {newId: ($be_map[.id] // .id), side: "backend", title: .title}}])
+    | from_entries
+  ')
+
+  # Apply ID remap and rebuild dependsOn (remove cross-file refs) for frontend.
+  # Alongside the existing remap, capture the pre-remap dep ids that did NOT
+  # resolve against the LOCAL id_map (i.e. cross-file) as __droppedDeps, and
+  # flag __becameRoot when the story had a non-empty dependsOn that is now
+  # entirely gone as a direct result of the drop.
   frontend_stories=$(printf '%s\n%s' "$frontend_stories" "$fe_id_map" | jq -s '
     .[0] as $stories | .[1] as $id_map |
     $stories | map(
-      .id = ($id_map[.id] // .id) |
-      .dependsOn = [(.dependsOn // [])[] | . as $dep | ($id_map[$dep] // null) | select(. != null)]
+      . as $story |
+      ($story.dependsOn // []) as $pre |
+      ($pre | length > 0) as $had_deps |
+      ([$pre[] | select(($id_map[.] // null) == null)]) as $dropped_ids |
+      $story
+      | .id = ($id_map[.id] // .id)
+      | .dependsOn = [$pre[] | . as $dep | ($id_map[$dep] // null) | select(. != null)]
+      | .__droppedDeps = $dropped_ids
+      | .__becameRoot = ($had_deps and (.dependsOn == []))
     )
   ')
 
-  # Apply ID remap and rebuild dependsOn for backend
+  # Apply ID remap and rebuild dependsOn for backend (same cross-file capture).
   backend_stories=$(printf '%s\n%s' "$backend_stories" "$be_id_map" | jq -s '
     .[0] as $stories | .[1] as $id_map |
     $stories | map(
-      .id = ($id_map[.id] // .id) |
-      .dependsOn = [(.dependsOn // [])[] | . as $dep | ($id_map[$dep] // null) | select(. != null)]
+      . as $story |
+      ($story.dependsOn // []) as $pre |
+      ($pre | length > 0) as $had_deps |
+      ([$pre[] | select(($id_map[.] // null) == null)]) as $dropped_ids |
+      $story
+      | .id = ($id_map[.id] // .id)
+      | .dependsOn = [$pre[] | . as $dep | ($id_map[$dep] // null) | select(. != null)]
+      | .__droppedDeps = $dropped_ids
+      | .__becameRoot = ($had_deps and (.dependsOn == []))
     )
   ')
+
+  # ============================================================
+  # Cross-file dependsOn: audible drop surfacing
+  # ============================================================
+  # Every dependsOn entry that failed local resolution above is, by
+  # construction, resolvable in the OTHER side's global_id_map -- the
+  # earlier outline:NN remap + unresolved-outline check (before this
+  # function runs) guarantees every dependsOn entry reaching this point
+  # names a real story somewhere in the merged array. Build one
+  # smellWarnings entry per affected story (both sides combined), with
+  # every title sanitized via _rm_sanitize before it enters JSON or stderr.
+  local cross_file_warnings
+  cross_file_warnings=$(printf '%s\n%s\n%s' "$frontend_stories" "$backend_stories" "$global_id_map" | jq -s "$_ROADMAP_SANITIZE_JQ"'
+    .[0] as $fe | .[1] as $be | .[2] as $gmap |
+    ( [$fe[] | . + {__side: "frontend"}] + [$be[] | . + {__side: "backend"}] ) as $all |
+    [
+      $all[] | select((.__droppedDeps // []) | length > 0) |
+      . as $story |
+      (
+        [
+          ($story.__droppedDeps // [])[] | . as $old |
+          ($gmap[$old] // {newId: $old, side: "unknown", title: ""}) |
+          {id: .newId, side: .side, title: (.title | _rm_sanitize(200))}
+        ]
+      ) as $dd |
+      {
+        type: "cross-file-dep-dropped",
+        storyId: $story.id,
+        side: $story.__side,
+        becameRoot: $story.__becameRoot,
+        droppedDeps: $dd,
+        message: (
+          ($dd | length | tostring) + " cross-file dependsOn edge(s) dropped targeting: " +
+          ($dd | map(.title) | join("; ")) +
+          (if $story.__becameRoot then " (story became a false wave-1 root)" else "" end)
+        )
+      }
+    ]
+  ')
+
+  # Merge into the Phase 4.2 smell_warnings param BEFORE it is threaded into
+  # either output file build below, so both files carry the same combined set.
+  local combined_smell_warnings
+  combined_smell_warnings=$(printf '%s\n%s' "$smell_warnings" "$cross_file_warnings" | jq -s '.[0] + .[1]')
+
+  # Aggregated stderr banner (never per-edge -- legitimate FE<->API edges and
+  # --foundation's one-injected-edge-per-story would otherwise flood every
+  # normal full-stack plan). One summary line with total dropped-edge count
+  # and distinct-affected-story count (both sides combined), followed by one
+  # enumeration line per FALSE-ROOT story only.
+  local total_dropped affected_count
+  total_dropped=$(printf '%s' "$cross_file_warnings" | jq '[.[].droppedDeps | length] | add // 0')
+  affected_count=$(printf '%s' "$cross_file_warnings" | jq 'length')
+  if [ "$affected_count" -gt 0 ]; then
+    echo "Warning: story-merge: ${total_dropped} cross-file dependsOn edge(s) dropped across ${affected_count} affected stories (--split full-stack; see metadata.smellWarnings)" >&2
+    local false_root_lines
+    false_root_lines=$(printf '%s' "$cross_file_warnings" | jq -r '
+      .[] | select(.becameRoot == true) |
+      (.storyId + " (" + .side + "): became a false wave-1 root -- its cross-file dependsOn target(s) " +
+       ([.droppedDeps[] | (.id + " (" + .side + ")")] | join(", ")) + " were dropped")
+    ')
+    if [ -n "$false_root_lines" ]; then
+      printf '%s\n' "$false_root_lines" >&2
+    fi
+  fi
 
   # Recompute waves independently per file
   frontend_stories=$(printf '%s' "$frontend_stories" | jq '
@@ -4991,6 +6115,17 @@ _story_merge_write_split() {
   base_name=$(basename "$output_path")
   ext="${base_name##*.}"
   local base_no_ext="${base_name%.$ext}"
+  # --phase-aware: the output basename for a phase-scoped invocation already
+  # ends in "-tasks" (e.g. "<feature>-phase-<N>-tasks.json"). Strip that single
+  # trailing "-tasks" segment once before appending "-frontend-tasks.json" /
+  # "-backend-tasks.json" so the split basenames keep a single "tasks" segment
+  # ("<feature>-phase-<N>-frontend-tasks.json") instead of doubling it. Default
+  # (unflagged) derivation is untouched -- it keeps appending directly to the
+  # full ".json"-stripped basename, preserving the existing double-"tasks"
+  # legacy basename (e.g. "<slug>-tasks-frontend-tasks.json").
+  if [ "$phase_aware" = true ]; then
+    base_no_ext="${base_no_ext%-tasks}"
+  fi
   local dir_part
   dir_part=$(dirname "$output_path")
   fe_path="${dir_part}/${base_no_ext}-frontend-tasks.json"
@@ -5001,10 +6136,11 @@ _story_merge_write_split() {
 
   # Build and write frontend tasks.json atomically
   # smellWarnings is injected only when non-empty; written to BOTH split files
-  # so reviewers see the same orphan-symbol surface regardless of which file
-  # they inspect first.
+  # (combined_smell_warnings = Phase 4.2 orphan-symbol + cross-file-dep-dropped)
+  # so reviewers see the same full smell surface regardless of which file they
+  # inspect first.
   local fe_json
-  fe_json=$(printf '%s\n%s' "$frontend_stories" "$smell_warnings" | jq -s '
+  fe_json=$(printf '%s\n%s' "$frontend_stories" "$combined_smell_warnings" | jq -s '
     .[0] as $stories | .[1] as $smells |
     {
       schemaVersion: "3.3",
@@ -5018,7 +6154,7 @@ _story_merge_write_split() {
         } +
         (if ($smells | length) > 0 then {smellWarnings: $smells} else {} end)
       ),
-      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors) | (.status //= "pending")]
+      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors) | del(._fe) | del(._side) | del(.__droppedDeps) | del(.__becameRoot) | (.status //= "pending")]
     }
   ')
   local tmp_fe
@@ -5037,7 +6173,7 @@ _story_merge_write_split() {
 
   # Build and write backend tasks.json atomically
   local be_json
-  be_json=$(printf '%s\n%s' "$backend_stories" "$smell_warnings" | jq -s '
+  be_json=$(printf '%s\n%s' "$backend_stories" "$combined_smell_warnings" | jq -s '
     .[0] as $stories | .[1] as $smells |
     {
       schemaVersion: "3.3",
@@ -5051,7 +6187,7 @@ _story_merge_write_split() {
         } +
         (if ($smells | length) > 0 then {smellWarnings: $smells} else {} end)
       ),
-      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors) | (.status //= "pending")]
+      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors) | del(._fe) | del(._side) | del(.__droppedDeps) | del(.__becameRoot) | (.status //= "pending")]
     }
   ')
   local tmp_be
@@ -5082,6 +6218,2604 @@ _story_merge_write_split() {
     '{frontend: $fe, backend: $be, frontend_stories: $fe_count, backend_stories: $be_count}'
 }
 
+# Write N split tasks files (full-stack mode, PROJECT axis: one file per repo).
+#
+# Chosen by cmd_story_merge when the merged array carries >= 2 distinct
+# normalized .project values -- a multi-repo layout. There is no
+# frontend/backend side decision on this path at all: the split axis IS the
+# project, so every repo named by a story gets its own valid, non-colliding
+# tasks file instead of being force-fit into two side files.
+#
+# All-or-nothing contract: every output path, slug, and branchName is derived
+# and validated BEFORE the first write, so a collision or an invalid branch
+# name lands zero files. Once the write loop starts, a mid-loop failure names
+# the files already on disk and keeps the staging dir so a retry is unambiguous.
+_story_merge_write_project_split() {
+  local merged_array="$1"
+  local output_path="$2"
+  local staging_dir="$3"
+  local smell_warnings="${4:-[]}"
+  local phase_aware="${5:-false}"
+  # Pre-remap id of the --foundation story, or "" when the flag was omitted.
+  # Compared against the PRE-remap dropped-dep ids below (the same namespace),
+  # so an empty value can never match a real story.
+  local foundation_id="${6:-}"
+
+  # ============================================================
+  # 1. Route every story to a project group
+  # ============================================================
+  # Group key = group_key, the same def _story_merge_resolve_axis chose the
+  # axis with. There is no fallback for a null key and there must not be one:
+  # this writer is only ever reached on the PROJECT axis, which the resolver
+  # enters only when every story is tagged, so group_key is non-null by
+  # construction. A `// "."` here would be a second normalization rule one
+  # function away from the first -- exactly the divergence that produced one
+  # file and one branch for two repositories (issue #72).
+  # Groups are emitted in lexicographic order by normalized project path
+  # (jq's `unique` sorts by codepoint), never staging-glob or first-encountered
+  # order.
+  local group_keys
+  group_keys=$(printf '%s' "$merged_array" | jq -c "$_STORY_MERGE_NORM_PROJECT_JQ"'
+    [.[] | . as $s | ($s.project | group_key)] | unique
+  ')
+
+  # ============================================================
+  # 2. Per-group id assignment + cross-group dependsOn sweep
+  # ============================================================
+  # Ids are reassigned US-001..US-M in group order, each group taking a
+  # contiguous block (mirrors the frontend-then-backend offset scheme of
+  # _story_merge_write_split), so ids stay unique across the whole N-file set.
+  # A dependsOn edge that crosses a group boundary cannot survive -- its target
+  # lives in another file -- so it is dropped and captured as __droppedDeps,
+  # with __becameRoot flagging a story whose entire dependsOn list vanished.
+  #
+  # Every select()/map() pass binds its story via `. as $s` first: piping a
+  # story into map/has() rebinds `.` away from the story object, which has
+  # already broken a prior fix to this function.
+  local prepared
+  prepared=$(printf '%s\n%s' "$merged_array" "$group_keys" | jq -s \
+    --arg foundation_id "$foundation_id" \
+    "$_STORY_MERGE_NORM_PROJECT_JQ$_ROADMAP_SANITIZE_JQ"'
+    def pad3: tostring | if length == 1 then "00" + . elif length == 2 then "0" + . else . end;
+    def recompute_waves:
+      reduce range(length) as $_ (
+        map(. + {wave: (if (.dependsOn // []) == [] then 1 else 0 end)});
+        . as $current |
+        map(
+          if .wave > 0 then .
+          else
+            . as $story |
+            ([$story.dependsOn[] | . as $dep_id | ($current[] | select(.id == $dep_id) | .wave)] | if length == 0 then [0] else . end) as $dep_waves |
+            if ($dep_waves | all(. > 0)) then
+              . + {wave: (($dep_waves | max) + 1)}
+            else
+              .
+            end
+          end
+        )
+      );
+    .[0] as $stories | .[1] as $keys |
+    # Stories bucketed per group, preserving merged (outline) order inside
+    # each bucket.
+    [ $keys[] | . as $g |
+      {project: $g, stories: [$stories[] | . as $s | select(($s.project | group_key) == $g)]}
+    ] as $buckets |
+    # Running offset -> contiguous US-NNN block per group, in group order.
+    (reduce range($buckets | length) as $i ({offset: 0, out: []};
+      .offset as $off |
+      ($buckets[$i].stories) as $bs |
+      {
+        offset: ($off + ($bs | length)),
+        out: (.out + [{
+          project: $buckets[$i].project,
+          idmap: ([$bs | to_entries[] | . as $e | {key: $e.value.id, value: ("US-" + (($off + $e.key + 1) | pad3))}] | from_entries),
+          stories: $bs
+        }])
+      }
+    ) | .out) as $blocks |
+    # Global pre-remap-id -> {newId, project, title} map, built across EVERY
+    # group before any dependsOn remap runs, so a dropped cross-group target
+    # can still be named usefully (it exists in no single output file).
+    ([$blocks[] | . as $b | ($b.stories[] | . as $s |
+       {key: $s.id, value: {newId: ($b.idmap[$s.id] // $s.id), project: $b.project, title: $s.title}})]
+     | from_entries) as $gmap |
+    [$blocks[] | . as $b |
+      {
+        project: $b.project,
+        stories: ([$b.stories[] | . as $s |
+          ($s.dependsOn // []) as $pre |
+          (($pre | length) > 0) as $had_deps |
+          ([$pre[] | . as $d | select(($b.idmap[$d] // null) == null)]) as $dropped_ids |
+          $s
+          | .id = ($b.idmap[$s.id] // $s.id)
+          | .dependsOn = [$pre[] | . as $dep | ($b.idmap[$dep] // null) | select(. != null)]
+          | .__droppedDeps = $dropped_ids
+          | .__becameRoot = ($had_deps and (.dependsOn == []))
+        ] | recompute_waves)
+      }
+    ] as $remapped |
+    # One cross-group dependsOn smellWarnings entry per affected story, every
+    # title sanitized before it enters JSON or stderr.
+    #
+    # This axis keys every entry by `project` -- the routing key of the group
+    # that owns it -- at BOTH the top level and in every droppedDeps[]. There is
+    # no frontend/backend verdict on this path, so there is no `side` field to
+    # emit; `side` remains exclusive to _story_merge_write_split. The two keys
+    # are mutually exclusive per axis, which is what lets the Step 5 renderer
+    # pick whichever one an entry actually carries.
+    #
+    # foundationEdge marks a dropped edge that --foundation itself injected
+    # into every non-foundation story. In a multi-repo split the foundation
+    # lives in exactly one group, so every OTHER group loses that edge and
+    # would otherwise be indistinguishable from a hand-authored missing
+    # dependency. $foundation_id is the PRE-remap id (same namespace as
+    # $old), and is "" when --foundation was omitted -- no real id matches it.
+    [$remapped[] | . as $b | ($b.stories[] | . as $s |
+      select(($s.__droppedDeps // []) | length > 0) |
+      ([($s.__droppedDeps // [])[] | . as $old |
+         ($gmap[$old] // {newId: $old, project: "unknown", title: ""}) |
+         {id: .newId, project: .project, title: (.title | _rm_sanitize(200)),
+          foundationEdge: (($foundation_id != "") and ($old == $foundation_id))}]) as $dd |
+      ($dd | map(select(.foundationEdge == true)) | length) as $fcount |
+      {
+        type: "cross-file-dep-dropped",
+        storyId: $s.id,
+        project: $b.project,
+        becameRoot: $s.__becameRoot,
+        droppedDeps: $dd,
+        message: (
+          ($dd | length | tostring) + " cross-file dependsOn edge(s) dropped targeting: " +
+          ($dd | map(.title) | join("; ")) +
+          (if $fcount > 0 then
+             " -- " + ($fcount | tostring) + " of these targets the shared --foundation story (" +
+             ($dd | map(select(.foundationEdge == true))
+                  | map(.id + " in project \"" + .project + "\"") | join(", ")) +
+             "), an edge --foundation injected into every story rather than a hand-authored dependency"
+           else "" end) +
+          (if $s.__becameRoot then " (story became a false wave-1 root)" else "" end)
+        )
+      })
+    ] as $cross_warnings |
+    {blocks: $remapped, crossWarnings: $cross_warnings}
+  ')
+
+  # Merge into the Phase 4.2 smell_warnings param BEFORE any file is built, so
+  # every one of the N files carries the same combined set.
+  local cross_file_warnings combined_smell_warnings
+  cross_file_warnings=$(printf '%s' "$prepared" | jq -c '.crossWarnings')
+  combined_smell_warnings=$(printf '%s\n%s' "$smell_warnings" "$cross_file_warnings" | jq -s '.[0] + .[1]')
+
+  # Aggregated stderr banner (never per-edge), mirroring the SIDE writer: one
+  # summary line, then one enumeration line per FALSE-ROOT story only.
+  local total_dropped affected_count
+  total_dropped=$(printf '%s' "$cross_file_warnings" | jq '[.[].droppedDeps | length] | add // 0')
+  affected_count=$(printf '%s' "$cross_file_warnings" | jq 'length')
+  if [ "$affected_count" -gt 0 ]; then
+    echo "Warning: story-merge: ${total_dropped} cross-project dependsOn edge(s) dropped across ${affected_count} affected stories (--split full-stack, project axis; see metadata.smellWarnings)" >&2
+
+    # --foundation note: separate from the drop-count banner above, because
+    # these edges are structurally different -- the merge itself injected
+    # them, so every non-foundation project group losing one is expected
+    # fallout of combining --foundation with a multi-repo split, not a sign of
+    # a hand-authored dependency that went missing.
+    local foundation_edge_count foundation_story_count
+    foundation_edge_count=$(printf '%s' "$cross_file_warnings" | jq '[.[].droppedDeps[] | select(.foundationEdge == true)] | length')
+    foundation_story_count=$(printf '%s' "$cross_file_warnings" | jq '[.[] | select((.droppedDeps // []) | any(.foundationEdge == true))] | length')
+    if [ "${foundation_edge_count:-0}" -gt 0 ]; then
+      echo "Note: story-merge: ${foundation_edge_count} of those edge(s), across ${foundation_story_count} stories, target the shared --foundation story, which lives in only one project group; --foundation injected them, so their loss is expected on a multi-repo split (see droppedDeps[].foundationEdge)" >&2
+    fi
+
+    local false_root_lines
+    false_root_lines=$(printf '%s' "$cross_file_warnings" | jq -r '
+      .[] | select(.becameRoot == true) |
+      (.storyId + " (" + .project + "): became a false wave-1 root -- its cross-project dependsOn target(s) " +
+       ([.droppedDeps[] | (.id + " (" + .project + ")")] | join(", ")) + " were dropped")
+    ')
+    if [ -n "$false_root_lines" ]; then
+      printf '%s\n' "$false_root_lines" >&2
+    fi
+  fi
+
+  # ============================================================
+  # 3. Derive every output path / slug / branchName up front
+  # ============================================================
+  local base_name ext base_no_ext dir_part
+  base_name=$(basename "$output_path")
+  ext="${base_name##*.}"
+  base_no_ext="${base_name%.$ext}"
+  # --phase-aware: identical single-"tasks"-segment collapse the SIDE writer
+  # applies. Pure string manipulation on the --output basename, independent of
+  # the split axis, so it composes unchanged at any N.
+  if [ "$phase_aware" = true ]; then
+    base_no_ext="${base_no_ext%-tasks}"
+  fi
+  dir_part=$(dirname "$output_path")
+
+  # slugify: a project path is NEVER interpolated raw into a filename. Every
+  # character outside [A-Za-z0-9_-] (notably "/" and ".") becomes "-", runs
+  # collapse, and leading/trailing "-" are trimmed; a value that flattens to
+  # nothing (e.g. ".") becomes "root".
+  local plan
+  plan=$(printf '%s' "$prepared" | jq -c \
+    --arg dir "$dir_part" \
+    --arg base "$base_no_ext" '
+    def slugify:
+      (gsub("[^A-Za-z0-9_-]"; "-") | gsub("-+"; "-") | gsub("^-+|-+$"; "")) as $s |
+      if $s == "" then "root" else $s end;
+    .blocks | to_entries | map(
+      . as $e | $e.value as $b | ($b.project | slugify) as $slug |
+      {
+        index: ($e.key + 1),
+        # .project is carried through verbatim, never sanitized: it is the
+        # routing key, and a lossy transform would make the key that groups
+        # differ from the key that is written. Malformed values are refused
+        # outright by _story_merge_resolve_axis, before this writer is reached.
+        project: $b.project,
+        slug: $slug,
+        path: ($dir + "/" + $base + "-" + $slug + "-tasks.json"),
+        branchName: ("feat/merged-" + $slug),
+        storyCount: ($b.stories | length)
+      }
+    )
+  ')
+
+  # Basename collision: two distinct project values that flatten to the same
+  # slug would silently overwrite each other. Hard-fail the WHOLE merge here,
+  # before the first write, so zero output files land.
+  local slug_collisions
+  slug_collisions=$(printf '%s' "$plan" | jq -r '
+    group_by(.slug) | map(select(length > 1)) | .[] |
+    "  basename slug \"" + .[0].slug + "\" is shared by projects: " + (map(.project) | join(", "))
+  ')
+  if [ -n "$slug_collisions" ]; then
+    echo "Error: story-merge: --split full-stack: distinct project values collide on the same output basename; no files were written:" >&2
+    printf '%s\n' "$slug_collisions" >&2
+    exit 1
+  fi
+
+  # Derived-name validation: every invariant the derived slug / path /
+  # branchName must satisfy before a single file is opened. Abort the whole
+  # merge on the first failure -- no partial write, no mangled fallback name.
+  #
+  # REFUSE, never truncate. Truncating two long project values to a common
+  # prefix manufactures a slug collision, which the guard above would then
+  # report as a basename conflict between projects that do not actually
+  # conflict -- a wrong diagnosis for a limit the caller can fix directly.
+  #
+  # Legs, and why each limit is where it is:
+  #   branchName regex  -- the invariant plan.md enforces before any git
+  #                        operation. Currently unreachable given slugify's
+  #                        output; kept because it costs one test() and is the
+  #                        only thing standing between a future slugify edit
+  #                        and a branch name handed to git unchecked.
+  #   slug <= 64        -- plan.md rewrites branchName to a ~87-char prefix in
+  #                        phase mode; 87 + 64 stays inside every downstream
+  #                        limit.
+  #   basename <= 248   -- NAME_MAX (255) minus the 7 bytes mktemp appends for
+  #                        ".XXXXXX". This is the leg that actually prevents a
+  #                        mid-loop mktemp death, and it has to be checked on
+  #                        the basename rather than the slug because most of
+  #                        that basename comes from --output, not from .project.
+  #   path <= 4000      -- PATH_MAX (4096) with headroom for the lock/tmp
+  #                        suffixes appended to it.
+  #   branchName <= 100 -- worktree-manager places a worktree as a single
+  #                        directory component, so branchName feeds a
+  #                        NAME_MAX-bounded name downstream.
+  local bad_derived
+  bad_derived=$(printf '%s' "$plan" | jq -r --arg re "$_ROADMAP_BRANCH_REGEX" '
+    .[] | . as $g |
+    ($g.path | split("/") | last) as $base |
+    [
+      (if ($g.branchName | test($re)) then empty
+       else "derived branchName failed validation against " + $re + ": " + $g.branchName end),
+      (if ($g.slug | length) > 64 then
+         "derived basename slug is " + (($g.slug | length) | tostring) + " chars (limit 64): " + $g.slug
+       else empty end),
+      (if ($base | length) > 248 then
+         "derived output basename is " + (($base | length) | tostring) +
+         " chars (limit 248 = NAME_MAX 255 minus the 7-char mktemp suffix): " + $base
+       else empty end),
+      (if ($g.path | length) > 4000 then
+         "derived output path is " + (($g.path | length) | tostring) + " chars (limit 4000)"
+       else empty end),
+      (if ($g.branchName | length) > 100 then
+         "derived branchName is " + (($g.branchName | length) | tostring) + " chars (limit 100): " + $g.branchName
+       else empty end)
+    ] | .[] | "  project \"" + $g.project + "\": " + .
+  ')
+  if [ -n "$bad_derived" ]; then
+    echo "Error: story-merge: --split full-stack: derived output name(s) failed validation; no files were written (shorten the offending project value -- names are refused, never truncated, because truncation would manufacture a basename collision between two distinct projects):" >&2
+    printf '%s\n' "$bad_derived" >&2
+    exit 1
+  fi
+
+  # ============================================================
+  # 4. Write every group's file atomically
+  # ============================================================
+  mkdir -p "$dir_part"
+
+  local group_total
+  group_total=$(printf '%s' "$plan" | jq 'length')
+
+  local written_paths=""
+  local idx=0
+  while [ "$idx" -lt "$group_total" ]; do
+    # tmp_group and write_exit are declared at their use site below, where the
+    # initialization they need is part of the same statement.
+    local group_path group_json
+    group_path=$(printf '%s' "$plan" | jq -r --argjson i "$idx" '.[$i].path')
+
+    # metadata.splitGroup is the self-describing marker for this file's place
+    # in the N-way split: its own project, its 1-based index, the total, and
+    # every sibling file's path. Downstream consumers discover the full set
+    # from it instead of re-deriving it from filename string conventions.
+    group_json=$(printf '%s\n%s\n%s' "$prepared" "$plan" "$combined_smell_warnings" | jq -s --argjson i "$idx" '
+      .[0] as $prep | .[1] as $plan | .[2] as $smells |
+      $plan[$i] as $g |
+      $prep.blocks[$i] as $b |
+      {
+        schemaVersion: "3.3",
+        metadata: (
+          {
+            title: ("feat: merged tasks (" + $g.slug + ")"),
+            type: "feat",
+            branchName: $g.branchName,
+            createdAt: (now | strftime("%Y-%m-%d")),
+            planPath: null,
+            splitGroup: {
+              project: $g.project,
+              index: $g.index,
+              total: ($plan | length),
+              siblings: [$plan[] | . as $sib | select($sib.index != $g.index) | $sib.path]
+            }
+          } +
+          (if ($smells | length) > 0 then {smellWarnings: $smells} else {} end)
+        ),
+        userStories: [$b.stories[] | del(.referenceInventory) | del(.ac_anchors) | del(._fe) | del(._side) | del(.__droppedDeps) | del(.__becameRoot) | (.status //= "pending")]
+      }
+    ')
+
+    # This script runs `set -euo pipefail`. A bare failing compound command
+    # exits the shell immediately, so a `write_exit=$?` on the NEXT line is
+    # unreachable and the whole error branch below with it -- which is exactly
+    # how a failed group write used to leave one file on disk advertising
+    # `total: 3` with two siblings that do not exist, an orphaned mktemp file,
+    # and no message at all.
+    #
+    # Three details keep this reachable, and all three are load-bearing:
+    #   1. `write_exit=0` is a real initialization. `-u` is on, and a bare
+    #      `local write_exit` leaves it declared-but-unset, which makes
+    #      `[ "$write_exit" -ne 0 ]` an unbound-variable error rather than a
+    #      false. It is also never `local write_exit=$?`: `local` is a builtin
+    #      and its own exit status overwrites `$?` before the assignment reads it.
+    #   2. The `|| write_exit=$?` makes the subshell the left side of an AND-OR
+    #      list, the one construct `set -e` is defined to exempt. The `200>`
+    #      redirect stays attached to the subshell, BEFORE the `||`, so a lock
+    #      path that cannot be opened (e.g. a directory) is a failure of the
+    #      exempted command rather than of the list.
+    #   3. mktemp gets the same treatment. It fails on ENOSPC/EACCES, and a
+    #      bare failing assignment is just as fatal under `set -e`.
+    local tmp_group=""
+    tmp_group=$(mktemp "${group_path}.XXXXXX" 2>/dev/null) || tmp_group=""
+    local write_exit=0
+    if [ -z "$tmp_group" ]; then
+      write_exit=1
+    else
+      (
+        _lock "${group_path}.lock"
+        printf '%s\n' "$group_json" > "$tmp_group"
+        mv "$tmp_group" "$group_path"
+      ) 200>"${group_path}.lock" || write_exit=$?
+      [ -n "$tmp_group" ] && rm -f "$tmp_group" 2>/dev/null || true
+    fi
+    if [ "$write_exit" -ne 0 ]; then
+      # Enumerate all THREE sets. The surviving files are the actionable part:
+      # each one advertises a splitGroup.total and a siblings[] list describing
+      # a complete N-way split that does not exist on disk, so the reader needs
+      # to know precisely which of those siblings landed and which never will.
+      local not_attempted remaining
+      remaining=$((group_total - idx - 1))
+      echo "Error: story-merge: failed to write project split output: $group_path" >&2
+      echo "  Written before this failure (${idx}):" >&2
+      if [ -n "$written_paths" ]; then
+        printf '%s\n' "$written_paths" >&2
+      else
+        echo "    (none)" >&2
+      fi
+      echo "  Failed:" >&2
+      echo "    $group_path" >&2
+      echo "  Not attempted (${remaining}):" >&2
+      if [ "$remaining" -gt 0 ]; then
+        not_attempted=$(printf '%s' "$plan" | jq -r --argjson i "$idx" '.[($i + 1):][] | "    " + .path')
+        printf '%s\n' "$not_attempted" >&2
+      else
+        echo "    (none)" >&2
+      fi
+      echo "  Staging dir preserved for retry:" >&2
+      echo "    $staging_dir" >&2
+      exit 1
+    fi
+    if [ -n "$written_paths" ]; then
+      written_paths="${written_paths}"$'\n'"    ${group_path}"
+    else
+      written_paths="    ${group_path}"
+    fi
+    idx=$((idx + 1))
+  done
+
+  # On success (all N writes landed): delete the staging dir
+  rm -rf "$staging_dir"
+
+  printf '%s' "$plan" | jq '[.[] | {path, project, branchName, storyCount}]'
+}
+
+# ============================================================================
+# split-detect — the read side of metadata.splitGroup
+# ============================================================================
+#
+# _story_merge_write_project_split (above) stamps every file it emits with a
+# self-describing metadata.splitGroup marker. This is the consumer: given a
+# scope, it answers "do the tasks files here form ONE group that must execute
+# together, and which members still have work?".
+#
+# It lives here rather than in /aimi:execute's markdown because every rule it
+# encodes -- anchor selection, sibling resolution, total validation, active
+# filtering, legacy-pair fallback -- is pure, deterministic, file-only logic.
+# Written as executable prose it was unreachable by both Bash test suites, and
+# it drifted into two divergent copies (flat flow vs. phase mode). Here one
+# copy serves both scopes and every rule is a test case.
+#
+# It is a QUERY, not a gate: every outcome, including "single" and "none",
+# exits 0. Non-zero is reserved for real errors (bad argument, unreadable dir).
+
+# A story is pending when its status is anything other than "completed".
+# Exactly one definition, used for every count this verb reports. The prose
+# it replaces had two that disagreed -- `!= "completed"` for the active filter
+# and `== "pending"` for the phase completion count -- so an in_progress story
+# was counted by one and not the other, which let a phase close with work
+# still in flight.
+_SPLIT_DETECT_DESCRIBE_JQ='
+  (if type == "object" then . else {} end) as $doc
+| (if ($doc.metadata | type) == "object" then $doc.metadata else {} end) as $m
+| (if ($m.splitGroup | type) == "object" then $m.splitGroup else {} end) as $sg
+| {
+    path: $path,
+    project: (if ($sg.project | type) == "string" then $sg.project else "." end),
+    branchName: (if ($m.branchName | type) == "string" then $m.branchName else null end),
+    storyCount: (if ($doc.userStories | type) == "array"
+                 then ($doc.userStories | length) else 0 end),
+    pendingCount: (if ($doc.userStories | type) == "array"
+                   then ([$doc.userStories[]
+                          | select((.status? // "pending") != "completed")] | length)
+                   else 0 end),
+    hasMarker: (($sg.total | type) == "number" and ($sg.siblings | type) == "array"),
+    declaredTotal: (if ($sg.total | type) == "number" then ($sg.total | tostring) else "" end),
+    siblings: (if ($sg.siblings | type) == "array"
+               then [$sg.siblings[] | tostring] else [] end)
+  }
+| . + {active: (.pendingCount > 0)}
+'
+
+# Emit one compact JSON descriptor for a candidate tasks file.
+# A file that is unreadable or not valid JSON yields an inert descriptor
+# (no marker, no stories) instead of aborting: one corrupt file sitting in
+# .aimi/tasks/ must not take detection down for every other feature.
+_split_detect_describe() {
+  local file="$1"
+  local desc=""
+  desc=$(jq -c --arg path "$file" "$_SPLIT_DETECT_DESCRIBE_JQ" "$file" 2>/dev/null) || desc=""
+  if [ -z "$desc" ]; then
+    desc=$(jq -nc --arg path "$file" '{path: $path, project: ".", branchName: null,
+      storyCount: 0, pendingCount: 0, hasMarker: false, declaredTotal: "",
+      siblings: [], active: false}')
+  fi
+  printf '%s' "$desc"
+}
+
+# List *-tasks.json files directly inside <dir> (depth 1 only), newest mtime
+# first. NUL-delimited find -> xargs -0 keeps paths containing spaces intact,
+# the same hardening _find_tasks_files_all carries; a newline-delimited
+# `xargs ls -t` word-splits them and silently returns nothing.
+_split_detect_list_dir() {
+  local dir="$1"
+  [ -d "$dir" ] || return 0
+  find "$dir" -mindepth 1 -maxdepth 1 -type f -name '*-tasks.json' -print0 2>/dev/null \
+    | xargs -0 ls -t 2>/dev/null || true
+}
+
+# Derive the phase's own governing tasks file from a phase directory, so it can
+# be excluded from the split candidate pool. Layout is
+# .aimi/tasks/<feature>/phase-<N>[.<M>][-<slug>]/<feature>-phase-<N>-tasks.json.
+# Prints nothing when <dir> is not shaped like a phase directory (nothing to
+# exclude then, which is the safe direction: an extra candidate is still
+# filtered by the marker and pair rules below).
+_split_detect_phase_main_file() {
+  local dir="$1"
+  local dir_base feature phase_id
+  dir_base=$(basename "$dir")
+  case "$dir_base" in
+    phase-[0-9]*) ;;
+    *) return 0 ;;
+  esac
+  phase_id=${dir_base#phase-}
+  phase_id=${phase_id%%-*}
+  case "$phase_id" in
+    ''|*[!0-9.]*) return 0 ;;
+  esac
+  feature=$(basename "$(dirname "$dir")")
+  [ -n "$feature" ] || return 0
+  printf '%s/%s-phase-%s-tasks.json' "$dir" "$feature" "$phase_id"
+}
+
+cmd_split_detect() {
+  local scope_dir=""
+  local dir_mode=false
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dir)
+        if [ $# -lt 2 ] || [ -z "${2:-}" ]; then
+          echo "Error: split-detect: --dir requires a directory path" >&2
+          exit 1
+        fi
+        scope_dir="$2"
+        dir_mode=true
+        shift 2
+        ;;
+      *)
+        echo "Error: split-detect: unknown argument: $1" >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  # ------------------------------------------------------------------
+  # 1. Build the candidate pool, newest mtime first
+  # ------------------------------------------------------------------
+  local candidates=""
+  local exclude_file=""
+  if [ "$dir_mode" = true ]; then
+    if [ ! -d "$scope_dir" ]; then
+      echo "Error: split-detect: --dir is not a directory: $scope_dir" >&2
+      exit 1
+    fi
+    scope_dir=$(resolve_path "$scope_dir")
+    validate_path_in_project "$scope_dir"
+    exclude_file=$(_split_detect_phase_main_file "$scope_dir")
+    candidates=$(_split_detect_list_dir "$scope_dir")
+  else
+    # Flat scope is depth 1 ONLY: candidates are the *-tasks.json files whose
+    # parent directory is $TASKS_DIR itself. _find_tasks_files_all globs depth
+    # 1-3, which includes every phase directory -- and that is exactly how a
+    # phase's split files used to be captured by the flat flow and executed as
+    # a flat split, leaving the phase unclaimed and nothing merged into the
+    # phase branch. The filter below is the fix, and it is load-bearing.
+    local all_files=""
+    all_files=$(_find_tasks_files_all)
+    if [ -n "$all_files" ]; then
+      while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        [ "$(dirname "$f")" = "$TASKS_DIR" ] || continue
+        candidates="${candidates}${f}"$'\n'
+      done <<< "$all_files"
+    fi
+  fi
+
+  local pool="[]"
+  if [ -n "$candidates" ]; then
+    local cand desc
+    while IFS= read -r cand; do
+      [ -n "$cand" ] || continue
+      [ -n "$exclude_file" ] && [ "$cand" = "$exclude_file" ] && continue
+      desc=$(_split_detect_describe "$cand")
+      pool=$(printf '%s' "$pool" | jq -c --argjson d "$desc" '. + [$d]')
+    done <<< "$candidates"
+  fi
+
+  local started_empty=false
+  [ "$(printf '%s' "$pool" | jq 'length')" -eq 0 ] && started_empty=true
+
+  # ------------------------------------------------------------------
+  # 2. Resolve the group
+  # ------------------------------------------------------------------
+  # "Newest wins": the anchor is the newest candidate, not the first
+  # marker-carrying file in mtime order. The old rule let a stale marked split
+  # from a past feature preempt today's plan whenever today's files carried no
+  # marker of their own.
+  local mode="none"
+  local anchor="null"
+  local members="[]"
+  local declared_total="0"
+  local degraded_reason=""
+
+  # AIMI_ROOT-is-a-git-repo check, computed once. find_aimi_root() already cd'd
+  # the process to AIMI_ROOT before cmd_split_detect ever runs (dispatch at
+  # line ~9167 happens after the find_aimi_root call at ~9116), and --dir only
+  # narrows the candidate pool below -- it never changes CWD. So $PWD here is
+  # AIMI_ROOT in both flat and --dir scope, and this is the identical check
+  # commands/execute.md documents as the canonical AIMI_ROOT_IS_GIT_REPO rule.
+  local aimi_root_is_git=true
+  git -C "$PWD" rev-parse --git-dir >/dev/null 2>&1 || aimi_root_is_git=false
+
+  while :; do
+    local pool_len=0
+    pool_len=$(printf '%s' "$pool" | jq 'length')
+    if [ "$pool_len" -eq 0 ]; then
+      mode="none"
+      if [ "$started_empty" != true ] && [ -z "$degraded_reason" ]; then
+        degraded_reason="every candidate group is already fully completed"
+      fi
+      break
+    fi
+
+    local newest newest_path newest_dir newest_marker
+    newest=$(printf '%s' "$pool" | jq -c '.[0]')
+    newest_path=$(printf '%s' "$newest" | jq -r '.path')
+    newest_dir=$(dirname "$newest_path")
+    newest_marker=$(printf '%s' "$newest" | jq -r '.hasMarker')
+
+    local group="[]"
+    local group_mode=""
+    local group_total="0"
+
+    if [ "$newest_marker" = "true" ]; then
+      # -- Marked group: the members are the anchor plus its OWN declared
+      #    siblings. Nothing else in the pool participates, however similar
+      #    its basename. Each sibling resolves BY BASENAME against the
+      #    anchor's own directory, which is what renders a traversal-shaped
+      #    sibling entry inert: "../../etc/passwd" becomes "<anchor-dir>/passwd",
+      #    which does not exist, and the group is voided.
+      local anchor_total="" resolve_ok=true bad_detail=""
+      anchor_total=$(printf '%s' "$newest" | jq -r '.declaredTotal')
+      group="[$newest]"
+
+      case "$anchor_total" in
+        ''|*[!0-9]*)
+          resolve_ok=false
+          bad_detail="declared total is not a whole number: \"${anchor_total}\""
+          ;;
+      esac
+
+      if [ "$resolve_ok" = true ]; then
+        local sib sib_path sib_desc dup
+        while IFS= read -r sib; do
+          [ -n "$sib" ] || continue
+          sib_path="$newest_dir/$(basename "$sib")"
+          if [ ! -f "$sib_path" ]; then
+            resolve_ok=false
+            bad_detail="declared sibling not found in the anchor's directory: $sib_path"
+            break
+          fi
+          dup=$(printf '%s' "$group" | jq -r --arg p "$sib_path" '[.[] | select(.path == $p)] | length')
+          if [ "$dup" -ne 0 ]; then
+            resolve_ok=false
+            bad_detail="declared sibling resolves to a member already in the group: $sib_path"
+            break
+          fi
+          sib_desc=$(_split_detect_describe "$sib_path")
+          group=$(printf '%s' "$group" | jq -c --argjson d "$sib_desc" '. + [$d]')
+        done <<< "$(printf '%s' "$newest" | jq -r '.siblings[]')"
+      fi
+
+      local resolved=0
+      resolved=$(printf '%s' "$group" | jq 'length')
+      if [ "$resolve_ok" != true ] || [ "$resolved" -ne "$anchor_total" ] || [ "$resolved" -lt 2 ]; then
+        # A group that fails validation degrades to single-file execution and
+        # is TERMINAL -- it deliberately does not fall through to the legacy
+        # pair rule. This scope was planned by the project-split writer, so any
+        # -frontend-/-backend-tasks.json sitting beside it is stale, and running
+        # it would execute the wrong work.
+        mode="single"
+        anchor=$(printf '%s' "$newest" | jq -c '.path')
+        members="[$newest]"
+        declared_total="1"
+        degraded_reason="split group anchored at ${newest_path} is unusable (declared total ${anchor_total:-?}, resolved ${resolved}"
+        if [ -n "$bad_detail" ]; then
+          degraded_reason="${degraded_reason}; ${bad_detail}"
+        fi
+        degraded_reason="${degraded_reason}) — degraded to single-file execution, legacy pair not considered"
+        break
+      fi
+
+      group_mode="project-split"
+      group_total="$anchor_total"
+    else
+      # -- No marker on the newest candidate: try the legacy
+      #    -frontend-tasks.json / -backend-tasks.json pair rule over the pool.
+      #    The counterpart must be in the pool, not merely on disk, so the
+      #    scope (flat depth 1, or this one phase directory) still bounds it.
+      local newest_base prefix fe_path be_path
+      newest_base=$(basename "$newest_path")
+      prefix=""
+      fe_path=""
+      be_path=""
+      case "$newest_base" in
+        *-frontend-tasks.json)
+          prefix="${newest_base%-frontend-tasks.json}"
+          fe_path="$newest_path"
+          be_path="$newest_dir/${prefix}-backend-tasks.json"
+          ;;
+        *-backend-tasks.json)
+          prefix="${newest_base%-backend-tasks.json}"
+          be_path="$newest_path"
+          fe_path="$newest_dir/${prefix}-frontend-tasks.json"
+          ;;
+      esac
+
+      local counterpart=""
+      if [ -n "$prefix" ]; then
+        if [ "$fe_path" = "$newest_path" ]; then counterpart="$be_path"; else counterpart="$fe_path"; fi
+        local in_pool
+        in_pool=$(printf '%s' "$pool" | jq -r --arg p "$counterpart" '[.[] | select(.path == $p)] | length')
+        [ "$in_pool" -eq 0 ] && counterpart=""
+      fi
+
+      if [ -n "$counterpart" ]; then
+        if [ "$aimi_root_is_git" != true ]; then
+          # A legacy frontend/backend pair with no metadata.splitGroup marker
+          # resolves to the root routing key "." (_SPLIT_DETECT_DESCRIBE_JQ's
+          # default at 6459) -- fine in a single-repo layout, but AIMI_ROOT
+          # here is not a git repository at all: a parent folder holding
+          # multiple git repos as subfolders, with no repository underneath
+          # "." to execute in. Refuse instead of binding to it. Reuses the
+          # same mode=none-plus-degradedReason shape as the exhausted-pool
+          # case above -- no new mode value, no new emitted field.
+          mode="none"
+          anchor="null"
+          members="[]"
+          declared_total="0"
+          degraded_reason="AIMI_ROOT (${PWD}) is not a git repository — this is a multi-repo layout, a parent folder holding multiple git repositories as subfolders. The legacy pair ${fe_path} / ${be_path} has no metadata.splitGroup marker and would route to the root group \".\", which has no repository to execute in. Re-plan with --split full-stack so every story carries its own project, then re-run."
+          break
+        fi
+        # Frontend first, backend second — the order the two-file writer and
+        # every downstream report already assume.
+        group=$(printf '%s' "$pool" | jq -c --arg fe "$fe_path" --arg be "$be_path" \
+          '[(.[] | select(.path == $fe)), (.[] | select(.path == $be))]')
+        group_mode="paired-split"
+        group_total="2"
+      else
+        mode="single"
+        anchor=$(printf '%s' "$newest" | jq -c '.path')
+        members="[$newest]"
+        declared_total="1"
+        break
+      fi
+    fi
+
+    # A group with nothing left to do is not this run's work. Drop ALL of its
+    # members from the pool and look again, rather than letting a completed
+    # stale split route today's real work to a single-file fallback.
+    local group_active=0
+    group_active=$(printf '%s' "$group" | jq '[.[] | select(.active)] | length')
+    if [ "$group_active" -eq 0 ]; then
+      pool=$(printf '%s\n%s' "$pool" "$group" | jq -sc '
+        .[1] as $g | [.[0][] | select(.path as $p | ($g | map(.path) | index($p)) == null)]')
+      continue
+    fi
+
+    mode="$group_mode"
+    anchor=$(printf '%s' "$newest" | jq -c '.path')
+    members="$group"
+    declared_total="$group_total"
+    break
+  done
+
+  # ------------------------------------------------------------------
+  # 3. Emit
+  # ------------------------------------------------------------------
+  printf '%s' "$members" | jq \
+    --arg mode "$mode" \
+    --argjson anchor "$anchor" \
+    --argjson total "$declared_total" \
+    --arg reason "$degraded_reason" \
+    '{
+      mode: $mode,
+      anchor: $anchor,
+      members: [.[] | {path, project, branchName, storyCount, pendingCount, active}],
+      activeCount: ([.[] | select(.active)] | length),
+      total: $total,
+      degradedReason: (if ($reason | length) > 0 then $reason else null end)
+    }'
+}
+
+# ============================================================================
+# Roadmap Lifecycle Subcommands (Phase/Milestone layer for large-scope features)
+# ============================================================================
+#
+# roadmap.json lives at .aimi/tasks/<feature>/roadmap.json and tracks phase
+# lifecycle state (pending -> planned -> in_progress -> completed, or ->
+# verification_failed) plus PID-alive claims so parallel /aimi:execute
+# sessions can safely claim independent phases without hallucinated bash.
+# Every write is a locked read-modify-write (mkdir-then-lock-then-tmpfile-
+# then-move), mirroring _story_merge_write_legacy. flock is held only for
+# the duration of each atomic operation -- never across separate CLI calls.
+
+# Single-path-component pattern for a phase's dir field: phase-N[.M][-slug]
+_ROADMAP_DIR_REGEX='^phase-[0-9]+(\.[0-9]+)?(-[a-z0-9][a-z0-9-]*)?$'
+# Single-path-component pattern for the --feature slug (no slash, no dotdot)
+_ROADMAP_FEATURE_REGEX='^[a-zA-Z0-9][a-zA-Z0-9_-]*$'
+# Reused branchName convention (see plugins/aimi-engineering/CLAUDE.md)
+_ROADMAP_BRANCH_REGEX='^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'
+
+# jq `def` spliced into programs that sanitize free-text roadmap fields
+# (name, goal, successCriteria entries, notes, branch, brainstormPath).
+# Strips code fences/backtick content, newlines, "$(" command-substitution
+# openers, HTML/XML tags, and common instruction-override phrases, then
+# truncates to maxlen. Mirrors commands/references/sanitization.md plus the
+# explicit newline/dollar-paren stripping called for in this story's notes.
+_ROADMAP_SANITIZE_JQ='
+def _rm_sanitize(maxlen):
+  if . == null then null else
+  ( .
+    | gsub("```[\\s\\S]*?```"; "")
+    | gsub("`[^`\n]*`"; "")
+    | gsub("`"; "")
+    | gsub("\r\n|\r|\n"; " ")
+    | gsub("\\$\\("; "")
+    | gsub("<[^>]*>"; "")
+    | gsub("ignore previous( instructions)?"; ""; "i")
+    | gsub("you are now"; ""; "i")
+    | gsub("system\\s*:"; ""; "i")
+    | if (length > maxlen) then .[0:maxlen] else . end
+  ) end;
+'
+
+# Process-liveness probe, ported from guard-runtime-state.py is_alive() (lines 26-34):
+# signal-zero kill probe. "No such process" -> not alive. "Exists, no permission
+# to signal" -> alive (mirrors ProcessLookupError=False / PermissionError=True).
+_is_pid_alive() {
+  local pid="$1"
+  if ! [[ "$pid" =~ ^[0-9]+$ ]] || [ "$pid" -le 0 ]; then
+    return 1
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+  local err
+  err=$(kill -0 "$pid" 2>&1 >/dev/null) || true
+  if printf '%s' "$err" | grep -qi "not permitted"; then
+    return 0
+  fi
+  return 1
+}
+
+# Validate --feature is present and a safe single path component.
+_roadmap_validate_feature() {
+  local feature="$1"
+  if [ -z "$feature" ]; then
+    echo "Error: roadmap: --feature <slug> is required" >&2
+    exit 1
+  fi
+  if ! [[ "$feature" =~ $_ROADMAP_FEATURE_REGEX ]]; then
+    echo "Error: roadmap: --feature must be a single path component matching $_ROADMAP_FEATURE_REGEX, got: $feature" >&2
+    exit 1
+  fi
+}
+
+# Compute the roadmap.json path for a feature (absolute, under TASKS_DIR).
+_roadmap_path() {
+  local feature="$1"
+  printf '%s/%s/roadmap.json\n' "$TASKS_DIR" "$feature"
+}
+
+# Shared roadmap-verb preamble: resolve the path, validate it's in-project,
+# and fail with a verb-prefixed message if the roadmap is missing or malformed.
+# Echoes the resolved path on success. Usage:
+#   roadmap_path=$(_roadmap_require <verb> <feature> [not-found-suffix] [--skip-malformed])
+# not-found-suffix is appended verbatim to the "roadmap not found" message
+# (e.g. " (run roadmap-init first)"); pass "" to omit it.
+# --skip-malformed omits the malformed-json check (roadmap-release-claim never
+# had one; preserved as-is rather than newly introduced here).
+# Several callers re-check malformed-ness a second time inside their _lock
+# subshell -- that inner check is deliberate (it re-reads under the lock to
+# catch a file that turns malformed between this call and lock acquisition)
+# and is not replaced by this helper.
+_roadmap_require() {
+  local verb="$1" feature="$2" suffix="${3:-}" skip_malformed="${4:-}"
+  local path
+  path=$(_roadmap_path "$feature")
+  validate_path_in_project "$path"
+  if [ ! -f "$path" ]; then
+    echo "Error: $verb: roadmap not found: $path${suffix}" >&2
+    exit 1
+  fi
+  if [ "$skip_malformed" != "--skip-malformed" ]; then
+    if ! jq -e . "$path" >/dev/null 2>&1; then
+      echo "Error: $verb: malformed roadmap.json: $path" >&2
+      exit 1
+    fi
+  fi
+  printf '%s\n' "$path"
+}
+
+# Validate --phase is present and a bare numeric id (int or one-decimal-place).
+_roadmap_validate_phase_id() {
+  local phase_id="$1"
+  local label="$2"
+  if [ -z "$phase_id" ] || ! [[ "$phase_id" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    echo "Error: $label: --phase <id> must be a numeric phase id" >&2
+    exit 1
+  fi
+}
+
+# Read a phases JSON array on stdin; print one human-readable error line per
+# creates[]/needs[] entry whose *identity* can never name a real artifact.
+#
+# The rule is deliberately narrow -- exactly three shapes are rejected, judged
+# over the identity (text before the first "(", trimmed) and nothing else:
+#   (a) empty after _cv_identity
+#   (b) a ".." PATH SEGMENT, i.e. (^|/)\.\.($|/) -- not any byte pair "..",
+#       so an identity like services/foo..bar is untouched
+#   (c) a leading "/" anchored at position 0 -- the Endpoint kind
+#       ("POST /api/notifications") contains a slash but does not begin with
+#       one, so anchoring matters or every endpoint phase becomes unwritable
+# Identity *strength* is explicitly not judged: at declaration time research has
+# not run, so a bare Table name ("notifications") or a bare directory
+# ("db/migrations") must pass -- guessing a path here fails at phase close for a
+# reason nobody can debug.
+#
+# creates[] and needs[] go through the same predicate in the same pass on
+# purpose: _cv_creates_in_scope matches a need against a provider's creates by
+# exact byte equality, so a rule applied to one list alone lets a roadmap hold
+# two shapes at once -- validate-contracts then reports a permanently unmet
+# need, which halts /aimi:plan, and agent mode never demotes an unmet need.
+#
+# Reuses $_CONTRACT_JQ_DEFS so the guard and validate-contracts agree on what an
+# identity is; a second copy of _cv_identity would drift.
+_roadmap_identity_errors() {
+  jq -r "$_CONTRACT_JQ_DEFS"'
+    [ .[]
+      | . as $p
+      | (["creates", "needs"][]) as $list
+      | (($p[$list] // [])[]) as $raw
+      | ($raw | if type == "string" then . else "" end) as $entry
+      | ($entry | _cv_identity) as $ident
+      | (
+          if ($ident | length) == 0 then "empty once the description is stripped"
+          elif ($ident | test("(^|/)\\.\\.($|/)")) then "contains a \"..\" path segment"
+          elif ($ident | test("^/")) then "begins with \"/\""
+          else empty end
+        ) as $reason
+      | "phase " + ($p.id|tostring) + ": " + $list + " entry \"" + $entry + "\" is not a usable artifact identity: " + $reason
+    ] | .[]
+  '
+}
+
+cmd_roadmap_init() {
+  local feature="" file="" sync_mode=false brainstorm_path=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      --file) shift; file="${1:-}" ;;
+      --sync) sync_mode=true ;;
+      --brainstorm-path) shift; brainstorm_path="${1:-}" ;;
+      *)
+        echo "Error: roadmap-init: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature"
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_path "$feature")
+  validate_path_in_project "$roadmap_path"
+
+  # --- Read the phases array from --file or stdin ---
+  local input_json
+  if [ -n "$file" ]; then
+    validate_path_in_project "$file"
+    if [ ! -f "$file" ]; then
+      echo "Error: roadmap-init: --file not found: $file" >&2
+      exit 1
+    fi
+    input_json=$(cat "$file")
+  else
+    input_json=$(cat)
+  fi
+
+  if ! printf '%s' "$input_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    echo "Error: roadmap-init: phases payload must be a JSON array" >&2
+    exit 1
+  fi
+
+  # --- Structural validation (payload-only; no I/O yet). Dangling dependsOn refs
+  # are checked later, inside the lock, against existing-file ids unioned with
+  # this payload's ids -- so a --sync phase may legitimately depend on a phase
+  # materialized by an earlier roadmap-init call. ---
+  local validation_errors
+  validation_errors=$(printf '%s' "$input_json" | jq -r '
+    . as $phases |
+    ([$phases[] | .id]) as $ids |
+    ([$ids | group_by(.) | map(select(length > 1)) | map(.[0])[]]) as $dup_ids |
+    [
+      ($dup_ids[] | "duplicate phase id: " + (.|tostring)),
+      ($phases[] | . as $p | if ($p.id == null or ($p.id|type) != "number") then "phase " + ($p.id|tostring) + ": id must be a number" else empty end),
+      ($phases[] | . as $p | if ($p.name == null or ($p.name|type) != "string" or ($p.name|length) == 0) then "phase " + ($p.id|tostring) + ": name is required" else empty end),
+      ($phases[] | . as $p | if ($p.goal == null or ($p.goal|type) != "string" or ($p.goal|length) == 0) then "phase " + ($p.id|tostring) + ": goal is required" else empty end),
+      ($phases[] | . as $p | if ($p.dependsOn != null and ($p.dependsOn|type) != "array") then "phase " + ($p.id|tostring) + ": dependsOn must be an array" else empty end),
+      ($phases[] | . as $p | (($p.dependsOn // [])[] | select(type != "number") | "phase " + ($p.id|tostring) + ": dependsOn entries must be numbers"))
+    ] | .[]
+  ')
+  if [ -n "$validation_errors" ]; then
+    echo "Error: roadmap-init: invalid phase payload:" >&2
+    printf '%s\n' "$validation_errors" >&2
+    exit 1
+  fi
+
+  # --- Sanitize free-text fields, compute dir, validate dir + branch patterns ---
+  local new_phases
+  new_phases=$(printf '%s' "$input_json" | jq "$_ROADMAP_SANITIZE_JQ"'
+    map(
+      .name = (.name | _rm_sanitize(200)) |
+      .goal = (.goal | _rm_sanitize(2000)) |
+      .slug = ((.slug // "") | _rm_sanitize(100)) |
+      .notes = (if .notes != null then (.notes | _rm_sanitize(5000)) else null end) |
+      .successCriteria = ((.successCriteria // []) | map(_rm_sanitize(2000))) |
+      .creates = ((.creates // []) | map(_rm_sanitize(500))) |
+      .needs = ((.needs // []) | map(_rm_sanitize(500))) |
+      .areas = ((.areas // []) | map(_rm_sanitize(500))) |
+      .dependsOn = (.dependsOn // []) |
+      .branch = (if .branch != null then (.branch | _rm_sanitize(200)) else null end) |
+      .dir = ("phase-" + (.id|tostring) + (if (.slug|length) > 0 then "-" + .slug else "" end)) |
+      .status = "pending" |
+      .claim = null
+    )
+  ')
+
+  local dir_errors
+  dir_errors=$(printf '%s' "$new_phases" | jq -r --arg re "$_ROADMAP_DIR_REGEX" '
+    [.[] | select((.dir | test($re)) | not) | "phase " + (.id|tostring) + ": computed dir \"" + .dir + "\" fails required pattern"] | .[]
+  ')
+  if [ -n "$dir_errors" ]; then
+    echo "Error: roadmap-init: invalid phase directory slug(s):" >&2
+    printf '%s\n' "$dir_errors" >&2
+    exit 1
+  fi
+
+  local branch_errors
+  branch_errors=$(printf '%s' "$new_phases" | jq -r --arg re "$_ROADMAP_BRANCH_REGEX" '
+    [.[] | select(.branch != null and ((.branch | test($re)) | not)) | "phase " + (.id|tostring) + ": branch \"" + .branch + "\" contains invalid characters"] | .[]
+  ')
+  if [ -n "$branch_errors" ]; then
+    echo "Error: roadmap-init: invalid branch name(s):" >&2
+    printf '%s\n' "$branch_errors" >&2
+    exit 1
+  fi
+
+  mkdir -p "$(dirname "$roadmap_path")"
+
+  # --- Locked read-modify-write: existence/--sync check, additive merge, atomic write ---
+  local out
+  out=$(
+    (
+      _lock "${roadmap_path}.lock"
+
+      if [ -f "$roadmap_path" ]; then
+        if [ "$sync_mode" != true ]; then
+          echo "Error: roadmap-init: $roadmap_path already exists; pass --sync to merge additively" >&2
+          exit 1
+        fi
+        if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
+          echo "Error: roadmap-init: existing roadmap.json is malformed: $roadmap_path" >&2
+          exit 1
+        fi
+
+        existing_meta=$(jq '{roadmapVersion, feature, createdAt, brainstormPath}' "$roadmap_path")
+        filtered_new=$(jq --argjson new "$new_phases" '
+          [.phases[].id] as $eids | [$new[] | select((.id as $i | $eids | index($i)) == null)]
+        ' "$roadmap_path")
+
+        # Dangling dependsOn check: allowed ids are existing-file ids unioned with
+        # this payload's own ids (covers both already-materialized phases and
+        # sibling phases introduced in this same call).
+        dangling=$(jq --argjson new "$new_phases" --argjson add "$filtered_new" -r '
+          ([.phases[].id] + [$new[].id] | unique) as $ids |
+          [$add[] | . as $p | ($p.dependsOn // [])[] | select((. as $d | $ids | index($d)) == null) | "phase " + ($p.id|tostring) + ": dependsOn references unknown phase id " + (.|tostring)] | .[]
+        ' "$roadmap_path")
+        if [ -n "$dangling" ]; then
+          echo "Error: roadmap-init: dangling dependsOn reference(s):" >&2
+          printf '%s\n' "$dangling" >&2
+          exit 1
+        fi
+
+        # Identity well-formedness, over filtered_new ONLY -- the phases this
+        # call actually writes. Never over the whole payload: plan.md always
+        # submits the full phase array and both call sites downgrade a
+        # roadmap-init failure to a warning, so a check that fired on a legacy
+        # phase would silently drop the new one instead of reporting anything.
+        identity_errors=""
+        identity_errors=$(printf '%s' "$filtered_new" | _roadmap_identity_errors)
+        if [ -n "$identity_errors" ]; then
+          echo "Error: roadmap-init: malformed creates/needs identity in new phase(s):" >&2
+          printf '%s\n' "$identity_errors" >&2
+          exit 1
+        fi
+
+        merged_phases=$(jq --argjson add "$filtered_new" '
+          (.phases + $add) | sort_by(.id)
+        ' "$roadmap_path")
+        roadmap_doc=$(printf '%s' "$existing_meta" | jq --argjson phases "$merged_phases" '. + {phases: $phases}')
+        added_count=$(printf '%s' "$filtered_new" | jq 'length')
+      else
+        dangling=$(printf '%s' "$new_phases" | jq -r '
+          ([.[].id] | unique) as $ids |
+          [.[] | . as $p | ($p.dependsOn // [])[] | select((. as $d | $ids | index($d)) == null) | "phase " + ($p.id|tostring) + ": dependsOn references unknown phase id " + (.|tostring)] | .[]
+        ')
+        if [ -n "$dangling" ]; then
+          echo "Error: roadmap-init: dangling dependsOn reference(s):" >&2
+          printf '%s\n' "$dangling" >&2
+          exit 1
+        fi
+
+        # Creation mode: every phase in new_phases is by definition new, so the
+        # same guard applies to the whole array here.
+        identity_errors=""
+        identity_errors=$(printf '%s' "$new_phases" | _roadmap_identity_errors)
+        if [ -n "$identity_errors" ]; then
+          echo "Error: roadmap-init: malformed creates/needs identity in new phase(s):" >&2
+          printf '%s\n' "$identity_errors" >&2
+          exit 1
+        fi
+
+        merged_phases=$(printf '%s' "$new_phases" | jq 'sort_by(.id)')
+        roadmap_doc=$(jq -n --arg feature "$feature" --arg bp "$brainstorm_path" --argjson phases "$merged_phases" "$_ROADMAP_SANITIZE_JQ"'
+          {
+            roadmapVersion: "1.0",
+            feature: $feature,
+            createdAt: (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
+            brainstormPath: (if ($bp|length) == 0 then null else ($bp | _rm_sanitize(500)) end),
+            phases: $phases
+          }
+        ')
+        added_count=$(printf '%s' "$merged_phases" | jq 'length')
+      fi
+
+      tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
+      printf '%s\n' "$roadmap_doc" > "$tmp_file"
+      mv "$tmp_file" "$roadmap_path"
+
+      jq -n --arg path "$roadmap_path" --argjson added "$added_count" --argjson total "$(printf '%s' "$merged_phases" | jq 'length')" \
+        '{roadmap: $path, added: $added, phases: $total}'
+    ) 200>"${roadmap_path}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
+}
+
+cmd_roadmap_get() {
+  local feature="" phase_id="" next_eligible=false
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      --phase) shift; phase_id="${1:-}" ;;
+      --next-eligible) next_eligible=true ;;
+      *)
+        echo "Error: roadmap-get: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature"
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_require "roadmap-get" "$feature")
+
+  if [ -n "$phase_id" ]; then
+    _roadmap_validate_phase_id "$phase_id" "roadmap-get"
+    if ! jq -e --argjson pid "$phase_id" '.phases[] | select(.id == $pid)' "$roadmap_path" >/dev/null 2>&1; then
+      echo "Error: roadmap-get: phase $phase_id not found in $roadmap_path" >&2
+      exit 1
+    fi
+    jq --argjson pid "$phase_id" '.phases[] | select(.id == $pid)' "$roadmap_path"
+    return 0
+  fi
+
+  if [ "$next_eligible" = true ]; then
+    local eligible
+    eligible=$(jq '
+      (reduce .phases[] as $p ({}; . + {($p.id|tostring): $p.status})) as $status_by_id |
+      [.phases[] | select(
+        (.status == "pending" or .status == "planned") and
+        (.claim == null) and
+        ((.dependsOn // []) | all(. as $d | $status_by_id[$d|tostring] == "completed"))
+      )] | sort_by(.id) | (.[0] // null)
+    ' "$roadmap_path")
+    if [ "$eligible" = "null" ]; then
+      echo "Error: roadmap-get: no eligible phase found" >&2
+      exit 1
+    fi
+    printf '%s\n' "$eligible"
+    return 0
+  fi
+
+  cat "$roadmap_path"
+}
+
+cmd_roadmap_set_status() {
+  local feature="" phase_id="" new_status="" force=false
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      --phase) shift; phase_id="${1:-}" ;;
+      --status) shift; new_status="${1:-}" ;;
+      --force) force=true ;;
+      *)
+        echo "Error: roadmap-set-status: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature"
+  _roadmap_validate_phase_id "$phase_id" "roadmap-set-status"
+
+  case "$new_status" in
+    pending|planned|in_progress|completed|verification_failed) ;;
+    *)
+      echo "Error: roadmap-set-status: --status must be one of pending|planned|in_progress|completed|verification_failed, got: $new_status" >&2
+      exit 1
+      ;;
+  esac
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_require "roadmap-set-status" "$feature")
+
+  local out
+  out=$(
+    (
+      _lock "${roadmap_path}.lock"
+
+      if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
+        echo "Error: roadmap-set-status: malformed roadmap.json: $roadmap_path" >&2
+        exit 1
+      fi
+
+      current_status=$(jq -r --argjson pid "$phase_id" '(.phases[] | select(.id == $pid) | .status) // empty' "$roadmap_path")
+      if [ -z "$current_status" ]; then
+        echo "Error: roadmap-set-status: phase $phase_id not found in $roadmap_path" >&2
+        exit 1
+      fi
+
+      # verification_failed is reachable from any non-terminal state (execute
+      # sets it when creates-verification fails). The rest of the graph:
+      #   pending -> planned            plan expands the phase
+      #   pending -> in_progress        execute claims a phase whose planned
+      #                                 transition was lost (plan aborted after
+      #                                 writing tasks.json but before setting
+      #                                 planned) -- allowing it makes execute
+      #                                 self-healing instead of silently
+      #                                 diverging from roadmap.json
+      #   planned -> in_progress        normal start
+      #   in_progress -> in_progress    idempotent resume of a crashed session
+      #   verification_failed -> in_progress   re-verify retry
+      #   in_progress|verification_failed -> completed
+      allowed=false
+      if [ "$new_status" = "verification_failed" ]; then
+        allowed=true
+      else
+        case "$current_status:$new_status" in
+          pending:planned|pending:in_progress|planned:in_progress|in_progress:in_progress|verification_failed:in_progress|in_progress:completed|verification_failed:completed) allowed=true ;;
+        esac
+      fi
+
+      if [ "$allowed" != true ] && [ "$force" != true ]; then
+        echo "Error: roadmap-set-status: transition $current_status -> $new_status is not allowed without --force" >&2
+        exit 1
+      fi
+
+      # Hard rule, not an --force-able ordering convention: a phase can never
+      # reach "completed" without handoff.md already on disk at its phase dir
+      # (see outline 11). handoff.md is written only via roadmap-write-handoff,
+      # which is the guard-protected path guard-runtime-state.py points callers
+      # at. This check runs even when --force is set -- --force overrides
+      # transition *order*, never this physical artifact precondition.
+      if [ "$new_status" = "completed" ]; then
+        phase_dir=$(jq -r --argjson pid "$phase_id" '(.phases[] | select(.id == $pid) | .dir) // empty' "$roadmap_path")
+        feature_dir=$(dirname "$roadmap_path")
+        if [ ! -f "$feature_dir/$phase_dir/handoff.md" ]; then
+          echo "Error: roadmap-set-status: phase $phase_id cannot transition to completed -- no handoff.md found at $feature_dir/$phase_dir/handoff.md. Write it first with roadmap-write-handoff." >&2
+          exit 1
+        fi
+      fi
+
+      # Completing a phase also releases its claim in the same atomic write --
+      # no window where status reads completed while the phase still shows
+      # claimed (see outline 11; mirrors cmd_mark_complete's single-write pattern).
+      if [ "$new_status" = "completed" ]; then
+        roadmap_doc=$(jq --argjson pid "$phase_id" --arg status "$new_status" '
+          .phases |= map(if .id == $pid then .status = $status | .claim = null else . end)
+        ' "$roadmap_path")
+      else
+        roadmap_doc=$(jq --argjson pid "$phase_id" --arg status "$new_status" '
+          .phases |= map(if .id == $pid then .status = $status else . end)
+        ' "$roadmap_path")
+      fi
+
+      tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
+      printf '%s\n' "$roadmap_doc" > "$tmp_file"
+      mv "$tmp_file" "$roadmap_path"
+
+      jq -n --argjson pid "$phase_id" --arg from "$current_status" --arg to "$new_status" '{phase: $pid, from: $from, to: $to}'
+    ) 200>"${roadmap_path}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
+}
+
+cmd_roadmap_claim() {
+  local feature="" session_id="" session_pid="" phase_override=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      --session-id) shift; session_id="${1:-}" ;;
+      --session-pid) shift; session_pid="${1:-}" ;;
+      --phase) shift; phase_override="${1:-}" ;;
+      *)
+        echo "Error: roadmap-claim: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature"
+  if [ -z "$session_id" ]; then
+    echo "Error: roadmap-claim: --session-id <id> is required" >&2
+    exit 1
+  fi
+  if ! [[ "$session_pid" =~ ^[0-9]+$ ]]; then
+    echo "Error: roadmap-claim: --session-pid <pid> must be a positive integer" >&2
+    exit 1
+  fi
+  if [ -n "$phase_override" ]; then
+    _roadmap_validate_phase_id "$phase_override" "roadmap-claim"
+  fi
+  # Sanitize the caller-supplied session id before it is ever written to roadmap.json.
+  session_id=$(printf '%s' "$session_id" | jq -Rr "$_ROADMAP_SANITIZE_JQ"'_rm_sanitize(200)')
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_require "roadmap-claim" "$feature" " (run roadmap-init first)")
+
+  # --phase is a bare numeric id at this point (validated above); pass it through
+  # to jq as a number, or JSON null when no override was given.
+  local phase_override_json="null"
+  [ -n "$phase_override" ] && phase_override_json="$phase_override"
+
+  local out
+  out=$(
+    (
+      _lock "${roadmap_path}.lock"
+
+      if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
+        echo "Error: roadmap-claim: malformed roadmap.json: $roadmap_path" >&2
+        exit 1
+      fi
+
+      # Identify stale claims (claimedPid no longer alive) inside this locked pass.
+      # sessionId travels alongside pid here so the release report line below
+      # ("released stale claim on phase <id> (session <sid> pid <pid> not
+      # alive)") can be built without a second read of roadmap.json.
+      # _is_pid_alive is a bash kill(2) probe, not something jq can do, so
+      # the loop itself stays bash -- but it only accumulates plain phase-id
+      # lines while the lock is held, then converts them to a JSON array in
+      # one jq pass at the end, instead of spawning one jq process per stale
+      # claim to grow the array incrementally.
+      claimed_pids=$(jq -c '[.phases[] | select(.claim != null) | {id: .id, pid: .claim.claimedPid, sessionId: .claim.claimedBy}]' "$roadmap_path")
+      stale_id_lines=""
+      while IFS=$'\t' read -r pid_phase_id pid_val; do
+        [ -z "$pid_phase_id" ] && continue
+        if ! _is_pid_alive "$pid_val"; then
+          stale_id_lines="${stale_id_lines}${pid_phase_id}"$'\n'
+        fi
+      done < <(printf '%s' "$claimed_pids" | jq -r '.[] | [(.id|tostring), (.pid|tostring)] | @tsv')
+      stale_ids=$(printf '%s' "$stale_id_lines" | jq -R -s 'split("\n") | map(select(length > 0) | tonumber)')
+      stale_released=$(printf '%s' "$claimed_pids" | jq --argjson stale_ids "$stale_ids" '
+        [.[] | select((.id) as $id | ($stale_ids | index($id)) != null)]
+      ')
+
+      now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+      result=$(jq -n \
+        --slurpfile cur "$roadmap_path" \
+        --argjson stale_ids "$stale_ids" \
+        --argjson stale_released "$stale_released" \
+        --arg session_id "$session_id" \
+        --arg now "$now" \
+        --argjson session_pid "$session_pid" \
+        --argjson phase_override "$phase_override_json" \
+        '
+          ($cur[0]) as $current |
+          ($current.phases | map(if ((.id) as $id | ($stale_ids | index($id)) != null) then .claim = null else . end)) as $cleared_phases |
+          (reduce $cleared_phases[] as $p ({}; . + {($p.id|tostring): $p.status})) as $status_by_id |
+          # Self-reclaim: this exact session already owns an unreleased claim on a
+          # still-active phase (matching the requested --phase when given). Return
+          # it again instead of erroring or re-running eligibility -- this is what
+          # makes re-running /aimi:execute on an already-claimed phase idempotent.
+          ($cleared_phases | map(select(
+            .claim != null and .claim.claimedBy == $session_id and
+            (.status == "pending" or .status == "planned" or .status == "in_progress") and
+            ($phase_override == null or .id == $phase_override)
+          ))) as $self_claimed |
+          (if ($self_claimed | length) > 0 then
+            ($self_claimed | sort_by(.id) | .[0]) as $mine |
+            {claimed: true, phase: $mine, phases: $cleared_phases}
+          elif $phase_override != null then
+            ($cleared_phases | map(select(.id == $phase_override))) as $target_arr |
+            if ($target_arr | length) == 0 then
+              {claimed: false, reason: "phase-not-found", phases: null}
+            else
+              ($target_arr[0]) as $target |
+              if ((["pending","planned","in_progress","verification_failed"] | index($target.status)) == null) then
+                {claimed: false, reason: "not-claimable", detail: ("phase status is " + $target.status), phases: null}
+              elif $target.claim != null then
+                {claimed: false, reason: "claimed", detail: "claimed by a live session", phases: null}
+              elif ((($target.dependsOn // []) | all(. as $d | $status_by_id[$d|tostring] == "completed")) | not) then
+                {claimed: false, reason: "blocked", detail: ("depends on incomplete phase(s): " + ((($target.dependsOn // []) | map(select($status_by_id[(.|tostring)] != "completed")) | map(tostring) | join(", ")))), phases: null}
+              else
+                ($cleared_phases | map(if .id == $target.id then . + {claim: {claimedBy: $session_id, claimedAt: $now, claimedPid: $session_pid}} else . end)) as $final_phases |
+                {claimed: true, phase: ($final_phases[] | select(.id == $target.id)), phases: $final_phases}
+              end
+            end
+          else
+            # Resumable = not yet terminal AND carrying no live claim. Stale
+            # claims were already cleared above, so an unclaimed in_progress
+            # phase is leftover from a crashed session and verification_failed
+            # is awaiting a re-verify run -- both must be re-claimable or crash
+            # recovery and verification retry are dead ends, which is exactly
+            # what execute.md tells the user to recover by re-running.
+            ($cleared_phases | map(select((.status == "pending" or .status == "planned" or .status == "in_progress" or .status == "verification_failed") and .claim == null))) as $candidates0 |
+            ($candidates0 | map(select( ((.dependsOn // []) | all(. as $d | $status_by_id[$d|tostring] == "completed")) ))) as $eligible |
+            if ($eligible | length) > 0 then
+              ($eligible | sort_by(.id) | .[0]) as $chosen |
+              ($cleared_phases | map(if .id == $chosen.id then . + {claim: {claimedBy: $session_id, claimedAt: $now, claimedPid: $session_pid}} else . end)) as $final_phases |
+              {claimed: true, phase: ($final_phases[] | select(.id == $chosen.id)), phases: $final_phases}
+            else
+              ($cleared_phases | map(select(.status == "pending" or .status == "planned" or .status == "in_progress" or .status == "verification_failed"))) as $remaining |
+              if ($remaining | length) == 0 then
+                {claimed: false, reason: "none-eligible", phases: null}
+              else
+                ($remaining | map(
+                  if .claim != null then
+                    {id: .id, reason: ("claimed by session " + .claim.claimedBy)}
+                  else
+                    {id: .id, reason: ("depends on incomplete phase(s): " + (((.dependsOn // []) | map(select($status_by_id[(.|tostring)] != "completed")) | map(tostring) | join(", "))))}
+                  end
+                )) as $blocked_reasons |
+                {claimed: false, reason: "all-blocked", blocked: $blocked_reasons, phases: null}
+              end
+            end
+          end) as $outcome |
+          $outcome + {staleReleased: $stale_released}
+        ')
+
+      claimed=$(printf '%s' "$result" | jq -r '.claimed')
+
+      if [ "$claimed" = "true" ]; then
+        new_phases_out=$(printf '%s' "$result" | jq '.phases')
+        roadmap_doc=$(jq --argjson phases "$new_phases_out" '.phases = $phases' "$roadmap_path")
+
+        tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
+        printf '%s\n' "$roadmap_doc" > "$tmp_file"
+        mv "$tmp_file" "$roadmap_path"
+
+        printf '%s' "$result" | jq '.phase + {staleReleased: .staleReleased}'
+        exit 0
+      fi
+
+      reason=$(printf '%s' "$result" | jq -r '.reason')
+      case "$reason" in
+        none-eligible)
+          echo "Error: roadmap-claim: no phase remains in pending or planned status" >&2
+          exit 4
+          ;;
+        phase-not-found)
+          echo "Error: roadmap-claim: phase $phase_override not found in $roadmap_path" >&2
+          exit 4
+          ;;
+        not-claimable|claimed|blocked)
+          detail=$(printf '%s' "$result" | jq -r '.detail')
+          echo "Error: roadmap-claim: phase $phase_override is not claimable: $detail" >&2
+          exit 3
+          ;;
+        *)
+          echo "Error: roadmap-claim: all remaining pending/planned phases are blocked:" >&2
+          printf '%s' "$result" | jq -r '.blocked[] | "  phase " + (.id|tostring) + ": " + .reason' >&2
+          exit 3
+          ;;
+      esac
+    ) 200>"${roadmap_path}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
+}
+
+cmd_roadmap_release_claim() {
+  local feature="" phase_id=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      --phase) shift; phase_id="${1:-}" ;;
+      *)
+        echo "Error: roadmap-release-claim: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature"
+  _roadmap_validate_phase_id "$phase_id" "roadmap-release-claim"
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_require "roadmap-release-claim" "$feature" "" --skip-malformed)
+
+  local out
+  out=$(
+    (
+      _lock "${roadmap_path}.lock"
+
+      if ! jq -e --argjson pid "$phase_id" '.phases[] | select(.id == $pid)' "$roadmap_path" >/dev/null 2>&1; then
+        echo "Error: roadmap-release-claim: phase $phase_id not found in $roadmap_path" >&2
+        exit 1
+      fi
+
+      roadmap_doc=$(jq --argjson pid "$phase_id" '
+        .phases |= map(if .id == $pid then .claim = null else . end)
+      ' "$roadmap_path")
+
+      tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
+      printf '%s\n' "$roadmap_doc" > "$tmp_file"
+      mv "$tmp_file" "$roadmap_path"
+
+      jq -n --argjson pid "$phase_id" '{released: $pid}'
+    ) 200>"${roadmap_path}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
+}
+
+cmd_roadmap_reconcile() {
+  local feature=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      *)
+        echo "Error: roadmap-reconcile: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature"
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_require "roadmap-reconcile" "$feature")
+
+  local feature_dir
+  feature_dir=$(dirname "$roadmap_path")
+
+  local out
+  out=$(
+    (
+      _lock "${roadmap_path}.lock"
+
+      if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
+        echo "Error: roadmap-reconcile: malformed roadmap.json: $roadmap_path" >&2
+        exit 1
+      fi
+
+      phase_dirs=$(jq -c '[.phases[] | {id: .id, dir: .dir, status: .status}]' "$roadmap_path")
+      corrections='[]'
+
+      blocked='[]'
+
+      while IFS=$'\t' read -r rc_id rc_dir rc_status; do
+        [ -z "$rc_id" ] && continue
+        # Phase tasks files follow <feature>-phase-<id>-tasks.json (the same
+        # convention phase-overlap, execute.md Step 1.7, plan.md Phase 3e and
+        # status.md use). Reading a bare tasks.json here made every lookup miss,
+        # so reconcile silently reported zero corrections.
+        rc_tasks_file="$feature_dir/$rc_dir/$feature-phase-$rc_id-tasks.json"
+        if [ ! -f "$rc_tasks_file" ]; then
+          continue
+        fi
+        if ! jq -e . "$rc_tasks_file" >/dev/null 2>&1; then
+          continue
+        fi
+        ground_truth=$(jq -r '
+          [.userStories[].status] as $statuses |
+          if ($statuses | length) == 0 then "unknown"
+          elif ($statuses | all(. == "completed")) then "completed"
+          elif ($statuses | any(. == "failed")) then "verification_failed"
+          else "in_progress"
+          end
+        ' "$rc_tasks_file")
+        if [ "$ground_truth" != "unknown" ] && [ "$ground_truth" != "$rc_status" ]; then
+          # Same hard precondition roadmap-set-status enforces: a phase never
+          # reaches "completed" without handoff.md on disk. Reconcile must not
+          # be a second write path with weaker invariants -- an otherwise-valid
+          # completed correction is reported as blocked instead of applied, so
+          # the divergence stays visible rather than silently healed wrong.
+          if [ "$ground_truth" = "completed" ] && [ ! -f "$feature_dir/$rc_dir/handoff.md" ]; then
+            blocked=$(printf '%s' "$blocked" | jq --argjson id "$rc_id" --arg from "$rc_status" --arg to "$ground_truth" \
+              '. + [{id: $id, from: $from, to: $to, reason: "no handoff.md -- write it with roadmap-write-handoff, then re-run"}]')
+          else
+            corrections=$(printf '%s' "$corrections" | jq --argjson id "$rc_id" --arg from "$rc_status" --arg to "$ground_truth" '. + [{id: $id, from: $from, to: $to}]')
+          fi
+        fi
+      done < <(printf '%s' "$phase_dirs" | jq -r '.[] | [(.id|tostring), .dir, .status] | @tsv')
+
+      if [ "$(printf '%s' "$corrections" | jq 'length')" -gt 0 ]; then
+        # Reaching "completed" also releases the claim in the same atomic write,
+        # mirroring roadmap-set-status -- otherwise a reconciled phase reads as
+        # done while still showing claimed by a dead session.
+        roadmap_doc=$(jq --argjson corr "$corrections" '
+          .phases |= map(
+            . as $p |
+            (($corr | map(select(.id == $p.id)) | .[0]) // null) as $c |
+            if $c != null then
+              ($p + {status: $c.to} | if $c.to == "completed" then .claim = null else . end)
+            else $p end
+          )
+        ' "$roadmap_path")
+
+        tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
+        printf '%s\n' "$roadmap_doc" > "$tmp_file"
+        mv "$tmp_file" "$roadmap_path"
+      fi
+
+      jq -n --argjson corr "$corrections" --argjson blocked "$blocked" '{corrections: $corr, blocked: $blocked}'
+    ) 200>"${roadmap_path}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
+}
+
+# Write a phase's handoff.md through a guard-protected CLI call (see outline
+# 11). guard-runtime-state.py blocks any direct Write/Edit tool call whose
+# target is .aimi/tasks/<feature>/phase-N/handoff.md and points the caller
+# back at this verb -- this is the only path that may create or overwrite
+# that file. Reads a JSON object from --file or stdin with five optional
+# array-of-string fields (decisions, artifacts, deviations, deferred,
+# contracts); each entry is sanitized and length-capped with the same
+# _rm_sanitize regime as every other free-text roadmap field. Always emits
+# exactly five "## " headings in the fixed order
+# "Decisions Made" / "Artifacts Created" / "Deviations" / "Deferred Items" /
+# "Contracts Delivered" -- the order roadmap-set-status's completed-requires-
+# handoff precondition and _cv_handoff_lists_artifact's "Artifacts Created"
+# lookup both depend on. Overwrites any existing handoff.md at that path
+# (idempotent retry after a verification_failed -> completed re-run).
+cmd_roadmap_write_handoff() {
+  local feature="" phase_id="" file=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      --phase) shift; phase_id="${1:-}" ;;
+      --file) shift; file="${1:-}" ;;
+      *)
+        echo "Error: roadmap-write-handoff: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature"
+  _roadmap_validate_phase_id "$phase_id" "roadmap-write-handoff"
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_require "roadmap-write-handoff" "$feature")
+
+  local phase_dir
+  phase_dir=$(jq -r --argjson pid "$phase_id" '(.phases[] | select(.id == $pid) | .dir) // empty' "$roadmap_path")
+  if [ -z "$phase_dir" ]; then
+    echo "Error: roadmap-write-handoff: phase $phase_id not found in $roadmap_path" >&2
+    exit 1
+  fi
+
+  local input_json
+  if [ -n "$file" ]; then
+    validate_path_in_project "$file"
+    if [ ! -f "$file" ]; then
+      echo "Error: roadmap-write-handoff: --file not found: $file" >&2
+      exit 1
+    fi
+    input_json=$(cat "$file")
+  else
+    input_json=$(cat)
+  fi
+
+  if ! printf '%s' "$input_json" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    echo "Error: roadmap-write-handoff: payload must be a JSON object" >&2
+    exit 1
+  fi
+
+  local key
+  for key in decisions artifacts deviations deferred contracts; do
+    if ! printf '%s' "$input_json" | jq -e --arg k "$key" '(.[$k] // []) as $v | ($v|type) == "array" and ($v | all(type == "string"))' >/dev/null 2>&1; then
+      echo "Error: roadmap-write-handoff: field '$key' must be an array of strings" >&2
+      exit 1
+    fi
+  done
+
+  local body
+  body=$(printf '%s' "$input_json" | jq -r "$_ROADMAP_SANITIZE_JQ"'
+    def clean: map(_rm_sanitize(2000));
+    def section(title; items):
+      "## " + title + "\n\n" +
+      (if (items | length) == 0 then "_None._\n" else ((items | map("- " + .)) | join("\n")) + "\n" end);
+    {
+      decisions: ((.decisions // []) | clean),
+      artifacts: ((.artifacts // []) | clean),
+      deviations: ((.deviations // []) | clean),
+      deferred: ((.deferred // []) | clean),
+      contracts: ((.contracts // []) | clean)
+    } as $s |
+    section("Decisions Made"; $s.decisions) + "\n" +
+    section("Artifacts Created"; $s.artifacts) + "\n" +
+    section("Deviations"; $s.deviations) + "\n" +
+    section("Deferred Items"; $s.deferred) + "\n" +
+    section("Contracts Delivered"; $s.contracts)
+  ')
+
+  local feature_dir handoff_path
+  feature_dir=$(dirname "$roadmap_path")
+  handoff_path="$feature_dir/$phase_dir/handoff.md"
+  validate_path_in_project "$handoff_path"
+
+  local out
+  out=$(
+    (
+      _lock "${roadmap_path}.lock"
+      mkdir -p "$(dirname "$handoff_path")"
+      tmp_file=$(mktemp "${handoff_path}.XXXXXX")
+      printf '%s\n' "$body" > "$tmp_file" && mv "$tmp_file" "$handoff_path"
+      jq -n --arg path "$handoff_path" '{handoff: $path}'
+    ) 200>"${roadmap_path}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
+}
+
+# ============================================================================
+# Contract Validation Subcommands (validate-contracts, roadmap-sweep)
+# ============================================================================
+# Cross-check a feature's roadmap.json creates[]/needs[] contracts: an unmet
+# need (no phase in the needing phase's dependsOn closure creates it) and a
+# duplicate creates (the same artifact identity declared by two or more
+# phases). Artifact identity is the substring before a creates/needs entry's
+# first "(", trimmed of surrounding whitespace (see outline 01's shared
+# scope-context reference).
+#
+# Schema note: the roadmap phase status enum is pending/planned/in_progress/
+# completed/verification_failed (see cmd_roadmap_set_status above) -- there
+# is no "deferred" status. roadmap-sweep's deferredNeeds check substitutes
+# the existing "provider resolved but status != completed" signal for the
+# undefined "deferred" status value, per this story's authoritative notes
+# reconciling the schema gap against outline 02/outline 14.
+
+# jq `def`s shared by validate-contracts and roadmap-sweep.
+_CONTRACT_JQ_DEFS='
+def _cv_identity: sub("\\(.*"; "") | gsub("^[ \t]+|[ \t]+$"; "");
+def _cv_suspicious: test("ignore previous|system:|INSTRUCTIONS|```|\\$\\("; "i") or test("[$`;|&]");
+'
+
+# Print newline-separated phase ids reachable via transitive dependsOn
+# closure from $2 (excluding $2 itself). $1 = roadmap_path.
+_cv_reachable_ids() {
+  local roadmap_path="$1" start_id="$2"
+  jq -r --argjson start "$start_id" '
+    (reduce .phases[] as $p ({}; . + {($p.id|tostring): ($p.dependsOn // [])})) as $deps |
+    def _cv_expand($cur): ($cur + ($cur | map($deps[(.|tostring)] // []) | add // [])) | unique;
+    ([$start] | until(_cv_expand(.) == .; _cv_expand(.))) - [$start] | .[]
+  ' "$roadmap_path"
+}
+
+# Print "id<TAB>identity<TAB>status<TAB>dir" for every creates[] entry of
+# every phase whose id is in the given newline-separated id list ($2),
+# sorted by phase id ascending (deterministic first-match order for
+# provider lookup). $1 = roadmap_path.
+_cv_creates_in_scope() {
+  local roadmap_path="$1" ids_input="$2"
+  local ids_json='[]'
+  if [ -n "$ids_input" ]; then
+    ids_json=$(printf '%s\n' "$ids_input" | jq -R 'select(length > 0) | tonumber' | jq -s '.')
+  fi
+  jq -r --argjson ids "$ids_json" "$_CONTRACT_JQ_DEFS"'
+    [.phases[] | select(.id as $i | $ids | index($i) != null)] | sort_by(.id) | .[] |
+    . as $p | ((.creates // [])[]? | _cv_identity) as $ident |
+    "\($p.id)\t\($ident)\t\($p.status)\t\($p.dir // "")"
+  ' "$roadmap_path"
+}
+
+# True (exit 0) when handoff.md at $1 lists artifact identity $2 under an
+# "Artifacts Created" section (any heading level). Fixed-string match (-F)
+# so an identity containing regex metacharacters cannot alter the search.
+_cv_handoff_lists_artifact() {
+  local handoff_path="$1" identity="$2"
+  [ -f "$handoff_path" ] || return 1
+  awk '
+    /^#+[ \t]+Artifacts Created/ { flag=1; next }
+    /^#+[ \t]/ { flag=0 }
+    flag { print }
+  ' "$handoff_path" | grep -qF -- "$identity"
+}
+
+# ============================================================================
+# verify-creates — prove a phase's creates[] exist in code, not in prose
+# ============================================================================
+#
+# Creates verification used to live as executable prose in /aimi:execute's
+# "Creates Verification" section: an orchestrator read a numbered procedure and
+# ran `[ -f "$PHASE_CONTAINER_PATH/$identity" ]`, then a bare `git grep -l -F`.
+# No Bash suite could reach it, and the procedure was wrong in three ways a
+# test would have caught the day it shipped:
+#
+#   * `[ -f ]` is false for a directory, so a creates entry naming one
+#     ("db/migrations") could never verify by path.
+#   * The text search carried no exclusions, so an identity mentioned once in
+#     docs/plano.md, in a test file, or in a `// TODO:` comment closed the
+#     phase — a phase could pass on a mention of the work instead of the work.
+#   * An endpoint identity is written "POST /api/notifications" (see the
+#     Creates/Needs Contracts table in commands/references/scope-contexts.md),
+#     but source code holds the path, not the method-plus-path literal, so a
+#     delivered endpoint read as missing while its documentation read as done.
+#
+# This is the move split-detect already made (see its header above): pure,
+# deterministic, file-only logic belongs where both Bash suites can reach it,
+# in exactly one copy, with every rule a test case.
+#
+# It is a QUERY, not a gate. Producing a verdict array exits 0 — including an
+# array where every entry is "missing". Non-zero is reserved for real errors
+# (unknown flag, absent/non-numeric --phase, absent/malformed roadmap.json,
+# --dir that is not a directory), which is what lets the caller loop over the
+# result instead of branching on the exit status.
+#
+# Deliberately NOT kind-aware: it does not try to map a table identity to a
+# migration file or an endpoint identity to a route file. Every identity runs
+# the same four steps; the kind column in scope-contexts.md stays a naming
+# convention, not a dispatch table.
+
+# Paths whose content is a MENTION of an artifact rather than the artifact:
+# documentation and tests.
+#
+# Every pattern uses the LONG ":(exclude)" form. The short "!" form is not
+# interchangeable — git reads the character after the colon as pathspec magic,
+# so ':!__tests__/*' aborts the whole invocation with
+#   fatal: Unimplemented pathspec magic '_' in ':!__tests__/*'
+# and exit 128, which would turn every artifact of every phase into "missing".
+# Long form only, for all patterns, so no future edit reintroduces the short
+# form by copying a neighbour.
+#
+# Default pathspec matching is fnmatch without FNM_PATHNAME — "*" crosses "/"
+# — so "*.md" excludes .md files at any depth, while "docs/*" is anchored at
+# the search root and needs the "*/docs/*" companion for nested copies.
+#
+# .aimi/* is excluded for a specific reason: roadmap.json holds the creates[]
+# strings themselves, so without it every identity would find itself in the
+# very file that declared it.
+_VERIFY_CREATES_EXCLUDES=(
+  ':(exclude)*.md'
+  ':(exclude)*.mdx'
+  ':(exclude)*.rst'
+  ':(exclude)*.adoc'
+  ':(exclude)*.txt'
+  ':(exclude)docs/*'
+  ':(exclude)doc/*'
+  ':(exclude)documentation/*'
+  ':(exclude)*/docs/*'
+  ':(exclude)*/doc/*'
+  ':(exclude)*/documentation/*'
+  ':(exclude)README*'
+  ':(exclude)CHANGELOG*'
+  ':(exclude)CONTRIBUTING*'
+  ':(exclude).aimi/*'
+  ':(exclude)*_test.*'
+  ':(exclude)*.test.*'
+  ':(exclude)*_spec.*'
+  ':(exclude)*.spec.*'
+  ':(exclude)test/*'
+  ':(exclude)tests/*'
+  ':(exclude)spec/*'
+  ':(exclude)__tests__/*'
+  ':(exclude)*/test/*'
+  ':(exclude)*/tests/*'
+  ':(exclude)*/spec/*'
+  ':(exclude)*/__tests__/*'
+)
+
+# The tracked-files caveat, stated in every "missing" verdict so the caller
+# reports the limit instead of silently owning it.
+_VERIFY_CREATES_TRACKED_NOTE='Note: git ls-files and git grep see tracked (committed) files only, so uncommitted work reads as missing.'
+
+# True (exit 0) when the identity names documentation itself. For those, a hit
+# under docs/ IS the artifact rather than a mention of it, so the exclusion
+# list is bypassed for that one entry.
+_verify_creates_is_doc_identity() {
+  local identity="$1"
+  case "$identity" in
+    docs/*|doc/*|*/docs/*|*/doc/*|*.md|*.rst|*.adoc|*.txt) return 0 ;;
+  esac
+  return 1
+}
+
+# True (exit 0) when a matched line is nothing but a TODO/FIXME/XXX/HACK
+# marker inside a comment — a note that the work is still owed, which must
+# never count as the work being done.
+_verify_creates_is_marker_line() {
+  local content="$1"
+  grep -Eq '^[[:space:]]*(//+|#+|--+|\*+|/\*+|<!--)[[:space:]]*(TODO|FIXME|XXX|HACK)([^A-Za-z0-9_]|$)' <<< "$content"
+}
+
+# Verify ONE creates identity against <dir>'s tracked files.
+# Prints one compact JSON object: {identity, status, method, evidence, gitStatus}.
+#   status    verified | missing | error
+#   method    "path" (step 1) | "text" (step 3) | null (not verified)
+#   gitStatus the highest exit status any git invocation returned for this
+#             entry — 0 or 1 in normal operation, above 1 only on tool failure.
+# Always returns 0: a verdict of "missing" or "error" is data, not failure.
+_verify_creates_one() {
+  local dir="$1" identity="$2"
+  local status="missing" method="" evidence=""
+  local git_max=0 rc=0
+
+  if [ -z "$identity" ]; then
+    _verify_creates_emit "$identity" "missing" "" \
+      "Malformed creates entry: empty artifact identity (expected \"<artifact-name> (<description>)\"). $_VERIFY_CREATES_TRACKED_NOTE" 0
+    return 0
+  fi
+
+  # --- Step 1: tracked path ------------------------------------------------
+  # Matches a FILE and a DIRECTORY alike. `[ -f ]`, which this replaces, is
+  # false on a directory, so a directory identity could only ever verify by
+  # text search — and usually did not verify at all.
+  # An absolute or traversing identity is never handed to git as a pathspec
+  # (same escape-prevention posture validate_path_in_project enforces); it
+  # falls through to the content search instead, which cannot leave the repo.
+  local path_safe=true
+  case "$identity" in
+    /*|../*|*/../*|*/..) path_safe=false ;;
+  esac
+  if [ "$path_safe" = true ]; then
+    local ls_out=""
+    rc=0
+    ls_out=$(git -C "$dir" ls-files -- "$identity" "$identity/*" 2>/dev/null) || rc=$?
+    if [ "$rc" -gt "$git_max" ]; then git_max=$rc; fi
+    if [ "$rc" -gt 1 ]; then
+      _verify_creates_emit "$identity" "error" "" \
+        "git ls-files exited $rc under $dir — tool failure, not an absent artifact." "$git_max"
+      return 0
+    fi
+    if [ -n "$ls_out" ]; then
+      local first_path="${ls_out%%$'\n'*}"
+      _verify_creates_emit "$identity" "verified" "path" \
+        "tracked path: $first_path" "$git_max"
+      return 0
+    fi
+  fi
+
+  # --- Step 2: endpoint path extraction -----------------------------------
+  # Load-bearing, not a nicety. In a repository that genuinely serves the
+  # route, the literal "POST /api/notifications" was found in docs/plano.md
+  # and nowhere else — real code writes router.post('/api/notifications', …).
+  # Excluding documentation without this step turns every endpoint-kind phase
+  # into verification_failed, and the only way to unblock it would be to write
+  # the literal into a comment: exactly the hole this verb closes.
+  #
+  # Only a leading HTTP method token followed by a space and a "/" is
+  # stripped. Every other identity reaches the search untouched — "DELETE
+  # user_sessions" is a table-shaped identity, not an endpoint, and searching
+  # it for "user_sessions" alone would weaken the check.
+  local search="$identity"
+  case "$identity" in
+    'GET /'*|'POST /'*|'PUT /'*|'PATCH /'*|'DELETE /'*|'HEAD /'*|'OPTIONS /'*)
+      search="${identity#* }"
+      ;;
+  esac
+  local searched_note=""
+  if [ "$search" != "$identity" ]; then
+    searched_note=" (searched \"$search\")"
+  fi
+
+  # --- Step 3: text search over tracked source ----------------------------
+  # rc is pre-initialized and captured with `|| rc=$?` because this script
+  # runs under `set -euo pipefail` (line 2) and git grep exits 1 on a
+  # legitimate no-match. `local rc=$?` would mask the status behind local's
+  # own success and is used nowhere here.
+  local grep_out=""
+  rc=0
+  if _verify_creates_is_doc_identity "$identity"; then
+    grep_out=$(git -C "$dir" grep -n -I -F -e "$search" 2>/dev/null) || rc=$?
+  else
+    grep_out=$(git -C "$dir" grep -n -I -F -e "$search" -- "${_VERIFY_CREATES_EXCLUDES[@]}" 2>/dev/null) || rc=$?
+  fi
+  if [ "$rc" -gt "$git_max" ]; then git_max=$rc; fi
+  if [ "$rc" -gt 1 ]; then
+    _verify_creates_emit "$identity" "error" "" \
+      "git grep exited $rc under $dir — tool failure, not an absent artifact." "$git_max"
+    return 0
+  fi
+
+  # --- Step 4: drop marker-only comment lines -----------------------------
+  local kept="" first_marker=""
+  if [ -n "$grep_out" ]; then
+    local gline rest hit_file hit_num hit_content
+    while IFS= read -r gline; do
+      [ -n "$gline" ] || continue
+      hit_file="${gline%%:*}"
+      rest="${gline#*:}"
+      hit_num="${rest%%:*}"
+      hit_content="${rest#*:}"
+      if _verify_creates_is_marker_line "$hit_content"; then
+        if [ -z "$first_marker" ]; then first_marker="$hit_file:$hit_num"; fi
+        continue
+      fi
+      kept="$hit_file:$hit_num"
+      break
+    done <<< "$grep_out"
+  fi
+
+  if [ -n "$kept" ]; then
+    _verify_creates_emit "$identity" "verified" "text" \
+      "tracked source: ${kept}${searched_note}" "$git_max"
+    return 0
+  fi
+
+  # --- Missing: name what was found and rejected, not just "not found" ----
+  local rejected=""
+  if [ -n "$first_marker" ]; then
+    rejected=" Found and rejected at $first_marker: TODO/FIXME marker comment, not an implementation."
+  else
+    local all_out=""
+    rc=0
+    all_out=$(git -C "$dir" grep -n -I -F -e "$search" 2>/dev/null) || rc=$?
+    if [ "$rc" -gt "$git_max" ]; then git_max=$rc; fi
+    if [ "$rc" -gt 1 ]; then
+      _verify_creates_emit "$identity" "error" "" \
+        "git grep exited $rc under $dir — tool failure, not an absent artifact." "$git_max"
+      return 0
+    fi
+    if [ -n "$all_out" ]; then
+      local aline afile arest anum acontent
+      aline="${all_out%%$'\n'*}"
+      afile="${aline%%:*}"
+      arest="${aline#*:}"
+      anum="${arest%%:*}"
+      acontent="${arest#*:}"
+      if _verify_creates_is_marker_line "$acontent"; then
+        rejected=" Found and rejected at $afile:$anum: TODO/FIXME marker comment, not an implementation."
+      else
+        rejected=" Found and rejected at $afile:$anum: documentation or test path, excluded from the source search."
+      fi
+    fi
+  fi
+
+  status="missing"
+  method=""
+  evidence="No tracked artifact for \"$identity\" under ${dir}${searched_note}.${rejected} $_VERIFY_CREATES_TRACKED_NOTE"
+  _verify_creates_emit "$identity" "$status" "$method" "$evidence" "$git_max"
+  return 0
+}
+
+# Emit one verdict object. jq builds it so an identity carrying quotes,
+# spaces or backslashes cannot break the array.
+_verify_creates_emit() {
+  jq -nc \
+    --arg identity "$1" \
+    --arg status "$2" \
+    --arg method "$3" \
+    --arg evidence "$4" \
+    --argjson gitStatus "$5" \
+    '{identity: $identity, status: $status,
+      method: (if $method == "" then null else $method end),
+      evidence: $evidence, gitStatus: $gitStatus}'
+}
+
+cmd_verify_creates() {
+  local feature="" phase_id="" dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      --phase)   shift; phase_id="${1:-}" ;;
+      --dir)     shift; dir="${1:-}" ;;
+      *)
+        echo "Error: verify-creates: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature"
+  _roadmap_validate_phase_id "$phase_id" "verify-creates"
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_require "verify-creates" "$feature")
+
+  if ! jq -e --argjson pid "$phase_id" '.phases[] | select(.id == $pid)' "$roadmap_path" >/dev/null 2>&1; then
+    echo "Error: verify-creates: phase $phase_id not found in $roadmap_path" >&2
+    exit 1
+  fi
+
+  # --dir is the phase container's absolute path. It defaults to PROJECT_ROOT
+  # rather than erroring, so the only --dir failure is a path that is not a
+  # directory (or escapes the project).
+  if [ -z "$dir" ]; then
+    dir="$PROJECT_ROOT"
+  fi
+  if [ ! -d "$dir" ]; then
+    echo "Error: verify-creates: --dir is not a directory: $dir" >&2
+    exit 1
+  fi
+  dir=$(resolve_path "$dir")
+  validate_path_in_project "$dir"
+
+  # Identities come from the one existing definition (_cv_identity), never a
+  # second copy: the substring before the first "(", trimmed.
+  local creates_raw
+  creates_raw=$(jq -r --argjson pid "$phase_id" "$_CONTRACT_JQ_DEFS"'
+    .phases[] | select(.id == $pid) | (.creates // [])[] | _cv_identity
+  ' "$roadmap_path")
+
+  local result='[]'
+  if [ -n "$creates_raw" ]; then
+    local identity entry
+    while IFS= read -r identity; do
+      entry=$(_verify_creates_one "$dir" "$identity")
+      result=$(printf '%s' "$result" | jq -c --argjson e "$entry" '. + [$e]')
+    done <<< "$creates_raw"
+  fi
+
+  printf '%s' "$result" | jq '.'
+}
+
+cmd_validate_contracts() {
+  local feature="" phase_id="" agent_mode=false
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --phase)
+        shift; phase_id="${1:-}"
+        ;;
+      --agent-mode)
+        agent_mode=true
+        ;;
+      -*)
+        echo "Usage: aimi-cli.sh validate-contracts <feature> [--phase <id>] [--agent-mode]" >&2
+        exit 1
+        ;;
+      *)
+        feature="$1"
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature"
+  if [ -n "$phase_id" ]; then
+    _roadmap_validate_phase_id "$phase_id" "validate-contracts"
+  fi
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_require "validate-contracts" "$feature")
+  if [ -n "$phase_id" ] && ! jq -e --argjson pid "$phase_id" '.phases[] | select(.id == $pid)' "$roadmap_path" >/dev/null 2>&1; then
+    echo "Error: validate-contracts: phase $phase_id not found in $roadmap_path" >&2
+    exit 1
+  fi
+
+  local feature_dir
+  feature_dir=$(dirname "$roadmap_path")
+
+  # --- Sanitization pass: always blocks; never demoted by --agent-mode ---
+  # (a duplicate-creates finding is the only check this story demotes)
+  local sanitize_hits
+  sanitize_hits=$(jq -r "$_CONTRACT_JQ_DEFS"'
+    [.phases[] | . as $p |
+      ("creates","needs") as $field |
+      select(($p[$field] // []) | any(_cv_suspicious)) |
+      {phase: $p.id, field: $field}
+    ] | unique_by([.phase,.field]) | .[] | "\(.phase)\t\(.field)"
+  ' "$roadmap_path")
+  if [ -n "$sanitize_hits" ]; then
+    while IFS=$'\t' read -r hit_phase hit_field; do
+      [ -z "$hit_phase" ] && continue
+      echo "Error: validate-contracts: phase $hit_phase field '$hit_field' contains suspicious content" >&2
+    done <<< "$sanitize_hits"
+    exit 1
+  fi
+
+  # --- Duplicate-creates collision check (across all phases, any status) ---
+  local dup_check dup_count
+  dup_check=$(jq "$_CONTRACT_JQ_DEFS"'
+    [.phases[] | . as $p | (($p.creates // [])[] | _cv_identity) as $ident | {identity: $ident, phase: $p.id}]
+    | group_by(.identity)
+    | map(select(length > 1))
+    | map({identity: .[0].identity, phases: ([.[].phase] | unique | sort)})
+  ' "$roadmap_path")
+  dup_count=$(printf '%s' "$dup_check" | jq 'length')
+
+  if [ "$dup_count" -gt 0 ]; then
+    local dup_msg
+    dup_msg=$(printf '%s' "$dup_check" | jq -r '
+      .[] | "  phase " + (.phases | map(tostring) | join(" and phase ")) +
+      ": both declare \"" + .identity + "\" -- convert the collision into a" +
+      " creates/needs contract between the two phases or promote the" +
+      " artifact to a shared foundation phase"
+    ')
+    if [ "$agent_mode" = "true" ]; then
+      echo "Warning: validate-contracts: duplicate creates (--agent-mode: proceeding):" >&2
+      printf '%s\n' "$dup_msg" >&2
+    else
+      echo "Error: validate-contracts: duplicate creates:" >&2
+      printf '%s\n' "$dup_msg" >&2
+      exit 1
+    fi
+  fi
+
+  # --- Needs resolution: scope is --phase (if given) or every phase ---
+  local scope_ids
+  if [ -n "$phase_id" ]; then
+    scope_ids=$(jq --argjson pid "$phase_id" -r '.phases[] | select(.id == $pid) | .id' "$roadmap_path")
+  else
+    scope_ids=$(jq -r '.phases[].id' "$roadmap_path")
+  fi
+
+  local missing_json='[]'
+  local providers_json='{}'
+
+  local sid
+  while IFS= read -r sid; do
+    [ -z "$sid" ] && continue
+
+    local reach_ids creates_tsv
+    reach_ids=$(_cv_reachable_ids "$roadmap_path" "$sid")
+    creates_tsv=$(_cv_creates_in_scope "$roadmap_path" "$reach_ids")
+
+    local need_ident
+    while IFS= read -r need_ident; do
+      [ -z "$need_ident" ] && continue
+
+      local prov_line
+      prov_line=$(printf '%s\n' "$creates_tsv" | awk -F'\t' -v want="$need_ident" '$2 == want { print; exit }')
+
+      if [ -z "$prov_line" ]; then
+        missing_json=$(printf '%s' "$missing_json" | jq --argjson pid "$sid" --arg need "$need_ident" '. + [{phase: $pid, need: $need, reason: "no-provider"}]')
+        continue
+      fi
+
+      local prov_id prov_status prov_dir
+      IFS=$'\t' read -r prov_id _ prov_status prov_dir <<< "$prov_line"
+
+      if [ -z "$phase_id" ]; then
+        # Unscoped run: identity resolution within the dependsOn closure is
+        # sufficient; the completed+handoff delivery gate only applies when
+        # --phase pins the check to one phase's execution readiness.
+        providers_json=$(printf '%s' "$providers_json" | jq --arg k "$need_ident" --argjson v "$prov_id" '. + {($k): $v}')
+        continue
+      fi
+
+      local delivered=false
+      if [ "$prov_status" = "completed" ] && _cv_handoff_lists_artifact "$feature_dir/$prov_dir/handoff.md" "$need_ident"; then
+        delivered=true
+      fi
+
+      if [ "$delivered" = "true" ]; then
+        providers_json=$(printf '%s' "$providers_json" | jq --arg k "$need_ident" --argjson v "$prov_id" '. + {($k): $v}')
+      else
+        missing_json=$(printf '%s' "$missing_json" | jq --argjson pid "$sid" --arg need "$need_ident" '. + [{phase: $pid, need: $need, reason: "not-delivered"}]')
+      fi
+    done < <(jq -r --argjson pid "$sid" "$_CONTRACT_JQ_DEFS"'.phases[] | select(.id == $pid) | (.needs // [])[] | _cv_identity' "$roadmap_path")
+  done < <(printf '%s\n' "$scope_ids")
+
+  local valid_bool="true"
+  if [ "$(printf '%s' "$missing_json" | jq 'length')" -gt 0 ]; then
+    valid_bool="false"
+  fi
+
+  if [ "$dup_count" -gt 0 ] && [ "$agent_mode" = "true" ]; then
+    jq -n --argjson valid "$valid_bool" --argjson missing "$missing_json" --argjson providers "$providers_json" --argjson dupw "$dup_check" \
+      '{valid: $valid, missing: $missing, providers: $providers, duplicateWarnings: $dupw}'
+  else
+    jq -n --argjson valid "$valid_bool" --argjson missing "$missing_json" --argjson providers "$providers_json" \
+      '{valid: $valid, missing: $missing, providers: $providers}'
+  fi
+
+  if [ "$valid_bool" = "false" ]; then
+    exit 1
+  fi
+  exit 0
+}
+
+# phase-overlap <feature> <phase-a> <phase-b>
+# Stage 2 of the sibling-phase overlap guard (execute.md calls this only after
+# its own stage-1 roadmap.json `areas` comparison finds a non-empty coarse
+# intersection). Loads both phases' already-expanded tasks.json files, unions
+# each phase's userStories[].implementation.files, and prints the sorted,
+# deduplicated intersection as {"overlapping_files": [...]}.
+cmd_phase_overlap() {
+  local -a positional=()
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -*)
+        echo "Usage: aimi-cli.sh phase-overlap <feature> <phase-a> <phase-b>" >&2
+        exit 1
+        ;;
+      *)
+        positional+=("$1")
+        ;;
+    esac
+    shift
+  done
+
+  if [ "${#positional[@]}" -ne 3 ]; then
+    echo "Usage: aimi-cli.sh phase-overlap <feature> <phase-a> <phase-b>" >&2
+    exit 1
+  fi
+
+  local feature="${positional[0]}" phase_a="${positional[1]}" phase_b="${positional[2]}"
+
+  _roadmap_validate_feature "$feature"
+  _roadmap_validate_phase_id "$phase_a" "phase-overlap"
+  _roadmap_validate_phase_id "$phase_b" "phase-overlap"
+
+  if [ "$phase_a" = "$phase_b" ]; then
+    echo "Error: phase-overlap: phase-a and phase-b must differ, got $phase_a twice" >&2
+    exit 1
+  fi
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_require "phase-overlap" "$feature" " (run roadmap-init first)")
+
+  local feature_dir
+  feature_dir=$(dirname "$roadmap_path")
+
+  local dir_a dir_b
+  dir_a=$(jq -r --argjson pid "$phase_a" '(.phases[] | select(.id == $pid) | .dir) // empty' "$roadmap_path")
+  dir_b=$(jq -r --argjson pid "$phase_b" '(.phases[] | select(.id == $pid) | .dir) // empty' "$roadmap_path")
+
+  if [ -z "$dir_a" ]; then
+    echo "Error: phase-overlap: phase $phase_a not found in $roadmap_path" >&2
+    exit 1
+  fi
+  if [ -z "$dir_b" ]; then
+    echo "Error: phase-overlap: phase $phase_b not found in $roadmap_path" >&2
+    exit 1
+  fi
+
+  # Mirrors execute.md Step 1.7's PHASE_TASKS_PATH convention:
+  # <feature_dir>/<phase_dir>/<feature>-phase-<id>-tasks.json
+  local tasks_a tasks_b
+  tasks_a="$feature_dir/$dir_a/$feature-phase-$phase_a-tasks.json"
+  tasks_b="$feature_dir/$dir_b/$feature-phase-$phase_b-tasks.json"
+
+  if [ ! -f "$tasks_a" ]; then
+    echo "Error: phase-overlap: phase $phase_a has no tasks file yet ($tasks_a) -- run /aimi:plan --phase $phase_a to materialize it first" >&2
+    exit 1
+  fi
+  if [ ! -f "$tasks_b" ]; then
+    echo "Error: phase-overlap: phase $phase_b has no tasks file yet ($tasks_b) -- run /aimi:plan --phase $phase_b to materialize it first" >&2
+    exit 1
+  fi
+  if ! jq -e . "$tasks_a" >/dev/null 2>&1; then
+    echo "Error: phase-overlap: malformed tasks file: $tasks_a" >&2
+    exit 1
+  fi
+  if ! jq -e . "$tasks_b" >/dev/null 2>&1; then
+    echo "Error: phase-overlap: malformed tasks file: $tasks_b" >&2
+    exit 1
+  fi
+
+  jq -n --slurpfile a "$tasks_a" --slurpfile b "$tasks_b" '
+    ([$a[0].userStories[]?.implementation.files[]?] | unique) as $files_a |
+    ([$b[0].userStories[]?.implementation.files[]?] | unique) as $files_b |
+    {overlapping_files: ([$files_a[] | select(. as $f | $files_b | index($f) != null)] | unique | sort)}
+  '
+}
+
+cmd_roadmap_sweep() {
+  local feature=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -*)
+        echo "Usage: aimi-cli.sh roadmap-sweep <feature>" >&2
+        exit 1
+        ;;
+      *)
+        feature="$1"
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature"
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_require "roadmap-sweep" "$feature")
+
+  # Single-pass, advisory-only computation: never exits non-zero. Suspicious
+  # creates/needs entries are dropped from $clean_phases before orphan/deferred
+  # computation so a flagged entry can never leak into any other output field
+  # -- only its owning phase id and field name are reported, via $warnings.
+  jq "$_CONTRACT_JQ_DEFS"'
+    (
+      [.phases[] | . as $p |
+        ("creates","needs") as $field |
+        select(($p[$field] // []) | any(_cv_suspicious)) |
+        {phase: $p.id, field: $field, message: "contains suspicious content"}
+      ] | unique_by([.phase,.field])
+    ) as $warnings |
+
+    (.phases | map(
+      .creates = ((.creates // []) | map(select(_cv_suspicious | not))) |
+      .needs = ((.needs // []) | map(select(_cv_suspicious | not)))
+    )) as $clean_phases |
+
+    ([$clean_phases[] | (.needs // [])[] | _cv_identity] | unique) as $need_idents |
+    ([$clean_phases[] | . as $p | (($p.creates // [])[] | _cv_identity) as $ident |
+      select(($need_idents | index($ident)) == null) |
+      {phase: $p.id, creates: $ident}
+    ]) as $orphan_creates |
+
+    ([$clean_phases[] | . as $p | (($p.creates // [])[] | _cv_identity) as $ident | {identity: $ident, phase: $p.id, status: $p.status}]) as $providers_flat |
+    ([$clean_phases[] | . as $np | (($np.needs // [])[] | _cv_identity) as $ident |
+      ([$providers_flat[] | select(.identity == $ident)] | sort_by(.phase) | .[0]) as $prov |
+      select($prov != null and $prov.status != "completed") |
+      {phase: $np.id, need: $ident, deferred: $prov.phase}
+    ]) as $deferred_needs |
+
+    {orphanCreates: $orphan_creates, deferredNeeds: $deferred_needs, warnings: $warnings}
+  ' "$roadmap_path"
+
+  exit 0
+}
+
+# ============================================================================
+# Payload Budget Estimation (advisory; Phase/Milestone Roadmap Layer)
+# ============================================================================
+#
+# estimate-payload is purely advisory per the brainstorm's "budget as
+# validator, not cutting criterion" decision: it never blocks planning and
+# never trims content itself. Its only job is to print a clear warning with
+# an actionable next step when a phase's context payload risks overflowing
+# the sub-agent context window.
+
+# Portable byte-size lookup (GNU stat -c%s, BSD/macOS stat -f%z fallback).
+_file_size_bytes() {
+  stat -c '%s' "$1" 2>/dev/null || stat -f '%z' "$1" 2>/dev/null
+}
+
+# Resolve the effective payload budget in bytes plus the fraction it
+# represents of the 400000-byte reference sub-agent window. --budget-bytes
+# is a manual debug escape hatch (no caller passes it; plan.md's only
+# caller uses the default); everything else defaults to 50% of the
+# reference window.
+# Usage: _estimate_payload_resolve_budget <flag_bytes>
+# Prints "<budgetBytes> <budgetFraction>" (space-separated) on stdout.
+_estimate_payload_resolve_budget() {
+  local flag_bytes="$1"
+  local reference_window=400000
+
+  local bytes="" fraction=""
+
+  if [ -n "$flag_bytes" ]; then
+    bytes="$flag_bytes"
+  else
+    fraction="0.5"
+  fi
+
+  if [ -n "$bytes" ]; then
+    fraction=$(jq -n --argjson b "$bytes" --argjson r "$reference_window" '$b / $r')
+  else
+    bytes=$(jq -n --argjson f "$fraction" --argjson r "$reference_window" '(($r * $f) | floor)')
+  fi
+
+  printf '%s %s\n' "$bytes" "$fraction"
+}
+
+# Sum the byte sizes of --outline (required) plus every repeated --research,
+# --spec, and --prototype path, and report whether the total fits within the
+# effective budget. Always exits 0 for valid input (advisory only); exits 1
+# only on usage errors (missing --outline, a given path that does not exist).
+cmd_estimate_payload() {
+  local outline="" budget_bytes_flag=""
+  local research_paths=() spec_paths=() prototype_paths=()
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --outline) shift; outline="${1:-}" ;;
+      --research) shift; research_paths+=("${1:-}") ;;
+      --spec) shift; spec_paths+=("${1:-}") ;;
+      --prototype) shift; prototype_paths+=("${1:-}") ;;
+      --budget-bytes) shift; budget_bytes_flag="${1:-}" ;;
+      *)
+        echo "Error: estimate-payload: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -z "$outline" ]; then
+    echo "Error: estimate-payload: --outline <path> is required" >&2
+    echo "Usage: aimi-cli.sh estimate-payload --outline <path> [--research <path>]... [--spec <path>]... [--prototype <path>]... [--budget-bytes <n>]" >&2
+    exit 1
+  fi
+  if [ ! -f "$outline" ]; then
+    echo "Error: estimate-payload: File not found: $outline" >&2
+    exit 1
+  fi
+
+  local outline_bytes research_bytes=0 spec_bytes=0 prototype_bytes=0
+  outline_bytes=$(_file_size_bytes "$outline")
+
+  local p
+  for p in "${research_paths[@]}"; do
+    if [ ! -f "$p" ]; then
+      echo "Error: estimate-payload: File not found: $p" >&2
+      exit 1
+    fi
+    research_bytes=$((research_bytes + $(_file_size_bytes "$p")))
+  done
+  for p in "${spec_paths[@]}"; do
+    if [ ! -f "$p" ]; then
+      echo "Error: estimate-payload: File not found: $p" >&2
+      exit 1
+    fi
+    spec_bytes=$((spec_bytes + $(_file_size_bytes "$p")))
+  done
+  for p in "${prototype_paths[@]}"; do
+    if [ ! -f "$p" ]; then
+      echo "Error: estimate-payload: File not found: $p" >&2
+      exit 1
+    fi
+    prototype_bytes=$((prototype_bytes + $(_file_size_bytes "$p")))
+  done
+
+  local total_bytes=$((outline_bytes + research_bytes + spec_bytes + prototype_bytes))
+
+  local budget_line budget_bytes budget_fraction
+  budget_line=$(_estimate_payload_resolve_budget "$budget_bytes_flag")
+  budget_bytes=$(printf '%s' "$budget_line" | cut -d' ' -f1)
+  budget_fraction=$(printf '%s' "$budget_line" | cut -d' ' -f2)
+
+  local over_budget=false
+  local warning="null"
+  if [ "$total_bytes" -gt "$budget_bytes" ]; then
+    over_budget=true
+    warning='"Payload exceeds budget -- split the phase along a semantic seam in the roadmap, or trim research/prototype scope."'
+  fi
+
+  jq -n \
+    --argjson total "$total_bytes" \
+    --argjson outline "$outline_bytes" \
+    --argjson research "$research_bytes" \
+    --argjson specs "$spec_bytes" \
+    --argjson prototypes "$prototype_bytes" \
+    --argjson budgetBytes "$budget_bytes" \
+    --argjson budgetFraction "$budget_fraction" \
+    --argjson overBudget "$over_budget" \
+    --argjson warning "$warning" \
+    '{
+      totalBytes: $total,
+      breakdown: {outline: $outline, research: $research, specs: $specs, prototypes: $prototypes},
+      budgetBytes: $budgetBytes,
+      budgetFraction: $budgetFraction,
+      overBudget: $overBudget,
+      warning: $warning
+    }'
+}
+
 # Display help
 cmd_help() {
   cat << 'EOF'
@@ -5104,6 +8838,10 @@ COMMANDS:
     mark-complete <id>        Mark story as completed (returns {id, status} JSON)
     mark-failed <id> [notes]  Mark story as failed (returns {id, status, notes} JSON)
     mark-skipped <id>         Mark story as skipped (returns {id, status} JSON)
+    set-execution-mode <container|inline>
+                              Persist a --container/--inline override onto metadata.execution
+                              (returns {execution} JSON). Refuses with non-zero exit on a
+                              phase-scoped tasks file (metadata.phase present).
     count-pending             Count pending stories
     validate-deps             Validate dependency graph (no cycles, no missing refs)
     validate-stories          Validate story content (length, suspicious patterns)
@@ -5135,6 +8873,13 @@ COMMANDS:
     get-state                 Get all state files as JSON
     detect-default-branch [--project <path>]
                               Detect and cache the repository's default branch
+    detect-parent-branch <branch> [--project <path>]
+                              Detect branch's parent (base) branch by token-aware
+                              git log decoration parsing + git merge-base verification.
+                              Output: {branch, base, verified, source
+                              ("decoration"|"default-branch")}. Falls back to the
+                              default branch (unverified) when no decoration
+                              candidate survives normalization or merge-base check.
     detect-interactivity [--non-interactive]
                               Print resolved interactivity mode (picker|agent)
                               Returns picker by default; returns agent only when
@@ -5198,6 +8943,21 @@ COMMANDS:
                               when the file exists but the host has no config.
     setup-branch <name> --default-branch <branch> [--project <path>]
                               Create or checkout branch with deterministic logic
+    resolve-base-branch <name> --default-branch <branch> [--base <branch>] [--project <path>]
+                              Decide what branch a new branch or container should be cut
+                              from -- no checkout is performed. Prints a single JSON object:
+                              {"base","reason","currentBranch","defaultBranch","promptNeeded"}.
+                              reason is exactly one of: explicit-base, target-exists,
+                              stacked-on-current, default-branch, detached-head.
+                              base prefers the origin/<name> remote-tracking ref when it
+                              exists, falling back to the bare local name otherwise --
+                              except for stacked-on-current, which always keeps the bare
+                              local ref, since stacking exists to inherit the local tip.
+                              --base "" is treated exactly like an omitted --base, so a
+                              caller may pass an unset variable through unconditionally.
+                              promptNeeded is true only when the target does not exist
+                              (locally or on origin), the current branch is not the
+                              default branch, and it is not merged into origin/<default>.
     clear-state               Clear all state files
     version                   Print the plugin version
     check-version [--quiet] [--fix]
@@ -5219,6 +8979,20 @@ COMMANDS:
                                 Use when cited sources include to-be-created files.
                               Absolute or outside-root path -> rejected (exit 1).
                               Flag accepted in either position relative to the path arg.
+    extract-sections <file> --anchors "<titles>"
+                              Print only the requested '## '/'### ' sections of a
+                              research .md file, concatenated verbatim in request order.
+                              Each section spans its matching heading up to the next
+                              heading of the same-or-higher level (or EOF) -- an h2
+                              anchor includes nested h3s and stops at the next h2/h1;
+                              an h3 anchor stops at the next h3/h2/h1.
+                              --anchors accepts comma- or newline-separated heading
+                              titles; matching is case-insensitive on heading text.
+                              An anchor with no matching heading is skipped (not an
+                              error); anchors matching nothing -> empty output, exit 0.
+                              Path confinement mirrors research-lookup (resolve_path +
+                              validate_path_in_project); missing file or missing
+                              <file>/--anchors arg -> error/usage on stderr, exit 1.
     research-gc               Delete orphaned .aimi/research/*.md files not referenced by any
                               active .aimi/tasks/*.json metadata.researchPaths or any
                               .aimi/brainstorms/*.md frontmatter researchPaths, AND older than
@@ -5252,6 +9026,7 @@ COMMANDS:
                               --source-command must be exactly 'brainstorm' or 'plan'.
     story-merge --staging-dir <dir> --output <path>
                               [--split legacy|full-stack] [--agent-mode]
+                              [--phase-aware] [--foundation <NN>]
                               Consolidate per-story staging *.json files into a
                               validated tasks.json. Steps: glob+validate JSON,
                               assign US-NNN IDs by lex order, remap outline:NN
@@ -5264,14 +9039,254 @@ COMMANDS:
                               that no other story references; not codebase
                               dead-code detection — always a warning, never a
                               hard block; skipped for single-story merges).
+                              --split full-stack additionally detects
+                              cross-file-dep-dropped smells: a dependsOn edge
+                              that crosses an output-file boundary (a repo
+                              boundary on the PROJECT axis, the
+                              frontend/backend boundary on the SIDE axis) is
+                              still dropped (each file's graph stays
+                              self-contained) but is now surfaced via one
+                              aggregated stderr banner plus a
+                              metadata.smellWarnings entry per affected story
+                              in EVERY output file the split produced (keyed by
+                              .project on the PROJECT axis, .side on the SIDE
+                              axis).
                               Writes atomically via _lock (tmp+mv). Deletes
                               staging dir on success; preserves on error.
-                              --split full-stack writes two output files:
+                              --split full-stack picks its axis by counting
+                              distinct normalized .project values (trim, strip
+                              one trailing slash, blank/absent = null).
+                              >= 2 -> PROJECT axis (multi-repo): one output
+                              file per project, <base>-<project-slug>-tasks.json,
+                              no frontend/backend decision at all; each file
+                              carries metadata.splitGroup + its own branchName.
+                              A multi-repo plan requires EVERY story to carry a
+                              project: once any story is tagged, a project-less
+                              story is refused (no files written) rather than
+                              routed anywhere. A story belonging to the root
+                              repository says so explicitly with "." — an absent
+                              project is not the root, it is unrouteable.
+                              < 2 -> SIDE axis (single-repo/monorepo, incl. no
+                              .project at all): two output files,
                               <base>-frontend-tasks.json and
-                              <base>-backend-tasks.json with unique IDs, rebuilt
-                              dependsOn, and independent wave numbers.
+                              <base>-backend-tasks.json, each story classified
+                              by its own file-pattern/title heuristic verdict.
+                              Both axes assign unique IDs, rebuild dependsOn,
+                              and recompute wave numbers per file.
+                              Derived slugs/paths/branch names are length-bounded
+                              and REFUSED (never truncated) when over: slug 64,
+                              output basename 248, full path 4000, branchName
+                              100. Truncation would manufacture a basename
+                              collision between two distinct long project values.
+                              --phase-aware (only meaningful with --split
+                              full-stack): strip one trailing "-tasks" segment
+                              from the --output basename before deriving the
+                              split basenames. Pure string manipulation on the
+                              basename, independent of the axis: on SIDE it
+                              yields <base>-frontend-tasks.json /
+                              <base>-backend-tasks.json, on PROJECT it yields
+                              <base>-<project-slug>-tasks.json — in both cases
+                              with a single "tasks" segment instead of the
+                              doubled legacy form. Requires an --output basename
+                              ending in "-tasks" with at least one character
+                              before it (the phase-scoped form, e.g.
+                              "<feature>-phase-<N>-tasks.json"); anything else
+                              (e.g. "tasks.json") is refused up front, because
+                              the strip would otherwise leave an empty or
+                              "-"-leading basename. Omitted: unchanged legacy
+                              derivation (double "-tasks-frontend-tasks.json").
+                              --foundation <NN> two-digit 1-based outline
+                              position of the shared foundation story (resolved
+                              against the same outline-position map as
+                              outline:NN, not a literal staging-filename digit).
+                              Appends the foundation's assigned US-NNN to every
+                              OTHER story's dependsOn, deduplicated, after the
+                              outline:NN remap and before cycle detection and
+                              wave computation, so injected edges participate in
+                              both. Refuses the whole merge when the foundation
+                              story's own dependsOn is non-empty. On the PROJECT
+                              axis the foundation lives in exactly one group, so
+                              every other group's injected edge is dropped and
+                              flagged droppedDeps[].foundationEdge: true, with
+                              its own stderr note separate from the ordinary
+                              drop-count banner — that loss is expected fallout
+                              of --foundation + multi-repo, not a hand-authored
+                              dependency that went missing. The SIDE axis emits
+                              no foundationEdge field.
                               --agent-mode demotes Phase 3.1 and Phase 4.1
                               hard rejects to warnings and proceeds.
+    split-detect [--dir <phase-dir>]
+                              Read side of metadata.splitGroup: decide whether
+                              the tasks files in scope form ONE split group that
+                              must execute together, and report which members
+                              still have pending work. A query, never a gate —
+                              every outcome, including "single" and "none",
+                              exits 0; non-zero is a real error (bad argument,
+                              unreadable --dir).
+                              Scope. Without --dir: FLAT — *-tasks.json whose
+                              parent directory is .aimi/tasks itself, depth 1
+                              only. The depth restriction is load-bearing:
+                              find-tasks-all globs depth 1-3, which includes
+                              phase directories, so without it a phase's split
+                              files are captured by the flat flow and run as a
+                              flat split — the phase never gets claimed and
+                              nothing merges into the phase branch. With --dir:
+                              that directory's *-tasks.json, minus the phase's
+                              own <feature>-phase-<N>-tasks.json.
+                              Algorithm. The anchor is the NEWEST candidate by
+                              mtime, not the first marker-carrying file in mtime
+                              order — the latter let a stale marked split from a
+                              past feature preempt today's plan whenever today's
+                              files carried no marker. If the anchor carries a
+                              well-formed metadata.splitGroup (total a number,
+                              siblings an array), siblings resolve BY BASENAME
+                              against the anchor's own directory (which renders
+                              a traversal-shaped sibling entry inert) and the
+                              resolved count must equal total and be >= 2.
+                              A group whose members are ALL completed is dropped
+                              whole from the pool and the search repeats, so a
+                              finished stale split cannot route today's real work
+                              to a single-file fallback. A marker present but
+                              failing validation degrades and is terminal — it
+                              does NOT fall through to the legacy pair, because
+                              any -frontend-/-backend-tasks.json beside a
+                              project-split marker is stale work. When the newest
+                              candidate carries no marker, the legacy
+                              -frontend-tasks.json/-backend-tasks.json pair rule
+                              is tried over the pool (counterpart must be in the
+                              pool, not merely on disk). Otherwise: single.
+                              Pending is (.status // "pending") != "completed" —
+                              one definition for every count reported, so an
+                              in_progress story is pending everywhere.
+                              Output. One JSON object: {mode: "project-split"|
+                              "paired-split"|"single"|"none", anchor, members:
+                              [{path,project,branchName,storyCount,pendingCount,
+                              active}], activeCount, total, degradedReason}.
+                              degradedReason explains any fall-back so the caller
+                              can report it without re-deriving why.
+    verify-creates --feature <slug> --phase <id> [--dir <container-path>]
+                              Prove a phase's declared creates[] exist in code.
+                              Prints a JSON array, one object per creates[]
+                              entry: {identity, status, method, evidence,
+                              gitStatus}. status is verified|missing|error;
+                              method is "path" (matched a tracked path),
+                              "text" (matched tracked source) or null.
+                              --dir is the phase container's absolute path;
+                              it defaults to the project root.
+                              A query, never a gate — producing a verdict array
+                              exits 0, including one where every entry is
+                              missing. Non-zero is a real error only: unknown
+                              flag, absent/non-numeric --phase, absent or
+                              malformed roadmap.json, --dir not a directory.
+                              Four steps per identity: (1) tracked path via
+                              git ls-files, matching a directory as well as a
+                              file; (2) strip a leading GET/POST/PUT/PATCH/
+                              DELETE/HEAD/OPTIONS token so "POST /api/x" is
+                              searched as "/api/x"; (3) git grep -F over
+                              tracked source excluding docs and tests, bypassed
+                              when the identity is itself documentation;
+                              (4) drop hits that are only a TODO/FIXME/XXX/HACK
+                              comment. A missing entry's evidence names the
+                              rejected location and line, and states that git
+                              sees tracked files only. git exiting above 1 is
+                              status "error" carrying the code — never
+                              "missing": a tool failure is not an absent
+                              artifact.
+    roadmap-init --feature <slug> [--file <path>] [--sync] [--brainstorm-path <path>]
+                              Read a sanitized phases array (stdin or --file) and
+                              atomically create/append to .aimi/tasks/<slug>/roadmap.json.
+                              Without --sync, an existing roadmap.json is a hard error.
+                              With --sync, only phases whose id is not already present
+                              are appended; existing phases are left byte-for-byte
+                              unchanged. Rejects (before any write) phases with a
+                              missing id/name/goal, a dangling dependsOn reference,
+                              or a computed dir that fails ^phase-[0-9]+(\.[0-9]+)?
+                              (-[a-z0-9][a-z0-9-]*)?$. Free-text fields are sanitized
+                              and length-capped per commands/references/sanitization.md.
+    roadmap-get --feature <slug> [--phase <id>] [--next-eligible]
+                              Read-only. Bare: print the full roadmap.json.
+                              --phase <id>: print one phase object.
+                              --next-eligible: print the lowest numeric-id phase
+                              in pending/planned status, unclaimed, whose dependsOn
+                              phases are all completed; exits 1 if none.
+    roadmap-set-status --feature <slug> --phase <id> --status <status> [--force]
+                              Locked read-modify-write. Enforces the guarded order
+                              pending -> planned -> in_progress -> completed, plus
+                              verification_failed -> completed (retry path); any
+                              status may move to verification_failed. Other
+                              transitions require --force. Transitioning to
+                              completed always requires handoff.md to already
+                              exist on disk at the phase's dir (write it first
+                              with roadmap-write-handoff) -- this precondition
+                              is NOT overridable by --force. A completed
+                              transition also clears the phase's claim in the
+                              same atomic write.
+    roadmap-write-handoff --feature <slug> --phase <id> [--file <path>]
+                              Read a JSON object (stdin or --file) with five
+                              optional array-of-string fields -- decisions,
+                              artifacts, deviations, deferred, contracts --
+                              sanitize each entry, and atomically write
+                              phase-<dir>/handoff.md with exactly five "## "
+                              headings in that fixed order: Decisions Made,
+                              Artifacts Created, Deviations, Deferred Items,
+                              Contracts Delivered. This is the only path that
+                              may create or overwrite that file -- direct
+                              Write/Edit tool calls on it are blocked by
+                              guard-runtime-state.py.
+    roadmap-claim --feature <slug> --session-id <id> --session-pid <pid> [--phase <id>]
+                              Atomic locked read-modify-write. Auto-releases any
+                              claim whose recorded pid fails a signal-zero liveness
+                              probe. Self-reclaim: if this session already owns an
+                              unreleased claim on a still-active phase (matching
+                              --phase when given), returns that same phase again
+                              instead of erroring or re-running eligibility.
+                              Without --phase: claims the lowest numeric-id phase
+                              that is pending/planned, unclaimed, and dependency-
+                              complete. With --phase <id>: claims that phase only
+                              if eligible; never falls through to a different phase.
+                              Exit 0 with the claimed phase JSON on success.
+                              Exit 3 (all-blocked / phase not claimable): pending/
+                              planned phases remain but none (or the named --phase)
+                              are currently claimable (stderr lists why).
+                              Exit 4 (none-eligible / phase not found): no phase
+                              remains pending/planned, or --phase names an id that
+                              does not exist in the roadmap.
+                              roadmap.json is left unmodified on exit 3 or 4.
+    roadmap-release-claim --feature <slug> --phase <id>
+                              Locked read-modify-write. Clears claimedBy/claimedAt/
+                              claimedPid on the named phase without touching status.
+                              No-op success when the phase already has no claim.
+    roadmap-reconcile --feature <slug>
+                              Locked read-modify-write. For each phase with an
+                              existing phase-<dir>/tasks.json, derives ground-truth
+                              status from userStories statuses (all completed ->
+                              completed; any failed -> verification_failed; else
+                              in_progress) and corrects any divergent phase status.
+                              Prints {corrections:[{id,from,to}...]}.
+    phase-overlap <feature> <phase-a> <phase-b>
+                              Deterministic stage-2 check for the sibling-phase
+                              overlap guard. Loads both phases' already-expanded
+                              phase-<dir>/<feature>-phase-<id>-tasks.json files,
+                              collects userStories[].implementation.files across
+                              all stories in each, and prints the sorted,
+                              deduplicated intersection as {"overlapping_files":[...]}.
+                              Exits non-zero with a clear error (not a jq stack
+                              trace) when either phase's tasks.json is missing --
+                              both phases must already be rolling-wave expanded.
+    estimate-payload --outline <path> [--research <path>]... [--spec <path>]...
+                              [--prototype <path>]... [--budget-bytes <n>]
+                              Advisory only -- never blocks, never trims content.
+                              Sums the byte sizes of --outline (required) plus every
+                              repeated --research/--spec/--prototype path and compares
+                              against an effective budget: --budget-bytes (manual debug
+                              escape hatch; no caller passes it) if given, else 50% of a
+                              400000-byte reference sub-agent window.
+                              Prints {totalBytes, breakdown{outline,research,specs,prototypes},
+                              budgetBytes, budgetFraction, overBudget, warning}.
+                              warning is null under budget; otherwise names splitting the
+                              phase along a semantic seam in the roadmap or trimming scope.
+                              Exits 0 for any valid input (even over budget); exits 1 only
+                              when --outline is missing or a given path does not exist.
     help                      Show this help message
 
 ENVIRONMENT:
@@ -5378,6 +9393,7 @@ main() {
     mark-complete)     cmd_mark_complete "${2:-}" ;;
     mark-failed)       cmd_mark_failed "${2:-}" "${3:-}" ;;
     mark-skipped)      cmd_mark_skipped "${2:-}" ;;
+    set-execution-mode) cmd_set_execution_mode "${2:-}" ;;
     count-pending)     cmd_count_pending ;;
     validate-deps)            cmd_validate_deps ;;
     validate-stories)         cmd_validate_stories ;;
@@ -5396,7 +9412,9 @@ main() {
     get-story-context) cmd_get_story_context "${2:-}" ;;
     get-state)         cmd_get_state ;;
     detect-default-branch) shift; cmd_detect_default_branch "$@" ;;
+    detect-parent-branch) shift; cmd_detect_parent_branch "$@" ;;
     setup-branch)      shift; cmd_setup_branch "$@" ;;
+    resolve-base-branch) shift; cmd_resolve_base_branch "$@" ;;
     clear-state)       cmd_clear_state ;;
     version)           cmd_version ;;
     check-version)     shift; cmd_check_version "$@" ;;
@@ -5406,10 +9424,24 @@ main() {
     archive-task)      cmd_archive_task "${2:-}" ;;
     research-lookup)   shift; cmd_research_lookup "$@" ;;
     research-gc)       cmd_research_gc ;;
+    extract-sections)  shift; cmd_extract_sections "$@" ;;
     detect-design-bundle) shift; cmd_detect_design_bundle "$@" ;;
     bundle-prototype-status)   shift; cmd_bundle_prototype_status "$@" ;;
     bundle-prototype-finalize) shift; cmd_bundle_prototype_finalize "$@" ;;
     story-merge)       shift; cmd_story_merge "$@" ;;
+    split-detect)      shift; cmd_split_detect "$@" ;;
+    roadmap-init)          shift; cmd_roadmap_init "$@" ;;
+    roadmap-get)           shift; cmd_roadmap_get "$@" ;;
+    roadmap-set-status)    shift; cmd_roadmap_set_status "$@" ;;
+    roadmap-claim)         shift; cmd_roadmap_claim "$@" ;;
+    roadmap-release-claim) shift; cmd_roadmap_release_claim "$@" ;;
+    roadmap-reconcile)     shift; cmd_roadmap_reconcile "$@" ;;
+    roadmap-write-handoff) shift; cmd_roadmap_write_handoff "$@" ;;
+    validate-contracts)    shift; cmd_validate_contracts "$@" ;;
+    verify-creates)        shift; cmd_verify_creates "$@" ;;
+    phase-overlap)         shift; cmd_phase_overlap "$@" ;;
+    roadmap-sweep)         shift; cmd_roadmap_sweep "$@" ;;
+    estimate-payload)      shift; cmd_estimate_payload "$@" ;;
     help|--help|-h)    cmd_help ;;
     *)
       echo "Unknown command: $1" >&2

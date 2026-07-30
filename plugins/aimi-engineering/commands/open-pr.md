@@ -1,6 +1,7 @@
 ---
 name: aimi:open-pr
 description: Open a pull request with title and description derived from git commits and diff
+argument-hint: "[--branch <name>]"
 disable-model-invocation: true
 allowed-tools: Bash(gh:*), Bash(git:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*)
 ---
@@ -11,13 +12,13 @@ Automatically detect the parent branch, build the PR title and description from 
 
 ## Project Conventions
 
-This command does not read the working project's `CLAUDE.md` or `AGENTS.md`. PR title and body are derived purely from git commits and the diff against the base branch (see Steps 2–4).
+This command does not read the working project's `CLAUDE.md` or `AGENTS.md`. The PR **body** is derived purely from git commits and the diff against the base branch (see Steps 2–4), with the internal `US-NNN` story tags stripped from every commit subject it renders (see Step 4b's story-tag strip). The PR **title** prefers the tasks file's feature-level `metadata.title` when one is available, falling back to the git-derived first-commit subject (see Step 4a) — this keeps the title describing the whole feature rather than the first story's slice. Both title and body strip the internal `US-NNN` story tags `/aimi:execute` writes per commit.
 
 For project-specific PR structure (e.g., required Test Plan section, issue-link footer, checklists), use GitHub's standard mechanism:
 
 - **`.github/pull_request_template.md`** — `gh pr create` honors this file automatically. Any template content is prepended to the body we build in Step 4b.
 
-Commit-message conventions (Conventional Commits, etc.) are preserved automatically because Step 4a derives the PR title from the first commit subject.
+Commit-message conventions (Conventional Commits, etc.) are preserved automatically: the `metadata.title` source is itself authored in `type: description` form, and the first-commit-subject fallback preserves the subject verbatim apart from stripping the internal `US-NNN` story tag.
 
 ## Step 0: Resolve CLI Path
 
@@ -31,6 +32,40 @@ Use `$AIMI_CLI` for all subsequent script calls.
 
 Run these checks before proceeding. STOP on failure unless noted.
 
+### Parse --branch Argument
+
+Scan `$ARGUMENTS` for an explicit `--branch <name>` token (mirrors the `--phase <N>` extraction style used by `/aimi:execute`). A bare `--branch` (no value) and `--branch=<name>` (equals form, not supported — use the space-separated form) must both hard-stop rather than silently falling through to Step 2a's HEAD-branch resolution the same way an omitted `--branch` does:
+
+```bash
+case " $ARGUMENTS " in
+  *" --branch="*)
+    echo "Error: --branch requires a value." >&2
+    echo "Use '--branch <name>' (space-separated) — '--branch=<name>' is not supported." >&2
+    exit 1
+    ;;
+  *" --branch "*)
+    CURRENT_BRANCH=$(echo "$ARGUMENTS" | sed -n 's/.*--branch[[:space:]]\+\([^ ]*\).*/\1/p')
+    if [ -z "$CURRENT_BRANCH" ]; then
+      echo "Error: --branch requires a value." >&2
+      exit 1
+    fi
+    ;;
+  *)
+    CURRENT_BRANCH=""
+    ;;
+esac
+```
+
+If `$CURRENT_BRANCH` is non-empty, validate it before any other `git`/`gh` call:
+
+```bash
+echo "$CURRENT_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'
+```
+
+If validation fails, report `Invalid --branch value: $CURRENT_BRANCH` and STOP.
+
+When `--branch` was not passed, `$CURRENT_BRANCH` stays empty here — Step 2a resolves it from the current checked-out branch as before.
+
 ### 1a. Verify GitHub CLI authentication
 
 ```bash
@@ -40,6 +75,14 @@ gh auth status
 If this fails, report: "GitHub CLI not authenticated. Run `gh auth login` first." and STOP.
 
 ### 1b. Check for existing PR on this branch
+
+When `$CURRENT_BRANCH` is already set (from `--branch`), check that branch explicitly:
+
+```bash
+gh pr view "$CURRENT_BRANCH" --json url --jq '.url' 2>/dev/null
+```
+
+Otherwise, check the currently checked-out branch:
 
 ```bash
 gh pr view --json url --jq '.url' 2>/dev/null
@@ -51,6 +94,8 @@ PR already exists for this branch: <url>
 ```
 
 ### 1c. Warn about uncommitted changes
+
+**Skip this step entirely when `$CURRENT_BRANCH` is already set (from `--branch`)** — this check inspects the CWD working tree, which is irrelevant for a branch checked out elsewhere or nowhere.
 
 ```bash
 git status --porcelain
@@ -69,26 +114,72 @@ Build the PR from git state directly — commits and diff against the base branc
 
 ### 2a. Get current branch
 
+**Skip this step entirely when `$CURRENT_BRANCH` is already set (from `--branch`)** — reuse that value instead of resolving HEAD.
+
+A bare HEAD read is not reliable here: after a container-mode `/aimi:execute` run, the **Main Working Tree Untouched Invariant** (`commands/references/container-execution.md:57`) means the main working tree was never checked out onto the feature branch, and Step 5's teardown (`container-execution.md:198`) removes the container with `--keep-branch`, leaving the feature branch checked out nowhere. HEAD stays parked on the base branch for the whole run — trusting it as-is would open a PR of the base branch against its own grandparent. Resolve both HEAD and the repository's default branch up front, then decide which one is actually the feature branch:
+
 ```bash
-git rev-parse --abbrev-ref HEAD
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+DEFAULT_BRANCH=$($AIMI_CLI detect-default-branch 2>/dev/null)
 ```
 
-Store as `$CURRENT_BRANCH`.
-
-### 2b. Detect parent branch via decorated ancestor
+**Case A — HEAD is already on a real feature branch.** When `$CURRENT_BRANCH` is non-empty, is not the literal string `HEAD` (detached), and differs from `$DEFAULT_BRANCH`, reuse it unchanged — no behavior change from before:
 
 ```bash
-git log --pretty=format:'%D' --first-parent | grep -v '^$' | grep -v "HEAD" | grep -v "$CURRENT_BRANCH" | head -1
+: # CURRENT_BRANCH already holds the right value; nothing to do
 ```
 
-Parse the output to extract a branch name. The output may contain multiple refs separated by commas (e.g., `origin/main, main`). Extract the first local branch name (without `origin/` prefix). If the output contains `origin/branch-name`, strip the `origin/` prefix.
-
-### 2c. Fallback to default branch
-
-If no parent branch was detected in 2b, use the repository's default branch:
+**Case B — HEAD is on `$DEFAULT_BRANCH` (or detached).** This is the normal container-mode end state. Resolve the feature branch from the active tasks file's `metadata.branchName` instead of trusting HEAD:
 
 ```bash
-gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name'
+CANDIDATE_BRANCH=$($AIMI_CLI metadata 2>/dev/null | jq -r '.branchName // empty' 2>/dev/null)
+if [ -n "$CANDIDATE_BRANCH" ] && echo "$CANDIDATE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'; then
+  CURRENT_BRANCH="$CANDIDATE_BRANCH"
+else
+  echo "Warning: No active tasks file found (or its branchName is missing/invalid) and HEAD is on $DEFAULT_BRANCH — proceeding with the checked-out branch, which may be the base branch itself." >&2
+fi
+```
+
+This reuses the single guarded `$AIMI_CLI metadata` call already established at Step 4a for `.title`, rather than `commands/review.md`'s two-step `find-tasks` + separate `jq -r '.metadata.branchName'`. That is safe for the same reason `find-tasks` is safe: `cmd_metadata`'s `get_tasks_file` (`aimi-cli.sh:507`) never calls `init-session`, so it satisfies `commands/review.md:63`'s concurrent-session-safety rationale — it never repoints a live `/aimi:execute` session's tracked tasks file. Its only state write is the narrow self-heal path (`aimi-cli.sh:511-521`) that fires only when the recorded state pointer already points to a deleted file, correcting a broken pointer rather than clobbering a valid one.
+
+Store the resolved value as `$CURRENT_BRANCH`.
+
+**Why Step 1c's skip condition is not widened to cover this case:** at Step 1c's point in the flow, neither `$DEFAULT_BRANCH` nor the Case A/Case B outcome exist yet — both are computed here in Step 2a, which runs after 1c. Widening 1c's skip condition would require moving branch detection earlier, out of this story's scope. The check is also advisory-only (it warns, never stops) and vacuously harmless in container mode, since the Main Working Tree Untouched Invariant keeps the CWD clean throughout the run regardless.
+
+### 2b. Detect parent branch via `detect-parent-branch`
+
+Call the tested CLI verb instead of parsing decorations by hand — it already handles decoration parsing, `origin/` prefix normalization, and `git merge-base` verification internally, and owns the "no verified candidate" fallback (it returns the repository's default branch itself in that case).
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+PARENT_RESULT=$($AIMI_CLI detect-parent-branch "$CURRENT_BRANCH")
+BASE_BRANCH=$(printf '%s' "$PARENT_RESULT" | jq -r '.base // empty')
+PARENT_VERIFIED=$(printf '%s' "$PARENT_RESULT" | jq -r '.verified // false')
+```
+
+Store as `$BASE_BRANCH` and `$PARENT_VERIFIED`. Note `.base` is the resolved parent branch — `.branch` in the response is merely an echo of the input `$CURRENT_BRANCH` and must never be read here.
+
+When `$PARENT_VERIFIED` is not `true` (the candidate could not be confirmed via `git merge-base`, or no decoration candidate existed and the verb fell back to the default branch), print an explicit warning naming the unverified candidate before continuing — do not silently proceed as if the value were trustworthy:
+
+```
+Warning: could not verify "$BASE_BRANCH" as the true parent branch of "$CURRENT_BRANCH" (git merge-base check failed or no candidate found). Proceeding with this value as the PR base — double-check it before merging.
+```
+
+Execution continues regardless of `$PARENT_VERIFIED`; Step 2d's regex validation is the only hard STOP gate on `$BASE_BRANCH`.
+
+### 2c. Fallback when the CLI call itself failed
+
+`detect-parent-branch` already owns the "no verified candidate" case internally (see 2b) — this step is **not** a second "no parent found" handler. It exists only as defense-in-depth for the narrower case where the CLI call in 2b itself failed or produced no output (e.g., `$AIMI_CLI` resolution broke, the process exited non-zero, or the JSON could not be parsed) and `$BASE_BRANCH` is still empty here:
+
+```bash
+if [ -z "$BASE_BRANCH" ]; then
+  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+  BASE_BRANCH=$($AIMI_CLI detect-default-branch)
+fi
 ```
 
 Store the result as `$BASE_BRANCH`.
@@ -108,7 +199,7 @@ If validation fails, report: "Invalid parent branch name detected: $BASE_BRANCH"
 Capture every non-merge commit on the branch with hash, subject, and body separated by ASCII unit separators (`%x1f`), one commit per record terminated by an ASCII record separator (`%x1e`). This lets the renderer split records cleanly even when commit bodies contain newlines:
 
 ```bash
-COMMIT_LOG=$(git log "$BASE_BRANCH"..HEAD --pretty=format:'%H%x1f%s%x1f%b%x1e' --no-merges)
+COMMIT_LOG=$(git log "$BASE_BRANCH".."$CURRENT_BRANCH" --pretty=format:'%H%x1f%s%x1f%b%x1e' --no-merges)
 ```
 
 Store as `$COMMIT_LOG`.
@@ -116,8 +207,8 @@ Store as `$COMMIT_LOG`.
 ### 2f. Capture diff summary and file list
 
 ```bash
-DIFF_STAT=$(git diff --stat "$BASE_BRANCH"..HEAD)
-FILES_CHANGED=$(git diff --name-only "$BASE_BRANCH"..HEAD)
+DIFF_STAT=$(git diff --stat "$BASE_BRANCH".."$CURRENT_BRANCH")
+FILES_CHANGED=$(git diff --name-only "$BASE_BRANCH".."$CURRENT_BRANCH")
 ```
 
 Store as `$DIFF_STAT` and `$FILES_CHANGED`.
@@ -126,12 +217,34 @@ Store as `$DIFF_STAT` and `$FILES_CHANGED`.
 
 ### 4a. PR Title
 
-Derive the PR title from the first commit subject on the branch (preserving conventional-commit form). When the branch has zero commits ahead of base, fall back to `$CURRENT_BRANCH`:
+Derive a **feature-level** PR title — one that describes the whole change, not just the first story's slice, and that never leaks an internal `US-NNN` story tag from the per-story commits `/aimi:execute` produces. Three sources, in order of preference:
+
+1. **Tasks metadata title.** When a tasks file exists for this session, `metadata.title` is the human-authored feature title (e.g. `feat: brownfield foundation gate + architecture-foundation skill (issue #56 phase 3)`) — the best PR title, since it summarizes the entire feature rather than whichever story happened to commit first. Read it with the same guarded `$AIMI_CLI metadata` call Step 4c uses; any failure (no tasks file, CLI error) falls through to source 2.
+2. **First commit subject, story-tag stripped.** Fall back to the first commit subject on the branch (preserving conventional-commit form), then strip any trailing aimi story tag the execute flow appends per story (e.g. a trailing ` — US-001` / ` - Story US-012a`, or a leading `US-001 `), so the internal id never reaches the public title.
+3. **Branch name.** When the branch has zero commits ahead of base, fall back to `$CURRENT_BRANCH`.
 
 ```bash
-PR_TITLE=$(git log "$BASE_BRANCH"..HEAD --reverse --pretty=format:'%s' --no-merges | head -1)
-if [ -z "$PR_TITLE" ]; then
-  PR_TITLE="$CURRENT_BRANCH"
+# Source 1: feature-level metadata title (guarded, like Step 4c). The
+# `metadata` subcommand emits the metadata object itself, so the title is at
+# the top level (`.title`), not nested under `.metadata`.
+METADATA_TITLE=$($AIMI_CLI metadata 2>/dev/null | jq -r '.title // empty' 2>/dev/null)
+# Ignore story-merge's pre-patch skeleton placeholder — never a real title.
+if [ "$METADATA_TITLE" = "feat: merged tasks" ]; then
+  METADATA_TITLE=""
+fi
+
+if [ -n "$METADATA_TITLE" ]; then
+  PR_TITLE="$METADATA_TITLE"
+else
+  # Source 2: first commit subject, with any internal story tag stripped.
+  PR_TITLE=$(git log "$BASE_BRANCH".."$CURRENT_BRANCH" --reverse --pretty=format:'%s' --no-merges | head -1)
+  PR_TITLE=$(printf '%s' "$PR_TITLE" | sed -E \
+    -e 's/[[:space:]]*(—|–|-)[[:space:]]*(Story[[:space:]]+)?US-[0-9]{3}[a-z]?[[:space:]]*$//' \
+    -e 's/^(Story[[:space:]]+)?US-[0-9]{3}[a-z]?[[:space:]:—–-]+//')
+  # Source 3: branch name when there are no commits ahead of base.
+  if [ -z "$PR_TITLE" ]; then
+    PR_TITLE="$CURRENT_BRANCH"
+  fi
 fi
 ```
 
@@ -141,9 +254,17 @@ Store as `$PR_TITLE`.
 
 Build the description from git state with three core sections:
 
-- **Summary**: Aggregated commit bodies from `$COMMIT_LOG`. Split records by the ASCII record separator (`%x1e`), then split each record's fields by the unit separator (`%x1f`) into `hash`, `subject`, `body`. Concatenate the non-empty `body` fields into a single prose block. If every commit body is empty, concatenate the commit subjects instead.
-- **Changes**: Each commit subject (the second field from every record) rendered as a bullet, one per line.
+- **Summary**: Aggregated commit bodies from `$COMMIT_LOG`. Split records by the ASCII record separator (`%x1e`), then split each record's fields by the unit separator (`%x1f`) into `hash`, `subject`, `body`. Concatenate the non-empty `body` fields into a single prose block. If every commit body is empty, concatenate the commit **subjects** instead — apply the **story-tag strip** below to each subject first.
+- **Changes**: Each commit **subject** (the second field from every record) rendered as a bullet, one per line — apply the **story-tag strip** below to each subject before rendering.
 - **Files Changed**: The `$DIFF_STAT` output rendered inside a fenced code block.
+
+**Story-tag strip (applies to every commit subject used in the body).** The per-story commits `/aimi:execute` produces carry an internal `US-NNN` tag in their subject (e.g. a trailing ` — US-001`, ` - Story US-012a`, or a leading `US-003 `). Strip that tag from each subject before it appears in the **Changes** bullets or the **Summary** subject-fallback, so the internal id never leaks into the public PR body — the identical rule Step 4a already applies to the title. The commit **bodies** (the Summary's primary source) are used verbatim; the tag lives only in subjects, so only subjects are stripped. Per subject `$s`:
+
+```bash
+s_clean=$(printf '%s' "$s" | sed -E \
+  -e 's/[[:space:]]*(—|–|-)[[:space:]]*(Story[[:space:]]+)?US-[0-9]{3}[a-z]?[[:space:]]*$//' \
+  -e 's/^(Story[[:space:]]+)?US-[0-9]{3}[a-z]?[[:space:]:—–-]+//')
+```
 
 ### 4c. Backend Implementation Spec (conditional)
 
@@ -220,6 +341,8 @@ When `$INCLUDE_BACKEND_SPEC=1`, render the spec deterministically from `metadata
 
 ### 5a. Push branch to origin
 
+Works unchanged for a branch not checked out anywhere, as long as the local ref exists — `git push` does not require checkout.
+
 ```bash
 git push -u origin "$CURRENT_BRANCH"
 ```
@@ -229,7 +352,7 @@ git push -u origin "$CURRENT_BRANCH"
 Use HEREDOC for the body to handle multi-line content safely. The Summary/Changes/Files Changed sections always appear. The Backend Implementation Spec section is appended only when `$INCLUDE_BACKEND_SPEC=1`:
 
 ```bash
-gh pr create --title "$PR_TITLE" --base "$BASE_BRANCH" --body "$(cat <<'EOF'
+gh pr create --title "$PR_TITLE" --base "$BASE_BRANCH" --head "$CURRENT_BRANCH" --body "$(cat <<'EOF'
 ## Summary
 
 <aggregated commit bodies from $COMMIT_LOG (fallback to concatenated subjects if all bodies empty)>

@@ -170,8 +170,51 @@ def _allow() -> None:
     sys.exit(0)
 
 
-def _find_tasks_json(start: str):
-    """Walk up from *start* looking for .aimi/tasks/*.json.
+def _current_branch(cwd: str) -> str | None:
+    """Resolve the git branch checked out at *cwd*, or None on any failure."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+        branch = result.stdout.strip()
+        return branch or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _select_governing_tasks_file(candidates: list[Path], branch: str | None) -> Path:
+    """Pick the tasks file that governs maxConcurrency for this session.
+
+    Prefers the single candidate whose metadata.branchName matches *branch*
+    (deterministic under parallel phase sessions, keyed off the same
+    branch-per-phase convention already used by the roadmap claim schema);
+    falls back to the most recently modified candidate when there is no
+    unique branch match, preserving the prior flat/legacy newest-mtime
+    behavior for flat and non-phase projects.
+    """
+    matches: list[Path] = []
+    if branch:
+        for candidate in candidates:
+            try:
+                data = json.loads(candidate.read_text())
+                meta = data.get("metadata") if isinstance(data, dict) else None
+                if isinstance(meta, dict) and meta.get("branchName") == branch:
+                    matches.append(candidate)
+            except Exception:  # noqa: BLE001
+                continue
+        if len(matches) == 1:
+            return matches[0]
+    return max(matches or candidates, key=lambda p: p.stat().st_mtime)
+
+
+def _find_tasks_json(start: str) -> tuple[Path | None, Path | None]:
+    """Walk up from *start* looking for .aimi/tasks/*-tasks.json (flat) or
+    .aimi/tasks/<feature>/phase-<N>-<slug>/*-tasks.json (nested phase folders).
 
     Returns (root_path, tasks_json_path) where root_path is the directory
     containing .aimi/, or (None, None) if not found.
@@ -181,9 +224,10 @@ def _find_tasks_json(start: str):
         aimi_dir = current / ".aimi" / "tasks"
         if aimi_dir.is_dir():
             candidates = list(aimi_dir.glob("*-tasks.json"))
+            candidates += list(aimi_dir.glob("*/*/*-tasks.json"))
             if candidates:
-                # Pick most recently modified
-                latest = max(candidates, key=lambda p: p.stat().st_mtime)
+                branch = _current_branch(start)
+                latest = _select_governing_tasks_file(candidates, branch)
                 return current, latest
         parent = current.parent
         if parent == current:

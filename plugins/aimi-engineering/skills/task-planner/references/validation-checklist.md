@@ -26,7 +26,7 @@ Apply before writing tasks.json.
 - [ ] `priority` values are sequential integers, consistent with dependency depth
 - [ ] `maxConcurrency` (if set) is a positive integer
 - [ ] `project` (if present) is a relative path with no `..` components, matching `^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$`
-- [ ] `project` is omitted when only one repo exists or story targets CWD repo
+- [ ] `project` is omitted only when the plan tags fewer than two distinct projects (single-repo/monorepo, or every story targets the CWD repo). In a multi-repo plan — two or more distinct `project` values — **every** story needs one, and a story belonging to the root repository must say so explicitly with `"."`; an absent or blank `project` is unrouteable and makes `story-merge` refuse the whole merge before any file is written
 - [ ] Every story has a `tasks[]` array with 3–15 ordered mechanical sub-steps in verb-object phrasing; whenever a story's `implementation.files` lists a path that also appears in another story's `implementation.files`, there is at least one explicit integration task ("Wire [component] into [owning file]")
 - [ ] `tasks[]` (if present) is a non-empty string array, each entry ≤ 5000 chars, max 50 entries; field is omitted when empty
 - [ ] `researchDepth` (if set) is one of: `skip`, `quick`, `standard`, `deep`
@@ -39,11 +39,18 @@ Apply before writing tasks.json.
 - [ ] Gates only attached when heuristics clearly match; most stories have no gate
 
 ## Split-File Validations (when `implementationScope` is set)
-- [ ] Full-stack: two files generated (`*-frontend-tasks.json` and `*-backend-tasks.json`)
-- [ ] Full-stack: each file has its own `branchName` (`type/[feature]-frontend`, `type/[feature]-backend`)
-- [ ] Full-stack: story IDs are unique across both files (no ID collisions)
-- [ ] Full-stack: no cross-file `dependsOn` references — each file's graph is self-contained
+
+Full-stack split is executed by `aimi-cli.sh story-merge --split full-stack` (functions `_story_merge_write_project_split` and `_story_merge_write_split`), invoked by `/aimi:plan` Phase 3e; the checks below describe what that command's output must satisfy, not an independently derivable split algorithm.
+
+story-merge picks its split **axis** from the merged array itself, by counting distinct normalized `.project` values: **2 or more → PROJECT axis** (multi-repo), one output file per project, N files, no frontend/backend decision at all; **fewer than 2 → SIDE axis** (single-repo/monorepo), the unchanged two-file frontend/backend writer. The file list to check always comes from `MERGE_RETURN` — the stdout `/aimi:plan` Phase 3e captured from story-merge — never from string-concatenating the `--output` base, because on the PROJECT axis the surviving projects, their basename slugs, and their count are runtime data computed inside story-merge.
+
+- [ ] Full-stack: every file named by `MERGE_RETURN` exists on disk, and the count of files validated equals the length of that returned list — N on the PROJECT axis (one per project, 2 or more distinct `.project` values), exactly two (`*-frontend-tasks.json` and `*-backend-tasks.json`) on the SIDE axis (fewer than 2 distinct `.project` values — the one case that still always yields exactly two files). Never assert a count derived from anything other than the returned list.
+- [ ] Full-stack: each returned file has its own `branchName`, distinct from every sibling's and valid against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` (SIDE axis: `type/[feature]-frontend` / `type/[feature]-backend`; PROJECT axis: `type/[feature]-<project-slug>`, one per returned entry; or their `ROADMAP_MODE=true` phase-suffixed equivalents)
+- [ ] Full-stack, PROJECT axis only: each file carries `metadata.splitGroup` = `{project, index, total, siblings[]}` — its own project routing key, its 1-based `index`, `total` equal to the returned list's length, and `siblings[]` naming the other N−1 returned paths — and it survived the `/aimi:plan` Phase 4 metadata patch verbatim. SIDE-axis, legacy, and frontend-only files have no `splitGroup` key and none should be invented for them.
+- [ ] Full-stack: story IDs are unique across all returned files (no ID collisions)
+- [ ] Full-stack: cross-file `dependsOn` references are removed (each file's graph is self-contained) — but not silently: story-merge emits an aggregated stderr banner (dropped-edge count + affected-story count) and records one `cross-file-dep-dropped` entry per affected story in `metadata.smellWarnings` of every output file. Each entry is keyed by `project` on the PROJECT axis and by `side` on the SIDE axis (mutually exclusive).
 - [ ] Full-stack: wave numbers computed independently per file (roots = wave 1 within each file)
 - [ ] Frontend-only: single `*-frontend-tasks.json` with `metadata.frontendOnly: true`
 - [ ] Frontend-only: `metadata.backendSpec` contains `endpoints`, `dataModels`, `businessRules`, `businessContext`
-- [ ] Phase 4.5 validation runs on each file independently using `$AIMI_CLI init-session --file <path>`
+- [ ] Full-stack + `ROADMAP_MODE=true`: `--phase-aware` was passed to story-merge and every returned split basename carries a single `tasks` segment (SIDE axis: `${featureSlug}-phase-${SELECTED_PHASE_ID}-frontend-tasks.json`, not `...-tasks-frontend-tasks.json`; PROJECT axis: `${featureSlug}-phase-${SELECTED_PHASE_ID}-<project-slug>-tasks.json`)
+- [ ] Phase 4.5 validation runs on each returned file independently using `$AIMI_CLI init-session --file <path>`
