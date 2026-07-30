@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import re
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
@@ -31,8 +32,19 @@ dispatcher = _load_dispatcher()
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _run_dispatcher(command: str, extra_env: dict | None = None, cwd: str | None = None):
-    """Feed the full hook event JSON via stdin, run dispatcher.main(), capture output."""
+def _run_dispatcher(
+    command: str,
+    extra_env: dict | None = None,
+    cwd: str | None = None,
+    branch: str = "feat/test",
+):
+    """Feed the full hook event JSON via stdin, run dispatcher.main(), capture output.
+
+    *branch* is the branch every mocked ``git rev-parse --abbrev-ref HEAD`` call
+    resolves to (default: an unprotected feature branch, preserving prior
+    callers' behavior). Pass a protected branch name (e.g. "main") to exercise
+    the deny path through the full main() entry point.
+    """
     inner: dict = {"command": command}
     if cwd:
         inner["cwd"] = cwd
@@ -47,7 +59,7 @@ def _run_dispatcher(command: str, extra_env: dict | None = None, cwd: str | None
         patch("sys.stdin", io.StringIO(stdin_data)),
         patch.dict("os.environ", env_patch, clear=False),
         patch("builtins.print", side_effect=captured.append),
-        patch("subprocess.run", return_value=_mock_proc("feat/test")),
+        patch("subprocess.run", return_value=_mock_proc(branch)),
     ):
         try:
             dispatcher.main()
@@ -244,3 +256,87 @@ def test_dispatcher_chains_handlers_in_order_for_commit():
     assert call_order == ["default_branch", "shell_true"], (
         f"Expected default_branch → shell_true, got: {call_order}"
     )
+
+
+# ---------------------------------------------------------------------------
+# US-001: command-position anchoring (issue #82) — full main() path regressions
+# ---------------------------------------------------------------------------
+
+def test_main_denies_git_C_commit_on_protected_branch():
+    """Confirms the L315 bug fix: `git -C <path> commit` must reach the handlers
+    through the real main() entry point (previously only _GIT_COMMIT_RE was
+    checked there, so this command was silently allowed straight through)."""
+    out = _run_dispatcher("git -C /repo commit -m x", branch="main")
+    assert out, "Expected deny from the full main() path"
+    data = json.loads(out[0])
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_main_denies_quoted_path_git_C_commit_on_protected_branch():
+    out = _run_dispatcher('git -C "/path with spaces" commit -m x', branch="main")
+    assert out, "Expected deny from the full main() path"
+    data = json.loads(out[0])
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_main_denies_newline_separated_multi_statement_commit_on_protected_branch():
+    out = _run_dispatcher("cd /repo\ngit add -A\ngit commit -m x", branch="main")
+    assert out, "Expected deny from the full main() path"
+    data = json.loads(out[0])
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_main_allows_grep_mention_silently_with_no_subprocess_calls():
+    """A grep mention of the phrase must never invoke subprocess.run through main()."""
+    inner = {"command": 'grep -rn "git commit" file.txt'}
+    event = {"tool_input": inner}
+    stdin_data = json.dumps(event)
+
+    captured = []
+    with (
+        patch("sys.stdin", io.StringIO(stdin_data)),
+        patch("builtins.print", side_effect=captured.append),
+        patch("subprocess.run") as mock_run,
+    ):
+        try:
+            dispatcher.main()
+        except SystemExit:
+            pass
+
+    assert not captured, "Expected silent allow"
+    mock_run.assert_not_called()
+
+
+def test_main_allows_heredoc_body_mention_silently_with_no_subprocess_calls():
+    """A heredoc body mentioning the phrase must never invoke subprocess.run through main()."""
+    inner = {"command": "cat <<EOF\nremember to git commit\nEOF"}
+    event = {"tool_input": inner}
+    stdin_data = json.dumps(event)
+
+    captured = []
+    with (
+        patch("sys.stdin", io.StringIO(stdin_data)),
+        patch("builtins.print", side_effect=captured.append),
+        patch("subprocess.run") as mock_run,
+    ):
+        try:
+            dispatcher.main()
+        except SystemExit:
+            pass
+
+    assert not captured, "Expected silent allow"
+    mock_run.assert_not_called()
+
+
+def test_main_denies_mixed_mention_and_real_commit_on_protected_branch():
+    """A mention (grep) followed by a real invocation in the same command must
+    still deny — the anchored regex finds the real invocation after `&&`."""
+    out = _run_dispatcher('grep -r "git commit" . && git commit -m x', branch="main")
+    assert out, "Expected deny from the full main() path"
+    data = json.loads(out[0])
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_neither_commit_regex_has_multiline_flag():
+    assert not (dispatcher._GIT_COMMIT_RE.flags & re.MULTILINE)
+    assert not (dispatcher._GIT_C_COMMIT_RE.flags & re.MULTILINE)
