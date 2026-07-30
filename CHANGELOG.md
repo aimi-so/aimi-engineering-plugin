@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.119.1] - 2026-07-30
+
+### Fixed
+
+- **`pre-bash-dispatcher.py`'s commit guard and worktree-add guard matched `git commit`/`git worktree add` as a bare substring anywhere in a Bash command string, so a commit message or comment merely *mentioning* either phrase — with no invocation present — triggered the guard (issue #82).** Both `_GIT_COMMIT_RE` and `_GIT_WORKTREE_ADD_RE` are now anchored to command-start position via a shared `_CMD_START` lookbehind (start of string, or immediately after `;`, `&&`, `||`, `|`, or a literal newline — regexes are never compiled with `re.MULTILINE`), so only a genuine invocation matches, not an incidental mention. `git -C <path> commit`/`git -C <path> worktree add` gained their own anchored `_GIT_C_COMMIT_RE`/`_GIT_C_WORKTREE_ADD_RE` variants (quoted-or-bare `-C` path token), closing two pre-existing gaps: `main()`'s routing gate previously never dispatched a `git -C <path> commit` invocation to the commit guard at all, and no `-C` variant of the worktree-add guard existed. A heredoc body is stripped from the detection copy before either family of regexes runs (`_strip_heredocs`, fails closed to the original unstripped string on any internal error), so a commit message authored via `<<EOF ... EOF` no longer feeds guard detection.
+- **Known limitation, accepted as residual risk:** command-position anchoring deliberately does not detect `git commit`/`git worktree add` invocations wrapped in `bash -c '...'`, inside a subshell `(...)`, produced via command substitution, chained with a single `&` (background) rather than `&&`, or embedded in an `if`/`then` body — forms the prior unanchored regex caught only by accident, alongside every false positive it produced. Closing this gap would require treating a quote character as a command-start anchor, which reopens issue #82's false-positive class; the trade-off is intentional and documented here rather than silently narrowed.
+
 ## [1.119.0] - 2026-07-29
 
 ### Added
