@@ -192,11 +192,9 @@ You can route each agent category to a different Claude model — research on on
 
 ## Contributors
 
-| | Contributions |
-|---|---|
-| **Aimi** ([@aimieacc](https://github.com/aimieacc)) | Core architecture, command pipeline, agent system |
-| **Stanley Yoshinori Takamatsu** ([@stanleytakamatsu](https://github.com/stanleytakamatsu)) | Plugin design, execution model, review workflow |
-| **Alex Chastinet** ([@alexchastinet](https://github.com/alexchastinet)) | Tooling fixes |
+<a href="https://github.com/aimieacc"><img src="https://github.com/aimieacc.png?size=100" width="64" height="64" alt="@aimieacc" /></a>
+<a href="https://github.com/stanleytakamatsu"><img src="https://github.com/stanleytakamatsu.png?size=100" width="64" height="64" alt="@stanleytakamatsu" /></a>
+<a href="https://github.com/alexchastinet"><img src="https://github.com/alexchastinet.png?size=100" width="64" height="64" alt="@alexchastinet" /></a>
 
 Full history on the [contributors graph](https://github.com/aimi-so/aimi-engineering-plugin/graphs/contributors).
 
