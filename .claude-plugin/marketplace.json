@@ -18,6 +18,7 @@
         "url": "https://github.com/aimi-so"
       },
       "homepage": "https://github.com/aimi-so/aimi-engineering-plugin",
+      "license": "MIT",
       "tags": ["autonomous-execution", "task-management", "standalone-agents", "ralph-style", "workflow-automation"],
       "source": "./plugins/aimi-engineering"
     }
