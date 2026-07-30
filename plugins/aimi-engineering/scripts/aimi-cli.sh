@@ -3230,43 +3230,237 @@ cmd_setup_branch() {
     return 0
   fi
 
-  # Case --base override: Branch is new and caller provided an explicit base
+  # Case --base override: Branch is new and caller provided an explicit base.
+  # The existence check stays here rather than in the shared resolver so this
+  # hard failure keeps its exact stderr text and exit code regardless of how
+  # the resolver's own "explicit-base" resolution behaves.
   if [ -n "$base_override" ]; then
-    local resolved_base
-    if git ls-remote --heads origin "$base_override" 2>/dev/null | grep -q "$base_override"; then
-      resolved_base="origin/$base_override"
-    elif git branch --list "$base_override" | grep -q "$base_override"; then
-      resolved_base="$base_override"
-    else
+    if ! git ls-remote --heads origin "$base_override" 2>/dev/null | grep -q "$base_override" && \
+       ! git branch --list "$base_override" | grep -q "$base_override"; then
       echo "Error: Base branch does not exist: $base_override" >&2
       exit 1
     fi
-    git checkout -b "$branch_name" "$resolved_base" >/dev/null 2>&1
-    printf '{"branch":"%s","action":"created-from-base","base":"%s"}\n' "$branch_name" "$base_override"
-    return 0
   fi
 
-  # Case 4/5: Branch is new — decide base
-  # Detached HEAD is treated as 'not merged'
-  if [ -z "$current_branch" ]; then
-    # Detached HEAD — create from current HEAD
-    git checkout -b "$branch_name" >/dev/null 2>&1
-    printf '{"branch":"%s","action":"created-from-current"}\n' "$branch_name"
-    return 0
-  fi
+  # Case 4/5: Branch is new — delegate the base decision to the shared
+  # resolver (_resolve_branch_base) so this path can never drift from the
+  # container path's resolve-base-branch. The mapping from reason to action
+  # is total: explicit-base -> created-from-base, default-branch ->
+  # created-from-default, detached-head and stacked-on-current both ->
+  # created-from-current. target-exists is unreachable here — Case 1-3 above
+  # already short-circuited on an existing target before the resolver runs.
+  local resolution reason base
+  resolution=$(_resolve_branch_base "$branch_name" "$default_branch" "$base_override")
+  reason=$(echo "$resolution" | jq -r '.reason')
+  base=$(echo "$resolution" | jq -r '.base')
 
-  # Check if current branch IS the default branch OR is fully merged into default
-  if [ "$current_branch" = "$default_branch" ] || \
-     git branch --merged "origin/$default_branch" 2>/dev/null | grep -q "^[* ] *${current_branch}$"; then
-    git checkout -b "$branch_name" "origin/$default_branch" >/dev/null 2>&1
-    printf '{"branch":"%s","action":"created-from-default"}\n' "$branch_name"
-    return 0
-  fi
-
-  # Current branch has unmerged work — create from current HEAD (stacking intent)
-  git checkout -b "$branch_name" >/dev/null 2>&1
-  printf '{"branch":"%s","action":"created-from-current"}\n' "$branch_name"
+  case "$reason" in
+    explicit-base)
+      git checkout -b "$branch_name" "$base" >/dev/null 2>&1
+      printf '{"branch":"%s","action":"created-from-base","base":"%s"}\n' "$branch_name" "$base_override"
+      ;;
+    default-branch)
+      git checkout -b "$branch_name" "$base" >/dev/null 2>&1
+      printf '{"branch":"%s","action":"created-from-default"}\n' "$branch_name"
+      ;;
+    detached-head|stacked-on-current)
+      # Create from current HEAD (detached or carrying unmerged work) without
+      # an explicit ref, matching the pre-existing behavior exactly.
+      git checkout -b "$branch_name" >/dev/null 2>&1
+      printf '{"branch":"%s","action":"created-from-current"}\n' "$branch_name"
+      ;;
+    *)
+      echo "Error: Unexpected base-resolution reason: $reason" >&2
+      exit 1
+      ;;
+  esac
   return 0
+}
+
+# Decide what branch a new branch or container should be cut from, without
+# performing any git mutation. Single source of truth shared by the inline
+# (cmd_setup_branch) and container (execute.md) paths so an empty/unset base
+# can never mean "stack on current" on one path and "use the default branch"
+# on the other. Assumes branch_name/default_branch/base_override are already
+# validated and CWD is inside the target git repository.
+#
+# Resolution order (first match wins):
+#   1. base_override given                                -> explicit-base
+#   2. branch_name already exists locally or on origin     -> target-exists
+#   3. HEAD is detached                                     -> detached-head
+#   4. current branch IS default, or merged into origin/default -> default-branch
+#   5. otherwise (current branch carries unmerged work)     -> stacked-on-current
+#
+# The emitted "base" prefers the origin/<name> remote-tracking ref over the
+# bare local name, so a container is never cut from a stale local ref after a
+# successful fetch -- mirroring how cmd_setup_branch already checks out
+# origin/$default_branch for created-from-default. Two reasons opt out:
+#
+#   stacked-on-current -- the candidate is the caller's own checkout, and
+#     inheriting its local tip is what stacking means. Preferring origin here
+#     drops every commit made since the last push.
+#   detached-head      -- base is the raw HEAD sha; there is no branch name to
+#     prefer a remote ref for.
+#
+# promptNeeded is true only when reason resolves to stacked-on-current --
+# the same four-condition gate execute.md Step 1.6 computes inline today
+# (target absent locally and on origin, current branch not default, current
+# branch not merged into origin/default), now computed once per repo here.
+# Exact ref predicates. Every one of these answers a yes/no question about a
+# single, fully-qualified ref -- never a pattern plus a substring grep.
+#
+# `git branch --list X | grep -q X` and `git ls-remote --heads origin X` both
+# match loosely: ls-remote patterns match on trailing path components, so a
+# probe for `main` reports refs/heads/team/main and the caller then emits an
+# origin/main that does not resolve, killing worktree creation in any repo
+# that happens to carry a scoped branch of the same leaf name.
+_local_has_branch() {
+  git show-ref --verify --quiet "refs/heads/$1"
+}
+
+_origin_has_branch() {
+  git ls-remote --heads origin "refs/heads/$1" 2>/dev/null \
+    | grep -q "[[:space:]]refs/heads/${1}$"
+}
+
+# Is <branch> already merged into origin/<default>?
+#
+# --format strips the "[* ] " column git normally prints, and -qxF matches the
+# whole line literally. A regex match here is unsafe: git permits `.` in ref
+# names, so a branch named feat.x matches a merged feat/x and its real
+# unmerged work is discarded with no prompt -- the exact failure issue #78 is
+# about, reached through a different door.
+_is_merged_into_default() {
+  git branch --format='%(refname:short)' --merged "origin/$2" 2>/dev/null \
+    | grep -qxF "$1"
+}
+
+_resolve_branch_base() {
+  local branch_name="$1" default_branch="$2" base_override="$3"
+  local current_branch reason base candidate prompt_needed
+  current_branch=$(git branch --show-current 2>/dev/null || echo "")
+  base=""
+  candidate=""
+  prompt_needed=false
+
+  if [ -n "$base_override" ]; then
+    reason="explicit-base"
+    candidate="$base_override"
+  elif _local_has_branch "$branch_name" || _origin_has_branch "$branch_name"; then
+    reason="target-exists"
+    candidate="$branch_name"
+  elif [ -z "$current_branch" ]; then
+    reason="detached-head"
+    base=$(git rev-parse HEAD 2>/dev/null || echo "")
+  elif [ "$current_branch" = "$default_branch" ] || _is_merged_into_default "$current_branch" "$default_branch"; then
+    reason="default-branch"
+    candidate="$default_branch"
+  else
+    reason="stacked-on-current"
+    candidate="$current_branch"
+    prompt_needed=true
+  fi
+
+  # Origin preference, scoped by reason: prefer the origin/<name>
+  # remote-tracking ref for a reference point the caller did not author, so a
+  # container is never cut from a stale local ref after a successful fetch.
+  #
+  # stacked-on-current is deliberately excluded. There the candidate IS the
+  # caller's own checkout, and inheriting its local tip is the entire point of
+  # stacking -- preferring origin would silently drop every commit made since
+  # the last push, which is the common state of an autonomous run. That would
+  # also put this path back in disagreement with cmd_setup_branch, whose
+  # stacked-on-current arm checks out from local HEAD.
+  if [ -n "$candidate" ]; then
+    if [ "$reason" != "stacked-on-current" ] && _origin_has_branch "$candidate"; then
+      base="origin/$candidate"
+    else
+      base="$candidate"
+    fi
+  fi
+
+  printf '{"base":"%s","reason":"%s","currentBranch":"%s","defaultBranch":"%s","promptNeeded":%s}\n' \
+    "$base" "$reason" "$current_branch" "$default_branch" "$prompt_needed"
+}
+
+# CLI wrapper for _resolve_branch_base(): arg-parsing, --project cd and the
+# three branch-name validations, mirroring cmd_setup_branch's shape exactly.
+cmd_resolve_base_branch() {
+  local branch_name="" default_branch="" project_dir="" base_override=""
+
+  # Parse arguments (positional + flags)
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --default-branch)
+        shift
+        default_branch="${1:-}"
+        ;;
+      --base)
+        shift
+        base_override="${1:-}"
+        ;;
+      --project)
+        shift
+        project_dir="${1:-}"
+        ;;
+      -*)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh resolve-base-branch <branchName> --default-branch <defaultBranch> [--base <baseBranch>] [--project <path>]" >&2
+        exit 1
+        ;;
+      *)
+        if [ -z "$branch_name" ]; then
+          branch_name="$1"
+        else
+          echo "Error: Unexpected argument: $1" >&2
+          echo "Usage: aimi-cli.sh resolve-base-branch <branchName> --default-branch <defaultBranch> [--base <baseBranch>] [--project <path>]" >&2
+          exit 1
+        fi
+        ;;
+    esac
+    shift
+  done
+
+  # Validate required arguments
+  if [ -z "$branch_name" ] || [ -z "$default_branch" ]; then
+    echo "Usage: aimi-cli.sh resolve-base-branch <branchName> --default-branch <defaultBranch> [--base <baseBranch>] [--project <path>]" >&2
+    exit 1
+  fi
+
+  # cd into project dir if specified (supports multi-repo layouts where AIMI root is not a git repo)
+  if [ -n "$project_dir" ]; then
+    if [ ! -d "$project_dir" ]; then
+      echo "Error: Project directory does not exist: $project_dir" >&2
+      exit 1
+    fi
+    cd "$project_dir"
+  fi
+
+  # Guard: must be inside a git repository
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
+    exit 1
+  fi
+
+  # Validate branch name (security)
+  if ! [[ "$branch_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: Invalid branch name: $branch_name" >&2
+    exit 1
+  fi
+
+  # Validate default branch name (security)
+  if ! [[ "$default_branch" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: Invalid branch name: $default_branch" >&2
+    exit 1
+  fi
+
+  # Validate base override branch name (security)
+  if [ -n "$base_override" ] && ! [[ "$base_override" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: Invalid branch name: $base_override" >&2
+    exit 1
+  fi
+
+  _resolve_branch_base "$branch_name" "$default_branch" "$base_override"
 }
 
 # Clear all state files (preserves tasks directory)
@@ -8749,6 +8943,21 @@ COMMANDS:
                               when the file exists but the host has no config.
     setup-branch <name> --default-branch <branch> [--project <path>]
                               Create or checkout branch with deterministic logic
+    resolve-base-branch <name> --default-branch <branch> [--base <branch>] [--project <path>]
+                              Decide what branch a new branch or container should be cut
+                              from -- no checkout is performed. Prints a single JSON object:
+                              {"base","reason","currentBranch","defaultBranch","promptNeeded"}.
+                              reason is exactly one of: explicit-base, target-exists,
+                              stacked-on-current, default-branch, detached-head.
+                              base prefers the origin/<name> remote-tracking ref when it
+                              exists, falling back to the bare local name otherwise --
+                              except for stacked-on-current, which always keeps the bare
+                              local ref, since stacking exists to inherit the local tip.
+                              --base "" is treated exactly like an omitted --base, so a
+                              caller may pass an unset variable through unconditionally.
+                              promptNeeded is true only when the target does not exist
+                              (locally or on origin), the current branch is not the
+                              default branch, and it is not merged into origin/<default>.
     clear-state               Clear all state files
     version                   Print the plugin version
     check-version [--quiet] [--fix]
@@ -9205,6 +9414,7 @@ main() {
     detect-default-branch) shift; cmd_detect_default_branch "$@" ;;
     detect-parent-branch) shift; cmd_detect_parent_branch "$@" ;;
     setup-branch)      shift; cmd_setup_branch "$@" ;;
+    resolve-base-branch) shift; cmd_resolve_base_branch "$@" ;;
     clear-state)       cmd_clear_state ;;
     version)           cmd_version ;;
     check-version)     shift; cmd_check_version "$@" ;;

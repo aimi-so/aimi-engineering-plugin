@@ -5703,12 +5703,53 @@ setup_git_fixture() {
   git push origin main >/dev/null 2>&1
   git branch -d feat/merged-branch >/dev/null 2>&1
 
-  # Create an unmerged branch with commits ahead of main
+  # Create an unmerged branch with commits ahead of main.
+  #
+  # The branch is pushed and THEN given one more local commit, so it is
+  # genuinely ahead of its own origin/ ref. That gap is the state a stacking
+  # decision has to get right -- an autonomous run commits locally and pushes
+  # late or never -- and it is what makes the difference between "base is the
+  # local tip" and "base is origin/<branch>" observable at all. With the push
+  # last, local == origin and every such divergence is invisible to the suite.
   git checkout -b feat/unmerged-branch >/dev/null 2>&1
   echo "unmerged" > unmerged.txt
   git add unmerged.txt
   git commit -m "Unmerged branch commit" >/dev/null 2>&1
   git push origin feat/unmerged-branch >/dev/null 2>&1
+  echo "local only" > unmerged-local-only.txt
+  git add unmerged-local-only.txt
+  git commit -m "Local-only commit ahead of origin" >/dev/null 2>&1
+
+  # A merged branch that is deliberately KEPT locally. `git branch --merged`
+  # lists local branches only, so feat/merged-branch above (deleted right
+  # after its merge) never appears in that list and cannot collide with
+  # anything. This one stays, to give the literal-match check below something
+  # real to collide against.
+  git checkout main >/dev/null 2>&1
+  git checkout -b feat/kept-merged >/dev/null 2>&1
+  echo "kept" > kept.txt
+  git add kept.txt
+  git commit -m "Kept merged branch commit" >/dev/null 2>&1
+  git checkout main >/dev/null 2>&1
+  git merge feat/kept-merged >/dev/null 2>&1
+  git push origin main >/dev/null 2>&1
+
+  # A branch whose name differs from feat/kept-merged only at a character that
+  # is a regex metacharacter. `feat.kept-merged` is NOT merged and carries real
+  # work; a merged-check that matches by regex rather than by literal line sees
+  # `feat/kept-merged` in the merged list and wrongly concludes this branch is
+  # merged -- discarding that work with no prompt.
+  git checkout -b feat.kept-merged >/dev/null 2>&1
+  echo "dot" > dot.txt
+  git add dot.txt
+  git commit -m "Unmerged work on a dot-named branch" >/dev/null 2>&1
+
+  # Origin carries team/scoped-name but NOT scoped-name. `git ls-remote --heads
+  # origin scoped-name` matches on trailing path components, so a probe that
+  # is not anchored to the full ref reports a branch that does not exist.
+  git checkout main >/dev/null 2>&1
+  git push origin main:refs/heads/team/scoped-name >/dev/null 2>&1
+  git fetch origin >/dev/null 2>&1
 
   # Go back to main
   git checkout main >/dev/null 2>&1
@@ -5996,6 +6037,362 @@ test_setup_branch() {
   assert_exit_code "0" "$exit_code" "setup-branch --base ignored (already on target): exit code"
   assert_eq "already-on-branch" "$action" "setup-branch --base ignored (already on target): action is already-on-branch"
   rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+}
+
+# ============================================================================
+# Resolve Base Branch Tests
+# ============================================================================
+
+test_resolve_base_branch() {
+  echo ""
+  echo "=== Testing resolve-base-branch command ==="
+
+  local stdout stderr_file exit_code reason base current_branch prompt_needed
+
+  # --- Subtest: explicit --base ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  # Stay on the default branch itself so promptNeeded's four conditions
+  # cannot coincidentally hold regardless of --base being supplied.
+  git checkout main >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/explicit-base --default-branch main --base main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  reason=$(echo "$stdout" | jq -r '.reason')
+  base=$(echo "$stdout" | jq -r '.base')
+  prompt_needed=$(echo "$stdout" | jq -r '.promptNeeded')
+  assert_exit_code "0" "$exit_code" "resolve-base-branch: explicit --base — exit code"
+  assert_eq "explicit-base" "$reason" "resolve-base-branch: explicit --base — reason"
+  assert_eq "origin/main" "$base" "resolve-base-branch: explicit --base — base prefers origin"
+  assert_eq "false" "$prompt_needed" "resolve-base-branch: explicit --base — promptNeeded"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: target branch already exists locally only ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout main >/dev/null 2>&1
+  git checkout -b feat/local-only >/dev/null 2>&1
+  echo "local" > local.txt && git add local.txt && git commit -m "local" >/dev/null 2>&1
+  git checkout main >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/local-only --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  reason=$(echo "$stdout" | jq -r '.reason')
+  base=$(echo "$stdout" | jq -r '.base')
+  prompt_needed=$(echo "$stdout" | jq -r '.promptNeeded')
+  assert_exit_code "0" "$exit_code" "resolve-base-branch: target exists locally — exit code"
+  assert_eq "target-exists" "$reason" "resolve-base-branch: target exists locally — reason"
+  assert_eq "feat/local-only" "$base" "resolve-base-branch: target exists locally — base is bare local name"
+  assert_eq "false" "$prompt_needed" "resolve-base-branch: target exists locally — promptNeeded"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: target branch exists on remote only ---
+  # feat/merged-branch was deleted locally by setup_git_fixture but remains
+  # pushed to origin — an existing remote-only branch with no fixture setup.
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout main >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/merged-branch --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  reason=$(echo "$stdout" | jq -r '.reason')
+  base=$(echo "$stdout" | jq -r '.base')
+  prompt_needed=$(echo "$stdout" | jq -r '.promptNeeded')
+  assert_exit_code "0" "$exit_code" "resolve-base-branch: target exists on remote only — exit code"
+  assert_eq "target-exists" "$reason" "resolve-base-branch: target exists on remote only — reason"
+  assert_eq "origin/feat/merged-branch" "$base" "resolve-base-branch: target exists on remote only — base prefers origin"
+  assert_eq "false" "$prompt_needed" "resolve-base-branch: target exists on remote only — promptNeeded"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: detached HEAD ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout main >/dev/null 2>&1
+  git checkout --detach main >/dev/null 2>&1
+  local head_sha
+  head_sha=$(git rev-parse HEAD)
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/from-detached --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  reason=$(echo "$stdout" | jq -r '.reason')
+  base=$(echo "$stdout" | jq -r '.base')
+  current_branch=$(echo "$stdout" | jq -r '.currentBranch')
+  prompt_needed=$(echo "$stdout" | jq -r '.promptNeeded')
+  assert_exit_code "0" "$exit_code" "resolve-base-branch: detached HEAD — exit code"
+  assert_eq "detached-head" "$reason" "resolve-base-branch: detached HEAD — reason"
+  assert_eq "$head_sha" "$base" "resolve-base-branch: detached HEAD — base is HEAD sha"
+  assert_eq "" "$current_branch" "resolve-base-branch: detached HEAD — currentBranch is empty"
+  assert_eq "false" "$prompt_needed" "resolve-base-branch: detached HEAD — promptNeeded"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: current branch IS the default branch ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout main >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/from-default --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  reason=$(echo "$stdout" | jq -r '.reason')
+  base=$(echo "$stdout" | jq -r '.base')
+  prompt_needed=$(echo "$stdout" | jq -r '.promptNeeded')
+  assert_exit_code "0" "$exit_code" "resolve-base-branch: current is default — exit code"
+  assert_eq "default-branch" "$reason" "resolve-base-branch: current is default — reason"
+  assert_eq "origin/main" "$base" "resolve-base-branch: current is default — base prefers origin"
+  assert_eq "false" "$prompt_needed" "resolve-base-branch: current is default — promptNeeded"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: current branch merged into default but not ON default ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout main >/dev/null 2>&1
+  git checkout -b feat/merged-branch >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/fresh-work --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  reason=$(echo "$stdout" | jq -r '.reason')
+  base=$(echo "$stdout" | jq -r '.base')
+  prompt_needed=$(echo "$stdout" | jq -r '.promptNeeded')
+  assert_exit_code "0" "$exit_code" "resolve-base-branch: current merged into default — exit code"
+  assert_eq "default-branch" "$reason" "resolve-base-branch: current merged into default — reason"
+  assert_eq "origin/main" "$base" "resolve-base-branch: current merged into default — base prefers origin"
+  assert_eq "false" "$prompt_needed" "resolve-base-branch: current merged into default — promptNeeded"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: current branch carries unmerged work — stacked-on-current, promptNeeded ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout feat/unmerged-branch >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/new-stack --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  reason=$(echo "$stdout" | jq -r '.reason')
+  base=$(echo "$stdout" | jq -r '.base')
+  prompt_needed=$(echo "$stdout" | jq -r '.promptNeeded')
+  assert_exit_code "0" "$exit_code" "resolve-base-branch: current unmerged — exit code"
+  assert_eq "stacked-on-current" "$reason" "resolve-base-branch: current unmerged — reason"
+  # Stacking inherits the LOCAL tip, never origin/<branch>. The fixture branch
+  # is deliberately one commit ahead of its own origin ref, so preferring
+  # origin here would silently drop that commit from the container.
+  assert_eq "feat/unmerged-branch" "$base" "resolve-base-branch: current unmerged — base is the local ref, not origin"
+  assert_eq "true" "$prompt_needed" "resolve-base-branch: current unmerged — promptNeeded is true"
+  local stacked_base_sha local_tip_sha
+  stacked_base_sha=$(git rev-parse "$base")
+  local_tip_sha=$(git rev-parse HEAD)
+  assert_eq "$local_tip_sha" "$stacked_base_sha" "resolve-base-branch: current unmerged — base resolves to the local tip commit"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: merged check matches literally, not as a regex ---
+  # feat.kept-merged is unmerged; feat/kept-merged is merged and still present
+  # locally. A regex match treats `.` as a wildcard, misreads the branch as
+  # merged, and returns default-branch with promptNeeded false -- silently
+  # discarding real work, which is exactly the failure issue #78 is about.
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout feat.kept-merged >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/new-from-dot --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  reason=$(echo "$stdout" | jq -r '.reason')
+  prompt_needed=$(echo "$stdout" | jq -r '.promptNeeded')
+  assert_exit_code "0" "$exit_code" "resolve-base-branch: dot-named unmerged branch — exit code"
+  assert_eq "stacked-on-current" "$reason" "resolve-base-branch: dot-named unmerged branch — not misread as merged"
+  assert_eq "true" "$prompt_needed" "resolve-base-branch: dot-named unmerged branch — promptNeeded is true"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: origin probe is anchored to the full ref ---
+  # Origin has team/scoped-name but no scoped-name. An unanchored
+  # `ls-remote --heads origin scoped-name` matches the trailing component and
+  # yields base "origin/scoped-name", a ref that does not resolve -- every
+  # container creation in such a repo then dies on `git worktree add`.
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout main >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch scoped-name --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  base=$(echo "$stdout" | jq -r '.base')
+  assert_exit_code "0" "$exit_code" "resolve-base-branch: tail-matching origin ref — exit code"
+  assert_eq "origin/main" "$base" "resolve-base-branch: tail-matching origin ref — target not misdetected via team/scoped-name"
+  git rev-parse --verify --quiet "$base" >/dev/null 2>&1 && rev_ok=0 || rev_ok=1
+  assert_eq "0" "$rev_ok" "resolve-base-branch: tail-matching origin ref — emitted base actually resolves"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: origin preference degrades to bare local name when offline ---
+  echo ""
+  echo "--- resolve-base-branch: origin preference and offline degradation ---"
+
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout main >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/origin-pref-1 --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  base=$(echo "$stdout" | jq -r '.base')
+  assert_eq "origin/main" "$base" "resolve-base-branch: origin present — base is origin/main"
+  rm -f "$stderr_file"
+
+  # Simulate offline: the live `git ls-remote --heads origin` probe can no
+  # longer reach a remote at all, so the origin preference must degrade to
+  # the bare local name rather than failing.
+  git remote remove origin >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/origin-pref-2 --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  base=$(echo "$stdout" | jq -r '.base')
+  assert_exit_code "0" "$exit_code" "resolve-base-branch: origin removed — exit code (does not fail)"
+  assert_eq "main" "$base" "resolve-base-branch: origin removed — base degrades to bare main"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Test: --project flag ---
+  echo ""
+  echo "--- resolve-base-branch --project flag ---"
+
+  setup_git_fixture
+  # Run from the non-git TEST_DIR, pointing --project at the fixture
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/project-flag --default-branch main --project "$GIT_FIXTURE_LOCAL" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  reason=$(echo "$stdout" | jq -r '.reason')
+  assert_exit_code "0" "$exit_code" "resolve-base-branch: --project flag — exit code"
+  assert_eq "default-branch" "$reason" "resolve-base-branch: --project flag — reason"
+  rm -f "$stderr_file"
+  teardown_git_fixture
+
+  # --- Subtest: invalid branch name ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch '../bad' --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  local stderr_output
+  stderr_output=$(cat "$stderr_file")
+  assert_exit_code "1" "$exit_code" "resolve-base-branch: invalid branch name — exit code"
+  assert_stderr_contains "Invalid branch name" "$stderr_output" "resolve-base-branch: invalid branch name — stderr message"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+}
+
+# ============================================================================
+# Setup-Branch / Resolve-Base-Branch Agreement Tests
+# ============================================================================
+
+# Regression test for US-002: asserts that for the same repository state,
+# resolve-base-branch's reason and setup-branch's action agree per the
+# total mapping _resolve_branch_base's callers share: explicit-base ->
+# created-from-base, default-branch -> created-from-default, and
+# stacked-on-current -> created-from-current. resolve-base-branch performs
+# no git mutation, so calling it before setup-branch on the same fixture
+# instance observes the identical repository state both commands decide from.
+test_setup_branch_resolve_agreement() {
+  echo ""
+  echo "=== Testing setup-branch / resolve-base-branch agreement ==="
+
+  local stdout stderr_file reason action
+
+  # --- Agreement: current branch IS default -> default-branch / created-from-default ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout main >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/agree-default --default-branch main 2>"$stderr_file")
+  reason=$(echo "$stdout" | jq -r '.reason')
+  rm -f "$stderr_file"
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" setup-branch feat/agree-default --default-branch main 2>"$stderr_file")
+  action=$(echo "$stdout" | jq -r '.action')
+  rm -f "$stderr_file"
+
+  assert_eq "default-branch" "$reason" "agreement: current is default — resolve-base-branch reason"
+  assert_eq "created-from-default" "$action" "agreement: current is default — setup-branch action"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Agreement: explicit --base -> explicit-base / created-from-base ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout feat/unmerged-branch >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/agree-base --default-branch main --base main 2>"$stderr_file")
+  reason=$(echo "$stdout" | jq -r '.reason')
+  rm -f "$stderr_file"
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" setup-branch feat/agree-base --default-branch main --base main 2>"$stderr_file")
+  action=$(echo "$stdout" | jq -r '.action')
+  rm -f "$stderr_file"
+
+  assert_eq "explicit-base" "$reason" "agreement: explicit --base — resolve-base-branch reason"
+  assert_eq "created-from-base" "$action" "agreement: explicit --base — setup-branch action"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Agreement: unmerged current branch -> stacked-on-current / created-from-current ---
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout feat/unmerged-branch >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/agree-current --default-branch main 2>"$stderr_file")
+  reason=$(echo "$stdout" | jq -r '.reason')
+  base=$(echo "$stdout" | jq -r '.base')
+  rm -f "$stderr_file"
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" setup-branch feat/agree-current --default-branch main 2>"$stderr_file")
+  action=$(echo "$stdout" | jq -r '.action')
+  rm -f "$stderr_file"
+
+  assert_eq "stacked-on-current" "$reason" "agreement: unmerged current — resolve-base-branch reason"
+  assert_eq "created-from-current" "$action" "agreement: unmerged current — setup-branch action"
+
+  # Labels agreeing is not the same as the two paths landing on the same
+  # commit. The fixture's current branch is one commit ahead of its own origin
+  # ref, so a base of origin/<branch> would pair the same two labels while the
+  # container came up missing that commit. Compare the commits themselves --
+  # this is the only agreement that matters.
+  local resolved_base_sha inline_head_sha
+  resolved_base_sha=$(git rev-parse "$base")
+  inline_head_sha=$(git rev-parse feat/agree-current)
+  assert_eq "$inline_head_sha" "$resolved_base_sha" "agreement: unmerged current — both paths land on the same commit"
 
   popd >/dev/null
   teardown_git_fixture
@@ -16010,6 +16407,16 @@ main() {
   echo ""
   echo "--- Setup Branch Tests ---"
   test_setup_branch
+
+  # Resolve-base-branch tests — uses own git fixture (independent of TEST_DIR)
+  echo ""
+  echo "--- Resolve Base Branch Tests ---"
+  test_resolve_base_branch
+
+  # Setup-branch / resolve-base-branch agreement — uses own git fixture (independent of TEST_DIR)
+  echo ""
+  echo "--- Setup-Branch / Resolve-Base-Branch Agreement Tests ---"
+  test_setup_branch_resolve_agreement
 
   # Detect-default-branch tests — uses own git fixture (independent of TEST_DIR)
   echo ""

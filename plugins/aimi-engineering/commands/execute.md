@@ -1,7 +1,7 @@
 ---
 name: aimi:execute
 description: Execute all pending stories autonomously with wave-based parallelism
-argument-hint: "[--phase <N>] [--container|--inline] [--push]"
+argument-hint: "[--phase <N>] [--base <branch>] [--container|--inline] [--push]"
 disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Bash(git:*), Bash(mkdir:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Bash(WORKTREE_MGR=*), Bash($WORKTREE_MGR:*), Task
 ---
@@ -28,6 +28,36 @@ If resolution fails, report error and STOP.
 
 Read and follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS`. When resolution fails, treat every category as `"inherit"` and continue.
 
+### Parse --base Override
+
+Scan `$ARGUMENTS` for an explicit `--base <branch>` token (mirrors the `--phase <N>` extraction style used by Step 1.7's Parse --phase Override, and the `--base` extraction `/aimi:next` already uses):
+
+Parse and validate in the **same** block, and echo the result — the validation cannot run in a fence of its own, because each Bash tool call is an isolated shell and a separate fence would test an unset variable against the regex and pass vacuously. The echo is what makes the value readable to every later step, mirroring Step 1.5's **Detect Git Repo Layout**, which echoes `AIMI_ROOT_IS_GIT_REPO` for exactly this reason:
+
+```bash
+case " $ARGUMENTS " in
+  *" --base "*)
+    BASE_BRANCH=$(echo "$ARGUMENTS" | sed -n 's/.*--base[[:space:]]\+\([^ ]*\).*/\1/p')
+    ;;
+  *)
+    BASE_BRANCH=""
+    ;;
+esac
+if [ -n "$BASE_BRANCH" ] && ! echo "$BASE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'; then
+  echo "Invalid --base value: $BASE_BRANCH" >&2
+  exit 1
+fi
+echo "BASE_BRANCH=$BASE_BRANCH"
+```
+
+A non-zero exit here stops the run before any git, worktree, or CLI call consumes the value.
+
+**Carrying `$BASE_BRANCH` forward.** The echoed value does not survive into any later Bash call — each one is its own shell. Every block below that reads `$BASE_BRANCH` must re-assign it at the top of that block with the literal value echoed here (`BASE_BRANCH=""` when `--base` was absent), the same way Step 0.9 Pass 2 re-assigns `SPLIT_PLAN` from Pass 1's printed stdout rather than assuming it persisted. The reading blocks are Step 0.9's split loop, Step 1.7's phase-container group loop, Step 2's Flat Container Mode, Main Repo Branch Setup, and Per-Project Branch Setup.
+
+When `--base` was not passed, `$BASE_BRANCH` stays empty and every `resolve-base-branch`/`setup-branch` call below omits `--base` — or passes it empty, which those verbs treat identically to omission — falling back to the verb's own resolution order. When it was passed, this runs in Step 0, before Step 0.9's split loop and Step 1.6's picker, so the value is available to be carried into every call site that threads it, including the multi-repo split path that has no other opportunity to learn it before its own worktrees are created. An explicit `--base` also short-circuits Step 1.6's own gating and any per-repo picker Step 2 would otherwise run: `resolve-base-branch` reports `reason: "explicit-base"` and `promptNeeded: false` whenever `--base` is supplied, so no `AskUserQuestion` fires on top of a choice the user already made — see Step 1.6 below.
+
+`--base` is matched on its own literal token, independently of `--phase`'s (numeric-only) and `--container`/`--inline`/`--push`'s (bare-token) extractions above and below — passing several of these flags in one invocation is unaffected, exactly as `--container`/`--inline`/`--push` already coexist without either stripping the raw `$ARGUMENTS` string.
+
 ## Multi-Repo Handling
 
 This section is the single source of truth for multi-repo layout detection and per-project story routing. All call sites below reference it by name.
@@ -43,12 +73,12 @@ while [ "$AIMI_ROOT" != "/" ] && [ ! -d "$AIMI_ROOT/.aimi" ]; do AIMI_ROOT=$(dir
 if git -C "$AIMI_ROOT" rev-parse --git-dir >/dev/null 2>&1; then AIMI_ROOT_IS_GIT_REPO=true; else AIMI_ROOT_IS_GIT_REPO=false; fi
 ```
 
-Two shell consumers embed it: Step 1.5's **Detect Git Repo Layout** (which echoes the value so the agent can read it) and the phase container's **Unsupported Combination Guard: Phase Mode + Multi-Repo**. Every other consumer below — Step 1.6's Early-Skip Guard, Step 2's container/branch-setup skips, Step 4's per-group commit counting — is an agent-level branch that references this rule by name and reads the value Step 1.5 echoed; no shell is involved, so none of them needs its own derivation.
+Two shell consumers embed it: Step 1.5's **Detect Git Repo Layout** (which echoes the value so the agent can read it) and the phase container's **Unsupported Combination Guard: Phase Mode + Multi-Repo**. Every other consumer below — Step 2's container/branch-setup skips, Step 4's per-group commit counting — is an agent-level branch that references this rule by name and reads the value Step 1.5 echoed; no shell is involved, so none of them needs its own derivation.
 
 When **true**, AIMI_ROOT is itself a git repository — all inline logic (default-branch detection, fetch, branch setup, worktree creation) runs directly against AIMI_ROOT. When **false**, this is a **multi-repo layout**: Claude Code runs from a parent folder containing multiple git repos as subfolders. In this layout:
 
 - Default-branch detection and `git fetch origin` are skipped at the AIMI_ROOT level and happen per-project instead.
-- Step 1.6 (Branch Base Selection) is skipped entirely; `BASE_BRANCH` is left unset.
+- Step 1.6 (Branch Base Selection) has no repository at AIMI_ROOT to select a base for, so it never fires there — but base selection itself is not skipped: it happens once per project group, inside Step 2's Per-Project Branch Setup, where each group calls `resolve-base-branch --project [resolved_project_path]` against its own checked-out repo and prompts (picker) or logs (agent) independently, exactly as Step 1.6 does for a single repo.
 - Step 2 "Main Repo Branch Setup" is skipped entirely; all branch setup is handled per-project.
 - All stories must carry a `project` field (the per-project path).
 
@@ -400,8 +430,11 @@ SPLIT_PLAN=$(cat <<'SPLIT_PLAN_EOF'
 [paste Pass 1's printed SPLIT_PLAN here, verbatim — one JSON record per line]
 SPLIT_PLAN_EOF
 )
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+BASE_BRANCH="[the value Step 0's Parse --base Override echoed, or empty when --base was absent]"
 
 SPLIT_EXECUTION_MODE=$(jq -r '.metadata.execution // "inline"' \
   "$(printf '%s\n' "$SPLIT_PLAN" | head -1 | jq -r '.file')")
@@ -412,20 +445,25 @@ while IFS= read -r record; do
   SPLIT_ROOT=$(printf '%s' "$record" | jq -r '.root')
   SPLIT_BRANCH=$(printf '%s' "$record" | jq -r '.branch')
   SPLIT_DEFAULT=$(printf '%s' "$record" | jq -r '.default')
-  # BASE_BRANCH is a Step 1.6 value and Step 1.6 has not run this early, so this
-  # always resolves to that repo's own default branch. Written as a default
-  # expansion rather than an `if [ -n "$BASE_BRANCH" ]` whose true branch is
-  # unreachable here.
-  CONTAINER_BASE="${BASE_BRANCH:-$SPLIT_DEFAULT}"
+  if [ -n "$BASE_BRANCH" ]; then
+    SPLIT_BASE_JSON=$($AIMI_CLI resolve-base-branch "$SPLIT_BRANCH" --project "$SPLIT_ROOT" --default-branch "$SPLIT_DEFAULT" --base "$BASE_BRANCH")
+  else
+    SPLIT_BASE_JSON=$($AIMI_CLI resolve-base-branch "$SPLIT_BRANCH" --project "$SPLIT_ROOT" --default-branch "$SPLIT_DEFAULT")
+  fi
+  CONTAINER_BASE=$(printf '%s' "$SPLIT_BASE_JSON" | jq -r '.base')
+  SPLIT_BASE_REASON=$(printf '%s' "$SPLIT_BASE_JSON" | jq -r '.reason')
   cd "$SPLIT_ROOT"
   if ! $WORKTREE_MGR create "$SPLIT_BRANCH" --from "$CONTAINER_BASE"; then
     echo "Worktree creation failed for $SPLIT_BRANCH in $SPLIT_ROOT — see the error above." >&2
     exit 1
   fi
+  echo "Worktree for $SPLIT_BRANCH ready in $SPLIT_ROOT — branched from $CONTAINER_BASE ($SPLIT_BASE_REASON)"
 done <<< "$SPLIT_PLAN"
 ```
 
-**When `SPLIT_EXECUTION_MODE` is `inline` or absent** (the fail-safe default — see `commands/references/execution-mode.md`), that loop is the whole pass: one worktree per active split file, each branched from its own repo's default branch.
+Each iteration's last line reports its own resolved base immediately once `create` above exits zero — fresh-create and reuse alike, since the echo runs unconditionally after that check rather than depending on which internal branch `$WORKTREE_MGR create` took. `$SPLIT_BASE_REASON` is rendered verbatim from `resolve-base-branch`'s own `reason` field, never paraphrased.
+
+**When `SPLIT_EXECUTION_MODE` is `inline` or absent** (the fail-safe default — see `commands/references/execution-mode.md`), that loop is the whole pass: one worktree per active split file, each cut from its own repo's own `resolve-base-branch` resolution — its default branch, unless that repo's own current checkout carries unmerged work worth stacking on, exactly as Step 1.6's picker would decide for a single repo. `BASE_BRANCH` is passed through as `--base` on every iteration when Step 0 parsed one, applying the same explicit choice uniformly across every active repo in the split rather than re-deriving it per member.
 
 **When `SPLIT_EXECUTION_MODE` is `container`,** the loop body is instead one delegation per record to **Create or Reuse a Container** (`${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md`), with `EXEC_ROOT` set to that record's `root`, `EXEC_BRANCH` to its `branch`, and `CONTAINER_BASE` as computed above — giving each member its own independently checkout-conflict-checked container rather than nesting one inside another, mirroring the phase-mode split's Create Split Worktrees. That reference's body is the same `cd "$EXEC_ROOT"` + `$WORKTREE_MGR create "$EXEC_BRANCH" --from "$CONTAINER_BASE"` pair the loop already runs, so the shape above is unchanged; what the delegation adds is the single source of truth for the reuse/idempotency and error contract. Handle its exit code exactly as Step 2's Per-Project Branch Setup does — no pre-flight checkout check is needed, since `$WORKTREE_MGR create` is branch-aware and its stderr already names the worktree holding the branch. Report that stderr verbatim and STOP without attempting remediation.
 
@@ -747,11 +785,11 @@ Warning: git fetch origin failed — continuing with local state. Branch may be 
 
 Before creating the task branch, when the current branch has unmerged work relative to the default branch, ask whether to stack on it or start fresh from the default branch. This prevents silently inheriting unrelated work or losing intentional stacking.
 
-`BASE_BRANCH` starts unset. It is set only when the user explicitly chooses a base; Step 2 threads it via `--base` only when set.
+This step resolves the base for AIMI_ROOT itself. In a multi-repo layout (`AIMI_ROOT_IS_GIT_REPO=false`) AIMI_ROOT is not a git repository, so the four gating conditions below have nothing to evaluate — `CURRENT_BRANCH` and `DEFAULT_BRANCH` both resolve empty, condition 3 (`CURRENT_BRANCH` != `DEFAULT_BRANCH`) is trivially false, and the step falls through to **When Prompt Is Not Needed** below without a dedicated early return. Each project group resolves its own base independently in Step 2's Per-Project Branch Setup instead — see Multi-Repo Handling above.
 
-### Early-Skip Guard (Multi-Repo)
+**Skip this step's gating and prompt entirely when `$BASE_BRANCH` is already non-empty** — Step 0's Parse --base Override already ran and the user supplied an explicit base on the command line. Re-asking on top of an explicit answer would prompt twice for the same decision. Proceed straight to Step 1.7 with `BASE_BRANCH` unchanged; Step 2 and the phase container thread it exactly as if this step's picker had chosen it, and `resolve-base-branch` reports `explicit-base`/`promptNeeded: false` for it downstream.
 
-If `AIMI_ROOT_IS_GIT_REPO` is false, skip this step entirely and leave `BASE_BRANCH` unset. See Multi-Repo Handling above.
+`BASE_BRANCH` otherwise starts unset entering this step. It is set only when the user explicitly chooses a base via the picker below; Step 2 threads it via `--base` only when set, either way.
 
 ### Resolve Interactivity Mode
 
@@ -791,7 +829,7 @@ B — Use default branch ([DEFAULT_BRANCH])
 Other — Specify a base branch
 ```
 
-**Option A:** `BASE_BRANCH=$CURRENT_BRANCH`
+**Option A:** leave `BASE_BRANCH` unset. Do **not** set it to `$CURRENT_BRANCH` — that turns the answer into an `explicit-base`, and an explicit base is a reference point the resolver prefers `origin/` for, which would hand the container the last pushed commit instead of the local tip the user just asked to stack on. Unset is exactly right: `resolve-base-branch` resolves this repo to `stacked-on-current` on its own, and that reason deliberately keeps the bare local ref. This mirrors Option A of the per-project picker in Step 2, which likewise keeps the already-resolved value.
 
 **Option B:** `BASE_BRANCH=$DEFAULT_BRANCH`
 
@@ -1324,6 +1362,7 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
 cd "$AIMI_ROOT"
+BASE_BRANCH="[the value Step 0's Parse --base Override echoed, or empty when --base was absent]"
 
 PHASE_GROUP_TOPLEVELS_SEEN=""
 PHASE_LAST_GROUP_TOPLEVEL=""
@@ -1378,10 +1417,12 @@ while IFS= read -r GROUP_PROJECT; do
   fi
 
   if [ -n "$BASE_BRANCH" ]; then
-    CONTAINER_BASE="$BASE_BRANCH"
+    GROUP_BASE_JSON=$($AIMI_CLI resolve-base-branch "$PHASE_BRANCH" --project "$GROUP_ROOT" --default-branch "$GROUP_DEFAULT" --base "$BASE_BRANCH")
   else
-    CONTAINER_BASE="$GROUP_DEFAULT"
+    GROUP_BASE_JSON=$($AIMI_CLI resolve-base-branch "$PHASE_BRANCH" --project "$GROUP_ROOT" --default-branch "$GROUP_DEFAULT")
   fi
+  CONTAINER_BASE=$(printf '%s' "$GROUP_BASE_JSON" | jq -r '.base')
+  CONTAINER_BASE_REASON=$(printf '%s' "$GROUP_BASE_JSON" | jq -r '.reason')
 
   EXEC_ROOT="$GROUP_TOPLEVEL"
   EXEC_BRANCH="$PHASE_BRANCH"
@@ -1390,12 +1431,12 @@ while IFS= read -r GROUP_PROJECT; do
 
   project_roots["$GROUP_KEY"]="$GROUP_TOPLEVEL"
   PHASE_CONTAINER_PATHS["$GROUP_KEY"]="$GROUP_TOPLEVEL/.worktrees/$PHASE_BRANCH"
-  echo "Phase container ready in project: $GROUP_KEY (${GROUP_TOPLEVEL}/.worktrees/${PHASE_BRANCH})"
+  echo "Phase container ready in project: $GROUP_KEY (${GROUP_TOPLEVEL}/.worktrees/${PHASE_BRANCH}) — branched from $CONTAINER_BASE ($CONTAINER_BASE_REASON)"
 done <<< "$PHASE_GROUP_PROJECTS"
 cd "$AIMI_ROOT"
 ```
 
-Delegates to **Create or Reuse a Container** (`${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md`) exactly as before — `EXEC_ROOT`/`EXEC_BRANCH`/`CONTAINER_BASE` set per group, `$WORKTREE_MGR create` called once per unique toplevel. `CONTAINER_BASE` generalizes yesterday's single `BASE_BRANCH`-or-`DEFAULT_BRANCH` selection so its `else` branch reads *this group's own* freshly-detected default branch (`GROUP_DEFAULT`) instead of the single main-root `$DEFAULT_BRANCH`. A per-group `detect-default-branch` failure is fatal for that group only — the claim is released and the run stops, exactly as Step 0.9 Pass 1 does at its own call site (execute.md:346-350/:377) — never falling back to another group's already-resolved branch.
+Delegates to **Create or Reuse a Container** (`${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md`) exactly as before — `EXEC_ROOT`/`EXEC_BRANCH`/`CONTAINER_BASE` set per group, `$WORKTREE_MGR create` called once per unique toplevel. `CONTAINER_BASE` is resolved per group by `resolve-base-branch` — the same shared primitive `cmd_setup_branch` and Flat Container Mode both use (`_resolve_branch_base` in `aimi-cli.sh`) — called with `--project "$GROUP_ROOT"` so each participating repository's base is decided against **its own** checked-out state, and `--default-branch "$GROUP_DEFAULT"` so the fallback is that group's own freshly-detected default rather than the single main-root `$DEFAULT_BRANCH`. This is what keeps a repository whose checkout carries unmerged work from silently losing that stacking: the resolver returns `stacked-on-current` for it while a sibling repository sitting clean on its own default returns `default-branch`, in the same loop, each correct for itself. `BASE_BRANCH` is threaded through as `--base` when Step 0's `--base` flag or Step 1.6's picker set one, applying that explicit choice uniformly across every participating repository. `CONTAINER_BASE_REASON` is rendered verbatim in the per-group report line above, never paraphrased. A per-group `detect-default-branch` failure is fatal for that group only — the claim is released and the run stops, exactly as Step 0.9 Pass 1 does at its own call site (execute.md:346-350/:377) — never falling back to another group's already-resolved branch.
 
 **With exactly one group** — today's single-repo, non-split, every-story-project-less case — also alias the scalar for byte-identical backward compatibility with **Phase-Mode Paired Split** and any other unmigrated scalar consumer:
 
@@ -1980,21 +2021,33 @@ fi
 ```
 
 ```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+BASE_BRANCH="[the value Step 0's Parse --base Override echoed, or empty when --base was absent]"
 if [ -n "$BASE_BRANCH" ]; then
-  CONTAINER_BASE="$BASE_BRANCH"
+  BASE_JSON=$($AIMI_CLI resolve-base-branch "$BRANCH_NAME" --default-branch "$DEFAULT_BRANCH" --base "$BASE_BRANCH")
 else
-  CONTAINER_BASE="$DEFAULT_BRANCH"
+  BASE_JSON=$($AIMI_CLI resolve-base-branch "$BRANCH_NAME" --default-branch "$DEFAULT_BRANCH")
 fi
+CONTAINER_BASE=$(echo "$BASE_JSON" | jq -r '.base')
+CONTAINER_BASE_REASON=$(echo "$BASE_JSON" | jq -r '.reason')
 ```
 
-Delegate to **Create or Reuse a Container** with `EXEC_ROOT="$AIMI_ROOT"`, `EXEC_BRANCH="$BRANCH_NAME"`, and `CONTAINER_BASE` as just computed (`BASE_BRANCH` when Step 1.6 set one, otherwise `DEFAULT_BRANCH` — the exact same base-selection rule each phase container's own group uses; see Create Phase Containers Per Project Group). The path is deterministic given `AIMI_ROOT` and `[branchName]`:
+Delegate to **Create or Reuse a Container** with `EXEC_ROOT="$AIMI_ROOT"`, `EXEC_BRANCH="$BRANCH_NAME"`, and `CONTAINER_BASE` as just resolved by `resolve-base-branch` — the same shared primitive `cmd_setup_branch` uses (`_resolve_branch_base` in `aimi-cli.sh`), called here with `--project` omitted because this path already runs with CWD at `AIMI_ROOT`, a git repository (Flat Container Mode's own skip condition above guarantees this). `BASE_BRANCH` is passed through as `--base` when Step 1.6 set one, so an explicit user choice is honored verbatim; when unset, the resolver applies its own stacked-on-current/default-branch heuristic — the same rule Step 1.6's own picker would have used for this repo. The path is deterministic given `AIMI_ROOT` and `[branchName]`:
 
 ```bash
 FEATURE_CONTAINER_PATH="$AIMI_ROOT/.worktrees/$BRANCH_NAME"
 CONTAINER_PATHS["DEFAULT"]="$FEATURE_CONTAINER_PATH"
+CONTAINER_BASE_MAP["DEFAULT"]="$CONTAINER_BASE"
+CONTAINER_BASE_REASON_MAP["DEFAULT"]="$CONTAINER_BASE_REASON"
 ```
 
-`CONTAINER_PATHS["DEFAULT"]` aliases the single-repo container into the same map Per-Project Branch Setup populates below, under the `"DEFAULT"` key Multi-Repo Handling's grouping pattern already uses for stories without a `project` field — so Step 4's wave loop can look up `CONTAINER_PATHS[group_key]` uniformly regardless of single-repo or multi-repo layout.
+`CONTAINER_PATHS["DEFAULT"]` aliases the single-repo container into the same map Per-Project Branch Setup populates below, under the `"DEFAULT"` key Multi-Repo Handling's grouping pattern already uses for stories without a `project` field — so Step 4's wave loop can look up `CONTAINER_PATHS[group_key]` uniformly regardless of single-repo or multi-repo layout. `CONTAINER_BASE_MAP["DEFAULT"]`/`CONTAINER_BASE_REASON_MAP["DEFAULT"]` mirror it for the resolved base and its reason, keyed identically, so anything downstream that needs to report or reuse the base a project group's container was actually cut from can look it up the same way.
+
+Report — on the create call above returning zero, whether it created `$FEATURE_CONTAINER_PATH` fresh or reused it silently (see Create or Reuse a Container's reuse contract):
+```
+Container for [branchName] ready — branched from [CONTAINER_BASE] ([CONTAINER_BASE_REASON])
+```
 
 Because this subsection's own `$WORKTREE_MGR create` call is the branch-creating operation for this run, `### Main Repo Branch Setup` below is skipped whenever this subsection applies — see its skip condition.
 
@@ -2005,10 +2058,11 @@ Because this subsection's own `$WORKTREE_MGR create` call is the branch-creating
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+BASE_BRANCH="[the value Step 0's Parse --base Override echoed, or empty when --base was absent]"
 if [ -n "$BASE_BRANCH" ]; then
-  BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $DEFAULT_BRANCH --base $BASE_BRANCH)
+  BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch "$DEFAULT_BRANCH" --base "$BASE_BRANCH")
 else
-  BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch $DEFAULT_BRANCH)
+  BRANCH_JSON=$($AIMI_CLI setup-branch [branchName] --default-branch "$DEFAULT_BRANCH")
 fi
 ```
 
@@ -2046,10 +2100,11 @@ Run the following sub-steps when any story has a non-null `project` field, or wh
 
    **When `PHASE_MODE` is false and `CONTAINER_MODE` is false** (`EXECUTION_MODE` inline or absent): set up the branch directly — unchanged for an inline-mode run:
    ```bash
+   BASE_BRANCH="[the value Step 0's Parse --base Override echoed, or empty when --base was absent]"
    if [ -n "$BASE_BRANCH" ]; then
-     PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch "$BRANCH_NAME" --default-branch $PROJECT_DEFAULT --project [resolved_project_path] --base $BASE_BRANCH)
+     PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch "$BRANCH_NAME" --default-branch "$PROJECT_DEFAULT" --project [resolved_project_path] --base "$BASE_BRANCH")
    else
-     PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch "$BRANCH_NAME" --default-branch $PROJECT_DEFAULT --project [resolved_project_path])
+     PROJECT_BRANCH_JSON=$($AIMI_CLI setup-branch "$BRANCH_NAME" --default-branch "$PROJECT_DEFAULT" --project [resolved_project_path])
    fi
    ```
    Extract the action from the JSON output and report:
@@ -2059,7 +2114,7 @@ Run the following sub-steps when any story has a non-null `project` field, or wh
 
    **When `CONTAINER_MODE` is true:**
 
-   Pure multi-repo layout (`AIMI_ROOT_IS_GIT_REPO=false`) skips Step 1.6 entirely and therefore never sets `INTERACTIVE_MODE`, which downstream picker/agent-mode gates elsewhere in this document still expect to be set. Re-resolve it here when still unset:
+   `INTERACTIVE_MODE` should already be set by Step 1.6 by this point, but re-resolve here when still unset regardless — a cheap, idempotent safety net so no per-repo prompt below is ever evaluated before `INTERACTIVE_MODE` exists:
    ```bash
    AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
    : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
@@ -2068,25 +2123,60 @@ Run the following sub-steps when any story has a non-null `project` field, or wh
    fi
    ```
 
+   Resolve this project group's own base — the same shared primitive Flat Container Mode uses above, called here with `--project` so it evaluates *this* repo's checked-out state (current branch, unmerged commits, existing local/remote target) instead of AIMI_ROOT's:
    ```bash
+   AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+   : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+   BASE_BRANCH="[the value Step 0's Parse --base Override echoed, or empty when --base was absent]"
    if [ -n "$BASE_BRANCH" ]; then
-     CONTAINER_BASE="$BASE_BRANCH"
+     PROJECT_BASE_JSON=$($AIMI_CLI resolve-base-branch "$BRANCH_NAME" --project [resolved_project_path] --default-branch "$PROJECT_DEFAULT" --base "$BASE_BRANCH")
    else
-     CONTAINER_BASE="$PROJECT_DEFAULT"
+     PROJECT_BASE_JSON=$($AIMI_CLI resolve-base-branch "$BRANCH_NAME" --project [resolved_project_path] --default-branch "$PROJECT_DEFAULT")
    fi
+   CONTAINER_BASE=$(echo "$PROJECT_BASE_JSON" | jq -r '.base')
+   CONTAINER_BASE_REASON=$(echo "$PROJECT_BASE_JSON" | jq -r '.reason')
+   PROMPT_NEEDED=$(echo "$PROJECT_BASE_JSON" | jq -r '.promptNeeded')
+   CURRENT_BRANCH=$(echo "$PROJECT_BASE_JSON" | jq -r '.currentBranch')
    ```
 
-   Delegate to **Create or Reuse a Container** with `EXEC_ROOT=[resolved_project_path]`, `EXEC_BRANCH="$BRANCH_NAME"`, and `CONTAINER_BASE` as just computed (`BASE_BRANCH` when Step 1.6 set one, otherwise `PROJECT_DEFAULT`) — producing one container per project group at `[resolved_project_path]/.worktrees/[branchName]`, never one container spanning multiple project roots:
+   `PROMPT_NEEDED` is `true` only when this repo's current branch carries unmerged work relative to its own default branch — the per-repo analogue of Step 1.6's four gating conditions, now evaluated once inside `resolve-base-branch` itself. When it is `false`, skip straight to the delegation below: no prompt, no log line, `CONTAINER_BASE`/`CONTAINER_BASE_REASON` stand exactly as resolved.
+
+   **When `PROMPT_NEEDED` is `true` and `INTERACTIVE_MODE=picker`:** use **AskUserQuestion**, naming this repo so a multi-repo run's separate prompts stay distinguishable:
+   ```
+   Which branch should be used as the base for [branchName] in [project_path] (currently on [current_branch])?
+
+   A — Stack on current branch ([current_branch])
+   B — Use default branch ([PROJECT_DEFAULT])
+   Other — Specify a base branch
+   ```
+   - **Option A:** keep `CONTAINER_BASE`/`CONTAINER_BASE_REASON` exactly as already resolved above — `PROMPT_NEEDED=true` already means `resolve-base-branch` chose to stack on `[current_branch]`.
+   - **Option B:** `CONTAINER_BASE="$PROJECT_DEFAULT"`, `CONTAINER_BASE_REASON="default-branch"`.
+   - **Option Other:** collect the free-form branch name the user typed. Validate it against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$`. If it does not match, report:
+     ```
+     Invalid branch name. Must match ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$
+     ```
+     and STOP. If valid, `CONTAINER_BASE=<user-input>`, `CONTAINER_BASE_REASON="explicit-base"`.
+
+   **When `PROMPT_NEEDED` is `true` and `INTERACTIVE_MODE=agent`:** no prompt — use `CONTAINER_BASE`/`CONTAINER_BASE_REASON` exactly as already resolved (this is what keeps container mode from silently discarding an unmerged current branch the way the removed multi-repo skip guard used to) and log one line per repo:
+   ```
+   agent-mode: base auto-resolved [CONTAINER_BASE] ([CONTAINER_BASE_REASON]) — project: [project_path]
+   ```
+
+   *Agent-mode fallback: if `INTERACTIVE_MODE=agent` and `PROMPT_NEEDED=true`, keep `CONTAINER_BASE`/`CONTAINER_BASE_REASON` as resolved and log `agent-mode: base auto-resolved [CONTAINER_BASE] ([CONTAINER_BASE_REASON]) — project: [project_path]`.*
+
+   Delegate to **Create or Reuse a Container** with `EXEC_ROOT=[resolved_project_path]`, `EXEC_BRANCH="$BRANCH_NAME"`, and `CONTAINER_BASE` as just resolved (and possibly overridden by the picker above) — producing one container per project group at `[resolved_project_path]/.worktrees/[branchName]`, never one container spanning multiple project roots:
 
    ```bash
    CONTAINER_PATHS[project_path]="[resolved_project_path]/.worktrees/$BRANCH_NAME"
+   CONTAINER_BASE_MAP[project_path]="$CONTAINER_BASE"
+   CONTAINER_BASE_REASON_MAP[project_path]="$CONTAINER_BASE_REASON"
    ```
 
-   `[project_path]` here is the group_key from Multi-Repo Handling's grouping pattern (the raw `story.project` value being iterated) — the map is keyed by `project_path`/`group_key`, not by the resolved absolute path, exactly like `PROJECT_GUIDELINES_MAP[project_path]` above and the Report line below.
+   `[project_path]` here is the group_key from Multi-Repo Handling's grouping pattern (the raw `story.project` value being iterated) — the map is keyed by `project_path`/`group_key`, not by the resolved absolute path, exactly like `PROJECT_GUIDELINES_MAP[project_path]` above and the Report line below. `CONTAINER_BASE_MAP`/`CONTAINER_BASE_REASON_MAP` mirror `CONTAINER_PATHS`'s keying for the resolved base and its reason.
 
    Report:
    ```
-   Container for [branchName] ready in project: [project_path] (CONTAINER_PATHS[project_path])
+   Container for [branchName] ready in project: [project_path] (CONTAINER_PATHS[project_path]) — branched from [CONTAINER_BASE] ([CONTAINER_BASE_REASON])
    ```
 
 ## Step 3: Check for Pending Stories
