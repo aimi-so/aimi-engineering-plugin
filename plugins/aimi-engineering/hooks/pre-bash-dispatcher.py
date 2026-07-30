@@ -16,32 +16,40 @@ from hook_utils import safe_hook, effective_cwd, load_aimi_config, deny  # noqa:
 # Module-level pre-compiled regexes — compiled once on import
 # ---------------------------------------------------------------------------
 
-# Command-position anchor: a `git commit` (or `git -C ... commit`) token must
-# appear at the start of a shell "statement" — string start, or immediately
-# after `;`, `&&`, `||`, `|`, or a newline — rather than matching anywhere in
-# the command text (e.g. inside a grep/echo argument or a heredoc body).
+# Command-position anchor: a `git commit` (or `git -C ... commit`) token, or a
+# `git worktree add` (or `git -C ... worktree add`) token, must appear at the
+# start of a shell "statement" — string start, or immediately after `;`,
+# `&&`, `||`, `|`, or a newline — rather than matching anywhere in the
+# command text (e.g. inside a grep/echo argument or a heredoc body).
 # Each lookbehind branch below is fixed-width, so it is valid under Python's
 # re module. No re.MULTILINE flag: the newline case is handled as a literal
 # lookbehind alternative, not via `^`/`$` line semantics.
 #
 # Residual risk (accepted, documented here rather than fixed): a real commit
-# invocation nested inside `bash -c 'git commit'`, a subshell like
+# or worktree-add invocation nested inside `bash -c '...'`, a subshell like
 # `(git commit)`, command substitution (e.g. `$(git commit)`), a single `&`
-# backgrounding a commit, or an `if`/`then` branch containing a commit is not
+# backgrounding the command, or an `if`/`then` branch containing it is not
 # preceded by any of these anchors and will slip past detection. The old
-# unanchored regex caught these shapes only "by accident" — while also
+# unanchored regexes caught these shapes only "by accident" — while also
 # false-positiving on mere mentions of the phrase. Closing this gap would
 # require quote/paren-aware shell parsing, which is out of scope here.
 _CMD_START = r"(?:(?<=^)|(?<=;)|(?<=&&)|(?<=\|\|)|(?<=\|)|(?<=\n))\s*"
 
 _GIT_COMMIT_RE = re.compile(_CMD_START + r"\bgit\s+commit\b")
-_GIT_WORKTREE_ADD_RE = re.compile(r"\bgit\s+worktree\s+add\b")
+_GIT_WORKTREE_ADD_RE = re.compile(_CMD_START + r"git\s+worktree\s+add\b")
 
 # Used by handle_default_branch for git -C variant. Path token accepts a
 # double-quoted path, a single-quoted path, or a bare non-whitespace token so
 # `git -C "/path with spaces" commit` is detected too.
 _GIT_C_COMMIT_RE = re.compile(
     _CMD_START + r"\bgit\s+-C\s+(?:\"[^\"]+\"|'[^']+'|\S+)\s+commit\b"
+)
+
+# Used by handle_worktree_budget for git -C variant. Same quoted-or-bare path
+# token as _GIT_C_COMMIT_RE, so `git -C "/path with spaces" worktree add` is
+# detected too.
+_GIT_C_WORKTREE_ADD_RE = re.compile(
+    _CMD_START + r"\bgit\s+-C\s+(?:\"[^\"]+\"|'[^']+'|\S+)\s+worktree\s+add\b"
 )
 
 # Heredoc opener: `<<` or `<<-` followed (after optional whitespace) by a
@@ -354,8 +362,11 @@ def handle_worktree_budget(command: str, tool_input: dict) -> None:
     Mirrors guard-worktree-budget.py logic.  Calls deny() + prints + exits on
     block; calls _allow() (sys.exit(0)) to allow.
     """
-    # Fast-path: only intercept `git worktree add` commands.
-    if not _GIT_WORKTREE_ADD_RE.search(command):
+    # Fast-path: only intercept `git worktree add` commands (heredoc bodies
+    # are stripped from the detection copy; the raw `command` below, passed
+    # to effective_cwd and the rest of this function, is untouched).
+    detect = _strip_heredocs(command)
+    if not (_GIT_WORKTREE_ADD_RE.search(detect) or _GIT_C_WORKTREE_ADD_RE.search(detect)):
         _allow()
 
     # Bypass env var.
@@ -410,7 +421,7 @@ def main(tool_input: dict) -> None:
         handle_shell_true(command, tool_input.get("tool_input", {}))
         sys.exit(0)
 
-    if _GIT_WORKTREE_ADD_RE.search(command):
+    if _GIT_WORKTREE_ADD_RE.search(detect) or _GIT_C_WORKTREE_ADD_RE.search(detect):
         handle_worktree_budget(command, tool_input.get("tool_input", {}))
         sys.exit(0)
 

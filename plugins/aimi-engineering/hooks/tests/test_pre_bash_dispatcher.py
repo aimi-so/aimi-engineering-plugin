@@ -340,3 +340,63 @@ def test_main_denies_mixed_mention_and_real_commit_on_protected_branch():
 def test_neither_commit_regex_has_multiline_flag():
     assert not (dispatcher._GIT_COMMIT_RE.flags & re.MULTILINE)
     assert not (dispatcher._GIT_C_COMMIT_RE.flags & re.MULTILINE)
+
+
+# ---------------------------------------------------------------------------
+# US-002: command-position anchoring parity for worktree-add (issue #82) --
+# full main() path routing regression
+# ---------------------------------------------------------------------------
+
+def test_dispatcher_routes_git_C_worktree_add_to_budget_handler(tmp_path, monkeypatch):
+    """Confirms the L320 routing fix: `git -C <path> worktree add` must reach
+    handle_worktree_budget through the real main() entry point (previously
+    only _GIT_WORKTREE_ADD_RE was checked there, and it does not match the -C
+    form, so this command was silently allowed straight through without ever
+    counting active worktrees)."""
+    tasks_dir = tmp_path / ".aimi" / "tasks"
+    tasks_dir.mkdir(parents=True)
+    data = {
+        "schemaVersion": "3.3",
+        "metadata": {"title": "T", "type": "feature", "branchName": "feat/x", "maxConcurrency": 2},
+        "userStories": [],
+    }
+    (tasks_dir / "2026-06-09-test-tasks.json").write_text(json.dumps(data))
+
+    monkeypatch.delenv("AIMI_WORKTREE_BUDGET_GUARD", raising=False)
+
+    # Simulate 2 active worktrees (= budget exhausted at max=2)
+    def fake_run(args, **kwargs):
+        if "worktree" in args and "list" in args:
+            output = (
+                f"worktree {tmp_path}\nHEAD aaaa\nbranch refs/heads/main\n\n"
+                f"worktree {tmp_path}/wt1\nHEAD bbbb\nbranch refs/heads/feat/wt1\n\n"
+                f"worktree {tmp_path}/wt2\nHEAD cccc\nbranch refs/heads/feat/wt2\n"
+            )
+            return MagicMock(returncode=0, stdout=output)
+        return MagicMock(returncode=0, stdout="")
+
+    inner = {"command": f"git -C {tmp_path} worktree add ../new-wt feat/y"}
+    event = {"tool_input": inner}
+    stdin_data = json.dumps(event)
+
+    captured = []
+
+    with (
+        patch("sys.stdin", io.StringIO(stdin_data)),
+        patch("subprocess.run", side_effect=fake_run),
+        patch("builtins.print", side_effect=captured.append),
+    ):
+        try:
+            dispatcher.main()
+        except SystemExit:
+            pass
+
+    assert captured, "Expected deny from worktree-budget handler via the git -C main() routing fix"
+    deny_data = json.loads(captured[0])
+    assert deny_data["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "2/2" in deny_data["hookSpecificOutput"]["userMessage"]
+
+
+def test_neither_worktree_add_regex_has_multiline_flag():
+    assert not (dispatcher._GIT_WORKTREE_ADD_RE.flags & re.MULTILINE)
+    assert not (dispatcher._GIT_C_WORKTREE_ADD_RE.flags & re.MULTILINE)
