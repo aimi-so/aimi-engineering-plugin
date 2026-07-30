@@ -16163,6 +16163,401 @@ test_estimate_payload_breakdown_sums_multiple_paths() {
 }
 
 # ============================================================================
+# Detect Forge Tests (US-001)
+# ============================================================================
+# detect-forge is the FOUNDATIONAL CONTRACT every later forge-* verb in this
+# phase calls -- its output shape {forge, host, remote, remoteUrl, source}
+# is consumed verbatim downstream. Every fixture here is fully offline (no
+# bare repo, no clone, no push, no `git remote show`) following the
+# setup_default_branch_offline_fixture precedent (test-aimi-cli.sh:6412):
+# `git remote add` never dials the URL it is given.
+
+# Creates an isolated git repo (own temp dir) with a single commit and zero
+# remotes, then adds one remote per name/url pair passed as arguments
+# (name1 url1 [name2 url2 ...]) via `git remote add` -- never dialed, so
+# this fixture is fast and fully offline. Sets DETECT_FORGE_FIXTURE_DIR and
+# pushd's into it; caller must popd + teardown_detect_forge_fixture.
+setup_detect_forge_fixture() {
+  DETECT_FORGE_FIXTURE_DIR=$(mktemp -d)
+
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+  git init >/dev/null 2>&1
+  git checkout -b main >/dev/null 2>&1
+  echo "init" > README.md
+  git add README.md
+  git commit -m "Initial commit" >/dev/null 2>&1
+
+  while [ $# -ge 2 ]; do
+    git remote add "$1" "$2"
+    shift 2
+  done
+
+  # Create .aimi/ directory so find_aimi_root succeeds
+  mkdir -p .aimi/tasks
+
+  popd >/dev/null
+}
+
+# Removes the temp directory created by setup_detect_forge_fixture
+teardown_detect_forge_fixture() {
+  rm -rf "$DETECT_FORGE_FIXTURE_DIR"
+  unset DETECT_FORGE_FIXTURE_DIR
+}
+
+# Creates a non-git AIMI_ROOT directory (own temp dir, with its own
+# .aimi/tasks so find_aimi_root succeeds) containing two sibling child git
+# repos, repo-a (origin -> github.com) and repo-b (origin -> gitlab.com) --
+# mirrors the documented Multi-Repo Execution Layout (AIMI_ROOT is a plain
+# non-git parent folder holding one git repository per subfolder). Used to
+# prove --project resolves each repo's own forge without requiring the
+# caller's cwd to already be inside it, and without leaking one repo's
+# result into the other's (aimi-cli.sh:1636-1659's --project support).
+setup_detect_forge_multirepo_fixture() {
+  DETECT_FORGE_MULTIREPO_DIR=$(mktemp -d)
+  mkdir -p "$DETECT_FORGE_MULTIREPO_DIR/.aimi/tasks"
+
+  local repo
+  for repo in repo-a repo-b; do
+    mkdir -p "$DETECT_FORGE_MULTIREPO_DIR/$repo"
+    pushd "$DETECT_FORGE_MULTIREPO_DIR/$repo" >/dev/null
+    git init >/dev/null 2>&1
+    git checkout -b main >/dev/null 2>&1
+    echo "init" > README.md
+    git add README.md
+    git commit -m "Initial commit" >/dev/null 2>&1
+    popd >/dev/null
+  done
+
+  git -C "$DETECT_FORGE_MULTIREPO_DIR/repo-a" remote add origin https://github.com/a/repo.git
+  git -C "$DETECT_FORGE_MULTIREPO_DIR/repo-b" remote add origin https://gitlab.com/b/repo.git
+}
+
+# Removes the temp directory created by setup_detect_forge_multirepo_fixture
+teardown_detect_forge_multirepo_fixture() {
+  rm -rf "$DETECT_FORGE_MULTIREPO_DIR"
+  unset DETECT_FORGE_MULTIREPO_DIR
+}
+
+test_detect_forge_known_hosts_ssh_and_https() {
+  echo ""
+  echo "=== detect-forge: known hosts resolve their adapter (ssh + https forms) ==="
+
+  setup_detect_forge_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  # Six fixtures covering the three known adapters in both URL forms; the
+  # gitea adapter's two forms deliberately use its two distinct known hosts
+  # (gitea.com and codeberg.org) so both are exercised.
+  local cases=(
+    "git@github.com:owner/repo.git|github|github.com"
+    "https://github.com/owner/repo.git|github|github.com"
+    "git@gitlab.com:owner/repo.git|gitlab|gitlab.com"
+    "https://gitlab.com/owner/repo.git|gitlab|gitlab.com"
+    "git@gitea.com:owner/repo.git|gitea|gitea.com"
+    "https://codeberg.org/owner/repo.git|gitea|codeberg.org"
+  )
+
+  local case_entry url expected_forge expected_host stdout exit_code
+  for case_entry in "${cases[@]}"; do
+    IFS='|' read -r url expected_forge expected_host <<< "$case_entry"
+    git remote add origin "$url"
+    stdout=$("$CLI" detect-forge) && exit_code=0 || exit_code=$?
+    assert_exit_code "0" "$exit_code" "detect-forge known host ($url): exit code"
+    assert_eq "$expected_forge" "$(echo "$stdout" | jq -r '.forge')" "detect-forge known host ($url): forge"
+    assert_eq "$expected_host" "$(echo "$stdout" | jq -r '.host')" "detect-forge known host ($url): host"
+    assert_eq "origin" "$(echo "$stdout" | jq -r '.remote')" "detect-forge known host ($url): remote"
+    assert_eq "remote" "$(echo "$stdout" | jq -r '.source')" "detect-forge known host ($url): source"
+    git remote remove origin
+  done
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_detect_forge_subdomain_and_lookalike_boundary() {
+  echo ""
+  echo "=== detect-forge: ssh.github.com subdomain rule; lookalike hosts do NOT match ==="
+
+  setup_detect_forge_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local stdout
+
+  # git@ssh.github.com:owner/repo.git -- GitHub's documented alternate SSH
+  # hostname, a genuine subdomain of github.com.
+  git remote add origin git@ssh.github.com:owner/repo.git
+  stdout=$("$CLI" detect-forge)
+  assert_eq "github" "$(echo "$stdout" | jq -r '.forge')" "detect-forge subdomain: ssh.github.com resolves github"
+  assert_eq "ssh.github.com" "$(echo "$stdout" | jq -r '.host')" "detect-forge subdomain: host preserved (not truncated to github.com)"
+  git remote remove origin
+
+  # notgithub.com -- shares the "github.com" suffix as a substring but is
+  # NOT github.com or a subdomain of it. Pins the boundary against a naive
+  # string-contains matcher.
+  git remote add origin https://notgithub.com/owner/repo.git
+  stdout=$("$CLI" detect-forge)
+  assert_eq "unknown" "$(echo "$stdout" | jq -r '.forge')" "detect-forge lookalike: notgithub.com does NOT match github"
+  git remote remove origin
+
+  # github.com.evil.example -- contains "github.com" as a prefix, not a
+  # suffix; pins the same boundary from the other direction.
+  git remote add origin https://github.com.evil.example/owner/repo.git
+  stdout=$("$CLI" detect-forge)
+  assert_eq "unknown" "$(echo "$stdout" | jq -r '.forge')" "detect-forge lookalike: github.com.evil.example does NOT match github"
+  git remote remove origin
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_detect_forge_unrecognized_hosts_are_unknown() {
+  echo ""
+  echo "=== detect-forge: self-hosted generic host and GHES-shaped host both resolve unknown ==="
+
+  setup_detect_forge_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local stdout exit_code
+
+  git remote add origin https://git.example-company.com/owner/repo.git
+  stdout=$("$CLI" detect-forge) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "detect-forge unrecognized: generic self-hosted host -- exit code"
+  assert_eq "unknown" "$(echo "$stdout" | jq -r '.forge')" "detect-forge unrecognized: generic self-hosted host -- forge unknown"
+  git remote remove origin
+
+  # A GitHub-Enterprise-Server-shaped origin -- deliberately NOT a
+  # github.com subdomain -- must never be guessed as "github" from the
+  # literal substring in its hostname.
+  git remote add origin https://github.example-corp.com/owner/repo.git
+  stdout=$("$CLI" detect-forge) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "detect-forge unrecognized: GHES-shaped host -- exit code"
+  assert_eq "unknown" "$(echo "$stdout" | jq -r '.forge')" "detect-forge unrecognized: GHES-shaped host -- forge unknown (never guessed github)"
+  git remote remove origin
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_detect_forge_alternate_port_ssh_and_scp_colon_boundary() {
+  echo ""
+  echo "=== detect-forge: alternate-port ssh:// vs scp-like colon -- never confused ==="
+
+  setup_detect_forge_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local stdout
+
+  # Explicit ssh:// scheme, alternate port -- the trailing :2222 IS a port
+  # and must be stripped from the host.
+  git remote add origin ssh://git@github.com:2222/owner/repo.git
+  stdout=$("$CLI" detect-forge)
+  assert_eq "github.com" "$(echo "$stdout" | jq -r '.host')" "detect-forge alternate port: host is github.com (port stripped)"
+  assert_eq "github" "$(echo "$stdout" | jq -r '.forge')" "detect-forge alternate port: forge is github"
+  git remote remove origin
+
+  # Companion negative: git's scp-like colon (no "://") is a host/path
+  # separator, NEVER a port -- must not be misparsed as host "github.com:owner".
+  git remote add origin git@github.com:owner/repo.git
+  stdout=$("$CLI" detect-forge)
+  assert_eq "github.com" "$(echo "$stdout" | jq -r '.host')" "detect-forge scp-like: host is exactly github.com (not github.com:owner)"
+  git remote remove origin
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_detect_forge_origin_wins_over_disagreement() {
+  echo ""
+  echo "=== detect-forge: origin always wins, even over a disagreeing second remote ==="
+
+  setup_detect_forge_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  git remote add origin https://github.com/owner/repo.git
+  git remote add upstream https://gitlab.com/owner/repo.git
+
+  local stdout
+  stdout=$("$CLI" detect-forge)
+  assert_eq "github" "$(echo "$stdout" | jq -r '.forge')" "detect-forge precedence: origin wins over disagreeing upstream -- forge"
+  assert_eq "origin" "$(echo "$stdout" | jq -r '.remote')" "detect-forge precedence: origin wins -- remote name"
+  assert_eq "remote" "$(echo "$stdout" | jq -r '.source')" "detect-forge precedence: origin wins -- source"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_detect_forge_no_origin_precedence() {
+  echo ""
+  echo "=== detect-forge: no-origin precedence -- single remote, ambiguous, zero remotes ==="
+
+  setup_detect_forge_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local stdout
+
+  # (a) exactly one remote, not named origin -- that remote's URL is used.
+  git remote add upstream https://gitlab.com/owner/repo.git
+  stdout=$("$CLI" detect-forge)
+  assert_eq "gitlab" "$(echo "$stdout" | jq -r '.forge')" "detect-forge no-origin: single non-origin remote -- forge"
+  assert_eq "upstream" "$(echo "$stdout" | jq -r '.remote')" "detect-forge no-origin: single non-origin remote -- remote name"
+  assert_eq "remote" "$(echo "$stdout" | jq -r '.source')" "detect-forge no-origin: single non-origin remote -- source"
+  git remote remove upstream
+
+  # (b) two non-origin remotes disagreeing -- ambiguous, never guessed from
+  # `git remote`'s listing order.
+  git remote add upstream https://gitlab.com/owner/repo.git
+  git remote add fork https://gitea.com/owner/repo.git
+  stdout=$("$CLI" detect-forge)
+  assert_eq "unknown" "$(echo "$stdout" | jq -r '.forge')" "detect-forge no-origin: ambiguous remotes -- forge unknown"
+  assert_eq "ambiguous-remotes" "$(echo "$stdout" | jq -r '.source')" "detect-forge no-origin: ambiguous remotes -- source"
+  assert_eq "null" "$(echo "$stdout" | jq -r '.remote')" "detect-forge no-origin: ambiguous remotes -- remote is null"
+  git remote remove upstream
+  git remote remove fork
+
+  # (c) zero remotes configured.
+  stdout=$("$CLI" detect-forge)
+  assert_eq "unknown" "$(echo "$stdout" | jq -r '.forge')" "detect-forge no-origin: zero remotes -- forge unknown"
+  assert_eq "no-remote" "$(echo "$stdout" | jq -r '.source')" "detect-forge no-origin: zero remotes -- source"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_detect_forge_override_valid_and_invalid() {
+  echo ""
+  echo "=== detect-forge: AIMI_FORGE_TYPE override -- valid short-circuits, invalid errors ==="
+
+  setup_detect_forge_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+  git remote add origin https://github.com/owner/repo.git
+
+  local stdout stderr_file stderr_output exit_code
+
+  stdout=$(AIMI_FORGE_TYPE=gitlab "$CLI" detect-forge)
+  assert_eq "gitlab" "$(echo "$stdout" | jq -r '.forge')" "detect-forge override: valid value wins over actual github origin"
+  assert_eq "null" "$(echo "$stdout" | jq -r '.host')" "detect-forge override: host is null"
+  assert_eq "null" "$(echo "$stdout" | jq -r '.remote')" "detect-forge override: remote is null"
+  assert_eq "null" "$(echo "$stdout" | jq -r '.remoteUrl')" "detect-forge override: remoteUrl is null"
+  assert_eq "override" "$(echo "$stdout" | jq -r '.source')" "detect-forge override: source is override"
+
+  stderr_file=$(mktemp)
+  stdout=$(AIMI_FORGE_TYPE=bitbucket "$CLI" detect-forge 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_output=$(cat "$stderr_file")
+  assert_exit_code "1" "$exit_code" "detect-forge override: invalid value -- exit code"
+  assert_stderr_contains "Error:" "$stderr_output" "detect-forge override: invalid value -- Error-prefixed stderr"
+  assert_stderr_contains "bitbucket" "$stderr_output" "detect-forge override: invalid value -- names the bad value"
+  assert_eq "" "$stdout" "detect-forge override: invalid value -- stdout empty"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_detect_forge_credential_redaction() {
+  echo ""
+  echo "=== detect-forge: embedded userinfo credentials are redacted from remoteUrl ==="
+
+  setup_detect_forge_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  git remote add origin https://x-access-token:ghp_secret_token@github.com/owner/repo.git
+  local stdout
+  stdout=$("$CLI" detect-forge)
+  assert_eq "github" "$(echo "$stdout" | jq -r '.forge')" "detect-forge redaction: forge classification unaffected"
+  assert_eq "github.com" "$(echo "$stdout" | jq -r '.host')" "detect-forge redaction: host classification unaffected"
+  assert_eq "https://github.com/owner/repo.git" "$(echo "$stdout" | jq -r '.remoteUrl')" "detect-forge redaction: remoteUrl has userinfo stripped"
+
+  if printf '%s' "$stdout" | grep -q "ghp_secret_token"; then
+    echo -e "${RED}✗${NC} detect-forge redaction: secret must never round-trip through stdout"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} detect-forge redaction: secret does not round-trip through stdout"
+    ((TESTS_PASSED++))
+  fi
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_detect_forge_project_cross_repo_isolation() {
+  echo ""
+  echo "=== detect-forge: --project resolves each sibling repo independently, no leakage, no cache ==="
+
+  setup_detect_forge_multirepo_fixture
+  pushd "$DETECT_FORGE_MULTIREPO_DIR" >/dev/null
+
+  local files_before files_after stdout_a stdout_b
+  files_before=$(find "$DETECT_FORGE_MULTIREPO_DIR/.aimi" -type f | sort)
+
+  # cwd is the AIMI_ROOT itself -- NOT inside repo-a or repo-b -- proving
+  # --project resolves the target repo without requiring the caller's cwd
+  # to already be inside it.
+  stdout_a=$("$CLI" detect-forge --project "$DETECT_FORGE_MULTIREPO_DIR/repo-a")
+  stdout_b=$("$CLI" detect-forge --project "$DETECT_FORGE_MULTIREPO_DIR/repo-b")
+
+  assert_eq "github" "$(echo "$stdout_a" | jq -r '.forge')" "detect-forge --project: repo-a resolves its own forge (github)"
+  assert_eq "gitlab" "$(echo "$stdout_b" | jq -r '.forge')" "detect-forge --project: repo-b resolves its own forge (gitlab), no leakage from repo-a"
+
+  files_after=$(find "$DETECT_FORGE_MULTIREPO_DIR/.aimi" -type f | sort)
+  assert_eq "$files_before" "$files_after" "detect-forge --project: no new file written under .aimi/ (never cached, unlike _default_branch_cache_key)"
+
+  popd >/dev/null
+  teardown_detect_forge_multirepo_fixture
+}
+
+test_detect_forge_never_dials_remote_or_caches() {
+  echo ""
+  echo "=== detect-forge: source never calls 'git remote show' or read_state/write_state ==="
+
+  # Comment lines are excluded -- the section's own header comments name
+  # "git remote show" and "read_state/write_state" as the things NOT to do,
+  # which would otherwise false-positive this check against its own prose.
+  local forge_block
+  forge_block=$(sed -n '/^# Forge Detection (detect-forge)/,/^# Normalize a single %D decoration token/p' "$CLI" | grep -v '^\s*#')
+
+  if printf '%s' "$forge_block" | grep -q "remote show"; then
+    echo -e "${RED}✗${NC} detect-forge must never call 'git remote show' (network dial)"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} detect-forge never calls 'git remote show'"
+    ((TESTS_PASSED++))
+  fi
+
+  if printf '%s' "$forge_block" | grep -qE "read_state|write_state"; then
+    echo -e "${RED}✗${NC} detect-forge must never call read_state/write_state (per-repo, never cached)"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} detect-forge never touches read_state/write_state"
+    ((TESTS_PASSED++))
+  fi
+}
+
+test_detect_forge_registered_in_help_and_dispatcher() {
+  echo ""
+  echo "=== detect-forge: listed in help with its flags and routed by the dispatcher ==="
+
+  local help_out
+  help_out=$("$CLI" help 2>&1)
+  assert_contains "detect-forge [--project <path>]" "$help_out" "help: lists detect-forge with --project"
+  assert_contains "AIMI_FORGE_TYPE=github|gitlab|gitea to override" "$help_out" "help: documents the AIMI_FORGE_TYPE override"
+
+  setup_detect_forge_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+  local dispatch_out
+  dispatch_out=$("$CLI" detect-forge 2>&1)
+  popd >/dev/null
+  teardown_detect_forge_fixture
+
+  if printf '%s' "$dispatch_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: detect-forge is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: detect-forge is routed"
+    ((TESTS_PASSED++))
+  fi
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -16722,6 +17117,22 @@ main() {
   test_roadmap_set_status_verification_failed_reachable_and_retryable
   test_roadmap_write_handoff_five_headings_sanitized
   test_roadmap_write_handoff_enables_validate_contracts_delivery
+
+  # Detect Forge Tests (US-001) -- the foundational contract every later
+  # forge-* verb in this phase consumes verbatim
+  echo ""
+  echo "--- Detect Forge Tests (US-001) ---"
+  test_detect_forge_known_hosts_ssh_and_https
+  test_detect_forge_subdomain_and_lookalike_boundary
+  test_detect_forge_unrecognized_hosts_are_unknown
+  test_detect_forge_alternate_port_ssh_and_scp_colon_boundary
+  test_detect_forge_origin_wins_over_disagreement
+  test_detect_forge_no_origin_precedence
+  test_detect_forge_override_valid_and_invalid
+  test_detect_forge_credential_redaction
+  test_detect_forge_project_cross_repo_isolation
+  test_detect_forge_never_dials_remote_or_caches
+  test_detect_forge_registered_in_help_and_dispatcher
 
   cleanup
 

@@ -1661,6 +1661,240 @@ cmd_detect_default_branch() {
   _resolve_default_branch
 }
 
+# ============================================================================
+# Forge Detection (detect-forge)
+# ============================================================================
+# FOUNDATIONAL CONTRACT for every forge-* verb in this phase: the output
+# shape {forge, host, remote, remoteUrl, source} is consumed verbatim
+# downstream and must not be re-derived. See cmd_help's detect-forge entry
+# and this story's acceptance criteria for the full contract.
+
+# Parse a git remote URL's hostname: lowercased, no port, no userinfo, no
+# path. Handles three shapes: an explicit ssh://[user[:pass]@]host[:port]/path
+# or https://[user[:pass]@]host[:port]/path (strip scheme, then strip
+# userinfo up to the LAST "@" within the authority only -- never inside the
+# path -- then split a trailing :<digits> port off the authority), and git's
+# scp-like [user@]host:path form (no "://" present -- the substring up to the
+# FIRST ":" is the host, everything after it is PATH, never a port; this is
+# the exact ambiguity an alternate-port ssh://...:2222/... URL must not
+# collide with). Prints empty on an unparseable string.
+_detect_forge_parse_host() {
+  local url host authority rest
+  url=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  host=""
+
+  if [[ "$url" == *"://"* ]]; then
+    rest="${url#*://}"
+    authority="${rest%%/*}"
+    if [[ "$authority" == *"@"* ]]; then
+      authority="${authority##*@}"
+    fi
+    if [[ "$authority" =~ ^(.+):([0-9]+)$ ]]; then
+      host="${BASH_REMATCH[1]}"
+    else
+      host="$authority"
+    fi
+  elif [[ "$url" == *":"* ]]; then
+    rest="$url"
+    if [[ "$rest" == *"@"* ]]; then
+      rest="${rest##*@}"
+    fi
+    host="${rest%%:*}"
+  fi
+
+  printf '%s' "$host"
+}
+
+# Exact-or-subdomain classification of a lowercase hostname against the fixed
+# known-forge host list, first match wins: github.com -> github; gitlab.com
+# -> gitlab; gitea.com, codeberg.org -> gitea. Gitea's own SaaS host and
+# codeberg.org (the largest public Forgejo instance) are both recognized
+# under the single "gitea" adapter, since Forgejo is a compatibility-
+# preserving fork of Gitea and the two are deliberately NOT distinguished
+# anywhere in this contract. Any other host -- including a GitHub Enterprise
+# Server host on a company-owned domain -- prints "unknown"; never guesses.
+_detect_forge_classify_host() {
+  local host="$1"
+  case "$host" in
+    github.com|*.github.com) printf 'github' ;;
+    gitlab.com|*.gitlab.com) printf 'gitlab' ;;
+    gitea.com|*.gitea.com|codeberg.org|*.codeberg.org) printf 'gitea' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# Implements the remote-precedence rule using only local reads -- `git
+# remote` to list configured remote names, `git remote get-url <name>` to
+# read a URL -- never `git remote show`, which dials the remote over the
+# network (the same lesson _resolve_default_branch already paid for; see its
+# "requires network" comment above). Precedence: an `origin` remote always
+# wins outright, even when it disagrees with every other configured remote;
+# else exactly one remote (any name) wins; else zero remotes is a distinct
+# outcome ("no-remote") from two-or-more disagreeing remotes ("ambiguous-
+# remotes", forge always unknown) -- never resolved by picking `git remote`'s
+# listing order. Emits {remote, remoteUrl, source} via jq -nc.
+_detect_forge_select_remote() {
+  local remotes remote_count remote_name="" remote_url="" source=""
+  remotes=$(git remote 2>/dev/null) || remotes=""
+
+  if [ -n "$remotes" ] && printf '%s\n' "$remotes" | grep -qx "origin"; then
+    remote_name="origin"
+    remote_url=$(git remote get-url origin 2>/dev/null) || remote_url=""
+    source="remote"
+  else
+    remote_count=0
+    if [ -n "$remotes" ]; then
+      remote_count=$(printf '%s\n' "$remotes" | wc -l | tr -d ' ')
+    fi
+    if [ "$remote_count" -eq 0 ]; then
+      source="no-remote"
+    elif [ "$remote_count" -eq 1 ]; then
+      remote_name="$remotes"
+      remote_url=$(git remote get-url "$remote_name" 2>/dev/null) || remote_url=""
+      source="remote"
+    else
+      source="ambiguous-remotes"
+    fi
+  fi
+
+  jq -nc \
+    --arg remote "$remote_name" \
+    --arg remoteUrl "$remote_url" \
+    --arg source "$source" \
+    '{remote: (if $remote == "" then null else $remote end),
+      remoteUrl: (if $remoteUrl == "" then null else $remoteUrl end),
+      source: $source}'
+}
+
+# Strips embedded userinfo credentials (user:pass@ or user@) from an http(s)
+# remote URL's authority before it is echoed back in detect-forge's JSON
+# output -- a secret must never round-trip through CLI stdout/logs. No-op on
+# any other scheme (in particular ssh://, whose leading "user@" is a literal
+# SSH login user such as "git@", never a credential -- the same reason git's
+# scp-like [user@]host:path form is left untouched below) and on a URL
+# carrying no userinfo at all.
+_detect_forge_redact_userinfo() {
+  local url="$1" scheme rest authority path
+  if [[ "$url" != *"://"* ]]; then
+    printf '%s' "$url"
+    return 0
+  fi
+
+  scheme="${url%%://*}"
+  case "$scheme" in
+    http|https) ;;
+    *)
+      printf '%s' "$url"
+      return 0
+      ;;
+  esac
+
+  rest="${url#*://}"
+  if [[ "$rest" == *"/"* ]]; then
+    authority="${rest%%/*}"
+    path="/${rest#*/}"
+  else
+    authority="$rest"
+    path=""
+  fi
+
+  if [[ "$authority" == *"@"* ]]; then
+    authority="${authority##*@}"
+  fi
+
+  printf '%s://%s%s' "$scheme" "$authority" "$path"
+}
+
+# Composes the final {forge, host, remote, remoteUrl, source} object.
+# AIMI_FORGE_TYPE (already validated by the caller, cmd_detect_forge) short-
+# circuits before any git command runs at all when set and non-empty --
+# source=override, host/remote/remoteUrl all null. Otherwise selects a
+# remote per _detect_forge_select_remote; only when that selection actually
+# chose a URL (source=="remote") does it classify the host and redact
+# embedded userinfo before echoing the URL back. detect-forge is per-
+# repository and is NEVER cached via read_state/write_state -- a multi-repo
+# AIMI_ROOT can legitimately mix a GitHub repo and a self-hosted GitLab repo
+# under sibling --project calls, and any cache would go stale the moment a
+# remote is repointed.
+_detect_forge() {
+  if [ -n "${AIMI_FORGE_TYPE:-}" ]; then
+    jq -nc --arg forge "$AIMI_FORGE_TYPE" \
+      '{forge: $forge, host: null, remote: null, remoteUrl: null, source: "override"}'
+    return 0
+  fi
+
+  local selection remote remote_url source forge="unknown" host=""
+  selection=$(_detect_forge_select_remote)
+  remote=$(printf '%s' "$selection" | jq -r '.remote // ""')
+  remote_url=$(printf '%s' "$selection" | jq -r '.remoteUrl // ""')
+  source=$(printf '%s' "$selection" | jq -r '.source')
+
+  if [ "$source" = "remote" ] && [ -n "$remote_url" ]; then
+    host=$(_detect_forge_parse_host "$remote_url")
+    forge=$(_detect_forge_classify_host "$host")
+    remote_url=$(_detect_forge_redact_userinfo "$remote_url")
+  fi
+
+  jq -nc \
+    --arg forge "$forge" \
+    --arg host "$host" \
+    --arg remote "$remote" \
+    --arg remoteUrl "$remote_url" \
+    --arg source "$source" \
+    '{forge: $forge,
+      host: (if $host == "" then null else $host end),
+      remote: (if $remote == "" then null else $remote end),
+      remoteUrl: (if $remoteUrl == "" then null else $remoteUrl end),
+      source: $source}'
+}
+
+# Detect the forge (github|gitlab|gitea|unknown) for the active git remote.
+# AIMI_FORGE_TYPE overrides detection entirely and must be one of
+# github|gitlab|gitea, validated here -- before _detect_forge ever runs --
+# so an invalid value never reaches a git command. Never cached (see
+# _detect_forge's header comment: per-repository, per-invocation).
+cmd_detect_forge() {
+  local project_dir=""
+
+  # Parse --project flag
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project)
+        shift
+        project_dir="${1:-}"
+        ;;
+    esac
+    shift
+  done
+
+  # cd into project dir if specified (supports multi-repo layouts where AIMI root is not a git repo)
+  if [ -n "$project_dir" ]; then
+    if [ ! -d "$project_dir" ]; then
+      echo "Error: Project directory does not exist: $project_dir" >&2
+      exit 1
+    fi
+    cd "$project_dir"
+  fi
+
+  # Guard: must be inside a git repository
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
+    exit 1
+  fi
+
+  if [ -n "${AIMI_FORGE_TYPE:-}" ]; then
+    case "$AIMI_FORGE_TYPE" in
+      github|gitlab|gitea) ;;
+      *)
+        echo "Error: detect-forge: unrecognized AIMI_FORGE_TYPE value: $AIMI_FORGE_TYPE (expected one of: github, gitlab, gitea)" >&2
+        exit 1
+        ;;
+    esac
+  fi
+
+  _detect_forge
+}
+
 # Normalize a single %D decoration token for parent-branch detection.
 # Pipeline: (1) strip an "X -> Y" arrow decoration, keeping the right-hand
 # side (covers "HEAD -> <branch>" and, defensively, "origin/HEAD ->
@@ -8880,6 +9114,16 @@ COMMANDS:
                               ("decoration"|"default-branch")}. Falls back to the
                               default branch (unverified) when no decoration
                               candidate survives normalization or merge-base check.
+    detect-forge [--project <path>]
+                              Classify the active git remote's hostname into
+                              github|gitlab|gitea|unknown (exact-or-subdomain,
+                              port-aware). Output: {forge, host, remote,
+                              remoteUrl, source ("override"|"remote"|
+                              "no-remote"|"ambiguous-remotes")}. Set
+                              AIMI_FORGE_TYPE=github|gitlab|gitea to override
+                              detection entirely (source=override, no git
+                              remote read runs); any other value exits 1.
+                              Never cached -- re-derived on every invocation.
     detect-interactivity [--non-interactive]
                               Print resolved interactivity mode (picker|agent)
                               Returns picker by default; returns agent only when
@@ -9413,6 +9657,7 @@ main() {
     get-state)         cmd_get_state ;;
     detect-default-branch) shift; cmd_detect_default_branch "$@" ;;
     detect-parent-branch) shift; cmd_detect_parent_branch "$@" ;;
+    detect-forge) shift; cmd_detect_forge "$@" ;;
     setup-branch)      shift; cmd_setup_branch "$@" ;;
     resolve-base-branch) shift; cmd_resolve_base_branch "$@" ;;
     clear-state)       cmd_clear_state ;;
