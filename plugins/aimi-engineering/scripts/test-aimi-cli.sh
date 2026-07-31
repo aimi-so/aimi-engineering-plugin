@@ -16574,6 +16574,8 @@ source_forge_contract_functions() {
   eval "$(sed -n '/^_forge_build_pr_json()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_forge_build_issue_json()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_forge_emit_status()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_emit_write_status()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_build_write_data()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_forge_bin_check()/,/^}/p' "$CLI")"
 }
 
@@ -16666,6 +16668,75 @@ test_forge_emit_status_three_outcomes() {
   assert_exit_code "1" "$exit_code" "status unknown value: exits 1"
   assert_stderr_contains "found, not_found or error" "$(cat /tmp/forge_status_stderr.$$)" "status unknown value: stderr names the three valid outcomes"
   rm -f /tmp/forge_status_stderr.$$
+}
+
+test_forge_emit_write_status_three_outcomes() {
+  echo ""
+  echo "=== _forge_emit_write_status: created / unchanged / degraded, same field names and null-forcing as the read builder ==="
+
+  source_forge_contract_functions
+
+  local out exit_code
+
+  out=$(_forge_emit_write_status created '{"url":"https://o/r/pull/1","number":1}')
+  assert_eq "created" "$(printf '%s' "$out" | jq -r '.status')" "write status created: status field"
+  assert_eq '{"url":"https://o/r/pull/1","number":1}' "$(printf '%s' "$out" | jq -c '.data')" "write status created: data carries the payload"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "write status created: message is null"
+
+  out=$(_forge_emit_write_status unchanged '{"url":"https://o/r/pull/55","number":55}')
+  assert_eq "unchanged" "$(printf '%s' "$out" | jq -r '.status')" "write status unchanged: status field"
+  assert_eq '{"url":"https://o/r/pull/55","number":55}' "$(printf '%s' "$out" | jq -c '.data')" "write status unchanged: data survives -- unchanged is a SUCCESS outcome, not a degraded one"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "write status unchanged: message is null"
+
+  out=$(_forge_emit_write_status degraded "" "gh pr create exited 1: HTTP 403")
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "write status degraded: status field"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "write status degraded: data is null"
+  assert_eq "gh pr create exited 1: HTTP 403" "$(printf '%s' "$out" | jq -r '.message')" "write status degraded: message carries the reason"
+
+  # data supplied alongside degraded is discarded, never leaked -- the exact
+  # null-forcing discipline _forge_emit_status applies on its own non-found
+  # branches.
+  out=$(_forge_emit_write_status degraded '{"should":"not appear"}' "boom")
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "write status degraded: stray data argument is forced null, never leaked"
+
+  # message supplied alongside a success status is discarded the same way.
+  out=$(_forge_emit_write_status created '{"url":"u","number":1}' "should not appear")
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "write status created: stray message argument is forced null"
+
+  # The envelope's key set is EXACTLY the read builder's key set -- same three
+  # names, no fourth field, no per-verb extra.
+  assert_eq '["data","message","status"]' "$(printf '%s' "$out" | jq -c 'keys')" "write envelope: exactly {status, data, message} -- identical key set to _forge_emit_status"
+
+  # Unknown status is a caller error, not silently coerced -- same guard shape
+  # _forge_emit_status uses for its own three values.
+  _forge_emit_write_status bogus >/dev/null 2>/tmp/forge_write_status_stderr.$$ && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "write status unknown value: exits 1"
+  assert_stderr_contains "created, unchanged or degraded" "$(cat /tmp/forge_write_status_stderr.$$)" "write status unknown value: stderr names the three valid outcomes"
+  rm -f /tmp/forge_write_status_stderr.$$
+
+  # A read-side status is NOT a valid write status and vice versa -- the two
+  # vocabularies never overlap by accident.
+  _forge_emit_write_status found >/dev/null 2>&1 && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "write status: the read side's 'found' is rejected -- a write has no lookup outcome"
+}
+
+test_forge_build_write_data_shape() {
+  echo ""
+  echo "=== _forge_build_write_data: one {url, number} builder shared by all three write verbs ==="
+
+  source_forge_contract_functions
+
+  local out
+
+  out=$(_forge_build_write_data "https://github.com/o/r/pull/7" "7")
+  assert_eq '{"url":"https://github.com/o/r/pull/7","number":7}' "$out" "write data: both fields supplied"
+  assert_eq "number" "$(printf '%s' "$out" | jq -r '.number | type')" "write data: number is a JSON int, never a quoted string"
+
+  out=$(_forge_build_write_data "https://github.com/o/r/pull/7" "")
+  assert_eq '{"url":"https://github.com/o/r/pull/7","number":null}' "$out" "write data: an unconfirmed number comes back null while the url survives"
+
+  out=$(_forge_build_write_data "" "")
+  assert_eq '{"url":null,"number":null}' "$out" "write data: both empty -> both null, never empty strings"
 }
 
 test_forge_bin_check_quiet_and_mandatory_modes() {
@@ -17762,8 +17833,8 @@ FAKE_GH
   out=$(PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body") && exit_code=0 || exit_code=$?
 
   assert_exit_code "0" "$exit_code" "forge-pr-create new PR: exit 0"
-  assert_eq '{"url":"https://github.com/owner/repo/pull/101","number":101,"created":true}' \
-    "$out" "forge-pr-create new PR: {url, number, created:true} derived from the structured re-read (AC1)"
+  assert_eq '{"status":"created","data":{"url":"https://github.com/owner/repo/pull/101","number":101},"message":null}' \
+    "$out" "forge-pr-create new PR: status created with {url, number} nested under data, derived from the structured re-read (AC1)"
 
   popd >/dev/null
   teardown_detect_forge_fixture
@@ -17803,8 +17874,9 @@ FAKE_GH
   out=$(PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body") && exit_code=0 || exit_code=$?
 
   assert_exit_code "0" "$exit_code" "forge-pr-create idempotent: exit 0"
-  assert_eq '{"url":"https://github.com/owner/repo/pull/55","number":55,"created":false}' \
-    "$out" "forge-pr-create idempotent: returns the existing PR with created:false, no duplicate opened (AC2)"
+  assert_eq '{"status":"unchanged","data":{"url":"https://github.com/owner/repo/pull/55","number":55},"message":null}' \
+    "$out" "forge-pr-create idempotent: reports status unchanged with the existing PR under data, no duplicate opened (AC2)"
+  assert_eq "unchanged" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-create idempotent: status is the literal 'unchanged' -- not 'created', and not a bare absent field"
 
   popd >/dev/null
   teardown_detect_forge_fixture
@@ -17848,7 +17920,9 @@ FAKE_GH
   out=$(PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
 
   assert_exit_code "1" "$exit_code" "forge-pr-create lookup error: exits 1"
-  assert_eq "" "$out" "forge-pr-create lookup error: no JSON on stdout"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-create lookup error: stdout carries a degraded envelope (in-band signal ON TOP of the exit code, never instead of it)"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "forge-pr-create lookup error: data is null on degraded"
+  assert_contains "forge-pr-view reported an error" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-create lookup error: message echoes the same reason stderr states"
   if [ -f "$sandbox/pr_create_invoked.flag" ]; then
     echo -e "${RED}✗${NC} forge-pr-create lookup error: gh pr create WAS invoked -- a duplicate PR would have been opened"
     ((TESTS_FAILED++))
@@ -17916,8 +17990,8 @@ FAKE_GH
       echo -e "${RED}✗${NC} forge-pr-create $stale_state existing PR: gh pr create was never invoked -- the $stale_state PR blocks creation forever"
       ((TESTS_FAILED++))
     fi
-    assert_eq '{"url":"https://github.com/owner/repo/pull/91","number":91,"created":true}' \
-      "$out" "forge-pr-create $stale_state existing PR: returns the NEW PR's own url/number with created:true -- the stale PR's identity never leaks"
+    assert_eq '{"status":"created","data":{"url":"https://github.com/owner/repo/pull/91","number":91},"message":null}' \
+      "$out" "forge-pr-create $stale_state existing PR: reports status created with the NEW PR's own url/number -- the stale PR's identity never leaks"
   done
 
   popd >/dev/null
@@ -17971,8 +18045,12 @@ FAKE_GH
   rm -f "$stderr_file"
 
   assert_exit_code "0" "$exit_code" "forge-pr-create re-read failure: exit 0 -- the PR really was created"
-  assert_eq '{"url":"https://github.com/owner/repo/pull/404","number":null,"created":true}' \
-    "$out" "forge-pr-create re-read failure: the captured url survives with number:null, created:true"
+  assert_eq '{"status":"created","data":{"url":"https://github.com/owner/repo/pull/404","number":null},"message":null}' \
+    "$out" "forge-pr-create re-read failure: the captured url survives under data with number:null, status stays created"
+  # NOT degraded: degraded forces data to null by contract, which would throw
+  # the created PR's url away and lead a caller to open a second PR for a
+  # branch that already has one.
+  assert_eq "created" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-create re-read failure: status is created, never degraded -- a degraded envelope would null out the url this branch exists to preserve"
   assert_stderr_contains "Warning:" "$stderr_text" "forge-pr-create re-read failure: stderr warns rather than erroring"
   assert_stderr_contains "https://github.com/owner/repo/pull/404" "$stderr_text" "forge-pr-create re-read failure: the Warning names the created PR's url"
   if printf '%s' "$stderr_text" | grep -qE "create it yourself|git push -u origin"; then
@@ -18004,7 +18082,8 @@ test_forge_pr_create_missing_gh_mandatory_print_nonzero_exit() {
   out=$(PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
 
   assert_exit_code "1" "$exit_code" "forge-pr-create gh-absent: EXITS NON-ZERO (a hard failure, unlike forge-issue-create's soft-fail exit 0)"
-  assert_eq "" "$out" "forge-pr-create gh-absent: no JSON on stdout"
+  assert_eq '{"status":"degraded","data":null,"message":"gh not found -- this pull request was not created automatically."}' \
+    "$out" "forge-pr-create gh-absent: stdout carries the degraded envelope -- no longer silent, while the exit code above stays 1"
   assert_stderr_contains "gh not found" "$(cat "$stderr_file")" "forge-pr-create gh-absent: _forge_bin_check's mandatory warning names gh"
   assert_stderr_contains "create it yourself" "$(cat "$stderr_file")" "forge-pr-create gh-absent: manual instruction printed (MANDATORY-PRINT)"
   assert_stderr_contains "git push -u origin feat-x" "$(cat "$stderr_file")" "forge-pr-create gh-absent: manual instruction includes the git push command (AC6)"
@@ -18037,7 +18116,9 @@ FAKE_GH
   out=$(PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
 
   assert_exit_code "1" "$exit_code" "forge-pr-create non-github forge: exits non-zero"
-  assert_eq "" "$out" "forge-pr-create non-github forge: no JSON on stdout"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-create non-github forge: stdout carries the degraded envelope while the exit code stays 1"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "forge-pr-create non-github forge: data is null on degraded"
+  assert_contains "no adapter for forge \"gitlab\"" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-create non-github forge: message names the unsupported forge"
   assert_stderr_contains "gitlab" "$(cat "$stderr_file")" "forge-pr-create non-github forge: manual instruction names the detected forge"
   assert_stderr_contains "create it yourself" "$(cat "$stderr_file")" "forge-pr-create non-github forge: manual instruction printed"
   if grep -q "gh should never be invoked" "$stderr_file"; then
@@ -18127,7 +18208,7 @@ FAKE_GH
   out=$(GH_TOKEN="secret-value-xyz" PATH="$sandbox" "$CLI" forge-pr-create --title T --base main --head feat-y --body B) && exit_code=0 || exit_code=$?
 
   assert_exit_code "0" "$exit_code" "forge-pr-create credential: exit 0 (GH_TOKEN inherited correctly, no argv leak, no --token flag)"
-  assert_eq "true" "$(printf '%s' "$out" | jq -c '.created')" "forge-pr-create credential: created true"
+  assert_eq "created" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-create credential: status created"
 
   popd >/dev/null
   teardown_detect_forge_fixture
@@ -18135,7 +18216,7 @@ FAKE_GH
 
 test_forge_pr_edit_success() {
   echo ""
-  echo "=== forge-pr-edit: successful body update -- prints {url, number} via a structured forge-pr-view re-read (AC4) ==="
+  echo "=== forge-pr-edit: successful body update -- status unchanged with {url, number} under data, via a structured forge-pr-view re-read (AC4) ==="
 
   setup_detect_forge_fixture origin https://github.com/owner/repo.git
   pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
@@ -18162,8 +18243,12 @@ FAKE_GH
   out=$(PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --body "updated body") && exit_code=0 || exit_code=$?
 
   assert_exit_code "0" "$exit_code" "forge-pr-edit success: exit 0"
-  assert_eq '{"url":"https://github.com/owner/repo/pull/303","number":303}' \
-    "$out" "forge-pr-edit success: {url, number} -- same shape forge-pr-create prints (AC4)"
+  assert_eq '{"status":"unchanged","data":{"url":"https://github.com/owner/repo/pull/303","number":303},"message":null}' \
+    "$out" "forge-pr-edit success: the same write envelope forge-pr-create emits, genuinely identical this time (AC4)"
+  # An edit mutates a number that already existed and mints no new
+  # identifier -- forge-contract.md's Write-Verb Status Convention calls that
+  # unchanged, even though the PR's BODY did change.
+  assert_eq "unchanged" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-edit success: status is unchanged -- never created, and never a bare absent field the way it was before"
 
   popd >/dev/null
   teardown_detect_forge_fixture
@@ -18186,7 +18271,8 @@ test_forge_pr_edit_missing_gh_mandatory_print_nonzero_exit() {
   out=$(PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --body "updated body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
 
   assert_exit_code "1" "$exit_code" "forge-pr-edit gh-absent: exits non-zero"
-  assert_eq "" "$out" "forge-pr-edit gh-absent: no JSON on stdout"
+  assert_eq '{"status":"degraded","data":null,"message":"gh not found -- this pull request was not edited automatically."}' \
+    "$out" "forge-pr-edit gh-absent: stdout carries the degraded envelope -- no longer silent, while the exit code above stays 1"
   assert_stderr_contains "gh not found" "$(cat "$stderr_file")" "forge-pr-edit gh-absent: _forge_bin_check's mandatory warning names gh"
   assert_stderr_contains "edit it yourself" "$(cat "$stderr_file")" "forge-pr-edit gh-absent: manual instruction printed (MANDATORY-PRINT, AC6)"
   rm -f "$stderr_file"
@@ -18221,7 +18307,9 @@ FAKE_GH
   out=$(PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --body "updated body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
 
   assert_exit_code "1" "$exit_code" "forge-pr-edit gh-failure: exits non-zero"
-  assert_eq "" "$out" "forge-pr-edit gh-failure: no JSON on stdout"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-edit gh-failure: stdout carries the degraded envelope while the exit code stays 1"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "forge-pr-edit gh-failure: data is null on degraded"
+  assert_contains "gh pr edit exited 1" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-edit gh-failure: message echoes the same gh exit-code text stderr states"
   assert_stderr_contains "gh pr edit exited 1" "$(cat "$stderr_file")" "forge-pr-edit gh-failure: error names the gh exit code"
   assert_stderr_contains "edit it yourself" "$(cat "$stderr_file")" "forge-pr-edit gh-failure: manual instruction printed"
   rm -f "$stderr_file"
@@ -18244,6 +18332,126 @@ test_forge_pr_edit_invalid_number_guard() {
   assert_exit_code "1" "$exit_code" "forge-pr-edit invalid --number: exit 1"
   assert_stderr_contains "--number must be a positive integer" "$(cat "$stderr_file")" "forge-pr-edit invalid --number: stderr names the bad value"
   rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_write_verbs_share_one_data_shape() {
+  echo ""
+  echo "=== forge-pr-create created / forge-pr-create unchanged / forge-pr-edit unchanged: all three nest an IDENTICAL {url, number} under data (AC3) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  # One fake gh, three scenarios selected by FAKE_SCENARIO so the three
+  # outcomes below are produced by the real verb bodies rather than by three
+  # different fixtures that could drift apart.
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+FLAG="$(dirname "$0")/pr_created.flag"
+case "${FAKE_SCENARIO:-}" in
+  create)
+    if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+      if [ -f "$FLAG" ]; then
+        echo '{"url":"https://github.com/owner/repo/pull/700","number":700}'
+        exit 0
+      fi
+      echo "no pull requests found for branch" >&2
+      exit 1
+    fi
+    if [ "$1" = "pr" ] && [ "$2" = "list" ]; then echo '[]'; exit 0; fi
+    if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+      : > "$FLAG"
+      echo "https://github.com/owner/repo/pull/700"
+      exit 0
+    fi
+    ;;
+  existing)
+    if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+      echo '{"url":"https://github.com/owner/repo/pull/701","number":701,"state":"OPEN"}'
+      exit 0
+    fi
+    ;;
+  edit)
+    if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then exit 0; fi
+    if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+      echo '{"url":"https://github.com/owner/repo/pull/702","number":702}'
+      exit 0
+    fi
+    ;;
+esac
+echo "unexpected gh invocation ($FAKE_SCENARIO): $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local created_out existing_out edit_out
+  rm -f "$sandbox/pr_created.flag"
+  created_out=$(FAKE_SCENARIO=create PATH="$sandbox" "$CLI" forge-pr-create --title T --base main --head feat-x --body B)
+  existing_out=$(FAKE_SCENARIO=existing PATH="$sandbox" "$CLI" forge-pr-create --title T --base main --head feat-x --body B)
+  edit_out=$(FAKE_SCENARIO=edit PATH="$sandbox" "$CLI" forge-pr-edit --number 702 --body B)
+
+  assert_eq "created"   "$(printf '%s' "$created_out"  | jq -r '.status')" "write-shape parity: forge-pr-create's fresh-creation branch reports created"
+  assert_eq "unchanged" "$(printf '%s' "$existing_out" | jq -r '.status')" "write-shape parity: forge-pr-create's idempotent branch reports unchanged"
+  assert_eq "unchanged" "$(printf '%s' "$edit_out"     | jq -r '.status')" "write-shape parity: forge-pr-edit's success path reports unchanged"
+
+  # The whole point of the shared envelope: one caller code path reads all
+  # three outcomes. Same envelope keys, same data keys, same value types.
+  local envelope_keys='["data","message","status"]' data_keys='["number","url"]'
+  assert_eq "$envelope_keys" "$(printf '%s' "$created_out"  | jq -c 'keys')" "write-shape parity: created envelope keys"
+  assert_eq "$envelope_keys" "$(printf '%s' "$existing_out" | jq -c 'keys')" "write-shape parity: unchanged (idempotent create) envelope keys"
+  assert_eq "$envelope_keys" "$(printf '%s' "$edit_out"     | jq -c 'keys')" "write-shape parity: unchanged (edit) envelope keys"
+  assert_eq "$data_keys" "$(printf '%s' "$created_out"  | jq -c '.data | keys')" "write-shape parity: created data keys are exactly {url, number}"
+  assert_eq "$data_keys" "$(printf '%s' "$existing_out" | jq -c '.data | keys')" "write-shape parity: unchanged (idempotent create) data keys are exactly {url, number}"
+  assert_eq "$data_keys" "$(printf '%s' "$edit_out"     | jq -c '.data | keys')" "write-shape parity: unchanged (edit) data keys are exactly {url, number}"
+
+  assert_eq "700" "$(printf '%s' "$created_out"  | jq -r '.data.number')" "write-shape parity: created data.number readable through one path"
+  assert_eq "701" "$(printf '%s' "$existing_out" | jq -r '.data.number')" "write-shape parity: unchanged (idempotent create) data.number readable through the SAME path"
+  assert_eq "702" "$(printf '%s' "$edit_out"     | jq -r '.data.number')" "write-shape parity: unchanged (edit) data.number readable through the SAME path"
+
+  local shape
+  for shape in "$created_out" "$existing_out" "$edit_out"; do
+    assert_eq "number" "$(printf '%s' "$shape" | jq -r '.data.number | type')" "write-shape parity: data.number is an int in every outcome"
+    assert_eq "string" "$(printf '%s' "$shape" | jq -r '.data.url | type')" "write-shape parity: data.url is a string in every outcome"
+  done
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_write_verbs_degraded_exit_code_split() {
+  echo ""
+  echo "=== degraded on all three write verbs: SAME envelope, deliberately DIFFERENT exit codes (hard-fail vs soft-fail) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # No gh in the sandbox -- one identical trigger for all three verbs, so the
+  # only variable left is each verb's own exit-code contract.
+
+  local create_out edit_out issue_out create_rc edit_rc issue_rc
+  create_out=$(PATH="$sandbox" "$CLI" forge-pr-create --title T --base main --head feat-x --body B 2>/dev/null) && create_rc=0 || create_rc=$?
+  edit_out=$(PATH="$sandbox" "$CLI" forge-pr-edit --number 9 --body B 2>/dev/null) && edit_rc=0 || edit_rc=$?
+  issue_out=$(PATH="$sandbox" "$CLI" forge-issue-create --title T --body B 2>/dev/null) && issue_rc=0 || issue_rc=$?
+
+  # Same in-band signal on all three.
+  assert_eq "degraded" "$(printf '%s' "$create_out" | jq -r '.status')" "exit split: forge-pr-create reports status degraded"
+  assert_eq "degraded" "$(printf '%s' "$edit_out"   | jq -r '.status')" "exit split: forge-pr-edit reports status degraded"
+  assert_eq "degraded" "$(printf '%s' "$issue_out"  | jq -r '.status')" "exit split: forge-issue-create reports status degraded"
+
+  # Deliberately different exit codes -- this story adds the envelope ON TOP
+  # of the exit-code contract, it does not replace it.
+  assert_exit_code "1" "$create_rc" "exit split: forge-pr-create degraded EXITS 1 (hard-fail -- opening a PR has no fallback)"
+  assert_exit_code "1" "$edit_rc"   "exit split: forge-pr-edit degraded EXITS 1 (hard-fail, same contract as forge-pr-create)"
+  assert_exit_code "0" "$issue_rc"  "exit split: forge-issue-create degraded EXITS 0 (soft-fail -- open-pr.md's contract that a failed backend issue never blocks PR creation)"
 
   popd >/dev/null
   teardown_detect_forge_fixture
@@ -18321,7 +18529,6 @@ FAKE_GH
 source_forge_issue_functions() {
   eval "$(sed -n '/^_forge_map_state()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_forge_extract_issue_number_from_url()/,/^}/p' "$CLI")"
-  eval "$(sed -n '/^_forge_emit_issue_create_status()/,/^}/p' "$CLI")"
 }
 
 # Builds a minimal, hermetic PATH sandbox containing exactly the external
@@ -18400,23 +18607,17 @@ test_forge_extract_issue_number_from_url() {
   assert_eq "" "$(_forge_extract_issue_number_from_url "not a url")" "extract: non-URL input -> empty"
 }
 
-test_forge_emit_issue_create_status_shape() {
+test_forge_emit_issue_create_status_is_gone() {
   echo ""
-  echo "=== _forge_emit_issue_create_status: created vs degraded shape ==="
+  echo "=== _forge_emit_issue_create_status: deleted outright, zero remaining callers (the shared write builder replaced it) ==="
 
-  source_forge_issue_functions
+  local hits
+  hits=$(grep -c '_forge_emit_issue_create_status' "$CLI" 2>/dev/null || true)
+  assert_eq "0" "$hits" "issue-create builder: no definition and no caller left anywhere in aimi-cli.sh"
 
-  local out
-  out=$(_forge_emit_issue_create_status created "https://github.com/o/r/issues/9" "9" "")
-  assert_eq "created" "$(printf '%s' "$out" | jq -r '.status')" "issue-create status: created"
-  assert_eq "9" "$(printf '%s' "$out" | jq -r '.number')" "issue-create status: number is an int"
-  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "issue-create status: message null on success"
-
-  out=$(_forge_emit_issue_create_status degraded "" "" "gh not found -- this issue was not created automatically.")
-  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "issue-create status: degraded"
-  assert_eq "null" "$(printf '%s' "$out" | jq -r '.url')" "issue-create status: url null on degraded"
-  assert_eq "null" "$(printf '%s' "$out" | jq -r '.number')" "issue-create status: number null on degraded"
-  assert_contains "gh not found" "$(printf '%s' "$out" | jq -r '.message')" "issue-create status: message carries the reason"
+  # And the verb it used to serve now goes through the shared write builder.
+  assert_contains "_forge_emit_write_status" "$(sed -n '/^_forge_issue_create()/,/^}/p' "$CLI")" \
+    "issue-create builder: _forge_issue_create emits through the shared _forge_emit_write_status instead"
 }
 
 test_forge_issue_view_found() {
@@ -18591,7 +18792,7 @@ FAKE_GH
 
 test_forge_issue_create_success() {
   echo ""
-  echo "=== forge-issue-create: success -- {url, number, status} derived from gh's own stdout URL ==="
+  echo "=== forge-issue-create: success -- the shared write envelope, url/number nested under data, derived from gh's own stdout URL ==="
 
   setup_detect_forge_fixture origin https://github.com/owner/repo.git
   pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
@@ -18617,8 +18818,9 @@ FAKE_GH
 
   assert_exit_code "0" "$exit_code" "forge-issue-create success: exit code"
   assert_eq "created" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-create success: status created"
-  assert_eq "https://github.com/owner/repo/issues/77" "$(printf '%s' "$out" | jq -r '.url')" "forge-issue-create success: url captured from gh stdout"
-  assert_eq "77" "$(printf '%s' "$out" | jq -r '.number')" "forge-issue-create success: number derived from the URL (no caller-side regex needed)"
+  assert_eq "https://github.com/owner/repo/issues/77" "$(printf '%s' "$out" | jq -r '.data.url')" "forge-issue-create success: url captured from gh stdout, nested under data like the two PR write verbs"
+  assert_eq "77" "$(printf '%s' "$out" | jq -r '.data.number')" "forge-issue-create success: number derived from the URL (no caller-side regex needed), nested under data"
+  assert_eq '["number","url"]' "$(printf '%s' "$out" | jq -c '.data | keys')" "forge-issue-create success: data keys are exactly {url, number} -- no flat sibling keys survive"
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "forge-issue-create success: message null"
   assert_eq "" "$(cat "$stderr_file")" "forge-issue-create success: no manual instruction printed on success"
   rm -f "$stderr_file"
@@ -18654,8 +18856,7 @@ FAKE_GH
 
   assert_exit_code "0" "$exit_code" "forge-issue-create degraded: exit code STAYS 0 -- never a hard failure a caller could mistake for a reason to block PR creation"
   assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-create degraded: status"
-  assert_eq "null" "$(printf '%s' "$out" | jq -r '.url')" "forge-issue-create degraded: url null"
-  assert_eq "null" "$(printf '%s' "$out" | jq -r '.number')" "forge-issue-create degraded: number null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "forge-issue-create degraded: data is null wholesale (the shared builder's null-forcing), so no stale url/number can leak"
   assert_contains "gh issue create exited 1" "$(printf '%s' "$out" | jq -r '.message')" "forge-issue-create degraded: message carries the gh failure detail"
   assert_stderr_contains "create it yourself" "$(cat "$stderr_file")" "forge-issue-create degraded: manual instruction printed (MANDATORY-PRINT)"
   assert_stderr_contains "Backend: thing" "$(cat "$stderr_file")" "forge-issue-create degraded: manual instruction includes the title"
@@ -19848,6 +20049,8 @@ main() {
   test_forge_build_pr_json_capability_gating
   test_forge_build_issue_json_capability_gating
   test_forge_emit_status_three_outcomes
+  test_forge_emit_write_status_three_outcomes
+  test_forge_build_write_data_shape
   test_forge_bin_check_quiet_and_mandatory_modes
   test_forge_contract_header_carries_both_creates_identities
 
@@ -19911,6 +20114,8 @@ main() {
   test_forge_pr_edit_missing_gh_mandatory_print_nonzero_exit
   test_forge_pr_edit_gh_failure_prints_manual_nonzero_exit
   test_forge_pr_edit_invalid_number_guard
+  test_forge_write_verbs_share_one_data_shape
+  test_forge_write_verbs_degraded_exit_code_split
   test_forge_pr_create_and_edit_registered_in_help_and_dispatcher
 
   # Forge Issue Verb Tests (US-006) -- forge-issue-view / forge-issue-create,
@@ -19919,7 +20124,7 @@ main() {
   echo "--- Forge Issue Verb Tests (US-006) ---"
   test_forge_map_state_table
   test_forge_extract_issue_number_from_url
-  test_forge_emit_issue_create_status_shape
+  test_forge_emit_issue_create_status_is_gone
   test_forge_issue_view_found
   test_forge_issue_view_not_found
   test_forge_issue_view_degraded_missing_gh

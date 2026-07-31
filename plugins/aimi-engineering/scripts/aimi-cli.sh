@@ -2279,6 +2279,82 @@ _forge_emit_status() {
     '{status: $status, data: $data, message: (if $message == "" then null else $message end)}'
 }
 
+# Shared WRITE-verb status envelope (forge-contract.md "Write-Verb Status
+# Convention") -- the exact sibling of _forge_emit_status above: identical
+# {status, data, message} field names and identical null-forcing
+# discipline, differing ONLY in which three values `status` may take.
+#
+# A write has no "not found" outcome (nothing was looked up), so forcing
+# the read side's found/not_found/error trio onto forge-pr-create/
+# forge-pr-edit/forge-issue-create would be a bad fit -- but letting each
+# of those three verbs hand-roll its own shape (a bare {url, number,
+# created} boolean here, a flat {url, number, status, message} there, a
+# status-less {url, number} somewhere else) was worse: a caller then had to
+# branch on field presence, on a per-verb vocabulary, or on the exit code
+# alone to learn what a write actually did.
+#
+# Usage: _forge_emit_write_status <status> [data-json] [message]
+#   status   created | unchanged | degraded -- anything else is a caller
+#            error (exit 1) rather than silently coerced, mirroring
+#            _forge_emit_status's own guard.
+#              created   -- a new resource identifier was minted.
+#              unchanged -- no new identifier was minted. Covers both
+#                           forge-pr-create finding an already-open PR and
+#                           every successful forge-pr-edit call, which only
+#                           ever mutates an existing number.
+#              degraded  -- the write could not complete automatically;
+#                           `message` carries the reason.
+#   data     JSON value (typically {url, number}). Forced to null unless
+#            status is "created" or "unchanged", so a caller cannot
+#            accidentally leak a stale identifier across a degraded branch.
+#   message  the one and only degraded-reason field in this contract.
+#            Forced to null unless status == "degraded".
+#
+# This envelope is an ADDITION to each verb's exit-code contract, never a
+# replacement for it: forge-pr-create/forge-pr-edit still exit non-zero on
+# every degraded outcome, and forge-issue-create still exits 0 on all of
+# them (see the EXIT CONTRACT DIFFERS comment in the pr-write section).
+_forge_emit_write_status() {
+  local status="$1" data_json="${2:-null}" message="${3:-}"
+
+  case "$status" in
+    created|unchanged|degraded) ;;
+    *)
+      echo "Error: _forge_emit_write_status: status must be created, unchanged or degraded (got: $status)" >&2
+      return 1
+      ;;
+  esac
+
+  if [ "$status" != "created" ] && [ "$status" != "unchanged" ]; then
+    data_json="null"
+  fi
+  if [ "$status" != "degraded" ]; then
+    message=""
+  fi
+
+  jq -nc \
+    --arg status "$status" \
+    --argjson data "$data_json" \
+    --arg message "$message" \
+    '{status: $status, data: $data, message: (if $message == "" then null else $message end)}'
+}
+
+# Builds the {url, number} object every write verb nests under the write
+# envelope's `data` key. One builder for all three verbs, so their success
+# shapes are identical BY CONSTRUCTION rather than by three hand-rolled jq
+# expressions that merely happen to agree today.
+# Usage: _forge_build_write_data <url> [number]
+#   url     empty -> null.
+#   number  empty -> null, otherwise a JSON int (never a quoted string).
+_forge_build_write_data() {
+  local url="${1:-}" number="${2:-}"
+  jq -nc \
+    --arg url "$url" \
+    --arg number "$number" \
+    '{url: (if $url == "" then null else $url end),
+      number: (if $number == "" then null else ($number | tonumber) end)}'
+}
+
 # Shared graceful-degradation gate (forge-contract.md "Degradation
 # Contract") for every forge-* verb that shells out to a forge CLI
 # (gh/glab/tea). `command -v` is a portable presence check that never
@@ -3020,10 +3096,11 @@ cmd_forge_pr_view() {
 # call (open-pr.md:355) does not capture its own output, so PR_URL/PR_BODY
 # (read later at :465/:479) are assigned by no block in that file --
 # grandfathered in scripts/command-blocks-baseline.txt as "read but never
-# assigned". forge-pr-create emits {url, number, created} as compact JSON so
-# a caller in an isolated Bash block can capture the created PR's identity
-# by plain assignment. Rewriting open-pr.md itself is story 08's job, not
-# this one -- this section only makes the value available.
+# assigned". forge-pr-create emits forge-contract.md's write-verb envelope
+# ({status, data: {url, number}, message}) as compact JSON so a caller in an
+# isolated Bash block can capture the created PR's identity by plain
+# assignment. Rewriting open-pr.md itself is story 08's job, not this one --
+# this section only makes the value available.
 #
 # EXIT CONTRACT DIFFERS FROM forge-issue-create ON PURPOSE: forge-issue-
 # create is a soft-fail verb (exit always 0, caller branches on `status`)
@@ -3113,15 +3190,25 @@ _forge_pr_write_print_manual() {
 # can share; this is what keeps the number's origin a structured field
 # read, never a trailing-digit regex on a URL string.
 #
+# RESULT ENVELOPE: every branch below emits forge-contract.md's shared
+# write-verb envelope via _forge_emit_write_status -- {status, data,
+# message} with status created | unchanged | degraded, the same shape
+# forge-pr-edit and forge-issue-create emit. stdout is therefore NEVER
+# silent, not even on a failure branch: a caller that reads stdout learns
+# what happened from `status` instead of having to infer it from an empty
+# capture. This is an ADDITION to the exit-code contract below, never a
+# replacement -- every degraded branch here still returns 1.
+#
 # IDEMPOTENCY (AC2): before ever shelling out to create anything, looks up
 # whether an open PR already exists for $head via forge-pr-view, in-process
 # (a direct function call, never a `$AIMI_CLI forge-pr-view` subprocess).
-# When an OPEN one is found, prints its {url, number, created:false} and
-# returns 0 WITHOUT attempting a second creation -- open-pr.md's own "PR
-# already exists for this branch" behavior today, informational rather than
-# an error. A retried phase in execute.md's per-repository loop is exactly
-# why this matters: a retry must never open a duplicate PR for the same
-# branch. That check branches over ALL THREE of forge-pr-view's statuses:
+# When an OPEN one is found, reports status "unchanged" with that PR's
+# {url, number} and returns 0 WITHOUT attempting a second creation --
+# open-pr.md's own "PR already exists for this branch" behavior today,
+# informational rather than an error. A retried phase in execute.md's
+# per-repository loop is exactly why this matters: a retry must never open
+# a duplicate PR for the same branch.
+# That check branches over ALL THREE of forge-pr-view's statuses:
 # only `found` + a normalized state of `open` short-circuits; `not_found`
 # and a found-but-closed/merged PR both proceed to creation; `error` (and
 # any status this code does not recognize) is a hard failure that NEVER
@@ -3133,11 +3220,15 @@ _forge_pr_write_print_manual() {
 # returned a url -- unsupported forge, missing gh, the existing-PR lookup
 # erroring, the create call itself failing, an unparseable success response
 # -- prints the manual create-it-yourself instructions via
-# _forge_pr_write_print_manual and returns 1. Once a url IS in hand the
-# manual fallback is never printed again: a post-create re-read failure
-# keeps that url, reports {url, number: null, created: true} at exit 0, and
-# warns that only the number is unconfirmed. Never retries, never prompts
-# interactively.
+# _forge_pr_write_print_manual, emits a status "degraded" envelope carrying
+# the same reason text, and returns 1. Once a url IS in hand the manual
+# fallback is never printed again AND the outcome is never downgraded to
+# degraded: a post-create re-read failure keeps that url, reports status
+# "created" with data {url, number: null} at exit 0, and warns that only
+# the number is unconfirmed. Reporting that branch as degraded would force
+# `data` to null and throw the created PR's url away -- the exact defect
+# the "PAST THIS POINT" comment below exists to prevent. Never retries,
+# never prompts interactively.
 _forge_pr_create() {
   local title="$1" base="$2" head="$3" body="$4"
   local forge
@@ -3145,11 +3236,13 @@ _forge_pr_create() {
 
   if [ "$forge" != "github" ]; then
     _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
+    _forge_emit_write_status degraded "" "forge-pr-create: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1."
     return 1
   fi
 
   if ! _forge_bin_check gh mandatory "$forge"; then
     _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
+    _forge_emit_write_status degraded "" "gh not found -- this pull request was not created automatically."
     return 1
   fi
 
@@ -3163,6 +3256,7 @@ _forge_pr_create() {
   if [ "$existing_rc" -ne 0 ]; then
     _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
     echo "Error: forge-pr-create: forge-pr-view lookup failed while checking for an existing PR (exit $existing_rc)." >&2
+    _forge_emit_write_status degraded "" "forge-pr-create: forge-pr-view lookup failed while checking for an existing PR (exit $existing_rc)."
     return 1
   fi
 
@@ -3184,10 +3278,13 @@ _forge_pr_create() {
       # pull request instead of being blocked forever by a dead one.
       existing_state=$(printf '%s' "$existing" | jq -r '.pr.state // empty')
       if [ "$existing_state" = "open" ]; then
-        jq -nc \
-          --arg url "$(printf '%s' "$existing" | jq -r '.pr.url // empty')" \
-          --argjson number "$(printf '%s' "$existing" | jq -c '.pr.number // null')" \
-          '{url: (if $url == "" then null else $url end), number: $number, created: false}'
+        # "unchanged", not a `created:false` boolean: no new PR number was
+        # minted, which is exactly what forge-contract.md's Write-Verb
+        # Status Convention names that outcome -- and the same word every
+        # successful forge-pr-edit call reports.
+        _forge_emit_write_status unchanged "$(_forge_build_write_data \
+          "$(printf '%s' "$existing" | jq -r '.pr.url // empty')" \
+          "$(printf '%s' "$existing" | jq -r '.pr.number // empty')")"
         return 0
       fi
       ;;
@@ -3204,6 +3301,7 @@ _forge_pr_create() {
       existing_message=$(printf '%s' "$existing" | jq -r '.message // empty')
       _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
       echo "Error: forge-pr-create: forge-pr-view reported an error while checking for an existing PR on $head: ${existing_message:-unknown error}" >&2
+      _forge_emit_write_status degraded "" "forge-pr-create: forge-pr-view reported an error while checking for an existing PR on $head: ${existing_message:-unknown error}"
       return 1
       ;;
   esac
@@ -3217,6 +3315,7 @@ _forge_pr_create() {
   if [ "$rc" -ne 0 ]; then
     _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
     echo "Error: forge-pr-create: gh pr create exited $rc: ${stderr_out:-unknown error}" >&2
+    _forge_emit_write_status degraded "" "gh pr create exited $rc: ${stderr_out:-unknown error}"
     return 1
   fi
 
@@ -3226,6 +3325,7 @@ _forge_pr_create() {
   if [ -z "$pr_url" ]; then
     _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
     echo "Error: forge-pr-create: gh pr create succeeded but its output did not contain a parseable PR URL." >&2
+    _forge_emit_write_status degraded "" "gh pr create succeeded but its output did not contain a parseable PR URL."
     return 1
   fi
 
@@ -3238,23 +3338,29 @@ _forge_pr_create() {
   # execute.md's per-repository loop would report a successful creation as a
   # failure. Only the number is unconfirmed, so it comes back null with a
   # Warning (not an Error) naming the url, at exit 0.
+  #
+  # That is also why both branches below stay status "created" rather than
+  # "degraded": a new PR number genuinely WAS minted, and `degraded` forces
+  # `data` to null by design (forge-contract.md's Write-Verb Status
+  # Convention), which would throw the very url this comment exists to
+  # protect straight back away.
   local reread="" reread_rc=0 reread_status reread_message pr_number
   reread=$(cmd_forge_pr_view --pr "$head" --include url,number) || reread_rc=$?
   if [ "$reread_rc" -ne 0 ]; then
     echo "Warning: forge-pr-create: the pull request WAS created at $pr_url, but the post-create forge-pr-view re-read failed (exit $reread_rc) -- only its number could not be confirmed. Do NOT create it again." >&2
-    jq -nc --arg url "$pr_url" '{url: $url, number: null, created: true}'
+    _forge_emit_write_status created "$(_forge_build_write_data "$pr_url" "")"
     return 0
   fi
   reread_status=$(printf '%s' "$reread" | jq -r '.status')
   if [ "$reread_status" != "found" ]; then
     reread_message=$(printf '%s' "$reread" | jq -r '.message // empty')
     echo "Warning: forge-pr-create: the pull request WAS created at $pr_url, but it could not be re-read afterward (forge-pr-view status: $reread_status${reread_message:+ -- $reread_message}) -- only its number could not be confirmed. Do NOT create it again." >&2
-    jq -nc --arg url "$pr_url" '{url: $url, number: null, created: true}'
+    _forge_emit_write_status created "$(_forge_build_write_data "$pr_url" "")"
     return 0
   fi
-  pr_number=$(printf '%s' "$reread" | jq -c '.pr.number // null')
+  pr_number=$(printf '%s' "$reread" | jq -r '.pr.number // empty')
 
-  jq -nc --arg url "$pr_url" --argjson number "$pr_number" '{url: $url, number: $number, created: true}'
+  _forge_emit_write_status created "$(_forge_build_write_data "$pr_url" "$pr_number")"
 }
 
 # Public wrapper: parses --title/--base/--head/--body/--project (deliberately
@@ -3317,13 +3423,25 @@ cmd_forge_pr_create() {
 
 # Shells `gh pr edit <number> --body <b>`, then re-reads the edited PR via
 # story 04's forge-pr-view lookup (in-process, keyed on the same numeric
-# identifier the caller supplied) to confirm and return {url, number} --
-# the same structured-field discipline _forge_pr_create applies, and the
-# same JSON shape, so a caller treats both verbs' output identically (AC4).
+# identifier the caller supplied) to confirm and report {url, number} under
+# the write envelope's `data` key -- the same structured-field discipline
+# _forge_pr_create applies, and now genuinely the same JSON shape, so a
+# caller really can treat both verbs' output identically (AC4). It did not
+# before: this function used to return a bare {url, number} with no status
+# field at all while forge-pr-create returned {url, number, created}, so
+# the two shapes never matched despite the comment here claiming they did.
+#
+# A successful edit reports status "unchanged", never "created": editing a
+# PR mutates a number that already existed and mints no new identifier,
+# which is precisely what forge-contract.md's Write-Verb Status Convention
+# means by that word. The PR's BODY did change -- "unchanged" is about the
+# resource identifier, not about the content.
 #
 # MANDATORY-PRINT degrade mode: identical contract to _forge_pr_create --
-# see this section's header comment. Never retries, never prompts
-# interactively, exits non-zero on every failure path.
+# see this section's header comment. Every failure branch also emits a
+# status "degraded" envelope on stdout carrying the same reason its stderr
+# text states. Never retries, never prompts interactively, exits non-zero
+# on every failure path.
 _forge_pr_edit() {
   local number="$1" body="$2"
   local forge
@@ -3331,11 +3449,13 @@ _forge_pr_edit() {
 
   if [ "$forge" != "github" ]; then
     _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
+    _forge_emit_write_status degraded "" "forge-pr-edit: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1."
     return 1
   fi
 
   if ! _forge_bin_check gh mandatory "$forge"; then
     _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
+    _forge_emit_write_status degraded "" "gh not found -- this pull request was not edited automatically."
     return 1
   fi
 
@@ -3348,6 +3468,7 @@ _forge_pr_edit() {
   if [ "$rc" -ne 0 ]; then
     _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
     echo "Error: forge-pr-edit: gh pr edit exited $rc: ${stderr_out:-unknown error}" >&2
+    _forge_emit_write_status degraded "" "gh pr edit exited $rc: ${stderr_out:-unknown error}"
     return 1
   fi
 
@@ -3356,18 +3477,20 @@ _forge_pr_edit() {
   if [ "$reread_rc" -ne 0 ]; then
     _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
     echo "Error: forge-pr-edit: gh pr edit succeeded but the post-edit forge-pr-view re-read failed (exit $reread_rc)." >&2
+    _forge_emit_write_status degraded "" "gh pr edit succeeded but the post-edit forge-pr-view re-read failed (exit $reread_rc)."
     return 1
   fi
   reread_status=$(printf '%s' "$reread" | jq -r '.status')
   if [ "$reread_status" != "found" ]; then
     _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
     echo "Error: forge-pr-edit: gh pr edit succeeded but the PR could not be re-read afterward." >&2
+    _forge_emit_write_status degraded "" "gh pr edit succeeded but the PR could not be re-read afterward."
     return 1
   fi
   pr_url=$(printf '%s' "$reread" | jq -r '.pr.url // empty')
-  pr_number=$(printf '%s' "$reread" | jq -c '.pr.number // null')
+  pr_number=$(printf '%s' "$reread" | jq -r '.pr.number // empty')
 
-  jq -nc --arg url "$pr_url" --argjson number "$pr_number" '{url: (if $url == "" then null else $url end), number: $number}'
+  _forge_emit_write_status unchanged "$(_forge_build_write_data "$pr_url" "$pr_number")"
 }
 
 # Public wrapper: parses --number/--body/--project (no --token or similarly
@@ -3641,29 +3764,6 @@ _forge_issue_create_print_manual() {
   } >&2
 }
 
-# Shared jq -nc builder for forge-issue-create's own result shape. This is
-# deliberately NOT forge-contract.md's found/not_found/error convention --
-# that trio is explicitly scoped to LOOKUP verbs (forge-auth-status,
-# forge-repo-info, forge-pr-view, forge-issue-view); a write verb has no
-# "not found" outcome, so it uses its own two-value vocabulary
-# (created|degraded) instead of forcing a bad fit. `message` re-uses
-# forge-contract.md's naming exactly -- the one and only degraded-reason
-# field name that contract permits -- rather than inventing a second one.
-_forge_emit_issue_create_status() {
-  local status="$1" url="${2:-}" number="${3:-}" message="${4:-}"
-  jq -nc \
-    --arg status "$status" \
-    --arg url "$url" \
-    --arg number "$number" \
-    --arg message "$message" \
-    '{
-      url: (if $url == "" then null else $url end),
-      number: (if $number == "" then null else ($number | tonumber) end),
-      status: $status,
-      message: (if $message == "" then null else $message end)
-    }'
-}
-
 # Shells `gh issue create --title <t> --body <b>`, capturing stdout as the
 # created issue's URL -- gh issue create has NO --json flag (confirmed:
 # unlike gh issue view/gh pr view, only a plain URL reaches stdout on
@@ -3680,12 +3780,29 @@ _forge_emit_issue_create_status() {
 # manual "create this yourself" instruction via
 # _forge_issue_create_print_manual.
 #
+# RESULT ENVELOPE: this verb SHARES aimi-cli.sh's one write-verb envelope
+# with forge-pr-create and forge-pr-edit -- forge-contract.md's Write-Verb
+# Status Convention, built here by the same _forge_emit_write_status
+# function those two call, with url and number nested under `data` exactly
+# as they are there. It used to maintain a deliberately separate two-value
+# (created|degraded) vocabulary with flat sibling url/number keys; there is
+# no longer any reason for a caller to learn a second shape to read this
+# verb's answer.
+#
+# What still distinguishes this envelope from forge-contract.md's READ-side
+# found/not_found/error trio is unchanged and correct: a write genuinely has
+# no "not found" outcome, since nothing was looked up. That is the reason
+# the write side has its own three values, not a reason for each write verb
+# to have its own.
+#
 # CONTRACT INVARIANT: printing that instruction is NEVER a hard failure.
-# This function always returns 0; its JSON result's `status` field
-# ("created" vs "degraded") is what a caller branches on -- see the
+# This function always returns 0 -- on EVERY branch, degraded included; its
+# JSON result's `status` field is what a caller branches on -- see the
 # section header above and cmd_forge_issue_create below for the full
 # statement of why (open-pr.md:481's existing soft-fail behavior must
-# survive this migration unchanged).
+# survive unchanged). Sharing the envelope with forge-pr-create/
+# forge-pr-edit deliberately does NOT share their exit-code contract: those
+# two exit non-zero on a degraded outcome, this one never does.
 _forge_issue_create() {
   local title="$1" body="$2"
   local forge
@@ -3693,13 +3810,13 @@ _forge_issue_create() {
 
   if [ "$forge" != "github" ]; then
     _forge_issue_create_print_manual "$title" "$body" "$forge"
-    _forge_emit_issue_create_status degraded "" "" "forge-issue-create: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1."
+    _forge_emit_write_status degraded "" "forge-issue-create: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1."
     return 0
   fi
 
   if ! _forge_bin_check gh mandatory "$forge"; then
     _forge_issue_create_print_manual "$title" "$body" "$forge"
-    _forge_emit_issue_create_status degraded "" "" "gh not found -- this issue was not created automatically."
+    _forge_emit_write_status degraded "" "gh not found -- this issue was not created automatically."
     return 0
   fi
 
@@ -3712,7 +3829,7 @@ _forge_issue_create() {
 
   if [ "$rc" -ne 0 ]; then
     _forge_issue_create_print_manual "$title" "$body" "$forge"
-    _forge_emit_issue_create_status degraded "" "" "gh issue create exited $rc: ${stderr_out:-unknown error}"
+    _forge_emit_write_status degraded "" "gh issue create exited $rc: ${stderr_out:-unknown error}"
     return 0
   fi
 
@@ -3722,11 +3839,11 @@ _forge_issue_create() {
 
   if [ -z "$issue_url" ] || [ -z "$issue_number" ]; then
     _forge_issue_create_print_manual "$title" "$body" "$forge"
-    _forge_emit_issue_create_status degraded "" "" "gh issue create succeeded but its output did not contain a parseable issue URL: ${issue_url:-<empty>}"
+    _forge_emit_write_status degraded "" "gh issue create succeeded but its output did not contain a parseable issue URL: ${issue_url:-<empty>}"
     return 0
   fi
 
-  _forge_emit_issue_create_status created "$issue_url" "$issue_number" ""
+  _forge_emit_write_status created "$(_forge_build_write_data "$issue_url" "$issue_number")"
 }
 
 # Public wrapper: parses --title/--body/--project (deliberately no --token
@@ -11304,10 +11421,14 @@ COMMANDS:
                               number is derived via a structured forge-pr-
                               view re-read, never a regex on the URL).
                               Idempotent: checks forge-pr-view for an
-                              existing open PR on --head first and returns
-                              it unchanged (created:false) instead of
-                              opening a duplicate. Output: {url, number,
-                              created}. Unlike forge-issue-create, a missing
+                              existing open PR on --head first and reports
+                              it as status "unchanged" instead of opening a
+                              duplicate. Output: {status: "created"|
+                              "unchanged"|"degraded", data: {url, number},
+                              message} (forge-contract.md's Write-Verb
+                              Status Convention -- the same envelope
+                              forge-pr-edit and forge-issue-create emit).
+                              Unlike forge-issue-create, a missing
                               gh binary or an unsupported forge prints the
                               manual git-push + PR-creation instructions to
                               stderr (MANDATORY-PRINT degrade mode) and
@@ -11319,11 +11440,13 @@ COMMANDS:
     forge-pr-edit --number <n> --body <text> [--project <path>]
                               Write verb -- shells gh pr edit <number>
                               --body, then re-reads the PR via forge-pr-view
-                              to confirm and return {url, number}, the same
-                              shape forge-pr-create prints. Same guards,
-                              degrade contract, and non-zero-exit-on-
-                              failure as forge-pr-create. GitHub only in
-                              phase 1.
+                              to confirm and report {url, number} under the
+                              same write envelope forge-pr-create emits. A
+                              successful edit reports status "unchanged": it
+                              mutates an existing number and mints no new
+                              identifier. Same guards, degrade contract, and
+                              non-zero-exit-on-failure as forge-pr-create.
+                              GitHub only in phase 1.
     forge-issue-view (--number <n> | --url <issue-url>) [--project <path>]
                               Read verb -- shells gh issue view, normalized to
                               {status: "found"|"not_found"|"error", data, message}
@@ -11336,8 +11459,13 @@ COMMANDS:
     forge-issue-create --title <t> --body <b> [--project <path>]
                               Write verb -- shells gh issue create (no --json
                               flag exists on it; the URL/number are captured
-                              and derived here). Output: {url, number,
-                              status: "created"|"degraded", message}. A
+                              and derived here). Output: the same write
+                              envelope the two PR write verbs emit --
+                              {status: "created"|"degraded", data: {url,
+                              number}, message} (forge-contract.md's
+                              Write-Verb Status Convention; "unchanged"
+                              never occurs here, since this verb only ever
+                              mints a new issue). A
                               degraded/failed create is NEVER a hard failure
                               (exit stays 0) -- it prints a manual "create
                               this yourself" instruction to stderr

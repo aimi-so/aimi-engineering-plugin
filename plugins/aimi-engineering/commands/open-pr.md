@@ -433,12 +433,13 @@ EOF
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 PR_CREATE_JSON=$($AIMI_CLI forge-pr-create --title "$PR_TITLE" --base "$BASE_BRANCH" --head "$CURRENT_BRANCH" --body "$PR_BODY")
-if [ -z "$PR_CREATE_JSON" ]; then
-  echo "Error: forge-pr-create produced no output — see the manual create-it-yourself instructions above (mandatory-print degradation, forge-contract.md's Degradation Contract)." >&2
+PR_STATUS=$(printf '%s' "$PR_CREATE_JSON" | jq -r '.status // empty' 2>/dev/null)
+if [ "$PR_STATUS" != "created" ] && [ "$PR_STATUS" != "unchanged" ]; then
+  echo "Error: forge-pr-create reported status ${PR_STATUS:-<none>} — see the manual create-it-yourself instructions above (mandatory-print degradation, forge-contract.md's Degradation Contract)." >&2
   exit 1
 fi
-PR_URL=$(printf '%s' "$PR_CREATE_JSON" | jq -r '.url')
-PR_NUMBER=$(printf '%s' "$PR_CREATE_JSON" | jq -r '.number')
+PR_URL=$(printf '%s' "$PR_CREATE_JSON" | jq -r '.data.url')
+PR_NUMBER=$(printf '%s' "$PR_CREATE_JSON" | jq -r '.data.number')
 echo "PR_URL=$PR_URL"
 echo "PR_NUMBER=$PR_NUMBER"
 echo "--- PR_BODY (verbatim, for Step 5c to re-derive) ---"
@@ -446,7 +447,9 @@ echo "$PR_BODY"
 echo "--- end PR_BODY ---"
 ```
 
-If `forge-pr-create` itself exits non-zero (an unsupported forge, a missing `gh` binary, or the `gh pr create` call failing), it has already printed manual create-it-yourself instructions to stderr — mandatory-print degradation, `forge-contract.md`'s Degradation Contract, since opening a PR has no other fallback. Report those instructions to the user and STOP.
+`forge-pr-create` returns `forge-contract.md`'s write-verb envelope — `{status, data: {url, number}, message}` with `status` one of `created`, `unchanged`, or `degraded` (Write-Verb Status Convention). `unchanged` means an open PR already existed for this branch and was reused rather than duplicated; both it and `created` carry a usable `data.url`/`data.number`, which is why the check above accepts either and treats everything else — a `degraded` envelope, or no envelope at all — as the failure case.
+
+If `forge-pr-create` itself exits non-zero (an unsupported forge, a missing `gh` binary, or the `gh pr create` call failing), it has already printed manual create-it-yourself instructions to stderr — mandatory-print degradation, `forge-contract.md`'s Degradation Contract, since opening a PR has no other fallback — **and** now emits a `status: "degraded"` envelope on stdout carrying the same reason in its `message` field. The exit code is unchanged; the envelope is an additional in-band signal, not a replacement for it. Report those instructions to the user and STOP.
 
 **Important**: The Backend Implementation Spec section is rendered entirely from the `backendSpec` metadata object. No LLM generation is used — all content comes from deterministic template rendering of the structured data. When `$INCLUDE_BACKEND_SPEC=0` (no tasks file, `frontendOnly` is false, or `backendSpec` is null), the section is omitted entirely and the PR body ends after the Files Changed section. If `businessContext` is a plain string (legacy format), render it as a single paragraph for backwards compatibility.
 
@@ -514,8 +517,8 @@ EOF
   ISSUE_CREATE_JSON=$($AIMI_CLI forge-issue-create --title "Backend: $METADATA_TITLE" --body "$ISSUE_BODY")
   ISSUE_STATUS=$(printf '%s' "$ISSUE_CREATE_JSON" | jq -r '.status')
   if [ "$ISSUE_STATUS" = "created" ]; then
-    ISSUE_URL=$(printf '%s' "$ISSUE_CREATE_JSON" | jq -r '.url')
-    ISSUE_NUMBER=$(printf '%s' "$ISSUE_CREATE_JSON" | jq -r '.number')
+    ISSUE_URL=$(printf '%s' "$ISSUE_CREATE_JSON" | jq -r '.data.url')
+    ISSUE_NUMBER=$(printf '%s' "$ISSUE_CREATE_JSON" | jq -r '.data.number')
     PR_EDIT_JSON=$($AIMI_CLI forge-pr-edit --number "$PR_NUMBER" --body "$(cat <<EOF
 $PR_BODY
 
@@ -532,9 +535,9 @@ fi
 
 Where `$METADATA_TITLE` is `metadata.title` from Step 4c, and `$PR_NUMBER`/`$PR_BODY` are the values re-assigned above from Step 5b's printed output.
 
-**Important**: `forge-issue-create` is a soft-fail verb — it always exits `0` and reports `created` or `degraded` in its own JSON `status` field (`commands/references/forge-contract.md`), so the `if`/`else` above branches on that field, never on a bare exit code. A `degraded` result (permissions denied, issues disabled, rate limit, missing forge CLI, or an unsupported forge) means the issue was not created automatically — a warning is logged but PR creation is NOT affected, since the backend spec still lives in the PR body (guaranteed by Step 5b). `forge-issue-create` itself already prints the manual "create this yourself" instructions to stderr on a `degraded` result (mandatory-print degradation), so no separate STOP is needed here. `forge-pr-edit` shares `forge-pr-create`'s own mandatory-print/non-zero-exit contract — if it fails, its own manual fallback instructions are already on stderr; the issue is still created and linked in every other respect.
+**Important**: `forge-issue-create` is a soft-fail verb — it always exits `0` and reports `created` or `degraded` in the `status` field of `forge-contract.md`'s shared write-verb envelope (`commands/references/forge-contract.md`, Write-Verb Status Convention), so the `if`/`else` above branches on that field, never on a bare exit code. A `degraded` result (permissions denied, issues disabled, rate limit, missing forge CLI, or an unsupported forge) means the issue was not created automatically — a warning is logged but PR creation is NOT affected, since the backend spec still lives in the PR body (guaranteed by Step 5b). `forge-issue-create` itself already prints the manual "create this yourself" instructions to stderr on a `degraded` result (mandatory-print degradation), so no separate STOP is needed here. `forge-pr-edit` emits that same envelope and shares `forge-pr-create`'s own mandatory-print/non-zero-exit contract — the shared shape deliberately does NOT mean a shared exit-code contract, and this verb's always-`0` exit is exactly what keeps a failed backend issue from blocking the PR. If `forge-pr-edit` fails, its own manual fallback instructions are already on stderr (alongside its `degraded` envelope on stdout); the issue is still created and linked in every other respect.
 
-**On success**: The issue URL and number are read directly from `forge-issue-create`'s JSON `number` field — the `grep -oE '[0-9]+$'` derivation is gone — and `forge-pr-edit` appends a "Related issue: #N" link to the PR body.
+**On success**: The issue URL and number are read from the envelope's nested `data.url` and `data.number` fields — the same nesting `forge-pr-create` and `forge-pr-edit` use, and the `grep -oE '[0-9]+$'` derivation is gone — and `forge-pr-edit` appends a "Related issue: #N" link to the PR body.
 
 **On failure (degraded)**: A warning message is displayed and execution continues to Step 5d.
 

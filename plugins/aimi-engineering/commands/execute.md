@@ -3565,11 +3565,11 @@ while IFS= read -r GROUP_PROJECT; do
     --body "Completes phase [PHASE_ID] of [FEATURE]. See [PHASE_DIR]/handoff.md for details." \
     --project "$GROUP_TOPLEVEL") || GROUP_PR_JSON=""
   if [ -n "$GROUP_PR_JSON" ]; then
-    GROUP_PR_URL=$(printf '%s' "$GROUP_PR_JSON" | jq -r '.url // empty')
-    GROUP_PR_CREATED=$(printf '%s' "$GROUP_PR_JSON" | jq -r '.created // empty')
-    if [ "$GROUP_PR_CREATED" = "true" ]; then
+    GROUP_PR_STATUS=$(printf '%s' "$GROUP_PR_JSON" | jq -r '.status // empty')
+    GROUP_PR_URL=$(printf '%s' "$GROUP_PR_JSON" | jq -r '.data.url // empty')
+    if [ "$GROUP_PR_STATUS" = "created" ]; then
       echo "Opened pull request for $GROUP_LABEL: $GROUP_PR_URL"
-    else
+    elif [ "$GROUP_PR_STATUS" = "unchanged" ]; then
       echo "Pull request already exists for $GROUP_LABEL: $GROUP_PR_URL"
     fi
   fi
@@ -3577,7 +3577,7 @@ done <<< "$PHASE_GROUP_PROJECTS"
 cd "$AIMI_ROOT"
 ```
 
-`forge-pr-create` owns the presence check for whichever forge CLI this repository's remote needs — there is no `command -v gh` gate in this file anymore. When the forge is unsupported, its CLI is missing, or the create call itself fails, `forge-pr-create` prints the manual push/PR-URL fallback instructions itself (mandatory-print degrade mode, `commands/references/forge-contract.md`) and exits non-zero; this loop does not reimplement or duplicate that guidance, it only skips the "opened"/"already exists" echo for that repository and moves on. `forge-pr-create` checks for an existing open PR on `$PHASE_BRANCH` before ever creating one (its own check-then-create contract, matching open-pr.md's pre-existing "PR already exists" behavior) — a retried or re-entered phase reuses that PR (`created:false`) rather than opening a duplicate.
+`forge-pr-create` owns the presence check for whichever forge CLI this repository's remote needs — there is no `command -v gh` gate in this file anymore. When the forge is unsupported, its CLI is missing, or the create call itself fails, `forge-pr-create` prints the manual push/PR-URL fallback instructions itself (mandatory-print degrade mode, `commands/references/forge-contract.md`), emits a `status: "degraded"` envelope, and exits non-zero; this loop does not reimplement or duplicate that guidance, it only skips the "opened"/"already exists" echo for that repository and moves on — the non-zero exit blanks `GROUP_PR_JSON` before either echo can be reached. `forge-pr-create` checks for an existing open PR on `$PHASE_BRANCH` before ever creating one (its own check-then-create contract, matching open-pr.md's pre-existing "PR already exists" behavior) — a retried or re-entered phase reuses that PR (`status: "unchanged"`, `forge-contract.md`'s Write-Verb Status Convention: no new PR number was minted) rather than opening a duplicate.
 
 If `git push` or `forge-pr-create` fails for a given repository (no permissions, offline, branch already has an open PR the tool itself cannot read, etc.), that repository's failure is what `forge-pr-create` already reported on stderr — report it verbatim and continue on to the next repository — do not retry, do not prompt interactively, and never revert the phase's `completed` status.
 

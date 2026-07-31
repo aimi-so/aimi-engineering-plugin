@@ -15,10 +15,36 @@ not a new field invented per verb.
 
 **Consumed by:** `aimi-cli.sh`'s shared jq builder functions
 (`_forge_build_pr_json`, `_forge_build_issue_json`, `_forge_emit_status`,
-`_forge_bin_check`) and every forge verb built on top of them. GitHub is the
+`_forge_emit_write_status`, `_forge_build_write_data`, `_forge_bin_check`)
+and every forge verb built on top of them. GitHub is the
 only adapter shipping in phase 1; this contract is written so GitLab (`glab`)
 and Gitea/Forgejo (`tea`) can be added later without changing the shape any
 existing caller already depends on.
+
+## Result Envelope Shapes — the complete list
+
+This file defines exactly **four** result envelope shapes and no others. An
+adapter author adding a GitLab or Gitea backend reads this list rather than
+inferring the total by reading all ten `forge-*` verb bodies, and a new verb
+picks one of these four rather than inventing a fifth.
+
+| # | Envelope | `status` values | Built by | Emitted by |
+|---|---|---|---|---|
+| 1 | **Read three-way** — `{status, data, message}` | `found` / `not_found` / `error` | `_forge_emit_status` | `forge-auth-status`, `forge-repo-info`, `forge-issue-view`, `forge-pr-review-threads`, `forge-resolve-review-thread` |
+| 2 | **`forge-pr-view`'s own** — `{status, pr, unsupported_fields, message}` | `found` / `not_found` / `error` | `_forge_pr_view_emit` | `forge-pr-view` only |
+| 3 | **Write three-way** — `{status, data, message}` | `created` / `unchanged` / `degraded` | `_forge_emit_write_status` | `forge-pr-create`, `forge-pr-edit`, `forge-issue-create` |
+| 4 | **Review/Approval** — `{approved, changes_requested, approvals_count, unsupported_fields, raw}` | *(no `status` field)* | *(no builder yet)* | *(no verb yet — spec only)* |
+
+Envelopes 1 and 3 share their three field names (`status`, `data`, `message`)
+and their null-forcing discipline exactly, and differ **only** in which three
+values `status` may take: a lookup can come back empty-handed (`not_found`), a
+write cannot, since a write looks nothing up. Envelope 2 is `forge-pr-view`'s
+documented exception and is scoped to that one verb — see **`forge-pr-view`
+Envelope** below for why it exists at all. Envelope 4 is a spec for a future
+verb, not a description of code that ships today.
+
+`message` is the single degraded-reason field across every envelope above.
+No verb may add a second one under any name.
 
 ## Normalized PR Field Set
 
@@ -179,6 +205,93 @@ below):
 sibling verb may add a second field (`degradedReason`, `reason`, or any
 other name) to carry the same information.
 
+## `forge-pr-view` Envelope
+
+`forge-pr-view` is the one documented exception to the read envelope above.
+It keeps the same `found`/`not_found`/`error` vocabulary and the same
+`message` degradation signal, but carries its payload under `pr` alongside a
+sibling `unsupported_fields` key instead of under a generic `data`:
+
+```json
+{"status": "found",     "pr": {"url": "..."}, "unsupported_fields": [], "message": null}
+{"status": "not_found", "pr": null, "unsupported_fields": null, "message": "no open pull request for feat-x"}
+{"status": "error",     "pr": null, "unsupported_fields": null, "message": "gh exited 4: authentication required"}
+```
+
+Two properties force the exception, and neither generalizes to any other
+verb:
+
+- Its `--include` field selector requires `pr` to carry **exactly** the
+  caller's requested keys and no others — never the fixed superset
+  `_forge_build_pr_json` always returns — so `unsupported_fields` has to sit
+  outside the payload it describes.
+- A `not_found` outcome here carries a populated `message` naming the ref
+  that was searched, which the Three-Way Status Convention above explicitly
+  permits ("`message` is `null` unless a short human-readable note is
+  useful") but `_forge_emit_status`'s own null-forcing does not produce.
+
+On `found`, `unsupported_fields` is **always** a JSON array — an explicitly
+empty `[]` when every requested capability-gated field was supplied, never a
+bare `null`. Built by `_forge_pr_view_emit`; no other verb may adopt this
+shape.
+
+## Write-Verb Status Convention
+
+Every forge **write** verb (`forge-pr-create`, `forge-pr-edit`,
+`forge-issue-create`) reports one of exactly three outcomes, through the same
+`{status, data, message}` field names and the same null-forcing discipline
+the read side uses. A write is never "not found" — nothing was looked up —
+so the read trio would be a bad fit; three per-verb vocabularies were worse
+still, since a caller then had to learn a different shape per verb, or read
+the exit code alone, to find out what a write actually did.
+
+| `status` | Meaning |
+|---|---|
+| `created` | A new resource identifier was minted. `data` carries `{url, number}` for the new resource; `message` is `null`. |
+| `unchanged` | No new identifier was minted. `data` carries `{url, number}` for the resource that already existed; `message` is `null`. |
+| `degraded` | The write could not complete automatically. `data` is `null`; `message` carries the reason — the same one-and-only degraded-reason field the read side uses. |
+
+Shape (built by `_forge_emit_write_status` — see **Shared Builder Functions**
+below):
+
+```json
+{"status": "created",   "data": {"url": "https://github.com/o/r/pull/101", "number": 101}, "message": null}
+{"status": "unchanged", "data": {"url": "https://github.com/o/r/pull/55", "number": 55},   "message": null}
+{"status": "degraded",  "data": null, "message": "gh pr create exited 1: HTTP 403"}
+```
+
+**`unchanged` covers two outcomes that look different but are the same
+fact.** `forge-pr-create` finding an already-open PR on `--head` reports it,
+and so does every successful `forge-pr-edit` call — an edit mutates a number
+that already existed. `forge-pr-edit`'s PR *body* really did change; the word
+is about the **resource identifier**, not the content. `forge-issue-create`
+never reports `unchanged` at all: it only ever mints a new issue.
+
+**The exit-code contract is unchanged by this envelope, and is not replaced
+by it.** The hard-fail versus soft-fail split stated in `aimi-cli.sh`'s own
+`EXIT CONTRACT DIFFERS FROM forge-issue-create ON PURPOSE` comment survives
+completely intact:
+
+| Verb | Exit code on `degraded` | Why |
+|---|---|---|
+| `forge-pr-create` | **non-zero** | Opening a PR has no fallback. `execute.md`'s per-repository loop needs a real non-zero exit for its own per-repository failure isolation. |
+| `forge-pr-edit` | **non-zero** | Same contract as `forge-pr-create`. |
+| `forge-issue-create` | **always `0`** | A failed backend issue must never block PR creation (`open-pr.md`'s documented soft-fail behavior). A caller branches on `status`, never on this verb's exit code. |
+
+What the envelope adds is an **in-band** signal: stdout is no longer silent
+on a failure path, so a caller reading stdout learns the outcome from
+`status` instead of inferring it from an empty capture. It removes the exit
+code being the *only* signal — it does not remove or weaken the exit code
+itself.
+
+One deliberate asymmetry inside `forge-pr-create`: once `gh pr create` has
+returned a URL, a failed post-create re-read still reports `created` (with
+`data.number` null and a `Warning` on stderr) at exit `0`, **not**
+`degraded`. The pull request genuinely exists and only its number is
+unconfirmed; reporting `degraded` would force `data` to `null` per the table
+above and throw the created PR's URL away, leading a caller to open a second
+pull request for a branch that already has one.
+
 ## Credential/Identity Model
 
 Credentials are **forge-and-host-scoped**, not global — a machine can hold
@@ -256,6 +369,23 @@ JSON assembly per verb — mirroring how `_verify_creates_emit` centralizes
   unless `status == "found"`; `message` is forced to `null` unless
   `status == "error"` — this prevents a caller from accidentally carrying a
   stale value across the wrong branch of the three-way outcome.
+- **`_forge_emit_write_status`** — `_forge_emit_write_status <status>
+  [data-json] [message]`, the write-side sibling of `_forge_emit_status`
+  above (see **Write-Verb Status Convention**). `status` must be exactly
+  `created`, `unchanged`, or `degraded`; any other value is a caller error
+  (exit 1), mirroring `_forge_emit_status`'s own guard rather than silently
+  coercing. `data` is forced to `null` unless `status` is `created` or
+  `unchanged`; `message` is forced to `null` unless `status == "degraded"`.
+  Returns exactly `{status, data, message}` — the identical field names and
+  null-forcing discipline the read-side builder uses, differing only in
+  which three values `status` may take.
+- **`_forge_build_write_data`** — `_forge_build_write_data <url> [number]`.
+  Builds the `{url, number}` object the three write verbs nest under
+  `_forge_emit_write_status`'s `data` key. An empty `url` or `number` comes
+  back `null`; a supplied `number` is a JSON int, never a quoted string.
+  One builder for all three verbs, so their success shapes are identical by
+  construction rather than by three hand-rolled `jq` expressions that merely
+  happen to agree.
 - **`_forge_bin_check`** — `_forge_bin_check <binary> <quiet|mandatory>
   <forge-label>`. See **Degradation Contract** above for the mode
   semantics.
