@@ -2246,16 +2246,27 @@ _forge_build_issue_json() {
 # broken". Every later forge lookup verb constructs its result through this
 # one function instead of hand-rolling the JSON assembly per verb.
 #
-# Usage: _forge_emit_status <status> [data-json] [message]
+# Usage: _forge_emit_status <status> [data-json] [message] [reason]
 #   status   found | not_found | error -- anything else is a caller error
 #            (unknown status, exit 1) rather than silently coerced.
 #   data     JSON value (typically a normalized PR/issue object). Forced to
 #            null unless status == "found", so a caller cannot accidentally
 #            leak a stale value across the wrong branch of the outcome.
-#   message  the one and only degraded-reason field in this contract.
-#            Forced to null unless status == "error".
+#   message  the human-readable degraded reason -- prose for a log or a
+#            person. Forced to null unless status == "error".
+#   reason   the MACHINE-readable degraded reason: a fixed, closed enum
+#            (no_adapter | cli_missing | not_authenticated | cli_failed,
+#            forge-contract.md "Degradation Reason Enum"), so a caller
+#            branches on a stable value instead of grepping translatable
+#            English out of `message`. Any other non-empty value is a caller
+#            error (exit 1) -- the identical discipline `status` above
+#            already gets, rather than silently passing an unknown value
+#            through to a caller that would then branch on it. Forced to
+#            null unless status == "error", exactly like `message`, so a
+#            stale reason can never ride along on a found/not_found result.
+#            It exists ALONGSIDE `message`, never as a replacement for it.
 _forge_emit_status() {
-  local status="$1" data_json="${2:-null}" message="${3:-}"
+  local status="$1" data_json="${2:-null}" message="${3:-}" reason="${4:-}"
 
   case "$status" in
     found|not_found|error) ;;
@@ -2265,18 +2276,31 @@ _forge_emit_status() {
       ;;
   esac
 
+  case "$reason" in
+    ""|no_adapter|cli_missing|not_authenticated|cli_failed) ;;
+    *)
+      echo "Error: _forge_emit_status: reason must be no_adapter, cli_missing, not_authenticated or cli_failed (got: $reason)" >&2
+      return 1
+      ;;
+  esac
+
   if [ "$status" != "found" ]; then
     data_json="null"
   fi
   if [ "$status" != "error" ]; then
     message=""
+    reason=""
   fi
 
   jq -nc \
     --arg status "$status" \
     --argjson data "$data_json" \
     --arg message "$message" \
-    '{status: $status, data: $data, message: (if $message == "" then null else $message end)}'
+    --arg reason "$reason" \
+    '{status: $status,
+      data: $data,
+      message: (if $message == "" then null else $message end),
+      reason: (if $reason == "" then null else $reason end)}'
 }
 
 # Shared WRITE-verb status envelope (forge-contract.md "Write-Verb Status
@@ -2388,6 +2412,55 @@ _forge_bin_check() {
   return 1
 }
 
+# Classifies an ALREADY-FAILED gh invocation into forge-contract.md's
+# Degradation Reason Enum, printing exactly one of `not_authenticated` or
+# `cli_failed`. One shared helper so every adapter below asks the question
+# the same way instead of each duplicating its own check.
+#
+# Usage: _forge_classify_gh_failure_reason <host>
+#
+# The answer is determined STRUCTURALLY, never by pattern-matching the
+# failing command's own stderr text: this calls _forge_auth_status_github
+# directly (a function call, never a `$AIMI_CLI forge-auth-status`
+# subprocess -- the exact primitive the shipped forge-auth-status verb uses
+# to answer this same question) and reads its `.authenticated` field. Note
+# that `.authenticated` is the field that answers "is the user logged in";
+# _forge_emit_status's own `status` field answers only "did the check run",
+# which is a different question and the wrong one to branch on here.
+#
+# Why structural rather than a stderr match on gh's known auth-failure
+# wording ("HTTP 401", "Bad credentials", "gh auth login"): that wording can
+# be reworded on any gh release and varies by locale, so a match silently
+# stops matching and misclassifies every future auth failure as cli_failed.
+# forge-pr-view's not_found detection was made structural for exactly this
+# reason; this follows that precedent rather than _forge_issue_view's
+# unremediated stderr match.
+#
+# COST AND ORDERING: the one extra `gh auth status` round trip happens only
+# on an already-failed request, and only after the CALLING adapter has
+# already confirmed gh is on PATH through its own separate _forge_bin_check
+# gate. cli_missing is therefore always ruled out before this ever runs --
+# the two reasons can never collide.
+#
+# Anything short of a definite "authenticated: false" resolves to
+# cli_failed, including a call that could not determine an active account at
+# all: this classifier only ever narrows an already-known failure, so the
+# catch-all is the safe direction.
+_forge_classify_gh_failure_reason() {
+  local host="${1:-}"
+  local auth_json="" authenticated=""
+
+  auth_json=$(_forge_auth_status_github "$host" 2>/dev/null) || auth_json=""
+  authenticated=$(printf '%s' "$auth_json" | jq -r '.authenticated' 2>/dev/null) || authenticated=""
+
+  if [ "$authenticated" = "false" ]; then
+    printf '%s' "not_authenticated"
+    return 0
+  fi
+
+  printf '%s' "cli_failed"
+}
+
 # ============================================================================
 # forge-auth-status / forge-repo-info (US-003)
 # ============================================================================
@@ -2398,7 +2471,8 @@ _forge_bin_check() {
 # contract.md). Every field name and the found/not_found/error vocabulary
 # below comes verbatim from that file -- forge-contract.md is the single
 # arbiter, and this section introduces no camelCase unsupportedFields, no
-# second degraded-reason field alongside status/message, and no gh
+# degradation field the contract does not itself define (the `reason` enum
+# below is the contract's own, not a per-verb invention), and no gh
 # invocation outside the two private *_github helpers below.
 #
 # forge-auth-status reports whether the active gh session is authenticated
@@ -2484,7 +2558,7 @@ _forge_auth_status() {
   forge=$(printf '%s' "$forge_info" | jq -r '.forge')
   host=$(printf '%s' "$forge_info" | jq -r '.host')
 
-  local status="error" message="" data_json="null"
+  local status="error" message="" data_json="null" reason=""
 
   if [ "$forge" = "github" ]; then
     if _forge_bin_check gh quiet github; then
@@ -2519,12 +2593,19 @@ _forge_auth_status() {
           identityHonored: $identityHonored}')
     else
       message="gh not found on PATH -- cannot check authentication status"
+      reason="cli_missing"
     fi
   else
     message="no forge adapter for ${forge} -- cannot check authentication status"
+    reason="no_adapter"
   fi
 
-  _forge_emit_status "$status" "$data_json" "$message"
+  # Note which branch does NOT set a reason: the found branch above, which
+  # covers the CONFIRMED negative (data.authenticated=false). A definitive
+  # "no, you are not logged in" is a successful lookup, so `reason` stays
+  # null there despite that outcome's name resembling not_authenticated --
+  # `reason` only ever describes a check that could not run at all.
+  _forge_emit_status "$status" "$data_json" "$message" "$reason"
 }
 
 # Detects whether the session is authenticated with the active forge and
@@ -2728,8 +2809,8 @@ cmd_forge_repo_info() {
 #
 # This verb's envelope is deliberately its OWN shape --
 # {status, pr, unsupported_fields, message} -- rather than the generic
-# three-way envelope _forge_emit_status builds ({status, data, message}):
-# the --include selector requires `pr` to carry exactly the caller's
+# three-way envelope _forge_emit_status builds ({status, data, message,
+# reason}): the --include selector requires `pr` to carry exactly the caller's
 # requested keys and no others, never the full fixed superset
 # _forge_build_pr_json always returns, and a not_found outcome here must
 # carry a populated `message` (naming the ref that was searched) rather
@@ -2739,7 +2820,11 @@ cmd_forge_repo_info() {
 # short human-readable note is useful"). The found/not_found/error status
 # vocabulary still matches that convention exactly, and the degraded-reason
 # field is named `message` here for the same reason: it is the contract's
-# ONE degradation signal, never a per-verb invention.
+# own human-readable degradation signal, never a per-verb invention. This
+# envelope deliberately does NOT carry the machine-readable `reason` enum
+# the shared builder now emits -- forge-contract.md's Degradation Reason
+# Enum names forge-pr-view's shape as the one exception `reason` is not
+# extended onto.
 #
 # Field names inside `pr` are the NORMALIZED PR contract's own (number,
 # url, title, body, state, headRefName, baseRefName, files, isDraft,
@@ -3637,16 +3722,20 @@ _forge_extract_issue_number_from_url() {
 # layer that can exit non-zero, and only for a caller-side usage error.
 _forge_issue_view() {
   local number="$1"
-  local forge
-  forge=$(_detect_forge | jq -r '.forge')
+  local forge_info forge host
+  # host is resolved alongside forge (this used to read only .forge) purely
+  # so the generic-failure branch below can hand it to the shared classifier.
+  forge_info=$(_detect_forge)
+  forge=$(printf '%s' "$forge_info" | jq -r '.forge')
+  host=$(printf '%s' "$forge_info" | jq -r '.host // empty')
 
   if [ "$forge" != "github" ]; then
-    _forge_emit_status error "" "forge-issue-view: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1."
+    _forge_emit_status error "" "forge-issue-view: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1." no_adapter
     return 0
   fi
 
   if ! _forge_bin_check gh quiet "$forge"; then
-    _forge_emit_status error "" "gh not found -- this issue lookup did not run automatically."
+    _forge_emit_status error "" "gh not found -- this issue lookup did not run automatically." cli_missing
     return 0
   fi
 
@@ -3679,7 +3768,13 @@ _forge_issue_view() {
     return 0
   fi
 
-  _forge_emit_status error "" "gh issue view exited $rc: ${stderr_out:-unknown error}"
+  # Reached only after the not-found stderr match above already failed, so
+  # gh genuinely broke. gh's presence was confirmed by the _forge_bin_check
+  # gate above, so the classifier only has to separate not_authenticated
+  # from cli_failed -- cli_missing is already ruled out.
+  local reason
+  reason=$(_forge_classify_gh_failure_reason "$host")
+  _forge_emit_status error "" "gh issue view exited $rc: ${stderr_out:-unknown error}" "$reason"
   return 0
 }
 
@@ -4028,7 +4123,7 @@ mutation ResolveReviewThread($threadId: ID!) {
 # still contains literal `$owner`/`$repo`/`$pr` (GraphQL's own variable
 # syntax, inert under bash single-quoting).
 _forge_pr_review_threads_github() {
-  local pr_number="$1" owner="$2" repo="$3" all_threads="$4"
+  local pr_number="$1" owner="$2" repo="$3" all_threads="$4" host="${5:-}"
   local err_file stdout rc=0
 
   err_file=$(mktemp)
@@ -4039,7 +4134,12 @@ _forge_pr_review_threads_github() {
   rm -f "$err_file"
 
   if [ "$rc" -ne 0 ]; then
-    _forge_emit_status error "" "gh api graphql exited $rc: ${stderr_out:-unknown error}"
+    # gh's presence was already confirmed by the caller's _forge_bin_check
+    # gate, so the classifier only separates not_authenticated from
+    # cli_failed -- structurally, never by reading stderr_out's wording.
+    local reason
+    reason=$(_forge_classify_gh_failure_reason "$host")
+    _forge_emit_status error "" "gh api graphql exited $rc: ${stderr_out:-unknown error}" "$reason"
     return 0
   fi
 
@@ -4089,16 +4189,20 @@ _forge_pr_review_threads_github() {
 # detection.
 _forge_pr_review_threads() {
   local pr_number="$1" owner="$2" repo="$3" all_threads="$4"
-  local forge
-  forge=$(_detect_forge | jq -r '.forge')
+  local forge_info forge host
+  # host is resolved alongside forge (this used to read only .forge) so it
+  # can be handed to the github adapter, which passes it to the classifier.
+  forge_info=$(_detect_forge)
+  forge=$(printf '%s' "$forge_info" | jq -r '.forge')
+  host=$(printf '%s' "$forge_info" | jq -r '.host // empty')
 
   if [ "$forge" != "github" ]; then
-    _forge_emit_status error "" "forge-pr-review-threads: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1."
+    _forge_emit_status error "" "forge-pr-review-threads: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1." no_adapter
     return 0
   fi
 
   if ! _forge_bin_check gh quiet "$forge"; then
-    _forge_emit_status error "" "gh not found -- this review-thread lookup did not run automatically."
+    _forge_emit_status error "" "gh not found -- this review-thread lookup did not run automatically." cli_missing
     return 0
   fi
 
@@ -4112,12 +4216,18 @@ _forge_pr_review_threads() {
     fi
   fi
 
+  # cli_failed, NOT a fifth enum value of its own and NOT routed through the
+  # classifier: no gh invocation happens on this branch, so there is nothing
+  # to re-check auth against, and forge-contract.md's cli_failed already
+  # names "an owner/repo that could not be auto-resolved" as one of the
+  # catch-all's cases. A fifth value for exactly one call site would be enum
+  # proliferation for a single caller-input edge case.
   if [ -z "$owner" ] || [ -z "$repo" ]; then
-    _forge_emit_status error "" "forge-pr-review-threads: could not resolve owner/repo -- pass --owner and --repo explicitly."
+    _forge_emit_status error "" "forge-pr-review-threads: could not resolve owner/repo -- pass --owner and --repo explicitly." cli_failed
     return 0
   fi
 
-  _forge_pr_review_threads_github "$pr_number" "$owner" "$repo" "$all_threads"
+  _forge_pr_review_threads_github "$pr_number" "$owner" "$repo" "$all_threads" "$host"
 }
 
 # Read verb: found | not_found | error, per forge-contract.md's Three-Way
@@ -4210,16 +4320,20 @@ cmd_forge_pr_review_threads() {
 # non-zero, driven by this function's JSON `status` field.
 _forge_resolve_review_thread() {
   local thread_id="$1"
-  local forge
-  forge=$(_detect_forge | jq -r '.forge')
+  local forge_info forge host
+  # host is resolved alongside forge (this used to read only .forge) purely
+  # so the generic-failure branch below can hand it to the shared classifier.
+  forge_info=$(_detect_forge)
+  forge=$(printf '%s' "$forge_info" | jq -r '.forge')
+  host=$(printf '%s' "$forge_info" | jq -r '.host // empty')
 
   if [ "$forge" != "github" ]; then
-    _forge_emit_status error "" "forge-resolve-review-thread: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1."
+    _forge_emit_status error "" "forge-resolve-review-thread: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1." no_adapter
     return 0
   fi
 
   if ! _forge_bin_check gh quiet "$forge"; then
-    _forge_emit_status error "" "gh not found -- this thread could not be resolved automatically."
+    _forge_emit_status error "" "gh not found -- this thread could not be resolved automatically." cli_missing
     return 0
   fi
 
@@ -4245,7 +4359,14 @@ _forge_resolve_review_thread() {
       _forge_emit_status found "$(jq -nc '{resolved: false, thread: null, unsupported_fields: []}')"
       return 0
     fi
-    _forge_emit_status error "" "gh api graphql exited $rc: ${stderr_out:-unknown error}"
+    # Reached only after the confirmed-invalid-id match above already
+    # failed, so gh genuinely broke. gh's presence was confirmed by the
+    # _forge_bin_check gate above, so the classifier only separates
+    # not_authenticated from cli_failed -- structurally, never by reading
+    # stderr_out's wording.
+    local reason
+    reason=$(_forge_classify_gh_failure_reason "$host")
+    _forge_emit_status error "" "gh api graphql exited $rc: ${stderr_out:-unknown error}" "$reason"
     return 0
   fi
 
@@ -4262,8 +4383,11 @@ _forge_resolve_review_thread() {
 
   local thread_json
   thread_json=$(printf '%s' "$stdout" | jq -c '.data.resolveReviewThread.thread // empty')
+  # cli_failed hard-coded rather than classified: gh itself exited 0 here,
+  # so nothing failed at the tool level and there is no failure to re-check
+  # auth against -- only the response shape is unexpected.
   if [ -z "$thread_json" ]; then
-    _forge_emit_status error "" "gh api graphql returned no thread and no errors for resolveReviewThread"
+    _forge_emit_status error "" "gh api graphql returned no thread and no errors for resolveReviewThread" cli_failed
     return 0
   fi
 

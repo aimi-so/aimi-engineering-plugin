@@ -16577,6 +16577,13 @@ source_forge_contract_functions() {
   eval "$(sed -n '/^_forge_emit_write_status()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_forge_build_write_data()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_forge_bin_check()/,/^}/p' "$CLI")"
+  # _forge_classify_gh_failure_reason calls _forge_auth_status_github
+  # directly (never a subprocess), so the callee must be eval'd too or the
+  # classifier's own test would exercise a function that is not defined --
+  # the same "source every helper the code under test reaches" rule
+  # source_cache_functions follows.
+  eval "$(sed -n '/^_forge_auth_status_github()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_classify_gh_failure_reason()/,/^}/p' "$CLI")"
 }
 
 test_forge_build_pr_json_capability_gating() {
@@ -16668,6 +16675,137 @@ test_forge_emit_status_three_outcomes() {
   assert_exit_code "1" "$exit_code" "status unknown value: exits 1"
   assert_stderr_contains "found, not_found or error" "$(cat /tmp/forge_status_stderr.$$)" "status unknown value: stderr names the three valid outcomes"
   rm -f /tmp/forge_status_stderr.$$
+}
+
+test_forge_emit_status_reason_enum() {
+  echo ""
+  echo "=== _forge_emit_status: the reason enum -- closed set, error-only, validated like status ==="
+
+  source_forge_contract_functions
+
+  local out exit_code
+
+  # The whole point of the field: on error, reason is carried through as the
+  # EXACT string supplied, alongside (never instead of) message.
+  out=$(_forge_emit_status error "" "gh exited 4: authentication required" not_authenticated)
+  assert_eq "not_authenticated" "$(printf '%s' "$out" | jq -r '.reason')" "reason on error: carried through as the exact string supplied"
+  assert_eq "gh exited 4: authentication required" "$(printf '%s' "$out" | jq -r '.message')" "reason on error: message survives alongside it, not replaced by it"
+  assert_eq '["data","message","reason","status"]' "$(printf '%s' "$out" | jq -c 'keys')" "reason on error: envelope is exactly {status, data, message, reason}"
+
+  # All four enum values are accepted.
+  local value
+  for value in no_adapter cli_missing not_authenticated cli_failed; do
+    out=$(_forge_emit_status error "" "boom" "$value")
+    assert_eq "$value" "$(printf '%s' "$out" | jq -r '.reason')" "reason enum: $value is a valid value"
+  done
+
+  # An error with no reason argument at all still emits the key, as null --
+  # every call site that predates this argument keeps working unchanged.
+  out=$(_forge_emit_status error "" "boom")
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.reason')" "reason omitted on error: key present, value null (the signature change is additive)"
+
+  # Forced null off the error branch -- a stale reason can never ride along
+  # on a successful outcome, exactly as message cannot.
+  out=$(_forge_emit_status found '{"number":1}' "" cli_failed)
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.reason')" "reason on found: forced null even when a non-empty reason is passed"
+  assert_eq '{"number":1}' "$(printf '%s' "$out" | jq -c '.data')" "reason on found: data still carried (only reason was discarded)"
+
+  out=$(_forge_emit_status not_found "" "" no_adapter)
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.reason')" "reason on not_found: forced null even when a non-empty reason is passed"
+
+  # An unrecognized reason is a caller error, not silently passed through to
+  # a caller that would then branch on it -- the identical discipline the
+  # status argument above already gets.
+  _forge_emit_status error "" "boom" bogus_reason >/dev/null 2>/tmp/forge_reason_stderr.$$ && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "reason unknown value: exits 1"
+  assert_stderr_contains "no_adapter, cli_missing, not_authenticated or cli_failed" "$(cat /tmp/forge_reason_stderr.$$)" "reason unknown value: stderr names the four valid values"
+  rm -f /tmp/forge_reason_stderr.$$
+
+  # The write-side envelope is deliberately NOT given a reason field -- the
+  # contract scopes the enum to envelope 1 only.
+  out=$(_forge_emit_write_status degraded "" "boom")
+  assert_eq '["data","message","status"]' "$(printf '%s' "$out" | jq -c 'keys')" "write envelope: still exactly {status, data, message} -- reason is scoped to the read envelope"
+}
+
+test_forge_classify_gh_failure_reason() {
+  echo ""
+  echo "=== _forge_classify_gh_failure_reason: structural auth re-check, never an stderr match ==="
+
+  source_forge_contract_functions
+
+  local fake_dir out
+  fake_dir=$(mktemp -d)
+
+  # Fake gh whose `auth status` subcommand exits non-zero -- the confirmed
+  # logged-out answer _forge_auth_status_github reports as authenticated:false.
+  cat > "$fake_dir/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo "You are not logged into any GitHub hosts." >&2
+  exit 1
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$fake_dir/gh"
+
+  out=$(PATH="$fake_dir:$PATH"; _forge_classify_gh_failure_reason github.com)
+  assert_eq "not_authenticated" "$out" "classifier: gh auth status exiting non-zero resolves to not_authenticated"
+
+  # Fake gh whose `auth status` reports an active, authenticated account --
+  # the failure was something else entirely.
+  cat > "$fake_dir/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo "github.com"
+  echo "  Logged in to github.com account octocat (keyring)"
+  echo "  - Active account: true"
+  exit 0
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$fake_dir/gh"
+
+  out=$(PATH="$fake_dir:$PATH"; _forge_classify_gh_failure_reason github.com)
+  assert_eq "cli_failed" "$out" "classifier: an authenticated account resolves to cli_failed (the failure was something else)"
+
+  # gh present and exiting 0 but reporting no parseable account at all: the
+  # classifier cannot confirm a logged-out state, so it takes the safe
+  # catch-all rather than claiming not_authenticated.
+  cat > "$fake_dir/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo "github.com"
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$fake_dir/gh"
+
+  out=$(PATH="$fake_dir:$PATH"; _forge_classify_gh_failure_reason github.com)
+  assert_eq "cli_failed" "$out" "classifier: an indeterminate auth answer resolves to cli_failed, never to not_authenticated"
+
+  rm -rf "$fake_dir"
+
+  # The mechanism itself, asserted structurally: the classifier must call
+  # the auth-status primitive, and must NOT reach its verdict by matching
+  # gh's own English failure wording, which reworks between releases and
+  # varies by locale.
+  local fn_block
+  fn_block=$(sed -n '/^_forge_classify_gh_failure_reason()/,/^}/p' "$CLI")
+  assert_contains "_forge_auth_status_github" "$fn_block" "classifier: reaches its verdict by calling _forge_auth_status_github directly"
+  assert_contains ".authenticated" "$fn_block" "classifier: branches on .authenticated (is the user logged in), not on a status field (did the check run)"
+
+  local prose_free_block
+  prose_free_block=$(printf '%s\n' "$fn_block" | grep -v '^[[:space:]]*#' || true)
+  if printf '%s' "$prose_free_block" | grep -qiE 'Bad credentials|HTTP 401|gh auth login'; then
+    echo -e "${RED}✗${NC} classifier: must not pattern-match gh's auth-failure stderr wording"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} classifier: no stderr wording match (Bad credentials / HTTP 401 / gh auth login) anywhere in its code"
+    ((TESTS_PASSED++))
+  fi
 }
 
 test_forge_emit_write_status_three_outcomes() {
@@ -16953,6 +17091,7 @@ test_forge_auth_status_single_account_authenticated() {
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.identityRequested')" "auth-status single account: identityRequested null when AIMI_FORGE_IDENTITY unset"
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.identityHonored')" "auth-status single account: identityHonored null when AIMI_FORGE_IDENTITY unset"
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "auth-status single account: message is null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.reason')" "auth-status single account: reason is null (nothing degraded)"
 
   popd >/dev/null
   teardown_fake_gh_fixture
@@ -16995,6 +17134,7 @@ test_forge_auth_status_not_authenticated_confirmed_negative() {
   assert_eq "false" "$(printf '%s' "$out" | jq -r '.data.authenticated')" "auth-status not-authenticated: authenticated is false"
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.account')" "auth-status not-authenticated: account is null"
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "auth-status not-authenticated: message stays null -- confirmed logged-out, not 'could not check'"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.reason')" "auth-status not-authenticated: reason stays null -- a CONFIRMED negative never acquires a reason, despite the name resembling not_authenticated"
 
   popd >/dev/null
   teardown_fake_gh_fixture
@@ -17072,6 +17212,7 @@ test_forge_auth_status_gh_absent_is_error() {
   assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "auth-status gh-absent: status is error"
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "auth-status gh-absent: data is null"
   assert_contains "gh" "$(printf '%s' "$out" | jq -r '.message')" "auth-status gh-absent: message names gh as the missing binary"
+  assert_eq "cli_missing" "$(printf '%s' "$out" | jq -r '.reason')" "auth-status gh-absent: reason is cli_missing"
   assert_eq "" "$(cat "$stderr_file")" "auth-status gh-absent: quiet mode -- no caller-mandated stderr banner"
 
   rm -f "$stderr_file"
@@ -17093,6 +17234,7 @@ test_forge_auth_status_no_adapter_is_error() {
   assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "auth-status no-adapter: status is error"
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "auth-status no-adapter: data is null"
   assert_contains "gitlab" "$(printf '%s' "$out" | jq -r '.message')" "auth-status no-adapter: message names the detected forge, not a generic placeholder"
+  assert_eq "no_adapter" "$(printf '%s' "$out" | jq -r '.reason')" "auth-status no-adapter: reason is no_adapter"
 
   popd >/dev/null
   teardown_detect_forge_fixture
@@ -18656,6 +18798,7 @@ FAKE_GH
   assert_eq "2" "$(printf '%s' "$out" | jq -r '.data.comments')" "forge-issue-view found: comments count derived from array length"
   assert_eq "[]" "$(printf '%s' "$out" | jq -c '.data.unsupported_fields')" "forge-issue-view found: unsupported_fields empty on GitHub"
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "forge-issue-view found: message null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.reason')" "forge-issue-view found: reason null"
 
   popd >/dev/null
   teardown_detect_forge_fixture
@@ -18688,6 +18831,7 @@ FAKE_GH
   assert_exit_code "0" "$exit_code" "forge-issue-view not-found: exit code stays 0 (query result, not a verb failure)"
   assert_eq "not_found" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-view not-found: status"
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "forge-issue-view not-found: data null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.reason')" "forge-issue-view not-found: reason null (nothing degraded -- the lookup ran and answered)"
 
   popd >/dev/null
   teardown_detect_forge_fixture
@@ -18713,6 +18857,7 @@ test_forge_issue_view_degraded_missing_gh() {
   assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-view gh-absent: status error"
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "forge-issue-view gh-absent: data null"
   assert_contains "gh not found" "$(printf '%s' "$out" | jq -r '.message')" "forge-issue-view gh-absent: message names gh"
+  assert_eq "cli_missing" "$(printf '%s' "$out" | jq -r '.reason')" "forge-issue-view gh-absent: reason is cli_missing"
   assert_eq "" "$(cat "$stderr_file")" "forge-issue-view gh-absent: QUIET mode -- zero stderr output"
   rm -f "$stderr_file"
 
@@ -18737,6 +18882,85 @@ test_forge_issue_view_non_github_forge_degrades() {
   assert_exit_code "0" "$exit_code" "forge-issue-view non-github: exit 0"
   assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-view non-github: status error"
   assert_contains "gitlab" "$(printf '%s' "$out" | jq -r '.message')" "forge-issue-view non-github: message names the detected forge"
+  assert_eq "no_adapter" "$(printf '%s' "$out" | jq -r '.reason')" "forge-issue-view non-github: reason is no_adapter"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_view_generic_failure_not_authenticated() {
+  echo ""
+  echo "=== forge-issue-view: gh broke AND the auth re-check says logged out -- reason not_authenticated ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  # `issue view` fails with wording that does NOT match the not-found probe,
+  # so the generic branch is reached; `auth status` then fails too, which is
+  # the structural signal the classifier reads.
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  echo "gh: something went wrong" >&2
+  exit 1
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo "You are not logged into any GitHub hosts." >&2
+  exit 1
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-issue-view --number 42) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-view not-authenticated: exit code stays 0 (degraded result)"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-view not-authenticated: status error"
+  assert_eq "not_authenticated" "$(printf '%s' "$out" | jq -r '.reason')" "forge-issue-view not-authenticated: reason resolved by the structural auth re-check, not by gh's stderr wording"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_view_generic_failure_cli_failed() {
+  echo ""
+  echo "=== forge-issue-view: gh broke but the auth re-check says logged in -- reason cli_failed ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  echo "gh: connection refused" >&2
+  exit 1
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo "github.com"
+  echo "  Logged in to github.com account octocat (keyring)"
+  echo "  - Active account: true"
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-issue-view --number 42) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-view cli-failed: exit code stays 0 (degraded result)"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-view cli-failed: status error"
+  assert_eq "cli_failed" "$(printf '%s' "$out" | jq -r '.reason')" "forge-issue-view cli-failed: an authenticated session means the failure was something else"
+  assert_contains "connection refused" "$(printf '%s' "$out" | jq -r '.message')" "forge-issue-view cli-failed: message still carries the detail to read"
 
   popd >/dev/null
   teardown_detect_forge_fixture
@@ -19223,6 +19447,7 @@ FAKE_GH
   assert_eq "not_found" "$(printf '%s' "$out" | jq -r '.status')" "pr-review-threads not-found: status"
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "pr-review-threads not-found: data null"
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "pr-review-threads not-found: message null -- distinguishable from the degraded case by this alone"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.reason')" "pr-review-threads not-found: reason null on the not_found outcome"
 
   popd >/dev/null
   teardown_detect_forge_fixture
@@ -19248,6 +19473,7 @@ test_forge_pr_review_threads_degraded_missing_gh() {
   assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "pr-review-threads gh-absent: status error"
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "pr-review-threads gh-absent: data null"
   assert_contains "gh not found" "$(printf '%s' "$out" | jq -r '.message')" "pr-review-threads gh-absent: message names gh -- non-null, distinguishable from the not_found case"
+  assert_eq "cli_missing" "$(printf '%s' "$out" | jq -r '.reason')" "pr-review-threads gh-absent: reason is cli_missing"
   assert_eq "" "$(cat "$stderr_file")" "pr-review-threads gh-absent: QUIET mode -- zero stderr output"
   rm -f "$stderr_file"
 
@@ -19272,6 +19498,117 @@ test_forge_pr_review_threads_non_github_forge_degrades() {
   assert_exit_code "0" "$exit_code" "pr-review-threads non-github: exit 0"
   assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "pr-review-threads non-github: status error"
   assert_contains "gitlab" "$(printf '%s' "$out" | jq -r '.message')" "pr-review-threads non-github: message names the detected forge"
+  assert_eq "no_adapter" "$(printf '%s' "$out" | jq -r '.reason')" "pr-review-threads non-github: reason is no_adapter"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_review_threads_owner_repo_unresolved_is_cli_failed() {
+  echo ""
+  echo "=== forge-pr-review-threads: owner/repo unresolvable -- cli_failed, NOT a fifth enum value ==="
+
+  # A github.com remote whose path has no owner/repo split, so neither the
+  # gh primary nor the local-parse fallback can produce an owner/repo pair.
+  setup_detect_forge_fixture origin https://github.com/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  # gh IS present (so the cli_missing gate passes) but cannot name the repo.
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
+  echo "error: could not determine repository" >&2
+  exit 1
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-review-threads --pr 5) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "pr-review-threads owner/repo-unresolved: exit code stays 0"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "pr-review-threads owner/repo-unresolved: status error"
+  assert_contains "could not resolve owner/repo" "$(printf '%s' "$out" | jq -r '.message')" "pr-review-threads owner/repo-unresolved: message names the unresolved pair"
+  assert_eq "cli_failed" "$(printf '%s' "$out" | jq -r '.reason')" "pr-review-threads owner/repo-unresolved: reason is cli_failed -- no fifth enum value for one call site, and no classifier call (no gh invocation to re-check auth against)"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_review_threads_graphql_failure_not_authenticated() {
+  echo ""
+  echo "=== forge-pr-review-threads: graphql broke AND the auth re-check says logged out -- not_authenticated ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  echo "gh: request failed" >&2
+  exit 1
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo "You are not logged into any GitHub hosts." >&2
+  exit 1
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-review-threads --pr 5 --owner acme --repo widgets) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "pr-review-threads not-authenticated: exit code stays 0"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "pr-review-threads not-authenticated: status error"
+  assert_eq "not_authenticated" "$(printf '%s' "$out" | jq -r '.reason')" "pr-review-threads not-authenticated: reason resolved structurally by the auth re-check"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_review_threads_graphql_failure_cli_failed() {
+  echo ""
+  echo "=== forge-pr-review-threads: graphql broke but the auth re-check says logged in -- cli_failed ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  echo "gh: connection refused" >&2
+  exit 1
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo "github.com"
+  echo "  Logged in to github.com account octocat (keyring)"
+  echo "  - Active account: true"
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-review-threads --pr 5 --owner acme --repo widgets) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "pr-review-threads cli-failed: exit code stays 0"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "pr-review-threads cli-failed: status error"
+  assert_eq "cli_failed" "$(printf '%s' "$out" | jq -r '.reason')" "pr-review-threads cli-failed: an authenticated session means the failure was something else"
 
   popd >/dev/null
   teardown_detect_forge_fixture
@@ -19350,6 +19687,7 @@ FAKE_GH
   assert_eq "a.rb" "$(printf '%s' "$out" | jq -r '.data.thread.path')" "resolve-review-thread success: thread.path"
   assert_eq "5" "$(printf '%s' "$out" | jq -r '.data.thread.line')" "resolve-review-thread success: thread.line"
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "resolve-review-thread success: message null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.reason')" "resolve-review-thread success: reason null"
   assert_eq "" "$(cat "$stderr_file")" "resolve-review-thread success: no manual instruction printed"
   rm -f "$stderr_file"
 
@@ -19390,6 +19728,7 @@ FAKE_GH
   assert_eq "false" "$(printf '%s' "$out" | jq -r '.data.resolved')" "resolve-review-thread confirmed-invalid: resolved false"
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.thread')" "resolve-review-thread confirmed-invalid: thread null"
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "resolve-review-thread confirmed-invalid: message null -- distinguishable from the degraded case by this alone"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.reason')" "resolve-review-thread confirmed-invalid: reason null -- status stays found, and a confirmed answer must not acquire a reason merely for sitting beside a degraded-sounding path"
   assert_eq "" "$(cat "$stderr_file")" "resolve-review-thread confirmed-invalid: the confirmed-invalid-id path prints NOTHING (only the degraded path does)"
   rm -f "$stderr_file"
 
@@ -19416,8 +19755,89 @@ test_forge_resolve_review_thread_missing_gh_mandatory_print() {
   assert_exit_code "1" "$exit_code" "resolve-review-thread gh-absent: exits NON-ZERO (write verb, no fallback path)"
   assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "resolve-review-thread gh-absent: status error"
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "resolve-review-thread gh-absent: data null"
+  assert_eq "cli_missing" "$(printf '%s' "$out" | jq -r '.reason')" "resolve-review-thread gh-absent: reason is cli_missing"
   assert_stderr_contains "gh not found" "$(cat "$stderr_file")" "resolve-review-thread gh-absent: stderr names gh as the missing binary"
   assert_stderr_contains "Files changed" "$(cat "$stderr_file")" "resolve-review-thread gh-absent: manual fallback instruction printed (no gh subcommand or REST fallback exists)"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_resolve_review_thread_mutation_failure_not_authenticated() {
+  echo ""
+  echo "=== forge-resolve-review-thread: mutation broke AND the auth re-check says logged out -- not_authenticated ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  # Deliberately NOT the "could not resolve to a node" wording, so the
+  # confirmed-invalid-id branch is skipped and the generic branch is reached.
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  echo "gh: request failed" >&2
+  exit 1
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo "You are not logged into any GitHub hosts." >&2
+  exit 1
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_resolve_review_thread_noauth_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-resolve-review-thread --thread-id PRRT_kwDOABC123 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "resolve-review-thread not-authenticated: exits non-zero (write verb, no fallback path)"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "resolve-review-thread not-authenticated: status error"
+  assert_eq "not_authenticated" "$(printf '%s' "$out" | jq -r '.reason')" "resolve-review-thread not-authenticated: reason resolved structurally by the auth re-check"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_resolve_review_thread_mutation_failure_cli_failed() {
+  echo ""
+  echo "=== forge-resolve-review-thread: mutation broke but the auth re-check says logged in -- cli_failed ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  echo "gh: connection refused" >&2
+  exit 1
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo "github.com"
+  echo "  Logged in to github.com account octocat (keyring)"
+  echo "  - Active account: true"
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_resolve_review_thread_clifailed_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-resolve-review-thread --thread-id PRRT_kwDOABC123 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "resolve-review-thread cli-failed: exits non-zero (write verb, no fallback path)"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "resolve-review-thread cli-failed: status error"
+  assert_eq "cli_failed" "$(printf '%s' "$out" | jq -r '.reason')" "resolve-review-thread cli-failed: an authenticated session means the failure was something else"
   rm -f "$stderr_file"
 
   popd >/dev/null
@@ -20049,6 +20469,8 @@ main() {
   test_forge_build_pr_json_capability_gating
   test_forge_build_issue_json_capability_gating
   test_forge_emit_status_three_outcomes
+  test_forge_emit_status_reason_enum
+  test_forge_classify_gh_failure_reason
   test_forge_emit_write_status_three_outcomes
   test_forge_build_write_data_shape
   test_forge_bin_check_quiet_and_mandatory_modes
@@ -20129,6 +20551,8 @@ main() {
   test_forge_issue_view_not_found
   test_forge_issue_view_degraded_missing_gh
   test_forge_issue_view_non_github_forge_degrades
+  test_forge_issue_view_generic_failure_not_authenticated
+  test_forge_issue_view_generic_failure_cli_failed
   test_forge_issue_view_input_errors
   test_forge_issue_create_success
   test_forge_issue_create_degraded_failure_prints_manual
@@ -20150,10 +20574,15 @@ main() {
   test_forge_pr_review_threads_not_found_null_pull_request
   test_forge_pr_review_threads_degraded_missing_gh
   test_forge_pr_review_threads_non_github_forge_degrades
+  test_forge_pr_review_threads_owner_repo_unresolved_is_cli_failed
+  test_forge_pr_review_threads_graphql_failure_not_authenticated
+  test_forge_pr_review_threads_graphql_failure_cli_failed
   test_forge_pr_review_threads_owner_repo_auto_detected
   test_forge_resolve_review_thread_success
   test_forge_resolve_review_thread_confirmed_invalid_id
   test_forge_resolve_review_thread_missing_gh_mandatory_print
+  test_forge_resolve_review_thread_mutation_failure_not_authenticated
+  test_forge_resolve_review_thread_mutation_failure_cli_failed
   test_forge_review_thread_verbs_registered_in_help_and_dispatcher
 
   cleanup

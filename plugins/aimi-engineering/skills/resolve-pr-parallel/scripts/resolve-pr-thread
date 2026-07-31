@@ -17,23 +17,33 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The top-of-file `set -e` is no longer the error-propagation mechanism for
 # this call -- forge-resolve-review-thread's own dispatcher wrapper exits
 # non-zero for BOTH a genuine tool failure and a confirmed no-adapter
-# capability gap (there is no third exit code), so this script inspects the
-# JSON body's own .message field to tell those two cases apart, the same
-# way aimi-cli.sh's own resolveReviewThread adapter pattern-matches GitHub's
-# fixed GraphQL error text to distinguish a confirmed-invalid thread id from
-# a broken invocation. `if ! ...; then` (not bare `set -e`) is what lets
-# this script keep running past a non-zero exit to make that distinction --
-# stdout is still captured into RESULT either way.
+# capability gap (there is no third exit code), so this script reads the
+# JSON body's own .reason field to tell those two cases apart.
+# `if ! ...; then` (not bare `set -e`) is what lets this script keep running
+# past a non-zero exit to make that distinction -- stdout is still captured
+# into RESULT either way.
 if ! RESULT=$("$AIMI_CLI" forge-resolve-review-thread --thread-id "$THREAD_ID" 2>/dev/null); then
     MESSAGE=$(printf '%s' "$RESULT" | jq -r '.message // empty' 2>/dev/null || true)
+    REASON=$(printf '%s' "$RESULT" | jq -r '.reason // empty' 2>/dev/null || true)
 
-    # "no adapter for forge" is the fixed substring aimi-cli.sh emits when
-    # the active forge (e.g. a Gitea remote) has no review-thread-resolution
-    # equivalent at all -- a PERMANENT capability gap, not a temporary tool
-    # failure. A caller looping over several thread ids must continue to the
-    # next id instead of aborting, so this is non-fatal: print the result,
-    # a distinct note identifying the thread, and exit 0.
-    if printf '%s' "$MESSAGE" | grep -qi "no adapter for forge"; then
+    # `no_adapter` is one of the four fixed values in forge-contract.md's
+    # Degradation Reason Enum, and the only one meaning the active forge
+    # (e.g. a Gitea remote) has no review-thread-resolution equivalent at
+    # all -- a PERMANENT capability gap, not a temporary tool failure. A
+    # caller looping over several thread ids must continue to the next id
+    # instead of aborting, so this is non-fatal: print the result, a
+    # distinct note identifying the thread, and exit 0.
+    #
+    # EXACT string equality on .reason, deliberately: this branch used to
+    # substring-match .message for the no-adapter wording, which made a
+    # human-readable, translatable sentence load-bearing control flow --
+    # any message that merely mentioned that phrase for an unrelated reason
+    # was silently misclassified as non-fatal. Every other value
+    # (cli_missing, not_authenticated, cli_failed) and an empty or absent
+    # .reason -- e.g. an older cached aimi-cli.sh predating this field --
+    # falls through to the fatal branch below, so the unknown case fails
+    # closed rather than being misread as the capability gap.
+    if [ "$REASON" = "no_adapter" ]; then
         printf '%s\n' "$RESULT"
         echo "Not resolved: thread $THREAD_ID was not resolved -- resolution is not supported on the active forge (${MESSAGE})." >&2
         exit 0

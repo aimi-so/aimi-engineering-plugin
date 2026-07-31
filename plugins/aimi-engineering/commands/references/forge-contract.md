@@ -7,11 +7,17 @@ is the **single arbiter** of the vocabulary below — every later forge verb
 `forge-pr-edit`, `forge-issue-view`, `forge-issue-create`, the review-thread
 verbs) consumes the field names, the envelope shapes, and the three-way
 status convention exactly as documented here. **No sibling verb may
-introduce a variant field-name casing (e.g. camelCase `unsupportedFields`)
-or a second degradation signal (e.g. a `degradedReason` field alongside
-`status`).** If a degraded reason is ever genuinely needed, it is the
-`message` field defined in the Three-Way Status Convention section below —
-not a new field invented per verb.
+introduce a variant field-name casing (e.g. camelCase `unsupportedFields`),
+and no verb may invent a further ad-hoc free-text degradation field of its
+own (e.g. a `degradedReason` string alongside `status`).** There is exactly
+one exception, and it is named here rather than invented per verb:
+`reason` — a **fixed, closed enum, never free text** — defined in the
+**Degradation Reason Enum** subsection below. It exists *alongside*
+`message`, never as a replacement for it, because the two answer different
+questions: `message` stays human-readable prose for a log or a person,
+while `reason` is the value a caller switches on programmatically without
+pattern-matching a translatable English string. Every other second
+degradation signal stays forbidden.
 
 **Consumed by:** `aimi-cli.sh`'s shared jq builder functions
 (`_forge_build_pr_json`, `_forge_build_issue_json`, `_forge_emit_status`,
@@ -30,21 +36,25 @@ picks one of these four rather than inventing a fifth.
 
 | # | Envelope | `status` values | Built by | Emitted by |
 |---|---|---|---|---|
-| 1 | **Read three-way** — `{status, data, message}` | `found` / `not_found` / `error` | `_forge_emit_status` | `forge-auth-status`, `forge-repo-info`, `forge-issue-view`, `forge-pr-review-threads`, `forge-resolve-review-thread` |
+| 1 | **Read three-way** — `{status, data, message, reason}` | `found` / `not_found` / `error` | `_forge_emit_status` | `forge-auth-status`, `forge-repo-info`, `forge-issue-view`, `forge-pr-review-threads`, `forge-resolve-review-thread` |
 | 2 | **`forge-pr-view`'s own** — `{status, pr, unsupported_fields, message}` | `found` / `not_found` / `error` | `_forge_pr_view_emit` | `forge-pr-view` only |
 | 3 | **Write three-way** — `{status, data, message}` | `created` / `unchanged` / `degraded` | `_forge_emit_write_status` | `forge-pr-create`, `forge-pr-edit`, `forge-issue-create` |
 | 4 | **Review/Approval** — `{approved, changes_requested, approvals_count, unsupported_fields, raw}` | *(no `status` field)* | *(no builder yet)* | *(no verb yet — spec only)* |
 
-Envelopes 1 and 3 share their three field names (`status`, `data`, `message`)
-and their null-forcing discipline exactly, and differ **only** in which three
-values `status` may take: a lookup can come back empty-handed (`not_found`), a
-write cannot, since a write looks nothing up. Envelope 2 is `forge-pr-view`'s
+Envelopes 1 and 3 share the three field names `status`, `data` and `message`
+and their null-forcing discipline exactly. They differ in two ways: which
+three values `status` may take — a lookup can come back empty-handed
+(`not_found`), a write cannot, since a write looks nothing up — and the
+machine-readable `reason` enum, which envelope 1 carries and envelope 3 does
+not (see **Degradation Reason Enum**). Envelope 2 is `forge-pr-view`'s
 documented exception and is scoped to that one verb — see **`forge-pr-view`
 Envelope** below for why it exists at all. Envelope 4 is a spec for a future
 verb, not a description of code that ships today.
 
-`message` is the single degraded-reason field across every envelope above.
-No verb may add a second one under any name.
+`message` carries the human-readable degraded reason across every envelope
+above; `reason` (envelope 1 only) carries the machine-readable one. Those two
+are the complete set — no verb may add a third degradation field under any
+name, and no verb may define enum values of its own beyond the four below.
 
 ## Normalized PR Field Set
 
@@ -183,7 +193,7 @@ existing `verified`/`missing`/`error` trio in `aimi-cli.sh`:
 |---|---|
 | `found` | The lookup succeeded and returned real data. `data` carries the normalized object (PR/issue/whatever the verb looks up); `message` is `null`. |
 | `not_found` | The lookup ran successfully and confirmed the thing does not exist (no PR for this branch, no such issue number). `data` is `null`; `message` is `null` unless a short human-readable note is useful. |
-| `error` | The tool itself failed — authentication broken, network unreachable, malformed response, unexpected exit code. `data` is `null`; `message` carries the failure detail. |
+| `error` | The tool itself failed — authentication broken, network unreachable, malformed response, unexpected exit code. `data` is `null`; `message` carries the human-readable failure detail and `reason` the machine-readable one (see **Degradation Reason Enum** below). |
 
 `not_found` and `error` must **never** be conflated. `gh pr view --json url`
 today exits non-zero for both "no PR exists for this branch" and "gh itself
@@ -196,14 +206,39 @@ Shape (built by `_forge_emit_status` — see **Shared Builder Functions**
 below):
 
 ```json
-{"status": "found", "data": { "...": "normalized object" }, "message": null}
-{"status": "not_found", "data": null, "message": null}
-{"status": "error", "data": null, "message": "gh exited 4: authentication required"}
+{"status": "found", "data": { "...": "normalized object" }, "message": null, "reason": null}
+{"status": "not_found", "data": null, "message": null, "reason": null}
+{"status": "error", "data": null, "message": "gh exited 4: authentication required", "reason": "not_authenticated"}
 ```
 
-`message` is the one and only degraded-reason field in this contract. No
-sibling verb may add a second field (`degradedReason`, `reason`, or any
-other name) to carry the same information.
+`message` and `reason` are the two — and the only two — degradation-related
+fields this contract permits. No sibling verb may invent a third field
+(`degradedReason`, `failureKind`, or any other name) to carry the same
+information, and none may extend `reason` with an enum value of its own
+beyond the four defined immediately below.
+
+### Degradation Reason Enum
+
+`reason` is populated only on `status == "error"`, and only ever with one of
+these four values. It is a **closed enum, never free text** — the four
+situations map onto four genuinely different agent responses, which is the
+whole reason a caller can branch on it instead of grepping `message` prose:
+
+| `reason` | Meaning | What the caller should do |
+|---|---|---|
+| `no_adapter` | The active forge has no adapter written for it yet (phase 1 ships GitHub only). A **permanent** gap for this install — retrying will not fix it, and neither will installing anything. | Stop. Do not retry. |
+| `cli_missing` | The forge CLI binary is not on `PATH` at all. | Install it, or complete the operation manually. |
+| `not_authenticated` | The forge CLI ran, but a live re-check of auth state against the same host — the same authenticated/account check `forge-auth-status` already performs — reports no valid credentials. Determined **structurally**, by re-querying auth state; **never** by pattern-matching the failing command's own stderr text, which reworks between CLI releases and varies by locale. | Re-authenticate, then retry. |
+| `cli_failed` | The forge CLI ran and failed for any other reason — network unreachable, malformed response, an owner/repo that could not be auto-resolved, or an unexpected exit code the structural auth re-check did not attribute to `not_authenticated`. | Read `message` for the detail. |
+
+`reason` is populated only by verbs built on the shared `_forge_emit_status`
+builder: `forge-auth-status`, `forge-issue-view`, `forge-pr-review-threads`,
+and `forge-resolve-review-thread`. `forge-repo-info` also builds on that
+envelope but never reaches `status == "error"` (its local-parse fallback
+keeps it to `found`/`not_found`), so it never populates `reason` in practice.
+`forge-pr-view`'s own distinct envelope — documented below under
+**`forge-pr-view` Envelope** — is a deliberate, pre-existing exception that
+this rule does **not** extend `reason` onto.
 
 ## `forge-pr-view` Envelope
 
@@ -364,11 +399,16 @@ JSON assembly per verb — mirroring how `_verify_creates_emit` centralizes
   (portable core); `--comments <int>` (capability-gated); `--raw <json
   object>`.
 - **`_forge_emit_status`** — `_forge_emit_status <status> [data-json]
-  [message]`. `status` must be exactly `found`, `not_found`, or `error`;
-  any other value is a caller error (exit 1). `data` is forced to `null`
-  unless `status == "found"`; `message` is forced to `null` unless
-  `status == "error"` — this prevents a caller from accidentally carrying a
-  stale value across the wrong branch of the three-way outcome.
+  [message] [reason]`. `status` must be exactly `found`, `not_found`, or
+  `error`; any other value is a caller error (exit 1). `reason`, the fourth
+  positional argument, is validated the identical way: it must be empty or
+  exactly one of `no_adapter`, `cli_missing`, `not_authenticated`,
+  `cli_failed` (see **Degradation Reason Enum**), and any other non-empty
+  value is a caller error (exit 1) rather than silently coerced or passed
+  through. `data` is forced to `null` unless `status == "found"`; `message`
+  and `reason` are both forced to `null` unless `status == "error"` — this
+  prevents a caller from accidentally carrying a stale value across the
+  wrong branch of the three-way outcome.
 - **`_forge_emit_write_status`** — `_forge_emit_write_status <status>
   [data-json] [message]`, the write-side sibling of `_forge_emit_status`
   above (see **Write-Verb Status Convention**). `status` must be exactly

@@ -221,7 +221,7 @@ test_resolve_pr_thread_success() {
 }
 
 test_resolve_pr_thread_genuine_failure() {
-  export STUB_RESOLVE_RESULT='{"status":"error","data":null,"message":"gh api graphql exited 4: authentication required"}'
+  export STUB_RESOLVE_RESULT='{"status":"error","data":null,"message":"gh api graphql exited 4: authentication required","reason":"not_authenticated"}'
   export STUB_RESOLVE_EXIT=1
   run_resolve_pr_thread PRRT_1
   assert_exit_code 1 "$RUN_RC" "resolve-pr-thread: exits 1 on a genuine tool failure"
@@ -231,7 +231,7 @@ test_resolve_pr_thread_genuine_failure() {
 }
 
 test_resolve_pr_thread_unsupported_forge() {
-  export STUB_RESOLVE_RESULT='{"status":"error","data":null,"message":"forge-resolve-review-thread: no adapter for forge \"gitea\" yet -- GitHub is the only adapter in phase 1."}'
+  export STUB_RESOLVE_RESULT='{"status":"error","data":null,"message":"forge-resolve-review-thread: no adapter for forge \"gitea\" yet -- GitHub is the only adapter in phase 1.","reason":"no_adapter"}'
   export STUB_RESOLVE_EXIT=1
   run_resolve_pr_thread PRRT_1
   assert_exit_code 0 "$RUN_RC" \
@@ -239,6 +239,46 @@ test_resolve_pr_thread_unsupported_forge() {
   assert_contains "Not resolved" "$RUN_STDERR" \
     "resolve-pr-thread: prints a distinct non-fatal message for the capability gap"
   assert_contains "PRRT_1" "$RUN_STDERR" "resolve-pr-thread: identifies the thread id in the non-fatal message"
+  unset STUB_RESOLVE_RESULT STUB_RESOLVE_EXIT
+}
+
+# no_adapter is the ONLY non-fatal reason. The two tests above already cover
+# no_adapter and not_authenticated; this proves the rule generalizes rather
+# than holding for exactly the two values that happen to be covered.
+test_resolve_pr_thread_cli_missing_is_fatal() {
+  export STUB_RESOLVE_RESULT='{"status":"error","data":null,"message":"gh not found -- this thread could not be resolved automatically.","reason":"cli_missing"}'
+  export STUB_RESOLVE_EXIT=1
+  run_resolve_pr_thread PRRT_1
+  assert_exit_code 1 "$RUN_RC" \
+    "resolve-pr-thread: cli_missing is fatal -- every reason except no_adapter exits 1"
+  assert_contains "Error:" "$RUN_STDERR" "resolve-pr-thread: cli_missing prints the fatal Error line"
+  unset STUB_RESOLVE_RESULT STUB_RESOLVE_EXIT
+}
+
+# An older cached aimi-cli.sh that predates the reason field emits no
+# .reason key at all. That absence must fail CLOSED (fatal), never be
+# misread as the non-fatal capability gap.
+test_resolve_pr_thread_absent_reason_field_is_fatal() {
+  export STUB_RESOLVE_RESULT='{"status":"error","data":null,"message":"gh api graphql exited 1: something broke"}'
+  export STUB_RESOLVE_EXIT=1
+  run_resolve_pr_thread PRRT_1
+  assert_exit_code 1 "$RUN_RC" \
+    "resolve-pr-thread: an absent .reason field is fatal (older CLI fails closed, not open)"
+  assert_contains "Error:" "$RUN_STDERR" "resolve-pr-thread: absent .reason prints the fatal Error line"
+  unset STUB_RESOLVE_RESULT STUB_RESOLVE_EXIT
+}
+
+# The regression this story exists to prevent: .message carries the exact
+# substring the old grep matched on, while .reason says cli_failed. Under
+# the old message-grep this exited 0 and silently swallowed a real failure.
+test_resolve_pr_thread_message_text_no_longer_controls_outcome() {
+  export STUB_RESOLVE_RESULT='{"status":"error","data":null,"message":"gh api graphql exited 1: upstream said no adapter for forge was involved","reason":"cli_failed"}'
+  export STUB_RESOLVE_EXIT=1
+  run_resolve_pr_thread PRRT_1
+  assert_exit_code 1 "$RUN_RC" \
+    "resolve-pr-thread: message containing 'no adapter for forge' no longer flips the outcome -- .reason alone decides"
+  assert_contains "Error:" "$RUN_STDERR" \
+    "resolve-pr-thread: the no-adapter-worded message still takes the fatal branch when .reason is cli_failed"
   unset STUB_RESOLVE_RESULT STUB_RESOLVE_EXIT
 }
 
@@ -280,6 +320,9 @@ main() {
   test_resolve_pr_thread_success
   test_resolve_pr_thread_genuine_failure
   test_resolve_pr_thread_unsupported_forge
+  test_resolve_pr_thread_cli_missing_is_fatal
+  test_resolve_pr_thread_absent_reason_field_is_fatal
+  test_resolve_pr_thread_message_text_no_longer_controls_outcome
 
   echo ""
   echo "--- Regression Tests ---"
