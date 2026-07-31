@@ -35,12 +35,13 @@ Before touching container, branch, or split-detection logic, read:
 
 ### Testing
 
-Four independent test suites — three plain Bash, one Python (pytest) for the `hooks/` directory:
+Five independent test suites — four plain Bash, one Python (pytest) for the `hooks/` directory:
 
 ```bash
 bash plugins/aimi-engineering/scripts/test-aimi-cli.sh
 bash plugins/aimi-engineering/scripts/test-worktree-manager.sh
 bash plugins/aimi-engineering/scripts/test-command-blocks.sh
+bash plugins/aimi-engineering/scripts/test-resolve-pr-parallel.sh
 python3 -m pytest plugins/aimi-engineering/hooks/tests/ -q
 ```
 
@@ -49,6 +50,7 @@ python3 -m pytest plugins/aimi-engineering/hooks/tests/ -q
 - Run `test-aimi-cli.sh` after any change to `plugins/aimi-engineering/scripts/aimi-cli.sh` or files it sources.
 - Run `test-worktree-manager.sh` after any change to `plugins/aimi-engineering/skills/git-worktree/scripts/worktree-manager.sh`.
 - **Run `test-command-blocks.sh` after any change under `plugins/aimi-engineering/commands/`** — including changes that touch only prose. Command files are executed, not read: an agent runs their ` ```bash ` blocks literally, each in its own isolated shell, so a "documentation-only" edit is a code change. This suite extracts every bash-fenced block and checks it parses, avoids bash-only constructs (blocks may run under zsh), does not read a variable that only exists inside a loop, and introduces no variable that nothing in the file assigns. Known findings are grandfathered in `scripts/command-blocks-baseline.txt`; the suite fails when a baselined entry stops firing, so that file shrinks as things are fixed. It cannot see a variable that a *prose sentence* reads — that class is only fixed by moving the logic into `aimi-cli.sh`.
+- Run `test-resolve-pr-parallel.sh` after any change to `plugins/aimi-engineering/skills/resolve-pr-parallel/scripts/`. It exists specifically because `test-command-blocks.sh`'s own scope is `commands/*.md` and it does not scan `skills/` at all, leaving these scripts with no other static-analysis safety net.
 - Run `python3 -m pytest plugins/aimi-engineering/hooks/tests/ -q` from the repo root after any change under `plugins/aimi-engineering/hooks/` (dispatcher handlers, guard logic, or their tests).
 
 ### OpenCode install verification
