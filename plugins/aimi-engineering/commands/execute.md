@@ -3558,24 +3558,30 @@ while IFS= read -r GROUP_PROJECT; do
   GROUP_CONTAINER="$GROUP_TOPLEVEL/.worktrees/$PHASE_BRANCH"
   GROUP_DEFAULT=$($AIMI_CLI detect-default-branch --project "$GROUP_TOPLEVEL") || GROUP_DEFAULT=""
 
-  if command -v gh >/dev/null 2>&1; then
-    cd "$GROUP_CONTAINER"
-    git push -u origin "$PHASE_BRANCH"
-    gh pr create --base "$GROUP_DEFAULT" --head "$PHASE_BRANCH" \
-      --title "Phase [PHASE_ID]: [PHASE_NAME]" \
-      --body "Completes phase [PHASE_ID] of [FEATURE]. See [PHASE_DIR]/handoff.md for details."
-  else
-    echo "gh not found — create the PR manually for $GROUP_LABEL:"
-    echo "  git -C \"$GROUP_CONTAINER\" push -u origin $PHASE_BRANCH"
-    echo "  Then open a PR: $GROUP_DEFAULT...$PHASE_BRANCH"
+  cd "$GROUP_CONTAINER"
+  git push -u origin "$PHASE_BRANCH"
+  GROUP_PR_JSON=$($AIMI_CLI forge-pr-create --base "$GROUP_DEFAULT" --head "$PHASE_BRANCH" \
+    --title "Phase [PHASE_ID]: [PHASE_NAME]" \
+    --body "Completes phase [PHASE_ID] of [FEATURE]. See [PHASE_DIR]/handoff.md for details." \
+    --project "$GROUP_TOPLEVEL") || GROUP_PR_JSON=""
+  if [ -n "$GROUP_PR_JSON" ]; then
+    GROUP_PR_URL=$(printf '%s' "$GROUP_PR_JSON" | jq -r '.url // empty')
+    GROUP_PR_CREATED=$(printf '%s' "$GROUP_PR_JSON" | jq -r '.created // empty')
+    if [ "$GROUP_PR_CREATED" = "true" ]; then
+      echo "Opened pull request for $GROUP_LABEL: $GROUP_PR_URL"
+    else
+      echo "Pull request already exists for $GROUP_LABEL: $GROUP_PR_URL"
+    fi
   fi
 done <<< "$PHASE_GROUP_PROJECTS"
 cd "$AIMI_ROOT"
 ```
 
-If `git push` or `gh pr create` fails for a given repository (no permissions, offline, branch already has an open PR, etc.), report that repository's failure verbatim and continue on to the next repository — do not retry, do not prompt interactively, and never revert the phase's `completed` status.
+`forge-pr-create` owns the presence check for whichever forge CLI this repository's remote needs — there is no `command -v gh` gate in this file anymore. When the forge is unsupported, its CLI is missing, or the create call itself fails, `forge-pr-create` prints the manual push/PR-URL fallback instructions itself (mandatory-print degrade mode, `commands/references/forge-contract.md`) and exits non-zero; this loop does not reimplement or duplicate that guidance, it only skips the "opened"/"already exists" echo for that repository and moves on. `forge-pr-create` checks for an existing open PR on `$PHASE_BRANCH` before ever creating one (its own check-then-create contract, matching open-pr.md's pre-existing "PR already exists" behavior) — a retried or re-entered phase reuses that PR (`created:false`) rather than opening a duplicate.
 
-With exactly one participating group — today's only previously-supported case — `PHASE_GROUP_PROJECTS` resolves to exactly `.`, `GROUP_TOPLEVEL` resolves to the same repository `$PHASE_CONTAINER_PATH` was built from, so `GROUP_CONTAINER` equals `$PHASE_CONTAINER_PATH` exactly, and `GROUP_DEFAULT` — detected fresh via the identical `--project`-scoped call Step 1.5's own `$DEFAULT_BRANCH` detection uses — equals `$DEFAULT_BRANCH`. The commands issued are therefore byte-identical to before. When more than one group participates, the loop runs once per repository, each against its own container, its own default branch, and its own pull request.
+If `git push` or `forge-pr-create` fails for a given repository (no permissions, offline, branch already has an open PR the tool itself cannot read, etc.), that repository's failure is what `forge-pr-create` already reported on stderr — report it verbatim and continue on to the next repository — do not retry, do not prompt interactively, and never revert the phase's `completed` status.
+
+With exactly one participating group — today's only previously-supported case — `PHASE_GROUP_PROJECTS` resolves to exactly `.`, `GROUP_TOPLEVEL` resolves to the same repository `$PHASE_CONTAINER_PATH` was built from, so `GROUP_CONTAINER` equals `$PHASE_CONTAINER_PATH` exactly, and `GROUP_DEFAULT` — detected fresh via the identical `--project`-scoped call Step 1.5's own `$DEFAULT_BRANCH` detection uses — equals `$DEFAULT_BRANCH`. The push and the forge call issued are therefore the same single-repository push and PR creation as before, now routed through `forge-pr-create` instead of a direct `gh pr create`. When more than one group participates, the loop runs once per repository, each against its own container, its own default branch, and its own pull request.
 
 ### Next Phase
 
