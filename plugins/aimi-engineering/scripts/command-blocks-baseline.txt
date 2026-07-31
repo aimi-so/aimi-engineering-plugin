@@ -68,8 +68,6 @@ unassigned	init.md	AIMI_CLI
 unassigned	next.md	CONTAINER_ROOT
 unassigned	next.md	PROJECT_PATH
 unassigned	open-pr.md	INCLUDE_BACKEND_SPEC
-unassigned	open-pr.md	PR_BODY
-unassigned	open-pr.md	PR_URL
 unassigned	open-pr.md	s
 unassigned	plan.md	BUNDLE_OVERRIDE
 unassigned	plan.md	d
