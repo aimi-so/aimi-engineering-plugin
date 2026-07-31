@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.120.0] - 2026-07-31
+
+### Changed
+
+- **Under OpenCode, forge write calls no longer prompt for per-call confirmation — a real broadening of unattended write consent, accepted deliberately.** `forge-pr-create`, `forge-pr-edit`, and `forge-issue-create` used to run as a bare `gh pr create`/`gh pr edit`/`gh issue create` invocation inside a command body, which fell outside `opencode.json`'s `permissions.bash` allowlist and prompted for approval every time. Those calls now run inside `aimi-cli.sh`, which the allowlist already covers with a blanket `aimi-cli.sh *` rule installed for CLI subcommands generally — so they stop prompting. This is intentional: a confirmation gate on these verbs, or a narrower `forge-*`-specific allowlist entry, would break unattended `/aimi:execute`, which is the plugin's purpose, so neither was added. No `gh *` permission entry exists anywhere in `install.sh`. See `docs/opencode.md`.
+- **`open-pr.md`'s pre-flight checks no longer conflate a broken forge check with a confirmed negative answer.** Previously, any failure of `gh auth status` was reported identically to "not authenticated," and any failure of `gh pr view` was reported identically to "no PR exists yet" — either misdiagnosis could let a broken token or a network failure proceed straight into creating a duplicate PR. Both checks now branch on `forge-auth-status`'s and `forge-pr-view`'s three-way `found`/`not_found`/`error` status (`commands/references/forge-contract.md`) and surface a distinct, accurate message when the check itself could not run, instead of silently treating that as a definitive answer.
+- `open-pr.md`'s standing `PR_URL`/`PR_BODY` defect is fixed as part of this migration: Step 5b previously never captured `gh pr create`'s output, so Step 5c read variables nothing had assigned. `forge-pr-create`'s JSON response is now captured and both values are threaded through correctly.
+- `docs/opencode.md` documents the OpenCode write-consent change above. `docs/commands.md` documents `--base <branch>` on `/aimi:execute` and `/aimi:next` (previously only in `README.md`), and now states that `/aimi:open-pr`, `/aimi:review`, and `/aimi:validate-bug` detect the forge from the git remote instead of assuming GitHub.
+
+### Added
+
+- **`detect-forge` and eight `forge-*` verbs in `aimi-cli.sh`** — `forge-auth-status`, `forge-repo-info`, `forge-pr-view`, `forge-pr-create`, `forge-pr-edit`, `forge-issue-view`, `forge-issue-create`, and two review-thread verbs (`forge-pr-review-threads`, `forge-resolve-review-thread`) — a normalized PR/issue field contract with a three-way `found`/`not_found`/`error` status convention and a documented degradation contract. GitHub is the only working adapter shipped in phase 1; GitLab and Gitea are designed for behind the same contract but not implemented yet. See `plugins/aimi-engineering/commands/references/forge-contract.md`.
+- `open-pr.md`, `review.md`, `validate-bug.md`, `execute.md`'s phase-mode PR-creation loop, and the `resolve-pr-parallel` skill scripts are migrated onto these verbs — no command file makes an executable `gh` call directly anymore; every `gh` invocation now lives inside `aimi-cli.sh`.
+
 ## [1.119.2] - 2026-07-30
 
 ### Fixed

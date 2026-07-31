@@ -82,6 +82,8 @@ Pass `--container` or `--inline` to override for one run. They are mutually excl
 
 `metadata.execution` applies only to flat tasks files. On a phase-scoped file — one with `metadata.phase` — `/aimi:next` refuses to run and points you at `/aimi:execute`, because it has no phase-claim logic and cannot resolve a phase's container base.
 
+Pass `--base <branch>` to name the container's base outright instead of being asked or having it inferred from your current checkout.
+
 ---
 
 ## `/aimi:execute`
@@ -122,6 +124,8 @@ Pushing the branch to `origin` needs confirmation. An interactive session is ask
 
 On a phase-scoped tasks file the flags are ignored with a warning — a claimed phase always runs in its own phase container, and `metadata.execution` never applied there.
 
+Pass `--base <branch>` to cut every container from this branch outright, instead of asking or inferring it from your current checkout — including every repository in a multi-repo or full-stack split run.
+
 ### What container mode does not handle
 
 - Stacks without a `package.json` `dev` script get no managed dev server. Visual verification degrades to `skipped`; it is not treated as a failure.
@@ -141,6 +145,8 @@ Multi-agent code review. Runs architecture, security, simplicity, performance, a
 /aimi:review feat/auth  # a specific branch
 ```
 
+Detects which forge your remote points at rather than assuming GitHub — GitHub is the only working adapter today, with GitLab and Gitea behind the same contract.
+
 ---
 
 ## `/aimi:open-pr`
@@ -152,6 +158,8 @@ Opens a pull request from the current task branch. Detects the parent branch, bu
 /aimi:open-pr --branch feat/user-auth
 ```
 
+Detects which forge your remote points at rather than assuming GitHub — GitHub is the only working adapter today, with GitLab and Gitea behind the same contract.
+
 ---
 
 ## `/aimi:validate-bug`
@@ -161,6 +169,8 @@ Reproduces a bug report and confirms whether the described behavior is real, usi
 ```bash
 /aimi:validate-bug Login fails silently when the email has a plus sign
 ```
+
+When given an issue or PR reference, detects which forge your remote points at rather than assuming GitHub — GitHub is the only working adapter today, with GitLab and Gitea behind the same contract.
 
 ---
 

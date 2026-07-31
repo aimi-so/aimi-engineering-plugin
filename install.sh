@@ -238,6 +238,21 @@ translate_command_body() {
   # rule — none of the substitutions above rewrite flag parsing or CLI
   # subcommand/flag names, so `--base` and its call sites survive translation
   # byte-identical, same as `--phase` already does.
+  #
+  # Coverage re-verified (forge-abstraction phase 1, US-012): none of the
+  # `detect-forge`/`forge-*` verb call sites migrated into open-pr.md,
+  # review.md, validate-bug.md, execute.md's phase-mode PR-creation loop, and
+  # the resolve-pr-parallel skill scripts need a new rule either — this
+  # function was sourced in isolation, fed a literal `$AIMI_CLI forge-pr-create
+  # --title … --base … --head … --body …` invocation, and returned it
+  # byte-identical, the same technique used for verify-creates and story-merge.
+  # Note the trade-off this migration carries: since every `gh` call these
+  # verbs make now runs inside `aimi-cli.sh` instead of directly in a command
+  # body, it is covered by the blanket `aimi_cli` allow rule below instead of
+  # prompting per call — a real broadening of unattended write consent,
+  # accepted deliberately (see CHANGELOG.md and docs/opencode.md) rather than
+  # narrowed with a `gh *` rule or a confirmation gate, because either would
+  # break unattended `/aimi:execute`.
   body="${body//Use \*\*AskUserQuestion\*\*/Use the **question** tool}"
   body="${body//Use AskUserQuestion/Use the question tool}"
   body="${body//via AskUserQuestion/via the question tool}"
