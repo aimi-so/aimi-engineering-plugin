@@ -17551,6 +17551,422 @@ test_forge_pr_view_registered_in_help_and_dispatcher() {
 }
 
 # ============================================================================
+# Forge PR Create/Edit Tests (US-005)
+# ============================================================================
+# forge-pr-create / forge-pr-edit are the first WRITE verbs that mutate a
+# pull request. Both need `gh pr view`/`gh pr list` (the idempotency check
+# and post-write structured re-read, via forge-pr-view) AND `gh pr create`/
+# `gh pr edit` in the SAME invocation, with call-order-dependent behavior
+# (not found -> create -> found) that the shared setup_fake_gh_fixture
+# above cannot express with its static FAKE_GH_* env vars. Reusing
+# setup_forge_cli_sandbox/teardown_forge_cli_sandbox instead (the US-006
+# fixture, whose own doc comment above already earmarks "forge-pr-view/
+# forge-pr-create ... need the identical technique") -- each test below
+# writes its own small `gh` heredoc script, using a marker file dropped
+# next to the fake `gh` binary itself to track state across the multiple
+# gh invocations one forge-pr-create/forge-pr-edit call makes.
+
+test_forge_pr_create_new_pr() {
+  echo ""
+  echo "=== forge-pr-create: no existing PR -- creates one, derives number via a structured forge-pr-view re-read, never a URL regex (AC1/AC3) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+FLAG="$(dirname "$0")/pr_created.flag"
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  if [ -f "$FLAG" ]; then
+    echo '{"url":"https://github.com/owner/repo/pull/101","number":101}'
+    exit 0
+  fi
+  echo "no pull requests found for branch" >&2
+  exit 1
+fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  echo '[]'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  : > "$FLAG"
+  echo "https://github.com/owner/repo/pull/101"
+  exit 0
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-create new PR: exit 0"
+  assert_eq '{"url":"https://github.com/owner/repo/pull/101","number":101,"created":true}' \
+    "$out" "forge-pr-create new PR: {url, number, created:true} derived from the structured re-read (AC1)"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_create_existing_pr_is_idempotent() {
+  echo ""
+  echo "=== forge-pr-create: an open PR already exists for --head -- returns it unchanged, never calls gh pr create (AC2) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  echo '{"url":"https://github.com/owner/repo/pull/55","number":55}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  echo "gh pr create should never have been invoked for an already-existing PR: $*" >&2
+  exit 66
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-create idempotent: exit 0"
+  assert_eq '{"url":"https://github.com/owner/repo/pull/55","number":55,"created":false}' \
+    "$out" "forge-pr-create idempotent: returns the existing PR with created:false, no duplicate opened (AC2)"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_create_missing_gh_mandatory_print_nonzero_exit() {
+  echo ""
+  echo "=== forge-pr-create: gh absent -- MANDATORY-PRINT degrade, EXIT NON-ZERO (differs from forge-issue-create's soft-fail) (AC6) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # No gh in the sandbox -- simulates "gh not installed".
+
+  local stderr_file="/tmp/forge_pr_create_no_gh_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-create gh-absent: EXITS NON-ZERO (a hard failure, unlike forge-issue-create's soft-fail exit 0)"
+  assert_eq "" "$out" "forge-pr-create gh-absent: no JSON on stdout"
+  assert_stderr_contains "gh not found" "$(cat "$stderr_file")" "forge-pr-create gh-absent: _forge_bin_check's mandatory warning names gh"
+  assert_stderr_contains "create it yourself" "$(cat "$stderr_file")" "forge-pr-create gh-absent: manual instruction printed (MANDATORY-PRINT)"
+  assert_stderr_contains "git push -u origin feat-x" "$(cat "$stderr_file")" "forge-pr-create gh-absent: manual instruction includes the git push command (AC6)"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_create_non_github_forge_mandatory_print() {
+  echo ""
+  echo "=== forge-pr-create: non-github forge (no adapter) -- MANDATORY-PRINT degrade, never shells to gh, exit non-zero ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+echo "gh should never be invoked for a non-github forge: $*" >&2
+exit 77
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_pr_create_gitlab_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-create non-github forge: exits non-zero"
+  assert_eq "" "$out" "forge-pr-create non-github forge: no JSON on stdout"
+  assert_stderr_contains "gitlab" "$(cat "$stderr_file")" "forge-pr-create non-github forge: manual instruction names the detected forge"
+  assert_stderr_contains "create it yourself" "$(cat "$stderr_file")" "forge-pr-create non-github forge: manual instruction printed"
+  if grep -q "gh should never be invoked" "$stderr_file"; then
+    echo -e "${RED}✗${NC} forge-pr-create non-github forge: gh was invoked despite having no adapter for this forge"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} forge-pr-create non-github forge: gh was never invoked"
+    ((TESTS_PASSED++))
+  fi
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_create_guard_failures() {
+  echo ""
+  echo "=== forge-pr-create: invalid --head/--base and missing required flags are caller errors, exit 1, before any gh call (AC1 guard) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local stderr_file="/tmp/forge_pr_create_guard_stderr.$$" exit_code
+
+  "$CLI" forge-pr-create --title T --base main --head "bad;head" --body B >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-pr-create invalid --head: exit 1"
+  assert_stderr_contains "invalid --head value" "$(cat "$stderr_file")" "forge-pr-create invalid --head: stderr names the bad value"
+
+  "$CLI" forge-pr-create --title T --base "bad;base" --head feat-x --body B >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-pr-create invalid --base: exit 1"
+  assert_stderr_contains "invalid --base value" "$(cat "$stderr_file")" "forge-pr-create invalid --base: stderr names the bad value"
+
+  "$CLI" forge-pr-create --base main --head feat-x --body B >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-pr-create missing --title: exit 1"
+  assert_stderr_contains "Usage: aimi-cli.sh forge-pr-create" "$(cat "$stderr_file")" "forge-pr-create missing --title: stderr prints usage"
+
+  rm -f "$stderr_file"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_create_credential_via_env_not_argv() {
+  echo ""
+  echo "=== forge-pr-create: credential reaches gh via inherited env var, never argv or a --token flag (AC5) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    *token*|*TOKEN*|--token|ghp_*|gho_*) echo "credential leaked into argv: $arg" >&2; exit 2 ;;
+  esac
+done
+if [ -z "${GH_TOKEN:-}" ]; then
+  echo "GH_TOKEN not inherited from environment" >&2
+  exit 3
+fi
+FLAG="$(dirname "$0")/pr_created.flag"
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  if [ -f "$FLAG" ]; then
+    echo '{"url":"https://github.com/owner/repo/pull/202","number":202}'
+    exit 0
+  fi
+  echo "no pull requests found" >&2
+  exit 1
+fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  echo '[]'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  : > "$FLAG"
+  echo "https://github.com/owner/repo/pull/202"
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(GH_TOKEN="secret-value-xyz" PATH="$sandbox" "$CLI" forge-pr-create --title T --base main --head feat-y --body B) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-create credential: exit 0 (GH_TOKEN inherited correctly, no argv leak, no --token flag)"
+  assert_eq "true" "$(printf '%s' "$out" | jq -c '.created')" "forge-pr-create credential: created true"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_edit_success() {
+  echo ""
+  echo "=== forge-pr-edit: successful body update -- prints {url, number} via a structured forge-pr-view re-read (AC4) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  echo '{"url":"https://github.com/owner/repo/pull/303","number":303}'
+  exit 0
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --body "updated body") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-edit success: exit 0"
+  assert_eq '{"url":"https://github.com/owner/repo/pull/303","number":303}' \
+    "$out" "forge-pr-edit success: {url, number} -- same shape forge-pr-create prints (AC4)"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_edit_missing_gh_mandatory_print_nonzero_exit() {
+  echo ""
+  echo "=== forge-pr-edit: gh absent -- MANDATORY-PRINT degrade, EXIT NON-ZERO (AC6) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # No gh in the sandbox -- simulates "gh not installed".
+
+  local stderr_file="/tmp/forge_pr_edit_no_gh_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --body "updated body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-edit gh-absent: exits non-zero"
+  assert_eq "" "$out" "forge-pr-edit gh-absent: no JSON on stdout"
+  assert_stderr_contains "gh not found" "$(cat "$stderr_file")" "forge-pr-edit gh-absent: _forge_bin_check's mandatory warning names gh"
+  assert_stderr_contains "edit it yourself" "$(cat "$stderr_file")" "forge-pr-edit gh-absent: manual instruction printed (MANDATORY-PRINT, AC6)"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_edit_gh_failure_prints_manual_nonzero_exit() {
+  echo ""
+  echo "=== forge-pr-edit: gh pr edit itself fails -- manual instruction printed, exit non-zero ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
+  echo "HTTP 404: Not Found" >&2
+  exit 1
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_pr_edit_fail_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --body "updated body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-edit gh-failure: exits non-zero"
+  assert_eq "" "$out" "forge-pr-edit gh-failure: no JSON on stdout"
+  assert_stderr_contains "gh pr edit exited 1" "$(cat "$stderr_file")" "forge-pr-edit gh-failure: error names the gh exit code"
+  assert_stderr_contains "edit it yourself" "$(cat "$stderr_file")" "forge-pr-edit gh-failure: manual instruction printed"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_edit_invalid_number_guard() {
+  echo ""
+  echo "=== forge-pr-edit: --number must be numeric-only before it is ever interpolated into a gh command (AC4 guard) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local stderr_file="/tmp/forge_pr_edit_bad_number_stderr.$$"
+  local exit_code
+  "$CLI" forge-pr-edit --number "abc" --body B >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-edit invalid --number: exit 1"
+  assert_stderr_contains "--number must be a positive integer" "$(cat "$stderr_file")" "forge-pr-edit invalid --number: stderr names the bad value"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_create_and_edit_registered_in_help_and_dispatcher() {
+  echo ""
+  echo "=== forge-pr-create / forge-pr-edit: listed in help with their flags and routed by the dispatcher ==="
+
+  local help_out
+  help_out=$("$CLI" help 2>&1)
+  assert_contains "forge-pr-create --title <t> --base <branch> --head <branch> [--body <text>] [--project <path>]" "$help_out" "help: lists forge-pr-create with its flags"
+  assert_contains "forge-pr-edit --number <n> --body <text> [--project <path>]" "$help_out" "help: lists forge-pr-edit with its flags"
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  echo '{"url":"https://github.com/owner/repo/pull/1","number":1}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
+  exit 0
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local create_out edit_out
+  create_out=$(PATH="$sandbox" "$CLI" forge-pr-create --title t --base main --head feat-x --body b 2>&1)
+  edit_out=$(PATH="$sandbox" "$CLI" forge-pr-edit --number 1 --body b 2>&1)
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+
+  if printf '%s' "$create_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: forge-pr-create is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: forge-pr-create is routed"
+    ((TESTS_PASSED++))
+  fi
+
+  if printf '%s' "$edit_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: forge-pr-edit is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: forge-pr-edit is routed"
+    ((TESTS_PASSED++))
+  fi
+}
+
+# ============================================================================
 # Forge Issue Verb Tests (US-006)
 # ============================================================================
 # forge-issue-view / forge-issue-create are the first forge-* verbs that
@@ -19135,6 +19551,23 @@ main() {
   test_forge_pr_view_missing_gh_binary_quiet_degrade
   test_forge_pr_view_non_github_forge_quiet_degrade
   test_forge_pr_view_registered_in_help_and_dispatcher
+
+  # Forge PR Create/Edit Tests (US-005) -- the first WRITE verbs that
+  # create/mutate a pull request, built on forge-pr-view (US-004) for both
+  # the idempotency check and the post-write structured re-read
+  echo ""
+  echo "--- Forge PR Create/Edit Tests (US-005) ---"
+  test_forge_pr_create_new_pr
+  test_forge_pr_create_existing_pr_is_idempotent
+  test_forge_pr_create_missing_gh_mandatory_print_nonzero_exit
+  test_forge_pr_create_non_github_forge_mandatory_print
+  test_forge_pr_create_guard_failures
+  test_forge_pr_create_credential_via_env_not_argv
+  test_forge_pr_edit_success
+  test_forge_pr_edit_missing_gh_mandatory_print_nonzero_exit
+  test_forge_pr_edit_gh_failure_prints_manual_nonzero_exit
+  test_forge_pr_edit_invalid_number_guard
+  test_forge_pr_create_and_edit_registered_in_help_and_dispatcher
 
   # Forge Issue Verb Tests (US-006) -- forge-issue-view / forge-issue-create,
   # the first forge-* verbs that actually shell out to a forge CLI
