@@ -10,14 +10,40 @@ fi
 
 THREAD_ID=$1
 
-gh api graphql -f threadId="$THREAD_ID" -f query='
-mutation ResolveReviewThread($threadId: ID!) {
-  resolveReviewThread(input: {threadId: $threadId}) {
-    thread {
-      id
-      isResolved
-      path
-      line
-    }
-  }
-}'
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./_resolve-cli.sh
+. "$SCRIPT_DIR/_resolve-cli.sh"
+
+# The top-of-file `set -e` is no longer the error-propagation mechanism for
+# this call -- forge-resolve-review-thread's own dispatcher wrapper exits
+# non-zero for BOTH a genuine tool failure and a confirmed no-adapter
+# capability gap (there is no third exit code), so this script inspects the
+# JSON body's own .message field to tell those two cases apart, the same
+# way aimi-cli.sh's own resolveReviewThread adapter pattern-matches GitHub's
+# fixed GraphQL error text to distinguish a confirmed-invalid thread id from
+# a broken invocation. `if ! ...; then` (not bare `set -e`) is what lets
+# this script keep running past a non-zero exit to make that distinction --
+# stdout is still captured into RESULT either way.
+if ! RESULT=$("$AIMI_CLI" forge-resolve-review-thread --thread-id "$THREAD_ID" 2>/dev/null); then
+    MESSAGE=$(printf '%s' "$RESULT" | jq -r '.message // empty' 2>/dev/null || true)
+
+    # "no adapter for forge" is the fixed substring aimi-cli.sh emits when
+    # the active forge (e.g. a Gitea remote) has no review-thread-resolution
+    # equivalent at all -- a PERMANENT capability gap, not a temporary tool
+    # failure. A caller looping over several thread ids must continue to the
+    # next id instead of aborting, so this is non-fatal: print the result,
+    # a distinct note identifying the thread, and exit 0.
+    if printf '%s' "$MESSAGE" | grep -qi "no adapter for forge"; then
+        printf '%s\n' "$RESULT"
+        echo "Not resolved: thread $THREAD_ID was not resolved -- resolution is not supported on the active forge (${MESSAGE})." >&2
+        exit 0
+    fi
+
+    # Any other non-zero outcome (gh missing, network, auth, a broken
+    # invocation) is a genuine tool failure -- the only case that prints
+    # "Error: <reason>" and exits 1.
+    echo "Error: ${MESSAGE:-forge-resolve-review-thread failed}" >&2
+    exit 1
+fi
+
+printf '%s\n' "$RESULT"
