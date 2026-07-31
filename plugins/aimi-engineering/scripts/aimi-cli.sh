@@ -2919,6 +2919,363 @@ cmd_forge_pr_view() {
 }
 
 # ============================================================================
+# forge-pr-create / forge-pr-edit (US-005)
+# ============================================================================
+# The first WRITE verbs in this phase that create/mutate a pull request.
+# Built entirely on US-001's detect-forge, US-002's shared degradation gate
+# (_forge_bin_check), and US-004's forge-pr-view -- called here as an
+# in-process function, never a `$AIMI_CLI forge-pr-view` subprocess -- for
+# both the idempotency check and the post-create structured re-read. Neither
+# helper below re-derives detect-forge or forge-pr-view's own lookup logic.
+#
+# THE DEFECT THIS PAIR EXISTS TO FIX: commands/open-pr.md's `gh pr create`
+# call (open-pr.md:355) does not capture its own output, so PR_URL/PR_BODY
+# (read later at :465/:479) are assigned by no block in that file --
+# grandfathered in scripts/command-blocks-baseline.txt as "read but never
+# assigned". forge-pr-create emits {url, number, created} as compact JSON so
+# a caller in an isolated Bash block can capture the created PR's identity
+# by plain assignment. Rewriting open-pr.md itself is story 08's job, not
+# this one -- this section only makes the value available.
+#
+# EXIT CONTRACT DIFFERS FROM forge-issue-create ON PURPOSE: forge-issue-
+# create is a soft-fail verb (exit always 0, caller branches on `status`)
+# because a failed backend issue must never block PR creation. Opening or
+# editing the PR itself has no such fallback -- execute.md's per-repository
+# PR-creation step needs a real non-zero exit so its own per-repository
+# failure isolation (report that repository's failure verbatim, move on to
+# the next repository) keeps working once it migrates onto this verb. Both
+# functions below NEVER retry, NEVER prompt interactively, and NEVER mutate
+# any phase/story completed status -- only the caller does that, and only
+# after observing the non-zero exit.
+#
+# IDENTITY: exactly like forge-issue-create, neither cmd_forge_pr_create nor
+# cmd_forge_pr_edit accepts a --token/--identity (or similarly credential-
+# shaped) flag. Any acting-account identity (e.g. AIMI_FORGE_IDENTITY, or a
+# GH_TOKEN a caller exported before invoking this CLI) reaches the child gh
+# process purely by environment-variable inheritance -- no extra code is
+# needed here to pass it along, and neither function ever echoes or logs
+# one verbatim. This is the exact signature phase 2's per-repository
+# account selection is expected to build on without retrofitting.
+
+# Prints the MANDATORY manual-fallback instructions (forge-contract.md's
+# Degradation Contract, mandatory mode) for every forge-pr-create/forge-pr-
+# edit failure path -- an unsupported forge, a missing gh binary, or the gh
+# call itself failing all funnel through this one function so the wording
+# is identical regardless of WHY automatic create/edit did not happen.
+# Always stderr, never stdout, so a caller consuming this verb's JSON result
+# on stdout never has to filter prose out of its own data.
+#
+# mode: create | edit.
+#   create -- prints the git push command plus a manual `gh pr create`
+#             invocation (AC6's "the git push command"), and, when
+#             forge-repo-info can resolve owner/repo (its own local-parse
+#             fallback needs only the git remote, not gh -- see US-003),
+#             the compare URL a human can open directly (AC6's "the
+#             compare-URL ... command").
+#   edit   -- prints a manual `gh pr edit` invocation and, when resolvable,
+#             the PR's own URL (AC6's "... or edit command").
+# repo-info is queried in-process (a direct function call, never a
+# subprocess) and is itself best-effort here: when it cannot resolve
+# owner/repo (no adapter, gh absent, no origin), the URL line is simply
+# omitted rather than guessing a wrong one.
+_forge_pr_write_print_manual() {
+  local mode="$1" forge="$2" base="$3" head_or_number="$4" body="$5" title="${6:-}"
+
+  local repo_info="" owner="" repo="" host=""
+  repo_info=$(_forge_repo_info 2>/dev/null) || repo_info=""
+  if [ -n "$repo_info" ] && [ "$(printf '%s' "$repo_info" | jq -r '.status' 2>/dev/null)" = "found" ]; then
+    owner=$(printf '%s' "$repo_info" | jq -r '.data.owner // empty')
+    repo=$(printf '%s' "$repo_info" | jq -r '.data.repo // empty')
+    host=$(printf '%s' "$repo_info" | jq -r '.data.host // empty')
+  fi
+  [ -n "$host" ] || host="github.com"
+
+  {
+    if [ "$mode" = "create" ]; then
+      echo "Warning: could not create this $forge pull request automatically -- create it yourself with:"
+      echo "  git push -u origin $head_or_number"
+      echo "  gh pr create --title \"$title\" --base $base --head $head_or_number --body ..."
+      if [ -n "$owner" ] && [ -n "$repo" ]; then
+        echo "  Or open: https://$host/$owner/$repo/compare/$base...$head_or_number?expand=1"
+      fi
+    else
+      echo "Warning: could not edit this $forge pull request automatically -- edit it yourself with:"
+      echo "  gh pr edit $head_or_number --body ..."
+      if [ -n "$owner" ] && [ -n "$repo" ]; then
+        echo "  Or open: https://$host/$owner/$repo/pull/$head_or_number"
+      fi
+    fi
+    echo "  Body:"
+    printf '%s\n' "$body" | sed 's/^/    /'
+  } >&2
+}
+
+# Shells `gh pr create --title <t> --base <b> --head <h> --body <b>`,
+# capturing stdout as the created PR's URL -- gh pr create has NO --json
+# flag (confirmed on this machine, exactly like gh issue create: only a
+# plain URL reaches stdout on success). The created PR's `number` is NEVER
+# derived by regexing that URL (AC3) -- instead, once creation succeeds,
+# this function re-queries story 04's forge-pr-view lookup for the same
+# --head branch (a structured re-read) and reads `.pr.number`/`.pr.url`
+# from ITS normalized output. forge-pr-view's own --pr flag only accepts a
+# branch name or a bare PR number (validated against a fixed regex) -- not
+# a URL -- so "feeding the URL back through forge-pr-view" is realized here
+# as re-querying by the already-validated --head branch, the one identifier
+# both the pre-create idempotency check and the post-create confirmation
+# can share; this is what keeps the number's origin a structured field
+# read, never a trailing-digit regex on a URL string.
+#
+# IDEMPOTENCY (AC2): before ever shelling out to create anything, looks up
+# whether an open PR already exists for $head via forge-pr-view, in-process
+# (a direct function call, never a `$AIMI_CLI forge-pr-view` subprocess).
+# When one is found, prints its {url, number, created:false} and returns 0
+# WITHOUT attempting a second creation -- open-pr.md's own "PR already
+# exists for this branch" behavior today, informational rather than an
+# error. A retried phase in execute.md's per-repository loop is exactly why
+# this matters: a retry must never open a duplicate PR for the same branch.
+#
+# MANDATORY-PRINT degrade mode: see this section's header comment above for
+# the full statement of why this differs from forge-issue-create's soft-
+# fail contract. Every failure path here -- unsupported forge, missing gh,
+# the create call itself failing, an unparseable success response, or the
+# post-create re-read failing to confirm the PR -- prints the manual
+# create-it-yourself instructions via _forge_pr_write_print_manual and
+# returns 1. Never retries, never prompts interactively.
+_forge_pr_create() {
+  local title="$1" base="$2" head="$3" body="$4"
+  local forge
+  forge=$(_detect_forge | jq -r '.forge')
+
+  if [ "$forge" != "github" ]; then
+    _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
+    return 1
+  fi
+
+  if ! _forge_bin_check gh mandatory "$forge"; then
+    _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
+    return 1
+  fi
+
+  local existing="" existing_rc=0 existing_status
+  existing=$(cmd_forge_pr_view --pr "$head" --include url,number) || existing_rc=$?
+  if [ "$existing_rc" -ne 0 ]; then
+    _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
+    echo "Error: forge-pr-create: forge-pr-view lookup failed while checking for an existing PR (exit $existing_rc)." >&2
+    return 1
+  fi
+
+  existing_status=$(printf '%s' "$existing" | jq -r '.status')
+  if [ "$existing_status" = "found" ]; then
+    jq -nc \
+      --arg url "$(printf '%s' "$existing" | jq -r '.pr.url // empty')" \
+      --argjson number "$(printf '%s' "$existing" | jq -c '.pr.number // null')" \
+      '{url: (if $url == "" then null else $url end), number: $number, created: false}'
+    return 0
+  fi
+
+  local err_file stdout rc=0 stderr_out
+  err_file=$(mktemp)
+  stdout=$(gh pr create --title "$title" --base "$base" --head "$head" --body "$body" 2>"$err_file") || rc=$?
+  stderr_out=$(cat "$err_file" 2>/dev/null || true)
+  rm -f "$err_file"
+
+  if [ "$rc" -ne 0 ]; then
+    _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
+    echo "Error: forge-pr-create: gh pr create exited $rc: ${stderr_out:-unknown error}" >&2
+    return 1
+  fi
+
+  local pr_url
+  pr_url=$(printf '%s' "$stdout" | tail -n1 | tr -d '\r')
+
+  if [ -z "$pr_url" ]; then
+    _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
+    echo "Error: forge-pr-create: gh pr create succeeded but its output did not contain a parseable PR URL." >&2
+    return 1
+  fi
+
+  # Structured re-read (AC3) -- never a regex on $pr_url.
+  local reread="" reread_rc=0 reread_status pr_number
+  reread=$(cmd_forge_pr_view --pr "$head" --include url,number) || reread_rc=$?
+  if [ "$reread_rc" -ne 0 ]; then
+    _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
+    echo "Error: forge-pr-create: gh pr create succeeded but the post-create forge-pr-view re-read failed (exit $reread_rc)." >&2
+    return 1
+  fi
+  reread_status=$(printf '%s' "$reread" | jq -r '.status')
+  if [ "$reread_status" != "found" ]; then
+    _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
+    echo "Error: forge-pr-create: gh pr create succeeded but the newly created PR could not be re-read afterward." >&2
+    return 1
+  fi
+  pr_number=$(printf '%s' "$reread" | jq -c '.pr.number // null')
+
+  jq -nc --arg url "$pr_url" --argjson number "$pr_number" '{url: $url, number: $number, created: true}'
+}
+
+# Public wrapper: parses --title/--base/--head/--body/--project (deliberately
+# no --token or similarly credential-shaped flag -- see this section's
+# header comment and forge-contract.md's Credential/Identity Model),
+# applies the three standard guards used by cmd_detect_parent_branch/
+# cmd_resolve_base_branch (project cd, git-repository check, branch-name
+# validation against the existing ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ pattern for
+# BOTH --base and --head, before either is ever interpolated into a git/gh
+# invocation), then delegates exactly once to _forge_pr_create.
+cmd_forge_pr_create() {
+  local title="" base="" head="" body="" project_dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --title)   shift; title="${1:-}" ;;
+      --base)    shift; base="${1:-}" ;;
+      --head)    shift; head="${1:-}" ;;
+      --body)    shift; body="${1:-}" ;;
+      --project) shift; project_dir="${1:-}" ;;
+      *)
+        echo "Error: forge-pr-create: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$project_dir" ]; then
+    if [ ! -d "$project_dir" ]; then
+      echo "Error: Project directory does not exist: $project_dir" >&2
+      exit 1
+    fi
+    cd "$project_dir"
+  fi
+
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
+    exit 1
+  fi
+
+  if [ -z "$title" ] || [ -z "$base" ] || [ -z "$head" ]; then
+    echo "Usage: aimi-cli.sh forge-pr-create --title <t> --base <branch> --head <branch> [--body <text>] [--project <path>]" >&2
+    exit 1
+  fi
+
+  # Validate every branch name BEFORE it is ever interpolated into a git/gh
+  # invocation (plugins/aimi-engineering/CLAUDE.md Security Requirements).
+  if ! [[ "$base" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: forge-pr-create: invalid --base value: $base" >&2
+    exit 1
+  fi
+  if ! [[ "$head" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: forge-pr-create: invalid --head value: $head" >&2
+    exit 1
+  fi
+
+  _forge_pr_create "$title" "$base" "$head" "$body"
+}
+
+# Shells `gh pr edit <number> --body <b>`, then re-reads the edited PR via
+# story 04's forge-pr-view lookup (in-process, keyed on the same numeric
+# identifier the caller supplied) to confirm and return {url, number} --
+# the same structured-field discipline _forge_pr_create applies, and the
+# same JSON shape, so a caller treats both verbs' output identically (AC4).
+#
+# MANDATORY-PRINT degrade mode: identical contract to _forge_pr_create --
+# see this section's header comment. Never retries, never prompts
+# interactively, exits non-zero on every failure path.
+_forge_pr_edit() {
+  local number="$1" body="$2"
+  local forge
+  forge=$(_detect_forge | jq -r '.forge')
+
+  if [ "$forge" != "github" ]; then
+    _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
+    return 1
+  fi
+
+  if ! _forge_bin_check gh mandatory "$forge"; then
+    _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
+    return 1
+  fi
+
+  local err_file rc=0 stderr_out
+  err_file=$(mktemp)
+  gh pr edit "$number" --body "$body" >/dev/null 2>"$err_file" || rc=$?
+  stderr_out=$(cat "$err_file" 2>/dev/null || true)
+  rm -f "$err_file"
+
+  if [ "$rc" -ne 0 ]; then
+    _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
+    echo "Error: forge-pr-edit: gh pr edit exited $rc: ${stderr_out:-unknown error}" >&2
+    return 1
+  fi
+
+  local reread="" reread_rc=0 reread_status pr_url pr_number
+  reread=$(cmd_forge_pr_view --pr "$number" --include url,number) || reread_rc=$?
+  if [ "$reread_rc" -ne 0 ]; then
+    _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
+    echo "Error: forge-pr-edit: gh pr edit succeeded but the post-edit forge-pr-view re-read failed (exit $reread_rc)." >&2
+    return 1
+  fi
+  reread_status=$(printf '%s' "$reread" | jq -r '.status')
+  if [ "$reread_status" != "found" ]; then
+    _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
+    echo "Error: forge-pr-edit: gh pr edit succeeded but the PR could not be re-read afterward." >&2
+    return 1
+  fi
+  pr_url=$(printf '%s' "$reread" | jq -r '.pr.url // empty')
+  pr_number=$(printf '%s' "$reread" | jq -c '.pr.number // null')
+
+  jq -nc --arg url "$pr_url" --argjson number "$pr_number" '{url: (if $url == "" then null else $url end), number: $number}'
+}
+
+# Public wrapper: parses --number/--body/--project (no --token or similarly
+# credential-shaped flag -- see this section's header comment), applies the
+# same three standard guards as cmd_forge_pr_create (project cd, git-
+# repository check, identifier validation before shelling out) -- --number
+# is validated as numeric-only (^[0-9]+$) rather than the branch-name
+# pattern, matching cmd_forge_issue_view's own numeric-identifier guard --
+# then delegates exactly once to _forge_pr_edit.
+cmd_forge_pr_edit() {
+  local number="" body="" project_dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --number)  shift; number="${1:-}" ;;
+      --body)    shift; body="${1:-}" ;;
+      --project) shift; project_dir="${1:-}" ;;
+      *)
+        echo "Error: forge-pr-edit: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$project_dir" ]; then
+    if [ ! -d "$project_dir" ]; then
+      echo "Error: Project directory does not exist: $project_dir" >&2
+      exit 1
+    fi
+    cd "$project_dir"
+  fi
+
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
+    exit 1
+  fi
+
+  if [ -z "$number" ]; then
+    echo "Usage: aimi-cli.sh forge-pr-edit --number <n> --body <text> [--project <path>]" >&2
+    exit 1
+  fi
+
+  if ! [[ "$number" =~ ^[0-9]+$ ]]; then
+    echo "Error: forge-pr-edit: --number must be a positive integer (got: $number)" >&2
+    exit 1
+  fi
+
+  _forge_pr_edit "$number" "$body"
+}
+
+# ============================================================================
 # Forge Issue Verbs — forge-issue-view, forge-issue-create (US-006)
 # ============================================================================
 # The first forge-* verbs in this phase to actually shell out to a forge
@@ -10349,6 +10706,32 @@ COMMANDS:
                               Only github ships in this phase; gitlab, gitea,
                               unknown, or a missing gh binary degrade to
                               status=error with no stderr output.
+    forge-pr-create --title <t> --base <branch> --head <branch> [--body <text>] [--project <path>]
+                              Write verb -- shells gh pr create (no --json
+                              flag exists on it; the URL is captured and the
+                              number is derived via a structured forge-pr-
+                              view re-read, never a regex on the URL).
+                              Idempotent: checks forge-pr-view for an
+                              existing open PR on --head first and returns
+                              it unchanged (created:false) instead of
+                              opening a duplicate. Output: {url, number,
+                              created}. Unlike forge-issue-create, a missing
+                              gh binary or an unsupported forge prints the
+                              manual git-push + PR-creation instructions to
+                              stderr (MANDATORY-PRINT degrade mode) and
+                              EXITS NON-ZERO -- a hard failure, so a
+                              caller's own per-repository failure isolation
+                              can react. GitHub only in phase 1. Identity,
+                              when needed, is read from an env var (e.g.
+                              AIMI_FORGE_IDENTITY / GH_TOKEN), never a flag.
+    forge-pr-edit --number <n> --body <text> [--project <path>]
+                              Write verb -- shells gh pr edit <number>
+                              --body, then re-reads the PR via forge-pr-view
+                              to confirm and return {url, number}, the same
+                              shape forge-pr-create prints. Same guards,
+                              degrade contract, and non-zero-exit-on-
+                              failure as forge-pr-create. GitHub only in
+                              phase 1.
     forge-issue-view (--number <n> | --url <issue-url>) [--project <path>]
                               Read verb -- shells gh issue view, normalized to
                               {status: "found"|"not_found"|"error", data, message}
@@ -10906,6 +11289,8 @@ main() {
     forge-auth-status) shift; cmd_forge_auth_status "$@" ;;
     forge-repo-info)   shift; cmd_forge_repo_info "$@" ;;
     forge-pr-view) shift; cmd_forge_pr_view "$@" ;;
+    forge-pr-create) shift; cmd_forge_pr_create "$@" ;;
+    forge-pr-edit) shift; cmd_forge_pr_edit "$@" ;;
     forge-issue-view)   shift; cmd_forge_issue_view "$@" ;;
     forge-issue-create) shift; cmd_forge_issue_create "$@" ;;
     setup-branch)      shift; cmd_setup_branch "$@" ;;
