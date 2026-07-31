@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.119.2] - 2026-07-30
+
+### Fixed
+
+- **1.119.1's command-position anchoring regressed real detections: a `git commit` or `git worktree add` preceded on the same statement by an environment assignment, a wrapper command, or a body-opening keyword stopped being guarded at all.** `[^\S\n]*` after the anchor consumes whitespace only, so any token between the separator and `git` broke the match — and the failure was silent, in the fail-open direction: the commit on the protected branch simply happened, with no message. Verified missed by 1.119.1 and detected again now: `GIT_AUTHOR_DATE=2020-01-01 git commit` (the canonical way to backdate a commit, and an everyday git idiom), `sudo git commit`, `env FOO=1 git commit`, `time`/`nohup`, `for f in a b; do git commit; done`, `if ok; then git commit; fi`, `else` bodies, `{ git commit; }` brace groups, and `! git commit`. `_CMD_START` is now `_CMD_ANCHOR` (unchanged) plus `_CMD_PREFIX`, a bounded run of those tokens; the four guard regexes concatenate `_CMD_START`, so none of their own definitions changed. Issue #82 stays closed — no prefix token can match `grep`, `echo`, `cat`, `find`, `jq` or `awk`, and every token requires trailing whitespace, which is what keeps `find … {} \;`, `jq '{a: 1}'`, `awk '{print $1}'`, brace expansion `{src,test}`, `${VAR}` and `!=` out of the guard. Confirmed a strict superset over all 802 string literals in the hook test suite: 28 detections gained, zero lost.
+- **This entry supersedes the environment-assignment and wrapper clause of 1.119.1's "Known limitation" bullet below** — that class is now detected, and the sentence claiming `\s*` consumes whitespace only is no longer the shipped behavior. The rest of that bullet (`bash -c`, subshell, command substitution, single `&`, non-`-C` option forms) still stands.
+- **Known limitation, accepted as residual risk:** a wrapper outside the four covered (`timeout`, `xargs`, `command`, `exec`, `nice`, `stdbuf`) or one carrying its own option token (`sudo -u alice git commit`, `env -i git commit`, `time -p git commit`) is not detected — covering those needs another nested quantifier, and the backtracking surface is not worth it. Also undetected: an assignment whose value holds a `$(...)` substitution containing whitespace, `VAR="a"b`, prefix runs deeper than six tokens, and `case` arms or bodies opened by `(`. Note that `FOO=a&b git commit` not matching is correct rather than a gap — bash parses it as `FOO=a &` followed by `b git commit`, so no commit runs.
+
+### Changed
+
+- `_GIT_WORKTREE_ADD_RE` gained the leading `\b` its three sibling regexes already carried. Provably a no-op — the anchor already guarantees the word boundary — but the asymmetry had been flagged by four separate reviewers as an inconsistency inviting a reader to hunt for a reason that does not exist.
+
 ## [1.119.1] - 2026-07-30
 
 ### Fixed

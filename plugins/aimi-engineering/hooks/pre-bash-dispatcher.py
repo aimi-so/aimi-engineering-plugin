@@ -25,36 +25,83 @@ from hook_utils import safe_hook, effective_cwd, load_aimi_config, deny  # noqa:
 # re module. No re.MULTILINE flag: the newline case is handled as a literal
 # lookbehind alternative, not via `^`/`$` line semantics.
 #
+# `_CMD_START` is the anchor followed by `_CMD_PREFIX`, the bounded run of
+# tokens a real invocation may legitimately carry between the separator and
+# `git`: environment assignments, the four wrapper commands, and the keywords
+# that open a body. Anchoring alone (1.119.1) rejected all of those, which
+# silently stopped guarding `GIT_AUTHOR_DATE=... git commit` and `sudo git
+# commit` — shapes the pre-anchoring regexes did detect.
+#
 # Residual risk (accepted, documented here rather than fixed). This list is
 # meant to be exhaustive — a reader should be able to trust that a shape not
 # named here is detected. Undetected:
 #   * nested inside `bash -c '...'`, a subshell `(git commit)`, or command
 #     substitution `$(git commit)`;
 #   * chained with a single `&` (background) rather than `&&`;
-#   * inside an `if`/`then`, `else`, `case`, loop (`do ... done`) or brace-
-#     group body;
-#   * preceded on the same statement by an environment assignment or wrapper
-#     prefix — `GIT_AUTHOR_DATE=... git commit`, `env`, `sudo`, `time`,
-#     `nohup`. `\s*` after the anchor consumes whitespace only, so anything
-#     between the separator and `git` breaks the match;
+#   * inside a `case` arm, or any body opened by `(` — `(` is deliberately
+#     not an anchor, since a paren as an anchor reopens the mention-matching
+#     false positives of issue #82;
+#   * a wrapper outside the four below (`timeout`, `xargs`, `command`,
+#     `exec`, `nice`, `stdbuf`), or one carrying its own option token
+#     (`sudo -u alice git commit`, `env -i git commit`, `time -p git
+#     commit`) — covering those needs another nested quantifier, which is
+#     not worth the backtracking surface;
+#   * an assignment whose value holds a `$(...)` substitution containing
+#     whitespace, or whose unquoted form starts with a quote (`VAR="a"b`);
+#   * a prefix run deeper than the {0,6} ceiling below;
 #   * option forms other than `-C`: `git -c key=value commit`,
 #     `git --git-dir=... commit`.
-# The old unanchored regexes caught these shapes only "by accident" — while
-# also false-positiving on mere mentions of the phrase. Closing the quote-
-# wrapped cases would require quote/paren-aware shell parsing, which is out of
-# scope here.
-# The trailing run must exclude `\n` specifically. A newline is both an anchor
-# (its own lookbehind branch) and a `\s` character, so `\s*` would let every
-# position inside a whitespace run start a match and then backtrack across the
-# rest of it — quadratic on a long run of blank lines (seconds of CPU on a few
-# thousand, enough to exhaust the hook timeout and stop denying anything).
-# `[^\S\n]*` is "whitespace except newline", which keeps `\r`, `\v` and `\f`
-# matching exactly as `\s*` did; `[ \t]*` would silently stop detecting a
-# command prefixed by a carriage return.
-_CMD_START = r"(?:(?<=^)|(?<=;)|(?<=&&)|(?<=\|\|)|(?<=\|)|(?<=\n))[^\S\n]*"
+# Note `FOO=a&b git commit` is NOT in this list: it does not match, and that
+# is correct rather than a gap — bash parses it as `FOO=a &` followed by
+# `b git commit`, so no commit runs. Excluding `&` from the value class is
+# faithful shell semantics.
+# Also: `effective_cwd` (hook_utils) resolves a `cd <path> &&` prefix only at
+# string start, so a `cd` inside a `do`/`then` body — newly detected here —
+# falls back to the session cwd and may check the wrong repository's branch.
+# Closing the quote-wrapped cases above would require quote/paren-aware shell
+# parsing, which is out of scope here.
+#
+# The anchor's trailing run must exclude `\n` specifically. A newline is both
+# an anchor (its own lookbehind branch) and a `\s` character, so `\s*` would
+# let every position inside a whitespace run start a match and then backtrack
+# across the rest of it — quadratic on a long run of blank lines (seconds of
+# CPU on a few thousand, enough to exhaust the hook timeout and stop denying
+# anything). `[^\S\n]*` is "whitespace except newline", which keeps `\r`, `\v`
+# and `\f` matching exactly as `\s*` did; `[ \t]*` would silently stop
+# detecting a command prefixed by a carriage return.
+_CMD_ANCHOR = r"(?:(?<=^)|(?<=;)|(?<=&&)|(?<=\|\|)|(?<=\|)|(?<=\n))[^\S\n]*"
+
+# The prefix run is bounded ({0,6}) and its assignment-value branches are
+# disjoint by first character — the bare branch may not begin with a quote,
+# and empty is its own branch. Both matter, and for different reasons. A bare
+# branch that may start with a quote makes `A="xy" ` parse two ways over the
+# identical span, doubling live paths per token: 0.0004s at 10 tokens,
+# 0.023s at 16, 0.38s at 20, over 3s at 24. The disjoint branches remove that
+# outright; the {0,6} ceiling on its own does NOT — measured, a bounded run
+# over an ambiguous value still scales ~5-7x per doubling, because the blowup
+# lives inside one iteration rather than in the iteration count. Keep both:
+# the ceiling is what makes a future added alternative safe by construction.
+# The {0,63} bound on the variable name likewise stops a long identifier with
+# no `=` from backtracking one character at a time. Each token's mandatory
+# trailing `[^\S\n]+` supplies the word boundary (`sudoedit`, `done`,
+# `timeout` cannot match) and guarantees no iteration matches empty — it is
+# also what keeps `find ... {} \;` and `jq '{a: 1}'` out of the guard, since
+# `{` and `!` then only match their real shell-operator forms.
+_ENV_ASSIGN = (
+    r"[A-Za-z_][A-Za-z0-9_]{0,63}="
+    r"(?:\"[^\"\n]*\"|'[^'\n]*'|[^\s;&|\"'][^\s;&|]*|)"
+)
+_WRAPPER_CMD = r"(?:sudo|env|time|nohup)"
+_BODY_KEYWORD = r"(?:do|then|else|\{|!)"
+_CMD_PREFIX = (
+    r"(?:(?:" + _ENV_ASSIGN + r"|" + _WRAPPER_CMD + r"|" + _BODY_KEYWORD
+    + r")[^\S\n]+){0,6}"
+)
+
+_CMD_START = _CMD_ANCHOR + _CMD_PREFIX
 
 _GIT_COMMIT_RE = re.compile(_CMD_START + r"\bgit\s+commit\b")
-_GIT_WORKTREE_ADD_RE = re.compile(_CMD_START + r"git\s+worktree\s+add\b")
+_GIT_WORKTREE_ADD_RE = re.compile(_CMD_START + r"\bgit\s+worktree\s+add\b")
 
 # Used by handle_default_branch for git -C variant. Path token accepts a
 # double-quoted path, a single-quoted path, or a bare non-whitespace token so

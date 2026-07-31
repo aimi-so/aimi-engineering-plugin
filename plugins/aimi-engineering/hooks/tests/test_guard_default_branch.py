@@ -265,3 +265,38 @@ def test_custom_protected_branches_via_config(tmp_path):
     data = json.loads(captured[0])
     assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "release" in data["hookSpecificOutput"]["userMessage"]
+
+
+# ---------------------------------------------------------------------------
+# Statement-prefix detection reaches the deny path (issue #82 follow-up)
+# ---------------------------------------------------------------------------
+
+def test_denies_env_prefixed_commit_on_protected_branch():
+    """`GIT_AUTHOR_DATE=... git commit` is a real invocation, not a mention.
+
+    1.119.1's anchoring rejected any token between the separator and `git`,
+    so this shape -- the canonical way to backdate a commit -- stopped being
+    guarded entirely, silently.
+    """
+    captured = _run_handler("GIT_AUTHOR_DATE=2020-01-01 git commit -m x", "main")
+    assert captured, "Expected deny for an env-prefixed commit on a protected branch"
+    data = json.loads(captured[0])
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_denies_sudo_prefixed_commit_on_protected_branch():
+    captured = _run_handler("sudo git commit -m x", "main")
+    assert captured, "Expected deny for a sudo-prefixed commit on a protected branch"
+    assert json.loads(captured[0])["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_denies_loop_body_commit_on_protected_branch():
+    captured = _run_handler("for f in a b; do git commit -m $f; done", "main")
+    assert captured, "Expected deny for a commit inside a loop body"
+    assert json.loads(captured[0])["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_env_prefixed_mention_still_allows_on_protected_branch():
+    """The prefix must not drag mentions back in -- issue #82 stays closed."""
+    captured = _run_handler('echo "FOO=1 git commit"', "main")
+    assert captured == [], f"Expected silent allow for a mention, got {captured}"
