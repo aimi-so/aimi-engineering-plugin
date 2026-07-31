@@ -18048,6 +18048,469 @@ test_forge_issue_verbs_registered_in_help_and_dispatcher() {
 }
 
 # ============================================================================
+# Forge Review-Thread Verb Tests (US-007)
+# ============================================================================
+# forge-pr-review-threads / forge-resolve-review-thread port the two GraphQL
+# scripts under skills/resolve-pr-parallel/scripts/ into aimi-cli.sh. Offline
+# fixtures reuse setup_forge_cli_sandbox/teardown_forge_cli_sandbox (US-006,
+# test-aimi-cli.sh:17593) rather than adding a fourth fake-gh fixture -- each
+# test below writes its own tiny `gh` stub into the sandbox, exactly the
+# technique that section's own header comment predicted this sibling story
+# would need for a `gh api graphql` invocation shape neither the FAKE_GH_*
+# parameterized fixture (US-003) nor a bare `gh issue`/`gh pr` stub already
+# covers.
+
+# Extracts the two query/mutation builder functions' literal source text
+# (not their runtime output) so the security tests below can inspect the
+# actual quoting/interpolation shape rather than a rendered string.
+_forge_review_thread_query_source() {
+  sed -n '/^_forge_review_threads_query()/,/^}/p' "$CLI"
+}
+_forge_resolve_review_thread_mutation_source() {
+  sed -n '/^_forge_resolve_review_thread_mutation()/,/^}/p' "$CLI"
+}
+
+# AC1's core security requirement: every identifier gh api graphql consumes
+# for these two verbs is bound through -f/-F, never through string
+# interpolation into the query/mutation text. The literal source of both
+# constants DOES contain `$owner`/`$repo`/`$pr`/`$threadId` -- that is
+# GraphQL's own variable-reference syntax, inert under bash's single-quoting
+# (see the section header comment in aimi-cli.sh immediately above these
+# two functions for the full statement of why a bare grep for any `$`
+# character would be a false positive here). What must be true instead, and
+# what this test actually asserts: (a) the query/mutation text is a single
+# bash single-quoted literal with no shell command substitution inside it,
+# and (b) the two adapter functions bind owner/repo/pr/threadId to gh ONLY
+# via -f/-F flags.
+test_forge_review_thread_queries_bind_via_flags_not_interpolation() {
+  echo ""
+  echo "=== forge-pr-review-threads / forge-resolve-review-thread: identifiers bound via gh -f/-F, zero shell interpolation in query text ==="
+
+  local query_src mutation_src
+  query_src=$(_forge_review_thread_query_source)
+  mutation_src=$(_forge_resolve_review_thread_mutation_source)
+
+  assert_contains "printf '%s' '" "$query_src" "review-threads query: body is a single-quoted printf literal"
+  assert_contains "printf '%s' '" "$mutation_src" "resolve-thread mutation: body is a single-quoted printf literal"
+
+  assert_contains '$owner: String!' "$query_src" "review-threads query: retains GraphQL \$owner variable declaration verbatim"
+  assert_contains '$repo: String!' "$query_src" "review-threads query: retains GraphQL \$repo variable declaration verbatim"
+  assert_contains '$pr: Int!' "$query_src" "review-threads query: retains GraphQL \$pr variable declaration verbatim"
+  assert_contains '$threadId: ID!' "$mutation_src" "resolve-thread mutation: retains GraphQL \$threadId variable declaration verbatim"
+
+  if printf '%s' "$query_src" | grep -qE '\$\(|`'; then
+    echo -e "${RED}✗${NC} review-threads query: contains shell command substitution (\$( or backtick) -- must be zero"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} review-threads query: no shell command substitution anywhere in the query text"
+    ((TESTS_PASSED++))
+  fi
+
+  if printf '%s' "$mutation_src" | grep -qE '\$\(|`'; then
+    echo -e "${RED}✗${NC} resolve-thread mutation: contains shell command substitution (\$( or backtick) -- must be zero"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} resolve-thread mutation: no shell command substitution anywhere in the mutation text"
+    ((TESTS_PASSED++))
+  fi
+
+  # The two adapter functions must bind every identifier via gh's own -f/-F
+  # flags -- never by concatenating the value into the query/mutation string.
+  local github_adapter_src resolve_adapter_src
+  github_adapter_src=$(sed -n '/^_forge_pr_review_threads_github()/,/^}/p' "$CLI")
+  resolve_adapter_src=$(sed -n '/^_forge_resolve_review_thread()/,/^}/p' "$CLI")
+
+  assert_contains '-f owner="$owner"' "$github_adapter_src" "forge-pr-review-threads: owner bound via gh -f flag"
+  assert_contains '-f repo="$repo"' "$github_adapter_src" "forge-pr-review-threads: repo bound via gh -f flag"
+  assert_contains '-F pr="$pr_number"' "$github_adapter_src" "forge-pr-review-threads: PR number bound via gh -F flag (Int! variable)"
+  assert_contains '-f threadId="$thread_id"' "$resolve_adapter_src" "forge-resolve-review-thread: thread id bound via gh -f flag"
+}
+
+# AC1's fail-fast usage checks: the PR number and thread id are validated
+# BEFORE either is ever passed to gh.
+test_forge_review_thread_input_validation() {
+  echo ""
+  echo "=== forge-pr-review-threads / forge-resolve-review-thread: PR number and thread id validated before reaching gh ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # No gh in the sandbox -- if validation did not fail-fast, the command
+  # would instead surface a "gh not found" degrade rather than a usage error.
+
+  local exit_code stderr_file="/tmp/forge_review_threads_validation_stderr.$$"
+
+  PATH="$sandbox" "$CLI" forge-pr-review-threads --pr abc --owner o --repo r >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-pr-review-threads non-numeric --pr: exit 1"
+  assert_stderr_contains "must be a positive integer" "$(cat "$stderr_file")" "forge-pr-review-threads non-numeric --pr: stderr names the constraint"
+
+  PATH="$sandbox" "$CLI" forge-pr-review-threads --pr 5 --owner 'o;rm' --repo r >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-pr-review-threads unsafe --owner: exit 1"
+  assert_stderr_contains "invalid --owner" "$(cat "$stderr_file")" "forge-pr-review-threads unsafe --owner: stderr names it invalid"
+
+  PATH="$sandbox" "$CLI" forge-resolve-review-thread --thread-id 'bad id; rm -rf /' >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-resolve-review-thread unsafe --thread-id: exit 1"
+  assert_stderr_contains "invalid --thread-id" "$(cat "$stderr_file")" "forge-resolve-review-thread unsafe --thread-id: stderr names it invalid"
+
+  rm -f "$stderr_file"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_review_threads_found_default_filter() {
+  echo ""
+  echo "=== forge-pr-review-threads: found -- default filter drops resolved/outdated threads ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  if printf '%s' "$*" | grep -q "FetchReviewThreads"; then
+    printf '%s' '{"data":{"repository":{"pullRequest":{"title":"Fix bug","url":"https://github.com/acme/widgets/pull/5","reviewThreads":{"totalCount":2,"edges":[{"node":{"id":"T1","isResolved":false,"isOutdated":false,"isCollapsed":false,"path":"a.rb","line":10,"startLine":10,"diffSide":"RIGHT","comments":{"totalCount":1,"nodes":[{"id":"C1","author":{"login":"alice"},"body":"fix this","createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-01T00:00:00Z","url":"https://github.com/acme/widgets/pull/5#C1","outdated":false}]}}},{"node":{"id":"T2","isResolved":true,"isOutdated":false,"isCollapsed":false,"path":"b.rb","line":20,"startLine":20,"diffSide":"RIGHT","comments":{"totalCount":0,"nodes":[]}}}]}}}}}'
+    exit 0
+  fi
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-review-threads --pr 5 --owner acme --repo widgets) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "pr-review-threads found: exit code"
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "pr-review-threads found: status"
+  assert_eq "5" "$(printf '%s' "$out" | jq -r '.data.pr.number')" "pr-review-threads found: pr.number"
+  assert_eq "Fix bug" "$(printf '%s' "$out" | jq -r '.data.pr.title')" "pr-review-threads found: pr.title"
+  assert_eq "https://github.com/acme/widgets/pull/5" "$(printf '%s' "$out" | jq -r '.data.pr.url')" "pr-review-threads found: pr.url"
+  assert_eq "1" "$(printf '%s' "$out" | jq '.data.threads | length')" "pr-review-threads found: default filter keeps only the unresolved, non-outdated thread"
+  assert_eq "T1" "$(printf '%s' "$out" | jq -r '.data.threads[0].id')" "pr-review-threads found: surviving thread id"
+  assert_eq "alice" "$(printf '%s' "$out" | jq -r '.data.threads[0].comments.nodes[0].author.login')" "pr-review-threads found: comment author.login preserved"
+  assert_eq "1" "$(printf '%s' "$out" | jq -r '.data.threads[0].comments.totalCount')" "pr-review-threads found: comments.totalCount preserved"
+  assert_eq "[]" "$(printf '%s' "$out" | jq -c '.data.unsupported_fields')" "pr-review-threads found: unsupported_fields empty on GitHub"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "pr-review-threads found: message null"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_review_threads_all_flag_includes_resolved_and_outdated() {
+  echo ""
+  echo "=== forge-pr-review-threads: --all returns resolved/outdated threads a plain call would filter out ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  if printf '%s' "$*" | grep -q "FetchReviewThreads"; then
+    printf '%s' '{"data":{"repository":{"pullRequest":{"title":"Fix bug","url":"https://github.com/acme/widgets/pull/5","reviewThreads":{"totalCount":2,"edges":[{"node":{"id":"T1","isResolved":false,"isOutdated":false,"isCollapsed":false,"path":"a.rb","line":10,"startLine":10,"diffSide":"RIGHT","comments":{"totalCount":0,"nodes":[]}}},{"node":{"id":"T2","isResolved":true,"isOutdated":true,"isCollapsed":true,"path":"b.rb","line":20,"startLine":20,"diffSide":"RIGHT","comments":{"totalCount":0,"nodes":[]}}}]}}}}}'
+    exit 0
+  fi
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-review-threads --pr 5 --owner acme --repo widgets --all) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "pr-review-threads --all: exit code"
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "pr-review-threads --all: status"
+  assert_eq "2" "$(printf '%s' "$out" | jq '.data.threads | length')" "pr-review-threads --all: both threads present, including resolved+outdated"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_review_threads_not_found_null_pull_request() {
+  echo ""
+  echo "=== forge-pr-review-threads: null pullRequest -- not_found, exits 0 ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  if printf '%s' "$*" | grep -q "FetchReviewThreads"; then
+    printf '%s' '{"data":{"repository":{"pullRequest":null}}}'
+    exit 0
+  fi
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-review-threads --pr 999999 --owner acme --repo widgets) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "pr-review-threads not-found: exit code stays 0 (query result, not a verb failure)"
+  assert_eq "not_found" "$(printf '%s' "$out" | jq -r '.status')" "pr-review-threads not-found: status"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "pr-review-threads not-found: data null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "pr-review-threads not-found: message null -- distinguishable from the degraded case by this alone"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_review_threads_degraded_missing_gh() {
+  echo ""
+  echo "=== forge-pr-review-threads: gh absent -- QUIET degrade (status error, zero stderr) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # No gh written into the sandbox at all -- simulates "gh not installed".
+
+  local stderr_file="/tmp/forge_pr_review_threads_gh_absent_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-review-threads --pr 5 --owner acme --repo widgets 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "pr-review-threads gh-absent: exit code stays 0 (degraded result, not a hard failure)"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "pr-review-threads gh-absent: status error"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "pr-review-threads gh-absent: data null"
+  assert_contains "gh not found" "$(printf '%s' "$out" | jq -r '.message')" "pr-review-threads gh-absent: message names gh -- non-null, distinguishable from the not_found case"
+  assert_eq "" "$(cat "$stderr_file")" "pr-review-threads gh-absent: QUIET mode -- zero stderr output"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_review_threads_non_github_forge_degrades() {
+  echo ""
+  echo "=== forge-pr-review-threads: non-GitHub forge (GitLab) has no adapter yet -- degrades, does not crash ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-review-threads --pr 1) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "pr-review-threads non-github: exit 0"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "pr-review-threads non-github: status error"
+  assert_contains "gitlab" "$(printf '%s' "$out" | jq -r '.message')" "pr-review-threads non-github: message names the detected forge"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_review_threads_owner_repo_auto_detected() {
+  echo ""
+  echo "=== forge-pr-review-threads: owner/repo auto-detected via forge-repo-info when not both supplied ==="
+
+  setup_detect_forge_fixture origin https://github.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  local log_file="$sandbox/gh.log"
+  cat > "$sandbox/gh" << FAKE_GH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$log_file"
+if [ "\$1" = "api" ] && [ "\$2" = "graphql" ]; then
+  if printf '%s' "\$*" | grep -q "FetchReviewThreads"; then
+    printf '%s' '{"data":{"repository":{"pullRequest":null}}}'
+    exit 0
+  fi
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-review-threads --pr 5) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "pr-review-threads auto-detect: exit code"
+  assert_eq "not_found" "$(printf '%s' "$out" | jq -r '.status')" "pr-review-threads auto-detect: query still ran (proves owner/repo resolved, not skipped)"
+  assert_contains 'owner=acme' "$(cat "$log_file")" "pr-review-threads auto-detect: owner auto-detected from the git remote via forge-repo-info"
+  assert_contains 'repo=widgets' "$(cat "$log_file")" "pr-review-threads auto-detect: repo auto-detected from the git remote via forge-repo-info"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_resolve_review_thread_success() {
+  echo ""
+  echo "=== forge-resolve-review-thread: success -- resolved:true, matches the mutation's own output fields ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  if printf '%s' "$*" | grep -q "resolveReviewThread"; then
+    printf '%s' '{"data":{"resolveReviewThread":{"thread":{"id":"PRRT_kwDOABC123","isResolved":true,"path":"a.rb","line":5}}}}'
+    exit 0
+  fi
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_resolve_review_thread_success_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-resolve-review-thread --thread-id PRRT_kwDOABC123 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "resolve-review-thread success: exit code"
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "resolve-review-thread success: status"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.resolved')" "resolve-review-thread success: resolved true"
+  assert_eq "PRRT_kwDOABC123" "$(printf '%s' "$out" | jq -r '.data.thread.id')" "resolve-review-thread success: thread.id"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.thread.isResolved')" "resolve-review-thread success: thread.isResolved"
+  assert_eq "a.rb" "$(printf '%s' "$out" | jq -r '.data.thread.path')" "resolve-review-thread success: thread.path"
+  assert_eq "5" "$(printf '%s' "$out" | jq -r '.data.thread.line')" "resolve-review-thread success: thread.line"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "resolve-review-thread success: message null"
+  assert_eq "" "$(cat "$stderr_file")" "resolve-review-thread success: no manual instruction printed"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_resolve_review_thread_confirmed_invalid_id() {
+  echo ""
+  echo "=== forge-resolve-review-thread: mutation errors array -- confirmed-invalid, exit 0, no print ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  if printf '%s' "$*" | grep -q "resolveReviewThread"; then
+    echo "gh: Could not resolve to a node with the global id of 'bad-id'. (resolveReviewThread)" >&2
+    exit 1
+  fi
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_resolve_review_thread_invalid_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-resolve-review-thread --thread-id bad-id 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "resolve-review-thread confirmed-invalid: exit 0 (the mutation ran; this is a confirmed answer, not a tool failure)"
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "resolve-review-thread confirmed-invalid: status found (a definitive answer is still a successful lookup, per forge-auth-status's own authenticated:false precedent)"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.data.resolved')" "resolve-review-thread confirmed-invalid: resolved false"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.thread')" "resolve-review-thread confirmed-invalid: thread null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "resolve-review-thread confirmed-invalid: message null -- distinguishable from the degraded case by this alone"
+  assert_eq "" "$(cat "$stderr_file")" "resolve-review-thread confirmed-invalid: the confirmed-invalid-id path prints NOTHING (only the degraded path does)"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_resolve_review_thread_missing_gh_mandatory_print() {
+  echo ""
+  echo "=== forge-resolve-review-thread: gh absent -- MANDATORY-PRINT degrade, exits non-zero ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # No gh in the sandbox -- simulates "gh not installed".
+
+  local stderr_file="/tmp/forge_resolve_review_thread_no_gh_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-resolve-review-thread --thread-id PRRT_kwDOABC123 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "resolve-review-thread gh-absent: exits NON-ZERO (write verb, no fallback path)"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "resolve-review-thread gh-absent: status error"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "resolve-review-thread gh-absent: data null"
+  assert_stderr_contains "gh not found" "$(cat "$stderr_file")" "resolve-review-thread gh-absent: stderr names gh as the missing binary"
+  assert_stderr_contains "Files changed" "$(cat "$stderr_file")" "resolve-review-thread gh-absent: manual fallback instruction printed (no gh subcommand or REST fallback exists)"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_review_thread_verbs_registered_in_help_and_dispatcher() {
+  echo ""
+  echo "=== forge-pr-review-threads / forge-resolve-review-thread: listed in help and routed by the dispatcher ==="
+
+  local help_out
+  help_out=$("$CLI" help 2>&1)
+  assert_contains "forge-pr-review-threads" "$help_out" "help: lists forge-pr-review-threads"
+  assert_contains "forge-resolve-review-thread" "$help_out" "help: lists forge-resolve-review-thread"
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  local view_out resolve_out
+  view_out=$(PATH="$sandbox" "$CLI" forge-pr-review-threads --pr 1 --owner o --repo r 2>&1)
+  resolve_out=$(PATH="$sandbox" "$CLI" forge-resolve-review-thread --thread-id T1 2>&1) || true
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+
+  if printf '%s' "$view_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: forge-pr-review-threads is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: forge-pr-review-threads is routed"
+    ((TESTS_PASSED++))
+  fi
+
+  if printf '%s' "$resolve_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: forge-resolve-review-thread is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: forge-resolve-review-thread is routed"
+    ((TESTS_PASSED++))
+  fi
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -18691,6 +19154,25 @@ main() {
   test_forge_issue_create_credential_via_env_not_argv
   test_forge_issue_create_input_errors
   test_forge_issue_verbs_registered_in_help_and_dispatcher
+
+  # Forge Review-Thread Verb Tests (US-007) -- forge-pr-review-threads /
+  # forge-resolve-review-thread, porting get-pr-comments/resolve-pr-thread's
+  # GraphQL query and mutation into aimi-cli.sh with every identifier bound
+  # via gh api graphql's own -f/-F flags
+  echo ""
+  echo "--- Forge Review-Thread Verb Tests (US-007) ---"
+  test_forge_review_thread_queries_bind_via_flags_not_interpolation
+  test_forge_review_thread_input_validation
+  test_forge_pr_review_threads_found_default_filter
+  test_forge_pr_review_threads_all_flag_includes_resolved_and_outdated
+  test_forge_pr_review_threads_not_found_null_pull_request
+  test_forge_pr_review_threads_degraded_missing_gh
+  test_forge_pr_review_threads_non_github_forge_degrades
+  test_forge_pr_review_threads_owner_repo_auto_detected
+  test_forge_resolve_review_thread_success
+  test_forge_resolve_review_thread_confirmed_invalid_id
+  test_forge_resolve_review_thread_missing_gh_mandatory_print
+  test_forge_review_thread_verbs_registered_in_help_and_dispatcher
 
   cleanup
 

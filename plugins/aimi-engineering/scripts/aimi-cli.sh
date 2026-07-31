@@ -3278,6 +3278,454 @@ cmd_forge_issue_create() {
   _forge_issue_create "$title" "$body"
 }
 
+# ============================================================================
+# Forge Review-Thread Verbs — forge-pr-review-threads, forge-resolve-review-thread (US-007)
+# ============================================================================
+# Ports skills/resolve-pr-parallel/scripts/get-pr-comments's reviewThreads
+# query and skills/resolve-pr-parallel/scripts/resolve-pr-thread's
+# resolveReviewThread mutation into aimi-cli.sh -- the only two GraphQL call
+# sites in this repository. Every identifier these two GraphQL documents
+# consume (owner, repo, PR number, thread id) is bound through `gh api
+# graphql`'s own -f/-F flags, never interpolated into the query text -- the
+# same class of hand-built string this codebase's `jq -nc --arg` convention
+# already prevents everywhere else, applied here to gh's own binding
+# mechanism instead of jq.
+#
+# NOTE on the two query/mutation constants below: they are single-quoted
+# verbatim ports and DO contain literal `$owner`, `$repo`, `$pr`, `$threadId`
+# characters -- that is GraphQL's own variable-reference syntax (declared in
+# each operation's signature, e.g. `($owner: String!)`, and bound externally
+# by gh via -f/-F), not shell interpolation. Bash never expands anything
+# inside a single-quoted string, so those tokens reach gh as inert literal
+# text; nothing in this file ever substitutes a shell variable into either
+# string. The actual security property enforced here (and asserted by this
+# story's own tests) is that neither string ever contains a BASH-style
+# expansion (`$(`, a backtick, or `${`) and that the gh invocations below
+# bind owner/repo/pr/threadId ONLY via -f/-F flags -- never by building the
+# query/mutation text with string concatenation or double-quoted
+# interpolation.
+#
+# Built entirely on US-001's detect-forge (direct function call), US-002's
+# shared degradation gate and generic three-way status envelope
+# (_forge_bin_check, _forge_emit_status -- forge-contract.md is the single
+# arbiter; no variant field-name casing or second degraded-reason field is
+# introduced here), and US-003's forge-repo-info (direct function call,
+# never a subprocess) for owner/repo auto-detection -- replacing
+# get-pr-comments:14-20's own inline OWNER/REPO detection.
+#
+# forge-pr-review-threads is a READ verb: three-way found/not_found/error,
+# QUIET degrade mode throughout (matches forge-issue-view's own posture --
+# a caller must not gain a spurious warning it does not have today). A null
+# GraphQL `pullRequest` is a confirmed not_found, never folded into error.
+#
+# forge-resolve-review-thread is a WRITE verb with NO fallback path (there
+# is no gh subcommand or REST endpoint for resolving a review thread), so it
+# follows forge-issue-create's MANDATORY-PRINT posture, but unlike forge-
+# issue-create it distinguishes a CONFIRMED negative (the mutation ran;
+# GraphQL says the thread id is invalid or inaccessible) from a
+# could-not-attempt negative (gh missing, unsupported forge, or gh itself
+# exiting non-zero for auth/network reasons). The confirmed negative reuses
+# status="found" with a false `resolved` field -- the same pattern forge-
+# auth-status already uses for a confirmed authenticated:false, per forge-
+# contract.md's Three-Way Status Convention: a definitive answer is still a
+# successful lookup, not an error. status="error" is reserved for the
+# could-not-attempt case. _forge_resolve_review_thread itself always stays
+# QUIET (JSON only, exit 0) so it is safely testable in isolation;
+# cmd_forge_resolve_review_thread (the public wrapper) is the ONLY layer
+# that prints the mandatory manual instruction and exits non-zero, driven
+# purely by the JSON status field.
+
+# Private helper holding the reviewThreads query, ported verbatim from
+# get-pr-comments:27-68 (query body only -- the `gh api graphql -f owner=...
+# -f query='` wrapper and the trailing `.data...edges | map(select(...))`
+# jq pipeline are NOT part of the query text and live in
+# _forge_pr_review_threads_github/_forge_pr_review_threads below instead,
+# now expressed as a jq filter over the raw GraphQL response rather than a
+# second external jq process piped from gh's own stdout).
+_forge_review_threads_query() {
+  printf '%s' '
+query FetchReviewThreads($owner: String!, $repo: String!, $pr: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $pr) {
+      title
+      url
+      reviewThreads(first: 100) {
+        totalCount
+        edges {
+          node {
+            id
+            isResolved
+            isOutdated
+            isCollapsed
+            path
+            line
+            startLine
+            diffSide
+            comments(first: 100) {
+              totalCount
+              nodes {
+                id
+                author {
+                  login
+                }
+                body
+                createdAt
+                updatedAt
+                url
+                outdated
+              }
+            }
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+}'
+}
+
+# Private helper holding the resolveReviewThread mutation, ported verbatim
+# from resolve-pr-thread:13-23.
+_forge_resolve_review_thread_mutation() {
+  printf '%s' '
+mutation ResolveReviewThread($threadId: ID!) {
+  resolveReviewThread(input: {threadId: $threadId}) {
+    thread {
+      id
+      isResolved
+      path
+      line
+    }
+  }
+}'
+}
+
+# github adapter for forge-pr-review-threads. <pr_number>/<owner>/<repo> are
+# already validated by cmd_forge_pr_review_threads before this ever runs;
+# <all_threads> is the literal string "true"/"false". Binds owner/repo/pr
+# via -f/-F only -- see the section header above for why the query text
+# still contains literal `$owner`/`$repo`/`$pr` (GraphQL's own variable
+# syntax, inert under bash single-quoting).
+_forge_pr_review_threads_github() {
+  local pr_number="$1" owner="$2" repo="$3" all_threads="$4"
+  local err_file stdout rc=0
+
+  err_file=$(mktemp)
+  stdout=$(gh api graphql -f owner="$owner" -f repo="$repo" -F pr="$pr_number" \
+    -f query="$(_forge_review_threads_query)" 2>"$err_file") || rc=$?
+  local stderr_out
+  stderr_out=$(cat "$err_file" 2>/dev/null || true)
+  rm -f "$err_file"
+
+  if [ "$rc" -ne 0 ]; then
+    _forge_emit_status error "" "gh api graphql exited $rc: ${stderr_out:-unknown error}"
+    return 0
+  fi
+
+  local pr_present
+  pr_present=$(printf '%s' "$stdout" | jq -r '.data.repository.pullRequest // empty')
+  if [ -z "$pr_present" ]; then
+    _forge_emit_status not_found
+    return 0
+  fi
+
+  local title url all_flag_json threads_json
+  title=$(printf '%s' "$stdout" | jq -r '.data.repository.pullRequest.title // ""')
+  url=$(printf '%s' "$stdout" | jq -r '.data.repository.pullRequest.url // ""')
+  if [ "$all_threads" = "true" ]; then all_flag_json=true; else all_flag_json=false; fi
+
+  # Collapses the edges/node GraphQL wrapper away (it carries no
+  # caller-visible data of its own) and, without --all, filters to
+  # isResolved==false and isOutdated==false -- matching get-pr-comments:68's
+  # existing filter exactly.
+  threads_json=$(printf '%s' "$stdout" | jq -c --argjson all "$all_flag_json" '
+    [.data.repository.pullRequest.reviewThreads.edges[].node]
+    | (if $all then . else map(select(.isResolved == false and .isOutdated == false)) end)
+  ')
+
+  local data_json
+  data_json=$(jq -nc \
+    --arg number "$pr_number" \
+    --arg title "$title" \
+    --arg url "$url" \
+    --argjson threads "$threads_json" \
+    '{
+      pr: {number: ($number | tonumber),
+           title: (if $title == "" then null else $title end),
+           url: (if $url == "" then null else $url end)},
+      threads: $threads,
+      unsupported_fields: []
+    }')
+  _forge_emit_status found "$data_json"
+}
+
+# Resolves forge/owner/repo, routes a non-github forge or missing gh to a
+# QUIET status=error result, and otherwise delegates to the github adapter.
+# Owner/repo are resolved via US-003's _forge_repo_info as a direct
+# function call (never a `$AIMI_CLI forge-repo-info` subprocess, never a
+# second private gh-repo-view call) whenever --owner/--repo are not both
+# supplied, replacing get-pr-comments:14-20's own inline OWNER/REPO
+# detection.
+_forge_pr_review_threads() {
+  local pr_number="$1" owner="$2" repo="$3" all_threads="$4"
+  local forge
+  forge=$(_detect_forge | jq -r '.forge')
+
+  if [ "$forge" != "github" ]; then
+    _forge_emit_status error "" "forge-pr-review-threads: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1."
+    return 0
+  fi
+
+  if ! _forge_bin_check gh quiet "$forge"; then
+    _forge_emit_status error "" "gh not found -- this review-thread lookup did not run automatically."
+    return 0
+  fi
+
+  if [ -z "$owner" ] || [ -z "$repo" ]; then
+    local repo_info repo_status
+    repo_info=$(_forge_repo_info)
+    repo_status=$(printf '%s' "$repo_info" | jq -r '.status')
+    if [ "$repo_status" = "found" ]; then
+      [ -n "$owner" ] || owner=$(printf '%s' "$repo_info" | jq -r '.data.owner')
+      [ -n "$repo" ]  || repo=$(printf '%s' "$repo_info" | jq -r '.data.repo')
+    fi
+  fi
+
+  if [ -z "$owner" ] || [ -z "$repo" ]; then
+    _forge_emit_status error "" "forge-pr-review-threads: could not resolve owner/repo -- pass --owner and --repo explicitly."
+    return 0
+  fi
+
+  _forge_pr_review_threads_github "$pr_number" "$owner" "$repo" "$all_threads"
+}
+
+# Read verb: found | not_found | error, per forge-contract.md's Three-Way
+# Status Convention. Output: {status, data, message}; data (when found)
+# carries {pr: {number, title, url}, threads: [...], unsupported_fields}.
+# Each thread carries get-pr-comments' current fields unchanged: id,
+# isResolved, isOutdated, isCollapsed, path, line, startLine, diffSide, and
+# comments: {totalCount, nodes: [{id, author: {login}, body, createdAt,
+# updatedAt, url, outdated}]}.
+# Usage: aimi-cli.sh forge-pr-review-threads --pr <number> [--owner <owner>
+# --repo <repo>] [--all] [--project <path>]
+cmd_forge_pr_review_threads() {
+  local pr_number="" owner="" repo="" all_threads="false" project_dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --pr)      shift; pr_number="${1:-}" ;;
+      --owner)   shift; owner="${1:-}" ;;
+      --repo)    shift; repo="${1:-}" ;;
+      --all)     all_threads="true" ;;
+      --project) shift; project_dir="${1:-}" ;;
+      *)
+        echo "Error: forge-pr-review-threads: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$project_dir" ]; then
+    if [ ! -d "$project_dir" ]; then
+      echo "Error: Project directory does not exist: $project_dir" >&2
+      exit 1
+    fi
+    cd "$project_dir"
+  fi
+
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
+    exit 1
+  fi
+
+  if [ -z "$pr_number" ]; then
+    echo "Usage: aimi-cli.sh forge-pr-review-threads --pr <number> [--owner <owner> --repo <repo>] [--all] [--project <path>]" >&2
+    exit 1
+  fi
+
+  # Fail-fast usage check BEFORE the PR number is ever passed to gh -- the
+  # primary injection defense is the -f/-F binding in the github adapter
+  # above, not this pattern check.
+  if ! [[ "$pr_number" =~ ^[0-9]+$ ]]; then
+    echo "Error: forge-pr-review-threads: --pr must be a positive integer (got: $pr_number)" >&2
+    exit 1
+  fi
+
+  if [ -n "$owner" ] && ! [[ "$owner" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "Error: forge-pr-review-threads: invalid --owner value: $owner" >&2
+    exit 1
+  fi
+
+  if [ -n "$repo" ] && ! [[ "$repo" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "Error: forge-pr-review-threads: invalid --repo value: $repo" >&2
+    exit 1
+  fi
+
+  _forge_pr_review_threads "$pr_number" "$owner" "$repo" "$all_threads"
+}
+
+# ----------------------------------------------------------------------------
+# GITEA CAPABILITY-GAP NOTE (documentation only -- no gitea/glab code path is
+# added or tested in this phase-1, GitHub-only story): a Gitea/Forgejo `tea`
+# adapter is expected to have NO equivalent for resolving a review thread at
+# all -- unlike a missing gh binary or an unwritten adapter, both of which
+# are TEMPORARY states, `tea` simply has no reviewThread/conversation-
+# resolution concept to call. Whichever future adapter lands for this verb
+# should report that permanent gap through the `unsupported_fields` array
+# naming the operation (e.g. `["resolveReviewThread"]`), never by reusing
+# the generic no-adapter `message` text an unwritten adapter produces today
+# -- "this forge cannot do this at all" and "nobody wrote the adapter yet"
+# are two different facts, and collapsing them would make a permanent gap
+# look like a temporary one.
+# ----------------------------------------------------------------------------
+# github adapter for forge-resolve-review-thread. <thread_id> is already
+# validated by cmd_forge_resolve_review_thread before this ever runs. Binds
+# threadId via -f only -- see the section header above for why the mutation
+# text still contains a literal `$threadId` (GraphQL's own variable syntax).
+# Always QUIET and always returns 0 -- found/error are three data outcomes,
+# not exit codes; cmd_forge_resolve_review_thread (the public wrapper) is
+# the only layer that prints the MANDATORY manual instruction and exits
+# non-zero, driven by this function's JSON `status` field.
+_forge_resolve_review_thread() {
+  local thread_id="$1"
+  local forge
+  forge=$(_detect_forge | jq -r '.forge')
+
+  if [ "$forge" != "github" ]; then
+    _forge_emit_status error "" "forge-resolve-review-thread: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1."
+    return 0
+  fi
+
+  if ! _forge_bin_check gh quiet "$forge"; then
+    _forge_emit_status error "" "gh not found -- this thread could not be resolved automatically."
+    return 0
+  fi
+
+  local err_file stdout rc=0
+  err_file=$(mktemp)
+  stdout=$(gh api graphql -f threadId="$thread_id" \
+    -f query="$(_forge_resolve_review_thread_mutation)" 2>"$err_file") || rc=$?
+  local stderr_out
+  stderr_out=$(cat "$err_file" 2>/dev/null || true)
+  rm -f "$err_file"
+
+  # gh api graphql exits non-zero when the GraphQL response's own `errors`
+  # array is non-empty -- a mutation targeting an invalid/inaccessible node
+  # id is exactly this case. That non-zero exit is a CONFIRMED negative
+  # answer, not a tool failure, so it must not fall into the generic
+  # "gh could not attempt this" branch below. GitHub's GraphQL API names
+  # this failure mode with the fixed message "Could not resolve to a node
+  # with the global id of" regardless of which mutation triggered it -- the
+  # same style of stderr pattern-match _forge_issue_view already uses to
+  # distinguish "no such issue" from "gh is broken".
+  if [ "$rc" -ne 0 ]; then
+    if printf '%s' "$stderr_out" | grep -qi "could not resolve to a node"; then
+      _forge_emit_status found "$(jq -nc '{resolved: false, thread: null, unsupported_fields: []}')"
+      return 0
+    fi
+    _forge_emit_status error "" "gh api graphql exited $rc: ${stderr_out:-unknown error}"
+    return 0
+  fi
+
+  # Defensive fallback for a gh response shape that returns exit 0 with a
+  # populated top-level `errors` array instead of a non-zero exit -- the
+  # same confirmed-negative outcome, reached by inspecting the body instead
+  # of the exit code.
+  local errors_count
+  errors_count=$(printf '%s' "$stdout" | jq -r '(.errors // []) | length')
+  if [ "$errors_count" != "0" ]; then
+    _forge_emit_status found "$(jq -nc '{resolved: false, thread: null, unsupported_fields: []}')"
+    return 0
+  fi
+
+  local thread_json
+  thread_json=$(printf '%s' "$stdout" | jq -c '.data.resolveReviewThread.thread // empty')
+  if [ -z "$thread_json" ]; then
+    _forge_emit_status error "" "gh api graphql returned no thread and no errors for resolveReviewThread"
+    return 0
+  fi
+
+  local data_json
+  data_json=$(printf '%s' "$thread_json" | jq -c '{
+    resolved: .isResolved,
+    thread: {id: .id, isResolved: .isResolved, path: .path, line: .line},
+    unsupported_fields: []
+  }')
+  _forge_emit_status found "$data_json"
+}
+
+# Write verb with NO fallback path -- MANDATORY-PRINT degrade mode.
+# Output: {status: "found"|"error", data, message}. status=="found" covers
+# BOTH a successful resolve (data.resolved=true) and a confirmed-invalid
+# thread id (data.resolved=false, the mutation ran) -- both exit 0, no
+# stderr. status=="error" means gh could not even attempt the mutation
+# (missing binary, unsupported forge, or gh itself exiting non-zero for a
+# reason other than a confirmed GraphQL error) -- prints the manual
+# "resolve it yourself" instruction to stderr and exits non-zero, since
+# there is no gh subcommand or REST fallback for resolving a review thread.
+# Usage: aimi-cli.sh forge-resolve-review-thread --thread-id <id> [--project <path>]
+cmd_forge_resolve_review_thread() {
+  local thread_id="" project_dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --thread-id) shift; thread_id="${1:-}" ;;
+      --project)   shift; project_dir="${1:-}" ;;
+      *)
+        echo "Error: forge-resolve-review-thread: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$project_dir" ]; then
+    if [ ! -d "$project_dir" ]; then
+      echo "Error: Project directory does not exist: $project_dir" >&2
+      exit 1
+    fi
+    cd "$project_dir"
+  fi
+
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
+    exit 1
+  fi
+
+  if [ -z "$thread_id" ]; then
+    echo "Usage: aimi-cli.sh forge-resolve-review-thread --thread-id <id> [--project <path>]" >&2
+    exit 1
+  fi
+
+  # Fail-fast usage check BEFORE the thread id is ever passed to gh -- the
+  # primary injection defense is the -f binding in the github adapter
+  # above, not this pattern check.
+  if ! [[ "$thread_id" =~ ^[A-Za-z0-9+/=_-]+$ ]]; then
+    echo "Error: forge-resolve-review-thread: invalid --thread-id value: $thread_id" >&2
+    exit 1
+  fi
+
+  local result status message
+  result=$(_forge_resolve_review_thread "$thread_id")
+  status=$(printf '%s' "$result" | jq -r '.status')
+
+  if [ "$status" = "error" ]; then
+    message=$(printf '%s' "$result" | jq -r '.message // "unknown error"')
+    {
+      echo "Warning: could not resolve this review thread automatically ($message)."
+      echo "There is no gh subcommand or REST fallback for this -- resolve it manually in the PR's Files changed tab (mark the conversation as resolved)."
+    } >&2
+    printf '%s\n' "$result"
+    exit 1
+  fi
+
+  printf '%s\n' "$result"
+}
+
 # Detect a Claude Design handoff bundle under a given root (defaults to CWD).
 # Scans depth-1 subdirectories for a README.md containing the handoff marker.
 # Returns JSON object when found, "null" when not found.
@@ -10369,6 +10817,44 @@ COMMANDS:
                               (MANDATORY-PRINT degrade mode) and lets the
                               caller branch on status instead. GitHub only
                               in phase 1.
+    forge-pr-review-threads --pr <number> [--owner <owner> --repo <repo>] [--all] [--project <path>]
+                              Read verb -- ports get-pr-comments' reviewThreads
+                              GraphQL query verbatim; owner, repo and the PR
+                              number are bound via gh api graphql's own -f/-F
+                              flags, never interpolated into the query text.
+                              Output: {status: "found"|"not_found"|"error",
+                              data, message} (forge-contract.md's Three-Way
+                              Status Convention). data carries {pr: {number,
+                              title, url}, threads: [...], unsupported_fields}.
+                              Each thread carries {id, isResolved, isOutdated,
+                              isCollapsed, path, line, startLine, diffSide,
+                              comments: {totalCount, nodes}}. Without --all,
+                              threads is filtered to isResolved==false and
+                              isOutdated==false, matching get-pr-comments'
+                              existing filter; --all returns every thread.
+                              Owner/repo auto-detected via forge-repo-info
+                              when not both supplied. QUIET degrade mode: a
+                              missing gh, unsupported forge, or gh failure
+                              yields status=error with no stderr. GitHub only
+                              in phase 1.
+    forge-resolve-review-thread --thread-id <id> [--project <path>]
+                              Write verb -- ports resolve-pr-thread's
+                              resolveReviewThread GraphQL mutation verbatim;
+                              the thread id is bound via gh api graphql's own
+                              -f flag, never interpolated. Output: {status:
+                              "found"|"error", data, message}. status="found"
+                              covers both a successful resolve
+                              (data.resolved=true) and a confirmed-invalid
+                              thread id (data.resolved=false, the mutation
+                              ran) -- both exit 0, no stderr. status="error"
+                              means gh could not attempt the mutation at all
+                              (missing binary, unsupported forge, or a
+                              genuine gh failure) -- MANDATORY-PRINT: prints a
+                              manual "resolve it yourself in the PR's Files
+                              changed tab" instruction to stderr and exits
+                              non-zero, since there is no gh subcommand or
+                              REST fallback for resolving a review thread.
+                              GitHub only in phase 1.
     detect-interactivity [--non-interactive]
                               Print resolved interactivity mode (picker|agent)
                               Returns picker by default; returns agent only when
@@ -10908,6 +11394,8 @@ main() {
     forge-pr-view) shift; cmd_forge_pr_view "$@" ;;
     forge-issue-view)   shift; cmd_forge_issue_view "$@" ;;
     forge-issue-create) shift; cmd_forge_issue_create "$@" ;;
+    forge-pr-review-threads) shift; cmd_forge_pr_review_threads "$@" ;;
+    forge-resolve-review-thread) shift; cmd_forge_resolve_review_thread "$@" ;;
     setup-branch)      shift; cmd_setup_branch "$@" ;;
     resolve-base-branch) shift; cmd_resolve_base_branch "$@" ;;
     clear-state)       cmd_clear_state ;;
