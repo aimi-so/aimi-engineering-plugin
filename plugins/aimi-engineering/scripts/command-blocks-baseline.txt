@@ -89,3 +89,23 @@ unassigned	references/container-execution.md	TASKS_PATH
 unassigned	references/execution-mode.md	TASKS_FILE
 unassigned	references/interactivity.md	AIMI_CLI
 unassigned	status.md	AIMI_CLI
+
+# --- argument-gate ----------------------------------------------------------
+# Pre-existing at the time check 5 was added (US-008, which fixed review.md's
+# own entry and left these). Every one of them interpolates $ARGUMENTS into a
+# block without validating it in that same block.
+#
+# These are NOT equivalent to review.md's fixed case in severity: each of the
+# blocks below parses $ARGUMENTS to extract a flag or a phase id and feeds the
+# result to aimi-cli.sh, which validates the value again on its own side,
+# whereas review.md's fed a PR identifier straight to a forge command line.
+# They are still worth fixing — a gate in the same block is cheap — but each
+# needs its own read of what that block actually does with the value, which is
+# why they are recorded here rather than blanket-patched.
+argument-gate	brainstorm.md	Step 0.5: Resolve Interactivity Mode (block 1)
+argument-gate	brainstorm.md	Step 0.7: Detect Claude Design Bundle (block 1)
+argument-gate	design/polish.md	Extract --non-interactive Flag (block 1)
+argument-gate	design/polish.md	Extract --non-interactive Flag (block 2)
+argument-gate	execute.md	Parse --phase Override (block 1)
+argument-gate	open-pr.md	Parse --branch Argument (block 1)
+argument-gate	plan.md	Parse --phase Override (block 1)

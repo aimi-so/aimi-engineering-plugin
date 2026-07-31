@@ -1774,14 +1774,20 @@ _detect_forge_select_remote() {
 # scp-like [user@]host:path form is left untouched below) and on a URL
 # carrying no userinfo at all.
 _detect_forge_redact_userinfo() {
-  local url="$1" scheme rest authority path
+  local url="$1" scheme scheme_lc rest authority path
   if [[ "$url" != *"://"* ]]; then
     printf '%s' "$url"
     return 0
   fi
 
   scheme="${url%%://*}"
-  case "$scheme" in
+  # URL schemes are case-insensitive (RFC 3986 s3.1), so match on a lowered
+  # copy -- an "HTTPS://" remote must be redacted exactly like "https://".
+  # $scheme itself keeps its original case for the printf below, so
+  # redaction never silently rewrites the caller's URL beyond the credential
+  # it was asked to strip.
+  scheme_lc=$(printf '%s' "$scheme" | tr 'A-Z' 'a-z')
+  case "$scheme_lc" in
     http|https) ;;
     *)
       printf '%s' "$url"
@@ -2558,7 +2564,14 @@ _forge_auth_status() {
   local forge_info forge host
   forge_info=$(_detect_forge)
   forge=$(printf '%s' "$forge_info" | jq -r '.forge')
-  host=$(printf '%s' "$forge_info" | jq -r '.host')
+  # `// empty` is load-bearing, not decoration: .host is JSON null whenever
+  # AIMI_FORGE_TYPE short-circuits detection, and a bare `jq -r '.host'`
+  # renders that null as the 4-character TEXT "null". That string is
+  # non-empty, so it survives every downstream emptiness check and reaches
+  # `gh auth status --hostname null` -- a host gh has no session for, whose
+  # refusal then reads as a confirmed authenticated:false. This is the same
+  # guard every other nullable field in this file already reads through.
+  host=$(printf '%s' "$forge_info" | jq -r '.host // empty')
 
   local status="error" message="" data_json="null" reason=""
 
@@ -2716,7 +2729,12 @@ _forge_repo_info() {
   local forge_info forge host remote_url
   forge_info=$(_detect_forge)
   forge=$(printf '%s' "$forge_info" | jq -r '.forge')
-  host=$(printf '%s' "$forge_info" | jq -r '.host')
+  # See _forge_auth_status's note on the same read: a JSON null host must
+  # become the empty string, never the text "null". Downstream, this is what
+  # makes _forge_pr_write_print_manual's own already-correct
+  # `.data.host // empty` fallback fire at all -- the string "null" is truthy
+  # in jq, so that fallback was silently dead and printed https://null/... .
+  host=$(printf '%s' "$forge_info" | jq -r '.host // empty')
   remote_url=$(printf '%s' "$forge_info" | jq -r '.remoteUrl // empty')
 
   local owner="" repo="" source=""
@@ -3598,12 +3616,18 @@ _forge_pr_edit() {
 cmd_forge_pr_edit() {
   check_jq
 
-  local number="" body="" project_dir=""
+  local number="" body="" project_dir="" body_provided=""
 
   while [ $# -gt 0 ]; do
     case "$1" in
       --number)  shift; number="${1:-}" ;;
-      --body)    shift; body="${1:-}" ;;
+      # body_provided tracks whether the FLAG was seen, deliberately not
+      # whether its value is non-empty: `gh pr edit N --body ""` blanks a
+      # description, so "flag omitted entirely" (a caller that forgot it,
+      # which must be refused) and "--body ''" (a deliberate clear, which
+      # must keep working) have to stay distinguishable. Checking $body for
+      # emptiness would collapse them back together.
+      --body)    shift; body="${1:-}"; body_provided=1 ;;
       --project) shift; project_dir="${1:-}" ;;
       *)
         echo "Error: forge-pr-edit: unknown flag: $1" >&2
@@ -3626,7 +3650,7 @@ cmd_forge_pr_edit() {
     exit 1
   fi
 
-  if [ -z "$number" ]; then
+  if [ -z "$number" ] || [ -z "$body_provided" ]; then
     echo "Usage: aimi-cli.sh forge-pr-edit --number <n> --body <text> [--project <path>]" >&2
     exit 1
   fi

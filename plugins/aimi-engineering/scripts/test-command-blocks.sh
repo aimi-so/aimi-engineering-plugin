@@ -429,6 +429,47 @@ check_unassigned() {
 }
 
 # ---------------------------------------------------------------------------
+# Same-block validation of $ARGUMENTS.
+#
+# $ARGUMENTS is raw user input, textually substituted into a block before the
+# shell ever sees it. Blocks are EXECUTED, each in its own isolated shell, so
+# a gate sitting in an EARLIER block cannot protect a later one: its `exit 1`
+# ends only its own shell, and the later block still runs. Any block that
+# interpolates $ARGUMENTS into a command line must therefore carry its own
+# gate, in that same block, above the use.
+#
+# A `case` gate is what this check wants for a numeric identifier: `grep -qE
+# '^[0-9]+$'` matches line by line, so it accepts a multi-line value whose
+# FIRST line is digits, while a `case` pattern tests the whole string. The
+# branch-name form (`grep -qE '^[a-zA-Z0-9]...`) is accepted too — it is the
+# established pattern for that field and is validated again downstream.
+# ---------------------------------------------------------------------------
+check_argument_gate_same_block() {
+  local findings="" id rel line heading body
+  while IFS=$'\t' read -r id rel line heading; do
+    [ -n "$id" ] || continue
+    body="$(cat "$BLOCKS_DIR/$id.sh" 2>/dev/null)"
+
+    case "$body" in
+      *'"$ARGUMENTS"'*) ;;
+      *) continue ;;
+    esac
+
+    case "$body" in
+      *'*[!0-9]*'*)          continue ;;
+      *"grep -qE '^[0-9]"*)  continue ;;
+      *"grep -qE '^[a-zA-Z"*) continue ;;
+    esac
+
+    findings="$findings$rel	$heading	$rel:$line — $heading"$'\n'
+  done < "$INDEX"
+
+  assert_no_findings "$(printf '%s' "$findings" | filter_baseline argument-gate)" \
+    "Check 5 — every block interpolating \$ARGUMENTS validates it in that same block" \
+    "Each block runs in its own shell, so a gate in a different block cannot stop this one. Add the gate above the use, in the same block."
+}
+
+# ---------------------------------------------------------------------------
 # The baseline is only honest if it shrinks. An entry that no longer matches
 # anything means the underlying issue was fixed (or a heading was renamed) and
 # the line must go, otherwise the baseline slowly becomes a permanent excuse.
@@ -471,6 +512,7 @@ main() {
   check_portability
   check_loop_scope
   check_unassigned
+  check_argument_gate_same_block
 
   echo ""
   echo "--- Baseline Hygiene ---"

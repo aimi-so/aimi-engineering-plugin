@@ -26,9 +26,23 @@ AIMI_CLI=""
 # Layer 0: AIMI_PLUGIN_DIR (OpenCode install) / CLAUDE_PLUGIN_ROOT, skipped
 # for AIMI_PLUGIN_DIR when CLAUDECODE is set so the Claude Code cache always
 # wins there.
-if [ -z "${CLAUDECODE:-}" ] && [ -n "${AIMI_PLUGIN_DIR:-}" ] && [ -x "$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh" ]; then
+#
+# Both branches apply cli-path-resolution.md's four documented Layer 0
+# checks: (1) env var non-empty, (2) path absolute, (3) directory exists,
+# (4) target script executable. The absolute-path check is the load-bearing
+# one here and is NOT redundant with the executable check: these scripts run
+# from an arbitrary repository's checkout, so a RELATIVE value (a bare "."
+# being the worst case) makes "$VAR/scripts/aimi-cli.sh" resolve against
+# that repository instead of a plugin install -- handing execution to any
+# checkout that happens to ship its own executable scripts/aimi-cli.sh.
+# CLAUDE_PLUGIN_ROOT carries the identical guards because it is the same
+# class of untrusted env-var-derived path; it has no section of its own in
+# cli-path-resolution.md (that doc's four-layer strategy is written for
+# command authoring generally, while CLAUDE_PLUGIN_ROOT is specific to this
+# one sourced helper), so this comment is its documentation.
+if [ -z "${CLAUDECODE:-}" ] && [ -n "${AIMI_PLUGIN_DIR:-}" ] && [ "${AIMI_PLUGIN_DIR#/}" != "$AIMI_PLUGIN_DIR" ] && [ -d "$AIMI_PLUGIN_DIR" ] && [ -x "$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh" ]; then
   AIMI_CLI="$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh"
-elif [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -x "$CLAUDE_PLUGIN_ROOT/scripts/aimi-cli.sh" ]; then
+elif [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ "${CLAUDE_PLUGIN_ROOT#/}" != "$CLAUDE_PLUGIN_ROOT" ] && [ -d "$CLAUDE_PLUGIN_ROOT" ] && [ -x "$CLAUDE_PLUGIN_ROOT/scripts/aimi-cli.sh" ]; then
   AIMI_CLI="$CLAUDE_PLUGIN_ROOT/scripts/aimi-cli.sh"
 fi
 
@@ -41,9 +55,17 @@ if [ -z "$AIMI_CLI" ]; then
 fi
 
 # Layer 2: glob fallback under the Claude Code plugin cache (zsh-safe via
-# `bash -c`, matching cli-path-resolution.md's own Layer 2 exactly).
+# `bash -c`, matching cli-path-resolution.md's own Layer 2 exactly), then
+# validated the same way Layer 1's cached path is directly above -- `ls`
+# matching a name proves only that the path exists, not that it can be run.
+# Clearing it back to empty on failure lets the not-found error below fire
+# with its own clear message instead of the caller dying on a bare
+# "Permission denied" from a path this file already knew was unusable.
 if [ -z "$AIMI_CLI" ]; then
   AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1')
+  if [ -n "$AIMI_CLI" ] && [ ! -x "$AIMI_CLI" ]; then
+    AIMI_CLI=""
+  fi
 fi
 
 if [ -z "$AIMI_CLI" ]; then

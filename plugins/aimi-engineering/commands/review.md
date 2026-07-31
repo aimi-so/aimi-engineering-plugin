@@ -85,14 +85,24 @@ $AIMI_CLI check-version --quiet --fix
 
 1. **PR number** (numeric): Fetch PR with `forge-pr-view` (`--include` is a comma-separated field selector — see `commands/references/forge-contract.md`; `files` is dropped here since nothing at this step consumes it). Runs in `forge-pr-view`'s built-in quiet degrade mode, so a missing/unauthenticated `gh` yields `status: "error"` with no stderr banner — the git-diff fallback documented in Error Handling below is what actually surfaces that to the user:
 
+   `$ARGUMENTS` is validated as digits-only **in the same block that interpolates it**, never in a block of its own — each fenced block runs in its own isolated shell, so a gate placed in an earlier block cannot stop this one: its `exit 1` ends only that shell. The `case` form is deliberate rather than the `grep -qE` used for branch names in item 3: `grep` matches line by line, so it would accept a multi-line value whose *first* line is digits, while `case` tests the whole string and rejects any non-digit character, newlines included.
+
    ```bash
    AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
    : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+   case "$ARGUMENTS" in
+     ''|*[!0-9]*)
+       echo "Error: Invalid PR number: $ARGUMENTS" >&2
+       exit 1
+       ;;
+   esac
    PR_JSON=$($AIMI_CLI forge-pr-view --pr "$ARGUMENTS" --include title,body,headRefName,baseRefName)
    ```
 
+   This gate is defense-in-depth, not the only line of defense — `forge-pr-view` validates its own `--pr` value against a fixed regex before it reaches any `gh` command, which is what covers a value crafted to break out of the quoting in the gate line itself.
+
    Branch on `PR_JSON`'s `status` field (`found` | `not_found` | `error` — forge-contract.md's Three-Way Status Convention): on `found`, read `.pr.title`/`.pr.body`/`.pr.headRefName`/`.pr.baseRefName`; on `not_found` or `error`, fall through to the git-diff comparison the same way a missing `gh` does (see Error Handling below).
-2. **GitHub URL**: Extract the PR number, then fetch with the same `forge-pr-view` call as item 1, substituting the extracted number for `$ARGUMENTS`.
+2. **GitHub URL**: Extract the PR number from the URL, assign that extracted number into `$ARGUMENTS`, then run item 1's block **unchanged** — the same validation gate and the same `forge-pr-view` call. Do NOT write a second, parallel `forge-pr-view` invocation for this case: item 1's block is the single gated path to that command, and re-entering it is what makes the URL case inherit the digits-only check instead of skipping it.
 3. **Branch name**: Validate `$ARGUMENTS` against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` before it is ever interpolated into a git command — the same check Case B step 4 below applies to `$CANDIDATE_BRANCH`:
 
    ```bash

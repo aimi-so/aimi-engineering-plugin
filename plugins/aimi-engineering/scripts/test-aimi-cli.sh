@@ -16956,6 +16956,10 @@ test_forge_contract_header_carries_both_creates_identities() {
 #   FAKE_GH_LIST_EXIT / FAKE_GH_LIST_STDERR -- `gh pr list` exit code + stderr
 #   FAKE_GH_LIST_JSON                        -- `gh pr list` stdout on exit 0 (default '[]')
 #   FAKE_GH_LOG                              -- optional file; every invocation's args appended, one per line
+#   FAKE_GH_AUTH_STRICT_HOSTNAME "1" makes `gh auth status --hostname X` exit 1 for any X
+#                              other than FAKE_GH_AUTH_HOST, the way real gh does. Off by
+#                              default so the flag is ignored (pre-existing behavior); set
+#                              it only in a test that is specifically about hostname handling.
 setup_fake_gh_fixture() {
   FAKE_GH_DIR=$(mktemp -d)
   cat > "$FAKE_GH_DIR/gh" << 'FAKE_GH_SCRIPT'
@@ -16966,6 +16970,26 @@ fi
 
 case "$1 $2" in
   "auth status")
+    # Opt-in faithfulness: real gh REJECTS a --hostname it has no session
+    # for, which is how a bogus hostname turns into a confirmed-looking
+    # "not authenticated" answer. The default stays lenient (ignores the
+    # flag entirely) so every pre-existing test keeps its old behavior;
+    # only a test that is specifically about hostname handling sets this.
+    if [ "${FAKE_GH_AUTH_STRICT_HOSTNAME:-0}" = "1" ]; then
+      want_host="${FAKE_GH_AUTH_HOST:-github.com}"
+      expect_value=""
+      for arg in "$@"; do
+        if [ -n "$expect_value" ]; then
+          if [ "$arg" != "$want_host" ]; then
+            echo "You are not logged into any hosts on $arg" >&2
+            exit 1
+          fi
+          expect_value=""
+          continue
+        fi
+        [ "$arg" = "--hostname" ] && expect_value=1
+      done
+    fi
     case "${FAKE_GH_AUTH_STATUS_MODE:-single}" in
       single)
         host="${FAKE_GH_AUTH_HOST:-github.com}"
@@ -17045,7 +17069,8 @@ teardown_fake_gh_fixture() {
   unset FAKE_GH_DIR FAKE_GH_AUTH_STATUS_MODE FAKE_GH_AUTH_HOST FAKE_GH_AUTH_ACCOUNT \
     FAKE_GH_AUTH_OTHER_ACCOUNT FAKE_GH_REPO_OWNER FAKE_GH_REPO_NAME FAKE_GH_REPO_VIEW_FAIL \
     FAKE_GH_CALL_COUNTER FAKE_GH_VIEW_EXIT FAKE_GH_VIEW_STDERR FAKE_GH_PR_JSON \
-    FAKE_GH_LIST_EXIT FAKE_GH_LIST_STDERR FAKE_GH_LIST_JSON FAKE_GH_LOG
+    FAKE_GH_LIST_EXIT FAKE_GH_LIST_STDERR FAKE_GH_LIST_JSON FAKE_GH_LOG \
+    FAKE_GH_AUTH_STRICT_HOSTNAME
 }
 
 # Prints a PATH value with every occurrence of <binary> made unresolvable,
@@ -17165,6 +17190,164 @@ test_forge_auth_status_identity_match_mismatch_and_unset() {
 
   popd >/dev/null
   teardown_fake_gh_fixture
+  teardown_detect_forge_fixture
+}
+
+# ---------------------------------------------------------------------------
+# AIMI_FORGE_TYPE override: a JSON null host must never become the STRING "null"
+#
+# _detect_forge short-circuits on AIMI_FORGE_TYPE with host/remote/remoteUrl
+# all JSON null. `jq -r '.host'` renders a JSON null as the 4-character text
+# "null", so the shell variable holds a non-empty string that then looks like
+# a real hostname to everything downstream: `gh auth status --hostname null`
+# (a host gh has no session for -> a confirmed-looking authenticated:false),
+# a data.host of "null" as a JSON string, and a manual-print URL of
+# https://null/owner/repo/... The fix is `.host // empty` at the two reads
+# that lacked it; every downstream symptom is transitive.
+# ---------------------------------------------------------------------------
+
+test_forge_auth_status_forge_type_override_host_is_json_null() {
+  echo ""
+  echo "=== forge-auth-status: AIMI_FORGE_TYPE override -- a null host never becomes the string \"null\" ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  setup_fake_gh_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local gh_log="$FAKE_GH_DIR/auth-invocations.log"
+  local out
+  out=$(PATH="$FAKE_GH_DIR:$PATH" AIMI_FORGE_TYPE=github FAKE_GH_AUTH_STRICT_HOSTNAME=1 \
+    FAKE_GH_AUTH_STATUS_MODE=single FAKE_GH_AUTH_ACCOUNT=octocat FAKE_GH_LOG="$gh_log" \
+    "$CLI" forge-auth-status)
+
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" \
+    "auth-status override: status is found"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.authenticated')" \
+    "auth-status override: reports the session's REAL authenticated:true, not a confirmed-but-wrong false"
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.data.account')" \
+    "auth-status override: the real account survives the override"
+  # jq -r prints BOTH a JSON null and the string "null" as `null`, so only
+  # `| type` can tell the fixed shape from the broken one.
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.host | type')" \
+    "auth-status override: data.host is a JSON null, never the 4-character string \"null\""
+
+  if grep -q -- '--hostname null' "$gh_log" 2>/dev/null; then
+    echo -e "${RED}✗${NC} auth-status override: gh must never be handed --hostname null"
+    echo "  gh invocations: $(cat "$gh_log")"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} auth-status override: gh is never handed --hostname null"
+    ((TESTS_PASSED++))
+  fi
+
+  popd >/dev/null
+  teardown_fake_gh_fixture
+  teardown_detect_forge_fixture
+}
+
+test_forge_repo_info_forge_type_override_host_is_json_null() {
+  echo ""
+  echo "=== forge-repo-info: AIMI_FORGE_TYPE override -- the same null host, the same single root fix ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  setup_fake_gh_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+  out=$(PATH="$FAKE_GH_DIR:$PATH" AIMI_FORGE_TYPE=github \
+    FAKE_GH_REPO_OWNER=owner FAKE_GH_REPO_NAME=repo "$CLI" forge-repo-info)
+
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "repo-info override: status is found"
+  assert_eq "owner/repo" "$(printf '%s' "$out" | jq -r '.data.nameWithOwner')" \
+    "repo-info override: owner/repo still resolve normally"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.host | type')" \
+    "repo-info override: data.host is a JSON null, never the 4-character string \"null\""
+
+  popd >/dev/null
+  teardown_fake_gh_fixture
+  teardown_detect_forge_fixture
+}
+
+# _forge_pr_write_print_manual's own `.data.host // empty` fallback was
+# already correct -- it just never fired, because the string "null" is truthy
+# in jq. This proves the fix at _forge_repo_info reaches it transitively,
+# with no change to _forge_pr_write_print_manual itself.
+test_forge_pr_write_manual_url_never_uses_null_host() {
+  echo ""
+  echo "=== forge-pr-edit manual fallback: URL uses the github.com default, never https://null/ ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
+  echo "HTTP 404: Not Found" >&2
+  exit 1
+fi
+if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
+  echo '{"owner":{"login":"owner"},"name":"repo"}'
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_pr_edit_manual_null_host.$$"
+  PATH="$sandbox" AIMI_FORGE_TYPE=github "$CLI" forge-pr-edit --number 303 --body "b" \
+    >/dev/null 2>"$stderr_file" || true
+
+  local stderr_out
+  stderr_out=$(cat "$stderr_file")
+
+  assert_stderr_contains "https://github.com/owner/repo/pull/303" "$stderr_out" \
+    "manual fallback: prints the pull URL on the github.com default host"
+
+  if printf '%s' "$stderr_out" | grep -q 'https://null/'; then
+    echo -e "${RED}✗${NC} manual fallback: must never print an https://null/ URL"
+    echo "  stderr: $stderr_out"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} manual fallback: never prints an https://null/ URL"
+    ((TESTS_PASSED++))
+  fi
+
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+# Cheap hardening, not a live exploit (the auditor confirmed no working PoC):
+# the scheme comparison was case-sensitive, so an uppercase HTTPS:// remote
+# skipped redaction entirely and round-tripped its embedded credential.
+test_detect_forge_credential_redaction_uppercase_scheme() {
+  echo ""
+  echo "=== detect-forge: userinfo redaction is case-insensitive on the scheme ==="
+
+  setup_detect_forge_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  git remote add origin HTTPS://x-access-token:ghp_uppercase_secret@github.com/owner/repo.git
+  local stdout
+  stdout=$("$CLI" detect-forge)
+
+  assert_eq "HTTPS://github.com/owner/repo.git" "$(echo "$stdout" | jq -r '.remoteUrl')" \
+    "detect-forge uppercase scheme: userinfo stripped, the scheme's original case preserved"
+
+  if printf '%s' "$stdout" | grep -q "ghp_uppercase_secret"; then
+    echo -e "${RED}✗${NC} detect-forge uppercase scheme: secret must never round-trip through stdout"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} detect-forge uppercase scheme: secret does not round-trip through stdout"
+    ((TESTS_PASSED++))
+  fi
+
+  popd >/dev/null
   teardown_detect_forge_fixture
 }
 
@@ -18455,6 +18638,97 @@ FAKE_GH
   assert_stderr_contains "gh pr edit exited 1" "$(cat "$stderr_file")" "forge-pr-edit gh-failure: error names the gh exit code"
   assert_stderr_contains "edit it yourself" "$(cat "$stderr_file")" "forge-pr-edit gh-failure: manual instruction printed"
   rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+# Omitting --body used to be indistinguishable from passing an empty one:
+# both left $body as "", and `gh pr edit N --body ""` BLANKS the description.
+# A caller that simply forgot the flag silently destroyed the PR body.
+test_forge_pr_edit_omitted_body_is_rejected() {
+  echo ""
+  echo "=== forge-pr-edit: --body omitted entirely -- rejected before gh runs, so a description is never blanked by omission ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  local gh_log="$sandbox/gh-invocations.log"
+  cat > "$sandbox/gh" << FAKE_GH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$gh_log"
+if [ "\$1" = "pr" ] && [ "\$2" = "edit" ]; then
+  exit 0
+fi
+if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
+  echo '{"url":"https://github.com/owner/repo/pull/303","number":303}'
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_pr_edit_no_body_stderr.$$"
+  local exit_code
+  PATH="$sandbox" "$CLI" forge-pr-edit --number 303 >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-edit omitted --body: exit 1"
+  assert_stderr_contains "Usage: aimi-cli.sh forge-pr-edit" "$(cat "$stderr_file")" \
+    "forge-pr-edit omitted --body: reuses the existing Usage message rather than inventing a second one"
+
+  local gh_calls=""
+  [ -f "$gh_log" ] && gh_calls=$(cat "$gh_log")
+  assert_eq "" "$gh_calls" \
+    "forge-pr-edit omitted --body: gh is never invoked at all -- the PR body cannot be blanked"
+
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+# The other half of the same distinction: an EXPLICIT --body "" is a
+# deliberate way to clear a description and must keep working. The rejection
+# above keys on whether the flag was SEEN, never on whether its value is
+# non-empty -- these two tests only both pass under that reading.
+test_forge_pr_edit_explicit_empty_body_still_clears() {
+  echo ""
+  echo "=== forge-pr-edit: an explicit --body \"\" is a deliberate clear and still succeeds ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  local gh_log="$sandbox/gh-invocations.log"
+  cat > "$sandbox/gh" << FAKE_GH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$gh_log"
+if [ "\$1" = "pr" ] && [ "\$2" = "edit" ]; then
+  exit 0
+fi
+if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
+  echo '{"url":"https://github.com/owner/repo/pull/303","number":303}'
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --body "") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-edit explicit empty --body: exit 0 -- a deliberate clear is still allowed"
+  assert_eq "unchanged" "$(printf '%s' "$out" | jq -r '.status')" \
+    "forge-pr-edit explicit empty --body: reports the normal unchanged write envelope"
+  assert_contains "pr edit 303 --body" "$(cat "$gh_log")" \
+    "forge-pr-edit explicit empty --body: gh IS invoked -- the clear actually reaches the forge"
 
   popd >/dev/null
   teardown_detect_forge_fixture
@@ -20773,6 +21047,10 @@ main() {
   test_forge_auth_status_multi_account_exactly_one_active
   test_forge_auth_status_not_authenticated_confirmed_negative
   test_forge_auth_status_identity_match_mismatch_and_unset
+  test_forge_auth_status_forge_type_override_host_is_json_null
+  test_forge_repo_info_forge_type_override_host_is_json_null
+  test_forge_pr_write_manual_url_never_uses_null_host
+  test_detect_forge_credential_redaction_uppercase_scheme
   test_forge_auth_status_no_identity_flag_anywhere
   test_forge_auth_status_gh_absent_is_error
   test_forge_auth_status_no_adapter_is_error
@@ -20823,6 +21101,8 @@ main() {
   test_forge_pr_edit_missing_gh_mandatory_print_nonzero_exit
   test_forge_pr_edit_gh_failure_prints_manual_nonzero_exit
   test_forge_pr_edit_invalid_number_guard
+  test_forge_pr_edit_omitted_body_is_rejected
+  test_forge_pr_edit_explicit_empty_body_still_clears
   test_forge_write_verbs_share_one_data_shape
   test_forge_write_verbs_degraded_exit_code_split
   test_forge_pr_create_and_edit_registered_in_help_and_dispatcher
