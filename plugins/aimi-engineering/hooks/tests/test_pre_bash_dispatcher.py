@@ -459,3 +459,163 @@ def test_main_prefilter_does_not_swallow_a_real_commit():
     out = _run_dispatcher("git commit -m x", branch="main")
     assert out, "Expected deny -- prefilter wrongly skipped a real invocation"
     assert json.loads(out[0])["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+# ---------------------------------------------------------------------------
+# Statement-prefix detection: env assignments, wrappers, body keywords
+#
+# 1.119.1's anchoring rejected every token between the separator and `git`,
+# which silently stopped guarding shapes the pre-anchoring regexes caught.
+# ---------------------------------------------------------------------------
+
+def _detects(command):
+    """True when any of the four guard regexes matches the detection copy."""
+    detect = dispatcher._strip_heredocs(command)
+    return any(
+        pattern.search(detect)
+        for pattern in (
+            dispatcher._GIT_COMMIT_RE,
+            dispatcher._GIT_C_COMMIT_RE,
+            dispatcher._GIT_WORKTREE_ADD_RE,
+            dispatcher._GIT_C_WORKTREE_ADD_RE,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "GIT_AUTHOR_DATE=2020-01-01 git commit -m x",
+        'GIT_AUTHOR_DATE="2020-01-01 12:00:00" git commit -m x',
+        "GIT_AUTHOR_DATE='2020-01-01 12:00:00' git commit -m x",
+        "GIT_AUTHOR_DATE=2020-01-01 GIT_COMMITTER_DATE=2020-01-01 git commit -m x",
+        "EMPTY= git commit -m x",
+        'FOO=a"b" git commit -m x',
+        'PATH="$HOME/bin:$PATH" git commit',
+        "sudo git commit -m x",
+        "env FOO=1 git commit",
+        "time git commit",
+        "nohup git commit",
+        "for f in a b; do git commit -m $f; done",
+        "if ok; then git commit; fi",
+        "if x; then y; else git commit; fi",
+        "{ git commit -m x; }",
+        "! git commit",
+        "while read l; do sudo GIT_AUTHOR_DATE=1 git commit; done",
+        "cd /r && sudo git commit -m x",
+        "x\n  GIT_AUTHOR_DATE=1 git commit",
+        "sudo git -C /repo commit -m x",
+        'FOO=1 git -C "/path with spaces" commit -m x',
+        "sudo git worktree add /tmp/w",
+        "FOO=1 git worktree add /tmp/w",
+        "for f in a; do git worktree add /tmp/w; done",
+        "if x; then git -C /r worktree add /tmp/w; fi",
+    ],
+)
+def test_statement_prefix_shapes_are_detected(command):
+    assert _detects(command), f"prefix shape must be detected: {command!r}"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Issue #82's own class -- these must never come back.
+        'grep -rn "git commit" file.txt',
+        "echo 'remember to git commit later'",
+        'rg "git commit" -n',
+        'echo "TODO: git commit"',
+        'grep -rn "git worktree add" .',
+        'echo "sudo git commit"',
+        'echo "FOO=1 git commit"',
+        'git log --grep "git commit"',
+        "cat <<EOF\nremember to git commit\nEOF",
+        # `{` and `!` survive ONLY because a prefix token requires trailing
+        # whitespace: `{}`, `{a:`, `{print`, `!=` and `!!` all fail on that.
+        r'find . -name "*.py" -exec grep -l "git commit" {} \;',
+        "jq '{a: 1}' f.json; echo git commit",
+        "awk '{print $1}' f; echo 'git commit'",
+        "ls {src,test}; echo git commit",
+        'test "$a" != "git commit"',
+        "echo ${GIT_DIR} | wc -l; echo git commit",
+        # A wrapper-looking word that is not a wrapper invocation.
+        "timeout 5 echo git commit",
+        "echo hi! git commit",
+        'python3 -m pytest -k "git_commit"',
+        "git status # git commit later",
+        'docker run img sh -c "git commit"',
+    ],
+)
+def test_mere_mentions_stay_undetected_with_statement_prefixes(command):
+    assert not _detects(command), f"mention must stay silent: {command!r}"
+
+
+def test_prefix_depth_ceiling_is_six():
+    """Pins the documented {0,6} bound so a reader meets it as a decision.
+
+    Six covers the deepest realistic prefix; a seventh token is dropped.
+    """
+    assert dispatcher._GIT_COMMIT_RE.search("A=1 " * 6 + "git commit")
+    assert dispatcher._GIT_COMMIT_RE.search(
+        "x; do sudo GIT_A=1 GIT_B=2 GIT_C=3 git commit"
+    )
+    assert dispatcher._GIT_COMMIT_RE.search("A=1 " * 7 + "git commit") is None
+
+
+def test_prefix_run_does_not_backtrack_exponentially():
+    """The assignment-value branches must stay disjoint by first character.
+
+    A bare value branch that may begin with a quote makes `A="xy" ` parse two
+    ways over the identical span, doubling live paths per token: 0.0004s at
+    n=10, 0.023s at n=16, 0.38s at n=20, over 3s at n=24 before the fix.
+    n=30 sits well past the {0,6} ceiling so this fails if EITHER defence --
+    the disjoint branches or the bound -- is later removed.
+    """
+    import time
+
+    payload = 'A="xy" ' * 30 + "gi"
+    start = time.perf_counter()
+    for pattern in (
+        dispatcher._GIT_COMMIT_RE,
+        dispatcher._GIT_C_COMMIT_RE,
+        dispatcher._GIT_WORKTREE_ADD_RE,
+        dispatcher._GIT_C_WORKTREE_ADD_RE,
+    ):
+        assert pattern.search(payload) is None
+    elapsed = time.perf_counter() - start
+    assert elapsed < 0.5, f"prefix scan took {elapsed:.3f}s -- backtracking regression"
+
+
+def test_prefix_scan_is_linear_across_many_anchors():
+    """A large command with a prefix run at every anchor must stay cheap.
+
+    The short canary above cannot see a multiplicative term that only shows
+    up once many anchor positions each pay the prefix cost.
+    """
+    import time
+
+    payload = ("A=1 B=2 sudo do then gi;\n" * 1600) + "echo done"
+    assert len(payload) > 35_000
+    start = time.perf_counter()
+    for pattern in (
+        dispatcher._GIT_COMMIT_RE,
+        dispatcher._GIT_C_COMMIT_RE,
+        dispatcher._GIT_WORKTREE_ADD_RE,
+        dispatcher._GIT_C_WORKTREE_ADD_RE,
+    ):
+        assert pattern.search(payload) is None
+    elapsed = time.perf_counter() - start
+    assert elapsed < 1.0, f"many-anchor scan took {elapsed:.3f}s -- cost regression"
+
+
+def test_main_denies_env_prefixed_commit_on_protected_branch():
+    """End-to-end through main(), not just the regex: the flagship shape."""
+    out = _run_dispatcher("GIT_AUTHOR_DATE=2020-01-01 git commit -m x", branch="main")
+    assert out, "Expected deny -- env-prefixed commit must reach the guard"
+    data = json.loads(out[0])
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_main_denies_sudo_prefixed_commit_on_protected_branch():
+    out = _run_dispatcher("sudo git commit -m x", branch="main")
+    assert out, "Expected deny -- sudo-prefixed commit must reach the guard"
+    assert json.loads(out[0])["hookSpecificOutput"]["permissionDecision"] == "deny"
