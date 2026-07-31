@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A completed phase no longer pushes a repository's branch to `origin` when no forge adapter can open the resulting pull request — a deliberate behavior change, and stricter than the gate it replaces.** Phase 1 moved `/aimi:execute`'s phase-mode PR call onto `forge-pr-create`, which correctly took the CLI-presence check with it, but left the `git push -u origin` one line above with no check at all — so a user with no forge CLI installed, or any GitLab/Gitea remote (phase 1 ships no write adapter for either), got a branch published where they previously got manual instructions and no push. The push is now gated per repository on `forge-auth-status` reporting `status: "found"`, which is true only when the remote resolves to a forge with a working write adapter *and* that adapter's CLI is on `PATH` — the same two conditions `forge-pr-create` gates its own write on. Note this is narrower than the pre-phase-1 gate, which tested only whether a GitHub CLI existed: a GitLab or Gitea remote on a machine that happened to have one installed used to get its branch pushed and only fail at PR creation. It no longer does, because whether a branch reaches `origin` should not depend on an unrelated binary being installed. A skipped repository prints its own recovery block instead — its label, the container-scoped `git push -u origin` command, and the `base...head` compare range — so the outcome is one pasted command, not a lost push. The check extends by itself: a future GitLab or Gitea write adapter makes those remotes report `found` with no change to `execute.md`.
+- **Every `forge-pr-create` failure in a completed phase now prints a line naming the repository it belongs to.** `_forge_pr_write_print_manual` has no repository context and so names none, which meant a multi-repo phase with N failing repositories emitted N indistinguishable stderr banners — the loop itself printed nothing attributable, contradicting the per-repository failure isolation documented directly beneath it. The loop now echoes one labelled line per failing repository alongside that banner.
+
 ## [1.120.0] - 2026-07-31
 
 ### Changed
