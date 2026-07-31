@@ -1854,6 +1854,8 @@ _detect_forge() {
 # so an invalid value never reaches a git command. Never cached (see
 # _detect_forge's header comment: per-repository, per-invocation).
 cmd_detect_forge() {
+  check_jq
+
   local project_dir=""
 
   # Parse --project flag
@@ -2614,6 +2616,8 @@ _forge_auth_status() {
 # --identity (or similarly named) flag exists anywhere in this parsing loop
 # -- identity selection is env-var-only, by design (see section header).
 cmd_forge_auth_status() {
+  check_jq
+
   local project_dir=""
 
   while [ $# -gt 0 ]; do
@@ -2761,6 +2765,8 @@ _forge_repo_info() {
 # Resolves the active forge's owner/repo for the current git repository. See
 # the section header above for the gh-primary/local-parse-fallback contract.
 cmd_forge_repo_info() {
+  check_jq
+
   local project_dir=""
 
   while [ $# -gt 0 ]; do
@@ -3080,6 +3086,8 @@ _forge_pr_view_github() {
 # forge-native object instead (forge-contract.md's Review/Approval Envelope
 # section says so explicitly).
 cmd_forge_pr_view() {
+  check_jq
+
   local pr_ref="" include_raw="" project_dir=""
 
   while [ $# -gt 0 ]; do
@@ -3457,6 +3465,8 @@ _forge_pr_create() {
 # BOTH --base and --head, before either is ever interpolated into a git/gh
 # invocation), then delegates exactly once to _forge_pr_create.
 cmd_forge_pr_create() {
+  check_jq
+
   local title="" base="" head="" body="" project_dir=""
 
   while [ $# -gt 0 ]; do
@@ -3586,6 +3596,8 @@ _forge_pr_edit() {
 # pattern, matching cmd_forge_issue_view's own numeric-identifier guard --
 # then delegates exactly once to _forge_pr_edit.
 cmd_forge_pr_edit() {
+  check_jq
+
   local number="" body="" project_dir=""
 
   while [ $# -gt 0 ]; do
@@ -3793,6 +3805,8 @@ _forge_issue_view() {
 # instead, even though it requests an identical field set, because it
 # reads a pull request, not an issue.
 cmd_forge_issue_view() {
+  check_jq
+
   local number="" url="" project_dir=""
 
   while [ $# -gt 0 ]; do
@@ -3955,6 +3969,8 @@ _forge_issue_create() {
 # already documents this soft-fail behavior in prose; this verb's `status`
 # field is what lets a future caller preserve it.
 cmd_forge_issue_create() {
+  check_jq
+
   local title="" body="" project_dir=""
 
   while [ $# -gt 0 ]; do
@@ -4240,6 +4256,8 @@ _forge_pr_review_threads() {
 # Usage: aimi-cli.sh forge-pr-review-threads --pr <number> [--owner <owner>
 # --repo <repo>] [--all] [--project <path>]
 cmd_forge_pr_review_threads() {
+  check_jq
+
   local pr_number="" owner="" repo="" all_threads="false" project_dir=""
 
   while [ $# -gt 0 ]; do
@@ -4411,6 +4429,8 @@ _forge_resolve_review_thread() {
 # there is no gh subcommand or REST fallback for resolving a review thread.
 # Usage: aimi-cli.sh forge-resolve-review-thread --thread-id <id> [--project <path>]
 cmd_forge_resolve_review_thread() {
+  check_jq
+
   local thread_id="" project_dir=""
 
   while [ $# -gt 0 ]; do
@@ -12119,6 +12139,24 @@ main() {
     models-prompt-check) cmd_models_prompt_check; return ;;
     models-prompt-dismiss) cmd_models_prompt_dismiss; return ;;
     prime-cache) cmd_prime_cache; return ;;
+    # Forge verbs: git + an optional forge CLI + jq, and nothing else. None of
+    # them reads or writes .aimi/ state, so requiring a project would be pure
+    # cost -- and find_aimi_root's cd side effect is actively wrong for them:
+    # in a multi-repo layout it moves the process out of the git repository the
+    # caller is standing in and into the non-git .aimi/ parent. Dispatching
+    # here leaves the process in the invoking CWD, which is what an omitted
+    # --project must resolve to. Each verb calls check_jq itself, since the
+    # one below runs too late to cover them.
+    detect-forge) shift; cmd_detect_forge "$@"; return ;;
+    forge-auth-status) shift; cmd_forge_auth_status "$@"; return ;;
+    forge-repo-info) shift; cmd_forge_repo_info "$@"; return ;;
+    forge-pr-view) shift; cmd_forge_pr_view "$@"; return ;;
+    forge-pr-create) shift; cmd_forge_pr_create "$@"; return ;;
+    forge-pr-edit) shift; cmd_forge_pr_edit "$@"; return ;;
+    forge-issue-view) shift; cmd_forge_issue_view "$@"; return ;;
+    forge-issue-create) shift; cmd_forge_issue_create "$@"; return ;;
+    forge-pr-review-threads) shift; cmd_forge_pr_review_threads "$@"; return ;;
+    forge-resolve-review-thread) shift; cmd_forge_resolve_review_thread "$@"; return ;;
   esac
 
   # Universal --help/-h: any subcommand with --help or -h anywhere in its args
@@ -12167,16 +12205,8 @@ main() {
     get-state)         cmd_get_state ;;
     detect-default-branch) shift; cmd_detect_default_branch "$@" ;;
     detect-parent-branch) shift; cmd_detect_parent_branch "$@" ;;
-    detect-forge) shift; cmd_detect_forge "$@" ;;
-    forge-auth-status) shift; cmd_forge_auth_status "$@" ;;
-    forge-repo-info)   shift; cmd_forge_repo_info "$@" ;;
-    forge-pr-view) shift; cmd_forge_pr_view "$@" ;;
-    forge-pr-create) shift; cmd_forge_pr_create "$@" ;;
-    forge-pr-edit) shift; cmd_forge_pr_edit "$@" ;;
-    forge-issue-view)   shift; cmd_forge_issue_view "$@" ;;
-    forge-issue-create) shift; cmd_forge_issue_create "$@" ;;
-    forge-pr-review-threads) shift; cmd_forge_pr_review_threads "$@" ;;
-    forge-resolve-review-thread) shift; cmd_forge_resolve_review_thread "$@" ;;
+    # detect-forge and every forge-* verb are dispatched in the skip-list case
+    # block above, before find_aimi_root -- never here.
     setup-branch)      shift; cmd_setup_branch "$@" ;;
     resolve-base-branch) shift; cmd_resolve_base_branch "$@" ;;
     clear-state)       cmd_clear_state ;;

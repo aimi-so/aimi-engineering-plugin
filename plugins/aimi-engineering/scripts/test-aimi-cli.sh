@@ -19885,6 +19885,293 @@ test_forge_review_thread_verbs_registered_in_help_and_dispatcher() {
 }
 
 # ============================================================================
+# Forge Dispatch-Order Tests (phase 1.1 US-006)
+# ============================================================================
+# Every forge-* verb used to be dispatched from main()'s SECOND case block --
+# the one that runs after find_aimi_root. find_aimi_root does two things: it
+# hard-exits when no .aimi/ exists anywhere up the tree, and it cd's the
+# process into the .aimi/ parent. Both were load-bearing failures for verbs
+# that need neither: nothing about opening or reading a pull request touches
+# .aimi/ state, and in a multi-repo layout the .aimi/ parent is not even a git
+# repository, so the cd actively moved the process OUT of the repo the caller
+# was standing in. These tests pin the ten verbs into the pre-find_aimi_root
+# "Skip auto-discovery" block, and pin the two consequences of living there:
+# each verb must call check_jq itself (main()'s single check_jq also sits
+# after find_aimi_root), and a stray --help now reaches the verb's own arg
+# parser instead of the universal --help intercept.
+
+# Creates a plain git repository in its own temp dir with a github.com origin
+# remote and exactly one commit, and deliberately NO .aimi/ directory -- not
+# in the repo, not anywhere in its parent chain. This is the resolve-pr-
+# parallel / get-pr-comments scenario: a caller that legitimately has no aimi
+# project at all. Sets FORGE_NO_AIMI_FIXTURE_DIR; caller must teardown.
+setup_forge_no_aimi_dir_fixture() {
+  FORGE_NO_AIMI_FIXTURE_DIR=$(mktemp -d)
+
+  pushd "$FORGE_NO_AIMI_FIXTURE_DIR" >/dev/null
+  git init >/dev/null 2>&1
+  git checkout -b main >/dev/null 2>&1
+  git remote add origin https://github.com/octocat/hello-world.git
+  echo "init" > README.md
+  git add README.md
+  git commit -m "Initial commit" >/dev/null 2>&1
+  popd >/dev/null
+}
+
+# Removes the temp directory created by setup_forge_no_aimi_dir_fixture
+teardown_forge_no_aimi_dir_fixture() {
+  rm -rf "$FORGE_NO_AIMI_FIXTURE_DIR"
+  unset FORGE_NO_AIMI_FIXTURE_DIR
+}
+
+# Walks from <dir> up to the filesystem root and prints the first parent that
+# owns a .aimi/ directory, or nothing when the whole chain is clean. Used to
+# prove setup_forge_no_aimi_dir_fixture really is .aimi-free before a test
+# reads anything into a passing detect-forge call -- a stray /tmp/.aimi on a
+# developer's machine would otherwise make this section silently vacuous.
+_first_aimi_owner_above() {
+  local dir="$1" parent
+  while true; do
+    [ -d "$dir/.aimi" ] && { printf '%s' "$dir"; return 0; }
+    parent=$(dirname "$dir")
+    [ "$parent" = "$dir" ] && return 0
+    dir="$parent"
+  done
+}
+
+# Prints the first executed statement of a shell function defined at column 0
+# in aimi-cli.sh -- blank lines and comment lines skipped, leading whitespace
+# stripped. Used to assert check_jq is genuinely FIRST, not merely present
+# somewhere in the body.
+_first_statement_of_cli_function() {
+  local fn="$1"
+  # Exact string compare on the header line rather than a regex -- awk's -v
+  # assignment applies its own escape processing, which silently mangles a
+  # backslash-escaped "() {" into a regex that matches nothing at all.
+  awk -v hdr="${fn}() {" '
+    !infn && $0 == hdr { infn = 1; next }
+    infn {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      if (line == "" || line ~ /^#/) next
+      print line
+      exit
+    }
+  ' "$CLI"
+}
+
+# The ten verbs this story moves, as "<cli-verb> <function-name>" pairs.
+_FORGE_DISPATCH_VERBS=(
+  "detect-forge cmd_detect_forge"
+  "forge-auth-status cmd_forge_auth_status"
+  "forge-repo-info cmd_forge_repo_info"
+  "forge-pr-view cmd_forge_pr_view"
+  "forge-pr-create cmd_forge_pr_create"
+  "forge-pr-edit cmd_forge_pr_edit"
+  "forge-issue-view cmd_forge_issue_view"
+  "forge-issue-create cmd_forge_issue_create"
+  "forge-pr-review-threads cmd_forge_pr_review_threads"
+  "forge-resolve-review-thread cmd_forge_resolve_review_thread"
+)
+
+test_forge_verbs_run_without_any_aimi_dir() {
+  echo ""
+  echo "=== forge verbs: a git repo with NO .aimi/ anywhere up the tree still gets a JSON envelope ==="
+
+  setup_forge_no_aimi_dir_fixture
+
+  local stray_owner
+  stray_owner=$(_first_aimi_owner_above "$FORGE_NO_AIMI_FIXTURE_DIR")
+  assert_eq "" "$stray_owner" "no-aimi fixture: no .aimi/ owner anywhere up the parent chain (fixture is genuinely aimi-free)"
+
+  pushd "$FORGE_NO_AIMI_FIXTURE_DIR" >/dev/null
+
+  local out exit_code
+  out=$("$CLI" detect-forge 2>&1) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "detect-forge no-aimi: exits 0 (was exit 1 'aimi/ directory not found in any parent directory')"
+  assert_eq "github" "$(printf '%s' "$out" | jq -r '.forge')" "detect-forge no-aimi: resolves the repo's own forge"
+  assert_eq "origin" "$(printf '%s' "$out" | jq -r '.remote')" "detect-forge no-aimi: resolves the repo's own remote"
+
+  # forge-pr-review-threads is the verb get-pr-comments actually calls -- the
+  # probe that opened this story. It degrades (no gh session here), but it
+  # must degrade through the CONTRACT envelope, not through find_aimi_root.
+  local threads_out threads_exit no_gh_path
+  no_gh_path=$(_path_without_binary gh)
+  threads_out=$(PATH="$no_gh_path" "$CLI" forge-pr-review-threads --pr 1 --owner o --repo r 2>&1) && threads_exit=0 || threads_exit=$?
+
+  assert_exit_code "0" "$threads_exit" "forge-pr-review-threads no-aimi: exits 0 (query verb degrades through its envelope)"
+  assert_eq "error" "$(printf '%s' "$threads_out" | jq -r '.status')" "forge-pr-review-threads no-aimi: status is error (gh absent), not a bare find_aimi_root exit"
+  assert_eq "cli_missing" "$(printf '%s' "$threads_out" | jq -r '.reason')" "forge-pr-review-threads no-aimi: reason is cli_missing -- a parseable envelope, which is the whole point"
+
+  # Control: a verb that DOES touch .aimi/ state must still fail here. The
+  # move must not have weakened auto-discovery for anything but the ten.
+  local control_out control_exit
+  control_out=$("$CLI" find-tasks 2>&1) && control_exit=0 || control_exit=$?
+  assert_exit_code "1" "$control_exit" "control: find-tasks still exits 1 without .aimi/ (auto-discovery unchanged for non-forge verbs)"
+  assert_contains ".aimi/ directory not found" "$control_out" "control: find-tasks still reports the .aimi-not-found error"
+
+  rm -rf "$no_gh_path"
+  popd >/dev/null
+  teardown_forge_no_aimi_dir_fixture
+}
+
+test_forge_repo_info_multi_repo_child_without_project() {
+  echo ""
+  echo "=== forge-repo-info: multi-repo child repo, no --project -- resolves the CHILD, not the .aimi parent ==="
+
+  setup_multi_repo_default_branch_fixture
+
+  # cd DIRECTLY into the child repo. Never pushd through
+  # MULTI_REPO_FIXTURE_ROOT (the non-git .aimi/ owner) -- the whole point is
+  # that the invoking cwd, not find_aimi_root's cd target, decides the repo.
+  pushd "$MULTI_REPO_FIXTURE_A" >/dev/null
+
+  local remote_url expected_path expected_owner expected_repo
+  remote_url=$(git remote get-url origin)
+  expected_path="${remote_url#/}"
+  expected_owner="${expected_path%/*}"
+  expected_repo="${expected_path##*/}"
+
+  local out exit_code
+  out=$("$CLI" forge-repo-info 2>&1) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "repo-info multi-repo child: exits 0 (was exit 1 'Not a git repository' after find_aimi_root cd'd to the non-git parent)"
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "repo-info multi-repo child: status is found"
+  assert_eq "$expected_owner" "$(printf '%s' "$out" | jq -r '.data.owner')" "repo-info multi-repo child: owner comes from the CHILD's own origin remote"
+  assert_eq "$expected_repo" "$(printf '%s' "$out" | jq -r '.data.repo')" "repo-info multi-repo child: repo comes from the CHILD's own origin remote"
+
+  # Structural companion to the output assertions: the verb resolved a repo
+  # the .aimi-owning parent does not even have (the parent is not a git repo
+  # at all), and it left the caller's own working directory untouched.
+  assert_eq "$MULTI_REPO_FIXTURE_A" "$(pwd)" "repo-info multi-repo child: caller's working directory is still the child repo after the call returns"
+
+  local parent_is_git
+  (cd "$MULTI_REPO_FIXTURE_ROOT" && git rev-parse --git-dir >/dev/null 2>&1) && parent_is_git=yes || parent_is_git=no
+  assert_eq "no" "$parent_is_git" "repo-info multi-repo child: the .aimi-owning parent is genuinely not a git repo (fixture pins the scenario)"
+
+  popd >/dev/null
+  teardown_multi_repo_default_branch_fixture
+}
+
+test_forge_verbs_dispatched_before_find_aimi_root() {
+  echo ""
+  echo "=== forge verbs: all ten case arms live in main()'s pre-find_aimi_root skip-list block ==="
+
+  local pre_block post_block entry verb fn
+  pre_block=$(awk '/^main\(\) \{$/ { infn = 1 } infn && /^  find_aimi_root$/ { exit } infn' "$CLI")
+  post_block=$(awk '/^  find_aimi_root$/ { infn = 1 } infn' "$CLI")
+
+  for entry in "${_FORGE_DISPATCH_VERBS[@]}"; do
+    verb="${entry%% *}"
+    fn="${entry##* }"
+
+    if printf '%s\n' "$pre_block" | grep -qE "^[[:space:]]*${verb}\)[[:space:]]*shift;[[:space:]]*${fn} \"\\\$@\";[[:space:]]*return[[:space:]]*;;"; then
+      echo -e "${GREEN}✓${NC} dispatch order: $verb is in the pre-find_aimi_root block, ending in '; return ;;'"
+      ((TESTS_PASSED++))
+    else
+      echo -e "${RED}✗${NC} dispatch order: $verb must live in the pre-find_aimi_root block as '$verb) shift; $fn \"\$@\"; return ;;'"
+      ((TESTS_FAILED++))
+    fi
+
+    if printf '%s\n' "$post_block" | grep -qE "^[[:space:]]*${verb}\)"; then
+      echo -e "${RED}✗${NC} dispatch order: $verb must NOT remain in the post-find_aimi_root block (duplicate case labels are silently shadowed by the first match)"
+      ((TESTS_FAILED++))
+    else
+      echo -e "${GREEN}✓${NC} dispatch order: $verb has no leftover arm in the post-find_aimi_root block"
+      ((TESTS_PASSED++))
+    fi
+  done
+}
+
+test_forge_verbs_call_check_jq_first() {
+  echo ""
+  echo "=== forge verbs: each wrapper opens with check_jq (main()'s own check_jq is behind find_aimi_root) ==="
+
+  local entry fn first
+  for entry in "${_FORGE_DISPATCH_VERBS[@]}"; do
+    fn="${entry##* }"
+    first=$(_first_statement_of_cli_function "$fn")
+    assert_eq "check_jq" "$first" "check_jq first: $fn's first executed statement is check_jq"
+  done
+
+  # Runtime proof, in the scenario where main()'s check_jq no longer runs at
+  # all: no .aimi/ anywhere AND jq genuinely absent from PATH. Without the
+  # in-function guard this surfaces a raw jq-not-found from deep inside a
+  # `jq -nc` call instead of the friendly install hint.
+  setup_forge_no_aimi_dir_fixture
+  pushd "$FORGE_NO_AIMI_FIXTURE_DIR" >/dev/null
+
+  local no_jq_path stderr_file="/tmp/forge_no_jq_stderr.$$" exit_code
+  no_jq_path=$(_path_without_binary jq)
+  PATH="$no_jq_path" "$CLI" forge-auth-status >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "check_jq runtime (no .aimi, no jq): forge-auth-status exits 1"
+  assert_stderr_contains "Error: jq is required but not installed." "$(cat "$stderr_file")" "check_jq runtime (no .aimi, no jq): friendly guard message, not a raw jq-not-found"
+
+  rm -f "$stderr_file"
+  rm -rf "$no_jq_path"
+  popd >/dev/null
+  teardown_forge_no_aimi_dir_fixture
+
+  # Same guard still fires with an .aimi/ present, proving the in-function
+  # call did not merely duplicate main()'s -- it replaced it for these verbs.
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local aimi_no_jq_path aimi_stderr_file="/tmp/forge_no_jq_aimi_stderr.$$" aimi_exit_code
+  aimi_no_jq_path=$(_path_without_binary jq)
+  PATH="$aimi_no_jq_path" "$CLI" forge-auth-status >/dev/null 2>"$aimi_stderr_file" && aimi_exit_code=0 || aimi_exit_code=$?
+
+  assert_exit_code "1" "$aimi_exit_code" "check_jq runtime (.aimi present, no jq): forge-auth-status exits 1"
+  assert_stderr_contains "Error: jq is required but not installed." "$(cat "$aimi_stderr_file")" "check_jq runtime (.aimi present, no jq): friendly guard message survives the dispatch move"
+
+  rm -f "$aimi_stderr_file"
+  rm -rf "$aimi_no_jq_path"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_verb_stray_help_flag_parity() {
+  echo ""
+  echo "=== forge verbs: a stray --help now reaches the verb's own parser (accepted parity change) ==="
+
+  # ACCEPTED, DELIBERATE parity change: main()'s universal --help-anywhere-in-
+  # args loop runs strictly AFTER the skip-list case returns, so a verb that
+  # lives in that block never sees it. resolve-models/detect-models have
+  # behaved exactly this way since they moved there; this test pins the forge
+  # verbs to the SAME behavior so it cannot silently drift into a third one.
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out exit_code
+  out=$("$CLI" forge-repo-info --help 2>&1) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-repo-info --help: exits non-zero (no longer intercepted by the universal --help loop)"
+  assert_contains "unknown flag: --help" "$out" "forge-repo-info --help: surfaces the verb's own unknown-flag error"
+
+  if printf '%s' "$out" | grep -q 'aimi-cli.sh - Deterministic'; then
+    echo -e "${RED}✗${NC} forge-repo-info --help: must NOT print the general help banner"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} forge-repo-info --help: does not print the general help banner"
+    ((TESTS_PASSED++))
+  fi
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+
+  # The pre-existing precedent this parity change matches, asserted live
+  # rather than in prose -- if detect-models ever regains the universal
+  # intercept, the forge verbs' behavior stops being "the same as its
+  # neighbors" and this section needs rethinking.
+  local models_out models_exit
+  models_out=$("$CLI" detect-models --help 2>&1) && models_exit=0 || models_exit=$?
+  assert_exit_code "1" "$models_exit" "detect-models --help: pre-existing precedent -- also exits non-zero"
+  assert_contains "unknown flag: --help" "$models_out" "detect-models --help: pre-existing precedent -- also surfaces its own unknown-flag error"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -20584,6 +20871,19 @@ main() {
   test_forge_resolve_review_thread_mutation_failure_not_authenticated
   test_forge_resolve_review_thread_mutation_failure_cli_failed
   test_forge_review_thread_verbs_registered_in_help_and_dispatcher
+
+  # Forge Dispatch-Order Tests (phase 1.1 US-006) -- all ten forge verbs
+  # dispatched ahead of find_aimi_root, so a caller with no .aimi/ anywhere
+  # (resolve-pr-parallel) and a multi-repo child repo both get a working
+  # envelope; plus the two consequences of that move (per-verb check_jq, and
+  # a stray --help reaching the verb's own parser)
+  echo ""
+  echo "--- Forge Dispatch-Order Tests (phase 1.1 US-006) ---"
+  test_forge_verbs_run_without_any_aimi_dir
+  test_forge_repo_info_multi_repo_child_without_project
+  test_forge_verbs_dispatched_before_find_aimi_root
+  test_forge_verbs_call_check_jq_first
+  test_forge_verb_stray_help_flag_parity
 
   cleanup
 
