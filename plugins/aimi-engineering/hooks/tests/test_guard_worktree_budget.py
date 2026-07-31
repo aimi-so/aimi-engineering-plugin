@@ -685,3 +685,45 @@ def test_denies_git_C_quoted_path_worktree_add_when_budget_exhausted(tmp_path, m
     assert captured, "Expected deny message -- quoted git -C path worktree add must reach budget-counting logic"
     deny_data = json.loads(captured[0])
     assert "2/2" in deny_data["hookSpecificOutput"]["userMessage"]
+
+
+def test_denies_loop_body_worktree_add_when_budget_exhausted(tmp_path, monkeypatch):
+    """A worktree add inside a `do ... done` body must still be gated.
+
+    Creating several worktrees in a loop is the natural way to blow the
+    budget, and it is exactly the shape 1.119.1's anchoring stopped seeing.
+    """
+    _make_tasks_json(tmp_path, max_concurrency=2)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(subprocess, "run", _fake_run_factory(2, str(tmp_path)))
+    monkeypatch.delenv("AIMI_WORKTREE_BUDGET_GUARD", raising=False)
+
+    captured = []
+    monkeypatch.setattr("builtins.print", lambda msg: captured.append(msg))
+
+    cmd = "for f in a b; do git worktree add ../wt-$f feat/$f; done"
+    with pytest.raises(SystemExit) as exc_info:
+        dispatcher.handle_worktree_budget(cmd, _tool_input_for(cmd))
+
+    assert exc_info.value.code == 0
+    assert captured, "Expected deny message -- loop-body invocation must be gated"
+    deny_data = json.loads(captured[0])
+    assert "2/2" in deny_data["hookSpecificOutput"]["userMessage"]
+
+
+def test_denies_sudo_prefixed_worktree_add_when_budget_exhausted(tmp_path, monkeypatch):
+    _make_tasks_json(tmp_path, max_concurrency=2)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(subprocess, "run", _fake_run_factory(2, str(tmp_path)))
+    monkeypatch.delenv("AIMI_WORKTREE_BUDGET_GUARD", raising=False)
+
+    captured = []
+    monkeypatch.setattr("builtins.print", lambda msg: captured.append(msg))
+
+    cmd = "sudo git worktree add ../wt-new feat/x"
+    with pytest.raises(SystemExit) as exc_info:
+        dispatcher.handle_worktree_budget(cmd, _tool_input_for(cmd))
+
+    assert exc_info.value.code == 0
+    assert captured, "Expected deny message -- sudo-prefixed invocation must be gated"
+    assert "2/2" in json.loads(captured[0])["hookSpecificOutput"]["userMessage"]
