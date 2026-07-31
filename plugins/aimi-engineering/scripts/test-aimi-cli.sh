@@ -16560,20 +16560,19 @@ test_detect_forge_registered_in_help_and_dispatcher() {
 # ============================================================================
 # Forge Contract Tests (US-002)
 # ============================================================================
-# _forge_build_pr_json, _forge_build_issue_json,
-# _forge_build_review_envelope_json, _forge_emit_status and _forge_bin_check
-# are pure jq-assembly / presence-check helpers with no cmd_ dispatcher
-# wrapper (this story introduces no forge-pr-view/forge-auth-status verb
-# body -- see commands/references/forge-contract.md), so they are sourced
-# directly for testing, matching the source_cache_functions precedent
-# (test-aimi-cli.sh:2005) rather than exercised via a subprocess call.
+# _forge_build_pr_json, _forge_build_issue_json, _forge_emit_status and
+# _forge_bin_check are pure jq-assembly / presence-check helpers with no
+# cmd_ dispatcher wrapper (this story introduces no forge-pr-view/
+# forge-auth-status verb body -- see commands/references/forge-contract.md),
+# so they are sourced directly for testing, matching the
+# source_cache_functions precedent (test-aimi-cli.sh:2005) rather than
+# exercised via a subprocess call.
 
-# Sources the five Forge Contract functions from aimi-cli.sh via sed
+# Sources the four Forge Contract functions from aimi-cli.sh via sed
 # extraction for direct, in-process testing.
 source_forge_contract_functions() {
   eval "$(sed -n '/^_forge_build_pr_json()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_forge_build_issue_json()/,/^}/p' "$CLI")"
-  eval "$(sed -n '/^_forge_build_review_envelope_json()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_forge_emit_status()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_forge_bin_check()/,/^}/p' "$CLI")"
 }
@@ -16633,36 +16632,6 @@ test_forge_build_issue_json_capability_gating() {
   out=$(_forge_build_issue_json --number 9 --url u --title t --body b --state open)
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.comments')" "Issue omitted: comments is null"
   assert_eq '["comments"]' "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "Issue omitted: unsupported_fields names comments"
-}
-
-test_forge_build_review_envelope_json_capability_gating() {
-  echo ""
-  echo "=== _forge_build_review_envelope_json: capability-gating (supplied / omitted / fully-supplied) ==="
-
-  source_forge_contract_functions
-
-  local out
-
-  out=$(_forge_build_review_envelope_json --approved true --changes-requested false \
-    --approvals-count 2 --raw '{"z":3}')
-  assert_eq "true" "$(printf '%s' "$out" | jq -r '.approved')" "Review fully-supplied: approved passes through"
-  assert_eq "false" "$(printf '%s' "$out" | jq -r '.changes_requested')" "Review fully-supplied: changes_requested passes through"
-  assert_eq "2" "$(printf '%s' "$out" | jq -r '.approvals_count')" "Review fully-supplied: approvals_count passes through"
-  assert_eq "[]" "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "Review fully-supplied: unsupported_fields is empty"
-  assert_eq '{"z":3}' "$(printf '%s' "$out" | jq -c '.raw')" "Review fully-supplied: raw passthrough preserved"
-
-  # All omitted -- e.g. GitLab, which has no changes_requested concept at all.
-  out=$(_forge_build_review_envelope_json)
-  assert_eq "null" "$(printf '%s' "$out" | jq -r '.approved')" "Review omitted: approved is null"
-  assert_eq "null" "$(printf '%s' "$out" | jq -r '.changes_requested')" "Review omitted: changes_requested is null"
-  assert_eq "null" "$(printf '%s' "$out" | jq -r '.approvals_count')" "Review omitted: approvals_count is null"
-  assert_eq '["approved","changes_requested","approvals_count"]' "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "Review omitted: unsupported_fields names all three"
-
-  # GitLab-shaped case: approved + approvals_count known, changes_requested has no concept.
-  out=$(_forge_build_review_envelope_json --approved true --approvals-count 1)
-  assert_eq "true" "$(printf '%s' "$out" | jq -r '.approved')" "Review GitLab-shaped: approved passes through"
-  assert_eq "null" "$(printf '%s' "$out" | jq -r '.changes_requested')" "Review GitLab-shaped: changes_requested is null (no concept on GitLab)"
-  assert_eq '["changes_requested"]' "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "Review GitLab-shaped: only changes_requested is gated"
 }
 
 test_forge_emit_status_three_outcomes() {
@@ -17283,7 +17252,7 @@ test_forge_pr_view_found_single_field() {
     "$CLI" forge-pr-view --pr feat-x --include url) && exit_code=0 || exit_code=$?
 
   assert_exit_code "0" "$exit_code" "forge-pr-view found: exit 0"
-  assert_eq '{"status":"found","pr":{"url":"https://github.com/o/r/pull/7"},"unsupported_fields":null,"evidence":null}' \
+  assert_eq '{"status":"found","pr":{"url":"https://github.com/o/r/pull/7"},"unsupported_fields":[],"message":null}' \
     "$out" "forge-pr-view found: exact envelope shape, literal-for-literal (AC1)"
 
   popd >/dev/null
@@ -17304,26 +17273,30 @@ test_forge_pr_view_include_field_sets() {
   # review.md's five-field call site (review.md:36).
   out=$(FAKE_GH_PR_JSON='{"title":"T","body":"B","files":[{"path":"a.txt"}],"headRefName":"feat","baseRefName":"main"}' \
     PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include title,body,files,headRefName,baseRefName)
-  assert_eq '{"status":"found","pr":{"title":"T","body":"B","files":[{"path":"a.txt"}],"headRefName":"feat","baseRefName":"main"},"unsupported_fields":null,"evidence":null}' \
+  assert_eq '{"status":"found","pr":{"title":"T","body":"B","files":[{"path":"a.txt"}],"headRefName":"feat","baseRefName":"main"},"unsupported_fields":[],"message":null}' \
     "$out" "forge-pr-view include: five-field review.md set returns exactly those keys"
 
   # review.md's files-only call site (review.md:99).
   out=$(FAKE_GH_PR_JSON='{"files":[{"path":"b.txt","additions":3,"deletions":1}]}' \
     PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include files)
-  assert_eq '{"status":"found","pr":{"files":[{"path":"b.txt","additions":3,"deletions":1}]},"unsupported_fields":null,"evidence":null}' \
+  assert_eq '{"status":"found","pr":{"files":[{"path":"b.txt","additions":3,"deletions":1}]},"unsupported_fields":[],"message":null}' \
     "$out" "forge-pr-view include: files-only returns exactly files"
 
-  # resolve-pr-parallel/SKILL.md's reviews,comments call site.
-  out=$(FAKE_GH_PR_JSON='{"reviews":[{"state":"APPROVED"}],"comments":2}' \
-    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include reviews,comments)
-  assert_eq '{"status":"found","pr":{"reviews":[{"state":"APPROVED"}],"comments":2},"unsupported_fields":null,"evidence":null}' \
-    "$out" "forge-pr-view include: reviews,comments returns exactly those keys"
+  # The two capability-gated PR contract fields that were never reachable
+  # through --include before this story (they replace the gh-only
+  # reviews/comments pair, which the contract cannot express and which had
+  # no caller outside this suite).
+  out=$(FAKE_GH_PR_JSON='{"isDraft":true,"mergeable":"MERGEABLE"}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include isDraft,mergeable)
+  assert_eq '{"status":"found","pr":{"isDraft":true,"mergeable":"MERGEABLE"},"unsupported_fields":[],"message":null}' \
+    "$out" "forge-pr-view include: isDraft,mergeable returns exactly those keys"
 
-  # Omitted --include -- default portable core, excludes files/reviews/comments
-  # (open-pr.md's own two call sites only ever want url).
-  out=$(FAKE_GH_PR_JSON='{"number":1,"url":"u","title":"t","body":"b","state":"open","headRefName":"h","baseRefName":"m"}' \
+  # Omitted --include -- default portable core, excludes files/isDraft/
+  # mergeable (open-pr.md's own two call sites only ever want url). gh
+  # reports state in uppercase; the envelope must carry it normalized.
+  out=$(FAKE_GH_PR_JSON='{"number":1,"url":"u","title":"t","body":"b","state":"OPEN","headRefName":"h","baseRefName":"m"}' \
     PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x)
-  assert_eq '{"status":"found","pr":{"number":1,"url":"u","title":"t","body":"b","state":"open","headRefName":"h","baseRefName":"m"},"unsupported_fields":null,"evidence":null}' \
+  assert_eq '{"status":"found","pr":{"number":1,"url":"u","title":"t","body":"b","state":"open","headRefName":"h","baseRefName":"m"},"unsupported_fields":[],"message":null}' \
     "$out" "forge-pr-view include: omitted defaults to the seven-field portable core"
 
   popd >/dev/null
@@ -17374,9 +17347,9 @@ test_forge_pr_view_not_found_and_error_never_conflated() {
   fi
 
   assert_eq "null" "$(printf '%s' "$not_found_out" | jq -r '.pr')" "forge-pr-view conflation guard: not_found -- pr is null"
-  assert_contains "$ref" "$(printf '%s' "$not_found_out" | jq -r '.evidence')" "forge-pr-view conflation guard: not_found -- evidence names the searched ref"
+  assert_contains "$ref" "$(printf '%s' "$not_found_out" | jq -r '.message')" "forge-pr-view conflation guard: not_found -- message names the searched ref"
   assert_eq "null" "$(printf '%s' "$error_out" | jq -r '.pr')" "forge-pr-view conflation guard: error -- pr is null"
-  assert_contains "authentication required" "$(printf '%s' "$error_out" | jq -r '.evidence')" "forge-pr-view conflation guard: error -- evidence carries gh's own failure text"
+  assert_contains "authentication required" "$(printf '%s' "$error_out" | jq -r '.message')" "forge-pr-view conflation guard: error -- message carries gh's own failure text"
 
   popd >/dev/null
   teardown_detect_forge_fixture
@@ -17444,7 +17417,7 @@ test_forge_pr_view_numeric_ref_skips_list_probe() {
     PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr 42)
 
   assert_eq "not_found" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-view numeric ref: still resolves to not_found via the stderr fallback"
-  assert_contains "42" "$(printf '%s' "$out" | jq -r '.evidence')" "forge-pr-view numeric ref: evidence names the numeric ref"
+  assert_contains "42" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-view numeric ref: message names the numeric ref"
 
   if [ -f "$log_file" ] && grep -q "^pr list" "$log_file"; then
     echo -e "${RED}✗${NC} forge-pr-view numeric ref: gh pr list was invoked despite a numeric ref"
@@ -17492,7 +17465,7 @@ test_forge_pr_view_missing_gh_binary_quiet_degrade() {
 
   assert_exit_code "0" "$exit_code" "forge-pr-view gh-absent: exits 0 (never a caller error)"
   assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-view gh-absent: status is error"
-  assert_contains "gh" "$(printf '%s' "$out" | jq -r '.evidence')" "forge-pr-view gh-absent: evidence names the missing binary"
+  assert_contains "gh" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-view gh-absent: message names the missing binary"
   assert_eq "" "$(cat "$stderr_file")" "forge-pr-view gh-absent: no stderr banner (quiet degrade mode, matching review.md's undocumented-warning-free fallback)"
   rm -f "$stderr_file"
 
@@ -17514,12 +17487,195 @@ test_forge_pr_view_non_github_forge_quiet_degrade() {
 
   assert_exit_code "0" "$exit_code" "forge-pr-view non-github forge: exits 0"
   assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-view non-github forge: status is error"
-  assert_contains "gitlab" "$(printf '%s' "$out" | jq -r '.evidence')" "forge-pr-view non-github forge: evidence names the detected forge"
+  assert_contains "gitlab" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-view non-github forge: message names the detected forge"
   assert_eq "" "$(cat "$stderr_file")" "forge-pr-view non-github forge: no stderr banner (quiet degrade mode)"
   rm -f "$stderr_file"
 
   popd >/dev/null
   teardown_detect_forge_fixture
+}
+
+test_forge_pr_view_state_normalization_matches_issue_view() {
+  echo ""
+  echo "=== forge-pr-view: --include state normalizes gh's OPEN/CLOSED/MERGED exactly like forge-issue-view already does ==="
+
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  # One fake gh answering BOTH verbs off the same raw state literal, so the
+  # parity assertion below compares the two verbs' normalization and nothing
+  # else.
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  printf '{"state":"%s"}' "$FAKE_RAW_STATE"
+  exit 0
+fi
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  printf '{"number":1,"title":"t","body":"b","state":"%s","url":"u","labels":[],"comments":[]}' "$FAKE_RAW_STATE"
+  exit 0
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local raw expected pr_state issue_state
+  for raw in OPEN CLOSED MERGED; do
+    expected=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')
+    pr_state=$(FAKE_RAW_STATE="$raw" PATH="$sandbox" "$CLI" forge-pr-view --pr feat-x --include state | jq -r '.pr.state')
+    issue_state=$(FAKE_RAW_STATE="$raw" PATH="$sandbox" "$CLI" forge-issue-view --number 1 | jq -r '.data.state')
+    assert_eq "$expected" "$pr_state" "forge-pr-view state: gh's $raw normalizes to $expected"
+    assert_eq "$pr_state" "$issue_state" "state parity: forge-pr-view and forge-issue-view agree on $raw"
+  done
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_view_unsupported_fields_is_always_an_array_on_found() {
+  echo ""
+  echo "=== forge-pr-view: unsupported_fields is an array on found (never bare null) and forced null on not_found/error ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+
+  # Every requested capability-gated field supplied -> explicitly empty [].
+  out=$(FAKE_GH_PR_JSON='{"files":[],"isDraft":false,"mergeable":"MERGEABLE"}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include files,isDraft,mergeable)
+  assert_eq "array" "$(printf '%s' "$out" | jq -r '.unsupported_fields | type')" "unsupported_fields: found, everything supplied -- type is array"
+  assert_eq "[]" "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "unsupported_fields: found, everything supplied -- explicitly empty, never bare null"
+
+  # A requested capability-gated field gh did not return -> named in the array.
+  out=$(FAKE_GH_PR_JSON='{"url":"u"}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url,files)
+  assert_eq '["files"]' "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "unsupported_fields: found, gated field absent -- names it"
+
+  # not_found / error keep it forced null alongside pr, mirroring
+  # _forge_emit_status's own null-forcing convention.
+  out=$(FAKE_GH_VIEW_EXIT=1 FAKE_GH_VIEW_STDERR='no pull requests found for branch "feat-x"' \
+    FAKE_GH_LIST_EXIT=0 FAKE_GH_LIST_JSON='[]' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include files)
+  assert_eq "not_found" "$(printf '%s' "$out" | jq -r '.status')" "unsupported_fields: not_found precondition"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.unsupported_fields')" "unsupported_fields: not_found -- forced null, matching pr"
+
+  out=$(FAKE_GH_VIEW_EXIT=1 FAKE_GH_VIEW_STDERR="authentication required, please run gh auth login" \
+    FAKE_GH_LIST_EXIT=1 FAKE_GH_LIST_STDERR="authentication required, please run gh auth login" \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include files)
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "unsupported_fields: error precondition"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.unsupported_fields')" "unsupported_fields: error -- forced null, matching pr"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+test_forge_pr_view_unsupported_fields_intersect_requested_only() {
+  echo ""
+  echo "=== forge-pr-view: unsupported_fields is intersected with --include -- a gated field never requested never appears ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+
+  # _forge_build_pr_json ALWAYS flags all three unpassed gated fields. This
+  # request names only one of them, so files and mergeable -- never asked
+  # for -- must not be reported as unsupported, and pr must carry exactly
+  # the two requested keys rather than the builder's ten-key superset.
+  out=$(FAKE_GH_PR_JSON='{"url":"u"}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url,isDraft)
+  assert_eq '["isDraft"]' "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "intersection: only the requested gated field is reported unsupported"
+  assert_eq '{"url":"u","isDraft":null}' "$(printf '%s' "$out" | jq -c '.pr')" "intersection: pr carries exactly the requested keys, never the builder's superset"
+
+  # Two of the three requested, both absent from gh's response.
+  out=$(FAKE_GH_PR_JSON='{"url":"u"}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url,files,mergeable)
+  assert_eq '["files","mergeable"]' "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "intersection: both requested gated fields reported, isDraft (unrequested) omitted"
+
+  # None of the three requested -> nothing to report at all.
+  out=$(FAKE_GH_PR_JSON='{"number":1,"url":"u"}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include number,url)
+  assert_eq "[]" "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "intersection: no gated field requested -- empty array, not all three"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+test_forge_pr_view_absent_key_vs_explicit_null_are_distinguishable() {
+  echo ""
+  echo "=== forge-pr-view: a key gh omits reads as unsupported; the same key returned as an explicit null does not ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+
+  # Case 1 -- gh's response omits `files` entirely.
+  out=$(FAKE_GH_PR_JSON='{"url":"u"}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url,files)
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.pr | has("files")')" "absent key: files is still a key in pr (requested keys are never dropped)"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.pr.files')" "absent key: files reads null"
+  assert_eq '["files"]' "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "absent key: files IS recorded in unsupported_fields"
+
+  # Case 2 -- gh's response includes `files` with an explicit JSON null.
+  out=$(FAKE_GH_PR_JSON='{"url":"u","files":null}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url,files)
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.pr | has("files")')" "explicit null: files is a key in pr"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.pr.files')" "explicit null: files reads null (same value as the absent case)"
+  assert_eq "[]" "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "explicit null: files is NOT recorded in unsupported_fields -- the two cases are no longer indistinguishable"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+test_forge_pr_view_include_accepts_contract_fields_and_rejects_gh_only_names() {
+  echo ""
+  echo "=== forge-pr-view: --include accepts the ten contract fields (isDraft/mergeable included) and rejects gh-only reviews/comments ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+
+  # isDraft and mergeable are PR contract fields that were never selectable
+  # through --include before this story; each must now return exactly its
+  # own key when requested alone.
+  out=$(FAKE_GH_PR_JSON='{"isDraft":true}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include isDraft)
+  assert_eq '{"isDraft":true}' "$(printf '%s' "$out" | jq -c '.pr')" "contract fields: isDraft alone returns exactly isDraft"
+
+  out=$(FAKE_GH_PR_JSON='{"mergeable":"CONFLICTING"}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include mergeable)
+  assert_eq '{"mergeable":"CONFLICTING"}' "$(printf '%s' "$out" | jq -c '.pr')" "contract fields: mergeable alone returns exactly mergeable"
+
+  # reviews/comments are gh-only names with no PR-contract equivalent and no
+  # caller anywhere in commands/ or skills/ -- now rejected as unknown.
+  local stderr_file="/tmp/forge_pr_view_gh_only_stderr.$$"
+  local name exit_code
+  for name in reviews comments; do
+    exit_code=0
+    "$CLI" forge-pr-view --pr feat-x --include "$name" >/dev/null 2>"$stderr_file" || exit_code=$?
+    assert_exit_code "1" "$exit_code" "contract fields: gh-only --include $name exits 1"
+    assert_stderr_contains "unknown --include field: $name" "$(cat "$stderr_file")" "contract fields: stderr names the rejected gh-only field $name"
+  done
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
 }
 
 test_forge_pr_view_registered_in_help_and_dispatcher() {
@@ -19503,14 +19659,13 @@ main() {
   test_detect_forge_never_dials_remote_or_caches
   test_detect_forge_registered_in_help_and_dispatcher
 
-  # Forge Contract Tests (US-002) -- shared PR/issue/review builders, the
+  # Forge Contract Tests (US-002) -- shared PR/issue builders, the
   # three-way status envelope, and the degradation helper every later
   # forge-* verb in this phase consumes
   echo ""
   echo "--- Forge Contract Tests (US-002) ---"
   test_forge_build_pr_json_capability_gating
   test_forge_build_issue_json_capability_gating
-  test_forge_build_review_envelope_json_capability_gating
   test_forge_emit_status_three_outcomes
   test_forge_bin_check_quiet_and_mandatory_modes
   test_forge_contract_header_carries_both_creates_identities
@@ -19550,6 +19705,11 @@ main() {
   test_forge_pr_view_unknown_include_field_rejected
   test_forge_pr_view_missing_gh_binary_quiet_degrade
   test_forge_pr_view_non_github_forge_quiet_degrade
+  test_forge_pr_view_state_normalization_matches_issue_view
+  test_forge_pr_view_unsupported_fields_is_always_an_array_on_found
+  test_forge_pr_view_unsupported_fields_intersect_requested_only
+  test_forge_pr_view_absent_key_vs_explicit_null_are_distinguishable
+  test_forge_pr_view_include_accepts_contract_fields_and_rejects_gh_only_names
   test_forge_pr_view_registered_in_help_and_dispatcher
 
   # Forge PR Create/Edit Tests (US-005) -- the first WRITE verbs that

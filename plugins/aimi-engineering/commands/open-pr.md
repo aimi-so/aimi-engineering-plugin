@@ -111,7 +111,7 @@ Branch on the printed JSON's `status` field (`found` | `not_found` | `error` —
 PR already exists for this branch: <url>
 ```
 - `status == "not_found"`: no existing PR for this branch — fall through to Step 1c exactly as today.
-- `status == "error"`: the existing-PR check itself could not complete — a missing forge CLI, broken auth, or a network failure. This step has no fallback either, so the same mandatory-print degradation as Step 1a applies. Report `.evidence` verbatim, prefixed with "Warning: existing-PR check could not complete: ", plus "Verify your forge CLI is installed and authenticated, then re-run this command." and STOP. Never treat this the same as `not_found` — a broken check must never be read as "no PR yet," since that would let a broken token proceed straight into creating a duplicate PR.
+- `status == "error"`: the existing-PR check itself could not complete — a missing forge CLI, broken auth, or a network failure. This step has no fallback either, so the same mandatory-print degradation as Step 1a applies. Report `.message` verbatim, prefixed with "Warning: existing-PR check could not complete: ", plus "Verify your forge CLI is installed and authenticated, then re-run this command." and STOP. Never treat this the same as `not_found` — a broken check must never be read as "no PR yet," since that would let a broken token proceed straight into creating a duplicate PR.
 
 ### 1c. Warn about uncommitted changes
 

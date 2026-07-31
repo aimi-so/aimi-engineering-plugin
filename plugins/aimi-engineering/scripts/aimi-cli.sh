@@ -2238,52 +2238,6 @@ _forge_build_issue_json() {
     }'
 }
 
-# Shared jq -nc builder for the review/approval envelope (forge-contract.md
-# "Review/Approval Envelope"). Unlike the PR/issue objects, all three
-# fields (--approved, --changes-requested JSON true/false; --approvals-
-# count, a JSON int) are capability-gated — any of them can be absent
-# depending on forge and plan tier, most notably GitLab's changes_requested,
-# which has no concept behind it at all. Tracked by flag presence, exactly
-# like the other two builders. --raw carries the untouched forge-native
-# review/approval payload (defaults to null).
-_forge_build_review_envelope_json() {
-  local approved_json="null" changes_requested_json="null" approvals_count_json="null" raw="null"
-  local approved_set=false changes_requested_set=false approvals_count_set=false
-
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --approved)           shift; approved_json="${1:-null}"; approved_set=true ;;
-      --changes-requested)  shift; changes_requested_json="${1:-null}"; changes_requested_set=true ;;
-      --approvals-count)    shift; approvals_count_json="${1:-null}"; approvals_count_set=true ;;
-      --raw)                shift; raw="${1:-null}" ;;
-      *)
-        echo "Error: _forge_build_review_envelope_json: unknown flag: $1" >&2
-        return 1
-        ;;
-    esac
-    shift
-  done
-
-  local unsupported='[]'
-  [ "$approved_set" = true ]          || unsupported=$(printf '%s' "$unsupported" | jq -c '. + ["approved"]')
-  [ "$changes_requested_set" = true ] || unsupported=$(printf '%s' "$unsupported" | jq -c '. + ["changes_requested"]')
-  [ "$approvals_count_set" = true ]   || unsupported=$(printf '%s' "$unsupported" | jq -c '. + ["approvals_count"]')
-
-  jq -nc \
-    --argjson approved "$approved_json" \
-    --argjson changesRequested "$changes_requested_json" \
-    --argjson approvalsCount "$approvals_count_json" \
-    --argjson unsupported "$unsupported" \
-    --argjson raw "$raw" \
-    '{
-      approved: $approved,
-      changes_requested: $changesRequested,
-      approvals_count: $approvalsCount,
-      unsupported_fields: $unsupported,
-      raw: $raw
-    }'
-}
-
 # Shared three-way status envelope (forge-contract.md "Three-Way Status
 # Convention"), modeled directly on _verify_creates_emit's own
 # verified/missing/error trio: found/not_found/error are three genuinely
@@ -2697,35 +2651,49 @@ cmd_forge_repo_info() {
 # today regardless of what it actually asked for.
 #
 # This verb's envelope is deliberately its OWN shape --
-# {status, pr, unsupported_fields, evidence} -- rather than the generic
+# {status, pr, unsupported_fields, message} -- rather than the generic
 # three-way envelope _forge_emit_status builds ({status, data, message}):
 # the --include selector requires `pr` to carry exactly the caller's
 # requested keys and no others, never the full fixed superset
 # _forge_build_pr_json always returns, and a not_found outcome here must
-# carry a populated `evidence` (naming the ref that was searched) rather
-# than staying forced-null the way _forge_emit_status's `message` does for
-# every outcome but error. The found/not_found/error status vocabulary
-# still matches forge-contract.md's Three-Way Status Convention exactly --
-# only this envelope's field names and null-forcing rules differ, driven by
-# this verb's own field-selectable contract. Field names inside `pr` are
-# gh's own (number, url, title, body, state, headRefName, baseRefName,
-# files, reviews, comments) rather than invented canonical names, since
-# github is the only adapter shipping in this phase and every current call
-# site's own jq expression (e.g. `.files[].path`) must survive unchanged.
+# carry a populated `message` (naming the ref that was searched) rather
+# than staying forced-null the way _forge_emit_status's own `message` does
+# for every outcome but error -- which forge-contract.md's Three-Way Status
+# Convention explicitly permits for not_found ("message is null unless a
+# short human-readable note is useful"). The found/not_found/error status
+# vocabulary still matches that convention exactly, and the degraded-reason
+# field is named `message` here for the same reason: it is the contract's
+# ONE degradation signal, never a per-verb invention.
+#
+# Field names inside `pr` are the NORMALIZED PR contract's own (number,
+# url, title, body, state, headRefName, baseRefName, files, isDraft,
+# mergeable) -- never gh's raw vocabulary. gh's response is translated in
+# both directions by _forge_map_pr_field_github and normalized through the
+# one shared _forge_build_pr_json builder, so GitHub's raw shape never
+# leaks past this adapter. On github the two vocabularies happen to be
+# identical today, so every current call site's own jq expression (e.g.
+# `.files[].path`) survives unchanged.
 #
 # Does NOT implement a gitlab or gitea adapter -- both, plus a missing gh
 # binary, degrade through the quiet _forge_bin_check mode, matching
 # review.md's own already-documented git-diff fallback for a missing gh so
 # a later migration onto this verb introduces no new warning banner.
 
-# Emit the forge-pr-view envelope: {status, pr, unsupported_fields, evidence}.
+# Emit the forge-pr-view envelope: {status, pr, unsupported_fields, message}.
 # status must be found | not_found | error (anything else is a caller error,
 # exit 1 -- never silently coerced). pr and unsupported_fields are forced
-# null unless status=="found"; evidence is forced null only when
-# status=="found" -- not_found and error both carry a populated evidence
+# null unless status=="found"; message is forced null only when
+# status=="found" -- not_found and error both carry a populated message
 # string (the searched ref, or gh's own failure text, respectively).
+#
+# On found, unsupported_fields is ALWAYS a JSON array, never a bare null --
+# including an explicitly empty [] when every requested capability-gated
+# field was supplied. A bare null there would be a third state alongside
+# "empty" and "populated" that no caller can interpret; the array-or-null
+# split is driven purely by status, mirroring _forge_emit_status's own
+# null-forcing convention.
 _forge_pr_view_emit() {
-  local status="$1" pr_json="${2:-null}" unsupported_json="${3:-null}" evidence="${4:-}"
+  local status="$1" pr_json="${2:-null}" unsupported_json="${3:-null}" message="${4:-}"
 
   case "$status" in
     found|not_found|error) ;;
@@ -2735,51 +2703,162 @@ _forge_pr_view_emit() {
       ;;
   esac
 
-  if [ "$status" != "found" ]; then
+  if [ "$status" = "found" ]; then
+    message=""
+    if [ -z "$unsupported_json" ] || [ "$unsupported_json" = "null" ]; then
+      unsupported_json="[]"
+    fi
+  else
     pr_json="null"
     unsupported_json="null"
-  fi
-  if [ "$status" = "found" ]; then
-    evidence=""
   fi
 
   jq -nc \
     --arg status "$status" \
     --argjson pr "$pr_json" \
     --argjson unsupportedFields "$unsupported_json" \
-    --arg evidence "$evidence" \
+    --arg message "$message" \
     '{status: $status, pr: $pr, unsupported_fields: $unsupportedFields,
-      evidence: (if $evidence == "" then null else $evidence end)}'
+      message: (if $message == "" then null else $message end)}'
+}
+
+# Maps one NORMALIZED PR contract field name (forge-contract.md's
+# "Normalized PR Field Set") to the field name GitHub's own
+# `gh pr view --json` uses for it. For phase 1 every one of the ten fields
+# maps to an identically-spelled gh field, but the table is written out
+# EXPLICITLY rather than assumed: it is the single seam a later GitLab or
+# Gitea adapter replaces (glab's `description`/`source_branch`/
+# `target_branch`, tea's `head`/`base`) without touching the verb body
+# around it. An unmapped name prints nothing, so a field this adapter
+# cannot express is never silently passed through to gh as-is.
+# Usage: _forge_map_pr_field_github <contract-field>
+_forge_map_pr_field_github() {
+  case "$1" in
+    number)      printf 'number' ;;
+    url)         printf 'url' ;;
+    title)       printf 'title' ;;
+    body)        printf 'body' ;;
+    state)       printf 'state' ;;
+    headRefName) printf 'headRefName' ;;
+    baseRefName) printf 'baseRefName' ;;
+    files)       printf 'files' ;;
+    isDraft)     printf 'isDraft' ;;
+    mergeable)   printf 'mergeable' ;;
+  esac
 }
 
 # github adapter for forge-pr-view. <ref> is a PR number or a branch name
-# (already validated by cmd_forge_pr_view before this ever runs); <fields_csv>
-# is the comma-joined --json field list (caller's --include set, or the
-# default cheap set). Captures gh's stdout and stderr on separate variables
-# (this file runs under set -euo pipefail -- rc is pre-initialized and
-# captured with `|| rc=$?`, mirroring _verify_creates_one's own capture
-# pattern) so a legitimate non-zero gh exit never aborts the script.
+# (already validated by cmd_forge_pr_view before this ever runs);
+# <fields_csv> is the comma-joined list of NORMALIZED PR contract field
+# names (caller's --include set, or the default cheap set) -- never gh's own
+# vocabulary. Every crossing of that boundary goes through
+# _forge_map_pr_field_github: contract name -> gh name on the way in (to
+# build gh's --json list), gh name -> contract name on the way out (to pick
+# the value out of gh's response). Captures gh's stdout and stderr on
+# separate variables (this file runs under set -euo pipefail -- rc is
+# pre-initialized and captured with `|| rc=$?`, mirroring
+# _verify_creates_one's own capture pattern) so a legitimate non-zero gh
+# exit never aborts the script.
 _forge_pr_view_github() {
   local ref="$1" fields_csv="$2"
   local stdout="" stderr="" rc=0 err_file
 
+  # Translate the caller's contract field names to gh's own BEFORE the
+  # --json field list is ever built, so gh never sees a name it does not
+  # know and this adapter never assumes the two vocabularies agree.
+  local -a requested=() gh_fields=()
+  local old_ifs="$IFS"
+  IFS=','
+  read -ra requested <<< "$fields_csv"
+  IFS="$old_ifs"
+
+  local field gh_field
+  for field in "${requested[@]}"; do
+    gh_field=$(_forge_map_pr_field_github "$field")
+    [ -n "$gh_field" ] && gh_fields+=("$gh_field")
+  done
+
+  local gh_fields_csv
+  gh_fields_csv=$(IFS=','; printf '%s' "${gh_fields[*]:-}")
+
   err_file=$(mktemp)
-  stdout=$(gh pr view "$ref" --json "$fields_csv" 2>"$err_file") || rc=$?
+  stdout=$(gh pr view "$ref" --json "$gh_fields_csv" 2>"$err_file") || rc=$?
   stderr=$(cat "$err_file")
   rm -f "$err_file"
 
   if [ "$rc" -eq 0 ]; then
-    # Re-subset gh's own response to exactly the requested keys -- a no-op
-    # against real gh (which already returns only the requested --json
-    # fields) but guarantees "exactly the requested keys and no others"
-    # regardless of what a given gh version actually returns.
-    local pr_json
-    pr_json=$(printf '%s' "$stdout" | jq -c --arg fields "$fields_csv" '
-      ($fields | split(",")) as $keys
-      | . as $src
-      | reduce $keys[] as $k ({}; . + {($k): $src[$k]})
+    # Normalize gh's raw response through the ONE shared builder rather
+    # than re-subsetting gh's own JSON: state is case-folded through the
+    # same _forge_map_state call forge-issue-view applies, and every
+    # capability-gated field is flagged by the builder's own presence rule.
+    #
+    # A flag is passed ONLY for a field the caller requested AND whose
+    # mapped key jq's has() confirms gh actually returned. has() rather
+    # than a bare index is what keeps "gh omitted this key entirely"
+    # (unsupported -- null AND named in unsupported_fields) distinguishable
+    # from "gh returned this key with an explicit null" (supported -- null
+    # but NOT named), which a bare index collapses into one indistinguishable
+    # null.
+    local -a builder_args=()
+    local present raw_value
+    for field in "${requested[@]}"; do
+      gh_field=$(_forge_map_pr_field_github "$field")
+      [ -n "$gh_field" ] || continue
+      present=$(printf '%s' "$stdout" | jq -r --arg k "$gh_field" 'has($k)' 2>/dev/null) || present="false"
+      [ "$present" = "true" ] || continue
+      case "$field" in
+        # Scalars reach the builder as strings. `if . == null` rather than
+        # `// ""` deliberately: `//` also swallows a legitimate `false`,
+        # which mergeable can genuinely carry on a forge that reports it as
+        # a boolean rather than GitHub's MERGEABLE/CONFLICTING/UNKNOWN enum.
+        number|url|title|body|headRefName|baseRefName|mergeable)
+          raw_value=$(printf '%s' "$stdout" | jq -r --arg k "$gh_field" '.[$k] | if . == null then "" else tostring end')
+          ;;
+        state)
+          raw_value=$(printf '%s' "$stdout" | jq -r --arg k "$gh_field" '.[$k] | if . == null then "" else tostring end')
+          raw_value=$(_forge_map_state "github" "$raw_value")
+          ;;
+        # JSON-valued fields reach the builder as raw JSON (--argjson on the
+        # other side), so an explicit null stays the JSON literal `null`.
+        files|isDraft)
+          raw_value=$(printf '%s' "$stdout" | jq -c --arg k "$gh_field" '.[$k]')
+          ;;
+      esac
+      case "$field" in
+        number)      builder_args+=(--number "$raw_value") ;;
+        url)         builder_args+=(--url "$raw_value") ;;
+        title)       builder_args+=(--title "$raw_value") ;;
+        body)        builder_args+=(--body "$raw_value") ;;
+        state)       builder_args+=(--state "$raw_value") ;;
+        headRefName) builder_args+=(--head-ref-name "$raw_value") ;;
+        baseRefName) builder_args+=(--base-ref-name "$raw_value") ;;
+        files)       builder_args+=(--files "$raw_value") ;;
+        isDraft)     builder_args+=(--is-draft "$raw_value") ;;
+        mergeable)   builder_args+=(--mergeable "$raw_value") ;;
+      esac
+    done
+
+    local pr_full pr_json unsupported_json fields_json
+    pr_full=$(_forge_build_pr_json ${builder_args[@]+"${builder_args[@]}"})
+    fields_json=$(printf '%s' "$fields_csv" | jq -Rc 'split(",")')
+
+    # Project the builder's fixed ten-key output down to exactly the keys
+    # this caller asked for, in the order it asked for them -- the
+    # never-pay-for-files-you-did-not-ask-for behavior this verb's --include
+    # selector exists for. The builder's superset is never emitted.
+    pr_json=$(printf '%s' "$pr_full" | jq -c --argjson keys "$fields_json" '
+      . as $src | reduce $keys[] as $k ({}; . + {($k): $src[$k]})
     ')
-    _forge_pr_view_emit "found" "$pr_json" "null" ""
+
+    # ...and intersect the builder's own unsupported_fields with that same
+    # requested list: the builder always flags an unpassed capability-gated
+    # flag, but a field the caller never included is simply not part of this
+    # answer and must not be reported as unsupported.
+    unsupported_json=$(printf '%s' "$pr_full" | jq -c --argjson keys "$fields_json" '
+      [.unsupported_fields[] | . as $f | select($keys | index($f))]
+    ')
+
+    _forge_pr_view_emit "found" "$pr_json" "$unsupported_json" ""
     return 0
   fi
 
@@ -2825,11 +2904,20 @@ _forge_pr_view_github() {
 # comment for the defect this fixes and why its envelope differs from the
 # generic forge-contract.md three-way envelope.
 # Usage: aimi-cli.sh forge-pr-view --pr <branch-or-number> [--include <fields>] [--project <path>]
-# --include is a comma-separated subset of: number, url, title, body, state,
-# headRefName, baseRefName, files, reviews, comments. Defaults to the
-# portable core (number,url,title,body,state,headRefName,baseRefName) when
-# omitted -- files/reviews/comments stay opt-in-only so a caller that only
-# wants url never triggers the more expensive per-file/thread lookups.
+# --include is a comma-separated subset of the TEN normalized PR contract
+# fields (forge-contract.md's "Normalized PR Field Set"): number, url,
+# title, body, state, headRefName, baseRefName, files, isDraft, mergeable.
+# Defaults to the portable core (number,url,title,body,state,headRefName,
+# baseRefName) when omitted -- the three capability-gated fields (files,
+# isDraft, mergeable) stay opt-in-only so a caller that only wants url never
+# triggers the more expensive per-file lookup.
+#
+# gh-only names with no PR-contract equivalent (reviews, comments) are NOT
+# accepted here: this selector runs on the contract's vocabulary, not gh's,
+# and a name the contract cannot express would have no meaning on a later
+# gitlab/gitea adapter. A verb needing per-reviewer detail consumes the
+# forge-native object instead (forge-contract.md's Review/Approval Envelope
+# section says so explicitly).
 cmd_forge_pr_view() {
   local pr_ref="" include_raw="" project_dir=""
 
@@ -2890,7 +2978,7 @@ cmd_forge_pr_view() {
   for field in "${requested_fields[@]}"; do
     known=false
     case "$field" in
-      number|url|title|body|state|headRefName|baseRefName|files|reviews|comments) known=true ;;
+      number|url|title|body|state|headRefName|baseRefName|files|isDraft|mergeable) known=true ;;
     esac
     if [ "$known" = false ]; then
       echo "Error: forge-pr-view: unknown --include field: $field" >&2

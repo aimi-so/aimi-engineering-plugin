@@ -14,8 +14,7 @@ or a second degradation signal (e.g. a `degradedReason` field alongside
 not a new field invented per verb.
 
 **Consumed by:** `aimi-cli.sh`'s shared jq builder functions
-(`_forge_build_pr_json`, `_forge_build_issue_json`,
-`_forge_build_review_envelope_json`, `_forge_emit_status`,
+(`_forge_build_pr_json`, `_forge_build_issue_json`, `_forge_emit_status`,
 `_forge_bin_check`) and every forge verb built on top of them. GitHub is the
 only adapter shipping in phase 1; this contract is written so GitLab (`glab`)
 and Gitea/Forgejo (`tea`) can be added later without changing the shape any
@@ -133,6 +132,13 @@ unified enum:
 | `unsupported_fields` | array of string | Same convention as the PR/issue objects — every one of the three fields above is individually capability-gated, since any of them can be absent depending on forge and plan tier. |
 | `raw` | object \| null | The forge-native review/approval payload, untouched, alongside the normalized envelope. |
 
+No verb implements this envelope yet and no shared builder assembles it —
+the shape above is the spec whichever future approval-state verb is built
+against it must produce, not a description of code that exists today.
+(`forge-pr-review-threads` is a different concept: review *threads*, not
+approval state, and it builds its own `{pr, threads, unsupported_fields}`
+shape.)
+
 Reviews themselves (the per-reviewer list of discrete review objects) have
 **no shared data model across forges** and are explicitly out of scope for
 this envelope — GitHub/Gitea's `reviews` arrays and GitLab's discussion
@@ -244,10 +250,6 @@ JSON assembly per verb — mirroring how `_verify_creates_emit` centralizes
   object. Flags: `--number`, `--url`, `--title`, `--body`, `--state`
   (portable core); `--comments <int>` (capability-gated); `--raw <json
   object>`.
-- **`_forge_build_review_envelope_json`** — builder for the review envelope.
-  Flags: `--approved <true|false>`, `--changes-requested <true|false>`,
-  `--approvals-count <int>` (all three capability-gated — presence of the
-  flag marks support), `--raw <json object>`.
 - **`_forge_emit_status`** — `_forge_emit_status <status> [data-json]
   [message]`. `status` must be exactly `found`, `not_found`, or `error`;
   any other value is a caller error (exit 1). `data` is forced to `null`
