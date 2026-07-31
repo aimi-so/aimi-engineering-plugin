@@ -17780,10 +17780,14 @@ test_forge_pr_create_existing_pr_is_idempotent() {
   sandbox=$(setup_forge_cli_sandbox)
   trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
 
+  # "state":"OPEN" is load-bearing: the existing-PR check requests
+  # url,number,state and only short-circuits on a normalized state of
+  # `open`, so a fixture without one would be treated as non-blocking and
+  # this test would silently invert into asserting the opposite.
   cat > "$sandbox/gh" << 'FAKE_GH'
 #!/usr/bin/env bash
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
-  echo '{"url":"https://github.com/owner/repo/pull/55","number":55}'
+  echo '{"url":"https://github.com/owner/repo/pull/55","number":55,"state":"OPEN"}'
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
@@ -17801,6 +17805,183 @@ FAKE_GH
   assert_exit_code "0" "$exit_code" "forge-pr-create idempotent: exit 0"
   assert_eq '{"url":"https://github.com/owner/repo/pull/55","number":55,"created":false}' \
     "$out" "forge-pr-create idempotent: returns the existing PR with created:false, no duplicate opened (AC2)"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_create_lookup_error_never_falls_through_to_create() {
+  echo ""
+  echo "=== forge-pr-create: forge-pr-view reports status error while checking for an existing PR -- NEVER opens a duplicate, exits 1 ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  # Both halves of forge-pr-view's github lookup fail with gh's own
+  # authentication wording -- `gh pr view` AND the `gh pr list` structural
+  # not_found probe -- so forge-pr-view reports status:"error" at EXIT 0.
+  # That exit-0-with-an-error-envelope is precisely what a bare
+  # `if [ "$existing_rc" -ne 0 ]` guard cannot see and what a bare
+  # `if [ "$existing_status" = "found" ]` check falls straight through,
+  # landing on `gh pr create` and opening a duplicate PR.
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "pr" ] && { [ "$2" = "view" ] || [ "$2" = "list" ]; }; then
+  echo "gh: To get started with GitHub CLI, please run:  gh auth login" >&2
+  exit 4
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  : > "$(dirname "$0")/pr_create_invoked.flag"
+  echo "gh pr create must never run when the existing-PR lookup itself failed: $*" >&2
+  exit 66
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_pr_create_lookup_error_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-create lookup error: exits 1"
+  assert_eq "" "$out" "forge-pr-create lookup error: no JSON on stdout"
+  if [ -f "$sandbox/pr_create_invoked.flag" ]; then
+    echo -e "${RED}✗${NC} forge-pr-create lookup error: gh pr create WAS invoked -- a duplicate PR would have been opened"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} forge-pr-create lookup error: gh pr create was never invoked"
+    ((TESTS_PASSED++))
+  fi
+  assert_stderr_contains "create it yourself" "$(cat "$stderr_file")" "forge-pr-create lookup error: manual fallback printed (MANDATORY-PRINT)"
+  assert_stderr_contains "forge-pr-view reported an error" "$(cat "$stderr_file")" "forge-pr-create lookup error: stderr names forge-pr-view as the failing lookup"
+  assert_stderr_contains "gh auth login" "$(cat "$stderr_file")" "forge-pr-create lookup error: stderr carries forge-pr-view's own message text"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_create_closed_or_merged_existing_pr_does_not_block() {
+  echo ""
+  echo "=== forge-pr-create: an existing CLOSED/MERGED PR on --head does not block -- a fresh PR is created and only its own identity is returned ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  # `gh pr view <branch>` is NOT state-filtered (verified against real gh
+  # 2.94.0 on this repository's own merged PR #84 and closed PR #6), so a
+  # branch whose prior PR was merged or closed still resolves to that stale
+  # PR here. FAKE_EXISTING_STATE stays unexpanded inside this quoted
+  # heredoc and is read by the fake gh at run time, so one script covers
+  # both the MERGED and the CLOSED variant.
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+FLAG="$(dirname "$0")/pr_created.flag"
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  if [ -f "$FLAG" ]; then
+    echo '{"url":"https://github.com/owner/repo/pull/91","number":91}'
+    exit 0
+  fi
+  echo "{\"url\":\"https://github.com/owner/repo/pull/12\",\"number\":12,\"state\":\"${FAKE_EXISTING_STATE:-MERGED}\"}"
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  : > "$FLAG"
+  echo "https://github.com/owner/repo/pull/91"
+  exit 0
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stale_state out exit_code
+  for stale_state in MERGED CLOSED; do
+    rm -f "$sandbox/pr_created.flag"
+    out=$(FAKE_EXISTING_STATE="$stale_state" PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body") && exit_code=0 || exit_code=$?
+
+    assert_exit_code "0" "$exit_code" "forge-pr-create $stale_state existing PR: exit 0"
+    if [ -f "$sandbox/pr_created.flag" ]; then
+      echo -e "${GREEN}✓${NC} forge-pr-create $stale_state existing PR: gh pr create WAS invoked (a $stale_state PR must not block a new one)"
+      ((TESTS_PASSED++))
+    else
+      echo -e "${RED}✗${NC} forge-pr-create $stale_state existing PR: gh pr create was never invoked -- the $stale_state PR blocks creation forever"
+      ((TESTS_FAILED++))
+    fi
+    assert_eq '{"url":"https://github.com/owner/repo/pull/91","number":91,"created":true}' \
+      "$out" "forge-pr-create $stale_state existing PR: returns the NEW PR's own url/number with created:true -- the stale PR's identity never leaks"
+  done
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_create_post_create_reread_failure_keeps_created_url() {
+  echo ""
+  echo "=== forge-pr-create: gh pr create succeeds but the post-create re-read fails -- keeps the captured url, exit 0, Warning not create-it-yourself ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  # Before the flag: a clean not_found (gh pr view fails with gh's own
+  # no-pull-requests wording, gh pr list confirms []). After creation: both
+  # fail with an authentication-style message instead, so the re-read comes
+  # back status:"error" -- a genuine failure, NOT a not_found. The PR
+  # nonetheless exists and its url is already in hand.
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+FLAG="$(dirname "$0")/pr_created.flag"
+if [ "$1" = "pr" ] && { [ "$2" = "view" ] || [ "$2" = "list" ]; }; then
+  if [ -f "$FLAG" ]; then
+    echo "gh: To get started with GitHub CLI, please run:  gh auth login" >&2
+    exit 4
+  fi
+  if [ "$2" = "list" ]; then
+    echo '[]'
+    exit 0
+  fi
+  echo "no pull requests found for branch" >&2
+  exit 1
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  : > "$FLAG"
+  echo "https://github.com/owner/repo/pull/404"
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_pr_create_reread_fail_stderr.$$"
+  local out exit_code stderr_text
+  out=$(PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_text=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+
+  assert_exit_code "0" "$exit_code" "forge-pr-create re-read failure: exit 0 -- the PR really was created"
+  assert_eq '{"url":"https://github.com/owner/repo/pull/404","number":null,"created":true}' \
+    "$out" "forge-pr-create re-read failure: the captured url survives with number:null, created:true"
+  assert_stderr_contains "Warning:" "$stderr_text" "forge-pr-create re-read failure: stderr warns rather than erroring"
+  assert_stderr_contains "https://github.com/owner/repo/pull/404" "$stderr_text" "forge-pr-create re-read failure: the Warning names the created PR's url"
+  if printf '%s' "$stderr_text" | grep -qE "create it yourself|git push -u origin"; then
+    echo -e "${RED}✗${NC} forge-pr-create re-read failure: the create-it-yourself fallback was printed for a PR that already exists -- following it would open a duplicate"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} forge-pr-create re-read failure: the create-it-yourself fallback is never printed once a url has been captured"
+    ((TESTS_PASSED++))
+  fi
 
   popd >/dev/null
   teardown_detect_forge_fixture
@@ -19719,6 +19900,9 @@ main() {
   echo "--- Forge PR Create/Edit Tests (US-005) ---"
   test_forge_pr_create_new_pr
   test_forge_pr_create_existing_pr_is_idempotent
+  test_forge_pr_create_lookup_error_never_falls_through_to_create
+  test_forge_pr_create_closed_or_merged_existing_pr_does_not_block
+  test_forge_pr_create_post_create_reread_failure_keeps_created_url
   test_forge_pr_create_missing_gh_mandatory_print_nonzero_exit
   test_forge_pr_create_non_github_forge_mandatory_print
   test_forge_pr_create_guard_failures

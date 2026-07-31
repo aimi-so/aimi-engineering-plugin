@@ -3116,19 +3116,28 @@ _forge_pr_write_print_manual() {
 # IDEMPOTENCY (AC2): before ever shelling out to create anything, looks up
 # whether an open PR already exists for $head via forge-pr-view, in-process
 # (a direct function call, never a `$AIMI_CLI forge-pr-view` subprocess).
-# When one is found, prints its {url, number, created:false} and returns 0
-# WITHOUT attempting a second creation -- open-pr.md's own "PR already
-# exists for this branch" behavior today, informational rather than an
-# error. A retried phase in execute.md's per-repository loop is exactly why
-# this matters: a retry must never open a duplicate PR for the same branch.
+# When an OPEN one is found, prints its {url, number, created:false} and
+# returns 0 WITHOUT attempting a second creation -- open-pr.md's own "PR
+# already exists for this branch" behavior today, informational rather than
+# an error. A retried phase in execute.md's per-repository loop is exactly
+# why this matters: a retry must never open a duplicate PR for the same
+# branch. That check branches over ALL THREE of forge-pr-view's statuses:
+# only `found` + a normalized state of `open` short-circuits; `not_found`
+# and a found-but-closed/merged PR both proceed to creation; `error` (and
+# any status this code does not recognize) is a hard failure that NEVER
+# reaches `gh pr create`.
 #
 # MANDATORY-PRINT degrade mode: see this section's header comment above for
 # the full statement of why this differs from forge-issue-create's soft-
-# fail contract. Every failure path here -- unsupported forge, missing gh,
-# the create call itself failing, an unparseable success response, or the
-# post-create re-read failing to confirm the PR -- prints the manual
-# create-it-yourself instructions via _forge_pr_write_print_manual and
-# returns 1. Never retries, never prompts interactively.
+# fail contract. Every failure path that runs BEFORE `gh pr create` has
+# returned a url -- unsupported forge, missing gh, the existing-PR lookup
+# erroring, the create call itself failing, an unparseable success response
+# -- prints the manual create-it-yourself instructions via
+# _forge_pr_write_print_manual and returns 1. Once a url IS in hand the
+# manual fallback is never printed again: a post-create re-read failure
+# keeps that url, reports {url, number: null, created: true} at exit 0, and
+# warns that only the number is unconfirmed. Never retries, never prompts
+# interactively.
 _forge_pr_create() {
   local title="$1" base="$2" head="$3" body="$4"
   local forge
@@ -3144,22 +3153,60 @@ _forge_pr_create() {
     return 1
   fi
 
-  local existing="" existing_rc=0 existing_status
-  existing=$(cmd_forge_pr_view --pr "$head" --include url,number) || existing_rc=$?
+  # Existing-PR check. `state` rides along with url/number precisely because
+  # this branch has to tell an OPEN PR (which blocks creation) apart from a
+  # closed/merged one (which must not) -- `gh pr view <branch>` is NOT
+  # state-filtered, so a branch reused after its prior PR was merged still
+  # resolves to that stale PR here.
+  local existing="" existing_rc=0 existing_status existing_state existing_message
+  existing=$(cmd_forge_pr_view --pr "$head" --include url,number,state) || existing_rc=$?
   if [ "$existing_rc" -ne 0 ]; then
     _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
     echo "Error: forge-pr-create: forge-pr-view lookup failed while checking for an existing PR (exit $existing_rc)." >&2
     return 1
   fi
 
+  # Branch over ALL THREE statuses forge-pr-view can return, never just
+  # found. forge-pr-view exists specifically so "no PR exists" is
+  # distinguishable from "the lookup broke", and it reports the latter as
+  # status:"error" INSIDE its envelope at exit 0 -- so the $existing_rc
+  # guard above cannot see it. A check that only tested for "found" let
+  # error fall through to `gh pr create` and opened a duplicate PR for a
+  # branch whose real PR the tool simply could not read (an expired token,
+  # a network blip). Creation happens on not_found alone -- plus the
+  # explicitly-inspected closed/merged case below.
   existing_status=$(printf '%s' "$existing" | jq -r '.status')
-  if [ "$existing_status" = "found" ]; then
-    jq -nc \
-      --arg url "$(printf '%s' "$existing" | jq -r '.pr.url // empty')" \
-      --argjson number "$(printf '%s' "$existing" | jq -c '.pr.number // null')" \
-      '{url: (if $url == "" then null else $url end), number: $number, created: false}'
-    return 0
-  fi
+  case "$existing_status" in
+    found)
+      # Only an OPEN PR blocks -- matching cmd_help's own "existing open PR"
+      # wording. A closed or merged PR on this branch falls through to
+      # creation exactly like not_found, so a reused branch gets a fresh
+      # pull request instead of being blocked forever by a dead one.
+      existing_state=$(printf '%s' "$existing" | jq -r '.pr.state // empty')
+      if [ "$existing_state" = "open" ]; then
+        jq -nc \
+          --arg url "$(printf '%s' "$existing" | jq -r '.pr.url // empty')" \
+          --argjson number "$(printf '%s' "$existing" | jq -c '.pr.number // null')" \
+          '{url: (if $url == "" then null else $url end), number: $number, created: false}'
+        return 0
+      fi
+      ;;
+    not_found)
+      ;;
+    error|*)
+      # `error` is named explicitly; `*` makes any future status value fail
+      # the same closed way. Neither is a defensible reason to create a PR:
+      # a status this code does not understand must never be read as
+      # permission to open one. Unreachable in practice today --
+      # _forge_pr_view_emit rejects a fourth status before it ever reaches
+      # this caller -- but the fall-through it replaces is exactly the class
+      # of defect this branch exists to prevent.
+      existing_message=$(printf '%s' "$existing" | jq -r '.message // empty')
+      _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
+      echo "Error: forge-pr-create: forge-pr-view reported an error while checking for an existing PR on $head: ${existing_message:-unknown error}" >&2
+      return 1
+      ;;
+  esac
 
   local err_file stdout rc=0 stderr_out
   err_file=$(mktemp)
@@ -3183,18 +3230,27 @@ _forge_pr_create() {
   fi
 
   # Structured re-read (AC3) -- never a regex on $pr_url.
-  local reread="" reread_rc=0 reread_status pr_number
+  #
+  # PAST THIS POINT THE PR EXISTS AND ITS URL IS IN HAND, so neither failure
+  # branch below may discard $pr_url, report failure, or print the manual
+  # create-it-yourself instructions: a caller following those instructions
+  # would open a SECOND pull request for a branch that already has one, and
+  # execute.md's per-repository loop would report a successful creation as a
+  # failure. Only the number is unconfirmed, so it comes back null with a
+  # Warning (not an Error) naming the url, at exit 0.
+  local reread="" reread_rc=0 reread_status reread_message pr_number
   reread=$(cmd_forge_pr_view --pr "$head" --include url,number) || reread_rc=$?
   if [ "$reread_rc" -ne 0 ]; then
-    _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
-    echo "Error: forge-pr-create: gh pr create succeeded but the post-create forge-pr-view re-read failed (exit $reread_rc)." >&2
-    return 1
+    echo "Warning: forge-pr-create: the pull request WAS created at $pr_url, but the post-create forge-pr-view re-read failed (exit $reread_rc) -- only its number could not be confirmed. Do NOT create it again." >&2
+    jq -nc --arg url "$pr_url" '{url: $url, number: null, created: true}'
+    return 0
   fi
   reread_status=$(printf '%s' "$reread" | jq -r '.status')
   if [ "$reread_status" != "found" ]; then
-    _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
-    echo "Error: forge-pr-create: gh pr create succeeded but the newly created PR could not be re-read afterward." >&2
-    return 1
+    reread_message=$(printf '%s' "$reread" | jq -r '.message // empty')
+    echo "Warning: forge-pr-create: the pull request WAS created at $pr_url, but it could not be re-read afterward (forge-pr-view status: $reread_status${reread_message:+ -- $reread_message}) -- only its number could not be confirmed. Do NOT create it again." >&2
+    jq -nc --arg url "$pr_url" '{url: $url, number: null, created: true}'
+    return 0
   fi
   pr_number=$(printf '%s' "$reread" | jq -c '.pr.number // null')
 
