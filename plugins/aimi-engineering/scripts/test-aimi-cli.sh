@@ -17097,6 +17097,87 @@ _path_without_binary() {
   printf '%s' "$shim_dir"
 }
 
+# The single "gh is genuinely absent from PATH" fixture, shared by every test
+# that needs that scenario. It wraps _path_without_binary rather than scanning
+# /usr/local/bin://usr/bin://bin for a file named `gh`, which is how a second,
+# independently written copy of this fixture used to do it -- both proved the
+# same narrow thing, so the directory-scanning pair was deleted in favour of
+# this one. Keeps the NO_GH_PATH_DIR name that pair already exported, and adds
+# the cleanup the tests that called _path_without_binary directly never did.
+#
+# NOT to be confused with setup_forge_cli_sandbox: that one is a broader
+# offline sandbox (a different, smaller tool allowlist plus a
+# command-v-then-/usr/bin-then-/bin fallback) whose 20+ callers mostly drop
+# their own scripted fake `gh` into it afterwards -- "gh present but scripted",
+# not "gh absent". Merging the two would have to either widen its allowlist or
+# narrow this one, changing what one set of tests actually proves, so it is
+# deliberately left alone.
+setup_forge_no_gh_fixture() {
+  NO_GH_PATH_DIR=$(_path_without_binary gh)
+}
+
+teardown_forge_no_gh_fixture() {
+  rm -rf "$NO_GH_PATH_DIR"
+  unset NO_GH_PATH_DIR
+}
+
+# Pins the one guarantee _forge_capture's RETURN trap exists to make: the
+# stderr scratch file it opens internally outlives NO return path -- not the
+# success path, and not the failure path either. The seven gh adapters it
+# replaced each cleaned up with an `rm -f` on the line after their `cat`, which
+# held only for the single straight-line path each one happened to take.
+#
+# _forge_capture unlinks the file before it returns, so the only way to observe
+# the path is to shim `mktemp` and record what it hands out. The shim records
+# to a FILE rather than a variable because _forge_capture calls mktemp inside a
+# command substitution, and that subshell cannot write back into this shell.
+test_forge_capture_scratch_file_never_survives() {
+  echo ""
+  echo "=== _forge_capture: stderr scratch file survives no return path, success or failure ==="
+
+  eval "$(sed -n '/^_forge_capture()/,/^}/p' "$CLI")"
+
+  local scratch_log
+  scratch_log=$(mktemp)
+  mktemp() {
+    local p
+    p=$(command mktemp "$@")
+    printf '%s\n' "$p" >> "$scratch_log"
+    printf '%s' "$p"
+  }
+
+  # --- success path ---
+  local out="" err="" rc=1 scratch first_scratch
+  _forge_capture out err rc -- printf 'ok-stdout' || true
+  scratch=$(tail -n1 "$scratch_log")
+  first_scratch="$scratch"
+  assert_eq "0" "$rc" "capture success: rc var receives the command's own exit status"
+  assert_eq "ok-stdout" "$out" "capture success: stdout reaches the caller's own variable"
+  assert_eq "" "$err" "capture success: stderr var is empty when the command wrote none"
+  assert_eq "yes" "$([ -n "$scratch" ] && echo yes || echo no)" "capture success: the mktemp shim observed a real scratch path (guards the next assertion from passing on an empty path)"
+  assert_eq "gone" "$([ -e "$scratch" ] && echo present || echo gone)" "capture success: scratch file does not survive the call"
+
+  # --- failure path ---
+  out=""; err=""; rc=0
+  _forge_capture out err rc -- sh -c 'echo o; echo boom >&2; exit 7' || true
+  scratch=$(tail -n1 "$scratch_log")
+  assert_eq "7" "$rc" "capture failure: rc var receives the failing command's own exit status"
+  assert_eq "boom" "$err" "capture failure: stderr reaches the caller's own variable"
+  assert_eq "yes" "$([ -n "$scratch" ] && [ "$scratch" != "$first_scratch" ] && echo yes || echo no)" "capture failure: this call opened its own distinct scratch path, so the check below is not re-testing the first one"
+  assert_eq "gone" "$([ -e "$scratch" ] && echo present || echo gone)" "capture failure: scratch file does not survive the call"
+
+  # The RETURN trap must be gone once _forge_capture returns. bash's RETURN
+  # trap is a shell-global, not a function-scoped one: a non-self-disarming one
+  # stays armed and fires AGAIN on the caller's own return, where the scratch
+  # path is out of scope -- a hard `unbound variable` abort under aimi-cli.sh's
+  # own `set -u`. This assertion pins the self-disarm, not merely the fact that
+  # today's two paths happen to clean up.
+  assert_eq "" "$(trap -p RETURN)" "capture: leaves no armed RETURN trap to fire a second time on the caller's own return"
+
+  unset -f mktemp
+  rm -f "$scratch_log"
+}
+
 test_forge_auth_status_single_account_authenticated() {
   echo ""
   echo "=== forge-auth-status: single authenticated account -- found, authenticated:true ==="
@@ -17386,10 +17467,10 @@ test_forge_auth_status_gh_absent_is_error() {
   setup_detect_forge_fixture origin https://github.com/owner/repo.git
   pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
 
-  local no_gh_path out exit_code stderr_file="/tmp/forge_auth_status_gh_absent_stderr.$$"
-  no_gh_path=$(_path_without_binary gh)
+  local out exit_code stderr_file="/tmp/forge_auth_status_gh_absent_stderr.$$"
+  setup_forge_no_gh_fixture
 
-  out=$(PATH="$no_gh_path" "$CLI" forge-auth-status 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  out=$(PATH="$NO_GH_PATH_DIR" "$CLI" forge-auth-status 2>"$stderr_file") && exit_code=0 || exit_code=$?
 
   assert_exit_code "0" "$exit_code" "auth-status gh-absent: exits 0 (query verb's 'no answer available', not a broken invocation)"
   assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "auth-status gh-absent: status is error"
@@ -17399,6 +17480,7 @@ test_forge_auth_status_gh_absent_is_error() {
   assert_eq "" "$(cat "$stderr_file")" "auth-status gh-absent: quiet mode -- no caller-mandated stderr banner"
 
   rm -f "$stderr_file"
+  teardown_forge_no_gh_fixture
   popd >/dev/null
   teardown_detect_forge_fixture
 }
@@ -17508,10 +17590,10 @@ test_forge_repo_info_gh_absent_falls_back_to_local_parse() {
   setup_detect_forge_fixture origin https://github.com/owner/repo.git
   pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
 
-  local no_gh_path out exit_code
-  no_gh_path=$(_path_without_binary gh)
+  local out exit_code
+  setup_forge_no_gh_fixture
 
-  out=$(PATH="$no_gh_path" "$CLI" forge-repo-info) && exit_code=0 || exit_code=$?
+  out=$(PATH="$NO_GH_PATH_DIR" "$CLI" forge-repo-info) && exit_code=0 || exit_code=$?
 
   assert_exit_code "0" "$exit_code" "repo-info gh-absent: exits 0"
   assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "repo-info gh-absent: status is found via fallback"
@@ -17519,6 +17601,7 @@ test_forge_repo_info_gh_absent_falls_back_to_local_parse() {
   assert_eq "repo" "$(printf '%s' "$out" | jq -r '.data.repo')" "repo-info gh-absent: repo parsed from remote URL"
   assert_eq "local-parse" "$(printf '%s' "$out" | jq -r '.data.source')" "repo-info gh-absent: source is local-parse"
 
+  teardown_forge_no_gh_fixture
   popd >/dev/null
   teardown_detect_forge_fixture
 }
@@ -17603,37 +17686,6 @@ test_forge_repo_info_registered_in_help_and_dispatcher() {
 # -- extended there to also serve `gh pr view`/`gh pr list`, per the
 # FAKE_GH_VIEW_*/FAKE_GH_PR_JSON/FAKE_GH_LIST_*/FAKE_GH_LOG vars documented
 # alongside it, exactly the sibling-story reuse it was built for.
-
-# Curates a PATH-prependable directory containing every binary from the
-# real system PATH except `gh` (sets NO_GH_PATH_DIR), so the missing-gh-
-# binary quiet-degrade path can be exercised even though this project's own
-# dev/CI images pre-install gh at /usr/bin/gh. The `PATH="/usr/bin:/bin"`
-# trick that reliably removes opencode for
-# test_detect_models_opencode_absent_fallback works only because opencode is
-# never installed there; gh lives in that very directory alongside git,
-# bash and jq, so the same trick would remove those too. Excluding only the
-# file named `gh` and symlinking everything else keeps the rest of the CLI
-# running normally.
-setup_path_without_gh_fixture() {
-  NO_GH_PATH_DIR=$(mktemp -d)
-  local dir src bin_name
-  for dir in /usr/local/bin /usr/bin /bin; do
-    [ -d "$dir" ] || continue
-    for src in "$dir"/*; do
-      [ -e "$src" ] || continue
-      bin_name=$(basename "$src")
-      [ "$bin_name" = "gh" ] && continue
-      [ -e "$NO_GH_PATH_DIR/$bin_name" ] && continue
-      ln -s "$src" "$NO_GH_PATH_DIR/$bin_name" 2>/dev/null
-    done
-  done
-}
-
-# Removes the temp directory created by setup_path_without_gh_fixture
-teardown_path_without_gh_fixture() {
-  rm -rf "$NO_GH_PATH_DIR"
-  unset NO_GH_PATH_DIR
-}
 
 test_forge_pr_view_found_single_field() {
   echo ""
@@ -17851,7 +17903,7 @@ test_forge_pr_view_missing_gh_binary_quiet_degrade() {
   echo ""
   echo "=== forge-pr-view: gh absent from PATH degrades to status=error with no stderr banner (quiet mode, AC6) ==="
 
-  setup_path_without_gh_fixture
+  setup_forge_no_gh_fixture
   setup_detect_forge_fixture origin https://github.com/o/r.git
   pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
 
@@ -17867,7 +17919,7 @@ test_forge_pr_view_missing_gh_binary_quiet_degrade() {
 
   popd >/dev/null
   teardown_detect_forge_fixture
-  teardown_path_without_gh_fixture
+  teardown_forge_no_gh_fixture
 }
 
 test_forge_pr_view_non_github_forge_quiet_degrade() {
@@ -21111,6 +21163,7 @@ main() {
   # the first forge-* verbs that actually shell out to a forge CLI
   echo ""
   echo "--- Forge Issue Verb Tests (US-006) ---"
+  test_forge_capture_scratch_file_never_survives
   test_forge_map_state_table
   test_forge_extract_issue_number_from_url
   test_forge_emit_issue_create_status_is_gone

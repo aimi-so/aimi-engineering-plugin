@@ -1561,6 +1561,42 @@ cmd_get_state() {
     }'
 }
 
+# Shared `--project`/git-repository entry guard. Fourteen commands each
+# carried a byte-identical copy of this block before it was extracted here:
+# cd into the requested project directory when one was given (multi-repo
+# layouts, where the AIMI root is not itself a git repo), then require the
+# resulting working directory to be a git repository. Exits 1 with the
+# unchanged wording on either failure.
+#
+# An empty argument means "use the invoking CWD" -- which is exactly what an
+# omitted --project already resolved to, so no caller needs to special-case it.
+# The `cd` intentionally escapes into the caller (a function's cd is not
+# scoped), because that is what the fourteen inline copies did.
+#
+# Deliberately NOT named _forge_*: ten of the fourteen callers are forge verbs,
+# but cmd_detect_default_branch, cmd_detect_parent_branch, cmd_setup_branch and
+# cmd_resolve_base_branch share this guard by behaviour, not by domain. A forge
+# prefix would misdescribe a quarter of its own callers, so the name follows
+# this file's other domain-neutral private helpers (_local_has_branch,
+# _is_merged_into_default, _is_pid_alive).
+#
+# Usage: _require_git_repo "$project_dir"
+_require_git_repo() {
+  local project_dir="$1"
+  if [ -n "$project_dir" ]; then
+    if [ ! -d "$project_dir" ]; then
+      echo "Error: Project directory does not exist: $project_dir" >&2
+      exit 1
+    fi
+    cd "$project_dir"
+  fi
+
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
+    exit 1
+  fi
+}
+
 # Derive a filesystem-safe cache-key suffix for a repository toplevel path,
 # so _resolve_default_branch's cache is scoped per repository instead of a
 # single shared file under AIMI_ROOT/.aimi/ (which silently leaked one
@@ -1643,20 +1679,7 @@ cmd_detect_default_branch() {
     shift
   done
 
-  # cd into project dir if specified (supports multi-repo layouts where AIMI root is not a git repo)
-  if [ -n "$project_dir" ]; then
-    if [ ! -d "$project_dir" ]; then
-      echo "Error: Project directory does not exist: $project_dir" >&2
-      exit 1
-    fi
-    cd "$project_dir"
-  fi
-
-  # Guard: must be inside a git repository
-  if ! git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
-    exit 1
-  fi
+  _require_git_repo "$project_dir"
 
   _resolve_default_branch
 }
@@ -1875,20 +1898,7 @@ cmd_detect_forge() {
     shift
   done
 
-  # cd into project dir if specified (supports multi-repo layouts where AIMI root is not a git repo)
-  if [ -n "$project_dir" ]; then
-    if [ ! -d "$project_dir" ]; then
-      echo "Error: Project directory does not exist: $project_dir" >&2
-      exit 1
-    fi
-    cd "$project_dir"
-  fi
-
-  # Guard: must be inside a git repository
-  if ! git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
-    exit 1
-  fi
+  _require_git_repo "$project_dir"
 
   if [ -n "${AIMI_FORGE_TYPE:-}" ]; then
     case "$AIMI_FORGE_TYPE" in
@@ -2052,20 +2062,7 @@ cmd_detect_parent_branch() {
     exit 1
   fi
 
-  # cd into project dir if specified (supports multi-repo layouts where AIMI root is not a git repo)
-  if [ -n "$project_dir" ]; then
-    if [ ! -d "$project_dir" ]; then
-      echo "Error: Project directory does not exist: $project_dir" >&2
-      exit 1
-    fi
-    cd "$project_dir"
-  fi
-
-  # Guard: must be inside a git repository
-  if ! git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
-    exit 1
-  fi
+  _require_git_repo "$project_dir"
 
   # Validate branch name (security) — before any git command uses it
   if ! [[ "$branch" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
@@ -2420,6 +2417,50 @@ _forge_bin_check() {
   return 1
 }
 
+# Runs a command with its stdout, stderr and exit status captured into three
+# caller-named variables, guaranteeing the stderr scratch file is removed on
+# every return path. Seven gh adapters below each carried their own
+# mktemp/capture/cat/rm copy of this, every one of them relying on the next
+# editor remembering to keep the `rm -f` as the last line.
+#
+# Usage -- ALWAYS a plain statement, NEVER inside $(...):
+#   _forge_capture <stdout_var> <stderr_var> <rc_var> -- <cmd> [args...] || true
+#
+# The trailing `|| true` is MANDATORY under this file's `set -e`: this function
+# returns the wrapped command's own exit status, so a legitimate non-zero gh
+# exit would otherwise abort the whole CLI. The real status is always readable
+# from <rc_var>, which is what all seven callers branch on. A `$(...)` wrapper
+# would fork a subshell, where a name-reference write cannot reach the caller's
+# variables and the exit status is discarded -- hence "plain statement".
+#
+# The RETURN trap DISARMS ITSELF, and that is load-bearing rather than
+# decorative: bash's RETURN trap is a shell-global, not a function-scoped one.
+# Left armed it fires a second time on the CALLER's own return, by which point
+# $_fc_err_file is out of scope -- a hard `unbound variable` abort under
+# `set -u`. Verified empirically both ways; the self-disarming form fires
+# exactly once per call, on whichever return path this function takes,
+# including a future early return nobody has written yet. It is not inherited
+# by nested calls (no `set -T`/functrace in this file), and the one nested
+# substitution any caller passes -- `-f query="$(_forge_review_threads_query)"`
+# -- is evaluated in the caller's own shell before this function is entered.
+#
+# Internals are _fc_-prefixed so a caller's own stdout/stderr/stderr_out/rc
+# locals can never collide with the name-reference targets.
+_forge_capture() {
+  local -n _fc_out="$1" _fc_err="$2" _fc_rc="$3"
+  shift 3
+  if [ "${1:-}" = "--" ]; then shift; fi
+
+  local _fc_err_file
+  _fc_err_file=$(mktemp) || exit 1
+  trap 'rm -f "$_fc_err_file"; trap - RETURN' RETURN
+
+  _fc_rc=0
+  _fc_out=$("$@" 2>"$_fc_err_file") || _fc_rc=$?
+  _fc_err=$(cat "$_fc_err_file" 2>/dev/null || true)
+  return "$_fc_rc"
+}
+
 # Classifies an ALREADY-FAILED gh invocation into forge-contract.md's
 # Degradation Reason Enum, printing exactly one of `not_authenticated` or
 # `cli_failed`. One shared helper so every adapter below asks the question
@@ -2647,18 +2688,7 @@ cmd_forge_auth_status() {
     shift
   done
 
-  if [ -n "$project_dir" ]; then
-    if [ ! -d "$project_dir" ]; then
-      echo "Error: Project directory does not exist: $project_dir" >&2
-      exit 1
-    fi
-    cd "$project_dir"
-  fi
-
-  if ! git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
-    exit 1
-  fi
+  _require_git_repo "$project_dir"
 
   _forge_auth_status
 }
@@ -2801,18 +2831,7 @@ cmd_forge_repo_info() {
     shift
   done
 
-  if [ -n "$project_dir" ]; then
-    if [ ! -d "$project_dir" ]; then
-      echo "Error: Project directory does not exist: $project_dir" >&2
-      exit 1
-    fi
-    cd "$project_dir"
-  fi
-
-  if ! git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
-    exit 1
-  fi
+  _require_git_repo "$project_dir"
 
   _forge_repo_info
 }
@@ -2946,7 +2965,7 @@ _forge_map_pr_field_github() {
 # exit never aborts the script.
 _forge_pr_view_github() {
   local ref="$1" fields_csv="$2"
-  local stdout="" stderr="" rc=0 err_file
+  local stdout="" stderr="" rc=0
 
   # Translate the caller's contract field names to gh's own BEFORE the
   # --json field list is ever built, so gh never sees a name it does not
@@ -2966,10 +2985,7 @@ _forge_pr_view_github() {
   local gh_fields_csv
   gh_fields_csv=$(IFS=','; printf '%s' "${gh_fields[*]:-}")
 
-  err_file=$(mktemp)
-  stdout=$(gh pr view "$ref" --json "$gh_fields_csv" 2>"$err_file") || rc=$?
-  stderr=$(cat "$err_file")
-  rm -f "$err_file"
+  _forge_capture stdout stderr rc -- gh pr view "$ref" --json "$gh_fields_csv" || true
 
   if [ "$rc" -eq 0 ]; then
     # Normalize gh's raw response through the ONE shared builder rather
@@ -3121,20 +3137,7 @@ cmd_forge_pr_view() {
     shift
   done
 
-  # cd into project dir if specified (supports multi-repo layouts where AIMI root is not a git repo)
-  if [ -n "$project_dir" ]; then
-    if [ ! -d "$project_dir" ]; then
-      echo "Error: Project directory does not exist: $project_dir" >&2
-      exit 1
-    fi
-    cd "$project_dir"
-  fi
-
-  # Guard: must be inside a git repository
-  if ! git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
-    exit 1
-  fi
+  _require_git_repo "$project_dir"
 
   if [ -z "$pr_ref" ]; then
     echo "Usage: aimi-cli.sh forge-pr-view --pr <branch-or-number> [--include <fields>] [--project <path>]" >&2
@@ -3417,11 +3420,8 @@ _forge_pr_create() {
       ;;
   esac
 
-  local err_file stdout rc=0 stderr_out
-  err_file=$(mktemp)
-  stdout=$(gh pr create --title "$title" --base "$base" --head "$head" --body "$body" 2>"$err_file") || rc=$?
-  stderr_out=$(cat "$err_file" 2>/dev/null || true)
-  rm -f "$err_file"
+  local stdout rc=0 stderr_out
+  _forge_capture stdout stderr_out rc -- gh pr create --title "$title" --base "$base" --head "$head" --body "$body" || true
 
   if [ "$rc" -ne 0 ]; then
     _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
@@ -3502,18 +3502,7 @@ cmd_forge_pr_create() {
     shift
   done
 
-  if [ -n "$project_dir" ]; then
-    if [ ! -d "$project_dir" ]; then
-      echo "Error: Project directory does not exist: $project_dir" >&2
-      exit 1
-    fi
-    cd "$project_dir"
-  fi
-
-  if ! git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
-    exit 1
-  fi
+  _require_git_repo "$project_dir"
 
   if [ -z "$title" ] || [ -z "$base" ] || [ -z "$head" ]; then
     echo "Usage: aimi-cli.sh forge-pr-create --title <t> --base <branch> --head <branch> [--body <text>] [--project <path>]" >&2
@@ -3572,11 +3561,11 @@ _forge_pr_edit() {
     return 1
   fi
 
-  local err_file rc=0 stderr_out
-  err_file=$(mktemp)
-  gh pr edit "$number" --body "$body" >/dev/null 2>"$err_file" || rc=$?
-  stderr_out=$(cat "$err_file" 2>/dev/null || true)
-  rm -f "$err_file"
+  # This call alone discarded gh's stdout to /dev/null rather than capturing
+  # it. It now lands in a local nothing reads, which is behaviourally
+  # identical -- neither form ever printed or inspected it.
+  local stdout rc=0 stderr_out
+  _forge_capture stdout stderr_out rc -- gh pr edit "$number" --body "$body" || true
 
   if [ "$rc" -ne 0 ]; then
     _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
@@ -3637,18 +3626,7 @@ cmd_forge_pr_edit() {
     shift
   done
 
-  if [ -n "$project_dir" ]; then
-    if [ ! -d "$project_dir" ]; then
-      echo "Error: Project directory does not exist: $project_dir" >&2
-      exit 1
-    fi
-    cd "$project_dir"
-  fi
-
-  if ! git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
-    exit 1
-  fi
+  _require_git_repo "$project_dir"
 
   if [ -z "$number" ] || [ -z "$body_provided" ]; then
     echo "Usage: aimi-cli.sh forge-pr-edit --number <n> --body <text> [--project <path>]" >&2
@@ -3775,12 +3753,9 @@ _forge_issue_view() {
     return 0
   fi
 
-  local err_file stdout rc=0
-  err_file=$(mktemp)
-  stdout=$(gh issue view "$number" --json number,title,body,labels,state,url,comments 2>"$err_file") || rc=$?
+  local stdout rc=0
   local stderr_out
-  stderr_out=$(cat "$err_file" 2>/dev/null || true)
-  rm -f "$err_file"
+  _forge_capture stdout stderr_out rc -- gh issue view "$number" --json number,title,body,labels,state,url,comments || true
 
   if [ "$rc" -eq 0 ]; then
     local num title_val body_val url_val state_raw state_norm labels_json comments_count data
@@ -3846,18 +3821,7 @@ cmd_forge_issue_view() {
     shift
   done
 
-  if [ -n "$project_dir" ]; then
-    if [ ! -d "$project_dir" ]; then
-      echo "Error: Project directory does not exist: $project_dir" >&2
-      exit 1
-    fi
-    cd "$project_dir"
-  fi
-
-  if ! git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
-    exit 1
-  fi
+  _require_git_repo "$project_dir"
 
   if [ -z "$number" ] && [ -n "$url" ]; then
     number=$(_forge_extract_issue_number_from_url "$url")
@@ -3953,12 +3917,9 @@ _forge_issue_create() {
     return 0
   fi
 
-  local err_file stdout rc=0
-  err_file=$(mktemp)
-  stdout=$(gh issue create --title "$title" --body "$body" 2>"$err_file") || rc=$?
+  local stdout rc=0
   local stderr_out
-  stderr_out=$(cat "$err_file" 2>/dev/null || true)
-  rm -f "$err_file"
+  _forge_capture stdout stderr_out rc -- gh issue create --title "$title" --body "$body" || true
 
   if [ "$rc" -ne 0 ]; then
     _forge_issue_create_print_manual "$title" "$body" "$forge"
@@ -4010,18 +3971,7 @@ cmd_forge_issue_create() {
     shift
   done
 
-  if [ -n "$project_dir" ]; then
-    if [ ! -d "$project_dir" ]; then
-      echo "Error: Project directory does not exist: $project_dir" >&2
-      exit 1
-    fi
-    cd "$project_dir"
-  fi
-
-  if ! git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
-    exit 1
-  fi
+  _require_git_repo "$project_dir"
 
   if [ -z "$title" ]; then
     echo "Error: forge-issue-create: --title <text> is required" >&2
@@ -4164,14 +4114,11 @@ mutation ResolveReviewThread($threadId: ID!) {
 # syntax, inert under bash single-quoting).
 _forge_pr_review_threads_github() {
   local pr_number="$1" owner="$2" repo="$3" all_threads="$4" host="${5:-}"
-  local err_file stdout rc=0
-
-  err_file=$(mktemp)
-  stdout=$(gh api graphql -f owner="$owner" -f repo="$repo" -F pr="$pr_number" \
-    -f query="$(_forge_review_threads_query)" 2>"$err_file") || rc=$?
+  local stdout rc=0
   local stderr_out
-  stderr_out=$(cat "$err_file" 2>/dev/null || true)
-  rm -f "$err_file"
+
+  _forge_capture stdout stderr_out rc -- gh api graphql -f owner="$owner" -f repo="$repo" -F pr="$pr_number" \
+    -f query="$(_forge_review_threads_query)" || true
 
   if [ "$rc" -ne 0 ]; then
     # gh's presence was already confirmed by the caller's _forge_bin_check
@@ -4299,18 +4246,7 @@ cmd_forge_pr_review_threads() {
     shift
   done
 
-  if [ -n "$project_dir" ]; then
-    if [ ! -d "$project_dir" ]; then
-      echo "Error: Project directory does not exist: $project_dir" >&2
-      exit 1
-    fi
-    cd "$project_dir"
-  fi
-
-  if ! git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
-    exit 1
-  fi
+  _require_git_repo "$project_dir"
 
   if [ -z "$pr_number" ]; then
     echo "Usage: aimi-cli.sh forge-pr-review-threads --pr <number> [--owner <owner> --repo <repo>] [--all] [--project <path>]" >&2
@@ -4379,13 +4315,10 @@ _forge_resolve_review_thread() {
     return 0
   fi
 
-  local err_file stdout rc=0
-  err_file=$(mktemp)
-  stdout=$(gh api graphql -f threadId="$thread_id" \
-    -f query="$(_forge_resolve_review_thread_mutation)" 2>"$err_file") || rc=$?
+  local stdout rc=0
   local stderr_out
-  stderr_out=$(cat "$err_file" 2>/dev/null || true)
-  rm -f "$err_file"
+  _forge_capture stdout stderr_out rc -- gh api graphql -f threadId="$thread_id" \
+    -f query="$(_forge_resolve_review_thread_mutation)" || true
 
   # gh api graphql exits non-zero when the GraphQL response's own `errors`
   # array is non-empty -- a mutation targeting an invalid/inaccessible node
@@ -4469,18 +4402,7 @@ cmd_forge_resolve_review_thread() {
     shift
   done
 
-  if [ -n "$project_dir" ]; then
-    if [ ! -d "$project_dir" ]; then
-      echo "Error: Project directory does not exist: $project_dir" >&2
-      exit 1
-    fi
-    cd "$project_dir"
-  fi
-
-  if ! git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
-    exit 1
-  fi
+  _require_git_repo "$project_dir"
 
   if [ -z "$thread_id" ]; then
     echo "Usage: aimi-cli.sh forge-resolve-review-thread --thread-id <id> [--project <path>]" >&2
@@ -5833,20 +5755,7 @@ cmd_setup_branch() {
     exit 1
   fi
 
-  # cd into project dir if specified (supports multi-repo layouts where AIMI root is not a git repo)
-  if [ -n "$project_dir" ]; then
-    if [ ! -d "$project_dir" ]; then
-      echo "Error: Project directory does not exist: $project_dir" >&2
-      exit 1
-    fi
-    cd "$project_dir"
-  fi
-
-  # Guard: must be inside a git repository
-  if ! git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
-    exit 1
-  fi
+  _require_git_repo "$project_dir"
 
   # Validate branch name (security)
   if ! [[ "$branch_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
@@ -6087,20 +5996,7 @@ cmd_resolve_base_branch() {
     exit 1
   fi
 
-  # cd into project dir if specified (supports multi-repo layouts where AIMI root is not a git repo)
-  if [ -n "$project_dir" ]; then
-    if [ ! -d "$project_dir" ]; then
-      echo "Error: Project directory does not exist: $project_dir" >&2
-      exit 1
-    fi
-    cd "$project_dir"
-  fi
-
-  # Guard: must be inside a git repository
-  if ! git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
-    exit 1
-  fi
+  _require_git_repo "$project_dir"
 
   # Validate branch name (security)
   if ! [[ "$branch_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
