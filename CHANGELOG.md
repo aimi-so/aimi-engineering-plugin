@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.119.3] - 2026-08-01
+
+### Fixed
+
+- **`install.sh` wrote OpenCode Bash auto-approval rules under `permissions` (plural), the opencode 0.x schema key; opencode 1.x rejects unknown top-level keys at startup with `Unrecognized key: permissions`, aborting launch before any session starts.** `install_permissions()` and `uninstall_permissions()` now use the singular `permission` key throughout: the heredoc JSON fragment, the `jq` merge (`.permission = ((.permission // {}) * $perms.permission)`), the `python3` fallback (`cfg.get('permission', …)`, `perms['permission']`, `cfg['permission']`), and the uninstall path (`grep '"permission"'`, `del(.permission)`, `cfg.pop('permission', None)`). Verified against the canonical schema at <https://opencode.ai/docs/permissions> and against opencode 1.18.10, where the singular key loads cleanly and the plural key is the rejection the user reproduced. Comments and human-readable log strings (`ok "Removed permissions from …"`) are unchanged — they are prose, not schema keys.
+- **Known limitation, accepted as residual risk:** a reinstall over an `opencode.json` that already carries the stale plural `permissions` key from a prior buggy install does **not** self-heal. The installer's idempotency guard greps for the `"git *"` rule, finds it under the old plural key, and returns early without ever writing the singular key or removing the plural one — so the startup crash persists across reinstalls. Affected users must delete the `permissions` (plural) block from `~/.config/opencode/opencode.json` by hand once; a migration step in `install_permissions()` was deliberately deferred. Fresh installs are correct.
+
 ## [1.119.2] - 2026-07-30
 
 ### Fixed
