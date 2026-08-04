@@ -9866,6 +9866,102 @@ _roadmap_validate_phase_id() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Phase ground truth, has-work, and candidate selection
+#
+# One phase's status per roadmap.json is a claim about a session; what a phase
+# still has to DO is a fact on disk, in its own tasks file. These three pieces
+# turn that fact into the ordering both selectors use.
+# ---------------------------------------------------------------------------
+
+# Classify a phase from its own tasks file's story statuses. This is
+# roadmap-reconcile's original inline expression, lifted verbatim so reconcile
+# and the has-work map below cannot drift into two different answers about the
+# same file. Callers guarantee the file exists and parses.
+_ROADMAP_GROUND_TRUTH_JQ='
+  [.userStories[].status] as $statuses |
+  if ($statuses | length) == 0 then "unknown"
+  elif ($statuses | all(. == "completed")) then "completed"
+  elif ($statuses | any(. == "failed")) then "verification_failed"
+  else "in_progress"
+  end
+'
+
+# Emit {"<phase id>": <has work bool>} for every phase in a roadmap.
+#   $1 roadmap.json path   $2 feature slug
+#
+# A phase has NO work only when its own tasks file exists, parses, holds at
+# least one story, and every story is "completed" -- i.e. exactly when the
+# classification above says "completed". Every other case is has-work:
+#   - no tasks file: a pending phase /aimi:plan has not expanded yet. Demoting
+#     a phase for being unplanned would rank the whole front of the roadmap
+#     last, which is the opposite of the intent.
+#   - unparseable: nothing is known, so nothing is demoted.
+#   - zero userStories ("unknown"): same reasoning reconcile already applies --
+#     it declines to correct a status from an empty story list.
+_roadmap_has_work_map() {
+  local roadmap_path="$1" feature="$2"
+  local feature_dir hw_id hw_dir hw_file hw_truth hw_map
+  feature_dir=$(dirname "$roadmap_path")
+  hw_map='{}'
+
+  while IFS=$'\t' read -r hw_id hw_dir; do
+    [ -z "$hw_id" ] && continue
+    hw_file="$feature_dir/$hw_dir/$feature-phase-$hw_id-tasks.json"
+    hw_truth="unknown"
+    if [ -f "$hw_file" ] && jq -e . "$hw_file" >/dev/null 2>&1; then
+      hw_truth=$(jq -r "$_ROADMAP_GROUND_TRUTH_JQ" "$hw_file")
+    fi
+    if [ "$hw_truth" = "completed" ]; then
+      hw_map=$(printf '%s' "$hw_map" | jq --arg k "$hw_id" '. + {($k): false}')
+    else
+      hw_map=$(printf '%s' "$hw_map" | jq --arg k "$hw_id" '. + {($k): true}')
+    fi
+  done < <(jq -r '.phases[] | [(.id|tostring), .dir] | @tsv' "$roadmap_path")
+
+  printf '%s' "$hw_map"
+}
+
+# The single dependency-eligibility + ordering implementation, spliced into
+# both roadmap-get --next-eligible and roadmap-claim's auto-mode branch so the
+# two cannot drift apart again. Takes the phases array, the allowed status set,
+# and the has-work side map; returns the eligible candidates in claim order.
+#
+# The caller supplies the array it wants judged, and that is deliberate: it is
+# the second axis on which the two selectors differ. roadmap-claim passes
+# $cleared_phases (dead-PID claims already nulled, inside its own flock);
+# roadmap-get --next-eligible passes .phases raw, because it holds no lock and
+# clearing stale claims is a decision that belongs where the lock is. So a
+# phase held by a dead session stays claimable by one and invisible to the
+# other, exactly as before -- unifying the ordering was never meant to change
+# that, and a read-only verb has no business inferring liveness.
+#
+# ORDER, not the set, was the defect (issue #90). Two jq hazards live in the
+# rank helper, both of which silently make the ranking a no-op:
+#   - `$work[$k] // true` is wrong: `//` fires on false as well as null, so
+#     every legitimate false collapses to true and nothing is ever demoted.
+#   - `$work | has(.id|tostring)` is wrong: the pipe rebinds `.` to $work, so
+#     `.id` is null and every lookup misses.
+# Binding the key first and testing has() explicitly avoids both.
+_ROADMAP_SELECT_JQ='
+def _rm_rank($work):
+  (.id|tostring) as $k
+  | if ($work | has($k)) then (if $work[$k] then 0 else 1 end) else 0 end;
+
+def _rm_candidates($phases; $allowed; $work):
+  (reduce $phases[] as $p ({}; . + {($p.id|tostring): $p.status})) as $status_by_id
+  | [ $phases[]
+      # `.status` is bound BEFORE the pipe into $allowed. Written the obvious
+      # way -- `$allowed | index(.status)` -- the pipe rebinds `.` to $allowed
+      # and jq dies with "Cannot index array with string". Same hazard as the
+      # rank helper above, different expression.
+      | select(.status as $st | ($allowed | index($st)) != null)
+      | select(.claim == null)
+      | select(((.dependsOn // []) | all(. as $d | $status_by_id[$d|tostring] == "completed")))
+    ]
+  | sort_by([_rm_rank($work), .id]);
+'
+
 # Read a phases JSON array on stdin; print one human-readable error line per
 # creates[]/needs[] entry whose *identity* can never name a real artifact.
 #
@@ -10602,14 +10698,17 @@ cmd_roadmap_get() {
   fi
 
   if [ "$next_eligible" = true ]; then
-    local eligible
-    eligible=$(jq '
-      (reduce .phases[] as $p ({}; . + {($p.id|tostring): $p.status})) as $status_by_id |
-      [.phases[] | select(
-        (.status == "pending" or .status == "planned") and
-        (.claim == null) and
-        ((.dependsOn // []) | all(. as $d | $status_by_id[$d|tostring] == "completed"))
-      )] | sort_by(.id) | (.[0] // null)
+    # Same selection implementation roadmap-claim's auto branch uses, narrowed
+    # to the two statuses this verb reports. `.phases` is passed raw: this verb
+    # holds no lock, so it never clears stale dead-PID claims (see the note on
+    # _ROADMAP_SELECT_JQ). Reading one tasks file per phase is new cost for a
+    # verb that previously touched only roadmap.json, and it is unsynchronized
+    # -- a tasks file rewritten mid-read yields "has work", the safe answer,
+    # since only an all-completed file demotes anything.
+    local eligible has_work
+    has_work=$(_roadmap_has_work_map "$roadmap_path" "$feature")
+    eligible=$(jq --argjson work "$has_work" "$_ROADMAP_SELECT_JQ"'
+      _rm_candidates(.phases; ["pending","planned"]; $work) | (.[0] // null)
     ' "$roadmap_path")
     if [ "$eligible" = "null" ]; then
       echo "Error: roadmap-get: no eligible phase found" >&2
@@ -10808,6 +10907,15 @@ cmd_roadmap_claim() {
 
       now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
+      # Has-work pre-pass, inside this same lock, so the ordering below reads a
+      # tasks-file snapshot no concurrent claim can move under it. It is a SIDE
+      # MAP handed to jq as one --argjson, never a field merged onto the phase
+      # objects: $cleared_phases is the very array written back to roadmap.json
+      # at the end of this function, so a synthetic key added here would be
+      # persisted forever and would then flow into validate-contracts,
+      # roadmap-sweep and roadmap-reconcile.
+      has_work=$(_roadmap_has_work_map "$roadmap_path" "$feature")
+
       result=$(jq -n \
         --slurpfile cur "$roadmap_path" \
         --argjson stale_ids "$stale_ids" \
@@ -10816,7 +10924,8 @@ cmd_roadmap_claim() {
         --arg now "$now" \
         --argjson session_pid "$session_pid" \
         --argjson phase_override "$phase_override_json" \
-        '
+        --argjson work "$has_work" \
+        "$_ROADMAP_SELECT_JQ"'
           ($cur[0]) as $current |
           ($current.phases | map(if ((.id) as $id | ($stale_ids | index($id)) != null) then .claim = null else . end)) as $cleared_phases |
           (reduce $cleared_phases[] as $p ({}; . + {($p.id|tostring): $p.status})) as $status_by_id |
@@ -10856,10 +10965,18 @@ cmd_roadmap_claim() {
             # is awaiting a re-verify run -- both must be re-claimable or crash
             # recovery and verification retry are dead ends, which is exactly
             # what execute.md tells the user to recover by re-running.
-            ($cleared_phases | map(select((.status == "pending" or .status == "planned" or .status == "in_progress" or .status == "verification_failed") and .claim == null))) as $candidates0 |
-            ($candidates0 | map(select( ((.dependsOn // []) | all(. as $d | $status_by_id[$d|tostring] == "completed")) ))) as $eligible |
+            #
+            # The ORDER within that set, not the set itself, was issue #90. A
+            # stuck phase is by construction older and therefore lower-id than
+            # whatever came after it, so plain sort_by(.id) made it win every
+            # auto-claim indefinitely, ahead of the phase genuinely ready to
+            # run. Candidates are now ranked by remaining work first and id
+            # second. Ranking DEMOTES, it never excludes: the moment a zero-work
+            # phase is the only eligible candidate it is claimed, which is what
+            # keeps crash recovery and the verification retry reachable.
+            (_rm_candidates($cleared_phases; ["pending","planned","in_progress","verification_failed"]; $work)) as $eligible |
             if ($eligible | length) > 0 then
-              ($eligible | sort_by(.id) | .[0]) as $chosen |
+              ($eligible | .[0]) as $chosen |
               ($cleared_phases | map(if .id == $chosen.id then . + {claim: {claimedBy: $session_id, claimedAt: $now, claimedPid: $session_pid}} else . end)) as $final_phases |
               {claimed: true, phase: ($final_phases[] | select(.id == $chosen.id)), phases: $final_phases}
             else
@@ -10898,7 +11015,7 @@ cmd_roadmap_claim() {
       reason=$(printf '%s' "$result" | jq -r '.reason')
       case "$reason" in
         none-eligible)
-          echo "Error: roadmap-claim: no phase remains in pending or planned status" >&2
+          echo "Error: roadmap-claim: no phase remains in pending, planned, in_progress or verification_failed status" >&2
           exit 4
           ;;
         phase-not-found)
@@ -11016,14 +11133,10 @@ cmd_roadmap_reconcile() {
         if ! jq -e . "$rc_tasks_file" >/dev/null 2>&1; then
           continue
         fi
-        ground_truth=$(jq -r '
-          [.userStories[].status] as $statuses |
-          if ($statuses | length) == 0 then "unknown"
-          elif ($statuses | all(. == "completed")) then "completed"
-          elif ($statuses | any(. == "failed")) then "verification_failed"
-          else "in_progress"
-          end
-        ' "$rc_tasks_file")
+        # Shared with the has-work map roadmap-claim ranks on
+        # (_ROADMAP_GROUND_TRUTH_JQ) -- one rule, so the two cannot disagree
+        # about the same tasks file.
+        ground_truth=$(jq -r "$_ROADMAP_GROUND_TRUTH_JQ" "$rc_tasks_file")
         if [ "$ground_truth" != "unknown" ] && [ "$ground_truth" != "$rc_status" ]; then
           # Same hard precondition roadmap-set-status enforces: a phase never
           # reaches "completed" without handoff.md on disk. Reconcile must not
@@ -12575,9 +12688,14 @@ COMMANDS:
     roadmap-get --feature <slug> [--phase <id>] [--next-eligible]
                               Read-only. Bare: print the full roadmap.json.
                               --phase <id>: print one phase object.
-                              --next-eligible: print the lowest numeric-id phase
-                              in pending/planned status, unclaimed, whose dependsOn
-                              phases are all completed; exits 1 if none.
+                              --next-eligible: print the next claimable phase in
+                              pending/planned status, unclaimed, whose dependsOn
+                              phases are all completed. Ordered by remaining work
+                              first and numeric id second -- a phase whose own
+                              tasks file shows every story completed is reported
+                              last, not first. Exits 1 if none. Does not clear
+                              stale dead-PID claims (roadmap-claim does that,
+                              under its lock); reads one tasks file per phase.
     roadmap-set-status --feature <slug> --phase <id> --status <status> [--force]
                               Locked read-modify-write. Enforces the guarded order
                               pending -> planned -> in_progress -> completed, plus
@@ -12609,10 +12727,16 @@ COMMANDS:
                               unreleased claim on a still-active phase (matching
                               --phase when given), returns that same phase again
                               instead of erroring or re-running eligibility.
-                              Without --phase: claims the lowest numeric-id phase
-                              that is pending/planned, unclaimed, and dependency-
-                              complete. With --phase <id>: claims that phase only
-                              if eligible; never falls through to a different phase.
+                              Without --phase: claims the next phase that is
+                              pending/planned/in_progress/verification_failed,
+                              unclaimed, and dependency-complete -- ordered by
+                              remaining work first and numeric id second, so a
+                              stuck phase with nothing left to run is demoted
+                              behind any phase that still has work but is still
+                              claimed once it is the only candidate. With
+                              --phase <id>: claims that phase only if eligible,
+                              with no ranking applied; never falls through to a
+                              different phase.
                               Exit 0 with the claimed phase JSON on success.
                               Exit 3 (all-blocked / phase not claimable): pending/
                               planned phases remain but none (or the named --phase)
