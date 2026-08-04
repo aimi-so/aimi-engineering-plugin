@@ -17686,6 +17686,17 @@ test_forge_repo_info_registered_in_help_and_dispatcher() {
 # -- extended there to also serve `gh pr view`/`gh pr list`, per the
 # FAKE_GH_VIEW_*/FAKE_GH_PR_JSON/FAKE_GH_LIST_*/FAKE_GH_LOG vars documented
 # alongside it, exactly the sibling-story reuse it was built for.
+#
+# FIXTURE NOTE (phase 1.1 US-010): every test below that models a FOUND PR
+# for a BRANCH-NAME ref now sets FAKE_GH_LIST_JSON to a populated array
+# alongside its FAKE_GH_PR_JSON. Since US-010 the `gh pr list --head <ref>`
+# probe is the PRIMARY existence signal for a branch ref rather than a
+# not-found-confirming backstop, and the shared fixture's unconfigured
+# default for that var is the EMPTY array -- so a found-PR scenario that
+# configures only gh pr view's response now resolves to not_found before gh
+# pr view is ever reached. Every such test's expected status, envelope and
+# exit code is unchanged; only its gh pr list configuration is. A NUMERIC
+# ref never probes and needs no such pairing.
 
 test_forge_pr_view_found_single_field() {
   echo ""
@@ -17696,7 +17707,7 @@ test_forge_pr_view_found_single_field() {
   pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
 
   local out exit_code
-  out=$(FAKE_GH_PR_JSON='{"url":"https://github.com/o/r/pull/7"}' PATH="$FAKE_GH_DIR:$PATH" \
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"url":"https://github.com/o/r/pull/7"}' PATH="$FAKE_GH_DIR:$PATH" \
     "$CLI" forge-pr-view --pr feat-x --include url) && exit_code=0 || exit_code=$?
 
   assert_exit_code "0" "$exit_code" "forge-pr-view found: exit 0"
@@ -17719,13 +17730,13 @@ test_forge_pr_view_include_field_sets() {
   local out
 
   # review.md's five-field call site (review.md:36).
-  out=$(FAKE_GH_PR_JSON='{"title":"T","body":"B","files":[{"path":"a.txt"}],"headRefName":"feat","baseRefName":"main"}' \
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"title":"T","body":"B","files":[{"path":"a.txt"}],"headRefName":"feat","baseRefName":"main"}' \
     PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include title,body,files,headRefName,baseRefName)
   assert_eq '{"status":"found","pr":{"title":"T","body":"B","files":[{"path":"a.txt"}],"headRefName":"feat","baseRefName":"main"},"unsupported_fields":[],"message":null}' \
     "$out" "forge-pr-view include: five-field review.md set returns exactly those keys"
 
   # review.md's files-only call site (review.md:99).
-  out=$(FAKE_GH_PR_JSON='{"files":[{"path":"b.txt","additions":3,"deletions":1}]}' \
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"files":[{"path":"b.txt","additions":3,"deletions":1}]}' \
     PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include files)
   assert_eq '{"status":"found","pr":{"files":[{"path":"b.txt","additions":3,"deletions":1}]},"unsupported_fields":[],"message":null}' \
     "$out" "forge-pr-view include: files-only returns exactly files"
@@ -17734,7 +17745,7 @@ test_forge_pr_view_include_field_sets() {
   # through --include before this story (they replace the gh-only
   # reviews/comments pair, which the contract cannot express and which had
   # no caller outside this suite).
-  out=$(FAKE_GH_PR_JSON='{"isDraft":true,"mergeable":"MERGEABLE"}' \
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"isDraft":true,"mergeable":"MERGEABLE"}' \
     PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include isDraft,mergeable)
   assert_eq '{"status":"found","pr":{"isDraft":true,"mergeable":"MERGEABLE"},"unsupported_fields":[],"message":null}' \
     "$out" "forge-pr-view include: isDraft,mergeable returns exactly those keys"
@@ -17742,7 +17753,7 @@ test_forge_pr_view_include_field_sets() {
   # Omitted --include -- default portable core, excludes files/isDraft/
   # mergeable (open-pr.md's own two call sites only ever want url). gh
   # reports state in uppercase; the envelope must carry it normalized.
-  out=$(FAKE_GH_PR_JSON='{"number":1,"url":"u","title":"t","body":"b","state":"OPEN","headRefName":"h","baseRefName":"m"}' \
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"number":1,"url":"u","title":"t","body":"b","state":"OPEN","headRefName":"h","baseRefName":"m"}' \
     PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x)
   assert_eq '{"status":"found","pr":{"number":1,"url":"u","title":"t","body":"b","state":"open","headRefName":"h","baseRefName":"m"},"unsupported_fields":[],"message":null}' \
     "$out" "forge-pr-view include: omitted defaults to the seven-field portable core"
@@ -17996,13 +18007,13 @@ test_forge_pr_view_unsupported_fields_is_always_an_array_on_found() {
   local out
 
   # Every requested capability-gated field supplied -> explicitly empty [].
-  out=$(FAKE_GH_PR_JSON='{"files":[],"isDraft":false,"mergeable":"MERGEABLE"}' \
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"files":[],"isDraft":false,"mergeable":"MERGEABLE"}' \
     PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include files,isDraft,mergeable)
   assert_eq "array" "$(printf '%s' "$out" | jq -r '.unsupported_fields | type')" "unsupported_fields: found, everything supplied -- type is array"
   assert_eq "[]" "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "unsupported_fields: found, everything supplied -- explicitly empty, never bare null"
 
   # A requested capability-gated field gh did not return -> named in the array.
-  out=$(FAKE_GH_PR_JSON='{"url":"u"}' \
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"url":"u"}' \
     PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url,files)
   assert_eq '["files"]' "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "unsupported_fields: found, gated field absent -- names it"
 
@@ -18039,18 +18050,18 @@ test_forge_pr_view_unsupported_fields_intersect_requested_only() {
   # request names only one of them, so files and mergeable -- never asked
   # for -- must not be reported as unsupported, and pr must carry exactly
   # the two requested keys rather than the builder's ten-key superset.
-  out=$(FAKE_GH_PR_JSON='{"url":"u"}' \
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"url":"u"}' \
     PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url,isDraft)
   assert_eq '["isDraft"]' "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "intersection: only the requested gated field is reported unsupported"
   assert_eq '{"url":"u","isDraft":null}' "$(printf '%s' "$out" | jq -c '.pr')" "intersection: pr carries exactly the requested keys, never the builder's superset"
 
   # Two of the three requested, both absent from gh's response.
-  out=$(FAKE_GH_PR_JSON='{"url":"u"}' \
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"url":"u"}' \
     PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url,files,mergeable)
   assert_eq '["files","mergeable"]' "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "intersection: both requested gated fields reported, isDraft (unrequested) omitted"
 
   # None of the three requested -> nothing to report at all.
-  out=$(FAKE_GH_PR_JSON='{"number":1,"url":"u"}' \
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"number":1,"url":"u"}' \
     PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include number,url)
   assert_eq "[]" "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "intersection: no gated field requested -- empty array, not all three"
 
@@ -18070,14 +18081,14 @@ test_forge_pr_view_absent_key_vs_explicit_null_are_distinguishable() {
   local out
 
   # Case 1 -- gh's response omits `files` entirely.
-  out=$(FAKE_GH_PR_JSON='{"url":"u"}' \
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"url":"u"}' \
     PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url,files)
   assert_eq "true" "$(printf '%s' "$out" | jq -r '.pr | has("files")')" "absent key: files is still a key in pr (requested keys are never dropped)"
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.pr.files')" "absent key: files reads null"
   assert_eq '["files"]' "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "absent key: files IS recorded in unsupported_fields"
 
   # Case 2 -- gh's response includes `files` with an explicit JSON null.
-  out=$(FAKE_GH_PR_JSON='{"url":"u","files":null}' \
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"url":"u","files":null}' \
     PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url,files)
   assert_eq "true" "$(printf '%s' "$out" | jq -r '.pr | has("files")')" "explicit null: files is a key in pr"
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.pr.files')" "explicit null: files reads null (same value as the absent case)"
@@ -18101,11 +18112,11 @@ test_forge_pr_view_include_accepts_contract_fields_and_rejects_gh_only_names() {
   # isDraft and mergeable are PR contract fields that were never selectable
   # through --include before this story; each must now return exactly its
   # own key when requested alone.
-  out=$(FAKE_GH_PR_JSON='{"isDraft":true}' \
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"isDraft":true}' \
     PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include isDraft)
   assert_eq '{"isDraft":true}' "$(printf '%s' "$out" | jq -c '.pr')" "contract fields: isDraft alone returns exactly isDraft"
 
-  out=$(FAKE_GH_PR_JSON='{"mergeable":"CONFLICTING"}' \
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"mergeable":"CONFLICTING"}' \
     PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include mergeable)
   assert_eq '{"mergeable":"CONFLICTING"}' "$(printf '%s' "$out" | jq -c '.pr')" "contract fields: mergeable alone returns exactly mergeable"
 
@@ -18139,7 +18150,7 @@ test_forge_pr_view_registered_in_help_and_dispatcher() {
   pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
 
   local dispatch_out
-  dispatch_out=$(FAKE_GH_PR_JSON='{"url":"u"}' PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url 2>&1)
+  dispatch_out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"url":"u"}' PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url 2>&1)
 
   popd >/dev/null
   teardown_detect_forge_fixture
@@ -18193,7 +18204,17 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   exit 1
 fi
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
-  echo '[]'
+  # Mirrors $FLAG exactly like the `pr view` handler above. Since phase 1.1
+  # US-010 this probe is forge-pr-view's PRIMARY existence signal for a
+  # branch ref, so a handler that always echoed the empty array would force
+  # the post-create re-read to not_found before gh pr view was ever reached
+  # -- silently turning this test's post-create path into an assertion about
+  # the wrong branch of the code.
+  if [ -f "$FLAG" ]; then
+    echo '[{"number":101}]'
+  else
+    echo '[]'
+  fi
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
@@ -18236,6 +18257,16 @@ test_forge_pr_create_existing_pr_is_idempotent() {
 #!/usr/bin/env bash
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   echo '{"url":"https://github.com/owner/repo/pull/55","number":55,"state":"OPEN"}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  # Added in phase 1.1 US-010. Before it, this script had no `pr list` arm at
+  # all: the probe hit the catch-all below, exited 99, and forge-pr-view fell
+  # back to the `pr view` handler -- so this scenario passed through the
+  # probe-unavailable FALLBACK path rather than the intended primary one. A
+  # populated array is the response consistent with the open PR the `pr view`
+  # handler above already reports.
+  echo '[{"number":55}]'
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
@@ -18832,7 +18863,13 @@ case "${FAKE_SCENARIO:-}" in
       echo "no pull requests found for branch" >&2
       exit 1
     fi
-    if [ "$1" = "pr" ] && [ "$2" = "list" ]; then echo '[]'; exit 0; fi
+    # Mirrors $FLAG like the `pr view` arm above -- see the same note on
+    # test_forge_pr_create_new_pr's script for why a permanently-empty list
+    # response would send the post-create re-read to not_found.
+    if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+      if [ -f "$FLAG" ]; then echo '[{"number":700}]'; else echo '[]'; fi
+      exit 0
+    fi
     if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
       : > "$FLAG"
       echo "https://github.com/owner/repo/pull/700"
@@ -18844,6 +18881,7 @@ case "${FAKE_SCENARIO:-}" in
       echo '{"url":"https://github.com/owner/repo/pull/701","number":701,"state":"OPEN"}'
       exit 0
     fi
+    if [ "$1" = "pr" ] && [ "$2" = "list" ]; then echo '[{"number":701}]'; exit 0; fi
     ;;
   edit)
     if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then exit 0; fi

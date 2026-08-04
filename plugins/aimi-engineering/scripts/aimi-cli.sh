@@ -1755,8 +1755,18 @@ _detect_forge_classify_host() {
 # else exactly one remote (any name) wins; else zero remotes is a distinct
 # outcome ("no-remote") from two-or-more disagreeing remotes ("ambiguous-
 # remotes", forge always unknown) -- never resolved by picking `git remote`'s
-# listing order. Emits {remote, remoteUrl, source} via jq -nc.
-_detect_forge_select_remote() {
+# listing order. Emits {remote, remoteUrl, source} as three plain-text lines
+# -- remote name, source, remote URL, in that order -- and spawns no jq
+# process to move them, so _detect_forge_type below can reach this
+# precedence rule for free. The URL is deliberately LAST: a pathological
+# remote URL carrying an embedded newline can then only truncate itself,
+# never shift the two fields classification actually branches on.
+#
+# This is the single implementation of the precedence rule.
+# _detect_forge_select_remote below is a thin JSON-wrapping shim over it, so
+# the jq-free and JSON-emitting paths can never drift into two subtly
+# different answers to the same question.
+_detect_forge_select_remote_raw() {
   local remotes remote_count remote_name="" remote_url="" source=""
   remotes=$(git remote 2>/dev/null) || remotes=""
 
@@ -1779,6 +1789,44 @@ _detect_forge_select_remote() {
       source="ambiguous-remotes"
     fi
   fi
+
+  printf '%s\n%s\n%s\n' "$remote_name" "$source" "$remote_url"
+}
+
+# Reads _detect_forge_select_remote_raw's three lines back into three
+# caller-named variables. A plain `IFS= read` loop rather than `$(...)` plus
+# parameter expansion, because command substitution strips trailing
+# newlines: an empty remote URL would collapse "third line, empty" into "no
+# third line at all" and slide `source` into the URL slot.
+#
+# Internals are _dsr_-prefixed so a caller's own remote/source/url locals can
+# never shadow the name-reference targets -- the same collision
+# _forge_capture's _fc_ prefixes exist to prevent.
+# Usage: _detect_forge_read_selection <name_var> <source_var> <url_var>
+_detect_forge_read_selection() {
+  local -n _dsr_name="$1" _dsr_source="$2" _dsr_url="$3"
+  _dsr_name=""
+  _dsr_source=""
+  _dsr_url=""
+
+  local _dsr_line _dsr_i=0
+  while IFS= read -r _dsr_line; do
+    case "$_dsr_i" in
+      0) _dsr_name="$_dsr_line" ;;
+      1) _dsr_source="$_dsr_line" ;;
+      2) _dsr_url="$_dsr_line" ;;
+    esac
+    _dsr_i=$((_dsr_i + 1))
+  done < <(_detect_forge_select_remote_raw)
+}
+
+# Unchanged public contract: the {remote, remoteUrl, source} JSON object
+# _detect_forge already consumes, byte-identical to what this function
+# emitted before it was split. All it does now is wrap the raw helper's
+# three values -- the precedence logic itself lives there.
+_detect_forge_select_remote() {
+  local remote_name remote_url source
+  _detect_forge_read_selection remote_name source remote_url
 
   jq -nc \
     --arg remote "$remote_name" \
@@ -1875,6 +1923,86 @@ _detect_forge() {
       remote: (if $remote == "" then null else $remote end),
       remoteUrl: (if $remoteUrl == "" then null else $remoteUrl end),
       source: $source}'
+}
+
+# Per-process memo behind _detect_forge_type, keyed on the working directory
+# each answer was derived in.
+#
+# KEYED, NOT GLOBAL, AND THAT DISTINCTION IS THE WHOLE POINT: a multi-repo
+# AIMI_ROOT is a plain non-git parent holding one git repository per
+# subfolder (see CLAUDE.md's Multi-Repo Execution Layout), and those
+# siblings can legitimately be a GitHub repo and a GitLab repo. One process
+# visiting both must get two answers. A single-slot cache would degrade into
+# "whichever repository was classified most recently" and silently report
+# github for the gitlab sibling -- the exact leak _detect_forge's own
+# "NEVER cached" header comment exists to prevent, reintroduced by the back
+# door. That comment is about a PERSISTED cache (read_state/write_state,
+# which survives a repointed remote); this memo lives and dies with one
+# invocation and is never written to disk.
+declare -gA _DETECT_FORGE_TYPE_MEMO
+
+# The forge word alone -- github|gitlab|gitea|unknown -- for the callers
+# that need only that and threw the rest of _detect_forge's envelope away.
+# No JSON is built or parsed anywhere on this path: it reaches the same
+# precedence rule through _detect_forge_select_remote_raw and the
+# already-pure-bash _detect_forge_parse_host/_detect_forge_classify_host, so
+# a derivation costs the two `git remote` reads and nothing else.
+#
+# WHO DOES *NOT* USE THIS, AND WHY: _forge_repo_info and _forge_auth_status
+# read `host`/`remoteUrl` out of the envelope, and so -- since US-004 grew
+# the shared failure classifier -- do _forge_issue_view,
+# _forge_pr_review_threads and _forge_resolve_review_thread, each of which
+# now hands `host` to _forge_classify_gh_failure_reason. This function
+# carries no host, so all five deliberately keep their full _detect_forge
+# call. Widening the memo to the whole envelope would serve them too and is
+# a reasonable follow-up, but it is a different change from this one.
+#
+# OUT-PARAMETER, NOT STDOUT, AND THAT IS LOAD-BEARING: a printed answer
+# forces every call site into `forge=$(_detect_forge_type)`, whose command
+# substitution forks a subshell -- and a memo populated inside a subshell
+# dies with it, leaving every call site a full derivation again. Writing
+# through a name reference keeps the memo in the ONE process that will reuse
+# it. Subshells forked later (`existing=$(cmd_forge_pr_view ...)` inside
+# _forge_pr_create) inherit the populated array and read it as a hit, which
+# is what collapses a create-a-new-PR run from three derivations to one.
+#
+# AIMI_FORGE_TYPE short-circuits before the memo as well as before any git
+# command: it is already a zero-cost stateless read, and it is deliberately
+# NOT validated here, mirroring _detect_forge's own override precedent above
+# (cmd_detect_forge validates it once, and internal callers already trust
+# the value unvalidated through _detect_forge).
+#
+# Internals are _dft_-prefixed so a caller's own `forge` local can never
+# shadow the name-reference target.
+# Usage: _detect_forge_type <forge_var>
+_detect_forge_type() {
+  local -n _dft_out="$1"
+
+  if [ -n "${AIMI_FORGE_TYPE:-}" ]; then
+    _dft_out="$AIMI_FORGE_TYPE"
+    return 0
+  fi
+
+  # $PWD, deliberately, rather than a subshelled `pwd -P`: every cmd_forge_*
+  # wrapper's --project handling cd's into its final working directory
+  # exactly once, before any forge derivation runs, so $PWD is stable and
+  # correct for the whole remaining lifetime of the invocation at zero fork
+  # cost.
+  local _dft_key="$PWD"
+  if [ -n "${_DETECT_FORGE_TYPE_MEMO[$_dft_key]+set}" ]; then
+    _dft_out="${_DETECT_FORGE_TYPE_MEMO[$_dft_key]}"
+    return 0
+  fi
+
+  local _dft_name _dft_source _dft_url _dft_forge="unknown"
+  _detect_forge_read_selection _dft_name _dft_source _dft_url
+
+  if [ "$_dft_source" = "remote" ] && [ -n "$_dft_url" ]; then
+    _dft_forge=$(_detect_forge_classify_host "$(_detect_forge_parse_host "$_dft_url")")
+  fi
+
+  _DETECT_FORGE_TYPE_MEMO["$_dft_key"]="$_dft_forge"
+  _dft_out="$_dft_forge"
 }
 
 # Detect the forge (github|gitlab|gitea|unknown) for the active git remote.
@@ -2966,6 +3094,11 @@ _forge_map_pr_field_github() {
 _forge_pr_view_github() {
   local ref="$1" fields_csv="$2"
   local stdout="" stderr="" rc=0
+  # Set only when the structural probe below ran cleanly AND reported one or
+  # more PRs -- i.e. existence is a confirmed structural fact, not an
+  # inference. Consulted after gh pr view to keep a view failure from being
+  # reinterpreted as not_found.
+  local list_confirmed_exists=false
 
   # Translate the caller's contract field names to gh's own BEFORE the
   # --json field list is ever built, so gh never sees a name it does not
@@ -2984,6 +3117,48 @@ _forge_pr_view_github() {
 
   local gh_fields_csv
   gh_fields_csv=$(IFS=','; printf '%s' "${gh_fields[*]:-}")
+
+  # --- structural existence probe, FIRST for a branch ref ----------------
+  # `gh pr list --head <branch> --json number` returns `[]` at exit 0 when no
+  # PR exists -- a structural fact in JSON rather than a string in a message,
+  # so it survives a gh release that rewords its own stderr or a non-English
+  # locale. `--state all` so a closed/merged PR still counts as found (gh pr
+  # list defaults to open-only, which would otherwise misreport a closed PR's
+  # branch as not_found). `--head` takes a branch name, never a PR number, so
+  # a NUMERIC ref skips this probe entirely and goes straight to gh pr view
+  # plus the stderr tier below -- unchanged in both directions by this
+  # reordering.
+  #
+  # WHY IT RUNS BEFORE gh pr view RATHER THAN AS ITS BACKSTOP: on the "no PR
+  # yet" path -- the dominant case in aggregate, since execute.md's per-phase
+  # idempotency pre-check runs this exact lookup on every phase close whether
+  # or not a PR already exists -- asking view first meant paying a doomed
+  # round trip and then paying the probe anyway to confirm what it meant. Two
+  # calls to learn "no". Probing first answers that structurally in one, and
+  # gh pr view is never invoked at all.
+  #
+  # The accepted, deliberate trade-off: a FOUND branch-ref lookup now costs
+  # two calls (probe, then view for the actual fields) where it used to cost
+  # one. That is the price of making absence cheap, and absence is the common
+  # case.
+  if ! [[ "$ref" =~ ^[0-9]+$ ]]; then
+    local list_out="" list_rc=0 list_count=""
+    list_out=$(gh pr list --head "$ref" --state all --json number 2>/dev/null) || list_rc=$?
+    if [ "$list_rc" -eq 0 ]; then
+      list_count=$(printf '%s' "$list_out" | jq 'length' 2>/dev/null) || list_count=""
+      if [ "$list_count" = "0" ]; then
+        _forge_pr_view_emit "not_found" "null" "null" "no pull request found for ref: $ref"
+        return 0
+      fi
+      # A parseable, non-zero count is a confirmed existence fact. An
+      # UNPARSEABLE response is not: it proves nothing either way, so it
+      # leaves the flag false and falls through to the same view-plus-stderr
+      # path a failed probe takes.
+      if [ -n "$list_count" ]; then
+        list_confirmed_exists=true
+      fi
+    fi
+  fi
 
   _forge_capture stdout stderr rc -- gh pr view "$ref" --json "$gh_fields_csv" || true
 
@@ -3064,29 +3239,23 @@ _forge_pr_view_github() {
   fi
 
   # --- not_found detection ---------------------------------------------
-  # Primary signal: `gh pr list --head <branch> --json number` returns `[]`
-  # at exit 0 when no PR exists -- a structural fact in JSON rather than a
-  # string in a message, so it survives a gh release that rewords its own
-  # stderr or a non-English locale. `--state all` so a closed/merged PR
-  # still counts as found (gh pr list defaults to open-only, which would
-  # otherwise misreport a closed PR's branch as not_found). This probe only
-  # applies to a branch ref -- `--head` takes a branch name, not a PR
-  # number -- so a numeric ref skips straight to the stderr fallback below.
-  if ! [[ "$ref" =~ ^[0-9]+$ ]]; then
-    local list_out="" list_rc=0 list_count=""
-    list_out=$(gh pr list --head "$ref" --state all --json number 2>/dev/null) || list_rc=$?
-    if [ "$list_rc" -eq 0 ]; then
-      list_count=$(printf '%s' "$list_out" | jq 'length' 2>/dev/null) || list_count=""
-      if [ "$list_count" = "0" ]; then
-        _forge_pr_view_emit "not_found" "null" "null" "no pull request found for ref: $ref"
-        return 0
-      fi
-    fi
+  # THE THREE-WAY STATUS MUST SURVIVE THE REORDER. The probe already said
+  # this PR exists, structurally; gh pr view then failed anyway (a transient
+  # error, or a race between the two calls). That is a tool failure and
+  # nothing else -- reporting not_found here would take the one case where
+  # absence has been positively DISPROVEN and report it as absence, which is
+  # precisely the conflation this verb exists to prevent. The stderr-text
+  # tier below is skipped too: gh pr view's own wording cannot outvote a
+  # structural fact, not even when it happens to say "no pull requests
+  # found".
+  if [ "$list_confirmed_exists" = true ]; then
+    _forge_pr_view_emit "error" "null" "null" "$stderr"
+    return 0
   fi
 
   # Secondary fallback: gh's own no-pull-requests-found wording. Kept
   # strictly as a backstop for when the structural probe above could not
-  # confirm not_found (a numeric ref, or the list probe itself failing) --
+  # confirm anything (a numeric ref, or the list probe itself failing) --
   # never the primary signal, since a translatable/rewordable string is
   # exactly the fragility this verb exists to avoid.
   if printf '%s' "$stderr" | grep -qi "no pull requests\? found"; then
@@ -3179,8 +3348,8 @@ cmd_forge_pr_view() {
   local fields_csv
   fields_csv=$(IFS=','; echo "${requested_fields[*]}")
 
-  local forge
-  forge=$(_detect_forge | jq -r '.forge')
+  local forge=""
+  _detect_forge_type forge
 
   case "$forge" in
     github)
@@ -3345,8 +3514,8 @@ _forge_pr_write_print_manual() {
 # never prompts interactively.
 _forge_pr_create() {
   local title="$1" base="$2" head="$3" body="$4"
-  local forge
-  forge=$(_detect_forge | jq -r '.forge')
+  local forge=""
+  _detect_forge_type forge
 
   if [ "$forge" != "github" ]; then
     _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
@@ -3546,8 +3715,8 @@ cmd_forge_pr_create() {
 # on every failure path.
 _forge_pr_edit() {
   local number="$1" body="$2"
-  local forge
-  forge=$(_detect_forge | jq -r '.forge')
+  local forge=""
+  _detect_forge_type forge
 
   if [ "$forge" != "github" ]; then
     _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
@@ -3902,8 +4071,8 @@ _forge_issue_create_print_manual() {
 # two exit non-zero on a degraded outcome, this one never does.
 _forge_issue_create() {
   local title="$1" body="$2"
-  local forge
-  forge=$(_detect_forge | jq -r '.forge')
+  local forge=""
+  _detect_forge_type forge
 
   if [ "$forge" != "github" ]; then
     _forge_issue_create_print_manual "$title" "$body" "$forge"
