@@ -13987,6 +13987,446 @@ test_roadmap_init_sanitizes_fields() {
   rm -rf ".aimi/tasks/$feature"
 }
 
+# ============================================================================
+# roadmap-amend-phase (US-002)
+# ============================================================================
+
+# Materialize the fixture this verb exists for: one provider phase whose single
+# creates identity two downstream phases cite verbatim in needs -- the exact
+# shape phases 2, 3 and 4 of this repo's own forge-abstraction roadmap have.
+# $1 = feature slug. Leaves .aimi/tasks/$1/roadmap.json on disk.
+_roadmap_amend_fixture() {
+  local feature="$1"
+  rm -rf ".aimi/tasks/$feature"
+  jq -n '[
+    {id: 1, name: "Forge", goal: "g1", slug: "forge", dependsOn: [],
+     creates: ["forge/base.sh (the base adapter)"], needs: [], areas: ["forge/**"]},
+    {id: 2, name: "Override", goal: "g2", slug: "override", dependsOn: [1],
+     creates: ["account override applied inside the forge command surface (the override)"],
+     needs: ["forge/base.sh (the base adapter)"], successCriteria: ["override lands"]},
+    {id: 3, name: "Cli", goal: "g3", slug: "cli", dependsOn: [2],
+     creates: ["cli/x.sh (the cli)"],
+     needs: ["account override applied inside the forge command surface (the override)"]},
+    {id: 4, name: "Docs", goal: "g4", slug: "docs", dependsOn: [2],
+     creates: ["docs/y.md (the docs)"],
+     needs: ["account override applied inside the forge command surface (the override)"]}
+  ]' | "$CLI" roadmap-init --feature "$feature" >/dev/null
+}
+
+test_roadmap_amend_phase_partial_merge() {
+  echo ""
+  echo "=== roadmap-amend-phase: partial merge by key presence leaves every other field and phase untouched ==="
+
+  local feature="rm-amend-merge"
+  _roadmap_amend_fixture "$feature"
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+
+  local siblings_before meta_before phase2_before
+  siblings_before=$(jq -c '[.phases[] | select(.id != 2)]' "$roadmap_file")
+  meta_before=$(jq -c '{roadmapVersion, feature, createdAt, brainstormPath}' "$roadmap_file")
+  phase2_before=$(jq -c '.phases[] | select(.id == 2)' "$roadmap_file")
+
+  local output exit_code
+  output=$("$CLI" roadmap-amend-phase --feature "$feature" --phase 2 --goal "the corrected outcome" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-amend-phase merge: scalar --goal amend exits 0"
+  assert_eq '["goal"]' "$(printf '%s' "$output" | jq -c '.amended')" "roadmap-amend-phase merge: amended names exactly the field that changed"
+  assert_eq '[]' "$(printf '%s' "$output" | jq -c '.retargeted')" "roadmap-amend-phase merge: retargeted is empty without --retarget-needs"
+  assert_eq "2" "$(printf '%s' "$output" | jq -r '.phase')" "roadmap-amend-phase merge: output names the amended phase"
+
+  assert_eq "the corrected outcome" "$(jq -r '.phases[] | select(.id == 2) | .goal' "$roadmap_file")" \
+    "roadmap-amend-phase merge: goal replaced wholesale"
+
+  # Absent keys leave the stored value byte-for-byte alone.
+  assert_eq "$(printf '%s' "$phase2_before" | jq -c '{id, dir, slug, name, dependsOn, status, claim}')" \
+    "$(jq -c '.phases[] | select(.id == 2) | {id, dir, slug, name, dependsOn, status, claim}' "$roadmap_file")" \
+    "roadmap-amend-phase merge: id/dir/slug/name/dependsOn/status/claim byte-identical"
+  assert_eq "$(printf '%s' "$phase2_before" | jq -c '{creates, needs, areas, successCriteria, branch}')" \
+    "$(jq -c '.phases[] | select(.id == 2) | {creates, needs, areas, successCriteria, branch}' "$roadmap_file")" \
+    "roadmap-amend-phase merge: unamended contract fields byte-identical"
+
+  assert_eq "$siblings_before" "$(jq -c '[.phases[] | select(.id != 2)]' "$roadmap_file")" \
+    "roadmap-amend-phase merge: every other phase byte-identical"
+  assert_eq "$meta_before" "$(jq -c '{roadmapVersion, feature, createdAt, brainstormPath}' "$roadmap_file")" \
+    "roadmap-amend-phase merge: document metadata byte-identical"
+
+  # A second amend over a list field replaces it wholesale, not element-wise.
+  output=$(jq -n '{successCriteria: ["only this one"], areas: ["forge/**", "cli/**"]}' \
+    | "$CLI" roadmap-amend-phase --feature "$feature" --phase 2 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-amend-phase merge: stdin object amend exits 0"
+  assert_eq '["areas","successCriteria"]' "$(printf '%s' "$output" | jq -c '.amended')" \
+    "roadmap-amend-phase merge: amended lists both keys the payload carried"
+  assert_eq '["only this one"]' "$(jq -c '.phases[] | select(.id == 2) | .successCriteria' "$roadmap_file")" \
+    "roadmap-amend-phase merge: successCriteria replaced wholesale, not appended"
+  assert_eq "the corrected outcome" "$(jq -r '.phases[] | select(.id == 2) | .goal' "$roadmap_file")" \
+    "roadmap-amend-phase merge: the earlier goal amend survived the second amend"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_amend_phase_rejects_unamendable_keys() {
+  echo ""
+  echo "=== roadmap-amend-phase: six-key allowlist; status and claim name their owning verb ==="
+
+  local feature="rm-amend-keys"
+  _roadmap_amend_fixture "$feature"
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+  local before; before=$(cat "$roadmap_file")
+
+  local output exit_code
+  output=$(jq -n '{banana: "x"}' | "$CLI" roadmap-amend-phase --feature "$feature" --phase 2 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-amend-phase keys: unknown key exits 1"
+  assert_contains '"banana"' "$output" "roadmap-amend-phase keys: unknown key is named"
+  assert_contains "goal, successCriteria, creates, needs, areas, branch" "$output" \
+    "roadmap-amend-phase keys: error lists the six amendable fields"
+
+  output=$(jq -n '{status: "completed"}' | "$CLI" roadmap-amend-phase --feature "$feature" --phase 2 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-amend-phase keys: status key exits 1"
+  assert_contains "roadmap-set-status" "$output" "roadmap-amend-phase keys: status redirects to its owning verb"
+
+  output=$(jq -n '{claim: null}' | "$CLI" roadmap-amend-phase --feature "$feature" --phase 2 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-amend-phase keys: claim key exits 1"
+  assert_contains "roadmap-claim / roadmap-release-claim" "$output" \
+    "roadmap-amend-phase keys: claim redirects to its owning verbs"
+
+  local identity_key
+  for identity_key in id dir slug name dependsOn; do
+    output=$(jq -n --arg k "$identity_key" '{($k): "x"}' | "$CLI" roadmap-amend-phase --feature "$feature" --phase 2 2>&1) && exit_code=0 || exit_code=$?
+    assert_exit_code "1" "$exit_code" "roadmap-amend-phase keys: $identity_key key exits 1"
+    assert_contains "\"$identity_key\" is not amendable" "$output" "roadmap-amend-phase keys: $identity_key is rejected by name"
+  done
+
+  output=$(jq -n '{}' | "$CLI" roadmap-amend-phase --feature "$feature" --phase 2 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-amend-phase keys: empty amendment exits 1"
+  assert_contains "no field to change" "$output" "roadmap-amend-phase keys: empty amendment says so"
+
+  output=$(jq -n '[1, 2]' | "$CLI" roadmap-amend-phase --feature "$feature" --phase 2 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-amend-phase keys: non-object payload exits 1"
+  assert_contains "must be a JSON object" "$output" "roadmap-amend-phase keys: non-object payload names the requirement"
+
+  output=$(jq -n '{creates: "not-an-array"}' | "$CLI" roadmap-amend-phase --feature "$feature" --phase 2 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-amend-phase keys: creates as a scalar exits 1"
+  assert_contains "creates must be an array of strings" "$output" "roadmap-amend-phase keys: wrong type names the field"
+
+  assert_eq "$before" "$(cat "$roadmap_file")" "roadmap-amend-phase keys: every rejection left roadmap.json byte-for-byte unchanged"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_amend_phase_orphan_refusal() {
+  echo ""
+  echo "=== roadmap-amend-phase: refuses by default to orphan a downstream needs entry ==="
+
+  local feature="rm-amend-orphan"
+  _roadmap_amend_fixture "$feature"
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+  local before; before=$(cat "$roadmap_file")
+
+  # Rename the one identity phases 3 and 4 both cite verbatim.
+  local output exit_code
+  output=$(jq -n '{creates: ["account override applied in the forge command surface (the override)"]}' \
+    | "$CLI" roadmap-amend-phase --feature "$feature" --phase 2 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-amend-phase orphan: refused by default"
+  assert_contains "phase 3 needs" "$output" "roadmap-amend-phase orphan: names downstream phase 3"
+  assert_contains "phase 4 needs" "$output" "roadmap-amend-phase orphan: names downstream phase 4"
+  assert_contains "account override applied inside the forge command surface" "$output" \
+    "roadmap-amend-phase orphan: names the cited identity"
+  assert_contains "--retarget-needs" "$output" "roadmap-amend-phase orphan: prints the invocation that would authorize the fix"
+  assert_contains '--retarget-needs "account override applied inside the forge command surface=account override applied in the forge command surface"' \
+    "$output" "roadmap-amend-phase orphan: the suggested pairing is filled in on both sides"
+
+  assert_eq "$before" "$(cat "$roadmap_file")" "roadmap-amend-phase orphan: refusal left roadmap.json byte-for-byte unchanged"
+
+  # Dropping an identity nobody cites needs no pair at all: phase 4 creates
+  # "docs/y.md", which no phase's needs references.
+  output=$(jq -n '{creates: []}' | "$CLI" roadmap-amend-phase --feature "$feature" --phase 4 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-amend-phase orphan: dropping an uncited identity needs no pair"
+  assert_eq '[]' "$(jq -c '.phases[] | select(.id == 4) | .creates' "$roadmap_file")" \
+    "roadmap-amend-phase orphan: the uncited creates entry was actually removed"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_amend_phase_retarget_authorizes_rewrite() {
+  echo ""
+  echo "=== roadmap-amend-phase: --retarget-needs rewrites every consumer in the same locked write ==="
+
+  local feature="rm-amend-retarget"
+  _roadmap_amend_fixture "$feature"
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+
+  local old_ident="account override applied inside the forge command surface"
+  local new_ident="account override applied in the forge command surface"
+  local new_entry="$new_ident (the override)"
+
+  local output exit_code
+  output=$(jq -n --arg e "$new_entry" '{creates: [$e]}' \
+    | "$CLI" roadmap-amend-phase --feature "$feature" --phase 2 --retarget-needs "$old_ident=$new_ident" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-amend-phase retarget: authorized amend exits 0"
+  assert_eq "2" "$(printf '%s' "$output" | jq '.retargeted | length')" \
+    "roadmap-amend-phase retarget: both consumers reported in the result"
+  assert_eq "[3,4]" "$(printf '%s' "$output" | jq -c '[.retargeted[].phase]')" \
+    "roadmap-amend-phase retarget: result names phases 3 and 4"
+
+  # Provider and consumer stay byte-identical: identity PLUS its parenthetical.
+  assert_eq "[\"$new_entry\"]" "$(jq -c '.phases[] | select(.id == 3) | .needs' "$roadmap_file")" \
+    "roadmap-amend-phase retarget: phase 3 needs rewritten to the new creates entry verbatim"
+  assert_eq "[\"$new_entry\"]" "$(jq -c '.phases[] | select(.id == 4) | .needs' "$roadmap_file")" \
+    "roadmap-amend-phase retarget: phase 4 needs rewritten to the new creates entry verbatim"
+  assert_eq "[\"$new_entry\"]" "$(jq -c '.phases[] | select(.id == 2) | .creates' "$roadmap_file")" \
+    "roadmap-amend-phase retarget: the provider's creates carries the same string"
+
+  # Phase 1 has a needs entry that no pair mentions; it must not be touched, and
+  # a phase with no needs key must not gain one.
+  assert_eq '["forge/base.sh (the base adapter)"]' "$(jq -c '.phases[] | select(.id == 2) | .needs' "$roadmap_file")" \
+    "roadmap-amend-phase retarget: an unrelated needs entry on the amended phase is untouched"
+
+  # A pair that authorizes nothing is an error, not a silent no-op.
+  local before; before=$(cat "$roadmap_file")
+  output=$("$CLI" roadmap-amend-phase --feature "$feature" --phase 2 --goal "g" --retarget-needs "nothing at all=something else" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-amend-phase retarget: pair whose old identity is not dropped exits 1"
+  assert_contains "does not drop the creates identity" "$output" \
+    "roadmap-amend-phase retarget: the unusable pair is explained"
+  assert_eq "$before" "$(cat "$roadmap_file")" "roadmap-amend-phase retarget: the unusable pair changed nothing"
+
+  # Both sides of the pair are required.
+  output=$("$CLI" roadmap-amend-phase --feature "$feature" --phase 2 --goal "g" --retarget-needs "=x" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-amend-phase retarget: empty old side exits 1"
+  output=$("$CLI" roadmap-amend-phase --feature "$feature" --phase 2 --goal "g" --retarget-needs "nopair" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-amend-phase retarget: a pair with no \"=\" exits 1"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_amend_phase_identity_equality_not_substring() {
+  echo ""
+  echo "=== roadmap-amend-phase: identity match is exact equality, never substring containment ==="
+
+  local feature="rm-amend-substring"
+  rm -rf ".aimi/tasks/$feature"
+
+  # Phase 2 creates the SHORT identity; phase 3 needs a LONGER string that
+  # contains it. A substring rule would call this an orphan (and, worse, would
+  # rewrite phase 3's unrelated need); exact equality must not.
+  jq -n '[
+    {id: 1, name: "Base", goal: "g", slug: "base", dependsOn: []},
+    {id: 2, name: "Short", goal: "g", slug: "short", dependsOn: [1],
+     creates: ["account override (the short one)"], needs: []},
+    {id: 3, name: "Long", goal: "g", slug: "long", dependsOn: [2],
+     creates: [], needs: ["account override applied inside the forge command surface (the long one)"]}
+  ]' | "$CLI" roadmap-init --feature "$feature" >/dev/null
+
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+  local phase3_before; phase3_before=$(jq -c '.phases[] | select(.id == 3)' "$roadmap_file")
+
+  local output exit_code
+  output=$(jq -n '{creates: ["forge/renamed.sh (nothing like the old name)"]}' \
+    | "$CLI" roadmap-amend-phase --feature "$feature" --phase 2 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-amend-phase substring: a longer downstream identity is NOT a match for the dropped shorter one"
+  assert_eq "$phase3_before" "$(jq -c '.phases[] | select(.id == 3)' "$roadmap_file")" \
+    "roadmap-amend-phase substring: the longer downstream needs entry is left byte-for-byte alone"
+
+  # And the mirror: the amended phase drops a LONG identity while a downstream
+  # phase needs a SHORTER string contained in it -- also not a match.
+  rm -rf ".aimi/tasks/$feature"
+  jq -n '[
+    {id: 1, name: "Base", goal: "g", slug: "base", dependsOn: []},
+    {id: 2, name: "Long", goal: "g", slug: "long", dependsOn: [1],
+     creates: ["account override applied inside the forge command surface (the long one)"], needs: []},
+    {id: 3, name: "Short", goal: "g", slug: "short", dependsOn: [2],
+     creates: [], needs: ["account override (the short one)"]}
+  ]' | "$CLI" roadmap-init --feature "$feature" >/dev/null
+
+  phase3_before=$(jq -c '.phases[] | select(.id == 3)' "$roadmap_file")
+  output=$(jq -n '{creates: ["forge/renamed.sh (nothing like the old name)"]}' \
+    | "$CLI" roadmap-amend-phase --feature "$feature" --phase 2 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-amend-phase substring: a shorter downstream identity is NOT a match for the dropped longer one"
+  assert_eq "$phase3_before" "$(jq -c '.phases[] | select(.id == 3)' "$roadmap_file")" \
+    "roadmap-amend-phase substring: the shorter downstream needs entry is left byte-for-byte alone"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_amend_phase_reuses_init_gates() {
+  echo ""
+  echo "=== roadmap-amend-phase: amended values face roadmap-init's own identity, branch and sanitize gates ==="
+
+  local feature="rm-amend-gates"
+  _roadmap_amend_fixture "$feature"
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+  local before; before=$(cat "$roadmap_file")
+
+  local output exit_code
+
+  output=$(jq -n '{needs: ["/etc/passwd (absolute path)"]}' | "$CLI" roadmap-amend-phase --feature "$feature" --phase 3 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-amend-phase gates: leading-slash identity exits 1"
+  assert_contains 'begins with "/"' "$output" "roadmap-amend-phase gates: the identity guard's own reason is reported"
+  assert_contains "/etc/passwd (absolute path)" "$output" "roadmap-amend-phase gates: the offending entry is named"
+
+  output=$(jq -n '{needs: ["../outside/thing.ts (escapes the repo)"]}' | "$CLI" roadmap-amend-phase --feature "$feature" --phase 3 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-amend-phase gates: \"..\" path segment exits 1"
+  assert_contains 'contains a ".." path segment' "$output" "roadmap-amend-phase gates: the traversal reason is reported"
+
+  output=$("$CLI" roadmap-amend-phase --feature "$feature" --phase 3 --branch 'feat/x;rm -rf /' 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-amend-phase gates: branch failing the pattern exits 1"
+  assert_contains 'feat/x;rm -rf /' "$output" "roadmap-amend-phase gates: the rejected branch string is named"
+
+  assert_eq "$before" "$(cat "$roadmap_file")" "roadmap-amend-phase gates: every gate refused before any write"
+
+  # The decimal-phase bug this verb was added for: a phase created with a null
+  # branch has no other writer, and roadmap-init --sync will never revisit it.
+  assert_eq "null" "$(jq -r '.phases[] | select(.id == 3) | .branch' "$roadmap_file")" \
+    "roadmap-amend-phase gates: precondition -- phase 3's branch starts null"
+  output=$("$CLI" roadmap-amend-phase --feature "$feature" --phase 3 --branch 'feat/phase-3-1-hotfix' 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-amend-phase gates: a valid branch fills a null branch"
+  assert_eq "feat/phase-3-1-hotfix" "$(jq -r '.phases[] | select(.id == 3) | .branch' "$roadmap_file")" \
+    "roadmap-amend-phase gates: branch is written"
+
+  # Free text goes through _rm_sanitize at roadmap-init's caps before it lands.
+  local long_goal
+  long_goal=$(python3 -c "print('x' * 2500)" 2>/dev/null || printf 'x%.0s' $(seq 1 2500))
+  output=$(jq -n --arg g "$long_goal" '{goal: $g}' | "$CLI" roadmap-amend-phase --feature "$feature" --phase 3 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-amend-phase gates: over-long goal is capped, not rejected"
+  assert_eq "2000" "$(jq -r '.phases[] | select(.id == 3) | .goal | length' "$roadmap_file")" \
+    "roadmap-amend-phase gates: goal truncated at roadmap-init's 2000-char cap"
+
+  output=$(jq -n '{goal: "clean $(rm -rf /) `backticks` <script>x</script> tail"}' \
+    | "$CLI" roadmap-amend-phase --feature "$feature" --phase 3 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-amend-phase gates: injection-shaped goal is sanitized, not rejected"
+  local amended_goal
+  amended_goal=$(jq -r '.phases[] | select(.id == 3) | .goal' "$roadmap_file")
+  if [[ "$amended_goal" == *'$('* || "$amended_goal" == *'`'* || "$amended_goal" == *'<script>'* ]]; then
+    echo -e "${RED}✗${NC} roadmap-amend-phase gates: goal must have \$(, backticks and HTML tags stripped"
+    echo "  got: $amended_goal"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} roadmap-amend-phase gates: goal sanitized with the same regime roadmap-init uses"
+    ((TESTS_PASSED++))
+  fi
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_amend_phase_rejects_duplicate_creates() {
+  echo ""
+  echo "=== roadmap-amend-phase: refuses an amendment that would duplicate another phase's creates identity ==="
+
+  local feature="rm-amend-dup"
+  _roadmap_amend_fixture "$feature"
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+  local before; before=$(cat "$roadmap_file")
+
+  # Phase 1 already declares forge/base.sh. validate-contracts hard-fails on a
+  # duplicate outside --agent-mode and that halts /aimi:plan, so the write is
+  # refused rather than producing a roadmap its own consumer rejects.
+  local output exit_code
+  output=$(jq -n '{creates: ["forge/base.sh (a second, colliding declaration)"]}' \
+    | "$CLI" roadmap-amend-phase --feature "$feature" --phase 3 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-amend-phase duplicate: colliding creates identity exits 1"
+  assert_contains "phase 3 would declare" "$output" "roadmap-amend-phase duplicate: names the amended phase"
+  assert_contains "phase 1 already declares" "$output" "roadmap-amend-phase duplicate: names the other phase"
+  assert_contains "forge/base.sh" "$output" "roadmap-amend-phase duplicate: names the identity"
+  assert_eq "$before" "$(cat "$roadmap_file")" "roadmap-amend-phase duplicate: refused before any write"
+
+  # Re-declaring an identity the amended phase ALREADY owned is not a collision
+  # this amendment introduces, so it must still be writable.
+  output=$(jq -n '{creates: ["cli/x.sh (the cli, reworded)"], goal: "still fine"}' \
+    | "$CLI" roadmap-amend-phase --feature "$feature" --phase 3 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-amend-phase duplicate: re-stating the phase's own identity is not a collision"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_amend_phase_handoff_advisory_only() {
+  echo ""
+  echo "=== roadmap-amend-phase: a completed phase whose handoff.md omits a new identity only warns ==="
+
+  local feature="rm-amend-handoff"
+  rm -rf ".aimi/tasks/$feature"
+
+  # Reproduce the phase-1 repair that motivated this verb: a completed phase
+  # whose creates were authored as English prose.
+  jq -n '[{id: 1, name: "Prose", goal: "g", slug: "prose", dependsOn: [],
+           creates: ["a sentence describing the work (not an artifact identity)"], needs: []}]' \
+    | "$CLI" roadmap-init --feature "$feature" >/dev/null
+  "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status planned >/dev/null
+  "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status in_progress >/dev/null
+  jq -n '{artifacts: ["a sentence describing the work"]}' | "$CLI" roadmap-write-handoff --feature "$feature" --phase 1 >/dev/null
+  "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status completed >/dev/null
+
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+  assert_eq "completed" "$(jq -r '.phases[0].status' "$roadmap_file")" \
+    "roadmap-amend-phase handoff: precondition -- the phase is completed"
+
+  local output exit_code
+  output=$(jq -n '{creates: ["forge/real-artifact.sh (the file that was actually written)"]}' \
+    | "$CLI" roadmap-amend-phase --feature "$feature" --phase 1 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-amend-phase handoff: completed status does not gate the amend"
+  assert_contains "Advisory" "$output" "roadmap-amend-phase handoff: an advisory is emitted"
+  assert_contains "forge/real-artifact.sh" "$output" "roadmap-amend-phase handoff: the advisory names the identity"
+  assert_contains "phase 1" "$output" "roadmap-amend-phase handoff: the advisory names the phase"
+  assert_eq "1" "$(printf '%s' "$output" | grep -c '^Advisory:')" \
+    "roadmap-amend-phase handoff: exactly one advisory line"
+
+  assert_eq '["forge/real-artifact.sh (the file that was actually written)"]' \
+    "$(jq -c '.phases[0].creates' "$roadmap_file")" "roadmap-amend-phase handoff: the write was performed"
+  assert_eq "completed" "$(jq -r '.phases[0].status' "$roadmap_file")" \
+    "roadmap-amend-phase handoff: status is untouched in either direction"
+
+  # An identity the handoff DOES list draws no advisory.
+  output=$(jq -n '{creates: ["a sentence describing the work (restored)"]}' \
+    | "$CLI" roadmap-amend-phase --feature "$feature" --phase 1 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-amend-phase handoff: restoring a listed identity exits 0"
+  assert_eq "0" "$(printf '%s' "$output" | grep -c '^Advisory:')" \
+    "roadmap-amend-phase handoff: no advisory when handoff.md already lists the identity"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_amend_phase_concurrent_writes_stay_atomic() {
+  echo ""
+  echo "=== roadmap-amend-phase: concurrent amends serialize under the roadmap lock, losing no update ==="
+
+  local feature="rm-amend-concurrent"
+  rm -rf ".aimi/tasks/$feature"
+
+  jq -n '[
+    {id: 1, name: "P1", goal: "g", slug: "p1", dependsOn: []},
+    {id: 2, name: "P2", goal: "g", slug: "p2", dependsOn: []},
+    {id: 3, name: "P3", goal: "g", slug: "p3", dependsOn: []},
+    {id: 4, name: "P4", goal: "g", slug: "p4", dependsOn: []},
+    {id: 5, name: "P5", goal: "g", slug: "p5", dependsOn: []},
+    {id: 6, name: "P6", goal: "g", slug: "p6", dependsOn: []}
+  ]' | "$CLI" roadmap-init --feature "$feature" >/dev/null
+
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+
+  # Six writers, one per phase, all in flight at once. A read-modify-write
+  # without the lock loses whichever updates were computed from a stale read.
+  local i
+  for i in 1 2 3 4 5 6; do
+    ( "$CLI" roadmap-amend-phase --feature "$feature" --phase "$i" --goal "goal-from-writer-$i" >/dev/null 2>&1 ) &
+  done
+  wait
+
+  if jq -e . "$roadmap_file" >/dev/null 2>&1; then
+    echo -e "${GREEN}✓${NC} roadmap-amend-phase concurrency: roadmap.json is still valid JSON after 6 concurrent writers"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} roadmap-amend-phase concurrency: roadmap.json is corrupt after 6 concurrent writers"
+    ((TESTS_FAILED++))
+    rm -rf ".aimi/tasks/$feature"
+    return
+  fi
+
+  assert_eq "[1,2,3,4,5,6]" "$(jq -c '[.phases[].id]' "$roadmap_file")" \
+    "roadmap-amend-phase concurrency: every phase survived"
+  assert_eq '["goal-from-writer-1","goal-from-writer-2","goal-from-writer-3","goal-from-writer-4","goal-from-writer-5","goal-from-writer-6"]' \
+    "$(jq -c '[.phases[].goal]' "$roadmap_file")" \
+    "roadmap-amend-phase concurrency: no update was lost to a stale read"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
 test_roadmap_decimal_sort() {
   echo ""
   echo "=== roadmap-get: numeric (not lexicographic) sort of decimal phase ids ==="
@@ -21367,6 +21807,15 @@ main() {
   test_roadmap_init_sync_ignores_legacy_identities
   test_roadmap_init_accepts_documented_identity_kinds
   test_roadmap_init_sanitizes_fields
+  test_roadmap_amend_phase_partial_merge
+  test_roadmap_amend_phase_rejects_unamendable_keys
+  test_roadmap_amend_phase_orphan_refusal
+  test_roadmap_amend_phase_retarget_authorizes_rewrite
+  test_roadmap_amend_phase_identity_equality_not_substring
+  test_roadmap_amend_phase_reuses_init_gates
+  test_roadmap_amend_phase_rejects_duplicate_creates
+  test_roadmap_amend_phase_handoff_advisory_only
+  test_roadmap_amend_phase_concurrent_writes_stay_atomic
   test_roadmap_decimal_sort
   test_roadmap_claim_dependency_not_done
   test_roadmap_claim_stale_release
