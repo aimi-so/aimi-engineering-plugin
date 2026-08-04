@@ -878,7 +878,7 @@ install_permissions() {
   local perms_json
   perms_json=$(cat <<PERMS
 {
-  "permissions": {
+  "permission": {
     "bash": {
       "git *": "allow",
       "$aimi_cli": "allow",
@@ -905,7 +905,7 @@ PERMS
     if command -v jq >/dev/null 2>&1; then
       local tmp
       tmp=$(mktemp)
-      jq --argjson perms "$perms_json" '.permissions = ((.permissions // {}) * $perms.permissions)' "$config_file" > "$tmp" && mv "$tmp" "$config_file"
+      jq --argjson perms "$perms_json" '.permission = ((.permission // {}) * $perms.permission)' "$config_file" > "$tmp" && mv "$tmp" "$config_file"
     elif command -v python3 >/dev/null 2>&1; then
       python3 -c "
 import json, sys
@@ -916,10 +916,10 @@ with open('$config_file') as f:
     try: cfg = json.load(f)
     except: cfg = {}
 
-existing = cfg.get('permissions', {})
-for section, rules in perms['permissions'].items():
+existing = cfg.get('permission', {})
+for section, rules in perms['permission'].items():
     existing.setdefault(section, {}).update(rules)
-cfg['permissions'] = existing
+cfg['permission'] = existing
 
 with open('$config_file', 'w') as f:
     json.dump(cfg, f, indent=2)
@@ -1172,18 +1172,18 @@ with open('$config_file', 'w') as f:
   fi
 
   # Remove permissions from opencode.json
-  if [ -f "$config_file" ] && grep -q '"permissions"' "$config_file" 2>/dev/null; then
+  if [ -f "$config_file" ] && grep -q '"permission"' "$config_file" 2>/dev/null; then
     if command -v jq >/dev/null 2>&1; then
       local tmp
       tmp=$(mktemp)
-      jq 'del(.permissions)' "$config_file" > "$tmp" && mv "$tmp" "$config_file"
+      jq 'del(.permission)' "$config_file" > "$tmp" && mv "$tmp" "$config_file"
       ok "Removed permissions from $config_file"
     elif command -v python3 >/dev/null 2>&1; then
       python3 -c "
 import json
 with open('$config_file') as f:
     cfg = json.load(f)
-cfg.pop('permissions', None)
+cfg.pop('permission', None)
 with open('$config_file', 'w') as f:
     json.dump(cfg, f, indent=2)
     f.write('\n')
