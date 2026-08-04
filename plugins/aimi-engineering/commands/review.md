@@ -31,10 +31,78 @@ Use `$DEFAULT_BRANCH` in all subsequent git diff commands instead of a hardcoded
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 ```
 
+### Resolve $AIMI_CLI
+
+Unconditional — every item below (PR number, GitHub URL, and the Setup section's changed-files lookup) needs `$AIMI_CLI` regardless of which target type is detected, not only the empty-argument path. Resolve the CLI path using the four-layer strategy. Each check is a separate Bash call (no compound operators).
+
+**Layer 0: AIMI_PLUGIN_DIR (env var override)**
+
+```bash
+if [ -z "${CLAUDECODE:-}" ] && [ -n "$AIMI_PLUGIN_DIR" ] && [ "${AIMI_PLUGIN_DIR#/}" != "$AIMI_PLUGIN_DIR" ] && [ -d "$AIMI_PLUGIN_DIR" ] && [ -x "$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh" ]; then AIMI_CLI="$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh"; fi
+```
+
+**Layer 1: Global cache (fast path)**
+
+```bash
+if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null); fi
+```
+
+**Layer 1 validation: verify cached path exists and is executable**
+
+```bash
+if [ -n "$AIMI_CLI" ] && [ ! -x "$AIMI_CLI" ]; then AIMI_CLI=""; fi
+```
+
+**Layer 2: Glob fallback (zsh-safe)**
+
+```bash
+if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1'); fi
+```
+
+**Layer 2 cache update: save for next time**
+
+```bash
+if [ -n "$AIMI_CLI" ]; then _aimi_cfg="${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}"; mkdir -p "$_aimi_cfg" && printf '%s\n' "$AIMI_CLI" > "$_aimi_cfg/cli-path.tmp" && mv "$_aimi_cfg/cli-path.tmp" "$_aimi_cfg/cli-path" && chmod 600 "$_aimi_cfg/cli-path"; fi
+```
+
+**Layer 3: Per-project fallback (last resort)**
+
+```bash
+if [ -z "$AIMI_CLI" ] && [ -f .aimi/cli-path ] && [ -x "$(cat .aimi/cli-path)" ]; then AIMI_CLI=$(cat .aimi/cli-path); fi
+```
+
+If `$AIMI_CLI` is still empty after all layers, report the error and STOP:
+- If `$AIMI_PLUGIN_DIR` is set: "aimi-cli.sh not found. Check AIMI_PLUGIN_DIR path: $AIMI_PLUGIN_DIR"
+- Otherwise: "aimi-cli.sh not found. Reinstall plugin: `/plugin install aimi-engineering`"
+
+**Run version check:**
+
+```bash
+$AIMI_CLI check-version --quiet --fix
+```
+
 ### Detect Target Type
 
-1. **PR number** (numeric): Fetch PR with `gh pr view $ARGUMENTS --json title,body,files,headRefName,baseRefName`
-2. **GitHub URL**: Extract PR number, then fetch as above
+1. **PR number** (numeric): Fetch PR with `forge-pr-view` (`--include` is a comma-separated field selector — see `commands/references/forge-contract.md`; `files` is dropped here since nothing at this step consumes it). Runs in `forge-pr-view`'s built-in quiet degrade mode, so a missing/unauthenticated `gh` yields `status: "error"` with no stderr banner — the git-diff fallback documented in Error Handling below is what actually surfaces that to the user:
+
+   `$ARGUMENTS` is validated as digits-only **in the same block that interpolates it**, never in a block of its own — each fenced block runs in its own isolated shell, so a gate placed in an earlier block cannot stop this one: its `exit 1` ends only that shell. The `case` form is deliberate rather than the `grep -qE` used for branch names in item 3: `grep` matches line by line, so it would accept a multi-line value whose *first* line is digits, while `case` tests the whole string and rejects any non-digit character, newlines included.
+
+   ```bash
+   AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+   : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+   case "$ARGUMENTS" in
+     ''|*[!0-9]*)
+       echo "Error: Invalid PR number: $ARGUMENTS" >&2
+       exit 1
+       ;;
+   esac
+   PR_JSON=$($AIMI_CLI forge-pr-view --pr "$ARGUMENTS" --include title,body,headRefName,baseRefName)
+   ```
+
+   This gate is defense-in-depth, not the only line of defense — `forge-pr-view` validates its own `--pr` value against a fixed regex before it reaches any `gh` command, which is what covers a value crafted to break out of the quoting in the gate line itself.
+
+   Branch on `PR_JSON`'s `status` field (`found` | `not_found` | `error` — forge-contract.md's Three-Way Status Convention): on `found`, read `.pr.title`/`.pr.body`/`.pr.headRefName`/`.pr.baseRefName`; on `not_found` or `error`, fall through to the git-diff comparison the same way a missing `gh` does (see Error Handling below).
+2. **GitHub URL**: Extract the PR number from the URL, assign that extracted number into `$ARGUMENTS`, then run item 1's block **unchanged** — the same validation gate and the same `forge-pr-view` call. Do NOT write a second, parallel `forge-pr-view` invocation for this case: item 1's block is the single gated path to that command, and re-entering it is what makes the URL case inherit the digits-only check instead of skipping it.
 3. **Branch name**: Validate `$ARGUMENTS` against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` before it is ever interpolated into a git command — the same check Case B step 4 below applies to `$CANDIDATE_BRANCH`:
 
    ```bash
@@ -96,7 +164,10 @@ Track whether `$REVIEW_BRANCH` was resolved from the tasks file (i.e. `$REVIEW_B
 
 ```bash
 # Get changed files
-gh pr view [number] --json files --jq '.files[].path'
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+PR_FILES_JSON=$($AIMI_CLI forge-pr-view --pr [number] --include files)
+echo "$PR_FILES_JSON" | jq -r '.pr.files[].path'
 # OR for branch comparison (REVIEW_BRANCH is $ARGUMENTS for the explicit
 # branch-name path in item 3 above, or the value resolved by "Resolve Review
 # Branch (Empty Argument)" when no argument was given):
@@ -323,5 +394,5 @@ For each finding: Small (< 30 min), Medium (30 min - 2 hours), Large (> 2 hours)
 | No review target found | Ask user to specify PR number or branch |
 | Agent fails | Proceed with available results, note in report |
 | No changed files | Report "No changes to review" |
-| gh CLI not installed | Fall back to git diff for branch comparison |
+| `forge-pr-view` reports `status: "error"` (e.g. gh CLI not installed) | Fall back to git diff for branch comparison |
 | Empty arguments, HEAD on `$DEFAULT_BRANCH` (or detached), no active tasks file discoverable (or its `branchName` is missing/invalid) | Fall back to `$CURRENT_BRANCH`; warn "nothing to review" (see Resolve Review Branch (Empty Argument)) |

@@ -1561,6 +1561,42 @@ cmd_get_state() {
     }'
 }
 
+# Shared `--project`/git-repository entry guard. Fourteen commands each
+# carried a byte-identical copy of this block before it was extracted here:
+# cd into the requested project directory when one was given (multi-repo
+# layouts, where the AIMI root is not itself a git repo), then require the
+# resulting working directory to be a git repository. Exits 1 with the
+# unchanged wording on either failure.
+#
+# An empty argument means "use the invoking CWD" -- which is exactly what an
+# omitted --project already resolved to, so no caller needs to special-case it.
+# The `cd` intentionally escapes into the caller (a function's cd is not
+# scoped), because that is what the fourteen inline copies did.
+#
+# Deliberately NOT named _forge_*: ten of the fourteen callers are forge verbs,
+# but cmd_detect_default_branch, cmd_detect_parent_branch, cmd_setup_branch and
+# cmd_resolve_base_branch share this guard by behaviour, not by domain. A forge
+# prefix would misdescribe a quarter of its own callers, so the name follows
+# this file's other domain-neutral private helpers (_local_has_branch,
+# _is_merged_into_default, _is_pid_alive).
+#
+# Usage: _require_git_repo "$project_dir"
+_require_git_repo() {
+  local project_dir="$1"
+  if [ -n "$project_dir" ]; then
+    if [ ! -d "$project_dir" ]; then
+      echo "Error: Project directory does not exist: $project_dir" >&2
+      exit 1
+    fi
+    cd "$project_dir"
+  fi
+
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
+    exit 1
+  fi
+}
+
 # Derive a filesystem-safe cache-key suffix for a repository toplevel path,
 # so _resolve_default_branch's cache is scoped per repository instead of a
 # single shared file under AIMI_ROOT/.aimi/ (which silently leaked one
@@ -1643,22 +1679,366 @@ cmd_detect_default_branch() {
     shift
   done
 
-  # cd into project dir if specified (supports multi-repo layouts where AIMI root is not a git repo)
-  if [ -n "$project_dir" ]; then
-    if [ ! -d "$project_dir" ]; then
-      echo "Error: Project directory does not exist: $project_dir" >&2
-      exit 1
-    fi
-    cd "$project_dir"
-  fi
-
-  # Guard: must be inside a git repository
-  if ! git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
-    exit 1
-  fi
+  _require_git_repo "$project_dir"
 
   _resolve_default_branch
+}
+
+# ============================================================================
+# Forge Detection (detect-forge)
+# ============================================================================
+# FOUNDATIONAL CONTRACT for every forge-* verb in this phase: the output
+# shape {forge, host, remote, remoteUrl, source} is consumed verbatim
+# downstream and must not be re-derived. See cmd_help's detect-forge entry
+# and this story's acceptance criteria for the full contract.
+
+# Parse a git remote URL's hostname: lowercased, no port, no userinfo, no
+# path. Handles three shapes: an explicit ssh://[user[:pass]@]host[:port]/path
+# or https://[user[:pass]@]host[:port]/path (strip scheme, then strip
+# userinfo up to the LAST "@" within the authority only -- never inside the
+# path -- then split a trailing :<digits> port off the authority), and git's
+# scp-like [user@]host:path form (no "://" present -- the substring up to the
+# FIRST ":" is the host, everything after it is PATH, never a port; this is
+# the exact ambiguity an alternate-port ssh://...:2222/... URL must not
+# collide with). Prints empty on an unparseable string.
+_detect_forge_parse_host() {
+  local url host authority rest
+  url=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  host=""
+
+  if [[ "$url" == *"://"* ]]; then
+    rest="${url#*://}"
+    authority="${rest%%/*}"
+    if [[ "$authority" == *"@"* ]]; then
+      authority="${authority##*@}"
+    fi
+    if [[ "$authority" =~ ^(.+):([0-9]+)$ ]]; then
+      host="${BASH_REMATCH[1]}"
+    else
+      host="$authority"
+    fi
+  elif [[ "$url" == *":"* ]]; then
+    rest="$url"
+    if [[ "$rest" == *"@"* ]]; then
+      rest="${rest##*@}"
+    fi
+    host="${rest%%:*}"
+  fi
+
+  printf '%s' "$host"
+}
+
+# Exact-or-subdomain classification of a lowercase hostname against the fixed
+# known-forge host list, first match wins: github.com -> github; gitlab.com
+# -> gitlab; gitea.com, codeberg.org -> gitea. Gitea's own SaaS host and
+# codeberg.org (the largest public Forgejo instance) are both recognized
+# under the single "gitea" adapter, since Forgejo is a compatibility-
+# preserving fork of Gitea and the two are deliberately NOT distinguished
+# anywhere in this contract. Any other host -- including a GitHub Enterprise
+# Server host on a company-owned domain -- prints "unknown"; never guesses.
+_detect_forge_classify_host() {
+  local host="$1"
+  case "$host" in
+    github.com|*.github.com) printf 'github' ;;
+    gitlab.com|*.gitlab.com) printf 'gitlab' ;;
+    gitea.com|*.gitea.com|codeberg.org|*.codeberg.org) printf 'gitea' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# Implements the remote-precedence rule using only local reads -- `git
+# remote` to list configured remote names, `git remote get-url <name>` to
+# read a URL -- never `git remote show`, which dials the remote over the
+# network (the same lesson _resolve_default_branch already paid for; see its
+# "requires network" comment above). Precedence: an `origin` remote always
+# wins outright, even when it disagrees with every other configured remote;
+# else exactly one remote (any name) wins; else zero remotes is a distinct
+# outcome ("no-remote") from two-or-more disagreeing remotes ("ambiguous-
+# remotes", forge always unknown) -- never resolved by picking `git remote`'s
+# listing order. Emits {remote, remoteUrl, source} as three plain-text lines
+# -- remote name, source, remote URL, in that order -- and spawns no jq
+# process to move them, so _detect_forge_type below can reach this
+# precedence rule for free. The URL is deliberately LAST: a pathological
+# remote URL carrying an embedded newline can then only truncate itself,
+# never shift the two fields classification actually branches on.
+#
+# This is the single implementation of the precedence rule.
+# _detect_forge_select_remote below is a thin JSON-wrapping shim over it, so
+# the jq-free and JSON-emitting paths can never drift into two subtly
+# different answers to the same question.
+_detect_forge_select_remote_raw() {
+  local remotes remote_count remote_name="" remote_url="" source=""
+  remotes=$(git remote 2>/dev/null) || remotes=""
+
+  if [ -n "$remotes" ] && printf '%s\n' "$remotes" | grep -qx "origin"; then
+    remote_name="origin"
+    remote_url=$(git remote get-url origin 2>/dev/null) || remote_url=""
+    source="remote"
+  else
+    remote_count=0
+    if [ -n "$remotes" ]; then
+      remote_count=$(printf '%s\n' "$remotes" | wc -l | tr -d ' ')
+    fi
+    if [ "$remote_count" -eq 0 ]; then
+      source="no-remote"
+    elif [ "$remote_count" -eq 1 ]; then
+      remote_name="$remotes"
+      remote_url=$(git remote get-url "$remote_name" 2>/dev/null) || remote_url=""
+      source="remote"
+    else
+      source="ambiguous-remotes"
+    fi
+  fi
+
+  printf '%s\n%s\n%s\n' "$remote_name" "$source" "$remote_url"
+}
+
+# Reads _detect_forge_select_remote_raw's three lines back into three
+# caller-named variables. A plain `IFS= read` loop rather than `$(...)` plus
+# parameter expansion, because command substitution strips trailing
+# newlines: an empty remote URL would collapse "third line, empty" into "no
+# third line at all" and slide `source` into the URL slot.
+#
+# Internals are _dsr_-prefixed so a caller's own remote/source/url locals can
+# never shadow the name-reference targets -- the same collision
+# _forge_capture's _fc_ prefixes exist to prevent.
+# Usage: _detect_forge_read_selection <name_var> <source_var> <url_var>
+_detect_forge_read_selection() {
+  local -n _dsr_name="$1" _dsr_source="$2" _dsr_url="$3"
+  _dsr_name=""
+  _dsr_source=""
+  _dsr_url=""
+
+  local _dsr_line _dsr_i=0
+  while IFS= read -r _dsr_line; do
+    case "$_dsr_i" in
+      0) _dsr_name="$_dsr_line" ;;
+      1) _dsr_source="$_dsr_line" ;;
+      2) _dsr_url="$_dsr_line" ;;
+    esac
+    _dsr_i=$((_dsr_i + 1))
+  done < <(_detect_forge_select_remote_raw)
+}
+
+# Unchanged public contract: the {remote, remoteUrl, source} JSON object
+# _detect_forge already consumes, byte-identical to what this function
+# emitted before it was split. All it does now is wrap the raw helper's
+# three values -- the precedence logic itself lives there.
+_detect_forge_select_remote() {
+  local remote_name remote_url source
+  _detect_forge_read_selection remote_name source remote_url
+
+  jq -nc \
+    --arg remote "$remote_name" \
+    --arg remoteUrl "$remote_url" \
+    --arg source "$source" \
+    '{remote: (if $remote == "" then null else $remote end),
+      remoteUrl: (if $remoteUrl == "" then null else $remoteUrl end),
+      source: $source}'
+}
+
+# Strips embedded userinfo credentials (user:pass@ or user@) from an http(s)
+# remote URL's authority before it is echoed back in detect-forge's JSON
+# output -- a secret must never round-trip through CLI stdout/logs. No-op on
+# any other scheme (in particular ssh://, whose leading "user@" is a literal
+# SSH login user such as "git@", never a credential -- the same reason git's
+# scp-like [user@]host:path form is left untouched below) and on a URL
+# carrying no userinfo at all.
+_detect_forge_redact_userinfo() {
+  local url="$1" scheme scheme_lc rest authority path
+  if [[ "$url" != *"://"* ]]; then
+    printf '%s' "$url"
+    return 0
+  fi
+
+  scheme="${url%%://*}"
+  # URL schemes are case-insensitive (RFC 3986 s3.1), so match on a lowered
+  # copy -- an "HTTPS://" remote must be redacted exactly like "https://".
+  # $scheme itself keeps its original case for the printf below, so
+  # redaction never silently rewrites the caller's URL beyond the credential
+  # it was asked to strip.
+  scheme_lc=$(printf '%s' "$scheme" | tr 'A-Z' 'a-z')
+  case "$scheme_lc" in
+    http|https) ;;
+    *)
+      printf '%s' "$url"
+      return 0
+      ;;
+  esac
+
+  rest="${url#*://}"
+  if [[ "$rest" == *"/"* ]]; then
+    authority="${rest%%/*}"
+    path="/${rest#*/}"
+  else
+    authority="$rest"
+    path=""
+  fi
+
+  if [[ "$authority" == *"@"* ]]; then
+    authority="${authority##*@}"
+  fi
+
+  printf '%s://%s%s' "$scheme" "$authority" "$path"
+}
+
+# Composes the final {forge, host, remote, remoteUrl, source} object.
+# AIMI_FORGE_TYPE (already validated by the caller, cmd_detect_forge) short-
+# circuits before any git command runs at all when set and non-empty --
+# source=override, host/remote/remoteUrl all null. Otherwise selects a
+# remote per _detect_forge_select_remote; only when that selection actually
+# chose a URL (source=="remote") does it classify the host and redact
+# embedded userinfo before echoing the URL back. detect-forge is per-
+# repository and is NEVER cached via read_state/write_state -- a multi-repo
+# AIMI_ROOT can legitimately mix a GitHub repo and a self-hosted GitLab repo
+# under sibling --project calls, and any cache would go stale the moment a
+# remote is repointed.
+_detect_forge() {
+  if [ -n "${AIMI_FORGE_TYPE:-}" ]; then
+    jq -nc --arg forge "$AIMI_FORGE_TYPE" \
+      '{forge: $forge, host: null, remote: null, remoteUrl: null, source: "override"}'
+    return 0
+  fi
+
+  local selection remote remote_url source forge="unknown" host=""
+  selection=$(_detect_forge_select_remote)
+  remote=$(printf '%s' "$selection" | jq -r '.remote // ""')
+  remote_url=$(printf '%s' "$selection" | jq -r '.remoteUrl // ""')
+  source=$(printf '%s' "$selection" | jq -r '.source')
+
+  if [ "$source" = "remote" ] && [ -n "$remote_url" ]; then
+    host=$(_detect_forge_parse_host "$remote_url")
+    forge=$(_detect_forge_classify_host "$host")
+    remote_url=$(_detect_forge_redact_userinfo "$remote_url")
+  fi
+
+  jq -nc \
+    --arg forge "$forge" \
+    --arg host "$host" \
+    --arg remote "$remote" \
+    --arg remoteUrl "$remote_url" \
+    --arg source "$source" \
+    '{forge: $forge,
+      host: (if $host == "" then null else $host end),
+      remote: (if $remote == "" then null else $remote end),
+      remoteUrl: (if $remoteUrl == "" then null else $remoteUrl end),
+      source: $source}'
+}
+
+# Per-process memo behind _detect_forge_type, keyed on the working directory
+# each answer was derived in.
+#
+# KEYED, NOT GLOBAL, AND THAT DISTINCTION IS THE WHOLE POINT: a multi-repo
+# AIMI_ROOT is a plain non-git parent holding one git repository per
+# subfolder (see CLAUDE.md's Multi-Repo Execution Layout), and those
+# siblings can legitimately be a GitHub repo and a GitLab repo. One process
+# visiting both must get two answers. A single-slot cache would degrade into
+# "whichever repository was classified most recently" and silently report
+# github for the gitlab sibling -- the exact leak _detect_forge's own
+# "NEVER cached" header comment exists to prevent, reintroduced by the back
+# door. That comment is about a PERSISTED cache (read_state/write_state,
+# which survives a repointed remote); this memo lives and dies with one
+# invocation and is never written to disk.
+declare -gA _DETECT_FORGE_TYPE_MEMO
+
+# The forge word alone -- github|gitlab|gitea|unknown -- for the callers
+# that need only that and threw the rest of _detect_forge's envelope away.
+# No JSON is built or parsed anywhere on this path: it reaches the same
+# precedence rule through _detect_forge_select_remote_raw and the
+# already-pure-bash _detect_forge_parse_host/_detect_forge_classify_host, so
+# a derivation costs the two `git remote` reads and nothing else.
+#
+# WHO DOES *NOT* USE THIS, AND WHY: _forge_repo_info and _forge_auth_status
+# read `host`/`remoteUrl` out of the envelope, and so -- since US-004 grew
+# the shared failure classifier -- do _forge_issue_view,
+# _forge_pr_review_threads and _forge_resolve_review_thread, each of which
+# now hands `host` to _forge_classify_gh_failure_reason. This function
+# carries no host, so all five deliberately keep their full _detect_forge
+# call. Widening the memo to the whole envelope would serve them too and is
+# a reasonable follow-up, but it is a different change from this one.
+#
+# OUT-PARAMETER, NOT STDOUT, AND THAT IS LOAD-BEARING: a printed answer
+# forces every call site into `forge=$(_detect_forge_type)`, whose command
+# substitution forks a subshell -- and a memo populated inside a subshell
+# dies with it, leaving every call site a full derivation again. Writing
+# through a name reference keeps the memo in the ONE process that will reuse
+# it. Subshells forked later (`existing=$(cmd_forge_pr_view ...)` inside
+# _forge_pr_create) inherit the populated array and read it as a hit, which
+# is what collapses a create-a-new-PR run from three derivations to one.
+#
+# AIMI_FORGE_TYPE short-circuits before the memo as well as before any git
+# command: it is already a zero-cost stateless read, and it is deliberately
+# NOT validated here, mirroring _detect_forge's own override precedent above
+# (cmd_detect_forge validates it once, and internal callers already trust
+# the value unvalidated through _detect_forge).
+#
+# Internals are _dft_-prefixed so a caller's own `forge` local can never
+# shadow the name-reference target.
+# Usage: _detect_forge_type <forge_var>
+_detect_forge_type() {
+  local -n _dft_out="$1"
+
+  if [ -n "${AIMI_FORGE_TYPE:-}" ]; then
+    _dft_out="$AIMI_FORGE_TYPE"
+    return 0
+  fi
+
+  # $PWD, deliberately, rather than a subshelled `pwd -P`: every cmd_forge_*
+  # wrapper's --project handling cd's into its final working directory
+  # exactly once, before any forge derivation runs, so $PWD is stable and
+  # correct for the whole remaining lifetime of the invocation at zero fork
+  # cost.
+  local _dft_key="$PWD"
+  if [ -n "${_DETECT_FORGE_TYPE_MEMO[$_dft_key]+set}" ]; then
+    _dft_out="${_DETECT_FORGE_TYPE_MEMO[$_dft_key]}"
+    return 0
+  fi
+
+  local _dft_name _dft_source _dft_url _dft_forge="unknown"
+  _detect_forge_read_selection _dft_name _dft_source _dft_url
+
+  if [ "$_dft_source" = "remote" ] && [ -n "$_dft_url" ]; then
+    _dft_forge=$(_detect_forge_classify_host "$(_detect_forge_parse_host "$_dft_url")")
+  fi
+
+  _DETECT_FORGE_TYPE_MEMO["$_dft_key"]="$_dft_forge"
+  _dft_out="$_dft_forge"
+}
+
+# Detect the forge (github|gitlab|gitea|unknown) for the active git remote.
+# AIMI_FORGE_TYPE overrides detection entirely and must be one of
+# github|gitlab|gitea, validated here -- before _detect_forge ever runs --
+# so an invalid value never reaches a git command. Never cached (see
+# _detect_forge's header comment: per-repository, per-invocation).
+cmd_detect_forge() {
+  check_jq
+
+  local project_dir=""
+
+  # Parse --project flag
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project)
+        shift
+        project_dir="${1:-}"
+        ;;
+    esac
+    shift
+  done
+
+  _require_git_repo "$project_dir"
+
+  if [ -n "${AIMI_FORGE_TYPE:-}" ]; then
+    case "$AIMI_FORGE_TYPE" in
+      github|gitlab|gitea) ;;
+      *)
+        echo "Error: detect-forge: unrecognized AIMI_FORGE_TYPE value: $AIMI_FORGE_TYPE (expected one of: github, gitlab, gitea)" >&2
+        exit 1
+        ;;
+    esac
+  fi
+
+  _detect_forge
 }
 
 # Normalize a single %D decoration token for parent-branch detection.
@@ -1810,20 +2190,7 @@ cmd_detect_parent_branch() {
     exit 1
   fi
 
-  # cd into project dir if specified (supports multi-repo layouts where AIMI root is not a git repo)
-  if [ -n "$project_dir" ]; then
-    if [ ! -d "$project_dir" ]; then
-      echo "Error: Project directory does not exist: $project_dir" >&2
-      exit 1
-    fi
-    cd "$project_dir"
-  fi
-
-  # Guard: must be inside a git repository
-  if ! git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
-    exit 1
-  fi
+  _require_git_repo "$project_dir"
 
   # Validate branch name (security) — before any git command uses it
   if ! [[ "$branch" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
@@ -1850,6 +2217,2390 @@ cmd_detect_parent_branch() {
     --argjson verified "$verified" \
     --arg source "$source" \
     '{branch: $branch, base: $base, verified: $verified, source: $source}'
+}
+
+# ============================================================================
+# Forge Contract — shared builders and degradation helper (US-002)
+# ============================================================================
+# This section delivers two artifacts this phase's roadmap declares under
+# creates[], each named here verbatim on its own line so a text search finds
+# the identity intact rather than split across a wrapped comment:
+#
+# normalized PR and issue field contract
+#
+# forge degradation contract (missing adapter or missing CLI prints a manual instruction)
+#
+# Full documentation, including the state-mapping table, capability-gated
+# field tables, the review/approval envelope rationale, the three-way status
+# convention, and the credential/identity model, lives in
+# commands/references/forge-contract.md — this section implements exactly
+# what that document specifies, nothing more.
+#
+# forge-contract.md is the SINGLE ARBITER of the vocabulary below. No later
+# forge-* verb may introduce a variant field-name casing (e.g. camelCase
+# unsupportedFields) or a second degradation signal (e.g. a degradedReason
+# field alongside status) — see that file's opening section for the full
+# statement.
+#
+# This section introduces NO gh/glab/tea invocation, no git-remote parsing,
+# and no forge-pr-view/forge-auth-status/forge-repo-info verb body. Those
+# belong to later stories in this phase, which call the functions below
+# rather than re-deriving the shapes they build.
+
+# Shared jq -nc builder for the normalized PR object (forge-contract.md
+# "Normalized PR Field Set"). Portable-core fields (--number, --url,
+# --title, --body, --state, --head-ref-name, --base-ref-name) are always
+# accepted and null when empty. Capability-gated fields (--files, a JSON
+# array; --is-draft, JSON true/false; --mergeable, a raw string — never
+# forced to boolean, since GitLab's detailed_merge_status is a 16-value
+# enum) are tracked by FLAG PRESENCE, not by value: omitting the flag is
+# what marks a field unsupported, regardless of what value would otherwise
+# have been passed. Every omitted capability-gated field comes back null
+# AND its name is appended to unsupported_fields — never a bare, unmarked
+# null. --raw carries the untouched forge-native object alongside the
+# normalized shape (JSON object/array/literal, defaults to null).
+_forge_build_pr_json() {
+  local number="" url="" title="" body="" state="" head_ref="" base_ref=""
+  local files_json="null" is_draft_json="null" mergeable="" raw="null"
+  local files_set=false is_draft_set=false mergeable_set=false
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --number)         shift; number="${1:-}" ;;
+      --url)            shift; url="${1:-}" ;;
+      --title)          shift; title="${1:-}" ;;
+      --body)           shift; body="${1:-}" ;;
+      --state)          shift; state="${1:-}" ;;
+      --head-ref-name)  shift; head_ref="${1:-}" ;;
+      --base-ref-name)  shift; base_ref="${1:-}" ;;
+      --files)          shift; files_json="${1:-null}"; files_set=true ;;
+      --is-draft)       shift; is_draft_json="${1:-null}"; is_draft_set=true ;;
+      --mergeable)      shift; mergeable="${1:-}"; mergeable_set=true ;;
+      --raw)            shift; raw="${1:-null}" ;;
+      *)
+        echo "Error: _forge_build_pr_json: unknown flag: $1" >&2
+        return 1
+        ;;
+    esac
+    shift
+  done
+
+  local unsupported='[]'
+  [ "$files_set" = true ]     || unsupported=$(printf '%s' "$unsupported" | jq -c '. + ["files"]')
+  [ "$is_draft_set" = true ]  || unsupported=$(printf '%s' "$unsupported" | jq -c '. + ["isDraft"]')
+  [ "$mergeable_set" = true ] || unsupported=$(printf '%s' "$unsupported" | jq -c '. + ["mergeable"]')
+
+  jq -nc \
+    --arg number "$number" \
+    --arg url "$url" \
+    --arg title "$title" \
+    --arg body "$body" \
+    --arg state "$state" \
+    --arg headRefName "$head_ref" \
+    --arg baseRefName "$base_ref" \
+    --argjson files "$files_json" \
+    --argjson isDraft "$is_draft_json" \
+    --arg mergeable "$mergeable" \
+    --argjson mergeableSet "$mergeable_set" \
+    --argjson unsupported "$unsupported" \
+    --argjson raw "$raw" \
+    '{
+      number: (if $number == "" then null else (try ($number | tonumber) catch $number) end),
+      url: (if $url == "" then null else $url end),
+      title: (if $title == "" then null else $title end),
+      body: (if $body == "" then null else $body end),
+      state: (if $state == "" then null else $state end),
+      headRefName: (if $headRefName == "" then null else $headRefName end),
+      baseRefName: (if $baseRefName == "" then null else $baseRefName end),
+      files: $files,
+      isDraft: $isDraft,
+      mergeable: (if $mergeableSet and ($mergeable != "") then $mergeable else null end),
+      unsupported_fields: $unsupported,
+      raw: $raw
+    }'
+}
+
+# Shared jq -nc builder for the normalized issue object (forge-contract.md
+# "Normalized Issue Field Set"). Portable-core fields (--number, --url,
+# --title, --body, --state) are always accepted and null when empty. The
+# one capability-gated field (--comments, a JSON int) is tracked by flag
+# presence exactly like _forge_build_pr_json's capability-gated fields.
+# --raw carries the untouched forge-native object (defaults to null).
+_forge_build_issue_json() {
+  local number="" url="" title="" body="" state="" raw="null"
+  local comments_json="null" comments_set=false
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --number)   shift; number="${1:-}" ;;
+      --url)      shift; url="${1:-}" ;;
+      --title)    shift; title="${1:-}" ;;
+      --body)     shift; body="${1:-}" ;;
+      --state)    shift; state="${1:-}" ;;
+      --comments) shift; comments_json="${1:-null}"; comments_set=true ;;
+      --raw)      shift; raw="${1:-null}" ;;
+      *)
+        echo "Error: _forge_build_issue_json: unknown flag: $1" >&2
+        return 1
+        ;;
+    esac
+    shift
+  done
+
+  local unsupported='[]'
+  [ "$comments_set" = true ] || unsupported='["comments"]'
+
+  jq -nc \
+    --arg number "$number" \
+    --arg url "$url" \
+    --arg title "$title" \
+    --arg body "$body" \
+    --arg state "$state" \
+    --argjson comments "$comments_json" \
+    --argjson unsupported "$unsupported" \
+    --argjson raw "$raw" \
+    '{
+      number: (if $number == "" then null else (try ($number | tonumber) catch $number) end),
+      url: (if $url == "" then null else $url end),
+      title: (if $title == "" then null else $title end),
+      body: (if $body == "" then null else $body end),
+      state: (if $state == "" then null else $state end),
+      comments: $comments,
+      unsupported_fields: $unsupported,
+      raw: $raw
+    }'
+}
+
+# Shared three-way status envelope (forge-contract.md "Three-Way Status
+# Convention"), modeled directly on _verify_creates_emit's own
+# verified/missing/error trio: found/not_found/error are three genuinely
+# distinct outcomes and must never be conflated the way `gh pr view --json
+# url` today exits non-zero for both "no PR exists" and "auth/network
+# broken". Every later forge lookup verb constructs its result through this
+# one function instead of hand-rolling the JSON assembly per verb.
+#
+# Usage: _forge_emit_status <status> [data-json] [message] [reason]
+#   status   found | not_found | error -- anything else is a caller error
+#            (unknown status, exit 1) rather than silently coerced.
+#   data     JSON value (typically a normalized PR/issue object). Forced to
+#            null unless status == "found", so a caller cannot accidentally
+#            leak a stale value across the wrong branch of the outcome.
+#   message  the human-readable degraded reason -- prose for a log or a
+#            person. Forced to null unless status == "error".
+#   reason   the MACHINE-readable degraded reason: a fixed, closed enum
+#            (no_adapter | cli_missing | not_authenticated | cli_failed,
+#            forge-contract.md "Degradation Reason Enum"), so a caller
+#            branches on a stable value instead of grepping translatable
+#            English out of `message`. Any other non-empty value is a caller
+#            error (exit 1) -- the identical discipline `status` above
+#            already gets, rather than silently passing an unknown value
+#            through to a caller that would then branch on it. Forced to
+#            null unless status == "error", exactly like `message`, so a
+#            stale reason can never ride along on a found/not_found result.
+#            It exists ALONGSIDE `message`, never as a replacement for it.
+_forge_emit_status() {
+  local status="$1" data_json="${2:-null}" message="${3:-}" reason="${4:-}"
+
+  case "$status" in
+    found|not_found|error) ;;
+    *)
+      echo "Error: _forge_emit_status: status must be found, not_found or error (got: $status)" >&2
+      return 1
+      ;;
+  esac
+
+  case "$reason" in
+    ""|no_adapter|cli_missing|not_authenticated|cli_failed) ;;
+    *)
+      echo "Error: _forge_emit_status: reason must be no_adapter, cli_missing, not_authenticated or cli_failed (got: $reason)" >&2
+      return 1
+      ;;
+  esac
+
+  if [ "$status" != "found" ]; then
+    data_json="null"
+  fi
+  if [ "$status" != "error" ]; then
+    message=""
+    reason=""
+  fi
+
+  jq -nc \
+    --arg status "$status" \
+    --argjson data "$data_json" \
+    --arg message "$message" \
+    --arg reason "$reason" \
+    '{status: $status,
+      data: $data,
+      message: (if $message == "" then null else $message end),
+      reason: (if $reason == "" then null else $reason end)}'
+}
+
+# Shared WRITE-verb status envelope (forge-contract.md "Write-Verb Status
+# Convention") -- the exact sibling of _forge_emit_status above: identical
+# {status, data, message} field names and identical null-forcing
+# discipline, differing ONLY in which three values `status` may take.
+#
+# A write has no "not found" outcome (nothing was looked up), so forcing
+# the read side's found/not_found/error trio onto forge-pr-create/
+# forge-pr-edit/forge-issue-create would be a bad fit -- but letting each
+# of those three verbs hand-roll its own shape (a bare {url, number,
+# created} boolean here, a flat {url, number, status, message} there, a
+# status-less {url, number} somewhere else) was worse: a caller then had to
+# branch on field presence, on a per-verb vocabulary, or on the exit code
+# alone to learn what a write actually did.
+#
+# Usage: _forge_emit_write_status <status> [data-json] [message]
+#   status   created | unchanged | degraded -- anything else is a caller
+#            error (exit 1) rather than silently coerced, mirroring
+#            _forge_emit_status's own guard.
+#              created   -- a new resource identifier was minted.
+#              unchanged -- no new identifier was minted. Covers both
+#                           forge-pr-create finding an already-open PR and
+#                           every successful forge-pr-edit call, which only
+#                           ever mutates an existing number.
+#              degraded  -- the write could not complete automatically;
+#                           `message` carries the reason.
+#   data     JSON value (typically {url, number}). Forced to null unless
+#            status is "created" or "unchanged", so a caller cannot
+#            accidentally leak a stale identifier across a degraded branch.
+#   message  the one and only degraded-reason field in this contract.
+#            Forced to null unless status == "degraded".
+#
+# This envelope is an ADDITION to each verb's exit-code contract, never a
+# replacement for it: forge-pr-create/forge-pr-edit still exit non-zero on
+# every degraded outcome, and forge-issue-create still exits 0 on all of
+# them (see the EXIT CONTRACT DIFFERS comment in the pr-write section).
+_forge_emit_write_status() {
+  local status="$1" data_json="${2:-null}" message="${3:-}"
+
+  case "$status" in
+    created|unchanged|degraded) ;;
+    *)
+      echo "Error: _forge_emit_write_status: status must be created, unchanged or degraded (got: $status)" >&2
+      return 1
+      ;;
+  esac
+
+  if [ "$status" != "created" ] && [ "$status" != "unchanged" ]; then
+    data_json="null"
+  fi
+  if [ "$status" != "degraded" ]; then
+    message=""
+  fi
+
+  jq -nc \
+    --arg status "$status" \
+    --argjson data "$data_json" \
+    --arg message "$message" \
+    '{status: $status, data: $data, message: (if $message == "" then null else $message end)}'
+}
+
+# Builds the {url, number} object every write verb nests under the write
+# envelope's `data` key. One builder for all three verbs, so their success
+# shapes are identical BY CONSTRUCTION rather than by three hand-rolled jq
+# expressions that merely happen to agree today.
+# Usage: _forge_build_write_data <url> [number]
+#   url     empty -> null.
+#   number  empty -> null, otherwise a JSON int (never a quoted string).
+_forge_build_write_data() {
+  local url="${1:-}" number="${2:-}"
+  jq -nc \
+    --arg url "$url" \
+    --arg number "$number" \
+    '{url: (if $url == "" then null else $url end),
+      number: (if $number == "" then null else ($number | tonumber) end)}'
+}
+
+# Shared graceful-degradation gate (forge-contract.md "Degradation
+# Contract") for every forge-* verb that shells out to a forge CLI
+# (gh/glab/tea). `command -v` is a portable presence check that never
+# invokes the binary, so it cannot itself hang, prompt, or leak an
+# unguarded 127 -- guarding here is the whole point of this function.
+#
+# Usage: _forge_bin_check <binary> <quiet|mandatory> <forge-label>
+#   Returns 0 when <binary> resolves on PATH, 1 otherwise -- in BOTH modes.
+#   quiet mode:     absence produces NO stderr output at all. For a caller
+#                   that already has its own fallback path and would only
+#                   restate it -- matches review.md's documented row ("gh
+#                   CLI not installed -> Fall back to git diff for branch
+#                   comparison"), which must not gain a spurious warning it
+#                   does not have today.
+#   mandatory mode: absence prints exactly ONE stderr warning naming the
+#                   missing binary, the forge label the caller passed (from
+#                   detect-forge's output -- never a generic placeholder),
+#                   and a manual next step -- matches execute.md's existing
+#                   `command -v gh` gate at the per-repository PR-creation
+#                   step.
+_forge_bin_check() {
+  local binary="$1" mode="$2" forge_label="$3"
+
+  if command -v "$binary" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if [ "$mode" = "mandatory" ]; then
+    echo "Warning: $binary not found -- this $forge_label operation cannot run automatically; install $binary or complete it manually." >&2
+  fi
+  return 1
+}
+
+# Runs a command with its stdout, stderr and exit status captured into three
+# caller-named variables, guaranteeing the stderr scratch file is removed on
+# every return path. Seven gh adapters below each carried their own
+# mktemp/capture/cat/rm copy of this, every one of them relying on the next
+# editor remembering to keep the `rm -f` as the last line.
+#
+# Usage -- ALWAYS a plain statement, NEVER inside $(...):
+#   _forge_capture <stdout_var> <stderr_var> <rc_var> -- <cmd> [args...] || true
+#
+# The trailing `|| true` is MANDATORY under this file's `set -e`: this function
+# returns the wrapped command's own exit status, so a legitimate non-zero gh
+# exit would otherwise abort the whole CLI. The real status is always readable
+# from <rc_var>, which is what all seven callers branch on. A `$(...)` wrapper
+# would fork a subshell, where a name-reference write cannot reach the caller's
+# variables and the exit status is discarded -- hence "plain statement".
+#
+# The RETURN trap DISARMS ITSELF, and that is load-bearing rather than
+# decorative: bash's RETURN trap is a shell-global, not a function-scoped one.
+# Left armed it fires a second time on the CALLER's own return, by which point
+# $_fc_err_file is out of scope -- a hard `unbound variable` abort under
+# `set -u`. Verified empirically both ways; the self-disarming form fires
+# exactly once per call, on whichever return path this function takes,
+# including a future early return nobody has written yet. It is not inherited
+# by nested calls (no `set -T`/functrace in this file), and the one nested
+# substitution any caller passes -- `-f query="$(_forge_review_threads_query)"`
+# -- is evaluated in the caller's own shell before this function is entered.
+#
+# Internals are _fc_-prefixed so a caller's own stdout/stderr/stderr_out/rc
+# locals can never collide with the name-reference targets.
+_forge_capture() {
+  local -n _fc_out="$1" _fc_err="$2" _fc_rc="$3"
+  shift 3
+  if [ "${1:-}" = "--" ]; then shift; fi
+
+  local _fc_err_file
+  _fc_err_file=$(mktemp) || exit 1
+  trap 'rm -f "$_fc_err_file"; trap - RETURN' RETURN
+
+  _fc_rc=0
+  _fc_out=$("$@" 2>"$_fc_err_file") || _fc_rc=$?
+  _fc_err=$(cat "$_fc_err_file" 2>/dev/null || true)
+  return "$_fc_rc"
+}
+
+# Classifies an ALREADY-FAILED gh invocation into forge-contract.md's
+# Degradation Reason Enum, printing exactly one of `not_authenticated` or
+# `cli_failed`. One shared helper so every adapter below asks the question
+# the same way instead of each duplicating its own check.
+#
+# Usage: _forge_classify_gh_failure_reason <host>
+#
+# The answer is determined STRUCTURALLY, never by pattern-matching the
+# failing command's own stderr text: this calls _forge_auth_status_github
+# directly (a function call, never a `$AIMI_CLI forge-auth-status`
+# subprocess -- the exact primitive the shipped forge-auth-status verb uses
+# to answer this same question) and reads its `.authenticated` field. Note
+# that `.authenticated` is the field that answers "is the user logged in";
+# _forge_emit_status's own `status` field answers only "did the check run",
+# which is a different question and the wrong one to branch on here.
+#
+# Why structural rather than a stderr match on gh's known auth-failure
+# wording ("HTTP 401", "Bad credentials", "gh auth login"): that wording can
+# be reworded on any gh release and varies by locale, so a match silently
+# stops matching and misclassifies every future auth failure as cli_failed.
+# forge-pr-view's not_found detection was made structural for exactly this
+# reason; this follows that precedent rather than _forge_issue_view's
+# unremediated stderr match.
+#
+# COST AND ORDERING: the one extra `gh auth status` round trip happens only
+# on an already-failed request, and only after the CALLING adapter has
+# already confirmed gh is on PATH through its own separate _forge_bin_check
+# gate. cli_missing is therefore always ruled out before this ever runs --
+# the two reasons can never collide.
+#
+# Anything short of a definite "authenticated: false" resolves to
+# cli_failed, including a call that could not determine an active account at
+# all: this classifier only ever narrows an already-known failure, so the
+# catch-all is the safe direction.
+_forge_classify_gh_failure_reason() {
+  local host="${1:-}"
+  local auth_json="" authenticated=""
+
+  auth_json=$(_forge_auth_status_github "$host" 2>/dev/null) || auth_json=""
+  authenticated=$(printf '%s' "$auth_json" | jq -r '.authenticated' 2>/dev/null) || authenticated=""
+
+  if [ "$authenticated" = "false" ]; then
+    printf '%s' "not_authenticated"
+    return 0
+  fi
+
+  printf '%s' "cli_failed"
+}
+
+# ============================================================================
+# forge-auth-status / forge-repo-info (US-003)
+# ============================================================================
+# Both verbs are read-only forge lookups built directly on detect-forge
+# (US-001, called here as a function, never as a `$AIMI_CLI detect-forge`
+# subprocess) and the shared PR/issue contract, three-way status envelope,
+# and degradation helper above (US-002, commands/references/forge-
+# contract.md). Every field name and the found/not_found/error vocabulary
+# below comes verbatim from that file -- forge-contract.md is the single
+# arbiter, and this section introduces no camelCase unsupportedFields, no
+# degradation field the contract does not itself define (the `reason` enum
+# below is the contract's own, not a per-verb invention), and no gh
+# invocation outside the two private *_github helpers below.
+#
+# forge-auth-status reports whether the active gh session is authenticated
+# AND which account it is acting as -- naming the acting account now is what
+# lets phase 2's per-repository account selection extend this verb instead
+# of retrofitting it. Phase 1 only compares identity (AIMI_FORGE_IDENTITY
+# against whichever account gh already reports active); it does not
+# implement switching (no `gh auth switch`, no GH_TOKEN override -- that is
+# phase 2's job). Identity is read from an environment variable, NEVER a
+# CLI flag -- a value that may later carry a credential must never leak
+# through ps or shell history (forge-contract.md "Credential/Identity
+# Model").
+#
+# "Not authenticated" and "could not check at all" are different facts and
+# must stay distinguishable, the same discipline _verify_creates_one already
+# applies by distinguishing a "missing" identity from a git tool failure
+# before ever calling _verify_creates_emit:
+#   - gh present, ran, reports no active session for this host -> a
+#     CONFIRMED negative. status="found", data.authenticated=false,
+#     data.account=null, message=null -- forge-contract.md's "found" covers
+#     the lookup succeeding and returning real data, and an authenticated-
+#     account check that definitively answers "no" is still a successful
+#     lookup, not a broken one.
+#   - gh absent from PATH, or the resolved forge has no adapter yet
+#     (gitlab/gitea/unknown) -> the check itself could not run.
+#     status="error", data=null, message names why. Callers branch on
+#     status/message first, never on data.authenticated alone.
+# "not_found" is not used by forge-auth-status: there is no "no such auth
+# status" outcome the way there is "no such PR" -- the check either runs to
+# a definitive true/false answer (found) or cannot run at all (error).
+
+# Runs `gh auth status` against one host, tolerating a non-zero exit under
+# `set -e` (gh's own convention: a non-zero exit here IS the confirmed
+# "not authenticated" answer, not a tool failure -- gh auth status has no
+# third outcome the way `gh pr view` conflates no-PR with broken auth).
+# Combines stdout+stderr since gh's own account listing goes to a different
+# stream across versions -- this parser only cares about the text, not
+# which stream carried it.
+# Prints {authenticated, account} -- account is the login of whichever
+# account gh marks "Active account: true" beneath, or the sole account
+# found when gh's output carries no explicit marker line at all.
+_forge_auth_status_github() {
+  local host="$1"
+  local out="" rc=0
+  if [ -n "$host" ]; then
+    out=$(gh auth status --hostname "$host" 2>&1) || rc=$?
+  else
+    out=$(gh auth status 2>&1) || rc=$?
+  fi
+
+  if [ "$rc" -ne 0 ]; then
+    jq -nc '{authenticated: false, account: null}'
+    return 0
+  fi
+
+  local active="" last="" line
+  while IFS= read -r line; do
+    if [[ "$line" =~ account[[:space:]]+([^[:space:]]+) ]]; then
+      last="${BASH_REMATCH[1]}"
+    fi
+    if [[ "$line" == *"Active account: true"* ]]; then
+      active="$last"
+    fi
+  done <<< "$out"
+  [ -n "$active" ] || active="$last"
+
+  jq -nc --arg account "$active" \
+    '{authenticated: true, account: (if $account == "" then null else $account end)}'
+}
+
+# Resolves forge/host via detect-forge's own helper (a direct function call,
+# never a `$AIMI_CLI detect-forge` subprocess), dispatches to the github
+# adapter when the forge is github and gh is present (checked via the
+# shared _forge_bin_check above in its quiet mode -- a missing binary here
+# has no caller-mandated stderr banner; the caller decides whether a
+# degraded result is fatal), and otherwise reports status=error with a
+# message naming why. AIMI_FORGE_IDENTITY, when set, is compared only
+# against the already-active account -- never used to invoke
+# `gh auth switch` or set GH_TOKEN.
+_forge_auth_status() {
+  local forge_info forge host
+  forge_info=$(_detect_forge)
+  forge=$(printf '%s' "$forge_info" | jq -r '.forge')
+  # `// empty` is load-bearing, not decoration: .host is JSON null whenever
+  # AIMI_FORGE_TYPE short-circuits detection, and a bare `jq -r '.host'`
+  # renders that null as the 4-character TEXT "null". That string is
+  # non-empty, so it survives every downstream emptiness check and reaches
+  # `gh auth status --hostname null` -- a host gh has no session for, whose
+  # refusal then reads as a confirmed authenticated:false. This is the same
+  # guard every other nullable field in this file already reads through.
+  host=$(printf '%s' "$forge_info" | jq -r '.host // empty')
+
+  local status="error" message="" data_json="null" reason=""
+
+  if [ "$forge" = "github" ]; then
+    if _forge_bin_check gh quiet github; then
+      local gh_out authenticated_json account identity_requested identity_honored_json
+      gh_out=$(_forge_auth_status_github "$host")
+      authenticated_json=$(printf '%s' "$gh_out" | jq -c '.authenticated')
+      account=$(printf '%s' "$gh_out" | jq -r '.account // empty')
+
+      identity_requested="${AIMI_FORGE_IDENTITY:-}"
+      identity_honored_json="null"
+      if [ -n "$identity_requested" ]; then
+        if [ "$identity_requested" = "$account" ]; then
+          identity_honored_json="true"
+        else
+          identity_honored_json="false"
+        fi
+      fi
+
+      status="found"
+      data_json=$(jq -nc \
+        --arg forge "$forge" \
+        --arg host "$host" \
+        --argjson authenticated "$authenticated_json" \
+        --arg account "$account" \
+        --arg identityRequested "$identity_requested" \
+        --argjson identityHonored "$identity_honored_json" \
+        '{forge: $forge,
+          host: (if $host == "" then null else $host end),
+          authenticated: $authenticated,
+          account: (if $account == "" then null else $account end),
+          identityRequested: (if $identityRequested == "" then null else $identityRequested end),
+          identityHonored: $identityHonored}')
+    else
+      message="gh not found on PATH -- cannot check authentication status"
+      reason="cli_missing"
+    fi
+  else
+    message="no forge adapter for ${forge} -- cannot check authentication status"
+    reason="no_adapter"
+  fi
+
+  # Note which branch does NOT set a reason: the found branch above, which
+  # covers the CONFIRMED negative (data.authenticated=false). A definitive
+  # "no, you are not logged in" is a successful lookup, so `reason` stays
+  # null there despite that outcome's name resembling not_authenticated --
+  # `reason` only ever describes a check that could not run at all.
+  _forge_emit_status "$status" "$data_json" "$message" "$reason"
+}
+
+# Detects whether the session is authenticated with the active forge and
+# which account it is acting as. See the section header above for the full
+# found/error contract and the AIMI_FORGE_IDENTITY comparison rules. No
+# --identity (or similarly named) flag exists anywhere in this parsing loop
+# -- identity selection is env-var-only, by design (see section header).
+cmd_forge_auth_status() {
+  check_jq
+
+  local project_dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project)
+        shift
+        project_dir="${1:-}"
+        ;;
+      *)
+        echo "Error: forge-auth-status: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _require_git_repo "$project_dir"
+
+  _forge_auth_status
+}
+
+# Requests owner and name from a single `gh repo view` call -- never the two
+# separate calls skills/resolve-pr-parallel/scripts/get-pr-comments makes
+# today. Prints {owner, repo} on success; returns 1 (no output) on any
+# failure so the caller falls back without needing to know why gh failed
+# (missing auth, network, or anything else -- mirrors _resolve_default_
+# branch's own primary-call-plus-offline-fallback shape, which does not
+# distinguish why the primary failed either).
+_forge_repo_info_github() {
+  local raw="" rc=0
+  raw=$(gh repo view --json owner,name 2>&1) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    return 1
+  fi
+  printf '%s' "$raw" | jq -c '{owner: .owner.login, repo: .name}' 2>/dev/null || return 1
+}
+
+# Parses owner/repo directly out of a git remote URL -- the offline fallback
+# used when gh is absent, unauthenticated, or the forge has no adapter yet.
+# Every path segment before the last becomes owner (not just the
+# second-to-last), so a GitLab-style nested subgroup path
+# (group/subgroup/repo) survives intact for a future GitLab adapter, even
+# though phase 1 ships GitHub only. Prints {owner, repo}, both null when the
+# path never yields at least two segments.
+_forge_repo_info_parse_url() {
+  local url="$1" path=""
+
+  if [[ "$url" == *"://"* ]]; then
+    path="${url#*://}"
+    path="${path#*/}"
+  elif [[ "$url" == *":"* ]]; then
+    path="${url#*:}"
+  else
+    path="$url"
+  fi
+
+  path="${path%.git}"
+  path="${path#/}"
+  path="${path%/}"
+
+  local repo="" owner=""
+  if [ -n "$path" ] && [[ "$path" == */* ]]; then
+    repo="${path##*/}"
+    owner="${path%/*}"
+  fi
+
+  if [ -z "$owner" ] || [ -z "$repo" ]; then
+    jq -nc '{owner: null, repo: null}'
+    return 0
+  fi
+
+  jq -nc --arg owner "$owner" --arg repo "$repo" '{owner: $owner, repo: $repo}'
+}
+
+# Two-tier resolution mirroring _resolve_default_branch's own shape: the
+# github adapter is the primary path when the forge is github and gh is
+# present; parsing owner/repo straight out of the already-resolved remote
+# URL is the offline fallback, used whenever gh is missing, unauthenticated,
+# the forge has no adapter, or the primary call otherwise fails. When even
+# the fallback yields no usable owner/repo (no origin configured, or a path
+# that never splits into two segments), reports status=not_found -- a
+# confirmed absence, not a tool error, per forge-contract.md's Three-Way
+# Status Convention.
+_forge_repo_info() {
+  local forge_info forge host remote_url
+  forge_info=$(_detect_forge)
+  forge=$(printf '%s' "$forge_info" | jq -r '.forge')
+  # See _forge_auth_status's note on the same read: a JSON null host must
+  # become the empty string, never the text "null". Downstream, this is what
+  # makes _forge_pr_write_print_manual's own already-correct
+  # `.data.host // empty` fallback fire at all -- the string "null" is truthy
+  # in jq, so that fallback was silently dead and printed https://null/... .
+  host=$(printf '%s' "$forge_info" | jq -r '.host // empty')
+  remote_url=$(printf '%s' "$forge_info" | jq -r '.remoteUrl // empty')
+
+  local owner="" repo="" source=""
+
+  if [ "$forge" = "github" ] && _forge_bin_check gh quiet github; then
+    local gh_json=""
+    if gh_json=$(_forge_repo_info_github); then
+      owner=$(printf '%s' "$gh_json" | jq -r '.owner // empty')
+      repo=$(printf '%s' "$gh_json" | jq -r '.repo // empty')
+      if [ -n "$owner" ] && [ -n "$repo" ]; then
+        source="gh"
+      fi
+    fi
+  fi
+
+  if { [ -z "$owner" ] || [ -z "$repo" ]; } && [ -n "$remote_url" ]; then
+    local parsed
+    parsed=$(_forge_repo_info_parse_url "$remote_url")
+    owner=$(printf '%s' "$parsed" | jq -r '.owner // empty')
+    repo=$(printf '%s' "$parsed" | jq -r '.repo // empty')
+    if [ -n "$owner" ] && [ -n "$repo" ]; then
+      source="local-parse"
+    fi
+  fi
+
+  local status="not_found" data_json="null"
+  if [ -n "$owner" ] && [ -n "$repo" ]; then
+    status="found"
+    data_json=$(jq -nc \
+      --arg forge "$forge" \
+      --arg host "$host" \
+      --arg owner "$owner" \
+      --arg repo "$repo" \
+      --arg source "$source" \
+      '{forge: $forge,
+        host: (if $host == "" then null else $host end),
+        owner: $owner,
+        repo: $repo,
+        nameWithOwner: ($owner + "/" + $repo),
+        source: $source}')
+  fi
+
+  _forge_emit_status "$status" "$data_json" ""
+}
+
+# Resolves the active forge's owner/repo for the current git repository. See
+# the section header above for the gh-primary/local-parse-fallback contract.
+cmd_forge_repo_info() {
+  check_jq
+
+  local project_dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project)
+        shift
+        project_dir="${1:-}"
+        ;;
+      *)
+        echo "Error: forge-repo-info: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _require_git_repo "$project_dir"
+
+  _forge_repo_info
+}
+
+# ============================================================================
+# forge-pr-view (US-004)
+# ============================================================================
+# Fixes the exact defect commands/open-pr.md carries today:
+#   gh pr view "$CURRENT_BRANCH" --json url --jq '.url' 2>/dev/null
+# exits non-zero for BOTH "no PR exists for this branch" AND "gh/auth is
+# broken" -- a broken token reads as "no PR yet" and open-pr.md proceeds to
+# create a duplicate. forge-pr-view adopts the three-way found/not_found/
+# error status forge-contract.md publishes so a caller can finally tell the
+# two apart, and adds a --include field selector so a caller that only wants
+# `url` (open-pr.md's own two call sites) never pays for the expensive
+# `files` field the way every current `gh pr view --json` call site does
+# today regardless of what it actually asked for.
+#
+# This verb's envelope is deliberately its OWN shape --
+# {status, pr, unsupported_fields, message} -- rather than the generic
+# three-way envelope _forge_emit_status builds ({status, data, message,
+# reason}): the --include selector requires `pr` to carry exactly the caller's
+# requested keys and no others, never the full fixed superset
+# _forge_build_pr_json always returns, and a not_found outcome here must
+# carry a populated `message` (naming the ref that was searched) rather
+# than staying forced-null the way _forge_emit_status's own `message` does
+# for every outcome but error -- which forge-contract.md's Three-Way Status
+# Convention explicitly permits for not_found ("message is null unless a
+# short human-readable note is useful"). The found/not_found/error status
+# vocabulary still matches that convention exactly, and the degraded-reason
+# field is named `message` here for the same reason: it is the contract's
+# own human-readable degradation signal, never a per-verb invention. This
+# envelope deliberately does NOT carry the machine-readable `reason` enum
+# the shared builder now emits -- forge-contract.md's Degradation Reason
+# Enum names forge-pr-view's shape as the one exception `reason` is not
+# extended onto.
+#
+# Field names inside `pr` are the NORMALIZED PR contract's own (number,
+# url, title, body, state, headRefName, baseRefName, files, isDraft,
+# mergeable) -- never gh's raw vocabulary. gh's response is translated in
+# both directions by _forge_map_pr_field_github and normalized through the
+# one shared _forge_build_pr_json builder, so GitHub's raw shape never
+# leaks past this adapter. On github the two vocabularies happen to be
+# identical today, so every current call site's own jq expression (e.g.
+# `.files[].path`) survives unchanged.
+#
+# Does NOT implement a gitlab or gitea adapter -- both, plus a missing gh
+# binary, degrade through the quiet _forge_bin_check mode, matching
+# review.md's own already-documented git-diff fallback for a missing gh so
+# a later migration onto this verb introduces no new warning banner.
+
+# Emit the forge-pr-view envelope: {status, pr, unsupported_fields, message}.
+# status must be found | not_found | error (anything else is a caller error,
+# exit 1 -- never silently coerced). pr and unsupported_fields are forced
+# null unless status=="found"; message is forced null only when
+# status=="found" -- not_found and error both carry a populated message
+# string (the searched ref, or gh's own failure text, respectively).
+#
+# On found, unsupported_fields is ALWAYS a JSON array, never a bare null --
+# including an explicitly empty [] when every requested capability-gated
+# field was supplied. A bare null there would be a third state alongside
+# "empty" and "populated" that no caller can interpret; the array-or-null
+# split is driven purely by status, mirroring _forge_emit_status's own
+# null-forcing convention.
+_forge_pr_view_emit() {
+  local status="$1" pr_json="${2:-null}" unsupported_json="${3:-null}" message="${4:-}"
+
+  case "$status" in
+    found|not_found|error) ;;
+    *)
+      echo "Error: _forge_pr_view_emit: status must be found, not_found or error (got: $status)" >&2
+      return 1
+      ;;
+  esac
+
+  if [ "$status" = "found" ]; then
+    message=""
+    if [ -z "$unsupported_json" ] || [ "$unsupported_json" = "null" ]; then
+      unsupported_json="[]"
+    fi
+  else
+    pr_json="null"
+    unsupported_json="null"
+  fi
+
+  jq -nc \
+    --arg status "$status" \
+    --argjson pr "$pr_json" \
+    --argjson unsupportedFields "$unsupported_json" \
+    --arg message "$message" \
+    '{status: $status, pr: $pr, unsupported_fields: $unsupportedFields,
+      message: (if $message == "" then null else $message end)}'
+}
+
+# Maps one NORMALIZED PR contract field name (forge-contract.md's
+# "Normalized PR Field Set") to the field name GitHub's own
+# `gh pr view --json` uses for it. For phase 1 every one of the ten fields
+# maps to an identically-spelled gh field, but the table is written out
+# EXPLICITLY rather than assumed: it is the single seam a later GitLab or
+# Gitea adapter replaces (glab's `description`/`source_branch`/
+# `target_branch`, tea's `head`/`base`) without touching the verb body
+# around it. An unmapped name prints nothing, so a field this adapter
+# cannot express is never silently passed through to gh as-is.
+# Usage: _forge_map_pr_field_github <contract-field>
+_forge_map_pr_field_github() {
+  case "$1" in
+    number)      printf 'number' ;;
+    url)         printf 'url' ;;
+    title)       printf 'title' ;;
+    body)        printf 'body' ;;
+    state)       printf 'state' ;;
+    headRefName) printf 'headRefName' ;;
+    baseRefName) printf 'baseRefName' ;;
+    files)       printf 'files' ;;
+    isDraft)     printf 'isDraft' ;;
+    mergeable)   printf 'mergeable' ;;
+  esac
+}
+
+# github adapter for forge-pr-view. <ref> is a PR number or a branch name
+# (already validated by cmd_forge_pr_view before this ever runs);
+# <fields_csv> is the comma-joined list of NORMALIZED PR contract field
+# names (caller's --include set, or the default cheap set) -- never gh's own
+# vocabulary. Every crossing of that boundary goes through
+# _forge_map_pr_field_github: contract name -> gh name on the way in (to
+# build gh's --json list), gh name -> contract name on the way out (to pick
+# the value out of gh's response). Captures gh's stdout and stderr on
+# separate variables (this file runs under set -euo pipefail -- rc is
+# pre-initialized and captured with `|| rc=$?`, mirroring
+# _verify_creates_one's own capture pattern) so a legitimate non-zero gh
+# exit never aborts the script.
+_forge_pr_view_github() {
+  local ref="$1" fields_csv="$2"
+  local stdout="" stderr="" rc=0
+  # Set only when the structural probe below ran cleanly AND reported one or
+  # more PRs -- i.e. existence is a confirmed structural fact, not an
+  # inference. Consulted after gh pr view to keep a view failure from being
+  # reinterpreted as not_found.
+  local list_confirmed_exists=false
+
+  # Translate the caller's contract field names to gh's own BEFORE the
+  # --json field list is ever built, so gh never sees a name it does not
+  # know and this adapter never assumes the two vocabularies agree.
+  local -a requested=() gh_fields=()
+  local old_ifs="$IFS"
+  IFS=','
+  read -ra requested <<< "$fields_csv"
+  IFS="$old_ifs"
+
+  local field gh_field
+  for field in "${requested[@]}"; do
+    gh_field=$(_forge_map_pr_field_github "$field")
+    [ -n "$gh_field" ] && gh_fields+=("$gh_field")
+  done
+
+  local gh_fields_csv
+  gh_fields_csv=$(IFS=','; printf '%s' "${gh_fields[*]:-}")
+
+  # --- structural existence probe, FIRST for a branch ref ----------------
+  # `gh pr list --head <branch> --json number` returns `[]` at exit 0 when no
+  # PR exists -- a structural fact in JSON rather than a string in a message,
+  # so it survives a gh release that rewords its own stderr or a non-English
+  # locale. `--state all` so a closed/merged PR still counts as found (gh pr
+  # list defaults to open-only, which would otherwise misreport a closed PR's
+  # branch as not_found). `--head` takes a branch name, never a PR number, so
+  # a NUMERIC ref skips this probe entirely and goes straight to gh pr view
+  # plus the stderr tier below -- unchanged in both directions by this
+  # reordering.
+  #
+  # WHY IT RUNS BEFORE gh pr view RATHER THAN AS ITS BACKSTOP: on the "no PR
+  # yet" path -- the dominant case in aggregate, since execute.md's per-phase
+  # idempotency pre-check runs this exact lookup on every phase close whether
+  # or not a PR already exists -- asking view first meant paying a doomed
+  # round trip and then paying the probe anyway to confirm what it meant. Two
+  # calls to learn "no". Probing first answers that structurally in one, and
+  # gh pr view is never invoked at all.
+  #
+  # The accepted, deliberate trade-off: a FOUND branch-ref lookup now costs
+  # two calls (probe, then view for the actual fields) where it used to cost
+  # one. That is the price of making absence cheap, and absence is the common
+  # case.
+  if ! [[ "$ref" =~ ^[0-9]+$ ]]; then
+    local list_out="" list_rc=0 list_count=""
+    list_out=$(gh pr list --head "$ref" --state all --json number 2>/dev/null) || list_rc=$?
+    if [ "$list_rc" -eq 0 ]; then
+      list_count=$(printf '%s' "$list_out" | jq 'length' 2>/dev/null) || list_count=""
+      if [ "$list_count" = "0" ]; then
+        _forge_pr_view_emit "not_found" "null" "null" "no pull request found for ref: $ref"
+        return 0
+      fi
+      # A parseable, non-zero count is a confirmed existence fact. An
+      # UNPARSEABLE response is not: it proves nothing either way, so it
+      # leaves the flag false and falls through to the same view-plus-stderr
+      # path a failed probe takes.
+      if [ -n "$list_count" ]; then
+        list_confirmed_exists=true
+      fi
+    fi
+  fi
+
+  _forge_capture stdout stderr rc -- gh pr view "$ref" --json "$gh_fields_csv" || true
+
+  if [ "$rc" -eq 0 ]; then
+    # Normalize gh's raw response through the ONE shared builder rather
+    # than re-subsetting gh's own JSON: state is case-folded through the
+    # same _forge_map_state call forge-issue-view applies, and every
+    # capability-gated field is flagged by the builder's own presence rule.
+    #
+    # A flag is passed ONLY for a field the caller requested AND whose
+    # mapped key jq's has() confirms gh actually returned. has() rather
+    # than a bare index is what keeps "gh omitted this key entirely"
+    # (unsupported -- null AND named in unsupported_fields) distinguishable
+    # from "gh returned this key with an explicit null" (supported -- null
+    # but NOT named), which a bare index collapses into one indistinguishable
+    # null.
+    local -a builder_args=()
+    local present raw_value
+    for field in "${requested[@]}"; do
+      gh_field=$(_forge_map_pr_field_github "$field")
+      [ -n "$gh_field" ] || continue
+      present=$(printf '%s' "$stdout" | jq -r --arg k "$gh_field" 'has($k)' 2>/dev/null) || present="false"
+      [ "$present" = "true" ] || continue
+      case "$field" in
+        # Scalars reach the builder as strings. `if . == null` rather than
+        # `// ""` deliberately: `//` also swallows a legitimate `false`,
+        # which mergeable can genuinely carry on a forge that reports it as
+        # a boolean rather than GitHub's MERGEABLE/CONFLICTING/UNKNOWN enum.
+        number|url|title|body|headRefName|baseRefName|mergeable)
+          raw_value=$(printf '%s' "$stdout" | jq -r --arg k "$gh_field" '.[$k] | if . == null then "" else tostring end')
+          ;;
+        state)
+          raw_value=$(printf '%s' "$stdout" | jq -r --arg k "$gh_field" '.[$k] | if . == null then "" else tostring end')
+          raw_value=$(_forge_map_state "github" "$raw_value")
+          ;;
+        # JSON-valued fields reach the builder as raw JSON (--argjson on the
+        # other side), so an explicit null stays the JSON literal `null`.
+        files|isDraft)
+          raw_value=$(printf '%s' "$stdout" | jq -c --arg k "$gh_field" '.[$k]')
+          ;;
+      esac
+      case "$field" in
+        number)      builder_args+=(--number "$raw_value") ;;
+        url)         builder_args+=(--url "$raw_value") ;;
+        title)       builder_args+=(--title "$raw_value") ;;
+        body)        builder_args+=(--body "$raw_value") ;;
+        state)       builder_args+=(--state "$raw_value") ;;
+        headRefName) builder_args+=(--head-ref-name "$raw_value") ;;
+        baseRefName) builder_args+=(--base-ref-name "$raw_value") ;;
+        files)       builder_args+=(--files "$raw_value") ;;
+        isDraft)     builder_args+=(--is-draft "$raw_value") ;;
+        mergeable)   builder_args+=(--mergeable "$raw_value") ;;
+      esac
+    done
+
+    local pr_full pr_json unsupported_json fields_json
+    pr_full=$(_forge_build_pr_json ${builder_args[@]+"${builder_args[@]}"})
+    fields_json=$(printf '%s' "$fields_csv" | jq -Rc 'split(",")')
+
+    # Project the builder's fixed ten-key output down to exactly the keys
+    # this caller asked for, in the order it asked for them -- the
+    # never-pay-for-files-you-did-not-ask-for behavior this verb's --include
+    # selector exists for. The builder's superset is never emitted.
+    pr_json=$(printf '%s' "$pr_full" | jq -c --argjson keys "$fields_json" '
+      . as $src | reduce $keys[] as $k ({}; . + {($k): $src[$k]})
+    ')
+
+    # ...and intersect the builder's own unsupported_fields with that same
+    # requested list: the builder always flags an unpassed capability-gated
+    # flag, but a field the caller never included is simply not part of this
+    # answer and must not be reported as unsupported.
+    unsupported_json=$(printf '%s' "$pr_full" | jq -c --argjson keys "$fields_json" '
+      [.unsupported_fields[] | . as $f | select($keys | index($f))]
+    ')
+
+    _forge_pr_view_emit "found" "$pr_json" "$unsupported_json" ""
+    return 0
+  fi
+
+  # --- not_found detection ---------------------------------------------
+  # THE THREE-WAY STATUS MUST SURVIVE THE REORDER. The probe already said
+  # this PR exists, structurally; gh pr view then failed anyway (a transient
+  # error, or a race between the two calls). That is a tool failure and
+  # nothing else -- reporting not_found here would take the one case where
+  # absence has been positively DISPROVEN and report it as absence, which is
+  # precisely the conflation this verb exists to prevent. The stderr-text
+  # tier below is skipped too: gh pr view's own wording cannot outvote a
+  # structural fact, not even when it happens to say "no pull requests
+  # found".
+  if [ "$list_confirmed_exists" = true ]; then
+    _forge_pr_view_emit "error" "null" "null" "$stderr"
+    return 0
+  fi
+
+  # Secondary fallback: gh's own no-pull-requests-found wording. Kept
+  # strictly as a backstop for when the structural probe above could not
+  # confirm anything (a numeric ref, or the list probe itself failing) --
+  # never the primary signal, since a translatable/rewordable string is
+  # exactly the fragility this verb exists to avoid.
+  if printf '%s' "$stderr" | grep -qi "no pull requests\? found"; then
+    _forge_pr_view_emit "not_found" "null" "null" "no pull request found for ref: $ref"
+    return 0
+  fi
+
+  # Every other non-zero exit is a genuine tool failure (auth, network,
+  # malformed response) -- never folded into not_found. evidence carries
+  # gh's own stderr text.
+  _forge_pr_view_emit "error" "null" "null" "$stderr"
+  return 0
+}
+
+# Field-selectable, three-way-status PR lookup. See this section's header
+# comment for the defect this fixes and why its envelope differs from the
+# generic forge-contract.md three-way envelope.
+# Usage: aimi-cli.sh forge-pr-view --pr <branch-or-number> [--include <fields>] [--project <path>]
+# --include is a comma-separated subset of the TEN normalized PR contract
+# fields (forge-contract.md's "Normalized PR Field Set"): number, url,
+# title, body, state, headRefName, baseRefName, files, isDraft, mergeable.
+# Defaults to the portable core (number,url,title,body,state,headRefName,
+# baseRefName) when omitted -- the three capability-gated fields (files,
+# isDraft, mergeable) stay opt-in-only so a caller that only wants url never
+# triggers the more expensive per-file lookup.
+#
+# gh-only names with no PR-contract equivalent (reviews, comments) are NOT
+# accepted here: this selector runs on the contract's vocabulary, not gh's,
+# and a name the contract cannot express would have no meaning on a later
+# gitlab/gitea adapter. A verb needing per-reviewer detail consumes the
+# forge-native object instead (forge-contract.md's Review/Approval Envelope
+# section says so explicitly).
+cmd_forge_pr_view() {
+  check_jq
+
+  local pr_ref="" include_raw="" project_dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --pr)      shift; pr_ref="${1:-}" ;;
+      --include) shift; include_raw="${1:-}" ;;
+      --project) shift; project_dir="${1:-}" ;;
+      *)
+        echo "Error: forge-pr-view: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _require_git_repo "$project_dir"
+
+  if [ -z "$pr_ref" ]; then
+    echo "Usage: aimi-cli.sh forge-pr-view --pr <branch-or-number> [--include <fields>] [--project <path>]" >&2
+    exit 1
+  fi
+
+  # Validate --pr before it is ever interpolated into a gh invocation:
+  # digits-only (a PR number) or the repo-wide branch-name regex.
+  if ! [[ "$pr_ref" =~ ^[0-9]+$ ]] && ! [[ "$pr_ref" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: forge-pr-view: invalid --pr value: $pr_ref" >&2
+    exit 1
+  fi
+
+  # --include: comma-separated field list (IFS=',' split, matching the
+  # decoration-token split at aimi-cli.sh:1727). An unrecognized field name
+  # is CLI misuse (exit 1) -- never folded into the substantive result.
+  local -a requested_fields=()
+  if [ -n "$include_raw" ]; then
+    local old_ifs="$IFS"
+    IFS=','
+    read -ra requested_fields <<< "$include_raw"
+    IFS="$old_ifs"
+  else
+    requested_fields=(number url title body state headRefName baseRefName)
+  fi
+
+  local field known
+  for field in "${requested_fields[@]}"; do
+    known=false
+    case "$field" in
+      number|url|title|body|state|headRefName|baseRefName|files|isDraft|mergeable) known=true ;;
+    esac
+    if [ "$known" = false ]; then
+      echo "Error: forge-pr-view: unknown --include field: $field" >&2
+      exit 1
+    fi
+  done
+
+  local fields_csv
+  fields_csv=$(IFS=','; echo "${requested_fields[*]}")
+
+  local forge=""
+  _detect_forge_type forge
+
+  case "$forge" in
+    github)
+      if _forge_bin_check gh quiet github; then
+        _forge_pr_view_github "$pr_ref" "$fields_csv"
+      else
+        _forge_pr_view_emit "error" "null" "null" "gh not found on PATH -- this github operation cannot run automatically."
+      fi
+      ;;
+    *)
+      _forge_pr_view_emit "error" "null" "null" "no forge-pr-view adapter for the '$forge' forge yet."
+      ;;
+  esac
+}
+
+# ============================================================================
+# forge-pr-create / forge-pr-edit (US-005)
+# ============================================================================
+# The first WRITE verbs in this phase that create/mutate a pull request.
+# Built entirely on US-001's detect-forge, US-002's shared degradation gate
+# (_forge_bin_check), and US-004's forge-pr-view -- called here as an
+# in-process function, never a `$AIMI_CLI forge-pr-view` subprocess -- for
+# both the idempotency check and the post-create structured re-read. Neither
+# helper below re-derives detect-forge or forge-pr-view's own lookup logic.
+#
+# THE DEFECT THIS PAIR EXISTS TO FIX: commands/open-pr.md's `gh pr create`
+# call (open-pr.md:355) does not capture its own output, so PR_URL/PR_BODY
+# (read later at :465/:479) are assigned by no block in that file --
+# grandfathered in scripts/command-blocks-baseline.txt as "read but never
+# assigned". forge-pr-create emits forge-contract.md's write-verb envelope
+# ({status, data: {url, number}, message}) as compact JSON so a caller in an
+# isolated Bash block can capture the created PR's identity by plain
+# assignment. Rewriting open-pr.md itself is story 08's job, not this one --
+# this section only makes the value available.
+#
+# EXIT CONTRACT DIFFERS FROM forge-issue-create ON PURPOSE: forge-issue-
+# create is a soft-fail verb (exit always 0, caller branches on `status`)
+# because a failed backend issue must never block PR creation. Opening or
+# editing the PR itself has no such fallback -- execute.md's per-repository
+# PR-creation step needs a real non-zero exit so its own per-repository
+# failure isolation (report that repository's failure verbatim, move on to
+# the next repository) keeps working once it migrates onto this verb. Both
+# functions below NEVER retry, NEVER prompt interactively, and NEVER mutate
+# any phase/story completed status -- only the caller does that, and only
+# after observing the non-zero exit.
+#
+# IDENTITY: exactly like forge-issue-create, neither cmd_forge_pr_create nor
+# cmd_forge_pr_edit accepts a --token/--identity (or similarly credential-
+# shaped) flag. Any acting-account identity (e.g. AIMI_FORGE_IDENTITY, or a
+# GH_TOKEN a caller exported before invoking this CLI) reaches the child gh
+# process purely by environment-variable inheritance -- no extra code is
+# needed here to pass it along, and neither function ever echoes or logs
+# one verbatim. This is the exact signature phase 2's per-repository
+# account selection is expected to build on without retrofitting.
+
+# Prints the MANDATORY manual-fallback instructions (forge-contract.md's
+# Degradation Contract, mandatory mode) for every forge-pr-create/forge-pr-
+# edit failure path -- an unsupported forge, a missing gh binary, or the gh
+# call itself failing all funnel through this one function so the wording
+# is identical regardless of WHY automatic create/edit did not happen.
+# Always stderr, never stdout, so a caller consuming this verb's JSON result
+# on stdout never has to filter prose out of its own data.
+#
+# mode: create | edit.
+#   create -- prints the git push command plus a manual `gh pr create`
+#             invocation (AC6's "the git push command"), and, when
+#             forge-repo-info can resolve owner/repo (its own local-parse
+#             fallback needs only the git remote, not gh -- see US-003),
+#             the compare URL a human can open directly (AC6's "the
+#             compare-URL ... command").
+#   edit   -- prints a manual `gh pr edit` invocation and, when resolvable,
+#             the PR's own URL (AC6's "... or edit command").
+# repo-info is queried in-process (a direct function call, never a
+# subprocess) and is itself best-effort here: when it cannot resolve
+# owner/repo (no adapter, gh absent, no origin), the URL line is simply
+# omitted rather than guessing a wrong one.
+_forge_pr_write_print_manual() {
+  local mode="$1" forge="$2" base="$3" head_or_number="$4" body="$5" title="${6:-}"
+
+  local repo_info="" owner="" repo="" host=""
+  repo_info=$(_forge_repo_info 2>/dev/null) || repo_info=""
+  if [ -n "$repo_info" ] && [ "$(printf '%s' "$repo_info" | jq -r '.status' 2>/dev/null)" = "found" ]; then
+    owner=$(printf '%s' "$repo_info" | jq -r '.data.owner // empty')
+    repo=$(printf '%s' "$repo_info" | jq -r '.data.repo // empty')
+    host=$(printf '%s' "$repo_info" | jq -r '.data.host // empty')
+  fi
+  [ -n "$host" ] || host="github.com"
+
+  {
+    if [ "$mode" = "create" ]; then
+      echo "Warning: could not create this $forge pull request automatically -- create it yourself with:"
+      echo "  git push -u origin $head_or_number"
+      echo "  gh pr create --title \"$title\" --base $base --head $head_or_number --body ..."
+      if [ -n "$owner" ] && [ -n "$repo" ]; then
+        echo "  Or open: https://$host/$owner/$repo/compare/$base...$head_or_number?expand=1"
+      fi
+    else
+      echo "Warning: could not edit this $forge pull request automatically -- edit it yourself with:"
+      echo "  gh pr edit $head_or_number --body ..."
+      if [ -n "$owner" ] && [ -n "$repo" ]; then
+        echo "  Or open: https://$host/$owner/$repo/pull/$head_or_number"
+      fi
+    fi
+    echo "  Body:"
+    printf '%s\n' "$body" | sed 's/^/    /'
+  } >&2
+}
+
+# Shells `gh pr create --title <t> --base <b> --head <h> --body <b>`,
+# capturing stdout as the created PR's URL -- gh pr create has NO --json
+# flag (confirmed on this machine, exactly like gh issue create: only a
+# plain URL reaches stdout on success). The created PR's `number` is NEVER
+# derived by regexing that URL (AC3) -- instead, once creation succeeds,
+# this function re-queries story 04's forge-pr-view lookup for the same
+# --head branch (a structured re-read) and reads `.pr.number`/`.pr.url`
+# from ITS normalized output. forge-pr-view's own --pr flag only accepts a
+# branch name or a bare PR number (validated against a fixed regex) -- not
+# a URL -- so "feeding the URL back through forge-pr-view" is realized here
+# as re-querying by the already-validated --head branch, the one identifier
+# both the pre-create idempotency check and the post-create confirmation
+# can share; this is what keeps the number's origin a structured field
+# read, never a trailing-digit regex on a URL string.
+#
+# RESULT ENVELOPE: every branch below emits forge-contract.md's shared
+# write-verb envelope via _forge_emit_write_status -- {status, data,
+# message} with status created | unchanged | degraded, the same shape
+# forge-pr-edit and forge-issue-create emit. stdout is therefore NEVER
+# silent, not even on a failure branch: a caller that reads stdout learns
+# what happened from `status` instead of having to infer it from an empty
+# capture. This is an ADDITION to the exit-code contract below, never a
+# replacement -- every degraded branch here still returns 1.
+#
+# IDEMPOTENCY (AC2): before ever shelling out to create anything, looks up
+# whether an open PR already exists for $head via forge-pr-view, in-process
+# (a direct function call, never a `$AIMI_CLI forge-pr-view` subprocess).
+# When an OPEN one is found, reports status "unchanged" with that PR's
+# {url, number} and returns 0 WITHOUT attempting a second creation --
+# open-pr.md's own "PR already exists for this branch" behavior today,
+# informational rather than an error. A retried phase in execute.md's
+# per-repository loop is exactly why this matters: a retry must never open
+# a duplicate PR for the same branch.
+# That check branches over ALL THREE of forge-pr-view's statuses:
+# only `found` + a normalized state of `open` short-circuits; `not_found`
+# and a found-but-closed/merged PR both proceed to creation; `error` (and
+# any status this code does not recognize) is a hard failure that NEVER
+# reaches `gh pr create`.
+#
+# MANDATORY-PRINT degrade mode: see this section's header comment above for
+# the full statement of why this differs from forge-issue-create's soft-
+# fail contract. Every failure path that runs BEFORE `gh pr create` has
+# returned a url -- unsupported forge, missing gh, the existing-PR lookup
+# erroring, the create call itself failing, an unparseable success response
+# -- prints the manual create-it-yourself instructions via
+# _forge_pr_write_print_manual, emits a status "degraded" envelope carrying
+# the same reason text, and returns 1. Once a url IS in hand the manual
+# fallback is never printed again AND the outcome is never downgraded to
+# degraded: a post-create re-read failure keeps that url, reports status
+# "created" with data {url, number: null} at exit 0, and warns that only
+# the number is unconfirmed. Reporting that branch as degraded would force
+# `data` to null and throw the created PR's url away -- the exact defect
+# the "PAST THIS POINT" comment below exists to prevent. Never retries,
+# never prompts interactively.
+_forge_pr_create() {
+  local title="$1" base="$2" head="$3" body="$4"
+  local forge=""
+  _detect_forge_type forge
+
+  if [ "$forge" != "github" ]; then
+    _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
+    _forge_emit_write_status degraded "" "forge-pr-create: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1."
+    return 1
+  fi
+
+  if ! _forge_bin_check gh mandatory "$forge"; then
+    _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
+    _forge_emit_write_status degraded "" "gh not found -- this pull request was not created automatically."
+    return 1
+  fi
+
+  # Existing-PR check. `state` rides along with url/number precisely because
+  # this branch has to tell an OPEN PR (which blocks creation) apart from a
+  # closed/merged one (which must not) -- `gh pr view <branch>` is NOT
+  # state-filtered, so a branch reused after its prior PR was merged still
+  # resolves to that stale PR here.
+  local existing="" existing_rc=0 existing_status existing_state existing_message
+  existing=$(cmd_forge_pr_view --pr "$head" --include url,number,state) || existing_rc=$?
+  if [ "$existing_rc" -ne 0 ]; then
+    _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
+    echo "Error: forge-pr-create: forge-pr-view lookup failed while checking for an existing PR (exit $existing_rc)." >&2
+    _forge_emit_write_status degraded "" "forge-pr-create: forge-pr-view lookup failed while checking for an existing PR (exit $existing_rc)."
+    return 1
+  fi
+
+  # Branch over ALL THREE statuses forge-pr-view can return, never just
+  # found. forge-pr-view exists specifically so "no PR exists" is
+  # distinguishable from "the lookup broke", and it reports the latter as
+  # status:"error" INSIDE its envelope at exit 0 -- so the $existing_rc
+  # guard above cannot see it. A check that only tested for "found" let
+  # error fall through to `gh pr create` and opened a duplicate PR for a
+  # branch whose real PR the tool simply could not read (an expired token,
+  # a network blip). Creation happens on not_found alone -- plus the
+  # explicitly-inspected closed/merged case below.
+  existing_status=$(printf '%s' "$existing" | jq -r '.status')
+  case "$existing_status" in
+    found)
+      # Only an OPEN PR blocks -- matching cmd_help's own "existing open PR"
+      # wording. A closed or merged PR on this branch falls through to
+      # creation exactly like not_found, so a reused branch gets a fresh
+      # pull request instead of being blocked forever by a dead one.
+      existing_state=$(printf '%s' "$existing" | jq -r '.pr.state // empty')
+      if [ "$existing_state" = "open" ]; then
+        # "unchanged", not a `created:false` boolean: no new PR number was
+        # minted, which is exactly what forge-contract.md's Write-Verb
+        # Status Convention names that outcome -- and the same word every
+        # successful forge-pr-edit call reports.
+        _forge_emit_write_status unchanged "$(_forge_build_write_data \
+          "$(printf '%s' "$existing" | jq -r '.pr.url // empty')" \
+          "$(printf '%s' "$existing" | jq -r '.pr.number // empty')")"
+        return 0
+      fi
+      ;;
+    not_found)
+      ;;
+    error|*)
+      # `error` is named explicitly; `*` makes any future status value fail
+      # the same closed way. Neither is a defensible reason to create a PR:
+      # a status this code does not understand must never be read as
+      # permission to open one. Unreachable in practice today --
+      # _forge_pr_view_emit rejects a fourth status before it ever reaches
+      # this caller -- but the fall-through it replaces is exactly the class
+      # of defect this branch exists to prevent.
+      existing_message=$(printf '%s' "$existing" | jq -r '.message // empty')
+      _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
+      echo "Error: forge-pr-create: forge-pr-view reported an error while checking for an existing PR on $head: ${existing_message:-unknown error}" >&2
+      _forge_emit_write_status degraded "" "forge-pr-create: forge-pr-view reported an error while checking for an existing PR on $head: ${existing_message:-unknown error}"
+      return 1
+      ;;
+  esac
+
+  local stdout rc=0 stderr_out
+  _forge_capture stdout stderr_out rc -- gh pr create --title "$title" --base "$base" --head "$head" --body "$body" || true
+
+  if [ "$rc" -ne 0 ]; then
+    _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
+    echo "Error: forge-pr-create: gh pr create exited $rc: ${stderr_out:-unknown error}" >&2
+    _forge_emit_write_status degraded "" "gh pr create exited $rc: ${stderr_out:-unknown error}"
+    return 1
+  fi
+
+  local pr_url
+  pr_url=$(printf '%s' "$stdout" | tail -n1 | tr -d '\r')
+
+  if [ -z "$pr_url" ]; then
+    _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
+    echo "Error: forge-pr-create: gh pr create succeeded but its output did not contain a parseable PR URL." >&2
+    _forge_emit_write_status degraded "" "gh pr create succeeded but its output did not contain a parseable PR URL."
+    return 1
+  fi
+
+  # Structured re-read (AC3) -- never a regex on $pr_url.
+  #
+  # PAST THIS POINT THE PR EXISTS AND ITS URL IS IN HAND, so neither failure
+  # branch below may discard $pr_url, report failure, or print the manual
+  # create-it-yourself instructions: a caller following those instructions
+  # would open a SECOND pull request for a branch that already has one, and
+  # execute.md's per-repository loop would report a successful creation as a
+  # failure. Only the number is unconfirmed, so it comes back null with a
+  # Warning (not an Error) naming the url, at exit 0.
+  #
+  # That is also why both branches below stay status "created" rather than
+  # "degraded": a new PR number genuinely WAS minted, and `degraded` forces
+  # `data` to null by design (forge-contract.md's Write-Verb Status
+  # Convention), which would throw the very url this comment exists to
+  # protect straight back away.
+  local reread="" reread_rc=0 reread_status reread_message pr_number
+  reread=$(cmd_forge_pr_view --pr "$head" --include url,number) || reread_rc=$?
+  if [ "$reread_rc" -ne 0 ]; then
+    echo "Warning: forge-pr-create: the pull request WAS created at $pr_url, but the post-create forge-pr-view re-read failed (exit $reread_rc) -- only its number could not be confirmed. Do NOT create it again." >&2
+    _forge_emit_write_status created "$(_forge_build_write_data "$pr_url" "")"
+    return 0
+  fi
+  reread_status=$(printf '%s' "$reread" | jq -r '.status')
+  if [ "$reread_status" != "found" ]; then
+    reread_message=$(printf '%s' "$reread" | jq -r '.message // empty')
+    echo "Warning: forge-pr-create: the pull request WAS created at $pr_url, but it could not be re-read afterward (forge-pr-view status: $reread_status${reread_message:+ -- $reread_message}) -- only its number could not be confirmed. Do NOT create it again." >&2
+    _forge_emit_write_status created "$(_forge_build_write_data "$pr_url" "")"
+    return 0
+  fi
+  pr_number=$(printf '%s' "$reread" | jq -r '.pr.number // empty')
+
+  _forge_emit_write_status created "$(_forge_build_write_data "$pr_url" "$pr_number")"
+}
+
+# Public wrapper: parses --title/--base/--head/--body/--project (deliberately
+# no --token or similarly credential-shaped flag -- see this section's
+# header comment and forge-contract.md's Credential/Identity Model),
+# applies the three standard guards used by cmd_detect_parent_branch/
+# cmd_resolve_base_branch (project cd, git-repository check, branch-name
+# validation against the existing ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ pattern for
+# BOTH --base and --head, before either is ever interpolated into a git/gh
+# invocation), then delegates exactly once to _forge_pr_create.
+cmd_forge_pr_create() {
+  check_jq
+
+  local title="" base="" head="" body="" project_dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --title)   shift; title="${1:-}" ;;
+      --base)    shift; base="${1:-}" ;;
+      --head)    shift; head="${1:-}" ;;
+      --body)    shift; body="${1:-}" ;;
+      --project) shift; project_dir="${1:-}" ;;
+      *)
+        echo "Error: forge-pr-create: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _require_git_repo "$project_dir"
+
+  if [ -z "$title" ] || [ -z "$base" ] || [ -z "$head" ]; then
+    echo "Usage: aimi-cli.sh forge-pr-create --title <t> --base <branch> --head <branch> [--body <text>] [--project <path>]" >&2
+    exit 1
+  fi
+
+  # Validate every branch name BEFORE it is ever interpolated into a git/gh
+  # invocation (plugins/aimi-engineering/CLAUDE.md Security Requirements).
+  if ! [[ "$base" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: forge-pr-create: invalid --base value: $base" >&2
+    exit 1
+  fi
+  if ! [[ "$head" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: forge-pr-create: invalid --head value: $head" >&2
+    exit 1
+  fi
+
+  _forge_pr_create "$title" "$base" "$head" "$body"
+}
+
+# Shells `gh pr edit <number> --body <b>`, then re-reads the edited PR via
+# story 04's forge-pr-view lookup (in-process, keyed on the same numeric
+# identifier the caller supplied) to confirm and report {url, number} under
+# the write envelope's `data` key -- the same structured-field discipline
+# _forge_pr_create applies, and now genuinely the same JSON shape, so a
+# caller really can treat both verbs' output identically (AC4). It did not
+# before: this function used to return a bare {url, number} with no status
+# field at all while forge-pr-create returned {url, number, created}, so
+# the two shapes never matched despite the comment here claiming they did.
+#
+# A successful edit reports status "unchanged", never "created": editing a
+# PR mutates a number that already existed and mints no new identifier,
+# which is precisely what forge-contract.md's Write-Verb Status Convention
+# means by that word. The PR's BODY did change -- "unchanged" is about the
+# resource identifier, not about the content.
+#
+# MANDATORY-PRINT degrade mode: identical contract to _forge_pr_create --
+# see this section's header comment. Every failure branch also emits a
+# status "degraded" envelope on stdout carrying the same reason its stderr
+# text states. Never retries, never prompts interactively, exits non-zero
+# on every failure path.
+_forge_pr_edit() {
+  local number="$1" body="$2"
+  local forge=""
+  _detect_forge_type forge
+
+  if [ "$forge" != "github" ]; then
+    _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
+    _forge_emit_write_status degraded "" "forge-pr-edit: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1."
+    return 1
+  fi
+
+  if ! _forge_bin_check gh mandatory "$forge"; then
+    _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
+    _forge_emit_write_status degraded "" "gh not found -- this pull request was not edited automatically."
+    return 1
+  fi
+
+  # This call alone discarded gh's stdout to /dev/null rather than capturing
+  # it. It now lands in a local nothing reads, which is behaviourally
+  # identical -- neither form ever printed or inspected it.
+  local stdout rc=0 stderr_out
+  _forge_capture stdout stderr_out rc -- gh pr edit "$number" --body "$body" || true
+
+  if [ "$rc" -ne 0 ]; then
+    _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
+    echo "Error: forge-pr-edit: gh pr edit exited $rc: ${stderr_out:-unknown error}" >&2
+    _forge_emit_write_status degraded "" "gh pr edit exited $rc: ${stderr_out:-unknown error}"
+    return 1
+  fi
+
+  local reread="" reread_rc=0 reread_status pr_url pr_number
+  reread=$(cmd_forge_pr_view --pr "$number" --include url,number) || reread_rc=$?
+  if [ "$reread_rc" -ne 0 ]; then
+    _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
+    echo "Error: forge-pr-edit: gh pr edit succeeded but the post-edit forge-pr-view re-read failed (exit $reread_rc)." >&2
+    _forge_emit_write_status degraded "" "gh pr edit succeeded but the post-edit forge-pr-view re-read failed (exit $reread_rc)."
+    return 1
+  fi
+  reread_status=$(printf '%s' "$reread" | jq -r '.status')
+  if [ "$reread_status" != "found" ]; then
+    _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
+    echo "Error: forge-pr-edit: gh pr edit succeeded but the PR could not be re-read afterward." >&2
+    _forge_emit_write_status degraded "" "gh pr edit succeeded but the PR could not be re-read afterward."
+    return 1
+  fi
+  pr_url=$(printf '%s' "$reread" | jq -r '.pr.url // empty')
+  pr_number=$(printf '%s' "$reread" | jq -r '.pr.number // empty')
+
+  _forge_emit_write_status unchanged "$(_forge_build_write_data "$pr_url" "$pr_number")"
+}
+
+# Public wrapper: parses --number/--body/--project (no --token or similarly
+# credential-shaped flag -- see this section's header comment), applies the
+# same three standard guards as cmd_forge_pr_create (project cd, git-
+# repository check, identifier validation before shelling out) -- --number
+# is validated as numeric-only (^[0-9]+$) rather than the branch-name
+# pattern, matching cmd_forge_issue_view's own numeric-identifier guard --
+# then delegates exactly once to _forge_pr_edit.
+cmd_forge_pr_edit() {
+  check_jq
+
+  local number="" body="" project_dir="" body_provided=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --number)  shift; number="${1:-}" ;;
+      # body_provided tracks whether the FLAG was seen, deliberately not
+      # whether its value is non-empty: `gh pr edit N --body ""` blanks a
+      # description, so "flag omitted entirely" (a caller that forgot it,
+      # which must be refused) and "--body ''" (a deliberate clear, which
+      # must keep working) have to stay distinguishable. Checking $body for
+      # emptiness would collapse them back together.
+      --body)    shift; body="${1:-}"; body_provided=1 ;;
+      --project) shift; project_dir="${1:-}" ;;
+      *)
+        echo "Error: forge-pr-edit: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _require_git_repo "$project_dir"
+
+  if [ -z "$number" ] || [ -z "$body_provided" ]; then
+    echo "Usage: aimi-cli.sh forge-pr-edit --number <n> --body <text> [--project <path>]" >&2
+    exit 1
+  fi
+
+  if ! [[ "$number" =~ ^[0-9]+$ ]]; then
+    echo "Error: forge-pr-edit: --number must be a positive integer (got: $number)" >&2
+    exit 1
+  fi
+
+  _forge_pr_edit "$number" "$body"
+}
+
+# ============================================================================
+# Forge Issue Verbs — forge-issue-view, forge-issue-create (US-006)
+# ============================================================================
+# The first forge-* verbs in this phase to actually shell out to a forge
+# CLI. Built entirely on US-002's shared builders/degradation gate
+# (_forge_build_issue_json, _forge_emit_status, _forge_bin_check) and
+# US-001's detect-forge -- neither is re-derived here.
+#
+# INVARIANT, stated here and again on cmd_forge_issue_create below because
+# it is the whole reason this pair exists: a failed or degraded issue
+# creation must NEVER be treated by a caller as a reason to block PR
+# creation. open-pr.md:481 already documents this in prose ("a warning is
+# logged but PR creation is NOT affected -- the backend spec still lives in
+# the PR body"); forge-issue-create's JSON `status` field (never its exit
+# code, which stays 0 on every syntactically valid call -- see below) is
+# what lets a future caller preserve that behavior once it migrates off a
+# raw `gh issue create` shell-out.
+#
+# GitHub is the only adapter this phase. A detected forge other than
+# "github" degrades exactly like a missing `gh` binary rather than
+# attempting a call that could only fail.
+
+# Forge-native issue/PR state strings, normalized per forge-contract.md's
+# "State Mapping" table. Case-folded first because GitHub's gh CLI returns
+# OPEN/CLOSED/MERGED in uppercase while GitLab/Gitea's APIs are lowercase.
+# Once case-folded, every cell in that table already agrees across all
+# three forges EXCEPT GitLab's "opened", which has no "open"-spelled
+# sibling anywhere else -- that is the one and only translation this
+# function performs. GitLab's "locked" has no GitHub or Gitea/Forgejo
+# equivalent and passes through unchanged rather than being collapsed into
+# "merged" (collapsing would silently discard a real GitLab-only signal).
+# An unrecognized forge, or a raw value this table does not name, passes
+# through case-folded and otherwise untouched -- this function normalizes
+# spelling, it never invents a value the source data did not provide.
+# Usage: _forge_map_state <forge: github|gitlab|gitea> <raw-state>
+_forge_map_state() {
+  local forge="$1" raw
+  raw=$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')
+
+  if [ "$forge" = "gitlab" ] && [ "$raw" = "opened" ]; then
+    printf 'open'
+    return 0
+  fi
+
+  printf '%s' "$raw"
+}
+
+# Extracts the trailing issue number from a GitHub issue URL
+# (https://github.com/<owner>/<repo>/issues/<n>, optionally followed by a
+# path/query/fragment). Prints empty on a non-matching URL rather than
+# guessing -- cmd_forge_issue_view treats an empty result as a caller-input
+# error, never a silent zero.
+_forge_extract_issue_number_from_url() {
+  local url="$1"
+  if [[ "$url" =~ /issues/([0-9]+)([/?#].*)?$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  fi
+}
+
+# Shells `gh issue view <n> --json number,title,body,labels,state,url,
+# comments`. `comments` is requested in addition to the field list this
+# story's own prose quotes, specifically so unsupported_fields comes back
+# [] on GitHub: forge-contract.md's issue object treats comments as the
+# ONE capability-gated field, and GitHub can supply it cheaply (a comment
+# COUNT, derived here from the length of gh's own comments array) -- only
+# GitLab's noisier discussion model and tea's uncertain counting semantics
+# keep it capability-gated at all. `labels` is not in forge-contract.md's
+# issue field table today -- GitHub/GitLab/Gitea all expose it as a
+# portable-core concept, so it rides alongside _forge_build_issue_json's
+# output via a jq merge rather than waiting on a contract-doc update this
+# story does not own.
+#
+# QUIET degrade mode throughout (forge-contract.md's Degradation
+# Contract): a missing gh, an unauthenticated session, and any other gh
+# failure all resolve to status "error" with NO stderr output --
+# validate-bug.md's free-text-description fallback (the caller this verb
+# was built for) must not gain a spurious warning it does not have today.
+#
+# Not-found is a query result, never a verb failure (mirrors split-detect
+# and verify-creates): gh conflates "no such issue" and "tool is broken"
+# into the same non-zero exit, so gh's own stderr text is pattern-matched
+# here to tell the two apart BEFORE calling _forge_emit_status -- the same
+# discipline _verify_creates_one already applies to git's ambiguous exit
+# codes. (The AC's "found (boolean)" language maps onto this three-way
+# `status` field: status=="found" is the found:true case, status==
+# "not_found" is the found:false case -- forge-contract.md's Three-Way
+# Status Convention is the single arbiter of this vocabulary and already
+# names forge-issue-view as one of its consumers, so no second/variant
+# "found" field is introduced alongside it.)
+#
+# Always returns 0 -- found/not_found/error are three data outcomes, not
+# three exit codes. cmd_forge_issue_view (the public wrapper) is the only
+# layer that can exit non-zero, and only for a caller-side usage error.
+_forge_issue_view() {
+  local number="$1"
+  local forge_info forge host
+  # host is resolved alongside forge (this used to read only .forge) purely
+  # so the generic-failure branch below can hand it to the shared classifier.
+  forge_info=$(_detect_forge)
+  forge=$(printf '%s' "$forge_info" | jq -r '.forge')
+  host=$(printf '%s' "$forge_info" | jq -r '.host // empty')
+
+  if [ "$forge" != "github" ]; then
+    _forge_emit_status error "" "forge-issue-view: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1." no_adapter
+    return 0
+  fi
+
+  if ! _forge_bin_check gh quiet "$forge"; then
+    _forge_emit_status error "" "gh not found -- this issue lookup did not run automatically." cli_missing
+    return 0
+  fi
+
+  local stdout rc=0
+  local stderr_out
+  _forge_capture stdout stderr_out rc -- gh issue view "$number" --json number,title,body,labels,state,url,comments || true
+
+  if [ "$rc" -eq 0 ]; then
+    local num title_val body_val url_val state_raw state_norm labels_json comments_count data
+    num=$(printf '%s' "$stdout" | jq -r '.number // empty')
+    title_val=$(printf '%s' "$stdout" | jq -r '.title // ""')
+    body_val=$(printf '%s' "$stdout" | jq -r '.body // ""')
+    url_val=$(printf '%s' "$stdout" | jq -r '.url // ""')
+    state_raw=$(printf '%s' "$stdout" | jq -r '.state // ""')
+    state_norm=$(_forge_map_state "$forge" "$state_raw")
+    labels_json=$(printf '%s' "$stdout" | jq -c '[(.labels // [])[].name]')
+    comments_count=$(printf '%s' "$stdout" | jq -c '(.comments // []) | length')
+    data=$(_forge_build_issue_json --number "$num" --url "$url_val" --title "$title_val" \
+      --body "$body_val" --state "$state_norm" --comments "$comments_count" --raw "$stdout")
+    data=$(printf '%s' "$data" | jq -c --argjson labels "$labels_json" '. + {labels: $labels}')
+    _forge_emit_status found "$data"
+    return 0
+  fi
+
+  if printf '%s' "$stderr_out" | grep -qi "Could not resolve to an issue or pull request"; then
+    _forge_emit_status not_found
+    return 0
+  fi
+
+  # Reached only after the not-found stderr match above already failed, so
+  # gh genuinely broke. gh's presence was confirmed by the _forge_bin_check
+  # gate above, so the classifier only has to separate not_authenticated
+  # from cli_failed -- cli_missing is already ruled out.
+  local reason
+  reason=$(_forge_classify_gh_failure_reason "$host")
+  _forge_emit_status error "" "gh issue view exited $rc: ${stderr_out:-unknown error}" "$reason"
+  return 0
+}
+
+# Public wrapper: parses --number/--url/--project, validates the numeric
+# identifier BEFORE it is ever interpolated into a gh command (mirroring
+# the branchName-validation posture in plugins/aimi-engineering/CLAUDE.md's
+# Security Requirements), confirms the git-repository guard the same way
+# detect-forge/detect-parent-branch/detect-default-branch already do (gh
+# infers which repo to query from cwd's remote; there is no --repo flag
+# here), then delegates exactly once to _forge_issue_view.
+#
+# Routing note for the later validate-bug.md migration (recorded here so
+# that story does not have to re-derive it): validate-bug.md's plain-
+# issue-number branch and its GitHub-issue-URL branch both route to THIS
+# verb; its PR-URL branch (validate-bug.md:39) routes to forge-pr-view
+# instead, even though it requests an identical field set, because it
+# reads a pull request, not an issue.
+cmd_forge_issue_view() {
+  check_jq
+
+  local number="" url="" project_dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --number)  shift; number="${1:-}" ;;
+      --url)     shift; url="${1:-}" ;;
+      --project) shift; project_dir="${1:-}" ;;
+      *)
+        echo "Error: forge-issue-view: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _require_git_repo "$project_dir"
+
+  if [ -z "$number" ] && [ -n "$url" ]; then
+    number=$(_forge_extract_issue_number_from_url "$url")
+    if [ -z "$number" ]; then
+      echo "Error: forge-issue-view: could not extract an issue number from --url: $url" >&2
+      exit 1
+    fi
+  fi
+
+  if [ -z "$number" ]; then
+    echo "Error: forge-issue-view: --number <n> or --url <issue-url> is required" >&2
+    exit 1
+  fi
+
+  if ! [[ "$number" =~ ^[0-9]+$ ]]; then
+    echo "Error: forge-issue-view: --number must be a positive integer (got: $number)" >&2
+    exit 1
+  fi
+
+  _forge_issue_view "$number"
+}
+
+# Prints the MANDATORY manual-fallback instruction (forge-contract.md's
+# Degradation Contract, mandatory mode) for every forge-issue-create
+# failure path -- missing gh, unauthenticated session, or the create call
+# itself failing all funnel through this one function so the instruction
+# is worded identically regardless of WHY automatic creation did not
+# happen. Always stderr, never stdout, so a caller consuming this verb's
+# JSON result on stdout never has to filter prose out of its own data.
+_forge_issue_create_print_manual() {
+  local title="$1" body="$2" forge="$3"
+  {
+    echo "Warning: could not create this $forge issue automatically -- create it yourself with:"
+    echo "  Title: $title"
+    echo "  Body:"
+    printf '%s\n' "$body" | sed 's/^/    /'
+  } >&2
+}
+
+# Shells `gh issue create --title <t> --body <b>`, capturing stdout as the
+# created issue's URL -- gh issue create has NO --json flag (confirmed:
+# unlike gh issue view/gh pr view, only a plain URL reaches stdout on
+# success) -- and deriving the issue number from that URL itself, the same
+# grep -oE '[0-9]+$' open-pr.md:464 does today, centralized and tested here
+# exactly once so open-pr.md's later migration (story 08) can drop its own
+# copy.
+#
+# MANDATORY-PRINT degrade mode (forge-contract.md's Degradation Contract):
+# unlike forge-issue-view's quiet read, this write verb has no fallback
+# path of its own, so every failure -- missing gh, unauthenticated
+# session, the create call itself failing (permissions denied, issues
+# disabled, rate limit), or an unparseable success response -- prints the
+# manual "create this yourself" instruction via
+# _forge_issue_create_print_manual.
+#
+# RESULT ENVELOPE: this verb SHARES aimi-cli.sh's one write-verb envelope
+# with forge-pr-create and forge-pr-edit -- forge-contract.md's Write-Verb
+# Status Convention, built here by the same _forge_emit_write_status
+# function those two call, with url and number nested under `data` exactly
+# as they are there. It used to maintain a deliberately separate two-value
+# (created|degraded) vocabulary with flat sibling url/number keys; there is
+# no longer any reason for a caller to learn a second shape to read this
+# verb's answer.
+#
+# What still distinguishes this envelope from forge-contract.md's READ-side
+# found/not_found/error trio is unchanged and correct: a write genuinely has
+# no "not found" outcome, since nothing was looked up. That is the reason
+# the write side has its own three values, not a reason for each write verb
+# to have its own.
+#
+# CONTRACT INVARIANT: printing that instruction is NEVER a hard failure.
+# This function always returns 0 -- on EVERY branch, degraded included; its
+# JSON result's `status` field is what a caller branches on -- see the
+# section header above and cmd_forge_issue_create below for the full
+# statement of why (open-pr.md:481's existing soft-fail behavior must
+# survive unchanged). Sharing the envelope with forge-pr-create/
+# forge-pr-edit deliberately does NOT share their exit-code contract: those
+# two exit non-zero on a degraded outcome, this one never does.
+_forge_issue_create() {
+  local title="$1" body="$2"
+  local forge=""
+  _detect_forge_type forge
+
+  if [ "$forge" != "github" ]; then
+    _forge_issue_create_print_manual "$title" "$body" "$forge"
+    _forge_emit_write_status degraded "" "forge-issue-create: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1."
+    return 0
+  fi
+
+  if ! _forge_bin_check gh mandatory "$forge"; then
+    _forge_issue_create_print_manual "$title" "$body" "$forge"
+    _forge_emit_write_status degraded "" "gh not found -- this issue was not created automatically."
+    return 0
+  fi
+
+  local stdout rc=0
+  local stderr_out
+  _forge_capture stdout stderr_out rc -- gh issue create --title "$title" --body "$body" || true
+
+  if [ "$rc" -ne 0 ]; then
+    _forge_issue_create_print_manual "$title" "$body" "$forge"
+    _forge_emit_write_status degraded "" "gh issue create exited $rc: ${stderr_out:-unknown error}"
+    return 0
+  fi
+
+  local issue_url issue_number
+  issue_url=$(printf '%s' "$stdout" | tail -n1 | tr -d '\r')
+  issue_number=$(printf '%s' "$issue_url" | grep -oE '[0-9]+$' || true)
+
+  if [ -z "$issue_url" ] || [ -z "$issue_number" ]; then
+    _forge_issue_create_print_manual "$title" "$body" "$forge"
+    _forge_emit_write_status degraded "" "gh issue create succeeded but its output did not contain a parseable issue URL: ${issue_url:-<empty>}"
+    return 0
+  fi
+
+  _forge_emit_write_status created "$(_forge_build_write_data "$issue_url" "$issue_number")"
+}
+
+# Public wrapper: parses --title/--body/--project (deliberately no --token
+# or similarly credential-shaped flag -- see forge-contract.md's
+# Credential/Identity Model; any acting-account identity must reach the
+# child gh process only through an environment variable, e.g. GH_TOKEN,
+# which a bash child process inherits automatically with no extra code
+# needed here to pass it along), confirms the git-repository guard, then
+# delegates exactly once to _forge_issue_create.
+#
+# INVARIANT (restated from the section header on purpose, not left
+# implicit): a degraded or failed issue creation from this verb must NEVER
+# be read by a caller as a reason to block PR creation. open-pr.md:481
+# already documents this soft-fail behavior in prose; this verb's `status`
+# field is what lets a future caller preserve it.
+cmd_forge_issue_create() {
+  check_jq
+
+  local title="" body="" project_dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --title)   shift; title="${1:-}" ;;
+      --body)    shift; body="${1:-}" ;;
+      --project) shift; project_dir="${1:-}" ;;
+      *)
+        echo "Error: forge-issue-create: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _require_git_repo "$project_dir"
+
+  if [ -z "$title" ]; then
+    echo "Error: forge-issue-create: --title <text> is required" >&2
+    exit 1
+  fi
+
+  _forge_issue_create "$title" "$body"
+}
+
+# ============================================================================
+# Forge Review-Thread Verbs — forge-pr-review-threads, forge-resolve-review-thread (US-007)
+# ============================================================================
+# Ports skills/resolve-pr-parallel/scripts/get-pr-comments's reviewThreads
+# query and skills/resolve-pr-parallel/scripts/resolve-pr-thread's
+# resolveReviewThread mutation into aimi-cli.sh -- the only two GraphQL call
+# sites in this repository. Every identifier these two GraphQL documents
+# consume (owner, repo, PR number, thread id) is bound through `gh api
+# graphql`'s own -f/-F flags, never interpolated into the query text -- the
+# same class of hand-built string this codebase's `jq -nc --arg` convention
+# already prevents everywhere else, applied here to gh's own binding
+# mechanism instead of jq.
+#
+# NOTE on the two query/mutation constants below: they are single-quoted
+# verbatim ports and DO contain literal `$owner`, `$repo`, `$pr`, `$threadId`
+# characters -- that is GraphQL's own variable-reference syntax (declared in
+# each operation's signature, e.g. `($owner: String!)`, and bound externally
+# by gh via -f/-F), not shell interpolation. Bash never expands anything
+# inside a single-quoted string, so those tokens reach gh as inert literal
+# text; nothing in this file ever substitutes a shell variable into either
+# string. The actual security property enforced here (and asserted by this
+# story's own tests) is that neither string ever contains a BASH-style
+# expansion (`$(`, a backtick, or `${`) and that the gh invocations below
+# bind owner/repo/pr/threadId ONLY via -f/-F flags -- never by building the
+# query/mutation text with string concatenation or double-quoted
+# interpolation.
+#
+# Built entirely on US-001's detect-forge (direct function call), US-002's
+# shared degradation gate and generic three-way status envelope
+# (_forge_bin_check, _forge_emit_status -- forge-contract.md is the single
+# arbiter; no variant field-name casing or second degraded-reason field is
+# introduced here), and US-003's forge-repo-info (direct function call,
+# never a subprocess) for owner/repo auto-detection -- replacing
+# get-pr-comments:14-20's own inline OWNER/REPO detection.
+#
+# forge-pr-review-threads is a READ verb: three-way found/not_found/error,
+# QUIET degrade mode throughout (matches forge-issue-view's own posture --
+# a caller must not gain a spurious warning it does not have today). A null
+# GraphQL `pullRequest` is a confirmed not_found, never folded into error.
+#
+# forge-resolve-review-thread is a WRITE verb with NO fallback path (there
+# is no gh subcommand or REST endpoint for resolving a review thread), so it
+# follows forge-issue-create's MANDATORY-PRINT posture, but unlike forge-
+# issue-create it distinguishes a CONFIRMED negative (the mutation ran;
+# GraphQL says the thread id is invalid or inaccessible) from a
+# could-not-attempt negative (gh missing, unsupported forge, or gh itself
+# exiting non-zero for auth/network reasons). The confirmed negative reuses
+# status="found" with a false `resolved` field -- the same pattern forge-
+# auth-status already uses for a confirmed authenticated:false, per forge-
+# contract.md's Three-Way Status Convention: a definitive answer is still a
+# successful lookup, not an error. status="error" is reserved for the
+# could-not-attempt case. _forge_resolve_review_thread itself always stays
+# QUIET (JSON only, exit 0) so it is safely testable in isolation;
+# cmd_forge_resolve_review_thread (the public wrapper) is the ONLY layer
+# that prints the mandatory manual instruction and exits non-zero, driven
+# purely by the JSON status field.
+
+# Private helper holding the reviewThreads query, ported verbatim from
+# get-pr-comments:27-68 (query body only -- the `gh api graphql -f owner=...
+# -f query='` wrapper and the trailing `.data...edges | map(select(...))`
+# jq pipeline are NOT part of the query text and live in
+# _forge_pr_review_threads_github/_forge_pr_review_threads below instead,
+# now expressed as a jq filter over the raw GraphQL response rather than a
+# second external jq process piped from gh's own stdout).
+_forge_review_threads_query() {
+  printf '%s' '
+query FetchReviewThreads($owner: String!, $repo: String!, $pr: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $pr) {
+      title
+      url
+      reviewThreads(first: 100) {
+        totalCount
+        edges {
+          node {
+            id
+            isResolved
+            isOutdated
+            isCollapsed
+            path
+            line
+            startLine
+            diffSide
+            comments(first: 100) {
+              totalCount
+              nodes {
+                id
+                author {
+                  login
+                }
+                body
+                createdAt
+                updatedAt
+                url
+                outdated
+              }
+            }
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+}'
+}
+
+# Private helper holding the resolveReviewThread mutation, ported verbatim
+# from resolve-pr-thread:13-23.
+_forge_resolve_review_thread_mutation() {
+  printf '%s' '
+mutation ResolveReviewThread($threadId: ID!) {
+  resolveReviewThread(input: {threadId: $threadId}) {
+    thread {
+      id
+      isResolved
+      path
+      line
+    }
+  }
+}'
+}
+
+# github adapter for forge-pr-review-threads. <pr_number>/<owner>/<repo> are
+# already validated by cmd_forge_pr_review_threads before this ever runs;
+# <all_threads> is the literal string "true"/"false". Binds owner/repo/pr
+# via -f/-F only -- see the section header above for why the query text
+# still contains literal `$owner`/`$repo`/`$pr` (GraphQL's own variable
+# syntax, inert under bash single-quoting).
+_forge_pr_review_threads_github() {
+  local pr_number="$1" owner="$2" repo="$3" all_threads="$4" host="${5:-}"
+  local stdout rc=0
+  local stderr_out
+
+  _forge_capture stdout stderr_out rc -- gh api graphql -f owner="$owner" -f repo="$repo" -F pr="$pr_number" \
+    -f query="$(_forge_review_threads_query)" || true
+
+  if [ "$rc" -ne 0 ]; then
+    # gh's presence was already confirmed by the caller's _forge_bin_check
+    # gate, so the classifier only separates not_authenticated from
+    # cli_failed -- structurally, never by reading stderr_out's wording.
+    local reason
+    reason=$(_forge_classify_gh_failure_reason "$host")
+    _forge_emit_status error "" "gh api graphql exited $rc: ${stderr_out:-unknown error}" "$reason"
+    return 0
+  fi
+
+  local pr_present
+  pr_present=$(printf '%s' "$stdout" | jq -r '.data.repository.pullRequest // empty')
+  if [ -z "$pr_present" ]; then
+    _forge_emit_status not_found
+    return 0
+  fi
+
+  local title url all_flag_json threads_json
+  title=$(printf '%s' "$stdout" | jq -r '.data.repository.pullRequest.title // ""')
+  url=$(printf '%s' "$stdout" | jq -r '.data.repository.pullRequest.url // ""')
+  if [ "$all_threads" = "true" ]; then all_flag_json=true; else all_flag_json=false; fi
+
+  # Collapses the edges/node GraphQL wrapper away (it carries no
+  # caller-visible data of its own) and, without --all, filters to
+  # isResolved==false and isOutdated==false -- matching get-pr-comments:68's
+  # existing filter exactly.
+  threads_json=$(printf '%s' "$stdout" | jq -c --argjson all "$all_flag_json" '
+    [.data.repository.pullRequest.reviewThreads.edges[].node]
+    | (if $all then . else map(select(.isResolved == false and .isOutdated == false)) end)
+  ')
+
+  local data_json
+  data_json=$(jq -nc \
+    --arg number "$pr_number" \
+    --arg title "$title" \
+    --arg url "$url" \
+    --argjson threads "$threads_json" \
+    '{
+      pr: {number: ($number | tonumber),
+           title: (if $title == "" then null else $title end),
+           url: (if $url == "" then null else $url end)},
+      threads: $threads,
+      unsupported_fields: []
+    }')
+  _forge_emit_status found "$data_json"
+}
+
+# Resolves forge/owner/repo, routes a non-github forge or missing gh to a
+# QUIET status=error result, and otherwise delegates to the github adapter.
+# Owner/repo are resolved via US-003's _forge_repo_info as a direct
+# function call (never a `$AIMI_CLI forge-repo-info` subprocess, never a
+# second private gh-repo-view call) whenever --owner/--repo are not both
+# supplied, replacing get-pr-comments:14-20's own inline OWNER/REPO
+# detection.
+_forge_pr_review_threads() {
+  local pr_number="$1" owner="$2" repo="$3" all_threads="$4"
+  local forge_info forge host
+  # host is resolved alongside forge (this used to read only .forge) so it
+  # can be handed to the github adapter, which passes it to the classifier.
+  forge_info=$(_detect_forge)
+  forge=$(printf '%s' "$forge_info" | jq -r '.forge')
+  host=$(printf '%s' "$forge_info" | jq -r '.host // empty')
+
+  if [ "$forge" != "github" ]; then
+    _forge_emit_status error "" "forge-pr-review-threads: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1." no_adapter
+    return 0
+  fi
+
+  if ! _forge_bin_check gh quiet "$forge"; then
+    _forge_emit_status error "" "gh not found -- this review-thread lookup did not run automatically." cli_missing
+    return 0
+  fi
+
+  if [ -z "$owner" ] || [ -z "$repo" ]; then
+    local repo_info repo_status
+    repo_info=$(_forge_repo_info)
+    repo_status=$(printf '%s' "$repo_info" | jq -r '.status')
+    if [ "$repo_status" = "found" ]; then
+      [ -n "$owner" ] || owner=$(printf '%s' "$repo_info" | jq -r '.data.owner')
+      [ -n "$repo" ]  || repo=$(printf '%s' "$repo_info" | jq -r '.data.repo')
+    fi
+  fi
+
+  # cli_failed, NOT a fifth enum value of its own and NOT routed through the
+  # classifier: no gh invocation happens on this branch, so there is nothing
+  # to re-check auth against, and forge-contract.md's cli_failed already
+  # names "an owner/repo that could not be auto-resolved" as one of the
+  # catch-all's cases. A fifth value for exactly one call site would be enum
+  # proliferation for a single caller-input edge case.
+  if [ -z "$owner" ] || [ -z "$repo" ]; then
+    _forge_emit_status error "" "forge-pr-review-threads: could not resolve owner/repo -- pass --owner and --repo explicitly." cli_failed
+    return 0
+  fi
+
+  _forge_pr_review_threads_github "$pr_number" "$owner" "$repo" "$all_threads" "$host"
+}
+
+# Read verb: found | not_found | error, per forge-contract.md's Three-Way
+# Status Convention. Output: {status, data, message}; data (when found)
+# carries {pr: {number, title, url}, threads: [...], unsupported_fields}.
+# Each thread carries get-pr-comments' current fields unchanged: id,
+# isResolved, isOutdated, isCollapsed, path, line, startLine, diffSide, and
+# comments: {totalCount, nodes: [{id, author: {login}, body, createdAt,
+# updatedAt, url, outdated}]}.
+# Usage: aimi-cli.sh forge-pr-review-threads --pr <number> [--owner <owner>
+# --repo <repo>] [--all] [--project <path>]
+cmd_forge_pr_review_threads() {
+  check_jq
+
+  local pr_number="" owner="" repo="" all_threads="false" project_dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --pr)      shift; pr_number="${1:-}" ;;
+      --owner)   shift; owner="${1:-}" ;;
+      --repo)    shift; repo="${1:-}" ;;
+      --all)     all_threads="true" ;;
+      --project) shift; project_dir="${1:-}" ;;
+      *)
+        echo "Error: forge-pr-review-threads: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _require_git_repo "$project_dir"
+
+  if [ -z "$pr_number" ]; then
+    echo "Usage: aimi-cli.sh forge-pr-review-threads --pr <number> [--owner <owner> --repo <repo>] [--all] [--project <path>]" >&2
+    exit 1
+  fi
+
+  # Fail-fast usage check BEFORE the PR number is ever passed to gh -- the
+  # primary injection defense is the -f/-F binding in the github adapter
+  # above, not this pattern check.
+  if ! [[ "$pr_number" =~ ^[0-9]+$ ]]; then
+    echo "Error: forge-pr-review-threads: --pr must be a positive integer (got: $pr_number)" >&2
+    exit 1
+  fi
+
+  if [ -n "$owner" ] && ! [[ "$owner" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "Error: forge-pr-review-threads: invalid --owner value: $owner" >&2
+    exit 1
+  fi
+
+  if [ -n "$repo" ] && ! [[ "$repo" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "Error: forge-pr-review-threads: invalid --repo value: $repo" >&2
+    exit 1
+  fi
+
+  _forge_pr_review_threads "$pr_number" "$owner" "$repo" "$all_threads"
+}
+
+# ----------------------------------------------------------------------------
+# GITEA CAPABILITY-GAP NOTE (documentation only -- no gitea/glab code path is
+# added or tested in this phase-1, GitHub-only story): a Gitea/Forgejo `tea`
+# adapter is expected to have NO equivalent for resolving a review thread at
+# all -- unlike a missing gh binary or an unwritten adapter, both of which
+# are TEMPORARY states, `tea` simply has no reviewThread/conversation-
+# resolution concept to call. Whichever future adapter lands for this verb
+# should report that permanent gap through the `unsupported_fields` array
+# naming the operation (e.g. `["resolveReviewThread"]`), never by reusing
+# the generic no-adapter `message` text an unwritten adapter produces today
+# -- "this forge cannot do this at all" and "nobody wrote the adapter yet"
+# are two different facts, and collapsing them would make a permanent gap
+# look like a temporary one.
+# ----------------------------------------------------------------------------
+# github adapter for forge-resolve-review-thread. <thread_id> is already
+# validated by cmd_forge_resolve_review_thread before this ever runs. Binds
+# threadId via -f only -- see the section header above for why the mutation
+# text still contains a literal `$threadId` (GraphQL's own variable syntax).
+# Always QUIET and always returns 0 -- found/error are three data outcomes,
+# not exit codes; cmd_forge_resolve_review_thread (the public wrapper) is
+# the only layer that prints the MANDATORY manual instruction and exits
+# non-zero, driven by this function's JSON `status` field.
+_forge_resolve_review_thread() {
+  local thread_id="$1"
+  local forge_info forge host
+  # host is resolved alongside forge (this used to read only .forge) purely
+  # so the generic-failure branch below can hand it to the shared classifier.
+  forge_info=$(_detect_forge)
+  forge=$(printf '%s' "$forge_info" | jq -r '.forge')
+  host=$(printf '%s' "$forge_info" | jq -r '.host // empty')
+
+  if [ "$forge" != "github" ]; then
+    _forge_emit_status error "" "forge-resolve-review-thread: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1." no_adapter
+    return 0
+  fi
+
+  if ! _forge_bin_check gh quiet "$forge"; then
+    _forge_emit_status error "" "gh not found -- this thread could not be resolved automatically." cli_missing
+    return 0
+  fi
+
+  local stdout rc=0
+  local stderr_out
+  _forge_capture stdout stderr_out rc -- gh api graphql -f threadId="$thread_id" \
+    -f query="$(_forge_resolve_review_thread_mutation)" || true
+
+  # gh api graphql exits non-zero when the GraphQL response's own `errors`
+  # array is non-empty -- a mutation targeting an invalid/inaccessible node
+  # id is exactly this case. That non-zero exit is a CONFIRMED negative
+  # answer, not a tool failure, so it must not fall into the generic
+  # "gh could not attempt this" branch below. GitHub's GraphQL API names
+  # this failure mode with the fixed message "Could not resolve to a node
+  # with the global id of" regardless of which mutation triggered it -- the
+  # same style of stderr pattern-match _forge_issue_view already uses to
+  # distinguish "no such issue" from "gh is broken".
+  if [ "$rc" -ne 0 ]; then
+    if printf '%s' "$stderr_out" | grep -qi "could not resolve to a node"; then
+      _forge_emit_status found "$(jq -nc '{resolved: false, thread: null, unsupported_fields: []}')"
+      return 0
+    fi
+    # Reached only after the confirmed-invalid-id match above already
+    # failed, so gh genuinely broke. gh's presence was confirmed by the
+    # _forge_bin_check gate above, so the classifier only separates
+    # not_authenticated from cli_failed -- structurally, never by reading
+    # stderr_out's wording.
+    local reason
+    reason=$(_forge_classify_gh_failure_reason "$host")
+    _forge_emit_status error "" "gh api graphql exited $rc: ${stderr_out:-unknown error}" "$reason"
+    return 0
+  fi
+
+  # Defensive fallback for a gh response shape that returns exit 0 with a
+  # populated top-level `errors` array instead of a non-zero exit -- the
+  # same confirmed-negative outcome, reached by inspecting the body instead
+  # of the exit code.
+  local errors_count
+  errors_count=$(printf '%s' "$stdout" | jq -r '(.errors // []) | length')
+  if [ "$errors_count" != "0" ]; then
+    _forge_emit_status found "$(jq -nc '{resolved: false, thread: null, unsupported_fields: []}')"
+    return 0
+  fi
+
+  local thread_json
+  thread_json=$(printf '%s' "$stdout" | jq -c '.data.resolveReviewThread.thread // empty')
+  # cli_failed hard-coded rather than classified: gh itself exited 0 here,
+  # so nothing failed at the tool level and there is no failure to re-check
+  # auth against -- only the response shape is unexpected.
+  if [ -z "$thread_json" ]; then
+    _forge_emit_status error "" "gh api graphql returned no thread and no errors for resolveReviewThread" cli_failed
+    return 0
+  fi
+
+  local data_json
+  data_json=$(printf '%s' "$thread_json" | jq -c '{
+    resolved: .isResolved,
+    thread: {id: .id, isResolved: .isResolved, path: .path, line: .line},
+    unsupported_fields: []
+  }')
+  _forge_emit_status found "$data_json"
+}
+
+# Write verb with NO fallback path -- MANDATORY-PRINT degrade mode.
+# Output: {status: "found"|"error", data, message}. status=="found" covers
+# BOTH a successful resolve (data.resolved=true) and a confirmed-invalid
+# thread id (data.resolved=false, the mutation ran) -- both exit 0, no
+# stderr. status=="error" means gh could not even attempt the mutation
+# (missing binary, unsupported forge, or gh itself exiting non-zero for a
+# reason other than a confirmed GraphQL error) -- prints the manual
+# "resolve it yourself" instruction to stderr and exits non-zero, since
+# there is no gh subcommand or REST fallback for resolving a review thread.
+# Usage: aimi-cli.sh forge-resolve-review-thread --thread-id <id> [--project <path>]
+cmd_forge_resolve_review_thread() {
+  check_jq
+
+  local thread_id="" project_dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --thread-id) shift; thread_id="${1:-}" ;;
+      --project)   shift; project_dir="${1:-}" ;;
+      *)
+        echo "Error: forge-resolve-review-thread: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _require_git_repo "$project_dir"
+
+  if [ -z "$thread_id" ]; then
+    echo "Usage: aimi-cli.sh forge-resolve-review-thread --thread-id <id> [--project <path>]" >&2
+    exit 1
+  fi
+
+  # Fail-fast usage check BEFORE the thread id is ever passed to gh -- the
+  # primary injection defense is the -f binding in the github adapter
+  # above, not this pattern check.
+  if ! [[ "$thread_id" =~ ^[A-Za-z0-9+/=_-]+$ ]]; then
+    echo "Error: forge-resolve-review-thread: invalid --thread-id value: $thread_id" >&2
+    exit 1
+  fi
+
+  local result status message
+  result=$(_forge_resolve_review_thread "$thread_id")
+  status=$(printf '%s' "$result" | jq -r '.status')
+
+  if [ "$status" = "error" ]; then
+    message=$(printf '%s' "$result" | jq -r '.message // "unknown error"')
+    {
+      echo "Warning: could not resolve this review thread automatically ($message)."
+      echo "There is no gh subcommand or REST fallback for this -- resolve it manually in the PR's Files changed tab (mark the conversation as resolved)."
+    } >&2
+    printf '%s\n' "$result"
+    exit 1
+  fi
+
+  printf '%s\n' "$result"
 }
 
 # Detect a Claude Design handoff bundle under a given root (defaults to CWD).
@@ -3173,20 +5924,7 @@ cmd_setup_branch() {
     exit 1
   fi
 
-  # cd into project dir if specified (supports multi-repo layouts where AIMI root is not a git repo)
-  if [ -n "$project_dir" ]; then
-    if [ ! -d "$project_dir" ]; then
-      echo "Error: Project directory does not exist: $project_dir" >&2
-      exit 1
-    fi
-    cd "$project_dir"
-  fi
-
-  # Guard: must be inside a git repository
-  if ! git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
-    exit 1
-  fi
+  _require_git_repo "$project_dir"
 
   # Validate branch name (security)
   if ! [[ "$branch_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
@@ -3427,20 +6165,7 @@ cmd_resolve_base_branch() {
     exit 1
   fi
 
-  # cd into project dir if specified (supports multi-repo layouts where AIMI root is not a git repo)
-  if [ -n "$project_dir" ]; then
-    if [ ! -d "$project_dir" ]; then
-      echo "Error: Project directory does not exist: $project_dir" >&2
-      exit 1
-    fi
-    cd "$project_dir"
-  fi
-
-  # Guard: must be inside a git repository
-  if ! git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "Error: Not a git repository. Use --project <path> to specify the git repo directory." >&2
-    exit 1
-  fi
+  _require_git_repo "$project_dir"
 
   # Validate branch name (security)
   if ! [[ "$branch_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
@@ -8880,6 +11605,144 @@ COMMANDS:
                               ("decoration"|"default-branch")}. Falls back to the
                               default branch (unverified) when no decoration
                               candidate survives normalization or merge-base check.
+    detect-forge [--project <path>]
+                              Classify the active git remote's hostname into
+                              github|gitlab|gitea|unknown (exact-or-subdomain,
+                              port-aware). Output: {forge, host, remote,
+                              remoteUrl, source ("override"|"remote"|
+                              "no-remote"|"ambiguous-remotes")}. Set
+                              AIMI_FORGE_TYPE=github|gitlab|gitea to override
+                              detection entirely (source=override, no git
+                              remote read runs); any other value exits 1.
+                              Never cached -- re-derived on every invocation.
+    forge-auth-status [--project <path>]
+                              Report whether the active forge session is authenticated
+                              and which account it is acting as. Output:
+                              {status ("found"|"error"), data, message}. data (when
+                              found) carries {forge, host, authenticated, account,
+                              identityRequested, identityHonored}. authenticated:false
+                              with status="found" is a confirmed logged-out session;
+                              status="error" means the check itself could not run (gh
+                              missing, or the forge has no adapter). Set
+                              AIMI_FORGE_IDENTITY=<login> (env var only, never a flag)
+                              to compare against the active account -- this does not
+                              switch accounts.
+    forge-repo-info [--project <path>]
+                              Resolve the active forge's owner/repo via a single
+                              `gh repo view` call, falling back to parsing the git
+                              remote URL when gh is unavailable. Output:
+                              {status ("found"|"not_found"), data, message}. data
+                              (when found) carries {forge, host, owner, repo,
+                              nameWithOwner, source ("gh"|"local-parse")}.
+    forge-pr-view --pr <branch-or-number> [--include <fields>] [--project <path>]
+                              Field-selectable PR lookup with a three-way
+                              found|not_found|error status, fixing the
+                              exit-code conflation `gh pr view --json url`
+                              carries today (a broken token reads as "no PR
+                              yet"). Output: {status, pr, unsupported_fields,
+                              evidence}. --include is a comma-separated
+                              subset of: number, url, title, body, state,
+                              headRefName, baseRefName, files, reviews,
+                              comments -- defaults to the portable core
+                              (excludes files/reviews/comments) when omitted.
+                              Only github ships in this phase; gitlab, gitea,
+                              unknown, or a missing gh binary degrade to
+                              status=error with no stderr output.
+    forge-pr-create --title <t> --base <branch> --head <branch> [--body <text>] [--project <path>]
+                              Write verb -- shells gh pr create (no --json
+                              flag exists on it; the URL is captured and the
+                              number is derived via a structured forge-pr-
+                              view re-read, never a regex on the URL).
+                              Idempotent: checks forge-pr-view for an
+                              existing open PR on --head first and reports
+                              it as status "unchanged" instead of opening a
+                              duplicate. Output: {status: "created"|
+                              "unchanged"|"degraded", data: {url, number},
+                              message} (forge-contract.md's Write-Verb
+                              Status Convention -- the same envelope
+                              forge-pr-edit and forge-issue-create emit).
+                              Unlike forge-issue-create, a missing
+                              gh binary or an unsupported forge prints the
+                              manual git-push + PR-creation instructions to
+                              stderr (MANDATORY-PRINT degrade mode) and
+                              EXITS NON-ZERO -- a hard failure, so a
+                              caller's own per-repository failure isolation
+                              can react. GitHub only in phase 1. Identity,
+                              when needed, is read from an env var (e.g.
+                              AIMI_FORGE_IDENTITY / GH_TOKEN), never a flag.
+    forge-pr-edit --number <n> --body <text> [--project <path>]
+                              Write verb -- shells gh pr edit <number>
+                              --body, then re-reads the PR via forge-pr-view
+                              to confirm and report {url, number} under the
+                              same write envelope forge-pr-create emits. A
+                              successful edit reports status "unchanged": it
+                              mutates an existing number and mints no new
+                              identifier. Same guards, degrade contract, and
+                              non-zero-exit-on-failure as forge-pr-create.
+                              GitHub only in phase 1.
+    forge-issue-view (--number <n> | --url <issue-url>) [--project <path>]
+                              Read verb -- shells gh issue view, normalized to
+                              {status: "found"|"not_found"|"error", data, message}
+                              (forge-contract.md's Three-Way Status Convention).
+                              data carries {number, url, title, body, state,
+                              labels, comments, unsupported_fields, raw} on
+                              found. QUIET degrade mode: a missing/unauthenticated
+                              gh yields status "error" with no stderr output.
+                              GitHub only in phase 1.
+    forge-issue-create --title <t> --body <b> [--project <path>]
+                              Write verb -- shells gh issue create (no --json
+                              flag exists on it; the URL/number are captured
+                              and derived here). Output: the same write
+                              envelope the two PR write verbs emit --
+                              {status: "created"|"degraded", data: {url,
+                              number}, message} (forge-contract.md's
+                              Write-Verb Status Convention; "unchanged"
+                              never occurs here, since this verb only ever
+                              mints a new issue). A
+                              degraded/failed create is NEVER a hard failure
+                              (exit stays 0) -- it prints a manual "create
+                              this yourself" instruction to stderr
+                              (MANDATORY-PRINT degrade mode) and lets the
+                              caller branch on status instead. GitHub only
+                              in phase 1.
+    forge-pr-review-threads --pr <number> [--owner <owner> --repo <repo>] [--all] [--project <path>]
+                              Read verb -- ports get-pr-comments' reviewThreads
+                              GraphQL query verbatim; owner, repo and the PR
+                              number are bound via gh api graphql's own -f/-F
+                              flags, never interpolated into the query text.
+                              Output: {status: "found"|"not_found"|"error",
+                              data, message} (forge-contract.md's Three-Way
+                              Status Convention). data carries {pr: {number,
+                              title, url}, threads: [...], unsupported_fields}.
+                              Each thread carries {id, isResolved, isOutdated,
+                              isCollapsed, path, line, startLine, diffSide,
+                              comments: {totalCount, nodes}}. Without --all,
+                              threads is filtered to isResolved==false and
+                              isOutdated==false, matching get-pr-comments'
+                              existing filter; --all returns every thread.
+                              Owner/repo auto-detected via forge-repo-info
+                              when not both supplied. QUIET degrade mode: a
+                              missing gh, unsupported forge, or gh failure
+                              yields status=error with no stderr. GitHub only
+                              in phase 1.
+    forge-resolve-review-thread --thread-id <id> [--project <path>]
+                              Write verb -- ports resolve-pr-thread's
+                              resolveReviewThread GraphQL mutation verbatim;
+                              the thread id is bound via gh api graphql's own
+                              -f flag, never interpolated. Output: {status:
+                              "found"|"error", data, message}. status="found"
+                              covers both a successful resolve
+                              (data.resolved=true) and a confirmed-invalid
+                              thread id (data.resolved=false, the mutation
+                              ran) -- both exit 0, no stderr. status="error"
+                              means gh could not attempt the mutation at all
+                              (missing binary, unsupported forge, or a
+                              genuine gh failure) -- MANDATORY-PRINT: prints a
+                              manual "resolve it yourself in the PR's Files
+                              changed tab" instruction to stderr and exits
+                              non-zero, since there is no gh subcommand or
+                              REST fallback for resolving a review thread.
+                              GitHub only in phase 1.
     detect-interactivity [--non-interactive]
                               Print resolved interactivity mode (picker|agent)
                               Returns picker by default; returns agent only when
@@ -9365,6 +12228,24 @@ main() {
     models-prompt-check) cmd_models_prompt_check; return ;;
     models-prompt-dismiss) cmd_models_prompt_dismiss; return ;;
     prime-cache) cmd_prime_cache; return ;;
+    # Forge verbs: git + an optional forge CLI + jq, and nothing else. None of
+    # them reads or writes .aimi/ state, so requiring a project would be pure
+    # cost -- and find_aimi_root's cd side effect is actively wrong for them:
+    # in a multi-repo layout it moves the process out of the git repository the
+    # caller is standing in and into the non-git .aimi/ parent. Dispatching
+    # here leaves the process in the invoking CWD, which is what an omitted
+    # --project must resolve to. Each verb calls check_jq itself, since the
+    # one below runs too late to cover them.
+    detect-forge) shift; cmd_detect_forge "$@"; return ;;
+    forge-auth-status) shift; cmd_forge_auth_status "$@"; return ;;
+    forge-repo-info) shift; cmd_forge_repo_info "$@"; return ;;
+    forge-pr-view) shift; cmd_forge_pr_view "$@"; return ;;
+    forge-pr-create) shift; cmd_forge_pr_create "$@"; return ;;
+    forge-pr-edit) shift; cmd_forge_pr_edit "$@"; return ;;
+    forge-issue-view) shift; cmd_forge_issue_view "$@"; return ;;
+    forge-issue-create) shift; cmd_forge_issue_create "$@"; return ;;
+    forge-pr-review-threads) shift; cmd_forge_pr_review_threads "$@"; return ;;
+    forge-resolve-review-thread) shift; cmd_forge_resolve_review_thread "$@"; return ;;
   esac
 
   # Universal --help/-h: any subcommand with --help or -h anywhere in its args
@@ -9413,6 +12294,8 @@ main() {
     get-state)         cmd_get_state ;;
     detect-default-branch) shift; cmd_detect_default_branch "$@" ;;
     detect-parent-branch) shift; cmd_detect_parent_branch "$@" ;;
+    # detect-forge and every forge-* verb are dispatched in the skip-list case
+    # block above, before find_aimi_root -- never here.
     setup-branch)      shift; cmd_setup_branch "$@" ;;
     resolve-base-branch) shift; cmd_resolve_base_branch "$@" ;;
     clear-state)       cmd_clear_state ;;

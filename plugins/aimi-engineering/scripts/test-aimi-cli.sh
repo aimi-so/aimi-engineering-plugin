@@ -16163,6 +16163,4768 @@ test_estimate_payload_breakdown_sums_multiple_paths() {
 }
 
 # ============================================================================
+# Detect Forge Tests (US-001)
+# ============================================================================
+# detect-forge is the FOUNDATIONAL CONTRACT every later forge-* verb in this
+# phase calls -- its output shape {forge, host, remote, remoteUrl, source}
+# is consumed verbatim downstream. Every fixture here is fully offline (no
+# bare repo, no clone, no push, no `git remote show`) following the
+# setup_default_branch_offline_fixture precedent (test-aimi-cli.sh:6412):
+# `git remote add` never dials the URL it is given.
+
+# Creates an isolated git repo (own temp dir) with a single commit and zero
+# remotes, then adds one remote per name/url pair passed as arguments
+# (name1 url1 [name2 url2 ...]) via `git remote add` -- never dialed, so
+# this fixture is fast and fully offline. Sets DETECT_FORGE_FIXTURE_DIR and
+# pushd's into it; caller must popd + teardown_detect_forge_fixture.
+setup_detect_forge_fixture() {
+  DETECT_FORGE_FIXTURE_DIR=$(mktemp -d)
+
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+  git init >/dev/null 2>&1
+  git checkout -b main >/dev/null 2>&1
+  echo "init" > README.md
+  git add README.md
+  git commit -m "Initial commit" >/dev/null 2>&1
+
+  while [ $# -ge 2 ]; do
+    git remote add "$1" "$2"
+    shift 2
+  done
+
+  # Create .aimi/ directory so find_aimi_root succeeds
+  mkdir -p .aimi/tasks
+
+  popd >/dev/null
+}
+
+# Removes the temp directory created by setup_detect_forge_fixture
+teardown_detect_forge_fixture() {
+  rm -rf "$DETECT_FORGE_FIXTURE_DIR"
+  unset DETECT_FORGE_FIXTURE_DIR
+}
+
+# Creates a non-git AIMI_ROOT directory (own temp dir, with its own
+# .aimi/tasks so find_aimi_root succeeds) containing two sibling child git
+# repos, repo-a (origin -> github.com) and repo-b (origin -> gitlab.com) --
+# mirrors the documented Multi-Repo Execution Layout (AIMI_ROOT is a plain
+# non-git parent folder holding one git repository per subfolder). Used to
+# prove --project resolves each repo's own forge without requiring the
+# caller's cwd to already be inside it, and without leaking one repo's
+# result into the other's (aimi-cli.sh:1636-1659's --project support).
+setup_detect_forge_multirepo_fixture() {
+  DETECT_FORGE_MULTIREPO_DIR=$(mktemp -d)
+  mkdir -p "$DETECT_FORGE_MULTIREPO_DIR/.aimi/tasks"
+
+  local repo
+  for repo in repo-a repo-b; do
+    mkdir -p "$DETECT_FORGE_MULTIREPO_DIR/$repo"
+    pushd "$DETECT_FORGE_MULTIREPO_DIR/$repo" >/dev/null
+    git init >/dev/null 2>&1
+    git checkout -b main >/dev/null 2>&1
+    echo "init" > README.md
+    git add README.md
+    git commit -m "Initial commit" >/dev/null 2>&1
+    popd >/dev/null
+  done
+
+  git -C "$DETECT_FORGE_MULTIREPO_DIR/repo-a" remote add origin https://github.com/a/repo.git
+  git -C "$DETECT_FORGE_MULTIREPO_DIR/repo-b" remote add origin https://gitlab.com/b/repo.git
+}
+
+# Removes the temp directory created by setup_detect_forge_multirepo_fixture
+teardown_detect_forge_multirepo_fixture() {
+  rm -rf "$DETECT_FORGE_MULTIREPO_DIR"
+  unset DETECT_FORGE_MULTIREPO_DIR
+}
+
+test_detect_forge_known_hosts_ssh_and_https() {
+  echo ""
+  echo "=== detect-forge: known hosts resolve their adapter (ssh + https forms) ==="
+
+  setup_detect_forge_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  # Six fixtures covering the three known adapters in both URL forms; the
+  # gitea adapter's two forms deliberately use its two distinct known hosts
+  # (gitea.com and codeberg.org) so both are exercised.
+  local cases=(
+    "git@github.com:owner/repo.git|github|github.com"
+    "https://github.com/owner/repo.git|github|github.com"
+    "git@gitlab.com:owner/repo.git|gitlab|gitlab.com"
+    "https://gitlab.com/owner/repo.git|gitlab|gitlab.com"
+    "git@gitea.com:owner/repo.git|gitea|gitea.com"
+    "https://codeberg.org/owner/repo.git|gitea|codeberg.org"
+  )
+
+  local case_entry url expected_forge expected_host stdout exit_code
+  for case_entry in "${cases[@]}"; do
+    IFS='|' read -r url expected_forge expected_host <<< "$case_entry"
+    git remote add origin "$url"
+    stdout=$("$CLI" detect-forge) && exit_code=0 || exit_code=$?
+    assert_exit_code "0" "$exit_code" "detect-forge known host ($url): exit code"
+    assert_eq "$expected_forge" "$(echo "$stdout" | jq -r '.forge')" "detect-forge known host ($url): forge"
+    assert_eq "$expected_host" "$(echo "$stdout" | jq -r '.host')" "detect-forge known host ($url): host"
+    assert_eq "origin" "$(echo "$stdout" | jq -r '.remote')" "detect-forge known host ($url): remote"
+    assert_eq "remote" "$(echo "$stdout" | jq -r '.source')" "detect-forge known host ($url): source"
+    git remote remove origin
+  done
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_detect_forge_subdomain_and_lookalike_boundary() {
+  echo ""
+  echo "=== detect-forge: ssh.github.com subdomain rule; lookalike hosts do NOT match ==="
+
+  setup_detect_forge_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local stdout
+
+  # git@ssh.github.com:owner/repo.git -- GitHub's documented alternate SSH
+  # hostname, a genuine subdomain of github.com.
+  git remote add origin git@ssh.github.com:owner/repo.git
+  stdout=$("$CLI" detect-forge)
+  assert_eq "github" "$(echo "$stdout" | jq -r '.forge')" "detect-forge subdomain: ssh.github.com resolves github"
+  assert_eq "ssh.github.com" "$(echo "$stdout" | jq -r '.host')" "detect-forge subdomain: host preserved (not truncated to github.com)"
+  git remote remove origin
+
+  # notgithub.com -- shares the "github.com" suffix as a substring but is
+  # NOT github.com or a subdomain of it. Pins the boundary against a naive
+  # string-contains matcher.
+  git remote add origin https://notgithub.com/owner/repo.git
+  stdout=$("$CLI" detect-forge)
+  assert_eq "unknown" "$(echo "$stdout" | jq -r '.forge')" "detect-forge lookalike: notgithub.com does NOT match github"
+  git remote remove origin
+
+  # github.com.evil.example -- contains "github.com" as a prefix, not a
+  # suffix; pins the same boundary from the other direction.
+  git remote add origin https://github.com.evil.example/owner/repo.git
+  stdout=$("$CLI" detect-forge)
+  assert_eq "unknown" "$(echo "$stdout" | jq -r '.forge')" "detect-forge lookalike: github.com.evil.example does NOT match github"
+  git remote remove origin
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_detect_forge_unrecognized_hosts_are_unknown() {
+  echo ""
+  echo "=== detect-forge: self-hosted generic host and GHES-shaped host both resolve unknown ==="
+
+  setup_detect_forge_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local stdout exit_code
+
+  git remote add origin https://git.example-company.com/owner/repo.git
+  stdout=$("$CLI" detect-forge) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "detect-forge unrecognized: generic self-hosted host -- exit code"
+  assert_eq "unknown" "$(echo "$stdout" | jq -r '.forge')" "detect-forge unrecognized: generic self-hosted host -- forge unknown"
+  git remote remove origin
+
+  # A GitHub-Enterprise-Server-shaped origin -- deliberately NOT a
+  # github.com subdomain -- must never be guessed as "github" from the
+  # literal substring in its hostname.
+  git remote add origin https://github.example-corp.com/owner/repo.git
+  stdout=$("$CLI" detect-forge) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "detect-forge unrecognized: GHES-shaped host -- exit code"
+  assert_eq "unknown" "$(echo "$stdout" | jq -r '.forge')" "detect-forge unrecognized: GHES-shaped host -- forge unknown (never guessed github)"
+  git remote remove origin
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_detect_forge_alternate_port_ssh_and_scp_colon_boundary() {
+  echo ""
+  echo "=== detect-forge: alternate-port ssh:// vs scp-like colon -- never confused ==="
+
+  setup_detect_forge_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local stdout
+
+  # Explicit ssh:// scheme, alternate port -- the trailing :2222 IS a port
+  # and must be stripped from the host.
+  git remote add origin ssh://git@github.com:2222/owner/repo.git
+  stdout=$("$CLI" detect-forge)
+  assert_eq "github.com" "$(echo "$stdout" | jq -r '.host')" "detect-forge alternate port: host is github.com (port stripped)"
+  assert_eq "github" "$(echo "$stdout" | jq -r '.forge')" "detect-forge alternate port: forge is github"
+  git remote remove origin
+
+  # Companion negative: git's scp-like colon (no "://") is a host/path
+  # separator, NEVER a port -- must not be misparsed as host "github.com:owner".
+  git remote add origin git@github.com:owner/repo.git
+  stdout=$("$CLI" detect-forge)
+  assert_eq "github.com" "$(echo "$stdout" | jq -r '.host')" "detect-forge scp-like: host is exactly github.com (not github.com:owner)"
+  git remote remove origin
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_detect_forge_origin_wins_over_disagreement() {
+  echo ""
+  echo "=== detect-forge: origin always wins, even over a disagreeing second remote ==="
+
+  setup_detect_forge_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  git remote add origin https://github.com/owner/repo.git
+  git remote add upstream https://gitlab.com/owner/repo.git
+
+  local stdout
+  stdout=$("$CLI" detect-forge)
+  assert_eq "github" "$(echo "$stdout" | jq -r '.forge')" "detect-forge precedence: origin wins over disagreeing upstream -- forge"
+  assert_eq "origin" "$(echo "$stdout" | jq -r '.remote')" "detect-forge precedence: origin wins -- remote name"
+  assert_eq "remote" "$(echo "$stdout" | jq -r '.source')" "detect-forge precedence: origin wins -- source"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_detect_forge_no_origin_precedence() {
+  echo ""
+  echo "=== detect-forge: no-origin precedence -- single remote, ambiguous, zero remotes ==="
+
+  setup_detect_forge_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local stdout
+
+  # (a) exactly one remote, not named origin -- that remote's URL is used.
+  git remote add upstream https://gitlab.com/owner/repo.git
+  stdout=$("$CLI" detect-forge)
+  assert_eq "gitlab" "$(echo "$stdout" | jq -r '.forge')" "detect-forge no-origin: single non-origin remote -- forge"
+  assert_eq "upstream" "$(echo "$stdout" | jq -r '.remote')" "detect-forge no-origin: single non-origin remote -- remote name"
+  assert_eq "remote" "$(echo "$stdout" | jq -r '.source')" "detect-forge no-origin: single non-origin remote -- source"
+  git remote remove upstream
+
+  # (b) two non-origin remotes disagreeing -- ambiguous, never guessed from
+  # `git remote`'s listing order.
+  git remote add upstream https://gitlab.com/owner/repo.git
+  git remote add fork https://gitea.com/owner/repo.git
+  stdout=$("$CLI" detect-forge)
+  assert_eq "unknown" "$(echo "$stdout" | jq -r '.forge')" "detect-forge no-origin: ambiguous remotes -- forge unknown"
+  assert_eq "ambiguous-remotes" "$(echo "$stdout" | jq -r '.source')" "detect-forge no-origin: ambiguous remotes -- source"
+  assert_eq "null" "$(echo "$stdout" | jq -r '.remote')" "detect-forge no-origin: ambiguous remotes -- remote is null"
+  git remote remove upstream
+  git remote remove fork
+
+  # (c) zero remotes configured.
+  stdout=$("$CLI" detect-forge)
+  assert_eq "unknown" "$(echo "$stdout" | jq -r '.forge')" "detect-forge no-origin: zero remotes -- forge unknown"
+  assert_eq "no-remote" "$(echo "$stdout" | jq -r '.source')" "detect-forge no-origin: zero remotes -- source"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_detect_forge_override_valid_and_invalid() {
+  echo ""
+  echo "=== detect-forge: AIMI_FORGE_TYPE override -- valid short-circuits, invalid errors ==="
+
+  setup_detect_forge_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+  git remote add origin https://github.com/owner/repo.git
+
+  local stdout stderr_file stderr_output exit_code
+
+  stdout=$(AIMI_FORGE_TYPE=gitlab "$CLI" detect-forge)
+  assert_eq "gitlab" "$(echo "$stdout" | jq -r '.forge')" "detect-forge override: valid value wins over actual github origin"
+  assert_eq "null" "$(echo "$stdout" | jq -r '.host')" "detect-forge override: host is null"
+  assert_eq "null" "$(echo "$stdout" | jq -r '.remote')" "detect-forge override: remote is null"
+  assert_eq "null" "$(echo "$stdout" | jq -r '.remoteUrl')" "detect-forge override: remoteUrl is null"
+  assert_eq "override" "$(echo "$stdout" | jq -r '.source')" "detect-forge override: source is override"
+
+  stderr_file=$(mktemp)
+  stdout=$(AIMI_FORGE_TYPE=bitbucket "$CLI" detect-forge 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_output=$(cat "$stderr_file")
+  assert_exit_code "1" "$exit_code" "detect-forge override: invalid value -- exit code"
+  assert_stderr_contains "Error:" "$stderr_output" "detect-forge override: invalid value -- Error-prefixed stderr"
+  assert_stderr_contains "bitbucket" "$stderr_output" "detect-forge override: invalid value -- names the bad value"
+  assert_eq "" "$stdout" "detect-forge override: invalid value -- stdout empty"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_detect_forge_credential_redaction() {
+  echo ""
+  echo "=== detect-forge: embedded userinfo credentials are redacted from remoteUrl ==="
+
+  setup_detect_forge_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  git remote add origin https://x-access-token:ghp_secret_token@github.com/owner/repo.git
+  local stdout
+  stdout=$("$CLI" detect-forge)
+  assert_eq "github" "$(echo "$stdout" | jq -r '.forge')" "detect-forge redaction: forge classification unaffected"
+  assert_eq "github.com" "$(echo "$stdout" | jq -r '.host')" "detect-forge redaction: host classification unaffected"
+  assert_eq "https://github.com/owner/repo.git" "$(echo "$stdout" | jq -r '.remoteUrl')" "detect-forge redaction: remoteUrl has userinfo stripped"
+
+  if printf '%s' "$stdout" | grep -q "ghp_secret_token"; then
+    echo -e "${RED}✗${NC} detect-forge redaction: secret must never round-trip through stdout"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} detect-forge redaction: secret does not round-trip through stdout"
+    ((TESTS_PASSED++))
+  fi
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_detect_forge_project_cross_repo_isolation() {
+  echo ""
+  echo "=== detect-forge: --project resolves each sibling repo independently, no leakage, no cache ==="
+
+  setup_detect_forge_multirepo_fixture
+  pushd "$DETECT_FORGE_MULTIREPO_DIR" >/dev/null
+
+  local files_before files_after stdout_a stdout_b
+  files_before=$(find "$DETECT_FORGE_MULTIREPO_DIR/.aimi" -type f | sort)
+
+  # cwd is the AIMI_ROOT itself -- NOT inside repo-a or repo-b -- proving
+  # --project resolves the target repo without requiring the caller's cwd
+  # to already be inside it.
+  stdout_a=$("$CLI" detect-forge --project "$DETECT_FORGE_MULTIREPO_DIR/repo-a")
+  stdout_b=$("$CLI" detect-forge --project "$DETECT_FORGE_MULTIREPO_DIR/repo-b")
+
+  assert_eq "github" "$(echo "$stdout_a" | jq -r '.forge')" "detect-forge --project: repo-a resolves its own forge (github)"
+  assert_eq "gitlab" "$(echo "$stdout_b" | jq -r '.forge')" "detect-forge --project: repo-b resolves its own forge (gitlab), no leakage from repo-a"
+
+  files_after=$(find "$DETECT_FORGE_MULTIREPO_DIR/.aimi" -type f | sort)
+  assert_eq "$files_before" "$files_after" "detect-forge --project: no new file written under .aimi/ (never cached, unlike _default_branch_cache_key)"
+
+  popd >/dev/null
+  teardown_detect_forge_multirepo_fixture
+}
+
+test_detect_forge_never_dials_remote_or_caches() {
+  echo ""
+  echo "=== detect-forge: source never calls 'git remote show' or read_state/write_state ==="
+
+  # Comment lines are excluded -- the section's own header comments name
+  # "git remote show" and "read_state/write_state" as the things NOT to do,
+  # which would otherwise false-positive this check against its own prose.
+  local forge_block
+  forge_block=$(sed -n '/^# Forge Detection (detect-forge)/,/^# Normalize a single %D decoration token/p' "$CLI" | grep -v '^\s*#')
+
+  if printf '%s' "$forge_block" | grep -q "remote show"; then
+    echo -e "${RED}✗${NC} detect-forge must never call 'git remote show' (network dial)"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} detect-forge never calls 'git remote show'"
+    ((TESTS_PASSED++))
+  fi
+
+  if printf '%s' "$forge_block" | grep -qE "read_state|write_state"; then
+    echo -e "${RED}✗${NC} detect-forge must never call read_state/write_state (per-repo, never cached)"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} detect-forge never touches read_state/write_state"
+    ((TESTS_PASSED++))
+  fi
+}
+
+test_detect_forge_registered_in_help_and_dispatcher() {
+  echo ""
+  echo "=== detect-forge: listed in help with its flags and routed by the dispatcher ==="
+
+  local help_out
+  help_out=$("$CLI" help 2>&1)
+  assert_contains "detect-forge [--project <path>]" "$help_out" "help: lists detect-forge with --project"
+  assert_contains "AIMI_FORGE_TYPE=github|gitlab|gitea to override" "$help_out" "help: documents the AIMI_FORGE_TYPE override"
+
+  setup_detect_forge_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+  local dispatch_out
+  dispatch_out=$("$CLI" detect-forge 2>&1)
+  popd >/dev/null
+  teardown_detect_forge_fixture
+
+  if printf '%s' "$dispatch_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: detect-forge is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: detect-forge is routed"
+    ((TESTS_PASSED++))
+  fi
+}
+
+# ============================================================================
+# Forge Contract Tests (US-002)
+# ============================================================================
+# _forge_build_pr_json, _forge_build_issue_json, _forge_emit_status and
+# _forge_bin_check are pure jq-assembly / presence-check helpers with no
+# cmd_ dispatcher wrapper (this story introduces no forge-pr-view/
+# forge-auth-status verb body -- see commands/references/forge-contract.md),
+# so they are sourced directly for testing, matching the
+# source_cache_functions precedent (test-aimi-cli.sh:2005) rather than
+# exercised via a subprocess call.
+
+# Sources the four Forge Contract functions from aimi-cli.sh via sed
+# extraction for direct, in-process testing.
+source_forge_contract_functions() {
+  eval "$(sed -n '/^_forge_build_pr_json()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_build_issue_json()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_emit_status()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_emit_write_status()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_build_write_data()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_bin_check()/,/^}/p' "$CLI")"
+  # _forge_classify_gh_failure_reason calls _forge_auth_status_github
+  # directly (never a subprocess), so the callee must be eval'd too or the
+  # classifier's own test would exercise a function that is not defined --
+  # the same "source every helper the code under test reaches" rule
+  # source_cache_functions follows.
+  eval "$(sed -n '/^_forge_auth_status_github()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_classify_gh_failure_reason()/,/^}/p' "$CLI")"
+}
+
+test_forge_build_pr_json_capability_gating() {
+  echo ""
+  echo "=== _forge_build_pr_json: capability-gating (supplied / omitted / fully-supplied) ==="
+
+  source_forge_contract_functions
+
+  local out
+
+  # Fully supplied -- every capability-gated field passed, unsupported_fields empty.
+  out=$(_forge_build_pr_json --number 123 --url "https://github.com/o/r/pull/123" \
+    --title "T" --body "B" --state open --head-ref-name feat --base-ref-name main \
+    --files '[{"path":"a.txt"}]' --is-draft false --mergeable true --raw '{"x":1}')
+  assert_eq "123" "$(printf '%s' "$out" | jq -r '.number')" "PR fully-supplied: number passes through as int"
+  assert_eq "open" "$(printf '%s' "$out" | jq -r '.state')" "PR fully-supplied: state passes through"
+  assert_eq "feat" "$(printf '%s' "$out" | jq -r '.headRefName')" "PR fully-supplied: headRefName passes through"
+  assert_eq '[{"path":"a.txt"}]' "$(printf '%s' "$out" | jq -c '.files')" "PR fully-supplied: files array passes through"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.isDraft')" "PR fully-supplied: isDraft passes through"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.mergeable')" "PR fully-supplied: mergeable passes through as raw string"
+  assert_eq "[]" "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "PR fully-supplied: unsupported_fields is empty"
+  assert_eq '{"x":1}' "$(printf '%s' "$out" | jq -c '.raw')" "PR fully-supplied: raw passthrough preserved"
+
+  # Omitted capability-gated fields -- come back null AND are named in unsupported_fields.
+  out=$(_forge_build_pr_json --number 5 --url u --title t --body b --state open \
+    --head-ref-name h --base-ref-name m)
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.files')" "PR omitted: files is null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.isDraft')" "PR omitted: isDraft is null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.mergeable')" "PR omitted: mergeable is null"
+  assert_eq '["files","isDraft","mergeable"]' "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "PR omitted: unsupported_fields names all three"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.raw')" "PR omitted: raw defaults to null"
+
+  # A single supplied capability-gated field passes through; the other two remain gated.
+  out=$(_forge_build_pr_json --number 5 --url u --title t --body b --state open \
+    --head-ref-name h --base-ref-name m --is-draft true)
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.isDraft')" "PR single-supplied: isDraft passes through"
+  assert_eq '["files","mergeable"]' "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "PR single-supplied: only the two still-omitted fields are named"
+}
+
+test_forge_build_issue_json_capability_gating() {
+  echo ""
+  echo "=== _forge_build_issue_json: capability-gating (supplied / omitted / fully-supplied) ==="
+
+  source_forge_contract_functions
+
+  local out
+
+  out=$(_forge_build_issue_json --number 9 --url u --title t --body b --state open \
+    --comments 3 --raw '{"y":2}')
+  assert_eq "9" "$(printf '%s' "$out" | jq -r '.number')" "Issue fully-supplied: number passes through as int"
+  assert_eq "3" "$(printf '%s' "$out" | jq -r '.comments')" "Issue fully-supplied: comments passes through"
+  assert_eq "[]" "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "Issue fully-supplied: unsupported_fields is empty"
+  assert_eq '{"y":2}' "$(printf '%s' "$out" | jq -c '.raw')" "Issue fully-supplied: raw passthrough preserved"
+
+  out=$(_forge_build_issue_json --number 9 --url u --title t --body b --state open)
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.comments')" "Issue omitted: comments is null"
+  assert_eq '["comments"]' "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "Issue omitted: unsupported_fields names comments"
+}
+
+test_forge_emit_status_three_outcomes() {
+  echo ""
+  echo "=== _forge_emit_status: found / not_found / error are three distinct outcomes ==="
+
+  source_forge_contract_functions
+
+  local out exit_code
+
+  out=$(_forge_emit_status found '{"number":1}')
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "status found: status field"
+  assert_eq '{"number":1}' "$(printf '%s' "$out" | jq -c '.data')" "status found: data carries the payload"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "status found: message is null"
+
+  out=$(_forge_emit_status not_found)
+  assert_eq "not_found" "$(printf '%s' "$out" | jq -r '.status')" "status not_found: status field"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "status not_found: data is null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "status not_found: message is null"
+
+  out=$(_forge_emit_status error "" "gh exited 4: authentication required")
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "status error: status field"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "status error: data is null"
+  assert_eq "gh exited 4: authentication required" "$(printf '%s' "$out" | jq -r '.message')" "status error: message carries the failure detail"
+
+  # data supplied alongside a non-found status is discarded, never leaked.
+  out=$(_forge_emit_status not_found '{"should":"not appear"}')
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "status not_found: stray data argument is forced null, never leaked"
+
+  # Unknown status is a caller error, not silently coerced.
+  _forge_emit_status bogus >/dev/null 2>/tmp/forge_status_stderr.$$ && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "status unknown value: exits 1"
+  assert_stderr_contains "found, not_found or error" "$(cat /tmp/forge_status_stderr.$$)" "status unknown value: stderr names the three valid outcomes"
+  rm -f /tmp/forge_status_stderr.$$
+}
+
+test_forge_emit_status_reason_enum() {
+  echo ""
+  echo "=== _forge_emit_status: the reason enum -- closed set, error-only, validated like status ==="
+
+  source_forge_contract_functions
+
+  local out exit_code
+
+  # The whole point of the field: on error, reason is carried through as the
+  # EXACT string supplied, alongside (never instead of) message.
+  out=$(_forge_emit_status error "" "gh exited 4: authentication required" not_authenticated)
+  assert_eq "not_authenticated" "$(printf '%s' "$out" | jq -r '.reason')" "reason on error: carried through as the exact string supplied"
+  assert_eq "gh exited 4: authentication required" "$(printf '%s' "$out" | jq -r '.message')" "reason on error: message survives alongside it, not replaced by it"
+  assert_eq '["data","message","reason","status"]' "$(printf '%s' "$out" | jq -c 'keys')" "reason on error: envelope is exactly {status, data, message, reason}"
+
+  # All four enum values are accepted.
+  local value
+  for value in no_adapter cli_missing not_authenticated cli_failed; do
+    out=$(_forge_emit_status error "" "boom" "$value")
+    assert_eq "$value" "$(printf '%s' "$out" | jq -r '.reason')" "reason enum: $value is a valid value"
+  done
+
+  # An error with no reason argument at all still emits the key, as null --
+  # every call site that predates this argument keeps working unchanged.
+  out=$(_forge_emit_status error "" "boom")
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.reason')" "reason omitted on error: key present, value null (the signature change is additive)"
+
+  # Forced null off the error branch -- a stale reason can never ride along
+  # on a successful outcome, exactly as message cannot.
+  out=$(_forge_emit_status found '{"number":1}' "" cli_failed)
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.reason')" "reason on found: forced null even when a non-empty reason is passed"
+  assert_eq '{"number":1}' "$(printf '%s' "$out" | jq -c '.data')" "reason on found: data still carried (only reason was discarded)"
+
+  out=$(_forge_emit_status not_found "" "" no_adapter)
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.reason')" "reason on not_found: forced null even when a non-empty reason is passed"
+
+  # An unrecognized reason is a caller error, not silently passed through to
+  # a caller that would then branch on it -- the identical discipline the
+  # status argument above already gets.
+  _forge_emit_status error "" "boom" bogus_reason >/dev/null 2>/tmp/forge_reason_stderr.$$ && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "reason unknown value: exits 1"
+  assert_stderr_contains "no_adapter, cli_missing, not_authenticated or cli_failed" "$(cat /tmp/forge_reason_stderr.$$)" "reason unknown value: stderr names the four valid values"
+  rm -f /tmp/forge_reason_stderr.$$
+
+  # The write-side envelope is deliberately NOT given a reason field -- the
+  # contract scopes the enum to envelope 1 only.
+  out=$(_forge_emit_write_status degraded "" "boom")
+  assert_eq '["data","message","status"]' "$(printf '%s' "$out" | jq -c 'keys')" "write envelope: still exactly {status, data, message} -- reason is scoped to the read envelope"
+}
+
+test_forge_classify_gh_failure_reason() {
+  echo ""
+  echo "=== _forge_classify_gh_failure_reason: structural auth re-check, never an stderr match ==="
+
+  source_forge_contract_functions
+
+  local fake_dir out
+  fake_dir=$(mktemp -d)
+
+  # Fake gh whose `auth status` subcommand exits non-zero -- the confirmed
+  # logged-out answer _forge_auth_status_github reports as authenticated:false.
+  cat > "$fake_dir/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo "You are not logged into any GitHub hosts." >&2
+  exit 1
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$fake_dir/gh"
+
+  out=$(PATH="$fake_dir:$PATH"; _forge_classify_gh_failure_reason github.com)
+  assert_eq "not_authenticated" "$out" "classifier: gh auth status exiting non-zero resolves to not_authenticated"
+
+  # Fake gh whose `auth status` reports an active, authenticated account --
+  # the failure was something else entirely.
+  cat > "$fake_dir/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo "github.com"
+  echo "  Logged in to github.com account octocat (keyring)"
+  echo "  - Active account: true"
+  exit 0
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$fake_dir/gh"
+
+  out=$(PATH="$fake_dir:$PATH"; _forge_classify_gh_failure_reason github.com)
+  assert_eq "cli_failed" "$out" "classifier: an authenticated account resolves to cli_failed (the failure was something else)"
+
+  # gh present and exiting 0 but reporting no parseable account at all: the
+  # classifier cannot confirm a logged-out state, so it takes the safe
+  # catch-all rather than claiming not_authenticated.
+  cat > "$fake_dir/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo "github.com"
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$fake_dir/gh"
+
+  out=$(PATH="$fake_dir:$PATH"; _forge_classify_gh_failure_reason github.com)
+  assert_eq "cli_failed" "$out" "classifier: an indeterminate auth answer resolves to cli_failed, never to not_authenticated"
+
+  rm -rf "$fake_dir"
+
+  # The mechanism itself, asserted structurally: the classifier must call
+  # the auth-status primitive, and must NOT reach its verdict by matching
+  # gh's own English failure wording, which reworks between releases and
+  # varies by locale.
+  local fn_block
+  fn_block=$(sed -n '/^_forge_classify_gh_failure_reason()/,/^}/p' "$CLI")
+  assert_contains "_forge_auth_status_github" "$fn_block" "classifier: reaches its verdict by calling _forge_auth_status_github directly"
+  assert_contains ".authenticated" "$fn_block" "classifier: branches on .authenticated (is the user logged in), not on a status field (did the check run)"
+
+  local prose_free_block
+  prose_free_block=$(printf '%s\n' "$fn_block" | grep -v '^[[:space:]]*#' || true)
+  if printf '%s' "$prose_free_block" | grep -qiE 'Bad credentials|HTTP 401|gh auth login'; then
+    echo -e "${RED}✗${NC} classifier: must not pattern-match gh's auth-failure stderr wording"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} classifier: no stderr wording match (Bad credentials / HTTP 401 / gh auth login) anywhere in its code"
+    ((TESTS_PASSED++))
+  fi
+}
+
+test_forge_emit_write_status_three_outcomes() {
+  echo ""
+  echo "=== _forge_emit_write_status: created / unchanged / degraded, same field names and null-forcing as the read builder ==="
+
+  source_forge_contract_functions
+
+  local out exit_code
+
+  out=$(_forge_emit_write_status created '{"url":"https://o/r/pull/1","number":1}')
+  assert_eq "created" "$(printf '%s' "$out" | jq -r '.status')" "write status created: status field"
+  assert_eq '{"url":"https://o/r/pull/1","number":1}' "$(printf '%s' "$out" | jq -c '.data')" "write status created: data carries the payload"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "write status created: message is null"
+
+  out=$(_forge_emit_write_status unchanged '{"url":"https://o/r/pull/55","number":55}')
+  assert_eq "unchanged" "$(printf '%s' "$out" | jq -r '.status')" "write status unchanged: status field"
+  assert_eq '{"url":"https://o/r/pull/55","number":55}' "$(printf '%s' "$out" | jq -c '.data')" "write status unchanged: data survives -- unchanged is a SUCCESS outcome, not a degraded one"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "write status unchanged: message is null"
+
+  out=$(_forge_emit_write_status degraded "" "gh pr create exited 1: HTTP 403")
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "write status degraded: status field"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "write status degraded: data is null"
+  assert_eq "gh pr create exited 1: HTTP 403" "$(printf '%s' "$out" | jq -r '.message')" "write status degraded: message carries the reason"
+
+  # data supplied alongside degraded is discarded, never leaked -- the exact
+  # null-forcing discipline _forge_emit_status applies on its own non-found
+  # branches.
+  out=$(_forge_emit_write_status degraded '{"should":"not appear"}' "boom")
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "write status degraded: stray data argument is forced null, never leaked"
+
+  # message supplied alongside a success status is discarded the same way.
+  out=$(_forge_emit_write_status created '{"url":"u","number":1}' "should not appear")
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "write status created: stray message argument is forced null"
+
+  # The envelope's key set is EXACTLY the read builder's key set -- same three
+  # names, no fourth field, no per-verb extra.
+  assert_eq '["data","message","status"]' "$(printf '%s' "$out" | jq -c 'keys')" "write envelope: exactly {status, data, message} -- identical key set to _forge_emit_status"
+
+  # Unknown status is a caller error, not silently coerced -- same guard shape
+  # _forge_emit_status uses for its own three values.
+  _forge_emit_write_status bogus >/dev/null 2>/tmp/forge_write_status_stderr.$$ && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "write status unknown value: exits 1"
+  assert_stderr_contains "created, unchanged or degraded" "$(cat /tmp/forge_write_status_stderr.$$)" "write status unknown value: stderr names the three valid outcomes"
+  rm -f /tmp/forge_write_status_stderr.$$
+
+  # A read-side status is NOT a valid write status and vice versa -- the two
+  # vocabularies never overlap by accident.
+  _forge_emit_write_status found >/dev/null 2>&1 && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "write status: the read side's 'found' is rejected -- a write has no lookup outcome"
+}
+
+test_forge_build_write_data_shape() {
+  echo ""
+  echo "=== _forge_build_write_data: one {url, number} builder shared by all three write verbs ==="
+
+  source_forge_contract_functions
+
+  local out
+
+  out=$(_forge_build_write_data "https://github.com/o/r/pull/7" "7")
+  assert_eq '{"url":"https://github.com/o/r/pull/7","number":7}' "$out" "write data: both fields supplied"
+  assert_eq "number" "$(printf '%s' "$out" | jq -r '.number | type')" "write data: number is a JSON int, never a quoted string"
+
+  out=$(_forge_build_write_data "https://github.com/o/r/pull/7" "")
+  assert_eq '{"url":"https://github.com/o/r/pull/7","number":null}' "$out" "write data: an unconfirmed number comes back null while the url survives"
+
+  out=$(_forge_build_write_data "" "")
+  assert_eq '{"url":null,"number":null}' "$out" "write data: both empty -> both null, never empty strings"
+}
+
+test_forge_bin_check_quiet_and_mandatory_modes() {
+  echo ""
+  echo "=== _forge_bin_check: quiet is silent on absence, mandatory names binary+forge on absence ==="
+
+  source_forge_contract_functions
+
+  local exit_code stderr_file="/tmp/forge_bin_check_stderr.$$"
+
+  # Quiet mode, binary present (jq -- always available under this test suite).
+  _forge_bin_check jq quiet github >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "bin_check quiet present: exit 0"
+  assert_eq "" "$(cat "$stderr_file")" "bin_check quiet present: no stderr"
+
+  # Quiet mode, binary absent -- NO stderr output at all.
+  _forge_bin_check aimi-nonexistent-binary-xyz quiet github >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "bin_check quiet absent: exit 1"
+  assert_eq "" "$(cat "$stderr_file")" "bin_check quiet absent: stderr stays completely silent"
+
+  # Mandatory mode, binary present -- exit 0, no warning needed.
+  _forge_bin_check jq mandatory github >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "bin_check mandatory present: exit 0"
+  assert_eq "" "$(cat "$stderr_file")" "bin_check mandatory present: no stderr"
+
+  # Mandatory mode, binary absent -- exactly one stderr warning naming the binary and the forge.
+  _forge_bin_check aimi-nonexistent-binary-xyz mandatory github >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "bin_check mandatory absent: exit 1"
+  assert_stderr_contains "aimi-nonexistent-binary-xyz" "$(cat "$stderr_file")" "bin_check mandatory absent: stderr names the missing binary"
+  assert_stderr_contains "github" "$(cat "$stderr_file")" "bin_check mandatory absent: stderr names the forge"
+
+  rm -f "$stderr_file"
+}
+
+test_forge_contract_header_carries_both_creates_identities() {
+  echo ""
+  echo "=== forge-contract section header: carries both phase creates identities verbatim ==="
+
+  local section_block
+  section_block=$(sed -n '/^# Forge Contract — shared builders and degradation helper (US-002)/,/^_forge_build_pr_json()/p' "$CLI")
+
+  assert_contains "normalized PR and issue field contract" "$section_block" "forge-contract header: names the PR/issue contract identity verbatim"
+  assert_contains "forge degradation contract (missing adapter or missing CLI prints a manual instruction)" "$section_block" "forge-contract header: names the degradation contract identity verbatim"
+}
+
+# ============================================================================
+# forge-auth-status / forge-repo-info Tests (US-003)
+# ============================================================================
+# Offline test fixtures: a reusable fake-`gh` PATH stub (setup_fake_gh_
+# fixture/teardown_fake_gh_fixture) so every scenario below -- and any
+# sibling forge-* verb story later in this phase that also shells out to gh
+# -- shares ONE stub rather than a private copy per story, per the fake-
+# opencode PATH-stub precedent already used by resolve-models' mtime-cache
+# test (test-aimi-cli.sh:8510-8583). Every git remote used below is local
+# (a bare repo, a nonexistent local path, or a literal remote URL string);
+# no test in this section makes a real network call or depends on real gh
+# credentials.
+
+# Writes a fake `gh` executable to a fresh temp dir and prepends nothing to
+# PATH itself -- callers do `PATH="$FAKE_GH_DIR:$PATH" ...` per invocation,
+# same as the fake-opencode precedent. Behavior is controlled entirely by
+# FAKE_GH_* environment variables so one stub covers every scenario,
+# including the forge-pr-view (US-004) `gh pr view`/`gh pr list` scenarios in
+# the section below -- exactly the sibling-story reuse this fixture was
+# built for:
+#   FAKE_GH_AUTH_STATUS_MODE   single (default) | multi | none
+#   FAKE_GH_AUTH_HOST          hostname echoed in the fake account block (default github.com)
+#   FAKE_GH_AUTH_ACCOUNT       the (single, or active-in-multi) account login (default octocat)
+#   FAKE_GH_AUTH_OTHER_ACCOUNT the non-active login in multi mode (default monalisa)
+#   FAKE_GH_REPO_OWNER         owner login `gh repo view` reports (default octocat)
+#   FAKE_GH_REPO_NAME          repo name `gh repo view` reports (default hello-world)
+#   FAKE_GH_REPO_VIEW_FAIL     "1" forces `gh repo view` to exit non-zero (simulates
+#                              missing auth / network failure, not absence of gh itself)
+#   FAKE_GH_CALL_COUNTER       optional path to a counter file incremented once per
+#                              `gh repo view` invocation, letting a test prove exactly
+#                              one call was made rather than the old two-call shape
+#   FAKE_GH_VIEW_EXIT / FAKE_GH_VIEW_STDERR -- `gh pr view` exit code + stderr
+#   FAKE_GH_PR_JSON                          -- `gh pr view` stdout on exit 0 (default '{}')
+#   FAKE_GH_LIST_EXIT / FAKE_GH_LIST_STDERR -- `gh pr list` exit code + stderr
+#   FAKE_GH_LIST_JSON                        -- `gh pr list` stdout on exit 0 (default '[]')
+#   FAKE_GH_LOG                              -- optional file; every invocation's args appended, one per line
+#   FAKE_GH_AUTH_STRICT_HOSTNAME "1" makes `gh auth status --hostname X` exit 1 for any X
+#                              other than FAKE_GH_AUTH_HOST, the way real gh does. Off by
+#                              default so the flag is ignored (pre-existing behavior); set
+#                              it only in a test that is specifically about hostname handling.
+setup_fake_gh_fixture() {
+  FAKE_GH_DIR=$(mktemp -d)
+  cat > "$FAKE_GH_DIR/gh" << 'FAKE_GH_SCRIPT'
+#!/usr/bin/env bash
+if [ -n "$FAKE_GH_LOG" ]; then
+  printf '%s\n' "$*" >> "$FAKE_GH_LOG"
+fi
+
+case "$1 $2" in
+  "auth status")
+    # Opt-in faithfulness: real gh REJECTS a --hostname it has no session
+    # for, which is how a bogus hostname turns into a confirmed-looking
+    # "not authenticated" answer. The default stays lenient (ignores the
+    # flag entirely) so every pre-existing test keeps its old behavior;
+    # only a test that is specifically about hostname handling sets this.
+    if [ "${FAKE_GH_AUTH_STRICT_HOSTNAME:-0}" = "1" ]; then
+      want_host="${FAKE_GH_AUTH_HOST:-github.com}"
+      expect_value=""
+      for arg in "$@"; do
+        if [ -n "$expect_value" ]; then
+          if [ "$arg" != "$want_host" ]; then
+            echo "You are not logged into any hosts on $arg" >&2
+            exit 1
+          fi
+          expect_value=""
+          continue
+        fi
+        [ "$arg" = "--hostname" ] && expect_value=1
+      done
+    fi
+    case "${FAKE_GH_AUTH_STATUS_MODE:-single}" in
+      single)
+        host="${FAKE_GH_AUTH_HOST:-github.com}"
+        account="${FAKE_GH_AUTH_ACCOUNT:-octocat}"
+        echo "$host"
+        echo "  Logged in to $host account $account (keyring)"
+        echo "  - Active account: true"
+        exit 0
+        ;;
+      multi)
+        host="${FAKE_GH_AUTH_HOST:-github.com}"
+        active="${FAKE_GH_AUTH_ACCOUNT:-octocat}"
+        other="${FAKE_GH_AUTH_OTHER_ACCOUNT:-monalisa}"
+        echo "$host"
+        echo "  Logged in to $host account $other (keyring)"
+        echo "  - Active account: false"
+        echo "  Logged in to $host account $active (keyring)"
+        echo "  - Active account: true"
+        exit 0
+        ;;
+      none)
+        echo "You are not logged into any GitHub hosts." >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  "repo view")
+    if [ -n "${FAKE_GH_CALL_COUNTER:-}" ]; then
+      count=$(cat "$FAKE_GH_CALL_COUNTER" 2>/dev/null || echo 0)
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$FAKE_GH_CALL_COUNTER"
+    fi
+    if [ "${FAKE_GH_REPO_VIEW_FAIL:-0}" = "1" ]; then
+      echo "error: could not determine repository" >&2
+      exit 1
+    fi
+    owner="${FAKE_GH_REPO_OWNER:-octocat}"
+    name="${FAKE_GH_REPO_NAME:-hello-world}"
+    printf '{"owner":{"login":"%s"},"name":"%s"}\n' "$owner" "$name"
+    exit 0
+    ;;
+  "pr view")
+    exit_code="${FAKE_GH_VIEW_EXIT:-0}"
+    if [ "$exit_code" = "0" ]; then
+      body="${FAKE_GH_PR_JSON:-}"
+      [ -z "$body" ] && body='{}'
+      printf '%s' "$body"
+      exit 0
+    fi
+    printf '%s' "${FAKE_GH_VIEW_STDERR:-}" >&2
+    exit "$exit_code"
+    ;;
+  "pr list")
+    exit_code="${FAKE_GH_LIST_EXIT:-0}"
+    if [ "$exit_code" = "0" ]; then
+      body="${FAKE_GH_LIST_JSON:-}"
+      [ -z "$body" ] && body='[]'
+      printf '%s' "$body"
+      exit 0
+    fi
+    printf '%s' "${FAKE_GH_LIST_STDERR:-}" >&2
+    exit "$exit_code"
+    ;;
+  *)
+    echo "fake-gh: unhandled invocation: $*" >&2
+    exit 127
+    ;;
+esac
+FAKE_GH_SCRIPT
+  chmod +x "$FAKE_GH_DIR/gh"
+}
+
+# Removes the fake-gh temp dir and every FAKE_GH_* control variable, so a
+# stray export never leaks into an unrelated later test.
+teardown_fake_gh_fixture() {
+  rm -rf "$FAKE_GH_DIR"
+  unset FAKE_GH_DIR FAKE_GH_AUTH_STATUS_MODE FAKE_GH_AUTH_HOST FAKE_GH_AUTH_ACCOUNT \
+    FAKE_GH_AUTH_OTHER_ACCOUNT FAKE_GH_REPO_OWNER FAKE_GH_REPO_NAME FAKE_GH_REPO_VIEW_FAIL \
+    FAKE_GH_CALL_COUNTER FAKE_GH_VIEW_EXIT FAKE_GH_VIEW_STDERR FAKE_GH_PR_JSON \
+    FAKE_GH_LIST_EXIT FAKE_GH_LIST_STDERR FAKE_GH_LIST_JSON FAKE_GH_LOG \
+    FAKE_GH_AUTH_STRICT_HOSTNAME
+}
+
+# Prints a PATH value with every occurrence of <binary> made unresolvable,
+# while every OTHER tool aimi-cli.sh depends on remains reachable under its
+# real name. A naive "strip every PATH directory containing <binary>"
+# approach is unsafe here: on a machine where gh happens to live in
+# /usr/bin alongside bash/jq/git/sed/..., stripping that directory would
+# also hide the interpreter and break the whole suite. Instead this mirrors
+# ONLY the fixed set of tools aimi-cli.sh actually shells out to (resolved
+# via `command -v` against the CALLER's real PATH, first match wins) into a
+# fresh directory, deliberately omitting <binary> -- so PATH="$(_path_
+# without_binary gh)" simulates gh being entirely absent, not merely
+# shadowed, without disturbing bash/jq/git/etc. Reusable by name for any
+# later story that needs the same "binary genuinely absent" scenario.
+_path_without_binary() {
+  local exclude="$1" shim_dir tool real
+  shim_dir=$(mktemp -d)
+  local tools=(env bash jq git sed grep awk mktemp wc tr basename dirname stat sha256sum shasum flock date cut find sort xargs cat head tail realpath printf)
+  for tool in "${tools[@]}"; do
+    [ "$tool" = "$exclude" ] && continue
+    real=$(command -v "$tool" 2>/dev/null) || continue
+    ln -s "$real" "$shim_dir/$tool" 2>/dev/null
+  done
+  printf '%s' "$shim_dir"
+}
+
+# The single "gh is genuinely absent from PATH" fixture, shared by every test
+# that needs that scenario. It wraps _path_without_binary rather than scanning
+# /usr/local/bin://usr/bin://bin for a file named `gh`, which is how a second,
+# independently written copy of this fixture used to do it -- both proved the
+# same narrow thing, so the directory-scanning pair was deleted in favour of
+# this one. Keeps the NO_GH_PATH_DIR name that pair already exported, and adds
+# the cleanup the tests that called _path_without_binary directly never did.
+#
+# NOT to be confused with setup_forge_cli_sandbox: that one is a broader
+# offline sandbox (a different, smaller tool allowlist plus a
+# command-v-then-/usr/bin-then-/bin fallback) whose 20+ callers mostly drop
+# their own scripted fake `gh` into it afterwards -- "gh present but scripted",
+# not "gh absent". Merging the two would have to either widen its allowlist or
+# narrow this one, changing what one set of tests actually proves, so it is
+# deliberately left alone.
+setup_forge_no_gh_fixture() {
+  NO_GH_PATH_DIR=$(_path_without_binary gh)
+}
+
+teardown_forge_no_gh_fixture() {
+  rm -rf "$NO_GH_PATH_DIR"
+  unset NO_GH_PATH_DIR
+}
+
+# Pins the one guarantee _forge_capture's RETURN trap exists to make: the
+# stderr scratch file it opens internally outlives NO return path -- not the
+# success path, and not the failure path either. The seven gh adapters it
+# replaced each cleaned up with an `rm -f` on the line after their `cat`, which
+# held only for the single straight-line path each one happened to take.
+#
+# _forge_capture unlinks the file before it returns, so the only way to observe
+# the path is to shim `mktemp` and record what it hands out. The shim records
+# to a FILE rather than a variable because _forge_capture calls mktemp inside a
+# command substitution, and that subshell cannot write back into this shell.
+test_forge_capture_scratch_file_never_survives() {
+  echo ""
+  echo "=== _forge_capture: stderr scratch file survives no return path, success or failure ==="
+
+  eval "$(sed -n '/^_forge_capture()/,/^}/p' "$CLI")"
+
+  local scratch_log
+  scratch_log=$(mktemp)
+  mktemp() {
+    local p
+    p=$(command mktemp "$@")
+    printf '%s\n' "$p" >> "$scratch_log"
+    printf '%s' "$p"
+  }
+
+  # --- success path ---
+  local out="" err="" rc=1 scratch first_scratch
+  _forge_capture out err rc -- printf 'ok-stdout' || true
+  scratch=$(tail -n1 "$scratch_log")
+  first_scratch="$scratch"
+  assert_eq "0" "$rc" "capture success: rc var receives the command's own exit status"
+  assert_eq "ok-stdout" "$out" "capture success: stdout reaches the caller's own variable"
+  assert_eq "" "$err" "capture success: stderr var is empty when the command wrote none"
+  assert_eq "yes" "$([ -n "$scratch" ] && echo yes || echo no)" "capture success: the mktemp shim observed a real scratch path (guards the next assertion from passing on an empty path)"
+  assert_eq "gone" "$([ -e "$scratch" ] && echo present || echo gone)" "capture success: scratch file does not survive the call"
+
+  # --- failure path ---
+  out=""; err=""; rc=0
+  _forge_capture out err rc -- sh -c 'echo o; echo boom >&2; exit 7' || true
+  scratch=$(tail -n1 "$scratch_log")
+  assert_eq "7" "$rc" "capture failure: rc var receives the failing command's own exit status"
+  assert_eq "boom" "$err" "capture failure: stderr reaches the caller's own variable"
+  assert_eq "yes" "$([ -n "$scratch" ] && [ "$scratch" != "$first_scratch" ] && echo yes || echo no)" "capture failure: this call opened its own distinct scratch path, so the check below is not re-testing the first one"
+  assert_eq "gone" "$([ -e "$scratch" ] && echo present || echo gone)" "capture failure: scratch file does not survive the call"
+
+  # The RETURN trap must be gone once _forge_capture returns. bash's RETURN
+  # trap is a shell-global, not a function-scoped one: a non-self-disarming one
+  # stays armed and fires AGAIN on the caller's own return, where the scratch
+  # path is out of scope -- a hard `unbound variable` abort under aimi-cli.sh's
+  # own `set -u`. This assertion pins the self-disarm, not merely the fact that
+  # today's two paths happen to clean up.
+  assert_eq "" "$(trap -p RETURN)" "capture: leaves no armed RETURN trap to fire a second time on the caller's own return"
+
+  unset -f mktemp
+  rm -f "$scratch_log"
+}
+
+test_forge_auth_status_single_account_authenticated() {
+  echo ""
+  echo "=== forge-auth-status: single authenticated account -- found, authenticated:true ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  setup_fake_gh_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+  out=$(PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_AUTH_STATUS_MODE=single FAKE_GH_AUTH_ACCOUNT=octocat "$CLI" forge-auth-status)
+
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "auth-status single account: status is found"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.authenticated')" "auth-status single account: authenticated is true"
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.data.account')" "auth-status single account: account is the logged-in login"
+  assert_eq "github" "$(printf '%s' "$out" | jq -r '.data.forge')" "auth-status single account: forge is github"
+  assert_eq "github.com" "$(printf '%s' "$out" | jq -r '.data.host')" "auth-status single account: host is github.com"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.identityRequested')" "auth-status single account: identityRequested null when AIMI_FORGE_IDENTITY unset"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.identityHonored')" "auth-status single account: identityHonored null when AIMI_FORGE_IDENTITY unset"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "auth-status single account: message is null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.reason')" "auth-status single account: reason is null (nothing degraded)"
+
+  popd >/dev/null
+  teardown_fake_gh_fixture
+  teardown_detect_forge_fixture
+}
+
+test_forge_auth_status_multi_account_exactly_one_active() {
+  echo ""
+  echo "=== forge-auth-status: multi-account session -- exactly one active account wins ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  setup_fake_gh_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+  out=$(PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_AUTH_STATUS_MODE=multi FAKE_GH_AUTH_ACCOUNT=octocat FAKE_GH_AUTH_OTHER_ACCOUNT=monalisa "$CLI" forge-auth-status)
+
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "auth-status multi-account: status is found"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.authenticated')" "auth-status multi-account: authenticated is true"
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.data.account')" "auth-status multi-account: account is the ONE marked active, not the other login"
+
+  popd >/dev/null
+  teardown_fake_gh_fixture
+  teardown_detect_forge_fixture
+}
+
+test_forge_auth_status_not_authenticated_confirmed_negative() {
+  echo ""
+  echo "=== forge-auth-status: no authenticated session -- confirmed negative, not an error ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  setup_fake_gh_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out exit_code
+  out=$(PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_AUTH_STATUS_MODE=none "$CLI" forge-auth-status) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "auth-status not-authenticated: exits 0 (a confirmed check, not a failure)"
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "auth-status not-authenticated: status is still found (the check itself succeeded)"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.data.authenticated')" "auth-status not-authenticated: authenticated is false"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.account')" "auth-status not-authenticated: account is null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "auth-status not-authenticated: message stays null -- confirmed logged-out, not 'could not check'"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.reason')" "auth-status not-authenticated: reason stays null -- a CONFIRMED negative never acquires a reason, despite the name resembling not_authenticated"
+
+  popd >/dev/null
+  teardown_fake_gh_fixture
+  teardown_detect_forge_fixture
+}
+
+test_forge_auth_status_identity_match_mismatch_and_unset() {
+  echo ""
+  echo "=== forge-auth-status: AIMI_FORGE_IDENTITY match / mismatch / unset -- env-var only ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  setup_fake_gh_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+
+  out=$(PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_AUTH_STATUS_MODE=single FAKE_GH_AUTH_ACCOUNT=octocat AIMI_FORGE_IDENTITY=octocat "$CLI" forge-auth-status)
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.data.identityRequested')" "auth-status identity match: identityRequested echoes the env value"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.identityHonored')" "auth-status identity match: identityHonored true when it equals the active account"
+
+  out=$(PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_AUTH_STATUS_MODE=single FAKE_GH_AUTH_ACCOUNT=octocat AIMI_FORGE_IDENTITY=someone-else "$CLI" forge-auth-status)
+  assert_eq "someone-else" "$(printf '%s' "$out" | jq -r '.data.identityRequested')" "auth-status identity mismatch: identityRequested echoes the env value"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.data.identityHonored')" "auth-status identity mismatch: identityHonored false when it differs from the active account"
+
+  out=$(PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_AUTH_STATUS_MODE=single FAKE_GH_AUTH_ACCOUNT=octocat "$CLI" forge-auth-status)
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.identityRequested')" "auth-status identity unset: identityRequested null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.identityHonored')" "auth-status identity unset: identityHonored null"
+
+  popd >/dev/null
+  teardown_fake_gh_fixture
+  teardown_detect_forge_fixture
+}
+
+# ---------------------------------------------------------------------------
+# AIMI_FORGE_TYPE override: a JSON null host must never become the STRING "null"
+#
+# _detect_forge short-circuits on AIMI_FORGE_TYPE with host/remote/remoteUrl
+# all JSON null. `jq -r '.host'` renders a JSON null as the 4-character text
+# "null", so the shell variable holds a non-empty string that then looks like
+# a real hostname to everything downstream: `gh auth status --hostname null`
+# (a host gh has no session for -> a confirmed-looking authenticated:false),
+# a data.host of "null" as a JSON string, and a manual-print URL of
+# https://null/owner/repo/... The fix is `.host // empty` at the two reads
+# that lacked it; every downstream symptom is transitive.
+# ---------------------------------------------------------------------------
+
+test_forge_auth_status_forge_type_override_host_is_json_null() {
+  echo ""
+  echo "=== forge-auth-status: AIMI_FORGE_TYPE override -- a null host never becomes the string \"null\" ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  setup_fake_gh_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local gh_log="$FAKE_GH_DIR/auth-invocations.log"
+  local out
+  out=$(PATH="$FAKE_GH_DIR:$PATH" AIMI_FORGE_TYPE=github FAKE_GH_AUTH_STRICT_HOSTNAME=1 \
+    FAKE_GH_AUTH_STATUS_MODE=single FAKE_GH_AUTH_ACCOUNT=octocat FAKE_GH_LOG="$gh_log" \
+    "$CLI" forge-auth-status)
+
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" \
+    "auth-status override: status is found"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.authenticated')" \
+    "auth-status override: reports the session's REAL authenticated:true, not a confirmed-but-wrong false"
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.data.account')" \
+    "auth-status override: the real account survives the override"
+  # jq -r prints BOTH a JSON null and the string "null" as `null`, so only
+  # `| type` can tell the fixed shape from the broken one.
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.host | type')" \
+    "auth-status override: data.host is a JSON null, never the 4-character string \"null\""
+
+  if grep -q -- '--hostname null' "$gh_log" 2>/dev/null; then
+    echo -e "${RED}✗${NC} auth-status override: gh must never be handed --hostname null"
+    echo "  gh invocations: $(cat "$gh_log")"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} auth-status override: gh is never handed --hostname null"
+    ((TESTS_PASSED++))
+  fi
+
+  popd >/dev/null
+  teardown_fake_gh_fixture
+  teardown_detect_forge_fixture
+}
+
+test_forge_repo_info_forge_type_override_host_is_json_null() {
+  echo ""
+  echo "=== forge-repo-info: AIMI_FORGE_TYPE override -- the same null host, the same single root fix ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  setup_fake_gh_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+  out=$(PATH="$FAKE_GH_DIR:$PATH" AIMI_FORGE_TYPE=github \
+    FAKE_GH_REPO_OWNER=owner FAKE_GH_REPO_NAME=repo "$CLI" forge-repo-info)
+
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "repo-info override: status is found"
+  assert_eq "owner/repo" "$(printf '%s' "$out" | jq -r '.data.nameWithOwner')" \
+    "repo-info override: owner/repo still resolve normally"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.host | type')" \
+    "repo-info override: data.host is a JSON null, never the 4-character string \"null\""
+
+  popd >/dev/null
+  teardown_fake_gh_fixture
+  teardown_detect_forge_fixture
+}
+
+# _forge_pr_write_print_manual's own `.data.host // empty` fallback was
+# already correct -- it just never fired, because the string "null" is truthy
+# in jq. This proves the fix at _forge_repo_info reaches it transitively,
+# with no change to _forge_pr_write_print_manual itself.
+test_forge_pr_write_manual_url_never_uses_null_host() {
+  echo ""
+  echo "=== forge-pr-edit manual fallback: URL uses the github.com default, never https://null/ ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
+  echo "HTTP 404: Not Found" >&2
+  exit 1
+fi
+if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
+  echo '{"owner":{"login":"owner"},"name":"repo"}'
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_pr_edit_manual_null_host.$$"
+  PATH="$sandbox" AIMI_FORGE_TYPE=github "$CLI" forge-pr-edit --number 303 --body "b" \
+    >/dev/null 2>"$stderr_file" || true
+
+  local stderr_out
+  stderr_out=$(cat "$stderr_file")
+
+  assert_stderr_contains "https://github.com/owner/repo/pull/303" "$stderr_out" \
+    "manual fallback: prints the pull URL on the github.com default host"
+
+  if printf '%s' "$stderr_out" | grep -q 'https://null/'; then
+    echo -e "${RED}✗${NC} manual fallback: must never print an https://null/ URL"
+    echo "  stderr: $stderr_out"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} manual fallback: never prints an https://null/ URL"
+    ((TESTS_PASSED++))
+  fi
+
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+# Cheap hardening, not a live exploit (the auditor confirmed no working PoC):
+# the scheme comparison was case-sensitive, so an uppercase HTTPS:// remote
+# skipped redaction entirely and round-tripped its embedded credential.
+test_detect_forge_credential_redaction_uppercase_scheme() {
+  echo ""
+  echo "=== detect-forge: userinfo redaction is case-insensitive on the scheme ==="
+
+  setup_detect_forge_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  git remote add origin HTTPS://x-access-token:ghp_uppercase_secret@github.com/owner/repo.git
+  local stdout
+  stdout=$("$CLI" detect-forge)
+
+  assert_eq "HTTPS://github.com/owner/repo.git" "$(echo "$stdout" | jq -r '.remoteUrl')" \
+    "detect-forge uppercase scheme: userinfo stripped, the scheme's original case preserved"
+
+  if printf '%s' "$stdout" | grep -q "ghp_uppercase_secret"; then
+    echo -e "${RED}✗${NC} detect-forge uppercase scheme: secret must never round-trip through stdout"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} detect-forge uppercase scheme: secret does not round-trip through stdout"
+    ((TESTS_PASSED++))
+  fi
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_auth_status_no_identity_flag_anywhere() {
+  echo ""
+  echo "=== forge-auth-status: identity is env-var-only -- no --identity flag exists ==="
+
+  local fn_block
+  fn_block=$(sed -n '/^cmd_forge_auth_status()/,/^}/p' "$CLI")
+
+  if printf '%s' "$fn_block" | grep -q -- '--identity'; then
+    echo -e "${RED}✗${NC} cmd_forge_auth_status: must never accept an --identity flag"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} cmd_forge_auth_status: flag-parsing loop has no --identity flag"
+    ((TESTS_PASSED++))
+  fi
+
+  # Excludes comment-only lines (e.g. this very test's own explanatory
+  # header above, which documents the absence of the flag by naming it) --
+  # the guarantee this check enforces is "no --identity flag in actual code
+  # ever parses a value", not "the four characters never appear in prose".
+  if grep -v '^[[:space:]]*#' "$CLI" | grep -q -- '--identity'; then
+    echo -e "${RED}✗${NC} aimi-cli.sh: --identity must never appear in code (a value that may later carry a credential must stay env-var-only)"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} aimi-cli.sh: --identity does not appear in any code line (comments excluded)"
+    ((TESTS_PASSED++))
+  fi
+}
+
+test_forge_auth_status_gh_absent_is_error() {
+  echo ""
+  echo "=== forge-auth-status: gh absent from PATH -- quiet degrade, status=error, exits 0 ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out exit_code stderr_file="/tmp/forge_auth_status_gh_absent_stderr.$$"
+  setup_forge_no_gh_fixture
+
+  out=$(PATH="$NO_GH_PATH_DIR" "$CLI" forge-auth-status 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "auth-status gh-absent: exits 0 (query verb's 'no answer available', not a broken invocation)"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "auth-status gh-absent: status is error"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "auth-status gh-absent: data is null"
+  assert_contains "gh" "$(printf '%s' "$out" | jq -r '.message')" "auth-status gh-absent: message names gh as the missing binary"
+  assert_eq "cli_missing" "$(printf '%s' "$out" | jq -r '.reason')" "auth-status gh-absent: reason is cli_missing"
+  assert_eq "" "$(cat "$stderr_file")" "auth-status gh-absent: quiet mode -- no caller-mandated stderr banner"
+
+  rm -f "$stderr_file"
+  teardown_forge_no_gh_fixture
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_auth_status_no_adapter_is_error() {
+  echo ""
+  echo "=== forge-auth-status: resolved forge has no adapter (gitlab) -- status=error, exits 0 ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out exit_code
+  out=$("$CLI" forge-auth-status) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "auth-status no-adapter: exits 0"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "auth-status no-adapter: status is error"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "auth-status no-adapter: data is null"
+  assert_contains "gitlab" "$(printf '%s' "$out" | jq -r '.message')" "auth-status no-adapter: message names the detected forge, not a generic placeholder"
+  assert_eq "no_adapter" "$(printf '%s' "$out" | jq -r '.reason')" "auth-status no-adapter: reason is no_adapter"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_auth_status_registered_in_help_and_dispatcher() {
+  echo ""
+  echo "=== forge-auth-status: listed in help beside detect-forge, routed by the dispatcher ==="
+
+  local help_out
+  help_out=$("$CLI" help 2>&1)
+  assert_contains "forge-auth-status [--project <path>]" "$help_out" "help: lists forge-auth-status"
+  assert_contains "AIMI_FORGE_IDENTITY=<login>" "$help_out" "help: documents the AIMI_FORGE_IDENTITY env var"
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  setup_fake_gh_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+  local dispatch_out
+  dispatch_out=$(PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-auth-status 2>&1)
+  popd >/dev/null
+  teardown_fake_gh_fixture
+  teardown_detect_forge_fixture
+
+  if printf '%s' "$dispatch_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: forge-auth-status is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: forge-auth-status is routed"
+    ((TESTS_PASSED++))
+  fi
+}
+
+test_forge_repo_info_gh_primary_single_call() {
+  echo ""
+  echo "=== forge-repo-info: gh present -- resolves via ONE gh repo view call ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  setup_fake_gh_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local counter_file="$FAKE_GH_DIR/call_count"
+  printf '0\n' > "$counter_file"
+
+  local out
+  out=$(PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_REPO_OWNER=acme FAKE_GH_REPO_NAME=widgets FAKE_GH_CALL_COUNTER="$counter_file" "$CLI" forge-repo-info)
+
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "repo-info gh-primary: status is found"
+  assert_eq "acme" "$(printf '%s' "$out" | jq -r '.data.owner')" "repo-info gh-primary: owner from gh"
+  assert_eq "widgets" "$(printf '%s' "$out" | jq -r '.data.repo')" "repo-info gh-primary: repo from gh"
+  assert_eq "acme/widgets" "$(printf '%s' "$out" | jq -r '.data.nameWithOwner')" "repo-info gh-primary: nameWithOwner composed correctly"
+  assert_eq "gh" "$(printf '%s' "$out" | jq -r '.data.source')" "repo-info gh-primary: source is gh"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "repo-info gh-primary: message is null"
+
+  local call_count
+  call_count=$(cat "$counter_file")
+  assert_eq "1" "$call_count" "repo-info gh-primary: exactly ONE gh repo view call, never the old two-call shape"
+
+  popd >/dev/null
+  teardown_fake_gh_fixture
+  teardown_detect_forge_fixture
+}
+
+test_forge_repo_info_local_parse_fallback_on_gh_failure() {
+  echo ""
+  echo "=== forge-repo-info: gh repo view fails (e.g. unauthenticated) -- falls back to local URL parse ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  setup_fake_gh_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+  out=$(PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_REPO_VIEW_FAIL=1 "$CLI" forge-repo-info)
+
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "repo-info local-parse fallback: status is still found"
+  assert_eq "owner" "$(printf '%s' "$out" | jq -r '.data.owner')" "repo-info local-parse fallback: owner parsed from remote URL"
+  assert_eq "repo" "$(printf '%s' "$out" | jq -r '.data.repo')" "repo-info local-parse fallback: repo parsed from remote URL"
+  assert_eq "local-parse" "$(printf '%s' "$out" | jq -r '.data.source')" "repo-info local-parse fallback: source names which tier resolved it"
+
+  popd >/dev/null
+  teardown_fake_gh_fixture
+  teardown_detect_forge_fixture
+}
+
+test_forge_repo_info_gh_absent_falls_back_to_local_parse() {
+  echo ""
+  echo "=== forge-repo-info: gh entirely absent from PATH -- falls back to local URL parse ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out exit_code
+  setup_forge_no_gh_fixture
+
+  out=$(PATH="$NO_GH_PATH_DIR" "$CLI" forge-repo-info) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "repo-info gh-absent: exits 0"
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "repo-info gh-absent: status is found via fallback"
+  assert_eq "owner" "$(printf '%s' "$out" | jq -r '.data.owner')" "repo-info gh-absent: owner parsed from remote URL"
+  assert_eq "repo" "$(printf '%s' "$out" | jq -r '.data.repo')" "repo-info gh-absent: repo parsed from remote URL"
+  assert_eq "local-parse" "$(printf '%s' "$out" | jq -r '.data.source')" "repo-info gh-absent: source is local-parse"
+
+  teardown_forge_no_gh_fixture
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_repo_info_nested_group_owner() {
+  echo ""
+  echo "=== forge-repo-info: nested group path -- every segment before the last is kept as owner ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/group/subgroup/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+  out=$("$CLI" forge-repo-info)
+
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "repo-info nested-group: status is found (gitlab has no adapter, so this is always local-parse)"
+  assert_eq "group/subgroup" "$(printf '%s' "$out" | jq -r '.data.owner')" "repo-info nested-group: owner keeps every segment before the last"
+  assert_eq "repo" "$(printf '%s' "$out" | jq -r '.data.repo')" "repo-info nested-group: repo is the final segment"
+  assert_eq "group/subgroup/repo" "$(printf '%s' "$out" | jq -r '.data.nameWithOwner')" "repo-info nested-group: nameWithOwner preserves the full nested path"
+  assert_eq "local-parse" "$(printf '%s' "$out" | jq -r '.data.source')" "repo-info nested-group: source is local-parse"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_repo_info_no_origin_is_not_found() {
+  echo ""
+  echo "=== forge-repo-info: no origin remote configured -- not_found, exits 0 ==="
+
+  setup_detect_forge_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out exit_code
+  out=$("$CLI" forge-repo-info) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "repo-info no-origin: exits 0"
+  assert_eq "not_found" "$(printf '%s' "$out" | jq -r '.status')" "repo-info no-origin: status is not_found (a confirmed absence, not a tool error)"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "repo-info no-origin: data is null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "repo-info no-origin: message is null"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_repo_info_registered_in_help_and_dispatcher() {
+  echo ""
+  echo "=== forge-repo-info: listed in help beside detect-forge, routed by the dispatcher ==="
+
+  local help_out
+  help_out=$("$CLI" help 2>&1)
+  assert_contains "forge-repo-info [--project <path>]" "$help_out" "help: lists forge-repo-info"
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  setup_fake_gh_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+  local dispatch_out
+  dispatch_out=$(PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-repo-info 2>&1)
+  popd >/dev/null
+  teardown_fake_gh_fixture
+  teardown_detect_forge_fixture
+
+  if printf '%s' "$dispatch_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: forge-repo-info is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: forge-repo-info is routed"
+    ((TESTS_PASSED++))
+  fi
+}
+
+# Forge PR View Tests (US-004)
+# ============================================================================
+# forge-pr-view is the first forge-* verb that actually shells out to a real
+# forge CLI (gh). Every fixture here is fully offline: `setup_detect_forge_
+# fixture` (test-aimi-cli.sh:16179) gives a github-shaped `git remote add`
+# that is never dialed, and a fake `gh` binary prepended to PATH -- mirroring
+# the fake-opencode-binary fixture `test_resolve_models_opencode_mtime_cache`
+# already uses (test-aimi-cli.sh:8518-8535) -- stands in for the real gh so
+# no test ever touches the network.
+
+# setup_fake_gh_fixture/teardown_fake_gh_fixture are the same shared fixture
+# defined in the forge-auth-status / forge-repo-info (US-003) section above
+# -- extended there to also serve `gh pr view`/`gh pr list`, per the
+# FAKE_GH_VIEW_*/FAKE_GH_PR_JSON/FAKE_GH_LIST_*/FAKE_GH_LOG vars documented
+# alongside it, exactly the sibling-story reuse it was built for.
+#
+# FIXTURE NOTE (phase 1.1 US-010): every test below that models a FOUND PR
+# for a BRANCH-NAME ref now sets FAKE_GH_LIST_JSON to a populated array
+# alongside its FAKE_GH_PR_JSON. Since US-010 the `gh pr list --head <ref>`
+# probe is the PRIMARY existence signal for a branch ref rather than a
+# not-found-confirming backstop, and the shared fixture's unconfigured
+# default for that var is the EMPTY array -- so a found-PR scenario that
+# configures only gh pr view's response now resolves to not_found before gh
+# pr view is ever reached. Every such test's expected status, envelope and
+# exit code is unchanged; only its gh pr list configuration is. A NUMERIC
+# ref never probes and needs no such pairing.
+
+test_forge_pr_view_found_single_field() {
+  echo ""
+  echo "=== forge-pr-view: found status, single --include field, exact envelope shape (AC1) ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out exit_code
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"url":"https://github.com/o/r/pull/7"}' PATH="$FAKE_GH_DIR:$PATH" \
+    "$CLI" forge-pr-view --pr feat-x --include url) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-view found: exit 0"
+  assert_eq '{"status":"found","pr":{"url":"https://github.com/o/r/pull/7"},"unsupported_fields":[],"message":null}' \
+    "$out" "forge-pr-view found: exact envelope shape, literal-for-literal (AC1)"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+test_forge_pr_view_include_field_sets() {
+  echo ""
+  echo "=== forge-pr-view: --include selects exactly the requested keys and no others (AC4) ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+
+  # review.md's five-field call site (review.md:36).
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"title":"T","body":"B","files":[{"path":"a.txt"}],"headRefName":"feat","baseRefName":"main"}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include title,body,files,headRefName,baseRefName)
+  assert_eq '{"status":"found","pr":{"title":"T","body":"B","files":[{"path":"a.txt"}],"headRefName":"feat","baseRefName":"main"},"unsupported_fields":[],"message":null}' \
+    "$out" "forge-pr-view include: five-field review.md set returns exactly those keys"
+
+  # review.md's files-only call site (review.md:99).
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"files":[{"path":"b.txt","additions":3,"deletions":1}]}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include files)
+  assert_eq '{"status":"found","pr":{"files":[{"path":"b.txt","additions":3,"deletions":1}]},"unsupported_fields":[],"message":null}' \
+    "$out" "forge-pr-view include: files-only returns exactly files"
+
+  # The two capability-gated PR contract fields that were never reachable
+  # through --include before this story (they replace the gh-only
+  # reviews/comments pair, which the contract cannot express and which had
+  # no caller outside this suite).
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"isDraft":true,"mergeable":"MERGEABLE"}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include isDraft,mergeable)
+  assert_eq '{"status":"found","pr":{"isDraft":true,"mergeable":"MERGEABLE"},"unsupported_fields":[],"message":null}' \
+    "$out" "forge-pr-view include: isDraft,mergeable returns exactly those keys"
+
+  # Omitted --include -- default portable core, excludes files/isDraft/
+  # mergeable (open-pr.md's own two call sites only ever want url). gh
+  # reports state in uppercase; the envelope must carry it normalized.
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"number":1,"url":"u","title":"t","body":"b","state":"OPEN","headRefName":"h","baseRefName":"m"}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x)
+  assert_eq '{"status":"found","pr":{"number":1,"url":"u","title":"t","body":"b","state":"open","headRefName":"h","baseRefName":"m"},"unsupported_fields":[],"message":null}' \
+    "$out" "forge-pr-view include: omitted defaults to the seven-field portable core"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+test_forge_pr_view_not_found_and_error_never_conflated() {
+  echo ""
+  echo "=== forge-pr-view: not_found and error are never conflated for the same --pr ref (AC3, highest risk) ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local ref="feat-x"
+
+  # Run 1: no PR exists -- gh pr view fails with its own not-found wording,
+  # gh pr list confirms via the structural [] signal.
+  local not_found_out
+  not_found_out=$(FAKE_GH_VIEW_EXIT=1 FAKE_GH_VIEW_STDERR="no pull requests found for branch \"$ref\"" \
+    FAKE_GH_LIST_EXIT=0 FAKE_GH_LIST_JSON='[]' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr "$ref")
+
+  # Run 2: same ref -- gh itself is broken (authentication-failure-shaped
+  # stderr instead of gh's own no-pull-requests-found wording), and the list
+  # probe fails too -- must resolve to error, never not_found. This is the
+  # exact defect open-pr.md's current `gh pr view --json url` exit-code
+  # check carries today: a broken token reads as "no PR yet".
+  local error_out
+  error_out=$(FAKE_GH_VIEW_EXIT=1 FAKE_GH_VIEW_STDERR="authentication required, please run gh auth login" \
+    FAKE_GH_LIST_EXIT=1 FAKE_GH_LIST_STDERR="authentication required, please run gh auth login" \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr "$ref")
+
+  local not_found_status error_status
+  not_found_status=$(printf '%s' "$not_found_out" | jq -r '.status')
+  error_status=$(printf '%s' "$error_out" | jq -r '.status')
+
+  assert_eq "not_found" "$not_found_status" "forge-pr-view conflation guard: run 1 (no PR) resolves to not_found"
+  assert_eq "error" "$error_status" "forge-pr-view conflation guard: run 2 (broken auth) resolves to error"
+
+  if [ "$not_found_status" != "$error_status" ]; then
+    echo -e "${GREEN}✓${NC} forge-pr-view conflation guard: not_found and error produce different status literals for the same ref"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} forge-pr-view conflation guard: not_found and error produced the SAME status literal ($not_found_status) -- this is exactly the open-pr.md defect this verb exists to fix"
+    ((TESTS_FAILED++))
+  fi
+
+  assert_eq "null" "$(printf '%s' "$not_found_out" | jq -r '.pr')" "forge-pr-view conflation guard: not_found -- pr is null"
+  assert_contains "$ref" "$(printf '%s' "$not_found_out" | jq -r '.message')" "forge-pr-view conflation guard: not_found -- message names the searched ref"
+  assert_eq "null" "$(printf '%s' "$error_out" | jq -r '.pr')" "forge-pr-view conflation guard: error -- pr is null"
+  assert_contains "authentication required" "$(printf '%s' "$error_out" | jq -r '.message')" "forge-pr-view conflation guard: error -- message carries gh's own failure text"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+test_forge_pr_view_not_found_prefers_structural_list_probe_over_stderr_text() {
+  echo ""
+  echo "=== forge-pr-view: not_found detection prefers the structural gh-pr-list-returns-[] probe over stderr wording (orchestrator note) ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  # gh pr view's stderr deliberately does NOT contain "no pull requests
+  # found" wording -- simulating a reworded gh release or a non-English
+  # locale -- proving the structural `gh pr list --head <branch> --json
+  # number` returning [] at exit 0 is what actually drives not_found here,
+  # never stderr pattern-matching.
+  local out
+  out=$(FAKE_GH_VIEW_EXIT=1 FAKE_GH_VIEW_STDERR="HTTP 404: no encontro ninguna solicitud" \
+    FAKE_GH_LIST_EXIT=0 FAKE_GH_LIST_JSON='[]' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x)
+
+  assert_eq "not_found" "$(printf '%s' "$out" | jq -r '.status')" \
+    "forge-pr-view structural probe: reworded/non-English stderr still resolves to not_found via the list probe"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+test_forge_pr_view_not_found_secondary_stderr_fallback() {
+  echo ""
+  echo "=== forge-pr-view: falls back to gh's stderr wording only when the structural list probe itself cannot confirm not_found ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+  out=$(FAKE_GH_VIEW_EXIT=1 FAKE_GH_VIEW_STDERR='no pull requests found for branch "feat-x"' \
+    FAKE_GH_LIST_EXIT=1 FAKE_GH_LIST_STDERR="transient failure" \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x)
+
+  assert_eq "not_found" "$(printf '%s' "$out" | jq -r '.status')" \
+    "forge-pr-view stderr fallback: list probe failure falls back to gh's own not-found wording"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+test_forge_pr_view_numeric_ref_skips_list_probe() {
+  echo ""
+  echo "=== forge-pr-view: a numeric --pr (PR number) never invokes gh pr list -- --head takes a branch name, not a number ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local log_file="$FAKE_GH_DIR/call.log"
+  local out
+  out=$(FAKE_GH_LOG="$log_file" FAKE_GH_VIEW_EXIT=1 FAKE_GH_VIEW_STDERR="no pull requests found for PR #42" \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr 42)
+
+  assert_eq "not_found" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-view numeric ref: still resolves to not_found via the stderr fallback"
+  assert_contains "42" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-view numeric ref: message names the numeric ref"
+
+  if [ -f "$log_file" ] && grep -q "^pr list" "$log_file"; then
+    echo -e "${RED}✗${NC} forge-pr-view numeric ref: gh pr list was invoked despite a numeric ref"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} forge-pr-view numeric ref: gh pr list was never invoked"
+    ((TESTS_PASSED++))
+  fi
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+test_forge_pr_view_unknown_include_field_rejected() {
+  echo ""
+  echo "=== forge-pr-view: an unrecognized --include field is CLI misuse, exit 1, never a substantive outcome (AC5) ==="
+
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local stderr_file="/tmp/forge_pr_view_bad_include_stderr.$$"
+  local exit_code
+  "$CLI" forge-pr-view --pr feat-x --include bogus >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-view bad --include: exits 1"
+  assert_stderr_contains "Error: forge-pr-view: unknown --include field: bogus" "$(cat "$stderr_file")" "forge-pr-view bad --include: stderr names the bad field"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_view_missing_gh_binary_quiet_degrade() {
+  echo ""
+  echo "=== forge-pr-view: gh absent from PATH degrades to status=error with no stderr banner (quiet mode, AC6) ==="
+
+  setup_forge_no_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local stderr_file="/tmp/forge_pr_view_no_gh_stderr.$$"
+  local out exit_code
+  out=$(PATH="$NO_GH_PATH_DIR" "$CLI" forge-pr-view --pr feat-x 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-view gh-absent: exits 0 (never a caller error)"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-view gh-absent: status is error"
+  assert_contains "gh" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-view gh-absent: message names the missing binary"
+  assert_eq "" "$(cat "$stderr_file")" "forge-pr-view gh-absent: no stderr banner (quiet degrade mode, matching review.md's undocumented-warning-free fallback)"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_forge_no_gh_fixture
+}
+
+test_forge_pr_view_non_github_forge_quiet_degrade() {
+  echo ""
+  echo "=== forge-pr-view: a non-github forge (gitlab/gitea) degrades to status=error with no stderr banner (quiet mode, AC6) ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local stderr_file="/tmp/forge_pr_view_gitlab_stderr.$$"
+  local out exit_code
+  out=$("$CLI" forge-pr-view --pr feat-x 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-view non-github forge: exits 0"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-view non-github forge: status is error"
+  assert_contains "gitlab" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-view non-github forge: message names the detected forge"
+  assert_eq "" "$(cat "$stderr_file")" "forge-pr-view non-github forge: no stderr banner (quiet degrade mode)"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_view_state_normalization_matches_issue_view() {
+  echo ""
+  echo "=== forge-pr-view: --include state normalizes gh's OPEN/CLOSED/MERGED exactly like forge-issue-view already does ==="
+
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  # One fake gh answering BOTH verbs off the same raw state literal, so the
+  # parity assertion below compares the two verbs' normalization and nothing
+  # else.
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  printf '{"state":"%s"}' "$FAKE_RAW_STATE"
+  exit 0
+fi
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  printf '{"number":1,"title":"t","body":"b","state":"%s","url":"u","labels":[],"comments":[]}' "$FAKE_RAW_STATE"
+  exit 0
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local raw expected pr_state issue_state
+  for raw in OPEN CLOSED MERGED; do
+    expected=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')
+    pr_state=$(FAKE_RAW_STATE="$raw" PATH="$sandbox" "$CLI" forge-pr-view --pr feat-x --include state | jq -r '.pr.state')
+    issue_state=$(FAKE_RAW_STATE="$raw" PATH="$sandbox" "$CLI" forge-issue-view --number 1 | jq -r '.data.state')
+    assert_eq "$expected" "$pr_state" "forge-pr-view state: gh's $raw normalizes to $expected"
+    assert_eq "$pr_state" "$issue_state" "state parity: forge-pr-view and forge-issue-view agree on $raw"
+  done
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_view_unsupported_fields_is_always_an_array_on_found() {
+  echo ""
+  echo "=== forge-pr-view: unsupported_fields is an array on found (never bare null) and forced null on not_found/error ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+
+  # Every requested capability-gated field supplied -> explicitly empty [].
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"files":[],"isDraft":false,"mergeable":"MERGEABLE"}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include files,isDraft,mergeable)
+  assert_eq "array" "$(printf '%s' "$out" | jq -r '.unsupported_fields | type')" "unsupported_fields: found, everything supplied -- type is array"
+  assert_eq "[]" "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "unsupported_fields: found, everything supplied -- explicitly empty, never bare null"
+
+  # A requested capability-gated field gh did not return -> named in the array.
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"url":"u"}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url,files)
+  assert_eq '["files"]' "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "unsupported_fields: found, gated field absent -- names it"
+
+  # not_found / error keep it forced null alongside pr, mirroring
+  # _forge_emit_status's own null-forcing convention.
+  out=$(FAKE_GH_VIEW_EXIT=1 FAKE_GH_VIEW_STDERR='no pull requests found for branch "feat-x"' \
+    FAKE_GH_LIST_EXIT=0 FAKE_GH_LIST_JSON='[]' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include files)
+  assert_eq "not_found" "$(printf '%s' "$out" | jq -r '.status')" "unsupported_fields: not_found precondition"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.unsupported_fields')" "unsupported_fields: not_found -- forced null, matching pr"
+
+  out=$(FAKE_GH_VIEW_EXIT=1 FAKE_GH_VIEW_STDERR="authentication required, please run gh auth login" \
+    FAKE_GH_LIST_EXIT=1 FAKE_GH_LIST_STDERR="authentication required, please run gh auth login" \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include files)
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "unsupported_fields: error precondition"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.unsupported_fields')" "unsupported_fields: error -- forced null, matching pr"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+test_forge_pr_view_unsupported_fields_intersect_requested_only() {
+  echo ""
+  echo "=== forge-pr-view: unsupported_fields is intersected with --include -- a gated field never requested never appears ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+
+  # _forge_build_pr_json ALWAYS flags all three unpassed gated fields. This
+  # request names only one of them, so files and mergeable -- never asked
+  # for -- must not be reported as unsupported, and pr must carry exactly
+  # the two requested keys rather than the builder's ten-key superset.
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"url":"u"}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url,isDraft)
+  assert_eq '["isDraft"]' "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "intersection: only the requested gated field is reported unsupported"
+  assert_eq '{"url":"u","isDraft":null}' "$(printf '%s' "$out" | jq -c '.pr')" "intersection: pr carries exactly the requested keys, never the builder's superset"
+
+  # Two of the three requested, both absent from gh's response.
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"url":"u"}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url,files,mergeable)
+  assert_eq '["files","mergeable"]' "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "intersection: both requested gated fields reported, isDraft (unrequested) omitted"
+
+  # None of the three requested -> nothing to report at all.
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"number":1,"url":"u"}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include number,url)
+  assert_eq "[]" "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "intersection: no gated field requested -- empty array, not all three"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+test_forge_pr_view_absent_key_vs_explicit_null_are_distinguishable() {
+  echo ""
+  echo "=== forge-pr-view: a key gh omits reads as unsupported; the same key returned as an explicit null does not ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+
+  # Case 1 -- gh's response omits `files` entirely.
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"url":"u"}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url,files)
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.pr | has("files")')" "absent key: files is still a key in pr (requested keys are never dropped)"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.pr.files')" "absent key: files reads null"
+  assert_eq '["files"]' "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "absent key: files IS recorded in unsupported_fields"
+
+  # Case 2 -- gh's response includes `files` with an explicit JSON null.
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"url":"u","files":null}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url,files)
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.pr | has("files")')" "explicit null: files is a key in pr"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.pr.files')" "explicit null: files reads null (same value as the absent case)"
+  assert_eq "[]" "$(printf '%s' "$out" | jq -c '.unsupported_fields')" "explicit null: files is NOT recorded in unsupported_fields -- the two cases are no longer indistinguishable"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+test_forge_pr_view_include_accepts_contract_fields_and_rejects_gh_only_names() {
+  echo ""
+  echo "=== forge-pr-view: --include accepts the ten contract fields (isDraft/mergeable included) and rejects gh-only reviews/comments ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+
+  # isDraft and mergeable are PR contract fields that were never selectable
+  # through --include before this story; each must now return exactly its
+  # own key when requested alone.
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"isDraft":true}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include isDraft)
+  assert_eq '{"isDraft":true}' "$(printf '%s' "$out" | jq -c '.pr')" "contract fields: isDraft alone returns exactly isDraft"
+
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"mergeable":"CONFLICTING"}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include mergeable)
+  assert_eq '{"mergeable":"CONFLICTING"}' "$(printf '%s' "$out" | jq -c '.pr')" "contract fields: mergeable alone returns exactly mergeable"
+
+  # reviews/comments are gh-only names with no PR-contract equivalent and no
+  # caller anywhere in commands/ or skills/ -- now rejected as unknown.
+  local stderr_file="/tmp/forge_pr_view_gh_only_stderr.$$"
+  local name exit_code
+  for name in reviews comments; do
+    exit_code=0
+    "$CLI" forge-pr-view --pr feat-x --include "$name" >/dev/null 2>"$stderr_file" || exit_code=$?
+    assert_exit_code "1" "$exit_code" "contract fields: gh-only --include $name exits 1"
+    assert_stderr_contains "unknown --include field: $name" "$(cat "$stderr_file")" "contract fields: stderr names the rejected gh-only field $name"
+  done
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+test_forge_pr_view_registered_in_help_and_dispatcher() {
+  echo ""
+  echo "=== forge-pr-view: listed in help with its flags and routed by the dispatcher (AC7) ==="
+
+  local help_out
+  help_out=$("$CLI" help 2>&1)
+  assert_contains "forge-pr-view --pr <branch-or-number> [--include <fields>] [--project <path>]" "$help_out" "help: lists forge-pr-view with its three flags"
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local dispatch_out
+  dispatch_out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"url":"u"}' PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url 2>&1)
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+
+  if printf '%s' "$dispatch_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: forge-pr-view is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: forge-pr-view is routed"
+    ((TESTS_PASSED++))
+  fi
+}
+
+# ============================================================================
+# Forge PR Create/Edit Tests (US-005)
+# ============================================================================
+# forge-pr-create / forge-pr-edit are the first WRITE verbs that mutate a
+# pull request. Both need `gh pr view`/`gh pr list` (the idempotency check
+# and post-write structured re-read, via forge-pr-view) AND `gh pr create`/
+# `gh pr edit` in the SAME invocation, with call-order-dependent behavior
+# (not found -> create -> found) that the shared setup_fake_gh_fixture
+# above cannot express with its static FAKE_GH_* env vars. Reusing
+# setup_forge_cli_sandbox/teardown_forge_cli_sandbox instead (the US-006
+# fixture, whose own doc comment above already earmarks "forge-pr-view/
+# forge-pr-create ... need the identical technique") -- each test below
+# writes its own small `gh` heredoc script, using a marker file dropped
+# next to the fake `gh` binary itself to track state across the multiple
+# gh invocations one forge-pr-create/forge-pr-edit call makes.
+
+test_forge_pr_create_new_pr() {
+  echo ""
+  echo "=== forge-pr-create: no existing PR -- creates one, derives number via a structured forge-pr-view re-read, never a URL regex (AC1/AC3) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+FLAG="$(dirname "$0")/pr_created.flag"
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  if [ -f "$FLAG" ]; then
+    echo '{"url":"https://github.com/owner/repo/pull/101","number":101}'
+    exit 0
+  fi
+  echo "no pull requests found for branch" >&2
+  exit 1
+fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  # Mirrors $FLAG exactly like the `pr view` handler above. Since phase 1.1
+  # US-010 this probe is forge-pr-view's PRIMARY existence signal for a
+  # branch ref, so a handler that always echoed the empty array would force
+  # the post-create re-read to not_found before gh pr view was ever reached
+  # -- silently turning this test's post-create path into an assertion about
+  # the wrong branch of the code.
+  if [ -f "$FLAG" ]; then
+    echo '[{"number":101}]'
+  else
+    echo '[]'
+  fi
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  : > "$FLAG"
+  echo "https://github.com/owner/repo/pull/101"
+  exit 0
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-create new PR: exit 0"
+  assert_eq '{"status":"created","data":{"url":"https://github.com/owner/repo/pull/101","number":101},"message":null}' \
+    "$out" "forge-pr-create new PR: status created with {url, number} nested under data, derived from the structured re-read (AC1)"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_create_existing_pr_is_idempotent() {
+  echo ""
+  echo "=== forge-pr-create: an open PR already exists for --head -- returns it unchanged, never calls gh pr create (AC2) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  # "state":"OPEN" is load-bearing: the existing-PR check requests
+  # url,number,state and only short-circuits on a normalized state of
+  # `open`, so a fixture without one would be treated as non-blocking and
+  # this test would silently invert into asserting the opposite.
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  echo '{"url":"https://github.com/owner/repo/pull/55","number":55,"state":"OPEN"}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  # Added in phase 1.1 US-010. Before it, this script had no `pr list` arm at
+  # all: the probe hit the catch-all below, exited 99, and forge-pr-view fell
+  # back to the `pr view` handler -- so this scenario passed through the
+  # probe-unavailable FALLBACK path rather than the intended primary one. A
+  # populated array is the response consistent with the open PR the `pr view`
+  # handler above already reports.
+  echo '[{"number":55}]'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  echo "gh pr create should never have been invoked for an already-existing PR: $*" >&2
+  exit 66
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-create idempotent: exit 0"
+  assert_eq '{"status":"unchanged","data":{"url":"https://github.com/owner/repo/pull/55","number":55},"message":null}' \
+    "$out" "forge-pr-create idempotent: reports status unchanged with the existing PR under data, no duplicate opened (AC2)"
+  assert_eq "unchanged" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-create idempotent: status is the literal 'unchanged' -- not 'created', and not a bare absent field"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_create_lookup_error_never_falls_through_to_create() {
+  echo ""
+  echo "=== forge-pr-create: forge-pr-view reports status error while checking for an existing PR -- NEVER opens a duplicate, exits 1 ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  # Both halves of forge-pr-view's github lookup fail with gh's own
+  # authentication wording -- `gh pr view` AND the `gh pr list` structural
+  # not_found probe -- so forge-pr-view reports status:"error" at EXIT 0.
+  # That exit-0-with-an-error-envelope is precisely what a bare
+  # `if [ "$existing_rc" -ne 0 ]` guard cannot see and what a bare
+  # `if [ "$existing_status" = "found" ]` check falls straight through,
+  # landing on `gh pr create` and opening a duplicate PR.
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "pr" ] && { [ "$2" = "view" ] || [ "$2" = "list" ]; }; then
+  echo "gh: To get started with GitHub CLI, please run:  gh auth login" >&2
+  exit 4
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  : > "$(dirname "$0")/pr_create_invoked.flag"
+  echo "gh pr create must never run when the existing-PR lookup itself failed: $*" >&2
+  exit 66
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_pr_create_lookup_error_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-create lookup error: exits 1"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-create lookup error: stdout carries a degraded envelope (in-band signal ON TOP of the exit code, never instead of it)"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "forge-pr-create lookup error: data is null on degraded"
+  assert_contains "forge-pr-view reported an error" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-create lookup error: message echoes the same reason stderr states"
+  if [ -f "$sandbox/pr_create_invoked.flag" ]; then
+    echo -e "${RED}✗${NC} forge-pr-create lookup error: gh pr create WAS invoked -- a duplicate PR would have been opened"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} forge-pr-create lookup error: gh pr create was never invoked"
+    ((TESTS_PASSED++))
+  fi
+  assert_stderr_contains "create it yourself" "$(cat "$stderr_file")" "forge-pr-create lookup error: manual fallback printed (MANDATORY-PRINT)"
+  assert_stderr_contains "forge-pr-view reported an error" "$(cat "$stderr_file")" "forge-pr-create lookup error: stderr names forge-pr-view as the failing lookup"
+  assert_stderr_contains "gh auth login" "$(cat "$stderr_file")" "forge-pr-create lookup error: stderr carries forge-pr-view's own message text"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_create_closed_or_merged_existing_pr_does_not_block() {
+  echo ""
+  echo "=== forge-pr-create: an existing CLOSED/MERGED PR on --head does not block -- a fresh PR is created and only its own identity is returned ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  # `gh pr view <branch>` is NOT state-filtered (verified against real gh
+  # 2.94.0 on this repository's own merged PR #84 and closed PR #6), so a
+  # branch whose prior PR was merged or closed still resolves to that stale
+  # PR here. FAKE_EXISTING_STATE stays unexpanded inside this quoted
+  # heredoc and is read by the fake gh at run time, so one script covers
+  # both the MERGED and the CLOSED variant.
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+FLAG="$(dirname "$0")/pr_created.flag"
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  if [ -f "$FLAG" ]; then
+    echo '{"url":"https://github.com/owner/repo/pull/91","number":91}'
+    exit 0
+  fi
+  echo "{\"url\":\"https://github.com/owner/repo/pull/12\",\"number\":12,\"state\":\"${FAKE_EXISTING_STATE:-MERGED}\"}"
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  : > "$FLAG"
+  echo "https://github.com/owner/repo/pull/91"
+  exit 0
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stale_state out exit_code
+  for stale_state in MERGED CLOSED; do
+    rm -f "$sandbox/pr_created.flag"
+    out=$(FAKE_EXISTING_STATE="$stale_state" PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body") && exit_code=0 || exit_code=$?
+
+    assert_exit_code "0" "$exit_code" "forge-pr-create $stale_state existing PR: exit 0"
+    if [ -f "$sandbox/pr_created.flag" ]; then
+      echo -e "${GREEN}✓${NC} forge-pr-create $stale_state existing PR: gh pr create WAS invoked (a $stale_state PR must not block a new one)"
+      ((TESTS_PASSED++))
+    else
+      echo -e "${RED}✗${NC} forge-pr-create $stale_state existing PR: gh pr create was never invoked -- the $stale_state PR blocks creation forever"
+      ((TESTS_FAILED++))
+    fi
+    assert_eq '{"status":"created","data":{"url":"https://github.com/owner/repo/pull/91","number":91},"message":null}' \
+      "$out" "forge-pr-create $stale_state existing PR: reports status created with the NEW PR's own url/number -- the stale PR's identity never leaks"
+  done
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_create_post_create_reread_failure_keeps_created_url() {
+  echo ""
+  echo "=== forge-pr-create: gh pr create succeeds but the post-create re-read fails -- keeps the captured url, exit 0, Warning not create-it-yourself ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  # Before the flag: a clean not_found (gh pr view fails with gh's own
+  # no-pull-requests wording, gh pr list confirms []). After creation: both
+  # fail with an authentication-style message instead, so the re-read comes
+  # back status:"error" -- a genuine failure, NOT a not_found. The PR
+  # nonetheless exists and its url is already in hand.
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+FLAG="$(dirname "$0")/pr_created.flag"
+if [ "$1" = "pr" ] && { [ "$2" = "view" ] || [ "$2" = "list" ]; }; then
+  if [ -f "$FLAG" ]; then
+    echo "gh: To get started with GitHub CLI, please run:  gh auth login" >&2
+    exit 4
+  fi
+  if [ "$2" = "list" ]; then
+    echo '[]'
+    exit 0
+  fi
+  echo "no pull requests found for branch" >&2
+  exit 1
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  : > "$FLAG"
+  echo "https://github.com/owner/repo/pull/404"
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_pr_create_reread_fail_stderr.$$"
+  local out exit_code stderr_text
+  out=$(PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_text=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+
+  assert_exit_code "0" "$exit_code" "forge-pr-create re-read failure: exit 0 -- the PR really was created"
+  assert_eq '{"status":"created","data":{"url":"https://github.com/owner/repo/pull/404","number":null},"message":null}' \
+    "$out" "forge-pr-create re-read failure: the captured url survives under data with number:null, status stays created"
+  # NOT degraded: degraded forces data to null by contract, which would throw
+  # the created PR's url away and lead a caller to open a second PR for a
+  # branch that already has one.
+  assert_eq "created" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-create re-read failure: status is created, never degraded -- a degraded envelope would null out the url this branch exists to preserve"
+  assert_stderr_contains "Warning:" "$stderr_text" "forge-pr-create re-read failure: stderr warns rather than erroring"
+  assert_stderr_contains "https://github.com/owner/repo/pull/404" "$stderr_text" "forge-pr-create re-read failure: the Warning names the created PR's url"
+  if printf '%s' "$stderr_text" | grep -qE "create it yourself|git push -u origin"; then
+    echo -e "${RED}✗${NC} forge-pr-create re-read failure: the create-it-yourself fallback was printed for a PR that already exists -- following it would open a duplicate"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} forge-pr-create re-read failure: the create-it-yourself fallback is never printed once a url has been captured"
+    ((TESTS_PASSED++))
+  fi
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_create_missing_gh_mandatory_print_nonzero_exit() {
+  echo ""
+  echo "=== forge-pr-create: gh absent -- MANDATORY-PRINT degrade, EXIT NON-ZERO (differs from forge-issue-create's soft-fail) (AC6) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # No gh in the sandbox -- simulates "gh not installed".
+
+  local stderr_file="/tmp/forge_pr_create_no_gh_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-create gh-absent: EXITS NON-ZERO (a hard failure, unlike forge-issue-create's soft-fail exit 0)"
+  assert_eq '{"status":"degraded","data":null,"message":"gh not found -- this pull request was not created automatically."}' \
+    "$out" "forge-pr-create gh-absent: stdout carries the degraded envelope -- no longer silent, while the exit code above stays 1"
+  assert_stderr_contains "gh not found" "$(cat "$stderr_file")" "forge-pr-create gh-absent: _forge_bin_check's mandatory warning names gh"
+  assert_stderr_contains "create it yourself" "$(cat "$stderr_file")" "forge-pr-create gh-absent: manual instruction printed (MANDATORY-PRINT)"
+  assert_stderr_contains "git push -u origin feat-x" "$(cat "$stderr_file")" "forge-pr-create gh-absent: manual instruction includes the git push command (AC6)"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_create_non_github_forge_mandatory_print() {
+  echo ""
+  echo "=== forge-pr-create: non-github forge (no adapter) -- MANDATORY-PRINT degrade, never shells to gh, exit non-zero ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+echo "gh should never be invoked for a non-github forge: $*" >&2
+exit 77
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_pr_create_gitlab_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-create non-github forge: exits non-zero"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-create non-github forge: stdout carries the degraded envelope while the exit code stays 1"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "forge-pr-create non-github forge: data is null on degraded"
+  assert_contains "no adapter for forge \"gitlab\"" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-create non-github forge: message names the unsupported forge"
+  assert_stderr_contains "gitlab" "$(cat "$stderr_file")" "forge-pr-create non-github forge: manual instruction names the detected forge"
+  assert_stderr_contains "create it yourself" "$(cat "$stderr_file")" "forge-pr-create non-github forge: manual instruction printed"
+  if grep -q "gh should never be invoked" "$stderr_file"; then
+    echo -e "${RED}✗${NC} forge-pr-create non-github forge: gh was invoked despite having no adapter for this forge"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} forge-pr-create non-github forge: gh was never invoked"
+    ((TESTS_PASSED++))
+  fi
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_create_guard_failures() {
+  echo ""
+  echo "=== forge-pr-create: invalid --head/--base and missing required flags are caller errors, exit 1, before any gh call (AC1 guard) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local stderr_file="/tmp/forge_pr_create_guard_stderr.$$" exit_code
+
+  "$CLI" forge-pr-create --title T --base main --head "bad;head" --body B >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-pr-create invalid --head: exit 1"
+  assert_stderr_contains "invalid --head value" "$(cat "$stderr_file")" "forge-pr-create invalid --head: stderr names the bad value"
+
+  "$CLI" forge-pr-create --title T --base "bad;base" --head feat-x --body B >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-pr-create invalid --base: exit 1"
+  assert_stderr_contains "invalid --base value" "$(cat "$stderr_file")" "forge-pr-create invalid --base: stderr names the bad value"
+
+  "$CLI" forge-pr-create --base main --head feat-x --body B >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-pr-create missing --title: exit 1"
+  assert_stderr_contains "Usage: aimi-cli.sh forge-pr-create" "$(cat "$stderr_file")" "forge-pr-create missing --title: stderr prints usage"
+
+  rm -f "$stderr_file"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_create_credential_via_env_not_argv() {
+  echo ""
+  echo "=== forge-pr-create: credential reaches gh via inherited env var, never argv or a --token flag (AC5) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    *token*|*TOKEN*|--token|ghp_*|gho_*) echo "credential leaked into argv: $arg" >&2; exit 2 ;;
+  esac
+done
+if [ -z "${GH_TOKEN:-}" ]; then
+  echo "GH_TOKEN not inherited from environment" >&2
+  exit 3
+fi
+FLAG="$(dirname "$0")/pr_created.flag"
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  if [ -f "$FLAG" ]; then
+    echo '{"url":"https://github.com/owner/repo/pull/202","number":202}'
+    exit 0
+  fi
+  echo "no pull requests found" >&2
+  exit 1
+fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  echo '[]'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  : > "$FLAG"
+  echo "https://github.com/owner/repo/pull/202"
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(GH_TOKEN="secret-value-xyz" PATH="$sandbox" "$CLI" forge-pr-create --title T --base main --head feat-y --body B) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-create credential: exit 0 (GH_TOKEN inherited correctly, no argv leak, no --token flag)"
+  assert_eq "created" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-create credential: status created"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_edit_success() {
+  echo ""
+  echo "=== forge-pr-edit: successful body update -- status unchanged with {url, number} under data, via a structured forge-pr-view re-read (AC4) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  echo '{"url":"https://github.com/owner/repo/pull/303","number":303}'
+  exit 0
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --body "updated body") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-edit success: exit 0"
+  assert_eq '{"status":"unchanged","data":{"url":"https://github.com/owner/repo/pull/303","number":303},"message":null}' \
+    "$out" "forge-pr-edit success: the same write envelope forge-pr-create emits, genuinely identical this time (AC4)"
+  # An edit mutates a number that already existed and mints no new
+  # identifier -- forge-contract.md's Write-Verb Status Convention calls that
+  # unchanged, even though the PR's BODY did change.
+  assert_eq "unchanged" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-edit success: status is unchanged -- never created, and never a bare absent field the way it was before"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_edit_missing_gh_mandatory_print_nonzero_exit() {
+  echo ""
+  echo "=== forge-pr-edit: gh absent -- MANDATORY-PRINT degrade, EXIT NON-ZERO (AC6) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # No gh in the sandbox -- simulates "gh not installed".
+
+  local stderr_file="/tmp/forge_pr_edit_no_gh_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --body "updated body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-edit gh-absent: exits non-zero"
+  assert_eq '{"status":"degraded","data":null,"message":"gh not found -- this pull request was not edited automatically."}' \
+    "$out" "forge-pr-edit gh-absent: stdout carries the degraded envelope -- no longer silent, while the exit code above stays 1"
+  assert_stderr_contains "gh not found" "$(cat "$stderr_file")" "forge-pr-edit gh-absent: _forge_bin_check's mandatory warning names gh"
+  assert_stderr_contains "edit it yourself" "$(cat "$stderr_file")" "forge-pr-edit gh-absent: manual instruction printed (MANDATORY-PRINT, AC6)"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_edit_gh_failure_prints_manual_nonzero_exit() {
+  echo ""
+  echo "=== forge-pr-edit: gh pr edit itself fails -- manual instruction printed, exit non-zero ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
+  echo "HTTP 404: Not Found" >&2
+  exit 1
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_pr_edit_fail_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --body "updated body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-edit gh-failure: exits non-zero"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-edit gh-failure: stdout carries the degraded envelope while the exit code stays 1"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "forge-pr-edit gh-failure: data is null on degraded"
+  assert_contains "gh pr edit exited 1" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-edit gh-failure: message echoes the same gh exit-code text stderr states"
+  assert_stderr_contains "gh pr edit exited 1" "$(cat "$stderr_file")" "forge-pr-edit gh-failure: error names the gh exit code"
+  assert_stderr_contains "edit it yourself" "$(cat "$stderr_file")" "forge-pr-edit gh-failure: manual instruction printed"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+# Omitting --body used to be indistinguishable from passing an empty one:
+# both left $body as "", and `gh pr edit N --body ""` BLANKS the description.
+# A caller that simply forgot the flag silently destroyed the PR body.
+test_forge_pr_edit_omitted_body_is_rejected() {
+  echo ""
+  echo "=== forge-pr-edit: --body omitted entirely -- rejected before gh runs, so a description is never blanked by omission ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  local gh_log="$sandbox/gh-invocations.log"
+  cat > "$sandbox/gh" << FAKE_GH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$gh_log"
+if [ "\$1" = "pr" ] && [ "\$2" = "edit" ]; then
+  exit 0
+fi
+if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
+  echo '{"url":"https://github.com/owner/repo/pull/303","number":303}'
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_pr_edit_no_body_stderr.$$"
+  local exit_code
+  PATH="$sandbox" "$CLI" forge-pr-edit --number 303 >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-edit omitted --body: exit 1"
+  assert_stderr_contains "Usage: aimi-cli.sh forge-pr-edit" "$(cat "$stderr_file")" \
+    "forge-pr-edit omitted --body: reuses the existing Usage message rather than inventing a second one"
+
+  local gh_calls=""
+  [ -f "$gh_log" ] && gh_calls=$(cat "$gh_log")
+  assert_eq "" "$gh_calls" \
+    "forge-pr-edit omitted --body: gh is never invoked at all -- the PR body cannot be blanked"
+
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+# The other half of the same distinction: an EXPLICIT --body "" is a
+# deliberate way to clear a description and must keep working. The rejection
+# above keys on whether the flag was SEEN, never on whether its value is
+# non-empty -- these two tests only both pass under that reading.
+test_forge_pr_edit_explicit_empty_body_still_clears() {
+  echo ""
+  echo "=== forge-pr-edit: an explicit --body \"\" is a deliberate clear and still succeeds ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  local gh_log="$sandbox/gh-invocations.log"
+  cat > "$sandbox/gh" << FAKE_GH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$gh_log"
+if [ "\$1" = "pr" ] && [ "\$2" = "edit" ]; then
+  exit 0
+fi
+if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
+  echo '{"url":"https://github.com/owner/repo/pull/303","number":303}'
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --body "") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-edit explicit empty --body: exit 0 -- a deliberate clear is still allowed"
+  assert_eq "unchanged" "$(printf '%s' "$out" | jq -r '.status')" \
+    "forge-pr-edit explicit empty --body: reports the normal unchanged write envelope"
+  assert_contains "pr edit 303 --body" "$(cat "$gh_log")" \
+    "forge-pr-edit explicit empty --body: gh IS invoked -- the clear actually reaches the forge"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_edit_invalid_number_guard() {
+  echo ""
+  echo "=== forge-pr-edit: --number must be numeric-only before it is ever interpolated into a gh command (AC4 guard) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local stderr_file="/tmp/forge_pr_edit_bad_number_stderr.$$"
+  local exit_code
+  "$CLI" forge-pr-edit --number "abc" --body B >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-edit invalid --number: exit 1"
+  assert_stderr_contains "--number must be a positive integer" "$(cat "$stderr_file")" "forge-pr-edit invalid --number: stderr names the bad value"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_write_verbs_share_one_data_shape() {
+  echo ""
+  echo "=== forge-pr-create created / forge-pr-create unchanged / forge-pr-edit unchanged: all three nest an IDENTICAL {url, number} under data (AC3) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  # One fake gh, three scenarios selected by FAKE_SCENARIO so the three
+  # outcomes below are produced by the real verb bodies rather than by three
+  # different fixtures that could drift apart.
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+FLAG="$(dirname "$0")/pr_created.flag"
+case "${FAKE_SCENARIO:-}" in
+  create)
+    if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+      if [ -f "$FLAG" ]; then
+        echo '{"url":"https://github.com/owner/repo/pull/700","number":700}'
+        exit 0
+      fi
+      echo "no pull requests found for branch" >&2
+      exit 1
+    fi
+    # Mirrors $FLAG like the `pr view` arm above -- see the same note on
+    # test_forge_pr_create_new_pr's script for why a permanently-empty list
+    # response would send the post-create re-read to not_found.
+    if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+      if [ -f "$FLAG" ]; then echo '[{"number":700}]'; else echo '[]'; fi
+      exit 0
+    fi
+    if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+      : > "$FLAG"
+      echo "https://github.com/owner/repo/pull/700"
+      exit 0
+    fi
+    ;;
+  existing)
+    if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+      echo '{"url":"https://github.com/owner/repo/pull/701","number":701,"state":"OPEN"}'
+      exit 0
+    fi
+    if [ "$1" = "pr" ] && [ "$2" = "list" ]; then echo '[{"number":701}]'; exit 0; fi
+    ;;
+  edit)
+    if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then exit 0; fi
+    if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+      echo '{"url":"https://github.com/owner/repo/pull/702","number":702}'
+      exit 0
+    fi
+    ;;
+esac
+echo "unexpected gh invocation ($FAKE_SCENARIO): $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local created_out existing_out edit_out
+  rm -f "$sandbox/pr_created.flag"
+  created_out=$(FAKE_SCENARIO=create PATH="$sandbox" "$CLI" forge-pr-create --title T --base main --head feat-x --body B)
+  existing_out=$(FAKE_SCENARIO=existing PATH="$sandbox" "$CLI" forge-pr-create --title T --base main --head feat-x --body B)
+  edit_out=$(FAKE_SCENARIO=edit PATH="$sandbox" "$CLI" forge-pr-edit --number 702 --body B)
+
+  assert_eq "created"   "$(printf '%s' "$created_out"  | jq -r '.status')" "write-shape parity: forge-pr-create's fresh-creation branch reports created"
+  assert_eq "unchanged" "$(printf '%s' "$existing_out" | jq -r '.status')" "write-shape parity: forge-pr-create's idempotent branch reports unchanged"
+  assert_eq "unchanged" "$(printf '%s' "$edit_out"     | jq -r '.status')" "write-shape parity: forge-pr-edit's success path reports unchanged"
+
+  # The whole point of the shared envelope: one caller code path reads all
+  # three outcomes. Same envelope keys, same data keys, same value types.
+  local envelope_keys='["data","message","status"]' data_keys='["number","url"]'
+  assert_eq "$envelope_keys" "$(printf '%s' "$created_out"  | jq -c 'keys')" "write-shape parity: created envelope keys"
+  assert_eq "$envelope_keys" "$(printf '%s' "$existing_out" | jq -c 'keys')" "write-shape parity: unchanged (idempotent create) envelope keys"
+  assert_eq "$envelope_keys" "$(printf '%s' "$edit_out"     | jq -c 'keys')" "write-shape parity: unchanged (edit) envelope keys"
+  assert_eq "$data_keys" "$(printf '%s' "$created_out"  | jq -c '.data | keys')" "write-shape parity: created data keys are exactly {url, number}"
+  assert_eq "$data_keys" "$(printf '%s' "$existing_out" | jq -c '.data | keys')" "write-shape parity: unchanged (idempotent create) data keys are exactly {url, number}"
+  assert_eq "$data_keys" "$(printf '%s' "$edit_out"     | jq -c '.data | keys')" "write-shape parity: unchanged (edit) data keys are exactly {url, number}"
+
+  assert_eq "700" "$(printf '%s' "$created_out"  | jq -r '.data.number')" "write-shape parity: created data.number readable through one path"
+  assert_eq "701" "$(printf '%s' "$existing_out" | jq -r '.data.number')" "write-shape parity: unchanged (idempotent create) data.number readable through the SAME path"
+  assert_eq "702" "$(printf '%s' "$edit_out"     | jq -r '.data.number')" "write-shape parity: unchanged (edit) data.number readable through the SAME path"
+
+  local shape
+  for shape in "$created_out" "$existing_out" "$edit_out"; do
+    assert_eq "number" "$(printf '%s' "$shape" | jq -r '.data.number | type')" "write-shape parity: data.number is an int in every outcome"
+    assert_eq "string" "$(printf '%s' "$shape" | jq -r '.data.url | type')" "write-shape parity: data.url is a string in every outcome"
+  done
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_write_verbs_degraded_exit_code_split() {
+  echo ""
+  echo "=== degraded on all three write verbs: SAME envelope, deliberately DIFFERENT exit codes (hard-fail vs soft-fail) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # No gh in the sandbox -- one identical trigger for all three verbs, so the
+  # only variable left is each verb's own exit-code contract.
+
+  local create_out edit_out issue_out create_rc edit_rc issue_rc
+  create_out=$(PATH="$sandbox" "$CLI" forge-pr-create --title T --base main --head feat-x --body B 2>/dev/null) && create_rc=0 || create_rc=$?
+  edit_out=$(PATH="$sandbox" "$CLI" forge-pr-edit --number 9 --body B 2>/dev/null) && edit_rc=0 || edit_rc=$?
+  issue_out=$(PATH="$sandbox" "$CLI" forge-issue-create --title T --body B 2>/dev/null) && issue_rc=0 || issue_rc=$?
+
+  # Same in-band signal on all three.
+  assert_eq "degraded" "$(printf '%s' "$create_out" | jq -r '.status')" "exit split: forge-pr-create reports status degraded"
+  assert_eq "degraded" "$(printf '%s' "$edit_out"   | jq -r '.status')" "exit split: forge-pr-edit reports status degraded"
+  assert_eq "degraded" "$(printf '%s' "$issue_out"  | jq -r '.status')" "exit split: forge-issue-create reports status degraded"
+
+  # Deliberately different exit codes -- this story adds the envelope ON TOP
+  # of the exit-code contract, it does not replace it.
+  assert_exit_code "1" "$create_rc" "exit split: forge-pr-create degraded EXITS 1 (hard-fail -- opening a PR has no fallback)"
+  assert_exit_code "1" "$edit_rc"   "exit split: forge-pr-edit degraded EXITS 1 (hard-fail, same contract as forge-pr-create)"
+  assert_exit_code "0" "$issue_rc"  "exit split: forge-issue-create degraded EXITS 0 (soft-fail -- open-pr.md's contract that a failed backend issue never blocks PR creation)"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_create_and_edit_registered_in_help_and_dispatcher() {
+  echo ""
+  echo "=== forge-pr-create / forge-pr-edit: listed in help with their flags and routed by the dispatcher ==="
+
+  local help_out
+  help_out=$("$CLI" help 2>&1)
+  assert_contains "forge-pr-create --title <t> --base <branch> --head <branch> [--body <text>] [--project <path>]" "$help_out" "help: lists forge-pr-create with its flags"
+  assert_contains "forge-pr-edit --number <n> --body <text> [--project <path>]" "$help_out" "help: lists forge-pr-edit with its flags"
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  echo '{"url":"https://github.com/owner/repo/pull/1","number":1}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
+  exit 0
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local create_out edit_out
+  create_out=$(PATH="$sandbox" "$CLI" forge-pr-create --title t --base main --head feat-x --body b 2>&1)
+  edit_out=$(PATH="$sandbox" "$CLI" forge-pr-edit --number 1 --body b 2>&1)
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+
+  if printf '%s' "$create_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: forge-pr-create is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: forge-pr-create is routed"
+    ((TESTS_PASSED++))
+  fi
+
+  if printf '%s' "$edit_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: forge-pr-edit is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: forge-pr-edit is routed"
+    ((TESTS_PASSED++))
+  fi
+}
+
+# ============================================================================
+# Forge Issue Verb Tests (US-006)
+# ============================================================================
+# forge-issue-view / forge-issue-create are the first forge-* verbs that
+# actually shell out to a forge CLI, so exercising them offline needs a
+# fake `gh` on PATH. setup_forge_cli_sandbox/teardown_forge_cli_sandbox
+# below is that reusable, clearly-named fixture pair -- written for reuse
+# across every forge-* verb's offline tests (forge-pr-view/forge-pr-create,
+# a sibling story in this same wave, need the identical technique), mirror-
+# ing the fake-opencode-binary precedent cmd_detect_models's tests already
+# established (test_resolve_models_opencode_mtime_cache, ~line 8510).
+
+# Sources the pure helper functions this section introduces (no gh
+# shell-out, no cmd_ dispatcher) for direct, in-process testing -- same
+# technique as source_forge_contract_functions above.
+source_forge_issue_functions() {
+  eval "$(sed -n '/^_forge_map_state()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_extract_issue_number_from_url()/,/^}/p' "$CLI")"
+}
+
+# Builds a minimal, hermetic PATH sandbox containing exactly the external
+# binaries this code path needs (bash, so the `#!/usr/bin/env bash`
+# shebang resolves via env; jq; git; mktemp; cat; rm; grep; sed; tr; tail;
+# dirname; basename -- find_aimi_root's resolve_path fallback needs the
+# last two whenever `realpath` is unavailable) -- and deliberately does
+# NOT include `gh`, so `command -v gh` genuinely fails inside the sandbox
+# exactly like a machine that never installed the GitHub CLI. This is
+# stronger than the `PATH="/usr/bin:/bin"` shortcut cmd_detect_models's
+# tests use for opencode absence (test-aimi-cli.sh:8834) -- that shortcut
+# only works because opencode is not preinstalled at /usr/bin on the test
+# machine, whereas `gh` IS very often preinstalled there (this repo's own
+# dev environment has /usr/bin/gh), so hiding it needs an explicit
+# allowlist sandbox instead of hoping the real PATH happens to lack it.
+#
+# A caller that wants a "gh present" scenario writes its own executable
+# <sandbox>/gh script afterward (a plain heredoc -- see the test functions
+# below), then invokes the CLI with `PATH="<sandbox>" "$CLI" ...` -- the
+# sandbox alone, no fallback to the real PATH, is what keeps the real gh
+# hidden for the "gh absent" tests.
+setup_forge_cli_sandbox() {
+  local sandbox
+  sandbox=$(mktemp -d)
+
+  local tool resolved candidate
+  for tool in bash jq git mktemp cat rm grep sed tr tail dirname basename; do
+    resolved=$(command -v "$tool" 2>/dev/null) || resolved=""
+    if [ -z "$resolved" ] || [ ! -x "$resolved" ]; then
+      for candidate in "/usr/bin/$tool" "/bin/$tool"; do
+        if [ -x "$candidate" ]; then
+          resolved="$candidate"
+          break
+        fi
+      done
+    fi
+    if [ -n "$resolved" ] && [ -x "$resolved" ]; then
+      ln -sf "$resolved" "$sandbox/$tool"
+    fi
+  done
+
+  printf '%s' "$sandbox"
+}
+
+# Removes a sandbox directory created by setup_forge_cli_sandbox.
+teardown_forge_cli_sandbox() {
+  rm -rf "$1"
+}
+
+test_forge_map_state_table() {
+  echo ""
+  echo "=== _forge_map_state: normalizes per forge-contract.md's State Mapping table ==="
+
+  source_forge_issue_functions
+
+  assert_eq "open"   "$(_forge_map_state github OPEN)"   "_forge_map_state: github OPEN -> open"
+  assert_eq "closed" "$(_forge_map_state github CLOSED)" "_forge_map_state: github CLOSED -> closed"
+  assert_eq "merged" "$(_forge_map_state github MERGED)" "_forge_map_state: github MERGED -> merged"
+  assert_eq "open"   "$(_forge_map_state gitlab opened)" "_forge_map_state: gitlab opened -> open (the one real divergence in the table)"
+  assert_eq "closed" "$(_forge_map_state gitlab closed)" "_forge_map_state: gitlab closed -> closed"
+  assert_eq "merged" "$(_forge_map_state gitlab merged)" "_forge_map_state: gitlab merged -> merged"
+  assert_eq "locked" "$(_forge_map_state gitlab locked)" "_forge_map_state: gitlab locked passes through unchanged (no GitHub/Gitea equivalent)"
+  assert_eq "open"   "$(_forge_map_state gitea open)"   "_forge_map_state: gitea open -> open"
+  assert_eq "closed" "$(_forge_map_state gitea closed)" "_forge_map_state: gitea closed -> closed"
+}
+
+test_forge_extract_issue_number_from_url() {
+  echo ""
+  echo "=== _forge_extract_issue_number_from_url: extracts trailing number, empty on mismatch ==="
+
+  source_forge_issue_functions
+
+  assert_eq "42" "$(_forge_extract_issue_number_from_url "https://github.com/owner/repo/issues/42")" "extract: plain issue URL"
+  assert_eq "42" "$(_forge_extract_issue_number_from_url "https://github.com/owner/repo/issues/42?tab=comments")" "extract: issue URL with query string"
+  assert_eq "" "$(_forge_extract_issue_number_from_url "https://github.com/owner/repo/pull/42")" "extract: PR URL does not match (no /issues/ segment)"
+  assert_eq "" "$(_forge_extract_issue_number_from_url "not a url")" "extract: non-URL input -> empty"
+}
+
+test_forge_emit_issue_create_status_is_gone() {
+  echo ""
+  echo "=== _forge_emit_issue_create_status: deleted outright, zero remaining callers (the shared write builder replaced it) ==="
+
+  local hits
+  hits=$(grep -c '_forge_emit_issue_create_status' "$CLI" 2>/dev/null || true)
+  assert_eq "0" "$hits" "issue-create builder: no definition and no caller left anywhere in aimi-cli.sh"
+
+  # And the verb it used to serve now goes through the shared write builder.
+  assert_contains "_forge_emit_write_status" "$(sed -n '/^_forge_issue_create()/,/^}/p' "$CLI")" \
+    "issue-create builder: _forge_issue_create emits through the shared _forge_emit_write_status instead"
+}
+
+test_forge_issue_view_found() {
+  echo ""
+  echo "=== forge-issue-view: found -- normalized shape, labels, comments count, state mapping ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  echo '{"number":42,"title":"Bug: thing broke","body":"steps to repro","state":"OPEN","url":"https://github.com/o/r/issues/42","labels":[{"name":"bug"},{"name":"P1"}],"comments":[{"id":1},{"id":2}]}'
+  exit 0
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-issue-view --number 42) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-view found: exit code"
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-view found: status"
+  assert_eq "42" "$(printf '%s' "$out" | jq -r '.data.number')" "forge-issue-view found: number"
+  assert_eq "Bug: thing broke" "$(printf '%s' "$out" | jq -r '.data.title')" "forge-issue-view found: title"
+  assert_eq "steps to repro" "$(printf '%s' "$out" | jq -r '.data.body')" "forge-issue-view found: body"
+  assert_eq "open" "$(printf '%s' "$out" | jq -r '.data.state')" "forge-issue-view found: state normalized (OPEN -> open)"
+  assert_eq "https://github.com/o/r/issues/42" "$(printf '%s' "$out" | jq -r '.data.url')" "forge-issue-view found: url"
+  assert_eq '["bug","P1"]' "$(printf '%s' "$out" | jq -c '.data.labels')" "forge-issue-view found: labels array of names"
+  assert_eq "2" "$(printf '%s' "$out" | jq -r '.data.comments')" "forge-issue-view found: comments count derived from array length"
+  assert_eq "[]" "$(printf '%s' "$out" | jq -c '.data.unsupported_fields')" "forge-issue-view found: unsupported_fields empty on GitHub"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "forge-issue-view found: message null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.reason')" "forge-issue-view found: reason null"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_view_not_found() {
+  echo ""
+  echo "=== forge-issue-view: not-found is a query result -- exit 0, status not_found ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  echo "GraphQL: Could not resolve to an issue or pull request with the number of $3. (repository.issue)" >&2
+  exit 1
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-issue-view --number 999999) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-view not-found: exit code stays 0 (query result, not a verb failure)"
+  assert_eq "not_found" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-view not-found: status"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "forge-issue-view not-found: data null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.reason')" "forge-issue-view not-found: reason null (nothing degraded -- the lookup ran and answered)"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_view_degraded_missing_gh() {
+  echo ""
+  echo "=== forge-issue-view: gh absent -- QUIET degrade (status error, zero stderr) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # No gh written into the sandbox at all -- simulates "gh not installed".
+
+  local stderr_file="/tmp/forge_issue_view_gh_absent_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-issue-view --number 42 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-view gh-absent: exit code stays 0 (degraded result, not a hard failure)"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-view gh-absent: status error"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "forge-issue-view gh-absent: data null"
+  assert_contains "gh not found" "$(printf '%s' "$out" | jq -r '.message')" "forge-issue-view gh-absent: message names gh"
+  assert_eq "cli_missing" "$(printf '%s' "$out" | jq -r '.reason')" "forge-issue-view gh-absent: reason is cli_missing"
+  assert_eq "" "$(cat "$stderr_file")" "forge-issue-view gh-absent: QUIET mode -- zero stderr output"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_view_non_github_forge_degrades() {
+  echo ""
+  echo "=== forge-issue-view: non-GitHub forge (GitLab) has no adapter yet -- degrades, does not crash ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-issue-view --number 1) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-view non-github: exit 0"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-view non-github: status error"
+  assert_contains "gitlab" "$(printf '%s' "$out" | jq -r '.message')" "forge-issue-view non-github: message names the detected forge"
+  assert_eq "no_adapter" "$(printf '%s' "$out" | jq -r '.reason')" "forge-issue-view non-github: reason is no_adapter"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_view_generic_failure_not_authenticated() {
+  echo ""
+  echo "=== forge-issue-view: gh broke AND the auth re-check says logged out -- reason not_authenticated ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  # `issue view` fails with wording that does NOT match the not-found probe,
+  # so the generic branch is reached; `auth status` then fails too, which is
+  # the structural signal the classifier reads.
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  echo "gh: something went wrong" >&2
+  exit 1
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo "You are not logged into any GitHub hosts." >&2
+  exit 1
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-issue-view --number 42) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-view not-authenticated: exit code stays 0 (degraded result)"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-view not-authenticated: status error"
+  assert_eq "not_authenticated" "$(printf '%s' "$out" | jq -r '.reason')" "forge-issue-view not-authenticated: reason resolved by the structural auth re-check, not by gh's stderr wording"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_view_generic_failure_cli_failed() {
+  echo ""
+  echo "=== forge-issue-view: gh broke but the auth re-check says logged in -- reason cli_failed ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  echo "gh: connection refused" >&2
+  exit 1
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo "github.com"
+  echo "  Logged in to github.com account octocat (keyring)"
+  echo "  - Active account: true"
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-issue-view --number 42) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-view cli-failed: exit code stays 0 (degraded result)"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-view cli-failed: status error"
+  assert_eq "cli_failed" "$(printf '%s' "$out" | jq -r '.reason')" "forge-issue-view cli-failed: an authenticated session means the failure was something else"
+  assert_contains "connection refused" "$(printf '%s' "$out" | jq -r '.message')" "forge-issue-view cli-failed: message still carries the detail to read"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_view_input_errors() {
+  echo ""
+  echo "=== forge-issue-view: --url extraction, and caller-input errors exit non-zero ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  echo "{\"number\":$3,\"title\":\"t\",\"body\":\"b\",\"state\":\"OPEN\",\"url\":\"https://github.com/o/r/issues/$3\",\"labels\":[],\"comments\":[]}"
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code stderr_file="/tmp/forge_issue_view_input_stderr.$$"
+
+  # --url extraction routes to the same normalized number path.
+  out=$(PATH="$sandbox" "$CLI" forge-issue-view --url "https://github.com/owner/repo/issues/123") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "forge-issue-view --url: exit code"
+  assert_eq "123" "$(printf '%s' "$out" | jq -r '.data.number')" "forge-issue-view --url: number extracted from URL"
+
+  # Missing both --number and --url.
+  PATH="$sandbox" "$CLI" forge-issue-view >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-issue-view missing identifier: exit 1"
+  assert_stderr_contains "--number <n> or --url" "$(cat "$stderr_file")" "forge-issue-view missing identifier: stderr names both flags"
+
+  # Non-numeric --number.
+  PATH="$sandbox" "$CLI" forge-issue-view --number abc >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-issue-view non-numeric --number: exit 1"
+  assert_stderr_contains "must be a positive integer" "$(cat "$stderr_file")" "forge-issue-view non-numeric --number: stderr names the constraint"
+
+  # Unknown/credential-shaped flag is rejected outright -- no --token exists.
+  PATH="$sandbox" "$CLI" forge-issue-view --token secret >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-issue-view --token: rejected as unknown flag, exit 1"
+  assert_stderr_contains "unknown flag" "$(cat "$stderr_file")" "forge-issue-view --token: stderr names it unknown"
+
+  rm -f "$stderr_file"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_create_success() {
+  echo ""
+  echo "=== forge-issue-create: success -- the shared write envelope, url/number nested under data, derived from gh's own stdout URL ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "issue" ] && [ "$2" = "create" ]; then
+  echo "https://github.com/owner/repo/issues/77"
+  exit 0
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_issue_create_success_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-issue-create --title "Backend: thing" --body "spec here" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-create success: exit code"
+  assert_eq "created" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-create success: status created"
+  assert_eq "https://github.com/owner/repo/issues/77" "$(printf '%s' "$out" | jq -r '.data.url')" "forge-issue-create success: url captured from gh stdout, nested under data like the two PR write verbs"
+  assert_eq "77" "$(printf '%s' "$out" | jq -r '.data.number')" "forge-issue-create success: number derived from the URL (no caller-side regex needed), nested under data"
+  assert_eq '["number","url"]' "$(printf '%s' "$out" | jq -c '.data | keys')" "forge-issue-create success: data keys are exactly {url, number} -- no flat sibling keys survive"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "forge-issue-create success: message null"
+  assert_eq "" "$(cat "$stderr_file")" "forge-issue-create success: no manual instruction printed on success"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_create_degraded_failure_prints_manual() {
+  echo ""
+  echo "=== forge-issue-create: create call fails -- degraded status, exit 0, manual instruction printed (soft-fail contract) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "issue" ] && [ "$2" = "create" ]; then
+  echo "HTTP 403: Resource not accessible by integration" >&2
+  exit 1
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_issue_create_fail_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-issue-create --title "Backend: thing" --body "spec here" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-create degraded: exit code STAYS 0 -- never a hard failure a caller could mistake for a reason to block PR creation"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-create degraded: status"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "forge-issue-create degraded: data is null wholesale (the shared builder's null-forcing), so no stale url/number can leak"
+  assert_contains "gh issue create exited 1" "$(printf '%s' "$out" | jq -r '.message')" "forge-issue-create degraded: message carries the gh failure detail"
+  assert_stderr_contains "create it yourself" "$(cat "$stderr_file")" "forge-issue-create degraded: manual instruction printed (MANDATORY-PRINT)"
+  assert_stderr_contains "Backend: thing" "$(cat "$stderr_file")" "forge-issue-create degraded: manual instruction includes the title"
+  assert_stderr_contains "spec here" "$(cat "$stderr_file")" "forge-issue-create degraded: manual instruction includes the body"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_create_missing_gh_mandatory_print() {
+  echo ""
+  echo "=== forge-issue-create: gh absent -- MANDATORY-PRINT degrade (bin_check warning + manual instruction) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # No gh in the sandbox -- simulates "gh not installed".
+
+  local stderr_file="/tmp/forge_issue_create_no_gh_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-issue-create --title "T" --body "B" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-create gh-absent: exit 0"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-create gh-absent: status degraded"
+  assert_stderr_contains "gh not found" "$(cat "$stderr_file")" "forge-issue-create gh-absent: _forge_bin_check's mandatory warning names gh"
+  assert_stderr_contains "create it yourself" "$(cat "$stderr_file")" "forge-issue-create gh-absent: manual instruction also printed"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_create_credential_via_env_not_argv() {
+  echo ""
+  echo "=== forge-issue-create: credential reaches gh via inherited env var, never argv ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+# Fails loudly if any argument looks like a credential -- proves
+# cmd_forge_issue_create/_forge_issue_create never interpolate one into argv.
+for arg in "$@"; do
+  case "$arg" in
+    *token*|*TOKEN*|--token|ghp_*|gho_*) echo "credential leaked into argv: $arg" >&2; exit 2 ;;
+  esac
+done
+if [ -z "${GH_TOKEN:-}" ]; then
+  echo "GH_TOKEN not inherited from environment" >&2
+  exit 3
+fi
+if [ "$1" = "issue" ] && [ "$2" = "create" ]; then
+  echo "https://github.com/owner/repo/issues/55"
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(GH_TOKEN="secret-value-xyz" PATH="$sandbox" "$CLI" forge-issue-create --title "T" --body "B") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-create credential: exit 0 (GH_TOKEN inherited correctly, no argv leak)"
+  assert_eq "created" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-create credential: status created"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_create_input_errors() {
+  echo ""
+  echo "=== forge-issue-create: missing --title and unknown/credential-shaped flags are caller errors ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  local stderr_file="/tmp/forge_issue_create_input_stderr.$$" exit_code
+
+  PATH="$sandbox" "$CLI" forge-issue-create --body "B" >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-issue-create missing --title: exit 1"
+  assert_stderr_contains "--title <text> is required" "$(cat "$stderr_file")" "forge-issue-create missing --title: stderr names the missing flag"
+
+  PATH="$sandbox" "$CLI" forge-issue-create --title T --body B --token secret >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-issue-create --token: rejected as unknown flag, exit 1"
+  assert_stderr_contains "unknown flag" "$(cat "$stderr_file")" "forge-issue-create --token: stderr names it unknown"
+
+  rm -f "$stderr_file"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_verbs_registered_in_help_and_dispatcher() {
+  echo ""
+  echo "=== forge-issue-view / forge-issue-create: listed in help and routed by the dispatcher ==="
+
+  local help_out
+  help_out=$("$CLI" help 2>&1)
+  assert_contains "forge-issue-view" "$help_out" "help: lists forge-issue-view"
+  assert_contains "forge-issue-create" "$help_out" "help: lists forge-issue-create"
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  local view_out create_out
+  view_out=$(PATH="$sandbox" "$CLI" forge-issue-view --number 1 2>&1)
+  create_out=$(PATH="$sandbox" "$CLI" forge-issue-create --title t --body b 2>&1)
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+
+  if printf '%s' "$view_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: forge-issue-view is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: forge-issue-view is routed"
+    ((TESTS_PASSED++))
+  fi
+
+  if printf '%s' "$create_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: forge-issue-create is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: forge-issue-create is routed"
+    ((TESTS_PASSED++))
+  fi
+}
+
+# ============================================================================
+# Forge Review-Thread Verb Tests (US-007)
+# ============================================================================
+# forge-pr-review-threads / forge-resolve-review-thread port the two GraphQL
+# scripts under skills/resolve-pr-parallel/scripts/ into aimi-cli.sh. Offline
+# fixtures reuse setup_forge_cli_sandbox/teardown_forge_cli_sandbox (US-006,
+# test-aimi-cli.sh:17593) rather than adding a fourth fake-gh fixture -- each
+# test below writes its own tiny `gh` stub into the sandbox, exactly the
+# technique that section's own header comment predicted this sibling story
+# would need for a `gh api graphql` invocation shape neither the FAKE_GH_*
+# parameterized fixture (US-003) nor a bare `gh issue`/`gh pr` stub already
+# covers.
+
+# Extracts the two query/mutation builder functions' literal source text
+# (not their runtime output) so the security tests below can inspect the
+# actual quoting/interpolation shape rather than a rendered string.
+_forge_review_thread_query_source() {
+  sed -n '/^_forge_review_threads_query()/,/^}/p' "$CLI"
+}
+_forge_resolve_review_thread_mutation_source() {
+  sed -n '/^_forge_resolve_review_thread_mutation()/,/^}/p' "$CLI"
+}
+
+# AC1's core security requirement: every identifier gh api graphql consumes
+# for these two verbs is bound through -f/-F, never through string
+# interpolation into the query/mutation text. The literal source of both
+# constants DOES contain `$owner`/`$repo`/`$pr`/`$threadId` -- that is
+# GraphQL's own variable-reference syntax, inert under bash's single-quoting
+# (see the section header comment in aimi-cli.sh immediately above these
+# two functions for the full statement of why a bare grep for any `$`
+# character would be a false positive here). What must be true instead, and
+# what this test actually asserts: (a) the query/mutation text is a single
+# bash single-quoted literal with no shell command substitution inside it,
+# and (b) the two adapter functions bind owner/repo/pr/threadId to gh ONLY
+# via -f/-F flags.
+test_forge_review_thread_queries_bind_via_flags_not_interpolation() {
+  echo ""
+  echo "=== forge-pr-review-threads / forge-resolve-review-thread: identifiers bound via gh -f/-F, zero shell interpolation in query text ==="
+
+  local query_src mutation_src
+  query_src=$(_forge_review_thread_query_source)
+  mutation_src=$(_forge_resolve_review_thread_mutation_source)
+
+  assert_contains "printf '%s' '" "$query_src" "review-threads query: body is a single-quoted printf literal"
+  assert_contains "printf '%s' '" "$mutation_src" "resolve-thread mutation: body is a single-quoted printf literal"
+
+  assert_contains '$owner: String!' "$query_src" "review-threads query: retains GraphQL \$owner variable declaration verbatim"
+  assert_contains '$repo: String!' "$query_src" "review-threads query: retains GraphQL \$repo variable declaration verbatim"
+  assert_contains '$pr: Int!' "$query_src" "review-threads query: retains GraphQL \$pr variable declaration verbatim"
+  assert_contains '$threadId: ID!' "$mutation_src" "resolve-thread mutation: retains GraphQL \$threadId variable declaration verbatim"
+
+  if printf '%s' "$query_src" | grep -qE '\$\(|`'; then
+    echo -e "${RED}✗${NC} review-threads query: contains shell command substitution (\$( or backtick) -- must be zero"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} review-threads query: no shell command substitution anywhere in the query text"
+    ((TESTS_PASSED++))
+  fi
+
+  if printf '%s' "$mutation_src" | grep -qE '\$\(|`'; then
+    echo -e "${RED}✗${NC} resolve-thread mutation: contains shell command substitution (\$( or backtick) -- must be zero"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} resolve-thread mutation: no shell command substitution anywhere in the mutation text"
+    ((TESTS_PASSED++))
+  fi
+
+  # The two adapter functions must bind every identifier via gh's own -f/-F
+  # flags -- never by concatenating the value into the query/mutation string.
+  local github_adapter_src resolve_adapter_src
+  github_adapter_src=$(sed -n '/^_forge_pr_review_threads_github()/,/^}/p' "$CLI")
+  resolve_adapter_src=$(sed -n '/^_forge_resolve_review_thread()/,/^}/p' "$CLI")
+
+  assert_contains '-f owner="$owner"' "$github_adapter_src" "forge-pr-review-threads: owner bound via gh -f flag"
+  assert_contains '-f repo="$repo"' "$github_adapter_src" "forge-pr-review-threads: repo bound via gh -f flag"
+  assert_contains '-F pr="$pr_number"' "$github_adapter_src" "forge-pr-review-threads: PR number bound via gh -F flag (Int! variable)"
+  assert_contains '-f threadId="$thread_id"' "$resolve_adapter_src" "forge-resolve-review-thread: thread id bound via gh -f flag"
+}
+
+# AC1's fail-fast usage checks: the PR number and thread id are validated
+# BEFORE either is ever passed to gh.
+test_forge_review_thread_input_validation() {
+  echo ""
+  echo "=== forge-pr-review-threads / forge-resolve-review-thread: PR number and thread id validated before reaching gh ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # No gh in the sandbox -- if validation did not fail-fast, the command
+  # would instead surface a "gh not found" degrade rather than a usage error.
+
+  local exit_code stderr_file="/tmp/forge_review_threads_validation_stderr.$$"
+
+  PATH="$sandbox" "$CLI" forge-pr-review-threads --pr abc --owner o --repo r >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-pr-review-threads non-numeric --pr: exit 1"
+  assert_stderr_contains "must be a positive integer" "$(cat "$stderr_file")" "forge-pr-review-threads non-numeric --pr: stderr names the constraint"
+
+  PATH="$sandbox" "$CLI" forge-pr-review-threads --pr 5 --owner 'o;rm' --repo r >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-pr-review-threads unsafe --owner: exit 1"
+  assert_stderr_contains "invalid --owner" "$(cat "$stderr_file")" "forge-pr-review-threads unsafe --owner: stderr names it invalid"
+
+  PATH="$sandbox" "$CLI" forge-resolve-review-thread --thread-id 'bad id; rm -rf /' >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-resolve-review-thread unsafe --thread-id: exit 1"
+  assert_stderr_contains "invalid --thread-id" "$(cat "$stderr_file")" "forge-resolve-review-thread unsafe --thread-id: stderr names it invalid"
+
+  rm -f "$stderr_file"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_review_threads_found_default_filter() {
+  echo ""
+  echo "=== forge-pr-review-threads: found -- default filter drops resolved/outdated threads ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  if printf '%s' "$*" | grep -q "FetchReviewThreads"; then
+    printf '%s' '{"data":{"repository":{"pullRequest":{"title":"Fix bug","url":"https://github.com/acme/widgets/pull/5","reviewThreads":{"totalCount":2,"edges":[{"node":{"id":"T1","isResolved":false,"isOutdated":false,"isCollapsed":false,"path":"a.rb","line":10,"startLine":10,"diffSide":"RIGHT","comments":{"totalCount":1,"nodes":[{"id":"C1","author":{"login":"alice"},"body":"fix this","createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-01T00:00:00Z","url":"https://github.com/acme/widgets/pull/5#C1","outdated":false}]}}},{"node":{"id":"T2","isResolved":true,"isOutdated":false,"isCollapsed":false,"path":"b.rb","line":20,"startLine":20,"diffSide":"RIGHT","comments":{"totalCount":0,"nodes":[]}}}]}}}}}'
+    exit 0
+  fi
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-review-threads --pr 5 --owner acme --repo widgets) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "pr-review-threads found: exit code"
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "pr-review-threads found: status"
+  assert_eq "5" "$(printf '%s' "$out" | jq -r '.data.pr.number')" "pr-review-threads found: pr.number"
+  assert_eq "Fix bug" "$(printf '%s' "$out" | jq -r '.data.pr.title')" "pr-review-threads found: pr.title"
+  assert_eq "https://github.com/acme/widgets/pull/5" "$(printf '%s' "$out" | jq -r '.data.pr.url')" "pr-review-threads found: pr.url"
+  assert_eq "1" "$(printf '%s' "$out" | jq '.data.threads | length')" "pr-review-threads found: default filter keeps only the unresolved, non-outdated thread"
+  assert_eq "T1" "$(printf '%s' "$out" | jq -r '.data.threads[0].id')" "pr-review-threads found: surviving thread id"
+  assert_eq "alice" "$(printf '%s' "$out" | jq -r '.data.threads[0].comments.nodes[0].author.login')" "pr-review-threads found: comment author.login preserved"
+  assert_eq "1" "$(printf '%s' "$out" | jq -r '.data.threads[0].comments.totalCount')" "pr-review-threads found: comments.totalCount preserved"
+  assert_eq "[]" "$(printf '%s' "$out" | jq -c '.data.unsupported_fields')" "pr-review-threads found: unsupported_fields empty on GitHub"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "pr-review-threads found: message null"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_review_threads_all_flag_includes_resolved_and_outdated() {
+  echo ""
+  echo "=== forge-pr-review-threads: --all returns resolved/outdated threads a plain call would filter out ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  if printf '%s' "$*" | grep -q "FetchReviewThreads"; then
+    printf '%s' '{"data":{"repository":{"pullRequest":{"title":"Fix bug","url":"https://github.com/acme/widgets/pull/5","reviewThreads":{"totalCount":2,"edges":[{"node":{"id":"T1","isResolved":false,"isOutdated":false,"isCollapsed":false,"path":"a.rb","line":10,"startLine":10,"diffSide":"RIGHT","comments":{"totalCount":0,"nodes":[]}}},{"node":{"id":"T2","isResolved":true,"isOutdated":true,"isCollapsed":true,"path":"b.rb","line":20,"startLine":20,"diffSide":"RIGHT","comments":{"totalCount":0,"nodes":[]}}}]}}}}}'
+    exit 0
+  fi
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-review-threads --pr 5 --owner acme --repo widgets --all) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "pr-review-threads --all: exit code"
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "pr-review-threads --all: status"
+  assert_eq "2" "$(printf '%s' "$out" | jq '.data.threads | length')" "pr-review-threads --all: both threads present, including resolved+outdated"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_review_threads_not_found_null_pull_request() {
+  echo ""
+  echo "=== forge-pr-review-threads: null pullRequest -- not_found, exits 0 ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  if printf '%s' "$*" | grep -q "FetchReviewThreads"; then
+    printf '%s' '{"data":{"repository":{"pullRequest":null}}}'
+    exit 0
+  fi
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-review-threads --pr 999999 --owner acme --repo widgets) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "pr-review-threads not-found: exit code stays 0 (query result, not a verb failure)"
+  assert_eq "not_found" "$(printf '%s' "$out" | jq -r '.status')" "pr-review-threads not-found: status"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "pr-review-threads not-found: data null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "pr-review-threads not-found: message null -- distinguishable from the degraded case by this alone"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.reason')" "pr-review-threads not-found: reason null on the not_found outcome"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_review_threads_degraded_missing_gh() {
+  echo ""
+  echo "=== forge-pr-review-threads: gh absent -- QUIET degrade (status error, zero stderr) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # No gh written into the sandbox at all -- simulates "gh not installed".
+
+  local stderr_file="/tmp/forge_pr_review_threads_gh_absent_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-review-threads --pr 5 --owner acme --repo widgets 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "pr-review-threads gh-absent: exit code stays 0 (degraded result, not a hard failure)"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "pr-review-threads gh-absent: status error"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "pr-review-threads gh-absent: data null"
+  assert_contains "gh not found" "$(printf '%s' "$out" | jq -r '.message')" "pr-review-threads gh-absent: message names gh -- non-null, distinguishable from the not_found case"
+  assert_eq "cli_missing" "$(printf '%s' "$out" | jq -r '.reason')" "pr-review-threads gh-absent: reason is cli_missing"
+  assert_eq "" "$(cat "$stderr_file")" "pr-review-threads gh-absent: QUIET mode -- zero stderr output"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_review_threads_non_github_forge_degrades() {
+  echo ""
+  echo "=== forge-pr-review-threads: non-GitHub forge (GitLab) has no adapter yet -- degrades, does not crash ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-review-threads --pr 1) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "pr-review-threads non-github: exit 0"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "pr-review-threads non-github: status error"
+  assert_contains "gitlab" "$(printf '%s' "$out" | jq -r '.message')" "pr-review-threads non-github: message names the detected forge"
+  assert_eq "no_adapter" "$(printf '%s' "$out" | jq -r '.reason')" "pr-review-threads non-github: reason is no_adapter"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_review_threads_owner_repo_unresolved_is_cli_failed() {
+  echo ""
+  echo "=== forge-pr-review-threads: owner/repo unresolvable -- cli_failed, NOT a fifth enum value ==="
+
+  # A github.com remote whose path has no owner/repo split, so neither the
+  # gh primary nor the local-parse fallback can produce an owner/repo pair.
+  setup_detect_forge_fixture origin https://github.com/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  # gh IS present (so the cli_missing gate passes) but cannot name the repo.
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
+  echo "error: could not determine repository" >&2
+  exit 1
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-review-threads --pr 5) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "pr-review-threads owner/repo-unresolved: exit code stays 0"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "pr-review-threads owner/repo-unresolved: status error"
+  assert_contains "could not resolve owner/repo" "$(printf '%s' "$out" | jq -r '.message')" "pr-review-threads owner/repo-unresolved: message names the unresolved pair"
+  assert_eq "cli_failed" "$(printf '%s' "$out" | jq -r '.reason')" "pr-review-threads owner/repo-unresolved: reason is cli_failed -- no fifth enum value for one call site, and no classifier call (no gh invocation to re-check auth against)"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_review_threads_graphql_failure_not_authenticated() {
+  echo ""
+  echo "=== forge-pr-review-threads: graphql broke AND the auth re-check says logged out -- not_authenticated ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  echo "gh: request failed" >&2
+  exit 1
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo "You are not logged into any GitHub hosts." >&2
+  exit 1
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-review-threads --pr 5 --owner acme --repo widgets) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "pr-review-threads not-authenticated: exit code stays 0"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "pr-review-threads not-authenticated: status error"
+  assert_eq "not_authenticated" "$(printf '%s' "$out" | jq -r '.reason')" "pr-review-threads not-authenticated: reason resolved structurally by the auth re-check"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_review_threads_graphql_failure_cli_failed() {
+  echo ""
+  echo "=== forge-pr-review-threads: graphql broke but the auth re-check says logged in -- cli_failed ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  echo "gh: connection refused" >&2
+  exit 1
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo "github.com"
+  echo "  Logged in to github.com account octocat (keyring)"
+  echo "  - Active account: true"
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-review-threads --pr 5 --owner acme --repo widgets) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "pr-review-threads cli-failed: exit code stays 0"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "pr-review-threads cli-failed: status error"
+  assert_eq "cli_failed" "$(printf '%s' "$out" | jq -r '.reason')" "pr-review-threads cli-failed: an authenticated session means the failure was something else"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_review_threads_owner_repo_auto_detected() {
+  echo ""
+  echo "=== forge-pr-review-threads: owner/repo auto-detected via forge-repo-info when not both supplied ==="
+
+  setup_detect_forge_fixture origin https://github.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  local log_file="$sandbox/gh.log"
+  cat > "$sandbox/gh" << FAKE_GH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$log_file"
+if [ "\$1" = "api" ] && [ "\$2" = "graphql" ]; then
+  if printf '%s' "\$*" | grep -q "FetchReviewThreads"; then
+    printf '%s' '{"data":{"repository":{"pullRequest":null}}}'
+    exit 0
+  fi
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-review-threads --pr 5) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "pr-review-threads auto-detect: exit code"
+  assert_eq "not_found" "$(printf '%s' "$out" | jq -r '.status')" "pr-review-threads auto-detect: query still ran (proves owner/repo resolved, not skipped)"
+  assert_contains 'owner=acme' "$(cat "$log_file")" "pr-review-threads auto-detect: owner auto-detected from the git remote via forge-repo-info"
+  assert_contains 'repo=widgets' "$(cat "$log_file")" "pr-review-threads auto-detect: repo auto-detected from the git remote via forge-repo-info"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_resolve_review_thread_success() {
+  echo ""
+  echo "=== forge-resolve-review-thread: success -- resolved:true, matches the mutation's own output fields ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  if printf '%s' "$*" | grep -q "resolveReviewThread"; then
+    printf '%s' '{"data":{"resolveReviewThread":{"thread":{"id":"PRRT_kwDOABC123","isResolved":true,"path":"a.rb","line":5}}}}'
+    exit 0
+  fi
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_resolve_review_thread_success_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-resolve-review-thread --thread-id PRRT_kwDOABC123 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "resolve-review-thread success: exit code"
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "resolve-review-thread success: status"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.resolved')" "resolve-review-thread success: resolved true"
+  assert_eq "PRRT_kwDOABC123" "$(printf '%s' "$out" | jq -r '.data.thread.id')" "resolve-review-thread success: thread.id"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.thread.isResolved')" "resolve-review-thread success: thread.isResolved"
+  assert_eq "a.rb" "$(printf '%s' "$out" | jq -r '.data.thread.path')" "resolve-review-thread success: thread.path"
+  assert_eq "5" "$(printf '%s' "$out" | jq -r '.data.thread.line')" "resolve-review-thread success: thread.line"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "resolve-review-thread success: message null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.reason')" "resolve-review-thread success: reason null"
+  assert_eq "" "$(cat "$stderr_file")" "resolve-review-thread success: no manual instruction printed"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_resolve_review_thread_confirmed_invalid_id() {
+  echo ""
+  echo "=== forge-resolve-review-thread: mutation errors array -- confirmed-invalid, exit 0, no print ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  if printf '%s' "$*" | grep -q "resolveReviewThread"; then
+    echo "gh: Could not resolve to a node with the global id of 'bad-id'. (resolveReviewThread)" >&2
+    exit 1
+  fi
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_resolve_review_thread_invalid_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-resolve-review-thread --thread-id bad-id 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "resolve-review-thread confirmed-invalid: exit 0 (the mutation ran; this is a confirmed answer, not a tool failure)"
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "resolve-review-thread confirmed-invalid: status found (a definitive answer is still a successful lookup, per forge-auth-status's own authenticated:false precedent)"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.data.resolved')" "resolve-review-thread confirmed-invalid: resolved false"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.thread')" "resolve-review-thread confirmed-invalid: thread null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "resolve-review-thread confirmed-invalid: message null -- distinguishable from the degraded case by this alone"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.reason')" "resolve-review-thread confirmed-invalid: reason null -- status stays found, and a confirmed answer must not acquire a reason merely for sitting beside a degraded-sounding path"
+  assert_eq "" "$(cat "$stderr_file")" "resolve-review-thread confirmed-invalid: the confirmed-invalid-id path prints NOTHING (only the degraded path does)"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_resolve_review_thread_missing_gh_mandatory_print() {
+  echo ""
+  echo "=== forge-resolve-review-thread: gh absent -- MANDATORY-PRINT degrade, exits non-zero ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # No gh in the sandbox -- simulates "gh not installed".
+
+  local stderr_file="/tmp/forge_resolve_review_thread_no_gh_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-resolve-review-thread --thread-id PRRT_kwDOABC123 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "resolve-review-thread gh-absent: exits NON-ZERO (write verb, no fallback path)"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "resolve-review-thread gh-absent: status error"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "resolve-review-thread gh-absent: data null"
+  assert_eq "cli_missing" "$(printf '%s' "$out" | jq -r '.reason')" "resolve-review-thread gh-absent: reason is cli_missing"
+  assert_stderr_contains "gh not found" "$(cat "$stderr_file")" "resolve-review-thread gh-absent: stderr names gh as the missing binary"
+  assert_stderr_contains "Files changed" "$(cat "$stderr_file")" "resolve-review-thread gh-absent: manual fallback instruction printed (no gh subcommand or REST fallback exists)"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_resolve_review_thread_mutation_failure_not_authenticated() {
+  echo ""
+  echo "=== forge-resolve-review-thread: mutation broke AND the auth re-check says logged out -- not_authenticated ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  # Deliberately NOT the "could not resolve to a node" wording, so the
+  # confirmed-invalid-id branch is skipped and the generic branch is reached.
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  echo "gh: request failed" >&2
+  exit 1
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo "You are not logged into any GitHub hosts." >&2
+  exit 1
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_resolve_review_thread_noauth_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-resolve-review-thread --thread-id PRRT_kwDOABC123 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "resolve-review-thread not-authenticated: exits non-zero (write verb, no fallback path)"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "resolve-review-thread not-authenticated: status error"
+  assert_eq "not_authenticated" "$(printf '%s' "$out" | jq -r '.reason')" "resolve-review-thread not-authenticated: reason resolved structurally by the auth re-check"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_resolve_review_thread_mutation_failure_cli_failed() {
+  echo ""
+  echo "=== forge-resolve-review-thread: mutation broke but the auth re-check says logged in -- cli_failed ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  echo "gh: connection refused" >&2
+  exit 1
+fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo "github.com"
+  echo "  Logged in to github.com account octocat (keyring)"
+  echo "  - Active account: true"
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_resolve_review_thread_clifailed_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-resolve-review-thread --thread-id PRRT_kwDOABC123 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "resolve-review-thread cli-failed: exits non-zero (write verb, no fallback path)"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "resolve-review-thread cli-failed: status error"
+  assert_eq "cli_failed" "$(printf '%s' "$out" | jq -r '.reason')" "resolve-review-thread cli-failed: an authenticated session means the failure was something else"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_review_thread_verbs_registered_in_help_and_dispatcher() {
+  echo ""
+  echo "=== forge-pr-review-threads / forge-resolve-review-thread: listed in help and routed by the dispatcher ==="
+
+  local help_out
+  help_out=$("$CLI" help 2>&1)
+  assert_contains "forge-pr-review-threads" "$help_out" "help: lists forge-pr-review-threads"
+  assert_contains "forge-resolve-review-thread" "$help_out" "help: lists forge-resolve-review-thread"
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  local view_out resolve_out
+  view_out=$(PATH="$sandbox" "$CLI" forge-pr-review-threads --pr 1 --owner o --repo r 2>&1)
+  resolve_out=$(PATH="$sandbox" "$CLI" forge-resolve-review-thread --thread-id T1 2>&1) || true
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+
+  if printf '%s' "$view_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: forge-pr-review-threads is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: forge-pr-review-threads is routed"
+    ((TESTS_PASSED++))
+  fi
+
+  if printf '%s' "$resolve_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: forge-resolve-review-thread is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: forge-resolve-review-thread is routed"
+    ((TESTS_PASSED++))
+  fi
+}
+
+# ============================================================================
+# Forge Dispatch-Order Tests (phase 1.1 US-006)
+# ============================================================================
+# Every forge-* verb used to be dispatched from main()'s SECOND case block --
+# the one that runs after find_aimi_root. find_aimi_root does two things: it
+# hard-exits when no .aimi/ exists anywhere up the tree, and it cd's the
+# process into the .aimi/ parent. Both were load-bearing failures for verbs
+# that need neither: nothing about opening or reading a pull request touches
+# .aimi/ state, and in a multi-repo layout the .aimi/ parent is not even a git
+# repository, so the cd actively moved the process OUT of the repo the caller
+# was standing in. These tests pin the ten verbs into the pre-find_aimi_root
+# "Skip auto-discovery" block, and pin the two consequences of living there:
+# each verb must call check_jq itself (main()'s single check_jq also sits
+# after find_aimi_root), and a stray --help now reaches the verb's own arg
+# parser instead of the universal --help intercept.
+
+# Creates a plain git repository in its own temp dir with a github.com origin
+# remote and exactly one commit, and deliberately NO .aimi/ directory -- not
+# in the repo, not anywhere in its parent chain. This is the resolve-pr-
+# parallel / get-pr-comments scenario: a caller that legitimately has no aimi
+# project at all. Sets FORGE_NO_AIMI_FIXTURE_DIR; caller must teardown.
+setup_forge_no_aimi_dir_fixture() {
+  FORGE_NO_AIMI_FIXTURE_DIR=$(mktemp -d)
+
+  pushd "$FORGE_NO_AIMI_FIXTURE_DIR" >/dev/null
+  git init >/dev/null 2>&1
+  git checkout -b main >/dev/null 2>&1
+  git remote add origin https://github.com/octocat/hello-world.git
+  echo "init" > README.md
+  git add README.md
+  git commit -m "Initial commit" >/dev/null 2>&1
+  popd >/dev/null
+}
+
+# Removes the temp directory created by setup_forge_no_aimi_dir_fixture
+teardown_forge_no_aimi_dir_fixture() {
+  rm -rf "$FORGE_NO_AIMI_FIXTURE_DIR"
+  unset FORGE_NO_AIMI_FIXTURE_DIR
+}
+
+# Walks from <dir> up to the filesystem root and prints the first parent that
+# owns a .aimi/ directory, or nothing when the whole chain is clean. Used to
+# prove setup_forge_no_aimi_dir_fixture really is .aimi-free before a test
+# reads anything into a passing detect-forge call -- a stray /tmp/.aimi on a
+# developer's machine would otherwise make this section silently vacuous.
+_first_aimi_owner_above() {
+  local dir="$1" parent
+  while true; do
+    [ -d "$dir/.aimi" ] && { printf '%s' "$dir"; return 0; }
+    parent=$(dirname "$dir")
+    [ "$parent" = "$dir" ] && return 0
+    dir="$parent"
+  done
+}
+
+# Prints the first executed statement of a shell function defined at column 0
+# in aimi-cli.sh -- blank lines and comment lines skipped, leading whitespace
+# stripped. Used to assert check_jq is genuinely FIRST, not merely present
+# somewhere in the body.
+_first_statement_of_cli_function() {
+  local fn="$1"
+  # Exact string compare on the header line rather than a regex -- awk's -v
+  # assignment applies its own escape processing, which silently mangles a
+  # backslash-escaped "() {" into a regex that matches nothing at all.
+  awk -v hdr="${fn}() {" '
+    !infn && $0 == hdr { infn = 1; next }
+    infn {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      if (line == "" || line ~ /^#/) next
+      print line
+      exit
+    }
+  ' "$CLI"
+}
+
+# The ten verbs this story moves, as "<cli-verb> <function-name>" pairs.
+_FORGE_DISPATCH_VERBS=(
+  "detect-forge cmd_detect_forge"
+  "forge-auth-status cmd_forge_auth_status"
+  "forge-repo-info cmd_forge_repo_info"
+  "forge-pr-view cmd_forge_pr_view"
+  "forge-pr-create cmd_forge_pr_create"
+  "forge-pr-edit cmd_forge_pr_edit"
+  "forge-issue-view cmd_forge_issue_view"
+  "forge-issue-create cmd_forge_issue_create"
+  "forge-pr-review-threads cmd_forge_pr_review_threads"
+  "forge-resolve-review-thread cmd_forge_resolve_review_thread"
+)
+
+test_forge_verbs_run_without_any_aimi_dir() {
+  echo ""
+  echo "=== forge verbs: a git repo with NO .aimi/ anywhere up the tree still gets a JSON envelope ==="
+
+  setup_forge_no_aimi_dir_fixture
+
+  local stray_owner
+  stray_owner=$(_first_aimi_owner_above "$FORGE_NO_AIMI_FIXTURE_DIR")
+  assert_eq "" "$stray_owner" "no-aimi fixture: no .aimi/ owner anywhere up the parent chain (fixture is genuinely aimi-free)"
+
+  pushd "$FORGE_NO_AIMI_FIXTURE_DIR" >/dev/null
+
+  local out exit_code
+  out=$("$CLI" detect-forge 2>&1) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "detect-forge no-aimi: exits 0 (was exit 1 'aimi/ directory not found in any parent directory')"
+  assert_eq "github" "$(printf '%s' "$out" | jq -r '.forge')" "detect-forge no-aimi: resolves the repo's own forge"
+  assert_eq "origin" "$(printf '%s' "$out" | jq -r '.remote')" "detect-forge no-aimi: resolves the repo's own remote"
+
+  # forge-pr-review-threads is the verb get-pr-comments actually calls -- the
+  # probe that opened this story. It degrades (no gh session here), but it
+  # must degrade through the CONTRACT envelope, not through find_aimi_root.
+  local threads_out threads_exit no_gh_path
+  no_gh_path=$(_path_without_binary gh)
+  threads_out=$(PATH="$no_gh_path" "$CLI" forge-pr-review-threads --pr 1 --owner o --repo r 2>&1) && threads_exit=0 || threads_exit=$?
+
+  assert_exit_code "0" "$threads_exit" "forge-pr-review-threads no-aimi: exits 0 (query verb degrades through its envelope)"
+  assert_eq "error" "$(printf '%s' "$threads_out" | jq -r '.status')" "forge-pr-review-threads no-aimi: status is error (gh absent), not a bare find_aimi_root exit"
+  assert_eq "cli_missing" "$(printf '%s' "$threads_out" | jq -r '.reason')" "forge-pr-review-threads no-aimi: reason is cli_missing -- a parseable envelope, which is the whole point"
+
+  # Control: a verb that DOES touch .aimi/ state must still fail here. The
+  # move must not have weakened auto-discovery for anything but the ten.
+  local control_out control_exit
+  control_out=$("$CLI" find-tasks 2>&1) && control_exit=0 || control_exit=$?
+  assert_exit_code "1" "$control_exit" "control: find-tasks still exits 1 without .aimi/ (auto-discovery unchanged for non-forge verbs)"
+  assert_contains ".aimi/ directory not found" "$control_out" "control: find-tasks still reports the .aimi-not-found error"
+
+  rm -rf "$no_gh_path"
+  popd >/dev/null
+  teardown_forge_no_aimi_dir_fixture
+}
+
+test_forge_repo_info_multi_repo_child_without_project() {
+  echo ""
+  echo "=== forge-repo-info: multi-repo child repo, no --project -- resolves the CHILD, not the .aimi parent ==="
+
+  setup_multi_repo_default_branch_fixture
+
+  # cd DIRECTLY into the child repo. Never pushd through
+  # MULTI_REPO_FIXTURE_ROOT (the non-git .aimi/ owner) -- the whole point is
+  # that the invoking cwd, not find_aimi_root's cd target, decides the repo.
+  pushd "$MULTI_REPO_FIXTURE_A" >/dev/null
+
+  local remote_url expected_path expected_owner expected_repo
+  remote_url=$(git remote get-url origin)
+  expected_path="${remote_url#/}"
+  expected_owner="${expected_path%/*}"
+  expected_repo="${expected_path##*/}"
+
+  local out exit_code
+  out=$("$CLI" forge-repo-info 2>&1) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "repo-info multi-repo child: exits 0 (was exit 1 'Not a git repository' after find_aimi_root cd'd to the non-git parent)"
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "repo-info multi-repo child: status is found"
+  assert_eq "$expected_owner" "$(printf '%s' "$out" | jq -r '.data.owner')" "repo-info multi-repo child: owner comes from the CHILD's own origin remote"
+  assert_eq "$expected_repo" "$(printf '%s' "$out" | jq -r '.data.repo')" "repo-info multi-repo child: repo comes from the CHILD's own origin remote"
+
+  # Structural companion to the output assertions: the verb resolved a repo
+  # the .aimi-owning parent does not even have (the parent is not a git repo
+  # at all), and it left the caller's own working directory untouched.
+  assert_eq "$MULTI_REPO_FIXTURE_A" "$(pwd)" "repo-info multi-repo child: caller's working directory is still the child repo after the call returns"
+
+  local parent_is_git
+  (cd "$MULTI_REPO_FIXTURE_ROOT" && git rev-parse --git-dir >/dev/null 2>&1) && parent_is_git=yes || parent_is_git=no
+  assert_eq "no" "$parent_is_git" "repo-info multi-repo child: the .aimi-owning parent is genuinely not a git repo (fixture pins the scenario)"
+
+  popd >/dev/null
+  teardown_multi_repo_default_branch_fixture
+}
+
+test_forge_verbs_dispatched_before_find_aimi_root() {
+  echo ""
+  echo "=== forge verbs: all ten case arms live in main()'s pre-find_aimi_root skip-list block ==="
+
+  local pre_block post_block entry verb fn
+  pre_block=$(awk '/^main\(\) \{$/ { infn = 1 } infn && /^  find_aimi_root$/ { exit } infn' "$CLI")
+  post_block=$(awk '/^  find_aimi_root$/ { infn = 1 } infn' "$CLI")
+
+  for entry in "${_FORGE_DISPATCH_VERBS[@]}"; do
+    verb="${entry%% *}"
+    fn="${entry##* }"
+
+    if printf '%s\n' "$pre_block" | grep -qE "^[[:space:]]*${verb}\)[[:space:]]*shift;[[:space:]]*${fn} \"\\\$@\";[[:space:]]*return[[:space:]]*;;"; then
+      echo -e "${GREEN}✓${NC} dispatch order: $verb is in the pre-find_aimi_root block, ending in '; return ;;'"
+      ((TESTS_PASSED++))
+    else
+      echo -e "${RED}✗${NC} dispatch order: $verb must live in the pre-find_aimi_root block as '$verb) shift; $fn \"\$@\"; return ;;'"
+      ((TESTS_FAILED++))
+    fi
+
+    if printf '%s\n' "$post_block" | grep -qE "^[[:space:]]*${verb}\)"; then
+      echo -e "${RED}✗${NC} dispatch order: $verb must NOT remain in the post-find_aimi_root block (duplicate case labels are silently shadowed by the first match)"
+      ((TESTS_FAILED++))
+    else
+      echo -e "${GREEN}✓${NC} dispatch order: $verb has no leftover arm in the post-find_aimi_root block"
+      ((TESTS_PASSED++))
+    fi
+  done
+}
+
+test_forge_verbs_call_check_jq_first() {
+  echo ""
+  echo "=== forge verbs: each wrapper opens with check_jq (main()'s own check_jq is behind find_aimi_root) ==="
+
+  local entry fn first
+  for entry in "${_FORGE_DISPATCH_VERBS[@]}"; do
+    fn="${entry##* }"
+    first=$(_first_statement_of_cli_function "$fn")
+    assert_eq "check_jq" "$first" "check_jq first: $fn's first executed statement is check_jq"
+  done
+
+  # Runtime proof, in the scenario where main()'s check_jq no longer runs at
+  # all: no .aimi/ anywhere AND jq genuinely absent from PATH. Without the
+  # in-function guard this surfaces a raw jq-not-found from deep inside a
+  # `jq -nc` call instead of the friendly install hint.
+  setup_forge_no_aimi_dir_fixture
+  pushd "$FORGE_NO_AIMI_FIXTURE_DIR" >/dev/null
+
+  local no_jq_path stderr_file="/tmp/forge_no_jq_stderr.$$" exit_code
+  no_jq_path=$(_path_without_binary jq)
+  PATH="$no_jq_path" "$CLI" forge-auth-status >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "check_jq runtime (no .aimi, no jq): forge-auth-status exits 1"
+  assert_stderr_contains "Error: jq is required but not installed." "$(cat "$stderr_file")" "check_jq runtime (no .aimi, no jq): friendly guard message, not a raw jq-not-found"
+
+  rm -f "$stderr_file"
+  rm -rf "$no_jq_path"
+  popd >/dev/null
+  teardown_forge_no_aimi_dir_fixture
+
+  # Same guard still fires with an .aimi/ present, proving the in-function
+  # call did not merely duplicate main()'s -- it replaced it for these verbs.
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local aimi_no_jq_path aimi_stderr_file="/tmp/forge_no_jq_aimi_stderr.$$" aimi_exit_code
+  aimi_no_jq_path=$(_path_without_binary jq)
+  PATH="$aimi_no_jq_path" "$CLI" forge-auth-status >/dev/null 2>"$aimi_stderr_file" && aimi_exit_code=0 || aimi_exit_code=$?
+
+  assert_exit_code "1" "$aimi_exit_code" "check_jq runtime (.aimi present, no jq): forge-auth-status exits 1"
+  assert_stderr_contains "Error: jq is required but not installed." "$(cat "$aimi_stderr_file")" "check_jq runtime (.aimi present, no jq): friendly guard message survives the dispatch move"
+
+  rm -f "$aimi_stderr_file"
+  rm -rf "$aimi_no_jq_path"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_verb_stray_help_flag_parity() {
+  echo ""
+  echo "=== forge verbs: a stray --help now reaches the verb's own parser (accepted parity change) ==="
+
+  # ACCEPTED, DELIBERATE parity change: main()'s universal --help-anywhere-in-
+  # args loop runs strictly AFTER the skip-list case returns, so a verb that
+  # lives in that block never sees it. resolve-models/detect-models have
+  # behaved exactly this way since they moved there; this test pins the forge
+  # verbs to the SAME behavior so it cannot silently drift into a third one.
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out exit_code
+  out=$("$CLI" forge-repo-info --help 2>&1) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-repo-info --help: exits non-zero (no longer intercepted by the universal --help loop)"
+  assert_contains "unknown flag: --help" "$out" "forge-repo-info --help: surfaces the verb's own unknown-flag error"
+
+  if printf '%s' "$out" | grep -q 'aimi-cli.sh - Deterministic'; then
+    echo -e "${RED}✗${NC} forge-repo-info --help: must NOT print the general help banner"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} forge-repo-info --help: does not print the general help banner"
+    ((TESTS_PASSED++))
+  fi
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+
+  # The pre-existing precedent this parity change matches, asserted live
+  # rather than in prose -- if detect-models ever regains the universal
+  # intercept, the forge verbs' behavior stops being "the same as its
+  # neighbors" and this section needs rethinking.
+  local models_out models_exit
+  models_out=$("$CLI" detect-models --help 2>&1) && models_exit=0 || models_exit=$?
+  assert_exit_code "1" "$models_exit" "detect-models --help: pre-existing precedent -- also exits non-zero"
+  assert_contains "unknown flag: --help" "$models_out" "detect-models --help: pre-existing precedent -- also surfaces its own unknown-flag error"
+}
+
+# ============================================================================
+# Forge Derivation Memo + PR-View Probe-Order Tests (phase 1.1 US-010)
+# ============================================================================
+# Two independent changes, measured independently because they do NOT
+# compound: the per-project-dir forge memo behind _detect_forge_type, and the
+# inverted gh pr list / gh pr view order in _forge_pr_view_github. For the
+# full forge-pr-create create-succeeds flow specifically the aggregate
+# gh-call count is UNCHANGED by the reordering alone (the existing-PR check
+# drops 2 to 1, the post-create re-read rises 1 to 2, exactly offsetting);
+# that flow's win comes entirely from the memo. Every count below is read
+# from a counter or log file, never asserted as "fewer".
+
+# Sources _detect_forge_type and everything it reaches into THIS process, so
+# the memo it populates is observable across calls -- the whole point of the
+# isolation test below. Follows source_cache_functions's eval-by-sed-range
+# pattern, and eval's the memo's own `declare -gA` line straight out of the
+# source rather than hand-redeclaring it here, so the test can never disagree
+# with the file about what that array is.
+source_detect_forge_type_functions() {
+  eval "$(sed -n '/^_detect_forge_parse_host()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_detect_forge_classify_host()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_detect_forge_select_remote_raw()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_detect_forge_read_selection()/,/^}/p' "$CLI")"
+  eval "$(grep '^declare -gA _DETECT_FORGE_TYPE_MEMO' "$CLI")"
+  eval "$(sed -n '/^_detect_forge_type()/,/^}/p' "$CLI")"
+}
+
+# Replaces <dir>/git with a wrapper that appends every `git remote ...`
+# invocation's arguments to <counter> and then exec's through to the REAL
+# git, unchanged. git's real absolute path is resolved BEFORE the wrapper is
+# written -- the same reason _path_without_binary resolves real paths first
+# rather than trusting PATH from inside a directory it is itself shadowing --
+# so the wrapper can never recurse into itself. Every other git invocation in
+# the flow (rev-parse --git-dir, checkout, commit, ...) passes straight
+# through and is not counted.
+#
+# <dir> is expected to be a setup_forge_cli_sandbox, whose `git` is a symlink
+# to the real binary; the rm is what keeps `cat >` from following that
+# symlink and trying to overwrite git itself.
+setup_git_remote_counter_shim() {
+  local dir="$1" counter="$2" real_git
+  real_git=$(command -v git)
+  : > "$counter"
+  rm -f "$dir/git"
+  cat > "$dir/git" << GIT_COUNTER_SHIM
+#!/usr/bin/env bash
+if [ "\$1" = "remote" ]; then
+  printf '%s\n' "\$*" >> "$counter"
+fi
+exec "$real_git" "\$@"
+GIT_COUNTER_SHIM
+  chmod +x "$dir/git"
+}
+
+test_detect_forge_type_never_builds_or_parses_json() {
+  echo ""
+  echo "=== _detect_forge_type: no jq token anywhere on its own path (AC1) ==="
+
+  # The whole point of the function is that the forge word costs no JSON
+  # round trip. _detect_forge, by contrast, builds its envelope with jq -nc
+  # -- so this grep is what distinguishes the new path from the old one
+  # rather than merely asserting it is faster.
+  local fn body
+  for fn in _detect_forge_type _detect_forge_read_selection _detect_forge_select_remote_raw \
+            _detect_forge_parse_host _detect_forge_classify_host; do
+    body=$(sed -n "/^$fn()/,/^}/p" "$CLI" | grep -v '^\s*#')
+    if [ -z "$body" ]; then
+      echo -e "${RED}✗${NC} _detect_forge_type jq-free: $fn is not defined in $CLI"
+      ((TESTS_FAILED++))
+      continue
+    fi
+    if printf '%s' "$body" | grep -q "jq"; then
+      echo -e "${RED}✗${NC} _detect_forge_type jq-free: $fn's body contains a jq token"
+      ((TESTS_FAILED++))
+    else
+      echo -e "${GREEN}✓${NC} _detect_forge_type jq-free: $fn's body contains no jq token"
+      ((TESTS_PASSED++))
+    fi
+  done
+
+  # ...and the control: the function this one exists to avoid DOES use jq,
+  # so the grep above is proven capable of failing.
+  if sed -n '/^_detect_forge()/,/^}/p' "$CLI" | grep -v '^\s*#' | grep -q "jq"; then
+    echo -e "${GREEN}✓${NC} _detect_forge_type jq-free: control -- _detect_forge itself does use jq, so the grep can fail"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} _detect_forge_type jq-free: control failed -- _detect_forge no longer uses jq, so the check above proves nothing"
+    ((TESTS_FAILED++))
+  fi
+}
+
+test_detect_forge_type_matches_detect_forge_across_fixtures() {
+  echo ""
+  echo "=== _detect_forge_type: agrees with detect-forge's own .forge on every fixture scenario (AC1) ==="
+
+  source_detect_forge_type_functions
+
+  # Every scenario the detect-forge suite above pins, run through BOTH the
+  # new jq-free path (in-process) and the shipped `detect-forge | jq -r
+  # .forge` path (subprocess), asserting they agree. This is what keeps the
+  # new function from becoming a second, silently-diverging implementation of
+  # the same precedence rules. Each case gets its OWN fixture directory, so
+  # no case can be answered out of the memo a previous case populated.
+  #
+  # Format: <label>|<expected>|<remote-name> <remote-url> [<name> <url> ...]
+  local cases=(
+    "https github|github|origin https://github.com/o/r.git"
+    "scp-like ssh github|github|origin git@github.com:o/r.git"
+    "explicit ssh:// gitlab|gitlab|origin ssh://git@gitlab.com/o/r.git"
+    "alternate-port ssh|github|origin ssh://git@github.com:2222/o/r.git"
+    "gitea host|gitea|origin https://gitea.com/o/r.git"
+    "codeberg is gitea|gitea|origin https://codeberg.org/o/r.git"
+    "github subdomain|github|origin git@ssh.github.com:o/r.git"
+    "lookalike suffix|unknown|origin https://notgithub.com/o/r.git"
+    "lookalike prefix|unknown|origin https://github.com.evil.example/o/r.git"
+    "origin wins over disagreement|github|origin https://github.com/o/r.git upstream https://gitlab.com/o/r.git"
+    "single non-origin remote|gitlab|fork https://gitlab.com/o/r.git"
+    "ambiguous remotes|unknown|alpha https://github.com/o/r.git beta https://gitlab.com/o/r.git"
+    "zero remotes|unknown|"
+  )
+
+  local case_entry label expected remotes direct subprocess
+  for case_entry in "${cases[@]}"; do
+    IFS='|' read -r label expected remotes <<< "$case_entry"
+
+    # shellcheck disable=SC2086 -- $remotes is a deliberate name/url word split
+    setup_detect_forge_fixture $remotes
+    pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+    direct=""
+    _detect_forge_type direct
+    subprocess=$("$CLI" detect-forge | jq -r '.forge')
+
+    assert_eq "$expected" "$direct" "detect-forge parity ($label): _detect_forge_type resolves $expected"
+    assert_eq "$subprocess" "$direct" "detect-forge parity ($label): the jq-free path agrees with detect-forge's own .forge"
+
+    popd >/dev/null
+    teardown_detect_forge_fixture
+  done
+
+  # The AIMI_FORGE_TYPE override, which short-circuits both paths before any
+  # git command runs at all.
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+  export AIMI_FORGE_TYPE=gitea
+  direct=""
+  _detect_forge_type direct
+  subprocess=$("$CLI" detect-forge | jq -r '.forge')
+  unset AIMI_FORGE_TYPE
+  assert_eq "gitea" "$direct" "detect-forge parity (AIMI_FORGE_TYPE override): override wins over the github remote"
+  assert_eq "$subprocess" "$direct" "detect-forge parity (AIMI_FORGE_TYPE override): both paths honor it identically"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_detect_forge_type_memo_is_keyed_per_project_dir() {
+  echo ""
+  echo "=== _detect_forge_type: the memo is keyed on the project dir -- two sibling repos, ONE process, two independent answers (AC2) ==="
+
+  # THE TEST THE REVIEW DEMANDED. Phase 1 deliberately does not cache
+  # detect-forge, and the reason is that sibling repositories under one
+  # multi-repo root must not leak forges into each other. A memo keyed on the
+  # resolved project directory preserves that; a global one silently destroys
+  # it. Everything below runs in THIS process -- no $CLI subprocess, no fork
+  # -- because a memo populated in a subshell would die with it and a global
+  # memo would then look indistinguishable from a keyed one.
+  source_detect_forge_type_functions
+  # Start from an empty memo: the parity test above runs in this same process
+  # and leaves its own per-fixture entries behind, which would make the entry
+  # COUNT asserted below meaningless. Re-eval'ing the `declare -gA` line does
+  # not clear an already-populated array, so clear it explicitly.
+  _DETECT_FORGE_TYPE_MEMO=()
+  setup_detect_forge_multirepo_fixture
+
+  local repo_a="$DETECT_FORGE_MULTIREPO_DIR/repo-a"
+  local repo_b="$DETECT_FORGE_MULTIREPO_DIR/repo-b"
+  local first="" second="" third=""
+
+  pushd "$repo_a" >/dev/null
+  _detect_forge_type first
+  popd >/dev/null
+
+  pushd "$repo_b" >/dev/null
+  _detect_forge_type second
+  popd >/dev/null
+
+  # Back to repo-a, which by now has been visited before AND has had a
+  # different repo classified in between. A single-slot memo answers gitlab
+  # here; a cwd-keyed one answers github.
+  pushd "$repo_a" >/dev/null
+  _detect_forge_type third
+  popd >/dev/null
+
+  assert_eq "github" "$first"  "memo isolation: repo-a's own forge, first visit"
+  assert_eq "gitlab" "$second" "memo isolation: repo-b answers gitlab in the SAME process -- repo-a's answer did not leak into it"
+  assert_eq "github" "$third"  "memo isolation: returning to repo-a still reads github -- the memo did not degrade into 'whichever repo was classified most recently'"
+
+  # A memo that is keyed but never actually populated would pass every
+  # assertion above while doing all three derivations for real. Reading the
+  # array directly is what pins BOTH halves: two entries (so it memoized at
+  # all) under the two repositories' own paths (so it memoized per-directory).
+  assert_eq "2" "${#_DETECT_FORGE_TYPE_MEMO[@]}" "memo isolation: exactly two memo entries -- one per project dir visited, not one global slot"
+  assert_eq "github" "${_DETECT_FORGE_TYPE_MEMO[$repo_a]:-MISSING}" "memo isolation: the memo entry keyed on repo-a's own path holds github"
+  assert_eq "gitlab" "${_DETECT_FORGE_TYPE_MEMO[$repo_b]:-MISSING}" "memo isolation: the memo entry keyed on repo-b's own path holds gitlab"
+
+  teardown_detect_forge_multirepo_fixture
+  unset _DETECT_FORGE_TYPE_MEMO
+}
+
+test_forge_pr_create_derives_forge_once_per_process() {
+  echo ""
+  echo "=== forge-pr-create: a full create-a-new-PR run derives the forge ONCE, measured by a git-remote counter (AC3) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  local counter="$sandbox/git-remote-calls.log"
+  setup_git_remote_counter_shim "$sandbox" "$counter"
+
+  # Same shape as test_forge_pr_create_new_pr's fixture: no PR before
+  # creation, the created PR visible to both gh pr list and gh pr view
+  # afterward, so the run takes the full create-succeeds path (pre-create
+  # existing-PR check -> gh pr create -> post-create re-read confirms found).
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+FLAG="$(dirname "$0")/pr_created.flag"
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  if [ -f "$FLAG" ]; then
+    echo '{"url":"https://github.com/owner/repo/pull/101","number":101}'
+    exit 0
+  fi
+  echo "no pull requests found for branch" >&2
+  exit 1
+fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  if [ -f "$FLAG" ]; then echo '[{"number":101}]'; else echo '[]'; fi
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  : > "$FLAG"
+  echo "https://github.com/owner/repo/pull/101"
+  exit 0
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body") && exit_code=0 || exit_code=$?
+
+  # The run must genuinely have taken the create-succeeds path -- a counter
+  # of 1 would also be what a run that failed early produced.
+  assert_exit_code "0" "$exit_code" "forge derivation count: the measured run exits 0"
+  assert_eq '{"status":"created","data":{"url":"https://github.com/owner/repo/pull/101","number":101},"message":null}' \
+    "$out" "forge derivation count: the measured run really did create a PR and confirm its number"
+
+  # A bare `git remote` (the remote LISTING call) is made exactly once per
+  # real derivation. BEFORE this story it read 3 -- _forge_pr_create's own
+  # call, cmd_forge_pr_view's during the pre-create existing-PR check, and
+  # cmd_forge_pr_view's again during the post-create re-read, none aware the
+  # other two had already run. AFTER, only the first is a real derivation;
+  # the other two are memo hits doing zero git work.
+  local bare_remote_calls all_remote_calls
+  bare_remote_calls=$(grep -cx 'remote' "$counter") || bare_remote_calls=0
+  all_remote_calls=$(grep -c '^remote' "$counter") || all_remote_calls=0
+
+  assert_eq "1" "$bare_remote_calls" "forge derivation count: exactly 1 real forge derivation (was 3 before this story's memo)"
+  assert_eq "2" "$all_remote_calls" "forge derivation count: 2 git-remote-family calls total -- one listing plus one get-url (was 6 before)"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_view_not_found_branch_ref_costs_one_gh_call() {
+  echo ""
+  echo "=== forge-pr-view: a not-found branch ref costs exactly ONE gh call -- pr list alone, pr view never invoked (AC4) ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local log_file="$FAKE_GH_DIR/call.log"
+  : > "$log_file"
+
+  # FAKE_GH_VIEW_* is deliberately left at its default (a SUCCESSFUL pr view
+  # returning '{}'), so if pr view were still being called first this lookup
+  # would come back `found` and the status assertion would fail loudly rather
+  # than the call count quietly drifting.
+  local out
+  out=$(FAKE_GH_LOG="$log_file" FAKE_GH_LIST_JSON='[]' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url)
+
+  assert_eq "not_found" "$(printf '%s' "$out" | jq -r '.status')" "gh call count (not_found): absence is confirmed structurally by the list probe"
+  assert_contains "feat-x" "$(printf '%s' "$out" | jq -r '.message')" "gh call count (not_found): message still names the searched ref"
+
+  local total list_calls view_calls
+  total=$(wc -l < "$log_file" | tr -d ' ')
+  list_calls=$(grep -c '^pr list' "$log_file") || list_calls=0
+  view_calls=$(grep -c '^pr view' "$log_file") || view_calls=0
+
+  # BEFORE this story: 2 -- a failing pr view followed by the confirming pr
+  # list. AFTER: 1.
+  assert_eq "1" "$total"      "gh call count (not_found): exactly 1 gh invocation total (was 2 before this story)"
+  assert_eq "1" "$list_calls" "gh call count (not_found): that one call is gh pr list"
+  assert_eq "0" "$view_calls" "gh call count (not_found): gh pr view is never invoked at all"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+test_forge_pr_view_found_branch_ref_costs_two_gh_calls_list_then_view() {
+  echo ""
+  echo "=== forge-pr-view: a FOUND branch ref costs two gh calls, pr list then pr view -- the accepted trade-off (AC4) ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local log_file="$FAKE_GH_DIR/call.log"
+  : > "$log_file"
+
+  local out
+  out=$(FAKE_GH_LOG="$log_file" FAKE_GH_LIST_JSON='[{"number":7}]' \
+    FAKE_GH_PR_JSON='{"url":"https://github.com/o/r/pull/7"}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url)
+
+  assert_eq '{"status":"found","pr":{"url":"https://github.com/o/r/pull/7"},"unsupported_fields":[],"message":null}' \
+    "$out" "gh call count (found): the envelope is unchanged by the reordering"
+
+  # DOCUMENTED, DELIBERATE TRADE-OFF, not a regression: a found branch-ref
+  # lookup rises from 1 gh call to 2, buying the not-found path -- the
+  # dominant case, since execute.md's per-phase idempotency pre-check runs
+  # this exact lookup on every phase close whether or not a PR exists yet --
+  # a drop from 2 to 1.
+  local total
+  total=$(wc -l < "$log_file" | tr -d ' ')
+  assert_eq "2" "$total" "gh call count (found): exactly 2 gh invocations (was 1 before this story -- the accepted trade-off)"
+  assert_eq "pr list --head feat-x --state all --json number" "$(sed -n '1p' "$log_file")" "gh call count (found): the probe runs FIRST"
+  assert_eq "pr view feat-x --json url" "$(sed -n '2p' "$log_file")" "gh call count (found): pr view runs SECOND, to fetch the fields the probe cannot return"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+test_forge_pr_view_list_confirms_but_view_fails_is_error_never_not_found() {
+  echo ""
+  echo "=== forge-pr-view: list confirms the PR exists but pr view then fails -- status error, never not_found (AC5) ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+
+  # No existing test exercises this sequence: under the OLD call order pr
+  # view always ran first, so "the probe already proved it exists, and then
+  # the view failed" could not arise. It can now, on a transient failure or a
+  # race between the two calls.
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' \
+    FAKE_GH_VIEW_EXIT=1 FAKE_GH_VIEW_STDERR="HTTP 502: upstream request timed out" \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url)
+
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "three-way survival: a view failure after a confirming probe is error"
+  assert_contains "HTTP 502" "$(printf '%s' "$out" | jq -r '.message')" "three-way survival: the message carries gh pr view's OWN stderr as evidence"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.pr')" "three-way survival: pr is null on error"
+
+  # The sharper half of the same guarantee: gh pr view failing with gh's own
+  # NOT-FOUND wording, while the probe has already structurally confirmed the
+  # PR exists. A structural fact must outvote a text match -- otherwise the
+  # stderr tier could still launder a confirmed-existing PR into not_found,
+  # which is the exact conflation this verb exists to prevent.
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' \
+    FAKE_GH_VIEW_EXIT=1 FAKE_GH_VIEW_STDERR='no pull requests found for branch "feat-x"' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url)
+
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "three-way survival: even gh's own not-found WORDING cannot outvote the probe's structural confirmation"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -16722,6 +21484,179 @@ main() {
   test_roadmap_set_status_verification_failed_reachable_and_retryable
   test_roadmap_write_handoff_five_headings_sanitized
   test_roadmap_write_handoff_enables_validate_contracts_delivery
+
+  # Detect Forge Tests (US-001) -- the foundational contract every later
+  # forge-* verb in this phase consumes verbatim
+  echo ""
+  echo "--- Detect Forge Tests (US-001) ---"
+  test_detect_forge_known_hosts_ssh_and_https
+  test_detect_forge_subdomain_and_lookalike_boundary
+  test_detect_forge_unrecognized_hosts_are_unknown
+  test_detect_forge_alternate_port_ssh_and_scp_colon_boundary
+  test_detect_forge_origin_wins_over_disagreement
+  test_detect_forge_no_origin_precedence
+  test_detect_forge_override_valid_and_invalid
+  test_detect_forge_credential_redaction
+  test_detect_forge_project_cross_repo_isolation
+  test_detect_forge_never_dials_remote_or_caches
+  test_detect_forge_registered_in_help_and_dispatcher
+
+  # Forge Contract Tests (US-002) -- shared PR/issue builders, the
+  # three-way status envelope, and the degradation helper every later
+  # forge-* verb in this phase consumes
+  echo ""
+  echo "--- Forge Contract Tests (US-002) ---"
+  test_forge_build_pr_json_capability_gating
+  test_forge_build_issue_json_capability_gating
+  test_forge_emit_status_three_outcomes
+  test_forge_emit_status_reason_enum
+  test_forge_classify_gh_failure_reason
+  test_forge_emit_write_status_three_outcomes
+  test_forge_build_write_data_shape
+  test_forge_bin_check_quiet_and_mandatory_modes
+  test_forge_contract_header_carries_both_creates_identities
+
+  # forge-auth-status / forge-repo-info Tests (US-003) -- both verbs built
+  # on detect-forge (US-001) and the shared three-way status/degradation
+  # contract (US-002); the reusable fake-gh PATH stub introduced here is
+  # available to any later forge-* verb story in this phase
+  echo ""
+  echo "--- forge-auth-status / forge-repo-info Tests (US-003) ---"
+  test_forge_auth_status_single_account_authenticated
+  test_forge_auth_status_multi_account_exactly_one_active
+  test_forge_auth_status_not_authenticated_confirmed_negative
+  test_forge_auth_status_identity_match_mismatch_and_unset
+  test_forge_auth_status_forge_type_override_host_is_json_null
+  test_forge_repo_info_forge_type_override_host_is_json_null
+  test_forge_pr_write_manual_url_never_uses_null_host
+  test_detect_forge_credential_redaction_uppercase_scheme
+  test_forge_auth_status_no_identity_flag_anywhere
+  test_forge_auth_status_gh_absent_is_error
+  test_forge_auth_status_no_adapter_is_error
+  test_forge_auth_status_registered_in_help_and_dispatcher
+  test_forge_repo_info_gh_primary_single_call
+  test_forge_repo_info_local_parse_fallback_on_gh_failure
+  test_forge_repo_info_gh_absent_falls_back_to_local_parse
+  test_forge_repo_info_nested_group_owner
+  test_forge_repo_info_no_origin_is_not_found
+  test_forge_repo_info_registered_in_help_and_dispatcher
+
+  # Forge PR View Tests (US-004) -- field-selectable PR lookup with a
+  # three-way found/not_found/error status, fixing the exit-code conflation
+  # gh pr view --json url carries today
+  echo ""
+  echo "--- Forge PR View Tests (US-004) ---"
+  test_forge_pr_view_found_single_field
+  test_forge_pr_view_include_field_sets
+  test_forge_pr_view_not_found_and_error_never_conflated
+  test_forge_pr_view_not_found_prefers_structural_list_probe_over_stderr_text
+  test_forge_pr_view_not_found_secondary_stderr_fallback
+  test_forge_pr_view_numeric_ref_skips_list_probe
+  test_forge_pr_view_unknown_include_field_rejected
+  test_forge_pr_view_missing_gh_binary_quiet_degrade
+  test_forge_pr_view_non_github_forge_quiet_degrade
+  test_forge_pr_view_state_normalization_matches_issue_view
+  test_forge_pr_view_unsupported_fields_is_always_an_array_on_found
+  test_forge_pr_view_unsupported_fields_intersect_requested_only
+  test_forge_pr_view_absent_key_vs_explicit_null_are_distinguishable
+  test_forge_pr_view_include_accepts_contract_fields_and_rejects_gh_only_names
+  test_forge_pr_view_registered_in_help_and_dispatcher
+
+  # Forge PR Create/Edit Tests (US-005) -- the first WRITE verbs that
+  # create/mutate a pull request, built on forge-pr-view (US-004) for both
+  # the idempotency check and the post-write structured re-read
+  echo ""
+  echo "--- Forge PR Create/Edit Tests (US-005) ---"
+  test_forge_pr_create_new_pr
+  test_forge_pr_create_existing_pr_is_idempotent
+  test_forge_pr_create_lookup_error_never_falls_through_to_create
+  test_forge_pr_create_closed_or_merged_existing_pr_does_not_block
+  test_forge_pr_create_post_create_reread_failure_keeps_created_url
+  test_forge_pr_create_missing_gh_mandatory_print_nonzero_exit
+  test_forge_pr_create_non_github_forge_mandatory_print
+  test_forge_pr_create_guard_failures
+  test_forge_pr_create_credential_via_env_not_argv
+  test_forge_pr_edit_success
+  test_forge_pr_edit_missing_gh_mandatory_print_nonzero_exit
+  test_forge_pr_edit_gh_failure_prints_manual_nonzero_exit
+  test_forge_pr_edit_invalid_number_guard
+  test_forge_pr_edit_omitted_body_is_rejected
+  test_forge_pr_edit_explicit_empty_body_still_clears
+  test_forge_write_verbs_share_one_data_shape
+  test_forge_write_verbs_degraded_exit_code_split
+  test_forge_pr_create_and_edit_registered_in_help_and_dispatcher
+
+  # Forge Issue Verb Tests (US-006) -- forge-issue-view / forge-issue-create,
+  # the first forge-* verbs that actually shell out to a forge CLI
+  echo ""
+  echo "--- Forge Issue Verb Tests (US-006) ---"
+  test_forge_capture_scratch_file_never_survives
+  test_forge_map_state_table
+  test_forge_extract_issue_number_from_url
+  test_forge_emit_issue_create_status_is_gone
+  test_forge_issue_view_found
+  test_forge_issue_view_not_found
+  test_forge_issue_view_degraded_missing_gh
+  test_forge_issue_view_non_github_forge_degrades
+  test_forge_issue_view_generic_failure_not_authenticated
+  test_forge_issue_view_generic_failure_cli_failed
+  test_forge_issue_view_input_errors
+  test_forge_issue_create_success
+  test_forge_issue_create_degraded_failure_prints_manual
+  test_forge_issue_create_missing_gh_mandatory_print
+  test_forge_issue_create_credential_via_env_not_argv
+  test_forge_issue_create_input_errors
+  test_forge_issue_verbs_registered_in_help_and_dispatcher
+
+  # Forge Review-Thread Verb Tests (US-007) -- forge-pr-review-threads /
+  # forge-resolve-review-thread, porting get-pr-comments/resolve-pr-thread's
+  # GraphQL query and mutation into aimi-cli.sh with every identifier bound
+  # via gh api graphql's own -f/-F flags
+  echo ""
+  echo "--- Forge Review-Thread Verb Tests (US-007) ---"
+  test_forge_review_thread_queries_bind_via_flags_not_interpolation
+  test_forge_review_thread_input_validation
+  test_forge_pr_review_threads_found_default_filter
+  test_forge_pr_review_threads_all_flag_includes_resolved_and_outdated
+  test_forge_pr_review_threads_not_found_null_pull_request
+  test_forge_pr_review_threads_degraded_missing_gh
+  test_forge_pr_review_threads_non_github_forge_degrades
+  test_forge_pr_review_threads_owner_repo_unresolved_is_cli_failed
+  test_forge_pr_review_threads_graphql_failure_not_authenticated
+  test_forge_pr_review_threads_graphql_failure_cli_failed
+  test_forge_pr_review_threads_owner_repo_auto_detected
+  test_forge_resolve_review_thread_success
+  test_forge_resolve_review_thread_confirmed_invalid_id
+  test_forge_resolve_review_thread_missing_gh_mandatory_print
+  test_forge_resolve_review_thread_mutation_failure_not_authenticated
+  test_forge_resolve_review_thread_mutation_failure_cli_failed
+  test_forge_review_thread_verbs_registered_in_help_and_dispatcher
+
+  # Forge Dispatch-Order Tests (phase 1.1 US-006) -- all ten forge verbs
+  # dispatched ahead of find_aimi_root, so a caller with no .aimi/ anywhere
+  # (resolve-pr-parallel) and a multi-repo child repo both get a working
+  # envelope; plus the two consequences of that move (per-verb check_jq, and
+  # a stray --help reaching the verb's own parser)
+  echo ""
+  echo "--- Forge Dispatch-Order Tests (phase 1.1 US-006) ---"
+  test_forge_verbs_run_without_any_aimi_dir
+  test_forge_repo_info_multi_repo_child_without_project
+  test_forge_verbs_dispatched_before_find_aimi_root
+  test_forge_verbs_call_check_jq_first
+  test_forge_verb_stray_help_flag_parity
+
+  # Forge Derivation Memo + PR-View Probe-Order Tests (phase 1.1 US-010) --
+  # the per-project-dir memo behind _detect_forge_type, and the inverted
+  # gh pr list / gh pr view order. Both measured by counter/log files.
+  echo ""
+  echo "--- Forge Derivation Memo + PR-View Probe-Order Tests (phase 1.1 US-010) ---"
+  test_detect_forge_type_never_builds_or_parses_json
+  test_detect_forge_type_matches_detect_forge_across_fixtures
+  test_detect_forge_type_memo_is_keyed_per_project_dir
+  test_forge_pr_create_derives_forge_once_per_process
+  test_forge_pr_view_not_found_branch_ref_costs_one_gh_call
+  test_forge_pr_view_found_branch_ref_costs_two_gh_calls_list_then_view
+  test_forge_pr_view_list_confirms_but_view_fails_is_error_never_not_found
 
   cleanup
 

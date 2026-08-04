@@ -14,6 +14,10 @@ if [ -z "${CLAUDECODE:-}" ] && [ -n "$AIMI_PLUGIN_DIR" ] && [ "${AIMI_PLUGIN_DIR
 
 Layer 0 first checks that `CLAUDECODE` is unset — when running inside Claude Code, Layer 0 is skipped so the Claude Code cache directory is always used. For non-Claude Code hosts (e.g., OpenCode), it validates AIMI_PLUGIN_DIR with four checks: (1) env var is non-empty, (2) path starts with `/` (absolute), (3) directory exists, (4) target script is executable. If any check fails, silently falls through to Layer 1. Layer 0 does NOT write to global cache — env var check is negligible cost, no side effects.
 
+All four checks matter, and the absolute-path one is not redundant with the executable one: a **relative** `AIMI_PLUGIN_DIR` (a bare `.` being the worst case) makes `$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh` resolve against the caller's current working directory, so any repository that ships its own executable `scripts/aimi-cli.sh` would be run instead of the plugin's.
+
+> **`skills/resolve-pr-parallel/scripts/_resolve-cli.sh`** mirrors this Layer 0 with one addition that has no counterpart elsewhere in this document: when `AIMI_PLUGIN_DIR` does not resolve, it falls back to `CLAUDE_PLUGIN_ROOT` (without the `CLAUDECODE` gate, since that variable is only ever set by Claude Code itself) under the **same four guards**. That branch lives only in that sourced helper — command authors never write it — which is why it is documented here as a note rather than as its own layer.
+
 ### Layer 1: Global cache (fast path)
 
 Try the new XDG path first; fall back to the legacy path during the migration window.

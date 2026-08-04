@@ -3,12 +3,12 @@ name: aimi:open-pr
 description: Open a pull request with title and description derived from git commits and diff
 argument-hint: "[--branch <name>]"
 disable-model-invocation: true
-allowed-tools: Bash(gh:*), Bash(git:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*)
+allowed-tools: Bash(git:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*)
 ---
 
 # Aimi Open PR
 
-Automatically detect the parent branch, build the PR title and description from git commits and the diff against the base branch, and create a pull request via `gh pr create`.
+Automatically detect the parent branch, build the PR title and description from git commits and the diff against the base branch, and create a pull request via the `forge-pr-create` verb (`plugins/aimi-engineering/commands/references/forge-contract.md`) — GitHub is the only adapter this verb ships in phase 1.
 
 ## Project Conventions
 
@@ -66,32 +66,52 @@ If validation fails, report `Invalid --branch value: $CURRENT_BRANCH` and STOP.
 
 When `--branch` was not passed, `$CURRENT_BRANCH` stays empty here — Step 2a resolves it from the current checked-out branch as before.
 
-### 1a. Verify GitHub CLI authentication
+### 1a. Verify forge authentication
 
 ```bash
-gh auth status
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+AUTH_STATUS_JSON=$($AIMI_CLI forge-auth-status)
+echo "$AUTH_STATUS_JSON"
 ```
 
-If this fails, report: "GitHub CLI not authenticated. Run `gh auth login` first." and STOP.
+Branch on the printed JSON's `status` field. `forge-auth-status` reports exactly `found` or `error` — never `not_found` (see `commands/references/forge-contract.md`'s Three-Way Status Convention and `forge-auth-status`'s own found/error contract: the check either runs to a definitive true/false answer, or cannot run at all):
+
+- `status == "found"` and `.data.authenticated == true`: authenticated. Continue to Step 1b exactly as today.
+- `status == "found"` and `.data.authenticated == false`: a confirmed logged-out session. Report, naming the actual forge from `.data.forge` (never a hardcoded "GitHub CLI" string): "`<.data.forge>` CLI not authenticated. Run `gh auth login` first." and STOP.
+- `status == "error"`: the authentication check itself could not run — `gh` missing from PATH, or no adapter for the detected forge. This step has no fallback, so the degradation must always surface (mandatory-print mode, `forge-contract.md`'s Degradation Contract — never the quiet mode `review.md`/`validate-bug.md` use where a fallback path already exists). Report `.message` verbatim (it already names the missing binary or the unsupported forge), prefixed with "Warning: ", plus "Install and authenticate a forge CLI for this repository, then re-run this command." and STOP.
+
+No branch above may silently fall through to Step 2 as if authenticated.
 
 ### 1b. Check for existing PR on this branch
 
 When `$CURRENT_BRANCH` is already set (from `--branch`), check that branch explicitly:
 
 ```bash
-gh pr view "$CURRENT_BRANCH" --json url --jq '.url' 2>/dev/null
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+PR_VIEW_JSON=$($AIMI_CLI forge-pr-view --pr "$CURRENT_BRANCH" --include url,number)
+echo "$PR_VIEW_JSON"
 ```
 
-Otherwise, check the currently checked-out branch:
+Otherwise, check the currently checked-out branch. `forge-pr-view --pr` always requires an explicit ref — unlike plain `gh pr view`, it never defaults to whatever is checked out — so resolve it locally first:
 
 ```bash
-gh pr view --json url --jq '.url' 2>/dev/null
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+PR_VIEW_REF=$(git rev-parse --abbrev-ref HEAD)
+PR_VIEW_JSON=$($AIMI_CLI forge-pr-view --pr "$PR_VIEW_REF" --include url,number)
+echo "$PR_VIEW_JSON"
 ```
 
-If this succeeds (exit code 0), an existing PR already exists. Report the PR URL to the user and STOP (do not error — this is informational):
+Branch on the printed JSON's `status` field (`found` | `not_found` | `error` — forge-contract.md's Three-Way Status Convention):
+
+- `status == "found"`: an existing PR already exists. Report the PR URL (`.pr.url`) to the user and STOP (do not error — this is informational):
 ```
 PR already exists for this branch: <url>
 ```
+- `status == "not_found"`: no existing PR for this branch — fall through to Step 1c exactly as today.
+- `status == "error"`: the existing-PR check itself could not complete — a missing forge CLI, broken auth, or a network failure. This step has no fallback either, so the same mandatory-print degradation as Step 1a applies. Report `.message` verbatim, prefixed with "Warning: existing-PR check could not complete: ", plus "Verify your forge CLI is installed and authenticated, then re-run this command." and STOP. Never treat this the same as `not_found` — a broken check must never be read as "no PR yet," since that would let a broken token proceed straight into creating a duplicate PR.
 
 ### 1c. Warn about uncommitted changes
 
@@ -349,10 +369,12 @@ git push -u origin "$CURRENT_BRANCH"
 
 ### 5b. Create the PR
 
-Use HEREDOC for the body to handle multi-line content safely. The Summary/Changes/Files Changed sections always appear. The Backend Implementation Spec section is appended only when `$INCLUDE_BACKEND_SPEC=1`:
+Render the body into a captured shell variable first — `$PR_BODY` — instead of embedding a HEREDOC directly as the `--body` argument, then call `forge-pr-create` with that variable plus the title, base, and head values. The Summary/Changes/Files Changed sections always appear. The Backend Implementation Spec section is appended only when `$INCLUDE_BACKEND_SPEC=1`:
 
 ```bash
-gh pr create --title "$PR_TITLE" --base "$BASE_BRANCH" --head "$CURRENT_BRANCH" --body "$(cat <<'EOF'
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+PR_BODY=$(cat <<'EOF'
 ## Summary
 
 <aggregated commit bodies from $COMMIT_LOG (fallback to concatenated subjects if all bodies empty)>
@@ -408,8 +430,23 @@ gh pr create --title "$PR_TITLE" --base "$BASE_BRANCH" --head "$CURRENT_BRANCH" 
 
 </if>
 EOF
-)"
+)
+
+PR_CREATE_JSON=$($AIMI_CLI forge-pr-create --title "$PR_TITLE" --base "$BASE_BRANCH" --head "$CURRENT_BRANCH" --body "$PR_BODY")
+PR_STATUS=$(printf '%s' "$PR_CREATE_JSON" | jq -r '.status // empty' 2>/dev/null)
+if [ "$PR_STATUS" != "created" ] && [ "$PR_STATUS" != "unchanged" ]; then
+  echo "Error: forge-pr-create reported status ${PR_STATUS:-<none>} — see the manual create-it-yourself instructions above (mandatory-print degradation, forge-contract.md's Degradation Contract)." >&2
+  exit 1
+fi
+PR_URL=$(printf '%s' "$PR_CREATE_JSON" | jq -r '.data.url')
+PR_NUMBER=$(printf '%s' "$PR_CREATE_JSON" | jq -r '.data.number')
+echo "PR_URL=$PR_URL"
+echo "PR_NUMBER=$PR_NUMBER"
 ```
+
+`forge-pr-create` returns `forge-contract.md`'s write-verb envelope — `{status, data: {url, number}, message}` with `status` one of `created`, `unchanged`, or `degraded` (Write-Verb Status Convention). `unchanged` means an open PR already existed for this branch and was reused rather than duplicated; both it and `created` carry a usable `data.url`/`data.number`, which is why the check above accepts either and treats everything else — a `degraded` envelope, or no envelope at all — as the failure case.
+
+If `forge-pr-create` itself exits non-zero (an unsupported forge, a missing `gh` binary, or the `gh pr create` call failing), it has already printed manual create-it-yourself instructions to stderr — mandatory-print degradation, `forge-contract.md`'s Degradation Contract, since opening a PR has no other fallback — **and** now emits a `status: "degraded"` envelope on stdout carrying the same reason in its `message` field. The exit code is unchanged; the envelope is an additional in-band signal, not a replacement for it. Report those instructions to the user and STOP.
 
 **Important**: The Backend Implementation Spec section is rendered entirely from the `backendSpec` metadata object. No LLM generation is used — all content comes from deterministic template rendering of the structured data. When `$INCLUDE_BACKEND_SPEC=0` (no tasks file, `frontendOnly` is false, or `backendSpec` is null), the section is omitted entirely and the PR body ends after the Files Changed section. If `businessContext` is a plain string (legacy format), render it as a single paragraph for backwards compatibility.
 
@@ -417,13 +454,39 @@ EOF
 
 This step only runs when `$INCLUDE_BACKEND_SPEC=1` (from Step 4c). If false, skip to Step 5d.
 
-Build the issue body reusing the same Backend Implementation Spec template from Step 4c. The issue body contains the four subsections (Endpoints, Data Models, Business Rules, Business Context) rendered identically to the PR body section.
-
-**Attempt to create the GitHub issue:**
+Each Bash tool call is its own shell, so nothing Step 5b assigned survives into this one (the same convention `$CURRENT_BRANCH`/`$AIMI_CLI` already use at the start of later steps in this file). Retype **only** `PR_NUMBER` — a small GitHub-issued integer, validated below as digits-only before it is used for anything — and re-read the body itself back through `forge-pr-view` rather than retyping Step 5b's printed transcript. The body is assembled from commit messages and the diff, so it is repository content, not operator input: pasting it into a shell heredoc would let a commit message whose own line matches the heredoc delimiter close it early and run every following line as a command in the operator's session. `PR_URL` is not re-assigned at all — `forge-pr-edit` takes `--number`, and nothing else in this step reads a URL.
 
 ```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+PR_NUMBER="[the PR_NUMBER value Step 5b printed]"
+if ! printf '%s' "$PR_NUMBER" | grep -qE '^[0-9]+$'; then
+  echo "Error: PR_NUMBER must be digits only (got: ${PR_NUMBER:-<empty>}). Re-read the PR_NUMBER= line Step 5b printed and retype it exactly." >&2
+  exit 1
+fi
+PR_VIEW_JSON=$($AIMI_CLI forge-pr-view --pr "$PR_NUMBER" --include url,number,body)
+PR_VIEW_STATUS=$(printf '%s' "$PR_VIEW_JSON" | jq -r '.status // empty' 2>/dev/null)
+PR_VIEW_NUMBER=$(printf '%s' "$PR_VIEW_JSON" | jq -r '.pr.number // empty' 2>/dev/null)
+PR_VIEW_MESSAGE=$(printf '%s' "$PR_VIEW_JSON" | jq -r '.message // empty' 2>/dev/null)
+if [ "$PR_VIEW_STATUS" = "found" ] && [ "$PR_VIEW_NUMBER" = "$PR_NUMBER" ]; then
+  PR_BODY=$(printf '%s' "$PR_VIEW_JSON" | jq -r '.pr.body // empty')
+else
+  PR_BODY=""
+  echo "Warning: could not re-read the body of PR #$PR_NUMBER (status=${PR_VIEW_STATUS:-<none>}, returned number=${PR_VIEW_NUMBER:-<none>}, message=${PR_VIEW_MESSAGE:-<none>}). The backend issue will still be created; only the 'Related issue' link back into the PR body is skipped." >&2
+fi
+```
+
+`forge-pr-view` returns its own envelope — `{status, pr, unsupported_fields, message}` with `status` one of `found`, `not_found`, or `error` (`forge-contract.md`'s **`forge-pr-view` Envelope**) — which is why `PR_BODY` is read from `.pr.body` rather than a generic `.data`. A returned `.pr.number` that disagrees with the retyped `$PR_NUMBER` is treated exactly like `not_found` or `error`: relinking the wrong PR's body is worse than not relinking at all. Every non-`found` outcome degrades to an empty `PR_BODY` plus the warning above and continues — the backend issue is still worth creating even when the link cannot be appended.
+
+Build the issue body reusing the same Backend Implementation Spec template from Step 4c. The issue body contains the four subsections (Endpoints, Data Models, Business Rules, Business Context) rendered identically to the PR body section.
+
+**Attempt to create the backend issue and link it to the PR:**
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 if [ "$INCLUDE_BACKEND_SPEC" = "1" ]; then
-  if ISSUE_URL=$(gh issue create --title "Backend: $METADATA_TITLE" --body "$(cat <<'EOF'
+  ISSUE_BODY=$(cat <<'EOF'
 ## Backend Implementation Spec
 
 ### Endpoints
@@ -460,29 +523,37 @@ if [ "$INCLUDE_BACKEND_SPEC" = "1" ]; then
 <omit any sub-section whose array is empty or absent>
 <if businessContext is a plain string (legacy), render as a single paragraph instead>
 EOF
-)" 2>/dev/null); then
-    ISSUE_NUMBER=$(echo "$ISSUE_URL" | grep -oE '[0-9]+$')
-    gh pr edit "$PR_URL" --body "$(cat <<EOF
+)
+  ISSUE_CREATE_JSON=$($AIMI_CLI forge-issue-create --title "Backend: $METADATA_TITLE" --body "$ISSUE_BODY")
+  ISSUE_STATUS=$(printf '%s' "$ISSUE_CREATE_JSON" | jq -r '.status')
+  if [ "$ISSUE_STATUS" = "created" ]; then
+    ISSUE_URL=$(printf '%s' "$ISSUE_CREATE_JSON" | jq -r '.data.url')
+    ISSUE_NUMBER=$(printf '%s' "$ISSUE_CREATE_JSON" | jq -r '.data.number')
+    if [ -n "$PR_BODY" ]; then
+      PR_EDIT_JSON=$($AIMI_CLI forge-pr-edit --number "$PR_NUMBER" --body "$(cat <<EOF
 $PR_BODY
 
 ---
 Related issue: #$ISSUE_NUMBER
 EOF
-)"
-    echo "Backend issue created: $ISSUE_URL (linked to PR)"
+)")
+      echo "Backend issue created: $ISSUE_URL (linked to PR)"
+    else
+      echo "Backend issue created: $ISSUE_URL — NOT linked in the PR body, because the PR body could not be re-read (see the warning above). Add \"Related issue: #$ISSUE_NUMBER\" to the PR body yourself."
+    fi
   else
     echo "Warning: Could not create backend issue (permissions denied, issues disabled, or rate limit). The backend spec is still available in the PR body."
   fi
 fi
 ```
 
-Where `$METADATA_TITLE` is `metadata.title` from Step 4c, `$PR_URL` is the PR URL returned from Step 5b, and `$PR_BODY` is the original PR body from Step 5b.
+Where `$METADATA_TITLE` is `metadata.title` from Step 4c, `$PR_NUMBER` is the digits-only value retyped and validated in the block above from Step 5b's printed output, and `$PR_BODY` is the body that same block re-read fresh through `forge-pr-view` — never a transcript pasted back in. An empty `$PR_BODY` means that re-read did not succeed, which is exactly what the `[ -n "$PR_BODY" ]` guard branches on: the issue is still created, only the `forge-pr-edit` link back into the PR body is skipped.
 
-**Important**: The `gh issue create` call is wrapped in an `if/then/else` block for graceful degradation. If the command fails (non-zero exit: permissions denied, issues disabled, rate limit), a warning is logged but PR creation is NOT affected — the backend spec still lives in the PR body (guaranteed by Step 5b). The `2>/dev/null` suppresses stderr from the failed command.
+**Important**: `forge-issue-create` is a soft-fail verb — it always exits `0` and reports `created` or `degraded` in the `status` field of `forge-contract.md`'s shared write-verb envelope (`commands/references/forge-contract.md`, Write-Verb Status Convention), so the `if`/`else` above branches on that field, never on a bare exit code. A `degraded` result (permissions denied, issues disabled, rate limit, missing forge CLI, or an unsupported forge) means the issue was not created automatically — a warning is logged but PR creation is NOT affected, since the backend spec still lives in the PR body (guaranteed by Step 5b). `forge-issue-create` itself already prints the manual "create this yourself" instructions to stderr on a `degraded` result (mandatory-print degradation), so no separate STOP is needed here. `forge-pr-edit` emits that same envelope and shares `forge-pr-create`'s own mandatory-print/non-zero-exit contract — the shared shape deliberately does NOT mean a shared exit-code contract, and this verb's always-`0` exit is exactly what keeps a failed backend issue from blocking the PR. If `forge-pr-edit` fails, its own manual fallback instructions are already on stderr (alongside its `degraded` envelope on stdout); the issue is still created and linked in every other respect.
 
-**On success**: The issue URL is captured, the issue number is extracted via `grep -oE '[0-9]+$'`, and `gh pr edit` appends a "Related issue: #N" link to the PR body.
+**On success**: The issue URL and number are read from the envelope's nested `data.url` and `data.number` fields — the same nesting `forge-pr-create` and `forge-pr-edit` use, and the `grep -oE '[0-9]+$'` derivation is gone — and `forge-pr-edit` appends a "Related issue: #N" link to the PR body whenever `$PR_BODY` was re-read successfully. When it was not, the issue is still created and reported, and the message says so instead of claiming a link that was never appended.
 
-**On failure**: A warning message is displayed and execution continues to Step 5d.
+**On failure (degraded)**: A warning message is displayed and execution continues to Step 5d.
 
 ### 5d. Report success
 

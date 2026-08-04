@@ -69,6 +69,16 @@ Three OpenCode gaps have workarounds rather than fixes.
 
 ---
 
+## Forge write calls no longer prompt for confirmation
+
+Before forge abstraction phase 1, every `gh` invocation lived directly in a command body (`open-pr.md`, `review.md`, `validate-bug.md`, `execute.md`, the `resolve-pr-parallel` skill scripts), so a bare `gh` call fell outside the `permissions.bash` allowlist in `opencode.json` and prompted you for approval every time — including writes like `gh pr create`, `gh pr edit`, and `gh issue create`.
+
+Those calls now go through `aimi-cli.sh`'s `forge-pr-create`, `forge-pr-edit`, and `forge-issue-create` verbs instead, and `opencode.json`'s allowlist already carries a blanket `aimi-cli.sh *` rule (installed for CLI subcommands generally, not added for this). The result: forge writes stop prompting for confirmation.
+
+This is a real broadening of unattended write consent, and it is intentional. A confirmation gate on these verbs, or a narrower `forge-*`-specific allowlist entry, would break unattended `/aimi:execute` — the plugin's whole purpose — so neither was added. No `gh *` permission entry exists in `install.sh` either. If you want per-call confirmation back for these operations, you need to edit `opencode.json` yourself; the installer will not do it for you.
+
+---
+
 ## `AIMI_PLUGIN_DIR`
 
 Points at the installed plugin directory so commands can find the CLI scripts, skill references, and agent definitions.
