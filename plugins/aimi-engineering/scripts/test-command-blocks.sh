@@ -22,6 +22,7 @@ set -uo pipefail
 #   4. read but never assigned anywhere in the same file
 #   5. $ARGUMENTS validated in the same block that interpolates it
 #   6. execute.md's phase-branch derivation, EXECUTED against fixtures
+#   7. plan.md's branchName derivations use the dot-slugified phase id
 #
 # Checks 1-5 are static. Check 6 is the first one that RUNS a block: it pulls
 # execute.md's phase-branch derivation out of the extracted set and executes it
@@ -577,6 +578,92 @@ FIXTURES
 }
 
 # ---------------------------------------------------------------------------
+# Check 7 — plan.md's branchName derivations use the dot-slugified phase id.
+#
+# Measured yield: 2 hits on the pre-fix tree (the branch-context raw-id leg
+# reporting all 6 occurrences, and the three-shapes leg reporting all 3
+# missing), 0 on the fixed tree, 0 false positives on either.
+#
+# WHY THIS IS WEAKER THAN CHECK 6, AND WHY IT IS STILL THE RIGHT SHAPE HERE
+#
+# plan.md has the same defect check 6 guards in execute.md: it built
+# metadata.branchName from the raw ${SELECTED_PHASE_ID}, then validated the
+# result against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` -- no dot -- and its own Phase 4
+# failure row says "report the invalid branch name and STOP". So a decimal
+# phase could not be planned, one command upstream of the execute.md failure.
+#
+# But check 6's approach is UNAVAILABLE here, and that is a fact about the
+# file, not a shortcut. All six of plan.md's branchName derivations are PROSE
+# instructing the agent what to compute -- verified by running plan.md through
+# this file's own fence-state machine: every one reports PROSE, none is inside
+# a ```bash fence. There is no block to extract and execute, so this check
+# asserts what the INSTRUCTION SAYS, not what the code DOES. It cannot catch an
+# agent that reads correct prose and computes the wrong thing. Do not read a
+# green run here as the guarantee check 6 provides.
+#
+# The discriminator between a branch and a path is the `type/` prefix: a branch
+# reads `type/${featureSlug}-phase-...`, a tasks-file path reads
+# `${featureSlug}-phase-...-tasks.json` with no `type/`. That is what keeps leg
+# 1 off plan.md's legitimate raw-id path at the TASKS_PATH assignment, which is
+# a real bash block and must keep the dot.
+# ---------------------------------------------------------------------------
+check_plan_branchname_slugified() {
+  local plan="$COMMANDS_DIR/plan.md"
+  local raw_branch missing shape kept widened
+
+  if [ ! -f "$plan" ]; then
+    assert_eq "found" "missing" "Check 7 — plan.md is readable"
+    return 0
+  fi
+
+  # Leg 1 -- no branchName derivation may interpolate the RAW id. The `type/`
+  # prefix is what makes an occurrence a branch rather than a filesystem path.
+  raw_branch="$(grep -nF 'type/${featureSlug}-phase-${SELECTED_PHASE_ID}' "$plan" \
+    | cut -c1-160 | sed 's/^/plan.md:/')"
+  assert_no_findings "$raw_branch" \
+    "Check 7 — no plan.md branchName derivation interpolates the raw phase id" \
+    "A decimal phase id yields '...-phase-5.5-...', which plan.md's own Phase 4 rule rejects and STOPs on. Use \${SELECTED_PHASE_ID_SLUG}."
+
+  # Leg 2 -- all three derivation shapes must carry the slugified symbol, so a
+  # partial fix (flat done, splits missed) fails instead of passing quietly.
+  missing=""
+  while IFS='|' read -r shape pattern; do
+    [ -n "$pattern" ] || continue
+    grep -qF "$pattern" "$plan" \
+      || missing="$missing$shape shape not found with the slugified id: $pattern"$'\n'
+  done <<'SHAPES'
+non-split|type/${featureSlug}-phase-${SELECTED_PHASE_ID_SLUG}-${PHASE_SLUG}`
+SIDE-axis|type/${featureSlug}-phase-${SELECTED_PHASE_ID_SLUG}-${PHASE_SLUG}-frontend
+PROJECT-axis|type/${featureSlug}-phase-${SELECTED_PHASE_ID_SLUG}-${PHASE_SLUG}-<project-slug>
+SHAPES
+  assert_no_findings "$(printf '%s' "$missing")" \
+    "Check 7 — all three branchName shapes (non-split, SIDE, PROJECT) use the slugified id" \
+    "Every shape must be fixed; a decimal phase reaches the split shapes too."
+
+  # Leg 3 -- the mirror of check 6's confinement assert. Filesystem paths must
+  # KEEP the raw id: execute.md reads these exact basenames with the dot, so
+  # slugifying them here would silently break the pair.
+  kept=""
+  for pattern in \
+    '${featureSlug}-phase-${SELECTED_PHASE_ID}-tasks.json' \
+    '${featureSlug}-phase-${SELECTED_PHASE_ID}-frontend-tasks.json' \
+    '${featureSlug}-phase-${SELECTED_PHASE_ID}-<project-slug>-tasks.json'
+  do
+    grep -qF "$pattern" "$plan" \
+      || kept="$kept tasks-file path lost its raw id: $pattern"$'\n'
+  done
+  assert_no_findings "$(printf '%s' "$kept")" \
+    "Check 7 — plan.md's tasks-file paths still carry the raw phase id" \
+    "These name real on-disk files that carry the dot, and execute.md reads them with the raw id."
+
+  # Leg 4 -- the fix conforms the value; it must never widen the regex.
+  widened="$(grep -nE '"branchName".*regex:.*\[a-zA-Z0-9[^]]*\\?\.' "$plan" | cut -c1-160)"
+  assert_no_findings "$widened" \
+    "Check 7 — plan.md's branchName regex was not widened to admit a dot" \
+    "Conform the derived value instead; this regex is shared with execute.md and aimi-cli.sh's _ROADMAP_BRANCH_REGEX."
+}
+
+# ---------------------------------------------------------------------------
 # The baseline is only honest if it shrinks. An entry that no longer matches
 # anything means the underlying issue was fixed (or a heading was renamed) and
 # the line must go, otherwise the baseline slowly becomes a permanent excuse.
@@ -621,6 +708,7 @@ main() {
   check_unassigned
   check_argument_gate_same_block
   check_phase_branch_derivation
+  check_plan_branchname_slugified
 
   echo ""
   echo "--- Baseline Hygiene ---"
