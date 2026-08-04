@@ -20,6 +20,17 @@ set -uo pipefail
 #   2. portability denylist (blocks may run under zsh, not just bash)
 #   3. loop-scope escape — assigned only inside a loop, read at loop depth 0
 #   4. read but never assigned anywhere in the same file
+#   5. $ARGUMENTS validated in the same block that interpolates it
+#   6. execute.md's phase-branch derivation, EXECUTED against fixtures
+#   7. execute.md's verification_failed re-verify branch, structurally
+#   8. plan.md's branchName derivations use the dot-slugified phase id
+#
+# Checks 1-5 are static. Check 6 is the first one that RUNS a block: it pulls
+# execute.md's phase-branch derivation out of the extracted set and executes it
+# against known inputs, asserting the exact branch name it produces. A static
+# check could not have caught the defect it guards — the block always parsed,
+# was always portable, and read nothing unassigned; it simply produced a value
+# the very next paragraph rejects.
 #
 # ADDRESSING
 #
@@ -470,6 +481,313 @@ check_argument_gate_same_block() {
 }
 
 # ---------------------------------------------------------------------------
+# Check 6 — execute.md's phase-branch derivation, executed against fixtures.
+#
+# Measured yield: 3 hits on the pre-fix tree (both decimal fixtures' exact
+# strings, plus the aggregate regex assert naming both), 0 on the fixed tree,
+# 0 false positives on either. Demonstrated by reverting only the derivation.
+#
+# WHY THIS ONE RUNS THE BLOCK
+#
+# execute.md derives PHASE_BRANCH from the phase id, then validates the result
+# against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` seven lines later. That regex has no
+# dot; phase ids are legitimately decimal. So a phase like 5.5 whose roadmap
+# `.branch` is null derived `feat/x-phase-5.5-slug`, failed the file's OWN
+# validation, released the claim and STOPped — unexecutable, with nothing in
+# any suite able to see it. The block parses, is portable, and reads nothing
+# unassigned; only its VALUE was wrong. Hence: execute it.
+#
+# The block is located by matching its body, never by a hardcoded index or
+# heading, so renaming the heading or adding a sibling block cannot silently
+# disable this check — it asserts it found exactly one.
+#
+# The confinement assert is the other half. The slugified id must reach the
+# branch name and NOTHING else: `$FEATURE-phase-$PHASE_ID-tasks.json` names
+# real files that carry the dot, and `--phase "$PHASE_ID"` must match
+# roadmap.json's own numeric id. Both keep the raw id.
+# ---------------------------------------------------------------------------
+PHASE_BRANCH_REGEX='^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'
+
+# Runs the located block in its own shell with the fixture pre-set, and echoes
+# whatever PHASE_BRANCH ends up as. PHASE_BRANCH starts empty on purpose — that
+# is the "roadmap .branch is null" case, the only one the block acts on.
+derive_phase_branch() {
+  local block="$1" phase_id="$2" phase_slug="$3"
+  PHASE_BRANCH="" FEATURE_TYPE="feat" FEATURE="caic-nestjs-port" \
+  PHASE_ID="$phase_id" PHASE_SLUG="$phase_slug" \
+    bash -c '. "$0"; printf "%s" "$PHASE_BRANCH"' "$block" 2>/dev/null
+}
+
+check_phase_branch_derivation() {
+  local id rel start heading body matches="" block actual expected findings=""
+  local fixture fid fslug
+
+  while IFS=$'\t' read -r id rel start heading; do
+    [ -n "$id" ] || continue
+    body="$(cat "$BLOCKS_DIR/$id.sh" 2>/dev/null)"
+    case "$body" in
+      *'PHASE_BRANCH="${FEATURE_TYPE}/${FEATURE}-phase-'*) matches="$matches$id " ;;
+    esac
+  done < "$INDEX"
+
+  assert_eq "1" "$(printf '%s' "$matches" | wc -w | tr -d ' ')" \
+    "Check 6a — exactly one block derives PHASE_BRANCH from FEATURE_TYPE/FEATURE"
+
+  block="$BLOCKS_DIR/$(printf '%s' "$matches" | awk '{print $1}').sh"
+  [ -f "$block" ] || return 0
+
+  # id|slug|expected branch. Decimal rows first — those are the regressions.
+  # The delimiter must NOT be a tab: tab is an IFS whitespace character, so
+  # bash collapses the two adjacent tabs of an empty-slug row into one and the
+  # row silently loses a field. That skipped both empty-slug fixtures when this
+  # was first written, and the check still reported green.
+  while IFS='|' read -r fid fslug expected; do
+    [ -n "$expected" ] || continue
+    fixture="id=$fid slug=${fslug:-<empty>}"
+    actual="$(derive_phase_branch "$block" "$fid" "$fslug")"
+    assert_eq "$expected" "$actual" "Check 6 — derivation for $fixture"
+    printf '%s' "$actual" | grep -qE "$PHASE_BRANCH_REGEX" \
+      || findings="$findings$fixture -> '$actual' fails ${PHASE_BRANCH_REGEX}"$'\n'
+  done <<'FIXTURES'
+5.5|identificacao-no-painel|feat/caic-nestjs-port-phase-5-5-identificacao-no-painel
+5.5||feat/caic-nestjs-port-phase-5-5
+5|identificacao-no-painel|feat/caic-nestjs-port-phase-5-identificacao-no-painel
+5||feat/caic-nestjs-port-phase-5
+FIXTURES
+
+  assert_no_findings "$(printf '%s' "$findings")" \
+    "Check 6 — every derived branch matches the regex execute.md validates against" \
+    "execute.md rejects this value itself seven lines below the derivation, releases the claim and STOPs."
+
+  # The slugified id is for the branch name only. Anywhere it touches a tasks
+  # file path or a --phase argument, the raw dot-bearing id was needed instead.
+  local leaks
+  leaks="$(
+    grep -n 'PHASE_ID_SLUG' "$COMMANDS_DIR/execute.md" 2>/dev/null \
+      | grep -E -- '-tasks\.json|--phase' \
+      | sed 's/^/execute.md:/'
+    # Outside the derivation block entirely (prose, or another block).
+    in_block="$(grep -c 'PHASE_ID_SLUG' "$block" 2>/dev/null || echo 0)"
+    in_file="$(grep -c 'PHASE_ID_SLUG' "$COMMANDS_DIR/execute.md" 2>/dev/null || echo 0)"
+    [ "$in_block" = "$in_file" ] \
+      || printf 'PHASE_ID_SLUG appears %s time(s) in execute.md but only %s inside the derivation block\n' \
+           "$in_file" "$in_block"
+  )"
+  assert_no_findings "$leaks" \
+    "Check 6 — the slugified phase id stays inside the derivation block" \
+    "Filesystem paths and --phase arguments must keep the raw \$PHASE_ID; only the branch name is slugified."
+}
+
+# ---------------------------------------------------------------------------
+# Check 7 — execute.md's verification_failed re-verify branch (issue #90).
+#
+# Measured yield: 4 of the 6 assertions fail on the pre-fix tree (7a, 7b, 7c
+# and 7d — 7c naming 5 of its 7 missing tokens), 0 on the fixed tree.
+# Demonstrated by reverting only execute.md. 7e and 7f are invariants that
+# hold on both trees by design: they exist to catch a *future* edit that adds
+# a claim release to the new branch, drops the one the STOP still needs, or
+# rewords away the re-run instruction the branch was written to honor.
+#
+# WHY THIS ONE IS STATIC PROSE MATCHING, NOT AN EXECUTED BLOCK
+#
+# The defect is a missing *control-flow branch* written in prose, not a wrong
+# value produced by a block. A phase that reaches verification_failed has zero
+# pending stories by construction, so Step 3's zero-pending case released the
+# claim, printed "All stories already complete!" and STOPped ~900 lines before
+# Phase Completion — the only place creates verification re-runs. The phase
+# stayed stuck forever and every dependent phase stayed blocked, while the
+# verification-failure report told the user to re-run /aimi:execute to
+# re-verify, which is exactly what could not work. Nothing executable was
+# wrong; a decision the file never made was missing. So this check asserts the
+# branch's *structure*: that the entry status is captured where it is still
+# recoverable, that the gate is decided before the release-and-STOP, and that
+# the branch adds no claim release of its own.
+#
+# The claim-release count is the load-bearing half. Step 3 sits on the path
+# every /aimi:execute run takes, and the new branch is NOT a STOP: Phase
+# Completion owns the release on both of its outcomes. A release added here
+# would hand the phase to a racing session mid-verification, and a release
+# removed from the existing STOP would leak a claim on every already-complete
+# phase-mode run. Exactly one, below the gate, is the whole contract.
+# ---------------------------------------------------------------------------
+check_reverify_branch() {
+  local md="$COMMANDS_DIR/execute.md"
+  local id rel start heading body matches="" block findings=""
+
+  # --- The capture: Step 1.7's on-success extraction block ------------------
+  # PHASE_ENTRY_STATUS must be read off the claim JSON there, because Step 1.7
+  # transitions the phase to in_progress within the same step — after that, no
+  # roadmap-get can recover the status the phase was claimed in.
+  while IFS=$'\t' read -r id rel start heading; do
+    [ -n "$id" ] || continue
+    [ "$rel" = "execute.md" ] || continue
+    body="$(cat "$BLOCKS_DIR/$id.sh" 2>/dev/null)"
+    case "$body" in
+      *'PHASE_ENTRY_STATUS='*) matches="$matches$id " ;;
+    esac
+  done < "$INDEX"
+
+  assert_eq "1" "$(printf '%s' "$matches" | wc -w | tr -d ' ')" \
+    "Check 7a — exactly one block in execute.md assigns PHASE_ENTRY_STATUS"
+
+  block="$BLOCKS_DIR/$(printf '%s' "$matches" | awk '{print $1}').sh"
+  if [ -f "$block" ]; then
+    [ "$(grep -cF 'PHASE_ENTRY_STATUS=' "$block")" = "1" ] \
+      || findings="$findings assigned more than once inside its own block"$'\n'
+    grep -qF 'PHASE_BRANCH=' "$block" && grep -qF 'PHASE_DIR=' "$block" \
+      || findings="$findings not in Step 1.7's claim-JSON extraction block (no PHASE_DIR/PHASE_BRANCH beside it)"$'\n'
+    grep -F 'PHASE_ENTRY_STATUS=' "$block" | grep -qF 'CLAIM_JSON' \
+      || findings="$findings not read from CLAIM_JSON — a later roadmap-get reports in_progress, not the entry status"$'\n'
+    grep -F 'PHASE_ENTRY_STATUS=' "$block" | grep -q '\.status // ""' \
+      || findings="$findings missing the .status // \"\" default — a status-less phase would yield the string null"$'\n'
+  else
+    findings="$findings PHASE_ENTRY_STATUS is never assigned in any bash block"$'\n'
+  fi
+
+  assert_no_findings "$(printf '%s' "$findings")" \
+    "Check 7b — PHASE_ENTRY_STATUS is captured once, from the claim JSON, in Step 1.7" \
+    "Step 1.7's own in_progress transition destroys the entry status; this block is the only place it can be read."
+
+  # --- The branch: Step 3's zero-pending case -------------------------------
+  local slice start_line gate_line rel_line msg_line rel_count gate_region
+  slice="$(awk '
+    /^## Step 3: Check for Pending Stories$/ { inside = 1 }
+    inside                                   { print }
+    inside && /^### Validate Dependencies$/  { exit }
+  ' "$md")"
+
+  start_line="$(printf '%s\n' "$slice" | grep -n 'If result is' | head -1 | cut -d: -f1)"
+  gate_line="$(printf '%s\n' "$slice" | grep -nF 'PHASE_ENTRY_STATUS' | head -1 | cut -d: -f1)"
+  rel_line="$(printf '%s\n' "$slice" | grep -nF 'roadmap-release-claim' | head -1 | cut -d: -f1)"
+  # -x: the report line itself, not the prose above it that quotes the string.
+  msg_line="$(printf '%s\n' "$slice" | grep -nxF 'All stories already complete!' | head -1 | cut -d: -f1)"
+  rel_count="$(printf '%s\n' "$slice" | grep -cF 'roadmap-release-claim')"
+
+  gate_region=""
+  if [ -n "$start_line" ] && [ -n "$rel_line" ] && [ "$rel_line" -gt "$start_line" ]; then
+    gate_region="$(printf '%s\n' "$slice" | sed -n "${start_line},$((rel_line - 1))p")"
+  fi
+
+  # The gate is a five-condition conjunction; dropping any one of them either
+  # re-breaks a working path or fires the branch where it must not.
+  local tok gate_findings=""
+  for tok in 'count-pending' 'PHASE_MODE' 'PHASE_ID' 'PHASE_SPLIT_MODE' \
+             'PHASE_ENTRY_STATUS' 'verification_failed' 'Phase Completion'; do
+    printf '%s\n' "$gate_region" | grep -qF "$tok" \
+      || gate_findings="$gate_findings the re-verify branch never names $tok"$'\n'
+  done
+  assert_no_findings "$(printf '%s' "$gate_findings")" \
+    "Check 7c — the re-verify branch states its full gate and where it continues to" \
+    "All five conditions plus the Phase Completion destination must be written down above the release-and-STOP."
+
+  local ordering="false"
+  if [ -n "$gate_line" ] && [ -n "$rel_line" ] && [ -n "$msg_line" ] \
+     && [ "$gate_line" -lt "$rel_line" ] && [ "$rel_line" -lt "$msg_line" ]; then
+    ordering="true"
+  fi
+  assert_eq "true" "$ordering" \
+    "Check 7d — the re-verify branch is decided before Step 3's release-and-STOP"
+
+  assert_eq "1" "$rel_count" \
+    "Check 7e — Step 3's zero-pending case releases the claim exactly once (the re-verify branch adds none)"
+
+  # The failure report tells the user to re-run to re-verify. That sentence is
+  # what the branch above makes true; if it is ever reworded away, the branch
+  # has lost the instruction it exists to honor.
+  local sentence_finding=""
+  grep -qF 'then re-run /aimi:execute to re-verify — creates verification re-runs' "$md" \
+    || sentence_finding="the verification-failed report no longer tells the user to re-run /aimi:execute to re-verify"
+  assert_no_findings "$sentence_finding" \
+    "Check 7f — the verification-failed report's re-run instruction is intact" \
+    "Step 3's re-verify branch exists to make that sentence true; keep them in sync."
+}
+
+# Check 8 — plan.md's branchName derivations use the dot-slugified phase id.
+#
+# Measured yield: 2 hits on the pre-fix tree (the branch-context raw-id leg
+# reporting all 6 occurrences, and the three-shapes leg reporting all 3
+# missing), 0 on the fixed tree, 0 false positives on either.
+#
+# WHY THIS IS WEAKER THAN CHECK 6, AND WHY IT IS STILL THE RIGHT SHAPE HERE
+#
+# plan.md has the same defect check 6 guards in execute.md: it built
+# metadata.branchName from the raw ${SELECTED_PHASE_ID}, then validated the
+# result against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` -- no dot -- and its own Phase 4
+# failure row says "report the invalid branch name and STOP". So a decimal
+# phase could not be planned, one command upstream of the execute.md failure.
+#
+# But check 6's approach is UNAVAILABLE here, and that is a fact about the
+# file, not a shortcut. All six of plan.md's branchName derivations are PROSE
+# instructing the agent what to compute -- verified by running plan.md through
+# this file's own fence-state machine: every one reports PROSE, none is inside
+# a ```bash fence. There is no block to extract and execute, so this check
+# asserts what the INSTRUCTION SAYS, not what the code DOES. It cannot catch an
+# agent that reads correct prose and computes the wrong thing. Do not read a
+# green run here as the guarantee check 6 provides.
+#
+# The discriminator between a branch and a path is the `type/` prefix: a branch
+# reads `type/${featureSlug}-phase-...`, a tasks-file path reads
+# `${featureSlug}-phase-...-tasks.json` with no `type/`. That is what keeps leg
+# 1 off plan.md's legitimate raw-id path at the TASKS_PATH assignment, which is
+# a real bash block and must keep the dot.
+# ---------------------------------------------------------------------------
+check_plan_branchname_slugified() {
+  local plan="$COMMANDS_DIR/plan.md"
+  local raw_branch missing shape kept widened
+
+  if [ ! -f "$plan" ]; then
+    assert_eq "found" "missing" "Check 8 — plan.md is readable"
+    return 0
+  fi
+
+  # Leg 1 -- no branchName derivation may interpolate the RAW id. The `type/`
+  # prefix is what makes an occurrence a branch rather than a filesystem path.
+  raw_branch="$(grep -nF 'type/${featureSlug}-phase-${SELECTED_PHASE_ID}' "$plan" \
+    | cut -c1-160 | sed 's/^/plan.md:/')"
+  assert_no_findings "$raw_branch" \
+    "Check 8 — no plan.md branchName derivation interpolates the raw phase id" \
+    "A decimal phase id yields '...-phase-5.5-...', which plan.md's own Phase 4 rule rejects and STOPs on. Use \${SELECTED_PHASE_ID_SLUG}."
+
+  # Leg 2 -- all three derivation shapes must carry the slugified symbol, so a
+  # partial fix (flat done, splits missed) fails instead of passing quietly.
+  missing=""
+  while IFS='|' read -r shape pattern; do
+    [ -n "$pattern" ] || continue
+    grep -qF "$pattern" "$plan" \
+      || missing="$missing$shape shape not found with the slugified id: $pattern"$'\n'
+  done <<'SHAPES'
+non-split|type/${featureSlug}-phase-${SELECTED_PHASE_ID_SLUG}-${PHASE_SLUG}`
+SIDE-axis|type/${featureSlug}-phase-${SELECTED_PHASE_ID_SLUG}-${PHASE_SLUG}-frontend
+PROJECT-axis|type/${featureSlug}-phase-${SELECTED_PHASE_ID_SLUG}-${PHASE_SLUG}-<project-slug>
+SHAPES
+  assert_no_findings "$(printf '%s' "$missing")" \
+    "Check 8 — all three branchName shapes (non-split, SIDE, PROJECT) use the slugified id" \
+    "Every shape must be fixed; a decimal phase reaches the split shapes too."
+
+  # Leg 3 -- the mirror of check 6's confinement assert. Filesystem paths must
+  # KEEP the raw id: execute.md reads these exact basenames with the dot, so
+  # slugifying them here would silently break the pair.
+  kept=""
+  for pattern in \
+    '${featureSlug}-phase-${SELECTED_PHASE_ID}-tasks.json' \
+    '${featureSlug}-phase-${SELECTED_PHASE_ID}-frontend-tasks.json' \
+    '${featureSlug}-phase-${SELECTED_PHASE_ID}-<project-slug>-tasks.json'
+  do
+    grep -qF "$pattern" "$plan" \
+      || kept="$kept tasks-file path lost its raw id: $pattern"$'\n'
+  done
+  assert_no_findings "$(printf '%s' "$kept")" \
+    "Check 8 — plan.md's tasks-file paths still carry the raw phase id" \
+    "These name real on-disk files that carry the dot, and execute.md reads them with the raw id."
+
+  # Leg 4 -- the fix conforms the value; it must never widen the regex.
+  widened="$(grep -nE '"branchName".*regex:.*\[a-zA-Z0-9[^]]*\\?\.' "$plan" | cut -c1-160)"
+  assert_no_findings "$widened" \
+    "Check 8 — plan.md's branchName regex was not widened to admit a dot" \
+    "Conform the derived value instead; this regex is shared with execute.md and aimi-cli.sh's _ROADMAP_BRANCH_REGEX."
+}
+
+# ---------------------------------------------------------------------------
 # The baseline is only honest if it shrinks. An entry that no longer matches
 # anything means the underlying issue was fixed (or a heading was renamed) and
 # the line must go, otherwise the baseline slowly becomes a permanent excuse.
@@ -513,6 +831,9 @@ main() {
   check_loop_scope
   check_unassigned
   check_argument_gate_same_block
+  check_phase_branch_derivation
+  check_reverify_branch
+  check_plan_branchname_slugified
 
   echo ""
   echo "--- Baseline Hygiene ---"

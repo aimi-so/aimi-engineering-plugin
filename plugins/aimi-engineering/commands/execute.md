@@ -120,7 +120,7 @@ Read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Creat
 
 ## Release the Claim on Abort
 
-This section is the single source of truth for releasing a phase's `roadmap-claim` when a phase-mode session (Step 1.7 onward) stops without reaching the normal completion path (**Mark Phase Completed** in Phase Completion, which already releases the claim atomically as part of its `completed` status write). Every other STOP/abort in phase mode, once this session has successfully claimed a phase, releases the claim first. There are no exceptions: a session that has stopped acting on a phase is no longer "actively working" it, and `roadmap-claim`'s own auto-mode branch already treats any *unclaimed* `pending`/`planned`/`in_progress`/`verification_failed` phase as re-claimable (lowest id among dependency-eligible candidates) — so an unclaimed phase, whatever its status, is cleanly recoverable by a plain `/aimi:execute` re-run, self or otherwise. Holding the claim past this session's own stop only forces that recovery to wait on PID-liveness staleness instead of being immediate.
+This section is the single source of truth for releasing a phase's `roadmap-claim` when a phase-mode session (Step 1.7 onward) stops without reaching the normal completion path (**Mark Phase Completed** in Phase Completion, which already releases the claim atomically as part of its `completed` status write). Every other STOP/abort in phase mode, once this session has successfully claimed a phase, releases the claim first. There are no exceptions: a session that has stopped acting on a phase is no longer "actively working" it, and `roadmap-claim`'s own auto-mode branch already treats any *unclaimed* `pending`/`planned`/`in_progress`/`verification_failed` phase as re-claimable (among dependency-eligible candidates, ordered by remaining work first and lowest id second) — so an unclaimed phase, whatever its status, is cleanly recoverable by a plain `/aimi:execute` re-run, self or otherwise. Holding the claim past this session's own stop only forces that recovery to wait on PID-liveness staleness instead of being immediate. The work-first ordering **demotes, never excludes**: a phase with nothing left to run — a `verification_failed` phase awaiting re-verification, or a session that crashed after its last story — waits behind any phase that still has pending work, and is claimed as soon as it is the only dependency-eligible candidate. That wait is bounded by the with-work phases completing; a dependency-eligible phase that keeps failing keeps its work and can starve the stuck phase indefinitely in auto mode, in which case `/aimi:execute --phase <N>` reaches it directly, unranked.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -913,7 +913,10 @@ PHASE_ID=$(printf '%s' "$CLAIM_JSON" | jq -r '.id')
 PHASE_DIR=$(printf '%s' "$CLAIM_JSON" | jq -r '.dir')
 PHASE_SLUG=$(printf '%s' "$CLAIM_JSON" | jq -r '.slug // ""')
 PHASE_BRANCH=$(printf '%s' "$CLAIM_JSON" | jq -r '.branch // ""')
+PHASE_ENTRY_STATUS=$(printf '%s' "$CLAIM_JSON" | jq -r '.status // ""')
 ```
+
+`PHASE_ENTRY_STATUS` is the phase's **entry status** — its `roadmap.json` status as it stood at claim time, before this session touched it. It must be captured here, in this block, and nowhere else. `roadmap-claim` mutates only the `.claim` sub-object and never drives status itself (see the transition call further down this same step, which is the one and only status-mutating call), so the `.status` field on the returned phase object is the pre-claim value and is trustworthy. Moments later that same step transitions the phase to `in_progress`, so **every** later `roadmap-get` — including Phase Completion's own — reports `in_progress`, and the entry status is permanently unrecoverable from that point on. A phase re-entered after a failed creates verification is the case that needs it: `verification_failed` survives only in this variable. The `// ""` default keeps a roadmap object with no `status` field yielding an empty string rather than the literal text `null`, so a comparison against `verification_failed` can never accidentally match a stringified absence. Like `PHASE_ID`, it does not survive across Bash tool calls; the orchestrator carries it forward the same way it carries every other value this step extracts.
 
 `FEATURE_TYPE` must come from this phase's own tasks file, not the mtime-discovered `$TASKS_PATH` from Step 1 — a feature with multiple materialized phase tasks files could have a more-recently-touched sibling phase file win that mtime race, leaking the sibling's `type` into this phase's branch prefix. `PHASE_TASKS_PATH` itself isn't resolved until **Point the session at this phase's own tasks file** below, so read directly from the same path that section computes, tolerating the file not existing yet (a not-yet-planned phase, or a full-stack split phase with no single governing file):
 
@@ -922,14 +925,19 @@ FEATURE_TYPE=$(jq -r '.metadata.type // "feat"' "$AIMI_ROOT/.aimi/tasks/$FEATURE
 FEATURE_TYPE="${FEATURE_TYPE:-feat}"
 ```
 
-If `PHASE_BRANCH` is empty (the phase carries no pre-assigned `.branch`), compute it from the `type/<feature>-phase-<N>-<slug>` convention. `PHASE_SLUG` can itself be empty (a phase with no slug); when it is, drop the trailing `-` rather than emitting a branch name that ends in one:
+If `PHASE_BRANCH` is empty (the phase carries no pre-assigned `.branch`), compute it from the `type/<feature>-phase-<N>-<slug>` convention. `PHASE_SLUG` can itself be empty (a phase with no slug); when it is, drop the trailing `-` rather than emitting a branch name that ends in one.
+
+The branch name is built from a **dot-slugified copy** of the phase id (`.` → `-`), never from the raw `$PHASE_ID`. Phase ids are legitimately decimal — `roadmap-init` accepts `5.5` and composes `.dir` from the raw value, and `/aimi:plan` renders the id exactly as its numeric frontmatter value — but the validation regex directly below has no dot in its character class, and neither does aimi-cli.sh's own `_ROADMAP_BRANCH_REGEX`, which enforces that same shape on a roadmap's `.branch` at write time. Interpolating the raw id here yielded `...-phase-5.5-...`, which this section then rejected seven lines later, released the claim and STOPped — so every decimal-id phase whose `.branch` was null could not be executed at all.
+
+The slugifying is confined to this one derivation. Every filesystem path (`$FEATURE-phase-$PHASE_ID-tasks.json`, and the split-basename prefix strip that mirrors it) and every `--phase "$PHASE_ID"` argument keeps the **raw** id: those name real on-disk files that carry the dot, and match `roadmap.json`'s own numeric id. An id with no dot slugifies to itself, so every integer-id phase keeps the exact branch name it has today. The slugified copy is derived inside the same block that interpolates it — blocks run in isolated shells and do not share state, so it cannot be computed in an earlier one.
 
 ```bash
 if [ -z "$PHASE_BRANCH" ]; then
+  PHASE_ID_SLUG=$(printf '%s' "$PHASE_ID" | tr '.' '-')
   if [ -z "$PHASE_SLUG" ]; then
-    PHASE_BRANCH="${FEATURE_TYPE}/${FEATURE}-phase-${PHASE_ID}"
+    PHASE_BRANCH="${FEATURE_TYPE}/${FEATURE}-phase-${PHASE_ID_SLUG}"
   else
-    PHASE_BRANCH="${FEATURE_TYPE}/${FEATURE}-phase-${PHASE_ID}-${PHASE_SLUG}"
+    PHASE_BRANCH="${FEATURE_TYPE}/${FEATURE}-phase-${PHASE_ID_SLUG}-${PHASE_SLUG}"
   fi
 fi
 ```
@@ -2188,6 +2196,35 @@ $AIMI_CLI count-pending
 ```
 
 If result is `0`:
+
+**Re-verify branch — a phase that entered `verification_failed` with nothing left to execute.** Evaluate this branch **first**, before the release-and-STOP below. It fires only when **all five** of these hold together:
+
+1. `count-pending` returned `0` (this is the `If result is 0` case, so it already holds here);
+2. `PHASE_MODE=true`;
+3. `$PHASE_ID` is set — the session itself ran Step 1.7, which is never true inside a Phase-Mode Paired Split sub-orchestrator, since one never learns `$PHASE_ID`;
+4. `PHASE_SPLIT_MODE=false`;
+5. `PHASE_ENTRY_STATUS` equals the literal string `verification_failed` (captured in Step 1.7's on-success extraction block — the only surviving witness of the entry status, since the `in_progress` transition in that same step overwrote it in `roadmap.json`).
+
+**If any single one of the five is false, fall through to the unchanged path below** — flat mode, flat container mode, a phase entered as `pending`/`planned`/`in_progress`, and a split sub-orchestrator with no `$PHASE_ID` all behave exactly as they do today, with no observable difference.
+
+When it fires: do **not** release the claim, do **not** print `All stories already complete!`, and do **not** STOP. Report the block below, then **skip Validate Dependencies, Steps 3.1, 3.2, 3.3 and 3.4, and all of Step 4**, and continue directly into the **Phase Completion** section.
+
+```
+Phase [PHASE_ID] has 0 pending stories but entered this run as
+verification_failed — every story is done, the phase's creates verification
+is what failed.
+
+Re-verifying branch [PHASE_BRANCH] instead of stopping. Skipping the wave
+loop (nothing to execute) and continuing straight to phase verification.
+```
+
+**Why this is not a STOP, and why the claim stays held.** Phase Completion owns the release on *both* of its outcomes: Mark Phase Completed releases atomically on success, and Creates Verification's `On any missing entry` path sets `verification_failed` again and releases on a repeat failure. Releasing here would hand the phase to a racing session in the middle of its own verification. Every *other* phase-mode STOP in Step 3 — the `All stories already complete!` STOP below and Validate Dependencies' failure STOP — keeps its existing release-first call unchanged.
+
+**Why skipping those steps is safe.** Phase Completion consumes nothing they produce: it re-fetches `PHASE_JSON`/`PHASE_NAME` from its own `roadmap-get` call, Creates Verification derives `PARTICIPATING_GROUP_KEYS` fresh from the phase's own tasks file and recomputes each participating repository's container as that repository's toplevel plus `.worktrees/$PHASE_BRANCH` rather than reusing anything from Step 1.7, and `$WORKTREE_MGR` is re-resolved inline where Mark Phase Completed needs it. `MAX_CONCURRENCY` (Step 3.2), the project guidelines (Step 3.3) and `VISUAL_URL` (Step 3.4) have no reader in Phase Completion or Step 5 on this path.
+
+**No `init-session` re-run is added here.** Step 1.7's **Point the session at this phase's own tasks file** already pointed session state at `$PHASE_TASKS_PATH`, and the `count-pending` that just returned `0` is the proof that it did — Phase Completion's own bare `count-pending` (Multi-File Pending Count, `PHASE_SPLIT_MODE=false` branch) reads that same session state, gets the same `0`, and its "pending count is greater than 0" abort branch is therefore not taken.
+
+This mirrors an already-supported route rather than inventing a new one: Phase-Mode Paired Split already continues to Phase Completion with `PHASE_ACTIVE_COUNT` of `0` — every member already completed, nothing spawned — precisely because Phase Completion is what re-runs the pending-count and creates-verification checks. This branch extends that same behavior to the non-split path. Condition 4 is belt-and-braces: a split phase's top-level orchestrator never reaches Step 3 at all (Step 1.7 routes `PHASE_SPLIT_MODE=true` to Phase-Mode Paired Split instead of Step 2), so the load-bearing conditions here are 3 and 5.
 
 **When `PHASE_MODE=true` and `$PHASE_ID` is set** (this session itself ran Step 1.7 — never true inside a Phase-Mode Paired Split sub-orchestrator, which never learns `$PHASE_ID`), release the claim first (see Release the Claim on Abort):
 
@@ -3616,6 +3653,8 @@ ROADMAP_SWEEP_REPORT=$($AIMI_CLI roadmap-sweep "$FEATURE")
 `ROADMAP_SWEEP_REPORT` is rendered as a `## Roadmap Sweep` section in Step 5's final summary (see below). No next-phase offer of any kind is shown.
 
 **Otherwise**, `NEXT_ELIGIBLE_JSON` is the next eligible phase object; extract `NEXT_PHASE_ID=$(printf '%s' "$NEXT_ELIGIBLE_JSON" | jq -r '.id')`.
+
+The phase named here is whichever one `roadmap-get --next-eligible` selects, and that is **not necessarily the lowest-numbered** eligible phase: the verb ranks dependency-eligible candidates by remaining work first — every candidate with pending stories ahead of every candidate without — and only then by ascending id. A phase whose stories are all complete is therefore offered *after* a higher-numbered phase that still has work, even though its id is lower. When every eligible candidate has work the ordering collapses to ascending id, which is why this offer is unchanged for the common case. Do not reword this prompt to promise the "next" or "lowest" phase.
 
 - **Interactive mode** (`$AIMI_CLI detect-interactivity` = `picker`): use **AskUserQuestion** with exactly two options:
   ```

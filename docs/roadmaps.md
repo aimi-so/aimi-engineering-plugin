@@ -46,6 +46,10 @@ The cut criteria, applied in order:
 
 `areas` are coarse globs. They exist so overlapping phases can be flagged before anyone writes code.
 
+A phase's contract is correctable after the fact. Nothing in the roadmap has to be right the first time: `goal`, `successCriteria`, `creates`, `needs`, `areas` and `branch` can each be rewritten on an existing phase, at any status, including one already completed — repairing a finished phase's declared artifacts is one of the reasons the correction path exists. Everything else about the phase is left exactly as it was, and so is every other phase.
+
+The one thing a correction will not do quietly is break a contract someone downstream is relying on. If you rename or remove a `creates` entry that a later phase names in its `needs`, the edit is refused and you are told which phases still cite it. You then either leave the identity alone or say explicitly what replaces it — and when you do, the provider's new wording and every consumer's `needs` are rewritten together, in one write, so the two sides never drift apart in between. An amendment that would make two phases claim to create the same thing is refused for the same reason: the roadmap's own validator rejects that, and planning stops.
+
 ---
 
 ## The approval gate

@@ -96,6 +96,24 @@ per kind:
 
 Every entry uses the string format `"<artifact-name> (<one-line description>)"`.
 
+**The artifact name must be a single token.** It is searched as a literal string,
+so it has to be a symbol, a path, a table name, or the `METHOD /path` endpoint
+form — that endpoint form is the *only* shape with a space in it that is
+accepted, and only with exactly one space before the `/`. `roadmap-init` refuses
+an entry whose name carries whitespace and names the phase, the list and the
+entry when it does. Write `_forge_account_override` or
+`services/forge/account.ts`, never `account override applied inside the forge
+command surface`. The reason is mechanical rather than stylistic: verification
+searches tracked source for that literal, and a multi-word phrase can only match
+prose — a comment or a string — while documentation, the one place such a phrase
+plausibly appears, is already excluded from the search. A whitespace-bearing
+name is therefore either unfindable or findable only in a comment.
+
+Passing this check proves the name is the *kind* of string a search can resolve.
+It never proves the artifact will exist: `cmd_forge_nonexistent` passes, and so
+does a prose phrase hyphen-joined into one token. At declaration time the
+artifact has not been built, so only shape can be judged.
+
 Contracts are checked deterministically, never by LLM judgment alone: a phase's
 `creates` entries are verified to exist in code at that phase's close, and a
 phase's `needs` entries are checked against prior phases' fulfilled `creates` at
@@ -118,8 +136,12 @@ first step that finds the artifact ends the search.
    `/` — the `METHOD /path` form in the table above — is stripped, so
    `POST /api/notifications` is searched as `/api/notifications`. Real code
    writes `router.post('/api/notifications', …)` and never the method-plus-path
-   literal. Nothing else is stripped: `DELETE user_sessions` is a table-shaped
-   identity and is searched whole.
+   literal. Nothing else is stripped, and the shape is exact: the method must be
+   followed by a single space and then a `/`. `POST  /api/x` with two spaces is
+   not that form and would be searched whole, which is why `roadmap-init` refuses
+   it rather than letting it reach a search it cannot survive. A method token
+   *not* followed by a slash is not an endpoint either — it would be searched
+   whole, carry a space, and so is refused at write time as well.
 3. **Text in source.** Whatever is left is matched as a literal string across
    tracked files, with documentation (`*.md`, `docs/`, `README*`), tests
    (`*_test.*`, `tests/`, `__tests__/`) and `.aimi/` excluded, and with lines
@@ -129,15 +151,21 @@ first step that finds the artifact ends the search.
    exclusions are bypassed for that entry — there the docs page *is* the
    artifact.
 
-This is guidance about verification strength, not a naming rule. `roadmap-init`
+This is guidance about verification *strength*, which is not judged. `roadmap-init`
 accepts a bare name such as `notifications` exactly as the table above
 prescribes, and the close check verifies it — via step 3 rather than step 1.
 Knowing which step an identity will take tells you how much a pass proves: a
 tracked path is direct evidence the artifact exists at that location, while a
 bare name is evidence that the name appears in non-documentation, non-test
-source. Neither `roadmap-init` nor the close check prefers one shape over
-another, and at declaration time an author often cannot know the eventual path —
-a wrong guessed path fails at close for a reason nobody can debug.
+source. Neither `roadmap-init` nor the close check prefers one of those shapes
+over the other, and at declaration time an author often cannot know the eventual
+path — a wrong guessed path fails at close for a reason nobody can debug.
+
+Exactly one shape *is* judged, and it is not about strength: an artifact name
+carrying whitespace in the token that will be searched is refused at write time,
+because no search this verb can run would ever resolve it (see the single-token
+rule above). Everything else — how specific the name is, how likely it is to
+exist, whether it looks like a path — is left to the author.
 
 One limit applies to every step: git sees tracked files only, so work that is
 not committed on the phase branch reads as missing. Every `missing` verdict says
