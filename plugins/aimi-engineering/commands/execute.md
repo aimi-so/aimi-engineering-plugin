@@ -3654,6 +3654,8 @@ ROADMAP_SWEEP_REPORT=$($AIMI_CLI roadmap-sweep "$FEATURE")
 
 **Otherwise**, `NEXT_ELIGIBLE_JSON` is the next eligible phase object; extract `NEXT_PHASE_ID=$(printf '%s' "$NEXT_ELIGIBLE_JSON" | jq -r '.id')`.
 
+The phase named here is whichever one `roadmap-get --next-eligible` selects, and that is **not necessarily the lowest-numbered** eligible phase: the verb ranks dependency-eligible candidates by remaining work first — every candidate with pending stories ahead of every candidate without — and only then by ascending id. A phase whose stories are all complete is therefore offered *after* a higher-numbered phase that still has work, even though its id is lower. When every eligible candidate has work the ordering collapses to ascending id, which is why this offer is unchanged for the common case. Do not reword this prompt to promise the "next" or "lowest" phase.
+
 - **Interactive mode** (`$AIMI_CLI detect-interactivity` = `picker`): use **AskUserQuestion** with exactly two options:
   ```
   Phase [PHASE_ID] is complete. Plan phase [NEXT_PHASE_ID] now?
