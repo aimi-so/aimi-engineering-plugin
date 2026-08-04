@@ -10995,6 +10995,16 @@ cmd_roadmap_claim() {
               end
             end
           end) as $outcome |
+          # INTERNAL envelope, never stdout. This attaches staleReleased to the
+          # $outcome wrapper ({claimed, phase, phases, reason...}) that the bash
+          # below destructures. Actual stdout is the SECOND `+ {staleReleased`
+          # further down -- `.phase + {staleReleased: .staleReleased}` -- and
+          # that one is the claim envelope execute.md Step 1.7 reads
+          # .id/.dir/.slug/.branch/.status off. So a grep for `+ {staleReleased`
+          # returns two hits, and always has; only the lower one is a contract.
+          # Projecting it would silently disable the re-verify branch in
+          # execute.md Step 3, which is why test-aimi-cli.sh pins all six of
+          # those fields on the auto path.
           $outcome + {staleReleased: $stale_released}
         ')
 
