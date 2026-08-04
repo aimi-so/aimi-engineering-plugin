@@ -922,14 +922,19 @@ FEATURE_TYPE=$(jq -r '.metadata.type // "feat"' "$AIMI_ROOT/.aimi/tasks/$FEATURE
 FEATURE_TYPE="${FEATURE_TYPE:-feat}"
 ```
 
-If `PHASE_BRANCH` is empty (the phase carries no pre-assigned `.branch`), compute it from the `type/<feature>-phase-<N>-<slug>` convention. `PHASE_SLUG` can itself be empty (a phase with no slug); when it is, drop the trailing `-` rather than emitting a branch name that ends in one:
+If `PHASE_BRANCH` is empty (the phase carries no pre-assigned `.branch`), compute it from the `type/<feature>-phase-<N>-<slug>` convention. `PHASE_SLUG` can itself be empty (a phase with no slug); when it is, drop the trailing `-` rather than emitting a branch name that ends in one.
+
+The branch name is built from a **dot-slugified copy** of the phase id (`.` → `-`), never from the raw `$PHASE_ID`. Phase ids are legitimately decimal — `roadmap-init` accepts `5.5` and composes `.dir` from the raw value, and `/aimi:plan` renders the id exactly as its numeric frontmatter value — but the validation regex directly below has no dot in its character class, and neither does aimi-cli.sh's own `_ROADMAP_BRANCH_REGEX`, which enforces that same shape on a roadmap's `.branch` at write time. Interpolating the raw id here yielded `...-phase-5.5-...`, which this section then rejected seven lines later, released the claim and STOPped — so every decimal-id phase whose `.branch` was null could not be executed at all.
+
+The slugifying is confined to this one derivation. Every filesystem path (`$FEATURE-phase-$PHASE_ID-tasks.json`, and the split-basename prefix strip that mirrors it) and every `--phase "$PHASE_ID"` argument keeps the **raw** id: those name real on-disk files that carry the dot, and match `roadmap.json`'s own numeric id. An id with no dot slugifies to itself, so every integer-id phase keeps the exact branch name it has today. The slugified copy is derived inside the same block that interpolates it — blocks run in isolated shells and do not share state, so it cannot be computed in an earlier one.
 
 ```bash
 if [ -z "$PHASE_BRANCH" ]; then
+  PHASE_ID_SLUG=$(printf '%s' "$PHASE_ID" | tr '.' '-')
   if [ -z "$PHASE_SLUG" ]; then
-    PHASE_BRANCH="${FEATURE_TYPE}/${FEATURE}-phase-${PHASE_ID}"
+    PHASE_BRANCH="${FEATURE_TYPE}/${FEATURE}-phase-${PHASE_ID_SLUG}"
   else
-    PHASE_BRANCH="${FEATURE_TYPE}/${FEATURE}-phase-${PHASE_ID}-${PHASE_SLUG}"
+    PHASE_BRANCH="${FEATURE_TYPE}/${FEATURE}-phase-${PHASE_ID_SLUG}-${PHASE_SLUG}"
   fi
 fi
 ```

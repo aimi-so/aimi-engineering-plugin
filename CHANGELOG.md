@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`/aimi:execute` can now run a decimal-numbered phase whose roadmap `branch` is null.** `commands/execute.md`'s **Claim the Phase** step interpolated the raw phase id into the derived branch name, then validated the result against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` seven lines later — a regex with no dot. A phase like `5.5` therefore derived `feat/<feature>-phase-5.5-<slug>`, failed the file's own validation, released the claim and STOPped, making every such phase impossible to execute. Decimal ids are intentional (`roadmap-init` accepts them and builds `.dir` from the raw value), so the fix slugifies the dot to a hyphen at the single point where the branch name is produced: the branch becomes `feat/<feature>-phase-5-5-<slug>`. Every other consumer keeps the raw id — the `<feature>-phase-<id>-tasks.json` paths name real files that carry the dot, and every `--phase` argument must match `roadmap.json`'s own numeric id. An id with no dot slugifies to itself, so integer-id phases keep byte-for-byte the branch names they have today, and a phase with a hand-filled `branch` is still passed through untouched. `scripts/test-command-blocks.sh` gains a check that executes the real derivation block out of `execute.md` against decimal/integer × present/empty-slug fixtures.
+
 ## [1.121.0] - 2026-08-04
 
 > Phase 1.1 of forge abstraction: remediation of the review findings raised against phase 1 (1.120.0), which has not yet reached `main`.

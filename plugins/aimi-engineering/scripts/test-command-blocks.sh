@@ -20,6 +20,15 @@ set -uo pipefail
 #   2. portability denylist (blocks may run under zsh, not just bash)
 #   3. loop-scope escape — assigned only inside a loop, read at loop depth 0
 #   4. read but never assigned anywhere in the same file
+#   5. $ARGUMENTS validated in the same block that interpolates it
+#   6. execute.md's phase-branch derivation, EXECUTED against fixtures
+#
+# Checks 1-5 are static. Check 6 is the first one that RUNS a block: it pulls
+# execute.md's phase-branch derivation out of the extracted set and executes it
+# against known inputs, asserting the exact branch name it produces. A static
+# check could not have caught the defect it guards — the block always parsed,
+# was always portable, and read nothing unassigned; it simply produced a value
+# the very next paragraph rejects.
 #
 # ADDRESSING
 #
@@ -470,6 +479,104 @@ check_argument_gate_same_block() {
 }
 
 # ---------------------------------------------------------------------------
+# Check 6 — execute.md's phase-branch derivation, executed against fixtures.
+#
+# Measured yield: 3 hits on the pre-fix tree (both decimal fixtures' exact
+# strings, plus the aggregate regex assert naming both), 0 on the fixed tree,
+# 0 false positives on either. Demonstrated by reverting only the derivation.
+#
+# WHY THIS ONE RUNS THE BLOCK
+#
+# execute.md derives PHASE_BRANCH from the phase id, then validates the result
+# against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` seven lines later. That regex has no
+# dot; phase ids are legitimately decimal. So a phase like 5.5 whose roadmap
+# `.branch` is null derived `feat/x-phase-5.5-slug`, failed the file's OWN
+# validation, released the claim and STOPped — unexecutable, with nothing in
+# any suite able to see it. The block parses, is portable, and reads nothing
+# unassigned; only its VALUE was wrong. Hence: execute it.
+#
+# The block is located by matching its body, never by a hardcoded index or
+# heading, so renaming the heading or adding a sibling block cannot silently
+# disable this check — it asserts it found exactly one.
+#
+# The confinement assert is the other half. The slugified id must reach the
+# branch name and NOTHING else: `$FEATURE-phase-$PHASE_ID-tasks.json` names
+# real files that carry the dot, and `--phase "$PHASE_ID"` must match
+# roadmap.json's own numeric id. Both keep the raw id.
+# ---------------------------------------------------------------------------
+PHASE_BRANCH_REGEX='^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'
+
+# Runs the located block in its own shell with the fixture pre-set, and echoes
+# whatever PHASE_BRANCH ends up as. PHASE_BRANCH starts empty on purpose — that
+# is the "roadmap .branch is null" case, the only one the block acts on.
+derive_phase_branch() {
+  local block="$1" phase_id="$2" phase_slug="$3"
+  PHASE_BRANCH="" FEATURE_TYPE="feat" FEATURE="caic-nestjs-port" \
+  PHASE_ID="$phase_id" PHASE_SLUG="$phase_slug" \
+    bash -c '. "$0"; printf "%s" "$PHASE_BRANCH"' "$block" 2>/dev/null
+}
+
+check_phase_branch_derivation() {
+  local id rel start heading body matches="" block actual expected findings=""
+  local fixture fid fslug
+
+  while IFS=$'\t' read -r id rel start heading; do
+    [ -n "$id" ] || continue
+    body="$(cat "$BLOCKS_DIR/$id.sh" 2>/dev/null)"
+    case "$body" in
+      *'PHASE_BRANCH="${FEATURE_TYPE}/${FEATURE}-phase-'*) matches="$matches$id " ;;
+    esac
+  done < "$INDEX"
+
+  assert_eq "1" "$(printf '%s' "$matches" | wc -w | tr -d ' ')" \
+    "Check 6a — exactly one block derives PHASE_BRANCH from FEATURE_TYPE/FEATURE"
+
+  block="$BLOCKS_DIR/$(printf '%s' "$matches" | awk '{print $1}').sh"
+  [ -f "$block" ] || return 0
+
+  # id|slug|expected branch. Decimal rows first — those are the regressions.
+  # The delimiter must NOT be a tab: tab is an IFS whitespace character, so
+  # bash collapses the two adjacent tabs of an empty-slug row into one and the
+  # row silently loses a field. That skipped both empty-slug fixtures when this
+  # was first written, and the check still reported green.
+  while IFS='|' read -r fid fslug expected; do
+    [ -n "$expected" ] || continue
+    fixture="id=$fid slug=${fslug:-<empty>}"
+    actual="$(derive_phase_branch "$block" "$fid" "$fslug")"
+    assert_eq "$expected" "$actual" "Check 6 — derivation for $fixture"
+    printf '%s' "$actual" | grep -qE "$PHASE_BRANCH_REGEX" \
+      || findings="$findings$fixture -> '$actual' fails ${PHASE_BRANCH_REGEX}"$'\n'
+  done <<'FIXTURES'
+5.5|identificacao-no-painel|feat/caic-nestjs-port-phase-5-5-identificacao-no-painel
+5.5||feat/caic-nestjs-port-phase-5-5
+5|identificacao-no-painel|feat/caic-nestjs-port-phase-5-identificacao-no-painel
+5||feat/caic-nestjs-port-phase-5
+FIXTURES
+
+  assert_no_findings "$(printf '%s' "$findings")" \
+    "Check 6 — every derived branch matches the regex execute.md validates against" \
+    "execute.md rejects this value itself seven lines below the derivation, releases the claim and STOPs."
+
+  # The slugified id is for the branch name only. Anywhere it touches a tasks
+  # file path or a --phase argument, the raw dot-bearing id was needed instead.
+  local leaks
+  leaks="$(
+    grep -n 'PHASE_ID_SLUG' "$COMMANDS_DIR/execute.md" 2>/dev/null \
+      | grep -E -- '-tasks\.json|--phase' \
+      | sed 's/^/execute.md:/'
+    # Outside the derivation block entirely (prose, or another block).
+    in_block="$(grep -c 'PHASE_ID_SLUG' "$block" 2>/dev/null || echo 0)"
+    in_file="$(grep -c 'PHASE_ID_SLUG' "$COMMANDS_DIR/execute.md" 2>/dev/null || echo 0)"
+    [ "$in_block" = "$in_file" ] \
+      || printf 'PHASE_ID_SLUG appears %s time(s) in execute.md but only %s inside the derivation block\n' \
+           "$in_file" "$in_block"
+  )"
+  assert_no_findings "$leaks" \
+    "Check 6 — the slugified phase id stays inside the derivation block" \
+    "Filesystem paths and --phase arguments must keep the raw \$PHASE_ID; only the branch name is slugified."
+}
+
+# ---------------------------------------------------------------------------
 # The baseline is only honest if it shrinks. An entry that no longer matches
 # anything means the underlying issue was fixed (or a heading was renamed) and
 # the line must go, otherwise the baseline slowly becomes a permanent excuse.
@@ -513,6 +620,7 @@ main() {
   check_loop_scope
   check_unassigned
   check_argument_gate_same_block
+  check_phase_branch_derivation
 
   echo ""
   echo "--- Baseline Hygiene ---"
