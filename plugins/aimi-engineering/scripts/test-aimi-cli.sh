@@ -20536,6 +20536,395 @@ test_forge_verb_stray_help_flag_parity() {
 }
 
 # ============================================================================
+# Forge Derivation Memo + PR-View Probe-Order Tests (phase 1.1 US-010)
+# ============================================================================
+# Two independent changes, measured independently because they do NOT
+# compound: the per-project-dir forge memo behind _detect_forge_type, and the
+# inverted gh pr list / gh pr view order in _forge_pr_view_github. For the
+# full forge-pr-create create-succeeds flow specifically the aggregate
+# gh-call count is UNCHANGED by the reordering alone (the existing-PR check
+# drops 2 to 1, the post-create re-read rises 1 to 2, exactly offsetting);
+# that flow's win comes entirely from the memo. Every count below is read
+# from a counter or log file, never asserted as "fewer".
+
+# Sources _detect_forge_type and everything it reaches into THIS process, so
+# the memo it populates is observable across calls -- the whole point of the
+# isolation test below. Follows source_cache_functions's eval-by-sed-range
+# pattern, and eval's the memo's own `declare -gA` line straight out of the
+# source rather than hand-redeclaring it here, so the test can never disagree
+# with the file about what that array is.
+source_detect_forge_type_functions() {
+  eval "$(sed -n '/^_detect_forge_parse_host()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_detect_forge_classify_host()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_detect_forge_select_remote_raw()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_detect_forge_read_selection()/,/^}/p' "$CLI")"
+  eval "$(grep '^declare -gA _DETECT_FORGE_TYPE_MEMO' "$CLI")"
+  eval "$(sed -n '/^_detect_forge_type()/,/^}/p' "$CLI")"
+}
+
+# Replaces <dir>/git with a wrapper that appends every `git remote ...`
+# invocation's arguments to <counter> and then exec's through to the REAL
+# git, unchanged. git's real absolute path is resolved BEFORE the wrapper is
+# written -- the same reason _path_without_binary resolves real paths first
+# rather than trusting PATH from inside a directory it is itself shadowing --
+# so the wrapper can never recurse into itself. Every other git invocation in
+# the flow (rev-parse --git-dir, checkout, commit, ...) passes straight
+# through and is not counted.
+#
+# <dir> is expected to be a setup_forge_cli_sandbox, whose `git` is a symlink
+# to the real binary; the rm is what keeps `cat >` from following that
+# symlink and trying to overwrite git itself.
+setup_git_remote_counter_shim() {
+  local dir="$1" counter="$2" real_git
+  real_git=$(command -v git)
+  : > "$counter"
+  rm -f "$dir/git"
+  cat > "$dir/git" << GIT_COUNTER_SHIM
+#!/usr/bin/env bash
+if [ "\$1" = "remote" ]; then
+  printf '%s\n' "\$*" >> "$counter"
+fi
+exec "$real_git" "\$@"
+GIT_COUNTER_SHIM
+  chmod +x "$dir/git"
+}
+
+test_detect_forge_type_never_builds_or_parses_json() {
+  echo ""
+  echo "=== _detect_forge_type: no jq token anywhere on its own path (AC1) ==="
+
+  # The whole point of the function is that the forge word costs no JSON
+  # round trip. _detect_forge, by contrast, builds its envelope with jq -nc
+  # -- so this grep is what distinguishes the new path from the old one
+  # rather than merely asserting it is faster.
+  local fn body
+  for fn in _detect_forge_type _detect_forge_read_selection _detect_forge_select_remote_raw \
+            _detect_forge_parse_host _detect_forge_classify_host; do
+    body=$(sed -n "/^$fn()/,/^}/p" "$CLI" | grep -v '^\s*#')
+    if [ -z "$body" ]; then
+      echo -e "${RED}✗${NC} _detect_forge_type jq-free: $fn is not defined in $CLI"
+      ((TESTS_FAILED++))
+      continue
+    fi
+    if printf '%s' "$body" | grep -q "jq"; then
+      echo -e "${RED}✗${NC} _detect_forge_type jq-free: $fn's body contains a jq token"
+      ((TESTS_FAILED++))
+    else
+      echo -e "${GREEN}✓${NC} _detect_forge_type jq-free: $fn's body contains no jq token"
+      ((TESTS_PASSED++))
+    fi
+  done
+
+  # ...and the control: the function this one exists to avoid DOES use jq,
+  # so the grep above is proven capable of failing.
+  if sed -n '/^_detect_forge()/,/^}/p' "$CLI" | grep -v '^\s*#' | grep -q "jq"; then
+    echo -e "${GREEN}✓${NC} _detect_forge_type jq-free: control -- _detect_forge itself does use jq, so the grep can fail"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} _detect_forge_type jq-free: control failed -- _detect_forge no longer uses jq, so the check above proves nothing"
+    ((TESTS_FAILED++))
+  fi
+}
+
+test_detect_forge_type_matches_detect_forge_across_fixtures() {
+  echo ""
+  echo "=== _detect_forge_type: agrees with detect-forge's own .forge on every fixture scenario (AC1) ==="
+
+  source_detect_forge_type_functions
+
+  # Every scenario the detect-forge suite above pins, run through BOTH the
+  # new jq-free path (in-process) and the shipped `detect-forge | jq -r
+  # .forge` path (subprocess), asserting they agree. This is what keeps the
+  # new function from becoming a second, silently-diverging implementation of
+  # the same precedence rules. Each case gets its OWN fixture directory, so
+  # no case can be answered out of the memo a previous case populated.
+  #
+  # Format: <label>|<expected>|<remote-name> <remote-url> [<name> <url> ...]
+  local cases=(
+    "https github|github|origin https://github.com/o/r.git"
+    "scp-like ssh github|github|origin git@github.com:o/r.git"
+    "explicit ssh:// gitlab|gitlab|origin ssh://git@gitlab.com/o/r.git"
+    "alternate-port ssh|github|origin ssh://git@github.com:2222/o/r.git"
+    "gitea host|gitea|origin https://gitea.com/o/r.git"
+    "codeberg is gitea|gitea|origin https://codeberg.org/o/r.git"
+    "github subdomain|github|origin git@ssh.github.com:o/r.git"
+    "lookalike suffix|unknown|origin https://notgithub.com/o/r.git"
+    "lookalike prefix|unknown|origin https://github.com.evil.example/o/r.git"
+    "origin wins over disagreement|github|origin https://github.com/o/r.git upstream https://gitlab.com/o/r.git"
+    "single non-origin remote|gitlab|fork https://gitlab.com/o/r.git"
+    "ambiguous remotes|unknown|alpha https://github.com/o/r.git beta https://gitlab.com/o/r.git"
+    "zero remotes|unknown|"
+  )
+
+  local case_entry label expected remotes direct subprocess
+  for case_entry in "${cases[@]}"; do
+    IFS='|' read -r label expected remotes <<< "$case_entry"
+
+    # shellcheck disable=SC2086 -- $remotes is a deliberate name/url word split
+    setup_detect_forge_fixture $remotes
+    pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+    direct=""
+    _detect_forge_type direct
+    subprocess=$("$CLI" detect-forge | jq -r '.forge')
+
+    assert_eq "$expected" "$direct" "detect-forge parity ($label): _detect_forge_type resolves $expected"
+    assert_eq "$subprocess" "$direct" "detect-forge parity ($label): the jq-free path agrees with detect-forge's own .forge"
+
+    popd >/dev/null
+    teardown_detect_forge_fixture
+  done
+
+  # The AIMI_FORGE_TYPE override, which short-circuits both paths before any
+  # git command runs at all.
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+  export AIMI_FORGE_TYPE=gitea
+  direct=""
+  _detect_forge_type direct
+  subprocess=$("$CLI" detect-forge | jq -r '.forge')
+  unset AIMI_FORGE_TYPE
+  assert_eq "gitea" "$direct" "detect-forge parity (AIMI_FORGE_TYPE override): override wins over the github remote"
+  assert_eq "$subprocess" "$direct" "detect-forge parity (AIMI_FORGE_TYPE override): both paths honor it identically"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_detect_forge_type_memo_is_keyed_per_project_dir() {
+  echo ""
+  echo "=== _detect_forge_type: the memo is keyed on the project dir -- two sibling repos, ONE process, two independent answers (AC2) ==="
+
+  # THE TEST THE REVIEW DEMANDED. Phase 1 deliberately does not cache
+  # detect-forge, and the reason is that sibling repositories under one
+  # multi-repo root must not leak forges into each other. A memo keyed on the
+  # resolved project directory preserves that; a global one silently destroys
+  # it. Everything below runs in THIS process -- no $CLI subprocess, no fork
+  # -- because a memo populated in a subshell would die with it and a global
+  # memo would then look indistinguishable from a keyed one.
+  source_detect_forge_type_functions
+  # Start from an empty memo: the parity test above runs in this same process
+  # and leaves its own per-fixture entries behind, which would make the entry
+  # COUNT asserted below meaningless. Re-eval'ing the `declare -gA` line does
+  # not clear an already-populated array, so clear it explicitly.
+  _DETECT_FORGE_TYPE_MEMO=()
+  setup_detect_forge_multirepo_fixture
+
+  local repo_a="$DETECT_FORGE_MULTIREPO_DIR/repo-a"
+  local repo_b="$DETECT_FORGE_MULTIREPO_DIR/repo-b"
+  local first="" second="" third=""
+
+  pushd "$repo_a" >/dev/null
+  _detect_forge_type first
+  popd >/dev/null
+
+  pushd "$repo_b" >/dev/null
+  _detect_forge_type second
+  popd >/dev/null
+
+  # Back to repo-a, which by now has been visited before AND has had a
+  # different repo classified in between. A single-slot memo answers gitlab
+  # here; a cwd-keyed one answers github.
+  pushd "$repo_a" >/dev/null
+  _detect_forge_type third
+  popd >/dev/null
+
+  assert_eq "github" "$first"  "memo isolation: repo-a's own forge, first visit"
+  assert_eq "gitlab" "$second" "memo isolation: repo-b answers gitlab in the SAME process -- repo-a's answer did not leak into it"
+  assert_eq "github" "$third"  "memo isolation: returning to repo-a still reads github -- the memo did not degrade into 'whichever repo was classified most recently'"
+
+  # A memo that is keyed but never actually populated would pass every
+  # assertion above while doing all three derivations for real. Reading the
+  # array directly is what pins BOTH halves: two entries (so it memoized at
+  # all) under the two repositories' own paths (so it memoized per-directory).
+  assert_eq "2" "${#_DETECT_FORGE_TYPE_MEMO[@]}" "memo isolation: exactly two memo entries -- one per project dir visited, not one global slot"
+  assert_eq "github" "${_DETECT_FORGE_TYPE_MEMO[$repo_a]:-MISSING}" "memo isolation: the memo entry keyed on repo-a's own path holds github"
+  assert_eq "gitlab" "${_DETECT_FORGE_TYPE_MEMO[$repo_b]:-MISSING}" "memo isolation: the memo entry keyed on repo-b's own path holds gitlab"
+
+  teardown_detect_forge_multirepo_fixture
+  unset _DETECT_FORGE_TYPE_MEMO
+}
+
+test_forge_pr_create_derives_forge_once_per_process() {
+  echo ""
+  echo "=== forge-pr-create: a full create-a-new-PR run derives the forge ONCE, measured by a git-remote counter (AC3) ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  local counter="$sandbox/git-remote-calls.log"
+  setup_git_remote_counter_shim "$sandbox" "$counter"
+
+  # Same shape as test_forge_pr_create_new_pr's fixture: no PR before
+  # creation, the created PR visible to both gh pr list and gh pr view
+  # afterward, so the run takes the full create-succeeds path (pre-create
+  # existing-PR check -> gh pr create -> post-create re-read confirms found).
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+FLAG="$(dirname "$0")/pr_created.flag"
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  if [ -f "$FLAG" ]; then
+    echo '{"url":"https://github.com/owner/repo/pull/101","number":101}'
+    exit 0
+  fi
+  echo "no pull requests found for branch" >&2
+  exit 1
+fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  if [ -f "$FLAG" ]; then echo '[{"number":101}]'; else echo '[]'; fi
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  : > "$FLAG"
+  echo "https://github.com/owner/repo/pull/101"
+  exit 0
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body") && exit_code=0 || exit_code=$?
+
+  # The run must genuinely have taken the create-succeeds path -- a counter
+  # of 1 would also be what a run that failed early produced.
+  assert_exit_code "0" "$exit_code" "forge derivation count: the measured run exits 0"
+  assert_eq '{"status":"created","data":{"url":"https://github.com/owner/repo/pull/101","number":101},"message":null}' \
+    "$out" "forge derivation count: the measured run really did create a PR and confirm its number"
+
+  # A bare `git remote` (the remote LISTING call) is made exactly once per
+  # real derivation. BEFORE this story it read 3 -- _forge_pr_create's own
+  # call, cmd_forge_pr_view's during the pre-create existing-PR check, and
+  # cmd_forge_pr_view's again during the post-create re-read, none aware the
+  # other two had already run. AFTER, only the first is a real derivation;
+  # the other two are memo hits doing zero git work.
+  local bare_remote_calls all_remote_calls
+  bare_remote_calls=$(grep -cx 'remote' "$counter") || bare_remote_calls=0
+  all_remote_calls=$(grep -c '^remote' "$counter") || all_remote_calls=0
+
+  assert_eq "1" "$bare_remote_calls" "forge derivation count: exactly 1 real forge derivation (was 3 before this story's memo)"
+  assert_eq "2" "$all_remote_calls" "forge derivation count: 2 git-remote-family calls total -- one listing plus one get-url (was 6 before)"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_view_not_found_branch_ref_costs_one_gh_call() {
+  echo ""
+  echo "=== forge-pr-view: a not-found branch ref costs exactly ONE gh call -- pr list alone, pr view never invoked (AC4) ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local log_file="$FAKE_GH_DIR/call.log"
+  : > "$log_file"
+
+  # FAKE_GH_VIEW_* is deliberately left at its default (a SUCCESSFUL pr view
+  # returning '{}'), so if pr view were still being called first this lookup
+  # would come back `found` and the status assertion would fail loudly rather
+  # than the call count quietly drifting.
+  local out
+  out=$(FAKE_GH_LOG="$log_file" FAKE_GH_LIST_JSON='[]' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url)
+
+  assert_eq "not_found" "$(printf '%s' "$out" | jq -r '.status')" "gh call count (not_found): absence is confirmed structurally by the list probe"
+  assert_contains "feat-x" "$(printf '%s' "$out" | jq -r '.message')" "gh call count (not_found): message still names the searched ref"
+
+  local total list_calls view_calls
+  total=$(wc -l < "$log_file" | tr -d ' ')
+  list_calls=$(grep -c '^pr list' "$log_file") || list_calls=0
+  view_calls=$(grep -c '^pr view' "$log_file") || view_calls=0
+
+  # BEFORE this story: 2 -- a failing pr view followed by the confirming pr
+  # list. AFTER: 1.
+  assert_eq "1" "$total"      "gh call count (not_found): exactly 1 gh invocation total (was 2 before this story)"
+  assert_eq "1" "$list_calls" "gh call count (not_found): that one call is gh pr list"
+  assert_eq "0" "$view_calls" "gh call count (not_found): gh pr view is never invoked at all"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+test_forge_pr_view_found_branch_ref_costs_two_gh_calls_list_then_view() {
+  echo ""
+  echo "=== forge-pr-view: a FOUND branch ref costs two gh calls, pr list then pr view -- the accepted trade-off (AC4) ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local log_file="$FAKE_GH_DIR/call.log"
+  : > "$log_file"
+
+  local out
+  out=$(FAKE_GH_LOG="$log_file" FAKE_GH_LIST_JSON='[{"number":7}]' \
+    FAKE_GH_PR_JSON='{"url":"https://github.com/o/r/pull/7"}' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url)
+
+  assert_eq '{"status":"found","pr":{"url":"https://github.com/o/r/pull/7"},"unsupported_fields":[],"message":null}' \
+    "$out" "gh call count (found): the envelope is unchanged by the reordering"
+
+  # DOCUMENTED, DELIBERATE TRADE-OFF, not a regression: a found branch-ref
+  # lookup rises from 1 gh call to 2, buying the not-found path -- the
+  # dominant case, since execute.md's per-phase idempotency pre-check runs
+  # this exact lookup on every phase close whether or not a PR exists yet --
+  # a drop from 2 to 1.
+  local total
+  total=$(wc -l < "$log_file" | tr -d ' ')
+  assert_eq "2" "$total" "gh call count (found): exactly 2 gh invocations (was 1 before this story -- the accepted trade-off)"
+  assert_eq "pr list --head feat-x --state all --json number" "$(sed -n '1p' "$log_file")" "gh call count (found): the probe runs FIRST"
+  assert_eq "pr view feat-x --json url" "$(sed -n '2p' "$log_file")" "gh call count (found): pr view runs SECOND, to fetch the fields the probe cannot return"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+test_forge_pr_view_list_confirms_but_view_fails_is_error_never_not_found() {
+  echo ""
+  echo "=== forge-pr-view: list confirms the PR exists but pr view then fails -- status error, never not_found (AC5) ==="
+
+  setup_fake_gh_fixture
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+
+  # No existing test exercises this sequence: under the OLD call order pr
+  # view always ran first, so "the probe already proved it exists, and then
+  # the view failed" could not arise. It can now, on a transient failure or a
+  # race between the two calls.
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' \
+    FAKE_GH_VIEW_EXIT=1 FAKE_GH_VIEW_STDERR="HTTP 502: upstream request timed out" \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url)
+
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "three-way survival: a view failure after a confirming probe is error"
+  assert_contains "HTTP 502" "$(printf '%s' "$out" | jq -r '.message')" "three-way survival: the message carries gh pr view's OWN stderr as evidence"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.pr')" "three-way survival: pr is null on error"
+
+  # The sharper half of the same guarantee: gh pr view failing with gh's own
+  # NOT-FOUND wording, while the probe has already structurally confirmed the
+  # PR exists. A structural fact must outvote a text match -- otherwise the
+  # stderr tier could still launder a confirmed-existing PR into not_found,
+  # which is the exact conflation this verb exists to prevent.
+  out=$(FAKE_GH_LIST_JSON='[{"number":7}]' \
+    FAKE_GH_VIEW_EXIT=1 FAKE_GH_VIEW_STDERR='no pull requests found for branch "feat-x"' \
+    PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include url)
+
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "three-way survival: even gh's own not-found WORDING cannot outvote the probe's structural confirmation"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  teardown_fake_gh_fixture
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -21255,6 +21644,19 @@ main() {
   test_forge_verbs_dispatched_before_find_aimi_root
   test_forge_verbs_call_check_jq_first
   test_forge_verb_stray_help_flag_parity
+
+  # Forge Derivation Memo + PR-View Probe-Order Tests (phase 1.1 US-010) --
+  # the per-project-dir memo behind _detect_forge_type, and the inverted
+  # gh pr list / gh pr view order. Both measured by counter/log files.
+  echo ""
+  echo "--- Forge Derivation Memo + PR-View Probe-Order Tests (phase 1.1 US-010) ---"
+  test_detect_forge_type_never_builds_or_parses_json
+  test_detect_forge_type_matches_detect_forge_across_fixtures
+  test_detect_forge_type_memo_is_keyed_per_project_dir
+  test_forge_pr_create_derives_forge_once_per_process
+  test_forge_pr_view_not_found_branch_ref_costs_one_gh_call
+  test_forge_pr_view_found_branch_ref_costs_two_gh_calls_list_then_view
+  test_forge_pr_view_list_confirms_but_view_fails_is_error_never_not_found
 
   cleanup
 
