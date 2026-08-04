@@ -14894,6 +14894,298 @@ test_roadmap_claim_self_reclaim() {
   rm -rf ".aimi/tasks/$feature"
 }
 
+# ---------------------------------------------------------------------------
+# Work-first candidate ordering (issue #90).
+#
+# A phase that reaches verification_failed has, by construction, zero pending
+# stories -- and it is older, therefore lower-id, than whatever came after it.
+# Under plain sort_by(.id) it won every auto-claim indefinitely while making no
+# progress, and every phase behind it stayed blocked. These tests pin the
+# ordering, and pin the three things the ordering must NOT break: the wide
+# candidate set, the claim envelope execute.md reads, and roadmap.json itself.
+# ---------------------------------------------------------------------------
+
+# Build a roadmap plus per-phase tasks fixtures.
+#   $1 feature   $2 phases JSON array
+# Then one "<id>|<dir>|<stories JSON or -->" line per phase on stdin; `--`
+# writes no tasks file at all (the never-planned case).
+_rm_work_fixture() {
+  local feature="$1" phases="$2"
+  local fx_id fx_dir fx_stories feature_dir=".aimi/tasks/$1"
+
+  rm -rf "$feature_dir"
+  printf '%s' "$phases" | "$CLI" roadmap-init --feature "$feature" >/dev/null
+
+  while IFS='|' read -r fx_id fx_dir fx_stories; do
+    [ -n "$fx_id" ] || continue
+    mkdir -p "$feature_dir/$fx_dir"
+    [ "$fx_stories" = "--" ] && continue
+    printf '%s\n' "$fx_stories" > "$feature_dir/$fx_dir/$feature-phase-$fx_id-tasks.json"
+  done
+}
+
+test_roadmap_claim_ranks_work_before_id() {
+  echo ""
+  echo "=== roadmap-claim: ranks candidates by remaining work before numeric id (issue #90) ==="
+
+  local feature="rm-rank-work"
+  _rm_work_fixture "$feature" '[
+    {"id": 1, "name": "Stuck", "goal": "g", "slug": "stuck", "dependsOn": []},
+    {"id": 1.1, "name": "Ready", "goal": "g", "slug": "ready", "dependsOn": []}
+  ]' <<'FIXTURES'
+1|phase-1-stuck|{"userStories":[{"id":"US-001","status":"completed"}]}
+1.1|phase-1.1-ready|{"userStories":[{"id":"US-001","status":"pending"}]}
+FIXTURES
+
+  "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status verification_failed >/dev/null
+  "$CLI" roadmap-set-status --feature "$feature" --phase 1.1 --status planned >/dev/null
+
+  # The reorder itself. Under the old lowest-id rule this returned 1; a
+  # ranking that silently no-ops (either jq hazard in _ROADMAP_SELECT_JQ)
+  # returns 1 as well, which is why this asserts the id and not merely that
+  # something was claimed.
+  local next_id claimed_id
+  next_id=$("$CLI" roadmap-get --feature "$feature" --next-eligible | jq -r '.id')
+  claimed_id=$("$CLI" roadmap-claim --feature "$feature" --session-id sess-rank --session-pid $$ | jq -r '.id')
+  assert_eq "1.1" "$claimed_id" "roadmap-claim: claims the higher-id phase that still has work, not the zero-work verification_failed phase 1"
+  assert_eq "1.1" "$next_id" "roadmap-get --next-eligible: agrees with the claim on the issue #90 roadmap"
+
+  local phase1_claim
+  phase1_claim=$(jq -r '.phases[] | select(.id == 1) | .claim' ".aimi/tasks/$feature/roadmap.json")
+  assert_eq "null" "$phase1_claim" "roadmap-claim: the demoted phase is left unclaimed, not claimed-and-abandoned"
+
+  rm -rf ".aimi/tasks/$feature"
+
+  # Control: when every candidate has work the ranking is inert and the
+  # pre-existing lowest-id behavior must be byte-for-byte preserved.
+  local ctl="rm-rank-control"
+  _rm_work_fixture "$ctl" '[
+    {"id": 1, "name": "A", "goal": "g", "slug": "a", "dependsOn": []},
+    {"id": 2, "name": "B", "goal": "g", "slug": "b", "dependsOn": []}
+  ]' <<'FIXTURES'
+1|phase-1-a|{"userStories":[{"id":"US-001","status":"pending"}]}
+2|phase-2-b|{"userStories":[{"id":"US-001","status":"pending"}]}
+FIXTURES
+
+  local ctl_id
+  ctl_id=$("$CLI" roadmap-claim --feature "$ctl" --session-id sess-ctl --session-pid $$ | jq -r '.id')
+  assert_eq "1" "$ctl_id" "roadmap-claim: with every candidate carrying work, selection is unchanged (lowest id)"
+
+  rm -rf ".aimi/tasks/$ctl"
+}
+
+test_roadmap_claim_demotes_never_excludes() {
+  echo ""
+  echo "=== roadmap-claim: a zero-work candidate is demoted, never excluded ==="
+
+  # verification_failed, no work, and the only candidate on the roadmap. If
+  # ranking had become an exclusion, this is where recovery would dead-end.
+  local feature="rm-demote-vf"
+  _rm_work_fixture "$feature" '[
+    {"id": 1, "name": "OnlyStuck", "goal": "g", "slug": "only", "dependsOn": []}
+  ]' <<'FIXTURES'
+1|phase-1-only|{"userStories":[{"id":"US-001","status":"completed"}]}
+FIXTURES
+  "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status verification_failed >/dev/null
+
+  local output exit_code
+  output=$("$CLI" roadmap-claim --feature "$feature" --session-id sess-dem --session-pid $$ 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-claim: sole zero-work verification_failed candidate is still claimed (exit 0)"
+  assert_eq "1" "$(printf '%s' "$output" | jq -r '.id')" "roadmap-claim: that phase is what comes back, not none-eligible/all-blocked"
+
+  rm -rf ".aimi/tasks/$feature"
+
+  # Same for a session that crashed after its last story but before Phase
+  # Completion: zero work left, but its handoff and completion path still need
+  # to run, so it must stay reachable.
+  local ip="rm-demote-ip"
+  _rm_work_fixture "$ip" '[
+    {"id": 1, "name": "CrashedDone", "goal": "g", "slug": "crashed", "dependsOn": []}
+  ]' <<'FIXTURES'
+1|phase-1-crashed|{"userStories":[{"id":"US-001","status":"completed"}]}
+FIXTURES
+  "$CLI" roadmap-set-status --feature "$ip" --phase 1 --status in_progress >/dev/null
+
+  local ip_exit ip_out
+  ip_out=$("$CLI" roadmap-claim --feature "$ip" --session-id sess-dem2 --session-pid $$ 2>&1) && ip_exit=0 || ip_exit=$?
+  assert_exit_code "0" "$ip_exit" "roadmap-claim: sole zero-work in_progress candidate is still claimed (exit 0)"
+  assert_eq "1" "$(printf '%s' "$ip_out" | jq -r '.id')" "roadmap-claim: the crashed-session phase comes back so its completion path can finish"
+
+  rm -rf ".aimi/tasks/$ip"
+}
+
+test_roadmap_claim_crash_recovery_outranks_planned() {
+  echo ""
+  echo "=== roadmap-claim: an unclaimed in_progress phase with work still outranks a higher-id planned phase ==="
+
+  # The status set stays wide; only the order changed. A status-based rank
+  # would have demoted this phase behind the untouched planned one, which is
+  # backwards -- a half-run phase with pending stories is the most urgent
+  # thing on the roadmap.
+  local feature="rm-crash-rank"
+  _rm_work_fixture "$feature" '[
+    {"id": 1, "name": "Crashed", "goal": "g", "slug": "crashed", "dependsOn": []},
+    {"id": 2, "name": "Later", "goal": "g", "slug": "later", "dependsOn": []}
+  ]' <<'FIXTURES'
+1|phase-1-crashed|{"userStories":[{"id":"US-001","status":"pending"},{"id":"US-002","status":"completed"}]}
+2|phase-2-later|{"userStories":[{"id":"US-001","status":"pending"}]}
+FIXTURES
+
+  "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status in_progress >/dev/null
+  "$CLI" roadmap-set-status --feature "$feature" --phase 2 --status planned >/dev/null
+
+  local claimed_id
+  claimed_id=$("$CLI" roadmap-claim --feature "$feature" --session-id sess-crash --session-pid $$ | jq -r '.id')
+  assert_eq "1" "$claimed_id" "roadmap-claim: in_progress with pending stories is auto-claimable and wins on work, not status"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_has_work_classification() {
+  echo ""
+  echo "=== roadmap-claim: has-work classification over missing / empty / mixed / all-completed tasks files ==="
+
+  # Each case puts the phase under test at id 1 against a phase at id 2 that
+  # definitely has work. Claiming 1 proves "has work" (it kept the lower id);
+  # claiming 2 proves "no work" (1 was demoted). The map itself is internal,
+  # so this is the observable it drives.
+  local case_name fixture expected feature
+  while IFS='|' read -r case_name fixture expected; do
+    [ -n "$case_name" ] || continue
+    feature="rm-hw-$case_name"
+    _rm_work_fixture "$feature" '[
+      {"id": 1, "name": "Under Test", "goal": "g", "slug": "ut", "dependsOn": []},
+      {"id": 2, "name": "Has Work", "goal": "g", "slug": "hw", "dependsOn": []}
+    ]' <<FIXTURES
+1|phase-1-ut|$fixture
+2|phase-2-hw|{"userStories":[{"id":"US-001","status":"pending"}]}
+FIXTURES
+
+    assert_eq "$expected" "$("$CLI" roadmap-claim --feature "$feature" --session-id "sess-hw-$case_name" --session-pid $$ | jq -r '.id')" \
+      "roadmap-claim has-work: $case_name tasks file -> claims phase $expected"
+
+    rm -rf ".aimi/tasks/$feature"
+  done <<'CASES'
+missing|--|1
+empty-stories|{"userStories":[]}|1
+mixed-statuses|{"userStories":[{"id":"US-001","status":"completed"},{"id":"US-002","status":"pending"}]}|1
+all-completed|{"userStories":[{"id":"US-001","status":"completed"}]}|2
+CASES
+
+  # Unparseable is its own case: the fixture cannot be valid JSON, so it is
+  # written directly rather than through the helper.
+  local bad="rm-hw-unparseable"
+  _rm_work_fixture "$bad" '[
+    {"id": 1, "name": "Under Test", "goal": "g", "slug": "ut", "dependsOn": []},
+    {"id": 2, "name": "Has Work", "goal": "g", "slug": "hw", "dependsOn": []}
+  ]' <<'FIXTURES'
+1|phase-1-ut|--
+2|phase-2-hw|{"userStories":[{"id":"US-001","status":"pending"}]}
+FIXTURES
+  printf '{ this is not json\n' > ".aimi/tasks/$bad/phase-1-ut/$bad-phase-1-tasks.json"
+
+  assert_eq "1" "$("$CLI" roadmap-claim --feature "$bad" --session-id sess-hw-bad --session-pid $$ | jq -r '.id')" \
+    "roadmap-claim has-work: unparseable tasks file -> claims phase 1 (nothing known, nothing demoted)"
+
+  rm -rf ".aimi/tasks/$bad"
+}
+
+test_roadmap_claim_envelope_contract() {
+  echo ""
+  echo "=== roadmap-claim: the auto-path envelope keeps every field execute.md Step 1.7 reads ==="
+
+  # execute.md's Claim the Phase block extracts .id/.dir/.slug/.branch/.status
+  # and reports .staleReleased. .status is the one that matters most: the
+  # re-verify branch in Step 3 fires only when the phase was claimed AS
+  # verification_failed, and Step 1.7 overwrites that status seconds later, so
+  # the claim envelope is its only witness. A projection here would disable
+  # that branch silently. This is the auto path specifically -- the pre-
+  # existing .status assertion in the suite covers only self-reclaim.
+  local feature="rm-envelope"
+  _rm_work_fixture "$feature" '[
+    {"id": 1, "name": "Stuck", "goal": "g", "slug": "stuck", "dependsOn": [], "branch": "feat/rm-envelope-phase-1"}
+  ]' <<'FIXTURES'
+1|phase-1-stuck|{"userStories":[{"id":"US-001","status":"completed"}]}
+FIXTURES
+  "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status verification_failed >/dev/null
+
+  local output
+  output=$("$CLI" roadmap-claim --feature "$feature" --session-id sess-env --session-pid $$)
+
+  local missing key
+  missing=""
+  for key in id dir slug branch status staleReleased; do
+    printf '%s' "$output" | jq -e "has(\"$key\")" >/dev/null 2>&1 || missing="$missing $key"
+  done
+  assert_eq "" "$missing" "roadmap-claim envelope: id/dir/slug/branch/status/staleReleased all survive the auto path"
+
+  assert_eq "verification_failed" "$(printf '%s' "$output" | jq -r '.status')" \
+    "roadmap-claim envelope: .status is the status at claim time, which is what the re-verify branch keys on"
+  assert_eq "phase-1-stuck" "$(printf '%s' "$output" | jq -r '.dir')" "roadmap-claim envelope: .dir survives"
+  assert_eq "feat/rm-envelope-phase-1" "$(printf '%s' "$output" | jq -r '.branch')" "roadmap-claim envelope: .branch survives"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_claim_writes_no_synthetic_keys() {
+  echo ""
+  echo "=== roadmap-claim: ranking adds no key to roadmap.json ==="
+
+  # The array the ranking runs over is the same array written back to disk, so
+  # computing has-work by enriching the phase objects would persist a synthetic
+  # key forever and leak it into validate-contracts, roadmap-sweep and
+  # roadmap-reconcile. The map is passed as a side --argjson instead; this is
+  # what proves it.
+  local feature="rm-no-synthetic"
+  _rm_work_fixture "$feature" '[
+    {"id": 1, "name": "A", "goal": "g", "slug": "a", "dependsOn": []},
+    {"id": 2, "name": "B", "goal": "g", "slug": "b", "dependsOn": []}
+  ]' <<'FIXTURES'
+1|phase-1-a|{"userStories":[{"id":"US-001","status":"completed"}]}
+2|phase-2-b|{"userStories":[{"id":"US-001","status":"pending"}]}
+FIXTURES
+
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+  local before after
+  before=$(jq -r '[.phases[] | keys[]] | unique | join(",")' "$roadmap_file")
+  "$CLI" roadmap-claim --feature "$feature" --session-id sess-syn --session-pid $$ >/dev/null
+  after=$(jq -r '[.phases[] | keys[]] | unique | join(",")' "$roadmap_file")
+
+  assert_eq "$before" "$after" "roadmap-claim: the phase key set in roadmap.json is unchanged after an auto-claim"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_claim_override_ignores_ranking() {
+  echo ""
+  echo "=== roadmap-claim --phase: explicit selection applies no ranking ==="
+
+  # Ranking belongs to auto mode only. An operator naming a stuck phase is
+  # telling the CLI exactly what they want, and --phase <N> is the documented
+  # escape hatch from the demotion above.
+  local feature="rm-override-rank"
+  _rm_work_fixture "$feature" '[
+    {"id": 1, "name": "Stuck", "goal": "g", "slug": "stuck", "dependsOn": []},
+    {"id": 2, "name": "Ready", "goal": "g", "slug": "ready", "dependsOn": []}
+  ]' <<'FIXTURES'
+1|phase-1-stuck|{"userStories":[{"id":"US-001","status":"completed"}]}
+2|phase-2-ready|{"userStories":[{"id":"US-001","status":"pending"}]}
+FIXTURES
+  "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status verification_failed >/dev/null
+
+  local output exit_code
+  output=$("$CLI" roadmap-claim --feature "$feature" --session-id sess-ovr --session-pid $$ --phase 1 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-claim --phase: a zero-work verification_failed phase is claimable by name (exit 0)"
+  assert_eq "1" "$(printf '%s' "$output" | jq -r '.id')" "roadmap-claim --phase: returns the named phase, not the work-ranked winner"
+  assert_eq "verification_failed" "$(printf '%s' "$output" | jq -r '.status')" "roadmap-claim --phase: the override path keeps .status too"
+
+  local phase2_claim
+  phase2_claim=$(jq -r '.phases[] | select(.id == 2) | .claim' ".aimi/tasks/$feature/roadmap.json")
+  assert_eq "null" "$phase2_claim" "roadmap-claim --phase: no fall-through to the with-work phase"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
 test_roadmap_release_claim() {
   echo ""
   echo "=== roadmap-release-claim: clears claim without touching status; no-op when already unclaimed ==="
@@ -22050,6 +22342,13 @@ main() {
   test_roadmap_claim_phase_override_eligible
   test_roadmap_claim_phase_override_ineligible
   test_roadmap_claim_self_reclaim
+  test_roadmap_claim_ranks_work_before_id
+  test_roadmap_claim_demotes_never_excludes
+  test_roadmap_claim_crash_recovery_outranks_planned
+  test_roadmap_has_work_classification
+  test_roadmap_claim_envelope_contract
+  test_roadmap_claim_writes_no_synthetic_keys
+  test_roadmap_claim_override_ignores_ranking
   test_roadmap_release_claim
   test_phase_overlap_disjoint
   test_phase_overlap_overlapping
