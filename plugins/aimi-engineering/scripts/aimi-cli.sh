@@ -9869,7 +9869,7 @@ _roadmap_validate_phase_id() {
 # Read a phases JSON array on stdin; print one human-readable error line per
 # creates[]/needs[] entry whose *identity* can never name a real artifact.
 #
-# The rule is deliberately narrow -- exactly three shapes are rejected, judged
+# The rule is deliberately narrow -- exactly four shapes are rejected, judged
 # over the identity (text before the first "(", trimmed) and nothing else:
 #   (a) empty after _cv_identity
 #   (b) a ".." PATH SEGMENT, i.e. (^|/)\.\.($|/) -- not any byte pair "..",
@@ -9877,10 +9877,47 @@ _roadmap_validate_phase_id() {
 #   (c) a leading "/" anchored at position 0 -- the Endpoint kind
 #       ("POST /api/notifications") contains a slash but does not begin with
 #       one, so anchoring matters or every endpoint phase becomes unwritable
+#   (d) whitespace in the token verify-creates will actually SEARCH, judged
+#       after the same METHOD-space-slash strip verify-creates step 2 performs
+#       (see _roadmap_reject_unfindable_identity below)
 # Identity *strength* is explicitly not judged: at declaration time research has
 # not run, so a bare Table name ("notifications") or a bare directory
 # ("db/migrations") must pass -- guessing a path here fails at phase close for a
 # reason nobody can debug.
+#
+# Why (d) is whitespace and not something richer. verify-creates has exactly two
+# ways to find an artifact: a tracked pathspec, and a fixed-string `git grep -F`
+# over tracked non-doc non-test source. A token carrying an interior space can
+# only match source that literally holds that space-separated phrase.
+# Identifiers, paths, table names and route literals never do. The only thing
+# that CAN hold it is prose -- a comment or a string -- and documentation is
+# already excluded, so a whitespace-bearing identity is either unfindable or,
+# worse, findable only in a comment. That is not a heuristic about English; it
+# is a statement about what the search can return.
+#
+# The two things (d) deliberately does NOT catch, so nobody reads it as a
+# guarantee of verifiability:
+#   * a hyphen-joined prose phrase ("forge-command-surface-in-aimi-cli") --
+#     an author who wants to write prose can defeat the rule trivially;
+#   * a single token that will simply never exist ("cmd_forge_nonexistent").
+# Existence cannot be checked at declaration time -- the artifact has not been
+# built yet. The rule proves the identity is the KIND of string a search can
+# resolve, never that it will resolve.
+#
+# The accepted false positive: an honest artifact whose name contains a space
+# ("src/My Component.tsx"). It is refusable and the author's only workaround is
+# to rename the file. That is the deliberate trade -- see
+# commands/references/scope-contexts.md, which teaches the rule and its limit.
+#
+# RETROACTIVITY IS THE CALLER'S PROPERTY, NOT THIS HELPER'S. Nothing here scopes
+# anything; this judges every phase object it is handed. Existing roadmaps stay
+# readable only because every caller hands over just the phases IT writes:
+# roadmap-init passes the whole payload in creation mode but only filtered_new
+# under --sync (phases whose ids are not already on disk), and
+# cmd_roadmap_amend_phase passes the id plus only the lists that call amends.
+# A caller that hands over a stored phase wholesale would retroactively refuse
+# roadmaps already written -- this repository's own phases 2, 3 and 4 carry
+# whitespace-bearing creates today.
 #
 # creates[] and needs[] go through the same predicate in the same pass on
 # purpose: _cv_creates_in_scope matches a need against a provider's creates by
@@ -9891,7 +9928,25 @@ _roadmap_validate_phase_id() {
 # Reuses $_CONTRACT_JQ_DEFS so the guard and validate-contracts agree on what an
 # identity is; a second copy of _cv_identity would drift.
 _roadmap_identity_errors() {
+  # _roadmap_reject_unfindable_identity lives HERE, not in $_CONTRACT_JQ_DEFS:
+  # that block is the shared vocabulary of validate-contracts and roadmap-sweep,
+  # and neither of them enforces this rule -- defining it there would imply they
+  # do. Input is an identity, output is true when the entry must be refused.
+  #
+  # The method alternation and the single-space-then-slash shape are byte-for-byte
+  # the ones verify-creates step 2 strips (`case` over 'GET /'*|'POST /'*|...
+  # then "${identity#* }"), so the token judged at write time is exactly the
+  # token searched at close time. "POST  /api/x" with two spaces does not match
+  # that shape there and must not match it here -- verify-creates would search
+  # it whole. CR and LF are in the class as insurance: roadmap-init's
+  # _rm_sanitize already folds newlines to spaces, but the amend path reaches
+  # this helper too and may sanitize differently.
   jq -r "$_CONTRACT_JQ_DEFS"'
+    def _roadmap_reject_unfindable_identity:
+      (if test("^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) /")
+         then sub("^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) "; "")
+         else . end)
+      | test("[ \t\r\n]");
     [ .[]
       | . as $p
       | (["creates", "needs"][]) as $list
@@ -9902,6 +9957,7 @@ _roadmap_identity_errors() {
           if ($ident | length) == 0 then "empty once the description is stripped"
           elif ($ident | test("(^|/)\\.\\.($|/)")) then "contains a \"..\" path segment"
           elif ($ident | test("^/")) then "begins with \"/\""
+          elif ($ident | _roadmap_reject_unfindable_identity) then "contains whitespace, so no source token could match it -- name the symbol, path, table or \"METHOD /path\" endpoint the phase will actually produce"
           else empty end
         ) as $reason
       | "phase " + ($p.id|tostring) + ": " + $list + " entry \"" + $entry + "\" is not a usable artifact identity: " + $reason
@@ -10353,7 +10409,19 @@ cmd_roadmap_amend_phase() {
       # payload actually carries are replaced, and each is replaced wholesale.
       amended_phase=$(printf '%s' "$stored_phase" | jq -c --argjson patch "$sanitized" '. + $patch')
 
-      identity_errors=$(printf '%s' "$amended_phase" | jq -c '[.]' | _roadmap_identity_errors)
+      # Judge ONLY the lists this call actually writes. Handing over the merged
+      # phase would re-judge a list the amendment never touched, which turns
+      # every tightening of _roadmap_identity_errors into a retroactive refusal:
+      # a phase whose stored creates holds a legacy whitespace identity could no
+      # longer have its needs amended at all -- and repairing exactly those
+      # phases is what this verb exists for. An absent creates/needs key already
+      # yields an empty list inside the helper, so no helper change is needed.
+      identity_check_phase=$(jq -c -n --argjson amended "$amended_phase" --argjson patch "$sanitized" '
+        {id: $amended.id}
+        + (if ($patch | has("creates")) then {creates: ($amended.creates // [])} else {} end)
+        + (if ($patch | has("needs")) then {needs: ($amended.needs // [])} else {} end)
+      ')
+      identity_errors=$(printf '%s' "$identity_check_phase" | jq -c '[.]' | _roadmap_identity_errors)
       if [ -n "$identity_errors" ]; then
         echo "Error: roadmap-amend-phase: malformed creates/needs identity in the amended phase:" >&2
         printf '%s\n' "$identity_errors" >&2
