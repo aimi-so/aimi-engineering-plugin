@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`aimi-cli.sh roadmap-amend-phase` — an existing phase's contract is now correctable through a sanctioned verb.** `roadmap-init` writes a phase's contract once at creation and `--sync` deliberately leaves an existing phase byte-for-byte alone, so a phase whose `creates`/`needs`/`goal`/`successCriteria`/`areas`/`branch` turned out wrong could only be fixed by hand-editing `roadmap.json` — which `guard-runtime-state.py` blocks on the Write/Edit path while redirecting the caller to a `roadmap-*` verb that did not exist. This verb makes that redirect truthful. It amends one phase in place under the same `flock` + `mktemp`-then-`mv` discipline `roadmap-init` uses, merging partially by key presence: a key present replaces that field wholesale, a key absent leaves the stored value — and every other phase, and the document metadata — byte-for-byte unchanged.
+  - `branch` is amendable because nothing else writes it for an existing phase, which is why a decimal phase's `null` branch could not be filled in. Amending it rewrites the roadmap field only — it does not move a worktree or git branch an `in_progress` phase already created. `status` and `claim` are excluded because `roadmap-set-status` and `roadmap-claim`/`roadmap-release-claim` already own them; both keys are rejected by name pointing at their owner, as are `id`, `dir`, `slug`, `name` and `dependsOn`.
+  - Dropping or renaming a `creates` identity a later phase cites in its `needs` is refused by default, naming every downstream phase and identity and printing the invocation that would authorize the fix. `--retarget-needs "<old identity>=<new identity>"` (repeatable) authorizes it, and the same locked write then replaces every matching downstream `needs` entry with the amended phase's new `creates` entry verbatim, so provider and consumer stay byte-identical. Identity comparison is exact equality via `_cv_identity`, never substring containment.
+  - Amended values pass `roadmap-init`'s own gates (same sanitizer and caps, same identity guard, same branch pattern). An amendment that would duplicate another phase's `creates` identity is refused, because `validate-contracts` hard-fails on that outside `--agent-mode` and halts `/aimi:plan`. A completed phase whose `handoff.md` omits a newly introduced identity draws one stderr advisory and still writes — repairing an already-completed phase's declared artifacts is a case this verb exists for, so no status gates the amend in either direction.
+
 ## [1.121.0] - 2026-08-04
 
 > Phase 1.1 of forge abstraction: remediation of the review findings raised against phase 1 (1.120.0), which has not yet reached `main`.
