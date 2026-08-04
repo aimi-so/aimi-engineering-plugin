@@ -22,6 +22,7 @@ set -uo pipefail
 #   4. read but never assigned anywhere in the same file
 #   5. $ARGUMENTS validated in the same block that interpolates it
 #   6. execute.md's phase-branch derivation, EXECUTED against fixtures
+#   7. execute.md's verification_failed re-verify branch, structurally
 #
 # Checks 1-5 are static. Check 6 is the first one that RUNS a block: it pulls
 # execute.md's phase-branch derivation out of the extracted set and executes it
@@ -577,6 +578,130 @@ FIXTURES
 }
 
 # ---------------------------------------------------------------------------
+# Check 7 — execute.md's verification_failed re-verify branch (issue #90).
+#
+# Measured yield: 4 of the 6 assertions fail on the pre-fix tree (7a, 7b, 7c
+# and 7d — 7c naming 5 of its 7 missing tokens), 0 on the fixed tree.
+# Demonstrated by reverting only execute.md. 7e and 7f are invariants that
+# hold on both trees by design: they exist to catch a *future* edit that adds
+# a claim release to the new branch, drops the one the STOP still needs, or
+# rewords away the re-run instruction the branch was written to honor.
+#
+# WHY THIS ONE IS STATIC PROSE MATCHING, NOT AN EXECUTED BLOCK
+#
+# The defect is a missing *control-flow branch* written in prose, not a wrong
+# value produced by a block. A phase that reaches verification_failed has zero
+# pending stories by construction, so Step 3's zero-pending case released the
+# claim, printed "All stories already complete!" and STOPped ~900 lines before
+# Phase Completion — the only place creates verification re-runs. The phase
+# stayed stuck forever and every dependent phase stayed blocked, while the
+# verification-failure report told the user to re-run /aimi:execute to
+# re-verify, which is exactly what could not work. Nothing executable was
+# wrong; a decision the file never made was missing. So this check asserts the
+# branch's *structure*: that the entry status is captured where it is still
+# recoverable, that the gate is decided before the release-and-STOP, and that
+# the branch adds no claim release of its own.
+#
+# The claim-release count is the load-bearing half. Step 3 sits on the path
+# every /aimi:execute run takes, and the new branch is NOT a STOP: Phase
+# Completion owns the release on both of its outcomes. A release added here
+# would hand the phase to a racing session mid-verification, and a release
+# removed from the existing STOP would leak a claim on every already-complete
+# phase-mode run. Exactly one, below the gate, is the whole contract.
+# ---------------------------------------------------------------------------
+check_reverify_branch() {
+  local md="$COMMANDS_DIR/execute.md"
+  local id rel start heading body matches="" block findings=""
+
+  # --- The capture: Step 1.7's on-success extraction block ------------------
+  # PHASE_ENTRY_STATUS must be read off the claim JSON there, because Step 1.7
+  # transitions the phase to in_progress within the same step — after that, no
+  # roadmap-get can recover the status the phase was claimed in.
+  while IFS=$'\t' read -r id rel start heading; do
+    [ -n "$id" ] || continue
+    [ "$rel" = "execute.md" ] || continue
+    body="$(cat "$BLOCKS_DIR/$id.sh" 2>/dev/null)"
+    case "$body" in
+      *'PHASE_ENTRY_STATUS='*) matches="$matches$id " ;;
+    esac
+  done < "$INDEX"
+
+  assert_eq "1" "$(printf '%s' "$matches" | wc -w | tr -d ' ')" \
+    "Check 7a — exactly one block in execute.md assigns PHASE_ENTRY_STATUS"
+
+  block="$BLOCKS_DIR/$(printf '%s' "$matches" | awk '{print $1}').sh"
+  if [ -f "$block" ]; then
+    [ "$(grep -cF 'PHASE_ENTRY_STATUS=' "$block")" = "1" ] \
+      || findings="$findings assigned more than once inside its own block"$'\n'
+    grep -qF 'PHASE_BRANCH=' "$block" && grep -qF 'PHASE_DIR=' "$block" \
+      || findings="$findings not in Step 1.7's claim-JSON extraction block (no PHASE_DIR/PHASE_BRANCH beside it)"$'\n'
+    grep -F 'PHASE_ENTRY_STATUS=' "$block" | grep -qF 'CLAIM_JSON' \
+      || findings="$findings not read from CLAIM_JSON — a later roadmap-get reports in_progress, not the entry status"$'\n'
+    grep -F 'PHASE_ENTRY_STATUS=' "$block" | grep -q '\.status // ""' \
+      || findings="$findings missing the .status // \"\" default — a status-less phase would yield the string null"$'\n'
+  else
+    findings="$findings PHASE_ENTRY_STATUS is never assigned in any bash block"$'\n'
+  fi
+
+  assert_no_findings "$(printf '%s' "$findings")" \
+    "Check 7b — PHASE_ENTRY_STATUS is captured once, from the claim JSON, in Step 1.7" \
+    "Step 1.7's own in_progress transition destroys the entry status; this block is the only place it can be read."
+
+  # --- The branch: Step 3's zero-pending case -------------------------------
+  local slice start_line gate_line rel_line msg_line rel_count gate_region
+  slice="$(awk '
+    /^## Step 3: Check for Pending Stories$/ { inside = 1 }
+    inside                                   { print }
+    inside && /^### Validate Dependencies$/  { exit }
+  ' "$md")"
+
+  start_line="$(printf '%s\n' "$slice" | grep -n 'If result is' | head -1 | cut -d: -f1)"
+  gate_line="$(printf '%s\n' "$slice" | grep -nF 'PHASE_ENTRY_STATUS' | head -1 | cut -d: -f1)"
+  rel_line="$(printf '%s\n' "$slice" | grep -nF 'roadmap-release-claim' | head -1 | cut -d: -f1)"
+  # -x: the report line itself, not the prose above it that quotes the string.
+  msg_line="$(printf '%s\n' "$slice" | grep -nxF 'All stories already complete!' | head -1 | cut -d: -f1)"
+  rel_count="$(printf '%s\n' "$slice" | grep -cF 'roadmap-release-claim')"
+
+  gate_region=""
+  if [ -n "$start_line" ] && [ -n "$rel_line" ] && [ "$rel_line" -gt "$start_line" ]; then
+    gate_region="$(printf '%s\n' "$slice" | sed -n "${start_line},$((rel_line - 1))p")"
+  fi
+
+  # The gate is a five-condition conjunction; dropping any one of them either
+  # re-breaks a working path or fires the branch where it must not.
+  local tok gate_findings=""
+  for tok in 'count-pending' 'PHASE_MODE' 'PHASE_ID' 'PHASE_SPLIT_MODE' \
+             'PHASE_ENTRY_STATUS' 'verification_failed' 'Phase Completion'; do
+    printf '%s\n' "$gate_region" | grep -qF "$tok" \
+      || gate_findings="$gate_findings the re-verify branch never names $tok"$'\n'
+  done
+  assert_no_findings "$(printf '%s' "$gate_findings")" \
+    "Check 7c — the re-verify branch states its full gate and where it continues to" \
+    "All five conditions plus the Phase Completion destination must be written down above the release-and-STOP."
+
+  local ordering="false"
+  if [ -n "$gate_line" ] && [ -n "$rel_line" ] && [ -n "$msg_line" ] \
+     && [ "$gate_line" -lt "$rel_line" ] && [ "$rel_line" -lt "$msg_line" ]; then
+    ordering="true"
+  fi
+  assert_eq "true" "$ordering" \
+    "Check 7d — the re-verify branch is decided before Step 3's release-and-STOP"
+
+  assert_eq "1" "$rel_count" \
+    "Check 7e — Step 3's zero-pending case releases the claim exactly once (the re-verify branch adds none)"
+
+  # The failure report tells the user to re-run to re-verify. That sentence is
+  # what the branch above makes true; if it is ever reworded away, the branch
+  # has lost the instruction it exists to honor.
+  local sentence_finding=""
+  grep -qF 'then re-run /aimi:execute to re-verify — creates verification re-runs' "$md" \
+    || sentence_finding="the verification-failed report no longer tells the user to re-run /aimi:execute to re-verify"
+  assert_no_findings "$sentence_finding" \
+    "Check 7f — the verification-failed report's re-run instruction is intact" \
+    "Step 3's re-verify branch exists to make that sentence true; keep them in sync."
+}
+
+# ---------------------------------------------------------------------------
 # The baseline is only honest if it shrinks. An entry that no longer matches
 # anything means the underlying issue was fixed (or a heading was renamed) and
 # the line must go, otherwise the baseline slowly becomes a permanent excuse.
@@ -621,6 +746,7 @@ main() {
   check_unassigned
   check_argument_gate_same_block
   check_phase_branch_derivation
+  check_reverify_branch
 
   echo ""
   echo "--- Baseline Hygiene ---"
