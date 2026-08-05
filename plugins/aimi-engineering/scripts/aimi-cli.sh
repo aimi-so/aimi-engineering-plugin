@@ -4192,6 +4192,111 @@ _forge_map_pr_field_github() {
   esac
 }
 
+# Maps one NORMALIZED PR contract field name (forge-contract.md's
+# "Normalized PR Field Set") to the field name GitLab's own
+# `glab mr view <ref> -F json` uses for it. This is the GitLab arm of the
+# seam _forge_map_pr_field_github's own header names as "the single seam a
+# later GitLab or Gitea adapter replaces"; the two are kept ADJACENT and
+# identically case-statement-shaped, ten branches each, so they stay
+# diffable side by side.
+#
+# An unmapped name prints nothing, so a field this adapter cannot express
+# is never silently passed through to glab as-is -- the identical
+# silent-empty default the github mapper's case statement has.
+#
+# HOW THIS TABLE IS USED DIFFERS FROM THE GITHUB ONE. gh has a
+# `--json <field-list>` selector, so its table names fields to REQUEST.
+# glab has no such selector: `-F json` prints the WHOLE marshalled
+# document (internal/cmdutils/output_format.go's EnableJSONOutput registers
+# `--output`/`-F` over the enum text|json, and
+# internal/commands/mr/view/mr_view.go's printJSONMR is literally
+# `return opts.io.PrintJSON(mr)` over a *gitlab.MergeRequest), and
+# filtering is done afterwards with `--jq`. So every name below is a KEY to
+# PICK OUT of that document, never a field to ask for.
+#
+# `reviews` is deliberately absent and is NOT one of the ten contract
+# fields. GitLab merge requests carry `reviewers` -- people ASSIGNED to
+# review (BasicMergeRequest.Reviewers, `json:"reviewers"`) -- but have no
+# equivalent of GitHub's `reviews` array of SUBMITTED
+# APPROVED/CHANGES_REQUESTED verdicts. GitLab models those as approvals, a
+# different resource behind its own endpoint
+# (MergeRequestsService.GetMergeRequestApprovals). Do not conflate
+# reviewers with reviews.
+#
+# VERIFICATION CEILING -- READ BEFORE TRUSTING ANY KEY BELOW. glab was NOT
+# installed on the machine this was written on, so not one key here was
+# observed coming out of the real binary. The phase-2 github mapper was
+# verified against a real gh v2.94.0 before a line of it was written; this
+# function cannot make that claim. Every key is instead read off glab's own
+# source and GitLab's API docs: gitlab-org/cli (the glab CLI) and
+# gitlab-org/api/client-go (go-gitlab), whose struct tags ARE glab's JSON
+# keys precisely because glab marshals *gitlab.MergeRequest directly rather
+# than projecting it. Line numbers below are client-go's merge_requests.go
+# on main as of 2026-08-05.
+#
+# number -> iid, NOT id. Both exist on the struct (`ID int64 json:"id"`
+# line 81, `IID int64 json:"iid"` line 82). `id` is globally unique across
+# the whole GitLab instance; `iid` is the per-project number the user sees
+# in the MR URL and types at the CLI. Mapping to `id` would yield a number
+# that resolves to a DIFFERENT merge request.
+#
+# state -> state names the KEY only. GitLab's VALUE vocabulary is its own
+# ("opened", not "open"), and normalizing it is _forge_map_state's job --
+# it already carries the gitlab arm that folds "opened" to "open".
+#
+# THE THREE MAPPINGS THAT HAD TO BE DETERMINED RATHER THAN ASSUMED:
+#
+#   files -> NOTHING, and that is a SETTLED answer rather than an
+#     unresolved one: `glab mr view -F json` carries no changed-file list at
+#     all, so there is no key to name. Neither MergeRequest nor the
+#     BasicMergeRequest it embeds has a Changes field; the only thing close
+#     is `ChangesCount string json:"changes_count"` (line 146), a COUNT
+#     string, not a file list. A file list requires a SEPARATE call --
+#     GetMergeRequestChanges (projects/:id/merge_requests/:iid/changes,
+#     merge_requests.go:538) or ListMergeRequestDiffs (.../diffs, line 561)
+#     -- and mr_view.go's JSON path issues neither. Emitting nothing is
+#     therefore correct, not merely cautious.
+#
+#   mergeable -> detailed_merge_status. `DetailedMergeStatus string
+#     json:"detailed_merge_status"` is on BasicMergeRequest (line 106) and
+#     there is NO MergeStatus field on either struct: the single
+#     `json:"merge_status"` in the whole file belongs to the unrelated
+#     BlockingMergeRequest type (line 1049), so `merge_status` never appears
+#     in a `glab mr view -F json` document at all. That settles the older-vs-
+#     newer question by absence rather than by preference, and it agrees
+#     with GitLab's docs deprecating merge_status in 15.6 in favour of
+#     detailed_merge_status. The VALUE is an enum string (e.g. "mergeable",
+#     "not_open"), not a boolean -- the same shape GitHub's
+#     MERGEABLE/CONFLICTING/UNKNOWN takes, which is why _forge_build_pr_json
+#     already carries mergeable as a string.
+#
+#   isDraft -> draft. BOTH keys are emitted, because glab marshals the whole
+#     struct: `Draft bool json:"draft"` on BasicMergeRequest (line 103) and
+#     `WorkInProgress bool json:"work_in_progress"` on MergeRequest (line
+#     159). The tie is broken by go-gitlab's own comment on the latter,
+#     verbatim "// Deprecated: use Draft instead" (line 158), which matches
+#     GitLab's API docs ("work_in_progress ... Deprecated. Use draft
+#     instead."). So `draft`.
+#
+# Usage: _forge_map_pr_field_gitlab <contract-field>
+_forge_map_pr_field_gitlab() {
+  case "$1" in
+    number)      printf 'iid' ;;
+    url)         printf 'web_url' ;;
+    title)       printf 'title' ;;
+    body)        printf 'description' ;;
+    state)       printf 'state' ;;
+    headRefName) printf 'source_branch' ;;
+    baseRefName) printf 'target_branch' ;;
+    # Deliberately EMPTY, not missing. The branch is kept so the two mappers
+    # stay ten-for-ten diffable and a reader meets the omission at the line
+    # they look at, rather than only in the header. See the `files` note.
+    files)       ;;
+    isDraft)     printf 'draft' ;;
+    mergeable)   printf 'detailed_merge_status' ;;
+  esac
+}
+
 # github adapter for forge-pr-view. <ref> is a PR number or a branch name
 # (already validated by cmd_forge_pr_view before this ever runs);
 # <fields_csv> is the comma-joined list of NORMALIZED PR contract field

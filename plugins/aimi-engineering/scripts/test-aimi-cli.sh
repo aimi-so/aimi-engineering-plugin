@@ -18248,6 +18248,299 @@ teardown_fake_gh_fixture() {
     FAKE_GH_AUTH_STATUS_HONORS_ENV_TOKEN FAKE_GH_ENV_TOKEN_ACCOUNT
 }
 
+# ---------------------------------------------------------------------------
+# Fake `glab` PATH stub (phase 3 US-001)
+# ---------------------------------------------------------------------------
+# Deliberately a SEPARATE stub from setup_fake_gh_fixture rather than a mode
+# added to it: the two CLIs share no subcommand vocabulary and no output
+# shape, so folding glab into the gh stub would mean one script whose every
+# branch is reachable by only one of the two callers.
+#
+# glab is NOT installed on the machine this was written on -- that is the
+# phase's declared verification ceiling, not an oversight -- so this stub is
+# the ONLY glab any test here ever sees. Its payloads are modelled on
+# go-gitlab's *gitlab.MergeRequest struct tags (the keys glab emits, because
+# `glab mr view -F json` marshals that struct whole), never on a captured
+# real-binary response.
+#
+# Same shape as the fake gh: written to a fresh temp dir, prepends nothing to
+# PATH itself (callers do `PATH="$FAKE_GLAB_DIR:$PATH" ...` per invocation),
+# and is driven entirely by FAKE_GLAB_* environment variables:
+#   FAKE_GLAB_LOG             optional file; every invocation's argv appended, one
+#                             line per call -- lets an assertion prove WHICH flags
+#                             were passed (`-F json`, never a gh-style --json list)
+#   FAKE_GLAB_MR_JSON         `glab mr view` stdout on exit 0 (default '{}')
+#   FAKE_GLAB_MR_JSON_SECOND  when set (together with FAKE_GLAB_CALL_COUNTER),
+#                             stdout for the SECOND and every later `mr view`
+#                             call. This is what lets one fixture report
+#                             DIFFERING output across two calls, so a
+#                             before/after comparison is proven able to move
+#                             rather than passing vacuously.
+#   FAKE_GLAB_CALL_COUNTER    path to a counter file incremented once per
+#                             `mr view`; required for MR_JSON_SECOND to fire
+#   FAKE_GLAB_VIEW_EXIT       `glab mr view` exit code (default 0)
+#   FAKE_GLAB_VIEW_STDERR     stderr emitted when VIEW_EXIT is non-zero
+setup_fake_glab_fixture() {
+  FAKE_GLAB_DIR=$(mktemp -d)
+  cat > "$FAKE_GLAB_DIR/glab" << 'FAKE_GLAB_SCRIPT'
+#!/usr/bin/env bash
+if [ -n "$FAKE_GLAB_LOG" ]; then
+  printf '%s\n' "$*" >> "$FAKE_GLAB_LOG"
+fi
+
+case "$1 $2" in
+  "mr view")
+    call=1
+    if [ -n "$FAKE_GLAB_CALL_COUNTER" ]; then
+      call=$(cat "$FAKE_GLAB_CALL_COUNTER" 2>/dev/null || echo 0)
+      call=$((call + 1))
+      printf '%s\n' "$call" > "$FAKE_GLAB_CALL_COUNTER"
+    fi
+    exit_code="${FAKE_GLAB_VIEW_EXIT:-0}"
+    if [ "$exit_code" != "0" ]; then
+      printf '%s' "${FAKE_GLAB_VIEW_STDERR:-}" >&2
+      exit "$exit_code"
+    fi
+    body="${FAKE_GLAB_MR_JSON:-}"
+    if [ "$call" -gt 1 ] && [ -n "${FAKE_GLAB_MR_JSON_SECOND:-}" ]; then
+      body="$FAKE_GLAB_MR_JSON_SECOND"
+    fi
+    [ -z "$body" ] && body='{}'
+    printf '%s' "$body"
+    exit 0
+    ;;
+  *)
+    echo "fake-glab: unhandled invocation: $*" >&2
+    exit 127
+    ;;
+esac
+FAKE_GLAB_SCRIPT
+  chmod +x "$FAKE_GLAB_DIR/glab"
+}
+
+# Removes the fake-glab temp dir and every FAKE_GLAB_* control variable, so a
+# stray export never leaks into an unrelated later test.
+teardown_fake_glab_fixture() {
+  rm -rf "$FAKE_GLAB_DIR"
+  unset FAKE_GLAB_DIR FAKE_GLAB_LOG FAKE_GLAB_MR_JSON FAKE_GLAB_MR_JSON_SECOND \
+    FAKE_GLAB_CALL_COUNTER FAKE_GLAB_VIEW_EXIT FAKE_GLAB_VIEW_STDERR
+}
+
+# Sources the GitLab field mapper plus the two functions the assertions below
+# reach through it: the github mapper (to cross-check that both answer for the
+# SAME ten contract fields) and _forge_map_state (to show that mapping the
+# KEY `state` and normalizing GitLab's VALUE "opened" are separate jobs).
+# Same "eval every helper the code under test reaches" rule
+# source_cache_functions follows.
+source_forge_gitlab_map_functions() {
+  eval "$(sed -n '/^_forge_map_pr_field_gitlab()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_map_pr_field_github()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_map_state()/,/^}/p' "$CLI")"
+}
+
+# One realistic `glab mr view <ref> -F json` document, built from go-gitlab's
+# own struct tags. Three properties matter and are load-bearing for the
+# assertions below, so do not "tidy" them away:
+#   - `id` (98765) DIFFERS from `iid` (42), so mapping number->id instead of
+#     number->iid produces a visibly wrong number rather than an accident that
+#     happens to pass.
+#   - BOTH `draft` and `work_in_progress` are present, because glab marshals
+#     the whole struct and really does emit both; the mapper's job is to pick
+#     the non-deprecated one.
+#   - There is NO file list and NO `merge_status` -- exactly as the real
+#     document has neither. `changes_count` is present because the real struct
+#     carries it, and it is a COUNT string, not something `files` could map to.
+_fake_glab_mr_fixture_json() {
+  printf '%s' '{
+    "id": 98765,
+    "iid": 42,
+    "project_id": 321,
+    "target_branch": "main",
+    "source_branch": "feat/gitlab-adapter",
+    "title": "Add the GitLab adapter",
+    "state": "opened",
+    "description": "Body text of the merge request.",
+    "draft": true,
+    "work_in_progress": true,
+    "detailed_merge_status": "not_open",
+    "web_url": "https://gitlab.com/acme/widgets/-/merge_requests/42",
+    "has_conflicts": false,
+    "changes_count": "3",
+    "author": {"username": "octocat"},
+    "reviewers": [{"username": "monalisa"}]
+  }'
+}
+
+# RUNS BEFORE ANY OTHER GLAB ASSERTION, ON PURPOSE. An assertion that passes
+# regardless of the code under test is not evidence, and that exact defect
+# class is why phase 2's machine-account check had to be rebuilt. So before a
+# single mapping assertion trusts this stub, prove the stub can turn a test
+# RED: drive the identical pipeline (fake glab payload -> mapper key -> jq
+# pick -> compare) twice with two different iids and show the verdict moves.
+test_fake_glab_stub_can_produce_a_failing_result() {
+  echo ""
+  echo "=== fake glab: the stub CAN produce a failing result (falsifiability proof, runs first) ==="
+
+  source_forge_gitlab_map_functions
+  setup_fake_glab_fixture
+
+  local key matching differing would_have_gone_red
+  key=$(_forge_map_pr_field_gitlab number)
+
+  # Payload whose iid IS the expected 42 -- the green case.
+  matching=$(FAKE_GLAB_MR_JSON='{"iid":42,"id":98765}' PATH="$FAKE_GLAB_DIR:$PATH" \
+    glab mr view 42 -F json | jq -r --arg k "$key" '.[$k]')
+
+  # SAME code path, SAME mapper key, payload whose iid DIFFERS. If the
+  # pipeline were insensitive to the stub's output, these two would be equal.
+  differing=$(FAKE_GLAB_MR_JSON='{"iid":7,"id":98765}' PATH="$FAKE_GLAB_DIR:$PATH" \
+    glab mr view 42 -F json | jq -r --arg k "$key" '.[$k]')
+
+  assert_eq "42" "$matching" "fake glab falsifiability: the matching payload yields the expected iid (green case)"
+  assert_eq "7" "$differing" "fake glab falsifiability: the differing payload yields the OTHER iid, so output really does track the fixture"
+
+  # The proof stated as a check rather than left as a comment: had `differing`
+  # been asserted against 42, assert_eq would have gone red. Written this way
+  # so a future edit that makes the stub ignore FAKE_GLAB_MR_JSON fails HERE,
+  # loudly, instead of quietly making every mapping assertion below vacuous.
+  would_have_gone_red=no
+  if [ "$differing" != "42" ]; then
+    would_have_gone_red=yes
+  fi
+  assert_eq "yes" "$would_have_gone_red" "fake glab falsifiability: asserting the differing payload against 42 WOULD have gone red -- the stub is not a rubber stamp"
+
+  teardown_fake_glab_fixture
+}
+
+# The stub records argv (so an assertion can prove which flags were passed,
+# not merely that a call happened) and can report DIFFERING output across two
+# calls (so a before/after comparison is proven able to move).
+test_fake_glab_records_argv_and_can_differ_across_calls() {
+  echo ""
+  echo "=== fake glab: argv recording, and differing output across two calls ==="
+
+  setup_fake_glab_fixture
+
+  local log counter first second logged
+  log=$(mktemp)
+  counter=$(mktemp)
+  printf '0\n' > "$counter"
+
+  first=$(FAKE_GLAB_LOG="$log" FAKE_GLAB_CALL_COUNTER="$counter" \
+    FAKE_GLAB_MR_JSON='{"iid":42}' FAKE_GLAB_MR_JSON_SECOND='{"iid":99}' \
+    PATH="$FAKE_GLAB_DIR:$PATH" glab mr view 42 -F json)
+  second=$(FAKE_GLAB_LOG="$log" FAKE_GLAB_CALL_COUNTER="$counter" \
+    FAKE_GLAB_MR_JSON='{"iid":42}' FAKE_GLAB_MR_JSON_SECOND='{"iid":99}' \
+    PATH="$FAKE_GLAB_DIR:$PATH" glab mr view 42 -F json)
+
+  assert_eq '{"iid":42}' "$first" "fake glab two-call: first call serves FAKE_GLAB_MR_JSON"
+  assert_eq '{"iid":99}' "$second" "fake glab two-call: second call serves FAKE_GLAB_MR_JSON_SECOND -- output can differ across calls"
+  assert_eq "2" "$(cat "$counter")" "fake glab two-call: the counter recorded exactly two mr view invocations"
+
+  logged=$(head -1 "$log")
+  assert_eq "mr view 42 -F json" "$logged" "fake glab argv: the exact argv is recorded, proving which flags were passed"
+
+  # glab has no gh-style `--json <field-list>` selector; `-F json` prints the
+  # whole document and filtering is `--jq`. Pin that so a later story does not
+  # port gh's request-a-field-list habit across by reflex.
+  assert_eq "0" "$(grep -c -- '--json' "$log")" "fake glab argv: no gh-style --json field-list selector was passed (glab has none)"
+  assert_eq "2" "$(grep -c -- '-F json' "$log")" "fake glab argv: both calls used glab's own -F json whole-document form"
+
+  rm -f "$log" "$counter"
+  teardown_fake_glab_fixture
+}
+
+# The mapping table itself: one assertion per contract field naming the exact
+# GitLab key, plus the unmappable-field-yields-empty rule. Every key is then
+# resolved against a realistic `glab mr view -F json` document served by the
+# stub, so a wrong key fails twice -- once on its name, once because it picks
+# nothing (or the wrong value) out of a real-shaped payload.
+test_forge_map_pr_field_gitlab() {
+  echo ""
+  echo "=== _forge_map_pr_field_gitlab: the ten contract fields -> GitLab's own vocabulary ==="
+
+  source_forge_gitlab_map_functions
+  setup_fake_glab_fixture
+
+  local doc out field
+  doc=$(_fake_glab_mr_fixture_json)
+  # Serve that fixture through the stub, so the values below are picked out of
+  # something a `glab mr view -F json` call actually produced rather than out
+  # of a local string the mapper never met.
+  out=$(FAKE_GLAB_MR_JSON="$doc" PATH="$FAKE_GLAB_DIR:$PATH" glab mr view 42 -F json)
+
+  # --- the exact GitLab key, one assertion per contract field --------------
+  assert_eq "iid"                   "$(_forge_map_pr_field_gitlab number)"      "gitlab map: number -> iid"
+  assert_eq "web_url"               "$(_forge_map_pr_field_gitlab url)"         "gitlab map: url -> web_url"
+  assert_eq "title"                 "$(_forge_map_pr_field_gitlab title)"       "gitlab map: title -> title"
+  assert_eq "description"           "$(_forge_map_pr_field_gitlab body)"        "gitlab map: body -> description"
+  assert_eq "state"                 "$(_forge_map_pr_field_gitlab state)"       "gitlab map: state -> state"
+  assert_eq "source_branch"         "$(_forge_map_pr_field_gitlab headRefName)" "gitlab map: headRefName -> source_branch"
+  assert_eq "target_branch"         "$(_forge_map_pr_field_gitlab baseRefName)" "gitlab map: baseRefName -> target_branch"
+  assert_eq "draft"                 "$(_forge_map_pr_field_gitlab isDraft)"     "gitlab map: isDraft -> draft (not the deprecated work_in_progress)"
+  assert_eq "detailed_merge_status" "$(_forge_map_pr_field_gitlab mergeable)"   "gitlab map: mergeable -> detailed_merge_status (not the 15.6-deprecated merge_status)"
+
+  # --- each mapped key resolves the right VALUE out of a real-shaped doc ---
+  assert_eq "42"                  "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitlab number)" '.[$k]')"      "gitlab map: the number key picks 42 out of a glab document"
+  assert_eq "https://gitlab.com/acme/widgets/-/merge_requests/42" \
+                                  "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitlab url)" '.[$k]')"         "gitlab map: the url key picks the web URL"
+  assert_eq "Add the GitLab adapter" \
+                                  "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitlab title)" '.[$k]')"       "gitlab map: the title key picks the title"
+  assert_eq "Body text of the merge request." \
+                                  "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitlab body)" '.[$k]')"        "gitlab map: the body key picks description, not a body key GitLab does not have"
+  assert_eq "opened"              "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitlab state)" '.[$k]')"       "gitlab map: the state key picks GitLab's raw 'opened'"
+  assert_eq "feat/gitlab-adapter" "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitlab headRefName)" '.[$k]')" "gitlab map: the headRefName key picks source_branch"
+  assert_eq "main"                "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitlab baseRefName)" '.[$k]')" "gitlab map: the baseRefName key picks target_branch"
+  assert_eq "true"                "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitlab isDraft)" '.[$k]')"     "gitlab map: the isDraft key picks the draft boolean"
+  assert_eq "not_open"            "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitlab mergeable)" '.[$k]')"   "gitlab map: the mergeable key picks the detailed_merge_status enum string"
+
+  # --- an unmappable field emits NOTHING -----------------------------------
+  assert_eq "" "$(_forge_map_pr_field_gitlab files)" "gitlab map: files emits nothing -- glab mr view -F json carries no changed-file list at all"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r 'has("files")')"   "gitlab map: and the document indeed has no files key that could have been mapped"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r 'has("changes")')" "gitlab map: nor a changes key -- a file list needs the separate /changes or /diffs endpoint"
+  assert_eq "3" "$(printf '%s' "$out" | jq -r '.changes_count')"     "gitlab map: changes_count exists but is a COUNT string, which is why files maps to nothing rather than to it"
+
+  assert_eq "" "$(_forge_map_pr_field_gitlab bogusField)" "gitlab map: an unknown field name emits nothing, never a pass-through to glab"
+  assert_eq "" "$(_forge_map_pr_field_gitlab '')"         "gitlab map: an empty field name emits nothing"
+
+  # `reviews` is NOT one of the ten contract fields and this story must not add
+  # it. GitLab has `reviewers` (assigned) but no submitted-verdict array; that
+  # is approvals, a different resource. Pin both halves.
+  assert_eq "" "$(_forge_map_pr_field_gitlab reviews)" "gitlab map: reviews emits nothing -- it is not a contract field and GitLab has no submitted-verdict array"
+  assert_eq "" "$(_forge_map_pr_field_github reviews)" "gitlab map: the github mapper does not answer for reviews either -- the ten-field contract is unchanged"
+  assert_eq "monalisa" "$(printf '%s' "$out" | jq -r '.reviewers[0].username')" "gitlab map: the document does carry reviewers (assigned people) -- proving reviewers and reviews are genuinely different things"
+
+  # --- the two distinctions a wrong-but-plausible key would have blurred ----
+  assert_eq "98765" "$(printf '%s' "$out" | jq -r '.id')" "gitlab map: id is present and DIFFERS from iid, so number -> id would resolve to another MR"
+  assert_eq "true"  "$(printf '%s' "$out" | jq -r '.id != .iid')" "gitlab map: id and iid are not interchangeable in this document"
+  assert_eq "true"  "$(printf '%s' "$out" | jq -r 'has("work_in_progress")')" "gitlab map: work_in_progress IS emitted too (glab marshals the whole struct) -- draft is chosen deliberately, not by absence"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r 'has("merge_status")')" "gitlab map: merge_status is absent from the document, settling mergeable -> detailed_merge_status by absence, not preference"
+
+  # --- key mapping and VALUE normalization are separate jobs ---------------
+  assert_eq "open" "$(_forge_map_state gitlab "$(printf '%s' "$out" | jq -r '.state')")" "gitlab map: _forge_map_state folds GitLab's 'opened' value to 'open' -- the mapper names the key, not the value"
+
+  # --- both mappers answer for exactly the same ten contract fields ---------
+  local gh_field gl_field covered=0
+  for field in number url title body state headRefName baseRefName files isDraft mergeable; do
+    gh_field=$(_forge_map_pr_field_github "$field")
+    if [ -n "$gh_field" ]; then
+      covered=$((covered + 1))
+    fi
+  done
+  assert_eq "10" "$covered" "gitlab map: the github mapper answers for all ten contract fields (the set this table had to cover)"
+
+  covered=0
+  for field in number url title body state headRefName baseRefName files isDraft mergeable; do
+    gl_field=$(_forge_map_pr_field_gitlab "$field")
+    if [ -n "$gl_field" ]; then
+      covered=$((covered + 1))
+    fi
+  done
+  assert_eq "9" "$covered" "gitlab map: the gitlab mapper answers for nine of the ten -- files alone is silently empty, by determination not omission"
+
+  teardown_fake_glab_fixture
+}
+
 # Prints a PATH value with every occurrence of <binary> made unresolvable,
 # while every OTHER tool aimi-cli.sh depends on remains reachable under its
 # real name. A naive "strip every PATH directory containing <binary>"
@@ -25031,6 +25324,16 @@ main() {
   test_forge_pr_view_not_found_branch_ref_costs_one_gh_call
   test_forge_pr_view_found_branch_ref_costs_two_gh_calls_list_then_view
   test_forge_pr_view_list_confirms_but_view_fails_is_error_never_not_found
+
+  # GitLab PR-field Mapping Tests (phase 3 US-001) -- the GitLab arm of the
+  # _forge_map_pr_field_* seam, plus the fake-glab PATH stub every later
+  # gitlab-adapter story in this phase reuses. The falsifiability proof runs
+  # FIRST, before any mapping assertion trusts that stub.
+  echo ""
+  echo "--- GitLab PR-field Mapping Tests (phase 3 US-001) ---"
+  test_fake_glab_stub_can_produce_a_failing_result
+  test_fake_glab_records_argv_and_can_differ_across_calls
+  test_forge_map_pr_field_gitlab
 
   cleanup
 
