@@ -3089,10 +3089,12 @@ _forge_account_override_slots() {
 #     the lookup succeeding and returning real data, and an authenticated-
 #     account check that definitively answers "no" is still a successful
 #     lookup, not a broken one.
-#   - gh absent from PATH, or the resolved forge has no adapter yet
-#     (gitlab/gitea/unknown) -> the check itself could not run.
-#     status="error", data=null, message names why. Callers branch on
-#     status/message first, never on data.authenticated alone.
+#   - the forge's own CLI absent from PATH, or the resolved forge has no
+#     adapter yet (gitea/unknown -- gitlab gained one in phase 3) -> the
+#     check itself could not run. status="error", data=null, message names
+#     why, naming the binary THAT forge needs (gh or glab, never a generic
+#     placeholder). Callers branch on status/message first, never on
+#     data.authenticated alone.
 # "not_found" is not used by forge-auth-status: there is no "no such auth
 # status" outcome the way there is "no such PR" -- the check either runs to
 # a definitive true/false answer (found) or cannot run at all (error).
@@ -3157,6 +3159,73 @@ _forge_auth_status_github() {
       accounts: $ARGS.positional}' ${accounts[@]+"${accounts[@]}"}
 }
 
+# The GitLab arm of the same question _forge_auth_status_github answers, and
+# emits the IDENTICAL {authenticated, account, accounts} object so
+# _forge_auth_status's own envelope builder below is shared rather than
+# forked per adapter.
+#
+# Runs `glab auth status [--hostname <host>]`, combining stdout+stderr for the
+# same reason the github helper does -- glab prints its status block through
+# its own LogErrorf (stderr), and this parser only cares about the text.
+# A NON-ZERO EXIT IS THE CONFIRMED "not authenticated" ANSWER, not a tool
+# failure: glab returns an error when no instance is configured at all, and a
+# different one when the requested --hostname was never authenticated
+# (internal/commands/auth/status/status.go). That is the same convention
+# `gh auth status` follows, which is why both helpers can share one shape.
+#
+# WHY THE PARSE DIFFERS FROM THE GITHUB ONE. glab has no "Active account:
+# true" marker line, because it has no multi-account-per-host model to mark:
+# its status block prints one `Logged in to <host> as <username> (<source>)`
+# line per authenticated INSTANCE. So the login is read out of that line's
+# `as <username>` position, and the first one found is the acting account --
+# never a marker line, which does not exist here. `--hostname` is always
+# passed when a host is known, so at most one instance block is printed;
+# `-a`/`--all` is deliberately never passed.
+#
+# VERIFICATION CEILING (phase-wide): glab is not installed on the machine
+# this was written on. The wording above is read off glab's own docs and
+# source, not off an observed binary -- the same declared ceiling
+# _forge_map_pr_field_gitlab's header states.
+_forge_auth_status_gitlab() {
+  local host="$1"
+  local out="" rc=0
+  if [ -n "$host" ]; then
+    out=$(glab auth status --hostname "$host" 2>&1) || rc=$?
+  else
+    out=$(glab auth status 2>&1) || rc=$?
+  fi
+
+  if [ "$rc" -ne 0 ]; then
+    jq -nc '{authenticated: false, account: null, accounts: []}'
+    return 0
+  fi
+
+  local login="" line seen known
+  local accounts=()
+  while IFS= read -r line; do
+    # Anchored on the literal " as " that separates host from login, so a
+    # host whose name happens to contain the word "as" cannot be mistaken
+    # for the login. The captured run stops at the first whitespace, which
+    # is what keeps the trailing "(<source>)" out.
+    if [[ "$line" =~ Logged[[:space:]]+in[[:space:]]+to[[:space:]]+[^[:space:]]+[[:space:]]+as[[:space:]]+([^[:space:]]+) ]]; then
+      login="${BASH_REMATCH[1]}"
+      seen=""
+      for known in ${accounts[@]+"${accounts[@]}"}; do
+        if [ "$known" = "$login" ]; then
+          seen="1"
+          break
+        fi
+      done
+      [ -n "$seen" ] || accounts+=("$login")
+    fi
+  done <<< "$out"
+
+  jq -nc --arg account "${accounts[0]:-}" --args \
+    '{authenticated: true,
+      account: (if $account == "" then null else $account end),
+      accounts: $ARGS.positional}' ${accounts[@]+"${accounts[@]}"}
+}
+
 # Resolves forge/host via detect-forge's own helper (a direct function call,
 # never a `$AIMI_CLI detect-forge` subprocess), dispatches to the github
 # adapter when the forge is github and gh is present (checked via the
@@ -3181,12 +3250,27 @@ _forge_auth_status() {
 
   local status="error" message="" data_json="null" reason=""
 
-  if [ "$forge" = "github" ]; then
-    if _forge_bin_check gh quiet github; then
-      local gh_out authenticated_json account identity_requested identity_honored_json
-      gh_out=$(_forge_auth_status_github "$host")
-      authenticated_json=$(printf '%s' "$gh_out" | jq -c '.authenticated')
-      account=$(printf '%s' "$gh_out" | jq -r '.account // empty')
+  # ONE binary name, chosen from the detected forge, then ONE shared body.
+  # The adapters differ only in which CLI is asked and how its status text is
+  # parsed -- both of which are settled before this point -- so the envelope
+  # below is built exactly once rather than copied per forge. `gitea` (and
+  # `unknown`) leave this empty and fall through to the no_adapter branch.
+  local adapter_bin=""
+  case "$forge" in
+    github) adapter_bin="gh" ;;
+    gitlab) adapter_bin="glab" ;;
+  esac
+
+  if [ -n "$adapter_bin" ]; then
+    if _forge_bin_check "$adapter_bin" quiet "$forge"; then
+      local cli_out authenticated_json account identity_requested identity_honored_json
+      if [ "$forge" = "gitlab" ]; then
+        cli_out=$(_forge_auth_status_gitlab "$host")
+      else
+        cli_out=$(_forge_auth_status_github "$host")
+      fi
+      authenticated_json=$(printf '%s' "$cli_out" | jq -c '.authenticated')
+      account=$(printf '%s' "$cli_out" | jq -r '.account // empty')
 
       identity_requested="${AIMI_FORGE_IDENTITY:-}"
       identity_honored_json="null"
@@ -3200,12 +3284,16 @@ _forge_auth_status() {
 
       status="found"
       # This builder names every field it emits, one by one -- it never
-      # splats $gh_out through. That containment is load-bearing, not
-      # incidental: _forge_auth_status_github also returns an `accounts`
-      # array (the whole login list, for the account-divergence section
-      # below), and forge-contract.md fixes this envelope's fields. A
-      # `+ $gh_out`-style merge here would leak a field the contract does
-      # not define into every forge-auth-status caller.
+      # splats $cli_out through. That containment is load-bearing, not
+      # incidental: _forge_auth_status_github (and its gitlab sibling) also
+      # returns an `accounts` array (the whole login list, for the
+      # account-divergence section below), and forge-contract.md fixes this
+      # envelope's fields. A `+ $cli_out`-style merge here would leak a field
+      # the contract does not define into every forge-auth-status caller.
+      #
+      # `forge` is $forge verbatim, so a GitLab repository reports
+      # "gitlab" here -- open-pr.md Step 1a prints `.data.forge` rather than
+      # a hardcoded "GitHub", and that is what makes it render correctly.
       data_json=$(jq -nc \
         --arg forge "$forge" \
         --arg host "$host" \
@@ -3220,7 +3308,11 @@ _forge_auth_status() {
           identityRequested: (if $identityRequested == "" then null else $identityRequested end),
           identityHonored: $identityHonored}')
     else
-      message="gh not found on PATH -- cannot check authentication status"
+      # Names the binary the DETECTED forge actually needs -- `glab` on a
+      # GitLab remote, never `gh`. Telling a GitLab user to install gh is
+      # the exact "message names the wrong CLI" defect the phase contract's
+      # fourth success criterion exists to prevent.
+      message="$adapter_bin not found on PATH -- cannot check authentication status"
       reason="cli_missing"
     fi
   else
@@ -3950,6 +4042,51 @@ _forge_repo_info_github() {
   printf '%s' "$raw" | jq -c '{owner: .owner.login, repo: .name}' 2>/dev/null || return 1
 }
 
+# The GitLab arm of _forge_repo_info_github: one `glab repo view -F json`
+# call, printing {owner, repo} on success and returning 1 (no output) on any
+# failure so the caller falls through to the same local-parse tier -- exactly
+# the contract the github helper above already has.
+#
+# `-F json`, NOT a gh-style `--json <field-list>`. glab has no field selector
+# on any read command: `-F, --output string  Format output as: text, json`
+# plus `--jq string  Filter JSON output with a jq expression` is the whole
+# interface (docs/source/repo/view.md), so the call asks for the WHOLE
+# document and this function picks keys out of it afterwards.
+#
+# GitLab models ownership as a NAMESPACE PATH, not an owner login, and that
+# path can be arbitrarily deep (group/subgroup/subgroup/project). So the
+# split is done by the SAME _forge_repo_info_parse_url the local-parse tier
+# uses -- it already treats every segment before the last as the owner,
+# specifically so a nested subgroup survives intact (see its header). Feeding
+# it a bare `group/subgroup/project` path exercises its no-scheme, no-colon
+# branch, which is a plain "last segment is the repo" split.
+#
+# `path_with_namespace` is the primary key; `namespace.full_path` + `path` is
+# the equivalent recomposition, kept as a fallback for a response that omits
+# the flattened form. Both are go-gitlab *gitlab.Project struct tags
+# (`PathWithNamespace json:"path_with_namespace"`, `Path json:"path"`,
+# `Namespace json:"namespace"` -> `FullPath json:"full_path"`), which ARE
+# glab's JSON keys because glab marshals the struct rather than projecting
+# it -- the same evidence chain, and the same declared verification ceiling
+# (glab not installed here), that _forge_map_pr_field_gitlab's header states.
+_forge_repo_info_gitlab() {
+  local raw="" rc=0
+  raw=$(glab repo view -F json 2>&1) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    return 1
+  fi
+
+  local path=""
+  path=$(printf '%s' "$raw" | jq -r '
+    if (.path_with_namespace // "") != "" then .path_with_namespace
+    elif (.namespace.full_path // "") != "" and (.path // "") != "" then (.namespace.full_path + "/" + .path)
+    else "" end' 2>/dev/null) || return 1
+
+  [ -n "$path" ] || return 1
+
+  _forge_repo_info_parse_url "$path"
+}
+
 # Parses owner/repo directly out of a git remote URL -- the offline fallback
 # used when gh is absent, unauthenticated, or the forge has no adapter yet.
 # Every path segment before the last becomes owner (not just the
@@ -3987,11 +4124,14 @@ _forge_repo_info_parse_url() {
   jq -nc --arg owner "$owner" --arg repo "$repo" '{owner: $owner, repo: $repo}'
 }
 
-# Two-tier resolution mirroring _resolve_default_branch's own shape: the
-# github adapter is the primary path when the forge is github and gh is
-# present; parsing owner/repo straight out of the already-resolved remote
-# URL is the offline fallback, used whenever gh is missing, unauthenticated,
-# the forge has no adapter, or the primary call otherwise fails. When even
+# Two-tier resolution mirroring _resolve_default_branch's own shape: a forge
+# adapter is the primary path when the detected forge has one AND its CLI is
+# present (github -> gh, gitlab -> glab); parsing owner/repo straight out of
+# the already-resolved remote URL is the offline fallback, used whenever that
+# CLI is missing, unauthenticated, the forge has no adapter, or the primary
+# call otherwise fails. AT MOST ONE forge CLI is ever invoked -- the arms are
+# an if/elif chain keyed on the detected forge, so a GitLab repository never
+# shells out to gh and a GitHub one never shells out to glab. When even
 # the fallback yields no usable owner/repo (no origin configured, or a path
 # that never splits into two segments), reports status=not_found -- a
 # confirmed absence, not a tool error, per forge-contract.md's Three-Way
@@ -4017,6 +4157,18 @@ _forge_repo_info() {
       repo=$(printf '%s' "$gh_json" | jq -r '.repo // empty')
       if [ -n "$owner" ] && [ -n "$repo" ]; then
         source="gh"
+      fi
+    fi
+  elif [ "$forge" = "gitlab" ] && _forge_bin_check glab quiet gitlab; then
+    # `source` distinguishes WHICH tier answered, so a GitLab repository
+    # whose glab call succeeded reports "glab" and is no longer indistinguish-
+    # able from one that only ever managed the offline remote-URL parse.
+    local glab_json=""
+    if glab_json=$(_forge_repo_info_gitlab); then
+      owner=$(printf '%s' "$glab_json" | jq -r '.owner // empty')
+      repo=$(printf '%s' "$glab_json" | jq -r '.repo // empty')
+      if [ -n "$owner" ] && [ -n "$repo" ]; then
+        source="glab"
       fi
     fi
   fi
@@ -4119,10 +4271,12 @@ cmd_forge_repo_info() {
 # identical today, so every current call site's own jq expression (e.g.
 # `.files[].path`) survives unchanged.
 #
-# Does NOT implement a gitlab or gitea adapter -- both, plus a missing gh
-# binary, degrade through the quiet _forge_bin_check mode, matching
-# review.md's own already-documented git-diff fallback for a missing gh so
-# a later migration onto this verb introduces no new warning banner.
+# Phase 3 added the gitlab adapter alongside it (_forge_pr_view_gitlab,
+# `glab mr view <ref> -F json`). gitea still has none, and it -- plus a
+# missing gh OR a missing glab -- degrades through the quiet
+# _forge_bin_check mode, matching review.md's own already-documented git-diff
+# fallback for a missing gh so a migration onto this verb introduces no new
+# warning banner.
 
 # Emit the forge-pr-view envelope: {status, pr, unsupported_fields, message}.
 # status must be found | not_found | error (anything else is a caller error,
@@ -4190,6 +4344,215 @@ _forge_map_pr_field_github() {
     isDraft)     printf 'isDraft' ;;
     mergeable)   printf 'mergeable' ;;
   esac
+}
+
+# Maps one NORMALIZED PR contract field name (forge-contract.md's
+# "Normalized PR Field Set") to the field name GitLab's own
+# `glab mr view <ref> -F json` uses for it. This is the GitLab arm of the
+# seam _forge_map_pr_field_github's own header names as "the single seam a
+# later GitLab or Gitea adapter replaces"; the two are kept ADJACENT and
+# identically case-statement-shaped, ten branches each, so they stay
+# diffable side by side.
+#
+# An unmapped name prints nothing, so a field this adapter cannot express
+# is never silently passed through to glab as-is -- the identical
+# silent-empty default the github mapper's case statement has.
+#
+# HOW THIS TABLE IS USED DIFFERS FROM THE GITHUB ONE. gh has a
+# `--json <field-list>` selector, so its table names fields to REQUEST.
+# glab has no such selector: `-F json` prints the WHOLE marshalled
+# document (internal/cmdutils/output_format.go's EnableJSONOutput registers
+# `--output`/`-F` over the enum text|json, and
+# internal/commands/mr/view/mr_view.go's printJSONMR is literally
+# `return opts.io.PrintJSON(mr)` over a *gitlab.MergeRequest), and
+# filtering is done afterwards with `--jq`. So every name below is a KEY to
+# PICK OUT of that document, never a field to ask for.
+#
+# `reviews` is deliberately absent and is NOT one of the ten contract
+# fields. GitLab merge requests carry `reviewers` -- people ASSIGNED to
+# review (BasicMergeRequest.Reviewers, `json:"reviewers"`) -- but have no
+# equivalent of GitHub's `reviews` array of SUBMITTED
+# APPROVED/CHANGES_REQUESTED verdicts. GitLab models those as approvals, a
+# different resource behind its own endpoint
+# (MergeRequestsService.GetMergeRequestApprovals). Do not conflate
+# reviewers with reviews.
+#
+# VERIFICATION CEILING -- READ BEFORE TRUSTING ANY KEY BELOW. glab was NOT
+# installed on the machine this was written on, so not one key here was
+# observed coming out of the real binary. The phase-2 github mapper was
+# verified against a real gh v2.94.0 before a line of it was written; this
+# function cannot make that claim. Every key is instead read off glab's own
+# source and GitLab's API docs: gitlab-org/cli (the glab CLI) and
+# gitlab-org/api/client-go (go-gitlab), whose struct tags ARE glab's JSON
+# keys precisely because glab marshals *gitlab.MergeRequest directly rather
+# than projecting it. Line numbers below are client-go's merge_requests.go
+# on main as of 2026-08-05.
+#
+# number -> iid, NOT id. Both exist on the struct (`ID int64 json:"id"`
+# line 81, `IID int64 json:"iid"` line 82). `id` is globally unique across
+# the whole GitLab instance; `iid` is the per-project number the user sees
+# in the MR URL and types at the CLI. Mapping to `id` would yield a number
+# that resolves to a DIFFERENT merge request.
+#
+# state -> state names the KEY only. GitLab's VALUE vocabulary is its own
+# ("opened", not "open"), and normalizing it is _forge_map_state's job --
+# it already carries the gitlab arm that folds "opened" to "open".
+#
+# THE THREE MAPPINGS THAT HAD TO BE DETERMINED RATHER THAN ASSUMED:
+#
+#   files -> NOTHING, and that is a SETTLED answer rather than an
+#     unresolved one: `glab mr view -F json` carries no changed-file list at
+#     all, so there is no key to name. Neither MergeRequest nor the
+#     BasicMergeRequest it embeds has a Changes field; the only thing close
+#     is `ChangesCount string json:"changes_count"` (line 146), a COUNT
+#     string, not a file list. A file list requires a SEPARATE call --
+#     GetMergeRequestChanges (projects/:id/merge_requests/:iid/changes,
+#     merge_requests.go:538) or ListMergeRequestDiffs (.../diffs, line 561)
+#     -- and mr_view.go's JSON path issues neither. Emitting nothing is
+#     therefore correct, not merely cautious.
+#
+#   mergeable -> detailed_merge_status. `DetailedMergeStatus string
+#     json:"detailed_merge_status"` is on BasicMergeRequest (line 106) and
+#     there is NO MergeStatus field on either struct: the single
+#     `json:"merge_status"` in the whole file belongs to the unrelated
+#     BlockingMergeRequest type (line 1049), so `merge_status` never appears
+#     in a `glab mr view -F json` document at all. That settles the older-vs-
+#     newer question by absence rather than by preference, and it agrees
+#     with GitLab's docs deprecating merge_status in 15.6 in favour of
+#     detailed_merge_status. The VALUE is an enum string (e.g. "mergeable",
+#     "not_open"), not a boolean -- the same shape GitHub's
+#     MERGEABLE/CONFLICTING/UNKNOWN takes, which is why _forge_build_pr_json
+#     already carries mergeable as a string.
+#
+#   isDraft -> draft. BOTH keys are emitted, because glab marshals the whole
+#     struct: `Draft bool json:"draft"` on BasicMergeRequest (line 103) and
+#     `WorkInProgress bool json:"work_in_progress"` on MergeRequest (line
+#     159). The tie is broken by go-gitlab's own comment on the latter,
+#     verbatim "// Deprecated: use Draft instead" (line 158), which matches
+#     GitLab's API docs ("work_in_progress ... Deprecated. Use draft
+#     instead."). So `draft`.
+#
+# Usage: _forge_map_pr_field_gitlab <contract-field>
+_forge_map_pr_field_gitlab() {
+  case "$1" in
+    number)      printf 'iid' ;;
+    url)         printf 'web_url' ;;
+    title)       printf 'title' ;;
+    body)        printf 'description' ;;
+    state)       printf 'state' ;;
+    headRefName) printf 'source_branch' ;;
+    baseRefName) printf 'target_branch' ;;
+    # Deliberately EMPTY, not missing. The branch is kept so the two mappers
+    # stay ten-for-ten diffable and a reader meets the omission at the line
+    # they look at, rather than only in the header. See the `files` note.
+    files)       ;;
+    isDraft)     printf 'draft' ;;
+    mergeable)   printf 'detailed_merge_status' ;;
+  esac
+}
+
+# THE ONE found-envelope construction, shared by every forge-pr-view adapter.
+# Takes a forge label, the adapter's RAW response document, and the caller's
+# requested contract-field list, and emits the finished
+# {status:"found", pr, unsupported_fields, message:null} envelope.
+#
+# It exists so the three-way envelope is built once rather than copied per
+# adapter. Everything below is forge-independent BY CONSTRUCTION: the only
+# per-forge knowledge is the single _forge_map_pr_field_* lookup and the
+# _forge_map_state forge label, both selected from $forge here. An adapter
+# body therefore never re-derives the projection, the unsupported_fields
+# intersection, or the null-vs-absent rule -- it fetches a document and hands
+# it over.
+#
+# A CONTRACT FIELD THE MAPPER ANSWERS EMPTY FOR IS REPORTED ABSENT, NEVER
+# GUESSED. The `[ -n "$native" ] || continue` below is that rule: on GitLab
+# `files` maps to nothing (the document carries no changed-file list at all),
+# so no flag reaches _forge_build_pr_json, which then marks `files` in
+# unsupported_fields and leaves its value null. That is a reported absence,
+# not an invented value.
+#
+# has() rather than a bare index keeps "the forge omitted this key entirely"
+# (unsupported -- null AND named in unsupported_fields) distinguishable from
+# "the forge returned this key with an explicit null" (supported -- null but
+# NOT named), which a bare index collapses into one indistinguishable null.
+#
+# Usage: _forge_pr_view_build_found <forge> <raw-json-document> <fields-csv>
+_forge_pr_view_build_found() {
+  local forge="$1" doc="$2" fields_csv="$3"
+
+  local -a requested=()
+  local old_ifs="$IFS"
+  IFS=','
+  read -ra requested <<< "$fields_csv"
+  IFS="$old_ifs"
+
+  local -a builder_args=()
+  local field native present raw_value
+  for field in "${requested[@]}"; do
+    case "$forge" in
+      github) native=$(_forge_map_pr_field_github "$field") ;;
+      gitlab) native=$(_forge_map_pr_field_gitlab "$field") ;;
+      *)      native="" ;;
+    esac
+    [ -n "$native" ] || continue
+    present=$(printf '%s' "$doc" | jq -r --arg k "$native" 'has($k)' 2>/dev/null) || present="false"
+    [ "$present" = "true" ] || continue
+    case "$field" in
+      # Scalars reach the builder as strings. `if . == null` rather than
+      # `// ""` deliberately: `//` also swallows a legitimate `false`, which
+      # mergeable can genuinely carry on a forge that reports it as a boolean
+      # rather than GitHub's MERGEABLE/CONFLICTING/UNKNOWN enum or GitLab's
+      # detailed_merge_status enum.
+      number|url|title|body|headRefName|baseRefName|mergeable)
+        raw_value=$(printf '%s' "$doc" | jq -r --arg k "$native" '.[$k] | if . == null then "" else tostring end')
+        ;;
+      state)
+        raw_value=$(printf '%s' "$doc" | jq -r --arg k "$native" '.[$k] | if . == null then "" else tostring end')
+        # The KEY is what the mapper answered; the VALUE vocabulary is a
+        # separate job -- this is where GitLab's "opened" becomes "open".
+        raw_value=$(_forge_map_state "$forge" "$raw_value")
+        ;;
+      # JSON-valued fields reach the builder as raw JSON (--argjson on the
+      # other side), so an explicit null stays the JSON literal `null`.
+      files|isDraft)
+        raw_value=$(printf '%s' "$doc" | jq -c --arg k "$native" '.[$k]')
+        ;;
+    esac
+    case "$field" in
+      number)      builder_args+=(--number "$raw_value") ;;
+      url)         builder_args+=(--url "$raw_value") ;;
+      title)       builder_args+=(--title "$raw_value") ;;
+      body)        builder_args+=(--body "$raw_value") ;;
+      state)       builder_args+=(--state "$raw_value") ;;
+      headRefName) builder_args+=(--head-ref-name "$raw_value") ;;
+      baseRefName) builder_args+=(--base-ref-name "$raw_value") ;;
+      files)       builder_args+=(--files "$raw_value") ;;
+      isDraft)     builder_args+=(--is-draft "$raw_value") ;;
+      mergeable)   builder_args+=(--mergeable "$raw_value") ;;
+    esac
+  done
+
+  local pr_full pr_json unsupported_json fields_json
+  pr_full=$(_forge_build_pr_json ${builder_args[@]+"${builder_args[@]}"})
+  fields_json=$(printf '%s' "$fields_csv" | jq -Rc 'split(",")')
+
+  # Project the builder's fixed ten-key output down to exactly the keys this
+  # caller asked for, in the order it asked for them -- the
+  # never-pay-for-files-you-did-not-ask-for behavior this verb's --include
+  # selector exists for. The builder's superset is never emitted.
+  pr_json=$(printf '%s' "$pr_full" | jq -c --argjson keys "$fields_json" '
+    . as $src | reduce $keys[] as $k ({}; . + {($k): $src[$k]})
+  ')
+
+  # ...and intersect the builder's own unsupported_fields with that same
+  # requested list: the builder always flags an unpassed capability-gated
+  # flag, but a field the caller never included is simply not part of this
+  # answer and must not be reported as unsupported.
+  unsupported_json=$(printf '%s' "$pr_full" | jq -c --argjson keys "$fields_json" '
+    [.unsupported_fields[] | . as $f | select($keys | index($f))]
+  ')
+
+  _forge_pr_view_emit "found" "$pr_json" "$unsupported_json" ""
 }
 
 # github adapter for forge-pr-view. <ref> is a PR number or a branch name
@@ -4276,78 +4639,13 @@ _forge_pr_view_github() {
   _forge_capture stdout stderr rc -- gh pr view "$ref" --json "$gh_fields_csv" || true
 
   if [ "$rc" -eq 0 ]; then
-    # Normalize gh's raw response through the ONE shared builder rather
-    # than re-subsetting gh's own JSON: state is case-folded through the
-    # same _forge_map_state call forge-issue-view applies, and every
-    # capability-gated field is flagged by the builder's own presence rule.
-    #
-    # A flag is passed ONLY for a field the caller requested AND whose
-    # mapped key jq's has() confirms gh actually returned. has() rather
-    # than a bare index is what keeps "gh omitted this key entirely"
-    # (unsupported -- null AND named in unsupported_fields) distinguishable
-    # from "gh returned this key with an explicit null" (supported -- null
-    # but NOT named), which a bare index collapses into one indistinguishable
-    # null.
-    local -a builder_args=()
-    local present raw_value
-    for field in "${requested[@]}"; do
-      gh_field=$(_forge_map_pr_field_github "$field")
-      [ -n "$gh_field" ] || continue
-      present=$(printf '%s' "$stdout" | jq -r --arg k "$gh_field" 'has($k)' 2>/dev/null) || present="false"
-      [ "$present" = "true" ] || continue
-      case "$field" in
-        # Scalars reach the builder as strings. `if . == null` rather than
-        # `// ""` deliberately: `//` also swallows a legitimate `false`,
-        # which mergeable can genuinely carry on a forge that reports it as
-        # a boolean rather than GitHub's MERGEABLE/CONFLICTING/UNKNOWN enum.
-        number|url|title|body|headRefName|baseRefName|mergeable)
-          raw_value=$(printf '%s' "$stdout" | jq -r --arg k "$gh_field" '.[$k] | if . == null then "" else tostring end')
-          ;;
-        state)
-          raw_value=$(printf '%s' "$stdout" | jq -r --arg k "$gh_field" '.[$k] | if . == null then "" else tostring end')
-          raw_value=$(_forge_map_state "github" "$raw_value")
-          ;;
-        # JSON-valued fields reach the builder as raw JSON (--argjson on the
-        # other side), so an explicit null stays the JSON literal `null`.
-        files|isDraft)
-          raw_value=$(printf '%s' "$stdout" | jq -c --arg k "$gh_field" '.[$k]')
-          ;;
-      esac
-      case "$field" in
-        number)      builder_args+=(--number "$raw_value") ;;
-        url)         builder_args+=(--url "$raw_value") ;;
-        title)       builder_args+=(--title "$raw_value") ;;
-        body)        builder_args+=(--body "$raw_value") ;;
-        state)       builder_args+=(--state "$raw_value") ;;
-        headRefName) builder_args+=(--head-ref-name "$raw_value") ;;
-        baseRefName) builder_args+=(--base-ref-name "$raw_value") ;;
-        files)       builder_args+=(--files "$raw_value") ;;
-        isDraft)     builder_args+=(--is-draft "$raw_value") ;;
-        mergeable)   builder_args+=(--mergeable "$raw_value") ;;
-      esac
-    done
-
-    local pr_full pr_json unsupported_json fields_json
-    pr_full=$(_forge_build_pr_json ${builder_args[@]+"${builder_args[@]}"})
-    fields_json=$(printf '%s' "$fields_csv" | jq -Rc 'split(",")')
-
-    # Project the builder's fixed ten-key output down to exactly the keys
-    # this caller asked for, in the order it asked for them -- the
-    # never-pay-for-files-you-did-not-ask-for behavior this verb's --include
-    # selector exists for. The builder's superset is never emitted.
-    pr_json=$(printf '%s' "$pr_full" | jq -c --argjson keys "$fields_json" '
-      . as $src | reduce $keys[] as $k ({}; . + {($k): $src[$k]})
-    ')
-
-    # ...and intersect the builder's own unsupported_fields with that same
-    # requested list: the builder always flags an unpassed capability-gated
-    # flag, but a field the caller never included is simply not part of this
-    # answer and must not be reported as unsupported.
-    unsupported_json=$(printf '%s' "$pr_full" | jq -c --argjson keys "$fields_json" '
-      [.unsupported_fields[] | . as $f | select($keys | index($f))]
-    ')
-
-    _forge_pr_view_emit "found" "$pr_json" "$unsupported_json" ""
+    # Normalize gh's raw response through the ONE shared found-envelope
+    # builder rather than re-subsetting gh's own JSON here: state is
+    # case-folded through the same _forge_map_state call forge-issue-view
+    # applies, every capability-gated field is flagged by the builder's own
+    # presence rule, and the projection/intersection logic is the same code
+    # the gitlab adapter runs.
+    _forge_pr_view_build_found "github" "$stdout" "$fields_csv"
     return 0
   fi
 
@@ -4379,6 +4677,105 @@ _forge_pr_view_github() {
   # Every other non-zero exit is a genuine tool failure (auth, network,
   # malformed response) -- never folded into not_found. evidence carries
   # gh's own stderr text.
+  _forge_pr_view_emit "error" "null" "null" "$stderr"
+  return 0
+}
+
+# gitlab adapter for forge-pr-view. Same signature and same three outcomes as
+# _forge_pr_view_github above, and the two are deliberately kept adjacent and
+# structurally parallel so a reader can diff them: probe, view, classify.
+#
+# THE ONE ASYMMETRY THAT MATTERS, AND THE SINGLE MOST LIKELY WAY TO GET THIS
+# ADAPTER WRONG: gh has a `--json <field-list>` SELECTOR, so the github
+# adapter above translates the caller's contract fields into gh's vocabulary
+# and asks gh for exactly those. glab has NO such selector on any read
+# command. Its entire output interface is
+#   -F, --output string   Format output as: text, json. (default "text")
+#       --jq string       Filter JSON output with a jq expression.
+# (docs/source/mr/view.md), and internal/commands/mr/view/mr_view.go's JSON
+# path is literally `return opts.io.PrintJSON(mr)` over a
+# *gitlab.MergeRequest -- the WHOLE marshalled document, every time.
+# Passing a field list to glab as if it were gh would hand it an argument it
+# does not define. So this adapter asks for `-F json` and PICKS keys out of
+# the returned document afterwards, via _forge_map_pr_field_gitlab. There is
+# no per-field cost to save on the request side, so no field list is built.
+#
+# not_found IS DETECTED STRUCTURALLY FIRST, exactly like the github arm:
+# `glab mr list --source-branch <branch> --all -F json` returns `[]` at exit 0
+# when no merge request exists for that branch -- a fact in JSON rather than a
+# string in a message, so it survives a glab release that rewords its own
+# stderr or a non-English locale. `--all` because `glab mr list` defaults to
+# opened-only, which would otherwise misreport a merged MR's branch as absent.
+# `--source-branch` takes a branch name, never an MR IID, so a NUMERIC ref
+# skips the probe entirely -- identical to `--head`'s role above.
+#
+# CONFLATING not_found WITH error IS THE DEFECT THIS VERB EXISTS TO PREVENT,
+# and that holds on GitLab too: when the probe positively CONFIRMED the MR
+# exists and `glab mr view` then failed anyway, this reports error, never
+# not_found, and does not consult stderr wording at all -- a string cannot
+# outvote a structural fact.
+#
+# VERIFICATION CEILING: glab is not installed on the machine this was written
+# on; every flag and key above is read off glab's own docs and source, never
+# observed coming out of the real binary. Same declared ceiling as
+# _forge_map_pr_field_gitlab's header.
+_forge_pr_view_gitlab() {
+  local ref="$1" fields_csv="$2"
+  local stdout="" stderr="" rc=0
+  # Set only when the structural probe below ran cleanly AND reported one or
+  # more merge requests -- i.e. existence is a confirmed structural fact, not
+  # an inference.
+  local list_confirmed_exists=false
+
+  if ! [[ "$ref" =~ ^[0-9]+$ ]]; then
+    local list_out="" list_rc=0 list_count=""
+    list_out=$(glab mr list --source-branch "$ref" --all -F json 2>/dev/null) || list_rc=$?
+    if [ "$list_rc" -eq 0 ]; then
+      list_count=$(printf '%s' "$list_out" | jq 'length' 2>/dev/null) || list_count=""
+      if [ "$list_count" = "0" ]; then
+        _forge_pr_view_emit "not_found" "null" "null" "no merge request found for ref: $ref"
+        return 0
+      fi
+      # A parseable, non-zero count is a confirmed existence fact. An
+      # UNPARSEABLE response is not: it proves nothing either way, so it
+      # leaves the flag false and falls through to the view-plus-stderr path.
+      if [ -n "$list_count" ]; then
+        list_confirmed_exists=true
+      fi
+    fi
+  fi
+
+  _forge_capture stdout stderr rc -- glab mr view "$ref" -F json || true
+
+  if [ "$rc" -eq 0 ]; then
+    # The SAME found-envelope builder the github arm calls, differing only in
+    # the forge label -- which is what selects _forge_map_pr_field_gitlab for
+    # the key lookup and the gitlab arm of _forge_map_state for the value.
+    # `files` is the field that mapper answers empty for, so it comes back
+    # null AND named in unsupported_fields: reported absent, never guessed.
+    _forge_pr_view_build_found "gitlab" "$stdout" "$fields_csv"
+    return 0
+  fi
+
+  # A structurally CONFIRMED existence outranks any stderr text, including
+  # text that happens to say 404. See the header.
+  if [ "$list_confirmed_exists" = true ]; then
+    _forge_pr_view_emit "error" "null" "null" "$stderr"
+    return 0
+  fi
+
+  # Secondary fallback only: glab surfaces a missing merge request as the
+  # API's own 404. Kept strictly as a backstop for when the structural probe
+  # could not confirm anything (a numeric ref, or the probe itself failing),
+  # never as the primary signal.
+  if printf '%s' "$stderr" | grep -qiE '404|not found'; then
+    _forge_pr_view_emit "not_found" "null" "null" "no merge request found for ref: $ref"
+    return 0
+  fi
+
+  # Every other non-zero exit is a genuine tool failure (auth, network,
+  # malformed response) -- never folded into not_found. The message carries
+  # glab's own stderr text.
   _forge_pr_view_emit "error" "null" "null" "$stderr"
   return 0
 }
@@ -4464,12 +4861,23 @@ cmd_forge_pr_view() {
   local forge=""
   _detect_forge_type forge
 
+  # Each arm gates on the binary THAT forge needs -- gh for github, glab for
+  # gitlab -- through the shared _forge_bin_check in its quiet mode, and its
+  # degraded message names that same binary. A GitLab user is never told to
+  # install gh.
   case "$forge" in
     github)
       if _forge_bin_check gh quiet github; then
         _forge_pr_view_github "$pr_ref" "$fields_csv"
       else
         _forge_pr_view_emit "error" "null" "null" "gh not found on PATH -- this github operation cannot run automatically."
+      fi
+      ;;
+    gitlab)
+      if _forge_bin_check glab quiet gitlab; then
+        _forge_pr_view_gitlab "$pr_ref" "$fields_csv"
+      else
+        _forge_pr_view_emit "error" "null" "null" "glab not found on PATH -- this gitlab operation cannot run automatically."
       fi
       ;;
     *)
@@ -4552,10 +4960,43 @@ _forge_pr_write_print_manual() {
     repo=$(printf '%s' "$repo_info" | jq -r '.data.repo // empty')
     host=$(printf '%s' "$repo_info" | jq -r '.data.host // empty')
   fi
-  [ -n "$host" ] || host="github.com"
+  if [ -z "$host" ]; then
+    # Per-forge default rather than a single github.com constant: on a GitLab
+    # repository whose host could not be resolved, printing a github.com URL
+    # would be actively misleading rather than merely unhelpful.
+    case "$forge" in
+      gitlab) host="gitlab.com" ;;
+      *)      host="github.com" ;;
+    esac
+  fi
 
   {
-    if [ "$mode" = "create" ]; then
+    if [ "$forge" = "gitlab" ]; then
+      # GitLab arm. Three things differ from the github arm below and every
+      # one of them is a correctness matter, not a cosmetic one:
+      #   - the noun is "merge request", not "pull request";
+      #   - the CLI is glab, and the invocation printed here CARRIES -y for
+      #     the same reason the automatic one does (see the GitLab write
+      #     adapters section) -- a human who copy-pastes this line into an
+      #     unattended script must not inherit the hang;
+      #   - GitLab's web paths are /-/merge_requests/... , and the "open a new
+      #     MR" form is a query-string on /-/merge_requests/new rather than
+      #     GitHub's /compare/base...head?expand=1.
+      if [ "$mode" = "create" ]; then
+        echo "Warning: could not create this gitlab merge request automatically -- create it yourself with:"
+        echo "  git push -u origin $head_or_number"
+        echo "  glab mr create -y --title \"$title\" --source-branch $head_or_number --target-branch $base --description ..."
+        if [ -n "$owner" ] && [ -n "$repo" ]; then
+          echo "  Or open: https://$host/$owner/$repo/-/merge_requests/new?merge_request%5Bsource_branch%5D=$head_or_number&merge_request%5Btarget_branch%5D=$base"
+        fi
+      else
+        echo "Warning: could not edit this gitlab merge request automatically -- edit it yourself with:"
+        echo "  glab mr update $head_or_number -y --description ..."
+        if [ -n "$owner" ] && [ -n "$repo" ]; then
+          echo "  Or open: https://$host/$owner/$repo/-/merge_requests/$head_or_number"
+        fi
+      fi
+    elif [ "$mode" = "create" ]; then
       echo "Warning: could not create this $forge pull request automatically -- create it yourself with:"
       echo "  git push -u origin $head_or_number"
       echo "  gh pr create --title \"$title\" --base $base --head $head_or_number --body ..."
@@ -4572,6 +5013,311 @@ _forge_pr_write_print_manual() {
     echo "  Body:"
     printf '%s\n' "$body" | sed 's/^/    /'
   } >&2
+}
+
+# ============================================================================
+# GitLab write adapters — forge-pr-create, forge-pr-edit, forge-issue-create
+# ============================================================================
+# The gitlab arms of this file's THREE write verbs, kept together in one
+# section rather than scattered into each verb's body so the one rule they
+# all obey is stated once and is impossible to read past.
+#
+# THE RULE: EVERY glab WRITE INVOCATION CARRIES -y (--yes). NO EXCEPTIONS.
+#
+# `glab mr create`, `glab mr update` and `glab issue create` each PROMPT for
+# a submission confirmation unless -y is passed (glab's own flag help:
+# "Skip submission confirmation prompt" on mr create, "Skip confirmation
+# prompt" on mr update, "Don't prompt for confirmation to submit the issue"
+# on issue create). `gh pr create` has no such flag and needs none, so the
+# habit carried over from the github adapter next door does NOT produce an
+# error here -- it produces a HANG, forever, with no output explaining why,
+# in an autonomous run with nobody present to answer. A hang is the single
+# hardest failure in this system to diagnose, which is why -y is written
+# FIRST on every invocation below, immediately after the subcommand, where
+# a reviewer meets it before any other flag.
+#
+# GLAB'S FLAG NAMES ARE NOT gh'S. Verified against glab's own published
+# command reference (docs/source/mr/create.md, docs/source/mr/update.md,
+# docs/source/issue/create.md):
+#   -t/--title           (same spelling as gh)
+#   -d/--description     NOT --body
+#   -s/--source-branch   NOT --head
+#   -b/--target-branch   NOT --base
+#   -y/--yes             no gh equivalent at all
+# `glab mr update` takes the merge request as a POSITIONAL argument
+# ([<id> | <branch>]) and accepts no --source-branch/--target-branch pair.
+#
+# VERIFICATION CEILING -- READ BEFORE TRUSTING ANY BEHAVIOR BELOW. glab was
+# NOT installed on the machine this was written on; that is this phase's
+# declared ceiling, not an oversight. Not one invocation here has been
+# observed against the real binary. Flag names and prompt behavior come from
+# glab's published command reference; the tests drive a fake glab that
+# records its argv, so what is actually PROVEN here is which flags this file
+# emits -- never what the real binary does with them.
+#
+# ACCOUNT-OVERRIDE LANDING SITE -- RESOLVED: IT STAYS EMPTY, AND HERE IS WHY.
+# The landing site the paragraph below describes was left for a later story
+# whose central question -- how glab accepts a per-invocation token, and
+# whether it can at all -- was deliberately left open at planning time. That
+# question has now been answered, and the answer is no. One line, the whole
+# reason:
+#
+#   glab has no per-account token retrieval: there is no `glab auth token` subcommand at all, and its credential store is keyed by HOST alone (`token`, Scope: ScopePerHost), so there is no per-account token for this file to ask glab for.
+#
+# EVIDENCE (glab source, gitlab-org/cli @ main, read 2026-08-05 -- glab is
+# not installed on this machine, this phase's declared verification ceiling,
+# so this is read off the source rather than off an observed binary):
+#
+#   1. internal/commands/auth/ holds exactly `login`, `logout`, `status`,
+#      `credentialhelper`, `docker` and `generate`. There is no `token`
+#      subcommand, so `gh auth token --user <login> --hostname <host>` --
+#      the ONE call _forge_account_override is built on -- has no glab
+#      counterpart to be rewritten into.
+#   2. There is no per-account model for such a subcommand to address even
+#      if it existed. internal/config/schema.go declares the `token` key as
+#      `Scope: ScopePerHost` -- one token per instance -- and
+#      internal/commands/auth/status/status.go iterates `cfg.Hosts()` and
+#      reads `cfg.GetWithSource(instance, "token", true)`: instances, never
+#      logins. `glab auth status --show-token --hostname <host>` therefore
+#      returns that host's single token, not a named account's, which is why
+#      it is not a workaround either.
+#   3. The two remaining subcommands are not a back door: `auth generate` is
+#      DPoP proof generation and `auth credentialhelper` is a git credential
+#      helper. Neither retrieves a token for a named account.
+#
+# THIS IS NOT THE HOST-DEPENDENCE PROBLEM, which is worth saying because it
+# is the first thing a reader will suspect after the
+# GH_TOKEN/GH_ENTERPRISE_TOKEN split next door. glab's token environment
+# variables are GITLAB_TOKEN, GITLAB_ACCESS_TOKEN and OAUTH_TOKEN
+# (internal/config/schema.go), and EnvKeyEquivalence() -- the function that
+# resolves them (internal/config/config_mapping.go) -- takes a config KEY and
+# no hostname at all. The same three names therefore apply to gitlab.com and
+# to every self-managed instance alike, so there is no GHES-style silent
+# mis-attribution to guard against here. The blocker is the missing
+# retrieval, not the variable name.
+#
+# SO THIS PATH DEGRADES, DELIBERATELY: every glab invocation below runs as
+# the machine's ACTIVE glab session, exactly as if no account had ever been
+# recorded for this repository. Nothing here reads the account store and
+# nothing here sets, blanks or exports a token variable -- which is also what
+# preserves the one selection mechanism glab does have: an operator who
+# exported GITLAB_TOKEN before invoking this CLI still picks the acting
+# account, because glab reads that variable itself and this file leaves it
+# untouched on its way to the child process.
+#
+# IF GLAB EVER GAINS PER-ACCOUNT RETRIEVAL, the landing site is still here
+# and still costs nothing: every glab invocation below is a SINGLE
+# `_forge_capture ... -- glab ...` statement on its own line, so a bash
+# PREFIX ASSIGNMENT can be added on the line directly above it --
+#
+#     GITLAB_TOKEN="$gitlab_token_override" \
+#       _forge_capture stdout stderr_out rc -- glab mr create -y ... || true
+#
+# exactly the shape phase 2 used for GH_TOKEN/GH_ENTERPRISE_TOKEN on the gh
+# side. `export` stays forbidden for the same reason it is on the gh side --
+# a process-wide token changes what every later auth/identity probe in the
+# same process reports, starting with _forge_auth_status_gitlab, whose
+# `Logged in to <host> as <username>` parse would then report the overridden
+# account as the machine's active one and make the very before/after check
+# that proves the machine account was left alone unable to detect anything.
+#
+# SAME-ACCOUNT INVARIANT: the idempotency check that decides created vs
+# unchanged, the write itself, and the post-write re-read are all part of ONE
+# operation and must run as ONE account. On a private project the creating
+# account can see a merge request its reader account cannot, so a check
+# performed as a different account would fail against an MR that was just
+# successfully created. Degrading to the active session satisfies that
+# invariant for free -- one session, every call -- and it is also why a
+# future override would have to be put on EVERY glab call in a given
+# function, not only on the one that writes.
+
+# Extracts the merge-request/issue URL from a glab write command's stdout.
+#
+# Deliberately NOT `tail -n1`, which is what the gh side does. gh pr create
+# and gh issue create print the bare URL and nothing else; glab's write
+# commands print a short human-readable confirmation around theirs, so the
+# URL is not reliably the last line. Scanning for the last http(s) token is
+# tolerant of that framing without depending on its exact wording.
+#
+# Prints the empty string when no URL is present -- callers treat that as a
+# degraded outcome rather than guessing one.
+# Usage: _forge_glab_write_url <captured-stdout>
+_forge_glab_write_url() {
+  local out="${1:-}" url=""
+  url=$(printf '%s' "$out" | tr -d '\r' | grep -oE 'https?://[^[:space:]]+' | tail -n1) || url=""
+  printf '%s' "$url"
+}
+
+# gitlab adapter for forge-pr-create. Same contract as the github arm in
+# _forge_pr_create: shared write envelope, MANDATORY-PRINT degradation,
+# non-zero exit on every degraded branch, never retries, never prompts.
+#
+# IDEMPOTENCY differs from the github arm in ONE way, and the difference is
+# forced rather than chosen. gh has `gh pr list --head <branch> --json number`,
+# a structural existence probe that answers "no PR" as `[]` at exit 0, so the
+# github arm can treat a FAILED lookup as a hard error and refuse to create.
+# glab's equivalent read, `glab mr view <branch> -F json`, exits NON-ZERO both
+# when the merge request does not exist and when the lookup itself fails, and
+# the two are distinguishable only by matching its stderr prose -- exactly the
+# fragility forge-pr-view's own not_found detection was made structural to
+# avoid. So a failed lookup here falls through to creation instead of
+# degrading. That direction is safe on GitLab specifically: GitLab refuses to
+# open a second open merge request for the same source/target branch pair, so
+# the worst case of guessing wrong is a loud failure from `glab mr create`,
+# not a duplicate merge request. Do not "fix" this into a stderr match.
+_forge_pr_create_gitlab() {
+  local title="$1" base="$2" head="$3" body="$4"
+
+  if ! _forge_bin_check glab mandatory gitlab; then
+    _forge_pr_write_print_manual create gitlab "$base" "$head" "$body" "$title"
+    _forge_emit_write_status degraded "" "glab not found -- this merge request was not created automatically."
+    return 1
+  fi
+
+  # Existing-MR check, as the same account the create below will run as.
+  local existing_out="" existing_err="" existing_rc=0 existing_state="" existing_iid=""
+  _forge_capture existing_out existing_err existing_rc -- glab mr view "$head" -F json || true
+
+  if [ "$existing_rc" -eq 0 ]; then
+    existing_iid=$(printf '%s' "$existing_out" | jq -r '.iid // empty' 2>/dev/null) || existing_iid=""
+    if [ -n "$existing_iid" ]; then
+      # GitLab's own state vocabulary ("opened"), folded to the contract's
+      # through the same _forge_map_state the read verbs use. Only an OPEN
+      # merge request blocks; a closed or merged one falls through to
+      # creation exactly as it does on the github side, so a reused branch
+      # is never blocked forever by a dead MR.
+      existing_state=$(_forge_map_state gitlab "$(printf '%s' "$existing_out" | jq -r '.state // empty' 2>/dev/null || true)")
+      if [ "$existing_state" = "open" ]; then
+        _forge_emit_write_status unchanged "$(_forge_build_write_data \
+          "$(printf '%s' "$existing_out" | jq -r '.web_url // empty')" \
+          "$existing_iid")"
+        return 0
+      fi
+    fi
+  fi
+
+  # WRITE 1 (gitlab). -y FIRST. See this section's header for why its absence
+  # would hang rather than fail, and for the prefix-assignment landing site
+  # that belongs on the line directly above this one.
+  local stdout="" stderr_out="" rc=0
+  _forge_capture stdout stderr_out rc -- glab mr create -y -t "$title" -d "$body" -s "$head" -b "$base" || true
+
+  if [ "$rc" -ne 0 ]; then
+    _forge_pr_write_print_manual create gitlab "$base" "$head" "$body" "$title"
+    echo "Error: forge-pr-create: glab mr create exited $rc: ${stderr_out:-unknown error}" >&2
+    _forge_emit_write_status degraded "" "glab mr create exited $rc: ${stderr_out:-unknown error}"
+    return 1
+  fi
+
+  local mr_url=""
+  mr_url=$(_forge_glab_write_url "$stdout")
+
+  if [ -z "$mr_url" ]; then
+    _forge_pr_write_print_manual create gitlab "$base" "$head" "$body" "$title"
+    echo "Error: forge-pr-create: glab mr create succeeded but its output did not contain a parseable merge request URL." >&2
+    _forge_emit_write_status degraded "" "glab mr create succeeded but its output did not contain a parseable merge request URL."
+    return 1
+  fi
+
+  # PAST THIS POINT THE MERGE REQUEST EXISTS AND ITS URL IS IN HAND -- the
+  # identical rule the github arm states at length: never discard $mr_url,
+  # never print the create-it-yourself instructions again, never downgrade to
+  # degraded (which would force data to null and throw the url away). Only the
+  # number is unconfirmed, so it comes back null with a Warning, at exit 0.
+  local reread_out="" reread_err="" reread_rc=0 mr_number=""
+  _forge_capture reread_out reread_err reread_rc -- glab mr view "$head" -F json || true
+  if [ "$reread_rc" -eq 0 ]; then
+    mr_number=$(printf '%s' "$reread_out" | jq -r '.iid // empty' 2>/dev/null) || mr_number=""
+  fi
+
+  if [ -z "$mr_number" ]; then
+    echo "Warning: forge-pr-create: the merge request WAS created at $mr_url, but the post-create glab mr view re-read did not confirm its number -- only the number is unconfirmed. Do NOT create it again." >&2
+    _forge_emit_write_status created "$(_forge_build_write_data "$mr_url" "")"
+    return 0
+  fi
+
+  _forge_emit_write_status created "$(_forge_build_write_data "$mr_url" "$mr_number")"
+}
+
+# gitlab adapter for forge-pr-edit. Same contract as the github arm in
+# _forge_pr_edit, including its status word: a successful edit reports
+# "unchanged", never "created", because editing mints no new identifier.
+# The merge request is a POSITIONAL argument to `glab mr update`, unlike
+# `gh pr edit <number>`'s otherwise similar shape.
+_forge_pr_edit_gitlab() {
+  local number="$1" body="$2"
+
+  if ! _forge_bin_check glab mandatory gitlab; then
+    _forge_pr_write_print_manual edit gitlab "" "$number" "$body"
+    _forge_emit_write_status degraded "" "glab not found -- this merge request was not edited automatically."
+    return 1
+  fi
+
+  # WRITE 2 (gitlab). -y FIRST, same rule, same landing site.
+  local stdout="" stderr_out="" rc=0
+  _forge_capture stdout stderr_out rc -- glab mr update "$number" -y -d "$body" || true
+
+  if [ "$rc" -ne 0 ]; then
+    _forge_pr_write_print_manual edit gitlab "" "$number" "$body"
+    echo "Error: forge-pr-edit: glab mr update exited $rc: ${stderr_out:-unknown error}" >&2
+    _forge_emit_write_status degraded "" "glab mr update exited $rc: ${stderr_out:-unknown error}"
+    return 1
+  fi
+
+  # Structured re-read, as the same account that just wrote.
+  local reread_out="" reread_err="" reread_rc=0 mr_url="" mr_number=""
+  _forge_capture reread_out reread_err reread_rc -- glab mr view "$number" -F json || true
+  if [ "$reread_rc" -eq 0 ]; then
+    mr_url=$(printf '%s' "$reread_out" | jq -r '.web_url // empty' 2>/dev/null) || mr_url=""
+    mr_number=$(printf '%s' "$reread_out" | jq -r '.iid // empty' 2>/dev/null) || mr_number=""
+  fi
+
+  if [ -z "$mr_number" ]; then
+    _forge_pr_write_print_manual edit gitlab "" "$number" "$body"
+    echo "Error: forge-pr-edit: glab mr update succeeded but the merge request could not be re-read afterward." >&2
+    _forge_emit_write_status degraded "" "glab mr update succeeded but the merge request could not be re-read afterward."
+    return 1
+  fi
+
+  _forge_emit_write_status unchanged "$(_forge_build_write_data "$mr_url" "$mr_number")"
+}
+
+# gitlab adapter for forge-issue-create. Keeps the github arm's SOFT-FAIL
+# contract byte for byte: ALWAYS returns 0, on every branch including
+# degraded, so a failed issue never blocks PR creation (open-pr.md:481). The
+# caller branches on the envelope's `status` field, never on an exit code.
+# Giving the gitlab branch a different exit-code contract from the github one
+# would silently reintroduce exactly the coupling this verb exists to prevent.
+_forge_issue_create_gitlab() {
+  local title="$1" body="$2"
+
+  if ! _forge_bin_check glab mandatory gitlab; then
+    _forge_issue_create_print_manual "$title" "$body" gitlab
+    _forge_emit_write_status degraded "" "glab not found -- this issue was not created automatically."
+    return 0
+  fi
+
+  # WRITE 3 (gitlab). -y FIRST, same rule, same landing site.
+  local stdout="" stderr_out="" rc=0
+  _forge_capture stdout stderr_out rc -- glab issue create -y -t "$title" -d "$body" || true
+
+  if [ "$rc" -ne 0 ]; then
+    _forge_issue_create_print_manual "$title" "$body" gitlab
+    _forge_emit_write_status degraded "" "glab issue create exited $rc: ${stderr_out:-unknown error}"
+    return 0
+  fi
+
+  local issue_url="" issue_number=""
+  issue_url=$(_forge_glab_write_url "$stdout")
+  issue_number=$(printf '%s' "$issue_url" | grep -oE '[0-9]+$' || true)
+
+  if [ -z "$issue_url" ] || [ -z "$issue_number" ]; then
+    _forge_issue_create_print_manual "$title" "$body" gitlab
+    _forge_emit_write_status degraded "" "glab issue create succeeded but its output did not contain a parseable issue URL: ${issue_url:-<empty>}"
+    return 0
+  fi
+
+  _forge_emit_write_status created "$(_forge_build_write_data "$issue_url" "$issue_number")"
 }
 
 # Shells `gh pr create --title <t> --base <b> --head <h> --body <b>`,
@@ -4633,11 +5379,24 @@ _forge_pr_create() {
   local forge=""
   _detect_forge_type forge
 
-  if [ "$forge" != "github" ]; then
-    _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
-    _forge_emit_write_status degraded "" "forge-pr-create: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1."
-    return 1
-  fi
+  # Routing, not a github/not-github gate. The `|| gl_rc=$?` capture is
+  # mandatory under this file's `set -e`: the gitlab arm returns 1 on every
+  # degraded branch by contract, and an uncaptured non-zero return from a
+  # plain statement would abort the whole CLI before the envelope reached
+  # stdout.
+  case "$forge" in
+    github) ;;
+    gitlab)
+      local gl_rc=0
+      _forge_pr_create_gitlab "$title" "$base" "$head" "$body" || gl_rc=$?
+      return "$gl_rc"
+      ;;
+    *)
+      _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
+      _forge_emit_write_status degraded "" "forge-pr-create: no adapter for forge \"$forge\" yet -- GitHub and GitLab are the only adapters."
+      return 1
+      ;;
+  esac
 
   if ! _forge_bin_check gh mandatory "$forge"; then
     _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
@@ -4860,11 +5619,21 @@ _forge_pr_edit() {
   local forge=""
   _detect_forge_type forge
 
-  if [ "$forge" != "github" ]; then
-    _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
-    _forge_emit_write_status degraded "" "forge-pr-edit: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1."
-    return 1
-  fi
+  # Same routing shape and the same `set -e` capture rule as
+  # _forge_pr_create above.
+  case "$forge" in
+    github) ;;
+    gitlab)
+      local gl_rc=0
+      _forge_pr_edit_gitlab "$number" "$body" || gl_rc=$?
+      return "$gl_rc"
+      ;;
+    *)
+      _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
+      _forge_emit_write_status degraded "" "forge-pr-edit: no adapter for forge \"$forge\" yet -- GitHub and GitLab are the only adapters."
+      return 1
+      ;;
+  esac
 
   if ! _forge_bin_check gh mandatory "$forge"; then
     _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
@@ -4983,9 +5752,11 @@ cmd_forge_pr_edit() {
 # what lets a future caller preserve that behavior once it migrates off a
 # raw `gh issue create` shell-out.
 #
-# GitHub is the only adapter this phase. A detected forge other than
-# "github" degrades exactly like a missing `gh` binary rather than
-# attempting a call that could only fail.
+# GitHub was the only adapter in phase 1; phase 3 added GitLab to the READ
+# verb (forge-issue-view -> `glab issue view <n> -F json`). forge-issue-create
+# is unchanged and still GitHub-only. A detected forge with no adapter still
+# degrades exactly like a missing CLI binary rather than attempting a call
+# that could only fail.
 
 # Forge-native issue/PR state strings, normalized per forge-contract.md's
 # "State Mapping" table. Case-folded first because GitHub's gh CLI returns
@@ -5067,8 +5838,18 @@ _forge_issue_view() {
   forge=$(printf '%s' "$forge_info" | jq -r '.forge')
   host=$(printf '%s' "$forge_info" | jq -r '.host // empty')
 
+  if [ "$forge" = "gitlab" ]; then
+    if ! _forge_bin_check glab quiet "$forge"; then
+      # Names glab, never gh -- the phase contract's fourth success criterion.
+      _forge_emit_status error "" "glab not found -- this issue lookup did not run automatically." cli_missing
+      return 0
+    fi
+    _forge_issue_view_gitlab "$number" "$host"
+    return 0
+  fi
+
   if [ "$forge" != "github" ]; then
-    _forge_emit_status error "" "forge-issue-view: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1." no_adapter
+    _forge_emit_status error "" "forge-issue-view: no adapter for forge \"$forge\" yet -- github and gitlab are the adapters available today." no_adapter
     return 0
   fi
 
@@ -5110,6 +5891,93 @@ _forge_issue_view() {
   local reason
   reason=$(_forge_classify_gh_failure_reason "$host")
   _forge_emit_status error "" "gh issue view exited $rc: ${stderr_out:-unknown error}" "$reason"
+  return 0
+}
+
+# gitlab adapter for forge-issue-view. Same three-way found/not_found/error
+# envelope (_forge_emit_status), same shared issue builder
+# (_forge_build_issue_json), same quiet degrade posture -- only the CLI, the
+# key vocabulary and the not-found signal differ.
+#
+# `-F json`, NOT a gh-style `--json <field-list>`. `glab issue view` offers
+# `-F, --output string  Format output as: text, json` plus `--jq string`
+# and no field selector at all (docs/source/issue/view.md), and its JSON path
+# marshals go-gitlab's *gitlab.Issue whole. So the call asks for the whole
+# document and this function picks keys out of it.
+#
+# THE KEYS COME FROM _forge_map_pr_field_gitlab, NOT FROM A SECOND HAND-
+# WRITTEN TABLE HERE. GitLab spells the five portable-core contract fields
+# identically on an issue and on a merge request -- `iid`, `web_url`,
+# `title`, `description`, `state` are struct tags on BOTH *gitlab.Issue and
+# *gitlab.MergeRequest -- so reusing that one table is what keeps this call
+# site from hard-coding GitLab key names of its own. That coincidence is not
+# left to trust: test-aimi-cli.sh asserts each of the five mapper answers
+# against a realistic `glab issue view -F json` document, so a future edit
+# that made the MR table diverge fails there rather than silently here. The
+# MR-only fields (headRefName/baseRefName/isDraft/mergeable/files) are simply
+# never asked for.
+#
+# `comments` IS DELIBERATELY NOT SUPPLIED, so it comes back null AND named in
+# unsupported_fields. forge-contract.md makes `comments` the issue object's
+# one capability-gated field precisely because GitLab's discussion model does
+# not answer the same question GitHub's flat comment array does; a count
+# invented from a differently-shaped resource would be a guess. Reporting it
+# absent is the contract's own mechanism for exactly this.
+#
+# `labels` rides alongside the builder's output via a jq merge, the same way
+# the github arm adds it. GitLab returns labels as an array of plain STRINGS
+# (go-gitlab `Labels []string json:"labels"`) where GitHub returns objects
+# with a `.name`; the expression below accepts either shape rather than
+# assuming one, so a label list is never silently dropped.
+#
+# VERIFICATION CEILING: glab is not installed on the machine this was written
+# on. Same declared ceiling as _forge_map_pr_field_gitlab's header.
+_forge_issue_view_gitlab() {
+  local number="$1" host="${2:-}"
+  local stdout rc=0
+  local stderr_out
+  _forge_capture stdout stderr_out rc -- glab issue view "$number" -F json || true
+
+  if [ "$rc" -eq 0 ]; then
+    local num title_val body_val url_val state_raw state_norm labels_json data
+    num=$(printf '%s' "$stdout" | jq -r --arg k "$(_forge_map_pr_field_gitlab number)" '.[$k] // empty')
+    title_val=$(printf '%s' "$stdout" | jq -r --arg k "$(_forge_map_pr_field_gitlab title)" '.[$k] // ""')
+    body_val=$(printf '%s' "$stdout" | jq -r --arg k "$(_forge_map_pr_field_gitlab body)" '.[$k] // ""')
+    url_val=$(printf '%s' "$stdout" | jq -r --arg k "$(_forge_map_pr_field_gitlab url)" '.[$k] // ""')
+    state_raw=$(printf '%s' "$stdout" | jq -r --arg k "$(_forge_map_pr_field_gitlab state)" '.[$k] // ""')
+    # Key mapping and VALUE normalization are separate jobs: this is where
+    # GitLab's "opened" becomes the contract's "open".
+    state_norm=$(_forge_map_state "gitlab" "$state_raw")
+    labels_json=$(printf '%s' "$stdout" | jq -c '[(.labels // [])[] | if type == "object" then .name else . end]')
+    data=$(_forge_build_issue_json --number "$num" --url "$url_val" --title "$title_val" \
+      --body "$body_val" --state "$state_norm" --raw "$stdout")
+    data=$(printf '%s' "$data" | jq -c --argjson labels "$labels_json" '. + {labels: $labels}')
+    _forge_emit_status found "$data"
+    return 0
+  fi
+
+  # not_found is a query RESULT, never a verb failure -- the same distinction
+  # the github arm draws. glab surfaces a missing issue as the API's own 404.
+  if printf '%s' "$stderr_out" | grep -qiE '404|not found'; then
+    _forge_emit_status not_found
+    return 0
+  fi
+
+  # Reached only after the not-found match above already failed, so glab
+  # genuinely broke. glab's presence was confirmed by the caller's own
+  # _forge_bin_check gate, so cli_missing is already ruled out and only
+  # not_authenticated vs cli_failed remains. Determined STRUCTURALLY, by
+  # asking _forge_auth_status_gitlab whether there is a session at all --
+  # never by pattern-matching glab's failure wording, which is translatable
+  # and rewordable. Anything short of a definite "authenticated: false"
+  # resolves to cli_failed, the safe direction for an already-known failure.
+  local reason="cli_failed" auth_json authenticated
+  auth_json=$(_forge_auth_status_gitlab "$host" 2>/dev/null) || auth_json=""
+  authenticated=$(printf '%s' "$auth_json" | jq -r '.authenticated' 2>/dev/null) || authenticated=""
+  if [ "$authenticated" = "false" ]; then
+    reason="not_authenticated"
+  fi
+  _forge_emit_status error "" "glab issue view exited $rc: ${stderr_out:-unknown error}" "$reason"
   return 0
 }
 
@@ -5229,11 +6097,21 @@ _forge_issue_create() {
   local forge=""
   _detect_forge_type forge
 
-  if [ "$forge" != "github" ]; then
-    _forge_issue_create_print_manual "$title" "$body" "$forge"
-    _forge_emit_write_status degraded "" "forge-issue-create: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1."
-    return 0
-  fi
+  # Same routing shape as the two pr verbs, with this verb's OWN exit-code
+  # contract preserved: the gitlab arm, like everything else here, always
+  # returns 0 and reports the outcome in the envelope's `status` field.
+  case "$forge" in
+    github) ;;
+    gitlab)
+      _forge_issue_create_gitlab "$title" "$body"
+      return 0
+      ;;
+    *)
+      _forge_issue_create_print_manual "$title" "$body" "$forge"
+      _forge_emit_write_status degraded "" "forge-issue-create: no adapter for forge \"$forge\" yet -- GitHub and GitLab are the only adapters."
+      return 0
+      ;;
+  esac
 
   if ! _forge_bin_check gh mandatory "$forge"; then
     _forge_issue_create_print_manual "$title" "$body" "$forge"
@@ -5506,13 +6384,204 @@ _forge_pr_review_threads_github() {
   _forge_emit_status found "$data_json"
 }
 
-# Resolves forge/owner/repo, routes a non-github forge or missing gh to a
-# QUIET status=error result, and otherwise delegates to the github adapter.
-# Owner/repo are resolved via US-003's _forge_repo_info as a direct
-# function call (never a `$AIMI_CLI forge-repo-info` subprocess, never a
-# second private gh-repo-view call) whenever --owner/--repo are not both
-# supplied, replacing get-pr-comments:14-20's own inline OWNER/REPO
-# detection.
+# gitlab adapter for forge-pr-review-threads (phase 3). <iid> is already
+# validated as a positive integer by cmd_forge_pr_review_threads before this
+# ever runs; <all_threads> is the literal string "true"/"false".
+#
+# glab's own documentation marks `glab mr note list` as EXPERIMENTAL and
+# possibly unstable ("This feature is an experiment and is not ready for
+# production use. It might be unstable or removed at any time.",
+# docs/source/mr/note/list.md) -- disclosed here so a caller relying on this
+# verb on GitLab knows the upstream tool does not yet consider it settled.
+#
+# VERIFICATION CEILING: glab was NOT installed on the machine this was
+# written on, exactly as _forge_map_pr_field_gitlab's header already records
+# for the same phase. Every flag and every JSON key below is read off glab's
+# own documentation (docs/source/mr/note/list.md, whose examples pin both the
+# array shape -- `glab mr note list -F json | jq '.[].notes[].body'` -- and
+# the full-id extraction -- `jq -r '.[].id'`) and GitLab's Discussions API,
+# never observed coming out of the real binary.
+#
+# VOCABULARY BOUNDARY. GitLab calls the unit a DISCUSSION; the normalized
+# contract calls it a THREAD. That translation happens here and nowhere
+# else: the word `discussion` must never reach the emitted envelope, whose
+# key stays `threads` with GitHub's own per-thread field names.
+#
+# THE FILTER IS SERVER-SIDE, ON PURPOSE. `--state` (all|resolved|
+# unresolved) is glab's own resolution-state filter, so the default call
+# asks GitLab for the unresolved discussions instead of fetching everything
+# and dropping the resolved ones locally. --all maps to `--state all`,
+# matching the github adapter's "include what a plain call filters out".
+#
+# --owner/--repo ARE DELIBERATELY NOT FORWARDED. They are gh's flat
+# owner/repo pair; a GitLab project is a nested group path
+# (group/subgroup/project) that pair cannot express, and glab's own
+# equivalent is a single `-R <full/path>` string. Rather than lossily
+# rebuild one from the other, this adapter targets the repository the
+# current working directory's remote already points at -- the same
+# repository _detect_forge classified to get here.
+#
+# CAPABILITY GAPS, all reported through unsupported_fields per forge-
+# contract.md ("An unpopulated capability-gated field is ALWAYS represented
+# as null PLUS its name recorded in unsupported_fields -- never a bare,
+# unmarked null"):
+#   pr.title / pr.url                   `glab mr note list` returns
+#     discussions only; supplying these would cost a SECOND `glab mr view`
+#     round trip this verb deliberately does not make.
+#   threads[].isOutdated                GitLab has no per-discussion
+#     outdated flag at all. This is also why the default call cannot
+#     reproduce the github adapter's second `isOutdated == false` filter --
+#     there is nothing to filter on.
+#   threads[].isCollapsed               a GitHub review-UI concept with no
+#     GitLab counterpart.
+#   threads[].comments.nodes[].url      GitLab's discussion notes carry no
+#     per-note permalink in this payload.
+#   threads[].comments.nodes[].outdated same gap as isOutdated, per note.
+_forge_pr_review_threads_gitlab() {
+  local iid="$1" all_threads="$2"
+  local state_filter="unresolved"
+  if [ "$all_threads" = "true" ]; then
+    state_filter="all"
+  fi
+
+  local stdout rc=0
+  local stderr_out
+  _forge_capture stdout stderr_out rc -- glab mr note list "$iid" -F json --state "$state_filter" || true
+
+  if [ "$rc" -ne 0 ]; then
+    # A merge request that does not exist is a confirmed NOT_FOUND, not a
+    # tool failure -- the same distinction _forge_issue_view already draws
+    # from gh's stderr. The match is on the HTTP status code `404` rather
+    # than on any English wording, because a status code is stable across
+    # glab releases and locales while prose is neither. Anything else stays
+    # cli_failed: misreading a could-not-attempt failure as a confirmed
+    # answer is the dangerous direction, so the catch-all points the safe way.
+    if printf '%s' "$stderr_out" | grep -q "404"; then
+      _forge_emit_status not_found
+      return 0
+    fi
+    # cli_failed hard-coded rather than classified: _forge_classify_gh_failure_
+    # reason is gh-specific (it calls _forge_auth_status_github), and this
+    # repository has no glab auth probe to ask instead. Inventing one here
+    # would duplicate whatever the phase's own account/auth story lands.
+    _forge_emit_status error "" "glab mr note list exited $rc: ${stderr_out:-unknown error}" cli_failed
+    return 0
+  fi
+
+  # ZERO UNRESOLVED DISCUSSIONS IS A `found` RESULT CARRYING AN EMPTY LIST,
+  # never not_found -- not_found means the MERGE REQUEST itself could not be
+  # located. Conflating the two would make a clean review look like a broken
+  # lookup. Go marshals an empty slice as `[]` and a nil slice as `null`, and
+  # a command that printed nothing at all is the same fact again, so all
+  # three collapse to the empty array here rather than to an error.
+  local discussions_json=""
+  if [ -n "$stdout" ]; then
+    discussions_json=$(printf '%s' "$stdout" | jq -c '. // []' 2>/dev/null) || discussions_json=""
+    if [ -z "$discussions_json" ]; then
+      _forge_emit_status error "" "glab mr note list returned output that is not JSON" cli_failed
+      return 0
+    fi
+  else
+    discussions_json='[]'
+  fi
+
+  # The one place GitLab's discussion vocabulary becomes the contract's
+  # thread vocabulary.
+  #
+  # `id` is emitted VERBATIM as GitLab's own full 40-character hex discussion
+  # id -- never the 8-character prefix glab's TEXT output displays. That is
+  # what makes the identifier ROUND TRIP: forge-resolve-review-thread hands
+  # this exact string straight back to `glab mr note resolve`, which accepts a
+  # full id, an 8+ character prefix, or an integer note id. Emitting a prefix
+  # here and resolving by full id (or the reverse) would work against a fake
+  # and fail against the real service.
+  #
+  # isResolved is DERIVED, because GitLab records resolution per NOTE, not per
+  # discussion: a discussion counts as resolved when it has at least one
+  # resolvable note and every one of them is resolved. A discussion with no
+  # resolvable notes (a plain comment thread) is not resolvable, hence false.
+  #
+  # path/line/diffSide come from the FIRST note's diff position, which is the
+  # note that anchored the discussion to the diff; a general (non-diff)
+  # discussion has no position and yields nulls for all three. diffSide is
+  # derived rather than read: GitLab records new_line for the post-image side
+  # and old_line for the pre-image side, which are GitHub's RIGHT and LEFT.
+  #
+  # Note ids are integers in GitLab and strings in GitHub, so they are cast to
+  # string here -- the contract's comment id stays one type across forges.
+  local threads_json
+  threads_json=$(printf '%s' "$discussions_json" | jq -c '
+    [ .[] | {
+        id: .id,
+        isResolved: (
+          [ .notes[]? | select(.resolvable == true) ] as $resolvable
+          | if ($resolvable | length) == 0
+            then false
+            else ($resolvable | all(.resolved == true))
+            end
+        ),
+        isOutdated: null,
+        isCollapsed: null,
+        path: (.notes[0].position.new_path // .notes[0].position.old_path // null),
+        line: (.notes[0].position.new_line // .notes[0].position.old_line // null),
+        startLine: (.notes[0].position.line_range.start.new_line
+                    // .notes[0].position.line_range.start.old_line // null),
+        diffSide: (
+          if (.notes[0].position.new_line // null) != null then "RIGHT"
+          elif (.notes[0].position.old_line // null) != null then "LEFT"
+          else null
+          end
+        ),
+        comments: {
+          totalCount: ((.notes // []) | length),
+          nodes: [ (.notes // [])[] | {
+            id: (.id | tostring),
+            author: {login: (.author.username // null)},
+            body: (.body // null),
+            createdAt: (.created_at // null),
+            updatedAt: (.updated_at // null),
+            url: null,
+            outdated: null
+          } ]
+        }
+      } ]
+  ' 2>/dev/null) || threads_json=""
+
+  # A payload that parsed as JSON but is not the ARRAY OF DISCUSSIONS the
+  # transform above expects (an error object, say) would otherwise reach
+  # `jq --argjson threads ""` below and spill a raw jq error onto stderr --
+  # unacceptable on a verb whose degrade mode is QUIET. Caught here instead.
+  if [ -z "$threads_json" ]; then
+    _forge_emit_status error "" "glab mr note list returned JSON that is not a discussion array" cli_failed
+    return 0
+  fi
+
+  local data_json
+  data_json=$(jq -nc \
+    --arg number "$iid" \
+    --argjson threads "$threads_json" \
+    '{
+      pr: {number: ($number | tonumber), title: null, url: null},
+      threads: $threads,
+      unsupported_fields: ["pr.title",
+                           "pr.url",
+                           "threads[].isOutdated",
+                           "threads[].isCollapsed",
+                           "threads[].comments.nodes[].url",
+                           "threads[].comments.nodes[].outdated"]
+    }')
+  _forge_emit_status found "$data_json"
+}
+
+# Resolves forge/owner/repo, routes a forge with no adapter or a missing
+# forge CLI to a QUIET status=error result, and otherwise delegates to the
+# github or gitlab adapter. Owner/repo are resolved via US-003's
+# _forge_repo_info as a direct function call (never a `$AIMI_CLI
+# forge-repo-info` subprocess, never a second private gh-repo-view call)
+# whenever --owner/--repo are not both supplied, replacing
+# get-pr-comments:14-20's own inline OWNER/REPO detection -- a GITHUB-ONLY
+# step, which is why the gitlab arm returns before it (glab addresses the
+# repository through the cwd remote, not an owner/repo pair).
 _forge_pr_review_threads() {
   local pr_number="$1" owner="$2" repo="$3" all_threads="$4"
   local forge_info forge host
@@ -5522,8 +6591,21 @@ _forge_pr_review_threads() {
   forge=$(printf '%s' "$forge_info" | jq -r '.forge')
   host=$(printf '%s' "$forge_info" | jq -r '.host // empty')
 
+  # GitLab returns HERE, before the owner/repo resolution below: that step is
+  # gh-specific and glab needs no owner/repo pair at all. Degradation runs
+  # through the SAME shared _forge_bin_check gate the github arm uses, in the
+  # same quiet mode, naming `glab` rather than `gh`.
+  if [ "$forge" = "gitlab" ]; then
+    if ! _forge_bin_check glab quiet "$forge"; then
+      _forge_emit_status error "" "glab not found -- this review-thread lookup did not run automatically." cli_missing
+      return 0
+    fi
+    _forge_pr_review_threads_gitlab "$pr_number" "$all_threads"
+    return 0
+  fi
+
   if [ "$forge" != "github" ]; then
-    _forge_emit_status error "" "forge-pr-review-threads: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1." no_adapter
+    _forge_emit_status error "" "forge-pr-review-threads: no adapter for forge \"$forge\" yet -- GitHub and GitLab are the only adapters." no_adapter
     return 0
   fi
 
@@ -5563,6 +6645,13 @@ _forge_pr_review_threads() {
 # isResolved, isOutdated, isCollapsed, path, line, startLine, diffSide, and
 # comments: {totalCount, nodes: [{id, author: {login}, body, createdAt,
 # updatedAt, url, outdated}]}.
+#
+# On GitLab the SHAPE is identical -- same keys, same three-way status -- but
+# several fields are capability-gated and come back null with their names in
+# `unsupported_fields`; see _forge_pr_review_threads_gitlab's header for the
+# list and the reason for each. A merge request with zero unresolved
+# discussions is `found` with an empty `threads` array, NOT `not_found`.
+# --owner/--repo are honored on GitHub only.
 # Usage: aimi-cli.sh forge-pr-review-threads --pr <number> [--owner <owner>
 # --repo <repo>] [--all] [--project <path>]
 cmd_forge_pr_review_threads() {
@@ -5635,6 +6724,91 @@ cmd_forge_pr_review_threads() {
 # not exit codes; cmd_forge_resolve_review_thread (the public wrapper) is
 # the only layer that prints the MANDATORY manual instruction and exits
 # non-zero, driven by this function's JSON `status` field.
+# gitlab adapter for forge-resolve-review-thread (phase 3). <thread_id> is
+# already validated by cmd_forge_resolve_review_thread before this ever runs.
+#
+# EXPERIMENTAL UPSTREAM: glab's own documentation marks `glab mr note resolve`
+# as an experiment "not ready for production use ... might be unstable or
+# removed at any time" (docs/source/mr/note/resolve.md).
+#
+# That is a DISCLOSURE to whoever relies on this verb, not a reason to skip
+# the routing: without it a GitLab caller gets no automatic resolve at all,
+# which is strictly worse than an automatic one whose upstream is still
+# settling.
+#
+# RESOLVES ONLY; POSTS NO REPLY. `glab mr note resolve` marks the discussion
+# resolved and writes no comment, which is exactly this verb's established
+# meaning here -- phase 2's handoff records that forge-resolve-review-thread
+# resolves a thread and does not post a comment, and that no reply call site
+# exists anywhere in this repository. The two agree, so nothing is
+# special-cased: this adapter issues ONE glab invocation and it is not a
+# note-creating one.
+#
+# THE MERGE REQUEST IS NOT NAMED, DELIBERATELY. `glab mr note resolve
+# [<id> | <branch>] <discussion-id>` takes the merge request as an OPTIONAL
+# leading positional and auto-detects it from the current branch when it is
+# omitted -- which is the only form this verb can use, because
+# forge-resolve-review-thread's contract carries a thread id and nothing
+# else (GitHub's node id is globally unique, so no PR number was ever part
+# of the signature).
+#
+# The id is passed through VERBATIM, byte for byte as
+# _forge_pr_review_threads_gitlab emitted it. glab accepts a full 40-char hex
+# discussion id, an 8+ character prefix, or an integer note id; the listing
+# side emits the full id, so nothing here re-derives, truncates or re-formats
+# it. That is the round trip, and it is what stops a fake from making a
+# prefix/full-id mismatch look correct.
+#
+# Always QUIET and always returns 0, same as the github adapter.
+_forge_resolve_review_thread_gitlab() {
+  local thread_id="$1"
+  local stdout rc=0
+  local stderr_out
+
+  # No account override is applied on this path. The GH_TOKEN/
+  # GH_ENTERPRISE_TOKEN prefix assignment the github arm carries is gh's own
+  # mechanism; the equivalent question for glab belongs to this phase's
+  # account story and is not answered by guessing at one here.
+  _forge_capture stdout stderr_out rc -- glab mr note resolve "$thread_id" || true
+
+  if [ "$rc" -ne 0 ]; then
+    # A discussion id GitLab cannot find is a CONFIRMED negative (the call
+    # ran; the answer is "no such thread"), reported as status="found" with
+    # resolved=false -- byte-identical to the github adapter's own
+    # confirmed-invalid-id result, per forge-contract.md's Three-Way Status
+    # Convention: a definitive answer is still a successful lookup.
+    #
+    # Matched on the HTTP status code `404` ONLY, never on English wording:
+    # a status code is stable across glab releases and locales. Every other
+    # failure -- glab could not auto-detect a merge request for this branch,
+    # the network was down, the token expired -- stays status="error", so the
+    # wrapper prints its manual instruction and exits non-zero. Reading a
+    # could-not-attempt failure as a confirmed answer is the dangerous
+    # direction; this narrow match points the safe way.
+    if printf '%s' "$stderr_out" | grep -q "404"; then
+      _forge_emit_status found "$(jq -nc '{resolved: false, thread: null, unsupported_fields: []}')"
+      return 0
+    fi
+    # cli_failed hard-coded rather than classified, for the same reason
+    # _forge_pr_review_threads_gitlab gives: the shared classifier is
+    # gh-specific and there is no glab auth probe in this repository.
+    _forge_emit_status error "" "glab mr note resolve exited $rc: ${stderr_out:-unknown error}" cli_failed
+    return 0
+  fi
+
+  # glab reports success by exit status, not by a JSON document, and it is
+  # given no `-F json` flag (its resolve subcommand documents none). So the
+  # thread object is rebuilt from what is known for certain: the id that was
+  # just resolved, and the fact that it now is. path/line are GitHub's, come
+  # from the GraphQL mutation's own response there, and have no counterpart
+  # in glab's output -- null plus unsupported_fields, per forge-contract.md.
+  _forge_emit_status found "$(jq -nc --arg id "$thread_id" '{
+    resolved: true,
+    thread: {id: $id, isResolved: true, path: null, line: null},
+    unsupported_fields: ["thread.path", "thread.line"]
+  }')"
+}
+
 _forge_resolve_review_thread() {
   local thread_id="$1"
   local forge_info forge host
@@ -5644,8 +6818,21 @@ _forge_resolve_review_thread() {
   forge=$(printf '%s' "$forge_info" | jq -r '.forge')
   host=$(printf '%s' "$forge_info" | jq -r '.host // empty')
 
+  # Same shared _forge_bin_check gate, same quiet mode, naming `glab` rather
+  # than `gh`. The wrapper below is still the only layer that prints and
+  # exits non-zero, driven purely by the JSON status field -- so a missing
+  # glab degrades through exactly the path a missing gh already does.
+  if [ "$forge" = "gitlab" ]; then
+    if ! _forge_bin_check glab quiet "$forge"; then
+      _forge_emit_status error "" "glab not found -- this thread could not be resolved automatically." cli_missing
+      return 0
+    fi
+    _forge_resolve_review_thread_gitlab "$thread_id"
+    return 0
+  fi
+
   if [ "$forge" != "github" ]; then
-    _forge_emit_status error "" "forge-resolve-review-thread: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1." no_adapter
+    _forge_emit_status error "" "forge-resolve-review-thread: no adapter for forge \"$forge\" yet -- GitHub and GitLab are the only adapters." no_adapter
     return 0
   fi
 
@@ -5784,7 +6971,7 @@ cmd_forge_resolve_review_thread() {
     message=$(printf '%s' "$result" | jq -r '.message // "unknown error"')
     {
       echo "Warning: could not resolve this review thread automatically ($message)."
-      echo "There is no gh subcommand or REST fallback for this -- resolve it manually in the PR's Files changed tab (mark the conversation as resolved)."
+      echo "There is no automatic fallback once the forge CLI itself cannot run this -- resolve it manually in the pull/merge request's diff view (GitHub: Files changed; GitLab: Changes) and mark the conversation/thread resolved."
     } >&2
     printf '%s\n' "$result"
     exit 1
