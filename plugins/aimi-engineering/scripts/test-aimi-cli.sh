@@ -22831,11 +22831,18 @@ test_forge_pr_create_missing_gh_mandatory_print_nonzero_exit() {
   teardown_detect_forge_fixture
 }
 
+# The remote here was gitlab.com until phase 3 gave GitLab a real adapter --
+# which turned this test's own premise ("this forge has no adapter") false and
+# made it assert the wrong thing. codeberg.org classifies as `gitea`
+# (_detect_forge_classify_host), still genuinely adapter-less, so the
+# unsupported-forge arm this test exists to cover stays exercised. The GitLab
+# equivalent -- glab absent rather than no adapter -- is
+# test_glw_forge_pr_create_gitlab_missing_glab_prints_mr_url below.
 test_forge_pr_create_non_github_forge_mandatory_print() {
   echo ""
   echo "=== forge-pr-create: non-github forge (no adapter) -- MANDATORY-PRINT degrade, never shells to gh, exit non-zero ==="
 
-  setup_detect_forge_fixture origin https://gitlab.com/o/r.git
+  setup_detect_forge_fixture origin https://codeberg.org/o/r.git
   pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
 
   local sandbox
@@ -22856,8 +22863,8 @@ FAKE_GH
   assert_exit_code "1" "$exit_code" "forge-pr-create non-github forge: exits non-zero"
   assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-create non-github forge: stdout carries the degraded envelope while the exit code stays 1"
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "forge-pr-create non-github forge: data is null on degraded"
-  assert_contains "no adapter for forge \"gitlab\"" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-create non-github forge: message names the unsupported forge"
-  assert_stderr_contains "gitlab" "$(cat "$stderr_file")" "forge-pr-create non-github forge: manual instruction names the detected forge"
+  assert_contains "no adapter for forge \"gitea\"" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-create non-github forge: message names the unsupported forge"
+  assert_stderr_contains "gitea" "$(cat "$stderr_file")" "forge-pr-create non-github forge: manual instruction names the detected forge"
   assert_stderr_contains "create it yourself" "$(cat "$stderr_file")" "forge-pr-create non-github forge: manual instruction printed"
   if grep -q "gh should never be invoked" "$stderr_file"; then
     echo -e "${RED}✗${NC} forge-pr-create non-github forge: gh was invoked despite having no adapter for this forge"
@@ -23345,6 +23352,726 @@ FAKE_GH
     echo -e "${GREEN}✓${NC} dispatcher: forge-pr-edit is routed"
     ((TESTS_PASSED++))
   fi
+}
+
+# ============================================================================
+# GitLab WRITE-verb tests (phase 3) — forge-pr-create / forge-pr-edit /
+# forge-issue-create routed to glab
+# ============================================================================
+# EVERY helper introduced by this section is `glw_`-prefixed (GitLab Write).
+# That is an orchestration constraint, not a style preference: sibling stories
+# are adding GitLab READ-verb and review-thread helpers to THIS SAME FILE in
+# parallel, and bash silently keeps the LAST definition of a duplicated
+# function name. Three individually-green branches whose helper names collide
+# produce a red container after the merge -- the exact failure that cost this
+# programme a wave-1 merge one phase ago. Grep before naming, and prefix
+# anyway.
+#
+# The section deliberately does NOT extend setup_fake_glab_fixture (the READ-
+# side stub a sibling story owns) with write subcommands, for the same
+# reason: an edit inside that shared function is a merge conflict waiting to
+# happen. glw_install_fake_glab below is a separate, self-contained stub.
+#
+# WHAT THESE TESTS ACTUALLY PROVE, AND WHAT THEY CANNOT. glab is not
+# installed on this machine (this phase's declared verification ceiling), so
+# every assertion here is about WHICH ARGV aimi-cli.sh emits, never about what
+# the real binary does with it. That is the right thing to pin regardless:
+# the defect this story exists to prevent is a MISSING FLAG, and a missing
+# flag is visible in argv.
+#
+# WHY -y IS ASSERTED ON RECORDED ARGV AND NEVER ON AN EXIT STATUS. `glab mr
+# create`, `glab mr update` and `glab issue create` PROMPT for confirmation
+# unless passed -y (`--yes`). `gh pr create` has no such flag, so the habit
+# carried over from the github adapter does not produce an error -- it
+# produces a HANG, forever, with no output explaining why, in an autonomous
+# run with nobody there to answer. A fake glab never prompts, so it exits 0
+# whether or not -y was passed: an exit-status assertion would pass vacuously
+# and prove exactly nothing. glw_argv_carries_yes below therefore reads the
+# stub's argv log, and test_glw_yes_flag_detector_can_go_red proves that
+# reader can return "no" before anything trusts it returning "yes".
+
+# Writes a fake `glab` into an existing setup_forge_cli_sandbox directory.
+# Records every invocation's argv (one line per call) to $GLW_GLAB_LOG, which
+# is what every -y assertion below reads.
+#
+# The `mr view` arm's not-found shape is load-bearing and modelled on glab
+# rather than on gh: glab has no `--head`-style structural existence probe
+# that answers "no merge request" as `[]` at exit 0, so absence arrives as a
+# NON-ZERO exit with prose on stderr -- indistinguishable, structurally, from
+# a lookup that genuinely failed. That is precisely why the adapter falls
+# through to creation on a failed lookup instead of degrading, and a stub that
+# modelled absence as gh does would hide the very asymmetry these tests exist
+# to lock in.
+glw_install_fake_glab() {
+  local sandbox="$1"
+  cat > "$sandbox/glab" << 'GLW_FAKE_GLAB'
+#!/usr/bin/env bash
+if [ -n "${GLW_GLAB_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$GLW_GLAB_LOG"
+fi
+
+FLAG="$(dirname "$0")/glw_mr_created.flag"
+
+case "$1 $2" in
+  "mr view")
+    if [ -f "$FLAG" ] && [ -n "${GLW_MR_VIEW_AFTER_JSON:-}" ]; then
+      printf '%s' "$GLW_MR_VIEW_AFTER_JSON"
+      exit 0
+    fi
+    if [ -n "${GLW_MR_VIEW_JSON:-}" ]; then
+      printf '%s' "$GLW_MR_VIEW_JSON"
+      exit 0
+    fi
+    echo "404 Not Found" >&2
+    exit 1
+    ;;
+  "mr create")
+    : > "$FLAG"
+    if [ "${GLW_MR_CREATE_EXIT:-0}" != "0" ]; then
+      printf '%s\n' "${GLW_MR_CREATE_STDERR:-glab: something went wrong}" >&2
+      exit "${GLW_MR_CREATE_EXIT}"
+    fi
+    printf '%s\n' "${GLW_MR_CREATE_STDOUT:-}"
+    exit 0
+    ;;
+  "mr update")
+    if [ "${GLW_MR_UPDATE_EXIT:-0}" != "0" ]; then
+      printf '%s\n' "${GLW_MR_UPDATE_STDERR:-glab: something went wrong}" >&2
+      exit "${GLW_MR_UPDATE_EXIT}"
+    fi
+    printf '%s\n' "${GLW_MR_UPDATE_STDOUT:-}"
+    exit 0
+    ;;
+  "issue create")
+    if [ "${GLW_ISSUE_CREATE_EXIT:-0}" != "0" ]; then
+      printf '%s\n' "${GLW_ISSUE_CREATE_STDERR:-glab: something went wrong}" >&2
+      exit "${GLW_ISSUE_CREATE_EXIT}"
+    fi
+    printf '%s\n' "${GLW_ISSUE_CREATE_STDOUT:-}"
+    exit 0
+    ;;
+esac
+echo "fake-glab (write): unhandled invocation: $*" >&2
+exit 99
+GLW_FAKE_GLAB
+  chmod +x "$sandbox/glab"
+}
+
+# Answers, from the RECORDED ARGV alone, whether a given glab write
+# subcommand carried -y. Prints "yes" or "no".
+#
+# Never consults an exit status -- see this section's header for why that
+# would be a vacuous assertion. `-y` is matched with explicit boundaries on
+# both sides so a `-yes`-shaped or `--yes-really`-shaped token can never be
+# mistaken for it.
+# Usage: glw_argv_carries_yes <log-file> <subcommand, e.g. "mr create">
+glw_argv_carries_yes() {
+  local log="$1" subcommand="$2"
+  if grep -qE "^${subcommand}( .*)? -y( |$)" "$log" 2>/dev/null; then
+    printf 'yes'
+  else
+    printf 'no'
+  fi
+}
+
+# Prints the one recorded argv line for a given glab subcommand, so an
+# assertion can pin the ENTIRE invocation -- flag names, flag order and -y --
+# in a single comparison rather than three loose greps.
+# Usage: glw_argv_line <log-file> <subcommand>
+glw_argv_line() {
+  local log="$1" subcommand="$2"
+  grep -E "^${subcommand}( |$)" "$log" 2>/dev/null | head -1 || true
+}
+
+# Counts recorded invocations of a glab subcommand. Used to prove a call was
+# NEVER made (the idempotency assertion), which no output comparison can show.
+# Usage: glw_argv_count <log-file> <subcommand>
+glw_argv_count() {
+  local log="$1" subcommand="$2"
+  grep -cE "^${subcommand}( |$)" "$log" 2>/dev/null || true
+}
+
+# Extracts one function body out of aimi-cli.sh for the static assertions
+# below -- same sed technique source_cache_functions/source_forge_gitlab_map_
+# functions use, but printing rather than eval'ing.
+# Usage: glw_fn_body <function-name>
+glw_fn_body() {
+  sed -n "/^$1()/,/^}/p" "$CLI"
+}
+
+# eval's the pure GitLab write helpers for direct, in-process testing.
+glw_source_write_helpers() {
+  eval "$(sed -n '/^_forge_glab_write_url()/,/^}/p' "$CLI")"
+}
+
+# RUNS BEFORE EVERY OTHER ASSERTION IN THIS SECTION, ON PURPOSE. The whole
+# story turns on one predicate -- "did this invocation carry -y" -- so that
+# predicate must be shown able to answer NO before a single test trusts it
+# answering YES. Without this, a glw_argv_carries_yes that always printed
+# "yes" would make every -y assertion below pass while the real defect (a
+# forever-hang in production) shipped untouched.
+test_glw_yes_flag_detector_can_go_red() {
+  echo ""
+  echo "=== glab write: the -y detector CAN answer 'no' (falsifiability proof, runs first) ==="
+
+  local log
+  log=$(mktemp)
+  {
+    printf '%s\n' 'mr create -t My MR -d the body -s feat-x -b main'
+    printf '%s\n' 'mr update 42 -d the body'
+    printf '%s\n' 'issue create -t My issue -d the body'
+  } > "$log"
+
+  assert_eq "no" "$(glw_argv_carries_yes "$log" "mr create")"    "-y detector: a recorded 'mr create' WITHOUT -y answers no"
+  assert_eq "no" "$(glw_argv_carries_yes "$log" "mr update")"    "-y detector: a recorded 'mr update' WITHOUT -y answers no"
+  assert_eq "no" "$(glw_argv_carries_yes "$log" "issue create")" "-y detector: a recorded 'issue create' WITHOUT -y answers no"
+
+  # ...and the same reader answers yes once -y really is there, so the two
+  # verdicts are proven to move rather than being constant.
+  {
+    printf '%s\n' 'mr create -y -t My MR -d the body -s feat-x -b main'
+    printf '%s\n' 'mr update 42 -y -d the body'
+    printf '%s\n' 'issue create -y -t My issue -d the body'
+  } > "$log"
+
+  assert_eq "yes" "$(glw_argv_carries_yes "$log" "mr create")"    "-y detector: a recorded 'mr create' WITH -y answers yes"
+  assert_eq "yes" "$(glw_argv_carries_yes "$log" "mr update")"    "-y detector: a recorded 'mr update' WITH -y answers yes"
+  assert_eq "yes" "$(glw_argv_carries_yes "$log" "issue create")" "-y detector: a recorded 'issue create' WITH -y answers yes"
+
+  # A flag that merely STARTS with -y is not -y. Without the boundary match
+  # this reader would rubber-stamp an invocation that never skipped the
+  # prompt.
+  printf '%s\n' 'mr create -yolo -t My MR' > "$log"
+  assert_eq "no" "$(glw_argv_carries_yes "$log" "mr create")" "-y detector: a '-yolo'-shaped token is NOT counted as -y"
+
+  rm -f "$log"
+}
+
+test_glw_forge_pr_create_gitlab_creates_mr_with_yes_flag() {
+  echo ""
+  echo "=== forge-pr-create (gitlab): opens an MR via glab mr create -- -y present, glab's own flag names, number from a structured re-read ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  glw_install_fake_glab "$sandbox"
+
+  local log="$sandbox/glab.log"
+  : > "$log"
+  rm -f "$sandbox/glw_mr_created.flag"
+
+  local out exit_code
+  out=$(GLW_GLAB_LOG="$log" \
+    GLW_MR_CREATE_STDOUT='!42 My MR (feat-x)
+ https://gitlab.com/acme/widgets/-/merge_requests/42' \
+    GLW_MR_VIEW_AFTER_JSON='{"iid":42,"id":98765,"state":"opened","web_url":"https://gitlab.com/acme/widgets/-/merge_requests/42"}' \
+    PATH="$sandbox" "$CLI" forge-pr-create --title "My MR" --base main --head feat-x --body "the body") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-create gitlab: exit 0"
+  assert_eq '{"status":"created","data":{"url":"https://gitlab.com/acme/widgets/-/merge_requests/42","number":42},"message":null}' \
+    "$out" "forge-pr-create gitlab: the SHARED write envelope, status created, number 42 from the re-read's iid (not its id 98765)"
+
+  # THE ASSERTION THIS STORY EXISTS FOR. Recorded argv, never exit status.
+  assert_eq "yes" "$(glw_argv_carries_yes "$log" "mr create")" \
+    "forge-pr-create gitlab: the recorded argv carries -y -- without it glab prompts and an autonomous run hangs forever"
+
+  # The whole invocation pinned in one comparison: -y first, then glab's own
+  # flag names in order. A gh-shaped --body/--head/--base would fail here.
+  assert_eq 'mr create -y -t My MR -d the body -s feat-x -b main' "$(glw_argv_line "$log" "mr create")" \
+    "forge-pr-create gitlab: exact argv -- -y, -t/--title, -d/--description, -s/--source-branch, -b/--target-branch"
+
+  local log_text
+  log_text=$(cat "$log")
+  assert_eq "0" "$(grep -c -- '--body' "$log" || true)"  "forge-pr-create gitlab: gh's --body never reaches glab (glab calls it --description)"
+  assert_eq "0" "$(grep -c -- '--head' "$log" || true)"  "forge-pr-create gitlab: gh's --head never reaches glab (glab calls it --source-branch)"
+  assert_eq "0" "$(grep -c -- '--base' "$log" || true)"  "forge-pr-create gitlab: gh's --base never reaches glab (glab calls it --target-branch)"
+  assert_contains "mr view feat-x -F json" "$log_text" "forge-pr-create gitlab: the idempotency check and the re-read both go through glab mr view -F json"
+  assert_eq "2" "$(glw_argv_count "$log" "mr view")" "forge-pr-create gitlab: exactly two mr view calls -- the pre-create check and the post-create structured re-read"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_glw_forge_pr_create_gitlab_existing_open_mr_is_unchanged() {
+  echo ""
+  echo "=== forge-pr-create (gitlab): an OPEN merge request already exists for --head -- reports unchanged, never calls glab mr create ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  glw_install_fake_glab "$sandbox"
+
+  local log="$sandbox/glab.log"
+  : > "$log"
+  rm -f "$sandbox/glw_mr_created.flag"
+
+  # "opened" (GitLab's own spelling), not "open": the adapter must fold it
+  # through _forge_map_state. A fixture spelling it "open" would let a missing
+  # fold pass unnoticed.
+  local out exit_code
+  out=$(GLW_GLAB_LOG="$log" \
+    GLW_MR_VIEW_JSON='{"iid":55,"state":"opened","web_url":"https://gitlab.com/acme/widgets/-/merge_requests/55"}' \
+    PATH="$sandbox" "$CLI" forge-pr-create --title "My MR" --base main --head feat-x --body "the body") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-create gitlab idempotent: exit 0"
+  assert_eq '{"status":"unchanged","data":{"url":"https://gitlab.com/acme/widgets/-/merge_requests/55","number":55},"message":null}' \
+    "$out" "forge-pr-create gitlab idempotent: status unchanged with the EXISTING MR under data -- no duplicate opened"
+  assert_eq "0" "$(glw_argv_count "$log" "mr create")" \
+    "forge-pr-create gitlab idempotent: glab mr create was NEVER invoked (a retried phase must not open a second MR)"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_glw_forge_pr_create_gitlab_stale_mr_does_not_block() {
+  echo ""
+  echo "=== forge-pr-create (gitlab): a CLOSED/MERGED merge request on --head does not block -- a fresh one is opened ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  glw_install_fake_glab "$sandbox"
+
+  local log="$sandbox/glab.log" stale out exit_code
+  for stale in closed merged locked; do
+    : > "$log"
+    rm -f "$sandbox/glw_mr_created.flag"
+
+    out=$(GLW_GLAB_LOG="$log" \
+      GLW_MR_VIEW_JSON="{\"iid\":12,\"state\":\"$stale\",\"web_url\":\"https://gitlab.com/acme/widgets/-/merge_requests/12\"}" \
+      GLW_MR_CREATE_STDOUT='!91 My MR (feat-x)
+ https://gitlab.com/acme/widgets/-/merge_requests/91' \
+      GLW_MR_VIEW_AFTER_JSON='{"iid":91,"state":"opened","web_url":"https://gitlab.com/acme/widgets/-/merge_requests/91"}' \
+      PATH="$sandbox" "$CLI" forge-pr-create --title "My MR" --base main --head feat-x --body "the body") && exit_code=0 || exit_code=$?
+
+    assert_exit_code "0" "$exit_code" "forge-pr-create gitlab $stale MR: exit 0"
+    assert_eq "1" "$(glw_argv_count "$log" "mr create")" "forge-pr-create gitlab $stale MR: glab mr create WAS invoked -- a $stale MR must not block a new one forever"
+    assert_eq '{"status":"created","data":{"url":"https://gitlab.com/acme/widgets/-/merge_requests/91","number":91},"message":null}' \
+      "$out" "forge-pr-create gitlab $stale MR: only the NEW merge request's identity is reported -- the stale one never leaks"
+    assert_eq "yes" "$(glw_argv_carries_yes "$log" "mr create")" "forge-pr-create gitlab $stale MR: the create still carried -y"
+  done
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_glw_forge_pr_create_gitlab_missing_glab_prints_mr_url() {
+  echo ""
+  echo "=== forge-pr-create (gitlab): glab absent -- MANDATORY-PRINT degrade that names the merge-request URL a human can open, exit non-zero ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # No glab written into the sandbox -- simulates "glab not installed", the
+  # phase contract's fourth success criterion. Opening an MR has no other
+  # fallback, so the instruction must ALWAYS reach the operator.
+
+  local stderr_file="/tmp/glw_pr_create_no_glab_stderr.$$"
+  local out exit_code stderr_text
+  out=$(PATH="$sandbox" "$CLI" forge-pr-create --title "My MR" --base main --head feat-x --body "the body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_text=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+
+  assert_exit_code "1" "$exit_code" "forge-pr-create gitlab glab-absent: exits non-zero (hard-fail, same contract as the github arm)"
+  assert_eq '{"status":"degraded","data":null,"message":"glab not found -- this merge request was not created automatically."}' \
+    "$out" "forge-pr-create gitlab glab-absent: degraded envelope naming glab, not gh"
+  assert_stderr_contains "glab not found" "$stderr_text" "forge-pr-create gitlab glab-absent: _forge_bin_check's mandatory warning names glab"
+  assert_stderr_contains "create it yourself" "$stderr_text" "forge-pr-create gitlab glab-absent: manual instruction printed (MANDATORY-PRINT)"
+  assert_stderr_contains "merge request" "$stderr_text" "forge-pr-create gitlab glab-absent: the noun is merge request, not pull request"
+  # THE URL a human can open by hand -- the phase contract's fourth success
+  # criterion. GitLab's new-MR form, not GitHub's /compare/base...head.
+  assert_stderr_contains "https://gitlab.com/acme/widgets/-/merge_requests/new?merge_request%5Bsource_branch%5D=feat-x&merge_request%5Btarget_branch%5D=main" \
+    "$stderr_text" "forge-pr-create gitlab glab-absent: stderr prints the merge-request URL the user can open by hand"
+  # The copy-pasteable command carries -y too: a human who pastes it into an
+  # unattended script must not inherit the hang this story exists to prevent.
+  assert_stderr_contains "glab mr create -y" "$stderr_text" "forge-pr-create gitlab glab-absent: the printed manual command itself carries -y"
+  if printf '%s' "$stderr_text" | grep -q "gh pr create"; then
+    echo -e "${RED}✗${NC} forge-pr-create gitlab glab-absent: the manual instruction told a GitLab user to run gh"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} forge-pr-create gitlab glab-absent: the manual instruction never mentions gh"
+    ((TESTS_PASSED++))
+  fi
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_glw_forge_pr_create_gitlab_create_failure_degrades() {
+  echo ""
+  echo "=== forge-pr-create (gitlab): glab mr create itself fails -- degraded envelope, manual instruction, exit non-zero ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  glw_install_fake_glab "$sandbox"
+
+  local log="$sandbox/glab.log"
+  : > "$log"
+  rm -f "$sandbox/glw_mr_created.flag"
+
+  local stderr_file="/tmp/glw_pr_create_fail_stderr.$$"
+  local out exit_code
+  out=$(GLW_GLAB_LOG="$log" GLW_MR_CREATE_EXIT=1 \
+    GLW_MR_CREATE_STDERR="POST https://gitlab.com/api/v4/projects/1/merge_requests: 409 {message: Another open merge request already exists}" \
+    PATH="$sandbox" "$CLI" forge-pr-create --title "My MR" --base main --head feat-x --body "the body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-create gitlab create-failure: exits non-zero"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-create gitlab create-failure: degraded envelope"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "forge-pr-create gitlab create-failure: data is null on degraded"
+  assert_contains "glab mr create exited 1" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-create gitlab create-failure: message names the glab exit code"
+  assert_stderr_contains "create it yourself" "$(cat "$stderr_file")" "forge-pr-create gitlab create-failure: manual instruction printed"
+  # Even the failing call carried -y: this branch is a genuine glab failure,
+  # never a prompt the run silently sat on.
+  assert_eq "yes" "$(glw_argv_carries_yes "$log" "mr create")" "forge-pr-create gitlab create-failure: the failing invocation still carried -y"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_glw_forge_pr_create_gitlab_reread_failure_keeps_created_url() {
+  echo ""
+  echo "=== forge-pr-create (gitlab): the MR was created but the re-read cannot confirm its number -- keeps the url, status created, exit 0 ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  glw_install_fake_glab "$sandbox"
+
+  local log="$sandbox/glab.log"
+  : > "$log"
+  rm -f "$sandbox/glw_mr_created.flag"
+
+  # GLW_MR_VIEW_AFTER_JSON deliberately unset, so the post-create re-read
+  # falls to the stub's non-zero not-found arm.
+  local stderr_file="/tmp/glw_pr_create_reread_stderr.$$"
+  local out exit_code stderr_text
+  out=$(GLW_GLAB_LOG="$log" \
+    GLW_MR_CREATE_STDOUT='!42 My MR (feat-x)
+ https://gitlab.com/acme/widgets/-/merge_requests/42' \
+    PATH="$sandbox" "$CLI" forge-pr-create --title "My MR" --base main --head feat-x --body "the body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_text=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+
+  assert_exit_code "0" "$exit_code" "forge-pr-create gitlab re-read failure: exit 0 -- the merge request really was created"
+  assert_eq '{"status":"created","data":{"url":"https://gitlab.com/acme/widgets/-/merge_requests/42","number":null},"message":null}' \
+    "$out" "forge-pr-create gitlab re-read failure: the url survives under data with number:null, status stays created"
+  assert_stderr_contains "Warning:" "$stderr_text" "forge-pr-create gitlab re-read failure: warns rather than erroring"
+  assert_stderr_contains "https://gitlab.com/acme/widgets/-/merge_requests/42" "$stderr_text" "forge-pr-create gitlab re-read failure: the Warning names the created MR's url"
+  if printf '%s' "$stderr_text" | grep -qE "create it yourself|git push -u origin"; then
+    echo -e "${RED}✗${NC} forge-pr-create gitlab re-read failure: the create-it-yourself fallback was printed for an MR that already exists -- following it would open a duplicate"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} forge-pr-create gitlab re-read failure: the create-it-yourself fallback is never printed once a url is in hand"
+    ((TESTS_PASSED++))
+  fi
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_glw_forge_pr_edit_gitlab_updates_with_yes_flag() {
+  echo ""
+  echo "=== forge-pr-edit (gitlab): updates an MR via glab mr update -- -y present, -d not --body, status unchanged ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  glw_install_fake_glab "$sandbox"
+
+  local log="$sandbox/glab.log"
+  : > "$log"
+  rm -f "$sandbox/glw_mr_created.flag"
+
+  local out exit_code
+  out=$(GLW_GLAB_LOG="$log" \
+    GLW_MR_VIEW_JSON='{"iid":303,"state":"opened","web_url":"https://gitlab.com/acme/widgets/-/merge_requests/303"}' \
+    PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --body "updated body") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-edit gitlab: exit 0"
+  assert_eq '{"status":"unchanged","data":{"url":"https://gitlab.com/acme/widgets/-/merge_requests/303","number":303},"message":null}' \
+    "$out" "forge-pr-edit gitlab: status unchanged (the identifier already existed) with {url, number} from the structured re-read"
+
+  assert_eq "yes" "$(glw_argv_carries_yes "$log" "mr update")" \
+    "forge-pr-edit gitlab: the recorded argv carries -y -- glab mr update prompts without it and the run hangs"
+  # The merge request is a POSITIONAL argument here, unlike gh pr edit's
+  # otherwise similar shape, and the body flag is -d.
+  assert_eq 'mr update 303 -y -d updated body' "$(glw_argv_line "$log" "mr update")" \
+    "forge-pr-edit gitlab: exact argv -- positional id, then -y, then -d/--description"
+  assert_eq "0" "$(grep -c -- '--body' "$log" || true)" "forge-pr-edit gitlab: gh's --body never reaches glab"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_glw_forge_pr_edit_gitlab_missing_glab_prints_mr_url() {
+  echo ""
+  echo "=== forge-pr-edit (gitlab): glab absent -- MANDATORY-PRINT degrade naming the MR's own URL, exit non-zero ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # No glab in the sandbox.
+
+  local stderr_file="/tmp/glw_pr_edit_no_glab_stderr.$$"
+  local out exit_code stderr_text
+  out=$(PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --body "updated body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_text=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+
+  assert_exit_code "1" "$exit_code" "forge-pr-edit gitlab glab-absent: exits non-zero"
+  assert_eq '{"status":"degraded","data":null,"message":"glab not found -- this merge request was not edited automatically."}' \
+    "$out" "forge-pr-edit gitlab glab-absent: degraded envelope naming glab"
+  assert_stderr_contains "edit it yourself" "$stderr_text" "forge-pr-edit gitlab glab-absent: manual instruction printed"
+  assert_stderr_contains "https://gitlab.com/acme/widgets/-/merge_requests/303" "$stderr_text" \
+    "forge-pr-edit gitlab glab-absent: stderr prints the merge-request URL the user can open by hand"
+  assert_stderr_contains "glab mr update 303 -y" "$stderr_text" "forge-pr-edit gitlab glab-absent: the printed manual command itself carries -y"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_glw_forge_pr_edit_gitlab_update_failure_degrades() {
+  echo ""
+  echo "=== forge-pr-edit (gitlab): glab mr update itself fails -- degraded envelope, manual instruction, exit non-zero ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  glw_install_fake_glab "$sandbox"
+
+  local log="$sandbox/glab.log"
+  : > "$log"
+
+  local stderr_file="/tmp/glw_pr_edit_fail_stderr.$$"
+  local out exit_code
+  out=$(GLW_GLAB_LOG="$log" GLW_MR_UPDATE_EXIT=1 GLW_MR_UPDATE_STDERR="404 Not Found" \
+    PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --body "updated body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-edit gitlab update-failure: exits non-zero"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-edit gitlab update-failure: degraded envelope"
+  assert_contains "glab mr update exited 1" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-edit gitlab update-failure: message names the glab exit code"
+  assert_stderr_contains "edit it yourself" "$(cat "$stderr_file")" "forge-pr-edit gitlab update-failure: manual instruction printed"
+  assert_eq "yes" "$(glw_argv_carries_yes "$log" "mr update")" "forge-pr-edit gitlab update-failure: the failing invocation still carried -y"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_glw_forge_issue_create_gitlab_soft_fails_and_carries_yes() {
+  echo ""
+  echo "=== forge-issue-create (gitlab): glab issue create -y -- and the always-exit-0 soft-fail contract survives on the gitlab branch ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  glw_install_fake_glab "$sandbox"
+
+  local log="$sandbox/glab.log"
+  : > "$log"
+
+  local out exit_code
+  out=$(GLW_GLAB_LOG="$log" \
+    GLW_ISSUE_CREATE_STDOUT='#7 Backend spec (acme/widgets)
+ https://gitlab.com/acme/widgets/-/issues/7' \
+    PATH="$sandbox" "$CLI" forge-issue-create --title "Backend spec" --body "the body") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-create gitlab: exit 0"
+  assert_eq '{"status":"created","data":{"url":"https://gitlab.com/acme/widgets/-/issues/7","number":7},"message":null}' \
+    "$out" "forge-issue-create gitlab: the SHARED write envelope, status created, number parsed from the issue URL"
+
+  assert_eq "yes" "$(glw_argv_carries_yes "$log" "issue create")" \
+    "forge-issue-create gitlab: the recorded argv carries -y -- glab issue create prompts without it"
+  assert_eq 'issue create -y -t Backend spec -d the body' "$(glw_argv_line "$log" "issue create")" \
+    "forge-issue-create gitlab: exact argv -- -y, -t/--title, -d/--description"
+  assert_eq "0" "$(grep -c -- '--body' "$log" || true)" "forge-issue-create gitlab: gh's --body never reaches glab"
+
+  # SOFT-FAIL, both ways it can be reached. A failed issue must NEVER block PR
+  # creation, so the gitlab branch may not acquire a different exit-code
+  # contract from the github one.
+  local fail_out fail_rc absent_out absent_rc
+  : > "$log"
+  fail_out=$(GLW_GLAB_LOG="$log" GLW_ISSUE_CREATE_EXIT=1 GLW_ISSUE_CREATE_STDERR="403 Forbidden" \
+    PATH="$sandbox" "$CLI" forge-issue-create --title "Backend spec" --body "the body" 2>/dev/null) && fail_rc=0 || fail_rc=$?
+  assert_exit_code "0" "$fail_rc" "forge-issue-create gitlab glab-failure: EXITS 0 (soft-fail preserved -- a failed issue never blocks a PR)"
+  assert_eq "degraded" "$(printf '%s' "$fail_out" | jq -r '.status')" "forge-issue-create gitlab glab-failure: the outcome is reported in status, not in the exit code"
+  assert_contains "glab issue create exited 1" "$(printf '%s' "$fail_out" | jq -r '.message')" "forge-issue-create gitlab glab-failure: message names the glab exit code"
+  assert_eq "yes" "$(glw_argv_carries_yes "$log" "issue create")" "forge-issue-create gitlab glab-failure: the failing invocation still carried -y"
+
+  rm -f "$sandbox/glab"
+  absent_out=$(PATH="$sandbox" "$CLI" forge-issue-create --title "Backend spec" --body "the body" 2>/dev/null) && absent_rc=0 || absent_rc=$?
+  assert_exit_code "0" "$absent_rc" "forge-issue-create gitlab glab-absent: EXITS 0 (soft-fail preserved)"
+  assert_eq '{"status":"degraded","data":null,"message":"glab not found -- this issue was not created automatically."}' \
+    "$absent_out" "forge-issue-create gitlab glab-absent: degraded envelope naming glab, not gh"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+# A SOURCE-LEVEL guard on top of the runtime ones. The runtime assertions
+# above prove the three code paths the tests happen to drive carry -y; this
+# one proves EVERY glab write invocation in the file does, including one a
+# future edit adds without a test. It is also the assertion that goes red
+# fastest under the mutation check this story was required to perform
+# (delete -y from any one write path).
+test_glw_every_glab_write_invocation_carries_yes_in_source() {
+  echo ""
+  echo "=== source guard: every glab WRITE invocation in aimi-cli.sh carries -y, and no gh flag name leaks into a glab call ==="
+
+  local write_lines missing=0 total=0 line
+  # Only the three WRITE subcommands. `glab mr view` is a read and has no
+  # confirmation prompt, so requiring -y there would be wrong, not stricter.
+  # Comment lines are dropped: the section header carries a worked example of
+  # the call shape, and counting it would make `total` report four write
+  # invocations where the file has three.
+  write_lines=$(grep -nE '_forge_capture .* -- glab (mr create|mr update|issue create)' "$CLI" \
+    | grep -vE '^[0-9]+:[[:space:]]*#' || true)
+
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    total=$((total + 1))
+    if ! printf '%s' "$line" | grep -qE ' -y( |$)'; then
+      missing=$((missing + 1))
+      echo -e "${RED}✗${NC} source guard: a glab write invocation is MISSING -y: $line"
+    fi
+  done <<< "$write_lines"
+
+  assert_eq "3" "$total"   "source guard: all three glab write invocations are present (mr create, mr update, issue create)"
+  assert_eq "0" "$missing" "source guard: every glab write invocation carries -y -- without it the run hangs on a confirmation prompt"
+
+  # Each verb named individually, so a red result says WHICH one regressed.
+  local verb
+  for verb in "mr create" "mr update" "issue create"; do
+    if printf '%s' "$write_lines" | grep -qE "glab ${verb} .*-y( |$)|glab ${verb} -y( |$)"; then
+      echo -e "${GREEN}✓${NC} source guard: glab $verb carries -y"
+      ((TESTS_PASSED++))
+    else
+      echo -e "${RED}✗${NC} source guard: glab $verb does NOT carry -y"
+      ((TESTS_FAILED++))
+    fi
+  done
+
+  # gh's flag vocabulary must never appear inside a glab invocation.
+  local glab_calls
+  glab_calls=$(grep -E '_forge_capture .* -- glab ' "$CLI" || true)
+  assert_eq "0" "$(printf '%s' "$glab_calls" | grep -c -- '--body' || true)" "source guard: no glab invocation passes gh's --body"
+  assert_eq "0" "$(printf '%s' "$glab_calls" | grep -c -- '--head' || true)"  "source guard: no glab invocation passes gh's --head"
+  assert_eq "0" "$(printf '%s' "$glab_calls" | grep -c -- '--base' || true)"  "source guard: no glab invocation passes gh's --base"
+}
+
+# The account override is a LATER story's subject and is deliberately absent
+# here. What this story owes it is a landing site: every glab call written as
+# a single `_forge_capture ... -- glab ...` statement, so a bash prefix
+# assignment can be added on the line above without restructuring anything.
+# This test pins that shape so a future edit cannot quietly remove it.
+test_glw_gitlab_write_call_sites_are_prefix_assignment_ready() {
+  echo ""
+  echo "=== landing site: every glab call is a single _forge_capture statement a prefix assignment can sit above ==="
+
+  local fn body glab_lines shaped=0 unshaped=0 line
+  for fn in _forge_pr_create_gitlab _forge_pr_edit_gitlab _forge_issue_create_gitlab; do
+    body=$(glw_fn_body "$fn")
+    if [ -z "$body" ]; then
+      echo -e "${RED}✗${NC} landing site: $fn is not defined in aimi-cli.sh"
+      ((TESTS_FAILED++))
+      continue
+    fi
+    # An INVOCATION is `glab` followed by one of its subcommands. Comments and
+    # double-quoted strings are stripped first so the many error/warning
+    # messages that legitimately mention "glab mr create" in prose are not
+    # mistaken for calls -- the naive grep counted seventeen of them.
+    glab_lines=$(printf '%s\n' "$body" \
+      | sed 's/"[^"]*"//g; s/#.*//' \
+      | grep -E 'glab (mr|issue) ' || true)
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      if printf '%s' "$line" | grep -qE '_forge_capture [a-z_]+ [a-z_]+ [a-z_]+ -- glab '; then
+        shaped=$((shaped + 1))
+      else
+        unshaped=$((unshaped + 1))
+        echo -e "${RED}✗${NC} landing site: a glab call in $fn is not a plain _forge_capture statement: $line"
+      fi
+    done <<< "$glab_lines"
+  done
+
+  assert_eq "0" "$unshaped" "landing site: every glab call in the three gitlab write adapters is a plain _forge_capture statement"
+  # 2 in pr-create (idempotency check + re-read) + 1 create, 1 update + 1
+  # re-read in pr-edit, 1 in issue-create.
+  assert_eq "6" "$shaped" "landing site: all six glab calls across the three adapters are shaped for a prefix assignment"
+
+  # `export` is forbidden on this path for the same reason it is on the gh
+  # side: a process-wide token changes what every later identity probe in the
+  # same process reports.
+  local all_bodies
+  all_bodies=$(glw_fn_body _forge_pr_create_gitlab; glw_fn_body _forge_pr_edit_gitlab; glw_fn_body _forge_issue_create_gitlab)
+  assert_eq "0" "$(printf '%s' "$all_bodies" | grep -cE '^\s*export ' || true)" "landing site: no gitlab write adapter exports a credential into the process environment"
+
+  # And the section header says so in words, so the later story finds a
+  # landing site rather than having to infer one from shape alone.
+  local header
+  header=$(sed -n '/^# GitLab write adapters/,/^_forge_glab_write_url()/p' "$CLI")
+  assert_contains "ACCOUNT-OVERRIDE LANDING SITE" "$header" "landing site: the section header names the landing site explicitly for the account-override story"
+  assert_contains "PREFIX ASSIGNMENT" "$header" "landing site: the header states the mechanism (prefix assignment, never export)"
+}
+
+test_glw_glab_write_url_extraction() {
+  echo ""
+  echo "=== _forge_glab_write_url: finds the URL inside glab's framed confirmation output, empty when there is none ==="
+
+  glw_source_write_helpers
+
+  assert_eq "https://gitlab.com/acme/widgets/-/merge_requests/42" \
+    "$(_forge_glab_write_url '!42 My MR (feat-x)
+ https://gitlab.com/acme/widgets/-/merge_requests/42')" \
+    "glab url: picks the URL out of glab's two-line create confirmation"
+
+  # Deliberately NOT `tail -n1`, which is what the gh side does: gh prints the
+  # bare URL and nothing else, glab frames it. A trailing line after the URL
+  # would defeat the tail habit; this proves it does not defeat this one.
+  assert_eq "https://gitlab.com/acme/widgets/-/merge_requests/42" \
+    "$(_forge_glab_write_url '!42 My MR (feat-x)
+ https://gitlab.com/acme/widgets/-/merge_requests/42
+Draft: this merge request is a draft.')" \
+    "glab url: a trailing line after the URL does not hide it"
+
+  assert_eq "https://gitlab.com/acme/widgets/-/issues/7" \
+    "$(_forge_glab_write_url ' https://gitlab.com/acme/widgets/-/issues/7')" \
+    "glab url: an issue URL is found the same way"
+
+  assert_eq "" "$(_forge_glab_write_url 'no url here at all')" "glab url: output with no URL yields the empty string, never a guess"
+  assert_eq "" "$(_forge_glab_write_url '')" "glab url: empty output yields the empty string"
 }
 
 # ============================================================================
@@ -26022,6 +26749,26 @@ main() {
   test_forge_write_verbs_share_one_data_shape
   test_forge_write_verbs_degraded_exit_code_split
   test_forge_pr_create_and_edit_registered_in_help_and_dispatcher
+
+  # GitLab WRITE-verb tests (phase 3) -- the three write verbs routed to glab.
+  # The -y falsifiability proof runs FIRST, before anything trusts the
+  # detector every other assertion in this block depends on.
+  echo ""
+  echo "--- GitLab Write-Verb Tests (phase 3) ---"
+  test_glw_yes_flag_detector_can_go_red
+  test_glw_glab_write_url_extraction
+  test_glw_forge_pr_create_gitlab_creates_mr_with_yes_flag
+  test_glw_forge_pr_create_gitlab_existing_open_mr_is_unchanged
+  test_glw_forge_pr_create_gitlab_stale_mr_does_not_block
+  test_glw_forge_pr_create_gitlab_missing_glab_prints_mr_url
+  test_glw_forge_pr_create_gitlab_create_failure_degrades
+  test_glw_forge_pr_create_gitlab_reread_failure_keeps_created_url
+  test_glw_forge_pr_edit_gitlab_updates_with_yes_flag
+  test_glw_forge_pr_edit_gitlab_missing_glab_prints_mr_url
+  test_glw_forge_pr_edit_gitlab_update_failure_degrades
+  test_glw_forge_issue_create_gitlab_soft_fails_and_carries_yes
+  test_glw_every_glab_write_invocation_carries_yes_in_source
+  test_glw_gitlab_write_call_sites_are_prefix_assignment_ready
 
   # Forge Issue Verb Tests (US-006) -- forge-issue-view / forge-issue-create,
   # the first forge-* verbs that actually shell out to a forge CLI

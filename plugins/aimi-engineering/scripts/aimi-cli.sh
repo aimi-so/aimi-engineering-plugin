@@ -4960,10 +4960,43 @@ _forge_pr_write_print_manual() {
     repo=$(printf '%s' "$repo_info" | jq -r '.data.repo // empty')
     host=$(printf '%s' "$repo_info" | jq -r '.data.host // empty')
   fi
-  [ -n "$host" ] || host="github.com"
+  if [ -z "$host" ]; then
+    # Per-forge default rather than a single github.com constant: on a GitLab
+    # repository whose host could not be resolved, printing a github.com URL
+    # would be actively misleading rather than merely unhelpful.
+    case "$forge" in
+      gitlab) host="gitlab.com" ;;
+      *)      host="github.com" ;;
+    esac
+  fi
 
   {
-    if [ "$mode" = "create" ]; then
+    if [ "$forge" = "gitlab" ]; then
+      # GitLab arm. Three things differ from the github arm below and every
+      # one of them is a correctness matter, not a cosmetic one:
+      #   - the noun is "merge request", not "pull request";
+      #   - the CLI is glab, and the invocation printed here CARRIES -y for
+      #     the same reason the automatic one does (see the GitLab write
+      #     adapters section) -- a human who copy-pastes this line into an
+      #     unattended script must not inherit the hang;
+      #   - GitLab's web paths are /-/merge_requests/... , and the "open a new
+      #     MR" form is a query-string on /-/merge_requests/new rather than
+      #     GitHub's /compare/base...head?expand=1.
+      if [ "$mode" = "create" ]; then
+        echo "Warning: could not create this gitlab merge request automatically -- create it yourself with:"
+        echo "  git push -u origin $head_or_number"
+        echo "  glab mr create -y --title \"$title\" --source-branch $head_or_number --target-branch $base --description ..."
+        if [ -n "$owner" ] && [ -n "$repo" ]; then
+          echo "  Or open: https://$host/$owner/$repo/-/merge_requests/new?merge_request%5Bsource_branch%5D=$head_or_number&merge_request%5Btarget_branch%5D=$base"
+        fi
+      else
+        echo "Warning: could not edit this gitlab merge request automatically -- edit it yourself with:"
+        echo "  glab mr update $head_or_number -y --description ..."
+        if [ -n "$owner" ] && [ -n "$repo" ]; then
+          echo "  Or open: https://$host/$owner/$repo/-/merge_requests/$head_or_number"
+        fi
+      fi
+    elif [ "$mode" = "create" ]; then
       echo "Warning: could not create this $forge pull request automatically -- create it yourself with:"
       echo "  git push -u origin $head_or_number"
       echo "  gh pr create --title \"$title\" --base $base --head $head_or_number --body ..."
@@ -4980,6 +5013,261 @@ _forge_pr_write_print_manual() {
     echo "  Body:"
     printf '%s\n' "$body" | sed 's/^/    /'
   } >&2
+}
+
+# ============================================================================
+# GitLab write adapters — forge-pr-create, forge-pr-edit, forge-issue-create
+# ============================================================================
+# The gitlab arms of this file's THREE write verbs, kept together in one
+# section rather than scattered into each verb's body so the one rule they
+# all obey is stated once and is impossible to read past.
+#
+# THE RULE: EVERY glab WRITE INVOCATION CARRIES -y (--yes). NO EXCEPTIONS.
+#
+# `glab mr create`, `glab mr update` and `glab issue create` each PROMPT for
+# a submission confirmation unless -y is passed (glab's own flag help:
+# "Skip submission confirmation prompt" on mr create, "Skip confirmation
+# prompt" on mr update, "Don't prompt for confirmation to submit the issue"
+# on issue create). `gh pr create` has no such flag and needs none, so the
+# habit carried over from the github adapter next door does NOT produce an
+# error here -- it produces a HANG, forever, with no output explaining why,
+# in an autonomous run with nobody present to answer. A hang is the single
+# hardest failure in this system to diagnose, which is why -y is written
+# FIRST on every invocation below, immediately after the subcommand, where
+# a reviewer meets it before any other flag.
+#
+# GLAB'S FLAG NAMES ARE NOT gh'S. Verified against glab's own published
+# command reference (docs/source/mr/create.md, docs/source/mr/update.md,
+# docs/source/issue/create.md):
+#   -t/--title           (same spelling as gh)
+#   -d/--description     NOT --body
+#   -s/--source-branch   NOT --head
+#   -b/--target-branch   NOT --base
+#   -y/--yes             no gh equivalent at all
+# `glab mr update` takes the merge request as a POSITIONAL argument
+# ([<id> | <branch>]) and accepts no --source-branch/--target-branch pair.
+#
+# VERIFICATION CEILING -- READ BEFORE TRUSTING ANY BEHAVIOR BELOW. glab was
+# NOT installed on the machine this was written on; that is this phase's
+# declared ceiling, not an oversight. Not one invocation here has been
+# observed against the real binary. Flag names and prompt behavior come from
+# glab's published command reference; the tests drive a fake glab that
+# records its argv, so what is actually PROVEN here is which flags this file
+# emits -- never what the real binary does with them.
+#
+# ACCOUNT-OVERRIDE LANDING SITE (deliberately NOT wired here). Selecting the
+# acting GitLab account is a separate story whose central question -- how
+# glab accepts a per-invocation token, and whether it can at all -- was
+# deliberately left open at planning time. Every glab invocation below is
+# therefore written as a SINGLE `_forge_capture ... -- glab ...` statement
+# on its own line, so that story can add a bash PREFIX ASSIGNMENT on the
+# line directly above it:
+#
+#     GITLAB_TOKEN="$gitlab_token_override" \
+#       _forge_capture stdout stderr_out rc -- glab mr create -y ... || true
+#
+# exactly the shape phase 2 used for GH_TOKEN/GH_ENTERPRISE_TOKEN on the gh
+# side. That is a landing site, not a refactor: nothing below needs to be
+# restructured to accept it. `export` stays forbidden for the same reason it
+# is on the gh side -- a process-wide token changes what every later
+# auth/identity probe in the same process reports.
+#
+# SAME-ACCOUNT INVARIANT: the idempotency check that decides created vs
+# unchanged, the write itself, and the post-write re-read are all part of ONE
+# operation and must run as ONE account. On a private project the creating
+# account can see a merge request its reader account cannot, so a check
+# performed as a different account would fail against an MR that was just
+# successfully created. Concretely that means the story above must put its
+# prefix assignment on EVERY glab call in a given function, not only on the
+# one that writes.
+
+# Extracts the merge-request/issue URL from a glab write command's stdout.
+#
+# Deliberately NOT `tail -n1`, which is what the gh side does. gh pr create
+# and gh issue create print the bare URL and nothing else; glab's write
+# commands print a short human-readable confirmation around theirs, so the
+# URL is not reliably the last line. Scanning for the last http(s) token is
+# tolerant of that framing without depending on its exact wording.
+#
+# Prints the empty string when no URL is present -- callers treat that as a
+# degraded outcome rather than guessing one.
+# Usage: _forge_glab_write_url <captured-stdout>
+_forge_glab_write_url() {
+  local out="${1:-}" url=""
+  url=$(printf '%s' "$out" | tr -d '\r' | grep -oE 'https?://[^[:space:]]+' | tail -n1) || url=""
+  printf '%s' "$url"
+}
+
+# gitlab adapter for forge-pr-create. Same contract as the github arm in
+# _forge_pr_create: shared write envelope, MANDATORY-PRINT degradation,
+# non-zero exit on every degraded branch, never retries, never prompts.
+#
+# IDEMPOTENCY differs from the github arm in ONE way, and the difference is
+# forced rather than chosen. gh has `gh pr list --head <branch> --json number`,
+# a structural existence probe that answers "no PR" as `[]` at exit 0, so the
+# github arm can treat a FAILED lookup as a hard error and refuse to create.
+# glab's equivalent read, `glab mr view <branch> -F json`, exits NON-ZERO both
+# when the merge request does not exist and when the lookup itself fails, and
+# the two are distinguishable only by matching its stderr prose -- exactly the
+# fragility forge-pr-view's own not_found detection was made structural to
+# avoid. So a failed lookup here falls through to creation instead of
+# degrading. That direction is safe on GitLab specifically: GitLab refuses to
+# open a second open merge request for the same source/target branch pair, so
+# the worst case of guessing wrong is a loud failure from `glab mr create`,
+# not a duplicate merge request. Do not "fix" this into a stderr match.
+_forge_pr_create_gitlab() {
+  local title="$1" base="$2" head="$3" body="$4"
+
+  if ! _forge_bin_check glab mandatory gitlab; then
+    _forge_pr_write_print_manual create gitlab "$base" "$head" "$body" "$title"
+    _forge_emit_write_status degraded "" "glab not found -- this merge request was not created automatically."
+    return 1
+  fi
+
+  # Existing-MR check, as the same account the create below will run as.
+  local existing_out="" existing_err="" existing_rc=0 existing_state="" existing_iid=""
+  _forge_capture existing_out existing_err existing_rc -- glab mr view "$head" -F json || true
+
+  if [ "$existing_rc" -eq 0 ]; then
+    existing_iid=$(printf '%s' "$existing_out" | jq -r '.iid // empty' 2>/dev/null) || existing_iid=""
+    if [ -n "$existing_iid" ]; then
+      # GitLab's own state vocabulary ("opened"), folded to the contract's
+      # through the same _forge_map_state the read verbs use. Only an OPEN
+      # merge request blocks; a closed or merged one falls through to
+      # creation exactly as it does on the github side, so a reused branch
+      # is never blocked forever by a dead MR.
+      existing_state=$(_forge_map_state gitlab "$(printf '%s' "$existing_out" | jq -r '.state // empty' 2>/dev/null || true)")
+      if [ "$existing_state" = "open" ]; then
+        _forge_emit_write_status unchanged "$(_forge_build_write_data \
+          "$(printf '%s' "$existing_out" | jq -r '.web_url // empty')" \
+          "$existing_iid")"
+        return 0
+      fi
+    fi
+  fi
+
+  # WRITE 1 (gitlab). -y FIRST. See this section's header for why its absence
+  # would hang rather than fail, and for the prefix-assignment landing site
+  # that belongs on the line directly above this one.
+  local stdout="" stderr_out="" rc=0
+  _forge_capture stdout stderr_out rc -- glab mr create -y -t "$title" -d "$body" -s "$head" -b "$base" || true
+
+  if [ "$rc" -ne 0 ]; then
+    _forge_pr_write_print_manual create gitlab "$base" "$head" "$body" "$title"
+    echo "Error: forge-pr-create: glab mr create exited $rc: ${stderr_out:-unknown error}" >&2
+    _forge_emit_write_status degraded "" "glab mr create exited $rc: ${stderr_out:-unknown error}"
+    return 1
+  fi
+
+  local mr_url=""
+  mr_url=$(_forge_glab_write_url "$stdout")
+
+  if [ -z "$mr_url" ]; then
+    _forge_pr_write_print_manual create gitlab "$base" "$head" "$body" "$title"
+    echo "Error: forge-pr-create: glab mr create succeeded but its output did not contain a parseable merge request URL." >&2
+    _forge_emit_write_status degraded "" "glab mr create succeeded but its output did not contain a parseable merge request URL."
+    return 1
+  fi
+
+  # PAST THIS POINT THE MERGE REQUEST EXISTS AND ITS URL IS IN HAND -- the
+  # identical rule the github arm states at length: never discard $mr_url,
+  # never print the create-it-yourself instructions again, never downgrade to
+  # degraded (which would force data to null and throw the url away). Only the
+  # number is unconfirmed, so it comes back null with a Warning, at exit 0.
+  local reread_out="" reread_err="" reread_rc=0 mr_number=""
+  _forge_capture reread_out reread_err reread_rc -- glab mr view "$head" -F json || true
+  if [ "$reread_rc" -eq 0 ]; then
+    mr_number=$(printf '%s' "$reread_out" | jq -r '.iid // empty' 2>/dev/null) || mr_number=""
+  fi
+
+  if [ -z "$mr_number" ]; then
+    echo "Warning: forge-pr-create: the merge request WAS created at $mr_url, but the post-create glab mr view re-read did not confirm its number -- only the number is unconfirmed. Do NOT create it again." >&2
+    _forge_emit_write_status created "$(_forge_build_write_data "$mr_url" "")"
+    return 0
+  fi
+
+  _forge_emit_write_status created "$(_forge_build_write_data "$mr_url" "$mr_number")"
+}
+
+# gitlab adapter for forge-pr-edit. Same contract as the github arm in
+# _forge_pr_edit, including its status word: a successful edit reports
+# "unchanged", never "created", because editing mints no new identifier.
+# The merge request is a POSITIONAL argument to `glab mr update`, unlike
+# `gh pr edit <number>`'s otherwise similar shape.
+_forge_pr_edit_gitlab() {
+  local number="$1" body="$2"
+
+  if ! _forge_bin_check glab mandatory gitlab; then
+    _forge_pr_write_print_manual edit gitlab "" "$number" "$body"
+    _forge_emit_write_status degraded "" "glab not found -- this merge request was not edited automatically."
+    return 1
+  fi
+
+  # WRITE 2 (gitlab). -y FIRST, same rule, same landing site.
+  local stdout="" stderr_out="" rc=0
+  _forge_capture stdout stderr_out rc -- glab mr update "$number" -y -d "$body" || true
+
+  if [ "$rc" -ne 0 ]; then
+    _forge_pr_write_print_manual edit gitlab "" "$number" "$body"
+    echo "Error: forge-pr-edit: glab mr update exited $rc: ${stderr_out:-unknown error}" >&2
+    _forge_emit_write_status degraded "" "glab mr update exited $rc: ${stderr_out:-unknown error}"
+    return 1
+  fi
+
+  # Structured re-read, as the same account that just wrote.
+  local reread_out="" reread_err="" reread_rc=0 mr_url="" mr_number=""
+  _forge_capture reread_out reread_err reread_rc -- glab mr view "$number" -F json || true
+  if [ "$reread_rc" -eq 0 ]; then
+    mr_url=$(printf '%s' "$reread_out" | jq -r '.web_url // empty' 2>/dev/null) || mr_url=""
+    mr_number=$(printf '%s' "$reread_out" | jq -r '.iid // empty' 2>/dev/null) || mr_number=""
+  fi
+
+  if [ -z "$mr_number" ]; then
+    _forge_pr_write_print_manual edit gitlab "" "$number" "$body"
+    echo "Error: forge-pr-edit: glab mr update succeeded but the merge request could not be re-read afterward." >&2
+    _forge_emit_write_status degraded "" "glab mr update succeeded but the merge request could not be re-read afterward."
+    return 1
+  fi
+
+  _forge_emit_write_status unchanged "$(_forge_build_write_data "$mr_url" "$mr_number")"
+}
+
+# gitlab adapter for forge-issue-create. Keeps the github arm's SOFT-FAIL
+# contract byte for byte: ALWAYS returns 0, on every branch including
+# degraded, so a failed issue never blocks PR creation (open-pr.md:481). The
+# caller branches on the envelope's `status` field, never on an exit code.
+# Giving the gitlab branch a different exit-code contract from the github one
+# would silently reintroduce exactly the coupling this verb exists to prevent.
+_forge_issue_create_gitlab() {
+  local title="$1" body="$2"
+
+  if ! _forge_bin_check glab mandatory gitlab; then
+    _forge_issue_create_print_manual "$title" "$body" gitlab
+    _forge_emit_write_status degraded "" "glab not found -- this issue was not created automatically."
+    return 0
+  fi
+
+  # WRITE 3 (gitlab). -y FIRST, same rule, same landing site.
+  local stdout="" stderr_out="" rc=0
+  _forge_capture stdout stderr_out rc -- glab issue create -y -t "$title" -d "$body" || true
+
+  if [ "$rc" -ne 0 ]; then
+    _forge_issue_create_print_manual "$title" "$body" gitlab
+    _forge_emit_write_status degraded "" "glab issue create exited $rc: ${stderr_out:-unknown error}"
+    return 0
+  fi
+
+  local issue_url="" issue_number=""
+  issue_url=$(_forge_glab_write_url "$stdout")
+  issue_number=$(printf '%s' "$issue_url" | grep -oE '[0-9]+$' || true)
+
+  if [ -z "$issue_url" ] || [ -z "$issue_number" ]; then
+    _forge_issue_create_print_manual "$title" "$body" gitlab
+    _forge_emit_write_status degraded "" "glab issue create succeeded but its output did not contain a parseable issue URL: ${issue_url:-<empty>}"
+    return 0
+  fi
+
+  _forge_emit_write_status created "$(_forge_build_write_data "$issue_url" "$issue_number")"
 }
 
 # Shells `gh pr create --title <t> --base <b> --head <h> --body <b>`,
@@ -5041,11 +5329,24 @@ _forge_pr_create() {
   local forge=""
   _detect_forge_type forge
 
-  if [ "$forge" != "github" ]; then
-    _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
-    _forge_emit_write_status degraded "" "forge-pr-create: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1."
-    return 1
-  fi
+  # Routing, not a github/not-github gate. The `|| gl_rc=$?` capture is
+  # mandatory under this file's `set -e`: the gitlab arm returns 1 on every
+  # degraded branch by contract, and an uncaptured non-zero return from a
+  # plain statement would abort the whole CLI before the envelope reached
+  # stdout.
+  case "$forge" in
+    github) ;;
+    gitlab)
+      local gl_rc=0
+      _forge_pr_create_gitlab "$title" "$base" "$head" "$body" || gl_rc=$?
+      return "$gl_rc"
+      ;;
+    *)
+      _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
+      _forge_emit_write_status degraded "" "forge-pr-create: no adapter for forge \"$forge\" yet -- GitHub and GitLab are the only adapters."
+      return 1
+      ;;
+  esac
 
   if ! _forge_bin_check gh mandatory "$forge"; then
     _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
@@ -5268,11 +5569,21 @@ _forge_pr_edit() {
   local forge=""
   _detect_forge_type forge
 
-  if [ "$forge" != "github" ]; then
-    _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
-    _forge_emit_write_status degraded "" "forge-pr-edit: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1."
-    return 1
-  fi
+  # Same routing shape and the same `set -e` capture rule as
+  # _forge_pr_create above.
+  case "$forge" in
+    github) ;;
+    gitlab)
+      local gl_rc=0
+      _forge_pr_edit_gitlab "$number" "$body" || gl_rc=$?
+      return "$gl_rc"
+      ;;
+    *)
+      _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
+      _forge_emit_write_status degraded "" "forge-pr-edit: no adapter for forge \"$forge\" yet -- GitHub and GitLab are the only adapters."
+      return 1
+      ;;
+  esac
 
   if ! _forge_bin_check gh mandatory "$forge"; then
     _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
@@ -5736,11 +6047,21 @@ _forge_issue_create() {
   local forge=""
   _detect_forge_type forge
 
-  if [ "$forge" != "github" ]; then
-    _forge_issue_create_print_manual "$title" "$body" "$forge"
-    _forge_emit_write_status degraded "" "forge-issue-create: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1."
-    return 0
-  fi
+  # Same routing shape as the two pr verbs, with this verb's OWN exit-code
+  # contract preserved: the gitlab arm, like everything else here, always
+  # returns 0 and reports the outcome in the envelope's `status` field.
+  case "$forge" in
+    github) ;;
+    gitlab)
+      _forge_issue_create_gitlab "$title" "$body"
+      return 0
+      ;;
+    *)
+      _forge_issue_create_print_manual "$title" "$body" "$forge"
+      _forge_emit_write_status degraded "" "forge-issue-create: no adapter for forge \"$forge\" yet -- GitHub and GitLab are the only adapters."
+      return 0
+      ;;
+  esac
 
   if ! _forge_bin_check gh mandatory "$forge"; then
     _forge_issue_create_print_manual "$title" "$body" "$forge"
