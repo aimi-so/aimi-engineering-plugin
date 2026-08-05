@@ -353,6 +353,63 @@ a CLI argument leaks through `ps` and shell history; an environment variable
 does not. This applies to every current and future forge verb, with no
 exception for a "just this once" convenience call.
 
+### The Remembered Answer — `forge-account-select`
+
+Which account a repository writes as is asked **once per repository** and
+remembered outside the repository, so the answer is never committed, never
+inherited by a sibling repository, and never shared with the rest of the team.
+`forge-account-select` owns that answer end to end — recording it, reading it
+back, and revoking it.
+
+**The command layer asks; the CLI decides whether asking is warranted and
+remembers the answer.** That split is the same one `interactivity.md`
+prescribes for every question site, and it is mechanical rather than stylistic:
+the CLI is invoked through the Bash tool with a non-TTY stdin, so a prompt
+implemented inside it would be silently dead in the host that matters.
+
+Exactly **two** answer states are storable, and they are distinguishable from
+each other and from having no answer at all:
+
+```json
+{"mode": "account", "account": "<login>", "recordedAt": "<ISO 8601 UTC>"}
+{"mode": "active",                        "recordedAt": "<ISO 8601 UTC>"}
+```
+
+`mode: "active"` is the **"always use whichever account is currently active"**
+answer. It is a first-class stored value, not the absence of one — encoding it
+as an empty account string, or by leaving the entry out, is refused on both the
+write and the read side, because neither is distinguishable from "has not been
+asked yet".
+
+The document is one file per repository holding **one entry per forge host**, so
+a repository with remotes on more than one host carries one answer per host.
+Every write is read-merge-write: recording or revoking one host's answer leaves
+every other host's entry byte-for-byte intact.
+
+Reading it back is decided on **this repository's entry**, never on the store
+file's existence — the file exists the moment the first repository answers, so
+an existence check would silence every repository afterwards. A store that is
+absent, empty, malformed, or missing this host's entry all mean *not yet
+answered*, and the question is raised again.
+
+**The answer is the only state, and it is revocable.** `--reselect` clears this
+repository's entry so the next check asks again; deleting the store file by hand
+does exactly the same thing. No companion marker or sentinel file exists that
+could outlive the deleted answer and keep the question suppressed.
+
+Reading the answer back has **zero side effects** — no file is created, no
+directory is created, nothing is written. That is what keeps an agent-mode or CI
+auto-selection *applied for that invocation but never persisted*: one unattended
+run must not be able to permanently answer the question on every human's behalf.
+Persisting is always a separate, explicit record call the command layer makes
+only after a person actually answered.
+
+An explicitly requested identity outranks the remembered one: when
+`AIMI_FORGE_IDENTITY` names the account to act as, the question is moot and is
+not raised. Consistent with the rest of this file, that value is an environment
+variable — `forge-account-select` accepts no `--token`, `--identity`, or
+otherwise credential-shaped flag, and none may be added to it.
+
 ## Degradation Contract
 
 A forge CLI (`gh`, `glab`, `tea`) may not be installed at all, and a forge

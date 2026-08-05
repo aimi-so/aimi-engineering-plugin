@@ -19005,6 +19005,570 @@ test_forge_git_identity_unset_keys_do_not_abort() {
   rm -rf "$repo"
 }
 
+# ============================================================================
+# Forge account selection -- the remembered answer (cmd_forge_account_select)
+# ============================================================================
+#
+# THESE TESTS DRIVE THE REAL CLI AS A SUBPROCESS, not sed+eval'd functions.
+# Two reasons, both deliberate:
+#   1. The acceptance contract includes the dispatcher arm and the help entry,
+#      which a sourced function cannot exercise at all.
+#   2. This phase already lost a merge to a sourcing-helper NAME COLLISION --
+#      US-001 and US-002 each defined `source_forge_account_functions`, bash
+#      kept the last definition, and six assertions failed with exit 127 in the
+#      merge even though each branch was green alone. Adding no third sourcing
+#      helper removes that whole failure class from this story.
+#
+# Every scenario is offline: throwaway local git repositories, the shared
+# fake-gh PATH stub, and an AIMI_CONFIG_DIR pointed at a mktemp -d so the real
+# ~/.config/aimi/ is never read or written. Every assertion is unconditional --
+# no early return, no environment-dependent assertion count -- so the totals are
+# identical whether or not the suite runs from a worktree (deliberate contrast
+# with test_init_session_writes_global_cache, whose branches legitimately differ).
+
+# Creates a throwaway repository plus an isolated config dir for one account
+# selection scenario, exporting FORGE_SELECT_REPO and FORGE_SELECT_CONFIG.
+# The config dir is NOT created on disk -- the side-effect test needs to prove
+# --check does not create it, and every write test creates it itself.
+# Usage: setup_forge_account_select_env [remote-url] [email] [name]
+setup_forge_account_select_env() {
+  local remote_url="${1:-https://github.com/owner/repo.git}"
+  local email="${2:-first.last@example.com}" name="${3:-First Last}"
+  FORGE_SELECT_TMPDIR=$(mktemp -d)
+  FORGE_SELECT_CONFIG="$FORGE_SELECT_TMPDIR/aimi-config"
+  FORGE_SELECT_REPO="$FORGE_SELECT_TMPDIR/repo"
+  mkdir -p "$FORGE_SELECT_REPO"
+  git -C "$FORGE_SELECT_REPO" init >/dev/null 2>&1
+  git -C "$FORGE_SELECT_REPO" remote add origin "$remote_url" >/dev/null 2>&1
+  if [ -n "$email" ]; then
+    git -C "$FORGE_SELECT_REPO" config user.email "$email"
+  fi
+  if [ -n "$name" ]; then
+    git -C "$FORGE_SELECT_REPO" config user.name "$name"
+  fi
+}
+
+teardown_forge_account_select_env() {
+  rm -rf "$FORGE_SELECT_TMPDIR"
+  unset FORGE_SELECT_TMPDIR FORGE_SELECT_CONFIG FORGE_SELECT_REPO
+}
+
+# Runs `aimi-cli.sh forge-account-select <args>` inside the scenario repository,
+# in a subshell so nothing it exports survives. GIT_CONFIG_GLOBAL/SYSTEM are
+# neutered to /dev/null so the developer's own user.email never leaks into an
+# assertion; FAKE_GH_* knobs are inherited from the caller.
+run_forge_account_select() {
+  (
+    cd "$FORGE_SELECT_REPO" || exit 1
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+    export AIMI_CONFIG_DIR="$FORGE_SELECT_CONFIG"
+    export PATH="$FAKE_GH_DIR:$PATH"
+    "$CLI" forge-account-select "$@"
+  )
+}
+
+# CHANGELOG:604's analogue, and the single most consequential test in this
+# story. `models-prompt-check` returned `skip` whenever models.json existed,
+# even when the current host's sub-table was missing or empty. Here the store
+# file exists the moment the FIRST host answers, so a check that decided on
+# file existence would silence every host afterwards. All four degenerate
+# inputs must yield ask.
+test_forge_account_select_check_decides_on_content_never_existence() {
+  echo ""
+  echo "=== forge-account-select --check: absent, foreign-key, empty and malformed stores ALL ask ==="
+
+  setup_fake_gh_fixture
+  setup_forge_account_select_env
+
+  local out
+  # (1) Store file absent entirely.
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check)
+  assert_eq "ask" "$(printf '%s' "$out" | jq -r '.decision')" "check/absent store: asks"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.stored')" "check/absent store: stored is null, not an invented answer"
+
+  # The config directory itself must not have been created by the read.
+  assert_eq "absent" "$([ -e "$FORGE_SELECT_CONFIG" ] && echo present || echo absent)" \
+    "check/absent store: --check did not create the config directory"
+
+  # (2) Store present but holding no entry for THIS host -- the shipped bug's
+  # exact shape. Seeded with a sibling host so the file is genuinely non-empty.
+  mkdir -p "$FORGE_SELECT_CONFIG"
+  local store
+  store=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --record-active | jq -r '.store')
+  printf '%s\n' '{"gitlab.com":{"mode":"account","account":"someone","recordedAt":"2026-01-01T00:00:00Z"}}' > "$store"
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check)
+  assert_eq "ask" "$(printf '%s' "$out" | jq -r '.decision')" "check/foreign key only: asks -- a store that exists is not an answer"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.stored')" "check/foreign key only: stored is null for this host"
+
+  # (3) Store present but empty.
+  : > "$store"
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check)
+  assert_eq "ask" "$(printf '%s' "$out" | jq -r '.decision')" "check/empty store: asks rather than skipping silently"
+
+  # (4) Store present but malformed JSON.
+  printf '%s\n' '{"github.com": {"mode": "acc' > "$store"
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check)
+  assert_eq "ask" "$(printf '%s' "$out" | jq -r '.decision')" "check/malformed store: asks rather than skipping silently"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.stored')" "check/malformed store: stored is null"
+
+  # (5) An entry that is present but does not ENCODE an answer -- the empty
+  # account string, which is the rejected encoding of the opt-out. Content
+  # checking applies to the entry, not just the document.
+  printf '%s\n' '{"github.com":{"mode":"account","account":""}}' > "$store"
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check)
+  assert_eq "ask" "$(printf '%s' "$out" | jq -r '.decision')" "check/empty account string: asks -- \"\" is not a usable answer"
+
+  teardown_forge_account_select_env
+  teardown_fake_gh_fixture
+}
+
+# CHANGELOG:487's analogue on the RECORD path. Named after that fix's own
+# regression test, test_detect_models_default_mode_preserves_other_host: the
+# defect was `detect-models` rebuilding the document with `jq -n` and dropping
+# the inactive host's sub-table on every invocation.
+test_forge_account_select_record_preserves_other_host() {
+  echo ""
+  echo "=== forge-account-select --record: the OTHER host's entry survives byte-for-byte ==="
+
+  setup_fake_gh_fixture
+  setup_forge_account_select_env
+
+  mkdir -p "$FORGE_SELECT_CONFIG"
+  local store
+  store=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --record-active | jq -r '.store')
+
+  # Seed two host keys in one document, the way a repository with remotes on
+  # two forges legitimately ends up.
+  printf '%s\n' '{"github.com":{"mode":"account","account":"octocat","recordedAt":"2026-01-01T00:00:00Z"},"gitlab.com":{"mode":"account","account":"monalisa","recordedAt":"2026-02-02T00:00:00Z"}}' > "$store"
+  local sibling_before
+  sibling_before=$(jq -c '."gitlab.com"' "$store")
+
+  FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --record newlogin >/dev/null
+
+  assert_eq "newlogin" "$(jq -r '."github.com".account' "$store")" "record preserves other host: this host's entry was replaced"
+  assert_eq "$sibling_before" "$(jq -c '."gitlab.com"' "$store")" "record preserves other host: gitlab.com's entry is byte-for-byte unchanged"
+  assert_eq "2" "$(jq 'keys | length' "$store")" "record preserves other host: the document still holds both keys"
+
+  # --record-active takes the same merge path, so it gets the same guarantee.
+  FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --record-active >/dev/null
+  assert_eq "active" "$(jq -r '."github.com".mode' "$store")" "record-active preserves other host: this host's entry became the active-account answer"
+  assert_eq "$sibling_before" "$(jq -c '."gitlab.com"' "$store")" "record-active preserves other host: gitlab.com's entry is still byte-for-byte unchanged"
+
+  teardown_forge_account_select_env
+  teardown_fake_gh_fixture
+}
+
+# The same regression on the RESELECT path, which is the trap: rewriting the
+# file without the entry is the obvious implementation and it destroys every
+# other host's answer.
+test_forge_account_select_reselect_preserves_other_host() {
+  echo ""
+  echo "=== forge-account-select --reselect: removes ONLY this host's entry ==="
+
+  setup_fake_gh_fixture
+  setup_forge_account_select_env
+
+  mkdir -p "$FORGE_SELECT_CONFIG"
+  local store
+  store=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --record-active | jq -r '.store')
+
+  printf '%s\n' '{"github.com":{"mode":"account","account":"octocat","recordedAt":"2026-01-01T00:00:00Z"},"gitlab.com":{"mode":"active","recordedAt":"2026-02-02T00:00:00Z"}}' > "$store"
+  local sibling_before
+  sibling_before=$(jq -c '."gitlab.com"' "$store")
+
+  local out
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --reselect)
+
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.cleared')" "reselect preserves other host: reports that an answer was actually cleared"
+  assert_eq "false" "$(jq 'has("github.com")' "$store")" "reselect preserves other host: this host's key is gone"
+  assert_eq "$sibling_before" "$(jq -c '."gitlab.com"' "$store")" "reselect preserves other host: gitlab.com's entry is byte-for-byte unchanged, mode discriminator and timestamp included"
+  assert_eq "1" "$(jq 'keys | length' "$store")" "reselect preserves other host: exactly one key was removed"
+
+  # Reselecting again is idempotent and still does not touch the sibling.
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --reselect)
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.cleared')" "reselect twice: reports that there was nothing left to clear"
+  assert_eq "$sibling_before" "$(jq -c '."gitlab.com"' "$store")" "reselect twice: gitlab.com's entry is still untouched"
+
+  teardown_forge_account_select_env
+  teardown_fake_gh_fixture
+}
+
+# CHANGELOG:615 verbatim: the models marker "suppressed the prompt even after
+# the config was deleted, leaving the user silently stuck ... with no way to
+# re-trigger the prompt short of also deleting the marker." The answer must be
+# the ONLY state, so both --reselect and deleting the file re-trigger.
+test_forge_account_select_answer_is_revocable_and_is_the_only_state() {
+  echo ""
+  echo "=== forge-account-select: the answer is the only state -- revocable, with no companion marker ==="
+
+  setup_fake_gh_fixture
+  setup_forge_account_select_env
+
+  local out store
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --record monalisa)
+  store=$(printf '%s' "$out" | jq -r '.store')
+
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check)
+  assert_eq "skip" "$(printf '%s' "$out" | jq -r '.decision')" "revocation: a recorded answer stops the question"
+  assert_eq "answer_recorded" "$(printf '%s' "$out" | jq -r '.basis')" "revocation: the basis names the recorded answer, not a divergence verdict"
+
+  # (a) --reselect re-triggers.
+  FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --reselect >/dev/null
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check)
+  assert_eq "ask" "$(printf '%s' "$out" | jq -r '.decision')" "revocation: --reselect makes the very next --check ask again"
+
+  # (b) Deleting the answer by hand does exactly the same. This is the half the
+  # models flow got wrong: there deleting the config left the marker behind and
+  # the prompt stayed suppressed.
+  FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --record monalisa >/dev/null
+  rm -f "$store"
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check)
+  assert_eq "ask" "$(printf '%s' "$out" | jq -r '.decision')" "revocation: deleting the store by hand re-triggers the question too"
+
+  # (c) There is no second file to also delete. After a full record cycle the
+  # config dir holds the store and its lock -- and nothing marker-shaped that
+  # could outlive the answer.
+  FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --record monalisa >/dev/null
+  local stray
+  stray=$(find "$FORGE_SELECT_CONFIG" -maxdepth 1 -type f ! -name 'forge-account-*.json' ! -name '*.lock' 2>/dev/null | wc -l | tr -d ' ')
+  assert_eq "0" "$stray" "revocation: no companion marker or sentinel file exists that could survive the answer's deletion"
+
+  teardown_forge_account_select_env
+  teardown_fake_gh_fixture
+}
+
+# Success criterion 3: "always use the active account" is a real, persisted
+# answer, distinguishable from "not asked yet". Storing "" or omitting the
+# entry are both rejected as encodings precisely because neither is
+# distinguishable from absent.
+test_forge_account_select_record_active_is_a_first_class_answer() {
+  echo ""
+  echo "=== forge-account-select --record-active: the opt-out is a stored value, not an absence ==="
+
+  setup_fake_gh_fixture
+  setup_forge_account_select_env
+
+  local out store
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --record-active)
+  store=$(printf '%s' "$out" | jq -r '.store')
+
+  assert_eq "active" "$(printf '%s' "$out" | jq -r '.stored.mode')" "record-active: the entry carries a mode discriminator"
+  assert_eq "false" "$(jq '."github.com" | has("account")' "$store")" "record-active: no account key is invented for the opt-out"
+  assert_eq "true" "$(jq '."github.com" | has("recordedAt")' "$store")" "record-active: the entry records when it was answered"
+
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check)
+  assert_eq "skip" "$(printf '%s' "$out" | jq -r '.decision')" "record-active: a later --check honors the opt-out"
+  assert_eq "active" "$(printf '%s' "$out" | jq -r '.stored.mode')" "record-active: --check tells \"chose the active account\" apart from \"not asked\""
+
+  # A named account is the other discriminator value, and reads back whole.
+  FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --record monalisa >/dev/null
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check)
+  assert_eq "account" "$(printf '%s' "$out" | jq -r '.stored.mode')" "record <login>: the mode discriminator says account"
+  assert_eq "monalisa" "$(printf '%s' "$out" | jq -r '.stored.account')" "record <login>: the login reads back verbatim"
+
+  teardown_forge_account_select_env
+  teardown_fake_gh_fixture
+}
+
+# --check must write NOTHING. That is the mechanical guarantee behind
+# interactivity.md's agent-mode rule: an auto-answer that got persisted would
+# let one CI run answer the question permanently for every human afterwards.
+test_forge_account_select_check_has_zero_side_effects() {
+  echo ""
+  echo "=== forge-account-select --check: creates nothing, writes nothing, mutates nothing ==="
+
+  setup_fake_gh_fixture
+  setup_forge_account_select_env
+
+  # (a) Virgin config dir: --check must not bring it into existence.
+  FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check >/dev/null
+  assert_eq "absent" "$([ -e "$FORGE_SELECT_CONFIG" ] && echo present || echo absent)" \
+    "check side effects: a virgin AIMI_CONFIG_DIR is still absent afterwards"
+
+  # (b) Pre-existing store: byte-identical before and after, mtime included.
+  local store checksum_before checksum_after
+  store=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --record monalisa | jq -r '.store')
+  checksum_before=$(cksum < "$store")
+  FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check >/dev/null
+  checksum_after=$(cksum < "$store")
+  assert_eq "$checksum_before" "$checksum_after" "check side effects: a pre-existing store is byte-identical after --check"
+
+  # (c) And --check on a repository whose answer is recorded creates no extra
+  # file in the config directory either.
+  local files_before files_after
+  files_before=$(find "$FORGE_SELECT_CONFIG" -maxdepth 1 | sort)
+  FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check >/dev/null
+  files_after=$(find "$FORGE_SELECT_CONFIG" -maxdepth 1 | sort)
+  assert_eq "$files_before" "$files_after" "check side effects: --check adds no file to the config directory"
+
+  teardown_forge_account_select_env
+  teardown_fake_gh_fixture
+}
+
+# AIMI_FORGE_IDENTITY names the account to act as, so the question is moot --
+# and the skip is decided without recording anything, matching this file's
+# env-over-stored convention (AIMI_FORGE_TYPE short-circuits detection).
+test_forge_account_select_check_identity_override_skips_and_records_nothing() {
+  echo ""
+  echo "=== forge-account-select --check: AIMI_FORGE_IDENTITY makes the question moot ==="
+
+  setup_fake_gh_fixture
+  setup_forge_account_select_env
+
+  local out
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi AIMI_FORGE_IDENTITY=monalisa run_forge_account_select --check)
+  assert_eq "skip" "$(printf '%s' "$out" | jq -r '.decision')" "identity override: decision is skip"
+  assert_eq "identity_override" "$(printf '%s' "$out" | jq -r '.basis')" "identity override: the basis names the override"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.stored')" "identity override: nothing was read back as an answer"
+  assert_eq "absent" "$([ -e "$FORGE_SELECT_CONFIG" ] && echo present || echo absent)" \
+    "identity override: nothing was recorded -- the config directory does not exist"
+
+  # Without the override the same repository asks, so the skip above is
+  # attributable to the override and not to the fixture being quiet.
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check)
+  assert_eq "ask" "$(printf '%s' "$out" | jq -r '.decision')" "identity override: the same repository asks once the override is gone"
+
+  teardown_forge_account_select_env
+  teardown_fake_gh_fixture
+}
+
+# Commit d1b19ca's lesson, applied to a keyed store. AIMI_FORGE_TYPE makes
+# _detect_forge emit a JSON null host, and a bare `jq -r '.host'` renders that
+# as the 4-character TEXT "null" -- non-empty, so it survives every emptiness
+# check. There it reached `gh auth status --hostname null` and the refusal read
+# as a confirmed not-authenticated answer. Here it would key an entry under the
+# literal host "null", which no later invocation resolving a real host would
+# ever find again.
+test_forge_account_select_null_host_never_becomes_a_key() {
+  echo ""
+  echo "=== forge-account-select: a JSON null host never becomes the literal key \"null\" ==="
+
+  setup_fake_gh_fixture
+  setup_forge_account_select_env
+
+  local out
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi AIMI_FORGE_TYPE=github run_forge_account_select --check)
+  assert_eq "skip" "$(printf '%s' "$out" | jq -r '.decision')" "null host: --check skips rather than asking a question whose answer cannot be keyed"
+  assert_eq "no_host" "$(printf '%s' "$out" | jq -r '.basis')" "null host: the basis names the missing host"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.host')" "null host: host is reported as JSON null, not the string \"null\""
+
+  # The write modes refuse outright rather than inventing a key.
+  local rc=0 stderr_file="$FORGE_SELECT_TMPDIR/stderr-null-host"
+  FAKE_GH_AUTH_STATUS_MODE=multi AIMI_FORGE_TYPE=github run_forge_account_select --record someone \
+    >/dev/null 2>"$stderr_file" || rc=$?
+  assert_exit_code "1" "$rc" "null host: --record refuses rather than keying an entry under \"null\""
+  assert_stderr_contains "no forge host resolved" "$(cat "$stderr_file")" "null host: the refusal says why"
+  assert_eq "absent" "$([ -e "$FORGE_SELECT_CONFIG" ] && echo present || echo absent)" \
+    "null host: the refused write created nothing at all"
+
+  rc=0
+  FAKE_GH_AUTH_STATUS_MODE=multi AIMI_FORGE_TYPE=github run_forge_account_select --reselect \
+    >/dev/null 2>"$stderr_file" || rc=$?
+  assert_exit_code "1" "$rc" "null host: --reselect refuses too, rather than deleting a key named \"null\""
+
+  teardown_forge_account_select_env
+  teardown_fake_gh_fixture
+}
+
+# Mode flags: exactly one, never zero, never two -- and reselect stays a FLAG.
+# A second verb would need a second `creates` identity and a roadmap amendment.
+test_forge_account_select_mode_flags_are_mutually_exclusive() {
+  echo ""
+  echo "=== forge-account-select: exactly one mode, and no credential-shaped flag ==="
+
+  setup_fake_gh_fixture
+  setup_forge_account_select_env
+
+  local stderr_file="$FORGE_SELECT_TMPDIR/stderr"
+  local rc=0
+
+  run_forge_account_select >/dev/null 2>"$stderr_file" || rc=$?
+  assert_exit_code "1" "$rc" "mode flags: no mode at all exits non-zero"
+  assert_stderr_contains "--check | --record <login> | --record-active | --reselect" "$(cat "$stderr_file")" \
+    "mode flags: the no-mode error names every valid mode"
+
+  rc=0
+  run_forge_account_select --check --reselect >/dev/null 2>"$stderr_file" || rc=$?
+  assert_exit_code "1" "$rc" "mode flags: two modes at once exits non-zero"
+  assert_stderr_contains "two modes given" "$(cat "$stderr_file")" "mode flags: the two-mode error says so"
+
+  rc=0
+  run_forge_account_select --record-active --record x >/dev/null 2>"$stderr_file" || rc=$?
+  assert_exit_code "1" "$rc" "mode flags: --record-active plus --record is also two modes"
+
+  rc=0
+  run_forge_account_select --record "" >/dev/null 2>"$stderr_file" || rc=$?
+  assert_exit_code "1" "$rc" "mode flags: an empty --record value is refused, not stored as the opt-out"
+  assert_stderr_contains "--record-active" "$(cat "$stderr_file")" \
+    "mode flags: the empty-login error points at --record-active as the way to say \"use whichever account is active\""
+
+  rc=0
+  run_forge_account_select --record >/dev/null 2>"$stderr_file" || rc=$?
+  assert_exit_code "1" "$rc" "mode flags: --record with no value at all is refused rather than aborting silently under set -e"
+
+  rc=0
+  run_forge_account_select --token ghp_secret >/dev/null 2>"$stderr_file" || rc=$?
+  assert_exit_code "1" "$rc" "mode flags: an unknown flag is refused"
+
+  # Reselect is a flag on this verb; there must be no second dispatcher verb
+  # carrying it, which would need its own `creates` identity.
+  local dispatch_arms
+  dispatch_arms=$(grep -c 'forge-account-[a-z-]*)' "$CLI" || true)
+  assert_eq "1" "$dispatch_arms" "mode flags: exactly one forge-account-* dispatcher arm exists -- reselect is a flag, not a verb"
+
+  # No credential-shaped flag anywhere in the verb or its private helpers.
+  local section
+  section=$(sed -n '/^_forge_account_store_read()/,/^cmd_forge_account_select()/p' "$CLI"; sed -n '/^cmd_forge_account_select()/,/^}/p' "$CLI")
+  if printf '%s' "$section" | grep -v '^[[:space:]]*#' | grep -qE -- '--token|--identity|--secret|--password'; then
+    echo -e "${RED}✗${NC} forge-account-select: no credential-shaped flag may be parsed by this verb"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} forge-account-select: parses no --token/--identity/--secret/--password flag"
+    ((TESTS_PASSED++))
+  fi
+
+  teardown_forge_account_select_env
+  teardown_fake_gh_fixture
+}
+
+# Structural companion to the two preservation tests: prove there is exactly
+# ONE write path and that it reads before it writes, so a future edit cannot
+# reintroduce the `jq -n` rebuild by adding a second writer somewhere else.
+test_forge_account_select_has_exactly_one_write_path() {
+  echo ""
+  echo "=== forge-account-select: one read-merge-write path, no jq -n document rebuild ==="
+
+  local merge_body record_body reselect_body check_body
+  merge_body=$(sed -n '/^_forge_account_store_merge()/,/^}/p' "$CLI")
+  record_body=$(sed -n '/^_forge_account_select_record()/,/^}/p' "$CLI")
+  reselect_body=$(sed -n '/^_forge_account_select_reselect()/,/^}/p' "$CLI")
+  check_body=$(sed -n '/^_forge_account_select_check()/,/^}/p' "$CLI")
+
+  assert_contains "_forge_account_store_read" "$merge_body" \
+    "one write path: the writer reads the current document before merging into it"
+  assert_contains "_lock" "$merge_body" "one write path: the write is taken under _lock"
+  assert_contains "chmod 0600" "$merge_body" "one write path: the temp file is restricted before any content is written"
+
+  # chmod must come BEFORE the content write, not after -- the file names
+  # accounts, so it must never exist readable-by-others even for an instant.
+  local chmod_line write_line
+  chmod_line=$(printf '%s\n' "$merge_body" | grep -n 'chmod 0600' | head -1 | cut -d: -f1)
+  write_line=$(printf '%s\n' "$merge_body" | grep -n '> "\$tmp"' | head -1 | cut -d: -f1)
+  local ordering="wrong"
+  if [ -n "$chmod_line" ] && [ -n "$write_line" ] && [ "$chmod_line" -lt "$write_line" ]; then
+    ordering="chmod-first"
+  fi
+  assert_eq "chmod-first" "$ordering" "one write path: chmod 0600 precedes the first content write"
+
+  # The document must never be rebuilt from nothing.
+  local rebuild="absent"
+  if printf '%s' "$merge_body" | grep -v '^[[:space:]]*#' | grep -q 'jq -n'; then
+    rebuild="present"
+  fi
+  assert_eq "absent" "$rebuild" "one write path: the writer never reconstructs the document with jq -n"
+
+  # No other function in this story may write the store itself.
+  local record_writes="none" reselect_writes="none" check_writes="none"
+  if printf '%s' "$record_body" | grep -v '^[[:space:]]*#' | grep -qE 'mv |> "\$store"|mkdir -p'; then
+    record_writes="direct"
+  fi
+  if printf '%s' "$reselect_body" | grep -v '^[[:space:]]*#' | grep -qE 'mv |> "\$store"|mkdir -p'; then
+    reselect_writes="direct"
+  fi
+  if printf '%s' "$check_body" | grep -v '^[[:space:]]*#' | grep -qE 'mv |> "\$store"|mkdir -p|_forge_account_store_merge'; then
+    check_writes="direct"
+  fi
+  assert_eq "none" "$record_writes" "one write path: --record does not write on its own, it goes through the merge helper"
+  assert_eq "none" "$reselect_writes" "one write path: --reselect does not write on its own either"
+  assert_eq "none" "$check_writes" "one write path: --check reaches no write helper at all"
+
+  # read_state/write_state are scoped to AIMI_ROOT/.aimi/ and must not be used
+  # for a path under the aimi config directory.
+  local uses_state="no"
+  if printf '%s' "$merge_body" | grep -qE 'read_state|write_state'; then
+    uses_state="yes"
+  fi
+  assert_eq "no" "$uses_state" "one write path: read_state/write_state are not used for a config-dir path"
+}
+
+# The acceptance contract includes the dispatcher arm (which must sit in the
+# EARLY forge block, before find_aimi_root's cd side effect) and the help entry.
+test_forge_account_select_registered_in_help_and_dispatcher() {
+  echo ""
+  echo "=== forge-account-select: listed in help, routed by the early forge dispatcher ==="
+
+  local help_out
+  help_out=$("$CLI" help 2>&1)
+  assert_contains "forge-account-select (--check | --record <login> | --record-active | --reselect)" "$help_out" \
+    "help: lists forge-account-select with all three modes"
+
+  setup_fake_gh_fixture
+  setup_forge_account_select_env
+
+  local dispatch_out
+  dispatch_out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check 2>&1)
+  if printf '%s' "$dispatch_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: forge-account-select is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: forge-account-select is routed"
+    ((TESTS_PASSED++))
+  fi
+
+  # The arm must be in the block that runs BEFORE find_aimi_root, so the
+  # process stays in the invoking CWD -- in a multi-repo layout find_aimi_root
+  # would cd out of the git repository the caller is standing in.
+  local dispatcher_line find_root_line
+  dispatcher_line=$(grep -n 'forge-account-select) shift; cmd_forge_account_select' "$CLI" | head -1 | cut -d: -f1)
+  find_root_line=$(grep -n '^  find_aimi_root$' "$CLI" | head -1 | cut -d: -f1)
+  local position="late"
+  if [ -n "$dispatcher_line" ] && [ -n "$find_root_line" ] && [ "$dispatcher_line" -lt "$find_root_line" ]; then
+    position="early"
+  fi
+  assert_eq "early" "$position" "dispatcher: the arm dispatches before find_aimi_root, so the process stays in the invoking CWD"
+
+  teardown_forge_account_select_env
+  teardown_fake_gh_fixture
+}
+
+# One store per repository, shared by every worktree -- consuming US-001's key
+# rather than re-deriving it. This repository creates worktrees constantly via
+# /aimi:execute, so an answer that did not survive into a worktree would make
+# "asked once" visibly false.
+test_forge_account_select_answer_survives_into_a_worktree() {
+  echo ""
+  echo "=== forge-account-select: an answer recorded in the main checkout is found from a worktree ==="
+
+  setup_fake_gh_fixture
+  setup_forge_account_select_env
+
+  # The scenario repo needs a commit before `git worktree add` will work.
+  git -C "$FORGE_SELECT_REPO" config user.email "first.last@example.com" >/dev/null 2>&1
+  git -C "$FORGE_SELECT_REPO" config user.name "First Last" >/dev/null 2>&1
+  : > "$FORGE_SELECT_REPO/README.md"
+  git -C "$FORGE_SELECT_REPO" add README.md >/dev/null 2>&1
+  git -C "$FORGE_SELECT_REPO" commit -q -m "init" >/dev/null 2>&1
+  git -C "$FORGE_SELECT_REPO" worktree add -q "$FORGE_SELECT_REPO/.worktrees/feat-x" -b feat-x >/dev/null 2>&1
+
+  FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --record monalisa >/dev/null
+
+  local out
+  out=$(
+    cd "$FORGE_SELECT_REPO/.worktrees/feat-x" || exit 1
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+    export AIMI_CONFIG_DIR="$FORGE_SELECT_CONFIG"
+    export PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_AUTH_STATUS_MODE=multi
+    "$CLI" forge-account-select --check
+  )
+  assert_eq "skip" "$(printf '%s' "$out" | jq -r '.decision')" "worktree: the answer recorded in the main checkout stops the question in a worktree"
+  assert_eq "monalisa" "$(printf '%s' "$out" | jq -r '.stored.account')" "worktree: the same answer reads back, not a second empty store"
+  assert_eq "1" "$(find "$FORGE_SELECT_CONFIG" -maxdepth 1 -name 'forge-account-*.json' | wc -l | tr -d ' ')" \
+    "worktree: exactly one store file exists for the repository and its worktree"
+
+  teardown_forge_account_select_env
+  teardown_fake_gh_fixture
+}
+
 # Cheap hardening, not a live exploit (the auditor confirmed no working PoC):
 # the scheme comparison was case-sensitive, so an uppercase HTTPS:// remote
 # skipped redaction entirely and round-tripped its embedded credential.
@@ -23182,6 +23746,26 @@ main() {
   test_forge_account_divergence_is_read_only
   test_forge_identity_logins_derivation_table
   test_forge_git_identity_unset_keys_do_not_abort
+
+  # Forge account selection -- the remembered answer. Records, reads back and
+  # revokes this repository's forge account. Three bugs the models ask-once
+  # flow already shipped are pinned here: an answer that could not be revoked
+  # (CHANGELOG:615), a check that decided on file existence rather than content
+  # (CHANGELOG:604), and a writer that clobbered a sibling scope (CHANGELOG:487).
+  echo ""
+  echo "--- Forge Account Select Tests (phase 2 US-003) ---"
+  test_forge_account_select_check_decides_on_content_never_existence
+  test_forge_account_select_record_preserves_other_host
+  test_forge_account_select_reselect_preserves_other_host
+  test_forge_account_select_answer_is_revocable_and_is_the_only_state
+  test_forge_account_select_record_active_is_a_first_class_answer
+  test_forge_account_select_check_has_zero_side_effects
+  test_forge_account_select_check_identity_override_skips_and_records_nothing
+  test_forge_account_select_null_host_never_becomes_a_key
+  test_forge_account_select_mode_flags_are_mutually_exclusive
+  test_forge_account_select_has_exactly_one_write_path
+  test_forge_account_select_registered_in_help_and_dispatcher
+  test_forge_account_select_answer_survives_into_a_worktree
 
   # Forge PR View Tests (US-004) -- field-selectable PR lookup with a
   # three-way found/not_found/error status, fixing the exit-code conflation

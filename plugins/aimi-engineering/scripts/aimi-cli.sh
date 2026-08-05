@@ -3167,6 +3167,451 @@ _forge_account_divergence() {
       match: $match}'
 }
 
+# ============================================================================
+# Forge account selection -- the remembered answer
+# ============================================================================
+# Owns THREE operations on ONE document: record an answer, read it back and
+# decide, and revoke it. It does not ask the human. That split is settled repo
+# convention, not a choice made here: commands/references/interactivity.md puts
+# the question in the COMMAND layer, and the reason is mechanical -- the only
+# interactive prompt in this entire file, _prompt_category, is gated on
+# `[ -t 0 ]` and reads /dev/tty, which never fires under Claude Code because
+# the CLI is invoked through the Bash tool with a non-TTY stdin. A prompt
+# implemented here would be silently dead in the only host that matters.
+#
+# THREE SHIPPED BUGS FROM THIS REPOSITORY'S OWN MODELS FLOW LAND HERE. None is
+# hypothetical; each cost a release:
+#
+#   1. AN ANSWER THAT COULD NOT BE REVOKED (1.93.0, CHANGELOG:615). The models
+#      dismissal marker "suppressed the prompt even after the config was
+#      deleted, leaving the user silently stuck on all-inherit defaults with no
+#      way to re-trigger the prompt short of also deleting the marker." The fix
+#      decoupled the two files so deleting the ANSWER always re-triggers. That
+#      is why --reselect exists in this verb at all, and why there is no
+#      companion marker or sentinel anywhere in this section: THE ANSWER IS THE
+#      ONLY STATE. Deleting the store by hand does exactly what --reselect does.
+#
+#   2. CHECKED BY FILE EXISTENCE RATHER THAN CONTENT (1.93.1, CHANGELOG:604).
+#      `models-prompt-check` returned `skip` whenever models.json existed, even
+#      when the current host's sub-table was missing or empty. The analogue here
+#      is worse than an inconvenience: the store file exists the moment THIS
+#      repository first answers, and phases 3/4 add gitlab.com and gitea hosts
+#      to the same document, so a check that reads "file exists -> don't ask"
+#      would silence every host after the first. --check therefore decides on
+#      THIS HOST'S ENTRY, and an absent / empty / malformed store and an entry
+#      that does not encode a usable answer ALL yield ask, never a silent skip.
+#
+#   3. A WRITER THAT CLOBBERED A SIBLING SCOPE (1.97.2, CHANGELOG:487).
+#      `detect-models` in default mode "wrote a fresh document via `jq -n`,
+#      silently dropping the inactive host's configured models on every
+#      invocation." Every write here is read-merge-write through the single
+#      _forge_account_store_merge path below, and NO code path in this section
+#      reconstructs the document with `jq -n`. --reselect is the trap: writing
+#      the file back without the entry is the obvious implementation and it
+#      destroys every other host's answer, so it too is a merge (`del`), not a
+#      rebuild. _forge_account_store_path's own header states the same
+#      obligation from the store's side.
+#
+# DOCUMENT SHAPE, and why a REBUILD is impossible rather than merely discouraged:
+# the store is a JSON object keyed by forge host, one file per repository
+# (_forge_account_store_path). This function CANNOT enumerate the hosts a
+# repository will ever use -- it only ever learns the ONE host _detect_forge
+# resolves from the remote it is standing in front of right now. A rebuild
+# would have to invent the other hosts' entries out of nothing, so read-merge-
+# write is the only implementation that can be correct, not a stylistic
+# preference. Each entry is:
+#     {"mode": "active",  "recordedAt": "<ISO 8601 UTC>"}
+#     {"mode": "account", "account": "<login>", "recordedAt": "<ISO 8601 UTC>"}
+# The `mode` discriminator is what makes "the user chose to always use whichever
+# account is active" a FIRST-CLASS persisted answer, distinguishable from "the
+# user has not been asked". Encoding the opt-out as an empty account string, or
+# by omitting the entry, is rejected on both the write and the read side --
+# neither is distinguishable from absent, which is precisely the property the
+# opt-out must not have.
+
+# Reads the store document, normalizing every degenerate input to `{}`:
+# file absent, file empty, file unreadable, file holding malformed JSON, and
+# file holding valid JSON that is not an object (an array or a bare string a
+# hand-edit could leave behind). Prints exactly one JSON object on stdout.
+#
+# Normalizing rather than erroring is bug 2's lesson applied at the read: the
+# caller's next step compares THIS HOST'S entry against `{}` and asks when it
+# finds nothing, so a corrupt store degrades into "nobody has answered yet"
+# and the user gets the question back. The alternative -- treating malformed
+# as "already answered" -- is the silent skip that shipped.
+_forge_account_store_read() {
+  local store="${1:-}" raw=""
+
+  if [ -z "$store" ] || [ ! -f "$store" ]; then
+    printf '{}\n'
+    return 0
+  fi
+
+  raw=$(cat "$store" 2>/dev/null) || raw=""
+  if [ -z "$raw" ]; then
+    printf '{}\n'
+    return 0
+  fi
+
+  printf '%s' "$raw" | jq -c 'if type == "object" then . else {} end' 2>/dev/null || printf '{}\n'
+}
+
+# THE ONLY WRITE PATH IN THIS SECTION. Read-merge-write, under one lock.
+# Usage: _forge_account_store_merge <store_path> <jq_filter> <jq_arg>...
+#
+# The jq filter is applied to the CURRENT document, read INSIDE the lock, so a
+# concurrent writer cannot slip between the read and the write and lose an
+# entry -- which is the whole reason the read is not hoisted out to the caller
+# where it would be easier to see.
+#
+# Combines the two precedents this repository already has rather than inventing
+# a third: roadmap-init's `( _lock "$f.lock"; ...; mv ) 200>"$f.lock"` subshell
+# shape, and write_aimi_models_config's create-then-restrict-then-write
+# ordering (mkdir -p, mktemp, chmod 0600 BEFORE any content, mv, temp removed on
+# mv failure). The 0600-before-content ordering is load-bearing for a file that
+# names accounts: it must never exist, even for the instant between creation and
+# the first write, readable by anyone but its owner.
+#
+# read_state/write_state are deliberately NOT used: their flock +
+# validate_path_in_project discipline is scoped to AIMI_ROOT/.aimi/ and does not
+# transfer to a path under the aimi config directory.
+#
+# The `|| rc=$?` makes the subshell the left side of an AND-OR list, the one
+# construct `set -e` is defined to exempt, so a lock path that cannot be opened
+# is a reportable failure rather than an instant, silent exit. The `200>`
+# redirect stays attached to the subshell, before the `||`.
+_forge_account_store_merge() {
+  local store="$1" filter="$2"
+  shift 2
+
+  local dir
+  dir=$(dirname "$store")
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    echo "Error: forge-account-select: cannot create directory: $dir" >&2
+    return 1
+  fi
+
+  local tmp=""
+  tmp=$(mktemp "${store}.XXXXXX" 2>/dev/null) || tmp=""
+  if [ -z "$tmp" ]; then
+    echo "Error: forge-account-select: cannot create a temp file beside $store" >&2
+    return 1
+  fi
+  chmod 0600 "$tmp"
+
+  local rc=0
+  (
+    _lock "${store}.lock"
+    local current merged
+    current=$(_forge_account_store_read "$store")
+    merged=$(printf '%s' "$current" | jq -c "$@" "$filter") || exit 1
+    printf '%s\n' "$merged" > "$tmp"
+    mv "$tmp" "$store"
+  ) 200>"${store}.lock" || rc=$?
+
+  rm -f "$tmp" 2>/dev/null || true
+
+  if [ "$rc" -ne 0 ]; then
+    echo "Error: forge-account-select: failed to write $store" >&2
+    return 1
+  fi
+}
+
+# Prints the forge host this repository's answer is keyed under, or nothing.
+#
+# `// empty` is not defensive noise. .host is JSON null whenever AIMI_FORGE_TYPE
+# short-circuits _detect_forge, and a bare `jq -r '.host'` renders that null as
+# the 4-character TEXT "null" -- non-empty, so it survives every downstream
+# emptiness check. Commit d1b19ca is where that exact value reached
+# `gh auth status --hostname null` and its refusal read as a CONFIRMED
+# not-authenticated answer. Here it would key an entry under the literal host
+# "null", which no later invocation resolving a real host would ever find again.
+_forge_account_host() {
+  local forge_info
+  forge_info=$(_detect_forge)
+  printf '%s' "$forge_info" | jq -r '.host // empty'
+}
+
+# Extracts THIS host's recorded answer from a store document, or `null`.
+#
+# The mode discriminator is validated here, not merely read: an entry that is
+# not an object, carries an unrecognized mode, or encodes mode "account" with a
+# missing or empty account is reported as `null` -- i.e. "nobody has answered".
+# That is bug 2's content-check discipline pushed one level down from the
+# document to the entry, and it is also the read-side half of rejecting the
+# empty string as an encoding of the "always use the active account" opt-out.
+_forge_account_stored_entry() {
+  local store="$1" host="$2"
+
+  if [ -z "$store" ] || [ -z "$host" ]; then
+    printf 'null\n'
+    return 0
+  fi
+
+  _forge_account_store_read "$store" | jq -c --arg host "$host" '
+    (.[$host] // null) as $e
+    | if ($e | type) != "object" then null
+      elif $e.mode == "active" then $e
+      elif $e.mode == "account" and ($e.account | type) == "string" and $e.account != "" then $e
+      else null
+      end'
+}
+
+# Usage/mode error. Always exits 1 -- every caller relies on that, so no arm of
+# the parsing loop needs its own guard against falling through.
+_forge_account_select_usage() {
+  if [ -n "${1:-}" ]; then
+    echo "Error: forge-account-select: $1" >&2
+  fi
+  echo "Usage: aimi-cli.sh forge-account-select (--check | --record <login> | --record-active | --reselect) [--project <path>]" >&2
+  echo "  Exactly one mode is required:" >&2
+  echo "    --check           read this repository's recorded answer back and decide whether the account question is warranted; writes nothing" >&2
+  echo "    --record <login>  remember <login> as this repository's forge account" >&2
+  echo "    --record-active   remember \"always use whichever account is active\" -- a real answer, not the absence of one" >&2
+  echo "    --reselect        forget this repository's answer so the next --check asks again" >&2
+  exit 1
+}
+
+# --check. Reads and decides; writes NOTHING -- no store file, no config
+# directory, no chmod, no mutation of a pre-existing store.
+#
+# That is not tidiness, it is the mechanical guarantee behind the agent-mode
+# rule. interactivity.md requires every question site to auto-select under
+# AIMI_AGENT_MODE / CI / --non-interactive, and if that auto-answer were
+# persisted, ONE CI run would silently and permanently answer the question for
+# every human who touched the repository afterwards. Applied-but-not-persisted
+# is enforced by --check writing nothing at all; persisting is always a
+# separate, explicit --record* call the command layer makes only after a human
+# actually answered.
+#
+# The rungs below are mutually exclusive and evaluated in a fixed order:
+#   identity_override  AIMI_FORGE_IDENTITY names the account to act as, so the
+#                      question is moot. Highest precedence, matching this
+#                      file's own env-over-stored convention (AIMI_FORGE_TYPE
+#                      short-circuits detection entirely).
+#   no_repository      no resolvable git identity, so there is nowhere to
+#                      remember an answer. Near-unreachable behind
+#                      _require_git_repo; kept because _forge_account_store_path
+#                      is documented to be allowed to decline.
+#   no_host            no forge host resolved (no remote, or AIMI_FORGE_TYPE
+#                      overriding detection), so the answer has no key. Asking
+#                      a question whose answer cannot be stored is worse than
+#                      not asking.
+#   answer_recorded    this host already has a usable answer.
+#   <divergence basis> otherwise the verdict from _forge_account_divergence is
+#                      adopted verbatim, decision and basis together. That
+#                      verdict is necessary but not sufficient on its own,
+#                      which is exactly what the rungs above supply.
+_forge_account_select_check() {
+  local store="$1"
+  local verdict host stored decision basis
+
+  verdict=$(_forge_account_divergence)
+  host=$(printf '%s' "$verdict" | jq -r '.host // empty')
+  stored=$(_forge_account_stored_entry "$store" "$host")
+
+  decision="skip"
+  if [ -n "${AIMI_FORGE_IDENTITY:-}" ]; then
+    basis="identity_override"
+  elif [ -z "$store" ]; then
+    basis="no_repository"
+  elif [ -z "$host" ]; then
+    basis="no_host"
+  elif [ "$stored" != "null" ]; then
+    basis="answer_recorded"
+  else
+    decision=$(printf '%s' "$verdict" | jq -r '.decision')
+    basis=$(printf '%s' "$verdict" | jq -r '.basis')
+  fi
+
+  printf '%s' "$verdict" | jq -c \
+    --arg decision "$decision" \
+    --arg basis "$basis" \
+    --argjson stored "$stored" \
+    --arg store "$store" \
+    '{action: "check"}
+     + .
+     + {decision: $decision,
+        basis: $basis,
+        stored: $stored,
+        store: (if $store == "" then null else $store end)}'
+}
+
+# --record <login> and --record-active. Both persist through the one merge path.
+_forge_account_select_record() {
+  local store="$1" entry_mode="$2" login="$3"
+
+  if [ -z "$store" ]; then
+    echo "Error: forge-account-select: no resolvable git repository here, so there is nowhere to record an answer" >&2
+    exit 1
+  fi
+
+  local host
+  host=$(_forge_account_host)
+  if [ -z "$host" ]; then
+    echo "Error: forge-account-select: no forge host resolved for this repository -- an answer is keyed by host, so there is nothing to key it under" >&2
+    echo "  A host comes from the git remote; AIMI_FORGE_TYPE overrides forge detection and deliberately reports no host." >&2
+    exit 1
+  fi
+
+  local recorded_at entry
+  recorded_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%SZ')
+
+  if [ "$entry_mode" = "active" ]; then
+    entry=$(jq -nc --arg at "$recorded_at" '{mode: "active", recordedAt: $at}')
+  else
+    entry=$(jq -nc --arg account "$login" --arg at "$recorded_at" \
+      '{mode: "account", account: $account, recordedAt: $at}')
+  fi
+
+  # `.[$host] = $entry` -- assignment into the document that was just read, so
+  # every OTHER host's entry survives byte-for-byte. Never `jq -n`.
+  _forge_account_store_merge "$store" '.[$host] = $entry' \
+    --arg host "$host" --argjson entry "$entry" || exit 1
+
+  jq -nc --arg host "$host" --arg store "$store" --argjson stored "$entry" \
+    '{action: "record", host: $host, store: $store, stored: $stored}'
+}
+
+# --reselect. Revocation, and the ONLY state involved: there is no companion
+# marker to also delete, so this and `rm` on the store file are equivalent.
+_forge_account_select_reselect() {
+  local store="$1"
+
+  if [ -z "$store" ]; then
+    echo "Error: forge-account-select: no resolvable git repository here, so there is no answer to forget" >&2
+    exit 1
+  fi
+
+  local host
+  host=$(_forge_account_host)
+  if [ -z "$host" ]; then
+    echo "Error: forge-account-select: no forge host resolved for this repository -- an answer is keyed by host, so there is nothing to look up" >&2
+    exit 1
+  fi
+
+  local had
+  had=$(_forge_account_stored_entry "$store" "$host")
+
+  # `del(.[$host])` on the document that was just read. Rewriting the file
+  # without the entry is the obvious implementation and it is CHANGELOG:487
+  # exactly: every other host's answer would go with it.
+  _forge_account_store_merge "$store" 'del(.[$host])' --arg host "$host" || exit 1
+
+  local cleared="false"
+  if [ "$had" != "null" ]; then
+    cleared="true"
+  fi
+
+  jq -nc --arg host "$host" --arg store "$store" --argjson cleared "$cleared" \
+    '{action: "reselect", host: $host, store: $store, stored: null, cleared: $cleared}'
+}
+
+# Records, reads back and revokes this repository's forge account answer.
+#
+# Usage: aimi-cli.sh forge-account-select (--check | --record <login> |
+#                                          --record-active | --reselect)
+#                                         [--project <path>]
+#
+# RESELECT IS A FLAG, NEVER A SECOND VERB. The phase declares exactly one
+# `creates` identity for this work, cmd_forge_account_select, and verify-creates
+# greps tracked source for that literal string at phase close; a second verb
+# would need a second identity and a roadmap amendment. Revocation was
+# originally proposed as its own story and was folded in here precisely to keep
+# that contract intact.
+#
+# NO --token, --identity OR OTHERWISE CREDENTIAL-SHAPED FLAG EXISTS in the
+# parsing loop below, and none may be added. cmd_forge_pr_create,
+# cmd_forge_pr_edit and cmd_forge_issue_create each carry the same statement:
+# an identity reaches a forge CLI only through the environment, never through
+# argv, because argv leaks through `ps` and shell history. A LOGIN is not a
+# credential, which is why --record takes one -- but the flag namespace stays
+# clear of anything a future reader could mistake for a token sink.
+cmd_forge_account_select() {
+  check_jq
+
+  local mode="" account="" project_dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --check)
+        if [ -n "$mode" ]; then
+          _forge_account_select_usage "two modes given (--$mode and --check) -- exactly one is allowed"
+        fi
+        mode="check"
+        ;;
+      --record)
+        if [ -n "$mode" ]; then
+          _forge_account_select_usage "two modes given (--$mode and --record) -- exactly one is allowed"
+        fi
+        mode="record"
+        # Consumes the value only when one is actually there. A bare `shift`
+        # on the last argument returns non-zero, and this file runs `set -e`,
+        # so `--record` with no login would abort the process before the
+        # empty-value check below could print anything at all.
+        if [ $# -ge 2 ]; then
+          shift
+          account="$1"
+        fi
+        ;;
+      --record-active)
+        if [ -n "$mode" ]; then
+          _forge_account_select_usage "two modes given (--$mode and --record-active) -- exactly one is allowed"
+        fi
+        mode="record-active"
+        ;;
+      --reselect)
+        if [ -n "$mode" ]; then
+          _forge_account_select_usage "two modes given (--$mode and --reselect) -- exactly one is allowed"
+        fi
+        mode="reselect"
+        ;;
+      --project)
+        if [ $# -ge 2 ]; then
+          shift
+          project_dir="$1"
+        fi
+        ;;
+      *)
+        _forge_account_select_usage "unknown flag: $1"
+        ;;
+    esac
+    shift
+  done
+
+  if [ -z "$mode" ]; then
+    _forge_account_select_usage "no mode given"
+  fi
+
+  # An empty --record value is refused rather than stored. Storing "" would
+  # encode the "always use the active account" opt-out as a value that is
+  # indistinguishable from absent -- the one property that answer must not
+  # have. A leading dash is refused too: it is a flag the parser swallowed as
+  # a value, never a login anyone meant to type.
+  if [ "$mode" = "record" ]; then
+    if [ -z "$account" ]; then
+      _forge_account_select_usage "--record requires a <login>; --record-active is the way to say \"always use whichever account is active\""
+    fi
+    case "$account" in
+      -*)
+        _forge_account_select_usage "--record got \"$account\", which looks like a flag rather than a login"
+        ;;
+    esac
+  fi
+
+  _require_git_repo "$project_dir"
+
+  local store=""
+  store=$(_forge_account_store_path) || store=""
+
+  case "$mode" in
+    check)         _forge_account_select_check "$store" ;;
+    record)        _forge_account_select_record "$store" "account" "$account" ;;
+    record-active) _forge_account_select_record "$store" "active" "" ;;
+    reselect)      _forge_account_select_reselect "$store" ;;
+  esac
+}
+
 # Requests owner and name from a single `gh repo view` call -- never the two
 # separate calls skills/resolve-pr-parallel/scripts/get-pr-comments makes
 # today. Prints {owner, repo} on success; returns 1 (no output) on any
@@ -12556,6 +13001,46 @@ COMMANDS:
                               AIMI_FORGE_IDENTITY=<login> (env var only, never a flag)
                               to compare against the active account -- this does not
                               switch accounts.
+    forge-account-select (--check | --record <login> | --record-active | --reselect) [--project <path>]
+                              Record, read back and revoke THIS repository's
+                              remembered forge account -- the ask-once store.
+                              Exactly one mode is required; giving two, or
+                              none, exits 1 naming the valid modes. Reselect
+                              is a FLAG on this verb, never a second verb.
+                              --check reads the answer back and decides:
+                              {action: "check", decision ("ask"|"skip"),
+                              basis, stored, store, ...} plus every field of
+                              the internal divergence verdict (forge, host,
+                              activeAccount, accounts, identity, match).
+                              basis is identity_override (AIMI_FORGE_IDENTITY
+                              names the account, so the question is moot),
+                              no_repository, no_host, answer_recorded, or the
+                              divergence verdict's own basis. --check WRITES
+                              NOTHING -- not the store, not the config
+                              directory -- which is what keeps an agent-mode
+                              or CI auto-answer applied-but-not-persisted, so
+                              one CI run cannot permanently answer for every
+                              human afterwards.
+                              --record <login> remembers a named account;
+                              --record-active remembers "always use whichever
+                              account is active" as a first-class answer,
+                              distinct from having no answer. An empty
+                              --record value is refused, since it would be
+                              indistinguishable from absent.
+                              --reselect forgets this repository's answer so
+                              the next --check asks again; deleting the store
+                              file by hand does the same, because the answer
+                              is the ONLY state -- there is no companion
+                              marker to also delete.
+                              The store is one JSON document per repository
+                              (keyed on the repository's git common dir, so
+                              every worktree shares it) holding one entry per
+                              forge host. Every write is read-merge-write, so
+                              recording or revoking one host never touches
+                              another's entry.
+                              No credential-shaped flag exists on this verb,
+                              by design -- an acting identity is env-var-only
+                              (AIMI_FORGE_IDENTITY / GH_TOKEN), never a flag.
     forge-repo-info [--project <path>]
                               Resolve the active forge's owner/repo via a single
                               `gh repo view` call, falling back to parsing the git
@@ -13224,6 +13709,7 @@ main() {
     # one below runs too late to cover them.
     detect-forge) shift; cmd_detect_forge "$@"; return ;;
     forge-auth-status) shift; cmd_forge_auth_status "$@"; return ;;
+    forge-account-select) shift; cmd_forge_account_select "$@"; return ;;
     forge-repo-info) shift; cmd_forge_repo_info "$@"; return ;;
     forge-pr-view) shift; cmd_forge_pr_view "$@"; return ;;
     forge-pr-create) shift; cmd_forge_pr_create "$@"; return ;;
