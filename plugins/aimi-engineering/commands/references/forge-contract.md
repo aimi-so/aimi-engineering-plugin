@@ -367,6 +367,60 @@ prescribes for every question site, and it is mechanical rather than stylistic:
 the CLI is invoked through the Bash tool with a non-TTY stdin, so a prompt
 implemented inside it would be silently dead in the host that matters.
 
+#### When the question is raised
+
+Two conditions, both required, evaluated at each ask site — the same shape the
+first-run model prompt uses (`cli-path-resolution.md`):
+
+1. `detect-interactivity` prints `picker`. Picker is the default; `agent`
+   comes only from an explicit opt-out (`--non-interactive`,
+   `AIMI_AGENT_MODE=true`, `CI=true`), never from a non-TTY shell.
+2. `forge-account-select --check` reports `decision: "ask"` — which happens
+   only when this repository has no recorded answer for its own host *and*
+   this project's git identity and the active forge account actually diverge.
+
+Every other outcome proceeds silently on the active account. The two ask sites
+are `commands/open-pr.md`'s Step 1a (once per repository) and
+`commands/execute.md`'s **Offer a Pull Request** (once per participating
+repository, naming the repository so a multi-repo run's prompts stay
+distinguishable). Both are translated command bodies, which is why the picker
+lives there and not in this file.
+
+Three answers are offerable, and each maps onto exactly one call:
+
+| Answer | Recorded as | Meaning |
+|---|---|---|
+| Always use the active account | `--record-active` | Permanent opt-out. A real stored answer (`mode: "active"`), which is what stops the question being raised again — not the absence of one. |
+| A named logged-in account | `--record <login>` | Every forge write for this repository acts as `<login>`. |
+| A free-form login | `--record <login>` | Same as above, after the command layer validates the typed value against the login shape the store accepts. |
+
+**Agent mode applies the first answer and never records it.** At either site,
+`INTERACTIVE_MODE=agent` auto-selects "use the active account" — which requires
+no action at all, since that is already the account every forge verb uses — and
+makes no record call whatsoever. The repository's recorded state after an
+unattended run is byte-for-byte what it was before, and the site logs one line
+saying so: `agent-mode: forge-account auto-selected active account (not
+recorded)`. The reason it must not be recorded is that this auto-answer is
+*also* the permanent opt-out: persisting it would let one CI run silently and
+permanently answer the question for every human afterwards, who would never be
+asked and would have no way to discover why.
+
+#### The callers that can apply an answer but can never ask
+
+`skills/resolve-pr-parallel/scripts/get-pr-comments` and
+`skills/resolve-pr-parallel/scripts/resolve-pr-thread` are plain shell scripts
+with no picker available on either host. They can apply a **stored** answer
+correctly, but they can never be the site that asks. A repository whose answer
+was never recorded therefore runs those two paths on the machine's active
+account.
+
+This asymmetry is accepted, not an oversight: it is the same degradation
+posture phase 1 took throughout — a path with no way to do the better thing
+does the working thing rather than failing. It is written down here so a reader
+meets it as a stated contract instead of inferring it from behaviour. The
+remedy is to answer the question once from either ask site above; every
+non-asking caller picks the recorded answer up from then on.
+
 Exactly **two** answer states are storable, and they are distinguishable from
 each other and from having no answer at all:
 
