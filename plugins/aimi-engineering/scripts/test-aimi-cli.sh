@@ -18475,6 +18475,536 @@ FAKE_GH
   teardown_detect_forge_fixture
 }
 
+# ============================================================================
+# Forge account selection -- divergence detection Tests
+# ============================================================================
+# _forge_git_identity, _forge_identity_logins and _forge_account_divergence
+# have no cmd_ dispatcher wrapper (this story adds no verb -- the verdict is
+# a private JSON consumed in-process, deliberately not a fifth forge result
+# envelope), so they are sourced directly, matching source_forge_contract_
+# functions above. Every scenario below is offline: the fake-gh PATH stub and
+# throwaway local git repositories only, no network and no real credentials.
+
+# Sources the account-divergence functions AND every helper they reach --
+# _forge_account_divergence calls _detect_forge, which fans out to six more
+# _detect_forge_* helpers, plus _forge_bin_check and _forge_auth_status_github.
+# Missing any one of them would leave the eval'd function calling an undefined
+# name, which is the rule the root CLAUDE.md states for these sourcing helpers.
+source_forge_account_functions() {
+  eval "$(sed -n '/^_detect_forge_parse_host()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_detect_forge_classify_host()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_detect_forge_select_remote_raw()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_detect_forge_read_selection()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_detect_forge_select_remote()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_detect_forge_redact_userinfo()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_detect_forge()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_bin_check()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_auth_status_github()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_git_identity()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_identity_logins()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_account_divergence()/,/^}/p' "$CLI")"
+}
+
+# Creates a throwaway git repository with one `origin` remote and, when
+# asked, a git identity written with `git -C <repo> config` -- LOCAL, never
+# --global. No test in this section may mutate the machine's real git config.
+# Usage: setup_forge_account_repo <remote-url> [email] [name]
+setup_forge_account_repo() {
+  local remote_url="$1" email="${2:-}" name="${3:-}" repo
+  repo=$(mktemp -d)
+  git -C "$repo" init >/dev/null 2>&1
+  git -C "$repo" remote add origin "$remote_url" >/dev/null 2>&1
+  if [ -n "$email" ]; then
+    git -C "$repo" config user.email "$email"
+  fi
+  if [ -n "$name" ]; then
+    git -C "$repo" config user.name "$name"
+  fi
+  printf '%s' "$repo"
+}
+
+# Runs _forge_account_divergence with <repo> as the working directory, in a
+# subshell so nothing it exports survives into the next test. Every remaining
+# argument is a VAR=value pair exported into that same subshell -- the PATH
+# and FAKE_GH_* knobs each scenario needs.
+#
+# GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM are pointed at /dev/null, which git
+# reads as an empty config file. That is a READ-side neutering inside one
+# subshell, not a write: it keeps every assertion below independent of
+# whatever user.email the developer's own machine happens to have set, and it
+# is the only way the "no git identity at all" rung is reachable at all,
+# since _forge_git_identity deliberately reads unqualified (repository config
+# where set, global otherwise).
+run_forge_account_divergence() {
+  local repo="$1"
+  shift
+  (
+    cd "$repo" || exit 1
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+    for _fad_assignment in "$@"; do
+      export "${_fad_assignment}"
+    done
+    _forge_account_divergence
+  )
+}
+
+# Fails when <pattern> appears anywhere in the fake gh's invocation log,
+# printing the whole log so a failure names the offending argv rather than
+# just asserting a boolean. A missing log file counts as "pattern absent".
+assert_gh_log_lacks() {
+  local pattern="$1" log_file="$2" test_name="$3"
+
+  if [ -f "$log_file" ] && grep -q -- "$pattern" "$log_file"; then
+    echo -e "${RED}✗${NC} $test_name"
+    echo "  gh invocations: $(cat "$log_file")"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} $test_name"
+    ((TESTS_PASSED++))
+  fi
+}
+
+test_forge_account_divergence_no_adapter() {
+  echo ""
+  echo "=== divergence rung 1: non-github forge -- skip/no_adapter, gh never consulted ==="
+
+  source_forge_account_functions
+  setup_fake_gh_fixture
+
+  local repo gh_log out
+  repo=$(setup_forge_account_repo "https://gitlab.com/owner/repo.git" "octocat@example.com" "octocat")
+  gh_log="$FAKE_GH_DIR/no-adapter.log"
+
+  out=$(run_forge_account_divergence "$repo" "PATH=$FAKE_GH_DIR:$PATH" "FAKE_GH_LOG=$gh_log")
+
+  assert_eq "skip" "$(printf '%s' "$out" | jq -r '.decision')" "divergence no_adapter: decision is skip"
+  assert_eq "no_adapter" "$(printf '%s' "$out" | jq -r '.basis')" "divergence no_adapter: basis reuses the contract's own spelling"
+  assert_eq "gitlab" "$(printf '%s' "$out" | jq -r '.forge')" "divergence no_adapter: the resolved forge is reported"
+  assert_eq "none" "$(printf '%s' "$out" | jq -r '.match')" "divergence no_adapter: match is none"
+  assert_eq "0" "$(printf '%s' "$out" | jq '.accounts | length')" "divergence no_adapter: accounts is empty"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.activeAccount')" "divergence no_adapter: activeAccount is null"
+  assert_eq "absent" "$([ -e "$gh_log" ] && echo present || echo absent)" "divergence no_adapter: gh is never invoked at all on a non-github forge"
+
+  rm -rf "$repo"
+  teardown_fake_gh_fixture
+}
+
+test_forge_account_divergence_cli_missing() {
+  echo ""
+  echo "=== divergence rung 2: gh absent from PATH -- skip/cli_missing ==="
+
+  source_forge_account_functions
+  setup_forge_no_gh_fixture
+
+  local repo out
+  repo=$(setup_forge_account_repo "https://github.com/owner/repo.git" "octocat@example.com" "octocat")
+
+  out=$(run_forge_account_divergence "$repo" "PATH=$NO_GH_PATH_DIR")
+
+  assert_eq "skip" "$(printf '%s' "$out" | jq -r '.decision')" "divergence cli_missing: decision is skip"
+  assert_eq "cli_missing" "$(printf '%s' "$out" | jq -r '.basis')" "divergence cli_missing: basis reuses the contract's own spelling"
+  assert_eq "github" "$(printf '%s' "$out" | jq -r '.forge')" "divergence cli_missing: forge still resolved to github"
+  assert_eq "github.com" "$(printf '%s' "$out" | jq -r '.host')" "divergence cli_missing: host still resolved from the remote"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.activeAccount')" "divergence cli_missing: activeAccount is null -- nothing was asked"
+  assert_eq "none" "$(printf '%s' "$out" | jq -r '.match')" "divergence cli_missing: match is none"
+
+  rm -rf "$repo"
+  teardown_forge_no_gh_fixture
+}
+
+test_forge_account_divergence_not_authenticated() {
+  echo ""
+  echo "=== divergence rung 3: gh present but logged out -- skip/not_authenticated ==="
+
+  source_forge_account_functions
+  setup_fake_gh_fixture
+
+  local repo out
+  repo=$(setup_forge_account_repo "https://github.com/owner/repo.git" "octocat@example.com" "octocat")
+
+  out=$(run_forge_account_divergence "$repo" "PATH=$FAKE_GH_DIR:$PATH" "FAKE_GH_AUTH_STATUS_MODE=none")
+
+  assert_eq "skip" "$(printf '%s' "$out" | jq -r '.decision')" "divergence not_authenticated: decision is skip"
+  assert_eq "not_authenticated" "$(printf '%s' "$out" | jq -r '.basis')" "divergence not_authenticated: basis reuses the contract's own spelling"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.activeAccount')" "divergence not_authenticated: activeAccount is null"
+  assert_eq "0" "$(printf '%s' "$out" | jq '.accounts | length')" "divergence not_authenticated: accounts is empty -- a refused status carries no list"
+  assert_eq "octocat@example.com" "$(printf '%s' "$out" | jq -r '.identity.email')" "divergence not_authenticated: the repository identity is still reported"
+
+  rm -rf "$repo"
+  teardown_fake_gh_fixture
+}
+
+test_forge_account_divergence_no_git_identity() {
+  echo ""
+  echo "=== divergence rung 4: repository has no git identity at all -- skip/no_git_identity ==="
+
+  source_forge_account_functions
+  setup_fake_gh_fixture
+
+  local repo out
+  # No email, no name -- and run_forge_account_divergence neuters the global
+  # and system config too, so `git config --get` genuinely finds nothing.
+  repo=$(setup_forge_account_repo "https://github.com/owner/repo.git")
+
+  out=$(run_forge_account_divergence "$repo" "PATH=$FAKE_GH_DIR:$PATH" \
+    "FAKE_GH_AUTH_STATUS_MODE=multi" "FAKE_GH_AUTH_ACCOUNT=octocat" "FAKE_GH_AUTH_OTHER_ACCOUNT=monalisa")
+
+  assert_eq "skip" "$(printf '%s' "$out" | jq -r '.decision')" "divergence no_git_identity: decision is skip"
+  assert_eq "no_git_identity" "$(printf '%s' "$out" | jq -r '.basis')" "divergence no_git_identity: basis names the outcome the contract enum does not model"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.identity.email')" "divergence no_git_identity: identity.email is JSON null when user.email is unset"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.identity.name')" "divergence no_git_identity: identity.name is JSON null when user.name is unset"
+  assert_eq "none" "$(printf '%s' "$out" | jq -r '.match')" "divergence no_git_identity: match is none"
+  # Two accounts are logged in, so the ONLY reason this is not `diverged` is
+  # that there is no identity to compare -- an unset key must not abort the
+  # CLI under `set -euo pipefail`, which is what the `|| ` on each read buys.
+  assert_eq "2" "$(printf '%s' "$out" | jq '.accounts | length')" "divergence no_git_identity: the account list is still read (so skip is the identity rung, not an empty keyring)"
+
+  rm -rf "$repo"
+  teardown_fake_gh_fixture
+}
+
+test_forge_account_divergence_identity_matches_active_noreply() {
+  echo ""
+  echo "=== divergence rung 5a: noreply address encodes the active login -- skip/identity_matches_active ==="
+
+  source_forge_account_functions
+  setup_fake_gh_fixture
+
+  local repo out
+  repo=$(setup_forge_account_repo "https://github.com/owner/repo.git" \
+    "12345+octocat@users.noreply.github.com" "Octo Cat")
+
+  out=$(run_forge_account_divergence "$repo" "PATH=$FAKE_GH_DIR:$PATH" \
+    "FAKE_GH_AUTH_STATUS_MODE=multi" "FAKE_GH_AUTH_ACCOUNT=octocat" "FAKE_GH_AUTH_OTHER_ACCOUNT=monalisa")
+
+  assert_eq "skip" "$(printf '%s' "$out" | jq -r '.decision')" "divergence noreply match: decision is skip -- an agreeing repository asks nothing"
+  assert_eq "identity_matches_active" "$(printf '%s' "$out" | jq -r '.basis')" "divergence noreply match: basis is identity_matches_active"
+  assert_eq "noreply" "$(printf '%s' "$out" | jq -r '.match')" "divergence noreply match: match records the authoritative confidence, not heuristic"
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.activeAccount')" "divergence noreply match: activeAccount is the login gh marks active"
+  # Two accounts are logged in, so this repository would be `diverged` if the
+  # match rung had not fired -- the assertion above is not passing by default.
+  assert_eq "2" "$(printf '%s' "$out" | jq '.accounts | length')" "divergence noreply match: a second account IS available, so the skip is the match, not single_account"
+
+  rm -rf "$repo"
+  teardown_fake_gh_fixture
+}
+
+test_forge_account_divergence_identity_matches_active_heuristic() {
+  echo ""
+  echo "=== divergence rung 5b: local-part heuristic matches, case-insensitively, ahead of single_account ==="
+
+  source_forge_account_functions
+  setup_fake_gh_fixture
+
+  local repo out
+  # Deliberately mixed case: GitHub logins are case-insensitive, so OctoCat
+  # must match the active `octocat`.
+  repo=$(setup_forge_account_repo "https://github.com/owner/repo.git" \
+    "OctoCat@example.com" "Octo Cat")
+
+  out=$(run_forge_account_divergence "$repo" "PATH=$FAKE_GH_DIR:$PATH" \
+    "FAKE_GH_AUTH_STATUS_MODE=single" "FAKE_GH_AUTH_ACCOUNT=octocat")
+
+  assert_eq "skip" "$(printf '%s' "$out" | jq -r '.decision')" "divergence heuristic match: decision is skip"
+  assert_eq "identity_matches_active" "$(printf '%s' "$out" | jq -r '.basis')" "divergence heuristic match: identity_matches_active is checked BEFORE single_account, so the informative basis wins over the incidental one"
+  assert_eq "heuristic" "$(printf '%s' "$out" | jq -r '.match')" "divergence heuristic match: match records heuristic, not noreply"
+  assert_eq "1" "$(printf '%s' "$out" | jq '.accounts | length')" "divergence heuristic match: exactly one account is logged in (the rung single_account would otherwise claim)"
+
+  rm -rf "$repo"
+  teardown_fake_gh_fixture
+}
+
+test_forge_account_divergence_single_account() {
+  echo ""
+  echo "=== divergence rung 6: identity disagrees but only one account is logged in -- skip/single_account ==="
+
+  source_forge_account_functions
+  setup_fake_gh_fixture
+
+  local repo out
+  repo=$(setup_forge_account_repo "https://github.com/owner/repo.git" \
+    "someone-else@example.com" "Some One")
+
+  out=$(run_forge_account_divergence "$repo" "PATH=$FAKE_GH_DIR:$PATH" \
+    "FAKE_GH_AUTH_STATUS_MODE=single" "FAKE_GH_AUTH_ACCOUNT=octocat")
+
+  assert_eq "skip" "$(printf '%s' "$out" | jq -r '.decision')" "divergence single_account: decision is skip -- there is no alternative account to offer"
+  assert_eq "single_account" "$(printf '%s' "$out" | jq -r '.basis')" "divergence single_account: the basis records WHY it stayed quiet"
+  assert_eq "none" "$(printf '%s' "$out" | jq -r '.match')" "divergence single_account: match is none -- the identity did NOT agree"
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.activeAccount')" "divergence single_account: activeAccount is still reported"
+  assert_eq "1" "$(printf '%s' "$out" | jq '.accounts | length')" "divergence single_account: exactly one account in the list"
+
+  rm -rf "$repo"
+  teardown_fake_gh_fixture
+}
+
+test_forge_account_divergence_diverged() {
+  echo ""
+  echo "=== divergence rung 7: identity disagrees and another account is available -- ask/diverged ==="
+
+  source_forge_account_functions
+  setup_fake_gh_fixture
+
+  local repo out
+  # The repository's identity points at monalisa; gh is acting as octocat.
+  # monalisa IS logged in, so there is a remedy to offer.
+  repo=$(setup_forge_account_repo "https://github.com/owner/repo.git" \
+    "monalisa@example.com" "Mona Lisa")
+
+  out=$(run_forge_account_divergence "$repo" "PATH=$FAKE_GH_DIR:$PATH" \
+    "FAKE_GH_AUTH_STATUS_MODE=multi" "FAKE_GH_AUTH_ACCOUNT=octocat" "FAKE_GH_AUTH_OTHER_ACCOUNT=monalisa")
+
+  assert_eq "ask" "$(printf '%s' "$out" | jq -r '.decision')" "divergence diverged: decision is ask"
+  assert_eq "diverged" "$(printf '%s' "$out" | jq -r '.basis')" "divergence diverged: basis is diverged"
+  assert_eq "none" "$(printf '%s' "$out" | jq -r '.match')" "divergence diverged: match is none -- no derived login agreed with the ACTIVE account"
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.activeAccount')" "divergence diverged: activeAccount is the active login, not the one the identity suggests"
+  assert_eq "monalisa,octocat" "$(printf '%s' "$out" | jq -r '.accounts | join(",")')" "divergence diverged: the account the identity points at is present in the list a later story can offer"
+  assert_eq "monalisa@example.com" "$(printf '%s' "$out" | jq -r '.identity.email')" "divergence diverged: the identity that drove the verdict is echoed back"
+  assert_eq "Mona Lisa" "$(printf '%s' "$out" | jq -r '.identity.name')" "divergence diverged: user.name is echoed back even though it is not login-shaped"
+
+  rm -rf "$repo"
+  teardown_fake_gh_fixture
+}
+
+test_forge_auth_status_github_accounts_list_order_and_dedup() {
+  echo ""
+  echo "=== _forge_auth_status_github: accounts list is gh's own order, de-duplicated, one parse pass ==="
+
+  source_forge_account_functions
+  setup_fake_gh_fixture
+
+  local out
+  out=$(PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_AUTH_STATUS_MODE=multi \
+    FAKE_GH_AUTH_ACCOUNT=octocat FAKE_GH_AUTH_OTHER_ACCOUNT=monalisa \
+    _forge_auth_status_github "github.com")
+
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.authenticated')" "accounts list: authenticated keeps its current semantics"
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.account')" "accounts list: account is still the ONE marked active"
+  assert_eq "monalisa,octocat" "$(printf '%s' "$out" | jq -r '.accounts | join(",")')" "accounts list: every login, in the order gh printed them (inactive first here, exactly as the fixture prints)"
+
+  # gh lists the same login once per host it is logged into. The list must
+  # de-duplicate, and the no-marker fallback at the end of the parse must
+  # still name the sole account found.
+  gh() {
+    printf '%s\n' "github.com" \
+      "  Logged in to github.com account octocat (keyring)" \
+      "ghe.example.com" \
+      "  Logged in to ghe.example.com account octocat (keyring)"
+  }
+  out=$(_forge_auth_status_github "")
+  unset -f gh
+
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.accounts | join(",")')" "accounts list: the same login seen on two hosts appears exactly once"
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.account')" "accounts list: the no-marker fallback still reports the sole account found as active"
+
+  # A refused status carries no list at all.
+  out=$(PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_AUTH_STATUS_MODE=none _forge_auth_status_github "github.com")
+  assert_eq "0" "$(printf '%s' "$out" | jq '.accounts | length')" "accounts list: [] when gh refused"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.authenticated')" "accounts list: authenticated false when gh refused"
+
+  teardown_fake_gh_fixture
+}
+
+test_forge_auth_status_envelope_has_no_accounts_field() {
+  echo ""
+  echo "=== forge-auth-status: the new accounts array stays inside the private helper ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  setup_fake_gh_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+  out=$(PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_AUTH_STATUS_MODE=multi \
+    FAKE_GH_AUTH_ACCOUNT=octocat FAKE_GH_AUTH_OTHER_ACCOUNT=monalisa "$CLI" forge-auth-status)
+
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.data | has("accounts")')" \
+    "auth-status envelope: data has no accounts key -- forge-contract.md defines this envelope's fields and the builder names each one by hand"
+  assert_eq "forge,host,authenticated,account,identityRequested,identityHonored" \
+    "$(printf '%s' "$out" | jq -r '.data | keys_unsorted | join(",")')" \
+    "auth-status envelope: the data field set is byte-for-byte the one that shipped"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r 'has("accounts")')" \
+    "auth-status envelope: no accounts key leaked to the top level either"
+
+  popd >/dev/null
+  teardown_fake_gh_fixture
+  teardown_detect_forge_fixture
+}
+
+# ---------------------------------------------------------------------------
+# HOST SAFETY -- the `--hostname null` trap must not reopen here.
+#
+# The two tests below run with FAKE_GH_AUTH_STRICT_HOSTNAME=1, the opt-in
+# mode that makes the fake gh REJECT a hostname it has no session for, the
+# way real gh does. That is what makes these tests able to fail: under the
+# lenient default the fake gh ignores --hostname entirely, so a bogus value
+# would sail through and the log assertion would be the only thing standing.
+# ---------------------------------------------------------------------------
+
+test_forge_account_divergence_hostname_is_the_real_host() {
+  echo ""
+  echo "=== divergence host safety: a real host reaches gh verbatim, under strict hostname checking ==="
+
+  source_forge_account_functions
+  setup_fake_gh_fixture
+
+  local repo gh_log out
+  repo=$(setup_forge_account_repo "https://github.com/owner/repo.git" "monalisa@example.com" "Mona Lisa")
+  gh_log="$FAKE_GH_DIR/real-host.log"
+
+  out=$(run_forge_account_divergence "$repo" "PATH=$FAKE_GH_DIR:$PATH" "FAKE_GH_LOG=$gh_log" \
+    "FAKE_GH_AUTH_STRICT_HOSTNAME=1" "FAKE_GH_AUTH_HOST=github.com" \
+    "FAKE_GH_AUTH_STATUS_MODE=multi" "FAKE_GH_AUTH_ACCOUNT=octocat" "FAKE_GH_AUTH_OTHER_ACCOUNT=monalisa")
+
+  assert_eq "github.com" "$(printf '%s' "$out" | jq -r '.host')" "divergence real host: the verdict reports the resolved host"
+  assert_contains "--hostname github.com" "$(cat "$gh_log")" "divergence real host: gh was handed the real hostname"
+  assert_gh_log_lacks '--hostname null' "$gh_log" "divergence real host: gh is never handed --hostname null"
+  # Under strict checking a wrong hostname exits 1, which _forge_auth_status_
+  # github reports as a CONFIRMED authenticated:false -- so a not_authenticated
+  # basis here would be the exact bug, dressed up as a definitive answer.
+  assert_eq "diverged" "$(printf '%s' "$out" | jq -r '.basis')" "divergence real host: gh answered for real (not the confirmed-looking false a rejected hostname produces)"
+
+  rm -rf "$repo"
+  teardown_fake_gh_fixture
+}
+
+test_forge_account_divergence_forge_type_override_host_is_json_null() {
+  echo ""
+  echo "=== divergence host safety: AIMI_FORGE_TYPE's JSON null host never becomes the string \"null\" ==="
+
+  source_forge_account_functions
+  setup_fake_gh_fixture
+
+  local repo gh_log out
+  # AIMI_FORGE_TYPE=github is what makes _detect_forge emit host: null in the
+  # first place -- the exact input that opened this trap the first time.
+  repo=$(setup_forge_account_repo "https://github.com/owner/repo.git" "monalisa@example.com" "Mona Lisa")
+  gh_log="$FAKE_GH_DIR/override-host.log"
+
+  out=$(run_forge_account_divergence "$repo" "PATH=$FAKE_GH_DIR:$PATH" "FAKE_GH_LOG=$gh_log" \
+    "AIMI_FORGE_TYPE=github" "FAKE_GH_AUTH_STRICT_HOSTNAME=1" "FAKE_GH_AUTH_HOST=github.com" \
+    "FAKE_GH_AUTH_STATUS_MODE=multi" "FAKE_GH_AUTH_ACCOUNT=octocat" "FAKE_GH_AUTH_OTHER_ACCOUNT=monalisa")
+
+  # jq -r prints BOTH a JSON null and the string "null" as `null`, so only
+  # `| type` can tell the fixed shape from the broken one.
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.host | type')" \
+    "divergence override: verdict host is a JSON null, never the 4-character string \"null\""
+  assert_gh_log_lacks '--hostname null' "$gh_log" "divergence override: gh is never handed --hostname null"
+  assert_gh_log_lacks '--hostname' "$gh_log" "divergence override: with no host at all gh is invoked with no --hostname flag whatsoever"
+  assert_eq "diverged" "$(printf '%s' "$out" | jq -r '.basis')" \
+    "divergence override: the real session survives the override (a rejected hostname would have read as a confirmed not_authenticated)"
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.activeAccount')" \
+    "divergence override: the real active account survives the override"
+
+  rm -rf "$repo"
+  teardown_fake_gh_fixture
+}
+
+test_forge_account_divergence_is_read_only() {
+  echo ""
+  echo "=== divergence: read-only -- no switch, no token, no store, nothing created ==="
+
+  source_forge_account_functions
+  setup_fake_gh_fixture
+
+  local repo gh_log sandbox_home before after out
+  repo=$(setup_forge_account_repo "https://github.com/owner/repo.git" "monalisa@example.com" "Mona Lisa")
+  gh_log="$FAKE_GH_DIR/read-only.log"
+  sandbox_home=$(mktemp -d)
+
+  before=$(find "$repo" -mindepth 1 | sort)
+
+  # Drive the two rungs that actually reach gh, sharing one log. HOME and
+  # XDG_CONFIG_HOME point at a throwaway directory -- deliberately NOT
+  # AIMI_CONFIG_DIR, which this story never sets, so an accidental store
+  # write would land inside the sandbox where it is visible rather than in
+  # the developer's real ~/.config.
+  out=$(run_forge_account_divergence "$repo" "PATH=$FAKE_GH_DIR:$PATH" "FAKE_GH_LOG=$gh_log" \
+    "HOME=$sandbox_home" "XDG_CONFIG_HOME=$sandbox_home/.config" \
+    "FAKE_GH_AUTH_STATUS_MODE=multi" "FAKE_GH_AUTH_ACCOUNT=octocat" "FAKE_GH_AUTH_OTHER_ACCOUNT=monalisa")
+  assert_eq "ask" "$(printf '%s' "$out" | jq -r '.decision')" "divergence read-only: the diverged run under test really did run"
+
+  out=$(run_forge_account_divergence "$repo" "PATH=$FAKE_GH_DIR:$PATH" "FAKE_GH_LOG=$gh_log" \
+    "HOME=$sandbox_home" "XDG_CONFIG_HOME=$sandbox_home/.config" \
+    "FAKE_GH_AUTH_STATUS_MODE=single" "FAKE_GH_AUTH_ACCOUNT=monalisa")
+  assert_eq "identity_matches_active" "$(printf '%s' "$out" | jq -r '.basis')" "divergence read-only: the agreeing run under test really did run"
+
+  assert_gh_log_lacks 'auth switch' "$gh_log" "divergence read-only: gh auth switch is never invoked"
+  assert_gh_log_lacks 'auth token' "$gh_log" "divergence read-only: gh auth token is never invoked"
+  assert_eq "" "$(grep -v '^auth status' "$gh_log")" "divergence read-only: every gh invocation logged is an auth status call and nothing else"
+
+  after=$(find "$repo" -mindepth 1 | sort)
+  assert_eq "$before" "$after" "divergence read-only: not one file is created or removed inside the repository"
+  assert_eq "absent" "$([ -e "$sandbox_home/.config/aimi" ] && echo present || echo absent)" "divergence read-only: no aimi config directory is created -- this story has no store and no ordering dependency on one"
+  assert_eq "absent" "$([ -e "$sandbox_home/.config" ] && echo present || echo absent)" "divergence read-only: the sandbox config root is not created either"
+
+  rm -rf "$repo" "$sandbox_home"
+  teardown_fake_gh_fixture
+}
+
+test_forge_identity_logins_derivation_table() {
+  echo ""
+  echo "=== _forge_identity_logins: noreply is authoritative, everything else is a labelled guess ==="
+
+  source_forge_account_functions
+
+  local out
+
+  out=$(_forge_identity_logins "12345+octocat@users.noreply.github.com" "Octo Cat")
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.[0].login')" "identity logins: the noreply form's <id>+<login> yields the login exactly"
+  assert_eq "noreply" "$(printf '%s' "$out" | jq -r '.[0].confidence')" "identity logins: the noreply form is labelled authoritative"
+  assert_eq "1" "$(printf '%s' "$out" | jq 'length')" "identity logins: an authoritative answer is emitted alone -- no heuristic can improve on it"
+
+  out=$(_forge_identity_logins "octocat@users.NOREPLY.GitHub.com" "Octo Cat")
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.[0].login')" "identity logins: the id prefix is optional and the domain compares case-insensitively"
+  assert_eq "noreply" "$(printf '%s' "$out" | jq -r '.[0].confidence')" "identity logins: a mixed-case noreply domain is still authoritative"
+
+  out=$(_forge_identity_logins "octocat@example.com" "Octo Cat")
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.[0].login')" "identity logins: an ordinary local-part is a candidate"
+  assert_eq "heuristic" "$(printf '%s' "$out" | jq -r '.[0].confidence')" "identity logins: an ordinary local-part is labelled a guess"
+  assert_eq "1" "$(printf '%s' "$out" | jq 'length')" "identity logins: \"Octo Cat\" is rejected -- the space is what the login shape test catches"
+
+  out=$(_forge_identity_logins "no.dots.allowed@example.com" "monalisa")
+  assert_eq "monalisa" "$(printf '%s' "$out" | jq -r '.[0].login')" "identity logins: a login-shaped user.name is a candidate when the local-part is not"
+  assert_eq "heuristic" "$(printf '%s' "$out" | jq -r '.[0].confidence')" "identity logins: a login-shaped user.name is labelled a guess"
+
+  out=$(_forge_identity_logins "99+monalisa@example.com" "monalisa")
+  assert_eq "monalisa" "$(printf '%s' "$out" | jq -r '.[0].login')" "identity logins: a leading <digits>+ is stripped off a non-noreply local-part too"
+  assert_eq "1" "$(printf '%s' "$out" | jq 'length')" "identity logins: a user.name that duplicates the local-part candidate is not listed twice"
+
+  out=$(_forge_identity_logins "first.last@example.com" "First Last")
+  assert_eq "0" "$(printf '%s' "$out" | jq 'length')" "identity logins: [] when nothing login-shaped can be derived at all"
+
+  out=$(_forge_identity_logins "" "")
+  assert_eq "0" "$(printf '%s' "$out" | jq 'length')" "identity logins: [] on an empty identity"
+}
+
+test_forge_git_identity_unset_keys_do_not_abort() {
+  echo ""
+  echo "=== _forge_git_identity: an unset key is JSON null, never an aborted CLI ==="
+
+  source_forge_account_functions
+
+  local repo out
+  repo=$(setup_forge_account_repo "https://github.com/owner/repo.git" "octocat@example.com")
+
+  out=$(cd "$repo" && export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null && _forge_git_identity)
+  assert_eq "octocat@example.com" "$(printf '%s' "$out" | jq -r '.email')" "git identity: user.email is read unqualified"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.name')" "git identity: an unset user.name is JSON null, and git config --get exiting 1 did not abort anything"
+
+  # Repository config must win over the global one -- the read is deliberately
+  # NOT --local, so it resolves the identity git would actually stamp here.
+  local global_config
+  global_config=$(mktemp)
+  printf '%s\n' "[user]" "	email = global@example.com" "	name = globaluser" > "$global_config"
+
+  out=$(cd "$repo" && export GIT_CONFIG_GLOBAL="$global_config" GIT_CONFIG_SYSTEM=/dev/null && _forge_git_identity)
+  assert_eq "octocat@example.com" "$(printf '%s' "$out" | jq -r '.email')" "git identity: repository config wins over global for a key set in both"
+  assert_eq "globaluser" "$(printf '%s' "$out" | jq -r '.name')" "git identity: global config fills in a key the repository does not set"
+
+  rm -f "$global_config"
+  rm -rf "$repo"
+}
+
 # Cheap hardening, not a live exploit (the auditor confirmed no working PoC):
 # the scheme comparison was case-sensitive, so an uppercase HTTPS:// remote
 # skipped redaction entirely and round-tripped its embedded credential.
@@ -22630,6 +23160,28 @@ main() {
   test_forge_repo_info_nested_group_owner
   test_forge_repo_info_no_origin_is_not_found
   test_forge_repo_info_registered_in_help_and_dispatcher
+
+  # Forge account selection -- divergence detection. Decides whether this
+  # repository's git identity disagrees with the account gh is acting as,
+  # and whether there is another account to pick. Read-only: no prompt, no
+  # store, no `gh auth switch`, no token -- those belong to sibling stories.
+  echo ""
+  echo "--- Forge Account Divergence Tests (phase 2 US-002) ---"
+  test_forge_account_divergence_no_adapter
+  test_forge_account_divergence_cli_missing
+  test_forge_account_divergence_not_authenticated
+  test_forge_account_divergence_no_git_identity
+  test_forge_account_divergence_identity_matches_active_noreply
+  test_forge_account_divergence_identity_matches_active_heuristic
+  test_forge_account_divergence_single_account
+  test_forge_account_divergence_diverged
+  test_forge_auth_status_github_accounts_list_order_and_dedup
+  test_forge_auth_status_envelope_has_no_accounts_field
+  test_forge_account_divergence_hostname_is_the_real_host
+  test_forge_account_divergence_forge_type_override_host_is_json_null
+  test_forge_account_divergence_is_read_only
+  test_forge_identity_logins_derivation_table
+  test_forge_git_identity_unset_keys_do_not_abort
 
   # Forge PR View Tests (US-004) -- field-selectable PR lookup with a
   # three-way found/not_found/error status, fixing the exit-code conflation

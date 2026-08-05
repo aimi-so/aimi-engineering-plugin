@@ -2782,9 +2782,16 @@ _forge_classify_gh_failure_reason() {
 # Combines stdout+stderr since gh's own account listing goes to a different
 # stream across versions -- this parser only cares about the text, not
 # which stream carried it.
-# Prints {authenticated, account} -- account is the login of whichever
-# account gh marks "Active account: true" beneath, or the sole account
-# found when gh's output carries no explicit marker line at all.
+# Prints {authenticated, account, accounts} -- account is the login of
+# whichever account gh marks "Active account: true" beneath, or the sole
+# account found when gh's output carries no explicit marker line at all.
+# `accounts` is EVERY login the same output listed, in gh's own print order,
+# de-duplicated, [] when none. It comes out of the SAME single parse pass as
+# `account`, deliberately: a second `gh auth status` call or a second parser
+# could disagree with this one (gh's output is not guaranteed stable between
+# two invocations -- an account can be added, removed or switched between
+# them), and a list that disagrees with the active account it is supposed to
+# contain is worse than no list at all.
 _forge_auth_status_github() {
   local host="$1"
   local out="" rc=0
@@ -2795,14 +2802,26 @@ _forge_auth_status_github() {
   fi
 
   if [ "$rc" -ne 0 ]; then
-    jq -nc '{authenticated: false, account: null}'
+    jq -nc '{authenticated: false, account: null, accounts: []}'
     return 0
   fi
 
-  local active="" last="" line
+  local active="" last="" line seen known
+  local accounts=()
   while IFS= read -r line; do
+    # Requires whitespace immediately after "account", which is exactly what
+    # keeps the marker lines out: "Active account: true" has a colon there,
+    # so the marker can never be mistaken for a login.
     if [[ "$line" =~ account[[:space:]]+([^[:space:]]+) ]]; then
       last="${BASH_REMATCH[1]}"
+      seen=""
+      for known in ${accounts[@]+"${accounts[@]}"}; do
+        if [ "$known" = "$last" ]; then
+          seen="1"
+          break
+        fi
+      done
+      [ -n "$seen" ] || accounts+=("$last")
     fi
     if [[ "$line" == *"Active account: true"* ]]; then
       active="$last"
@@ -2810,8 +2829,10 @@ _forge_auth_status_github() {
   done <<< "$out"
   [ -n "$active" ] || active="$last"
 
-  jq -nc --arg account "$active" \
-    '{authenticated: true, account: (if $account == "" then null else $account end)}'
+  jq -nc --arg account "$active" --args \
+    '{authenticated: true,
+      account: (if $account == "" then null else $account end),
+      accounts: $ARGS.positional}' ${accounts[@]+"${accounts[@]}"}
 }
 
 # Resolves forge/host via detect-forge's own helper (a direct function call,
@@ -2856,6 +2877,13 @@ _forge_auth_status() {
       fi
 
       status="found"
+      # This builder names every field it emits, one by one -- it never
+      # splats $gh_out through. That containment is load-bearing, not
+      # incidental: _forge_auth_status_github also returns an `accounts`
+      # array (the whole login list, for the account-divergence section
+      # below), and forge-contract.md fixes this envelope's fields. A
+      # `+ $gh_out`-style merge here would leak a field the contract does
+      # not define into every forge-auth-status caller.
       data_json=$(jq -nc \
         --arg forge "$forge" \
         --arg host "$host" \
@@ -2913,6 +2941,230 @@ cmd_forge_auth_status() {
   _require_git_repo "$project_dir"
 
   _forge_auth_status
+}
+
+# ============================================================================
+# Forge account selection -- divergence detection
+# ============================================================================
+# Answers exactly ONE question: does this repository's git identity disagree
+# with the forge account gh is currently acting as, and is there another
+# account available to pick instead? Nothing here asks the human, applies an
+# account, or remembers an answer -- those are separate concerns owned
+# elsewhere. Concretely this section:
+#   - reads `git config user.email` / `user.name` and `gh auth status`, and
+#     writes NOTHING. No file under ~/.config/aimi/ or .aimi/ is read or
+#     created, so this code has no ordering dependency on the account store.
+#   - never runs `gh auth switch`, never sets or exports GH_TOKEN, and never
+#     calls `gh auth token`. Applying an account is a different job.
+#   - makes NO network call. `gh api user --jq .login` would resolve the
+#     active login authoritatively but costs a round trip;
+#     _forge_auth_status_github already parses it offline, which is why this
+#     section extends that parser rather than reaching for the API.
+#
+# The verdict is a PRIVATE json object consumed in-process by callers in this
+# file -- deliberately NOT a fifth forge result envelope. forge-contract.md
+# fixes the envelope count at four and its `reason` at a closed four-value
+# enum, so:
+#   - `basis` is a field on this private verdict, NEVER the `reason` argument
+#     of _forge_emit_status. It reuses the contract's own spellings
+#     no_adapter / cli_missing / not_authenticated where it means exactly
+#     what the contract means by them, and adds diverged /
+#     identity_matches_active / single_account / no_git_identity for outcomes
+#     that enum does not model. Passing any of those four into
+#     _forge_emit_status would be rejected by that function's own case guard,
+#     which is the backstop for this rule.
+#   - forge-auth-status's emitted envelope is unchanged by this section.
+#
+# THE HARD PART is that the comparison crosses two namespaces with no general
+# mapping: a git identity is an EMAIL, a forge account is a LOGIN. Only
+# GitHub's noreply form encodes the login authoritatively; everything else is
+# a heuristic, which is why each derived candidate carries its own
+# confidence. The heuristics are deliberately biased toward catching the
+# AGREEING cases, because the two failure directions are not symmetric: a
+# false "they agree" is silent and unrecoverable by the user, while a false
+# "they diverge" costs one question that is answered once.
+
+# Prints {email, name} for the identity git would actually stamp on a commit
+# in the current working directory -- repository config where set, global
+# otherwise, which is why neither read is qualified with --local.
+#
+# The `|| ` assignment on each read is REQUIRED, not defensive noise: an
+# unset key makes `git config --get` exit 1, and a bare `x=$(git config ...)`
+# under this file's `set -euo pipefail` would abort the whole CLI on a
+# repository that simply has no user.name configured.
+_forge_git_identity() {
+  local email="" name=""
+  email=$(git config --get user.email 2>/dev/null) || email=""
+  name=$(git config --get user.name 2>/dev/null) || name=""
+
+  jq -nc --arg email "$email" --arg name "$name" \
+    '{email: (if $email == "" then null else $email end),
+      name: (if $name == "" then null else $name end)}'
+}
+
+# Derives the GitHub logins an email plus a name could plausibly stand for,
+# as [{login, confidence}] in decreasing authority, [] when nothing
+# login-shaped can be derived at all.
+#
+# Usage: _forge_identity_logins <email> <name>
+#
+#   confidence=noreply   The address is GitHub's own noreply form,
+#                        [<numeric-id>+]<login>@users.noreply.github.com,
+#                        which ENCODES the login exactly. Authoritative, and
+#                        emitted alone -- no heuristic can improve on it.
+#   confidence=heuristic A guess: the email local-part (with a leading
+#                        <digits>+ stripped, the shape GitHub's own noreply
+#                        addresses use), and user.name when it is
+#                        login-shaped. The shape test ^[A-Za-z0-9][A-Za-z0-9-]*$
+#                        is what rejects the overwhelmingly common
+#                        "First Last" value of user.name.
+#
+# The noreply DOMAIN is compared case-insensitively (mail domains are), but
+# only a lowercased COPY of the domain is used for that test so the login the
+# local-part carries keeps the casing its owner typed. Callers compare
+# case-insensitively anyway, since GitHub logins are.
+_forge_identity_logins() {
+  local email="$1" name="$2"
+  local entries=() local_part domain login
+
+  local_part="${email%@*}"
+  domain=$(printf '%s' "${email##*@}" | tr '[:upper:]' '[:lower:]')
+
+  if [ "$domain" = "users.noreply.github.com" ] &&
+     [[ "$local_part" =~ ^([0-9]+\+)?([A-Za-z0-9][A-Za-z0-9-]*)$ ]]; then
+    login="${BASH_REMATCH[2]}"
+    jq -nc --arg login "$login" '[{login: $login, confidence: "noreply"}]'
+    return 0
+  fi
+
+  local candidate
+  candidate="${email%%@*}"
+  if [[ "$candidate" =~ ^[0-9]+\+(.*)$ ]]; then
+    candidate="${BASH_REMATCH[1]}"
+  fi
+  if [[ "$candidate" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]]; then
+    entries+=("$(jq -nc --arg login "$candidate" '{login: $login, confidence: "heuristic"}')")
+  fi
+
+  if [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] &&
+     [ "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$candidate" | tr '[:upper:]' '[:lower:]')" ]; then
+    entries+=("$(jq -nc --arg login "$name" '{login: $login, confidence: "heuristic"}')")
+  fi
+
+  if [ ${#entries[@]} -eq 0 ]; then
+    printf '[]\n'
+    return 0
+  fi
+  printf '%s\n' "${entries[@]}" | jq -sc '.'
+}
+
+# Prints exactly one verdict object:
+#   {decision, basis, forge, host, activeAccount, accounts, identity, match}
+#     decision       "ask" | "skip" -- whether the caller should raise the
+#                    account question at all. Necessary, not sufficient: a
+#                    caller that has already recorded an answer for this
+#                    repository combines that with this verdict.
+#     basis          why (see the section header -- NOT the contract's reason)
+#     forge          the resolved forge, from _detect_forge
+#     host           the resolved host, or null
+#     activeAccount  the login gh is currently acting as, or null
+#     accounts       every login gh reports, in gh's own order, [] when none
+#     identity       {email, name} this repository's git identity
+#     match          "noreply" | "heuristic" | "none" -- the confidence of
+#                    the derived login that MATCHED activeAccount, "none"
+#                    when none did or the comparison never ran
+#
+# The decision table below is evaluated in a fixed order, each rung mutually
+# exclusive with the ones above it. Two orderings are deliberate:
+#   - identity_matches_active is checked BEFORE single_account, so a
+#     one-account repository whose identity genuinely agrees reports the
+#     informative basis rather than the incidental one.
+#   - single_account SKIPS rather than asks. With one account logged in there
+#     is no alternative to offer: account selection resolves logins already
+#     in gh's keyring, so a one-account machine has no remedy even when the
+#     identity plainly disagrees. Recording the basis is what lets a caller
+#     say why it stayed quiet instead of appearing to have no opinion.
+_forge_account_divergence() {
+  local forge_info forge host
+  forge_info=$(_detect_forge)
+  forge=$(printf '%s' "$forge_info" | jq -r '.forge')
+  # `// empty` is load-bearing here for exactly the reason spelled out at
+  # _forge_auth_status's own host read above (aimi-cli.sh:2757-2763): .host
+  # is JSON null whenever AIMI_FORGE_TYPE short-circuits detection, and a
+  # bare `jq -r '.host'` renders that null as the 4-character TEXT "null" --
+  # non-empty, so it survives every downstream emptiness check and reaches
+  # `gh auth status --hostname null`, whose refusal then reads as a CONFIRMED
+  # not-authenticated answer. This read is the only way a host reaches gh
+  # from this function, so "" is the only value that can stand for "no host".
+  host=$(printf '%s' "$forge_info" | jq -r '.host // empty')
+
+  local identity_json email name
+  identity_json=$(_forge_git_identity)
+  email=$(printf '%s' "$identity_json" | jq -r '.email // empty')
+  name=$(printf '%s' "$identity_json" | jq -r '.name // empty')
+
+  local decision="skip" basis="" active="" accounts_json="[]" match="none"
+
+  if [ "$forge" != "github" ]; then
+    basis="no_adapter"
+  elif ! _forge_bin_check gh quiet github; then
+    basis="cli_missing"
+  else
+    local gh_out authenticated
+    gh_out=$(_forge_auth_status_github "$host")
+    authenticated=$(printf '%s' "$gh_out" | jq -r '.authenticated')
+    active=$(printf '%s' "$gh_out" | jq -r '.account // empty')
+    accounts_json=$(printf '%s' "$gh_out" | jq -c '.accounts')
+
+    if [ "$authenticated" != "true" ]; then
+      basis="not_authenticated"
+    elif [ -z "$email" ] && [ -z "$name" ]; then
+      basis="no_git_identity"
+    else
+      local logins_json matched
+      logins_json=$(_forge_identity_logins "$email" "$name")
+      # First candidate that matches wins, and _forge_identity_logins emits
+      # the authoritative noreply candidate alone -- so `match` reports the
+      # strongest confidence that actually agreed, never a weaker one that
+      # happened to be listed first.
+      matched=$(printf '%s' "$logins_json" | jq -r --arg active "$active" \
+        '($active | ascii_downcase) as $a
+         | if $a == "" then empty
+           else (map(select((.login | ascii_downcase) == $a)) | .[0] // null
+                 | if . == null then empty else .confidence end)
+           end')
+
+      if [ -n "$matched" ]; then
+        basis="identity_matches_active"
+        match="$matched"
+      elif [ "$(printf '%s' "$accounts_json" | jq 'length')" -lt 2 ]; then
+        basis="single_account"
+      else
+        decision="ask"
+        basis="diverged"
+      fi
+    fi
+  fi
+
+  jq -nc \
+    --arg decision "$decision" \
+    --arg basis "$basis" \
+    --arg forge "$forge" \
+    --arg host "$host" \
+    --arg activeAccount "$active" \
+    --argjson accounts "$accounts_json" \
+    --arg email "$email" \
+    --arg name "$name" \
+    --arg match "$match" \
+    '{decision: $decision,
+      basis: $basis,
+      forge: $forge,
+      host: (if $host == "" then null else $host end),
+      activeAccount: (if $activeAccount == "" then null else $activeAccount end),
+      accounts: $accounts,
+      identity: {email: (if $email == "" then null else $email end),
+                 name: (if $name == "" then null else $name end)},
+      match: $match}'
 }
 
 # Requests owner and name from a single `gh repo view` call -- never the two
