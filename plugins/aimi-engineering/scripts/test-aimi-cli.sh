@@ -2380,7 +2380,7 @@ test_check_version_fix_updates_global_cache() {
 # at `[ "$_HAS_SHA256SUM" -eq 1 ]` under this suite's `set -u`. They are
 # recomputed here exactly as aimi-cli.sh computes them, so the digest the test
 # sees is the digest the real CLI produces on the same machine.
-source_forge_account_functions() {
+source_forge_account_store_functions() {
   _HAS_REALPATH=$(command -v realpath &>/dev/null && echo 1 || echo 0)
   _HAS_SHA256SUM=$(command -v sha256sum &>/dev/null && echo 1 || echo 0)
   eval "$(sed -n '/^resolve_path()/,/^}/p' "$CLI")"
@@ -2399,7 +2399,7 @@ test_forge_account_store_path() {
   echo ""
   echo "=== Testing _forge_account_store_path: one store per repository, stable across worktrees ==="
 
-  source_forge_account_functions
+  source_forge_account_store_functions
 
   # A PLAIN, non-git parent holding one git repository per subfolder — the
   # multi-repo layout the root CLAUDE.md describes. Two siblings here must
