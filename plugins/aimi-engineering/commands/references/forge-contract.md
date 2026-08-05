@@ -410,6 +410,75 @@ not raised. Consistent with the rest of this file, that value is an environment
 variable — `forge-account-select` accepts no `--token`, `--identity`, or
 otherwise credential-shaped flag, and none may be added to it.
 
+### Applying the Answer — One Invocation at a Time
+
+The remembered login is turned into an acting account by `gh auth token`, which
+prints that one account's stored token **without touching the active-account
+pointer**. `gh auth switch` is the only thing that rewrites `hosts.yml`
+globally, and no path here ever calls it. That is what lets both halves of the
+guarantee hold at once: every forge write acts as the project's account, and
+the machine's active account is byte-for-byte unchanged afterwards.
+
+The token is applied as a **bash prefix assignment on the wrapped call**, and
+both variable names are written literally because bash cannot prefix-assign a
+dynamically named variable. At most one slot is ever non-empty — the resolver
+decides which:
+
+```bash
+GH_TOKEN="$(_forge_account_override GH_TOKEN)" \
+GH_ENTERPRISE_TOKEN="$(_forge_account_override GH_ENTERPRISE_TOKEN)" \
+  _forge_capture stdout stderr_out rc -- gh pr create --title "Add the thing" --base main --head feat || true
+```
+
+`gh` treats an **empty** token variable as unset, so the "always use whichever
+account is active" answer and the no-answer case reuse this identical shape
+with no separate branch anywhere.
+
+**`export` is forbidden; the override is a prefix assignment on one command,
+always.** This is load-bearing rather than stylistic. With a token in the
+environment, `gh auth status` reports the *env-token* account as
+`Active account: true` — so an override that leaked process-wide would make
+`forge-auth-status` report the overridden account as the machine's active one,
+and the very before/after check that proves the machine account was left alone
+would lose the ability to detect the violation. For the same reason the token
+lookup itself runs with both variables cleared, or it resolves to itself
+instead of to the keyring.
+
+**Which variable, decided by host.** `gh` honors `GH_TOKEN` for `github.com`
+and `*.ghe.com` only; a GitHub Enterprise Server host on a company domain
+requires `GH_ENTERPRISE_TOKEN`. Emitting the wrong one does not error — it is
+ignored, and the write succeeds **attributed to the wrong account**, which is
+why the mapping is fixed rather than left to a caller:
+
+| Host | Variable | `gh auth token` hostname flag |
+|---|---|---|
+| `github.com`, `*.github.com` | `GH_TOKEN` | `--hostname <host>` |
+| `ghe.com`, `*.ghe.com` | `GH_TOKEN` | `--hostname <host>` |
+| any other non-empty host (GHES on a company domain) | `GH_ENTERPRISE_TOKEN` | `--hostname <host>` |
+| empty / unresolvable host (the `AIMI_FORGE_TYPE` override path, where `host` is null) | `GH_TOKEN` | omitted entirely |
+
+The host is lowercased before matching, and an unresolvable host omits
+`--hostname` rather than passing the four-character string `null` — a null read
+as text once turned a bogus hostname into a confirmed-looking
+`authenticated: false`.
+
+**The token never reaches argv, and never reaches a log.** The
+`env GH_TOKEN=… gh …` shape is banned outright, because `env(1)`'s own argv
+carries the value and leaks it through `ps`; the prefix-assignment form never
+materializes the token as an argv element at all. Nothing echoes, logs or emits
+it either — it is the resolver's stdout value and nothing else, held to the same
+bar as the userinfo stripped from a remote URL before `detect-forge` prints it.
+
+**Degradation matches the rest of this file.** A remembered account that was
+later logged out makes the lookup fail; the resolver then yields the empty
+string and emits exactly one stderr warning naming the login and the host, and
+the operation proceeds as the machine's active account. The write is not
+blocked — the same warn-and-fall-back posture the Degradation Contract below
+establishes — but the wrong-account attribution is made visible rather than
+silent. The warning never carries the token and never forwards the forge CLI's
+own stderr verbatim, which can echo token prefixes. No new `reason` enum value
+is introduced by any of this.
+
 ## Degradation Contract
 
 A forge CLI (`gh`, `glab`, `tea`) may not be installed at all, and a forge

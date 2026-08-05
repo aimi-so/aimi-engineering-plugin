@@ -2732,6 +2732,188 @@ _forge_classify_gh_failure_reason() {
   printf '%s' "cli_failed"
 }
 
+# Prints the gh token this repository's REMEMBERED ACCOUNT should act as for
+# ONE forge invocation, or the empty string. Always exits 0. Writes nothing,
+# anywhere: no `gh auth switch`, no hosts.yml, no file on disk.
+#
+# Usage -- ALWAYS a bash PREFIX ASSIGNMENT on the wrapped call, NEVER `env`:
+#   GH_TOKEN="$(_forge_account_override GH_TOKEN)" \
+#   GH_ENTERPRISE_TOKEN="$(_forge_account_override GH_ENTERPRISE_TOKEN)" \
+#     _forge_capture stdout stderr_out rc -- gh pr create --title "$title" ... || true
+#
+# BOTH SLOTS ARE WRITTEN LITERALLY, AT MOST ONE IS EVER NON-EMPTY. Bash cannot
+# prefix-assign a dynamically named variable, so the call site names both and
+# passes the name it is filling; this function decides which one gets a value
+# and returns empty for the other. gh treats an EMPTY token variable as unset
+# (verified, gh 2.94.0), which is why the "always use whichever account is
+# active" opt-out and the no-answer case reuse the identical call-site shape
+# with no separate branch anywhere.
+#
+# `export` IS FORBIDDEN; THE OVERRIDE IS A PREFIX ASSIGNMENT ON ONE COMMAND,
+# ALWAYS. That rule is load-bearing, not stylistic. Under a process-wide
+# GH_TOKEN, `gh auth status` reports the ENV-TOKEN account as
+# "Active account: true" -- so _forge_auth_status_github's parser below would
+# start reporting the overridden account as the machine's active one, and the
+# very before/after check that proves the machine account was left alone would
+# become unable to detect a violation. A prefix assignment on a FUNCTION
+# invocation is set inside the function, exported into the `gh` grandchild it
+# spawns, and unset again the moment the function returns, so _forge_capture
+# needs no signature change and nothing survives the call.
+#
+# NO TOKEN EVER REACHES argv. The `env GH_TOKEN=... gh ...` shape is banned for
+# exactly this reason -- env(1)'s own argv carries the value and leaks it
+# through `ps`. Nothing here echoes, logs or emits the token either: it is this
+# function's stdout value and nothing else. Same bar phase 1 already holds with
+# _detect_forge_redact_userinfo, which strips embedded userinfo from a remote
+# URL before it can round-trip through this CLI's stdout.
+#
+# HOST DECIDES THE VARIABLE NAME, AND GETTING IT WRONG FAILS SILENTLY:
+# gh honors GH_TOKEN for github.com and *.ghe.com ONLY; a GitHub Enterprise
+# Server host on a company domain needs GH_ENTERPRISE_TOKEN instead
+# (`gh help environment`). Emitting GH_TOKEN at a GHES host does not error --
+# it is ignored, and the write succeeds attributed to the WRONG ACCOUNT, which
+# is the worst available outcome. The mapping:
+#
+#   github.com, *.github.com   -> GH_TOKEN             --hostname <host>
+#   ghe.com, *.ghe.com         -> GH_TOKEN             --hostname <host>
+#   any other non-empty host   -> GH_ENTERPRISE_TOKEN  --hostname <host>
+#   empty / unresolvable host  -> GH_TOKEN             --hostname omitted entirely
+#
+# The empty-host row is the AIMI_FORGE_TYPE override path, where _detect_forge
+# emits host: null and there is no hostname to pass; gh then uses its own
+# default host. The host is derived here through the jq-free
+# _detect_forge_read_selection + _detect_forge_parse_host pair (two `git remote`
+# reads, zero jq processes) rather than taken from the caller, because three of
+# the four write paths reach identity through _detect_forge_type, which by its
+# own header comment carries no host at all. That pair returns a lowercased
+# plain string and can never produce the four-character text "null" the way a
+# bare `jq -r '.host'` can -- the defect commit d1b19ca paid for, where "null"
+# reached --hostname and its refusal read as a confirmed not-authenticated
+# answer. Every jq read below uses `// empty` for the same reason.
+#
+# COST. The requested-name check happens BEFORE any gh call and before the
+# store is read, so the non-matching slot costs nothing at all and one routed
+# write costs exactly ONE `gh auth token` process, never two. The opt-out and
+# the no-answer case cost zero gh processes.
+#
+# Precedence, highest first -- the same env-over-stored convention
+# AIMI_FORGE_TYPE already sets for detection:
+#   1. AIMI_FORGE_IDENTITY, when non-empty
+#   2. the account cmd_forge_account_select recorded for this repository
+#   3. nothing -- empty override, the machine's active account acts
+# The store holds a LOGIN, never a token. Nothing here persists a token; it is
+# minted per invocation and dies with the process.
+#
+# THE LOOKUP RUNS OUTSIDE ANY OVERRIDE, deliberately: `gh auth token` with a
+# GH_TOKEN already in the environment returns THAT token rather than the
+# keyring's, so an ambient override would make this function resolve to itself.
+# Both variables are cleared for its own call.
+#
+# DEGRADATION IS DELIBERATE. A remembered account that was later
+# `gh auth logout`'d makes `gh auth token --user <login>` exit non-zero
+# ("no oauth token found for <host> account <login>"). This prints nothing,
+# exits 0, and emits exactly ONE stderr warning naming the login and host --
+# never the token, and never gh's own stderr verbatim, which can echo token
+# prefixes. The write then proceeds as the machine's active account: the same
+# warn-and-fall-back posture _forge_bin_check and _forge_emit_write_status
+# already established, with the wrong-account attribution made visible rather
+# than the write blocked. Because this is evaluated inside a `$( )` in a prefix
+# assignment, the warning goes straight to the user's stderr and is never
+# captured into _forge_capture's stderr_out, so it cannot contaminate an
+# emitted JSON `message`.
+#
+# CLASSIFIER SEAM, decided rather than discovered later:
+# _forge_classify_gh_failure_reason above calls _forge_auth_status_github, and
+# under a correct per-invocation override that call runs OUTSIDE the override --
+# it would re-check the MACHINE account's auth after a write failed as a
+# DIFFERENT account. It SHOULD run under the same override, because with the
+# override applied `gh auth status` reports the env-token account, which is
+# exactly the account whose failure is being classified. Exactly ONE classifier
+# call sits inside a write path: the one in _forge_resolve_review_thread (the
+# `reason=$(_forge_classify_gh_failure_reason "$host")` line after its
+# could-not-resolve-to-a-node match). The other two -- in _forge_issue_view and
+# _forge_pr_review_threads_github -- are pure reads outside this phase's write
+# set, and _forge_pr_create/_forge_pr_edit/_forge_issue_create never call it.
+# That one prefix assignment lands with the routing pass, not here, so the two
+# stories never edit the same function. If it is dropped the impact stays low:
+# the classifier only narrows an already-known failure and its catch-all
+# cli_failed is the safe direction.
+#
+# Residual, accepted and named rather than defended against: `bash -x` would
+# print the token as part of the prefix-assignment expansion. This file never
+# enables xtrace (`set -euo pipefail` only), so that is a debugging-time hazard,
+# not a shipped leak.
+#
+# Internals are _fao_-prefixed so _detect_forge_read_selection's name-reference
+# targets can never collide with a caller's own locals.
+_forge_account_override() {
+  local _fao_want="${1:-}"
+  [ -n "$_fao_want" ] || return 0
+
+  # Host first -- it decides both the variable name and the store key.
+  # AIMI_FORGE_TYPE short-circuits before any git command, mirroring
+  # _detect_forge's own override arm, which emits host: null on that path.
+  local _fao_host=""
+  if [ -z "${AIMI_FORGE_TYPE:-}" ]; then
+    local _fao_name _fao_source _fao_url
+    _detect_forge_read_selection _fao_name _fao_source _fao_url
+    if [ "$_fao_source" = "remote" ] && [ -n "$_fao_url" ]; then
+      _fao_host=$(_detect_forge_parse_host "$_fao_url")
+    fi
+  fi
+
+  local _fao_var="GH_TOKEN"
+  case "$_fao_host" in
+    ""|github.com|*.github.com|ghe.com|*.ghe.com) _fao_var="GH_TOKEN" ;;
+    *) _fao_var="GH_ENTERPRISE_TOKEN" ;;
+  esac
+
+  # The slot this host does not use costs nothing: no store read, no gh call.
+  [ "$_fao_want" = "$_fao_var" ] || return 0
+
+  local _fao_login=""
+  if [ -n "${AIMI_FORGE_IDENTITY:-}" ]; then
+    _fao_login="$AIMI_FORGE_IDENTITY"
+  elif [ -n "$_fao_host" ]; then
+    # An answer is keyed by host, so an unresolvable host has nothing to look
+    # up. _forge_account_store_path is documented to be allowed to decline.
+    local _fao_store="" _fao_entry=""
+    _fao_store=$(_forge_account_store_path) || _fao_store=""
+    if [ -n "$_fao_store" ]; then
+      # _forge_account_stored_entry already validates the mode discriminator
+      # and rejects an empty account string, so `null` covers absent, corrupt
+      # and not-an-answer alike. mode "active" is the deliberate opt-out and
+      # yields empty here -- a real answer, not a missing one.
+      _fao_entry=$(_forge_account_stored_entry "$_fao_store" "$_fao_host")
+      if [ "$_fao_entry" != "null" ]; then
+        _fao_login=$(printf '%s' "$_fao_entry" | jq -r 'if .mode == "account" then (.account // empty) else empty end')
+      fi
+    fi
+  fi
+
+  [ -n "$_fao_login" ] || return 0
+
+  # gh's absence is not this function's diagnosis to make -- the calling write
+  # path already gates on _forge_bin_check and says so once. Warning here too
+  # would add a second, wrong explanation ("no token for <login>") for a
+  # machine that simply has no gh.
+  _forge_bin_check gh quiet github || return 0
+
+  local _fao_token="" _fao_rc=0
+  if [ -n "$_fao_host" ]; then
+    _fao_token=$(GH_TOKEN= GH_ENTERPRISE_TOKEN= gh auth token --user "$_fao_login" --hostname "$_fao_host" 2>/dev/null) || _fao_rc=$?
+  else
+    _fao_token=$(GH_TOKEN= GH_ENTERPRISE_TOKEN= gh auth token --user "$_fao_login" 2>/dev/null) || _fao_rc=$?
+  fi
+
+  if [ "$_fao_rc" -ne 0 ]; then
+    echo "Warning: no gh token for account \"$_fao_login\" on host \"${_fao_host:-default}\" -- it may have been logged out; this operation will proceed as the machine active account." >&2
+    return 0
+  fi
+
+  printf '%s' "$_fao_token"
+}
+
 # ============================================================================
 # forge-auth-status / forge-repo-info (US-003)
 # ============================================================================
