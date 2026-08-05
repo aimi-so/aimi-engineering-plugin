@@ -19703,7 +19703,15 @@ source_forge_account_override_functions() {
   eval "$(sed -n '/^_forge_account_stored_entry()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_forge_bin_check()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_forge_auth_status_github()/,/^}/p' "$CLI")"
+  # The host memo and its reader, plus the slot filler that warms it. The
+  # `declare -gA` line is eval'd straight out of the CLI (the same technique
+  # test_detect_forge_type_memo_is_per_directory uses for
+  # _DETECT_FORGE_TYPE_MEMO) -- without it the memo lookup is an unbound-array
+  # reference under `set -u`.
+  eval "$(grep '^declare -gA _FORGE_ACCOUNT_HOST_MEMO' "$CLI")"
+  eval "$(sed -n '/^_forge_account_host_cached()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_forge_account_override()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_account_override_slots()/,/^}/p' "$CLI")"
 }
 
 # Creates a throwaway repository whose `origin` points at <remote-url>, plus an
@@ -20171,6 +20179,497 @@ test_forge_account_override_reads_what_the_recorder_wrote() {
 
   teardown_forge_override_env
   teardown_fake_gh_fixture
+}
+
+# ============================================================================
+# Routing the four forge write paths through the account override (US-006)
+# ============================================================================
+# These drive the REAL CLI as a subprocess, one write verb per run, rather than
+# sed+eval'ing the write functions into this shell. Two reasons, both learned in
+# this phase: a fourth sourcing helper would be a fourth chance at the name
+# collision that already cost US-001/US-002 six assertions, and a subprocess run
+# additionally exercises the dispatcher arm that reaches each verb.
+#
+# Every scenario is offline: a throwaway local git repository, an AIMI_CONFIG_DIR
+# pointed at a mktemp -d so the real ~/.config/aimi/ is never touched, and a
+# hermetic PATH sandbox whose only `gh` is the heredoc written below.
+
+# One scenario: repo + isolated config dir + PATH sandbox + a gh log.
+setup_forge_routing_env() {
+  FORGE_ROUTING_TMPDIR=$(mktemp -d)
+  FORGE_ROUTING_CONFIG="$FORGE_ROUTING_TMPDIR/aimi-config"
+  FORGE_ROUTING_REPO="$FORGE_ROUTING_TMPDIR/repo"
+  FORGE_ROUTING_LOG="$FORGE_ROUTING_TMPDIR/gh.log"
+  FORGE_ROUTING_SANDBOX=$(setup_forge_cli_sandbox)
+  mkdir -p "$FORGE_ROUTING_REPO" "$FORGE_ROUTING_CONFIG"
+  # Created empty up front so a "no such line" assertion reads a real empty
+  # file rather than grep's file-missing error.
+  : > "$FORGE_ROUTING_LOG"
+  git -C "$FORGE_ROUTING_REPO" init >/dev/null 2>&1
+  git -C "$FORGE_ROUTING_REPO" remote add origin "${1:-https://github.com/owner/repo.git}" >/dev/null 2>&1
+  write_forge_routing_fake_gh
+}
+
+teardown_forge_routing_env() {
+  teardown_forge_cli_sandbox "$FORGE_ROUTING_SANDBOX"
+  rm -rf "$FORGE_ROUTING_TMPDIR"
+  unset FORGE_ROUTING_TMPDIR FORGE_ROUTING_CONFIG FORGE_ROUTING_REPO FORGE_ROUTING_LOG \
+    FORGE_ROUTING_SANDBOX
+}
+
+FORGE_ROUTING_TOKEN="gho_routingfake000000000000000000000000"
+
+# The one fake `gh` every scenario below shares. Its defining behavior is the
+# log line it writes on EVERY invocation: "<verb> <subverb> <the token that
+# actually arrived>". That is what turns "the override reached this call site"
+# from an argument into an observation, per call site, including the ones a
+# write makes indirectly through forge-pr-view.
+#
+# `auth status` reads its answer from a STATE FILE and `auth switch` is the only
+# arm that rewrites it -- the same division real gh has, and the reason the
+# machine-account before/after check below is not vacuous. It also reports the
+# ENV-TOKEN account as active whenever a token is in the environment, which is
+# what real gh does and what would expose a process-wide export.
+write_forge_routing_fake_gh() {
+  cat > "$FORGE_ROUTING_SANDBOX/gh" << 'ROUTING_FAKE_GH'
+#!/usr/bin/env bash
+HERE="$(dirname "$0")"
+STATE="$HERE/gh-active-account"
+CREATED_FLAG="$HERE/pr-created.flag"
+
+if [ -n "${FORGE_ROUTING_LOG:-}" ]; then
+  printf '%s %s %s\n' "$1" "$2" "${GH_TOKEN:-<unset>}" >> "$FORGE_ROUTING_LOG"
+fi
+
+active="octocat"
+if [ -f "$STATE" ]; then
+  active=$(cat "$STATE")
+fi
+
+case "$1 $2" in
+  "auth token")
+    # Real gh hands back the ENVIRONMENT token when one is set, which is exactly
+    # why _forge_account_override clears both slots for its own lookup. Emulated
+    # so a missing clear would be visible rather than inferred.
+    if [ -n "${GH_TOKEN:-}" ]; then printf '%s\n' "$GH_TOKEN"; exit 0; fi
+    if [ -n "${GH_ENTERPRISE_TOKEN:-}" ]; then printf '%s\n' "$GH_ENTERPRISE_TOKEN"; exit 0; fi
+    printf '%s\n' "gho_routingfake000000000000000000000000"
+    exit 0
+    ;;
+  "auth switch")
+    # Present ONLY so the before/after check can be shown to be capable of
+    # failing. Nothing in aimi-cli.sh may ever reach this arm.
+    want=""
+    expect=""
+    for arg in "$@"; do
+      if [ "$expect" = "user" ]; then want="$arg"; expect=""; continue; fi
+      [ "$arg" = "--user" ] && expect="user"
+    done
+    printf '%s' "${want:-octocat}" > "$STATE"
+    exit 0
+    ;;
+  "auth status")
+    if [ -n "${GH_TOKEN:-}" ] || [ -n "${GH_ENTERPRISE_TOKEN:-}" ]; then
+      echo "github.com"
+      echo "  Logged in to github.com account env-token-account (GH_TOKEN)"
+      echo "  - Active account: true"
+      echo "  Logged in to github.com account $active (keyring)"
+      echo "  - Active account: false"
+      exit 0
+    fi
+    echo "github.com"
+    echo "  Logged in to github.com account monalisa (keyring)"
+    echo "  - Active account: false"
+    echo "  Logged in to github.com account $active (keyring)"
+    echo "  - Active account: true"
+    exit 0
+    ;;
+  "pr list")
+    if [ -f "$CREATED_FLAG" ]; then echo '[{"number":101}]'; else echo '[]'; fi
+    exit 0
+    ;;
+  "pr view")
+    echo '{"url":"https://github.com/owner/repo/pull/101","number":101}'
+    exit 0
+    ;;
+  "pr create")
+    : > "$CREATED_FLAG"
+    echo "https://github.com/owner/repo/pull/101"
+    exit 0
+    ;;
+  "pr edit")
+    exit 0
+    ;;
+  "issue create")
+    echo "https://github.com/owner/repo/issues/77"
+    exit 0
+    ;;
+  "api graphql")
+    echo '{"data":{"resolveReviewThread":{"thread":{"id":"PRRT_1","isResolved":true,"path":"a.txt","line":1}}}}'
+    exit 0
+    ;;
+esac
+echo "routing fake gh: unhandled invocation: $*" >&2
+exit 99
+ROUTING_FAKE_GH
+  chmod +x "$FORGE_ROUTING_SANDBOX/gh"
+}
+
+# Runs the real CLI inside the scenario repo, on the sandbox PATH ALONE, with
+# every ambient forge variable cleared. Extra VAR=value pairs are exported first.
+# Usage: run_forge_routing_cli [VAR=value]... -- <cli args>...
+run_forge_routing_cli() {
+  local -a envs=()
+  while [ $# -gt 0 ] && [ "$1" != "--" ]; do
+    envs+=("$1")
+    shift
+  done
+  [ "${1:-}" = "--" ] && shift
+  (
+    cd "$FORGE_ROUTING_REPO" || exit 1
+    unset GH_TOKEN GH_ENTERPRISE_TOKEN AIMI_FORGE_IDENTITY AIMI_FORGE_TYPE
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+    export AIMI_CONFIG_DIR="$FORGE_ROUTING_CONFIG"
+    export FORGE_ROUTING_LOG="$FORGE_ROUTING_LOG"
+    export PATH="$FORGE_ROUTING_SANDBOX"
+    local pair
+    for pair in ${envs[@]+"${envs[@]}"}; do
+      export "$pair"
+    done
+    "$CLI" "$@"
+  )
+}
+
+# Records this repository's answer through the REAL verb -- never a hand-written
+# store file -- so the routing tests read back exactly what the recorder wrote,
+# under whatever store key the recorder chose.
+#
+# The ONE step that runs with the sandbox PREPENDED to the real PATH rather than
+# replacing it: the store's write path needs date/mkdir/chmod/mv/flock, and
+# widening the shared sandbox allowlist to cover a write path no forge verb
+# takes would change what its twenty-odd other callers exercise. The fake gh
+# still wins (the sandbox comes first), and the store FILENAME is identical
+# either way -- _default_branch_cache_key hashes with sha256sum on both sides,
+# which is exactly why sha256sum/shasum/awk had to join the allowlist.
+# Usage: record_forge_routing_account (--record <login> | --record-active)
+record_forge_routing_account() {
+  (
+    cd "$FORGE_ROUTING_REPO" || exit 1
+    unset GH_TOKEN GH_ENTERPRISE_TOKEN AIMI_FORGE_IDENTITY AIMI_FORGE_TYPE
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+    export AIMI_CONFIG_DIR="$FORGE_ROUTING_CONFIG"
+    export FORGE_ROUTING_LOG="$FORGE_ROUTING_LOG"
+    export PATH="$FORGE_ROUTING_SANDBOX:$PATH"
+    "$CLI" forge-account-select "$@"
+  ) >/dev/null
+}
+
+# The token recorded on each logged line for <verb> <subverb>, one per line.
+# Usage: forge_routing_tokens_for "pr create"
+forge_routing_tokens_for() {
+  grep "^$1 " "$FORGE_ROUTING_LOG" | sed "s/^$1 //" | tr '\n' ',' | sed 's/,$//'
+}
+
+# AC1/AC2/AC3/AC4 + the in-operation reads: every one of the seven routed sites
+# is asserted by the token that actually arrived at gh, verb by verb, from a log
+# the fake writes itself. A site that silently stopped being routed shows up
+# here as <unset>, not as a passing test.
+test_forge_write_paths_route_the_recorded_account() {
+  echo ""
+  echo "=== forge writes: all four write paths and their in-operation reads run as the recorded account ==="
+
+  setup_forge_routing_env
+  record_forge_routing_account --record monalisa
+
+  local tok="$FORGE_ROUTING_TOKEN"
+
+  # --- WRITE 1: create PR, plus its idempotency check and post-create re-read.
+  : > "$FORGE_ROUTING_LOG"
+  local out exit_code
+  out=$(run_forge_routing_cli -- forge-pr-create --title "T" --base main --head feat-x --body "B") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "routed pr-create: exit 0"
+  assert_eq "created" "$(printf '%s' "$out" | jq -r '.status')" "routed pr-create: really took the create-succeeds path"
+  assert_eq "$tok" "$(forge_routing_tokens_for 'pr create')" "routed pr-create: the WRITE itself carried the recorded account's token"
+  assert_eq "$tok,$tok" "$(forge_routing_tokens_for 'pr list')" "routed pr-create: BOTH in-operation pr list probes carried it -- the idempotency check and the post-create re-read"
+  assert_eq "$tok" "$(forge_routing_tokens_for 'pr view')" "routed pr-create: the post-create structured re-read carried it too (a private repo would 404 this read on the machine account)"
+  # The lookup that MINTS the token must not itself run under one, or it
+  # resolves to whatever was already in the environment instead of the keyring.
+  assert_eq "<unset>" "$(forge_routing_tokens_for 'auth token')" "routed pr-create: the override's own lookup ran with both slots cleared"
+
+  # --- WRITE 2: edit PR, plus its post-edit re-read.
+  : > "$FORGE_ROUTING_LOG"
+  out=$(run_forge_routing_cli -- forge-pr-edit --number 101 --body "new body") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "routed pr-edit: exit 0"
+  assert_eq "$tok" "$(forge_routing_tokens_for 'pr edit')" "routed pr-edit: the WRITE itself carried the recorded account's token"
+  assert_eq "$tok" "$(forge_routing_tokens_for 'pr view')" "routed pr-edit: the post-edit re-read carried it"
+
+  # --- WRITE 3: create issue.
+  : > "$FORGE_ROUTING_LOG"
+  out=$(run_forge_routing_cli -- forge-issue-create --title "T" --body "B") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "routed issue-create: exit 0 (soft-fail verb, always 0)"
+  assert_eq "created" "$(printf '%s' "$out" | jq -r '.status')" "routed issue-create: really created"
+  assert_eq "$tok" "$(forge_routing_tokens_for 'issue create')" "routed issue-create: the WRITE carried the recorded account's token"
+
+  # --- WRITE 4: resolve review thread.
+  : > "$FORGE_ROUTING_LOG"
+  out=$(run_forge_routing_cli -- forge-resolve-review-thread --thread-id PRRT_kwDOABC123) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "routed resolve-review-thread: exit 0"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.resolved')" "routed resolve-review-thread: the mutation really ran"
+  assert_eq "$tok" "$(forge_routing_tokens_for 'api graphql')" "routed resolve-review-thread: the resolveReviewThread mutation carried the recorded account's token"
+
+  # --- NEGATIVE SCOPE: forge-pr-view invoked directly as its OWN verb stays a
+  # plain machine-account read. Only the reads made INSIDE a write inherit
+  # anything, and this is the assertion that keeps that distinction honest.
+  : > "$FORGE_ROUTING_LOG"
+  out=$(run_forge_routing_cli -- forge-pr-view --pr feat-x --include url,number) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "unrouted pr-view verb: exit 0"
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "unrouted pr-view verb: really performed the lookup"
+  assert_eq "<unset>" "$(forge_routing_tokens_for 'pr list')" "unrouted pr-view verb: the list probe carried no token -- the verb is still a pure reader"
+  assert_eq "<unset>" "$(forge_routing_tokens_for 'pr view')" "unrouted pr-view verb: the view call carried no token either"
+  assert_eq "" "$(forge_routing_tokens_for 'auth token')" "unrouted pr-view verb: no account lookup happened at all, so the store was never even read"
+
+  teardown_forge_routing_env
+}
+
+# Criterion 6, end to end and NOT vacuous: the machine's active account is read
+# before and after, from the same persisted place real gh keeps it, and the
+# fixture is shown to be capable of reporting a change.
+test_forge_writes_leave_the_machine_account_unchanged() {
+  echo ""
+  echo "=== forge writes: the machine's active account is byte-identical before and after, and no auth switch is ever called ==="
+
+  setup_forge_routing_env
+  record_forge_routing_account --record monalisa
+
+  local before after
+  before=$(run_forge_routing_cli -- forge-auth-status | jq -r '.data.account')
+  assert_eq "octocat" "$before" "machine account before: the keyring's active account, read with no override in effect"
+
+  : > "$FORGE_ROUTING_LOG"
+  run_forge_routing_cli -- forge-pr-create --title T --base main --head feat-x --body B >/dev/null
+  run_forge_routing_cli -- forge-pr-edit --number 101 --body B2 >/dev/null
+  run_forge_routing_cli -- forge-issue-create --title T --body B >/dev/null
+  run_forge_routing_cli -- forge-resolve-review-thread --thread-id PRRT_kwDOABC123 >/dev/null
+
+  after=$(run_forge_routing_cli -- forge-auth-status | jq -r '.data.account')
+  assert_eq "$before" "$after" "machine account after: byte-identical once all four write verbs have run under a DIFFERENT recorded account"
+
+  # `gh auth switch` is the only command that rewrites gh's active-account
+  # pointer, and this phase must never call it.
+  local switched="no"
+  if grep -q '^auth switch' "$FORGE_ROUTING_LOG"; then switched="yes"; fi
+  assert_eq "no" "$switched" "machine account: no write path invoked gh auth switch"
+
+  # THE PROOF THAT THE COMPARISON CAN FAIL. Without this the assertion above
+  # would pass against a fixture with no active-account state at all.
+  ( cd "$FORGE_ROUTING_REPO" && PATH="$FORGE_ROUTING_SANDBOX" gh auth switch --user monalisa >/dev/null )
+  local after_switch
+  after_switch=$(run_forge_routing_cli -- forge-auth-status | jq -r '.data.account')
+  assert_eq "monalisa" "$after_switch" "machine account: the fixture DOES report a different account once something actually switches it -- the before/after check is not vacuous"
+
+  # And the second half of the same guarantee: a token that leaked into the
+  # environment process-wide makes the very same read report the env-token
+  # account, which is what `export` would have caused.
+  local under_leak
+  under_leak=$(run_forge_routing_cli "GH_TOKEN=$FORGE_ROUTING_TOKEN" -- forge-auth-status | jq -r '.data.account')
+  assert_eq "env-token-account" "$under_leak" "machine account: a process-wide token WOULD be visible to forge-auth-status -- which is why the override is only ever a prefix assignment"
+
+  teardown_forge_routing_env
+}
+
+# The "always use whichever account is active" answer is a real recorded answer,
+# and it must flow through the identical call-site shape with no branch of its
+# own -- and, critically, must not BLANK a token the caller exported.
+test_forge_writes_active_account_answer_needs_no_branch() {
+  echo ""
+  echo "=== forge writes: the active-account answer and an inherited GH_TOKEN both flow through the identical shape ==="
+
+  setup_forge_routing_env
+  record_forge_routing_account --record-active
+
+  : > "$FORGE_ROUTING_LOG"
+  local out exit_code
+  out=$(run_forge_routing_cli -- forge-pr-create --title T --base main --head feat-x --body B) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "active-account answer: forge-pr-create still succeeds"
+  assert_eq "created" "$(printf '%s' "$out" | jq -r '.status')" "active-account answer: the write really happened"
+  assert_eq "<unset>" "$(forge_routing_tokens_for 'pr create')" "active-account answer: no token is emitted, so gh acts as the machine's active account"
+  assert_eq "" "$(forge_routing_tokens_for 'auth token')" "active-account answer: zero gh auth token invocations -- the opt-out costs nothing"
+
+  # An inherited GH_TOKEN is how gh decides the acting account when this
+  # repository has no answer of its own. The empty override must not revoke it:
+  # a bare GH_TOKEN="$empty" prefix would, silently.
+  #
+  # The flag the run above dropped is cleared first so this second create takes
+  # the same no-existing-PR path rather than the idempotent short-circuit.
+  rm -f "$FORGE_ROUTING_SANDBOX/pr-created.flag"
+  : > "$FORGE_ROUTING_LOG"
+  out=$(run_forge_routing_cli "GH_TOKEN=caller-exported-token" -- forge-pr-create --title T --base main --head feat-y --body B) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "inherited token: forge-pr-create still succeeds"
+  assert_eq "caller-exported-token" "$(forge_routing_tokens_for 'pr create')" "inherited token: an empty override leaves a caller-exported GH_TOKEN reaching gh untouched, never blanked"
+
+  # Structural half of the same criterion: the shape is literally identical at
+  # every routed site, so there is no empty-override special case to drift.
+  local routed_sites
+  routed_sites=$(grep -c 'GH_TOKEN="\$gh_token_override" GH_ENTERPRISE_TOKEN="\$ghe_token_override"' "$CLI") || routed_sites=0
+  assert_eq "8" "$routed_sites" "identical shape: exactly 8 prefix-assignment sites -- 4 writes, 3 in-operation reads, 1 in-write failure classifier"
+
+  # And no process-wide export of either variable anywhere in the file, not
+  # merely inside the override helper.
+  #
+  # COUNTED, NEVER `grep -q`, and that is not a style choice: this suite runs
+  # under `set -o pipefail`, and `grep -v ... | grep -q ...` makes the right
+  # half exit the instant it matches, which SIGPIPEs the left half and turns
+  # the whole pipeline non-zero -- so an `if` on it reads a real hit as "no
+  # hit" and the guard fails OPEN. Verified by mutation: an `export
+  # GH_TOKEN="$gh_token_override"` planted in _forge_pr_create left the
+  # `grep -q` form entirely green. `grep -c` consumes all of its input, so it
+  # cannot fire early, and `|| hits=0` absorbs grep's exit 1 on zero matches.
+  local export_hits
+  export_hits=$(grep -v '^[[:space:]]*#' "$CLI" | grep -cE '(export|declare -x)[[:space:]]+GH_(TOKEN|ENTERPRISE_TOKEN)') || export_hits=0
+  assert_eq "0" "$export_hits" "export rule: aimi-cli.sh never exports GH_TOKEN or GH_ENTERPRISE_TOKEN process-wide, anywhere -- a prefix assignment is the only permitted form"
+
+  teardown_forge_routing_env
+}
+
+# The classifier seam US-005 recorded and left for the routing pass. Exactly one
+# _forge_classify_gh_failure_reason call sits inside a write path; left unrouted
+# it would re-check the MACHINE account after a mutation failed as a DIFFERENT
+# one.
+test_forge_resolve_review_thread_classifier_runs_under_the_override() {
+  echo ""
+  echo "=== forge-resolve-review-thread: the in-write failure classifier re-checks the account that actually failed ==="
+
+  setup_forge_routing_env
+  record_forge_routing_account --record monalisa
+
+  # The mutation breaks in a way that is NOT the confirmed-invalid-node case, so
+  # the generic branch runs and the classifier is reached.
+  cat > "$FORGE_ROUTING_SANDBOX/gh" << 'CLASSIFIER_FAKE_GH'
+#!/usr/bin/env bash
+if [ -n "${FORGE_ROUTING_LOG:-}" ]; then
+  printf '%s %s %s\n' "$1" "$2" "${GH_TOKEN:-<unset>}" >> "$FORGE_ROUTING_LOG"
+fi
+case "$1 $2" in
+  "auth token")
+    if [ -n "${GH_TOKEN:-}" ]; then printf '%s\n' "$GH_TOKEN"; exit 0; fi
+    printf '%s\n' "gho_routingfake000000000000000000000000"
+    exit 0
+    ;;
+  "api graphql")
+    echo "gh: connection refused" >&2
+    exit 1
+    ;;
+  "auth status")
+    echo "github.com"
+    echo "  Logged in to github.com account octocat (keyring)"
+    echo "  - Active account: true"
+    exit 0
+    ;;
+esac
+exit 99
+CLASSIFIER_FAKE_GH
+  chmod +x "$FORGE_ROUTING_SANDBOX/gh"
+
+  : > "$FORGE_ROUTING_LOG"
+  local out exit_code
+  out=$(run_forge_routing_cli -- forge-resolve-review-thread --thread-id PRRT_kwDOABC123 2>/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "classifier seam: the verb still exits non-zero on a broken mutation"
+  assert_eq "cli_failed" "$(printf '%s' "$out" | jq -r '.reason')" "classifier seam: the reason enum is unchanged by routing -- no new value, same catch-all"
+  assert_eq "$FORGE_ROUTING_TOKEN" "$(forge_routing_tokens_for 'auth status')" \
+    "classifier seam: the auth re-check ran as the account whose write failed, not as the machine account"
+
+  teardown_forge_routing_env
+}
+
+# AC5's argv scan, extended to the two write verbs that lacked one. The fake
+# refuses any credential-shaped argv element AND refuses to run without the
+# environment variable, so one run proves both halves at once.
+test_forge_pr_edit_credential_via_env_not_argv() {
+  echo ""
+  echo "=== forge-pr-edit: credential reaches gh via the environment, never argv ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    *token*|*TOKEN*|--token|ghp_*|gho_*) echo "credential leaked into argv: $arg" >&2; exit 2 ;;
+  esac
+done
+if [ -z "${GH_TOKEN:-}" ]; then
+  echo "GH_TOKEN not inherited from environment" >&2
+  exit 3
+fi
+if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  echo '{"url":"https://github.com/owner/repo/pull/404","number":404}'
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(GH_TOKEN="secret-value-xyz" PATH="$sandbox" "$CLI" forge-pr-edit --number 404 --body "B") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-edit credential: exit 0 (GH_TOKEN inherited, nothing credential-shaped in argv)"
+  assert_eq "unchanged" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-edit credential: status unchanged"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_resolve_review_thread_credential_via_env_not_argv() {
+  echo ""
+  echo "=== forge-resolve-review-thread: credential reaches gh via the environment, never argv ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  # The mutation text itself is bound through -f query=..., so it IS an argv
+  # element -- and it legitimately contains neither `token` nor a gh_-prefixed
+  # value. The scan below is therefore a real constraint on this verb, not one
+  # its own payload would trip.
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    *token*|*TOKEN*|--token|ghp_*|gho_*) echo "credential leaked into argv: $arg" >&2; exit 2 ;;
+  esac
+done
+if [ -z "${GH_TOKEN:-}" ]; then
+  echo "GH_TOKEN not inherited from environment" >&2
+  exit 3
+fi
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  echo '{"data":{"resolveReviewThread":{"thread":{"id":"PRRT_1","isResolved":true,"path":"a.txt","line":1}}}}'
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(GH_TOKEN="secret-value-xyz" PATH="$sandbox" "$CLI" forge-resolve-review-thread --thread-id PRRT_kwDOABC123) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-resolve-review-thread credential: exit 0 (GH_TOKEN inherited, nothing credential-shaped in argv)"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.resolved')" "forge-resolve-review-thread credential: the mutation really ran"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
 }
 
 # Cheap hardening, not a live exploit (the auditor confirmed no working PoC):
@@ -21830,8 +22329,17 @@ setup_forge_cli_sandbox() {
   local sandbox
   sandbox=$(mktemp -d)
 
+  # sha256sum/shasum/awk joined the list for the phase-2 account store.
+  # _forge_account_store_path names its file after
+  # _default_branch_cache_key's digest of the repository's git common dir, and
+  # that helper falls back to a portable `tr -c` slugification when NEITHER
+  # hashing tool is on PATH (awk is what reads the digest out of either one's
+  # output). Without all three the sandbox would compute a DIFFERENT store
+  # filename than production and than any test that seeded the store from the
+  # real PATH -- so a routed write would silently find no recorded answer and
+  # the assertion would pass for the wrong reason.
   local tool resolved candidate
-  for tool in bash jq git mktemp cat rm grep sed tr tail dirname basename; do
+  for tool in bash jq git mktemp cat rm grep sed tr tail dirname basename sha256sum shasum awk; do
     resolved=$(command -v "$tool" 2>/dev/null) || resolved=""
     if [ -z "$resolved" ] || [ ! -x "$resolved" ]; then
       for candidate in "/usr/bin/$tool" "/bin/$tool"; do
@@ -23566,18 +24074,33 @@ FAKE_GH
   assert_eq '{"status":"created","data":{"url":"https://github.com/owner/repo/pull/101","number":101},"message":null}' \
     "$out" "forge derivation count: the measured run really did create a PR and confirm its number"
 
-  # A bare `git remote` (the remote LISTING call) is made exactly once per
-  # real derivation. BEFORE this story it read 3 -- _forge_pr_create's own
-  # call, cmd_forge_pr_view's during the pre-create existing-PR check, and
-  # cmd_forge_pr_view's again during the post-create re-read, none aware the
-  # other two had already run. AFTER, only the first is a real derivation;
-  # the other two are memo hits doing zero git work.
-  local bare_remote_calls all_remote_calls
+  # A bare `git remote` (the remote LISTING call) is made exactly once per real
+  # derivation, and this run makes exactly TWO derivations -- no more.
+  #
+  #   1. _detect_forge_type's, memoized in _DETECT_FORGE_TYPE_MEMO. Before
+  #      phase 1.1 this alone read 3 (_forge_pr_create's own call, plus
+  #      cmd_forge_pr_view's during the pre-create existing-PR check and again
+  #      during the post-create re-read, none aware the others had run); the
+  #      memo collapsed the second and third into zero-git-work hits.
+  #   2. _forge_account_host_cached's, memoized in _FORGE_ACCOUNT_HOST_MEMO and
+  #      added by the phase-2 routing pass. The account override is keyed by
+  #      host, and _detect_forge_type carries no host at all (its own header
+  #      says so), so the host is a genuinely separate question.
+  #
+  # THE NUMBER 2 IS THE POINT, and 3 is the failure this pins: the routing pass
+  # asks _forge_account_override for BOTH token slots, and each call would
+  # derive the host for itself if _forge_account_override_slots did not warm the
+  # memo from the caller's own shell first -- a memo populated inside either
+  # `$(...)` lookup would die with that subshell. The three cmd_forge_pr_view
+  # calls this run makes still contribute nothing at all.
+  local bare_remote_calls all_remote_calls geturl_calls
   bare_remote_calls=$(grep -cx 'remote' "$counter") || bare_remote_calls=0
   all_remote_calls=$(grep -c '^remote' "$counter") || all_remote_calls=0
+  geturl_calls=$(grep -c '^remote get-url' "$counter") || geturl_calls=0
 
-  assert_eq "1" "$bare_remote_calls" "forge derivation count: exactly 1 real forge derivation (was 3 before this story's memo)"
-  assert_eq "2" "$all_remote_calls" "forge derivation count: 2 git-remote-family calls total -- one listing plus one get-url (was 6 before)"
+  assert_eq "2" "$bare_remote_calls" "forge derivation count: exactly 2 real derivations -- the forge word and the account host, each derived ONCE (3 would mean the two token slots each derived the host for themselves)"
+  assert_eq "2" "$geturl_calls" "forge derivation count: one get-url per derivation, never a third"
+  assert_eq "4" "$all_remote_calls" "forge derivation count: 4 git-remote-family calls total -- one listing plus one get-url per derivation (was 6 before the phase-1.1 memo, with no host derivation at all)"
 
   popd >/dev/null
   teardown_detect_forge_fixture
@@ -24385,6 +24908,10 @@ main() {
   test_forge_account_override_degrades_when_the_account_is_gone
   test_forge_account_override_leaks_nothing_and_switches_nothing
   test_forge_account_override_reads_what_the_recorder_wrote
+  test_forge_write_paths_route_the_recorded_account
+  test_forge_writes_leave_the_machine_account_unchanged
+  test_forge_writes_active_account_answer_needs_no_branch
+  test_forge_resolve_review_thread_classifier_runs_under_the_override
 
   # Forge PR View Tests (US-004) -- field-selectable PR lookup with a
   # three-way found/not_found/error status, fixing the exit-code conflation
@@ -24421,6 +24948,8 @@ main() {
   test_forge_pr_create_non_github_forge_mandatory_print
   test_forge_pr_create_guard_failures
   test_forge_pr_create_credential_via_env_not_argv
+  test_forge_pr_edit_credential_via_env_not_argv
+  test_forge_resolve_review_thread_credential_via_env_not_argv
   test_forge_pr_edit_success
   test_forge_pr_edit_missing_gh_mandatory_print_nonzero_exit
   test_forge_pr_edit_gh_failure_prints_manual_nonzero_exit

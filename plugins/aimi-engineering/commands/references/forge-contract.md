@@ -478,15 +478,43 @@ both variable names are written literally because bash cannot prefix-assign a
 dynamically named variable. At most one slot is ever non-empty — the resolver
 decides which:
 
+Both slots are resolved **once per invocation** into two locals, because one
+write reaches `gh` three or four times (the write itself plus the reads it makes
+internally) and must not re-derive the account at each step:
+
 ```bash
-GH_TOKEN="$(_forge_account_override GH_TOKEN)" \
-GH_ENTERPRISE_TOKEN="$(_forge_account_override GH_ENTERPRISE_TOKEN)" \
+gh_token_override="" ghe_token_override=""
+_forge_account_override_slots gh_token_override ghe_token_override
+
+GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
   _forge_capture stdout stderr_out rc -- gh pr create --title "Add the thing" --base main --head feat || true
 ```
 
 `gh` treats an **empty** token variable as unset, so the "always use whichever
 account is active" answer and the no-answer case reuse this identical shape
 with no separate branch anywhere.
+
+**An empty override never blanks an inherited token.** When nothing was recorded
+— or the answer was the active-account opt-out — the acting account is whatever
+`gh` would have chosen on its own, and that includes a `GH_TOKEN` the caller
+exported before invoking this CLI. The resolver therefore defaults each empty
+slot to the ambient value rather than emitting the empty string over it, so the
+inheritance this file's **Credential/Identity Model** promises stays intact. A
+recorded account still outranks an ambient token, because a non-empty override
+never reaches that default.
+
+**Which calls are routed.** The four write paths — create PR, edit PR, create
+issue, resolve review thread — plus the reads a write makes as part of the same
+logical operation: `forge-pr-create`'s idempotency check and post-create
+re-read, and `forge-pr-edit`'s post-edit re-read. That last group is
+correctness, not tidiness: on a **private** repository the account that creates
+a PR can see it while a different reader account cannot, so a re-read performed
+as the machine account would fail against a PR that was just created
+successfully. `forge-pr-view` invoked **directly as its own verb** is not
+routed and stays a plain machine-account read — only the reads made *inside* a
+write inherit the account. The one failure classifier that runs inside a write
+path is routed too, so it re-checks the account that actually failed rather than
+the machine's.
 
 **`export` is forbidden; the override is a prefix assignment on one command,
 always.** This is load-bearing rather than stylistic. With a token in the
