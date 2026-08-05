@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A per-repository forge account store path, resolved outside the repository and stable across every worktree.** New internal helper `_forge_account_store_path` in `aimi-cli.sh` returns `<aimi config dir>/forge-account-<key>.json` — one file per repository, under `$AIMI_CONFIG_DIR` / `${XDG_CONFIG_HOME:-~/.config}/aimi` via the existing `_aimi_config_dir` resolver, so a remembered forge account is never committed, never shared with the rest of the team, and never inherited by a sibling repository. The key is the SHA-256 of the repository's absolute git common directory, produced by the same `_default_branch_cache_key` helper the per-repository default-branch cache already uses; no second hashing scheme was introduced.
+  - **Keyed on `git rev-parse --git-common-dir`, not `--show-toplevel`.** `--show-toplevel` answers with the *worktree* path, so every `.worktrees/<branch>` checkout of one repository would hash differently and be asked for its account all over again. The common directory is the one `.git` both the main checkout and every worktree share, which is what makes "asked once, remembered thereafter" true for a repository that uses worktrees.
+  - **The hashed value is guaranteed absolute before it is hashed.** Bare `git rev-parse --git-common-dir` answers *relatively* — `.git` from a toplevel, `../../../.git` from a sub-directory — so hashing it raw would hand every repository on the machine one shared key whenever the CLI ran from a toplevel, and would also change one repository's key depending on which sub-directory the command ran in. `--path-format=absolute` (git ≥ 2.31) is used first; older git falls back to the bare form joined against the current directory and normalized through `resolve_path`, which produces a byte-identical key.
+  - **Outside a git repository the helper returns non-zero and prints nothing** rather than falling back to a hash of the empty string, which would have become a single global "no-repo" store every non-repository caller wrote into. Callers read the non-zero return as "no remembered answer, proceed on the active account".
+  - The document at that path is a JSON object **keyed by forge host**, because one repository can carry remotes on more than one host. Writers must read the existing document and merge into it; rebuilding it with `jq -n` would drop every other host's entry, the exact defect fixed in 1.97.2 for `models.json`.
+
 ## [1.122.0] - 2026-08-04
 
 > Phase 1.2 of forge abstraction: **roadmap-consumer-agreement**. Four defects of one family — a roadmap layer whose consumers disagreed with the roadmap, or with each other, about the same file on disk.
