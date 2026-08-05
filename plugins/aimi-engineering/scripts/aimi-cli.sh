@@ -298,6 +298,96 @@ _aimi_models_prompt_marker_path() {
   printf '%s\n' "$aimi_dir/models-prompt-seen-$host"
 }
 
+# Return the path to THIS repository's remembered forge account store, as a
+# fifth sibling of the four config-path helpers above. Prints exactly one
+# absolute path on stdout; returns 1 printing nothing when the current
+# directory has no resolvable git identity.
+#
+# WHY --git-common-dir AND NOT --show-toplevel: `--show-toplevel` answers with
+# the WORKTREE path, so every `.worktrees/<branch>` checkout of one repository
+# hashes to a different key and gets asked for its account all over again. This
+# repository creates worktrees constantly via /aimi:execute, so that is a daily
+# regression, not a corner case. `--git-common-dir` answers with the ONE shared
+# `.git` directory from both the main checkout and every worktree, which is
+# what makes "asks once, never again" true. This is a deliberate, recorded
+# deviation from the phase-2 roadmap's success criterion 4, whose literal
+# wording says "keyed by a hash of the repository toplevel" -- the roadmap was
+# deliberately not amended; see US-001's notes. Everything else criterion 4
+# asks for is preserved: hash-keyed, stored outside the repository, never
+# committed, per-user.
+#
+# WHY THE VALUE MUST BE ABSOLUTE BEFORE IT IS HASHED -- load-bearing, not
+# defensive: bare `git rev-parse --git-common-dir` returns a RELATIVE path.
+# Verified in this repository at git 2.34.1: `.git` from the toplevel and
+# `../../../.git` from plugins/aimi-engineering/scripts. Hashing that raw would
+# hand EVERY repository on the machine the single shared key hash('.git')
+# whenever the CLI runs from a toplevel -- the "scope too coarse" defect
+# CHANGELOG 1.93.2 already had to remediate once, when a global
+# models-prompt-seen marker had to become per-host -- and would also make one
+# repository's key vary by current directory, re-asking from a subdirectory.
+# So `--path-format=absolute` (git >= 2.31) is tried first, and the bare form
+# is only a fallback that is joined against $PWD and normalized through
+# resolve_path. One machine runs one git, so a single invocation never mixes
+# the two routes; only the fallback normalizes symlinks, which is why the
+# absolute route is the one that must stay primary.
+#
+# DOCUMENT SHAPE THIS PATH POINTS AT -- READ, MERGE, WRITE; NEVER `jq -n`:
+# the file holds a JSON OBJECT KEYED BY FORGE HOST, e.g.
+#   {"github.com": {...}, "gitlab.com": {...}}
+# It is multi-entry by nature: one repository can carry remotes on more than
+# one host, and phases 3 and 4 add glab/tea hosts alongside github.com. Any
+# writer MUST read the existing document and merge its own host key into it,
+# and MUST NOT rebuild the document with `jq -n`. That exact mistake shipped
+# here before: CHANGELOG:487 (1.97.2), where `detect-models` in default mode
+# rebuilt models.json with `jq -n` and silently dropped the OTHER host's
+# sub-table on every single invocation (regression test
+# test_detect_models_default_mode_preserves_other_host). The per-repository
+# split into separate files makes sibling repositories structurally unable to
+# clobber each other; the per-host merge obligation is what keeps a single
+# repository's own hosts from doing it.
+#
+# MEMOIZES NOTHING, DELIBERATELY: like its four siblings this is a pure stdout
+# printer, so every call site reaches it through `$(...)` -- and a memo
+# populated inside a command-substitution subshell dies with that subshell, as
+# _detect_forge_type's header spells out (aimi-cli.sh:1960-1967). Per-invocation
+# memoization of the resolved ACCOUNT belongs to _forge_account_override, which
+# can use the same bash name-reference discipline _detect_forge_type uses.
+_forge_account_store_path() {
+  local common_dir=""
+
+  # Primary: the absolute answer, straight from git.
+  common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common_dir=""
+
+  # Fallback for git < 2.31 (no --path-format): take the bare answer, join a
+  # relative one against the current directory, and normalize.
+  if [ -z "$common_dir" ] || [ "${common_dir#/}" = "$common_dir" ]; then
+    common_dir=$(git rev-parse --git-common-dir 2>/dev/null) || common_dir=""
+    if [ -n "$common_dir" ]; then
+      case "$common_dir" in
+        /*) ;;
+        *) common_dir="$(pwd)/$common_dir" ;;
+      esac
+      common_dir=$(resolve_path "$common_dir" 2>/dev/null) || common_dir=""
+    fi
+  fi
+
+  # Degradation: no git repository, or git could not answer. Return non-zero
+  # with empty stdout -- callers read that as "no remembered answer, proceed on
+  # the active account", matching _forge_bin_check's optional-mode posture.
+  # NEVER fall through to hashing the empty string the way _resolve_default_branch
+  # tolerates an empty toplevel: hash('') would become ONE global "no-repo"
+  # store every non-repo caller writes into, which is precisely the coarse-scope
+  # defect the absolute-path guarantee above exists to prevent. Silent by
+  # design -- being outside a repository is an expected condition, not an error.
+  if [ -z "$common_dir" ] || [ "${common_dir#/}" = "$common_dir" ]; then
+    return 1
+  fi
+
+  local aimi_dir
+  aimi_dir=$(_aimi_config_dir)
+  printf '%s\n' "$aimi_dir/forge-account-$(_default_branch_cache_key "$common_dir").json"
+}
+
 # Read the models config JSON, returning empty string when the file is absent.
 # Does not validate contents — callers must handle malformed JSON.
 read_aimi_models_config() {
@@ -1606,6 +1696,10 @@ _require_git_repo() {
 # back to a portable non-sha256 slugification when neither hashing tool is
 # available -- the slugification never introduces a `/`, so the returned
 # suffix is always safe to use as a flat filename directly inside .aimi/.
+# SECOND CALLER since phase 2: _forge_account_store_path hashes the absolute
+# git common dir with this same helper. Its behavior is therefore frozen --
+# the digest emitted for a given input must stay byte-identical, because
+# `.aimi/default-branch-<hash>` files already exist on disk.
 # Usage: _default_branch_cache_key <repo-toplevel-path>
 # Prints: a filesystem-safe string containing no `/`
 _default_branch_cache_key() {

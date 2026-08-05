@@ -2362,6 +2362,120 @@ test_check_version_fix_updates_global_cache() {
 }
 
 # ============================================================================
+# _forge_account_store_path Tests
+# ============================================================================
+#
+# _forge_account_store_path is the fifth config-dir path helper, which is why
+# its tests live beside the other config-path tests rather than down in the
+# forge section: it shells out to `git rev-parse` and to nothing else, needs no
+# `gh` and no network, and shares _aimi_config_dir with _global_cache_path.
+
+# Sources the helpers _forge_account_store_path needs, in the same sed+eval
+# style as source_cache_functions above and source_forge_issue_functions below.
+#
+# The two bare assignments are NOT optional and NOT copy-paste noise:
+# _HAS_REALPATH and _HAS_SHA256SUM are plain TOP-LEVEL assignments in
+# aimi-cli.sh (:19-20), not functions, so a `sed '/^name()/,/^}/p'` extraction
+# cannot reach them. Without them the eval'd _default_branch_cache_key blows up
+# at `[ "$_HAS_SHA256SUM" -eq 1 ]` under this suite's `set -u`. They are
+# recomputed here exactly as aimi-cli.sh computes them, so the digest the test
+# sees is the digest the real CLI produces on the same machine.
+source_forge_account_functions() {
+  _HAS_REALPATH=$(command -v realpath &>/dev/null && echo 1 || echo 0)
+  _HAS_SHA256SUM=$(command -v sha256sum &>/dev/null && echo 1 || echo 0)
+  eval "$(sed -n '/^resolve_path()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_aimi_config_dir()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_default_branch_cache_key()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_account_store_path()/,/^}/p' "$CLI")"
+}
+
+# Every assertion below is unconditional and runs on every code path — no early
+# return, no assertion whose existence depends on the environment. That is a
+# deliberate contrast with test_init_session_writes_global_cache (~:2245), whose
+# worktree branch fires ONE assertion where its normal-checkout branch fires
+# THREE, which is exactly why this suite legitimately reports different totals
+# depending on whether the CLI under test is worktree-resident.
+test_forge_account_store_path() {
+  echo ""
+  echo "=== Testing _forge_account_store_path: one store per repository, stable across worktrees ==="
+
+  source_forge_account_functions
+
+  # A PLAIN, non-git parent holding one git repository per subfolder — the
+  # multi-repo layout the root CLAUDE.md describes. Two siblings here must
+  # never resolve to the same store file.
+  local multi_root config_dir non_repo repo_a repo_b
+  multi_root=$(mktemp -d)
+  config_dir=$(mktemp -d)
+  non_repo=$(mktemp -d)
+  repo_a="$multi_root/service-a"
+  repo_b="$multi_root/service-b"
+
+  mkdir -p "$repo_a" "$repo_b" "$repo_a/nested/deeper"
+  git init -q "$repo_a" >/dev/null 2>&1
+  git -C "$repo_a" config user.email "test@example.com" >/dev/null 2>&1
+  git -C "$repo_a" config user.name "Aimi Test" >/dev/null 2>&1
+  : > "$repo_a/README.md"
+  git -C "$repo_a" add README.md >/dev/null 2>&1
+  git -C "$repo_a" commit -q -m "init" >/dev/null 2>&1
+  # A worktree of repo_a, laid out the way /aimi:execute lays them out.
+  git -C "$repo_a" worktree add -q "$repo_a/.worktrees/feat-x" -b feat-x >/dev/null 2>&1
+  git init -q "$repo_b" >/dev/null 2>&1
+
+  local saved_aimi_config_set=0 saved_aimi_config=""
+  if [ -n "${AIMI_CONFIG_DIR:-}" ]; then
+    saved_aimi_config_set=1
+    saved_aimi_config="$AIMI_CONFIG_DIR"
+  fi
+  export AIMI_CONFIG_DIR="$config_dir"
+
+  local path_main="" path_worktree="" path_subdir="" path_b="" path_nonrepo=""
+  local rc_nonrepo=0 stdout_lines=0
+  path_main=$(cd "$repo_a" && _forge_account_store_path) || path_main=""
+  path_worktree=$(cd "$repo_a/.worktrees/feat-x" && _forge_account_store_path) || path_worktree=""
+  path_subdir=$(cd "$repo_a/nested/deeper" && _forge_account_store_path) || path_subdir=""
+  path_b=$(cd "$repo_b" && _forge_account_store_path) || path_b=""
+  path_nonrepo=$(cd "$non_repo" && _forge_account_store_path) || rc_nonrepo=$?
+  stdout_lines=$( { cd "$repo_a" && _forge_account_store_path; } | wc -l | tr -d ' ')
+
+  # (a) worktree stability — the whole reason the key is the git common dir
+  # and not the toplevel.
+  assert_eq "$path_main" "$path_worktree" "_forge_account_store_path: a worktree resolves to the SAME store as its main checkout"
+
+  # (c) sub-directory invariance — the relative `../../.git` answer must never
+  # reach the hash.
+  assert_eq "$path_main" "$path_subdir" "_forge_account_store_path: a sub-directory resolves to the same store as the toplevel"
+
+  # (b) sibling non-collision under one non-git multi-repo parent.
+  local sibling_verdict="different"
+  if [ "$path_main" = "$path_b" ]; then
+    sibling_verdict="collided on $path_main"
+  fi
+  assert_eq "different" "$sibling_verdict" "_forge_account_store_path: two sibling repositories under one multi-repo root get two different stores"
+
+  # (d) absolute, rooted at the AIMI_CONFIG_DIR this test set, named .json.
+  local abs_verdict="relative"
+  case "$path_main" in
+    /*) abs_verdict="absolute" ;;
+  esac
+  assert_eq "absolute" "$abs_verdict" "_forge_account_store_path: the printed path is absolute"
+  assert_contains "$config_dir/forge-account-" "$path_main" "_forge_account_store_path: the store is rooted at AIMI_CONFIG_DIR as forge-account-<key>"
+  assert_eq "json" "${path_main##*.}" "_forge_account_store_path: the store file is a .json document"
+  assert_eq "1" "$stdout_lines" "_forge_account_store_path: prints exactly one line on stdout and nothing else"
+
+  # (e) outside a git repository: non-zero, empty stdout, no shared hash('') key.
+  assert_exit_code "1" "$rc_nonrepo" "_forge_account_store_path: returns 1 outside a git repository"
+  assert_eq "" "$path_nonrepo" "_forge_account_store_path: prints nothing outside a git repository"
+
+  if [ "$saved_aimi_config_set" -eq 1 ]; then
+    export AIMI_CONFIG_DIR="$saved_aimi_config"
+  else
+    unset AIMI_CONFIG_DIR
+  fi
+  rm -rf "$multi_root" "$config_dir" "$non_repo"
+}
+
+# ============================================================================
 # _aimi_config_dir Tests
 # ============================================================================
 
@@ -22023,6 +22137,7 @@ main() {
   test_read_global_worktree_cache_tampered
   test_init_session_writes_global_cache
   test_check_version_fix_updates_global_cache
+  test_forge_account_store_path
 
   # XDG cache location tests — new path + read-both fallback
   echo ""
