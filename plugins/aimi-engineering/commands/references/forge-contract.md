@@ -353,6 +353,214 @@ a CLI argument leaks through `ps` and shell history; an environment variable
 does not. This applies to every current and future forge verb, with no
 exception for a "just this once" convenience call.
 
+### The Remembered Answer — `forge-account-select`
+
+Which account a repository writes as is asked **once per repository** and
+remembered outside the repository, so the answer is never committed, never
+inherited by a sibling repository, and never shared with the rest of the team.
+`forge-account-select` owns that answer end to end — recording it, reading it
+back, and revoking it.
+
+**The command layer asks; the CLI decides whether asking is warranted and
+remembers the answer.** That split is the same one `interactivity.md`
+prescribes for every question site, and it is mechanical rather than stylistic:
+the CLI is invoked through the Bash tool with a non-TTY stdin, so a prompt
+implemented inside it would be silently dead in the host that matters.
+
+#### When the question is raised
+
+Two conditions, both required, evaluated at each ask site — the same shape the
+first-run model prompt uses (`cli-path-resolution.md`):
+
+1. `detect-interactivity` prints `picker`. Picker is the default; `agent`
+   comes only from an explicit opt-out (`--non-interactive`,
+   `AIMI_AGENT_MODE=true`, `CI=true`), never from a non-TTY shell.
+2. `forge-account-select --check` reports `decision: "ask"` — which happens
+   only when this repository has no recorded answer for its own host *and*
+   this project's git identity and the active forge account actually diverge.
+
+Every other outcome proceeds silently on the active account. The two ask sites
+are `commands/open-pr.md`'s Step 1a (once per repository) and
+`commands/execute.md`'s **Offer a Pull Request** (once per participating
+repository, naming the repository so a multi-repo run's prompts stay
+distinguishable). Both are translated command bodies, which is why the picker
+lives there and not in this file.
+
+Three answers are offerable, and each maps onto exactly one call:
+
+| Answer | Recorded as | Meaning |
+|---|---|---|
+| Always use the active account | `--record-active` | Permanent opt-out. A real stored answer (`mode: "active"`), which is what stops the question being raised again — not the absence of one. |
+| A named logged-in account | `--record <login>` | Every forge write for this repository acts as `<login>`. |
+| A free-form login | `--record <login>` | Same as above, after the command layer validates the typed value against the login shape the store accepts. |
+
+**Agent mode applies the first answer and never records it.** At either site,
+`INTERACTIVE_MODE=agent` auto-selects "use the active account" — which requires
+no action at all, since that is already the account every forge verb uses — and
+makes no record call whatsoever. The repository's recorded state after an
+unattended run is byte-for-byte what it was before, and the site logs one line
+saying so: `agent-mode: forge-account auto-selected active account (not
+recorded)`. The reason it must not be recorded is that this auto-answer is
+*also* the permanent opt-out: persisting it would let one CI run silently and
+permanently answer the question for every human afterwards, who would never be
+asked and would have no way to discover why.
+
+#### The callers that can apply an answer but can never ask
+
+`skills/resolve-pr-parallel/scripts/get-pr-comments` and
+`skills/resolve-pr-parallel/scripts/resolve-pr-thread` are plain shell scripts
+with no picker available on either host. They can apply a **stored** answer
+correctly, but they can never be the site that asks. A repository whose answer
+was never recorded therefore runs those two paths on the machine's active
+account.
+
+This asymmetry is accepted, not an oversight: it is the same degradation
+posture phase 1 took throughout — a path with no way to do the better thing
+does the working thing rather than failing. It is written down here so a reader
+meets it as a stated contract instead of inferring it from behaviour. The
+remedy is to answer the question once from either ask site above; every
+non-asking caller picks the recorded answer up from then on.
+
+Exactly **two** answer states are storable, and they are distinguishable from
+each other and from having no answer at all:
+
+```json
+{"mode": "account", "account": "<login>", "recordedAt": "<ISO 8601 UTC>"}
+{"mode": "active",                        "recordedAt": "<ISO 8601 UTC>"}
+```
+
+`mode: "active"` is the **"always use whichever account is currently active"**
+answer. It is a first-class stored value, not the absence of one — encoding it
+as an empty account string, or by leaving the entry out, is refused on both the
+write and the read side, because neither is distinguishable from "has not been
+asked yet".
+
+The document is one file per repository holding **one entry per forge host**, so
+a repository with remotes on more than one host carries one answer per host.
+Every write is read-merge-write: recording or revoking one host's answer leaves
+every other host's entry byte-for-byte intact.
+
+Reading it back is decided on **this repository's entry**, never on the store
+file's existence — the file exists the moment the first repository answers, so
+an existence check would silence every repository afterwards. A store that is
+absent, empty, malformed, or missing this host's entry all mean *not yet
+answered*, and the question is raised again.
+
+**The answer is the only state, and it is revocable.** `--reselect` clears this
+repository's entry so the next check asks again; deleting the store file by hand
+does exactly the same thing. No companion marker or sentinel file exists that
+could outlive the deleted answer and keep the question suppressed.
+
+Reading the answer back has **zero side effects** — no file is created, no
+directory is created, nothing is written. That is what keeps an agent-mode or CI
+auto-selection *applied for that invocation but never persisted*: one unattended
+run must not be able to permanently answer the question on every human's behalf.
+Persisting is always a separate, explicit record call the command layer makes
+only after a person actually answered.
+
+An explicitly requested identity outranks the remembered one: when
+`AIMI_FORGE_IDENTITY` names the account to act as, the question is moot and is
+not raised. Consistent with the rest of this file, that value is an environment
+variable — `forge-account-select` accepts no `--token`, `--identity`, or
+otherwise credential-shaped flag, and none may be added to it.
+
+### Applying the Answer — One Invocation at a Time
+
+The remembered login is turned into an acting account by `gh auth token`, which
+prints that one account's stored token **without touching the active-account
+pointer**. `gh auth switch` is the only thing that rewrites `hosts.yml`
+globally, and no path here ever calls it. That is what lets both halves of the
+guarantee hold at once: every forge write acts as the project's account, and
+the machine's active account is byte-for-byte unchanged afterwards.
+
+The token is applied as a **bash prefix assignment on the wrapped call**, and
+both variable names are written literally because bash cannot prefix-assign a
+dynamically named variable. At most one slot is ever non-empty — the resolver
+decides which:
+
+Both slots are resolved **once per invocation** into two locals, because one
+write reaches `gh` three or four times (the write itself plus the reads it makes
+internally) and must not re-derive the account at each step:
+
+```bash
+gh_token_override="" ghe_token_override=""
+_forge_account_override_slots gh_token_override ghe_token_override
+
+GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+  _forge_capture stdout stderr_out rc -- gh pr create --title "Add the thing" --base main --head feat || true
+```
+
+`gh` treats an **empty** token variable as unset, so the "always use whichever
+account is active" answer and the no-answer case reuse this identical shape
+with no separate branch anywhere.
+
+**An empty override never blanks an inherited token.** When nothing was recorded
+— or the answer was the active-account opt-out — the acting account is whatever
+`gh` would have chosen on its own, and that includes a `GH_TOKEN` the caller
+exported before invoking this CLI. The resolver therefore defaults each empty
+slot to the ambient value rather than emitting the empty string over it, so the
+inheritance this file's **Credential/Identity Model** promises stays intact. A
+recorded account still outranks an ambient token, because a non-empty override
+never reaches that default.
+
+**Which calls are routed.** The four write paths — create PR, edit PR, create
+issue, resolve review thread — plus the reads a write makes as part of the same
+logical operation: `forge-pr-create`'s idempotency check and post-create
+re-read, and `forge-pr-edit`'s post-edit re-read. That last group is
+correctness, not tidiness: on a **private** repository the account that creates
+a PR can see it while a different reader account cannot, so a re-read performed
+as the machine account would fail against a PR that was just created
+successfully. `forge-pr-view` invoked **directly as its own verb** is not
+routed and stays a plain machine-account read — only the reads made *inside* a
+write inherit the account. The one failure classifier that runs inside a write
+path is routed too, so it re-checks the account that actually failed rather than
+the machine's.
+
+**`export` is forbidden; the override is a prefix assignment on one command,
+always.** This is load-bearing rather than stylistic. With a token in the
+environment, `gh auth status` reports the *env-token* account as
+`Active account: true` — so an override that leaked process-wide would make
+`forge-auth-status` report the overridden account as the machine's active one,
+and the very before/after check that proves the machine account was left alone
+would lose the ability to detect the violation. For the same reason the token
+lookup itself runs with both variables cleared, or it resolves to itself
+instead of to the keyring.
+
+**Which variable, decided by host.** `gh` honors `GH_TOKEN` for `github.com`
+and `*.ghe.com` only; a GitHub Enterprise Server host on a company domain
+requires `GH_ENTERPRISE_TOKEN`. Emitting the wrong one does not error — it is
+ignored, and the write succeeds **attributed to the wrong account**, which is
+why the mapping is fixed rather than left to a caller:
+
+| Host | Variable | `gh auth token` hostname flag |
+|---|---|---|
+| `github.com`, `*.github.com` | `GH_TOKEN` | `--hostname <host>` |
+| `ghe.com`, `*.ghe.com` | `GH_TOKEN` | `--hostname <host>` |
+| any other non-empty host (GHES on a company domain) | `GH_ENTERPRISE_TOKEN` | `--hostname <host>` |
+| empty / unresolvable host (the `AIMI_FORGE_TYPE` override path, where `host` is null) | `GH_TOKEN` | omitted entirely |
+
+The host is lowercased before matching, and an unresolvable host omits
+`--hostname` rather than passing the four-character string `null` — a null read
+as text once turned a bogus hostname into a confirmed-looking
+`authenticated: false`.
+
+**The token never reaches argv, and never reaches a log.** The
+`env GH_TOKEN=… gh …` shape is banned outright, because `env(1)`'s own argv
+carries the value and leaks it through `ps`; the prefix-assignment form never
+materializes the token as an argv element at all. Nothing echoes, logs or emits
+it either — it is the resolver's stdout value and nothing else, held to the same
+bar as the userinfo stripped from a remote URL before `detect-forge` prints it.
+
+**Degradation matches the rest of this file.** A remembered account that was
+later logged out makes the lookup fail; the resolver then yields the empty
+string and emits exactly one stderr warning naming the login and the host, and
+the operation proceeds as the machine's active account. The write is not
+blocked — the same warn-and-fall-back posture the Degradation Contract below
+establishes — but the wrong-account attribution is made visible rather than
+silent. The warning never carries the token and never forwards the forge CLI's
+own stderr verbatim, which can echo token prefixes. No new `reason` enum value
+is introduced by any of this.
+
 ## Degradation Contract
 
 A forge CLI (`gh`, `glab`, `tea`) may not be installed at all, and a forge

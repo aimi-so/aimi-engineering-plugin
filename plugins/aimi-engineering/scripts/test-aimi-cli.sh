@@ -2362,6 +2362,120 @@ test_check_version_fix_updates_global_cache() {
 }
 
 # ============================================================================
+# _forge_account_store_path Tests
+# ============================================================================
+#
+# _forge_account_store_path is the fifth config-dir path helper, which is why
+# its tests live beside the other config-path tests rather than down in the
+# forge section: it shells out to `git rev-parse` and to nothing else, needs no
+# `gh` and no network, and shares _aimi_config_dir with _global_cache_path.
+
+# Sources the helpers _forge_account_store_path needs, in the same sed+eval
+# style as source_cache_functions above and source_forge_issue_functions below.
+#
+# The two bare assignments are NOT optional and NOT copy-paste noise:
+# _HAS_REALPATH and _HAS_SHA256SUM are plain TOP-LEVEL assignments in
+# aimi-cli.sh (:19-20), not functions, so a `sed '/^name()/,/^}/p'` extraction
+# cannot reach them. Without them the eval'd _default_branch_cache_key blows up
+# at `[ "$_HAS_SHA256SUM" -eq 1 ]` under this suite's `set -u`. They are
+# recomputed here exactly as aimi-cli.sh computes them, so the digest the test
+# sees is the digest the real CLI produces on the same machine.
+source_forge_account_store_functions() {
+  _HAS_REALPATH=$(command -v realpath &>/dev/null && echo 1 || echo 0)
+  _HAS_SHA256SUM=$(command -v sha256sum &>/dev/null && echo 1 || echo 0)
+  eval "$(sed -n '/^resolve_path()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_aimi_config_dir()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_default_branch_cache_key()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_account_store_path()/,/^}/p' "$CLI")"
+}
+
+# Every assertion below is unconditional and runs on every code path — no early
+# return, no assertion whose existence depends on the environment. That is a
+# deliberate contrast with test_init_session_writes_global_cache (~:2245), whose
+# worktree branch fires ONE assertion where its normal-checkout branch fires
+# THREE, which is exactly why this suite legitimately reports different totals
+# depending on whether the CLI under test is worktree-resident.
+test_forge_account_store_path() {
+  echo ""
+  echo "=== Testing _forge_account_store_path: one store per repository, stable across worktrees ==="
+
+  source_forge_account_store_functions
+
+  # A PLAIN, non-git parent holding one git repository per subfolder — the
+  # multi-repo layout the root CLAUDE.md describes. Two siblings here must
+  # never resolve to the same store file.
+  local multi_root config_dir non_repo repo_a repo_b
+  multi_root=$(mktemp -d)
+  config_dir=$(mktemp -d)
+  non_repo=$(mktemp -d)
+  repo_a="$multi_root/service-a"
+  repo_b="$multi_root/service-b"
+
+  mkdir -p "$repo_a" "$repo_b" "$repo_a/nested/deeper"
+  git init -q "$repo_a" >/dev/null 2>&1
+  git -C "$repo_a" config user.email "test@example.com" >/dev/null 2>&1
+  git -C "$repo_a" config user.name "Aimi Test" >/dev/null 2>&1
+  : > "$repo_a/README.md"
+  git -C "$repo_a" add README.md >/dev/null 2>&1
+  git -C "$repo_a" commit -q -m "init" >/dev/null 2>&1
+  # A worktree of repo_a, laid out the way /aimi:execute lays them out.
+  git -C "$repo_a" worktree add -q "$repo_a/.worktrees/feat-x" -b feat-x >/dev/null 2>&1
+  git init -q "$repo_b" >/dev/null 2>&1
+
+  local saved_aimi_config_set=0 saved_aimi_config=""
+  if [ -n "${AIMI_CONFIG_DIR:-}" ]; then
+    saved_aimi_config_set=1
+    saved_aimi_config="$AIMI_CONFIG_DIR"
+  fi
+  export AIMI_CONFIG_DIR="$config_dir"
+
+  local path_main="" path_worktree="" path_subdir="" path_b="" path_nonrepo=""
+  local rc_nonrepo=0 stdout_lines=0
+  path_main=$(cd "$repo_a" && _forge_account_store_path) || path_main=""
+  path_worktree=$(cd "$repo_a/.worktrees/feat-x" && _forge_account_store_path) || path_worktree=""
+  path_subdir=$(cd "$repo_a/nested/deeper" && _forge_account_store_path) || path_subdir=""
+  path_b=$(cd "$repo_b" && _forge_account_store_path) || path_b=""
+  path_nonrepo=$(cd "$non_repo" && _forge_account_store_path) || rc_nonrepo=$?
+  stdout_lines=$( { cd "$repo_a" && _forge_account_store_path; } | wc -l | tr -d ' ')
+
+  # (a) worktree stability — the whole reason the key is the git common dir
+  # and not the toplevel.
+  assert_eq "$path_main" "$path_worktree" "_forge_account_store_path: a worktree resolves to the SAME store as its main checkout"
+
+  # (c) sub-directory invariance — the relative `../../.git` answer must never
+  # reach the hash.
+  assert_eq "$path_main" "$path_subdir" "_forge_account_store_path: a sub-directory resolves to the same store as the toplevel"
+
+  # (b) sibling non-collision under one non-git multi-repo parent.
+  local sibling_verdict="different"
+  if [ "$path_main" = "$path_b" ]; then
+    sibling_verdict="collided on $path_main"
+  fi
+  assert_eq "different" "$sibling_verdict" "_forge_account_store_path: two sibling repositories under one multi-repo root get two different stores"
+
+  # (d) absolute, rooted at the AIMI_CONFIG_DIR this test set, named .json.
+  local abs_verdict="relative"
+  case "$path_main" in
+    /*) abs_verdict="absolute" ;;
+  esac
+  assert_eq "absolute" "$abs_verdict" "_forge_account_store_path: the printed path is absolute"
+  assert_contains "$config_dir/forge-account-" "$path_main" "_forge_account_store_path: the store is rooted at AIMI_CONFIG_DIR as forge-account-<key>"
+  assert_eq "json" "${path_main##*.}" "_forge_account_store_path: the store file is a .json document"
+  assert_eq "1" "$stdout_lines" "_forge_account_store_path: prints exactly one line on stdout and nothing else"
+
+  # (e) outside a git repository: non-zero, empty stdout, no shared hash('') key.
+  assert_exit_code "1" "$rc_nonrepo" "_forge_account_store_path: returns 1 outside a git repository"
+  assert_eq "" "$path_nonrepo" "_forge_account_store_path: prints nothing outside a git repository"
+
+  if [ "$saved_aimi_config_set" -eq 1 ]; then
+    export AIMI_CONFIG_DIR="$saved_aimi_config"
+  else
+    unset AIMI_CONFIG_DIR
+  fi
+  rm -rf "$multi_root" "$config_dir" "$non_repo"
+}
+
+# ============================================================================
 # _aimi_config_dir Tests
 # ============================================================================
 
@@ -17918,6 +18032,21 @@ test_forge_contract_header_carries_both_creates_identities() {
 #                              other than FAKE_GH_AUTH_HOST, the way real gh does. Off by
 #                              default so the flag is ignored (pre-existing behavior); set
 #                              it only in a test that is specifically about hostname handling.
+#                              It applies to `gh auth token --hostname X` too.
+#   FAKE_GH_AUTH_TOKEN         the token `gh auth token` prints (default a gho_-shaped fake)
+#   FAKE_GH_AUTH_TOKEN_FAIL    "1" forces `gh auth token` to exit 1 with real gh's
+#                              "no oauth token found for <host> account <user>" wording,
+#                              simulating a remembered account that was later logged out
+#   FAKE_GH_AUTH_STATUS_HONORS_ENV_TOKEN
+#                              "1" makes `gh auth status` report the ENV-TOKEN account as
+#                              "Active account: true" when GH_TOKEN/GH_ENTERPRISE_TOKEN is
+#                              set, which is what real gh does. OPT-IN, and that matters:
+#                              the developer's own shell may legitimately export GH_TOKEN,
+#                              and turning this on by default would change the answer every
+#                              pre-existing test gets. Same opt-in posture as
+#                              FAKE_GH_AUTH_STRICT_HOSTNAME above.
+#   FAKE_GH_ENV_TOKEN_ACCOUNT  the login reported under that env-token block
+#                              (default env-token-account)
 setup_fake_gh_fixture() {
   FAKE_GH_DIR=$(mktemp -d)
   cat > "$FAKE_GH_DIR/gh" << 'FAKE_GH_SCRIPT'
@@ -17948,6 +18077,24 @@ case "$1 $2" in
         [ "$arg" = "--hostname" ] && expect_value=1
       done
     fi
+    # Opt-in faithfulness, part two: with a token in the environment real gh
+    # reports THAT account as the active one and demotes the keyring account
+    # to "Active account: false". This is the landmine behind the
+    # export-is-forbidden rule -- an override that leaked process-wide would
+    # make forge-auth-status report the overridden account as machine-active,
+    # and a before/after check would lose the ability to see the violation.
+    # Off by default because a developer's own shell may export GH_TOKEN.
+    if [ "${FAKE_GH_AUTH_STATUS_HONORS_ENV_TOKEN:-0}" = "1" ] &&
+       { [ -n "${GH_TOKEN:-}" ] || [ -n "${GH_ENTERPRISE_TOKEN:-}" ]; }; then
+      host="${FAKE_GH_AUTH_HOST:-github.com}"
+      account="${FAKE_GH_AUTH_ACCOUNT:-octocat}"
+      echo "$host"
+      echo "  Logged in to $host account ${FAKE_GH_ENV_TOKEN_ACCOUNT:-env-token-account} (GH_TOKEN)"
+      echo "  - Active account: true"
+      echo "  Logged in to $host account $account (keyring)"
+      echo "  - Active account: false"
+      exit 0
+    fi
     case "${FAKE_GH_AUTH_STATUS_MODE:-single}" in
       single)
         host="${FAKE_GH_AUTH_HOST:-github.com}"
@@ -17973,6 +18120,75 @@ case "$1 $2" in
         exit 1
         ;;
     esac
+    ;;
+  "auth token")
+    # Real gh returns the ENVIRONMENT token whenever one is set, which is
+    # precisely why _forge_account_override has to clear GH_TOKEN and
+    # GH_ENTERPRISE_TOKEN for its own lookup or it resolves to itself instead
+    # of to the keyring. Emulated here unconditionally -- deliberately
+    # stricter than real gh, whose precedence alongside an explicit --user is
+    # less clear-cut -- so a test can prove the clearing DECISIVELY (the
+    # ambient value comes back only if the clearing is missing) rather than
+    # by inference from a token that would have looked the same either way.
+    if [ -n "${GH_TOKEN:-}" ]; then
+      printf '%s\n' "$GH_TOKEN"
+      exit 0
+    fi
+    if [ -n "${GH_ENTERPRISE_TOKEN:-}" ]; then
+      printf '%s\n' "$GH_ENTERPRISE_TOKEN"
+      exit 0
+    fi
+    # Long flags only (--user/--hostname); the code under test never uses the
+    # -u/-h short forms and honoring `-h` here would collide with help.
+    want_user=""
+    want_host=""
+    expect=""
+    for arg in "$@"; do
+      if [ "$expect" = "user" ]; then
+        want_user="$arg"
+        expect=""
+        continue
+      fi
+      if [ "$expect" = "host" ]; then
+        want_host="$arg"
+        expect=""
+        continue
+      fi
+      case "$arg" in
+        --user) expect="user" ;;
+        --hostname) expect="host" ;;
+      esac
+    done
+    host="${FAKE_GH_AUTH_HOST:-github.com}"
+    if [ "${FAKE_GH_AUTH_STRICT_HOSTNAME:-0}" = "1" ] && [ -n "$want_host" ] && [ "$want_host" != "$host" ]; then
+      echo "no oauth token found for $want_host account ${want_user:-<active>}" >&2
+      exit 1
+    fi
+    if [ "${FAKE_GH_AUTH_TOKEN_FAIL:-0}" = "1" ]; then
+      echo "no oauth token found for ${want_host:-$host} account ${want_user:-<active>}" >&2
+      exit 1
+    fi
+    # The fixture's account set, mode by mode -- a login outside it fails the
+    # way real gh fails for an account that was logged out.
+    case "${FAKE_GH_AUTH_STATUS_MODE:-single}" in
+      single) known="${FAKE_GH_AUTH_ACCOUNT:-octocat}" ;;
+      multi)  known="${FAKE_GH_AUTH_ACCOUNT:-octocat} ${FAKE_GH_AUTH_OTHER_ACCOUNT:-monalisa}" ;;
+      *)      known="" ;;
+    esac
+    if [ -n "$want_user" ]; then
+      found=0
+      for acct in $known; do
+        if [ "$acct" = "$want_user" ]; then
+          found=1
+        fi
+      done
+      if [ "$found" != "1" ]; then
+        echo "no oauth token found for ${want_host:-$host} account $want_user" >&2
+        exit 1
+      fi
+    fi
+    printf '%s\n' "${FAKE_GH_AUTH_TOKEN:-gho_faketoken0000000000000000000000000000}"
+    exit 0
     ;;
   "repo view")
     if [ -n "${FAKE_GH_CALL_COUNTER:-}" ]; then
@@ -18028,7 +18244,8 @@ teardown_fake_gh_fixture() {
     FAKE_GH_AUTH_OTHER_ACCOUNT FAKE_GH_REPO_OWNER FAKE_GH_REPO_NAME FAKE_GH_REPO_VIEW_FAIL \
     FAKE_GH_CALL_COUNTER FAKE_GH_VIEW_EXIT FAKE_GH_VIEW_STDERR FAKE_GH_PR_JSON \
     FAKE_GH_LIST_EXIT FAKE_GH_LIST_STDERR FAKE_GH_LIST_JSON FAKE_GH_LOG \
-    FAKE_GH_AUTH_STRICT_HOSTNAME
+    FAKE_GH_AUTH_STRICT_HOSTNAME FAKE_GH_AUTH_TOKEN FAKE_GH_AUTH_TOKEN_FAIL \
+    FAKE_GH_AUTH_STATUS_HONORS_ENV_TOKEN FAKE_GH_ENV_TOKEN_ACCOUNT
 }
 
 # Prints a PATH value with every occurrence of <binary> made unresolvable,
@@ -18356,6 +18573,2100 @@ FAKE_GH
   fi
 
   rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+# ============================================================================
+# Forge account selection -- divergence detection Tests
+# ============================================================================
+# _forge_git_identity, _forge_identity_logins and _forge_account_divergence
+# have no cmd_ dispatcher wrapper (this story adds no verb -- the verdict is
+# a private JSON consumed in-process, deliberately not a fifth forge result
+# envelope), so they are sourced directly, matching source_forge_contract_
+# functions above. Every scenario below is offline: the fake-gh PATH stub and
+# throwaway local git repositories only, no network and no real credentials.
+
+# Sources the account-divergence functions AND every helper they reach --
+# _forge_account_divergence calls _detect_forge, which fans out to six more
+# _detect_forge_* helpers, plus _forge_bin_check and _forge_auth_status_github.
+# Missing any one of them would leave the eval'd function calling an undefined
+# name, which is the rule the root CLAUDE.md states for these sourcing helpers.
+source_forge_account_functions() {
+  eval "$(sed -n '/^_detect_forge_parse_host()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_detect_forge_classify_host()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_detect_forge_select_remote_raw()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_detect_forge_read_selection()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_detect_forge_select_remote()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_detect_forge_redact_userinfo()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_detect_forge()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_bin_check()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_auth_status_github()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_git_identity()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_identity_logins()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_account_divergence()/,/^}/p' "$CLI")"
+}
+
+# Creates a throwaway git repository with one `origin` remote and, when
+# asked, a git identity written with `git -C <repo> config` -- LOCAL, never
+# --global. No test in this section may mutate the machine's real git config.
+# Usage: setup_forge_account_repo <remote-url> [email] [name]
+setup_forge_account_repo() {
+  local remote_url="$1" email="${2:-}" name="${3:-}" repo
+  repo=$(mktemp -d)
+  git -C "$repo" init >/dev/null 2>&1
+  git -C "$repo" remote add origin "$remote_url" >/dev/null 2>&1
+  if [ -n "$email" ]; then
+    git -C "$repo" config user.email "$email"
+  fi
+  if [ -n "$name" ]; then
+    git -C "$repo" config user.name "$name"
+  fi
+  printf '%s' "$repo"
+}
+
+# Runs _forge_account_divergence with <repo> as the working directory, in a
+# subshell so nothing it exports survives into the next test. Every remaining
+# argument is a VAR=value pair exported into that same subshell -- the PATH
+# and FAKE_GH_* knobs each scenario needs.
+#
+# GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM are pointed at /dev/null, which git
+# reads as an empty config file. That is a READ-side neutering inside one
+# subshell, not a write: it keeps every assertion below independent of
+# whatever user.email the developer's own machine happens to have set, and it
+# is the only way the "no git identity at all" rung is reachable at all,
+# since _forge_git_identity deliberately reads unqualified (repository config
+# where set, global otherwise).
+run_forge_account_divergence() {
+  local repo="$1"
+  shift
+  (
+    cd "$repo" || exit 1
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+    for _fad_assignment in "$@"; do
+      export "${_fad_assignment}"
+    done
+    _forge_account_divergence
+  )
+}
+
+# Fails when <pattern> appears anywhere in the fake gh's invocation log,
+# printing the whole log so a failure names the offending argv rather than
+# just asserting a boolean. A missing log file counts as "pattern absent".
+assert_gh_log_lacks() {
+  local pattern="$1" log_file="$2" test_name="$3"
+
+  if [ -f "$log_file" ] && grep -q -- "$pattern" "$log_file"; then
+    echo -e "${RED}✗${NC} $test_name"
+    echo "  gh invocations: $(cat "$log_file")"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} $test_name"
+    ((TESTS_PASSED++))
+  fi
+}
+
+test_forge_account_divergence_no_adapter() {
+  echo ""
+  echo "=== divergence rung 1: non-github forge -- skip/no_adapter, gh never consulted ==="
+
+  source_forge_account_functions
+  setup_fake_gh_fixture
+
+  local repo gh_log out
+  repo=$(setup_forge_account_repo "https://gitlab.com/owner/repo.git" "octocat@example.com" "octocat")
+  gh_log="$FAKE_GH_DIR/no-adapter.log"
+
+  out=$(run_forge_account_divergence "$repo" "PATH=$FAKE_GH_DIR:$PATH" "FAKE_GH_LOG=$gh_log")
+
+  assert_eq "skip" "$(printf '%s' "$out" | jq -r '.decision')" "divergence no_adapter: decision is skip"
+  assert_eq "no_adapter" "$(printf '%s' "$out" | jq -r '.basis')" "divergence no_adapter: basis reuses the contract's own spelling"
+  assert_eq "gitlab" "$(printf '%s' "$out" | jq -r '.forge')" "divergence no_adapter: the resolved forge is reported"
+  assert_eq "none" "$(printf '%s' "$out" | jq -r '.match')" "divergence no_adapter: match is none"
+  assert_eq "0" "$(printf '%s' "$out" | jq '.accounts | length')" "divergence no_adapter: accounts is empty"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.activeAccount')" "divergence no_adapter: activeAccount is null"
+  assert_eq "absent" "$([ -e "$gh_log" ] && echo present || echo absent)" "divergence no_adapter: gh is never invoked at all on a non-github forge"
+
+  rm -rf "$repo"
+  teardown_fake_gh_fixture
+}
+
+test_forge_account_divergence_cli_missing() {
+  echo ""
+  echo "=== divergence rung 2: gh absent from PATH -- skip/cli_missing ==="
+
+  source_forge_account_functions
+  setup_forge_no_gh_fixture
+
+  local repo out
+  repo=$(setup_forge_account_repo "https://github.com/owner/repo.git" "octocat@example.com" "octocat")
+
+  out=$(run_forge_account_divergence "$repo" "PATH=$NO_GH_PATH_DIR")
+
+  assert_eq "skip" "$(printf '%s' "$out" | jq -r '.decision')" "divergence cli_missing: decision is skip"
+  assert_eq "cli_missing" "$(printf '%s' "$out" | jq -r '.basis')" "divergence cli_missing: basis reuses the contract's own spelling"
+  assert_eq "github" "$(printf '%s' "$out" | jq -r '.forge')" "divergence cli_missing: forge still resolved to github"
+  assert_eq "github.com" "$(printf '%s' "$out" | jq -r '.host')" "divergence cli_missing: host still resolved from the remote"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.activeAccount')" "divergence cli_missing: activeAccount is null -- nothing was asked"
+  assert_eq "none" "$(printf '%s' "$out" | jq -r '.match')" "divergence cli_missing: match is none"
+
+  rm -rf "$repo"
+  teardown_forge_no_gh_fixture
+}
+
+test_forge_account_divergence_not_authenticated() {
+  echo ""
+  echo "=== divergence rung 3: gh present but logged out -- skip/not_authenticated ==="
+
+  source_forge_account_functions
+  setup_fake_gh_fixture
+
+  local repo out
+  repo=$(setup_forge_account_repo "https://github.com/owner/repo.git" "octocat@example.com" "octocat")
+
+  out=$(run_forge_account_divergence "$repo" "PATH=$FAKE_GH_DIR:$PATH" "FAKE_GH_AUTH_STATUS_MODE=none")
+
+  assert_eq "skip" "$(printf '%s' "$out" | jq -r '.decision')" "divergence not_authenticated: decision is skip"
+  assert_eq "not_authenticated" "$(printf '%s' "$out" | jq -r '.basis')" "divergence not_authenticated: basis reuses the contract's own spelling"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.activeAccount')" "divergence not_authenticated: activeAccount is null"
+  assert_eq "0" "$(printf '%s' "$out" | jq '.accounts | length')" "divergence not_authenticated: accounts is empty -- a refused status carries no list"
+  assert_eq "octocat@example.com" "$(printf '%s' "$out" | jq -r '.identity.email')" "divergence not_authenticated: the repository identity is still reported"
+
+  rm -rf "$repo"
+  teardown_fake_gh_fixture
+}
+
+test_forge_account_divergence_no_git_identity() {
+  echo ""
+  echo "=== divergence rung 4: repository has no git identity at all -- skip/no_git_identity ==="
+
+  source_forge_account_functions
+  setup_fake_gh_fixture
+
+  local repo out
+  # No email, no name -- and run_forge_account_divergence neuters the global
+  # and system config too, so `git config --get` genuinely finds nothing.
+  repo=$(setup_forge_account_repo "https://github.com/owner/repo.git")
+
+  out=$(run_forge_account_divergence "$repo" "PATH=$FAKE_GH_DIR:$PATH" \
+    "FAKE_GH_AUTH_STATUS_MODE=multi" "FAKE_GH_AUTH_ACCOUNT=octocat" "FAKE_GH_AUTH_OTHER_ACCOUNT=monalisa")
+
+  assert_eq "skip" "$(printf '%s' "$out" | jq -r '.decision')" "divergence no_git_identity: decision is skip"
+  assert_eq "no_git_identity" "$(printf '%s' "$out" | jq -r '.basis')" "divergence no_git_identity: basis names the outcome the contract enum does not model"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.identity.email')" "divergence no_git_identity: identity.email is JSON null when user.email is unset"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.identity.name')" "divergence no_git_identity: identity.name is JSON null when user.name is unset"
+  assert_eq "none" "$(printf '%s' "$out" | jq -r '.match')" "divergence no_git_identity: match is none"
+  # Two accounts are logged in, so the ONLY reason this is not `diverged` is
+  # that there is no identity to compare -- an unset key must not abort the
+  # CLI under `set -euo pipefail`, which is what the `|| ` on each read buys.
+  assert_eq "2" "$(printf '%s' "$out" | jq '.accounts | length')" "divergence no_git_identity: the account list is still read (so skip is the identity rung, not an empty keyring)"
+
+  rm -rf "$repo"
+  teardown_fake_gh_fixture
+}
+
+test_forge_account_divergence_identity_matches_active_noreply() {
+  echo ""
+  echo "=== divergence rung 5a: noreply address encodes the active login -- skip/identity_matches_active ==="
+
+  source_forge_account_functions
+  setup_fake_gh_fixture
+
+  local repo out
+  repo=$(setup_forge_account_repo "https://github.com/owner/repo.git" \
+    "12345+octocat@users.noreply.github.com" "Octo Cat")
+
+  out=$(run_forge_account_divergence "$repo" "PATH=$FAKE_GH_DIR:$PATH" \
+    "FAKE_GH_AUTH_STATUS_MODE=multi" "FAKE_GH_AUTH_ACCOUNT=octocat" "FAKE_GH_AUTH_OTHER_ACCOUNT=monalisa")
+
+  assert_eq "skip" "$(printf '%s' "$out" | jq -r '.decision')" "divergence noreply match: decision is skip -- an agreeing repository asks nothing"
+  assert_eq "identity_matches_active" "$(printf '%s' "$out" | jq -r '.basis')" "divergence noreply match: basis is identity_matches_active"
+  assert_eq "noreply" "$(printf '%s' "$out" | jq -r '.match')" "divergence noreply match: match records the authoritative confidence, not heuristic"
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.activeAccount')" "divergence noreply match: activeAccount is the login gh marks active"
+  # Two accounts are logged in, so this repository would be `diverged` if the
+  # match rung had not fired -- the assertion above is not passing by default.
+  assert_eq "2" "$(printf '%s' "$out" | jq '.accounts | length')" "divergence noreply match: a second account IS available, so the skip is the match, not single_account"
+
+  rm -rf "$repo"
+  teardown_fake_gh_fixture
+}
+
+test_forge_account_divergence_identity_matches_active_heuristic() {
+  echo ""
+  echo "=== divergence rung 5b: local-part heuristic matches, case-insensitively, ahead of single_account ==="
+
+  source_forge_account_functions
+  setup_fake_gh_fixture
+
+  local repo out
+  # Deliberately mixed case: GitHub logins are case-insensitive, so OctoCat
+  # must match the active `octocat`.
+  repo=$(setup_forge_account_repo "https://github.com/owner/repo.git" \
+    "OctoCat@example.com" "Octo Cat")
+
+  out=$(run_forge_account_divergence "$repo" "PATH=$FAKE_GH_DIR:$PATH" \
+    "FAKE_GH_AUTH_STATUS_MODE=single" "FAKE_GH_AUTH_ACCOUNT=octocat")
+
+  assert_eq "skip" "$(printf '%s' "$out" | jq -r '.decision')" "divergence heuristic match: decision is skip"
+  assert_eq "identity_matches_active" "$(printf '%s' "$out" | jq -r '.basis')" "divergence heuristic match: identity_matches_active is checked BEFORE single_account, so the informative basis wins over the incidental one"
+  assert_eq "heuristic" "$(printf '%s' "$out" | jq -r '.match')" "divergence heuristic match: match records heuristic, not noreply"
+  assert_eq "1" "$(printf '%s' "$out" | jq '.accounts | length')" "divergence heuristic match: exactly one account is logged in (the rung single_account would otherwise claim)"
+
+  rm -rf "$repo"
+  teardown_fake_gh_fixture
+}
+
+test_forge_account_divergence_single_account() {
+  echo ""
+  echo "=== divergence rung 6: identity disagrees but only one account is logged in -- skip/single_account ==="
+
+  source_forge_account_functions
+  setup_fake_gh_fixture
+
+  local repo out
+  repo=$(setup_forge_account_repo "https://github.com/owner/repo.git" \
+    "someone-else@example.com" "Some One")
+
+  out=$(run_forge_account_divergence "$repo" "PATH=$FAKE_GH_DIR:$PATH" \
+    "FAKE_GH_AUTH_STATUS_MODE=single" "FAKE_GH_AUTH_ACCOUNT=octocat")
+
+  assert_eq "skip" "$(printf '%s' "$out" | jq -r '.decision')" "divergence single_account: decision is skip -- there is no alternative account to offer"
+  assert_eq "single_account" "$(printf '%s' "$out" | jq -r '.basis')" "divergence single_account: the basis records WHY it stayed quiet"
+  assert_eq "none" "$(printf '%s' "$out" | jq -r '.match')" "divergence single_account: match is none -- the identity did NOT agree"
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.activeAccount')" "divergence single_account: activeAccount is still reported"
+  assert_eq "1" "$(printf '%s' "$out" | jq '.accounts | length')" "divergence single_account: exactly one account in the list"
+
+  rm -rf "$repo"
+  teardown_fake_gh_fixture
+}
+
+test_forge_account_divergence_diverged() {
+  echo ""
+  echo "=== divergence rung 7: identity disagrees and another account is available -- ask/diverged ==="
+
+  source_forge_account_functions
+  setup_fake_gh_fixture
+
+  local repo out
+  # The repository's identity points at monalisa; gh is acting as octocat.
+  # monalisa IS logged in, so there is a remedy to offer.
+  repo=$(setup_forge_account_repo "https://github.com/owner/repo.git" \
+    "monalisa@example.com" "Mona Lisa")
+
+  out=$(run_forge_account_divergence "$repo" "PATH=$FAKE_GH_DIR:$PATH" \
+    "FAKE_GH_AUTH_STATUS_MODE=multi" "FAKE_GH_AUTH_ACCOUNT=octocat" "FAKE_GH_AUTH_OTHER_ACCOUNT=monalisa")
+
+  assert_eq "ask" "$(printf '%s' "$out" | jq -r '.decision')" "divergence diverged: decision is ask"
+  assert_eq "diverged" "$(printf '%s' "$out" | jq -r '.basis')" "divergence diverged: basis is diverged"
+  assert_eq "none" "$(printf '%s' "$out" | jq -r '.match')" "divergence diverged: match is none -- no derived login agreed with the ACTIVE account"
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.activeAccount')" "divergence diverged: activeAccount is the active login, not the one the identity suggests"
+  assert_eq "monalisa,octocat" "$(printf '%s' "$out" | jq -r '.accounts | join(",")')" "divergence diverged: the account the identity points at is present in the list a later story can offer"
+  assert_eq "monalisa@example.com" "$(printf '%s' "$out" | jq -r '.identity.email')" "divergence diverged: the identity that drove the verdict is echoed back"
+  assert_eq "Mona Lisa" "$(printf '%s' "$out" | jq -r '.identity.name')" "divergence diverged: user.name is echoed back even though it is not login-shaped"
+
+  rm -rf "$repo"
+  teardown_fake_gh_fixture
+}
+
+test_forge_auth_status_github_accounts_list_order_and_dedup() {
+  echo ""
+  echo "=== _forge_auth_status_github: accounts list is gh's own order, de-duplicated, one parse pass ==="
+
+  source_forge_account_functions
+  setup_fake_gh_fixture
+
+  local out
+  out=$(PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_AUTH_STATUS_MODE=multi \
+    FAKE_GH_AUTH_ACCOUNT=octocat FAKE_GH_AUTH_OTHER_ACCOUNT=monalisa \
+    _forge_auth_status_github "github.com")
+
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.authenticated')" "accounts list: authenticated keeps its current semantics"
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.account')" "accounts list: account is still the ONE marked active"
+  assert_eq "monalisa,octocat" "$(printf '%s' "$out" | jq -r '.accounts | join(",")')" "accounts list: every login, in the order gh printed them (inactive first here, exactly as the fixture prints)"
+
+  # gh lists the same login once per host it is logged into. The list must
+  # de-duplicate, and the no-marker fallback at the end of the parse must
+  # still name the sole account found.
+  gh() {
+    printf '%s\n' "github.com" \
+      "  Logged in to github.com account octocat (keyring)" \
+      "ghe.example.com" \
+      "  Logged in to ghe.example.com account octocat (keyring)"
+  }
+  out=$(_forge_auth_status_github "")
+  unset -f gh
+
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.accounts | join(",")')" "accounts list: the same login seen on two hosts appears exactly once"
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.account')" "accounts list: the no-marker fallback still reports the sole account found as active"
+
+  # A refused status carries no list at all.
+  out=$(PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_AUTH_STATUS_MODE=none _forge_auth_status_github "github.com")
+  assert_eq "0" "$(printf '%s' "$out" | jq '.accounts | length')" "accounts list: [] when gh refused"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.authenticated')" "accounts list: authenticated false when gh refused"
+
+  teardown_fake_gh_fixture
+}
+
+test_forge_auth_status_envelope_has_no_accounts_field() {
+  echo ""
+  echo "=== forge-auth-status: the new accounts array stays inside the private helper ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  setup_fake_gh_fixture
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local out
+  out=$(PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_AUTH_STATUS_MODE=multi \
+    FAKE_GH_AUTH_ACCOUNT=octocat FAKE_GH_AUTH_OTHER_ACCOUNT=monalisa "$CLI" forge-auth-status)
+
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.data | has("accounts")')" \
+    "auth-status envelope: data has no accounts key -- forge-contract.md defines this envelope's fields and the builder names each one by hand"
+  assert_eq "forge,host,authenticated,account,identityRequested,identityHonored" \
+    "$(printf '%s' "$out" | jq -r '.data | keys_unsorted | join(",")')" \
+    "auth-status envelope: the data field set is byte-for-byte the one that shipped"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r 'has("accounts")')" \
+    "auth-status envelope: no accounts key leaked to the top level either"
+
+  popd >/dev/null
+  teardown_fake_gh_fixture
+  teardown_detect_forge_fixture
+}
+
+# ---------------------------------------------------------------------------
+# HOST SAFETY -- the `--hostname null` trap must not reopen here.
+#
+# The two tests below run with FAKE_GH_AUTH_STRICT_HOSTNAME=1, the opt-in
+# mode that makes the fake gh REJECT a hostname it has no session for, the
+# way real gh does. That is what makes these tests able to fail: under the
+# lenient default the fake gh ignores --hostname entirely, so a bogus value
+# would sail through and the log assertion would be the only thing standing.
+# ---------------------------------------------------------------------------
+
+test_forge_account_divergence_hostname_is_the_real_host() {
+  echo ""
+  echo "=== divergence host safety: a real host reaches gh verbatim, under strict hostname checking ==="
+
+  source_forge_account_functions
+  setup_fake_gh_fixture
+
+  local repo gh_log out
+  repo=$(setup_forge_account_repo "https://github.com/owner/repo.git" "monalisa@example.com" "Mona Lisa")
+  gh_log="$FAKE_GH_DIR/real-host.log"
+
+  out=$(run_forge_account_divergence "$repo" "PATH=$FAKE_GH_DIR:$PATH" "FAKE_GH_LOG=$gh_log" \
+    "FAKE_GH_AUTH_STRICT_HOSTNAME=1" "FAKE_GH_AUTH_HOST=github.com" \
+    "FAKE_GH_AUTH_STATUS_MODE=multi" "FAKE_GH_AUTH_ACCOUNT=octocat" "FAKE_GH_AUTH_OTHER_ACCOUNT=monalisa")
+
+  assert_eq "github.com" "$(printf '%s' "$out" | jq -r '.host')" "divergence real host: the verdict reports the resolved host"
+  assert_contains "--hostname github.com" "$(cat "$gh_log")" "divergence real host: gh was handed the real hostname"
+  assert_gh_log_lacks '--hostname null' "$gh_log" "divergence real host: gh is never handed --hostname null"
+  # Under strict checking a wrong hostname exits 1, which _forge_auth_status_
+  # github reports as a CONFIRMED authenticated:false -- so a not_authenticated
+  # basis here would be the exact bug, dressed up as a definitive answer.
+  assert_eq "diverged" "$(printf '%s' "$out" | jq -r '.basis')" "divergence real host: gh answered for real (not the confirmed-looking false a rejected hostname produces)"
+
+  rm -rf "$repo"
+  teardown_fake_gh_fixture
+}
+
+test_forge_account_divergence_forge_type_override_host_is_json_null() {
+  echo ""
+  echo "=== divergence host safety: AIMI_FORGE_TYPE's JSON null host never becomes the string \"null\" ==="
+
+  source_forge_account_functions
+  setup_fake_gh_fixture
+
+  local repo gh_log out
+  # AIMI_FORGE_TYPE=github is what makes _detect_forge emit host: null in the
+  # first place -- the exact input that opened this trap the first time.
+  repo=$(setup_forge_account_repo "https://github.com/owner/repo.git" "monalisa@example.com" "Mona Lisa")
+  gh_log="$FAKE_GH_DIR/override-host.log"
+
+  out=$(run_forge_account_divergence "$repo" "PATH=$FAKE_GH_DIR:$PATH" "FAKE_GH_LOG=$gh_log" \
+    "AIMI_FORGE_TYPE=github" "FAKE_GH_AUTH_STRICT_HOSTNAME=1" "FAKE_GH_AUTH_HOST=github.com" \
+    "FAKE_GH_AUTH_STATUS_MODE=multi" "FAKE_GH_AUTH_ACCOUNT=octocat" "FAKE_GH_AUTH_OTHER_ACCOUNT=monalisa")
+
+  # jq -r prints BOTH a JSON null and the string "null" as `null`, so only
+  # `| type` can tell the fixed shape from the broken one.
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.host | type')" \
+    "divergence override: verdict host is a JSON null, never the 4-character string \"null\""
+  assert_gh_log_lacks '--hostname null' "$gh_log" "divergence override: gh is never handed --hostname null"
+  assert_gh_log_lacks '--hostname' "$gh_log" "divergence override: with no host at all gh is invoked with no --hostname flag whatsoever"
+  assert_eq "diverged" "$(printf '%s' "$out" | jq -r '.basis')" \
+    "divergence override: the real session survives the override (a rejected hostname would have read as a confirmed not_authenticated)"
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.activeAccount')" \
+    "divergence override: the real active account survives the override"
+
+  rm -rf "$repo"
+  teardown_fake_gh_fixture
+}
+
+test_forge_account_divergence_is_read_only() {
+  echo ""
+  echo "=== divergence: read-only -- no switch, no token, no store, nothing created ==="
+
+  source_forge_account_functions
+  setup_fake_gh_fixture
+
+  local repo gh_log sandbox_home before after out
+  repo=$(setup_forge_account_repo "https://github.com/owner/repo.git" "monalisa@example.com" "Mona Lisa")
+  gh_log="$FAKE_GH_DIR/read-only.log"
+  sandbox_home=$(mktemp -d)
+
+  before=$(find "$repo" -mindepth 1 | sort)
+
+  # Drive the two rungs that actually reach gh, sharing one log. HOME and
+  # XDG_CONFIG_HOME point at a throwaway directory -- deliberately NOT
+  # AIMI_CONFIG_DIR, which this story never sets, so an accidental store
+  # write would land inside the sandbox where it is visible rather than in
+  # the developer's real ~/.config.
+  out=$(run_forge_account_divergence "$repo" "PATH=$FAKE_GH_DIR:$PATH" "FAKE_GH_LOG=$gh_log" \
+    "HOME=$sandbox_home" "XDG_CONFIG_HOME=$sandbox_home/.config" \
+    "FAKE_GH_AUTH_STATUS_MODE=multi" "FAKE_GH_AUTH_ACCOUNT=octocat" "FAKE_GH_AUTH_OTHER_ACCOUNT=monalisa")
+  assert_eq "ask" "$(printf '%s' "$out" | jq -r '.decision')" "divergence read-only: the diverged run under test really did run"
+
+  out=$(run_forge_account_divergence "$repo" "PATH=$FAKE_GH_DIR:$PATH" "FAKE_GH_LOG=$gh_log" \
+    "HOME=$sandbox_home" "XDG_CONFIG_HOME=$sandbox_home/.config" \
+    "FAKE_GH_AUTH_STATUS_MODE=single" "FAKE_GH_AUTH_ACCOUNT=monalisa")
+  assert_eq "identity_matches_active" "$(printf '%s' "$out" | jq -r '.basis')" "divergence read-only: the agreeing run under test really did run"
+
+  assert_gh_log_lacks 'auth switch' "$gh_log" "divergence read-only: gh auth switch is never invoked"
+  assert_gh_log_lacks 'auth token' "$gh_log" "divergence read-only: gh auth token is never invoked"
+  assert_eq "" "$(grep -v '^auth status' "$gh_log")" "divergence read-only: every gh invocation logged is an auth status call and nothing else"
+
+  after=$(find "$repo" -mindepth 1 | sort)
+  assert_eq "$before" "$after" "divergence read-only: not one file is created or removed inside the repository"
+  assert_eq "absent" "$([ -e "$sandbox_home/.config/aimi" ] && echo present || echo absent)" "divergence read-only: no aimi config directory is created -- this story has no store and no ordering dependency on one"
+  assert_eq "absent" "$([ -e "$sandbox_home/.config" ] && echo present || echo absent)" "divergence read-only: the sandbox config root is not created either"
+
+  rm -rf "$repo" "$sandbox_home"
+  teardown_fake_gh_fixture
+}
+
+test_forge_identity_logins_derivation_table() {
+  echo ""
+  echo "=== _forge_identity_logins: noreply is authoritative, everything else is a labelled guess ==="
+
+  source_forge_account_functions
+
+  local out
+
+  out=$(_forge_identity_logins "12345+octocat@users.noreply.github.com" "Octo Cat")
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.[0].login')" "identity logins: the noreply form's <id>+<login> yields the login exactly"
+  assert_eq "noreply" "$(printf '%s' "$out" | jq -r '.[0].confidence')" "identity logins: the noreply form is labelled authoritative"
+  assert_eq "1" "$(printf '%s' "$out" | jq 'length')" "identity logins: an authoritative answer is emitted alone -- no heuristic can improve on it"
+
+  out=$(_forge_identity_logins "octocat@users.NOREPLY.GitHub.com" "Octo Cat")
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.[0].login')" "identity logins: the id prefix is optional and the domain compares case-insensitively"
+  assert_eq "noreply" "$(printf '%s' "$out" | jq -r '.[0].confidence')" "identity logins: a mixed-case noreply domain is still authoritative"
+
+  out=$(_forge_identity_logins "octocat@example.com" "Octo Cat")
+  assert_eq "octocat" "$(printf '%s' "$out" | jq -r '.[0].login')" "identity logins: an ordinary local-part is a candidate"
+  assert_eq "heuristic" "$(printf '%s' "$out" | jq -r '.[0].confidence')" "identity logins: an ordinary local-part is labelled a guess"
+  assert_eq "1" "$(printf '%s' "$out" | jq 'length')" "identity logins: \"Octo Cat\" is rejected -- the space is what the login shape test catches"
+
+  out=$(_forge_identity_logins "no.dots.allowed@example.com" "monalisa")
+  assert_eq "monalisa" "$(printf '%s' "$out" | jq -r '.[0].login')" "identity logins: a login-shaped user.name is a candidate when the local-part is not"
+  assert_eq "heuristic" "$(printf '%s' "$out" | jq -r '.[0].confidence')" "identity logins: a login-shaped user.name is labelled a guess"
+
+  out=$(_forge_identity_logins "99+monalisa@example.com" "monalisa")
+  assert_eq "monalisa" "$(printf '%s' "$out" | jq -r '.[0].login')" "identity logins: a leading <digits>+ is stripped off a non-noreply local-part too"
+  assert_eq "1" "$(printf '%s' "$out" | jq 'length')" "identity logins: a user.name that duplicates the local-part candidate is not listed twice"
+
+  out=$(_forge_identity_logins "first.last@example.com" "First Last")
+  assert_eq "0" "$(printf '%s' "$out" | jq 'length')" "identity logins: [] when nothing login-shaped can be derived at all"
+
+  out=$(_forge_identity_logins "" "")
+  assert_eq "0" "$(printf '%s' "$out" | jq 'length')" "identity logins: [] on an empty identity"
+}
+
+test_forge_git_identity_unset_keys_do_not_abort() {
+  echo ""
+  echo "=== _forge_git_identity: an unset key is JSON null, never an aborted CLI ==="
+
+  source_forge_account_functions
+
+  local repo out
+  repo=$(setup_forge_account_repo "https://github.com/owner/repo.git" "octocat@example.com")
+
+  out=$(cd "$repo" && export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null && _forge_git_identity)
+  assert_eq "octocat@example.com" "$(printf '%s' "$out" | jq -r '.email')" "git identity: user.email is read unqualified"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.name')" "git identity: an unset user.name is JSON null, and git config --get exiting 1 did not abort anything"
+
+  # Repository config must win over the global one -- the read is deliberately
+  # NOT --local, so it resolves the identity git would actually stamp here.
+  local global_config
+  global_config=$(mktemp)
+  printf '%s\n' "[user]" "	email = global@example.com" "	name = globaluser" > "$global_config"
+
+  out=$(cd "$repo" && export GIT_CONFIG_GLOBAL="$global_config" GIT_CONFIG_SYSTEM=/dev/null && _forge_git_identity)
+  assert_eq "octocat@example.com" "$(printf '%s' "$out" | jq -r '.email')" "git identity: repository config wins over global for a key set in both"
+  assert_eq "globaluser" "$(printf '%s' "$out" | jq -r '.name')" "git identity: global config fills in a key the repository does not set"
+
+  rm -f "$global_config"
+  rm -rf "$repo"
+}
+
+# ============================================================================
+# Forge account selection -- the remembered answer (cmd_forge_account_select)
+# ============================================================================
+#
+# THESE TESTS DRIVE THE REAL CLI AS A SUBPROCESS, not sed+eval'd functions.
+# Two reasons, both deliberate:
+#   1. The acceptance contract includes the dispatcher arm and the help entry,
+#      which a sourced function cannot exercise at all.
+#   2. This phase already lost a merge to a sourcing-helper NAME COLLISION --
+#      US-001 and US-002 each defined `source_forge_account_functions`, bash
+#      kept the last definition, and six assertions failed with exit 127 in the
+#      merge even though each branch was green alone. Adding no third sourcing
+#      helper removes that whole failure class from this story.
+#
+# Every scenario is offline: throwaway local git repositories, the shared
+# fake-gh PATH stub, and an AIMI_CONFIG_DIR pointed at a mktemp -d so the real
+# ~/.config/aimi/ is never read or written. Every assertion is unconditional --
+# no early return, no environment-dependent assertion count -- so the totals are
+# identical whether or not the suite runs from a worktree (deliberate contrast
+# with test_init_session_writes_global_cache, whose branches legitimately differ).
+
+# Creates a throwaway repository plus an isolated config dir for one account
+# selection scenario, exporting FORGE_SELECT_REPO and FORGE_SELECT_CONFIG.
+# The config dir is NOT created on disk -- the side-effect test needs to prove
+# --check does not create it, and every write test creates it itself.
+# Usage: setup_forge_account_select_env [remote-url] [email] [name]
+setup_forge_account_select_env() {
+  local remote_url="${1:-https://github.com/owner/repo.git}"
+  local email="${2:-first.last@example.com}" name="${3:-First Last}"
+  FORGE_SELECT_TMPDIR=$(mktemp -d)
+  FORGE_SELECT_CONFIG="$FORGE_SELECT_TMPDIR/aimi-config"
+  FORGE_SELECT_REPO="$FORGE_SELECT_TMPDIR/repo"
+  mkdir -p "$FORGE_SELECT_REPO"
+  git -C "$FORGE_SELECT_REPO" init >/dev/null 2>&1
+  git -C "$FORGE_SELECT_REPO" remote add origin "$remote_url" >/dev/null 2>&1
+  if [ -n "$email" ]; then
+    git -C "$FORGE_SELECT_REPO" config user.email "$email"
+  fi
+  if [ -n "$name" ]; then
+    git -C "$FORGE_SELECT_REPO" config user.name "$name"
+  fi
+}
+
+teardown_forge_account_select_env() {
+  rm -rf "$FORGE_SELECT_TMPDIR"
+  unset FORGE_SELECT_TMPDIR FORGE_SELECT_CONFIG FORGE_SELECT_REPO
+}
+
+# Runs `aimi-cli.sh forge-account-select <args>` inside the scenario repository,
+# in a subshell so nothing it exports survives. GIT_CONFIG_GLOBAL/SYSTEM are
+# neutered to /dev/null so the developer's own user.email never leaks into an
+# assertion; FAKE_GH_* knobs are inherited from the caller.
+run_forge_account_select() {
+  (
+    cd "$FORGE_SELECT_REPO" || exit 1
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+    export AIMI_CONFIG_DIR="$FORGE_SELECT_CONFIG"
+    export PATH="$FAKE_GH_DIR:$PATH"
+    "$CLI" forge-account-select "$@"
+  )
+}
+
+# CHANGELOG:604's analogue, and the single most consequential test in this
+# story. `models-prompt-check` returned `skip` whenever models.json existed,
+# even when the current host's sub-table was missing or empty. Here the store
+# file exists the moment the FIRST host answers, so a check that decided on
+# file existence would silence every host afterwards. All four degenerate
+# inputs must yield ask.
+test_forge_account_select_check_decides_on_content_never_existence() {
+  echo ""
+  echo "=== forge-account-select --check: absent, foreign-key, empty and malformed stores ALL ask ==="
+
+  setup_fake_gh_fixture
+  setup_forge_account_select_env
+
+  local out
+  # (1) Store file absent entirely.
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check)
+  assert_eq "ask" "$(printf '%s' "$out" | jq -r '.decision')" "check/absent store: asks"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.stored')" "check/absent store: stored is null, not an invented answer"
+
+  # The config directory itself must not have been created by the read.
+  assert_eq "absent" "$([ -e "$FORGE_SELECT_CONFIG" ] && echo present || echo absent)" \
+    "check/absent store: --check did not create the config directory"
+
+  # (2) Store present but holding no entry for THIS host -- the shipped bug's
+  # exact shape. Seeded with a sibling host so the file is genuinely non-empty.
+  mkdir -p "$FORGE_SELECT_CONFIG"
+  local store
+  store=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --record-active | jq -r '.store')
+  printf '%s\n' '{"gitlab.com":{"mode":"account","account":"someone","recordedAt":"2026-01-01T00:00:00Z"}}' > "$store"
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check)
+  assert_eq "ask" "$(printf '%s' "$out" | jq -r '.decision')" "check/foreign key only: asks -- a store that exists is not an answer"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.stored')" "check/foreign key only: stored is null for this host"
+
+  # (3) Store present but empty.
+  : > "$store"
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check)
+  assert_eq "ask" "$(printf '%s' "$out" | jq -r '.decision')" "check/empty store: asks rather than skipping silently"
+
+  # (4) Store present but malformed JSON.
+  printf '%s\n' '{"github.com": {"mode": "acc' > "$store"
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check)
+  assert_eq "ask" "$(printf '%s' "$out" | jq -r '.decision')" "check/malformed store: asks rather than skipping silently"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.stored')" "check/malformed store: stored is null"
+
+  # (5) An entry that is present but does not ENCODE an answer -- the empty
+  # account string, which is the rejected encoding of the opt-out. Content
+  # checking applies to the entry, not just the document.
+  printf '%s\n' '{"github.com":{"mode":"account","account":""}}' > "$store"
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check)
+  assert_eq "ask" "$(printf '%s' "$out" | jq -r '.decision')" "check/empty account string: asks -- \"\" is not a usable answer"
+
+  teardown_forge_account_select_env
+  teardown_fake_gh_fixture
+}
+
+# CHANGELOG:487's analogue on the RECORD path. Named after that fix's own
+# regression test, test_detect_models_default_mode_preserves_other_host: the
+# defect was `detect-models` rebuilding the document with `jq -n` and dropping
+# the inactive host's sub-table on every invocation.
+test_forge_account_select_record_preserves_other_host() {
+  echo ""
+  echo "=== forge-account-select --record: the OTHER host's entry survives byte-for-byte ==="
+
+  setup_fake_gh_fixture
+  setup_forge_account_select_env
+
+  mkdir -p "$FORGE_SELECT_CONFIG"
+  local store
+  store=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --record-active | jq -r '.store')
+
+  # Seed two host keys in one document, the way a repository with remotes on
+  # two forges legitimately ends up.
+  printf '%s\n' '{"github.com":{"mode":"account","account":"octocat","recordedAt":"2026-01-01T00:00:00Z"},"gitlab.com":{"mode":"account","account":"monalisa","recordedAt":"2026-02-02T00:00:00Z"}}' > "$store"
+  local sibling_before
+  sibling_before=$(jq -c '."gitlab.com"' "$store")
+
+  FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --record newlogin >/dev/null
+
+  assert_eq "newlogin" "$(jq -r '."github.com".account' "$store")" "record preserves other host: this host's entry was replaced"
+  assert_eq "$sibling_before" "$(jq -c '."gitlab.com"' "$store")" "record preserves other host: gitlab.com's entry is byte-for-byte unchanged"
+  assert_eq "2" "$(jq 'keys | length' "$store")" "record preserves other host: the document still holds both keys"
+
+  # --record-active takes the same merge path, so it gets the same guarantee.
+  FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --record-active >/dev/null
+  assert_eq "active" "$(jq -r '."github.com".mode' "$store")" "record-active preserves other host: this host's entry became the active-account answer"
+  assert_eq "$sibling_before" "$(jq -c '."gitlab.com"' "$store")" "record-active preserves other host: gitlab.com's entry is still byte-for-byte unchanged"
+
+  teardown_forge_account_select_env
+  teardown_fake_gh_fixture
+}
+
+# The same regression on the RESELECT path, which is the trap: rewriting the
+# file without the entry is the obvious implementation and it destroys every
+# other host's answer.
+test_forge_account_select_reselect_preserves_other_host() {
+  echo ""
+  echo "=== forge-account-select --reselect: removes ONLY this host's entry ==="
+
+  setup_fake_gh_fixture
+  setup_forge_account_select_env
+
+  mkdir -p "$FORGE_SELECT_CONFIG"
+  local store
+  store=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --record-active | jq -r '.store')
+
+  printf '%s\n' '{"github.com":{"mode":"account","account":"octocat","recordedAt":"2026-01-01T00:00:00Z"},"gitlab.com":{"mode":"active","recordedAt":"2026-02-02T00:00:00Z"}}' > "$store"
+  local sibling_before
+  sibling_before=$(jq -c '."gitlab.com"' "$store")
+
+  local out
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --reselect)
+
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.cleared')" "reselect preserves other host: reports that an answer was actually cleared"
+  assert_eq "false" "$(jq 'has("github.com")' "$store")" "reselect preserves other host: this host's key is gone"
+  assert_eq "$sibling_before" "$(jq -c '."gitlab.com"' "$store")" "reselect preserves other host: gitlab.com's entry is byte-for-byte unchanged, mode discriminator and timestamp included"
+  assert_eq "1" "$(jq 'keys | length' "$store")" "reselect preserves other host: exactly one key was removed"
+
+  # Reselecting again is idempotent and still does not touch the sibling.
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --reselect)
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.cleared')" "reselect twice: reports that there was nothing left to clear"
+  assert_eq "$sibling_before" "$(jq -c '."gitlab.com"' "$store")" "reselect twice: gitlab.com's entry is still untouched"
+
+  teardown_forge_account_select_env
+  teardown_fake_gh_fixture
+}
+
+# CHANGELOG:615 verbatim: the models marker "suppressed the prompt even after
+# the config was deleted, leaving the user silently stuck ... with no way to
+# re-trigger the prompt short of also deleting the marker." The answer must be
+# the ONLY state, so both --reselect and deleting the file re-trigger.
+test_forge_account_select_answer_is_revocable_and_is_the_only_state() {
+  echo ""
+  echo "=== forge-account-select: the answer is the only state -- revocable, with no companion marker ==="
+
+  setup_fake_gh_fixture
+  setup_forge_account_select_env
+
+  local out store
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --record monalisa)
+  store=$(printf '%s' "$out" | jq -r '.store')
+
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check)
+  assert_eq "skip" "$(printf '%s' "$out" | jq -r '.decision')" "revocation: a recorded answer stops the question"
+  assert_eq "answer_recorded" "$(printf '%s' "$out" | jq -r '.basis')" "revocation: the basis names the recorded answer, not a divergence verdict"
+
+  # (a) --reselect re-triggers.
+  FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --reselect >/dev/null
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check)
+  assert_eq "ask" "$(printf '%s' "$out" | jq -r '.decision')" "revocation: --reselect makes the very next --check ask again"
+
+  # (b) Deleting the answer by hand does exactly the same. This is the half the
+  # models flow got wrong: there deleting the config left the marker behind and
+  # the prompt stayed suppressed.
+  FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --record monalisa >/dev/null
+  rm -f "$store"
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check)
+  assert_eq "ask" "$(printf '%s' "$out" | jq -r '.decision')" "revocation: deleting the store by hand re-triggers the question too"
+
+  # (c) There is no second file to also delete. After a full record cycle the
+  # config dir holds the store and its lock -- and nothing marker-shaped that
+  # could outlive the answer.
+  FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --record monalisa >/dev/null
+  local stray
+  stray=$(find "$FORGE_SELECT_CONFIG" -maxdepth 1 -type f ! -name 'forge-account-*.json' ! -name '*.lock' 2>/dev/null | wc -l | tr -d ' ')
+  assert_eq "0" "$stray" "revocation: no companion marker or sentinel file exists that could survive the answer's deletion"
+
+  teardown_forge_account_select_env
+  teardown_fake_gh_fixture
+}
+
+# Success criterion 3: "always use the active account" is a real, persisted
+# answer, distinguishable from "not asked yet". Storing "" or omitting the
+# entry are both rejected as encodings precisely because neither is
+# distinguishable from absent.
+test_forge_account_select_record_active_is_a_first_class_answer() {
+  echo ""
+  echo "=== forge-account-select --record-active: the opt-out is a stored value, not an absence ==="
+
+  setup_fake_gh_fixture
+  setup_forge_account_select_env
+
+  local out store
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --record-active)
+  store=$(printf '%s' "$out" | jq -r '.store')
+
+  assert_eq "active" "$(printf '%s' "$out" | jq -r '.stored.mode')" "record-active: the entry carries a mode discriminator"
+  assert_eq "false" "$(jq '."github.com" | has("account")' "$store")" "record-active: no account key is invented for the opt-out"
+  assert_eq "true" "$(jq '."github.com" | has("recordedAt")' "$store")" "record-active: the entry records when it was answered"
+
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check)
+  assert_eq "skip" "$(printf '%s' "$out" | jq -r '.decision')" "record-active: a later --check honors the opt-out"
+  assert_eq "active" "$(printf '%s' "$out" | jq -r '.stored.mode')" "record-active: --check tells \"chose the active account\" apart from \"not asked\""
+
+  # A named account is the other discriminator value, and reads back whole.
+  FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --record monalisa >/dev/null
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check)
+  assert_eq "account" "$(printf '%s' "$out" | jq -r '.stored.mode')" "record <login>: the mode discriminator says account"
+  assert_eq "monalisa" "$(printf '%s' "$out" | jq -r '.stored.account')" "record <login>: the login reads back verbatim"
+
+  teardown_forge_account_select_env
+  teardown_fake_gh_fixture
+}
+
+# --check must write NOTHING. That is the mechanical guarantee behind
+# interactivity.md's agent-mode rule: an auto-answer that got persisted would
+# let one CI run answer the question permanently for every human afterwards.
+test_forge_account_select_check_has_zero_side_effects() {
+  echo ""
+  echo "=== forge-account-select --check: creates nothing, writes nothing, mutates nothing ==="
+
+  setup_fake_gh_fixture
+  setup_forge_account_select_env
+
+  # (a) Virgin config dir: --check must not bring it into existence.
+  FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check >/dev/null
+  assert_eq "absent" "$([ -e "$FORGE_SELECT_CONFIG" ] && echo present || echo absent)" \
+    "check side effects: a virgin AIMI_CONFIG_DIR is still absent afterwards"
+
+  # (b) Pre-existing store: byte-identical before and after, mtime included.
+  local store checksum_before checksum_after
+  store=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --record monalisa | jq -r '.store')
+  checksum_before=$(cksum < "$store")
+  FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check >/dev/null
+  checksum_after=$(cksum < "$store")
+  assert_eq "$checksum_before" "$checksum_after" "check side effects: a pre-existing store is byte-identical after --check"
+
+  # (c) And --check on a repository whose answer is recorded creates no extra
+  # file in the config directory either.
+  local files_before files_after
+  files_before=$(find "$FORGE_SELECT_CONFIG" -maxdepth 1 | sort)
+  FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check >/dev/null
+  files_after=$(find "$FORGE_SELECT_CONFIG" -maxdepth 1 | sort)
+  assert_eq "$files_before" "$files_after" "check side effects: --check adds no file to the config directory"
+
+  teardown_forge_account_select_env
+  teardown_fake_gh_fixture
+}
+
+# AIMI_FORGE_IDENTITY names the account to act as, so the question is moot --
+# and the skip is decided without recording anything, matching this file's
+# env-over-stored convention (AIMI_FORGE_TYPE short-circuits detection).
+test_forge_account_select_check_identity_override_skips_and_records_nothing() {
+  echo ""
+  echo "=== forge-account-select --check: AIMI_FORGE_IDENTITY makes the question moot ==="
+
+  setup_fake_gh_fixture
+  setup_forge_account_select_env
+
+  local out
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi AIMI_FORGE_IDENTITY=monalisa run_forge_account_select --check)
+  assert_eq "skip" "$(printf '%s' "$out" | jq -r '.decision')" "identity override: decision is skip"
+  assert_eq "identity_override" "$(printf '%s' "$out" | jq -r '.basis')" "identity override: the basis names the override"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.stored')" "identity override: nothing was read back as an answer"
+  assert_eq "absent" "$([ -e "$FORGE_SELECT_CONFIG" ] && echo present || echo absent)" \
+    "identity override: nothing was recorded -- the config directory does not exist"
+
+  # Without the override the same repository asks, so the skip above is
+  # attributable to the override and not to the fixture being quiet.
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check)
+  assert_eq "ask" "$(printf '%s' "$out" | jq -r '.decision')" "identity override: the same repository asks once the override is gone"
+
+  teardown_forge_account_select_env
+  teardown_fake_gh_fixture
+}
+
+# Commit d1b19ca's lesson, applied to a keyed store. AIMI_FORGE_TYPE makes
+# _detect_forge emit a JSON null host, and a bare `jq -r '.host'` renders that
+# as the 4-character TEXT "null" -- non-empty, so it survives every emptiness
+# check. There it reached `gh auth status --hostname null` and the refusal read
+# as a confirmed not-authenticated answer. Here it would key an entry under the
+# literal host "null", which no later invocation resolving a real host would
+# ever find again.
+test_forge_account_select_null_host_never_becomes_a_key() {
+  echo ""
+  echo "=== forge-account-select: a JSON null host never becomes the literal key \"null\" ==="
+
+  setup_fake_gh_fixture
+  setup_forge_account_select_env
+
+  local out
+  out=$(FAKE_GH_AUTH_STATUS_MODE=multi AIMI_FORGE_TYPE=github run_forge_account_select --check)
+  assert_eq "skip" "$(printf '%s' "$out" | jq -r '.decision')" "null host: --check skips rather than asking a question whose answer cannot be keyed"
+  assert_eq "no_host" "$(printf '%s' "$out" | jq -r '.basis')" "null host: the basis names the missing host"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.host')" "null host: host is reported as JSON null, not the string \"null\""
+
+  # The write modes refuse outright rather than inventing a key.
+  local rc=0 stderr_file="$FORGE_SELECT_TMPDIR/stderr-null-host"
+  FAKE_GH_AUTH_STATUS_MODE=multi AIMI_FORGE_TYPE=github run_forge_account_select --record someone \
+    >/dev/null 2>"$stderr_file" || rc=$?
+  assert_exit_code "1" "$rc" "null host: --record refuses rather than keying an entry under \"null\""
+  assert_stderr_contains "no forge host resolved" "$(cat "$stderr_file")" "null host: the refusal says why"
+  assert_eq "absent" "$([ -e "$FORGE_SELECT_CONFIG" ] && echo present || echo absent)" \
+    "null host: the refused write created nothing at all"
+
+  rc=0
+  FAKE_GH_AUTH_STATUS_MODE=multi AIMI_FORGE_TYPE=github run_forge_account_select --reselect \
+    >/dev/null 2>"$stderr_file" || rc=$?
+  assert_exit_code "1" "$rc" "null host: --reselect refuses too, rather than deleting a key named \"null\""
+
+  teardown_forge_account_select_env
+  teardown_fake_gh_fixture
+}
+
+# Mode flags: exactly one, never zero, never two -- and reselect stays a FLAG.
+# A second verb would need a second `creates` identity and a roadmap amendment.
+test_forge_account_select_mode_flags_are_mutually_exclusive() {
+  echo ""
+  echo "=== forge-account-select: exactly one mode, and no credential-shaped flag ==="
+
+  setup_fake_gh_fixture
+  setup_forge_account_select_env
+
+  local stderr_file="$FORGE_SELECT_TMPDIR/stderr"
+  local rc=0
+
+  run_forge_account_select >/dev/null 2>"$stderr_file" || rc=$?
+  assert_exit_code "1" "$rc" "mode flags: no mode at all exits non-zero"
+  assert_stderr_contains "--check | --record <login> | --record-active | --reselect" "$(cat "$stderr_file")" \
+    "mode flags: the no-mode error names every valid mode"
+
+  rc=0
+  run_forge_account_select --check --reselect >/dev/null 2>"$stderr_file" || rc=$?
+  assert_exit_code "1" "$rc" "mode flags: two modes at once exits non-zero"
+  assert_stderr_contains "two modes given" "$(cat "$stderr_file")" "mode flags: the two-mode error says so"
+
+  rc=0
+  run_forge_account_select --record-active --record x >/dev/null 2>"$stderr_file" || rc=$?
+  assert_exit_code "1" "$rc" "mode flags: --record-active plus --record is also two modes"
+
+  rc=0
+  run_forge_account_select --record "" >/dev/null 2>"$stderr_file" || rc=$?
+  assert_exit_code "1" "$rc" "mode flags: an empty --record value is refused, not stored as the opt-out"
+  assert_stderr_contains "--record-active" "$(cat "$stderr_file")" \
+    "mode flags: the empty-login error points at --record-active as the way to say \"use whichever account is active\""
+
+  rc=0
+  run_forge_account_select --record >/dev/null 2>"$stderr_file" || rc=$?
+  assert_exit_code "1" "$rc" "mode flags: --record with no value at all is refused rather than aborting silently under set -e"
+
+  rc=0
+  run_forge_account_select --token ghp_secret >/dev/null 2>"$stderr_file" || rc=$?
+  assert_exit_code "1" "$rc" "mode flags: an unknown flag is refused"
+
+  # Reselect is a flag on this verb; there must be no second dispatcher verb
+  # carrying it, which would need its own `creates` identity.
+  local dispatch_arms
+  dispatch_arms=$(grep -c 'forge-account-[a-z-]*)' "$CLI" || true)
+  assert_eq "1" "$dispatch_arms" "mode flags: exactly one forge-account-* dispatcher arm exists -- reselect is a flag, not a verb"
+
+  # No credential-shaped flag anywhere in the verb or its private helpers.
+  local section
+  section=$(sed -n '/^_forge_account_store_read()/,/^cmd_forge_account_select()/p' "$CLI"; sed -n '/^cmd_forge_account_select()/,/^}/p' "$CLI")
+  if printf '%s' "$section" | grep -v '^[[:space:]]*#' | grep -qE -- '--token|--identity|--secret|--password'; then
+    echo -e "${RED}✗${NC} forge-account-select: no credential-shaped flag may be parsed by this verb"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} forge-account-select: parses no --token/--identity/--secret/--password flag"
+    ((TESTS_PASSED++))
+  fi
+
+  teardown_forge_account_select_env
+  teardown_fake_gh_fixture
+}
+
+# Structural companion to the two preservation tests: prove there is exactly
+# ONE write path and that it reads before it writes, so a future edit cannot
+# reintroduce the `jq -n` rebuild by adding a second writer somewhere else.
+test_forge_account_select_has_exactly_one_write_path() {
+  echo ""
+  echo "=== forge-account-select: one read-merge-write path, no jq -n document rebuild ==="
+
+  local merge_body record_body reselect_body check_body
+  merge_body=$(sed -n '/^_forge_account_store_merge()/,/^}/p' "$CLI")
+  record_body=$(sed -n '/^_forge_account_select_record()/,/^}/p' "$CLI")
+  reselect_body=$(sed -n '/^_forge_account_select_reselect()/,/^}/p' "$CLI")
+  check_body=$(sed -n '/^_forge_account_select_check()/,/^}/p' "$CLI")
+
+  assert_contains "_forge_account_store_read" "$merge_body" \
+    "one write path: the writer reads the current document before merging into it"
+  assert_contains "_lock" "$merge_body" "one write path: the write is taken under _lock"
+  assert_contains "chmod 0600" "$merge_body" "one write path: the temp file is restricted before any content is written"
+
+  # chmod must come BEFORE the content write, not after -- the file names
+  # accounts, so it must never exist readable-by-others even for an instant.
+  local chmod_line write_line
+  chmod_line=$(printf '%s\n' "$merge_body" | grep -n 'chmod 0600' | head -1 | cut -d: -f1)
+  write_line=$(printf '%s\n' "$merge_body" | grep -n '> "\$tmp"' | head -1 | cut -d: -f1)
+  local ordering="wrong"
+  if [ -n "$chmod_line" ] && [ -n "$write_line" ] && [ "$chmod_line" -lt "$write_line" ]; then
+    ordering="chmod-first"
+  fi
+  assert_eq "chmod-first" "$ordering" "one write path: chmod 0600 precedes the first content write"
+
+  # The document must never be rebuilt from nothing.
+  local rebuild="absent"
+  if printf '%s' "$merge_body" | grep -v '^[[:space:]]*#' | grep -q 'jq -n'; then
+    rebuild="present"
+  fi
+  assert_eq "absent" "$rebuild" "one write path: the writer never reconstructs the document with jq -n"
+
+  # No other function in this story may write the store itself.
+  local record_writes="none" reselect_writes="none" check_writes="none"
+  if printf '%s' "$record_body" | grep -v '^[[:space:]]*#' | grep -qE 'mv |> "\$store"|mkdir -p'; then
+    record_writes="direct"
+  fi
+  if printf '%s' "$reselect_body" | grep -v '^[[:space:]]*#' | grep -qE 'mv |> "\$store"|mkdir -p'; then
+    reselect_writes="direct"
+  fi
+  if printf '%s' "$check_body" | grep -v '^[[:space:]]*#' | grep -qE 'mv |> "\$store"|mkdir -p|_forge_account_store_merge'; then
+    check_writes="direct"
+  fi
+  assert_eq "none" "$record_writes" "one write path: --record does not write on its own, it goes through the merge helper"
+  assert_eq "none" "$reselect_writes" "one write path: --reselect does not write on its own either"
+  assert_eq "none" "$check_writes" "one write path: --check reaches no write helper at all"
+
+  # read_state/write_state are scoped to AIMI_ROOT/.aimi/ and must not be used
+  # for a path under the aimi config directory.
+  local uses_state="no"
+  if printf '%s' "$merge_body" | grep -qE 'read_state|write_state'; then
+    uses_state="yes"
+  fi
+  assert_eq "no" "$uses_state" "one write path: read_state/write_state are not used for a config-dir path"
+}
+
+# The acceptance contract includes the dispatcher arm (which must sit in the
+# EARLY forge block, before find_aimi_root's cd side effect) and the help entry.
+test_forge_account_select_registered_in_help_and_dispatcher() {
+  echo ""
+  echo "=== forge-account-select: listed in help, routed by the early forge dispatcher ==="
+
+  local help_out
+  help_out=$("$CLI" help 2>&1)
+  assert_contains "forge-account-select (--check | --record <login> | --record-active | --reselect)" "$help_out" \
+    "help: lists forge-account-select with all three modes"
+
+  setup_fake_gh_fixture
+  setup_forge_account_select_env
+
+  local dispatch_out
+  dispatch_out=$(FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --check 2>&1)
+  if printf '%s' "$dispatch_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: forge-account-select is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: forge-account-select is routed"
+    ((TESTS_PASSED++))
+  fi
+
+  # The arm must be in the block that runs BEFORE find_aimi_root, so the
+  # process stays in the invoking CWD -- in a multi-repo layout find_aimi_root
+  # would cd out of the git repository the caller is standing in.
+  local dispatcher_line find_root_line
+  dispatcher_line=$(grep -n 'forge-account-select) shift; cmd_forge_account_select' "$CLI" | head -1 | cut -d: -f1)
+  find_root_line=$(grep -n '^  find_aimi_root$' "$CLI" | head -1 | cut -d: -f1)
+  local position="late"
+  if [ -n "$dispatcher_line" ] && [ -n "$find_root_line" ] && [ "$dispatcher_line" -lt "$find_root_line" ]; then
+    position="early"
+  fi
+  assert_eq "early" "$position" "dispatcher: the arm dispatches before find_aimi_root, so the process stays in the invoking CWD"
+
+  teardown_forge_account_select_env
+  teardown_fake_gh_fixture
+}
+
+# One store per repository, shared by every worktree -- consuming US-001's key
+# rather than re-deriving it. This repository creates worktrees constantly via
+# /aimi:execute, so an answer that did not survive into a worktree would make
+# "asked once" visibly false.
+test_forge_account_select_answer_survives_into_a_worktree() {
+  echo ""
+  echo "=== forge-account-select: an answer recorded in the main checkout is found from a worktree ==="
+
+  setup_fake_gh_fixture
+  setup_forge_account_select_env
+
+  # The scenario repo needs a commit before `git worktree add` will work.
+  git -C "$FORGE_SELECT_REPO" config user.email "first.last@example.com" >/dev/null 2>&1
+  git -C "$FORGE_SELECT_REPO" config user.name "First Last" >/dev/null 2>&1
+  : > "$FORGE_SELECT_REPO/README.md"
+  git -C "$FORGE_SELECT_REPO" add README.md >/dev/null 2>&1
+  git -C "$FORGE_SELECT_REPO" commit -q -m "init" >/dev/null 2>&1
+  git -C "$FORGE_SELECT_REPO" worktree add -q "$FORGE_SELECT_REPO/.worktrees/feat-x" -b feat-x >/dev/null 2>&1
+
+  FAKE_GH_AUTH_STATUS_MODE=multi run_forge_account_select --record monalisa >/dev/null
+
+  local out
+  out=$(
+    cd "$FORGE_SELECT_REPO/.worktrees/feat-x" || exit 1
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+    export AIMI_CONFIG_DIR="$FORGE_SELECT_CONFIG"
+    export PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_AUTH_STATUS_MODE=multi
+    "$CLI" forge-account-select --check
+  )
+  assert_eq "skip" "$(printf '%s' "$out" | jq -r '.decision')" "worktree: the answer recorded in the main checkout stops the question in a worktree"
+  assert_eq "monalisa" "$(printf '%s' "$out" | jq -r '.stored.account')" "worktree: the same answer reads back, not a second empty store"
+  assert_eq "1" "$(find "$FORGE_SELECT_CONFIG" -maxdepth 1 -name 'forge-account-*.json' | wc -l | tr -d ' ')" \
+    "worktree: exactly one store file exists for the repository and its worktree"
+
+  teardown_forge_account_select_env
+  teardown_fake_gh_fixture
+}
+
+# ============================================================================
+# _forge_account_override -- the per-invocation account override (US-005)
+# ============================================================================
+# The helper is a private printer, not a verb, so these tests reach it by
+# sed+eval like source_forge_contract_functions does. The sourcing helper below
+# is named source_forge_account_OVERRIDE_functions on purpose: this phase
+# already lost a merge to a sourcing-helper NAME COLLISION -- US-001 and US-002
+# each defined `source_forge_account_functions`, bash kept the last definition,
+# and six assertions failed with exit 127 on the merge even though each branch
+# was green alone. Both that name and `source_forge_account_store_functions`
+# are already taken in this file; this one adds a third distinct name rather
+# than a third definition of an existing one, and reuses the store helper
+# instead of re-eval'ing what it already provides.
+#
+# Every scenario is offline -- throwaway local git repositories, the shared
+# fake-gh PATH stub, and an AIMI_CONFIG_DIR pointed at a mktemp -d, so the real
+# ~/.config/aimi/ is never read or written and no real gh credential is ever
+# touched. Every assertion is unconditional, so the totals are identical
+# whether or not the suite runs from a worktree.
+
+source_forge_account_override_functions() {
+  # Brings resolve_path, _aimi_config_dir, _default_branch_cache_key,
+  # _forge_account_store_path and the _HAS_* globals they need.
+  source_forge_account_store_functions
+  eval "$(sed -n '/^_detect_forge_parse_host()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_detect_forge_select_remote_raw()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_detect_forge_read_selection()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_account_store_read()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_account_stored_entry()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_bin_check()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_auth_status_github()/,/^}/p' "$CLI")"
+  # The host memo and its reader, plus the slot filler that warms it. The
+  # `declare -gA` line is eval'd straight out of the CLI (the same technique
+  # test_detect_forge_type_memo_is_per_directory uses for
+  # _DETECT_FORGE_TYPE_MEMO) -- without it the memo lookup is an unbound-array
+  # reference under `set -u`.
+  eval "$(grep '^declare -gA _FORGE_ACCOUNT_HOST_MEMO' "$CLI")"
+  eval "$(sed -n '/^_forge_account_host_cached()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_account_override()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_account_override_slots()/,/^}/p' "$CLI")"
+}
+
+# Creates a throwaway repository whose `origin` points at <remote-url>, plus an
+# isolated config dir holding a store that already records <mode>/<login> for
+# <host>. Written directly rather than through the CLI so a scenario can seed a
+# host the fixture repo could not otherwise reach; the round trip through the
+# real recorder is asserted separately by
+# test_forge_account_override_reads_what_the_recorder_wrote.
+# Usage: setup_forge_override_env <remote-url> [store-host] [mode] [login]
+setup_forge_override_env() {
+  local remote_url="$1" store_host="${2:-}" mode="${3:-account}" login="${4:-monalisa}"
+  FORGE_OVERRIDE_TMPDIR=$(mktemp -d)
+  FORGE_OVERRIDE_CONFIG="$FORGE_OVERRIDE_TMPDIR/aimi-config"
+  FORGE_OVERRIDE_REPO="$FORGE_OVERRIDE_TMPDIR/repo"
+  FORGE_OVERRIDE_LOG="$FORGE_OVERRIDE_TMPDIR/gh.log"
+  mkdir -p "$FORGE_OVERRIDE_REPO" "$FORGE_OVERRIDE_CONFIG"
+  # Created empty up front so count_override_lookups can report a real 0
+  # instead of grep's "no such file" empty string.
+  : > "$FORGE_OVERRIDE_LOG"
+  git -C "$FORGE_OVERRIDE_REPO" init >/dev/null 2>&1
+  git -C "$FORGE_OVERRIDE_REPO" remote add origin "$remote_url" >/dev/null 2>&1
+
+  if [ -n "$store_host" ]; then
+    local store
+    store=$(
+      cd "$FORGE_OVERRIDE_REPO" || exit 1
+      export AIMI_CONFIG_DIR="$FORGE_OVERRIDE_CONFIG"
+      _forge_account_store_path
+    )
+    if [ "$mode" = "active" ]; then
+      jq -nc --arg host "$store_host" \
+        '{($host): {mode: "active", recordedAt: "2026-01-01T00:00:00Z"}}' > "$store"
+    else
+      jq -nc --arg host "$store_host" --arg account "$login" \
+        '{($host): {mode: "account", account: $account, recordedAt: "2026-01-01T00:00:00Z"}}' > "$store"
+    fi
+  fi
+}
+
+teardown_forge_override_env() {
+  rm -rf "$FORGE_OVERRIDE_TMPDIR"
+  unset FORGE_OVERRIDE_TMPDIR FORGE_OVERRIDE_CONFIG FORGE_OVERRIDE_REPO FORGE_OVERRIDE_LOG
+}
+
+# Evaluates `_forge_account_override <VAR>` inside the scenario repository, in a
+# subshell so nothing it sets survives into the next assertion. GH_TOKEN and
+# GH_ENTERPRISE_TOKEN are cleared first unless the caller passed its own -- the
+# developer's real shell may export either, and an inherited one would silently
+# change what the fake returns.
+# Usage: run_forge_override <VAR_NAME> [VAR=value]...
+run_forge_override() {
+  local var="$1"
+  shift
+  (
+    cd "$FORGE_OVERRIDE_REPO" || exit 1
+    unset GH_TOKEN GH_ENTERPRISE_TOKEN AIMI_FORGE_IDENTITY AIMI_FORGE_TYPE
+    export AIMI_CONFIG_DIR="$FORGE_OVERRIDE_CONFIG"
+    export PATH="$FAKE_GH_DIR:$PATH"
+    export FAKE_GH_LOG="$FORGE_OVERRIDE_LOG"
+    for pair in "$@"; do
+      export "$pair"
+    done
+    _forge_account_override "$var"
+  )
+}
+
+# Counts `gh auth token` invocations recorded in the scenario's shared log.
+count_override_lookups() {
+  grep -c '^auth token' "$FORGE_OVERRIDE_LOG" 2>/dev/null || true
+}
+
+FAKE_TOKEN_VALUE="gho_faketoken0000000000000000000000000000"
+
+# AC3. The mapping is not stylistic: gh honors GH_TOKEN for github.com and
+# *.ghe.com only, and emitting it against a GitHub Enterprise Server host does
+# not error -- it is ignored and the write succeeds attributed to the WRONG
+# account. Each host below asserts BOTH slots, because "the right one carries
+# the token" and "the wrong one stays empty" are two different failures.
+test_forge_account_override_host_selects_the_variable() {
+  echo ""
+  echo "=== _forge_account_override: the host picks the variable name (GH_TOKEN vs GH_ENTERPRISE_TOKEN) ==="
+
+  source_forge_account_override_functions
+  setup_fake_gh_fixture
+
+  # github.com -- the ordinary case.
+  setup_forge_override_env "https://github.com/owner/repo.git" "github.com" account monalisa
+  assert_eq "$FAKE_TOKEN_VALUE" \
+    "$(run_forge_override GH_TOKEN FAKE_GH_AUTH_STATUS_MODE=multi FAKE_GH_AUTH_STRICT_HOSTNAME=1 FAKE_GH_AUTH_HOST=github.com)" \
+    "host github.com: GH_TOKEN carries the token"
+  assert_eq "" \
+    "$(run_forge_override GH_ENTERPRISE_TOKEN FAKE_GH_AUTH_STATUS_MODE=multi FAKE_GH_AUTH_STRICT_HOSTNAME=1 FAKE_GH_AUTH_HOST=github.com)" \
+    "host github.com: GH_ENTERPRISE_TOKEN stays empty"
+  assert_contains "auth token --user monalisa --hostname github.com" "$(cat "$FORGE_OVERRIDE_LOG")" \
+    "host github.com: the lookup passes --user and --hostname"
+  teardown_forge_override_env
+
+  # *.ghe.com -- GitHub Enterprise Cloud with data residency. GH_TOKEN, NOT
+  # GH_ENTERPRISE_TOKEN, per `gh help environment`.
+  setup_forge_override_env "https://acme.ghe.com/owner/repo.git" "acme.ghe.com" account monalisa
+  assert_eq "$FAKE_TOKEN_VALUE" \
+    "$(run_forge_override GH_TOKEN FAKE_GH_AUTH_STATUS_MODE=multi FAKE_GH_AUTH_STRICT_HOSTNAME=1 FAKE_GH_AUTH_HOST=acme.ghe.com)" \
+    "host acme.ghe.com: GH_TOKEN carries the token"
+  assert_eq "" \
+    "$(run_forge_override GH_ENTERPRISE_TOKEN FAKE_GH_AUTH_STATUS_MODE=multi FAKE_GH_AUTH_STRICT_HOSTNAME=1 FAKE_GH_AUTH_HOST=acme.ghe.com)" \
+    "host acme.ghe.com: GH_ENTERPRISE_TOKEN stays empty"
+  teardown_forge_override_env
+
+  # A GitHub Enterprise SERVER host on a company domain -- the silent-failure
+  # case. GH_ENTERPRISE_TOKEN is the only variable gh reads here.
+  setup_forge_override_env "https://github.acme.example/owner/repo.git" "github.acme.example" account monalisa
+  assert_eq "$FAKE_TOKEN_VALUE" \
+    "$(run_forge_override GH_ENTERPRISE_TOKEN FAKE_GH_AUTH_STATUS_MODE=multi FAKE_GH_AUTH_STRICT_HOSTNAME=1 FAKE_GH_AUTH_HOST=github.acme.example)" \
+    "GHES host: GH_ENTERPRISE_TOKEN carries the token"
+  assert_eq "" \
+    "$(run_forge_override GH_TOKEN FAKE_GH_AUTH_STATUS_MODE=multi FAKE_GH_AUTH_STRICT_HOSTNAME=1 FAKE_GH_AUTH_HOST=github.acme.example)" \
+    "GHES host: GH_TOKEN stays empty -- emitting it here would be ignored and misattribute the write"
+  assert_contains "auth token --user monalisa --hostname github.acme.example" "$(cat "$FORGE_OVERRIDE_LOG")" \
+    "GHES host: the lookup still passes the real --hostname"
+  teardown_forge_override_env
+
+  # The host is lowercased before matching -- _detect_forge_parse_host already
+  # does it, and an uppercase remote must not fall through to the GHES arm.
+  setup_forge_override_env "https://GitHub.COM/owner/repo.git" "github.com" account monalisa
+  assert_eq "$FAKE_TOKEN_VALUE" \
+    "$(run_forge_override GH_TOKEN FAKE_GH_AUTH_STATUS_MODE=multi FAKE_GH_AUTH_STRICT_HOSTNAME=1 FAKE_GH_AUTH_HOST=github.com)" \
+    "uppercase remote host: still classified as github.com, so GH_TOKEN carries the token"
+  teardown_forge_override_env
+
+  # Empty/unresolvable host -- the AIMI_FORGE_TYPE override path, where
+  # _detect_forge emits host: null. GH_TOKEN, and --hostname omitted ENTIRELY
+  # rather than passed as the four-character string "null".
+  setup_forge_override_env "https://github.com/owner/repo.git"
+  local no_host_out
+  no_host_out=$(run_forge_override GH_TOKEN AIMI_FORGE_TYPE=github AIMI_FORGE_IDENTITY=monalisa FAKE_GH_AUTH_STATUS_MODE=multi)
+  assert_eq "$FAKE_TOKEN_VALUE" "$no_host_out" "empty host: GH_TOKEN carries the token"
+  assert_eq "auth token --user monalisa" "$(cat "$FORGE_OVERRIDE_LOG")" \
+    "empty host: --hostname is omitted entirely, and the literal string null never reaches gh"
+  assert_eq "" \
+    "$(run_forge_override GH_ENTERPRISE_TOKEN AIMI_FORGE_TYPE=github AIMI_FORGE_IDENTITY=monalisa FAKE_GH_AUTH_STATUS_MODE=multi)" \
+    "empty host: GH_ENTERPRISE_TOKEN stays empty"
+  teardown_forge_override_env
+
+  teardown_fake_gh_fixture
+}
+
+# AC7. One routed write must cost exactly ONE `gh auth token` process, and the
+# opt-out must cost none at all -- both counted from the fake's own log rather
+# than inferred.
+test_forge_account_override_costs_nothing_when_it_has_nothing_to_do() {
+  echo ""
+  echo "=== _forge_account_override: zero-cost non-matching slot, zero-cost opt-out ==="
+
+  source_forge_account_override_functions
+  setup_fake_gh_fixture
+
+  # The slot this host does not use must return empty BEFORE any gh call.
+  setup_forge_override_env "https://github.com/owner/repo.git" "github.com" account monalisa
+  assert_eq "" "$(run_forge_override GH_ENTERPRISE_TOKEN FAKE_GH_AUTH_STATUS_MODE=multi)" \
+    "non-matching slot: empty"
+  assert_eq "0" "$(count_override_lookups)" "non-matching slot: zero gh auth token invocations"
+  assert_eq "$FAKE_TOKEN_VALUE" "$(run_forge_override GH_TOKEN FAKE_GH_AUTH_STATUS_MODE=multi)" \
+    "matching slot: token"
+  assert_eq "1" "$(count_override_lookups)" "matching slot: exactly ONE gh auth token invocation, never two"
+  teardown_forge_override_env
+
+  # mode "active" is a real recorded answer -- deliberately use the machine
+  # account -- not the absence of one. Both slots empty, no gh call at all.
+  setup_forge_override_env "https://github.com/owner/repo.git" "github.com" active
+  assert_eq "" "$(run_forge_override GH_TOKEN FAKE_GH_AUTH_STATUS_MODE=multi)" \
+    "opt-out (mode active): GH_TOKEN empty -- the same call-site shape, no separate branch"
+  assert_eq "" "$(run_forge_override GH_ENTERPRISE_TOKEN FAKE_GH_AUTH_STATUS_MODE=multi)" \
+    "opt-out (mode active): GH_ENTERPRISE_TOKEN empty"
+  assert_eq "0" "$(count_override_lookups)" "opt-out (mode active): zero gh auth token invocations"
+  teardown_forge_override_env
+
+  # No answer recorded at all.
+  setup_forge_override_env "https://github.com/owner/repo.git"
+  assert_eq "" "$(run_forge_override GH_TOKEN FAKE_GH_AUTH_STATUS_MODE=multi)" \
+    "no answer recorded: GH_TOKEN empty"
+  assert_eq "" "$(run_forge_override GH_ENTERPRISE_TOKEN FAKE_GH_AUTH_STATUS_MODE=multi)" \
+    "no answer recorded: GH_ENTERPRISE_TOKEN empty"
+  assert_eq "0" "$(count_override_lookups)" "no answer recorded: zero gh auth token invocations"
+  teardown_forge_override_env
+
+  # A store entry that does not ENCODE an answer -- the rejected empty-account
+  # string. Treated as "nobody answered", never as a login of "".
+  setup_forge_override_env "https://github.com/owner/repo.git"
+  local store
+  store=$(cd "$FORGE_OVERRIDE_REPO" && AIMI_CONFIG_DIR="$FORGE_OVERRIDE_CONFIG" _forge_account_store_path)
+  printf '%s\n' '{"github.com":{"mode":"account","account":""}}' > "$store"
+  assert_eq "" "$(run_forge_override GH_TOKEN FAKE_GH_AUTH_STATUS_MODE=multi)" \
+    "empty account string: empty override, not a lookup for the login \"\""
+  assert_eq "0" "$(count_override_lookups)" "empty account string: zero gh auth token invocations"
+  teardown_forge_override_env
+
+  teardown_fake_gh_fixture
+}
+
+# AC8. Env beats store beats nothing -- the same env-over-stored convention
+# AIMI_FORGE_TYPE already sets for detection.
+test_forge_account_override_precedence() {
+  echo ""
+  echo "=== _forge_account_override: AIMI_FORGE_IDENTITY outranks the stored answer ==="
+
+  source_forge_account_override_functions
+  setup_fake_gh_fixture
+
+  # Env set AND store set -- env wins, and the log proves WHICH login was
+  # looked up rather than just that a token came back.
+  setup_forge_override_env "https://github.com/owner/repo.git" "github.com" account monalisa
+  assert_eq "$FAKE_TOKEN_VALUE" \
+    "$(run_forge_override GH_TOKEN AIMI_FORGE_IDENTITY=octocat FAKE_GH_AUTH_STATUS_MODE=multi)" \
+    "env + store: a token comes back"
+  assert_eq "auth token --user octocat --hostname github.com" "$(cat "$FORGE_OVERRIDE_LOG")" \
+    "env + store: AIMI_FORGE_IDENTITY's login is the one looked up, not the stored one"
+  teardown_forge_override_env
+
+  # Env unset, store set -- the store answers.
+  setup_forge_override_env "https://github.com/owner/repo.git" "github.com" account monalisa
+  assert_eq "$FAKE_TOKEN_VALUE" "$(run_forge_override GH_TOKEN FAKE_GH_AUTH_STATUS_MODE=multi)" \
+    "store only: a token comes back"
+  assert_eq "auth token --user monalisa --hostname github.com" "$(cat "$FORGE_OVERRIDE_LOG")" \
+    "store only: the stored login is the one looked up"
+  teardown_forge_override_env
+
+  # Neither -- empty, and nothing is asked of gh.
+  setup_forge_override_env "https://github.com/owner/repo.git"
+  assert_eq "" "$(run_forge_override GH_TOKEN FAKE_GH_AUTH_STATUS_MODE=multi)" \
+    "neither env nor store: empty override, the machine active account acts"
+  assert_eq "0" "$(count_override_lookups)" "neither env nor store: zero gh auth token invocations"
+  teardown_forge_override_env
+
+  teardown_fake_gh_fixture
+}
+
+# AC6. `gh auth token` returns the ENVIRONMENT token when one is set, so a
+# lookup that inherited an ambient override would resolve to itself instead of
+# to the keyring. The fake emulates that precedence, which makes this decisive:
+# the ambient value comes back if and only if the clearing is missing.
+test_forge_account_override_lookup_ignores_an_ambient_override() {
+  echo ""
+  echo "=== _forge_account_override: the lookup runs outside any ambient GH_TOKEN ==="
+
+  source_forge_account_override_functions
+  setup_fake_gh_fixture
+
+  setup_forge_override_env "https://github.com/owner/repo.git" "github.com" account monalisa
+  assert_eq "$FAKE_TOKEN_VALUE" \
+    "$(run_forge_override GH_TOKEN GH_TOKEN=ambient-token-must-not-win FAKE_GH_AUTH_STATUS_MODE=multi)" \
+    "ambient GH_TOKEN: the keyring token comes back, not the ambient value"
+  teardown_forge_override_env
+
+  setup_forge_override_env "https://github.acme.example/owner/repo.git" "github.acme.example" account monalisa
+  assert_eq "$FAKE_TOKEN_VALUE" \
+    "$(run_forge_override GH_ENTERPRISE_TOKEN GH_ENTERPRISE_TOKEN=ambient-enterprise-must-not-win FAKE_GH_AUTH_STATUS_MODE=multi)" \
+    "ambient GH_ENTERPRISE_TOKEN: the keyring token comes back, not the ambient value"
+  teardown_forge_override_env
+
+  teardown_fake_gh_fixture
+}
+
+# AC9. A remembered account that was later `gh auth logout`'d. The write is not
+# blocked -- the same warn-and-fall-back posture _forge_bin_check established --
+# but the wrong-account attribution is made visible.
+test_forge_account_override_degrades_when_the_account_is_gone() {
+  echo ""
+  echo "=== _forge_account_override: a logged-out remembered account degrades with one visible warning ==="
+
+  source_forge_account_override_functions
+  setup_fake_gh_fixture
+
+  # A login the fixture's account set does not contain, which is exactly how
+  # real gh answers for an account that was logged out.
+  setup_forge_override_env "https://github.com/owner/repo.git" "github.com" account ghost-account
+  local stderr_file out rc=0
+  stderr_file=$(mktemp)
+  out=$(run_forge_override GH_TOKEN FAKE_GH_AUTH_STATUS_MODE=multi 2>"$stderr_file") || rc=$?
+
+  assert_eq "0" "$rc" "logged-out account: exits 0 -- the write is not blocked"
+  assert_eq "" "$out" "logged-out account: prints the empty string"
+  assert_eq "1" "$(wc -l < "$stderr_file" | tr -d ' ')" "logged-out account: exactly ONE stderr warning line"
+  assert_contains "ghost-account" "$(cat "$stderr_file")" "logged-out account: the warning names the login"
+  assert_contains "github.com" "$(cat "$stderr_file")" "logged-out account: the warning names the host"
+  assert_contains "machine active account" "$(cat "$stderr_file")" \
+    "logged-out account: the warning says the operation proceeds as the machine active account"
+
+  # gh's own auth-failure stderr can echo token prefixes, so it is never
+  # forwarded verbatim.
+  local warning_leaks="no"
+  if grep -qE 'gho_|ghp_|no oauth token found' "$stderr_file"; then
+    warning_leaks="yes"
+  fi
+  assert_eq "no" "$warning_leaks" "logged-out account: the warning carries no token and does not forward gh's raw stderr"
+
+  rm -f "$stderr_file"
+  teardown_forge_override_env
+  teardown_fake_gh_fixture
+}
+
+# AC4 + AC5. The three independent guarantees, asserted rather than argued:
+# the token never reaches argv, `gh auth switch` is never invoked, and the
+# machine's active account reads back byte-identical afterwards.
+test_forge_account_override_leaks_nothing_and_switches_nothing() {
+  echo ""
+  echo "=== _forge_account_override: no token in argv, no auth switch, machine account unchanged ==="
+
+  source_forge_account_override_functions
+  setup_fake_gh_fixture
+  setup_forge_override_env "https://github.com/owner/repo.git" "github.com" account monalisa
+
+  # The AC2 call-site shape, exercised end to end against a fake gh that
+  # refuses any credential-shaped argv element -- the same scan
+  # test_forge_pr_create_credential_via_env_not_argv uses, with the literal
+  # `auth token` subcommand allowed through because that word IS the gh verb
+  # the override itself has to call.
+  cat > "$FAKE_GH_DIR/argv-scan" << 'ARGV_SCAN'
+#!/usr/bin/env bash
+# Logged into the same file the fake gh writes, so the argv-leak assertion
+# below covers BOTH the override's own lookup and this wrapped write.
+if [ -n "${FAKE_GH_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$FAKE_GH_LOG"
+fi
+for arg in "$@"; do
+  case "$arg" in
+    --token|ghp_*|gho_*|*TOKEN=*) echo "credential leaked into argv: $arg" >&2; exit 2 ;;
+  esac
+done
+if [ -z "${GH_TOKEN:-}" ]; then
+  echo "GH_TOKEN not inherited from environment" >&2
+  exit 3
+fi
+printf '%s' "$GH_TOKEN"
+exit 0
+ARGV_SCAN
+  chmod +x "$FAKE_GH_DIR/argv-scan"
+
+  local scanned rc=0
+  scanned=$(
+    cd "$FORGE_OVERRIDE_REPO" || exit 1
+    unset GH_TOKEN GH_ENTERPRISE_TOKEN AIMI_FORGE_IDENTITY AIMI_FORGE_TYPE
+    export AIMI_CONFIG_DIR="$FORGE_OVERRIDE_CONFIG"
+    export PATH="$FAKE_GH_DIR:$PATH"
+    export FAKE_GH_LOG="$FORGE_OVERRIDE_LOG"
+    export FAKE_GH_AUTH_STATUS_MODE=multi
+    GH_TOKEN="$(_forge_account_override GH_TOKEN)" \
+    GH_ENTERPRISE_TOKEN="$(_forge_account_override GH_ENTERPRISE_TOKEN)" \
+      argv-scan pr create --title "T" --base main --head feat --body "B"
+  ) || rc=$?
+
+  assert_exit_code "0" "$rc" "call-site shape: the wrapped command sees GH_TOKEN inherited and no credential in its argv"
+  assert_eq "$FAKE_TOKEN_VALUE" "$scanned" "call-site shape: the wrapped command acts as the remembered account's token"
+
+  # The single most direct statement of AC4: FAKE_GH_LOG records every gh
+  # invocation's argv, so a token that reached argv ANYWHERE -- the override's
+  # own lookup or the wrapped write -- would be sitting in this file.
+  local argv_leak="no"
+  if grep -qE 'gho_|ghp_' "$FORGE_OVERRIDE_LOG"; then
+    argv_leak="yes"
+  fi
+  assert_eq "no" "$argv_leak" "argv scan: the token value appears in no logged argv line at all"
+
+  # AC5.1 -- the one thing that would rewrite hosts.yml globally.
+  local switched="no"
+  if grep -q '^auth switch' "$FORGE_OVERRIDE_LOG"; then
+    switched="yes"
+  fi
+  assert_eq "no" "$switched" "auth switch: never invoked"
+
+  # AC5.2 -- structural. An export would survive the prefix assignment and be
+  # visible to every later command in the same process.
+  local override_body exports="absent"
+  override_body=$(sed -n '/^_forge_account_override()/,/^}/p' "$CLI")
+  if printf '%s' "$override_body" | grep -v '^[[:space:]]*#' | grep -qE '(export|declare -x)[[:space:]]+GH_'; then
+    exports="present"
+  fi
+  assert_eq "absent" "$exports" "export rule: the helper never exports a token variable process-wide"
+
+  # AC5.3 -- before/after, in ONE shell so an export WOULD be detectable, with
+  # the fake reporting the env-token account as active the way real gh does.
+  local before after
+  before=$(
+    cd "$FORGE_OVERRIDE_REPO" || exit 1
+    unset GH_TOKEN GH_ENTERPRISE_TOKEN AIMI_FORGE_IDENTITY AIMI_FORGE_TYPE
+    export AIMI_CONFIG_DIR="$FORGE_OVERRIDE_CONFIG"
+    export PATH="$FAKE_GH_DIR:$PATH"
+    export FAKE_GH_AUTH_STATUS_MODE=multi FAKE_GH_AUTH_STATUS_HONORS_ENV_TOKEN=1
+    _forge_auth_status_github github.com | jq -r '.account'
+  )
+  after=$(
+    cd "$FORGE_OVERRIDE_REPO" || exit 1
+    unset GH_TOKEN GH_ENTERPRISE_TOKEN AIMI_FORGE_IDENTITY AIMI_FORGE_TYPE
+    export AIMI_CONFIG_DIR="$FORGE_OVERRIDE_CONFIG"
+    export PATH="$FAKE_GH_DIR:$PATH"
+    export FAKE_GH_AUTH_STATUS_MODE=multi FAKE_GH_AUTH_STATUS_HONORS_ENV_TOKEN=1
+    # Prefix assignment on a FUNCTION invocation, exactly the shape story 06
+    # applies to _forge_capture -- set inside, gone the moment it returns.
+    _probe_wrapped_call() { :; }
+    GH_TOKEN="$(_forge_account_override GH_TOKEN)" \
+    GH_ENTERPRISE_TOKEN="$(_forge_account_override GH_ENTERPRISE_TOKEN)" \
+      _probe_wrapped_call
+    _forge_auth_status_github github.com | jq -r '.account'
+  )
+  assert_eq "octocat" "$before" "machine account: the keyring's active account before"
+  assert_eq "$before" "$after" "machine account: byte-identical after the override was applied"
+
+  # And the guarantee that gives that comparison teeth: with a token actually
+  # in the environment the fake DOES report a different active account, so the
+  # equality above is a real observation, not a fixture that cannot fail.
+  local under_override
+  under_override=$(
+    cd "$FORGE_OVERRIDE_REPO" || exit 1
+    unset AIMI_FORGE_IDENTITY AIMI_FORGE_TYPE GH_ENTERPRISE_TOKEN
+    export PATH="$FAKE_GH_DIR:$PATH"
+    export FAKE_GH_AUTH_STATUS_MODE=multi FAKE_GH_AUTH_STATUS_HONORS_ENV_TOKEN=1
+    GH_TOKEN="$FAKE_TOKEN_VALUE" _forge_auth_status_github github.com | jq -r '.account'
+  )
+  assert_eq "env-token-account" "$under_override" \
+    "machine account: the fixture CAN report a different active account under a leaked token -- the before/after check is not vacuous"
+
+  teardown_forge_override_env
+  teardown_fake_gh_fixture
+}
+
+# The store key must match on both sides. The recorder keys by
+# _forge_account_host (a jq read of _detect_forge's envelope); the override
+# derives the host jq-free through _detect_forge_read_selection +
+# _detect_forge_parse_host. They are the same string today, and this asserts it
+# end to end rather than by reading both implementations.
+test_forge_account_override_reads_what_the_recorder_wrote() {
+  echo ""
+  echo "=== _forge_account_override: reads back exactly what forge-account-select recorded ==="
+
+  source_forge_account_override_functions
+  setup_fake_gh_fixture
+  setup_forge_override_env "https://github.com/owner/repo.git"
+
+  # Recorded through the real verb, as a subprocess -- no hand-written store.
+  local recorded
+  recorded=$(
+    cd "$FORGE_OVERRIDE_REPO" || exit 1
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+    export AIMI_CONFIG_DIR="$FORGE_OVERRIDE_CONFIG"
+    export PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_AUTH_STATUS_MODE=multi
+    "$CLI" forge-account-select --record monalisa | jq -r '.stored.account'
+  )
+  assert_eq "monalisa" "$recorded" "round trip: the verb recorded the login"
+  assert_eq "$FAKE_TOKEN_VALUE" "$(run_forge_override GH_TOKEN FAKE_GH_AUTH_STATUS_MODE=multi)" \
+    "round trip: the override finds that answer under the same host key"
+  assert_contains "auth token --user monalisa" "$(cat "$FORGE_OVERRIDE_LOG")" \
+    "round trip: the login the override looked up is the one the verb recorded"
+
+  # And revoking it puts the override back to empty, with no gh call.
+  : > "$FORGE_OVERRIDE_LOG"
+  (
+    cd "$FORGE_OVERRIDE_REPO" || exit 1
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+    export AIMI_CONFIG_DIR="$FORGE_OVERRIDE_CONFIG"
+    export PATH="$FAKE_GH_DIR:$PATH" FAKE_GH_AUTH_STATUS_MODE=multi
+    "$CLI" forge-account-select --reselect >/dev/null
+  )
+  assert_eq "" "$(run_forge_override GH_TOKEN FAKE_GH_AUTH_STATUS_MODE=multi)" \
+    "round trip: after --reselect the override is empty again"
+  assert_eq "0" "$(count_override_lookups)" "round trip: after --reselect no gh auth token invocation happens"
+
+  teardown_forge_override_env
+  teardown_fake_gh_fixture
+}
+
+# ============================================================================
+# Routing the four forge write paths through the account override (US-006)
+# ============================================================================
+# These drive the REAL CLI as a subprocess, one write verb per run, rather than
+# sed+eval'ing the write functions into this shell. Two reasons, both learned in
+# this phase: a fourth sourcing helper would be a fourth chance at the name
+# collision that already cost US-001/US-002 six assertions, and a subprocess run
+# additionally exercises the dispatcher arm that reaches each verb.
+#
+# Every scenario is offline: a throwaway local git repository, an AIMI_CONFIG_DIR
+# pointed at a mktemp -d so the real ~/.config/aimi/ is never touched, and a
+# hermetic PATH sandbox whose only `gh` is the heredoc written below.
+
+# One scenario: repo + isolated config dir + PATH sandbox + a gh log.
+setup_forge_routing_env() {
+  FORGE_ROUTING_TMPDIR=$(mktemp -d)
+  FORGE_ROUTING_CONFIG="$FORGE_ROUTING_TMPDIR/aimi-config"
+  FORGE_ROUTING_REPO="$FORGE_ROUTING_TMPDIR/repo"
+  FORGE_ROUTING_LOG="$FORGE_ROUTING_TMPDIR/gh.log"
+  FORGE_ROUTING_SANDBOX=$(setup_forge_cli_sandbox)
+  mkdir -p "$FORGE_ROUTING_REPO" "$FORGE_ROUTING_CONFIG"
+  # Created empty up front so a "no such line" assertion reads a real empty
+  # file rather than grep's file-missing error.
+  : > "$FORGE_ROUTING_LOG"
+  git -C "$FORGE_ROUTING_REPO" init >/dev/null 2>&1
+  git -C "$FORGE_ROUTING_REPO" remote add origin "${1:-https://github.com/owner/repo.git}" >/dev/null 2>&1
+  write_forge_routing_fake_gh
+}
+
+teardown_forge_routing_env() {
+  teardown_forge_cli_sandbox "$FORGE_ROUTING_SANDBOX"
+  rm -rf "$FORGE_ROUTING_TMPDIR"
+  unset FORGE_ROUTING_TMPDIR FORGE_ROUTING_CONFIG FORGE_ROUTING_REPO FORGE_ROUTING_LOG \
+    FORGE_ROUTING_SANDBOX
+}
+
+FORGE_ROUTING_TOKEN="gho_routingfake000000000000000000000000"
+
+# The one fake `gh` every scenario below shares. Its defining behavior is the
+# log line it writes on EVERY invocation: "<verb> <subverb> <the token that
+# actually arrived>". That is what turns "the override reached this call site"
+# from an argument into an observation, per call site, including the ones a
+# write makes indirectly through forge-pr-view.
+#
+# `auth status` reads its answer from a STATE FILE and `auth switch` is the only
+# arm that rewrites it -- the same division real gh has, and the reason the
+# machine-account before/after check below is not vacuous. It also reports the
+# ENV-TOKEN account as active whenever a token is in the environment, which is
+# what real gh does and what would expose a process-wide export.
+write_forge_routing_fake_gh() {
+  cat > "$FORGE_ROUTING_SANDBOX/gh" << 'ROUTING_FAKE_GH'
+#!/usr/bin/env bash
+HERE="$(dirname "$0")"
+STATE="$HERE/gh-active-account"
+CREATED_FLAG="$HERE/pr-created.flag"
+
+if [ -n "${FORGE_ROUTING_LOG:-}" ]; then
+  printf '%s %s %s\n' "$1" "$2" "${GH_TOKEN:-<unset>}" >> "$FORGE_ROUTING_LOG"
+fi
+
+active="octocat"
+if [ -f "$STATE" ]; then
+  active=$(cat "$STATE")
+fi
+
+case "$1 $2" in
+  "auth token")
+    # Real gh hands back the ENVIRONMENT token when one is set, which is exactly
+    # why _forge_account_override clears both slots for its own lookup. Emulated
+    # so a missing clear would be visible rather than inferred.
+    if [ -n "${GH_TOKEN:-}" ]; then printf '%s\n' "$GH_TOKEN"; exit 0; fi
+    if [ -n "${GH_ENTERPRISE_TOKEN:-}" ]; then printf '%s\n' "$GH_ENTERPRISE_TOKEN"; exit 0; fi
+    printf '%s\n' "gho_routingfake000000000000000000000000"
+    exit 0
+    ;;
+  "auth switch")
+    # Present ONLY so the before/after check can be shown to be capable of
+    # failing. Nothing in aimi-cli.sh may ever reach this arm.
+    want=""
+    expect=""
+    for arg in "$@"; do
+      if [ "$expect" = "user" ]; then want="$arg"; expect=""; continue; fi
+      [ "$arg" = "--user" ] && expect="user"
+    done
+    printf '%s' "${want:-octocat}" > "$STATE"
+    exit 0
+    ;;
+  "auth status")
+    if [ -n "${GH_TOKEN:-}" ] || [ -n "${GH_ENTERPRISE_TOKEN:-}" ]; then
+      echo "github.com"
+      echo "  Logged in to github.com account env-token-account (GH_TOKEN)"
+      echo "  - Active account: true"
+      echo "  Logged in to github.com account $active (keyring)"
+      echo "  - Active account: false"
+      exit 0
+    fi
+    echo "github.com"
+    echo "  Logged in to github.com account monalisa (keyring)"
+    echo "  - Active account: false"
+    echo "  Logged in to github.com account $active (keyring)"
+    echo "  - Active account: true"
+    exit 0
+    ;;
+  "pr list")
+    if [ -f "$CREATED_FLAG" ]; then echo '[{"number":101}]'; else echo '[]'; fi
+    exit 0
+    ;;
+  "pr view")
+    echo '{"url":"https://github.com/owner/repo/pull/101","number":101}'
+    exit 0
+    ;;
+  "pr create")
+    : > "$CREATED_FLAG"
+    echo "https://github.com/owner/repo/pull/101"
+    exit 0
+    ;;
+  "pr edit")
+    exit 0
+    ;;
+  "issue create")
+    echo "https://github.com/owner/repo/issues/77"
+    exit 0
+    ;;
+  "api graphql")
+    echo '{"data":{"resolveReviewThread":{"thread":{"id":"PRRT_1","isResolved":true,"path":"a.txt","line":1}}}}'
+    exit 0
+    ;;
+esac
+echo "routing fake gh: unhandled invocation: $*" >&2
+exit 99
+ROUTING_FAKE_GH
+  chmod +x "$FORGE_ROUTING_SANDBOX/gh"
+}
+
+# Runs the real CLI inside the scenario repo, on the sandbox PATH ALONE, with
+# every ambient forge variable cleared. Extra VAR=value pairs are exported first.
+# Usage: run_forge_routing_cli [VAR=value]... -- <cli args>...
+run_forge_routing_cli() {
+  local -a envs=()
+  while [ $# -gt 0 ] && [ "$1" != "--" ]; do
+    envs+=("$1")
+    shift
+  done
+  [ "${1:-}" = "--" ] && shift
+  (
+    cd "$FORGE_ROUTING_REPO" || exit 1
+    unset GH_TOKEN GH_ENTERPRISE_TOKEN AIMI_FORGE_IDENTITY AIMI_FORGE_TYPE
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+    export AIMI_CONFIG_DIR="$FORGE_ROUTING_CONFIG"
+    export FORGE_ROUTING_LOG="$FORGE_ROUTING_LOG"
+    export PATH="$FORGE_ROUTING_SANDBOX"
+    local pair
+    for pair in ${envs[@]+"${envs[@]}"}; do
+      export "$pair"
+    done
+    "$CLI" "$@"
+  )
+}
+
+# Records this repository's answer through the REAL verb -- never a hand-written
+# store file -- so the routing tests read back exactly what the recorder wrote,
+# under whatever store key the recorder chose.
+#
+# The ONE step that runs with the sandbox PREPENDED to the real PATH rather than
+# replacing it: the store's write path needs date/mkdir/chmod/mv/flock, and
+# widening the shared sandbox allowlist to cover a write path no forge verb
+# takes would change what its twenty-odd other callers exercise. The fake gh
+# still wins (the sandbox comes first), and the store FILENAME is identical
+# either way -- _default_branch_cache_key hashes with sha256sum on both sides,
+# which is exactly why sha256sum/shasum/awk had to join the allowlist.
+# Usage: record_forge_routing_account (--record <login> | --record-active)
+record_forge_routing_account() {
+  (
+    cd "$FORGE_ROUTING_REPO" || exit 1
+    unset GH_TOKEN GH_ENTERPRISE_TOKEN AIMI_FORGE_IDENTITY AIMI_FORGE_TYPE
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+    export AIMI_CONFIG_DIR="$FORGE_ROUTING_CONFIG"
+    export FORGE_ROUTING_LOG="$FORGE_ROUTING_LOG"
+    export PATH="$FORGE_ROUTING_SANDBOX:$PATH"
+    "$CLI" forge-account-select "$@"
+  ) >/dev/null
+}
+
+# The token recorded on each logged line for <verb> <subverb>, one per line.
+# Usage: forge_routing_tokens_for "pr create"
+forge_routing_tokens_for() {
+  grep "^$1 " "$FORGE_ROUTING_LOG" | sed "s/^$1 //" | tr '\n' ',' | sed 's/,$//'
+}
+
+# AC1/AC2/AC3/AC4 + the in-operation reads: every one of the seven routed sites
+# is asserted by the token that actually arrived at gh, verb by verb, from a log
+# the fake writes itself. A site that silently stopped being routed shows up
+# here as <unset>, not as a passing test.
+test_forge_write_paths_route_the_recorded_account() {
+  echo ""
+  echo "=== forge writes: all four write paths and their in-operation reads run as the recorded account ==="
+
+  setup_forge_routing_env
+  record_forge_routing_account --record monalisa
+
+  local tok="$FORGE_ROUTING_TOKEN"
+
+  # --- WRITE 1: create PR, plus its idempotency check and post-create re-read.
+  : > "$FORGE_ROUTING_LOG"
+  local out exit_code
+  out=$(run_forge_routing_cli -- forge-pr-create --title "T" --base main --head feat-x --body "B") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "routed pr-create: exit 0"
+  assert_eq "created" "$(printf '%s' "$out" | jq -r '.status')" "routed pr-create: really took the create-succeeds path"
+  assert_eq "$tok" "$(forge_routing_tokens_for 'pr create')" "routed pr-create: the WRITE itself carried the recorded account's token"
+  assert_eq "$tok,$tok" "$(forge_routing_tokens_for 'pr list')" "routed pr-create: BOTH in-operation pr list probes carried it -- the idempotency check and the post-create re-read"
+  assert_eq "$tok" "$(forge_routing_tokens_for 'pr view')" "routed pr-create: the post-create structured re-read carried it too (a private repo would 404 this read on the machine account)"
+  # The lookup that MINTS the token must not itself run under one, or it
+  # resolves to whatever was already in the environment instead of the keyring.
+  assert_eq "<unset>" "$(forge_routing_tokens_for 'auth token')" "routed pr-create: the override's own lookup ran with both slots cleared"
+
+  # --- WRITE 2: edit PR, plus its post-edit re-read.
+  : > "$FORGE_ROUTING_LOG"
+  out=$(run_forge_routing_cli -- forge-pr-edit --number 101 --body "new body") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "routed pr-edit: exit 0"
+  assert_eq "$tok" "$(forge_routing_tokens_for 'pr edit')" "routed pr-edit: the WRITE itself carried the recorded account's token"
+  assert_eq "$tok" "$(forge_routing_tokens_for 'pr view')" "routed pr-edit: the post-edit re-read carried it"
+
+  # --- WRITE 3: create issue.
+  : > "$FORGE_ROUTING_LOG"
+  out=$(run_forge_routing_cli -- forge-issue-create --title "T" --body "B") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "routed issue-create: exit 0 (soft-fail verb, always 0)"
+  assert_eq "created" "$(printf '%s' "$out" | jq -r '.status')" "routed issue-create: really created"
+  assert_eq "$tok" "$(forge_routing_tokens_for 'issue create')" "routed issue-create: the WRITE carried the recorded account's token"
+
+  # --- WRITE 4: resolve review thread.
+  : > "$FORGE_ROUTING_LOG"
+  out=$(run_forge_routing_cli -- forge-resolve-review-thread --thread-id PRRT_kwDOABC123) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "routed resolve-review-thread: exit 0"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.resolved')" "routed resolve-review-thread: the mutation really ran"
+  assert_eq "$tok" "$(forge_routing_tokens_for 'api graphql')" "routed resolve-review-thread: the resolveReviewThread mutation carried the recorded account's token"
+
+  # --- NEGATIVE SCOPE: forge-pr-view invoked directly as its OWN verb stays a
+  # plain machine-account read. Only the reads made INSIDE a write inherit
+  # anything, and this is the assertion that keeps that distinction honest.
+  : > "$FORGE_ROUTING_LOG"
+  out=$(run_forge_routing_cli -- forge-pr-view --pr feat-x --include url,number) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "unrouted pr-view verb: exit 0"
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "unrouted pr-view verb: really performed the lookup"
+  assert_eq "<unset>" "$(forge_routing_tokens_for 'pr list')" "unrouted pr-view verb: the list probe carried no token -- the verb is still a pure reader"
+  assert_eq "<unset>" "$(forge_routing_tokens_for 'pr view')" "unrouted pr-view verb: the view call carried no token either"
+  assert_eq "" "$(forge_routing_tokens_for 'auth token')" "unrouted pr-view verb: no account lookup happened at all, so the store was never even read"
+
+  teardown_forge_routing_env
+}
+
+# Criterion 6, end to end and NOT vacuous: the machine's active account is read
+# before and after, from the same persisted place real gh keeps it, and the
+# fixture is shown to be capable of reporting a change.
+test_forge_writes_leave_the_machine_account_unchanged() {
+  echo ""
+  echo "=== forge writes: the machine's active account is byte-identical before and after, and no auth switch is ever called ==="
+
+  setup_forge_routing_env
+  record_forge_routing_account --record monalisa
+
+  local before after
+  before=$(run_forge_routing_cli -- forge-auth-status | jq -r '.data.account')
+  assert_eq "octocat" "$before" "machine account before: the keyring's active account, read with no override in effect"
+
+  : > "$FORGE_ROUTING_LOG"
+  run_forge_routing_cli -- forge-pr-create --title T --base main --head feat-x --body B >/dev/null
+  run_forge_routing_cli -- forge-pr-edit --number 101 --body B2 >/dev/null
+  run_forge_routing_cli -- forge-issue-create --title T --body B >/dev/null
+  run_forge_routing_cli -- forge-resolve-review-thread --thread-id PRRT_kwDOABC123 >/dev/null
+
+  after=$(run_forge_routing_cli -- forge-auth-status | jq -r '.data.account')
+  assert_eq "$before" "$after" "machine account after: byte-identical once all four write verbs have run under a DIFFERENT recorded account"
+
+  # `gh auth switch` is the only command that rewrites gh's active-account
+  # pointer, and this phase must never call it.
+  local switched="no"
+  if grep -q '^auth switch' "$FORGE_ROUTING_LOG"; then switched="yes"; fi
+  assert_eq "no" "$switched" "machine account: no write path invoked gh auth switch"
+
+  # THE PROOF THAT THE COMPARISON CAN FAIL. Without this the assertion above
+  # would pass against a fixture with no active-account state at all.
+  ( cd "$FORGE_ROUTING_REPO" && PATH="$FORGE_ROUTING_SANDBOX" gh auth switch --user monalisa >/dev/null )
+  local after_switch
+  after_switch=$(run_forge_routing_cli -- forge-auth-status | jq -r '.data.account')
+  assert_eq "monalisa" "$after_switch" "machine account: the fixture DOES report a different account once something actually switches it -- the before/after check is not vacuous"
+
+  # And the second half of the same guarantee: a token that leaked into the
+  # environment process-wide makes the very same read report the env-token
+  # account, which is what `export` would have caused.
+  local under_leak
+  under_leak=$(run_forge_routing_cli "GH_TOKEN=$FORGE_ROUTING_TOKEN" -- forge-auth-status | jq -r '.data.account')
+  assert_eq "env-token-account" "$under_leak" "machine account: a process-wide token WOULD be visible to forge-auth-status -- which is why the override is only ever a prefix assignment"
+
+  teardown_forge_routing_env
+}
+
+# The "always use whichever account is active" answer is a real recorded answer,
+# and it must flow through the identical call-site shape with no branch of its
+# own -- and, critically, must not BLANK a token the caller exported.
+test_forge_writes_active_account_answer_needs_no_branch() {
+  echo ""
+  echo "=== forge writes: the active-account answer and an inherited GH_TOKEN both flow through the identical shape ==="
+
+  setup_forge_routing_env
+  record_forge_routing_account --record-active
+
+  : > "$FORGE_ROUTING_LOG"
+  local out exit_code
+  out=$(run_forge_routing_cli -- forge-pr-create --title T --base main --head feat-x --body B) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "active-account answer: forge-pr-create still succeeds"
+  assert_eq "created" "$(printf '%s' "$out" | jq -r '.status')" "active-account answer: the write really happened"
+  assert_eq "<unset>" "$(forge_routing_tokens_for 'pr create')" "active-account answer: no token is emitted, so gh acts as the machine's active account"
+  assert_eq "" "$(forge_routing_tokens_for 'auth token')" "active-account answer: zero gh auth token invocations -- the opt-out costs nothing"
+
+  # An inherited GH_TOKEN is how gh decides the acting account when this
+  # repository has no answer of its own. The empty override must not revoke it:
+  # a bare GH_TOKEN="$empty" prefix would, silently.
+  #
+  # The flag the run above dropped is cleared first so this second create takes
+  # the same no-existing-PR path rather than the idempotent short-circuit.
+  rm -f "$FORGE_ROUTING_SANDBOX/pr-created.flag"
+  : > "$FORGE_ROUTING_LOG"
+  out=$(run_forge_routing_cli "GH_TOKEN=caller-exported-token" -- forge-pr-create --title T --base main --head feat-y --body B) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "inherited token: forge-pr-create still succeeds"
+  assert_eq "caller-exported-token" "$(forge_routing_tokens_for 'pr create')" "inherited token: an empty override leaves a caller-exported GH_TOKEN reaching gh untouched, never blanked"
+
+  # Structural half of the same criterion: the shape is literally identical at
+  # every routed site, so there is no empty-override special case to drift.
+  local routed_sites
+  routed_sites=$(grep -c 'GH_TOKEN="\$gh_token_override" GH_ENTERPRISE_TOKEN="\$ghe_token_override"' "$CLI") || routed_sites=0
+  assert_eq "8" "$routed_sites" "identical shape: exactly 8 prefix-assignment sites -- 4 writes, 3 in-operation reads, 1 in-write failure classifier"
+
+  # And no process-wide export of either variable anywhere in the file, not
+  # merely inside the override helper.
+  #
+  # COUNTED, NEVER `grep -q`, and that is not a style choice: this suite runs
+  # under `set -o pipefail`, and `grep -v ... | grep -q ...` makes the right
+  # half exit the instant it matches, which SIGPIPEs the left half and turns
+  # the whole pipeline non-zero -- so an `if` on it reads a real hit as "no
+  # hit" and the guard fails OPEN. Verified by mutation: an `export
+  # GH_TOKEN="$gh_token_override"` planted in _forge_pr_create left the
+  # `grep -q` form entirely green. `grep -c` consumes all of its input, so it
+  # cannot fire early, and `|| hits=0` absorbs grep's exit 1 on zero matches.
+  local export_hits
+  export_hits=$(grep -v '^[[:space:]]*#' "$CLI" | grep -cE '(export|declare -x)[[:space:]]+GH_(TOKEN|ENTERPRISE_TOKEN)') || export_hits=0
+  assert_eq "0" "$export_hits" "export rule: aimi-cli.sh never exports GH_TOKEN or GH_ENTERPRISE_TOKEN process-wide, anywhere -- a prefix assignment is the only permitted form"
+
+  teardown_forge_routing_env
+}
+
+# The classifier seam US-005 recorded and left for the routing pass. Exactly one
+# _forge_classify_gh_failure_reason call sits inside a write path; left unrouted
+# it would re-check the MACHINE account after a mutation failed as a DIFFERENT
+# one.
+test_forge_resolve_review_thread_classifier_runs_under_the_override() {
+  echo ""
+  echo "=== forge-resolve-review-thread: the in-write failure classifier re-checks the account that actually failed ==="
+
+  setup_forge_routing_env
+  record_forge_routing_account --record monalisa
+
+  # The mutation breaks in a way that is NOT the confirmed-invalid-node case, so
+  # the generic branch runs and the classifier is reached.
+  cat > "$FORGE_ROUTING_SANDBOX/gh" << 'CLASSIFIER_FAKE_GH'
+#!/usr/bin/env bash
+if [ -n "${FORGE_ROUTING_LOG:-}" ]; then
+  printf '%s %s %s\n' "$1" "$2" "${GH_TOKEN:-<unset>}" >> "$FORGE_ROUTING_LOG"
+fi
+case "$1 $2" in
+  "auth token")
+    if [ -n "${GH_TOKEN:-}" ]; then printf '%s\n' "$GH_TOKEN"; exit 0; fi
+    printf '%s\n' "gho_routingfake000000000000000000000000"
+    exit 0
+    ;;
+  "api graphql")
+    echo "gh: connection refused" >&2
+    exit 1
+    ;;
+  "auth status")
+    echo "github.com"
+    echo "  Logged in to github.com account octocat (keyring)"
+    echo "  - Active account: true"
+    exit 0
+    ;;
+esac
+exit 99
+CLASSIFIER_FAKE_GH
+  chmod +x "$FORGE_ROUTING_SANDBOX/gh"
+
+  : > "$FORGE_ROUTING_LOG"
+  local out exit_code
+  out=$(run_forge_routing_cli -- forge-resolve-review-thread --thread-id PRRT_kwDOABC123 2>/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "classifier seam: the verb still exits non-zero on a broken mutation"
+  assert_eq "cli_failed" "$(printf '%s' "$out" | jq -r '.reason')" "classifier seam: the reason enum is unchanged by routing -- no new value, same catch-all"
+  assert_eq "$FORGE_ROUTING_TOKEN" "$(forge_routing_tokens_for 'auth status')" \
+    "classifier seam: the auth re-check ran as the account whose write failed, not as the machine account"
+
+  teardown_forge_routing_env
+}
+
+# AC5's argv scan, extended to the two write verbs that lacked one. The fake
+# refuses any credential-shaped argv element AND refuses to run without the
+# environment variable, so one run proves both halves at once.
+test_forge_pr_edit_credential_via_env_not_argv() {
+  echo ""
+  echo "=== forge-pr-edit: credential reaches gh via the environment, never argv ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    *token*|*TOKEN*|--token|ghp_*|gho_*) echo "credential leaked into argv: $arg" >&2; exit 2 ;;
+  esac
+done
+if [ -z "${GH_TOKEN:-}" ]; then
+  echo "GH_TOKEN not inherited from environment" >&2
+  exit 3
+fi
+if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  echo '{"url":"https://github.com/owner/repo/pull/404","number":404}'
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(GH_TOKEN="secret-value-xyz" PATH="$sandbox" "$CLI" forge-pr-edit --number 404 --body "B") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-edit credential: exit 0 (GH_TOKEN inherited, nothing credential-shaped in argv)"
+  assert_eq "unchanged" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-edit credential: status unchanged"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_resolve_review_thread_credential_via_env_not_argv() {
+  echo ""
+  echo "=== forge-resolve-review-thread: credential reaches gh via the environment, never argv ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  # The mutation text itself is bound through -f query=..., so it IS an argv
+  # element -- and it legitimately contains neither `token` nor a gh_-prefixed
+  # value. The scan below is therefore a real constraint on this verb, not one
+  # its own payload would trip.
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    *token*|*TOKEN*|--token|ghp_*|gho_*) echo "credential leaked into argv: $arg" >&2; exit 2 ;;
+  esac
+done
+if [ -z "${GH_TOKEN:-}" ]; then
+  echo "GH_TOKEN not inherited from environment" >&2
+  exit 3
+fi
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  echo '{"data":{"resolveReviewThread":{"thread":{"id":"PRRT_1","isResolved":true,"path":"a.txt","line":1}}}}'
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(GH_TOKEN="secret-value-xyz" PATH="$sandbox" "$CLI" forge-resolve-review-thread --thread-id PRRT_kwDOABC123) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-resolve-review-thread credential: exit 0 (GH_TOKEN inherited, nothing credential-shaped in argv)"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.resolved')" "forge-resolve-review-thread credential: the mutation really ran"
 
   popd >/dev/null
   teardown_detect_forge_fixture
@@ -20018,8 +22329,17 @@ setup_forge_cli_sandbox() {
   local sandbox
   sandbox=$(mktemp -d)
 
+  # sha256sum/shasum/awk joined the list for the phase-2 account store.
+  # _forge_account_store_path names its file after
+  # _default_branch_cache_key's digest of the repository's git common dir, and
+  # that helper falls back to a portable `tr -c` slugification when NEITHER
+  # hashing tool is on PATH (awk is what reads the digest out of either one's
+  # output). Without all three the sandbox would compute a DIFFERENT store
+  # filename than production and than any test that seeded the store from the
+  # real PATH -- so a routed write would silently find no recorded answer and
+  # the assertion would pass for the wrong reason.
   local tool resolved candidate
-  for tool in bash jq git mktemp cat rm grep sed tr tail dirname basename; do
+  for tool in bash jq git mktemp cat rm grep sed tr tail dirname basename sha256sum shasum awk; do
     resolved=$(command -v "$tool" 2>/dev/null) || resolved=""
     if [ -z "$resolved" ] || [ ! -x "$resolved" ]; then
       for candidate in "/usr/bin/$tool" "/bin/$tool"; do
@@ -21754,18 +24074,33 @@ FAKE_GH
   assert_eq '{"status":"created","data":{"url":"https://github.com/owner/repo/pull/101","number":101},"message":null}' \
     "$out" "forge derivation count: the measured run really did create a PR and confirm its number"
 
-  # A bare `git remote` (the remote LISTING call) is made exactly once per
-  # real derivation. BEFORE this story it read 3 -- _forge_pr_create's own
-  # call, cmd_forge_pr_view's during the pre-create existing-PR check, and
-  # cmd_forge_pr_view's again during the post-create re-read, none aware the
-  # other two had already run. AFTER, only the first is a real derivation;
-  # the other two are memo hits doing zero git work.
-  local bare_remote_calls all_remote_calls
+  # A bare `git remote` (the remote LISTING call) is made exactly once per real
+  # derivation, and this run makes exactly TWO derivations -- no more.
+  #
+  #   1. _detect_forge_type's, memoized in _DETECT_FORGE_TYPE_MEMO. Before
+  #      phase 1.1 this alone read 3 (_forge_pr_create's own call, plus
+  #      cmd_forge_pr_view's during the pre-create existing-PR check and again
+  #      during the post-create re-read, none aware the others had run); the
+  #      memo collapsed the second and third into zero-git-work hits.
+  #   2. _forge_account_host_cached's, memoized in _FORGE_ACCOUNT_HOST_MEMO and
+  #      added by the phase-2 routing pass. The account override is keyed by
+  #      host, and _detect_forge_type carries no host at all (its own header
+  #      says so), so the host is a genuinely separate question.
+  #
+  # THE NUMBER 2 IS THE POINT, and 3 is the failure this pins: the routing pass
+  # asks _forge_account_override for BOTH token slots, and each call would
+  # derive the host for itself if _forge_account_override_slots did not warm the
+  # memo from the caller's own shell first -- a memo populated inside either
+  # `$(...)` lookup would die with that subshell. The three cmd_forge_pr_view
+  # calls this run makes still contribute nothing at all.
+  local bare_remote_calls all_remote_calls geturl_calls
   bare_remote_calls=$(grep -cx 'remote' "$counter") || bare_remote_calls=0
   all_remote_calls=$(grep -c '^remote' "$counter") || all_remote_calls=0
+  geturl_calls=$(grep -c '^remote get-url' "$counter") || geturl_calls=0
 
-  assert_eq "1" "$bare_remote_calls" "forge derivation count: exactly 1 real forge derivation (was 3 before this story's memo)"
-  assert_eq "2" "$all_remote_calls" "forge derivation count: 2 git-remote-family calls total -- one listing plus one get-url (was 6 before)"
+  assert_eq "2" "$bare_remote_calls" "forge derivation count: exactly 2 real derivations -- the forge word and the account host, each derived ONCE (3 would mean the two token slots each derived the host for themselves)"
+  assert_eq "2" "$geturl_calls" "forge derivation count: one get-url per derivation, never a third"
+  assert_eq "4" "$all_remote_calls" "forge derivation count: 4 git-remote-family calls total -- one listing plus one get-url per derivation (was 6 before the phase-1.1 memo, with no host derivation at all)"
 
   popd >/dev/null
   teardown_detect_forge_fixture
@@ -22023,6 +24358,7 @@ main() {
   test_read_global_worktree_cache_tampered
   test_init_session_writes_global_cache
   test_check_version_fix_updates_global_cache
+  test_forge_account_store_path
 
   # XDG cache location tests — new path + read-both fallback
   echo ""
@@ -22516,6 +24852,67 @@ main() {
   test_forge_repo_info_no_origin_is_not_found
   test_forge_repo_info_registered_in_help_and_dispatcher
 
+  # Forge account selection -- divergence detection. Decides whether this
+  # repository's git identity disagrees with the account gh is acting as,
+  # and whether there is another account to pick. Read-only: no prompt, no
+  # store, no `gh auth switch`, no token -- those belong to sibling stories.
+  echo ""
+  echo "--- Forge Account Divergence Tests (phase 2 US-002) ---"
+  test_forge_account_divergence_no_adapter
+  test_forge_account_divergence_cli_missing
+  test_forge_account_divergence_not_authenticated
+  test_forge_account_divergence_no_git_identity
+  test_forge_account_divergence_identity_matches_active_noreply
+  test_forge_account_divergence_identity_matches_active_heuristic
+  test_forge_account_divergence_single_account
+  test_forge_account_divergence_diverged
+  test_forge_auth_status_github_accounts_list_order_and_dedup
+  test_forge_auth_status_envelope_has_no_accounts_field
+  test_forge_account_divergence_hostname_is_the_real_host
+  test_forge_account_divergence_forge_type_override_host_is_json_null
+  test_forge_account_divergence_is_read_only
+  test_forge_identity_logins_derivation_table
+  test_forge_git_identity_unset_keys_do_not_abort
+
+  # Forge account selection -- the remembered answer. Records, reads back and
+  # revokes this repository's forge account. Three bugs the models ask-once
+  # flow already shipped are pinned here: an answer that could not be revoked
+  # (CHANGELOG:615), a check that decided on file existence rather than content
+  # (CHANGELOG:604), and a writer that clobbered a sibling scope (CHANGELOG:487).
+  echo ""
+  echo "--- Forge Account Select Tests (phase 2 US-003) ---"
+  test_forge_account_select_check_decides_on_content_never_existence
+  test_forge_account_select_record_preserves_other_host
+  test_forge_account_select_reselect_preserves_other_host
+  test_forge_account_select_answer_is_revocable_and_is_the_only_state
+  test_forge_account_select_record_active_is_a_first_class_answer
+  test_forge_account_select_check_has_zero_side_effects
+  test_forge_account_select_check_identity_override_skips_and_records_nothing
+  test_forge_account_select_null_host_never_becomes_a_key
+  test_forge_account_select_mode_flags_are_mutually_exclusive
+  test_forge_account_select_has_exactly_one_write_path
+  test_forge_account_select_registered_in_help_and_dispatcher
+  test_forge_account_select_answer_survives_into_a_worktree
+
+  # The remembered answer applied to ONE forge invocation, without touching
+  # the machine's active account. The two criteria that look contradictory --
+  # every write uses the project's account, AND the machine account is
+  # unchanged afterwards -- are both satisfied by a per-invocation token
+  # override that never calls `gh auth switch`.
+  echo ""
+  echo "--- Forge Account Override Tests (phase 2 US-005) ---"
+  test_forge_account_override_host_selects_the_variable
+  test_forge_account_override_costs_nothing_when_it_has_nothing_to_do
+  test_forge_account_override_precedence
+  test_forge_account_override_lookup_ignores_an_ambient_override
+  test_forge_account_override_degrades_when_the_account_is_gone
+  test_forge_account_override_leaks_nothing_and_switches_nothing
+  test_forge_account_override_reads_what_the_recorder_wrote
+  test_forge_write_paths_route_the_recorded_account
+  test_forge_writes_leave_the_machine_account_unchanged
+  test_forge_writes_active_account_answer_needs_no_branch
+  test_forge_resolve_review_thread_classifier_runs_under_the_override
+
   # Forge PR View Tests (US-004) -- field-selectable PR lookup with a
   # three-way found/not_found/error status, fixing the exit-code conflation
   # gh pr view --json url carries today
@@ -22551,6 +24948,8 @@ main() {
   test_forge_pr_create_non_github_forge_mandatory_print
   test_forge_pr_create_guard_failures
   test_forge_pr_create_credential_via_env_not_argv
+  test_forge_pr_edit_credential_via_env_not_argv
+  test_forge_resolve_review_thread_credential_via_env_not_argv
   test_forge_pr_edit_success
   test_forge_pr_edit_missing_gh_mandatory_print_nonzero_exit
   test_forge_pr_edit_gh_failure_prints_manual_nonzero_exit

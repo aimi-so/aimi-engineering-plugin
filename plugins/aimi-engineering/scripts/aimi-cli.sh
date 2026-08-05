@@ -298,6 +298,99 @@ _aimi_models_prompt_marker_path() {
   printf '%s\n' "$aimi_dir/models-prompt-seen-$host"
 }
 
+# Return the path to THIS repository's remembered forge account store, as a
+# fifth sibling of the four config-path helpers above. Prints exactly one
+# absolute path on stdout; returns 1 printing nothing when the current
+# directory has no resolvable git identity.
+#
+# WHY --git-common-dir AND NOT --show-toplevel: `--show-toplevel` answers with
+# the WORKTREE path, so every `.worktrees/<branch>` checkout of one repository
+# hashes to a different key and gets asked for its account all over again. This
+# repository creates worktrees constantly via /aimi:execute, so that is a daily
+# regression, not a corner case. `--git-common-dir` answers with the ONE shared
+# `.git` directory from both the main checkout and every worktree, which is
+# what makes "asks once, never again" true. This is a deliberate, recorded
+# deviation from the phase-2 roadmap's success criterion 4, whose literal
+# wording says "keyed by a hash of the repository toplevel" -- the roadmap was
+# deliberately not amended; see US-001's notes. Everything else criterion 4
+# asks for is preserved: hash-keyed, stored outside the repository, never
+# committed, per-user.
+#
+# WHY THE VALUE MUST BE ABSOLUTE BEFORE IT IS HASHED -- load-bearing, not
+# defensive: bare `git rev-parse --git-common-dir` returns a RELATIVE path.
+# Verified in this repository at git 2.34.1: `.git` from the toplevel and
+# `../../../.git` from plugins/aimi-engineering/scripts. Hashing that raw would
+# hand EVERY repository on the machine the single shared key hash('.git')
+# whenever the CLI runs from a toplevel -- the "scope too coarse" defect
+# CHANGELOG 1.93.2 already had to remediate once, when a global
+# models-prompt-seen marker had to become per-host -- and would also make one
+# repository's key vary by current directory, re-asking from a subdirectory.
+# So `--path-format=absolute` (git >= 2.31) is tried first, and the bare form
+# is only a fallback that is joined against $PWD and normalized through
+# resolve_path. One machine runs one git, so a single invocation never mixes
+# the two routes; only the fallback normalizes symlinks, which is why the
+# absolute route is the one that must stay primary.
+#
+# DOCUMENT SHAPE THIS PATH POINTS AT -- READ, MERGE, WRITE; NEVER `jq -n`:
+# the file holds a JSON OBJECT KEYED BY FORGE HOST, e.g.
+#   {"github.com": {...}, "gitlab.com": {...}}
+# It is multi-entry by nature: one repository can carry remotes on more than
+# one host, and phases 3 and 4 add glab/tea hosts alongside github.com. Any
+# writer MUST read the existing document and merge its own host key into it,
+# and MUST NOT rebuild the document with `jq -n`. That exact mistake shipped
+# here before: CHANGELOG:487 (1.97.2), where `detect-models` in default mode
+# rebuilt models.json with `jq -n` and silently dropped the OTHER host's
+# sub-table on every single invocation (regression test
+# test_detect_models_default_mode_preserves_other_host). The per-repository
+# split into separate files makes sibling repositories structurally unable to
+# clobber each other; the per-host merge obligation is what keeps a single
+# repository's own hosts from doing it.
+#
+# MEMOIZES NOTHING, DELIBERATELY: like its four siblings this is a pure stdout
+# printer, so every call site reaches it through `$(...)` -- and a memo
+# populated inside a command-substitution subshell dies with that subshell, as
+# _detect_forge_type's header spells out. Per-invocation memoization of the
+# resolved ACCOUNT lives one level up instead, in the
+# _forge_account_host_cached / _forge_account_override_slots pair, which uses
+# exactly that name-reference discipline: the memo is warmed by a plain
+# statement in the write function's own shell, and the `$(...)` lookups that
+# follow inherit it.
+_forge_account_store_path() {
+  local common_dir=""
+
+  # Primary: the absolute answer, straight from git.
+  common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common_dir=""
+
+  # Fallback for git < 2.31 (no --path-format): take the bare answer, join a
+  # relative one against the current directory, and normalize.
+  if [ -z "$common_dir" ] || [ "${common_dir#/}" = "$common_dir" ]; then
+    common_dir=$(git rev-parse --git-common-dir 2>/dev/null) || common_dir=""
+    if [ -n "$common_dir" ]; then
+      case "$common_dir" in
+        /*) ;;
+        *) common_dir="$(pwd)/$common_dir" ;;
+      esac
+      common_dir=$(resolve_path "$common_dir" 2>/dev/null) || common_dir=""
+    fi
+  fi
+
+  # Degradation: no git repository, or git could not answer. Return non-zero
+  # with empty stdout -- callers read that as "no remembered answer, proceed on
+  # the active account", matching _forge_bin_check's optional-mode posture.
+  # NEVER fall through to hashing the empty string the way _resolve_default_branch
+  # tolerates an empty toplevel: hash('') would become ONE global "no-repo"
+  # store every non-repo caller writes into, which is precisely the coarse-scope
+  # defect the absolute-path guarantee above exists to prevent. Silent by
+  # design -- being outside a repository is an expected condition, not an error.
+  if [ -z "$common_dir" ] || [ "${common_dir#/}" = "$common_dir" ]; then
+    return 1
+  fi
+
+  local aimi_dir
+  aimi_dir=$(_aimi_config_dir)
+  printf '%s\n' "$aimi_dir/forge-account-$(_default_branch_cache_key "$common_dir").json"
+}
+
 # Read the models config JSON, returning empty string when the file is absent.
 # Does not validate contents — callers must handle malformed JSON.
 read_aimi_models_config() {
@@ -1606,6 +1699,10 @@ _require_git_repo() {
 # back to a portable non-sha256 slugification when neither hashing tool is
 # available -- the slugification never introduces a `/`, so the returned
 # suffix is always safe to use as a flat filename directly inside .aimi/.
+# SECOND CALLER since phase 2: _forge_account_store_path hashes the absolute
+# git common dir with this same helper. Its behavior is therefore frozen --
+# the digest emitted for a given input must stay byte-identical, because
+# `.aimi/default-branch-<hash>` files already exist on disk.
 # Usage: _default_branch_cache_key <repo-toplevel-path>
 # Prints: a filesystem-safe string containing no `/`
 _default_branch_cache_key() {
@@ -2638,6 +2735,325 @@ _forge_classify_gh_failure_reason() {
   printf '%s' "cli_failed"
 }
 
+# Prints the gh token this repository's REMEMBERED ACCOUNT should act as for
+# ONE forge invocation, or the empty string. Always exits 0. Writes nothing,
+# anywhere: no `gh auth switch`, no hosts.yml, no file on disk.
+#
+# Usage -- ALWAYS a bash PREFIX ASSIGNMENT on the wrapped call, NEVER `env`:
+#   GH_TOKEN="$(_forge_account_override GH_TOKEN)" \
+#   GH_ENTERPRISE_TOKEN="$(_forge_account_override GH_ENTERPRISE_TOKEN)" \
+#     _forge_capture stdout stderr_out rc -- gh pr create --title "$title" ... || true
+#
+# BOTH SLOTS ARE WRITTEN LITERALLY, AT MOST ONE IS EVER NON-EMPTY. Bash cannot
+# prefix-assign a dynamically named variable, so the call site names both and
+# passes the name it is filling; this function decides which one gets a value
+# and returns empty for the other. gh treats an EMPTY token variable as unset
+# (verified, gh 2.94.0), which is why the "always use whichever account is
+# active" opt-out and the no-answer case reuse the identical call-site shape
+# with no separate branch anywhere.
+#
+# `export` IS FORBIDDEN; THE OVERRIDE IS A PREFIX ASSIGNMENT ON ONE COMMAND,
+# ALWAYS. That rule is load-bearing, not stylistic. Under a process-wide
+# GH_TOKEN, `gh auth status` reports the ENV-TOKEN account as
+# "Active account: true" -- so _forge_auth_status_github's parser below would
+# start reporting the overridden account as the machine's active one, and the
+# very before/after check that proves the machine account was left alone would
+# become unable to detect a violation. A prefix assignment on a FUNCTION
+# invocation is set inside the function, exported into the `gh` grandchild it
+# spawns, and unset again the moment the function returns, so _forge_capture
+# needs no signature change and nothing survives the call.
+#
+# NO TOKEN EVER REACHES argv. The `env GH_TOKEN=... gh ...` shape is banned for
+# exactly this reason -- env(1)'s own argv carries the value and leaks it
+# through `ps`. Nothing here echoes, logs or emits the token either: it is this
+# function's stdout value and nothing else. Same bar phase 1 already holds with
+# _detect_forge_redact_userinfo, which strips embedded userinfo from a remote
+# URL before it can round-trip through this CLI's stdout.
+#
+# HOST DECIDES THE VARIABLE NAME, AND GETTING IT WRONG FAILS SILENTLY:
+# gh honors GH_TOKEN for github.com and *.ghe.com ONLY; a GitHub Enterprise
+# Server host on a company domain needs GH_ENTERPRISE_TOKEN instead
+# (`gh help environment`). Emitting GH_TOKEN at a GHES host does not error --
+# it is ignored, and the write succeeds attributed to the WRONG ACCOUNT, which
+# is the worst available outcome. The mapping:
+#
+#   github.com, *.github.com   -> GH_TOKEN             --hostname <host>
+#   ghe.com, *.ghe.com         -> GH_TOKEN             --hostname <host>
+#   any other non-empty host   -> GH_ENTERPRISE_TOKEN  --hostname <host>
+#   empty / unresolvable host  -> GH_TOKEN             --hostname omitted entirely
+#
+# The empty-host row is the AIMI_FORGE_TYPE override path, where _detect_forge
+# emits host: null and there is no hostname to pass; gh then uses its own
+# default host. The host is derived through _forge_account_host_cached below --
+# the jq-free _detect_forge_read_selection + _detect_forge_parse_host pair (two
+# `git remote` reads on a memo miss, zero jq processes) -- rather than taken
+# from the caller, because three of the four write paths reach identity through
+# _detect_forge_type, which by its own header comment carries no host at all.
+# That pair returns a lowercased
+# plain string and can never produce the four-character text "null" the way a
+# bare `jq -r '.host'` can -- the defect commit d1b19ca paid for, where "null"
+# reached --hostname and its refusal read as a confirmed not-authenticated
+# answer. Every jq read below uses `// empty` for the same reason.
+#
+# COST. The requested-name check happens BEFORE any gh call and before the
+# store is read, so the non-matching slot costs nothing at all and one routed
+# write costs exactly ONE `gh auth token` process, never two. The opt-out and
+# the no-answer case cost zero gh processes.
+#
+# Precedence, highest first -- the same env-over-stored convention
+# AIMI_FORGE_TYPE already sets for detection:
+#   1. AIMI_FORGE_IDENTITY, when non-empty
+#   2. the account cmd_forge_account_select recorded for this repository
+#   3. nothing -- empty override, the machine's active account acts
+# The store holds a LOGIN, never a token. Nothing here persists a token; it is
+# minted per invocation and dies with the process.
+#
+# THE LOOKUP RUNS OUTSIDE ANY OVERRIDE, deliberately: `gh auth token` with a
+# GH_TOKEN already in the environment returns THAT token rather than the
+# keyring's, so an ambient override would make this function resolve to itself.
+# Both variables are cleared for its own call.
+#
+# DEGRADATION IS DELIBERATE. A remembered account that was later
+# `gh auth logout`'d makes `gh auth token --user <login>` exit non-zero
+# ("no oauth token found for <host> account <login>"). This prints nothing,
+# exits 0, and emits exactly ONE stderr warning naming the login and host --
+# never the token, and never gh's own stderr verbatim, which can echo token
+# prefixes. The write then proceeds as the machine's active account: the same
+# warn-and-fall-back posture _forge_bin_check and _forge_emit_write_status
+# already established, with the wrong-account attribution made visible rather
+# than the write blocked. Because this is evaluated inside a `$( )` in a prefix
+# assignment, the warning goes straight to the user's stderr and is never
+# captured into _forge_capture's stderr_out, so it cannot contaminate an
+# emitted JSON `message`.
+#
+# CLASSIFIER SEAM, decided rather than discovered later, and now CLOSED:
+# _forge_classify_gh_failure_reason above calls _forge_auth_status_github, so
+# left outside the override that call would re-check the MACHINE account's auth
+# after a write failed as a DIFFERENT account. It SHOULD run under the same
+# override, because with the override applied `gh auth status` reports the
+# env-token account, which is exactly the account whose failure is being
+# classified. Exactly ONE classifier call sits inside a write path: the one in
+# _forge_resolve_review_thread (the
+# `reason=$(_forge_classify_gh_failure_reason "$host")` line after its
+# could-not-resolve-to-a-node match). The other two -- in _forge_issue_view and
+# _forge_pr_review_threads_github -- are pure reads outside this phase's write
+# set, and _forge_pr_create/_forge_pr_edit/_forge_issue_create never call it.
+# The routing pass carried that one prefix assignment to that one CALL SITE;
+# the classifier function itself was never edited, which is what kept the two
+# stories off the same function. See the ROUTING RULE block below.
+#
+# Residual, accepted and named rather than defended against: `bash -x` would
+# print the token as part of the prefix-assignment expansion. This file never
+# enables xtrace (`set -euo pipefail` only), so that is a debugging-time hazard,
+# not a shipped leak.
+#
+# Per-process memo behind _forge_account_host_cached, keyed on the working
+# directory each answer was derived in -- the same shape, and keyed for the same
+# multi-repo reason, as _DETECT_FORGE_TYPE_MEMO above.
+declare -gA _FORGE_ACCOUNT_HOST_MEMO
+
+# The forge host an override is keyed under: a lowercased plain string, or empty
+# when there is none. Two `git remote` reads on a miss, zero on a hit.
+#
+# OUT-PARAMETER, NOT STDOUT, for precisely _detect_forge_type's reason: a memo
+# populated inside a `$(...)` subshell dies with that subshell, and
+# _forge_account_override below is ALWAYS called inside one (it is a printer,
+# used in a prefix assignment). So the memo is warmed by
+# _forge_account_override_slots -- a plain statement in the caller's own shell
+# -- and the two `$(...)` lookups it then makes inherit the populated array and
+# read it as a hit. Without that warming, one routed write would derive the host
+# twice, once per slot, to answer the same question.
+#
+# Internals are _fahc_-prefixed so _detect_forge_read_selection's name-reference
+# targets can never collide with a caller's own locals.
+# Usage: _forge_account_host_cached <host_var>
+_forge_account_host_cached() {
+  local -n _fahc_out="$1"
+  _fahc_out=""
+
+  # AIMI_FORGE_TYPE short-circuits before the memo as well as before any git
+  # command, mirroring _detect_forge's own override arm, which emits host: null
+  # on that path -- there is no host to key anything under.
+  if [ -n "${AIMI_FORGE_TYPE:-}" ]; then
+    return 0
+  fi
+
+  local _fahc_key="$PWD"
+  if [ -n "${_FORGE_ACCOUNT_HOST_MEMO[$_fahc_key]+set}" ]; then
+    _fahc_out="${_FORGE_ACCOUNT_HOST_MEMO[$_fahc_key]}"
+    return 0
+  fi
+
+  local _fahc_name _fahc_source _fahc_url _fahc_host=""
+  _detect_forge_read_selection _fahc_name _fahc_source _fahc_url
+  if [ "$_fahc_source" = "remote" ] && [ -n "$_fahc_url" ]; then
+    _fahc_host=$(_detect_forge_parse_host "$_fahc_url")
+  fi
+
+  _FORGE_ACCOUNT_HOST_MEMO["$_fahc_key"]="$_fahc_host"
+  _fahc_out="$_fahc_host"
+}
+
+# Internals are _fao_-prefixed so _detect_forge_read_selection's name-reference
+# targets can never collide with a caller's own locals.
+_forge_account_override() {
+  local _fao_want="${1:-}"
+  [ -n "$_fao_want" ] || return 0
+
+  # Host first -- it decides both the variable name and the store key.
+  local _fao_host=""
+  _forge_account_host_cached _fao_host
+
+  local _fao_var="GH_TOKEN"
+  case "$_fao_host" in
+    ""|github.com|*.github.com|ghe.com|*.ghe.com) _fao_var="GH_TOKEN" ;;
+    *) _fao_var="GH_ENTERPRISE_TOKEN" ;;
+  esac
+
+  # The slot this host does not use costs nothing: no store read, no gh call.
+  [ "$_fao_want" = "$_fao_var" ] || return 0
+
+  local _fao_login=""
+  if [ -n "${AIMI_FORGE_IDENTITY:-}" ]; then
+    _fao_login="$AIMI_FORGE_IDENTITY"
+  elif [ -n "$_fao_host" ]; then
+    # An answer is keyed by host, so an unresolvable host has nothing to look
+    # up. _forge_account_store_path is documented to be allowed to decline.
+    local _fao_store="" _fao_entry=""
+    _fao_store=$(_forge_account_store_path) || _fao_store=""
+    if [ -n "$_fao_store" ]; then
+      # _forge_account_stored_entry already validates the mode discriminator
+      # and rejects an empty account string, so `null` covers absent, corrupt
+      # and not-an-answer alike. mode "active" is the deliberate opt-out and
+      # yields empty here -- a real answer, not a missing one.
+      _fao_entry=$(_forge_account_stored_entry "$_fao_store" "$_fao_host")
+      if [ "$_fao_entry" != "null" ]; then
+        _fao_login=$(printf '%s' "$_fao_entry" | jq -r 'if .mode == "account" then (.account // empty) else empty end')
+      fi
+    fi
+  fi
+
+  [ -n "$_fao_login" ] || return 0
+
+  # gh's absence is not this function's diagnosis to make -- the calling write
+  # path already gates on _forge_bin_check and says so once. Warning here too
+  # would add a second, wrong explanation ("no token for <login>") for a
+  # machine that simply has no gh.
+  _forge_bin_check gh quiet github || return 0
+
+  local _fao_token="" _fao_rc=0
+  if [ -n "$_fao_host" ]; then
+    _fao_token=$(GH_TOKEN= GH_ENTERPRISE_TOKEN= gh auth token --user "$_fao_login" --hostname "$_fao_host" 2>/dev/null) || _fao_rc=$?
+  else
+    _fao_token=$(GH_TOKEN= GH_ENTERPRISE_TOKEN= gh auth token --user "$_fao_login" 2>/dev/null) || _fao_rc=$?
+  fi
+
+  if [ "$_fao_rc" -ne 0 ]; then
+    echo "Warning: no gh token for account \"$_fao_login\" on host \"${_fao_host:-default}\" -- it may have been logged out; this operation will proceed as the machine active account." >&2
+    return 0
+  fi
+
+  printf '%s' "$_fao_token"
+}
+
+# Fills the caller's TWO prefix-assignment locals for ONE forge invocation.
+# Usage -- ALWAYS a plain statement, never inside $(...):
+#   local gh_token_override="" ghe_token_override=""
+#   _forge_account_override_slots gh_token_override ghe_token_override
+#
+# This exists so a write function resolves the account ONCE and then names the
+# same two locals at every routed command, instead of paying for the derivation
+# at each of the three or four gh-facing steps one write makes. It adds NO
+# resolution logic of its own: _forge_account_override above remains the single
+# place that decides which slot gets a value and what that value is.
+#
+# AN EMPTY OVERRIDE MUST NOT BLANK AN INHERITED TOKEN. Empty means "nothing was
+# recorded for this repository" or the deliberate "always use whichever account
+# is active" opt-out -- and in BOTH cases the acting account is whatever gh
+# would have used on its own, which includes a GH_TOKEN the caller exported
+# before invoking this CLI. Phase 1's contract (see cmd_forge_issue_create's
+# header) promises that inherited value reaches the child gh process untouched,
+# and a bare `GH_TOKEN="$empty"` prefix would silently revoke it. Parameter
+# expansion rather than an `if`, so the opt-out is not a second code path: a
+# recorded account still wins over the ambient value, since a non-empty override
+# never reaches the default arm.
+#
+# Internals are _faos_-prefixed so the caller's own two locals can never collide
+# with the name-reference targets.
+_forge_account_override_slots() {
+  local -n _faos_gh="$1" _faos_ghe="$2"
+
+  # Warm the host memo HERE, in the caller's own shell. The two lookups below
+  # are command substitutions, so a memo either of them populated would die
+  # with its subshell -- see _forge_account_host_cached's header.
+  local _faos_host=""
+  _forge_account_host_cached _faos_host
+
+  _faos_gh=$(_forge_account_override GH_TOKEN)
+  _faos_ghe=$(_forge_account_override GH_ENTERPRISE_TOKEN)
+
+  _faos_gh="${_faos_gh:-${GH_TOKEN:-}}"
+  _faos_ghe="${_faos_ghe:-${GH_ENTERPRISE_TOKEN:-}}"
+}
+
+# ----------------------------------------------------------------------------
+# ROUTING RULE FOR THE FOUR FORGE WRITE PATHS (US-006)
+# ----------------------------------------------------------------------------
+# THE OVERRIDE IS A PREFIX ASSIGNMENT ON EXACTLY ONE COMMAND, ALWAYS. It is
+# never `export`ed, never assigned at file scope, and never set by a wrapper
+# around a whole function body. That rule is load-bearing rather than
+# stylistic: with GH_TOKEN set process-wide, `gh auth status` reports the
+# env-token account as "Active account: true", which is precisely the marker
+# _forge_auth_status_github parses -- an exported override would make
+# forge-auth-status report the OVERRIDDEN account as the machine's active one,
+# and would leave the very before/after check that proves the machine account
+# was left alone structurally unable to detect a violation.
+#
+# SEVEN SITES, AND NO OTHERS. Each write function resolves BOTH slots ONCE into
+# two locals immediately after its own _forge_bin_check gate -- at most one is
+# ever non-empty, and only the matching one costs a `gh auth token` process --
+# then names both on every routed command:
+#
+#   _forge_pr_create              gh pr create      the write
+#                                 cmd_forge_pr_view idempotency check
+#                                 cmd_forge_pr_view post-create re-read
+#   _forge_pr_edit                gh pr edit        the write
+#                                 cmd_forge_pr_view post-edit re-read
+#   _forge_issue_create           gh issue create   the write
+#   _forge_resolve_review_thread  gh api graphql    the resolveReviewThread mutation
+#
+# Resolved ONCE per invocation, not once per site: a single forge-pr-create run
+# reaches gh three or four times and must not re-derive the host and re-mint the
+# token each time. That is what _forge_account_override_slots is for -- it fills
+# the caller's two locals from a plain statement in the caller's own shell, so
+# the host memo it warms survives into the `$(...)` lookups that follow. A memo
+# populated INSIDE one of those lookups would die with its subshell, exactly as
+# _detect_forge_type's own header spells out.
+#
+# WHY THE IN-OPERATION READS ARE ROUTED TOO -- correctness, not tidiness: on a
+# PRIVATE repository the account that creates a PR can see it while a different
+# reader account cannot, so a post-create re-read performed as the machine
+# account would fail against a PR that was just successfully created. One
+# logical operation stays on one identity. This does NOT make forge-pr-view an
+# override-applying verb: invoked directly as its own verb it stays a plain
+# machine-account read, and only the reads made INSIDE a write inherit anything.
+#
+# NO BRANCH FOR THE OPT-OUT. When the remembered answer is "always use whichever
+# account is active" -- or nothing was ever recorded -- both locals are empty and
+# every site keeps the identical shape, because gh treats an empty token
+# variable as unset. An `if` here would be a second code path for the commonest
+# case of all.
+#
+# NOT INVOCATIONS, NOT ROUTED: the two `echo` lines in
+# _forge_pr_write_print_manual PRINT a `gh pr create` / `gh pr edit` command for
+# a human to run. They shell out to nothing.
+#
+# ONE CLASSIFIER CALL IS ROUTED, the one inside _forge_resolve_review_thread.
+# See the CLASSIFIER SEAM paragraph on _forge_account_override above for why;
+# the prefix assignment lives at that call site and
+# _forge_classify_gh_failure_reason itself is unmodified.
+# ----------------------------------------------------------------------------
+
 # ============================================================================
 # forge-auth-status / forge-repo-info (US-003)
 # ============================================================================
@@ -2688,9 +3104,16 @@ _forge_classify_gh_failure_reason() {
 # Combines stdout+stderr since gh's own account listing goes to a different
 # stream across versions -- this parser only cares about the text, not
 # which stream carried it.
-# Prints {authenticated, account} -- account is the login of whichever
-# account gh marks "Active account: true" beneath, or the sole account
-# found when gh's output carries no explicit marker line at all.
+# Prints {authenticated, account, accounts} -- account is the login of
+# whichever account gh marks "Active account: true" beneath, or the sole
+# account found when gh's output carries no explicit marker line at all.
+# `accounts` is EVERY login the same output listed, in gh's own print order,
+# de-duplicated, [] when none. It comes out of the SAME single parse pass as
+# `account`, deliberately: a second `gh auth status` call or a second parser
+# could disagree with this one (gh's output is not guaranteed stable between
+# two invocations -- an account can be added, removed or switched between
+# them), and a list that disagrees with the active account it is supposed to
+# contain is worse than no list at all.
 _forge_auth_status_github() {
   local host="$1"
   local out="" rc=0
@@ -2701,14 +3124,26 @@ _forge_auth_status_github() {
   fi
 
   if [ "$rc" -ne 0 ]; then
-    jq -nc '{authenticated: false, account: null}'
+    jq -nc '{authenticated: false, account: null, accounts: []}'
     return 0
   fi
 
-  local active="" last="" line
+  local active="" last="" line seen known
+  local accounts=()
   while IFS= read -r line; do
+    # Requires whitespace immediately after "account", which is exactly what
+    # keeps the marker lines out: "Active account: true" has a colon there,
+    # so the marker can never be mistaken for a login.
     if [[ "$line" =~ account[[:space:]]+([^[:space:]]+) ]]; then
       last="${BASH_REMATCH[1]}"
+      seen=""
+      for known in ${accounts[@]+"${accounts[@]}"}; do
+        if [ "$known" = "$last" ]; then
+          seen="1"
+          break
+        fi
+      done
+      [ -n "$seen" ] || accounts+=("$last")
     fi
     if [[ "$line" == *"Active account: true"* ]]; then
       active="$last"
@@ -2716,8 +3151,10 @@ _forge_auth_status_github() {
   done <<< "$out"
   [ -n "$active" ] || active="$last"
 
-  jq -nc --arg account "$active" \
-    '{authenticated: true, account: (if $account == "" then null else $account end)}'
+  jq -nc --arg account "$active" --args \
+    '{authenticated: true,
+      account: (if $account == "" then null else $account end),
+      accounts: $ARGS.positional}' ${accounts[@]+"${accounts[@]}"}
 }
 
 # Resolves forge/host via detect-forge's own helper (a direct function call,
@@ -2762,6 +3199,13 @@ _forge_auth_status() {
       fi
 
       status="found"
+      # This builder names every field it emits, one by one -- it never
+      # splats $gh_out through. That containment is load-bearing, not
+      # incidental: _forge_auth_status_github also returns an `accounts`
+      # array (the whole login list, for the account-divergence section
+      # below), and forge-contract.md fixes this envelope's fields. A
+      # `+ $gh_out`-style merge here would leak a field the contract does
+      # not define into every forge-auth-status caller.
       data_json=$(jq -nc \
         --arg forge "$forge" \
         --arg host "$host" \
@@ -2819,6 +3263,675 @@ cmd_forge_auth_status() {
   _require_git_repo "$project_dir"
 
   _forge_auth_status
+}
+
+# ============================================================================
+# Forge account selection -- divergence detection
+# ============================================================================
+# Answers exactly ONE question: does this repository's git identity disagree
+# with the forge account gh is currently acting as, and is there another
+# account available to pick instead? Nothing here asks the human, applies an
+# account, or remembers an answer -- those are separate concerns owned
+# elsewhere. Concretely this section:
+#   - reads `git config user.email` / `user.name` and `gh auth status`, and
+#     writes NOTHING. No file under ~/.config/aimi/ or .aimi/ is read or
+#     created, so this code has no ordering dependency on the account store.
+#   - never runs `gh auth switch`, never sets or exports GH_TOKEN, and never
+#     calls `gh auth token`. Applying an account is a different job.
+#   - makes NO network call. `gh api user --jq .login` would resolve the
+#     active login authoritatively but costs a round trip;
+#     _forge_auth_status_github already parses it offline, which is why this
+#     section extends that parser rather than reaching for the API.
+#
+# The verdict is a PRIVATE json object consumed in-process by callers in this
+# file -- deliberately NOT a fifth forge result envelope. forge-contract.md
+# fixes the envelope count at four and its `reason` at a closed four-value
+# enum, so:
+#   - `basis` is a field on this private verdict, NEVER the `reason` argument
+#     of _forge_emit_status. It reuses the contract's own spellings
+#     no_adapter / cli_missing / not_authenticated where it means exactly
+#     what the contract means by them, and adds diverged /
+#     identity_matches_active / single_account / no_git_identity for outcomes
+#     that enum does not model. Passing any of those four into
+#     _forge_emit_status would be rejected by that function's own case guard,
+#     which is the backstop for this rule.
+#   - forge-auth-status's emitted envelope is unchanged by this section.
+#
+# THE HARD PART is that the comparison crosses two namespaces with no general
+# mapping: a git identity is an EMAIL, a forge account is a LOGIN. Only
+# GitHub's noreply form encodes the login authoritatively; everything else is
+# a heuristic, which is why each derived candidate carries its own
+# confidence. The heuristics are deliberately biased toward catching the
+# AGREEING cases, because the two failure directions are not symmetric: a
+# false "they agree" is silent and unrecoverable by the user, while a false
+# "they diverge" costs one question that is answered once.
+
+# Prints {email, name} for the identity git would actually stamp on a commit
+# in the current working directory -- repository config where set, global
+# otherwise, which is why neither read is qualified with --local.
+#
+# The `|| ` assignment on each read is REQUIRED, not defensive noise: an
+# unset key makes `git config --get` exit 1, and a bare `x=$(git config ...)`
+# under this file's `set -euo pipefail` would abort the whole CLI on a
+# repository that simply has no user.name configured.
+_forge_git_identity() {
+  local email="" name=""
+  email=$(git config --get user.email 2>/dev/null) || email=""
+  name=$(git config --get user.name 2>/dev/null) || name=""
+
+  jq -nc --arg email "$email" --arg name "$name" \
+    '{email: (if $email == "" then null else $email end),
+      name: (if $name == "" then null else $name end)}'
+}
+
+# Derives the GitHub logins an email plus a name could plausibly stand for,
+# as [{login, confidence}] in decreasing authority, [] when nothing
+# login-shaped can be derived at all.
+#
+# Usage: _forge_identity_logins <email> <name>
+#
+#   confidence=noreply   The address is GitHub's own noreply form,
+#                        [<numeric-id>+]<login>@users.noreply.github.com,
+#                        which ENCODES the login exactly. Authoritative, and
+#                        emitted alone -- no heuristic can improve on it.
+#   confidence=heuristic A guess: the email local-part (with a leading
+#                        <digits>+ stripped, the shape GitHub's own noreply
+#                        addresses use), and user.name when it is
+#                        login-shaped. The shape test ^[A-Za-z0-9][A-Za-z0-9-]*$
+#                        is what rejects the overwhelmingly common
+#                        "First Last" value of user.name.
+#
+# The noreply DOMAIN is compared case-insensitively (mail domains are), but
+# only a lowercased COPY of the domain is used for that test so the login the
+# local-part carries keeps the casing its owner typed. Callers compare
+# case-insensitively anyway, since GitHub logins are.
+_forge_identity_logins() {
+  local email="$1" name="$2"
+  local entries=() local_part domain login
+
+  local_part="${email%@*}"
+  domain=$(printf '%s' "${email##*@}" | tr '[:upper:]' '[:lower:]')
+
+  if [ "$domain" = "users.noreply.github.com" ] &&
+     [[ "$local_part" =~ ^([0-9]+\+)?([A-Za-z0-9][A-Za-z0-9-]*)$ ]]; then
+    login="${BASH_REMATCH[2]}"
+    jq -nc --arg login "$login" '[{login: $login, confidence: "noreply"}]'
+    return 0
+  fi
+
+  local candidate
+  candidate="${email%%@*}"
+  if [[ "$candidate" =~ ^[0-9]+\+(.*)$ ]]; then
+    candidate="${BASH_REMATCH[1]}"
+  fi
+  if [[ "$candidate" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]]; then
+    entries+=("$(jq -nc --arg login "$candidate" '{login: $login, confidence: "heuristic"}')")
+  fi
+
+  if [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] &&
+     [ "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$candidate" | tr '[:upper:]' '[:lower:]')" ]; then
+    entries+=("$(jq -nc --arg login "$name" '{login: $login, confidence: "heuristic"}')")
+  fi
+
+  if [ ${#entries[@]} -eq 0 ]; then
+    printf '[]\n'
+    return 0
+  fi
+  printf '%s\n' "${entries[@]}" | jq -sc '.'
+}
+
+# Prints exactly one verdict object:
+#   {decision, basis, forge, host, activeAccount, accounts, identity, match}
+#     decision       "ask" | "skip" -- whether the caller should raise the
+#                    account question at all. Necessary, not sufficient: a
+#                    caller that has already recorded an answer for this
+#                    repository combines that with this verdict.
+#     basis          why (see the section header -- NOT the contract's reason)
+#     forge          the resolved forge, from _detect_forge
+#     host           the resolved host, or null
+#     activeAccount  the login gh is currently acting as, or null
+#     accounts       every login gh reports, in gh's own order, [] when none
+#     identity       {email, name} this repository's git identity
+#     match          "noreply" | "heuristic" | "none" -- the confidence of
+#                    the derived login that MATCHED activeAccount, "none"
+#                    when none did or the comparison never ran
+#
+# The decision table below is evaluated in a fixed order, each rung mutually
+# exclusive with the ones above it. Two orderings are deliberate:
+#   - identity_matches_active is checked BEFORE single_account, so a
+#     one-account repository whose identity genuinely agrees reports the
+#     informative basis rather than the incidental one.
+#   - single_account SKIPS rather than asks. With one account logged in there
+#     is no alternative to offer: account selection resolves logins already
+#     in gh's keyring, so a one-account machine has no remedy even when the
+#     identity plainly disagrees. Recording the basis is what lets a caller
+#     say why it stayed quiet instead of appearing to have no opinion.
+_forge_account_divergence() {
+  local forge_info forge host
+  forge_info=$(_detect_forge)
+  forge=$(printf '%s' "$forge_info" | jq -r '.forge')
+  # `// empty` is load-bearing here for exactly the reason spelled out at
+  # _forge_auth_status's own host read above (aimi-cli.sh:2757-2763): .host
+  # is JSON null whenever AIMI_FORGE_TYPE short-circuits detection, and a
+  # bare `jq -r '.host'` renders that null as the 4-character TEXT "null" --
+  # non-empty, so it survives every downstream emptiness check and reaches
+  # `gh auth status --hostname null`, whose refusal then reads as a CONFIRMED
+  # not-authenticated answer. This read is the only way a host reaches gh
+  # from this function, so "" is the only value that can stand for "no host".
+  host=$(printf '%s' "$forge_info" | jq -r '.host // empty')
+
+  local identity_json email name
+  identity_json=$(_forge_git_identity)
+  email=$(printf '%s' "$identity_json" | jq -r '.email // empty')
+  name=$(printf '%s' "$identity_json" | jq -r '.name // empty')
+
+  local decision="skip" basis="" active="" accounts_json="[]" match="none"
+
+  if [ "$forge" != "github" ]; then
+    basis="no_adapter"
+  elif ! _forge_bin_check gh quiet github; then
+    basis="cli_missing"
+  else
+    local gh_out authenticated
+    gh_out=$(_forge_auth_status_github "$host")
+    authenticated=$(printf '%s' "$gh_out" | jq -r '.authenticated')
+    active=$(printf '%s' "$gh_out" | jq -r '.account // empty')
+    accounts_json=$(printf '%s' "$gh_out" | jq -c '.accounts')
+
+    if [ "$authenticated" != "true" ]; then
+      basis="not_authenticated"
+    elif [ -z "$email" ] && [ -z "$name" ]; then
+      basis="no_git_identity"
+    else
+      local logins_json matched
+      logins_json=$(_forge_identity_logins "$email" "$name")
+      # First candidate that matches wins, and _forge_identity_logins emits
+      # the authoritative noreply candidate alone -- so `match` reports the
+      # strongest confidence that actually agreed, never a weaker one that
+      # happened to be listed first.
+      matched=$(printf '%s' "$logins_json" | jq -r --arg active "$active" \
+        '($active | ascii_downcase) as $a
+         | if $a == "" then empty
+           else (map(select((.login | ascii_downcase) == $a)) | .[0] // null
+                 | if . == null then empty else .confidence end)
+           end')
+
+      if [ -n "$matched" ]; then
+        basis="identity_matches_active"
+        match="$matched"
+      elif [ "$(printf '%s' "$accounts_json" | jq 'length')" -lt 2 ]; then
+        basis="single_account"
+      else
+        decision="ask"
+        basis="diverged"
+      fi
+    fi
+  fi
+
+  jq -nc \
+    --arg decision "$decision" \
+    --arg basis "$basis" \
+    --arg forge "$forge" \
+    --arg host "$host" \
+    --arg activeAccount "$active" \
+    --argjson accounts "$accounts_json" \
+    --arg email "$email" \
+    --arg name "$name" \
+    --arg match "$match" \
+    '{decision: $decision,
+      basis: $basis,
+      forge: $forge,
+      host: (if $host == "" then null else $host end),
+      activeAccount: (if $activeAccount == "" then null else $activeAccount end),
+      accounts: $accounts,
+      identity: {email: (if $email == "" then null else $email end),
+                 name: (if $name == "" then null else $name end)},
+      match: $match}'
+}
+
+# ============================================================================
+# Forge account selection -- the remembered answer
+# ============================================================================
+# Owns THREE operations on ONE document: record an answer, read it back and
+# decide, and revoke it. It does not ask the human. That split is settled repo
+# convention, not a choice made here: commands/references/interactivity.md puts
+# the question in the COMMAND layer, and the reason is mechanical -- the only
+# interactive prompt in this entire file, _prompt_category, is gated on
+# `[ -t 0 ]` and reads /dev/tty, which never fires under Claude Code because
+# the CLI is invoked through the Bash tool with a non-TTY stdin. A prompt
+# implemented here would be silently dead in the only host that matters.
+#
+# THREE SHIPPED BUGS FROM THIS REPOSITORY'S OWN MODELS FLOW LAND HERE. None is
+# hypothetical; each cost a release:
+#
+#   1. AN ANSWER THAT COULD NOT BE REVOKED (1.93.0, CHANGELOG:615). The models
+#      dismissal marker "suppressed the prompt even after the config was
+#      deleted, leaving the user silently stuck on all-inherit defaults with no
+#      way to re-trigger the prompt short of also deleting the marker." The fix
+#      decoupled the two files so deleting the ANSWER always re-triggers. That
+#      is why --reselect exists in this verb at all, and why there is no
+#      companion marker or sentinel anywhere in this section: THE ANSWER IS THE
+#      ONLY STATE. Deleting the store by hand does exactly what --reselect does.
+#
+#   2. CHECKED BY FILE EXISTENCE RATHER THAN CONTENT (1.93.1, CHANGELOG:604).
+#      `models-prompt-check` returned `skip` whenever models.json existed, even
+#      when the current host's sub-table was missing or empty. The analogue here
+#      is worse than an inconvenience: the store file exists the moment THIS
+#      repository first answers, and phases 3/4 add gitlab.com and gitea hosts
+#      to the same document, so a check that reads "file exists -> don't ask"
+#      would silence every host after the first. --check therefore decides on
+#      THIS HOST'S ENTRY, and an absent / empty / malformed store and an entry
+#      that does not encode a usable answer ALL yield ask, never a silent skip.
+#
+#   3. A WRITER THAT CLOBBERED A SIBLING SCOPE (1.97.2, CHANGELOG:487).
+#      `detect-models` in default mode "wrote a fresh document via `jq -n`,
+#      silently dropping the inactive host's configured models on every
+#      invocation." Every write here is read-merge-write through the single
+#      _forge_account_store_merge path below, and NO code path in this section
+#      reconstructs the document with `jq -n`. --reselect is the trap: writing
+#      the file back without the entry is the obvious implementation and it
+#      destroys every other host's answer, so it too is a merge (`del`), not a
+#      rebuild. _forge_account_store_path's own header states the same
+#      obligation from the store's side.
+#
+# DOCUMENT SHAPE, and why a REBUILD is impossible rather than merely discouraged:
+# the store is a JSON object keyed by forge host, one file per repository
+# (_forge_account_store_path). This function CANNOT enumerate the hosts a
+# repository will ever use -- it only ever learns the ONE host _detect_forge
+# resolves from the remote it is standing in front of right now. A rebuild
+# would have to invent the other hosts' entries out of nothing, so read-merge-
+# write is the only implementation that can be correct, not a stylistic
+# preference. Each entry is:
+#     {"mode": "active",  "recordedAt": "<ISO 8601 UTC>"}
+#     {"mode": "account", "account": "<login>", "recordedAt": "<ISO 8601 UTC>"}
+# The `mode` discriminator is what makes "the user chose to always use whichever
+# account is active" a FIRST-CLASS persisted answer, distinguishable from "the
+# user has not been asked". Encoding the opt-out as an empty account string, or
+# by omitting the entry, is rejected on both the write and the read side --
+# neither is distinguishable from absent, which is precisely the property the
+# opt-out must not have.
+
+# Reads the store document, normalizing every degenerate input to `{}`:
+# file absent, file empty, file unreadable, file holding malformed JSON, and
+# file holding valid JSON that is not an object (an array or a bare string a
+# hand-edit could leave behind). Prints exactly one JSON object on stdout.
+#
+# Normalizing rather than erroring is bug 2's lesson applied at the read: the
+# caller's next step compares THIS HOST'S entry against `{}` and asks when it
+# finds nothing, so a corrupt store degrades into "nobody has answered yet"
+# and the user gets the question back. The alternative -- treating malformed
+# as "already answered" -- is the silent skip that shipped.
+_forge_account_store_read() {
+  local store="${1:-}" raw=""
+
+  if [ -z "$store" ] || [ ! -f "$store" ]; then
+    printf '{}\n'
+    return 0
+  fi
+
+  raw=$(cat "$store" 2>/dev/null) || raw=""
+  if [ -z "$raw" ]; then
+    printf '{}\n'
+    return 0
+  fi
+
+  printf '%s' "$raw" | jq -c 'if type == "object" then . else {} end' 2>/dev/null || printf '{}\n'
+}
+
+# THE ONLY WRITE PATH IN THIS SECTION. Read-merge-write, under one lock.
+# Usage: _forge_account_store_merge <store_path> <jq_filter> <jq_arg>...
+#
+# The jq filter is applied to the CURRENT document, read INSIDE the lock, so a
+# concurrent writer cannot slip between the read and the write and lose an
+# entry -- which is the whole reason the read is not hoisted out to the caller
+# where it would be easier to see.
+#
+# Combines the two precedents this repository already has rather than inventing
+# a third: roadmap-init's `( _lock "$f.lock"; ...; mv ) 200>"$f.lock"` subshell
+# shape, and write_aimi_models_config's create-then-restrict-then-write
+# ordering (mkdir -p, mktemp, chmod 0600 BEFORE any content, mv, temp removed on
+# mv failure). The 0600-before-content ordering is load-bearing for a file that
+# names accounts: it must never exist, even for the instant between creation and
+# the first write, readable by anyone but its owner.
+#
+# read_state/write_state are deliberately NOT used: their flock +
+# validate_path_in_project discipline is scoped to AIMI_ROOT/.aimi/ and does not
+# transfer to a path under the aimi config directory.
+#
+# The `|| rc=$?` makes the subshell the left side of an AND-OR list, the one
+# construct `set -e` is defined to exempt, so a lock path that cannot be opened
+# is a reportable failure rather than an instant, silent exit. The `200>`
+# redirect stays attached to the subshell, before the `||`.
+_forge_account_store_merge() {
+  local store="$1" filter="$2"
+  shift 2
+
+  local dir
+  dir=$(dirname "$store")
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    echo "Error: forge-account-select: cannot create directory: $dir" >&2
+    return 1
+  fi
+
+  local tmp=""
+  tmp=$(mktemp "${store}.XXXXXX" 2>/dev/null) || tmp=""
+  if [ -z "$tmp" ]; then
+    echo "Error: forge-account-select: cannot create a temp file beside $store" >&2
+    return 1
+  fi
+  chmod 0600 "$tmp"
+
+  local rc=0
+  (
+    _lock "${store}.lock"
+    local current merged
+    current=$(_forge_account_store_read "$store")
+    merged=$(printf '%s' "$current" | jq -c "$@" "$filter") || exit 1
+    printf '%s\n' "$merged" > "$tmp"
+    mv "$tmp" "$store"
+  ) 200>"${store}.lock" || rc=$?
+
+  rm -f "$tmp" 2>/dev/null || true
+
+  if [ "$rc" -ne 0 ]; then
+    echo "Error: forge-account-select: failed to write $store" >&2
+    return 1
+  fi
+}
+
+# Prints the forge host this repository's answer is keyed under, or nothing.
+#
+# `// empty` is not defensive noise. .host is JSON null whenever AIMI_FORGE_TYPE
+# short-circuits _detect_forge, and a bare `jq -r '.host'` renders that null as
+# the 4-character TEXT "null" -- non-empty, so it survives every downstream
+# emptiness check. Commit d1b19ca is where that exact value reached
+# `gh auth status --hostname null` and its refusal read as a CONFIRMED
+# not-authenticated answer. Here it would key an entry under the literal host
+# "null", which no later invocation resolving a real host would ever find again.
+_forge_account_host() {
+  local forge_info
+  forge_info=$(_detect_forge)
+  printf '%s' "$forge_info" | jq -r '.host // empty'
+}
+
+# Extracts THIS host's recorded answer from a store document, or `null`.
+#
+# The mode discriminator is validated here, not merely read: an entry that is
+# not an object, carries an unrecognized mode, or encodes mode "account" with a
+# missing or empty account is reported as `null` -- i.e. "nobody has answered".
+# That is bug 2's content-check discipline pushed one level down from the
+# document to the entry, and it is also the read-side half of rejecting the
+# empty string as an encoding of the "always use the active account" opt-out.
+_forge_account_stored_entry() {
+  local store="$1" host="$2"
+
+  if [ -z "$store" ] || [ -z "$host" ]; then
+    printf 'null\n'
+    return 0
+  fi
+
+  _forge_account_store_read "$store" | jq -c --arg host "$host" '
+    (.[$host] // null) as $e
+    | if ($e | type) != "object" then null
+      elif $e.mode == "active" then $e
+      elif $e.mode == "account" and ($e.account | type) == "string" and $e.account != "" then $e
+      else null
+      end'
+}
+
+# Usage/mode error. Always exits 1 -- every caller relies on that, so no arm of
+# the parsing loop needs its own guard against falling through.
+_forge_account_select_usage() {
+  if [ -n "${1:-}" ]; then
+    echo "Error: forge-account-select: $1" >&2
+  fi
+  echo "Usage: aimi-cli.sh forge-account-select (--check | --record <login> | --record-active | --reselect) [--project <path>]" >&2
+  echo "  Exactly one mode is required:" >&2
+  echo "    --check           read this repository's recorded answer back and decide whether the account question is warranted; writes nothing" >&2
+  echo "    --record <login>  remember <login> as this repository's forge account" >&2
+  echo "    --record-active   remember \"always use whichever account is active\" -- a real answer, not the absence of one" >&2
+  echo "    --reselect        forget this repository's answer so the next --check asks again" >&2
+  exit 1
+}
+
+# --check. Reads and decides; writes NOTHING -- no store file, no config
+# directory, no chmod, no mutation of a pre-existing store.
+#
+# That is not tidiness, it is the mechanical guarantee behind the agent-mode
+# rule. interactivity.md requires every question site to auto-select under
+# AIMI_AGENT_MODE / CI / --non-interactive, and if that auto-answer were
+# persisted, ONE CI run would silently and permanently answer the question for
+# every human who touched the repository afterwards. Applied-but-not-persisted
+# is enforced by --check writing nothing at all; persisting is always a
+# separate, explicit --record* call the command layer makes only after a human
+# actually answered.
+#
+# The rungs below are mutually exclusive and evaluated in a fixed order:
+#   identity_override  AIMI_FORGE_IDENTITY names the account to act as, so the
+#                      question is moot. Highest precedence, matching this
+#                      file's own env-over-stored convention (AIMI_FORGE_TYPE
+#                      short-circuits detection entirely).
+#   no_repository      no resolvable git identity, so there is nowhere to
+#                      remember an answer. Near-unreachable behind
+#                      _require_git_repo; kept because _forge_account_store_path
+#                      is documented to be allowed to decline.
+#   no_host            no forge host resolved (no remote, or AIMI_FORGE_TYPE
+#                      overriding detection), so the answer has no key. Asking
+#                      a question whose answer cannot be stored is worse than
+#                      not asking.
+#   answer_recorded    this host already has a usable answer.
+#   <divergence basis> otherwise the verdict from _forge_account_divergence is
+#                      adopted verbatim, decision and basis together. That
+#                      verdict is necessary but not sufficient on its own,
+#                      which is exactly what the rungs above supply.
+_forge_account_select_check() {
+  local store="$1"
+  local verdict host stored decision basis
+
+  verdict=$(_forge_account_divergence)
+  host=$(printf '%s' "$verdict" | jq -r '.host // empty')
+  stored=$(_forge_account_stored_entry "$store" "$host")
+
+  decision="skip"
+  if [ -n "${AIMI_FORGE_IDENTITY:-}" ]; then
+    basis="identity_override"
+  elif [ -z "$store" ]; then
+    basis="no_repository"
+  elif [ -z "$host" ]; then
+    basis="no_host"
+  elif [ "$stored" != "null" ]; then
+    basis="answer_recorded"
+  else
+    decision=$(printf '%s' "$verdict" | jq -r '.decision')
+    basis=$(printf '%s' "$verdict" | jq -r '.basis')
+  fi
+
+  printf '%s' "$verdict" | jq -c \
+    --arg decision "$decision" \
+    --arg basis "$basis" \
+    --argjson stored "$stored" \
+    --arg store "$store" \
+    '{action: "check"}
+     + .
+     + {decision: $decision,
+        basis: $basis,
+        stored: $stored,
+        store: (if $store == "" then null else $store end)}'
+}
+
+# --record <login> and --record-active. Both persist through the one merge path.
+_forge_account_select_record() {
+  local store="$1" entry_mode="$2" login="$3"
+
+  if [ -z "$store" ]; then
+    echo "Error: forge-account-select: no resolvable git repository here, so there is nowhere to record an answer" >&2
+    exit 1
+  fi
+
+  local host
+  host=$(_forge_account_host)
+  if [ -z "$host" ]; then
+    echo "Error: forge-account-select: no forge host resolved for this repository -- an answer is keyed by host, so there is nothing to key it under" >&2
+    echo "  A host comes from the git remote; AIMI_FORGE_TYPE overrides forge detection and deliberately reports no host." >&2
+    exit 1
+  fi
+
+  local recorded_at entry
+  recorded_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%SZ')
+
+  if [ "$entry_mode" = "active" ]; then
+    entry=$(jq -nc --arg at "$recorded_at" '{mode: "active", recordedAt: $at}')
+  else
+    entry=$(jq -nc --arg account "$login" --arg at "$recorded_at" \
+      '{mode: "account", account: $account, recordedAt: $at}')
+  fi
+
+  # `.[$host] = $entry` -- assignment into the document that was just read, so
+  # every OTHER host's entry survives byte-for-byte. Never `jq -n`.
+  _forge_account_store_merge "$store" '.[$host] = $entry' \
+    --arg host "$host" --argjson entry "$entry" || exit 1
+
+  jq -nc --arg host "$host" --arg store "$store" --argjson stored "$entry" \
+    '{action: "record", host: $host, store: $store, stored: $stored}'
+}
+
+# --reselect. Revocation, and the ONLY state involved: there is no companion
+# marker to also delete, so this and `rm` on the store file are equivalent.
+_forge_account_select_reselect() {
+  local store="$1"
+
+  if [ -z "$store" ]; then
+    echo "Error: forge-account-select: no resolvable git repository here, so there is no answer to forget" >&2
+    exit 1
+  fi
+
+  local host
+  host=$(_forge_account_host)
+  if [ -z "$host" ]; then
+    echo "Error: forge-account-select: no forge host resolved for this repository -- an answer is keyed by host, so there is nothing to look up" >&2
+    exit 1
+  fi
+
+  local had
+  had=$(_forge_account_stored_entry "$store" "$host")
+
+  # `del(.[$host])` on the document that was just read. Rewriting the file
+  # without the entry is the obvious implementation and it is CHANGELOG:487
+  # exactly: every other host's answer would go with it.
+  _forge_account_store_merge "$store" 'del(.[$host])' --arg host "$host" || exit 1
+
+  local cleared="false"
+  if [ "$had" != "null" ]; then
+    cleared="true"
+  fi
+
+  jq -nc --arg host "$host" --arg store "$store" --argjson cleared "$cleared" \
+    '{action: "reselect", host: $host, store: $store, stored: null, cleared: $cleared}'
+}
+
+# Records, reads back and revokes this repository's forge account answer.
+#
+# Usage: aimi-cli.sh forge-account-select (--check | --record <login> |
+#                                          --record-active | --reselect)
+#                                         [--project <path>]
+#
+# RESELECT IS A FLAG, NEVER A SECOND VERB. The phase declares exactly one
+# `creates` identity for this work, cmd_forge_account_select, and verify-creates
+# greps tracked source for that literal string at phase close; a second verb
+# would need a second identity and a roadmap amendment. Revocation was
+# originally proposed as its own story and was folded in here precisely to keep
+# that contract intact.
+#
+# NO --token, --identity OR OTHERWISE CREDENTIAL-SHAPED FLAG EXISTS in the
+# parsing loop below, and none may be added. cmd_forge_pr_create,
+# cmd_forge_pr_edit and cmd_forge_issue_create each carry the same statement:
+# an identity reaches a forge CLI only through the environment, never through
+# argv, because argv leaks through `ps` and shell history. A LOGIN is not a
+# credential, which is why --record takes one -- but the flag namespace stays
+# clear of anything a future reader could mistake for a token sink.
+cmd_forge_account_select() {
+  check_jq
+
+  local mode="" account="" project_dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --check)
+        if [ -n "$mode" ]; then
+          _forge_account_select_usage "two modes given (--$mode and --check) -- exactly one is allowed"
+        fi
+        mode="check"
+        ;;
+      --record)
+        if [ -n "$mode" ]; then
+          _forge_account_select_usage "two modes given (--$mode and --record) -- exactly one is allowed"
+        fi
+        mode="record"
+        # Consumes the value only when one is actually there. A bare `shift`
+        # on the last argument returns non-zero, and this file runs `set -e`,
+        # so `--record` with no login would abort the process before the
+        # empty-value check below could print anything at all.
+        if [ $# -ge 2 ]; then
+          shift
+          account="$1"
+        fi
+        ;;
+      --record-active)
+        if [ -n "$mode" ]; then
+          _forge_account_select_usage "two modes given (--$mode and --record-active) -- exactly one is allowed"
+        fi
+        mode="record-active"
+        ;;
+      --reselect)
+        if [ -n "$mode" ]; then
+          _forge_account_select_usage "two modes given (--$mode and --reselect) -- exactly one is allowed"
+        fi
+        mode="reselect"
+        ;;
+      --project)
+        if [ $# -ge 2 ]; then
+          shift
+          project_dir="$1"
+        fi
+        ;;
+      *)
+        _forge_account_select_usage "unknown flag: $1"
+        ;;
+    esac
+    shift
+  done
+
+  if [ -z "$mode" ]; then
+    _forge_account_select_usage "no mode given"
+  fi
+
+  # An empty --record value is refused rather than stored. Storing "" would
+  # encode the "always use the active account" opt-out as a value that is
+  # indistinguishable from absent -- the one property that answer must not
+  # have. A leading dash is refused too: it is a flag the parser swallowed as
+  # a value, never a login anyone meant to type.
+  if [ "$mode" = "record" ]; then
+    if [ -z "$account" ]; then
+      _forge_account_select_usage "--record requires a <login>; --record-active is the way to say \"always use whichever account is active\""
+    fi
+    case "$account" in
+      -*)
+        _forge_account_select_usage "--record got \"$account\", which looks like a flag rather than a login"
+        ;;
+    esac
+  fi
+
+  _require_git_repo "$project_dir"
+
+  local store=""
+  store=$(_forge_account_store_path) || store=""
+
+  case "$mode" in
+    check)         _forge_account_select_check "$store" ;;
+    record)        _forge_account_select_record "$store" "account" "$account" ;;
+    record-active) _forge_account_select_record "$store" "active" "" ;;
+    reselect)      _forge_account_select_reselect "$store" ;;
+  esac
 }
 
 # Requests owner and name from a single `gh repo view` call -- never the two
@@ -3397,13 +4510,16 @@ cmd_forge_pr_view() {
 # after observing the non-zero exit.
 #
 # IDENTITY: exactly like forge-issue-create, neither cmd_forge_pr_create nor
-# cmd_forge_pr_edit accepts a --token/--identity (or similarly credential-
-# shaped) flag. Any acting-account identity (e.g. AIMI_FORGE_IDENTITY, or a
-# GH_TOKEN a caller exported before invoking this CLI) reaches the child gh
-# process purely by environment-variable inheritance -- no extra code is
-# needed here to pass it along, and neither function ever echoes or logs
-# one verbatim. This is the exact signature phase 2's per-repository
-# account selection is expected to build on without retrofitting.
+# cmd_forge_pr_edit accepts a --token (or similarly credential-shaped) flag.
+# Any acting-account identity (e.g. AIMI_FORGE_IDENTITY, or a GH_TOKEN a
+# caller exported before invoking this CLI) reaches the child gh process
+# purely by environment-variable inheritance -- no extra code is needed here
+# to pass it along, and neither function ever echoes or logs one verbatim.
+# Phase 2's per-repository account selection built on that signature without
+# retrofitting it: both functions below now resolve _forge_account_override
+# once and apply it as a bash PREFIX ASSIGNMENT on each gh write and on the
+# forge-pr-view reads made as part of the same operation. See the ROUTING
+# RULE block above the forge-auth-status section for the full statement.
 
 # Prints the MANDATORY manual-fallback instructions (forge-contract.md's
 # Degradation Contract, mandatory mode) for every forge-pr-create/forge-pr-
@@ -3529,13 +4645,27 @@ _forge_pr_create() {
     return 1
   fi
 
+  # This repository's remembered account, resolved ONCE for all three gh-facing
+  # steps below (the idempotency check, the create itself, the post-create
+  # re-read) rather than re-derived at each one. Both slots are named at every
+  # site and at most one is ever non-empty; the empty case is the opt-out and
+  # needs no branch. Resolved AFTER the gh gate above so a machine with no gh
+  # gets one explanation, not two. See the ROUTING RULE block above the
+  # forge-auth-status section -- export is forbidden, prefix assignment only.
+  local gh_token_override="" ghe_token_override=""
+  _forge_account_override_slots gh_token_override ghe_token_override
+
   # Existing-PR check. `state` rides along with url/number precisely because
   # this branch has to tell an OPEN PR (which blocks creation) apart from a
   # closed/merged one (which must not) -- `gh pr view <branch>` is NOT
   # state-filtered, so a branch reused after its prior PR was merged still
   # resolves to that stale PR here.
+  # Routed: this lookup is part of the create operation, so it must run as the
+  # same account the create will (a private repo can let the creating account
+  # see a PR its reader account cannot).
   local existing="" existing_rc=0 existing_status existing_state existing_message
-  existing=$(cmd_forge_pr_view --pr "$head" --include url,number,state) || existing_rc=$?
+  existing=$(GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    cmd_forge_pr_view --pr "$head" --include url,number,state) || existing_rc=$?
   if [ "$existing_rc" -ne 0 ]; then
     _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
     echo "Error: forge-pr-create: forge-pr-view lookup failed while checking for an existing PR (exit $existing_rc)." >&2
@@ -3589,8 +4719,15 @@ _forge_pr_create() {
       ;;
   esac
 
+  # WRITE 1. The prefix assignment is on the _forge_capture call itself, so the
+  # value is set for the duration of that one function call, exported into the
+  # `gh` grandchild it spawns, and unset again the moment it returns --
+  # _forge_capture's argv-only signature is untouched and the token never
+  # becomes an argv element. `env GH_TOKEN=... gh ...` is forbidden for exactly
+  # that reason: env(1)'s own argv would carry it into the process table.
   local stdout rc=0 stderr_out
-  _forge_capture stdout stderr_out rc -- gh pr create --title "$title" --base "$base" --head "$head" --body "$body" || true
+  GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    _forge_capture stdout stderr_out rc -- gh pr create --title "$title" --base "$base" --head "$head" --body "$body" || true
 
   if [ "$rc" -ne 0 ]; then
     _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
@@ -3624,8 +4761,13 @@ _forge_pr_create() {
   # `data` to null by design (forge-contract.md's Write-Verb Status
   # Convention), which would throw the very url this comment exists to
   # protect straight back away.
+  # Routed for the same reason the idempotency check above is, and here the
+  # consequence is concrete: on a private repository this re-read performed as
+  # the machine account would fail against a PR the overridden account has just
+  # successfully created.
   local reread="" reread_rc=0 reread_status reread_message pr_number
-  reread=$(cmd_forge_pr_view --pr "$head" --include url,number) || reread_rc=$?
+  reread=$(GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    cmd_forge_pr_view --pr "$head" --include url,number) || reread_rc=$?
   if [ "$reread_rc" -ne 0 ]; then
     echo "Warning: forge-pr-create: the pull request WAS created at $pr_url, but the post-create forge-pr-view re-read failed (exit $reread_rc) -- only its number could not be confirmed. Do NOT create it again." >&2
     _forge_emit_write_status created "$(_forge_build_write_data "$pr_url" "")"
@@ -3730,11 +4872,21 @@ _forge_pr_edit() {
     return 1
   fi
 
+  # Resolved ONCE for both the edit and its post-edit re-read -- see
+  # _forge_pr_create's own resolution and the ROUTING RULE block above the
+  # forge-auth-status section.
+  local gh_token_override="" ghe_token_override=""
+  _forge_account_override_slots gh_token_override ghe_token_override
+
   # This call alone discarded gh's stdout to /dev/null rather than capturing
   # it. It now lands in a local nothing reads, which is behaviourally
   # identical -- neither form ever printed or inspected it.
+  #
+  # WRITE 2. Identical prefix-assignment shape to WRITE 1: on the
+  # _forge_capture call, never inside its argv, never via `env`.
   local stdout rc=0 stderr_out
-  _forge_capture stdout stderr_out rc -- gh pr edit "$number" --body "$body" || true
+  GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    _forge_capture stdout stderr_out rc -- gh pr edit "$number" --body "$body" || true
 
   if [ "$rc" -ne 0 ]; then
     _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
@@ -3743,8 +4895,11 @@ _forge_pr_edit() {
     return 1
   fi
 
+  # Routed: part of the same logical edit, so it reads as the account that
+  # just wrote.
   local reread="" reread_rc=0 reread_status pr_url pr_number
-  reread=$(cmd_forge_pr_view --pr "$number" --include url,number) || reread_rc=$?
+  reread=$(GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    cmd_forge_pr_view --pr "$number" --include url,number) || reread_rc=$?
   if [ "$reread_rc" -ne 0 ]; then
     _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
     echo "Error: forge-pr-edit: gh pr edit succeeded but the post-edit forge-pr-view re-read failed (exit $reread_rc)." >&2
@@ -4086,9 +5241,18 @@ _forge_issue_create() {
     return 0
   fi
 
+  # Resolved once, then applied to the one gh call this verb makes -- this path
+  # has no in-operation read (the issue number is parsed from the URL gh
+  # itself printed, never re-queried). See the ROUTING RULE block above the
+  # forge-auth-status section.
+  local gh_token_override="" ghe_token_override=""
+  _forge_account_override_slots gh_token_override ghe_token_override
+
+  # WRITE 3. Identical prefix-assignment shape to WRITE 1 and WRITE 2.
   local stdout rc=0
   local stderr_out
-  _forge_capture stdout stderr_out rc -- gh issue create --title "$title" --body "$body" || true
+  GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    _forge_capture stdout stderr_out rc -- gh issue create --title "$title" --body "$body" || true
 
   if [ "$rc" -ne 0 ]; then
     _forge_issue_create_print_manual "$title" "$body" "$forge"
@@ -4111,11 +5275,17 @@ _forge_issue_create() {
 
 # Public wrapper: parses --title/--body/--project (deliberately no --token
 # or similarly credential-shaped flag -- see forge-contract.md's
-# Credential/Identity Model; any acting-account identity must reach the
-# child gh process only through an environment variable, e.g. GH_TOKEN,
-# which a bash child process inherits automatically with no extra code
-# needed here to pass it along), confirms the git-repository guard, then
+# Credential/Identity Model), confirms the git-repository guard, then
 # delegates exactly once to _forge_issue_create.
+#
+# HOW THE ACTING ACCOUNT REACHES gh, now that phase 2 has landed: only ever
+# through an environment variable, never a flag. A GH_TOKEN a caller exported
+# before invoking this CLI is inherited by the child gh process with no code
+# here to pass it along; this repository's own remembered account is applied by
+# _forge_issue_create as a bash prefix assignment on the single `gh issue
+# create` call, which never enters argv and never outlives that call. This
+# paragraph used to state the inheritance half as the whole story and point at
+# the second half as future work.
 #
 # INVARIANT (restated from the section header on purpose, not left
 # implicit): a degraded or failed issue creation from this verb must NEVER
@@ -4484,9 +5654,19 @@ _forge_resolve_review_thread() {
     return 0
   fi
 
+  # Resolved once, for the mutation below and for the failure classifier that
+  # judges it. See the ROUTING RULE block above the forge-auth-status section.
+  local gh_token_override="" ghe_token_override=""
+  _forge_account_override_slots gh_token_override ghe_token_override
+
+  # WRITE 4. Same prefix-assignment shape as the other three. The nested
+  # `$(_forge_resolve_review_thread_mutation)` substitution is evaluated in this
+  # shell BEFORE _forge_capture is entered, so the prefix assignment does not
+  # disturb it.
   local stdout rc=0
   local stderr_out
-  _forge_capture stdout stderr_out rc -- gh api graphql -f threadId="$thread_id" \
+  GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    _forge_capture stdout stderr_out rc -- gh api graphql -f threadId="$thread_id" \
     -f query="$(_forge_resolve_review_thread_mutation)" || true
 
   # gh api graphql exits non-zero when the GraphQL response's own `errors`
@@ -4508,8 +5688,18 @@ _forge_resolve_review_thread() {
     # _forge_bin_check gate above, so the classifier only separates
     # not_authenticated from cli_failed -- structurally, never by reading
     # stderr_out's wording.
+    #
+    # ROUTED, and this is the ONLY classifier call inside a write path. Left
+    # unrouted it would re-check the MACHINE account's auth after a mutation
+    # that failed as a DIFFERENT account -- an overridden account whose token
+    # expired would be classified against the wrong account entirely. Under the
+    # override `gh auth status` reports the env-token account, which is exactly
+    # the one whose failure is being classified. The prefix assignment is at
+    # this call site; _forge_classify_gh_failure_reason itself is unmodified,
+    # and its other two callers are pure reads that stay unrouted.
     local reason
-    reason=$(_forge_classify_gh_failure_reason "$host")
+    reason=$(GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+      _forge_classify_gh_failure_reason "$host")
     _forge_emit_status error "" "gh api graphql exited $rc: ${stderr_out:-unknown error}" "$reason"
     return 0
   fi
@@ -12210,6 +13400,46 @@ COMMANDS:
                               AIMI_FORGE_IDENTITY=<login> (env var only, never a flag)
                               to compare against the active account -- this does not
                               switch accounts.
+    forge-account-select (--check | --record <login> | --record-active | --reselect) [--project <path>]
+                              Record, read back and revoke THIS repository's
+                              remembered forge account -- the ask-once store.
+                              Exactly one mode is required; giving two, or
+                              none, exits 1 naming the valid modes. Reselect
+                              is a FLAG on this verb, never a second verb.
+                              --check reads the answer back and decides:
+                              {action: "check", decision ("ask"|"skip"),
+                              basis, stored, store, ...} plus every field of
+                              the internal divergence verdict (forge, host,
+                              activeAccount, accounts, identity, match).
+                              basis is identity_override (AIMI_FORGE_IDENTITY
+                              names the account, so the question is moot),
+                              no_repository, no_host, answer_recorded, or the
+                              divergence verdict's own basis. --check WRITES
+                              NOTHING -- not the store, not the config
+                              directory -- which is what keeps an agent-mode
+                              or CI auto-answer applied-but-not-persisted, so
+                              one CI run cannot permanently answer for every
+                              human afterwards.
+                              --record <login> remembers a named account;
+                              --record-active remembers "always use whichever
+                              account is active" as a first-class answer,
+                              distinct from having no answer. An empty
+                              --record value is refused, since it would be
+                              indistinguishable from absent.
+                              --reselect forgets this repository's answer so
+                              the next --check asks again; deleting the store
+                              file by hand does the same, because the answer
+                              is the ONLY state -- there is no companion
+                              marker to also delete.
+                              The store is one JSON document per repository
+                              (keyed on the repository's git common dir, so
+                              every worktree shares it) holding one entry per
+                              forge host. Every write is read-merge-write, so
+                              recording or revoking one host never touches
+                              another's entry.
+                              No credential-shaped flag exists on this verb,
+                              by design -- an acting identity is env-var-only
+                              (AIMI_FORGE_IDENTITY / GH_TOKEN), never a flag.
     forge-repo-info [--project <path>]
                               Resolve the active forge's owner/repo via a single
                               `gh repo view` call, falling back to parsing the git
@@ -12878,6 +14108,7 @@ main() {
     # one below runs too late to cover them.
     detect-forge) shift; cmd_detect_forge "$@"; return ;;
     forge-auth-status) shift; cmd_forge_auth_status "$@"; return ;;
+    forge-account-select) shift; cmd_forge_account_select "$@"; return ;;
     forge-repo-info) shift; cmd_forge_repo_info "$@"; return ;;
     forge-pr-view) shift; cmd_forge_pr_view "$@"; return ;;
     forge-pr-create) shift; cmd_forge_pr_create "$@"; return ;;

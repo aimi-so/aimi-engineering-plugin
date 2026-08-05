@@ -253,6 +253,23 @@ translate_command_body() {
   # accepted deliberately (see CHANGELOG.md and docs/opencode.md) rather than
   # narrowed with a `gh *` rule or a confirmation gate, because either would
   # break unattended `/aimi:execute`.
+  # Coverage re-verified (forge-abstraction phase 2, forge account picker): the
+  # per-repository forge-account pickers added to open-pr.md (Step 1a) and
+  # execute.md (Offer a Pull Request) need no new rule — this function was
+  # sourced in isolation, fed both picker paragraphs literally, and returned
+  # `Use the **question** tool` from the first substitution below with no
+  # AskUserQuestion literal left in either. Their `$AIMI_CLI
+  # forge-account-select --check/--record/--record-active --project …` calls
+  # survive byte-identical for the same reason verify-creates and story-merge
+  # do: no substitution here matches a subcommand or flag name.
+  #
+  # This is also why those pickers live in the command bodies and NOT in
+  # commands/references/forge-contract.md. Reference files never reach this
+  # function: they are delivered by the verbatim whole-tree copy below and both
+  # command-install loops skip the "references" subdirectory by name. A picker
+  # written into a reference file would reach OpenCode untranslated, naming a
+  # tool that host does not have. forge-contract.md therefore carries the
+  # account-selection contract in prose with no AskUserQuestion literal at all.
   body="${body//Use \*\*AskUserQuestion\*\*/Use the **question** tool}"
   body="${body//Use AskUserQuestion/Use the question tool}"
   body="${body//via AskUserQuestion/via the question tool}"

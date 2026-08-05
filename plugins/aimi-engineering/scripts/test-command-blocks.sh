@@ -24,6 +24,8 @@ set -uo pipefail
 #   6. execute.md's phase-branch derivation, EXECUTED against fixtures
 #   7. execute.md's verification_failed re-verify branch, structurally
 #   8. plan.md's branchName derivations use the dot-slugified phase id
+#   9. the forge-account picker records ONLY from a human answer, never in
+#      agent mode
 #
 # Checks 1-5 are static. Check 6 is the first one that RUNS a block: it pulls
 # execute.md's phase-branch derivation out of the extracted set and executes it
@@ -788,6 +790,109 @@ SHAPES
 }
 
 # ---------------------------------------------------------------------------
+# Check 9 — the forge-account picker persists ONLY a human's answer.
+#
+# WHY THIS IS A CHECK AND NOT A CODE COMMENT
+#
+# interactivity.md requires every question site to auto-select the first
+# non-escape option under agent mode (--non-interactive / AIMI_AGENT_MODE / CI).
+# At this site that option is "always use the active account" — which is ALSO
+# the question's permanent opt-out: recording it is precisely what stops the
+# question ever being raised again. So persisting the agent-mode auto-answer
+# would let ONE unattended CI run silently and permanently answer the question
+# for every human who touches that repository afterwards. They would never be
+# asked, and would have no way to discover why.
+#
+# That defect is invisible until it has already happened to someone: nothing
+# fails, nothing is logged, the picker simply never appears again. The repo has
+# shipped this exact shape once already (1.93.0's unrevocable dismissal). So the
+# rule is pinned structurally, the way check 7 pins a prose control-flow branch:
+# every `$AIMI_CLI forge-account-select --record*` INVOCATION in an ask site
+# must sit above that site's agent-mode branch. Prose that merely NAMES the
+# flags is not an invocation and is deliberately not matched — invocations go
+# through $AIMI_CLI, and the agent-mode paragraph's own "make no
+# `forge-account-select --record` ... call at all" sentence must not trip it.
+# ---------------------------------------------------------------------------
+FORGE_ACCOUNT_SITES='open-pr.md|#### Select the acting forge account for this repository
+execute.md|#### Select the acting forge account per repository'
+
+# Prints the ask site's region: the heading line through the line before the
+# next markdown heading, each line prefixed with its 1-based number in the file.
+forge_account_region() {
+  awk -v H="$2" '
+    { n = n + 1 }
+    !inside && index($0, H) == 1 { inside = 1; print n "\t" $0; next }
+    inside && /^#+ / { exit }
+    inside { print n "\t" $0 }
+  ' "$1"
+}
+
+check_forge_account_picker() {
+  local file heading region path
+  local missing="" persist="" contract=""
+
+  while IFS='|' read -r file heading; do
+    [ -n "$heading" ] || continue
+    path="$COMMANDS_DIR/$file"
+    if [ ! -f "$path" ]; then
+      missing="$missing$file is not readable"$'\n'
+      continue
+    fi
+    region="$(forge_account_region "$path" "$heading")"
+    if [ -z "$region" ]; then
+      missing="$missing$file has no '$heading' section"$'\n'
+      continue
+    fi
+
+    # The picker itself, in the exact literal install.sh matches on.
+    printf '%s\n' "$region" | grep -qF 'Use **AskUserQuestion**' \
+      || missing="$missing$file: the ask site never writes the literal 'Use **AskUserQuestion**'"$'\n'
+
+    # The agent-mode branch, and the log line that makes non-persistence
+    # observable in the transcript rather than merely asserted here.
+    printf '%s\n' "$region" | grep -qF 'agent-mode: forge-account auto-selected active account (not recorded)' \
+      || missing="$missing$file: the agent-mode log line no longer states '(not recorded)'"$'\n'
+    printf '%s\n' "$region" | grep -qF 'Agent-mode fallback:' \
+      || missing="$missing$file: the ask site has no agent-mode fallback sentence (interactivity.md requires one)"$'\n'
+
+    # --- the property -----------------------------------------------------
+    local records last_record agent_line nrecords
+    records="$(printf '%s\n' "$region" | grep -F '$AIMI_CLI forge-account-select --record' | cut -f1)"
+    nrecords="$(printf '%s' "$records" | grep -c . || true)"
+    agent_line="$(printf '%s\n' "$region" | grep -nF '**When `INTERACTIVE_MODE=agent`**' | head -1 | cut -d: -f1)"
+    agent_line="$(printf '%s\n' "$region" | sed -n "${agent_line:-0}p" | cut -f1)"
+    last_record="$(printf '%s\n' "$records" | tail -1)"
+
+    if [ "$nrecords" != "2" ]; then
+      persist="$persist$file: expected exactly 2 forge-account-select --record* invocations (--record-active and --record <login>, both in the one picker-mode fence), found $nrecords"$'\n'
+    fi
+    if [ -z "$agent_line" ]; then
+      persist="$persist$file: the ask site never opens an agent-mode branch, so nothing bounds where a record call may appear"$'\n'
+    elif [ -n "$last_record" ] && [ "$last_record" -ge "$agent_line" ]; then
+      persist="$persist$file:$last_record — a forge-account-select --record* invocation sits at or below the agent-mode branch ($file:$agent_line)"$'\n'
+    fi
+  done <<EOF
+$FORGE_ACCOUNT_SITES
+EOF
+
+  assert_no_findings "$(printf '%s' "$missing")" \
+    "Check 9 — both forge-account ask sites carry the picker, the agent-mode branch and the (not recorded) log line" \
+    "interactivity.md requires the exact 'Use **AskUserQuestion**' literal, a fallback sentence, and one log line per site."
+
+  assert_no_findings "$(printf '%s' "$persist")" \
+    "Check 9 — every forge-account record call sits above the agent-mode branch (agent mode persists nothing)" \
+    "Option A is also the permanent opt-out: a record call reachable from agent mode lets one CI run answer the question forever for every human."
+
+  # The picker literal must NOT reach a reference file: references are copied
+  # verbatim by install.sh and skipped by both command-install loops, so one
+  # written here arrives in OpenCode naming a tool that host does not have.
+  contract="$(grep -n 'AskUserQuestion' "$COMMANDS_DIR/references/forge-contract.md" 2>/dev/null | cut -c1-160 | sed 's/^/forge-contract.md:/')"
+  assert_no_findings "$contract" \
+    "Check 9 — forge-contract.md carries the account contract with no AskUserQuestion literal" \
+    "commands/references/ is never run through install.sh's translate_command_body. Put the picker in a command body instead."
+}
+
+# ---------------------------------------------------------------------------
 # The baseline is only honest if it shrinks. An entry that no longer matches
 # anything means the underlying issue was fixed (or a heading was renamed) and
 # the line must go, otherwise the baseline slowly becomes a permanent excuse.
@@ -834,6 +939,7 @@ main() {
   check_phase_branch_derivation
   check_reverify_branch
   check_plan_branchname_slugified
+  check_forge_account_picker
 
   echo ""
   echo "--- Baseline Hygiene ---"
