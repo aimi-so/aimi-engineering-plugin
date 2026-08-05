@@ -349,9 +349,12 @@ _aimi_models_prompt_marker_path() {
 # MEMOIZES NOTHING, DELIBERATELY: like its four siblings this is a pure stdout
 # printer, so every call site reaches it through `$(...)` -- and a memo
 # populated inside a command-substitution subshell dies with that subshell, as
-# _detect_forge_type's header spells out (aimi-cli.sh:1960-1967). Per-invocation
-# memoization of the resolved ACCOUNT belongs to _forge_account_override, which
-# can use the same bash name-reference discipline _detect_forge_type uses.
+# _detect_forge_type's header spells out. Per-invocation memoization of the
+# resolved ACCOUNT lives one level up instead, in the
+# _forge_account_host_cached / _forge_account_override_slots pair, which uses
+# exactly that name-reference discipline: the memo is warmed by a plain
+# statement in the write function's own shell, and the `$(...)` lookups that
+# follow inherit it.
 _forge_account_store_path() {
   local common_dir=""
 
@@ -2781,11 +2784,12 @@ _forge_classify_gh_failure_reason() {
 #
 # The empty-host row is the AIMI_FORGE_TYPE override path, where _detect_forge
 # emits host: null and there is no hostname to pass; gh then uses its own
-# default host. The host is derived here through the jq-free
-# _detect_forge_read_selection + _detect_forge_parse_host pair (two `git remote`
-# reads, zero jq processes) rather than taken from the caller, because three of
-# the four write paths reach identity through _detect_forge_type, which by its
-# own header comment carries no host at all. That pair returns a lowercased
+# default host. The host is derived through _forge_account_host_cached below --
+# the jq-free _detect_forge_read_selection + _detect_forge_parse_host pair (two
+# `git remote` reads on a memo miss, zero jq processes) -- rather than taken
+# from the caller, because three of the four write paths reach identity through
+# _detect_forge_type, which by its own header comment carries no host at all.
+# That pair returns a lowercased
 # plain string and can never produce the four-character text "null" the way a
 # bare `jq -r '.host'` can -- the defect commit d1b19ca paid for, where "null"
 # reached --hostname and its refusal read as a confirmed not-authenticated
@@ -2822,28 +2826,74 @@ _forge_classify_gh_failure_reason() {
 # captured into _forge_capture's stderr_out, so it cannot contaminate an
 # emitted JSON `message`.
 #
-# CLASSIFIER SEAM, decided rather than discovered later:
-# _forge_classify_gh_failure_reason above calls _forge_auth_status_github, and
-# under a correct per-invocation override that call runs OUTSIDE the override --
-# it would re-check the MACHINE account's auth after a write failed as a
-# DIFFERENT account. It SHOULD run under the same override, because with the
-# override applied `gh auth status` reports the env-token account, which is
-# exactly the account whose failure is being classified. Exactly ONE classifier
-# call sits inside a write path: the one in _forge_resolve_review_thread (the
+# CLASSIFIER SEAM, decided rather than discovered later, and now CLOSED:
+# _forge_classify_gh_failure_reason above calls _forge_auth_status_github, so
+# left outside the override that call would re-check the MACHINE account's auth
+# after a write failed as a DIFFERENT account. It SHOULD run under the same
+# override, because with the override applied `gh auth status` reports the
+# env-token account, which is exactly the account whose failure is being
+# classified. Exactly ONE classifier call sits inside a write path: the one in
+# _forge_resolve_review_thread (the
 # `reason=$(_forge_classify_gh_failure_reason "$host")` line after its
 # could-not-resolve-to-a-node match). The other two -- in _forge_issue_view and
 # _forge_pr_review_threads_github -- are pure reads outside this phase's write
 # set, and _forge_pr_create/_forge_pr_edit/_forge_issue_create never call it.
-# That one prefix assignment lands with the routing pass, not here, so the two
-# stories never edit the same function. If it is dropped the impact stays low:
-# the classifier only narrows an already-known failure and its catch-all
-# cli_failed is the safe direction.
+# The routing pass carried that one prefix assignment to that one CALL SITE;
+# the classifier function itself was never edited, which is what kept the two
+# stories off the same function. See the ROUTING RULE block below.
 #
 # Residual, accepted and named rather than defended against: `bash -x` would
 # print the token as part of the prefix-assignment expansion. This file never
 # enables xtrace (`set -euo pipefail` only), so that is a debugging-time hazard,
 # not a shipped leak.
 #
+# Per-process memo behind _forge_account_host_cached, keyed on the working
+# directory each answer was derived in -- the same shape, and keyed for the same
+# multi-repo reason, as _DETECT_FORGE_TYPE_MEMO above.
+declare -gA _FORGE_ACCOUNT_HOST_MEMO
+
+# The forge host an override is keyed under: a lowercased plain string, or empty
+# when there is none. Two `git remote` reads on a miss, zero on a hit.
+#
+# OUT-PARAMETER, NOT STDOUT, for precisely _detect_forge_type's reason: a memo
+# populated inside a `$(...)` subshell dies with that subshell, and
+# _forge_account_override below is ALWAYS called inside one (it is a printer,
+# used in a prefix assignment). So the memo is warmed by
+# _forge_account_override_slots -- a plain statement in the caller's own shell
+# -- and the two `$(...)` lookups it then makes inherit the populated array and
+# read it as a hit. Without that warming, one routed write would derive the host
+# twice, once per slot, to answer the same question.
+#
+# Internals are _fahc_-prefixed so _detect_forge_read_selection's name-reference
+# targets can never collide with a caller's own locals.
+# Usage: _forge_account_host_cached <host_var>
+_forge_account_host_cached() {
+  local -n _fahc_out="$1"
+  _fahc_out=""
+
+  # AIMI_FORGE_TYPE short-circuits before the memo as well as before any git
+  # command, mirroring _detect_forge's own override arm, which emits host: null
+  # on that path -- there is no host to key anything under.
+  if [ -n "${AIMI_FORGE_TYPE:-}" ]; then
+    return 0
+  fi
+
+  local _fahc_key="$PWD"
+  if [ -n "${_FORGE_ACCOUNT_HOST_MEMO[$_fahc_key]+set}" ]; then
+    _fahc_out="${_FORGE_ACCOUNT_HOST_MEMO[$_fahc_key]}"
+    return 0
+  fi
+
+  local _fahc_name _fahc_source _fahc_url _fahc_host=""
+  _detect_forge_read_selection _fahc_name _fahc_source _fahc_url
+  if [ "$_fahc_source" = "remote" ] && [ -n "$_fahc_url" ]; then
+    _fahc_host=$(_detect_forge_parse_host "$_fahc_url")
+  fi
+
+  _FORGE_ACCOUNT_HOST_MEMO["$_fahc_key"]="$_fahc_host"
+  _fahc_out="$_fahc_host"
+}
+
 # Internals are _fao_-prefixed so _detect_forge_read_selection's name-reference
 # targets can never collide with a caller's own locals.
 _forge_account_override() {
@@ -2851,16 +2901,8 @@ _forge_account_override() {
   [ -n "$_fao_want" ] || return 0
 
   # Host first -- it decides both the variable name and the store key.
-  # AIMI_FORGE_TYPE short-circuits before any git command, mirroring
-  # _detect_forge's own override arm, which emits host: null on that path.
   local _fao_host=""
-  if [ -z "${AIMI_FORGE_TYPE:-}" ]; then
-    local _fao_name _fao_source _fao_url
-    _detect_forge_read_selection _fao_name _fao_source _fao_url
-    if [ "$_fao_source" = "remote" ] && [ -n "$_fao_url" ]; then
-      _fao_host=$(_detect_forge_parse_host "$_fao_url")
-    fi
-  fi
+  _forge_account_host_cached _fao_host
 
   local _fao_var="GH_TOKEN"
   case "$_fao_host" in
@@ -2913,6 +2955,104 @@ _forge_account_override() {
 
   printf '%s' "$_fao_token"
 }
+
+# Fills the caller's TWO prefix-assignment locals for ONE forge invocation.
+# Usage -- ALWAYS a plain statement, never inside $(...):
+#   local gh_token_override="" ghe_token_override=""
+#   _forge_account_override_slots gh_token_override ghe_token_override
+#
+# This exists so a write function resolves the account ONCE and then names the
+# same two locals at every routed command, instead of paying for the derivation
+# at each of the three or four gh-facing steps one write makes. It adds NO
+# resolution logic of its own: _forge_account_override above remains the single
+# place that decides which slot gets a value and what that value is.
+#
+# AN EMPTY OVERRIDE MUST NOT BLANK AN INHERITED TOKEN. Empty means "nothing was
+# recorded for this repository" or the deliberate "always use whichever account
+# is active" opt-out -- and in BOTH cases the acting account is whatever gh
+# would have used on its own, which includes a GH_TOKEN the caller exported
+# before invoking this CLI. Phase 1's contract (see cmd_forge_issue_create's
+# header) promises that inherited value reaches the child gh process untouched,
+# and a bare `GH_TOKEN="$empty"` prefix would silently revoke it. Parameter
+# expansion rather than an `if`, so the opt-out is not a second code path: a
+# recorded account still wins over the ambient value, since a non-empty override
+# never reaches the default arm.
+#
+# Internals are _faos_-prefixed so the caller's own two locals can never collide
+# with the name-reference targets.
+_forge_account_override_slots() {
+  local -n _faos_gh="$1" _faos_ghe="$2"
+
+  # Warm the host memo HERE, in the caller's own shell. The two lookups below
+  # are command substitutions, so a memo either of them populated would die
+  # with its subshell -- see _forge_account_host_cached's header.
+  local _faos_host=""
+  _forge_account_host_cached _faos_host
+
+  _faos_gh=$(_forge_account_override GH_TOKEN)
+  _faos_ghe=$(_forge_account_override GH_ENTERPRISE_TOKEN)
+
+  _faos_gh="${_faos_gh:-${GH_TOKEN:-}}"
+  _faos_ghe="${_faos_ghe:-${GH_ENTERPRISE_TOKEN:-}}"
+}
+
+# ----------------------------------------------------------------------------
+# ROUTING RULE FOR THE FOUR FORGE WRITE PATHS (US-006)
+# ----------------------------------------------------------------------------
+# THE OVERRIDE IS A PREFIX ASSIGNMENT ON EXACTLY ONE COMMAND, ALWAYS. It is
+# never `export`ed, never assigned at file scope, and never set by a wrapper
+# around a whole function body. That rule is load-bearing rather than
+# stylistic: with GH_TOKEN set process-wide, `gh auth status` reports the
+# env-token account as "Active account: true", which is precisely the marker
+# _forge_auth_status_github parses -- an exported override would make
+# forge-auth-status report the OVERRIDDEN account as the machine's active one,
+# and would leave the very before/after check that proves the machine account
+# was left alone structurally unable to detect a violation.
+#
+# SEVEN SITES, AND NO OTHERS. Each write function resolves BOTH slots ONCE into
+# two locals immediately after its own _forge_bin_check gate -- at most one is
+# ever non-empty, and only the matching one costs a `gh auth token` process --
+# then names both on every routed command:
+#
+#   _forge_pr_create              gh pr create      the write
+#                                 cmd_forge_pr_view idempotency check
+#                                 cmd_forge_pr_view post-create re-read
+#   _forge_pr_edit                gh pr edit        the write
+#                                 cmd_forge_pr_view post-edit re-read
+#   _forge_issue_create           gh issue create   the write
+#   _forge_resolve_review_thread  gh api graphql    the resolveReviewThread mutation
+#
+# Resolved ONCE per invocation, not once per site: a single forge-pr-create run
+# reaches gh three or four times and must not re-derive the host and re-mint the
+# token each time. That is what _forge_account_override_slots is for -- it fills
+# the caller's two locals from a plain statement in the caller's own shell, so
+# the host memo it warms survives into the `$(...)` lookups that follow. A memo
+# populated INSIDE one of those lookups would die with its subshell, exactly as
+# _detect_forge_type's own header spells out.
+#
+# WHY THE IN-OPERATION READS ARE ROUTED TOO -- correctness, not tidiness: on a
+# PRIVATE repository the account that creates a PR can see it while a different
+# reader account cannot, so a post-create re-read performed as the machine
+# account would fail against a PR that was just successfully created. One
+# logical operation stays on one identity. This does NOT make forge-pr-view an
+# override-applying verb: invoked directly as its own verb it stays a plain
+# machine-account read, and only the reads made INSIDE a write inherit anything.
+#
+# NO BRANCH FOR THE OPT-OUT. When the remembered answer is "always use whichever
+# account is active" -- or nothing was ever recorded -- both locals are empty and
+# every site keeps the identical shape, because gh treats an empty token
+# variable as unset. An `if` here would be a second code path for the commonest
+# case of all.
+#
+# NOT INVOCATIONS, NOT ROUTED: the two `echo` lines in
+# _forge_pr_write_print_manual PRINT a `gh pr create` / `gh pr edit` command for
+# a human to run. They shell out to nothing.
+#
+# ONE CLASSIFIER CALL IS ROUTED, the one inside _forge_resolve_review_thread.
+# See the CLASSIFIER SEAM paragraph on _forge_account_override above for why;
+# the prefix assignment lives at that call site and
+# _forge_classify_gh_failure_reason itself is unmodified.
+# ----------------------------------------------------------------------------
 
 # ============================================================================
 # forge-auth-status / forge-repo-info (US-003)
@@ -4370,13 +4510,16 @@ cmd_forge_pr_view() {
 # after observing the non-zero exit.
 #
 # IDENTITY: exactly like forge-issue-create, neither cmd_forge_pr_create nor
-# cmd_forge_pr_edit accepts a --token/--identity (or similarly credential-
-# shaped) flag. Any acting-account identity (e.g. AIMI_FORGE_IDENTITY, or a
-# GH_TOKEN a caller exported before invoking this CLI) reaches the child gh
-# process purely by environment-variable inheritance -- no extra code is
-# needed here to pass it along, and neither function ever echoes or logs
-# one verbatim. This is the exact signature phase 2's per-repository
-# account selection is expected to build on without retrofitting.
+# cmd_forge_pr_edit accepts a --token (or similarly credential-shaped) flag.
+# Any acting-account identity (e.g. AIMI_FORGE_IDENTITY, or a GH_TOKEN a
+# caller exported before invoking this CLI) reaches the child gh process
+# purely by environment-variable inheritance -- no extra code is needed here
+# to pass it along, and neither function ever echoes or logs one verbatim.
+# Phase 2's per-repository account selection built on that signature without
+# retrofitting it: both functions below now resolve _forge_account_override
+# once and apply it as a bash PREFIX ASSIGNMENT on each gh write and on the
+# forge-pr-view reads made as part of the same operation. See the ROUTING
+# RULE block above the forge-auth-status section for the full statement.
 
 # Prints the MANDATORY manual-fallback instructions (forge-contract.md's
 # Degradation Contract, mandatory mode) for every forge-pr-create/forge-pr-
@@ -4502,13 +4645,27 @@ _forge_pr_create() {
     return 1
   fi
 
+  # This repository's remembered account, resolved ONCE for all three gh-facing
+  # steps below (the idempotency check, the create itself, the post-create
+  # re-read) rather than re-derived at each one. Both slots are named at every
+  # site and at most one is ever non-empty; the empty case is the opt-out and
+  # needs no branch. Resolved AFTER the gh gate above so a machine with no gh
+  # gets one explanation, not two. See the ROUTING RULE block above the
+  # forge-auth-status section -- export is forbidden, prefix assignment only.
+  local gh_token_override="" ghe_token_override=""
+  _forge_account_override_slots gh_token_override ghe_token_override
+
   # Existing-PR check. `state` rides along with url/number precisely because
   # this branch has to tell an OPEN PR (which blocks creation) apart from a
   # closed/merged one (which must not) -- `gh pr view <branch>` is NOT
   # state-filtered, so a branch reused after its prior PR was merged still
   # resolves to that stale PR here.
+  # Routed: this lookup is part of the create operation, so it must run as the
+  # same account the create will (a private repo can let the creating account
+  # see a PR its reader account cannot).
   local existing="" existing_rc=0 existing_status existing_state existing_message
-  existing=$(cmd_forge_pr_view --pr "$head" --include url,number,state) || existing_rc=$?
+  existing=$(GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    cmd_forge_pr_view --pr "$head" --include url,number,state) || existing_rc=$?
   if [ "$existing_rc" -ne 0 ]; then
     _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
     echo "Error: forge-pr-create: forge-pr-view lookup failed while checking for an existing PR (exit $existing_rc)." >&2
@@ -4562,8 +4719,15 @@ _forge_pr_create() {
       ;;
   esac
 
+  # WRITE 1. The prefix assignment is on the _forge_capture call itself, so the
+  # value is set for the duration of that one function call, exported into the
+  # `gh` grandchild it spawns, and unset again the moment it returns --
+  # _forge_capture's argv-only signature is untouched and the token never
+  # becomes an argv element. `env GH_TOKEN=... gh ...` is forbidden for exactly
+  # that reason: env(1)'s own argv would carry it into the process table.
   local stdout rc=0 stderr_out
-  _forge_capture stdout stderr_out rc -- gh pr create --title "$title" --base "$base" --head "$head" --body "$body" || true
+  GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    _forge_capture stdout stderr_out rc -- gh pr create --title "$title" --base "$base" --head "$head" --body "$body" || true
 
   if [ "$rc" -ne 0 ]; then
     _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
@@ -4597,8 +4761,13 @@ _forge_pr_create() {
   # `data` to null by design (forge-contract.md's Write-Verb Status
   # Convention), which would throw the very url this comment exists to
   # protect straight back away.
+  # Routed for the same reason the idempotency check above is, and here the
+  # consequence is concrete: on a private repository this re-read performed as
+  # the machine account would fail against a PR the overridden account has just
+  # successfully created.
   local reread="" reread_rc=0 reread_status reread_message pr_number
-  reread=$(cmd_forge_pr_view --pr "$head" --include url,number) || reread_rc=$?
+  reread=$(GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    cmd_forge_pr_view --pr "$head" --include url,number) || reread_rc=$?
   if [ "$reread_rc" -ne 0 ]; then
     echo "Warning: forge-pr-create: the pull request WAS created at $pr_url, but the post-create forge-pr-view re-read failed (exit $reread_rc) -- only its number could not be confirmed. Do NOT create it again." >&2
     _forge_emit_write_status created "$(_forge_build_write_data "$pr_url" "")"
@@ -4703,11 +4872,21 @@ _forge_pr_edit() {
     return 1
   fi
 
+  # Resolved ONCE for both the edit and its post-edit re-read -- see
+  # _forge_pr_create's own resolution and the ROUTING RULE block above the
+  # forge-auth-status section.
+  local gh_token_override="" ghe_token_override=""
+  _forge_account_override_slots gh_token_override ghe_token_override
+
   # This call alone discarded gh's stdout to /dev/null rather than capturing
   # it. It now lands in a local nothing reads, which is behaviourally
   # identical -- neither form ever printed or inspected it.
+  #
+  # WRITE 2. Identical prefix-assignment shape to WRITE 1: on the
+  # _forge_capture call, never inside its argv, never via `env`.
   local stdout rc=0 stderr_out
-  _forge_capture stdout stderr_out rc -- gh pr edit "$number" --body "$body" || true
+  GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    _forge_capture stdout stderr_out rc -- gh pr edit "$number" --body "$body" || true
 
   if [ "$rc" -ne 0 ]; then
     _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
@@ -4716,8 +4895,11 @@ _forge_pr_edit() {
     return 1
   fi
 
+  # Routed: part of the same logical edit, so it reads as the account that
+  # just wrote.
   local reread="" reread_rc=0 reread_status pr_url pr_number
-  reread=$(cmd_forge_pr_view --pr "$number" --include url,number) || reread_rc=$?
+  reread=$(GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    cmd_forge_pr_view --pr "$number" --include url,number) || reread_rc=$?
   if [ "$reread_rc" -ne 0 ]; then
     _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
     echo "Error: forge-pr-edit: gh pr edit succeeded but the post-edit forge-pr-view re-read failed (exit $reread_rc)." >&2
@@ -5059,9 +5241,18 @@ _forge_issue_create() {
     return 0
   fi
 
+  # Resolved once, then applied to the one gh call this verb makes -- this path
+  # has no in-operation read (the issue number is parsed from the URL gh
+  # itself printed, never re-queried). See the ROUTING RULE block above the
+  # forge-auth-status section.
+  local gh_token_override="" ghe_token_override=""
+  _forge_account_override_slots gh_token_override ghe_token_override
+
+  # WRITE 3. Identical prefix-assignment shape to WRITE 1 and WRITE 2.
   local stdout rc=0
   local stderr_out
-  _forge_capture stdout stderr_out rc -- gh issue create --title "$title" --body "$body" || true
+  GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    _forge_capture stdout stderr_out rc -- gh issue create --title "$title" --body "$body" || true
 
   if [ "$rc" -ne 0 ]; then
     _forge_issue_create_print_manual "$title" "$body" "$forge"
@@ -5084,11 +5275,17 @@ _forge_issue_create() {
 
 # Public wrapper: parses --title/--body/--project (deliberately no --token
 # or similarly credential-shaped flag -- see forge-contract.md's
-# Credential/Identity Model; any acting-account identity must reach the
-# child gh process only through an environment variable, e.g. GH_TOKEN,
-# which a bash child process inherits automatically with no extra code
-# needed here to pass it along), confirms the git-repository guard, then
+# Credential/Identity Model), confirms the git-repository guard, then
 # delegates exactly once to _forge_issue_create.
+#
+# HOW THE ACTING ACCOUNT REACHES gh, now that phase 2 has landed: only ever
+# through an environment variable, never a flag. A GH_TOKEN a caller exported
+# before invoking this CLI is inherited by the child gh process with no code
+# here to pass it along; this repository's own remembered account is applied by
+# _forge_issue_create as a bash prefix assignment on the single `gh issue
+# create` call, which never enters argv and never outlives that call. This
+# paragraph used to state the inheritance half as the whole story and point at
+# the second half as future work.
 #
 # INVARIANT (restated from the section header on purpose, not left
 # implicit): a degraded or failed issue creation from this verb must NEVER
@@ -5457,9 +5654,19 @@ _forge_resolve_review_thread() {
     return 0
   fi
 
+  # Resolved once, for the mutation below and for the failure classifier that
+  # judges it. See the ROUTING RULE block above the forge-auth-status section.
+  local gh_token_override="" ghe_token_override=""
+  _forge_account_override_slots gh_token_override ghe_token_override
+
+  # WRITE 4. Same prefix-assignment shape as the other three. The nested
+  # `$(_forge_resolve_review_thread_mutation)` substitution is evaluated in this
+  # shell BEFORE _forge_capture is entered, so the prefix assignment does not
+  # disturb it.
   local stdout rc=0
   local stderr_out
-  _forge_capture stdout stderr_out rc -- gh api graphql -f threadId="$thread_id" \
+  GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    _forge_capture stdout stderr_out rc -- gh api graphql -f threadId="$thread_id" \
     -f query="$(_forge_resolve_review_thread_mutation)" || true
 
   # gh api graphql exits non-zero when the GraphQL response's own `errors`
@@ -5481,8 +5688,18 @@ _forge_resolve_review_thread() {
     # _forge_bin_check gate above, so the classifier only separates
     # not_authenticated from cli_failed -- structurally, never by reading
     # stderr_out's wording.
+    #
+    # ROUTED, and this is the ONLY classifier call inside a write path. Left
+    # unrouted it would re-check the MACHINE account's auth after a mutation
+    # that failed as a DIFFERENT account -- an overridden account whose token
+    # expired would be classified against the wrong account entirely. Under the
+    # override `gh auth status` reports the env-token account, which is exactly
+    # the one whose failure is being classified. The prefix assignment is at
+    # this call site; _forge_classify_gh_failure_reason itself is unmodified,
+    # and its other two callers are pure reads that stay unrouted.
     local reason
-    reason=$(_forge_classify_gh_failure_reason "$host")
+    reason=$(GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+      _forge_classify_gh_failure_reason "$host")
     _forge_emit_status error "" "gh api graphql exited $rc: ${stderr_out:-unknown error}" "$reason"
     return 0
   fi
