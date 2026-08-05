@@ -3573,6 +3573,81 @@ PHASE_GROUP_PROJECTS=$(printf '%s\n' "$PHASE_GROUP_RAW" | grep -v '^$' | sort -u
 [ -n "$PHASE_GROUP_PROJECTS" ] || PHASE_GROUP_PROJECTS="."
 ```
 
+#### Select the acting forge account per repository
+
+Before any of those repositories is pushed or gets a pull request, settle which account will author those writes — once per repository ever, and **separately per repository**, since a multi-repo phase can legitimately span two repositories that want two different accounts. Resolve interactivity once (re-resolved here when still unset, the same cheap idempotent safety net the per-repo base-branch picker above uses, since each Bash call is an isolated shell) and ask the CLI, per group, whether the question is warranted:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+if [ -z "$INTERACTIVE_MODE" ]; then
+  INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
+fi
+echo "$INTERACTIVE_MODE"
+while IFS= read -r ACCOUNT_GROUP_PROJECT; do
+  [ -n "$ACCOUNT_GROUP_PROJECT" ] || continue
+  if [ "$ACCOUNT_GROUP_PROJECT" = "." ]; then
+    ACCOUNT_GROUP_ROOT="$AIMI_ROOT"
+  else
+    ACCOUNT_GROUP_ROOT="$AIMI_ROOT/$ACCOUNT_GROUP_PROJECT"
+  fi
+  ACCOUNT_GROUP_TOPLEVEL=$(git -C "$ACCOUNT_GROUP_ROOT" rev-parse --show-toplevel 2>/dev/null) || ACCOUNT_GROUP_TOPLEVEL=""
+  [ -n "$ACCOUNT_GROUP_TOPLEVEL" ] || continue
+  ACCOUNT_CHECK_JSON=$($AIMI_CLI forge-account-select --check --project "$ACCOUNT_GROUP_TOPLEVEL") || ACCOUNT_CHECK_JSON=""
+  [ -n "$ACCOUNT_CHECK_JSON" ] || continue
+  printf '%s\t%s\t%s\n' "$ACCOUNT_GROUP_PROJECT" "$ACCOUNT_GROUP_TOPLEVEL" "$ACCOUNT_CHECK_JSON"
+done <<< "$PHASE_GROUP_PROJECTS"
+```
+
+Each printed line is one repository: its group key, its repository root, and its `forge-account-select --check` verdict. `detect-interactivity` prints exactly `picker` or `agent`, and `picker` is the default — `agent` comes only from an explicit opt-out (`--non-interactive`, `AIMI_AGENT_MODE=true`, `CI=true`); a non-TTY shell is **not** a signal for agent mode. `commands/references/interactivity.md` is the arbiter for mode resolution, option format and the agent-mode rule at this site.
+
+Ask for a given repository **only** when `INTERACTIVE_MODE` is `picker` AND that line's `.decision` is `"ask"` — the same two-condition AND the first-run model prompt uses (`commands/references/cli-path-resolution.md`). `forge-account-select --check` owns the second condition entirely: it reports `"ask"` only when that repository has no recorded answer *for its own host* and that project's git identity and the active forge account actually diverge. It decides on that repository's own entry, never on the store file's existence, so a store already holding other repositories' answers still asks here. Every other `.basis` — `answer_recorded`, `identity_override`, `no_repository`, `no_host`, `single_account`, `identity_matches_active`, `not_authenticated`, `cli_missing`, `no_adapter` — reports `"skip"`: that repository gets no picker and no output. `--check` writes nothing, so evaluating it never changes what a later run asks.
+
+**When `INTERACTIVE_MODE=picker` and a line's `.decision == "ask"`:** Use **AskUserQuestion** once for that repository, naming it so a multi-repo run's separate prompts stay distinguishable — the same discipline the per-repo `resolve-base-branch` picker above follows:
+
+```
+Which account should author the pull request for [project_path] on [host]?
+
+A — Always use the active account ([activeAccount])
+B — [the divergence candidate]
+C/D/E — [further logged-in accounts, in the order .accounts lists them]
+Other — Enter a different account login
+```
+
+- **Option A** is deliberately the least disruptive answer, and it is the one agent mode auto-picks below: every write for that repository stays on whichever account is active.
+- **Option B** is the divergence candidate — the login in that line's `.accounts` that the repository's own git identity points at and that is not `.activeAccount`. Derive it from `.identity.email`: a `…@users.noreply.github.com` address encodes the login exactly (dropping any leading `<digits>+`); otherwise use the address's local-part with the same leading `<digits>+` dropped. When no `.accounts` entry matches, option B is the first `.accounts` entry other than `.activeAccount`.
+- **C/D/E** are the remaining `.accounts` entries in gh's own order, and **Other** is the free-form escape hatch, always last. Never fewer than 2 options and never more than 6 in total, so at most five accounts are listed; when gh reports more than fit, keep option A and the divergence candidate and drop the remainder — `Other` already covers them.
+
+Record the answer once per repository that was actually answered — picker mode only. Both the repository and the chosen value cross into this call as literals the orchestrator substitutes, never as shell variables carried over from the enumeration fence above:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+FORGE_ACCOUNT_PROJECT="[the repository root printed for the group just answered]"
+FORGE_ACCOUNT_CHOICE="[the account chosen above — the literal word active for option A, otherwise the login]"
+if [ "$FORGE_ACCOUNT_CHOICE" = "active" ]; then
+  $AIMI_CLI forge-account-select --record-active --project "$FORGE_ACCOUNT_PROJECT"
+elif echo "$FORGE_ACCOUNT_CHOICE" | grep -qE '^[A-Za-z0-9][A-Za-z0-9-]*$'; then
+  $AIMI_CLI forge-account-select --record "$FORGE_ACCOUNT_CHOICE" --project "$FORGE_ACCOUNT_PROJECT"
+else
+  echo "Not a forge login: $FORGE_ACCOUNT_CHOICE — nothing recorded for $FORGE_ACCOUNT_PROJECT." >&2
+fi
+```
+
+Option A records the permanent "always use the active account" opt-out — a real stored answer, not the absence of one, which is why it stops the question being raised for that repository again. Every other option records that login. A free-form `Other` value that fails the login shape records nothing and is reported, and this step then continues on the active account rather than stopping: this whole step is best-effort like the rest of **Offer a Pull Request**, and the phase is already `completed`. Because nothing was recorded, the next run asks that repository again. This command layer performs no file I/O of its own — it owns the prompt, and `forge-account-select` owns both "should I ask?" and "remember this answer".
+
+**When `INTERACTIVE_MODE=agent`** (`--non-interactive`, `AIMI_AGENT_MODE=true`, or `CI=true`): no picker for any repository. Auto-select option A — act as whichever account is active — and make **no** `forge-account-select --record` or `--record-active` call at all, for any repository. Applying option A takes no action of any kind: the active account is already the one every forge verb uses, so "applied for this invocation" and "changed nothing" are the same thing here. Every participating repository's recorded state after an agent-mode run is byte-for-byte what it was before. Log exactly one line per repository — no retry, no blocking, no second line:
+
+```
+agent-mode: forge-account auto-selected active account (not recorded) — project: [project_path]
+```
+
+*Agent-mode fallback: if `INTERACTIVE_MODE=agent`, auto-select option A for every repository and record nothing. Log: `agent-mode: forge-account auto-selected active account (not recorded) — project: [project_path]`.*
+
+**Why the auto-answer is never persisted.** Option A is not merely the least disruptive answer — it is also that repository's *permanent* opt-out. Recording it is precisely what stops the question ever being raised again. So if agent mode persisted its own auto-answer, one unattended CI run would silently and permanently answer the question on behalf of every human who touches that repository afterwards: they would never be asked, and would have no way to discover why. `/aimi:execute` is the command most likely to run unattended, which is what makes this site the one where the mistake would actually be made. The failure is not hypothetical here — 1.93.0 shipped a remembered dismissal that could not be revoked and left users silently stuck with no way to re-trigger the prompt. Applied-but-not-persisted is what keeps it from recurring: the `(not recorded)` in each log line is the observable proof in the transcript, and `--check`'s zero-side-effect contract is the mechanical guarantee behind it.
+
+Whatever was recorded here is applied by the forge verbs themselves through the credential mechanism `commands/references/forge-contract.md`'s **Credential/Identity Model** describes — the loop below neither reads the answer nor passes it along, and is unchanged by this subsection.
+
 For each group, resolve its own repository root, container, and default branch, then push and open a PR against that repository — never a value assumed to survive from Step 1.7 or from Mark Phase Completed above:
 
 ```bash

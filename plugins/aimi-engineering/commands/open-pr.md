@@ -83,6 +83,72 @@ Branch on the printed JSON's `status` field. `forge-auth-status` reports exactly
 
 No branch above may silently fall through to Step 2 as if authenticated.
 
+#### Select the acting forge account for this repository
+
+Step 1a has just established that a forge exists for this repository and that its adapter is authenticated — the two preconditions that make the account question meaningful at all. Settle here, once per repository ever, which account should author this repository's forge writes.
+
+Resolve interactivity and ask the CLI whether the question is warranted, in one call:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
+ACCOUNT_CHECK_JSON=$($AIMI_CLI forge-account-select --check)
+echo "$INTERACTIVE_MODE"
+echo "$ACCOUNT_CHECK_JSON"
+```
+
+`detect-interactivity` prints exactly `picker` or `agent`, and `picker` is the default — `agent` comes only from an explicit opt-out (`--non-interactive`, `AIMI_AGENT_MODE=true`, `CI=true`). A non-TTY shell is **not** a signal for agent mode; see `commands/references/interactivity.md`, which is the arbiter for mode resolution, option format and the agent-mode rule for this site.
+
+Ask **only** when `INTERACTIVE_MODE` is `picker` AND `ACCOUNT_CHECK_JSON`'s `.decision` is `"ask"` — the same two-condition AND the first-run model prompt already uses (`commands/references/cli-path-resolution.md`: `detect-interactivity == picker` AND `models-prompt-check == prompt`, otherwise proceed silently). `forge-account-select --check` is the sole owner of the second condition: it reports `"ask"` only when this repository has no recorded answer *for its own host* and this project's git identity and the active forge account actually diverge. It decides on this repository's own entry, never on the store file's existence, so a store that already holds other repositories' answers still asks here. Every other outcome reports `"skip"` — `.basis` of `answer_recorded`, `identity_override`, `no_repository`, `no_host`, `single_account`, `identity_matches_active`, `not_authenticated`, `cli_missing`, or `no_adapter` — and this subsection then does nothing at all: no picker, no output, straight on to Step 1b. `--check` writes nothing, so evaluating it never changes what a later run will ask.
+
+**When `INTERACTIVE_MODE=picker` and `.decision == "ask"`:** Use **AskUserQuestion**, building the options from `ACCOUNT_CHECK_JSON`:
+
+```
+Which account should author this repository's pull requests and issues on [host]?
+
+A — Always use the active account ([activeAccount])
+B — [the divergence candidate]
+C/D/E — [further logged-in accounts, in the order .accounts lists them]
+Other — Enter a different account login
+```
+
+- **Option A** is deliberately the least disruptive answer, and it is the one agent mode auto-picks below: every write stays on whichever account is active, now and in future.
+- **Option B** is the divergence candidate — the login in `.accounts` that this repository's own git identity points at and that is not `.activeAccount`. Derive it from `.identity.email`: a `…@users.noreply.github.com` address encodes the login exactly (dropping any leading `<digits>+`); otherwise use the address's local-part with the same leading `<digits>+` dropped. When no `.accounts` entry matches, option B is simply the first `.accounts` entry other than `.activeAccount`.
+- **C/D/E** are the remaining `.accounts` entries, in the order gh listed them.
+- **Other** is the free-form escape hatch, and is always last.
+
+Never fewer than 2 options and never more than 6 in total (`commands/references/interactivity.md`), so at most five accounts are ever listed. When gh reports more accounts than fit, keep option A and the divergence candidate and drop the remainder — `Other` already covers them.
+
+Record the answer — picker mode only, and only once a human has actually selected something. The chosen value crosses into this call as a literal the orchestrator substitutes, never as a shell variable carried over from the fence above (each fence runs in its own shell):
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+FORGE_ACCOUNT_CHOICE="[the account chosen above — the literal word active for option A, otherwise the login]"
+if [ "$FORGE_ACCOUNT_CHOICE" = "active" ]; then
+  $AIMI_CLI forge-account-select --record-active
+elif echo "$FORGE_ACCOUNT_CHOICE" | grep -qE '^[A-Za-z0-9][A-Za-z0-9-]*$'; then
+  $AIMI_CLI forge-account-select --record "$FORGE_ACCOUNT_CHOICE"
+else
+  echo "Not a forge login: $FORGE_ACCOUNT_CHOICE" >&2
+  echo 'A login must match ^[A-Za-z0-9][A-Za-z0-9-]*$ — nothing was recorded.' >&2
+  exit 1
+fi
+```
+
+Option A records the permanent "always use the active account" opt-out — a real stored answer, not the absence of one, which is exactly why it stops the question being raised here again. Every other option records that login. The `Other` free-form value is validated against the login shape above *before* it reaches the verb; if it fails, nothing is recorded and this step STOPs, so the answer stays unrecorded and the next run asks again. This command layer performs no file I/O of its own — it owns the prompt, and `forge-account-select` owns both "should I ask?" and "remember this answer".
+
+**When `INTERACTIVE_MODE=agent`** (`--non-interactive`, `AIMI_AGENT_MODE=true`, or `CI=true`): no picker. Auto-select option A — act as whichever account is active — and make **no** `forge-account-select --record` or `--record-active` call at all. Applying option A takes no action of any kind: the active account is already the one every forge verb uses, so "applied for this invocation" and "changed nothing" are the same thing here. The repository's recorded state after an agent-mode run is byte-for-byte what it was before. Log exactly one line — no retry, no blocking, no second line:
+
+```
+agent-mode: forge-account auto-selected active account (not recorded)
+```
+
+*Agent-mode fallback: if `INTERACTIVE_MODE=agent`, auto-select option A and record nothing. Log: `agent-mode: forge-account auto-selected active account (not recorded)`.*
+
+**Why the auto-answer is never persisted.** Option A is not merely the least disruptive answer — it is also this repository's *permanent* opt-out. Recording it is precisely what stops the question ever being raised again. So if agent mode persisted its own auto-answer, one unattended CI run would silently and permanently answer the question on behalf of every human who touches the repository afterwards: they would never be asked, and would have no way to discover why. That failure is not hypothetical here — 1.93.0 shipped a remembered dismissal that could not be revoked and left users silently stuck with no way to re-trigger the prompt. Applied-but-not-persisted is what keeps it from recurring: the `(not recorded)` in the log line above is the observable proof in the transcript, and `--check`'s zero-side-effect contract is the mechanical guarantee behind it.
+
 ### 1b. Check for existing PR on this branch
 
 When `$CURRENT_BRANCH` is already set (from `--branch`), check that branch explicitly:
