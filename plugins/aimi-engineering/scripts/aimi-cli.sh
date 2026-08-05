@@ -6334,13 +6334,204 @@ _forge_pr_review_threads_github() {
   _forge_emit_status found "$data_json"
 }
 
-# Resolves forge/owner/repo, routes a non-github forge or missing gh to a
-# QUIET status=error result, and otherwise delegates to the github adapter.
-# Owner/repo are resolved via US-003's _forge_repo_info as a direct
-# function call (never a `$AIMI_CLI forge-repo-info` subprocess, never a
-# second private gh-repo-view call) whenever --owner/--repo are not both
-# supplied, replacing get-pr-comments:14-20's own inline OWNER/REPO
-# detection.
+# gitlab adapter for forge-pr-review-threads (phase 3). <iid> is already
+# validated as a positive integer by cmd_forge_pr_review_threads before this
+# ever runs; <all_threads> is the literal string "true"/"false".
+#
+# glab's own documentation marks `glab mr note list` as EXPERIMENTAL and
+# possibly unstable ("This feature is an experiment and is not ready for
+# production use. It might be unstable or removed at any time.",
+# docs/source/mr/note/list.md) -- disclosed here so a caller relying on this
+# verb on GitLab knows the upstream tool does not yet consider it settled.
+#
+# VERIFICATION CEILING: glab was NOT installed on the machine this was
+# written on, exactly as _forge_map_pr_field_gitlab's header already records
+# for the same phase. Every flag and every JSON key below is read off glab's
+# own documentation (docs/source/mr/note/list.md, whose examples pin both the
+# array shape -- `glab mr note list -F json | jq '.[].notes[].body'` -- and
+# the full-id extraction -- `jq -r '.[].id'`) and GitLab's Discussions API,
+# never observed coming out of the real binary.
+#
+# VOCABULARY BOUNDARY. GitLab calls the unit a DISCUSSION; the normalized
+# contract calls it a THREAD. That translation happens here and nowhere
+# else: the word `discussion` must never reach the emitted envelope, whose
+# key stays `threads` with GitHub's own per-thread field names.
+#
+# THE FILTER IS SERVER-SIDE, ON PURPOSE. `--state` (all|resolved|
+# unresolved) is glab's own resolution-state filter, so the default call
+# asks GitLab for the unresolved discussions instead of fetching everything
+# and dropping the resolved ones locally. --all maps to `--state all`,
+# matching the github adapter's "include what a plain call filters out".
+#
+# --owner/--repo ARE DELIBERATELY NOT FORWARDED. They are gh's flat
+# owner/repo pair; a GitLab project is a nested group path
+# (group/subgroup/project) that pair cannot express, and glab's own
+# equivalent is a single `-R <full/path>` string. Rather than lossily
+# rebuild one from the other, this adapter targets the repository the
+# current working directory's remote already points at -- the same
+# repository _detect_forge classified to get here.
+#
+# CAPABILITY GAPS, all reported through unsupported_fields per forge-
+# contract.md ("An unpopulated capability-gated field is ALWAYS represented
+# as null PLUS its name recorded in unsupported_fields -- never a bare,
+# unmarked null"):
+#   pr.title / pr.url                   `glab mr note list` returns
+#     discussions only; supplying these would cost a SECOND `glab mr view`
+#     round trip this verb deliberately does not make.
+#   threads[].isOutdated                GitLab has no per-discussion
+#     outdated flag at all. This is also why the default call cannot
+#     reproduce the github adapter's second `isOutdated == false` filter --
+#     there is nothing to filter on.
+#   threads[].isCollapsed               a GitHub review-UI concept with no
+#     GitLab counterpart.
+#   threads[].comments.nodes[].url      GitLab's discussion notes carry no
+#     per-note permalink in this payload.
+#   threads[].comments.nodes[].outdated same gap as isOutdated, per note.
+_forge_pr_review_threads_gitlab() {
+  local iid="$1" all_threads="$2"
+  local state_filter="unresolved"
+  if [ "$all_threads" = "true" ]; then
+    state_filter="all"
+  fi
+
+  local stdout rc=0
+  local stderr_out
+  _forge_capture stdout stderr_out rc -- glab mr note list "$iid" -F json --state "$state_filter" || true
+
+  if [ "$rc" -ne 0 ]; then
+    # A merge request that does not exist is a confirmed NOT_FOUND, not a
+    # tool failure -- the same distinction _forge_issue_view already draws
+    # from gh's stderr. The match is on the HTTP status code `404` rather
+    # than on any English wording, because a status code is stable across
+    # glab releases and locales while prose is neither. Anything else stays
+    # cli_failed: misreading a could-not-attempt failure as a confirmed
+    # answer is the dangerous direction, so the catch-all points the safe way.
+    if printf '%s' "$stderr_out" | grep -q "404"; then
+      _forge_emit_status not_found
+      return 0
+    fi
+    # cli_failed hard-coded rather than classified: _forge_classify_gh_failure_
+    # reason is gh-specific (it calls _forge_auth_status_github), and this
+    # repository has no glab auth probe to ask instead. Inventing one here
+    # would duplicate whatever the phase's own account/auth story lands.
+    _forge_emit_status error "" "glab mr note list exited $rc: ${stderr_out:-unknown error}" cli_failed
+    return 0
+  fi
+
+  # ZERO UNRESOLVED DISCUSSIONS IS A `found` RESULT CARRYING AN EMPTY LIST,
+  # never not_found -- not_found means the MERGE REQUEST itself could not be
+  # located. Conflating the two would make a clean review look like a broken
+  # lookup. Go marshals an empty slice as `[]` and a nil slice as `null`, and
+  # a command that printed nothing at all is the same fact again, so all
+  # three collapse to the empty array here rather than to an error.
+  local discussions_json=""
+  if [ -n "$stdout" ]; then
+    discussions_json=$(printf '%s' "$stdout" | jq -c '. // []' 2>/dev/null) || discussions_json=""
+    if [ -z "$discussions_json" ]; then
+      _forge_emit_status error "" "glab mr note list returned output that is not JSON" cli_failed
+      return 0
+    fi
+  else
+    discussions_json='[]'
+  fi
+
+  # The one place GitLab's discussion vocabulary becomes the contract's
+  # thread vocabulary.
+  #
+  # `id` is emitted VERBATIM as GitLab's own full 40-character hex discussion
+  # id -- never the 8-character prefix glab's TEXT output displays. That is
+  # what makes the identifier ROUND TRIP: forge-resolve-review-thread hands
+  # this exact string straight back to `glab mr note resolve`, which accepts a
+  # full id, an 8+ character prefix, or an integer note id. Emitting a prefix
+  # here and resolving by full id (or the reverse) would work against a fake
+  # and fail against the real service.
+  #
+  # isResolved is DERIVED, because GitLab records resolution per NOTE, not per
+  # discussion: a discussion counts as resolved when it has at least one
+  # resolvable note and every one of them is resolved. A discussion with no
+  # resolvable notes (a plain comment thread) is not resolvable, hence false.
+  #
+  # path/line/diffSide come from the FIRST note's diff position, which is the
+  # note that anchored the discussion to the diff; a general (non-diff)
+  # discussion has no position and yields nulls for all three. diffSide is
+  # derived rather than read: GitLab records new_line for the post-image side
+  # and old_line for the pre-image side, which are GitHub's RIGHT and LEFT.
+  #
+  # Note ids are integers in GitLab and strings in GitHub, so they are cast to
+  # string here -- the contract's comment id stays one type across forges.
+  local threads_json
+  threads_json=$(printf '%s' "$discussions_json" | jq -c '
+    [ .[] | {
+        id: .id,
+        isResolved: (
+          [ .notes[]? | select(.resolvable == true) ] as $resolvable
+          | if ($resolvable | length) == 0
+            then false
+            else ($resolvable | all(.resolved == true))
+            end
+        ),
+        isOutdated: null,
+        isCollapsed: null,
+        path: (.notes[0].position.new_path // .notes[0].position.old_path // null),
+        line: (.notes[0].position.new_line // .notes[0].position.old_line // null),
+        startLine: (.notes[0].position.line_range.start.new_line
+                    // .notes[0].position.line_range.start.old_line // null),
+        diffSide: (
+          if (.notes[0].position.new_line // null) != null then "RIGHT"
+          elif (.notes[0].position.old_line // null) != null then "LEFT"
+          else null
+          end
+        ),
+        comments: {
+          totalCount: ((.notes // []) | length),
+          nodes: [ (.notes // [])[] | {
+            id: (.id | tostring),
+            author: {login: (.author.username // null)},
+            body: (.body // null),
+            createdAt: (.created_at // null),
+            updatedAt: (.updated_at // null),
+            url: null,
+            outdated: null
+          } ]
+        }
+      } ]
+  ' 2>/dev/null) || threads_json=""
+
+  # A payload that parsed as JSON but is not the ARRAY OF DISCUSSIONS the
+  # transform above expects (an error object, say) would otherwise reach
+  # `jq --argjson threads ""` below and spill a raw jq error onto stderr --
+  # unacceptable on a verb whose degrade mode is QUIET. Caught here instead.
+  if [ -z "$threads_json" ]; then
+    _forge_emit_status error "" "glab mr note list returned JSON that is not a discussion array" cli_failed
+    return 0
+  fi
+
+  local data_json
+  data_json=$(jq -nc \
+    --arg number "$iid" \
+    --argjson threads "$threads_json" \
+    '{
+      pr: {number: ($number | tonumber), title: null, url: null},
+      threads: $threads,
+      unsupported_fields: ["pr.title",
+                           "pr.url",
+                           "threads[].isOutdated",
+                           "threads[].isCollapsed",
+                           "threads[].comments.nodes[].url",
+                           "threads[].comments.nodes[].outdated"]
+    }')
+  _forge_emit_status found "$data_json"
+}
+
+# Resolves forge/owner/repo, routes a forge with no adapter or a missing
+# forge CLI to a QUIET status=error result, and otherwise delegates to the
+# github or gitlab adapter. Owner/repo are resolved via US-003's
+# _forge_repo_info as a direct function call (never a `$AIMI_CLI
+# forge-repo-info` subprocess, never a second private gh-repo-view call)
+# whenever --owner/--repo are not both supplied, replacing
+# get-pr-comments:14-20's own inline OWNER/REPO detection -- a GITHUB-ONLY
+# step, which is why the gitlab arm returns before it (glab addresses the
+# repository through the cwd remote, not an owner/repo pair).
 _forge_pr_review_threads() {
   local pr_number="$1" owner="$2" repo="$3" all_threads="$4"
   local forge_info forge host
@@ -6350,8 +6541,21 @@ _forge_pr_review_threads() {
   forge=$(printf '%s' "$forge_info" | jq -r '.forge')
   host=$(printf '%s' "$forge_info" | jq -r '.host // empty')
 
+  # GitLab returns HERE, before the owner/repo resolution below: that step is
+  # gh-specific and glab needs no owner/repo pair at all. Degradation runs
+  # through the SAME shared _forge_bin_check gate the github arm uses, in the
+  # same quiet mode, naming `glab` rather than `gh`.
+  if [ "$forge" = "gitlab" ]; then
+    if ! _forge_bin_check glab quiet "$forge"; then
+      _forge_emit_status error "" "glab not found -- this review-thread lookup did not run automatically." cli_missing
+      return 0
+    fi
+    _forge_pr_review_threads_gitlab "$pr_number" "$all_threads"
+    return 0
+  fi
+
   if [ "$forge" != "github" ]; then
-    _forge_emit_status error "" "forge-pr-review-threads: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1." no_adapter
+    _forge_emit_status error "" "forge-pr-review-threads: no adapter for forge \"$forge\" yet -- GitHub and GitLab are the only adapters." no_adapter
     return 0
   fi
 
@@ -6391,6 +6595,13 @@ _forge_pr_review_threads() {
 # isResolved, isOutdated, isCollapsed, path, line, startLine, diffSide, and
 # comments: {totalCount, nodes: [{id, author: {login}, body, createdAt,
 # updatedAt, url, outdated}]}.
+#
+# On GitLab the SHAPE is identical -- same keys, same three-way status -- but
+# several fields are capability-gated and come back null with their names in
+# `unsupported_fields`; see _forge_pr_review_threads_gitlab's header for the
+# list and the reason for each. A merge request with zero unresolved
+# discussions is `found` with an empty `threads` array, NOT `not_found`.
+# --owner/--repo are honored on GitHub only.
 # Usage: aimi-cli.sh forge-pr-review-threads --pr <number> [--owner <owner>
 # --repo <repo>] [--all] [--project <path>]
 cmd_forge_pr_review_threads() {
@@ -6463,6 +6674,91 @@ cmd_forge_pr_review_threads() {
 # not exit codes; cmd_forge_resolve_review_thread (the public wrapper) is
 # the only layer that prints the MANDATORY manual instruction and exits
 # non-zero, driven by this function's JSON `status` field.
+# gitlab adapter for forge-resolve-review-thread (phase 3). <thread_id> is
+# already validated by cmd_forge_resolve_review_thread before this ever runs.
+#
+# EXPERIMENTAL UPSTREAM: glab's own documentation marks `glab mr note resolve`
+# as an experiment "not ready for production use ... might be unstable or
+# removed at any time" (docs/source/mr/note/resolve.md).
+#
+# That is a DISCLOSURE to whoever relies on this verb, not a reason to skip
+# the routing: without it a GitLab caller gets no automatic resolve at all,
+# which is strictly worse than an automatic one whose upstream is still
+# settling.
+#
+# RESOLVES ONLY; POSTS NO REPLY. `glab mr note resolve` marks the discussion
+# resolved and writes no comment, which is exactly this verb's established
+# meaning here -- phase 2's handoff records that forge-resolve-review-thread
+# resolves a thread and does not post a comment, and that no reply call site
+# exists anywhere in this repository. The two agree, so nothing is
+# special-cased: this adapter issues ONE glab invocation and it is not a
+# note-creating one.
+#
+# THE MERGE REQUEST IS NOT NAMED, DELIBERATELY. `glab mr note resolve
+# [<id> | <branch>] <discussion-id>` takes the merge request as an OPTIONAL
+# leading positional and auto-detects it from the current branch when it is
+# omitted -- which is the only form this verb can use, because
+# forge-resolve-review-thread's contract carries a thread id and nothing
+# else (GitHub's node id is globally unique, so no PR number was ever part
+# of the signature).
+#
+# The id is passed through VERBATIM, byte for byte as
+# _forge_pr_review_threads_gitlab emitted it. glab accepts a full 40-char hex
+# discussion id, an 8+ character prefix, or an integer note id; the listing
+# side emits the full id, so nothing here re-derives, truncates or re-formats
+# it. That is the round trip, and it is what stops a fake from making a
+# prefix/full-id mismatch look correct.
+#
+# Always QUIET and always returns 0, same as the github adapter.
+_forge_resolve_review_thread_gitlab() {
+  local thread_id="$1"
+  local stdout rc=0
+  local stderr_out
+
+  # No account override is applied on this path. The GH_TOKEN/
+  # GH_ENTERPRISE_TOKEN prefix assignment the github arm carries is gh's own
+  # mechanism; the equivalent question for glab belongs to this phase's
+  # account story and is not answered by guessing at one here.
+  _forge_capture stdout stderr_out rc -- glab mr note resolve "$thread_id" || true
+
+  if [ "$rc" -ne 0 ]; then
+    # A discussion id GitLab cannot find is a CONFIRMED negative (the call
+    # ran; the answer is "no such thread"), reported as status="found" with
+    # resolved=false -- byte-identical to the github adapter's own
+    # confirmed-invalid-id result, per forge-contract.md's Three-Way Status
+    # Convention: a definitive answer is still a successful lookup.
+    #
+    # Matched on the HTTP status code `404` ONLY, never on English wording:
+    # a status code is stable across glab releases and locales. Every other
+    # failure -- glab could not auto-detect a merge request for this branch,
+    # the network was down, the token expired -- stays status="error", so the
+    # wrapper prints its manual instruction and exits non-zero. Reading a
+    # could-not-attempt failure as a confirmed answer is the dangerous
+    # direction; this narrow match points the safe way.
+    if printf '%s' "$stderr_out" | grep -q "404"; then
+      _forge_emit_status found "$(jq -nc '{resolved: false, thread: null, unsupported_fields: []}')"
+      return 0
+    fi
+    # cli_failed hard-coded rather than classified, for the same reason
+    # _forge_pr_review_threads_gitlab gives: the shared classifier is
+    # gh-specific and there is no glab auth probe in this repository.
+    _forge_emit_status error "" "glab mr note resolve exited $rc: ${stderr_out:-unknown error}" cli_failed
+    return 0
+  fi
+
+  # glab reports success by exit status, not by a JSON document, and it is
+  # given no `-F json` flag (its resolve subcommand documents none). So the
+  # thread object is rebuilt from what is known for certain: the id that was
+  # just resolved, and the fact that it now is. path/line are GitHub's, come
+  # from the GraphQL mutation's own response there, and have no counterpart
+  # in glab's output -- null plus unsupported_fields, per forge-contract.md.
+  _forge_emit_status found "$(jq -nc --arg id "$thread_id" '{
+    resolved: true,
+    thread: {id: $id, isResolved: true, path: null, line: null},
+    unsupported_fields: ["thread.path", "thread.line"]
+  }')"
+}
+
 _forge_resolve_review_thread() {
   local thread_id="$1"
   local forge_info forge host
@@ -6472,8 +6768,21 @@ _forge_resolve_review_thread() {
   forge=$(printf '%s' "$forge_info" | jq -r '.forge')
   host=$(printf '%s' "$forge_info" | jq -r '.host // empty')
 
+  # Same shared _forge_bin_check gate, same quiet mode, naming `glab` rather
+  # than `gh`. The wrapper below is still the only layer that prints and
+  # exits non-zero, driven purely by the JSON status field -- so a missing
+  # glab degrades through exactly the path a missing gh already does.
+  if [ "$forge" = "gitlab" ]; then
+    if ! _forge_bin_check glab quiet "$forge"; then
+      _forge_emit_status error "" "glab not found -- this thread could not be resolved automatically." cli_missing
+      return 0
+    fi
+    _forge_resolve_review_thread_gitlab "$thread_id"
+    return 0
+  fi
+
   if [ "$forge" != "github" ]; then
-    _forge_emit_status error "" "forge-resolve-review-thread: no adapter for forge \"$forge\" yet -- GitHub is the only adapter in phase 1." no_adapter
+    _forge_emit_status error "" "forge-resolve-review-thread: no adapter for forge \"$forge\" yet -- GitHub and GitLab are the only adapters." no_adapter
     return 0
   fi
 
@@ -6612,7 +6921,7 @@ cmd_forge_resolve_review_thread() {
     message=$(printf '%s' "$result" | jq -r '.message // "unknown error"')
     {
       echo "Warning: could not resolve this review thread automatically ($message)."
-      echo "There is no gh subcommand or REST fallback for this -- resolve it manually in the PR's Files changed tab (mark the conversation as resolved)."
+      echo "There is no automatic fallback once the forge CLI itself cannot run this -- resolve it manually in the pull/merge request's diff view (GitHub: Files changed; GitLab: Changes) and mark the conversation/thread resolved."
     } >&2
     printf '%s\n' "$result"
     exit 1
