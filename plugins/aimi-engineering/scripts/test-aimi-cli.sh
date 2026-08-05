@@ -21137,12 +21137,20 @@ ARGV_SCAN
 
   # AC5.2 -- structural. An export would survive the prefix assignment and be
   # visible to every later command in the same process.
-  local override_body exports="absent"
+  #
+  # COUNTED with `grep -c`, never `grep -v ... | grep -q ...`. This suite runs
+  # under `set -o pipefail`, and `grep -q` exits the instant it matches, which
+  # SIGPIPEs the `grep -v` feeding it and turns the whole pipeline non-zero --
+  # so the `if` reads a REAL HIT as "no hit" and the guard fails OPEN, which is
+  # exactly what phase 2 found when it planted a deliberate `export` and this
+  # shape stayed green. `grep -c` consumes all of its input and cannot fire
+  # early; `|| hits=0` absorbs grep's exit 1 on zero matches. The whole-file
+  # counterpart of this check, and its own falsifiability proof, live in
+  # gla_count_token_exports / test_gla_export_guard_counts_rather_than_short_circuits.
+  local override_body export_hits
   override_body=$(sed -n '/^_forge_account_override()/,/^}/p' "$CLI")
-  if printf '%s' "$override_body" | grep -v '^[[:space:]]*#' | grep -qE '(export|declare -x)[[:space:]]+GH_'; then
-    exports="present"
-  fi
-  assert_eq "absent" "$exports" "export rule: the helper never exports a token variable process-wide"
+  export_hits=$(printf '%s\n' "$override_body" | grep -v '^[[:space:]]*#' | grep -cE '(export|declare -x)[[:space:]]+(GH|GITLAB|OAUTH)_') || export_hits=0
+  assert_eq "0" "$export_hits" "export rule: the helper never exports a token variable process-wide"
 
   # AC5.3 -- before/after, in ONE shell so an export WOULD be detectable, with
   # the fake reporting the env-token account as active the way real gh does.
@@ -24044,6 +24052,532 @@ test_glw_gitlab_write_call_sites_are_prefix_assignment_ready() {
   header=$(sed -n '/^# GitLab write adapters/,/^_forge_glab_write_url()/p' "$CLI")
   assert_contains "ACCOUNT-OVERRIDE LANDING SITE" "$header" "landing site: the section header names the landing site explicitly for the account-override story"
   assert_contains "PREFIX ASSIGNMENT" "$header" "landing site: the header states the mechanism (prefix assignment, never export)"
+}
+
+# ============================================================================
+# GitLab ACCOUNT selection (gla_) -- the DEGRADED branch, and its proof
+# ============================================================================
+# Phase 2 gave gh writes a remembered-account override built on exactly one
+# call: `gh auth token --user <login> --hostname <host>`. This story asked
+# whether glab has a counterpart, and the answer -- read off gitlab-org/cli's
+# own source, since glab is not installed here (this phase's declared
+# verification ceiling) -- is NO:
+#
+#   * internal/commands/auth/ holds login, logout, status, credentialhelper,
+#     docker and generate. There is no `token` subcommand.
+#   * internal/config/schema.go declares `token` as Scope: ScopePerHost, and
+#     internal/commands/auth/status/status.go iterates cfg.Hosts() reading
+#     cfg.GetWithSource(instance, "token", true) -- instances, never logins.
+#     There is no per-account credential to retrieve in the first place.
+#
+# So the gitlab write path degrades to the machine's active glab session, and
+# what these tests police is that the degradation is HONEST: the account glab
+# reports as active is byte-identical before and after a routed write, no
+# token variable is ever exported, and the one selection mechanism glab does
+# have -- an operator-exported GITLAB_TOKEN -- still reaches the child.
+#
+# WHY THE FIXTURE READS ITS ENVIRONMENT, AND WHY THAT IS THE WHOLE STORY. A
+# before/after comparison against a fake that always prints the same account
+# passes no matter what the code under test does -- including when a token
+# leaks process-wide, which is the exact violation the comparison exists to
+# catch. Phase 2 shipped that tautology. So this fixture models glab's real
+# precedence (env token over stored token, empty variables skipped) and
+# test_gla_fake_glab_can_report_a_differing_active_account PROVES it can
+# print a different account -- twice, by two independent levers -- before a
+# single before/after assertion below trusts it printing the same one.
+
+# Writes a fake `glab` into an existing setup_forge_cli_sandbox directory that
+# answers `auth status` as well as the `mr view`/`mr create` pair, so ONE stub
+# can serve both halves of a before/write/after sequence.
+#
+# Driven entirely by environment, exactly like the real binary:
+#   GLA_GLAB_LOG              optional; every invocation's argv, one line each
+#   GLA_GLAB_TOKEN_LOG        optional; "<verb> <subverb> <token-or-<unset>>"
+#                             per call, on its OWN channel -- never argv, so
+#                             the "no token reached argv" scan stays honest
+#   GLA_GLAB_CONFIG_ACCOUNT   account the STORED per-host token belongs to
+#                             (default "machine-account") -- lever 1
+#   GLA_GLAB_ENV_TOKEN_ACCOUNT account an ENV token belongs to
+#                             (default "env-token-account") -- lever 2
+#   GLA_MR_VIEW_JSON          `mr view` stdout on exit 0; absent means 404
+#   GLA_MR_VIEW_AFTER_JSON    `mr view` stdout once `mr create` has run
+#   GLA_MR_CREATE_STDOUT      `mr create` stdout
+#
+# The status line is printed to STDERR and worded `Logged in to <host> as
+# <username> (<source>)` because that is what glab does -- it logs the status
+# block through LogErrorf, and _forge_auth_status_gitlab merges 2>&1 for that
+# reason. A stub that printed to stdout, or that emitted gh's "Active
+# account: true" marker, would exercise a parser this file does not have.
+gla_install_fake_glab_auth() {
+  local sandbox="$1"
+  cat > "$sandbox/glab" << 'GLA_FAKE_GLAB'
+#!/usr/bin/env bash
+if [ -n "${GLA_GLAB_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$GLA_GLAB_LOG"
+fi
+
+# Real glab resolves a token from the environment first and falls back to the
+# per-host config entry: GetFromEnvWithSource walks GITLAB_TOKEN,
+# GITLAB_ACCESS_TOKEN, OAUTH_TOKEN in that order and SKIPS an empty value
+# (`if val := os.Getenv(e); val != ""`). Modelled exactly -- the empty-skip
+# included -- because "an empty variable is not a token" is precisely the
+# distinction a blanking bug would blur.
+gla_tok=""
+for gla_candidate in "${GITLAB_TOKEN:-}" "${GITLAB_ACCESS_TOKEN:-}" "${OAUTH_TOKEN:-}"; do
+  if [ -n "$gla_candidate" ]; then
+    gla_tok="$gla_candidate"
+    break
+  fi
+done
+
+if [ -n "${GLA_GLAB_TOKEN_LOG:-}" ]; then
+  printf '%s %s\n' "$1 $2" "${gla_tok:-<unset>}" >> "$GLA_GLAB_TOKEN_LOG"
+fi
+
+# THE LINE THAT MAKES THE BEFORE/AFTER CHECK ABLE TO FAIL: whichever token is
+# actually in force decides which account is reported as logged in. A token
+# that leaked into the environment therefore CHANGES this answer.
+gla_account="${GLA_GLAB_CONFIG_ACCOUNT:-machine-account}"
+gla_source="the configuration file"
+if [ -n "$gla_tok" ]; then
+  gla_account="${GLA_GLAB_ENV_TOKEN_ACCOUNT:-env-token-account}"
+  gla_source="environment variable GITLAB_TOKEN"
+fi
+
+gla_host="gitlab.com"
+if [ "${3:-}" = "--hostname" ] && [ -n "${4:-}" ]; then
+  gla_host="$4"
+fi
+
+gla_flag="$(dirname "$0")/gla_mr_created.flag"
+
+case "$1 $2" in
+  "auth status")
+    printf 'Logged in to %s as %s (%s)\n' "$gla_host" "$gla_account" "$gla_source" >&2
+    exit 0
+    ;;
+  "mr view")
+    if [ -f "$gla_flag" ] && [ -n "${GLA_MR_VIEW_AFTER_JSON:-}" ]; then
+      printf '%s' "$GLA_MR_VIEW_AFTER_JSON"
+      exit 0
+    fi
+    if [ -n "${GLA_MR_VIEW_JSON:-}" ]; then
+      printf '%s' "$GLA_MR_VIEW_JSON"
+      exit 0
+    fi
+    echo "404 Not Found" >&2
+    exit 1
+    ;;
+  "mr create")
+    : > "$gla_flag"
+    printf '%s\n' "${GLA_MR_CREATE_STDOUT:-}"
+    exit 0
+    ;;
+esac
+echo "fake-glab (account): unhandled invocation: $*" >&2
+exit 99
+GLA_FAKE_GLAB
+  chmod +x "$sandbox/glab"
+}
+
+# The account `forge-auth-status` reports as active for this repository, read
+# through the PRODUCTION parser (_forge_auth_status_gitlab) rather than by
+# re-reading the stub's own output -- a comparison against a parser the test
+# wrote itself would prove nothing about the file under test.
+# Usage: gla_active_account <sandbox> [VAR=value ...]
+gla_active_account() {
+  local sandbox="$1"
+  shift
+  env -u GITLAB_TOKEN -u GITLAB_ACCESS_TOKEN -u OAUTH_TOKEN \
+    "$@" PATH="$sandbox" "$CLI" forge-auth-status 2>/dev/null | jq -r '.data.account // "<none>"'
+}
+
+# Counts `export`/`declare -x` of any forge token variable in a given file.
+#
+# COUNTED WITH `grep -c`, AND THAT IS NOT A STYLE CHOICE. This suite runs
+# under `set -o pipefail`. In the `grep -v ... | grep -q ...` shape, the right
+# half exits the instant it matches, SIGPIPEs the left half, and the pipeline
+# reports FAILURE -- so an `if` on it reads a real hit as "no hit" and the
+# guard fails OPEN. Phase 2 found exactly that: a deliberately planted
+# `export GH_TOKEN=...` passed straight through the `grep -q` form.
+# `grep -c` consumes all of its input and cannot fire early, and the trailing
+# `|| count=0` absorbs grep's exit 1 on zero matches rather than aborting.
+#
+# Both glab's names and gh's are covered. GITLAB_ACCESS_TOKEN and OAUTH_TOKEN
+# are in the pattern because glab honors all three (internal/config/schema.go
+# lists EnvVars {GITLAB_TOKEN, GITLAB_ACCESS_TOKEN, OAUTH_TOKEN} for the
+# `token` key), so exporting the second or third would leak exactly as far as
+# exporting the first.
+# Usage: gla_count_token_exports <file>
+gla_count_token_exports() {
+  local file="$1" count
+  count=$(grep -v '^[[:space:]]*#' "$file" | grep -cE '(export|declare -x)[[:space:]]+(GH_TOKEN|GH_ENTERPRISE_TOKEN|GITLAB_TOKEN|GITLAB_ACCESS_TOKEN|OAUTH_TOKEN)') || count=0
+  printf '%s' "$count"
+}
+
+# The GitLab write-adapter section header, which is where a reader meets the
+# account question and must find it answered.
+gla_write_header() {
+  sed -n '/^# GitLab write adapters/,/^_forge_glab_write_url()/p' "$CLI"
+}
+
+# RUNS BEFORE EVERY BEFORE/AFTER ASSERTION IN THIS SECTION, ON PURPOSE. The
+# machine-account-unchanged claim is a comparison of two readings, and a fake
+# that cannot report anything but one account makes that comparison pass
+# unconditionally -- even while a token leaks process-wide. So the stub is
+# shown able to report a DIFFERENT active account by two independent levers
+# before anything trusts it reporting the same one.
+test_gla_fake_glab_can_report_a_differing_active_account() {
+  echo ""
+  echo "=== glab account fixture: the stub CAN report a different active account (falsifiability proof, runs first) ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  gla_install_fake_glab_auth "$sandbox"
+
+  # Baseline: the stored per-host session.
+  assert_eq "machine-account" "$(gla_active_account "$sandbox")" \
+    "fixture proof: with no env token the stub reports the machine's stored session account"
+
+  # LEVER 1 -- a different stored session. Proves the reported account is not
+  # a constant baked into the stub.
+  assert_eq "someone-else" "$(gla_active_account "$sandbox" GLA_GLAB_CONFIG_ACCOUNT=someone-else)" \
+    "fixture proof #1: a different stored session makes the stub report a DIFFERENT active account"
+
+  # LEVER 2 -- a token in the environment. This is the one that matters: it is
+  # the exact mechanism by which an exported override would corrupt the
+  # after-reading, so the fixture must be shown to notice it.
+  assert_eq "octocat-gl" \
+    "$(env GITLAB_TOKEN=glpat-leaked GLA_GLAB_ENV_TOKEN_ACCOUNT=octocat-gl PATH="$sandbox" "$CLI" forge-auth-status 2>/dev/null | jq -r '.data.account')" \
+    "fixture proof #2: a GITLAB_TOKEN in the environment makes the stub report the ENV token's account -- so a leaked override would be visible"
+
+  # ...and each of glab's other two token variables moves it too, which is why
+  # the export guard's pattern covers all three rather than GITLAB_TOKEN alone.
+  assert_eq "octocat-gl" \
+    "$(env GITLAB_ACCESS_TOKEN=glpat-leaked GLA_GLAB_ENV_TOKEN_ACCOUNT=octocat-gl PATH="$sandbox" "$CLI" forge-auth-status 2>/dev/null | jq -r '.data.account')" \
+    "fixture proof: GITLAB_ACCESS_TOKEN moves the reported account too (glab honors all three names)"
+
+  # An EMPTY variable is not a token -- glab skips it (GetFromEnvWithSource:
+  # `if val := os.Getenv(e); val != ""`). Without this the fixture could not
+  # tell "no override" apart from "override blanked the inherited value".
+  assert_eq "machine-account" \
+    "$(env GITLAB_TOKEN= PATH="$sandbox" "$CLI" forge-auth-status 2>/dev/null | jq -r '.data.account')" \
+    "fixture proof: an EMPTY GITLAB_TOKEN is skipped, not honored -- the stored session still wins"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+# eval's the gitlab pr-create path and its dependencies into the CURRENT shell,
+# alongside the auth-status parser that reads the machine account back.
+#
+# Sourced rather than driven through `$CLI` for one reason, and it is the whole
+# reason the before/after check below means anything: a separate `$CLI` process
+# per reading makes a process-wide `export` UNDETECTABLE, because the export
+# dies with the process that made it. Three subprocesses would compare equal no
+# matter what the write did in its own address space -- the exact tautology
+# phase 2 shipped. In one shell, an export survives from the write into the
+# after-reading, so the comparison can actually fail. Mirrors
+# source_forge_account_override_functions' technique and phase 2's own AC5.3.
+gla_source_gitlab_write_path() {
+  local fn
+  for fn in _forge_bin_check _forge_capture _forge_map_state \
+            _forge_build_write_data _forge_emit_write_status \
+            _forge_pr_write_print_manual _forge_glab_write_url \
+            _forge_auth_status_gitlab _forge_pr_create_gitlab; do
+    eval "$(sed -n "/^${fn}()/,/^}/p" "$CLI")"
+  done
+}
+
+# Success criterion 3's degraded half, asserted end to end: a routed GitLab
+# write leaves the machine's active glab account byte-identical.
+test_gla_gitlab_write_leaves_the_machine_account_untouched() {
+  echo ""
+  echo "=== gitlab writes: the machine's active glab account is byte-identical before and after a routed write ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  gla_install_fake_glab_auth "$sandbox"
+
+  gla_source_gitlab_write_path
+
+  local log="$sandbox/glab.log" toklog="$sandbox/glab-token.log"
+  : > "$log"
+  : > "$toklog"
+  rm -f "$sandbox/gla_mr_created.flag"
+
+  # ONE shell: before-reading, the real write, after-reading. Emitted as three
+  # tab-separated fields so a single subshell carries all of them out.
+  #
+  # THE WRITE IS A PLAIN STATEMENT REDIRECTED TO A FILE, never `s=$(...)`, and
+  # that is the difference between a probe with teeth and a probe without one.
+  # A command substitution is its own subshell: an `export` the function made
+  # inside it would die with that subshell, and the after-reading in the parent
+  # would be clean no matter what -- the tautology all over again, just moved
+  # one level in. Verified by mutation: with the write wrapped in `$(...)`, a
+  # planted `export GITLAB_TOKEN` in _forge_pr_create_gitlab left this whole
+  # test green. Run as a statement, the same plant turns it red.
+  local probe before after status writeout
+  writeout=$(mktemp)
+  probe=$(
+    unset GITLAB_TOKEN GITLAB_ACCESS_TOKEN OAUTH_TOKEN AIMI_FORGE_IDENTITY AIMI_FORGE_TYPE
+    export PATH="$sandbox:$PATH"
+    export GLA_GLAB_LOG="$log" GLA_GLAB_TOKEN_LOG="$toklog"
+    export GLA_MR_CREATE_STDOUT='!42 My MR (feat-x)
+ https://gitlab.com/acme/widgets/-/merge_requests/42'
+    export GLA_MR_VIEW_AFTER_JSON='{"iid":42,"state":"opened","web_url":"https://gitlab.com/acme/widgets/-/merge_requests/42"}'
+
+    local b a s
+    b=$(_forge_auth_status_gitlab gitlab.com | jq -r '.account')
+    _forge_pr_create_gitlab "My MR" main feat-x "the body" > "$writeout" 2>/dev/null || true
+    s=$(jq -r '.status' < "$writeout" 2>/dev/null) || s="<unparseable>"
+    a=$(_forge_auth_status_gitlab gitlab.com | jq -r '.account')
+    printf '%s\t%s\t%s' "$b" "$s" "$a"
+  )
+  rm -f "$writeout"
+  before=$(printf '%s' "$probe" | cut -f1)
+  status=$(printf '%s' "$probe" | cut -f2)
+  after=$(printf '%s' "$probe" | cut -f3)
+
+  assert_eq "machine-account" "$before" "machine account: the before-reading is the stored session, as the fixture proof established"
+  assert_eq "created" "$status" "machine account: the write really happened, so the after-reading is not vacuous"
+  assert_eq "$before" "$after" "machine account: byte-identical before and after, read in the SAME shell the write ran in -- an export would have been visible here"
+  assert_eq "machine-account" "$after" "machine account: and it is still the stored session, not an override's account"
+
+  # THE TEETH. The identical probe with a deliberate process-wide export in the
+  # middle DOES move the after-reading, so the equality above is a real
+  # observation of the code under test rather than a fixture that cannot fail.
+  # Without this, an assertion that two readings match is indistinguishable
+  # from an assertion that nothing was ever read.
+  local leaked_after
+  leaked_after=$(
+    unset GITLAB_TOKEN GITLAB_ACCESS_TOKEN OAUTH_TOKEN AIMI_FORGE_IDENTITY AIMI_FORGE_TYPE
+    export PATH="$sandbox:$PATH"
+    export GLA_GLAB_ENV_TOKEN_ACCOUNT=leaked-override-account
+    _forge_auth_status_gitlab gitlab.com >/dev/null
+    export GITLAB_TOKEN="glpat-leaked-into-the-process"
+    _forge_auth_status_gitlab gitlab.com | jq -r '.account'
+  )
+  assert_eq "leaked-override-account" "$leaked_after" \
+    "machine account: a process-wide export between two readings DOES change the second one -- the before/after comparison is capable of going red"
+
+  # The direct statement of the degradation: glab was handed no token at all,
+  # on any call, so it acted as its own active session throughout.
+  local tokens
+  tokens=$(grep -c '<unset>' "$toklog") || tokens=0
+  assert_eq "5" "$tokens" "degrades to the active session: every glab call in the probe -- the two auth-status readings plus the three write calls -- ran with NO token supplied by this CLI"
+  assert_eq "0" "$(grep -cv '<unset>' "$toklog")" "degrades to the active session: not one glab call received a token from this CLI"
+
+  # And nothing leaked into argv either -- the rule that outlives the branch.
+  assert_eq "0" "$(grep -cE 'glpat-|GITLAB_TOKEN' "$log")" "argv scan: no token and no token variable appears in any recorded glab argv line"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+# The other half of "degrades by using the machine's active glab session":
+# glab's ONE real selection mechanism is an operator-exported token, and this
+# path must not revoke it. Phase 2 shipped a bare `TOKEN=""` prefix that did
+# exactly that; the gitlab path avoids it by setting nothing at all, and this
+# pins that outcome rather than the absence of a line of code.
+test_gla_inherited_gitlab_token_reaches_glab_untouched() {
+  echo ""
+  echo "=== gitlab writes: an operator-exported GITLAB_TOKEN reaches glab untouched -- never blanked ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  gla_install_fake_glab_auth "$sandbox"
+
+  local log="$sandbox/glab.log" toklog="$sandbox/glab-token.log"
+  : > "$log"
+  : > "$toklog"
+  rm -f "$sandbox/gla_mr_created.flag"
+
+  local out exit_code
+  out=$(env GITLAB_TOKEN=caller-exported-token \
+    GLA_GLAB_LOG="$log" GLA_GLAB_TOKEN_LOG="$toklog" \
+    GLA_MR_CREATE_STDOUT='!42 My MR (feat-x)
+ https://gitlab.com/acme/widgets/-/merge_requests/42' \
+    GLA_MR_VIEW_AFTER_JSON='{"iid":42,"state":"opened","web_url":"https://gitlab.com/acme/widgets/-/merge_requests/42"}' \
+    PATH="$sandbox" "$CLI" forge-pr-create --title "My MR" --base main --head feat-x --body "the body") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "inherited token: forge-pr-create still succeeds"
+  assert_eq "created" "$(printf '%s' "$out" | jq -r '.status')" "inherited token: the write really happened"
+
+  # EVERY call, not merely the writing one: the idempotency check, the create
+  # and the re-read are one operation and must run as one account.
+  assert_eq "3" "$(grep -c 'caller-exported-token' "$toklog")" \
+    "inherited token: all three glab calls received the caller's exported GITLAB_TOKEN untouched -- never blanked, and never on only some of them"
+  assert_eq "0" "$(grep -c '<unset>' "$toklog")" \
+    "inherited token: not one glab call had the inherited token stripped from its environment"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+# The export guard, hardened, plus the proof that the hardening was necessary.
+test_gla_export_guard_counts_rather_than_short_circuits() {
+  echo ""
+  echo "=== export guard: no token variable is exported anywhere in aimi-cli.sh, counted so the guard cannot fail open ==="
+
+  assert_eq "0" "$(gla_count_token_exports "$CLI")" \
+    "export rule: aimi-cli.sh exports no GH_TOKEN, GH_ENTERPRISE_TOKEN, GITLAB_TOKEN, GITLAB_ACCESS_TOKEN or OAUTH_TOKEN anywhere -- a prefix assignment is the only permitted form"
+
+  # FALSIFIABILITY. A guard asserting "zero" against a file that has zero is
+  # indistinguishable from a guard that always prints zero, so the counter is
+  # shown to move on a copy with a deliberately planted export.
+  local planted
+  planted=$(mktemp)
+  cp "$CLI" "$planted"
+  printf '%s\n' 'export GITLAB_TOKEN="$gitlab_token_override"' >> "$planted"
+  assert_eq "1" "$(gla_count_token_exports "$planted")" \
+    'export guard proof: a planted "export GITLAB_TOKEN" is COUNTED -- the guard can go red'
+
+  printf '%s\n' 'export GH_TOKEN="$gh_token_override"' >> "$planted"
+  assert_eq "2" "$(gla_count_token_exports "$planted")" \
+    "export guard proof: a second planted export raises the count to 2 -- every hit is seen, not just the first"
+
+  # AND WHY `grep -c` RATHER THAN `grep -v | grep -q`, demonstrated rather than
+  # asserted: under pipefail the -q form exits the instant it matches, which
+  # SIGPIPEs the `grep -v` still feeding it and makes the whole pipeline
+  # non-zero -- so an `if` on it reads a real hit as "no hit".
+  #
+  # The planted export goes at the TOP of this copy, not the bottom, and that
+  # placement is the experiment rather than a detail: `grep -q` must exit while
+  # the left half still has thousands of lines left to write, or there is
+  # nothing left to SIGPIPE and the demonstration would be timing-dependent.
+  # aimi-cli.sh is far larger than a pipe buffer, so a first-line match makes
+  # the race deterministic in the direction being shown.
+  local early
+  early=$(mktemp)
+  printf '%s\n' 'export GITLAB_TOKEN="$gitlab_token_override"' > "$early"
+  cat "$CLI" >> "$early"
+
+  assert_eq "1" "$(gla_count_token_exports "$early")" \
+    "export guard proof: the counting form sees the export on line 1 of a 28k-line file"
+
+  local short_circuit_verdict="absent"
+  if (set -o pipefail; grep -v '^[[:space:]]*#' "$early" | grep -qE '(export|declare -x)[[:space:]]+GITLAB_TOKEN') >/dev/null 2>&1; then
+    short_circuit_verdict="present"
+  fi
+  assert_eq "absent" "$short_circuit_verdict" \
+    'export guard proof: the discarded "grep -v | grep -q" shape reports ABSENT on that same file -- fail-open, which is why this guard counts instead'
+
+  # A comment mentioning the forbidden form is not a violation of it. The
+  # header this story rewrote says `export` several times, on purpose.
+  local commented
+  commented=$(mktemp)
+  cp "$CLI" "$commented"
+  printf '%s\n' '#   export GITLAB_TOKEN="..."   <- never do this' >> "$commented"
+  assert_eq "0" "$(gla_count_token_exports "$commented")" \
+    "export guard: a commented-out export is not counted, so the section header can name the forbidden form in prose"
+
+  rm -f "$planted" "$commented" "$early"
+}
+
+# The header is where a reader meets the question, so the answer has to be
+# there and has to be concrete.
+test_gla_gitlab_write_header_records_the_determination() {
+  echo ""
+  echo "=== gitlab write header: records WHY the account override is not wired, in one concrete line ==="
+
+  local header
+  header=$(gla_write_header)
+
+  # The reason is ONE line. A paragraph is a place to hide a hedge; a single
+  # line has to commit.
+  local reason_line reason_count
+  reason_line=$(printf '%s\n' "$header" | grep -F 'glab has no per-account token retrieval' || true)
+  reason_count=$(printf '%s\n' "$header" | grep -cF 'glab has no per-account token retrieval') || reason_count=0
+  assert_eq "1" "$reason_count" "determination: the header states the reason on exactly ONE line"
+
+  # It names the MISSING CAPABILITY concretely -- the specific call that does
+  # not exist and the specific reason there is nothing for it to return --
+  # rather than the useless "not supported".
+  assert_contains "glab auth token" "$reason_line" "determination: the one line names the missing subcommand by name"
+  assert_contains "ScopePerHost" "$reason_line" "determination: the one line names the concrete reason there is no per-account credential -- the store is keyed by host"
+
+  # The evidence is recorded alongside it, so the next reader can re-check the
+  # finding instead of re-litigating it.
+  assert_contains "internal/commands/auth/" "$header" "determination: the header cites the glab source path the subcommand list was read from"
+  assert_contains "internal/config/schema.go" "$header" "determination: the header cites the schema that keys the token store by host"
+  assert_contains "status.go" "$header" "determination: the header cites the auth-status source that iterates instances rather than logins"
+
+  # The host-dependence question was ASKED and answered, because the
+  # GH_TOKEN/GH_ENTERPRISE_TOKEN split next door makes it the first thing a
+  # reader will suspect -- and getting it wrong on the gh side fails silently.
+  assert_contains "EnvKeyEquivalence" "$header" "determination: the header records that glab's token env resolution takes no hostname, so there is no GHES-style host split here"
+  assert_contains "GITLAB_ACCESS_TOKEN" "$header" "determination: the header names all three token variables glab honors, not GITLAB_TOKEN alone"
+
+  # And it states the behavior that follows, in the reader's terms.
+  assert_contains "ACTIVE glab session" "$header" "determination: the header says what the path does instead -- degrade to the machine's active session"
+
+  # The escape hatch that survives the degradation is documented too: it is
+  # the only account-selection mechanism a GitLab user still has here.
+  assert_contains "exported GITLAB_TOKEN" "$header" "determination: the header records the one selection mechanism that still works -- an operator-exported GITLAB_TOKEN"
+}
+
+# interactivity.md's agent-mode rule, unchanged from phase 2: an auto-answer is
+# applied for the invocation and NEVER persisted, because one CI run must not
+# silently answer the question forever for every human afterwards. On this path
+# the auto-answer is "use the active account" -- which is what every gitlab
+# write already does -- so applied-for-this-invocation and changed-nothing are
+# the same operation, and the observable is that no store file appears.
+test_gla_agent_mode_persists_no_gitlab_account_answer() {
+  echo ""
+  echo "=== agent mode: a routed gitlab write records no account answer -- applied for the invocation, never persisted ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox config
+  sandbox=$(setup_forge_cli_sandbox)
+  config=$(mktemp -d)
+  trap "teardown_forge_cli_sandbox '$sandbox'; rm -rf '$config'" RETURN
+  gla_install_fake_glab_auth "$sandbox"
+
+  rm -f "$sandbox/gla_mr_created.flag"
+
+  # The store lives at $AIMI_CONFIG_DIR/forge-account-<digest>.json, so an
+  # empty config dir before and after is the whole assertion.
+  assert_eq "0" "$(find "$config" -name 'forge-account-*.json' | wc -l | tr -d ' ')" \
+    "agent mode: no account store exists before the write (baseline, so the after-count means something)"
+
+  local out exit_code
+  out=$(env -u GITLAB_TOKEN -u GITLAB_ACCESS_TOKEN -u OAUTH_TOKEN \
+    AIMI_AGENT_MODE=true AIMI_CONFIG_DIR="$config" \
+    GLA_MR_CREATE_STDOUT='!42 My MR (feat-x)
+ https://gitlab.com/acme/widgets/-/merge_requests/42' \
+    GLA_MR_VIEW_AFTER_JSON='{"iid":42,"state":"opened","web_url":"https://gitlab.com/acme/widgets/-/merge_requests/42"}' \
+    PATH="$sandbox" "$CLI" forge-pr-create --title "My MR" --base main --head feat-x --body "the body") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "agent mode: the write succeeded, so the no-persistence claim is about a real invocation"
+  assert_eq "created" "$(printf '%s' "$out" | jq -r '.status')" "agent mode: the merge request was really created"
+
+  assert_eq "0" "$(find "$config" -name 'forge-account-*.json' | wc -l | tr -d ' ')" \
+    "agent mode: still no account store after the write -- the auto-answer was applied for this invocation and persisted nowhere"
+
+  # Stronger than a file count: the gitlab write path does not read the store
+  # either, so there is no answer for it to have recorded in the first place.
+  local bodies
+  bodies=$(glw_fn_body _forge_pr_create_gitlab; glw_fn_body _forge_pr_edit_gitlab; glw_fn_body _forge_issue_create_gitlab)
+  assert_eq "0" "$(printf '%s\n' "$bodies" | grep -cE '_forge_account_(override|store_path|stored_entry|select)')" \
+    "agent mode: no gitlab write adapter touches the account store at all -- nothing to persist, by construction"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
 }
 
 test_glw_glab_write_url_extraction() {
@@ -27575,6 +28109,19 @@ main() {
   test_glw_forge_issue_create_gitlab_soft_fails_and_carries_yes
   test_glw_every_glab_write_invocation_carries_yes_in_source
   test_glw_gitlab_write_call_sites_are_prefix_assignment_ready
+
+  # GitLab ACCOUNT selection (phase 3, US-005) -- the DEGRADED branch: glab has
+  # no per-account token retrieval, so these police that the degradation is
+  # honest. The fixture falsifiability proof runs FIRST, before any before/after
+  # comparison trusts the stub to report the same account twice.
+  echo ""
+  echo "--- GitLab Account-Selection Tests (phase 3) ---"
+  test_gla_fake_glab_can_report_a_differing_active_account
+  test_gla_gitlab_write_leaves_the_machine_account_untouched
+  test_gla_inherited_gitlab_token_reaches_glab_untouched
+  test_gla_export_guard_counts_rather_than_short_circuits
+  test_gla_gitlab_write_header_records_the_determination
+  test_gla_agent_mode_persists_no_gitlab_account_answer
 
   # Forge Issue Verb Tests (US-006) -- forge-issue-view / forge-issue-create,
   # the first forge-* verbs that actually shell out to a forge CLI

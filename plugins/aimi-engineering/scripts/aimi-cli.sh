@@ -5055,31 +5055,81 @@ _forge_pr_write_print_manual() {
 # records its argv, so what is actually PROVEN here is which flags this file
 # emits -- never what the real binary does with them.
 #
-# ACCOUNT-OVERRIDE LANDING SITE (deliberately NOT wired here). Selecting the
-# acting GitLab account is a separate story whose central question -- how
-# glab accepts a per-invocation token, and whether it can at all -- was
-# deliberately left open at planning time. Every glab invocation below is
-# therefore written as a SINGLE `_forge_capture ... -- glab ...` statement
-# on its own line, so that story can add a bash PREFIX ASSIGNMENT on the
-# line directly above it:
+# ACCOUNT-OVERRIDE LANDING SITE -- RESOLVED: IT STAYS EMPTY, AND HERE IS WHY.
+# The landing site the paragraph below describes was left for a later story
+# whose central question -- how glab accepts a per-invocation token, and
+# whether it can at all -- was deliberately left open at planning time. That
+# question has now been answered, and the answer is no. One line, the whole
+# reason:
+#
+#   glab has no per-account token retrieval: there is no `glab auth token` subcommand at all, and its credential store is keyed by HOST alone (`token`, Scope: ScopePerHost), so there is no per-account token for this file to ask glab for.
+#
+# EVIDENCE (glab source, gitlab-org/cli @ main, read 2026-08-05 -- glab is
+# not installed on this machine, this phase's declared verification ceiling,
+# so this is read off the source rather than off an observed binary):
+#
+#   1. internal/commands/auth/ holds exactly `login`, `logout`, `status`,
+#      `credentialhelper`, `docker` and `generate`. There is no `token`
+#      subcommand, so `gh auth token --user <login> --hostname <host>` --
+#      the ONE call _forge_account_override is built on -- has no glab
+#      counterpart to be rewritten into.
+#   2. There is no per-account model for such a subcommand to address even
+#      if it existed. internal/config/schema.go declares the `token` key as
+#      `Scope: ScopePerHost` -- one token per instance -- and
+#      internal/commands/auth/status/status.go iterates `cfg.Hosts()` and
+#      reads `cfg.GetWithSource(instance, "token", true)`: instances, never
+#      logins. `glab auth status --show-token --hostname <host>` therefore
+#      returns that host's single token, not a named account's, which is why
+#      it is not a workaround either.
+#   3. The two remaining subcommands are not a back door: `auth generate` is
+#      DPoP proof generation and `auth credentialhelper` is a git credential
+#      helper. Neither retrieves a token for a named account.
+#
+# THIS IS NOT THE HOST-DEPENDENCE PROBLEM, which is worth saying because it
+# is the first thing a reader will suspect after the
+# GH_TOKEN/GH_ENTERPRISE_TOKEN split next door. glab's token environment
+# variables are GITLAB_TOKEN, GITLAB_ACCESS_TOKEN and OAUTH_TOKEN
+# (internal/config/schema.go), and EnvKeyEquivalence() -- the function that
+# resolves them (internal/config/config_mapping.go) -- takes a config KEY and
+# no hostname at all. The same three names therefore apply to gitlab.com and
+# to every self-managed instance alike, so there is no GHES-style silent
+# mis-attribution to guard against here. The blocker is the missing
+# retrieval, not the variable name.
+#
+# SO THIS PATH DEGRADES, DELIBERATELY: every glab invocation below runs as
+# the machine's ACTIVE glab session, exactly as if no account had ever been
+# recorded for this repository. Nothing here reads the account store and
+# nothing here sets, blanks or exports a token variable -- which is also what
+# preserves the one selection mechanism glab does have: an operator who
+# exported GITLAB_TOKEN before invoking this CLI still picks the acting
+# account, because glab reads that variable itself and this file leaves it
+# untouched on its way to the child process.
+#
+# IF GLAB EVER GAINS PER-ACCOUNT RETRIEVAL, the landing site is still here
+# and still costs nothing: every glab invocation below is a SINGLE
+# `_forge_capture ... -- glab ...` statement on its own line, so a bash
+# PREFIX ASSIGNMENT can be added on the line directly above it --
 #
 #     GITLAB_TOKEN="$gitlab_token_override" \
 #       _forge_capture stdout stderr_out rc -- glab mr create -y ... || true
 #
 # exactly the shape phase 2 used for GH_TOKEN/GH_ENTERPRISE_TOKEN on the gh
-# side. That is a landing site, not a refactor: nothing below needs to be
-# restructured to accept it. `export` stays forbidden for the same reason it
-# is on the gh side -- a process-wide token changes what every later
-# auth/identity probe in the same process reports.
+# side. `export` stays forbidden for the same reason it is on the gh side --
+# a process-wide token changes what every later auth/identity probe in the
+# same process reports, starting with _forge_auth_status_gitlab, whose
+# `Logged in to <host> as <username>` parse would then report the overridden
+# account as the machine's active one and make the very before/after check
+# that proves the machine account was left alone unable to detect anything.
 #
 # SAME-ACCOUNT INVARIANT: the idempotency check that decides created vs
 # unchanged, the write itself, and the post-write re-read are all part of ONE
 # operation and must run as ONE account. On a private project the creating
 # account can see a merge request its reader account cannot, so a check
 # performed as a different account would fail against an MR that was just
-# successfully created. Concretely that means the story above must put its
-# prefix assignment on EVERY glab call in a given function, not only on the
-# one that writes.
+# successfully created. Degrading to the active session satisfies that
+# invariant for free -- one session, every call -- and it is also why a
+# future override would have to be put on EVERY glab call in a given
+# function, not only on the one that writes.
 
 # Extracts the merge-request/issue URL from a glab write command's stdout.
 #
