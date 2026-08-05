@@ -23418,9 +23418,14 @@ test_forge_pr_review_threads_degraded_missing_gh() {
 
 test_forge_pr_review_threads_non_github_forge_degrades() {
   echo ""
-  echo "=== forge-pr-review-threads: non-GitHub forge (GitLab) has no adapter yet -- degrades, does not crash ==="
+  echo "=== forge-pr-review-threads: a forge with STILL no adapter (gitea) degrades, does not crash ==="
 
-  setup_detect_forge_fixture origin https://gitlab.com/owner/repo.git
+  # Retargeted from gitlab to codeberg.org in phase 3 US-004: gitlab is now a
+  # routed adapter (see the GitLab Review-Thread Routing Tests block), so it is
+  # no longer an example of the no_adapter branch. Gitea/Forgejo still is, and
+  # the branch still needs a live case guarding it -- deleting this test
+  # instead would have left `no_adapter` untested for this verb entirely.
+  setup_detect_forge_fixture origin https://codeberg.org/owner/repo.git
   pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
 
   local sandbox
@@ -23430,10 +23435,10 @@ test_forge_pr_review_threads_non_github_forge_degrades() {
   local out exit_code
   out=$(PATH="$sandbox" "$CLI" forge-pr-review-threads --pr 1) && exit_code=0 || exit_code=$?
 
-  assert_exit_code "0" "$exit_code" "pr-review-threads non-github: exit 0"
-  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "pr-review-threads non-github: status error"
-  assert_contains "gitlab" "$(printf '%s' "$out" | jq -r '.message')" "pr-review-threads non-github: message names the detected forge"
-  assert_eq "no_adapter" "$(printf '%s' "$out" | jq -r '.reason')" "pr-review-threads non-github: reason is no_adapter"
+  assert_exit_code "0" "$exit_code" "pr-review-threads adapterless forge: exit 0"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "pr-review-threads adapterless forge: status error"
+  assert_contains "gitea" "$(printf '%s' "$out" | jq -r '.message')" "pr-review-threads adapterless forge: message names the detected forge"
+  assert_eq "no_adapter" "$(printf '%s' "$out" | jq -r '.reason')" "pr-review-threads adapterless forge: reason is no_adapter"
 
   popd >/dev/null
   teardown_detect_forge_fixture
@@ -23817,6 +23822,807 @@ test_forge_review_thread_verbs_registered_in_help_and_dispatcher() {
     echo -e "${GREEN}✓${NC} dispatcher: forge-resolve-review-thread is routed"
     ((TESTS_PASSED++))
   fi
+}
+
+# ============================================================================
+# GitLab Review-Thread Routing Tests (phase 3 US-004)
+# ============================================================================
+# forge-pr-review-threads and forge-resolve-review-thread routed to
+# `glab mr note list` / `glab mr note resolve`.
+#
+# NAMING: every function this story adds is prefixed `glt_` (GitLab Threads),
+# INCLUDING the test functions themselves. That is an orchestration
+# constraint, not a style preference: three sibling stories edited this one
+# file in parallel, and bash silently keeps the LAST definition of a
+# duplicated function name -- three individually green branches would then
+# produce one red merge. A per-story prefix makes that collision impossible
+# to express.
+#
+# glab is NOT installed on the machine this was written on -- the phase's
+# declared verification ceiling, already recorded by
+# _forge_map_pr_field_gitlab's header for the same reason -- so the stub
+# below is the only glab any assertion here ever sees. Its payloads are
+# modelled on GitLab's Discussions API shape, which glab's own documented
+# examples pin (`glab mr note list -F json | jq '.[].notes[].body'` and
+# `jq -r '.[].id'`), never on a captured real-binary response.
+#
+# A SEPARATE stub from setup_fake_glab_fixture on purpose: that one answers
+# `mr view` for the field-mapper story and hard-exits 127 on anything else.
+# Extending it here would put three parallel stories inside one case
+# statement.
+
+# Writes an argv-recording fake `glab` into an existing forge CLI sandbox and
+# prints nothing. Every invocation's argv is appended to <sandbox>/glab.log,
+# one line per call, so an assertion can prove WHICH flags were passed rather
+# than merely that a call happened -- the whole point of the --state
+# assertion below, which a fake that returned only unresolved items could
+# otherwise satisfy vacuously.
+#
+# Driven entirely by GLT_* environment variables, all optional:
+#   GLT_LIST_PAYLOAD_FILE   file whose contents are `mr note list` stdout
+#   GLT_LIST_STDOUT         literal `mr note list` stdout (used when no file)
+#   GLT_LIST_FAIL_STDERR    when set, `mr note list` writes it to stderr and
+#                           exits 1 instead of printing anything
+#   GLT_RESOLVE_FAIL_STDERR same, for `mr note resolve`
+glt_write_fake_glab() {
+  local sandbox="$1"
+  cat > "$sandbox/glab" << 'GLT_FAKE_GLAB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GLT_GLAB_LOG"
+case "$1 $2 $3" in
+  "mr note list")
+    if [ -n "${GLT_LIST_FAIL_STDERR:-}" ]; then
+      printf '%s' "$GLT_LIST_FAIL_STDERR" >&2
+      exit 1
+    fi
+    if [ -n "${GLT_LIST_PAYLOAD_FILE:-}" ]; then
+      cat "$GLT_LIST_PAYLOAD_FILE"
+    else
+      printf '%s' "${GLT_LIST_STDOUT-[]}"
+    fi
+    exit 0
+    ;;
+  "mr note resolve")
+    if [ -n "${GLT_RESOLVE_FAIL_STDERR:-}" ]; then
+      printf '%s' "$GLT_RESOLVE_FAIL_STDERR" >&2
+      exit 1
+    fi
+    echo "Resolved discussion."
+    exit 0
+    ;;
+esac
+echo "fake-glab: unhandled invocation: $*" >&2
+exit 127
+GLT_FAKE_GLAB
+  chmod +x "$sandbox/glab"
+}
+
+# The recorded argv log, or the empty string when glab was never invoked.
+glt_glab_argv() {
+  cat "${1}/glab.log" 2>/dev/null || true
+}
+
+# How many times the fake glab was invoked. Load-bearing for the "resolves and
+# does NOT post a reply" proof: the count must be exactly one.
+glt_glab_call_count() {
+  local log="${1}/glab.log" count
+  if [ ! -f "$log" ]; then
+    printf '0'
+    return 0
+  fi
+  count=$(grep -c '' "$log" 2>/dev/null) || count=0
+  printf '%s' "$count"
+}
+
+# One realistic `glab mr note list <iid> -F json` document: a JSON ARRAY of
+# discussions, each carrying a `notes` array. Three properties are
+# load-bearing and must not be "tidied" away:
+#   - the first discussion's `id` is a FULL 40-character hex string. The
+#     round-trip assertion resolves by exactly this value, so shortening it to
+#     glab's 8-character display prefix would make that test pass by accident.
+#   - the second discussion is a general (non-diff) note with NO position, so
+#     path/line/diffSide are proven to come back null rather than guessed at.
+#   - the second discussion's single note is `resolvable: false`, which is a
+#     different thing from an unresolved resolvable note and must not be
+#     reported as resolved.
+glt_discussion_fixture() {
+  printf '%s' '[
+    {
+      "id": "6a9c1750b37d513a43987b574953fceb50b03ce7",
+      "individual_note": false,
+      "notes": [
+        {"id": 1126, "type": "DiffNote", "body": "please rename this",
+         "author": {"username": "monalisa"},
+         "created_at": "2026-01-01T10:00:00Z", "updated_at": "2026-01-01T10:30:00Z",
+         "system": false, "resolvable": true, "resolved": false, "resolved_by": null,
+         "position": {"base_sha": "aaa", "start_sha": "bbb", "head_sha": "ccc",
+                      "old_path": "src/main.go", "new_path": "src/main.go",
+                      "position_type": "text", "old_line": null, "new_line": 17,
+                      "line_range": {"start": {"type": "new", "old_line": null, "new_line": 15},
+                                     "end":   {"type": "new", "old_line": null, "new_line": 17}}}},
+        {"id": 1127, "type": "DiffNote", "body": "agreed",
+         "author": {"username": "octocat"},
+         "created_at": "2026-01-01T11:00:00Z", "updated_at": "2026-01-01T11:00:00Z",
+         "system": false, "resolvable": true, "resolved": false, "resolved_by": null}
+      ]
+    },
+    {
+      "id": "aa11bb22cc33dd44ee55ff66aa77bb88cc99dd00",
+      "individual_note": true,
+      "notes": [
+        {"id": 2000, "type": null, "body": "general remark",
+         "author": {"username": "hubot"},
+         "created_at": "2026-01-02T10:00:00Z", "updated_at": "2026-01-02T10:00:00Z",
+         "system": false, "resolvable": false, "resolved": false}
+      ]
+    }
+  ]'
+}
+
+# A hermetic PATH sandbox with the argv-recording fake glab installed in it.
+# Prints the sandbox path, so it is safe inside $(...) -- which is exactly why
+# the sandbox is created HERE and not inside the runner below: the runner is
+# always called in a command substitution, and a value written from inside one
+# dies with that subshell. Same pitfall _forge_capture's own header documents.
+glt_new_sandbox() {
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  glt_write_fake_glab "$sandbox"
+  printf '%s' "$sandbox"
+}
+
+# Same sandbox, WITHOUT the fake glab. The allowlist setup_forge_cli_sandbox
+# builds carries no glab of its own, so `command -v glab` genuinely fails
+# inside it, exactly like a machine that never installed the GitLab CLI.
+glt_new_sandbox_without_glab() {
+  setup_forge_cli_sandbox
+}
+
+# Runs one aimi-cli.sh invocation inside the throwaway gitlab-remote
+# repository, under <sandbox> as the entire PATH. Prints the command's stdout;
+# its stderr goes to <stderr-file>. GLT_GLAB_LOG is pointed at
+# <sandbox>/glab.log so glt_glab_argv can read the recorded argv afterwards.
+#
+# Usage: glt_run_cli <sandbox> <stderr-file> [ENV=VAL ...] -- <args...>
+glt_run_cli() {
+  local sandbox="$1" stderr_file="$2"
+  shift 2
+
+  local assignments=()
+  while [ $# -gt 0 ] && [ "$1" != "--" ]; do
+    assignments+=("$1")
+    shift
+  done
+  [ "${1:-}" = "--" ] && shift
+
+  (
+    cd "$GLT_REPO_DIR" || exit 1
+    export PATH="$sandbox"
+    export GLT_GLAB_LOG="$sandbox/glab.log"
+    if [ "${#assignments[@]}" -gt 0 ]; then
+      for _glt_assignment in "${assignments[@]}"; do
+        export "${_glt_assignment?}"
+      done
+    fi
+    "$CLI" "$@" 2>"$stderr_file"
+  )
+}
+
+# Creates the gitlab-remote repository every test below runs inside, exported
+# as GLT_REPO_DIR. Deliberately NOT setup_detect_forge_fixture: that helper
+# pushd's the whole test process into the fixture, and these tests instead run
+# the CLI in a subshell so a failing assertion can never leave the suite
+# standing in a deleted directory.
+glt_setup_repo() {
+  local remote_url="${1:-https://gitlab.com/acme/widgets.git}"
+  GLT_REPO_DIR=$(mktemp -d)
+  (
+    cd "$GLT_REPO_DIR" || exit 1
+    git init >/dev/null 2>&1
+    git checkout -b main >/dev/null 2>&1
+    echo "init" > README.md
+    git add README.md
+    git commit -m "Initial commit" >/dev/null 2>&1
+    git remote add origin "$remote_url"
+    mkdir -p .aimi/tasks
+  )
+}
+
+glt_teardown_repo() {
+  rm -rf "$GLT_REPO_DIR"
+  unset GLT_REPO_DIR
+}
+
+# Copies aimi-cli.sh, applies one sed mutation to the copy, and prints the
+# copy's path. The mutation harness for the two "prove the routing is what
+# makes the assertion pass" tests below: an assertion nobody has shown able to
+# fail is not evidence.
+glt_mutated_cli() {
+  local sed_expr="$1"
+  local mutant
+  mutant=$(mktemp)
+  sed "$sed_expr" "$CLI" > "$mutant"
+  chmod +x "$mutant"
+  printf '%s' "$mutant"
+}
+
+# Runs a MUTATED copy of the CLI through the same sandbox/repo/fake-glab the
+# real assertions use, so the only difference between the green run and the
+# red run is the one routing line the mutation removed.
+glt_run_mutated_cli() {
+  local mutant="$1" sandbox="$2"
+  shift 2
+  (
+    cd "$GLT_REPO_DIR" || exit 1
+    export PATH="$sandbox"
+    export GLT_GLAB_LOG="$sandbox/glab.log"
+    "$mutant" "$@" 2>/dev/null
+  )
+}
+
+# ---------------------------------------------------------------------------
+# RUNS FIRST, ON PURPOSE: prove the fake glab can turn these tests RED before
+# a single routing assertion trusts it. An assertion that passes regardless of
+# what the stub returns is not evidence -- that exact defect class is why
+# phase 2's machine-account check had to be rebuilt.
+# ---------------------------------------------------------------------------
+glt_test_fake_glab_can_produce_a_failing_result() {
+  echo ""
+  echo "=== gitlab review threads: the fake glab CAN turn an assertion red (falsifiability proof, runs first) ==="
+
+  glt_setup_repo
+
+  local sandbox_a sandbox_b out_a out_b id_a id_b would_have_gone_red
+  local stderr_file="/tmp/glt_falsifiability_stderr.$$"
+
+  sandbox_a=$(glt_new_sandbox)
+  sandbox_b=$(glt_new_sandbox)
+
+  # Same code path, same flags, two DIFFERENT discussion ids. If the emitted
+  # thread id did not actually track the stub's payload, these would be equal.
+  out_a=$(glt_run_cli "$sandbox_a" "$stderr_file" \
+    'GLT_LIST_STDOUT=[{"id":"1111111111111111111111111111111111111111","notes":[]}]' \
+    -- forge-pr-review-threads --pr 42)
+  out_b=$(glt_run_cli "$sandbox_b" "$stderr_file" \
+    'GLT_LIST_STDOUT=[{"id":"2222222222222222222222222222222222222222","notes":[]}]' \
+    -- forge-pr-review-threads --pr 42)
+
+  id_a=$(printf '%s' "$out_a" | jq -r '.data.threads[0].id')
+  id_b=$(printf '%s' "$out_b" | jq -r '.data.threads[0].id')
+
+  assert_eq "1111111111111111111111111111111111111111" "$id_a" "glt falsifiability: the first payload's discussion id is what comes out"
+  assert_eq "2222222222222222222222222222222222222222" "$id_b" "glt falsifiability: the second payload's DIFFERENT id comes out, so output really does track the stub"
+
+  # Stated as a check rather than left as a comment: had id_b been asserted
+  # against id_a, assert_eq would have gone red. Written this way so a future
+  # edit that makes the stub ignore its own payload fails HERE, loudly,
+  # instead of quietly making every assertion below vacuous.
+  would_have_gone_red=no
+  if [ "$id_b" != "$id_a" ]; then
+    would_have_gone_red=yes
+  fi
+  assert_eq "yes" "$would_have_gone_red" "glt falsifiability: asserting the second id against the first WOULD have gone red -- the stub is not a rubber stamp"
+
+  teardown_forge_cli_sandbox "$sandbox_a"
+  teardown_forge_cli_sandbox "$sandbox_b"
+  rm -f "$stderr_file"
+  glt_teardown_repo
+}
+
+# THE ARGV ASSERTION. Asserted from the fake glab's RECORDED ARGV, never from
+# the returned list: a fake that served only unresolved discussions would make
+# a client-side filter look exactly as correct as a server-side one, so the
+# returned list cannot tell the two apart and the argv can.
+glt_test_pr_review_threads_asks_glab_for_state_unresolved() {
+  echo ""
+  echo "=== forge-pr-review-threads (gitlab): asks glab for --state unresolved, does not fetch everything and filter locally ==="
+
+  glt_setup_repo
+
+  local sandbox out payload_file argv
+  local stderr_file="/tmp/glt_state_unresolved_stderr.$$"
+  payload_file=$(mktemp)
+  glt_discussion_fixture > "$payload_file"
+  sandbox=$(glt_new_sandbox)
+
+  out=$(glt_run_cli "$sandbox" "$stderr_file" "GLT_LIST_PAYLOAD_FILE=$payload_file" \
+    -- forge-pr-review-threads --pr 42)
+  argv=$(glt_glab_argv "$sandbox")
+
+  # The exact argv, in order -- the subcommand, the iid, glab's own
+  # whole-document -F json form, and the server-side resolution filter.
+  assert_eq "mr note list 42 -F json --state unresolved" "$argv" "glt argv: the listing call is exactly \`glab mr note list <iid> -F json --state unresolved\`"
+  assert_contains "--state unresolved" "$argv" "glt argv: --state unresolved is passed to glab -- the filter is SERVER-side, proven from argv rather than from the returned list"
+  assert_eq "1" "$(glt_glab_call_count "$sandbox")" "glt argv: exactly one glab invocation -- no second whole-fetch call to filter from"
+  assert_eq "0" "$(printf '%s\n' "$argv" | grep -c -- '--json')" "glt argv: no gh-style --json field-list selector (glab has none)"
+  assert_eq "0" "$(printf '%s\n' "$argv" | grep -c -- '--state all')" "glt argv: the DEFAULT call never asks for --state all, which is what fetching-everything-then-filtering would have looked like"
+
+  # And the envelope the argv produced.
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "glt listing: status found"
+  assert_eq "42" "$(printf '%s' "$out" | jq -r '.data.pr.number')" "glt listing: pr.number is the iid the caller asked for"
+  assert_eq "2" "$(printf '%s' "$out" | jq '.data.threads | length')" "glt listing: both discussions become threads"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "glt listing: message null on found"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.reason')" "glt listing: reason null on found"
+  assert_eq "" "$(cat "$stderr_file")" "glt listing: QUIET -- zero stderr output"
+
+  rm -f "$payload_file" "$stderr_file"
+  teardown_forge_cli_sandbox "$sandbox"
+  glt_teardown_repo
+}
+
+# GitLab calls the unit a DISCUSSION; the contract calls it a THREAD. Pin the
+# translation, and pin that the GitLab word never reaches the envelope.
+glt_test_pr_review_threads_maps_discussion_vocabulary_to_thread() {
+  echo ""
+  echo "=== forge-pr-review-threads (gitlab): discussion vocabulary becomes thread vocabulary at the adapter boundary ==="
+
+  glt_setup_repo
+
+  local sandbox out payload_file
+  local stderr_file="/tmp/glt_vocabulary_stderr.$$"
+  payload_file=$(mktemp)
+  glt_discussion_fixture > "$payload_file"
+  sandbox=$(glt_new_sandbox)
+
+  out=$(glt_run_cli "$sandbox" "$stderr_file" "GLT_LIST_PAYLOAD_FILE=$payload_file" \
+    -- forge-pr-review-threads --pr 42)
+
+  # The envelope key is `threads`, and the word `discussion` -- along with
+  # every GitLab-native key name -- is nowhere in the emitted JSON.
+  assert_eq "true"  "$(printf '%s' "$out" | jq -r '.data | has("threads")')" "glt vocabulary: the envelope key is threads"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.data | has("discussions")')" "glt vocabulary: there is no discussions key"
+  assert_eq "0" "$(printf '%s' "$out" | grep -c -i 'discussion')" "glt vocabulary: the word discussion does not leak into the normalized envelope anywhere"
+  assert_eq "0" "$(printf '%s' "$out" | grep -c 'individual_note\|resolvable\|new_path\|created_at')" "glt vocabulary: no GitLab-native key name survives into the envelope"
+
+  # Per-thread field translation, first (diff-anchored) discussion.
+  assert_eq "6a9c1750b37d513a43987b574953fceb50b03ce7" "$(printf '%s' "$out" | jq -r '.data.threads[0].id')" "glt vocabulary: thread id is GitLab's FULL 40-character discussion id, not the 8-char display prefix"
+  assert_eq "40" "$(printf '%s' "$out" | jq -r '.data.threads[0].id | length')" "glt vocabulary: and it really is 40 characters long"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.data.threads[0].isResolved')" "glt vocabulary: isResolved derived from the notes' per-note resolved flags"
+  assert_eq "src/main.go" "$(printf '%s' "$out" | jq -r '.data.threads[0].path')" "glt vocabulary: path comes from the anchoring note's diff position"
+  assert_eq "17" "$(printf '%s' "$out" | jq -r '.data.threads[0].line')" "glt vocabulary: line comes from position.new_line"
+  assert_eq "15" "$(printf '%s' "$out" | jq -r '.data.threads[0].startLine')" "glt vocabulary: startLine comes from position.line_range.start"
+  assert_eq "RIGHT" "$(printf '%s' "$out" | jq -r '.data.threads[0].diffSide')" "glt vocabulary: a new_line position is GitHub's RIGHT side"
+  assert_eq "2" "$(printf '%s' "$out" | jq -r '.data.threads[0].comments.totalCount')" "glt vocabulary: notes become comments"
+  assert_eq "monalisa" "$(printf '%s' "$out" | jq -r '.data.threads[0].comments.nodes[0].author.login')" "glt vocabulary: GitLab's author.username becomes the contract's author.login"
+  assert_eq "please rename this" "$(printf '%s' "$out" | jq -r '.data.threads[0].comments.nodes[0].body')" "glt vocabulary: note body carried through"
+  assert_eq "2026-01-01T10:00:00Z" "$(printf '%s' "$out" | jq -r '.data.threads[0].comments.nodes[0].createdAt')" "glt vocabulary: created_at becomes createdAt"
+  assert_eq "2026-01-01T10:30:00Z" "$(printf '%s' "$out" | jq -r '.data.threads[0].comments.nodes[0].updatedAt')" "glt vocabulary: updated_at becomes updatedAt"
+  assert_eq "\"1126\"" "$(printf '%s' "$out" | jq -c '.data.threads[0].comments.nodes[0].id')" "glt vocabulary: GitLab's integer note id is cast to string, so the contract's comment id is one type across forges"
+
+  # Second (general, non-diff) discussion: nothing is invented for it.
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.threads[1].path')" "glt vocabulary: a general discussion has no diff position, so path is null rather than guessed"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.threads[1].line')" "glt vocabulary: and line is null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.threads[1].diffSide')" "glt vocabulary: and diffSide is null"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.data.threads[1].isResolved')" "glt vocabulary: a discussion with no RESOLVABLE note is not reported resolved"
+
+  # Capability gaps are declared, never left as bare unmarked nulls.
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.threads[0].isOutdated')" "glt vocabulary: isOutdated is null -- GitLab has no per-discussion outdated flag"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.threads[0].isCollapsed')" "glt vocabulary: isCollapsed is null -- a GitHub review-UI concept"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.unsupported_fields | index("threads[].isOutdated") != null')" "glt vocabulary: isOutdated's name is recorded in unsupported_fields, per forge-contract.md"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.unsupported_fields | index("threads[].isCollapsed") != null')" "glt vocabulary: isCollapsed's name is recorded too"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.unsupported_fields | index("pr.title") != null')" "glt vocabulary: pr.title is declared unsupported rather than silently null (it would cost a second glab call)"
+
+  rm -f "$payload_file" "$stderr_file"
+  teardown_forge_cli_sandbox "$sandbox"
+  glt_teardown_repo
+}
+
+glt_test_pr_review_threads_all_flag_asks_for_state_all() {
+  echo ""
+  echo "=== forge-pr-review-threads (gitlab): --all maps to glab's --state all ==="
+
+  glt_setup_repo
+
+  local sandbox out argv
+  local stderr_file="/tmp/glt_state_all_stderr.$$"
+
+  sandbox=$(glt_new_sandbox)
+  out=$(glt_run_cli "$sandbox" "$stderr_file" 'GLT_LIST_STDOUT=[]' \
+    -- forge-pr-review-threads --pr 42 --all)
+  argv=$(glt_glab_argv "$sandbox")
+
+  assert_eq "mr note list 42 -F json --state all" "$argv" "glt --all: asks glab for --state all -- still server-side, still one call"
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "glt --all: status found"
+
+  rm -f "$stderr_file"
+  teardown_forge_cli_sandbox "$sandbox"
+  glt_teardown_repo
+}
+
+# THE DISTINCTION THAT MAKES A CLEAN REVIEW READABLE: zero unresolved threads
+# is a `found` result carrying an empty list. not_found means the MERGE
+# REQUEST itself could not be located. Conflating them would make a clean
+# review look like a broken lookup.
+glt_test_pr_review_threads_zero_threads_is_found_with_empty_list() {
+  echo ""
+  echo "=== forge-pr-review-threads (gitlab): zero unresolved discussions is FOUND with an empty list, never not_found ==="
+
+  glt_setup_repo
+
+  local sandbox_empty sandbox_null sandbox_blank sandbox_missing
+  local out_empty out_null out_blank out_missing
+  local stderr_file="/tmp/glt_empty_stderr.$$"
+
+  # Go marshals an empty slice as [] and a nil slice as null, and a command
+  # that printed nothing at all is the same fact again. All three are a clean
+  # review, so all three must be `found`.
+  sandbox_empty=$(glt_new_sandbox)
+  sandbox_null=$(glt_new_sandbox)
+  sandbox_blank=$(glt_new_sandbox)
+  sandbox_missing=$(glt_new_sandbox)
+
+  out_empty=$(glt_run_cli "$sandbox_empty" "$stderr_file" 'GLT_LIST_STDOUT=[]' \
+    -- forge-pr-review-threads --pr 42)
+  out_null=$(glt_run_cli "$sandbox_null" "$stderr_file" 'GLT_LIST_STDOUT=null' \
+    -- forge-pr-review-threads --pr 42)
+  out_blank=$(glt_run_cli "$sandbox_blank" "$stderr_file" 'GLT_LIST_STDOUT=' \
+    -- forge-pr-review-threads --pr 42)
+
+  assert_eq "found" "$(printf '%s' "$out_empty" | jq -r '.status')" "glt empty: an empty JSON array is FOUND"
+  assert_eq "[]"    "$(printf '%s' "$out_empty" | jq -c '.data.threads')" "glt empty: carrying an empty threads list"
+  assert_eq "42"    "$(printf '%s' "$out_empty" | jq -r '.data.pr.number')" "glt empty: and still naming the merge request it looked at"
+  assert_eq "found" "$(printf '%s' "$out_null" | jq -r '.status')" "glt empty: a null payload (Go's nil slice) is FOUND too, not an error"
+  assert_eq "[]"    "$(printf '%s' "$out_null" | jq -c '.data.threads')" "glt empty: null collapses to an empty list"
+  assert_eq "found" "$(printf '%s' "$out_blank" | jq -r '.status')" "glt empty: no output at all is FOUND too"
+  assert_eq "[]"    "$(printf '%s' "$out_blank" | jq -c '.data.threads')" "glt empty: and also collapses to an empty list"
+
+  # The contrast that gives the assertion its meaning: a merge request that
+  # genuinely does not exist IS not_found, and the two outcomes differ.
+  out_missing=$(glt_run_cli "$sandbox_missing" "$stderr_file" \
+    'GLT_LIST_FAIL_STDERR=GET https://gitlab.com/api/v4/...: 404 {message: 404 Not found}' \
+    -- forge-pr-review-threads --pr 999999)
+
+  assert_eq "not_found" "$(printf '%s' "$out_missing" | jq -r '.status')" "glt empty: a 404 from glab IS not_found -- the merge request itself could not be located"
+  assert_eq "null" "$(printf '%s' "$out_missing" | jq -r '.data')" "glt empty: not_found carries no data"
+  local differ=no
+  if [ "$(printf '%s' "$out_empty" | jq -r '.status')" != "$(printf '%s' "$out_missing" | jq -r '.status')" ]; then
+    differ=yes
+  fi
+  assert_eq "yes" "$differ" "glt empty: 'no threads' and 'no merge request' produce DIFFERENT statuses -- they are not conflated"
+
+  rm -f "$stderr_file"
+  teardown_forge_cli_sandbox "$sandbox_empty"
+  teardown_forge_cli_sandbox "$sandbox_null"
+  teardown_forge_cli_sandbox "$sandbox_blank"
+  teardown_forge_cli_sandbox "$sandbox_missing"
+  glt_teardown_repo
+}
+
+glt_test_pr_review_threads_glab_failure_is_cli_failed() {
+  echo ""
+  echo "=== forge-pr-review-threads (gitlab): a non-404 glab failure stays error/cli_failed, never a confirmed answer ==="
+
+  glt_setup_repo
+
+  local sandbox out
+  local stderr_file="/tmp/glt_list_broken_stderr.$$"
+
+  sandbox=$(glt_new_sandbox)
+  out=$(glt_run_cli "$sandbox" "$stderr_file" \
+    'GLT_LIST_FAIL_STDERR=Post "https://gitlab.com/api/v4/...": dial tcp: connection refused' \
+    -- forge-pr-review-threads --pr 42)
+
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "glt broken: status error"
+  assert_eq "cli_failed" "$(printf '%s' "$out" | jq -r '.reason')" "glt broken: reason cli_failed -- a could-not-attempt failure is never read as not_found"
+  assert_contains "glab mr note list exited 1" "$(printf '%s' "$out" | jq -r '.message')" "glt broken: message names the failing glab call and its exit status"
+  assert_eq "" "$(cat "$stderr_file")" "glt broken: still QUIET -- a read verb prints nothing"
+
+  rm -f "$stderr_file"
+  teardown_forge_cli_sandbox "$sandbox"
+  glt_teardown_repo
+}
+
+glt_test_pr_review_threads_glab_absent_degrades_through_the_shared_gate() {
+  echo ""
+  echo "=== forge-pr-review-threads (gitlab): glab absent -- same shared _forge_bin_check gate, naming glab not gh ==="
+
+  glt_setup_repo
+
+  local sandbox out
+  local stderr_file="/tmp/glt_no_glab_stderr.$$"
+
+  sandbox=$(glt_new_sandbox_without_glab)
+  out=$(glt_run_cli "$sandbox" "$stderr_file" -- forge-pr-review-threads --pr 42)
+
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "glt no-glab: status error"
+  assert_eq "cli_missing" "$(printf '%s' "$out" | jq -r '.reason')" "glt no-glab: reason cli_missing -- the same enum value the gh path uses"
+  assert_contains "glab not found" "$(printf '%s' "$out" | jq -r '.message')" "glt no-glab: the message names glab, not gh"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.message' | grep -c 'gh not found')" "glt no-glab: and does NOT name gh -- the wrong binary would send a GitLab user hunting for the wrong install"
+  assert_eq "" "$(cat "$stderr_file")" "glt no-glab: QUIET mode -- zero stderr, exactly like the gh path"
+
+  rm -f "$stderr_file"
+  teardown_forge_cli_sandbox "$sandbox"
+  glt_teardown_repo
+}
+
+glt_test_resolve_review_thread_via_glab() {
+  echo ""
+  echo "=== forge-resolve-review-thread (gitlab): resolves via \`glab mr note resolve\` ==="
+
+  glt_setup_repo
+
+  local sandbox out argv
+  local stderr_file="/tmp/glt_resolve_ok_stderr.$$"
+  local full_id="6a9c1750b37d513a43987b574953fceb50b03ce7"
+
+  sandbox=$(glt_new_sandbox)
+  out=$(glt_run_cli "$sandbox" "$stderr_file" -- forge-resolve-review-thread --thread-id "$full_id")
+  argv=$(glt_glab_argv "$sandbox")
+
+  assert_eq "mr note resolve $full_id" "$argv" "glt resolve: the call is exactly \`glab mr note resolve <discussion-id>\`, with the merge request auto-detected from the branch"
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "glt resolve: status found"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.resolved')" "glt resolve: resolved true"
+  assert_eq "$full_id" "$(printf '%s' "$out" | jq -r '.data.thread.id')" "glt resolve: the thread object echoes the id that was resolved"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.thread.isResolved')" "glt resolve: thread.isResolved true"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.thread.path')" "glt resolve: path is null -- glab's resolve prints no diff position"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.unsupported_fields | index("thread.path") != null')" "glt resolve: and that null is DECLARED in unsupported_fields, never left bare"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "glt resolve: message null"
+  assert_eq "" "$(cat "$stderr_file")" "glt resolve: nothing printed on the success path"
+  assert_eq "0" "$(printf '%s' "$out" | grep -c -i 'discussion')" "glt resolve: the word discussion does not leak into the normalized envelope"
+
+  rm -f "$stderr_file"
+  teardown_forge_cli_sandbox "$sandbox"
+  glt_teardown_repo
+}
+
+# The verb RESOLVES and does NOT post a reply -- phase 2's handoff records
+# that decision, and `glab mr note resolve` behaves the same way, so the two
+# agree without special-casing. Proven from argv: one invocation, and it is
+# not a note-creating one.
+glt_test_resolve_review_thread_posts_no_reply() {
+  echo ""
+  echo "=== forge-resolve-review-thread (gitlab): resolves the thread and posts NO reply comment ==="
+
+  glt_setup_repo
+
+  local sandbox argv
+  local stderr_file="/tmp/glt_no_reply_stderr.$$"
+
+  sandbox=$(glt_new_sandbox)
+  glt_run_cli "$sandbox" "$stderr_file" -- forge-resolve-review-thread --thread-id 6a9c1750b37d513a43987b574953fceb50b03ce7 >/dev/null
+  argv=$(glt_glab_argv "$sandbox")
+
+  assert_eq "1" "$(glt_glab_call_count "$sandbox")" "glt no-reply: exactly ONE glab invocation -- no second call could have posted anything"
+  assert_eq "0" "$(printf '%s\n' "$argv" | grep -c 'note create')" "glt no-reply: no \`mr note create\` anywhere in the recorded argv"
+  assert_eq "0" "$(printf '%s\n' "$argv" | grep -c 'mr comment')" "glt no-reply: no \`mr comment\` either"
+  assert_eq "0" "$(printf '%s\n' "$argv" | grep -c -- '--message')" "glt no-reply: no --message flag -- nothing carried comment text"
+  assert_eq "0" "$(printf '%s\n' "$argv" | grep -c -- '-m ')" "glt no-reply: nor its short form"
+  assert_contains "note resolve" "$argv" "glt no-reply: the one call really is the resolve subcommand"
+
+  rm -f "$stderr_file"
+  teardown_forge_cli_sandbox "$sandbox"
+  glt_teardown_repo
+}
+
+glt_test_resolve_review_thread_confirmed_missing_is_found_false() {
+  echo ""
+  echo "=== forge-resolve-review-thread (gitlab): a 404 is a CONFIRMED negative (found/resolved:false), a broken call is not ==="
+
+  glt_setup_repo
+
+  local sandbox_404 sandbox_broken out_404 out_broken exit_404 exit_broken
+  local stderr_404="/tmp/glt_resolve_404_stderr.$$"
+  local stderr_broken="/tmp/glt_resolve_broken_stderr.$$"
+
+  sandbox_404=$(glt_new_sandbox)
+  sandbox_broken=$(glt_new_sandbox)
+
+  out_404=$(glt_run_cli "$sandbox_404" "$stderr_404" \
+    'GLT_RESOLVE_FAIL_STDERR=GET https://gitlab.com/api/v4/...: 404 {message: 404 Discussion Not Found}' \
+    -- forge-resolve-review-thread --thread-id deadbeefdeadbeefdeadbeefdeadbeefdeadbeef) && exit_404=0 || exit_404=$?
+
+  assert_exit_code "0" "$exit_404" "glt resolve-404: exit 0 -- the call ran and returned a definitive answer"
+  assert_eq "found" "$(printf '%s' "$out_404" | jq -r '.status')" "glt resolve-404: status found, matching the github adapter's confirmed-invalid-id result"
+  assert_eq "false" "$(printf '%s' "$out_404" | jq -r '.data.resolved')" "glt resolve-404: resolved false"
+  assert_eq "null" "$(printf '%s' "$out_404" | jq -r '.data.thread')" "glt resolve-404: thread null"
+  assert_eq "null" "$(printf '%s' "$out_404" | jq -r '.reason')" "glt resolve-404: no reason -- a confirmed answer is not a degradation"
+  assert_eq "" "$(cat "$stderr_404")" "glt resolve-404: nothing printed"
+
+  # The contrast: glab could not even attempt the resolve. That must NOT be
+  # read as "the thread does not exist" -- it is the dangerous direction.
+  out_broken=$(glt_run_cli "$sandbox_broken" "$stderr_broken" \
+    'GLT_RESOLVE_FAIL_STDERR=no open merge request available for branch main' \
+    -- forge-resolve-review-thread --thread-id deadbeefdeadbeefdeadbeefdeadbeefdeadbeef) && exit_broken=0 || exit_broken=$?
+
+  assert_exit_code "1" "$exit_broken" "glt resolve-broken: exits non-zero (write verb, no fallback path)"
+  assert_eq "error" "$(printf '%s' "$out_broken" | jq -r '.status')" "glt resolve-broken: status error, NOT a found/resolved:false that would claim the thread was checked"
+  assert_eq "cli_failed" "$(printf '%s' "$out_broken" | jq -r '.reason')" "glt resolve-broken: reason cli_failed"
+  assert_stderr_contains "resolve it manually" "$(cat "$stderr_broken")" "glt resolve-broken: the mandatory manual instruction is printed"
+
+  rm -f "$stderr_404" "$stderr_broken"
+  teardown_forge_cli_sandbox "$sandbox_404"
+  teardown_forge_cli_sandbox "$sandbox_broken"
+  glt_teardown_repo
+}
+
+glt_test_resolve_review_thread_glab_absent_mandatory_print() {
+  echo ""
+  echo "=== forge-resolve-review-thread (gitlab): glab absent -- MANDATORY-PRINT degrade naming glab, exits non-zero ==="
+
+  glt_setup_repo
+
+  local sandbox out exit_code
+  local stderr_file="/tmp/glt_resolve_no_glab_stderr.$$"
+
+  sandbox=$(glt_new_sandbox_without_glab)
+  out=$(glt_run_cli "$sandbox" "$stderr_file" \
+    -- forge-resolve-review-thread --thread-id 6a9c1750b37d513a43987b574953fceb50b03ce7) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "glt resolve no-glab: exits non-zero, exactly like the gh-absent path"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "glt resolve no-glab: status error"
+  assert_eq "cli_missing" "$(printf '%s' "$out" | jq -r '.reason')" "glt resolve no-glab: reason cli_missing -- the same shared gate, the same enum value"
+  assert_contains "glab not found" "$(printf '%s' "$out" | jq -r '.message')" "glt resolve no-glab: the message names glab"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.message' | grep -c 'gh not found')" "glt resolve no-glab: and does NOT name gh"
+  assert_stderr_contains "resolve it manually" "$(cat "$stderr_file")" "glt resolve no-glab: manual instruction printed"
+
+  rm -f "$stderr_file"
+  teardown_forge_cli_sandbox "$sandbox"
+  glt_teardown_repo
+}
+
+# THE ROUND TRIP. Whatever identifier the listing verb emits must be accepted
+# VERBATIM by the resolve verb. Emitting a prefix and resolving by full id (or
+# the reverse) would work by luck against a fake and fail against the real
+# service, so the id is never retyped here -- it is read out of the listing's
+# own output and fed straight back in.
+glt_test_thread_id_round_trips_from_listing_to_resolve() {
+  echo ""
+  echo "=== gitlab review threads: the id the listing emits is accepted VERBATIM by the resolve call (round trip) ==="
+
+  glt_setup_repo
+
+  local sandbox_list sandbox_resolve list_out resolve_out emitted_id resolve_argv payload_file
+  local stderr_file="/tmp/glt_round_trip_stderr.$$"
+  payload_file=$(mktemp)
+  glt_discussion_fixture > "$payload_file"
+  sandbox_list=$(glt_new_sandbox)
+  sandbox_resolve=$(glt_new_sandbox)
+
+  list_out=$(glt_run_cli "$sandbox_list" "$stderr_file" "GLT_LIST_PAYLOAD_FILE=$payload_file" \
+    -- forge-pr-review-threads --pr 42)
+  emitted_id=$(printf '%s' "$list_out" | jq -r '.data.threads[0].id')
+
+  # Deliberately NOT a literal -- the value comes from the listing verb's own
+  # output, so a change to what the listing emits is felt here immediately.
+  resolve_out=$(glt_run_cli "$sandbox_resolve" "$stderr_file" \
+    -- forge-resolve-review-thread --thread-id "$emitted_id")
+  resolve_argv=$(glt_glab_argv "$sandbox_resolve")
+
+  assert_eq "mr note resolve $emitted_id" "$resolve_argv" "glt round trip: the emitted id reaches glab's argv byte for byte, unshortened and unreformatted"
+  assert_eq "40" "$(printf '%s' "$emitted_id" | wc -c | tr -d ' ')" "glt round trip: 40 characters plus no trailing newline -- the FULL discussion id, not glab's 8-character display prefix"
+  assert_eq "found" "$(printf '%s' "$resolve_out" | jq -r '.status')" "glt round trip: the resolve call succeeded on that id"
+  assert_eq "$emitted_id" "$(printf '%s' "$resolve_out" | jq -r '.data.thread.id')" "glt round trip: and the resolve result reports the same id back"
+
+  # The failure this test exists to catch, stated as a check: had the listing
+  # emitted a truncated prefix, the argv assertion above would have compared
+  # against that prefix and still passed -- so pin the length independently
+  # against the fixture's own full id.
+  assert_eq "6a9c1750b37d513a43987b574953fceb50b03ce7" "$emitted_id" "glt round trip: the emitted id is the fixture's full discussion id, so the round trip is not merely self-consistent"
+
+  rm -f "$payload_file" "$stderr_file"
+  teardown_forge_cli_sandbox "$sandbox_list"
+  teardown_forge_cli_sandbox "$sandbox_resolve"
+  glt_teardown_repo
+}
+
+# The upstream-status disclosure required by this story, asserted against the
+# source text so it cannot be deleted silently.
+glt_test_resolve_records_glab_experimental_status() {
+  echo ""
+  echo "=== forge-resolve-review-thread (gitlab): the header discloses that glab marks \`mr note resolve\` EXPERIMENTAL ==="
+
+  local resolve_src
+  resolve_src=$(sed -n '/^# gitlab adapter for forge-resolve-review-thread/,/^_forge_resolve_review_thread_gitlab()/p' "$CLI")
+
+  assert_contains "EXPERIMENTAL" "$resolve_src" "glt disclosure: the header says EXPERIMENTAL in as many words"
+  assert_contains "docs/source/mr/note/resolve.md" "$resolve_src" "glt disclosure: and cites glab's own documentation page for it"
+  assert_contains "might be unstable" "$resolve_src" "glt disclosure: quoting upstream's own 'might be unstable or removed at any time'"
+  assert_contains "not a reason to skip" "$resolve_src" "glt disclosure: recorded as a disclosure to the caller, not as grounds for leaving GitLab unrouted"
+}
+
+# ---------------------------------------------------------------------------
+# MUTATION TESTS. Each unroutes ONE verb in a COPY of the CLI -- by disabling
+# that verb's own `forge == gitlab` gate and nothing else -- and confirms a
+# SPECIFIC NAMED assertion above goes red, so the assertions are known to be
+# load-bearing rather than merely green.
+#
+# The gate CONDITION is what is mutated, not the adapter call below it:
+# deleting the call alone would leave the gate's trailing `return 0` in place,
+# and the verb would emit nothing at all rather than falling through. Changing
+# the condition makes the verb behave exactly as it did before this story --
+# the adapterless `no_adapter` envelope -- which is the honest counterfactual.
+# The substitution is scoped to each verb's own function body by a sed address
+# range, so unrouting one verb provably leaves the other routed.
+# ---------------------------------------------------------------------------
+glt_test_mutation_unrouting_the_listing_verb_turns_an_assertion_red() {
+  echo ""
+  echo "=== mutation: unrouting forge-pr-review-threads makes the named --state-unresolved assertion go red ==="
+
+  glt_setup_repo
+
+  local sandbox mutant argv_green argv_red status_red reason_red payload_file
+  local stderr_file="/tmp/glt_mutation_list_stderr.$$"
+  payload_file=$(mktemp)
+  glt_discussion_fixture > "$payload_file"
+
+  # Green baseline through the real CLI, same fixture, same sandbox shape.
+  sandbox=$(glt_new_sandbox)
+  glt_run_cli "$sandbox" "$stderr_file" "GLT_LIST_PAYLOAD_FILE=$payload_file" \
+    -- forge-pr-review-threads --pr 42 >/dev/null
+  argv_green=$(glt_glab_argv "$sandbox")
+  assert_eq "mr note list 42 -F json --state unresolved" "$argv_green" "glt mutation (listing): the UNMUTATED CLI passes --state unresolved -- the assertion being mutated"
+
+  # The mutation: disable the gitlab gate inside _forge_pr_review_threads
+  # ONLY. The verb then falls through to the adapterless branch and never
+  # calls glab at all.
+  mutant=$(glt_mutated_cli '/^_forge_pr_review_threads() {$/,/^}$/ s/^  if \[ "\$forge" = "gitlab" \]; then$/  if [ "$forge" = "gitlab-unrouted-by-mutation" ]; then/')
+  assert_eq "1" "$(diff "$CLI" "$mutant" | grep -c '^> ')" "glt mutation (listing): the mutation changed EXACTLY one line -- a broad edit would not localize the failure"
+  rm -f "$sandbox/glab.log"
+  glt_run_mutated_cli "$mutant" "$sandbox" forge-pr-review-threads --pr 42 >/dev/null || true
+  argv_red=$(glt_glab_argv "$sandbox")
+
+  assert_eq "" "$argv_red" "glt mutation (listing): with the gitlab gate disabled, glab is never invoked -- so \"the listing call is exactly glab mr note list <iid> -F json --state unresolved\" goes RED"
+  local moved=no
+  if [ "$argv_red" != "$argv_green" ]; then moved=yes; fi
+  assert_eq "yes" "$moved" "glt mutation (listing): the verdict MOVED between the real and the mutated CLI, so that assertion is load-bearing, not decorative"
+
+  # And the envelope regresses to the adapterless answer, naming the second
+  # assertion this mutation kills.
+  rm -f "$sandbox/glab.log"
+  local mutant_out
+  mutant_out=$(glt_run_mutated_cli "$mutant" "$sandbox" forge-pr-review-threads --pr 42 || true)
+  status_red=$(printf '%s' "$mutant_out" | jq -r '.status')
+  reason_red=$(printf '%s' "$mutant_out" | jq -r '.reason')
+  assert_eq "error" "$status_red" "glt mutation (listing): the mutated CLI answers error, so \"glt listing: status found\" goes RED too"
+  assert_eq "no_adapter" "$reason_red" "glt mutation (listing): with reason no_adapter -- exactly the pre-story behavior this routing replaced"
+
+  # And the OTHER verb is untouched by this mutation, which is what makes the
+  # two mutation tests independent evidence rather than one fact counted twice.
+  rm -f "$sandbox/glab.log"
+  glt_run_mutated_cli "$mutant" "$sandbox" forge-resolve-review-thread --thread-id 6a9c1750b37d513a43987b574953fceb50b03ce7 >/dev/null || true
+  assert_contains "note resolve" "$(glt_glab_argv "$sandbox")" "glt mutation (listing): the RESOLVE verb still reaches glab under this mutation -- the unrouting is scoped to one verb"
+
+  rm -f "$mutant" "$payload_file" "$stderr_file"
+  teardown_forge_cli_sandbox "$sandbox"
+  glt_teardown_repo
+}
+
+glt_test_mutation_unrouting_the_resolve_verb_turns_an_assertion_red() {
+  echo ""
+  echo "=== mutation: unrouting forge-resolve-review-thread makes the named resolve-argv assertion go red ==="
+
+  glt_setup_repo
+
+  local sandbox mutant argv_green argv_red mutant_out
+  local stderr_file="/tmp/glt_mutation_resolve_stderr.$$"
+  local full_id="6a9c1750b37d513a43987b574953fceb50b03ce7"
+
+  sandbox=$(glt_new_sandbox)
+  glt_run_cli "$sandbox" "$stderr_file" -- forge-resolve-review-thread --thread-id "$full_id" >/dev/null
+  argv_green=$(glt_glab_argv "$sandbox")
+  assert_eq "mr note resolve $full_id" "$argv_green" "glt mutation (resolve): the UNMUTATED CLI calls glab mr note resolve -- the assertion being mutated"
+
+  mutant=$(glt_mutated_cli '/^_forge_resolve_review_thread() {$/,/^}$/ s/^  if \[ "\$forge" = "gitlab" \]; then$/  if [ "$forge" = "gitlab-unrouted-by-mutation" ]; then/')
+  assert_eq "1" "$(diff "$CLI" "$mutant" | grep -c '^> ')" "glt mutation (resolve): the mutation changed EXACTLY one line, scoped to this verb's own function body"
+  rm -f "$sandbox/glab.log"
+  mutant_out=$(glt_run_mutated_cli "$mutant" "$sandbox" forge-resolve-review-thread --thread-id "$full_id" || true)
+  argv_red=$(glt_glab_argv "$sandbox")
+
+  assert_eq "" "$argv_red" "glt mutation (resolve): with the gitlab gate disabled, glab is never invoked -- so \"the call is exactly glab mr note resolve <discussion-id>\" goes RED"
+  local moved=no
+  if [ "$argv_red" != "$argv_green" ]; then moved=yes; fi
+  assert_eq "yes" "$moved" "glt mutation (resolve): the verdict MOVED between the real and the mutated CLI, so that assertion is load-bearing"
+  assert_eq "error" "$(printf '%s' "$mutant_out" | jq -r '.status')" "glt mutation (resolve): the mutated CLI answers error, so \"glt resolve: resolved true\" goes RED too"
+  assert_eq "no_adapter" "$(printf '%s' "$mutant_out" | jq -r '.reason')" "glt mutation (resolve): with reason no_adapter -- the pre-story behavior this routing replaced"
+
+  # The mirror image of the listing mutation's own cross-check.
+  rm -f "$sandbox/glab.log"
+  glt_run_mutated_cli "$mutant" "$sandbox" forge-pr-review-threads --pr 42 >/dev/null || true
+  assert_contains "note list" "$(glt_glab_argv "$sandbox")" "glt mutation (resolve): the LISTING verb still reaches glab under this mutation -- the unrouting is scoped to one verb"
+
+  rm -f "$mutant" "$stderr_file"
+  teardown_forge_cli_sandbox "$sandbox"
+  glt_teardown_repo
 }
 
 # ============================================================================
@@ -25298,6 +26104,30 @@ main() {
   test_forge_resolve_review_thread_mutation_failure_not_authenticated
   test_forge_resolve_review_thread_mutation_failure_cli_failed
   test_forge_review_thread_verbs_registered_in_help_and_dispatcher
+
+  # GitLab Review-Thread Routing Tests (phase 3 US-004) -- the two review-thread
+  # verbs routed to `glab mr note list` / `glab mr note resolve`. Every function
+  # in this block is `glt_`-prefixed (see its header for why). The
+  # falsifiability proof runs FIRST, before any routing assertion trusts the
+  # fake glab; the two mutation tests run LAST, each unrouting one verb and
+  # naming the assertion that goes red.
+  echo ""
+  echo "--- GitLab Review-Thread Routing Tests (phase 3 US-004) ---"
+  glt_test_fake_glab_can_produce_a_failing_result
+  glt_test_pr_review_threads_asks_glab_for_state_unresolved
+  glt_test_pr_review_threads_maps_discussion_vocabulary_to_thread
+  glt_test_pr_review_threads_all_flag_asks_for_state_all
+  glt_test_pr_review_threads_zero_threads_is_found_with_empty_list
+  glt_test_pr_review_threads_glab_failure_is_cli_failed
+  glt_test_pr_review_threads_glab_absent_degrades_through_the_shared_gate
+  glt_test_resolve_review_thread_via_glab
+  glt_test_resolve_review_thread_posts_no_reply
+  glt_test_resolve_review_thread_confirmed_missing_is_found_false
+  glt_test_resolve_review_thread_glab_absent_mandatory_print
+  glt_test_thread_id_round_trips_from_listing_to_resolve
+  glt_test_resolve_records_glab_experimental_status
+  glt_test_mutation_unrouting_the_listing_verb_turns_an_assertion_red
+  glt_test_mutation_unrouting_the_resolve_verb_turns_an_assertion_red
 
   # Forge Dispatch-Order Tests (phase 1.1 US-006) -- all ten forge verbs
   # dispatched ahead of find_aimi_root, so a caller with no .aimi/ anywhere
