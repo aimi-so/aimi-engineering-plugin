@@ -6354,12 +6354,17 @@ test_forge_auth_status_gh_absent_is_error() {
 
 test_forge_auth_status_no_adapter_is_error() {
   echo ""
-  echo "=== forge-auth-status: resolved forge has no adapter (gitea) -- status=error, exits 0 ==="
+  echo "=== forge-auth-status: resolved forge has no adapter (unknown) -- status=error, exits 0 ==="
 
-  # gitea, not gitlab: phase 3 US-002 routed gitlab to glab, so gitea is now
-  # the forge that genuinely still has no adapter. This test is about the
-  # no_adapter branch, and it must keep pointing at a forge that reaches it.
-  setup_detect_forge_fixture origin https://gitea.com/owner/repo.git
+  # `unknown`, not gitea: phase 4 outline:02 routed gitea to `tea`, so the
+  # no_adapter branch this test pins is now reached only by an unrecognized
+  # remote host. RETARGETED, never deleted -- deleting would leave the
+  # no_adapter path untested. This is the END of the retarget line: three
+  # forge words exist (AIMI_FORGE_TYPE validates only github|gitlab|gitea,
+  # aimi-cli.sh:2130) and all three now have adapters, so `unknown` --
+  # reachable solely through a host _detect_forge_classify_host does not
+  # recognize, and `git remote add` never dials -- is the only control left.
+  setup_detect_forge_fixture origin https://git.example.com/owner/repo.git
   pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
 
   local out exit_code
@@ -6368,7 +6373,7 @@ test_forge_auth_status_no_adapter_is_error() {
   assert_exit_code "0" "$exit_code" "auth-status no-adapter: exits 0"
   assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "auth-status no-adapter: status is error"
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "auth-status no-adapter: data is null"
-  assert_contains "gitea" "$(printf '%s' "$out" | jq -r '.message')" "auth-status no-adapter: message names the detected forge, not a generic placeholder"
+  assert_contains "unknown" "$(printf '%s' "$out" | jq -r '.message')" "auth-status no-adapter: message names the detected forge, not a generic placeholder"
   assert_eq "no_adapter" "$(printf '%s' "$out" | jq -r '.reason')" "auth-status no-adapter: reason is no_adapter"
 
   popd >/dev/null

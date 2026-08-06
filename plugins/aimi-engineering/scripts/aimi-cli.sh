@@ -3226,15 +3226,129 @@ _forge_auth_status_gitlab() {
       accounts: $ARGS.positional}' ${accounts[@]+"${accounts[@]}"}
 }
 
+# gitea adapter for forge-auth-status. Same {authenticated, account, accounts}
+# contract as its github and gitlab siblings, deliberately kept adjacent so
+# the three stay diffable -- and ONE deliberate divergence from the gitlab
+# arm, spelled out below because copying that arm by habit is what would
+# break this verb.
+#
+# `tea login list -o json` is an OFFLINE CONFIG READ (cmd/login/list.go,
+# modules/print/login.go:34-54): it prints the locally stored login entries
+# as an array of all-STRING rows keyed name, url, ssh_host, user, default.
+# It never dials the instance. That makes `authenticated: true` here a
+# WEAKER claim than gh's validated answer: it proves a login entry for this
+# host exists, NOT that its token still works. Recorded so a caller reading
+# `authenticated` on a Gitea remote calibrates it correctly rather than
+# assuming parity with GitHub's.
+#
+# WHY NOT `tea whoami`: it makes a network round trip
+# (client.Users.GetMyUserInfo, cmd/whoami.go:22-31) and then DISCARDS its own
+# error (`user, _, _ :=`) before printing. A probe that throws away the very
+# failure it is being asked about cannot answer this question, so no code
+# path in this adapter invokes it.
+#
+# THE ONE DELIBERATE DIVERGENCE FROM _forge_auth_status_gitlab: on a non-zero
+# exit, or on stdout jq cannot parse as an array, this returns NON-ZERO
+# instead of a clean `{authenticated: false}`. glab's non-zero exit IS its
+# confirmed "not authenticated" answer, so folding it into a negative there
+# is correct. `tea` exits 1 UNIFORMLY for every error (main.go:18-30 -- there
+# is no distinct exit code for anything), so the same reading would
+# manufacture a false clean negative out of a broken PATH, a corrupt config
+# or a jq-unparseable response. A false negative here is exactly what lets a
+# broken session walk into opening a duplicate pull request, which is the
+# defect this whole verb exists to prevent. Only an EMPTY match set on a
+# cleanly parsed list is a definitive `authenticated: false`.
+#
+# Entry selection is HOST-FILTERED, never first-wins: `tea login list`
+# returns every configured instance, so accepting entry zero would report a
+# codeberg.org session as proof of a gitea.com login. The `default` entry
+# among the matches wins, else the first match. Comparison is on the URL's
+# HOST component (scheme, userinfo, path and port stripped, case-folded), so
+# a stored `https://gitea.com/` matches a detected `gitea.com`.
+#
+# NO CREDENTIAL IS BOUND ANYWHERE IN THIS FUNCTION, and that is a security
+# property rather than an omission: `tea` honours GH_TOKEN whenever
+# GITEA_INSTANCE_URL is also set (modules/context/context_login.go:15-51), so
+# copying the GitHub write path's prefix-assignment habit would hand a GitHub
+# token to a Gitea instance. Identity selection on tea is `--login <name>`,
+# which names a stored entry and carries no secret; this read verb does not
+# need it and does not pass it.
+#
+# VERIFICATION CEILING: `tea` is NOT INSTALLED on the machine this was
+# written on. Every flag, subcommand and JSON key above was read off
+# `gitea/tea` `main` source on 2026-08-06 and has never been observed coming
+# out of the real binary. What the tests prove is WHICH ARGV this function
+# emits and HOW it parses a fixture -- never what real `tea` does with them.
+# Where that under-verifies is the key NAMES themselves: the stub emits
+# whatever the author believed, so a wrong key would pass green on both
+# sides. Same declared ceiling _forge_map_pr_field_gitea's header states.
+#
+# Usage: _forge_auth_status_gitea <host>
+#   rc 0 -> {authenticated, account, accounts} on stdout
+#   rc 1 -> the check COULD NOT RUN; the caller must report error, never a
+#           negative
+_forge_auth_status_gitea() {
+  local host="${1:-}"
+  local out="" rc=0
+
+  # No `--login`, no `-r/--repo`: the login list is instance-wide and this
+  # call is the thing that decides WHICH login is active, so scoping it to
+  # one would beg the question.
+  out=$(tea login list -o json 2>/dev/null) || rc=$?
+
+  if [ "$rc" -ne 0 ]; then
+    return 1
+  fi
+
+  # A cleanly parsed ARRAY is the precondition for treating an empty match
+  # set as a definitive negative. Anything else -- empty stdout, a jq parse
+  # error, an object where an array was promised -- proves nothing, so it
+  # takes the same could-not-run exit as a non-zero rc above.
+  local shape=""
+  shape=$(printf '%s' "$out" | jq -r 'type' 2>/dev/null) || shape=""
+  if [ "$shape" != "array" ]; then
+    return 1
+  fi
+
+  jq -nc --arg host "$host" --argjson logins "$out" '
+    def hostof:
+      ((. // "") | tostring)
+      | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
+      | sub("^[^/@]*@"; "")
+      | sub("/.*$"; "")
+      | sub(":[0-9]+$"; "")
+      | ascii_downcase;
+    [ $logins[]
+      | select(type == "object")
+      | { user: ((.user // "") | tostring),
+          host: (.url | hostof),
+          isdefault: (((.default // "") | tostring) | ascii_downcase) } ] as $rows
+    | (if $host == "" then $rows
+       else [ $rows[] | select(.host == ($host | ascii_downcase)) ] end) as $matched
+    | ([ $matched[] | select(.isdefault == "true") ] + $matched) as $ordered
+    | { authenticated: (($matched | length) > 0),
+        account: (((($ordered[0] // {}).user) // "") | if . == "" then null else . end),
+        accounts: (reduce ($matched[] | .user | select(. != "")) as $u
+                     ([]; if (index($u) != null) then . else . + [$u] end)) }'
+}
+
 # Resolves forge/host via detect-forge's own helper (a direct function call,
-# never a `$AIMI_CLI detect-forge` subprocess), dispatches to the github
-# adapter when the forge is github and gh is present (checked via the
-# shared _forge_bin_check above in its quiet mode -- a missing binary here
-# has no caller-mandated stderr banner; the caller decides whether a
-# degraded result is fatal), and otherwise reports status=error with a
-# message naming why. AIMI_FORGE_IDENTITY, when set, is compared only
-# against the already-active account -- never used to invoke
-# `gh auth switch` or set GH_TOKEN.
+# never a `$AIMI_CLI detect-forge` subprocess), dispatches to the adapter the
+# detected forge needs -- gh for github, glab for gitlab, tea for gitea --
+# when that binary is present (checked via the shared _forge_bin_check above
+# in its quiet mode: a missing binary here has no caller-mandated stderr
+# banner; the caller decides whether a degraded result is fatal), and
+# otherwise reports status=error with a message naming why.
+# AIMI_FORGE_IDENTITY, when set, is compared only against the already-active
+# account -- never used to invoke `gh auth switch` or set GH_TOKEN.
+#
+# THIS VERB HAS ONLY TWO OUTCOMES, found and error -- the documented
+# exception to forge-contract.md's three-way convention. A CONFIRMED "no,
+# you are not logged in" is a SUCCESSFUL lookup and reports found with
+# data.authenticated=false; error means the check could not run at all. The
+# distinction is load-bearing rather than pedantic: a broken check that read
+# as a clean negative is what would let a bad session walk into creating a
+# duplicate pull request.
 _forge_auth_status() {
   local forge_info forge host
   forge_info=$(_detect_forge)
@@ -3253,65 +3367,85 @@ _forge_auth_status() {
   # ONE binary name, chosen from the detected forge, then ONE shared body.
   # The adapters differ only in which CLI is asked and how its status text is
   # parsed -- both of which are settled before this point -- so the envelope
-  # below is built exactly once rather than copied per forge. `gitea` (and
-  # `unknown`) leave this empty and fall through to the no_adapter branch.
+  # below is built exactly once rather than copied per forge. Only `unknown`
+  # leaves this empty and falls through to the no_adapter branch; gitea was
+  # routed to `tea` in phase 4 and no longer reaches it.
   local adapter_bin=""
   case "$forge" in
     github) adapter_bin="gh" ;;
     gitlab) adapter_bin="glab" ;;
+    gitea)  adapter_bin="tea" ;;
   esac
 
   if [ -n "$adapter_bin" ]; then
     if _forge_bin_check "$adapter_bin" quiet "$forge"; then
-      local cli_out authenticated_json account identity_requested identity_honored_json
-      if [ "$forge" = "gitlab" ]; then
-        cli_out=$(_forge_auth_status_gitlab "$host")
+      local cli_out="" cli_rc=0 authenticated_json account identity_requested identity_honored_json
+      # ONE adapter selection, THREE arms, still ONE shared envelope builder
+      # below -- the jq call is not copied per forge. Only the gitea arm can
+      # report "the check could not run at all": `tea` exits 1 UNIFORMLY for
+      # every error, so its adapter refuses to turn a failure into a clean
+      # negative and signals that refusal as a non-zero return instead. gh's
+      # and glab's non-zero exits ARE their own confirmed negatives, so
+      # neither can ever reach cli_rc != 0.
+      case "$forge" in
+        gitlab) cli_out=$(_forge_auth_status_gitlab "$host") ;;
+        gitea)  cli_out=$(_forge_auth_status_gitea "$host") || cli_rc=$? ;;
+        *)      cli_out=$(_forge_auth_status_github "$host") ;;
+      esac
+
+      if [ "$cli_rc" -ne 0 ]; then
+        # The adapter could not answer. That is an ERROR, never a negative:
+        # emitting authenticated=false here would manufacture a clean
+        # negative out of a tool failure, and it is precisely such a false
+        # negative that lets a broken session open a duplicate pull request.
+        # `data_json` stays null, so `authenticated` cannot be read at all.
+        message="$adapter_bin could not report authentication status -- the check did not run"
+        reason="cli_failed"
       else
-        cli_out=$(_forge_auth_status_github "$host")
-      fi
-      authenticated_json=$(printf '%s' "$cli_out" | jq -c '.authenticated')
-      account=$(printf '%s' "$cli_out" | jq -r '.account // empty')
+        authenticated_json=$(printf '%s' "$cli_out" | jq -c '.authenticated')
+        account=$(printf '%s' "$cli_out" | jq -r '.account // empty')
 
-      identity_requested="${AIMI_FORGE_IDENTITY:-}"
-      identity_honored_json="null"
-      if [ -n "$identity_requested" ]; then
-        if [ "$identity_requested" = "$account" ]; then
-          identity_honored_json="true"
-        else
-          identity_honored_json="false"
+        identity_requested="${AIMI_FORGE_IDENTITY:-}"
+        identity_honored_json="null"
+        if [ -n "$identity_requested" ]; then
+          if [ "$identity_requested" = "$account" ]; then
+            identity_honored_json="true"
+          else
+            identity_honored_json="false"
+          fi
         fi
-      fi
 
-      status="found"
-      # This builder names every field it emits, one by one -- it never
-      # splats $cli_out through. That containment is load-bearing, not
-      # incidental: _forge_auth_status_github (and its gitlab sibling) also
-      # returns an `accounts` array (the whole login list, for the
-      # account-divergence section below), and forge-contract.md fixes this
-      # envelope's fields. A `+ $cli_out`-style merge here would leak a field
-      # the contract does not define into every forge-auth-status caller.
-      #
-      # `forge` is $forge verbatim, so a GitLab repository reports
-      # "gitlab" here -- open-pr.md Step 1a prints `.data.forge` rather than
-      # a hardcoded "GitHub", and that is what makes it render correctly.
-      data_json=$(jq -nc \
-        --arg forge "$forge" \
-        --arg host "$host" \
-        --argjson authenticated "$authenticated_json" \
-        --arg account "$account" \
-        --arg identityRequested "$identity_requested" \
-        --argjson identityHonored "$identity_honored_json" \
-        '{forge: $forge,
-          host: (if $host == "" then null else $host end),
-          authenticated: $authenticated,
-          account: (if $account == "" then null else $account end),
-          identityRequested: (if $identityRequested == "" then null else $identityRequested end),
-          identityHonored: $identityHonored}')
+        status="found"
+        # This builder names every field it emits, one by one -- it never
+        # splats $cli_out through. That containment is load-bearing, not
+        # incidental: _forge_auth_status_github (and its gitlab sibling) also
+        # returns an `accounts` array (the whole login list, for the
+        # account-divergence section below), and forge-contract.md fixes this
+        # envelope's fields. A `+ $cli_out`-style merge here would leak a field
+        # the contract does not define into every forge-auth-status caller.
+        #
+        # `forge` is $forge verbatim, so a GitLab repository reports
+        # "gitlab" here -- open-pr.md Step 1a prints `.data.forge` rather than
+        # a hardcoded "GitHub", and that is what makes it render correctly.
+        data_json=$(jq -nc \
+          --arg forge "$forge" \
+          --arg host "$host" \
+          --argjson authenticated "$authenticated_json" \
+          --arg account "$account" \
+          --arg identityRequested "$identity_requested" \
+          --argjson identityHonored "$identity_honored_json" \
+          '{forge: $forge,
+            host: (if $host == "" then null else $host end),
+            authenticated: $authenticated,
+            account: (if $account == "" then null else $account end),
+            identityRequested: (if $identityRequested == "" then null else $identityRequested end),
+            identityHonored: $identityHonored}')
+      fi
     else
       # Names the binary the DETECTED forge actually needs -- `glab` on a
-      # GitLab remote, never `gh`. Telling a GitLab user to install gh is
-      # the exact "message names the wrong CLI" defect the phase contract's
-      # fourth success criterion exists to prevent.
+      # GitLab remote, `tea` on a Gitea one, never `gh`. Telling a GitLab
+      # user to install gh is the exact "message names the wrong CLI" defect
+      # the phase contract's fourth success criterion exists to prevent.
       message="$adapter_bin not found on PATH -- cannot check authentication status"
       reason="cli_missing"
     fi
@@ -4150,6 +4284,22 @@ _forge_repo_info() {
 
   local owner="" repo="" source=""
 
+  # THERE IS NO gitea TIER IN THIS CHAIN, AND ITS ABSENCE IS A DECISION.
+  # Recorded here rather than left as a gap, so the next reader meets a
+  # reason instead of an oversight:
+  #   - `tea` has no "show the current repository as JSON" command at all.
+  #   - `tea repos <owner>/<name>` REQUIRES the slug as an argument -- the
+  #     very thing a repo-info tier would have to local-parse out of the
+  #     remote URL first -- and then calls print.RepoDetails WITHOUT
+  #     honouring `--output` (cmd/repos.go:47-65), so there is no JSON to
+  #     read back either.
+  #   - `tea repos list` lists every accessible repository, not this one.
+  # A gitea arm would therefore local-parse the answer, ask tea about it, and
+  # learn nothing -- pure cost. gitea falls through to _forge_repo_info_parse_url
+  # below and reports source "local-parse", which is a correct answer and the
+  # reason this verb already worked for Gitea before any adapter existed.
+  # (Read off gitea/tea `main` source on 2026-08-06; `tea` is not installed
+  # on the machine this was written on.)
   if [ "$forge" = "github" ] && _forge_bin_check gh quiet github; then
     local gh_json=""
     if gh_json=$(_forge_repo_info_github); then
@@ -4931,6 +5081,162 @@ _forge_pr_view_gitlab() {
   return 0
 }
 
+# gitea adapter for forge-pr-view. Same signature and same three outcomes as
+# the github and gitlab arms above, and all three are deliberately kept
+# adjacent and structurally parallel so a reader can diff them: probe, view,
+# classify.
+#
+# TWO ASYMMETRIES MAKE `tea` NOT `glab`, AND CARRYING THE GITLAB SHAPE OVER
+# BY HABIT IS THE SINGLE MOST LIKELY WAY TO GET THIS ADAPTER WRONG.
+#
+# (a) `tea` HAS a field selector. `--fields, -f` is a CSV flag over a fixed
+# allowlist (cmd/flags/generic.go:157). _forge_pr_view_gitlab fetches the
+# whole document and picks keys afterwards ONLY because glab has no selector
+# at all; that is not a house style to copy. So the LIST probe below asks for
+# exactly the two fields it consumes. But the selector does NOT extend to the
+# detail path: `tea pulls <index> -o json` emits a fixed `pullData`
+# projection (cmd/pulls.go:29-52, routed at :88-93), so no `-f` belongs on
+# that invocation either -- and a gh-style `--json <field-list>` belongs on
+# neither, because `tea` defines no such flag anywhere.
+#
+# (b) `tea` emits TWO DIFFERENT JSON SHAPES for the same resource, chosen by
+# whether an index argument was passed. This has no gh or glab analogue.
+#   DETAIL -- `tea pulls <index> -o json`: ONE OBJECT with TYPED values
+#     (index is a number, mergeable/hasMerged are real booleans), head/base
+#     are BARE refs (cmd/pulls.go:174-177).
+#   LIST -- `tea pulls list -o json -f <csv>`: a JSON ARRAY whose keys are
+#     snake-cased and whose values are ALWAYS STRINGS
+#     (modules/print/table.go:175-208), and whose `head` may carry an
+#     `owner:` prefix for a cross-fork pull request (formatPRHead,
+#     modules/print/pull.go:83-93).
+# This function uses DETAIL for the found path and LIST for the structural
+# probe, and must never mix their assumptions.
+#
+# not_found IS ESTABLISHED STRUCTURALLY, exactly like the two arms above,
+# and it has to be: `tea` exits 1 UNIFORMLY for every error (main.go:18-30)
+# with no distinct "not found" code at all -- the precise conflation this
+# verb exists to defeat. But the probe is HARDER here than on either other
+# forge, because `tea pulls list` has NO head/source-branch filter
+# (cmd/pulls/list.go:31 carries only --fields plus --state/--page/--limit).
+# So the listing is fetched with `--state all` -- a merged or closed pull
+# request must still count as found -- and filtered LOCALLY. The local
+# comparison is on the SUFFIX after the last `:`, never plain equality: a
+# cross-fork row spells its head `contributor:feat-x`, and reporting that as
+# absent would invite a duplicate pull request. Git refs cannot contain `:`,
+# so the split is unambiguous.
+#
+# THE PROBE ALSO RESOLVES THE INDEX. `tea pulls <arg>` takes an INDEX, never
+# a branch name, so a branch ref could not address the detail call at all
+# without this step -- which is why the probe selects `index` alongside
+# `head`. A purely numeric ref addresses the pull request directly and skips
+# the probe entirely, the same way `--head`/`--source-branch` are skipped
+# above.
+#
+# CONFLATING not_found WITH error IS THE DEFECT THIS VERB EXISTS TO PREVENT:
+# when the probe positively CONFIRMED the pull request exists and the detail
+# call then failed anyway, this reports error and does not consult stderr
+# wording at all -- not even when that wording happens to say 404. A string
+# cannot outvote a structural fact.
+#
+# NO CREDENTIAL IS BOUND ON ANY INVOCATION HERE. `tea` honours GH_TOKEN when
+# GITEA_INSTANCE_URL is also set (modules/context/context_login.go:15-51), so
+# a prefix assignment copied from the GitHub write path would hand a GitHub
+# token to a Gitea instance.
+#
+# VERIFICATION CEILING: `tea` is NOT INSTALLED on the machine this was
+# written on. Every flag, subcommand and JSON key above was read off
+# `gitea/tea` `main` source on 2026-08-06 and has never been observed coming
+# out of the real binary. The tests prove WHICH ARGV this function emits and
+# HOW it parses a fixture -- never what real `tea` does with them. Same
+# declared ceiling _forge_map_pr_field_gitea's header states.
+_forge_pr_view_gitea() {
+  local ref="$1" fields_csv="$2"
+  local stdout="" stderr="" rc=0
+  # Set only when the structural probe below ran cleanly AND reported one or
+  # more matching pull requests -- i.e. existence is a confirmed structural
+  # fact, not an inference.
+  local list_confirmed_exists=false
+  # The argument the DETAIL call is addressed with. A numeric ref is already
+  # an index; a branch ref becomes one only if the probe resolves it.
+  local detail_ref="$ref"
+
+  if ! [[ "$ref" =~ ^[0-9]+$ ]]; then
+    local list_out="" list_rc=0 list_count="" list_index=""
+    list_out=$(tea pulls list --state all -f index,head -o json 2>/dev/null) || list_rc=$?
+    if [ "$list_rc" -eq 0 ]; then
+      # The local head filter, in the LIST vocabulary: every value is a
+      # string, and `head` may be `owner:branch`. `sub("^.*:"; "")` is greedy
+      # and therefore strips through the LAST colon, leaving a bare ref
+      # untouched when there is none.
+      list_count=$(printf '%s' "$list_out" | jq --arg ref "$ref" '
+        [ .[]
+          | select(type == "object")
+          | select((((.head // "") | tostring) | sub("^.*:"; "")) == $ref) ] | length' 2>/dev/null) || list_count=""
+      if [ "$list_count" = "0" ]; then
+        _forge_pr_view_emit "not_found" "null" "null" "no pull request found for ref: $ref"
+        return 0
+      fi
+      # A parseable, non-zero count is a confirmed existence fact. An
+      # UNPARSEABLE response is not: it proves nothing either way, so it
+      # leaves the flag false and falls through to the same detail-plus-
+      # stderr path a failed probe takes.
+      if [ -n "$list_count" ]; then
+        list_confirmed_exists=true
+        list_index=$(printf '%s' "$list_out" | jq -r --arg ref "$ref" '
+          [ .[]
+            | select(type == "object")
+            | select((((.head // "") | tostring) | sub("^.*:"; "")) == $ref) ][0].index // "" | tostring' 2>/dev/null) || list_index=""
+        [ -n "$list_index" ] && detail_ref="$list_index"
+      fi
+    fi
+  fi
+
+  _forge_capture stdout stderr rc -- tea pulls "$detail_ref" -o json || true
+
+  if [ "$rc" -eq 0 ]; then
+    # `merged` is DERIVED here, in the adapter, and nowhere else in this
+    # file. tea's DETAIL `state` is `pr.State` raw -- open/closed only
+    # (cmd/pulls.go:33) -- while merged-ness lives in the separate
+    # `hasMerged` boolean (:46). Reading a second key is exactly what a
+    # one-field-one-key mapper cannot express, which is why
+    # _forge_map_pr_state_gitea is a sibling of the mapper rather than a
+    # branch inside it, and why _forge_map_state stays gitea-free: that
+    # function normalizes SPELLING and must not invent a value the source
+    # data did not provide. The rewritten document is then handed to the ONE
+    # shared found-envelope builder, which does the key lookup through
+    # _forge_map_pr_field_gitea -- this arm builds no key table of its own.
+    local state_norm normalized
+    state_norm=$(_forge_map_pr_state_gitea "$stdout")
+    normalized=$(printf '%s' "$stdout" | jq -c --arg state "$state_norm" '
+      if (type == "object" and has("state")) then .state = $state else . end' 2>/dev/null) || normalized="$stdout"
+    [ -n "$normalized" ] || normalized="$stdout"
+    _forge_pr_view_build_found "gitea" "$normalized" "$fields_csv"
+    return 0
+  fi
+
+  # A structurally CONFIRMED existence outranks any stderr text, including
+  # text that happens to say 404. See the header.
+  if [ "$list_confirmed_exists" = true ]; then
+    _forge_pr_view_emit "error" "null" "null" "$stderr"
+    return 0
+  fi
+
+  # Secondary fallback only, for when the structural probe could not confirm
+  # anything (a numeric ref, or the probe itself failing). `tea` has no
+  # not-found exit code, so this reads its prose -- which is exactly the
+  # fragility the probe above exists to avoid, hence backstop-only.
+  if printf '%s' "$stderr" | grep -qiE '404|not found'; then
+    _forge_pr_view_emit "not_found" "null" "null" "no pull request found for ref: $ref"
+    return 0
+  fi
+
+  # Every other non-zero exit is a genuine tool failure (auth, network,
+  # malformed response) -- never folded into not_found. The message carries
+  # tea's own stderr text.
+  _forge_pr_view_emit "error" "null" "null" "$stderr"
+  return 0
+}
+
 # Field-selectable, three-way-status PR lookup. See this section's header
 # comment for the defect this fixes and why its envelope differs from the
 # generic forge-contract.md three-way envelope.
@@ -5013,9 +5319,10 @@ cmd_forge_pr_view() {
   _detect_forge_type forge
 
   # Each arm gates on the binary THAT forge needs -- gh for github, glab for
-  # gitlab -- through the shared _forge_bin_check in its quiet mode, and its
-  # degraded message names that same binary. A GitLab user is never told to
-  # install gh.
+  # gitlab, tea for gitea -- through the shared _forge_bin_check in its quiet
+  # mode, and its degraded message names that same binary. A GitLab user is
+  # never told to install gh, and neither is a Gitea one. The `*)` arm is
+  # still reachable, by `unknown`.
   case "$forge" in
     github)
       if _forge_bin_check gh quiet github; then
@@ -5029,6 +5336,13 @@ cmd_forge_pr_view() {
         _forge_pr_view_gitlab "$pr_ref" "$fields_csv"
       else
         _forge_pr_view_emit "error" "null" "null" "glab not found on PATH -- this gitlab operation cannot run automatically."
+      fi
+      ;;
+    gitea)
+      if _forge_bin_check tea quiet gitea; then
+        _forge_pr_view_gitea "$pr_ref" "$fields_csv"
+      else
+        _forge_pr_view_emit "error" "null" "null" "tea not found on PATH -- this gitea operation cannot run automatically."
       fi
       ;;
     *)
@@ -5999,8 +6313,18 @@ _forge_issue_view() {
     return 0
   fi
 
+  if [ "$forge" = "gitea" ]; then
+    if ! _forge_bin_check tea quiet "$forge"; then
+      # Names tea, never gh -- the phase contract's fourth success criterion.
+      _forge_emit_status error "" "tea not found -- this issue lookup did not run automatically." cli_missing
+      return 0
+    fi
+    _forge_issue_view_gitea "$number" "$host"
+    return 0
+  fi
+
   if [ "$forge" != "github" ]; then
-    _forge_emit_status error "" "forge-issue-view: no adapter for forge \"$forge\" yet -- github and gitlab are the adapters available today." no_adapter
+    _forge_emit_status error "" "forge-issue-view: no adapter for forge \"$forge\" yet -- github, gitlab and gitea are the adapters available today." no_adapter
     return 0
   fi
 
@@ -6129,6 +6453,114 @@ _forge_issue_view_gitlab() {
     reason="not_authenticated"
   fi
   _forge_emit_status error "" "glab issue view exited $rc: ${stderr_out:-unknown error}" "$reason"
+  return 0
+}
+
+# gitea adapter for forge-issue-view. Same three-way found/not_found/error
+# envelope (_forge_emit_status), same shared issue builder
+# (_forge_build_issue_json), same quiet degrade posture -- only the CLI, the
+# key vocabulary and the not-found signal differ.
+#
+# `tea issues <index> -o json` is the DETAIL form (cmd/issues.go's `issueData`
+# struct: id, index, title, state, created, labels[], user, body,
+# assignees[], url, closedAt, comments[]). No `-f`, and no gh-style
+# `--json <field-list>`: tea's `-f` selector lives on the LIST path only, and
+# the detail path emits a fixed projection.
+#
+# THE KEYS COME FROM _forge_map_pr_field_gitea, NOT FROM A SECOND HAND-
+# WRITTEN TABLE HERE -- the same reuse _forge_issue_view_gitlab makes, and
+# for the same reason. Gitea spells the five portable-core contract fields
+# identically on an issue and on a pull request: `index`, `url`, `title`,
+# `body` and `state` are struct fields on BOTH `pullData` and `issueData`.
+# The PR-only fields (headRefName/baseRefName/isDraft/mergeable/files) are
+# simply never asked for.
+#
+# `comments` IS DELIBERATELY NOT SUPPLIED, so it comes back null AND named in
+# unsupported_fields. This is not caution about tea's counting semantics
+# alone -- it is a data fact: `issueData.Comments` is an ARRAY that is
+# populated ONLY when `--comments` is passed (cmd/issues.go:148-154), and is
+# an EMPTY ARRAY otherwise. Deriving a count from its length here would
+# report `comments: 0` for every issue in existence. A wrong count is worse
+# than a declared absence, and the contract's unsupported_fields array is the
+# mechanism for exactly this.
+#
+# `labels` rides alongside the builder's output via a jq merge, the same way
+# the github and gitlab arms add it, and through the same either-shape
+# expression: tea's own printer can hand back plain strings while the API
+# object carries `{name}`, so accepting either is what keeps a label list
+# from being silently dropped.
+#
+# THERE IS DELIBERATELY NO STRUCTURAL not_found PROBE HERE, unlike
+# _forge_pr_view_gitea, and this is a recorded decision rather than an
+# oversight so it is not later "improved" into a scan: `tea issues list` is
+# PAGINATED (--page/--limit) and has no index filter at all, so a local scan
+# of one page could report a real issue as missing. A FALSE not_found is the
+# one outcome that must never be invented, and a paginated scan can invent
+# it. So absence is claimed only on a POSITIVE 404/not-found stderr match,
+# and every other failure resolves to error -- falling through in the SAFE
+# direction, which is the same rule the pr-view arm applies to an
+# unparseable probe.
+#
+# NO CREDENTIAL IS BOUND ON ANY INVOCATION HERE -- see
+# _forge_auth_status_gitea's header for why a GH_TOKEN prefix assignment on a
+# `tea` call would be a real leak rather than a hypothetical one.
+#
+# VERIFICATION CEILING: `tea` is NOT INSTALLED on the machine this was
+# written on. Every flag, subcommand and JSON key above was read off
+# `gitea/tea` `main` source on 2026-08-06 and has never been observed coming
+# out of the real binary. The tests prove WHICH ARGV this function emits and
+# HOW it parses a fixture -- never what real `tea` does with them.
+_forge_issue_view_gitea() {
+  local number="$1" host="${2:-}"
+  local stdout rc=0
+  local stderr_out
+  _forge_capture stdout stderr_out rc -- tea issues "$number" -o json || true
+
+  if [ "$rc" -eq 0 ]; then
+    local num title_val body_val url_val state_raw state_norm labels_json data
+    num=$(printf '%s' "$stdout" | jq -r --arg k "$(_forge_map_pr_field_gitea number)" '.[$k] // empty')
+    title_val=$(printf '%s' "$stdout" | jq -r --arg k "$(_forge_map_pr_field_gitea title)" '.[$k] // ""')
+    body_val=$(printf '%s' "$stdout" | jq -r --arg k "$(_forge_map_pr_field_gitea body)" '.[$k] // ""')
+    url_val=$(printf '%s' "$stdout" | jq -r --arg k "$(_forge_map_pr_field_gitea url)" '.[$k] // ""')
+    state_raw=$(printf '%s' "$stdout" | jq -r --arg k "$(_forge_map_pr_field_gitea state)" '.[$k] // ""')
+    # Key mapping and VALUE normalization are separate jobs. There is no
+    # hasMerged derivation on this path and there must not be: an ISSUE is
+    # never merged, so _forge_map_state's plain case-fold is the whole job.
+    state_norm=$(_forge_map_state "gitea" "$state_raw")
+    labels_json=$(printf '%s' "$stdout" | jq -c '[(.labels // [])[] | if type == "object" then .name else . end]')
+    data=$(_forge_build_issue_json --number "$num" --url "$url_val" --title "$title_val" \
+      --body "$body_val" --state "$state_norm" --raw "$stdout")
+    data=$(printf '%s' "$data" | jq -c --argjson labels "$labels_json" '. + {labels: $labels}')
+    _forge_emit_status found "$data"
+    return 0
+  fi
+
+  # not_found is a query RESULT, never a verb failure -- the same distinction
+  # the github and gitlab arms draw. A POSITIVE match is required; see the
+  # header for why nothing weaker may claim absence on this path.
+  if printf '%s' "$stderr_out" | grep -qiE '404|not found'; then
+    _forge_emit_status not_found
+    return 0
+  fi
+
+  # Reached only after the not-found match above already failed, so tea
+  # genuinely broke. tea's presence was confirmed by the caller's own
+  # _forge_bin_check gate, so cli_missing is already ruled out and only
+  # not_authenticated vs cli_failed remains. Determined STRUCTURALLY, by
+  # asking _forge_auth_status_gitea whether a login entry for this host
+  # exists at all -- never by pattern-matching tea's failure wording, which
+  # is translatable and rewordable. That adapter returns NON-ZERO when it
+  # could not read the login list, which lands here as an empty $auth_json
+  # and therefore cli_failed: anything short of a definite
+  # "authenticated: false" resolves to cli_failed, the safe direction for an
+  # already-known failure.
+  local reason="cli_failed" auth_json authenticated
+  auth_json=$(_forge_auth_status_gitea "$host" 2>/dev/null) || auth_json=""
+  authenticated=$(printf '%s' "$auth_json" | jq -r '.authenticated' 2>/dev/null) || authenticated=""
+  if [ "$authenticated" = "false" ]; then
+    reason="not_authenticated"
+  fi
+  _forge_emit_status error "" "tea issues exited $rc: ${stderr_out:-unknown error}" "$reason"
   return 0
 }
 
