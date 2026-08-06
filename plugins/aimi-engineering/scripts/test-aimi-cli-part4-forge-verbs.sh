@@ -25,6 +25,7 @@ set -uo pipefail
 #   - Forge Dispatch-Order Tests (phase 1.1 US-006)
 #   - Forge Derivation Memo + PR-View Probe-Order Tests (phase 1.1 US-010)
 #   - GitLab PR-field Mapping Tests (phase 3 US-001)
+#   - Gitea PR-field Mapping Tests (phase 4 outline:01)
 #   - GitLab READ-verb Routing Tests (phase 3 US-002)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -326,6 +327,527 @@ test_forge_map_pr_field_gitlab() {
   assert_eq "9" "$covered" "gitlab map: the gitlab mapper answers for nine of the ten -- files alone is silently empty, by determination not omission"
 
   teardown_fake_glab_fixture
+}
+
+# ============================================================================
+# Gitea PR-field Mapping Tests (phase 4 outline:01)
+# ============================================================================
+# Covers the gitea arm of the _forge_map_pr_field_* seam, the sibling
+# _forge_map_pr_state_gitea derivation, and the `gitea)` arm added to
+# _forge_pr_view_build_found.
+#
+# EVERY function and control variable this section introduces is prefixed
+# `gtm_`/`GTM_` (Gitea Map). That is not decoration. Sibling stories in this
+# same phase are editing this same file for the read verbs, the write verbs
+# and the review threads, on branches none of us can see, and bash silently
+# keeps the LAST definition of a duplicated function -- so three
+# individually-green branches can merge into a red one. The phase-2 founding
+# incident: two wave-1 stories both defined source_forge_account_functions
+# and six assertions failed with exit 127 only on the merge. `gtm_` is
+# verified disjoint from the existing `gla_`, `glr_`, `glt_`, `glw_` and
+# `run_` prefixes here, and the siblings have reserved `gtr_`, `gtw_`, `gtt_`.
+#
+# tea is genuinely NOT INSTALLED on this machine. That is the phase's declared
+# verification ceiling, the same one phase 3 declared for glab: the stub below
+# is the only tea these tests ever see, and its payloads are modelled on
+# `gitea/tea` `main` source read on 2026-08-06 rather than on a captured
+# real-binary response. These tests prove WHICH arguments the adapter emits
+# and HOW it parses a fixture -- never what real tea does with them.
+#
+# The gitea) arm added to _forge_pr_view_build_found has no production caller
+# until outline:02 routes cmd_forge_pr_view, which is why every test here
+# calls the functions directly rather than through the CLI, and why the
+# existing `no adapter for forge "gitea"` control assertions stay green.
+
+# A fake `tea` covering the two pull-request invocations this story needs:
+# the DETAIL form `tea pulls <index> -o json` and the LIST form
+# `tea pulls list ... -f <csv> -o json`. They serve from SEPARATE control
+# variables on purpose -- the whole point of AC2 is that the two shapes are
+# genuinely different documents, which a single shared payload variable would
+# quietly erase.
+#
+# Written to its own `mktemp -d` and prepends nothing to PATH itself --
+# callers do `PATH="$GTM_TEA_DIR:$PATH" tea …` per invocation, the same
+# pattern all four fake-glab stubs above follow. Driven entirely by GTM_TEA_*
+# environment variables:
+#   GTM_TEA_LOG             optional file; every invocation's argv appended,
+#                           one line per call -- lets an assertion prove WHICH
+#                           flags were passed (`-o json` and tea's own `-f`
+#                           selector, never a gh-style `--json <field-list>`)
+#   GTM_TEA_DETAIL_JSON     `tea pulls <index> -o json` stdout (default '{}')
+#   GTM_TEA_DETAIL_JSON_SECOND  when set together with GTM_TEA_CALL_COUNTER,
+#                           stdout for the SECOND and every later detail call,
+#                           so one fixture can report DIFFERING output across
+#                           two calls and a before/after comparison is proven
+#                           able to move rather than passing vacuously
+#   GTM_TEA_CALL_COUNTER    path to a counter file incremented once per detail
+#                           call; required for DETAIL_JSON_SECOND to fire
+#   GTM_TEA_DETAIL_EXIT     detail-call exit code (default 0)
+#   GTM_TEA_DETAIL_STDERR   stderr emitted when that exit is non-zero
+#   GTM_TEA_LIST_JSON       `tea pulls list … -o json` stdout (default '[]')
+gtm_setup_fake_tea_fixture() {
+  GTM_TEA_DIR=$(mktemp -d)
+  cat > "$GTM_TEA_DIR/tea" << 'GTM_FAKE_TEA_SCRIPT'
+#!/usr/bin/env bash
+if [ -n "${GTM_TEA_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$GTM_TEA_LOG"
+fi
+
+case "$1" in
+  pulls)
+    case "$2" in
+      list)
+        body="${GTM_TEA_LIST_JSON:-}"
+        [ -z "$body" ] && body='[]'
+        printf '%s' "$body"
+        exit 0
+        ;;
+      *)
+        call=1
+        if [ -n "${GTM_TEA_CALL_COUNTER:-}" ]; then
+          call=$(cat "$GTM_TEA_CALL_COUNTER" 2>/dev/null || echo 0)
+          call=$((call + 1))
+          printf '%s\n' "$call" > "$GTM_TEA_CALL_COUNTER"
+        fi
+        code="${GTM_TEA_DETAIL_EXIT:-0}"
+        if [ "$code" != "0" ]; then
+          printf '%s' "${GTM_TEA_DETAIL_STDERR:-}" >&2
+          exit "$code"
+        fi
+        body="${GTM_TEA_DETAIL_JSON:-}"
+        if [ "$call" -gt 1 ] && [ -n "${GTM_TEA_DETAIL_JSON_SECOND:-}" ]; then
+          body="$GTM_TEA_DETAIL_JSON_SECOND"
+        fi
+        [ -z "$body" ] && body='{}'
+        printf '%s' "$body"
+        exit 0
+        ;;
+    esac
+    ;;
+  *)
+    echo "fake-tea: unhandled invocation: $*" >&2
+    exit 127
+    ;;
+esac
+GTM_FAKE_TEA_SCRIPT
+  chmod +x "$GTM_TEA_DIR/tea"
+}
+
+# Removes the fake-tea temp dir and every GTM_TEA_* control variable, so a
+# stray export never leaks into an unrelated later test. It deliberately does
+# NOT unset AIMI_CONFIG_DIR: this section never sets it, and unsetting it here
+# would hand the rest of part 4 back to the real ~/.config/aimi.
+gtm_teardown_fake_tea_fixture() {
+  rm -rf "$GTM_TEA_DIR"
+  unset GTM_TEA_DIR GTM_TEA_LOG GTM_TEA_DETAIL_JSON GTM_TEA_DETAIL_JSON_SECOND \
+    GTM_TEA_CALL_COUNTER GTM_TEA_DETAIL_EXIT GTM_TEA_DETAIL_STDERR GTM_TEA_LIST_JSON
+}
+
+# The DETAIL shape: `tea pulls <index> -o json` emits ONE OBJECT with TYPED
+# values, built from cmd/pulls.go:29-52's purpose-built `pullData` struct.
+# Four properties are load-bearing for the assertions below, so do not "tidy"
+# them away:
+#   - `id` (98765) DIFFERS from `index` (42), so mapping number -> id instead
+#     of number -> index produces a visibly wrong number rather than an
+#     accident that happens to pass.
+#   - `index` is a JSON NUMBER and `mergeable`/`hasMerged` are real BOOLEANS
+#     -- the typed half of the detail-vs-list split.
+#   - `head` and `base` are BARE branch names with no `owner:` prefix
+#     (cmd/pulls.go:174-177 uses pr.Head.Ref/pr.Base.Ref directly).
+#   - There is NO `draft` key and NO per-file list anywhere in the document,
+#     which is what settles isDraft/files mapping to nothing by ABSENCE in
+#     the data rather than by the author's preference. `diffUrl` is present
+#     because the real struct carries it, and it is a URL -- not something
+#     `files` could have mapped to.
+gtm_fake_tea_pull_detail_json() {
+  printf '%s' '{
+    "id": 98765,
+    "index": 42,
+    "title": "Add the Gitea adapter",
+    "state": "open",
+    "created": "2026-08-01T09:00:00Z",
+    "updated": "2026-08-02T09:00:00Z",
+    "labels": [],
+    "user": "octocat",
+    "body": "Body text of the pull request.",
+    "assignees": [],
+    "url": "https://gitea.com/acme/widgets/pulls/42",
+    "base": "main",
+    "head": "feat/gitea-adapter",
+    "headSha": "deadbeefcafe1234567890abcdefdeadbeefcafe",
+    "diffUrl": "https://gitea.com/acme/widgets/pulls/42.diff",
+    "mergeable": true,
+    "hasMerged": false,
+    "mergedAt": null,
+    "closedAt": null,
+    "reviews": [],
+    "comments": []
+  }'
+}
+
+# The LIST shape, for the SAME pull request: `tea pulls list -o json -f <csv>`
+# emits a JSON ARRAY whose keys are the --fields names SNAKE-CASED
+# (modules/print/table.go:175-179) and whose every value is a JSON STRING,
+# because orderedRow.MarshalJSON (:187-208) marshals a map[string]string.
+# Three differences from the detail fixture above are the whole point:
+#   - `"index": "42"` is a STRING where the detail document has a number, and
+#     `"mergeable": "true"` a STRING where the detail document has a boolean.
+#   - `head` carries an `owner:branch` prefix (formatPRHead,
+#     modules/print/pull.go:83-93, prefixes the owner for a cross-fork PR).
+#   - `state` is literally "merged", which the detail path never prints --
+#     formatPRState (:95-100) returns it whenever pr.Merged != nil, while
+#     cmd/pulls.go:33 hands back pr.State raw.
+# It exists so AC2's "the adapter reads the DETAIL path" is a TEST rather
+# than a comment.
+gtm_fake_tea_pull_list_json() {
+  printf '%s' '[
+    {
+      "index": "42",
+      "title": "Add the Gitea adapter",
+      "state": "merged",
+      "url": "https://gitea.com/acme/widgets/pulls/42",
+      "body": "Body text of the pull request.",
+      "mergeable": "true",
+      "base": "main",
+      "head": "contributor:feat/gitea-adapter",
+      "author": "octocat",
+      "updated": "2026-08-02T09:00:00Z"
+    }
+  ]'
+}
+
+# Sources the gitea field mapper plus every helper the assertions below reach
+# through it: the state derivation and _forge_map_state it delegates to, the
+# two sibling mappers (to cross-check that all three answer over the SAME ten
+# contract fields), and the whole _forge_pr_view_build_found ->
+# _forge_build_pr_json -> _forge_pr_view_emit chain the envelope assertions
+# drive. Same "eval every helper the code under test reaches" rule
+# source_cache_functions follows -- a missing eval here surfaces as exit 127
+# inside a subshell, which reads as a wrong VALUE rather than a missing
+# function.
+gtm_source_forge_gitea_map_functions() {
+  eval "$(sed -n '/^_forge_map_pr_field_gitea()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_map_pr_field_gitlab()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_map_pr_field_github()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_map_pr_state_gitea()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_map_state()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_pr_view_build_found()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_build_pr_json()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_pr_view_emit()/,/^}/p' "$CLI")"
+}
+
+# RUNS BEFORE ANY OTHER GITEA ASSERTION, ON PURPOSE. An assertion that passes
+# regardless of the code under test is not evidence, and this repository has
+# shipped that exact defect twice. So before a single mapping assertion trusts
+# this stub, prove it can turn a test RED: drive the identical pipeline (fake
+# tea payload -> mapper key -> jq pick -> compare) twice with two different
+# index values and show the verdict moves.
+gtm_test_fake_tea_stub_can_produce_a_failing_result() {
+  echo ""
+  echo "=== fake tea: the stub CAN produce a failing result (falsifiability proof, runs first) ==="
+
+  gtm_source_forge_gitea_map_functions
+  gtm_setup_fake_tea_fixture
+
+  local key matching differing would_have_gone_red
+  key=$(_forge_map_pr_field_gitea number)
+
+  # Payload whose index IS the expected 42 -- the green case.
+  matching=$(GTM_TEA_DETAIL_JSON='{"index":42,"id":98765}' PATH="$GTM_TEA_DIR:$PATH" \
+    tea pulls 42 -o json | jq -r --arg k "$key" '.[$k]')
+
+  # SAME code path, SAME mapper key, payload whose index DIFFERS. If the
+  # pipeline were insensitive to the stub's output, these two would be equal.
+  differing=$(GTM_TEA_DETAIL_JSON='{"index":7,"id":98765}' PATH="$GTM_TEA_DIR:$PATH" \
+    tea pulls 42 -o json | jq -r --arg k "$key" '.[$k]')
+
+  assert_eq "42" "$matching" "fake tea falsifiability: the matching payload yields the expected index (green case)"
+  assert_eq "7" "$differing" "fake tea falsifiability: the differing payload yields the OTHER index, so output really does track the fixture"
+
+  # The proof stated as a check rather than left as a comment: had `differing`
+  # been asserted against 42, assert_eq would have gone red. Written this way
+  # so a future edit that makes the stub ignore GTM_TEA_DETAIL_JSON fails
+  # HERE, loudly, instead of quietly making every assertion below vacuous.
+  would_have_gone_red=no
+  if [ "$differing" != "42" ]; then
+    would_have_gone_red=yes
+  fi
+  assert_eq "yes" "$would_have_gone_red" "fake tea falsifiability: asserting the differing payload against 42 WOULD have gone red -- the stub is not a rubber stamp"
+
+  gtm_teardown_fake_tea_fixture
+}
+
+# The mapping table itself: one assertion per contract field naming the exact
+# tea key, plus the unmappable-field-yields-empty rule. Every key is then
+# resolved against a real-shaped `tea pulls <index> -o json` DETAIL document
+# served through the stub, so a wrong key fails twice -- once on its name,
+# once because it picks nothing (or the wrong value) out of a real-shaped
+# payload.
+gtm_test_forge_map_pr_field_gitea() {
+  echo ""
+  echo "=== _forge_map_pr_field_gitea: the ten contract fields -> tea's own DETAIL vocabulary ==="
+
+  gtm_source_forge_gitea_map_functions
+  gtm_setup_fake_tea_fixture
+
+  local doc out field
+  doc=$(gtm_fake_tea_pull_detail_json)
+  # Serve that fixture through the stub, so the values below are picked out of
+  # something a `tea pulls 42 -o json` call actually produced rather than out
+  # of a local string the mapper never met.
+  out=$(GTM_TEA_DETAIL_JSON="$doc" PATH="$GTM_TEA_DIR:$PATH" tea pulls 42 -o json)
+
+  # --- the exact tea key, one assertion per contract field -----------------
+  assert_eq "index"     "$(_forge_map_pr_field_gitea number)"      "gitea map: number -> index (the per-repo number, not the instance-wide id)"
+  assert_eq "url"       "$(_forge_map_pr_field_gitea url)"         "gitea map: url -> url"
+  assert_eq "title"     "$(_forge_map_pr_field_gitea title)"       "gitea map: title -> title"
+  assert_eq "body"      "$(_forge_map_pr_field_gitea body)"        "gitea map: body -> body (tea spells it body, unlike glab's description)"
+  assert_eq "state"     "$(_forge_map_pr_field_gitea state)"       "gitea map: state -> state"
+  assert_eq "head"      "$(_forge_map_pr_field_gitea headRefName)" "gitea map: headRefName -> head"
+  assert_eq "base"      "$(_forge_map_pr_field_gitea baseRefName)" "gitea map: baseRefName -> base"
+  assert_eq "mergeable" "$(_forge_map_pr_field_gitea mergeable)"   "gitea map: mergeable -> mergeable"
+
+  # --- each mapped key resolves the right VALUE out of a real-shaped doc ---
+  assert_eq "42" "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitea number)" '.[$k]')" \
+    "gitea map: the number key picks 42 out of a tea DETAIL document"
+  assert_eq "https://gitea.com/acme/widgets/pulls/42" \
+    "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitea url)" '.[$k]')" \
+    "gitea map: the url key picks the HTML URL"
+  assert_eq "Add the Gitea adapter" \
+    "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitea title)" '.[$k]')" \
+    "gitea map: the title key picks the title"
+  assert_eq "Body text of the pull request." \
+    "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitea body)" '.[$k]')" \
+    "gitea map: the body key picks body, not a description key tea does not have"
+  assert_eq "open" "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitea state)" '.[$k]')" \
+    "gitea map: the state key picks tea's raw DETAIL state"
+  assert_eq "feat/gitea-adapter" \
+    "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitea headRefName)" '.[$k]')" \
+    "gitea map: the headRefName key picks head"
+  assert_eq "main" "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitea baseRefName)" '.[$k]')" \
+    "gitea map: the baseRefName key picks base"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitea mergeable)" '.[$k]')" \
+    "gitea map: the mergeable key picks the mergeable boolean"
+
+  # --- the two capability-gated fields emit NOTHING, settled by absence ----
+  assert_eq "" "$(_forge_map_pr_field_gitea files)" \
+    "gitea map: files emits nothing -- diff/patch/diffUrl are URLs, not a parsed per-file list"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r 'has("files")')" \
+    "gitea map: and the DETAIL document indeed has no files key that could have been mapped"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r 'has("changedFiles")')" \
+    "gitea map: nor a changedFiles key -- the omission is settled by the data, not by preference"
+  assert_eq "https://gitea.com/acme/widgets/pulls/42.diff" "$(printf '%s' "$out" | jq -r '.diffUrl')" \
+    "gitea map: diffUrl exists but is a URL, which is exactly why files maps to nothing rather than to it"
+
+  assert_eq "" "$(_forge_map_pr_field_gitea isDraft)" \
+    "gitea map: isDraft emits nothing -- Gitea models a draft as a 'WIP: ' title prefix, not a field"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r 'has("draft")')" \
+    "gitea map: and the DETAIL document carries no draft key at all"
+
+  assert_eq "" "$(_forge_map_pr_field_gitea bogusField)" "gitea map: an unknown field name emits nothing, never a pass-through to tea"
+  assert_eq "" "$(_forge_map_pr_field_gitea '')"         "gitea map: an empty field name emits nothing"
+
+  # --- the distinctions a wrong-but-plausible key would have blurred -------
+  assert_eq "98765" "$(printf '%s' "$out" | jq -r '.id')" \
+    "gitea map: id is present and DIFFERS from index, so number -> id would resolve to another pull request"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.id != .index')" \
+    "gitea map: id and index are not interchangeable in this document"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.head | contains(":")')" \
+    "gitea map: the DETAIL head is a BARE branch name -- no owner: prefix, unlike the list shape"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.base | contains(":")')" \
+    "gitea map: the DETAIL base is a bare branch name too"
+
+  # --- all three mappers, measured over the same ten contract fields -------
+  # Asserted together in ONE test so a later edit that quietly widens or
+  # narrows the gitea table goes red against its two siblings rather than
+  # drifting alone.
+  local covered=0
+  for field in number url title body state headRefName baseRefName files isDraft mergeable; do
+    if [ -n "$(_forge_map_pr_field_github "$field")" ]; then
+      covered=$((covered + 1))
+    fi
+  done
+  assert_eq "10" "$covered" "gitea map: the github mapper answers for all ten contract fields (the set this table had to cover)"
+
+  covered=0
+  for field in number url title body state headRefName baseRefName files isDraft mergeable; do
+    if [ -n "$(_forge_map_pr_field_gitlab "$field")" ]; then
+      covered=$((covered + 1))
+    fi
+  done
+  assert_eq "9" "$covered" "gitea map: the gitlab mapper answers for nine of the ten -- files alone is silently empty there"
+
+  covered=0
+  for field in number url title body state headRefName baseRefName files isDraft mergeable; do
+    if [ -n "$(_forge_map_pr_field_gitea "$field")" ]; then
+      covered=$((covered + 1))
+    fi
+  done
+  assert_eq "8" "$covered" "gitea map: the gitea mapper answers for exactly eight of the ten -- files AND isDraft are silently empty, by determination not omission"
+
+  gtm_teardown_fake_tea_fixture
+}
+
+# AC2: the detail-vs-list JSON split, pinned by test rather than only by the
+# mapper's header comment. Two fixtures for the SAME pull request, proven to
+# be genuinely different shapes, and then fed to the same adapter entry point
+# so an implementation that pointed a gitea verb at `tea pulls list` output
+# is caught here rather than shipped.
+gtm_test_tea_detail_and_list_shapes_differ() {
+  echo ""
+  echo "=== tea DETAIL vs LIST: two shapes for one pull request, and the adapter reads DETAIL ==="
+
+  gtm_source_forge_gitea_map_functions
+  gtm_setup_fake_tea_fixture
+
+  local log detail_doc list_doc detail_out list_out fields probe_rc
+  log=$(mktemp)
+  detail_doc=$(gtm_fake_tea_pull_detail_json)
+  list_doc=$(gtm_fake_tea_pull_list_json)
+
+  detail_out=$(GTM_TEA_LOG="$log" GTM_TEA_DETAIL_JSON="$detail_doc" PATH="$GTM_TEA_DIR:$PATH" \
+    tea pulls 42 -o json)
+  list_out=$(GTM_TEA_LOG="$log" GTM_TEA_LIST_JSON="$list_doc" PATH="$GTM_TEA_DIR:$PATH" \
+    tea pulls list --state all -f index,title,state,url,body,mergeable,base,head -o json)
+
+  # --- the two shapes are genuinely different documents --------------------
+  assert_eq "object" "$(printf '%s' "$detail_out" | jq -r 'type')" "tea shapes: the DETAIL response is one object"
+  assert_eq "array"  "$(printf '%s' "$list_out" | jq -r 'type')"   "tea shapes: the LIST response is an array"
+  assert_eq "number" "$(printf '%s' "$detail_out" | jq -r '.index | type')"    "tea shapes: DETAIL .index is a JSON number"
+  assert_eq "string" "$(printf '%s' "$list_out" | jq -r '.[0].index | type')"  "tea shapes: LIST .index is a JSON string -- every list value is stringified"
+  assert_eq "boolean" "$(printf '%s' "$detail_out" | jq -r '.mergeable | type')"   "tea shapes: DETAIL .mergeable is a real boolean"
+  assert_eq "string"  "$(printf '%s' "$list_out" | jq -r '.[0].mergeable | type')" "tea shapes: LIST .mergeable is the string \"true\""
+  assert_eq "false" "$(printf '%s' "$detail_out" | jq -r '.head | contains(":")')"   "tea shapes: DETAIL .head carries no owner: prefix"
+  assert_eq "true"  "$(printf '%s' "$list_out" | jq -r '.[0].head | contains(":")')" "tea shapes: LIST .head DOES carry an owner: prefix (formatPRHead)"
+  assert_eq "open"   "$(printf '%s' "$detail_out" | jq -r '.state')"   "tea shapes: DETAIL .state is pr.State raw -- open/closed only"
+  assert_eq "merged" "$(printf '%s' "$list_out" | jq -r '.[0].state')" "tea shapes: LIST .state can literally be 'merged' (formatPRState), which DETAIL never prints"
+
+  # --- has() on an array really does fail, which is what makes the LIST
+  # --- document produce an all-null pr rather than a wrong-value one -------
+  probe_rc=0
+  printf '%s' "$list_out" | jq -r --arg k index 'has($k)' >/dev/null 2>&1 || probe_rc=$?
+  assert_eq "5" "$probe_rc" "tea shapes: jq has(\"index\") on an ARRAY exits 5 -- build_found's 2>/dev/null || present=false turns that into skip-this-field"
+
+  # --- the adapter reads DETAIL: same call, two documents, opposite results
+  fields="number,url,title,body,state,headRefName,baseRefName,files,isDraft,mergeable"
+  local from_detail from_list
+  from_detail=$(_forge_pr_view_build_found gitea "$detail_out" "$fields")
+  from_list=$(_forge_pr_view_build_found gitea "$list_out" "$fields")
+
+  assert_eq "0" "$(printf '%s' "$from_list" | jq -r '[.pr[] | select(. != null)] | length')" \
+    "tea shapes: feeding the LIST array to build_found yields a pr whose EVERY key is null"
+  assert_eq "null" "$(printf '%s' "$from_list" | jq -r '.pr.number')" "tea shapes: LIST -> .pr.number is null, not the string 42"
+  assert_eq "null" "$(printf '%s' "$from_list" | jq -r '.pr.headRefName')" "tea shapes: LIST -> .pr.headRefName is null, not an owner:branch string"
+  assert_eq '["files","isDraft","mergeable"]' "$(printf '%s' "$from_list" | jq -c '.unsupported_fields | sort')" \
+    "tea shapes: LIST -> even mergeable is reported unsupported, because no field was resolvable at all"
+
+  assert_eq "8" "$(printf '%s' "$from_detail" | jq -r '[.pr[] | select(. != null)] | length')" \
+    "tea shapes: the DETAIL object populates eight of the ten keys -- the same call, the other shape"
+  assert_eq "42" "$(printf '%s' "$from_detail" | jq -r '.pr.number')" "tea shapes: DETAIL -> .pr.number is 42"
+  assert_eq "feat/gitea-adapter" "$(printf '%s' "$from_detail" | jq -r '.pr.headRefName')" "tea shapes: DETAIL -> .pr.headRefName is the bare ref"
+
+  # --- argv: the adapter's own vocabulary reached the stub -----------------
+  # The control assertion comes FIRST and MUST match, so the zero below is a
+  # measurement rather than a grep that silently matched nothing.
+  assert_eq "2" "$(grep -c -- '-o json' "$log")" "tea argv control: both calls carried tea's own -o json (this MUST match, so the zero below is trustworthy)"
+  assert_eq "1" "$(grep -c -- ' -f index,' "$log")" "tea argv: the list call carried tea's own -f field selector"
+  assert_eq "0" "$(grep -c -- '--json' "$log")" "tea argv: no gh-style --json field-list flag was passed anywhere (tea has none)"
+  assert_eq "pulls 42 -o json" "$(head -1 "$log")" "tea argv: the DETAIL call is the bare index form -- tea pulls 42 -o json, no field list"
+
+  rm -f "$log"
+  gtm_teardown_fake_tea_fixture
+}
+
+# AC3: `merged` is DERIVED in the gitea adapter from hasMerged, and
+# _forge_map_state gains no gitea branch for it.
+gtm_test_forge_map_pr_state_gitea() {
+  echo ""
+  echo "=== _forge_map_pr_state_gitea: merged comes from hasMerged, never from an invented state ==="
+
+  gtm_source_forge_gitea_map_functions
+
+  assert_eq "merged" "$(_forge_map_pr_state_gitea '{"state":"closed","hasMerged":true,"mergedAt":"2026-08-01T10:00:00Z"}')" \
+    "gitea state: hasMerged true -> merged, even though tea's own DETAIL state says closed"
+  assert_eq "closed" "$(_forge_map_pr_state_gitea '{"state":"closed","hasMerged":false}')" \
+    "gitea state: hasMerged false -> the raw closed, never merged"
+  assert_eq "open" "$(_forge_map_pr_state_gitea '{"state":"open","hasMerged":false}')" \
+    "gitea state: an open pull request passes through as open"
+  assert_eq "open" "$(_forge_map_pr_state_gitea '{"state":"OPEN","hasMerged":false}')" \
+    "gitea state: case-folding still comes from _forge_map_state, not from a second hand-rolled tr"
+  assert_eq "closed" "$(_forge_map_pr_state_gitea '{"state":"closed"}')" \
+    "gitea state: a document with NO hasMerged key passes its raw state through -- absence never becomes merged"
+
+  # --- _forge_map_state itself is untouched by this story ------------------
+  # Counting form, not `grep -q` inside an if: a fail-open guard that silently
+  # matches nothing reports success. The gitlab control runs alongside and
+  # MUST be non-zero, which is what makes the gitea zero a measurement.
+  local state_body gitea_hits gitlab_hits
+  state_body=$(mktemp)
+  declare -f _forge_map_state > "$state_body"
+
+  gitea_hits=$(grep -v '^[[:space:]]*#' "$state_body" | grep -cE 'gitea') || gitea_hits=0
+  gitlab_hits=$(grep -v '^[[:space:]]*#' "$state_body" | grep -cE 'gitlab') || gitlab_hits=0
+
+  assert_eq "1" "$gitlab_hits" "gitea state control: the identical query DOES find _forge_map_state's gitlab arm, so the zero below is a measurement"
+  assert_eq "0" "$gitea_hits"  "gitea state: _forge_map_state's body contains ZERO occurrences of gitea -- the derivation lives in the adapter"
+
+  assert_eq "closed" "$(_forge_map_state gitea closed)" "gitea state: _forge_map_state still passes gitea's closed straight through"
+  assert_eq "merged" "$(_forge_map_state gitea merged)" "gitea state: _forge_map_state still passes gitea's merged straight through, case-folded and untouched"
+
+  rm -f "$state_body"
+}
+
+# AC4: the gitea arm of _forge_pr_view_build_found produces a contract-shaped
+# found envelope, with the two capability gaps REPORTED rather than guessed.
+gtm_test_forge_pr_view_build_found_gitea() {
+  echo ""
+  echo "=== _forge_pr_view_build_found gitea: the found envelope, with capability gaps reported ==="
+
+  gtm_source_forge_gitea_map_functions
+  gtm_setup_fake_tea_fixture
+
+  local doc out full subset
+  doc=$(gtm_fake_tea_pull_detail_json)
+  out=$(GTM_TEA_DETAIL_JSON="$doc" PATH="$GTM_TEA_DIR:$PATH" tea pulls 42 -o json)
+
+  full=$(_forge_pr_view_build_found gitea "$out" \
+    "number,url,title,body,state,headRefName,baseRefName,files,isDraft,mergeable")
+
+  assert_eq "found" "$(printf '%s' "$full" | jq -r '.status')" "gitea envelope: status is found"
+  assert_eq '["number","url","title","body","state","headRefName","baseRefName","files","isDraft","mergeable"]' \
+    "$(printf '%s' "$full" | jq -c '.pr | keys_unsorted')" \
+    "gitea envelope: pr carries exactly the ten requested names, in the order they were requested"
+
+  assert_eq "42" "$(printf '%s' "$full" | jq -r '.pr.number')" "gitea envelope: number is 42"
+  assert_eq "number" "$(printf '%s' "$full" | jq -r '.pr.number | type')" \
+    "gitea envelope: number is a JSON NUMBER even though the detail value passes through tostring on the way to the builder"
+  assert_eq "https://gitea.com/acme/widgets/pulls/42" "$(printf '%s' "$full" | jq -r '.pr.url')" "gitea envelope: url is tea's HTML url"
+  assert_eq "open" "$(printf '%s' "$full" | jq -r '.pr.state')" "gitea envelope: state normalized through _forge_map_state gitea"
+  assert_eq "feat/gitea-adapter" "$(printf '%s' "$full" | jq -r '.pr.headRefName')" "gitea envelope: headRefName is tea's bare head ref"
+  assert_eq "main" "$(printf '%s' "$full" | jq -r '.pr.baseRefName')" "gitea envelope: baseRefName is tea's bare base ref"
+  assert_eq "true" "$(printf '%s' "$full" | jq -r '.pr.mergeable')" "gitea envelope: mergeable is carried"
+  assert_eq "string" "$(printf '%s' "$full" | jq -r '.pr.mergeable | type')" \
+    "gitea envelope: mergeable is a JSON STRING (_forge_build_pr_json's --mergeable is --arg) -- a boolean here would be a contract break"
+
+  assert_eq "null" "$(printf '%s' "$full" | jq -r '.pr.files')"   "gitea envelope: files is null"
+  assert_eq "null" "$(printf '%s' "$full" | jq -r '.pr.isDraft')" "gitea envelope: isDraft is null"
+  assert_eq '["files","isDraft"]' "$(printf '%s' "$full" | jq -c '.unsupported_fields | sort')" \
+    "gitea envelope: the two null fields are NAMED in unsupported_fields -- never a bare unmarked null"
+  assert_eq "2" "$(printf '%s' "$full" | jq -r '.unsupported_fields | length')" "gitea envelope: exactly two fields are reported unsupported"
+  assert_eq "false" "$(printf '%s' "$full" | jq -r '.unsupported_fields | index("mergeable") != null')" \
+    "gitea envelope: mergeable is NOT among them -- tea does expose it"
+
+  # --- an --include-style subset still narrows correctly for gitea ---------
+  subset=$(_forge_pr_view_build_found gitea "$out" "number,url,state")
+
+  assert_eq '["number","url","state"]' "$(printf '%s' "$subset" | jq -c '.pr | keys_unsorted')" \
+    "gitea envelope subset: pr carries exactly the three requested keys"
+  assert_eq "[]" "$(printf '%s' "$subset" | jq -c '.unsupported_fields')" \
+    "gitea envelope subset: unsupported_fields is empty -- a field the caller never asked for is not reported unsupported"
+  assert_eq "array" "$(printf '%s' "$subset" | jq -r '.unsupported_fields | type')" \
+    "gitea envelope subset: and it is an ARRAY, never a bare null"
+
+  gtm_teardown_fake_tea_fixture
 }
 
 # ============================================================================
@@ -7675,6 +8197,20 @@ main() {
   test_fake_glab_stub_can_produce_a_failing_result
   test_fake_glab_records_argv_and_can_differ_across_calls
   test_forge_map_pr_field_gitlab
+
+  # Gitea PR-field Mapping Tests (phase 4 outline:01) -- the gitea arm of the
+  # _forge_map_pr_field_* seam, the _forge_map_pr_state_gitea derivation that
+  # reads hasMerged, and the gitea) arm of _forge_pr_view_build_found, plus
+  # the fake-tea PATH stub every later gitea-adapter story in this phase
+  # reuses. The falsifiability proof runs FIRST, before any mapping assertion
+  # trusts that stub.
+  echo ""
+  echo "--- Gitea PR-field Mapping Tests (phase 4 outline:01) ---"
+  gtm_test_fake_tea_stub_can_produce_a_failing_result
+  gtm_test_forge_map_pr_field_gitea
+  gtm_test_tea_detail_and_list_shapes_differ
+  gtm_test_forge_map_pr_state_gitea
+  gtm_test_forge_pr_view_build_found_gitea
 
   # GitLab READ-verb Routing Tests (phase 3 US-002) -- forge-pr-view,
   # forge-issue-view, forge-repo-info and forge-auth-status routed to glab.

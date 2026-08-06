@@ -4451,6 +4451,156 @@ _forge_map_pr_field_gitlab() {
   esac
 }
 
+# Maps one NORMALIZED PR contract field name (forge-contract.md's
+# "Normalized PR Field Set") to the key Gitea's own `tea` CLI uses for it.
+# This is the gitea arm of the seam _forge_map_pr_field_github's header names
+# as "the single seam a later GitLab or Gitea adapter replaces"; the three
+# mappers are kept ADJACENT and identically case-statement-shaped, ten
+# branches each, so they stay diffable side by side.
+#
+# An unmapped name prints nothing, so a field this adapter cannot express is
+# never silently passed through to tea as-is -- the identical silent-empty
+# default the other two mappers' case statements have.
+#
+# TEA EMITS TWO DIFFERENT JSON SHAPES FOR THE SAME PULL REQUEST, AND EVERY
+# KEY BELOW NAMES THE FIRST ONE. This has no gh or glab analogue and is the
+# single most likely way to get this adapter wrong:
+#
+#   DETAIL -- `tea pulls <index> -o json`. One OBJECT with TYPED values,
+#     built from the purpose-built `pullData` struct (cmd/pulls.go:29-52):
+#     `index` is a JSON number, `mergeable`/`hasMerged` are real booleans,
+#     and `base`/`head` are pr.Base.Ref/pr.Head.Ref -- BARE branch names
+#     with no `owner:` prefix (cmd/pulls.go:174-177).
+#
+#   LIST -- `tea pulls list -o json -f <csv>`. A JSON ARRAY whose keys are
+#     the --fields names SNAKE-CASED (modules/print/table.go:175-179,
+#     toSnakeCase) and whose values are ALWAYS JSON STRINGS, because
+#     orderedRow.MarshalJSON (:187-208) marshals a map[string]string. `index`
+#     comes back "42", `mergeable` "true", `head` may carry an `owner:branch`
+#     prefix for a cross-fork PR (formatPRHead, modules/print/pull.go:83-93).
+#
+# THIS ADAPTER READS THE DETAIL PATH. _forge_build_pr_json already tolerates
+# a string number (`try ($number | tonumber) catch $number`), so the detail
+# document's typed values survive the trip through the builder unharmed.
+# Pointing a gitea verb at `tea pulls list` output instead would hand
+# _forge_pr_view_build_found an array, whose every has($k) probe fails and
+# whose every field is therefore skipped -- a silently all-null pr.
+#
+# TEA HAS A FIELD SELECTOR, SO DO NOT COPY GLAB'S SHAPE BY HABIT. `--fields,
+# -f` is a CSV flag over a fixed allowlist (cmd/flags/generic.go:157,
+# FieldsFlag) -- closer to gh's `--json <field-list>` than to glab.
+# _forge_pr_view_gitlab fetches the WHOLE marshalled document and picks keys
+# out of it afterwards (aimi-cli.sh:4688-4701) only because glab has no
+# selector at all; that is a workaround for a missing feature, not a house
+# style, and a gitea read verb must not inherit it.
+#
+# VERIFICATION CEILING -- READ BEFORE TRUSTING ANY KEY BELOW. tea is NOT
+# installed on the machine this was written on, so not one key here was
+# observed coming out of the real binary -- the same ceiling phase 3
+# declared for glab at :4380-4389, and for the same reason. Every flag,
+# subcommand and JSON key below was read off `gitea/tea` `main` source on
+# 2026-08-06, file and line cited per claim. The tests can prove WHICH
+# arguments this file emits and HOW it parses a fixture; they can never
+# prove what real tea does with them.
+#
+# THE THREE MAPPINGS THAT HAD TO BE DETERMINED RATHER THAN ASSUMED:
+#
+#   number -> index, NOT id. Both exist on pullData (`id` at cmd/pulls.go:30,
+#     `index` at :31). `id` is the Gitea instance's globally unique row id;
+#     `index` is the per-repository number the user sees in the PR URL and
+#     types at the CLI -- the same id-vs-iid distinction GitLab has. Mapping
+#     to `id` would yield a number that resolves to a DIFFERENT pull request.
+#
+#   files -> NOTHING, settled by absence rather than caution. tea exposes
+#     `diff` and `patch` (PullFields, modules/print/pull.go:170-196) but both
+#     resolve to x.DiffURL/x.PatchURL (:277-280) -- URLs, and the DETAIL
+#     document's `diffUrl` likewise. There is no parsed per-file list in
+#     either shape, so there is no key to name. Same answer, same grounds, as
+#     _forge_map_pr_field_gitlab's own `files` branch above.
+#
+#   isDraft -> NOTHING. Gitea models a draft as a TITLE PREFIX, not a field:
+#     `tea pulls create --draft` prepends "WIP: " to the title
+#     (cmd/pulls/create.go:89-91, utils.AddDraftPrefix). pullData carries no
+#     draft key and PullFields has no `draft` entry, so the CLI never
+#     surfaces one to read back. Deriving it by string-matching a title
+#     prefix would be a guess; reporting it in unsupported_fields is the
+#     contract's answer for exactly this case.
+#
+# `state` names the KEY only, and the gitea VALUE vocabulary needs more than
+# a table lookup -- see _forge_map_pr_state_gitea directly below, which is
+# where `merged` is derived. This mapper answers `state` so the raw value
+# still reaches _forge_pr_view_build_found; the merged derivation reads a
+# DIFFERENT key (`hasMerged`) and so cannot live in a one-field-one-key
+# table.
+#
+# CONTRADICTS commands/references/forge-contract.md:100-107, KNOWINGLY. That
+# document states tea "does not expose a distinct `merged` value", that a
+# merged PR "reads as `closed` under tea's own field list", and that an
+# adapter "should normalize tea's `closed` straight through". Both halves are
+# falsified by source: formatPRState (modules/print/pull.go:95-100) returns
+# "merged" whenever pr.Merged != nil, and the DETAIL path carries
+# `hasMerged`/`mergedAt` alongside the raw state (cmd/pulls.go:33,46,47).
+# The correct behaviour is implemented here; correcting that document is
+# outline:06's job, not this story's, so the two disagree on purpose until
+# then.
+#
+# Usage: _forge_map_pr_field_gitea <contract-field>
+_forge_map_pr_field_gitea() {
+  case "$1" in
+    number)      printf 'index' ;;
+    url)         printf 'url' ;;
+    title)       printf 'title' ;;
+    body)        printf 'body' ;;
+    state)       printf 'state' ;;
+    headRefName) printf 'head' ;;
+    baseRefName) printf 'base' ;;
+    # Deliberately EMPTY, not missing. The branch is kept so the three mappers
+    # stay ten-for-ten diffable and a reader meets the omission at the line
+    # they look at, rather than only in the header. `diff`/`patch`/`diffUrl`
+    # are URLs, not a per-file list -- see the `files` note.
+    files)       ;;
+    # Deliberately EMPTY too: Gitea has no draft FIELD at all, only the
+    # "WIP: " title prefix `--draft` writes. See the `isDraft` note.
+    isDraft)     ;;
+    mergeable)   printf 'mergeable' ;;
+  esac
+}
+
+# Normalizes a `tea pulls <index> -o json` DETAIL document's state into the
+# contract vocabulary, printing `merged` for a merged pull request.
+#
+# This is a SIBLING of _forge_map_pr_field_gitea rather than a branch inside
+# it, because the merged answer reads a DIFFERENT key (`hasMerged`) than the
+# `state` key, which a one-field-one-key table cannot express. It is also
+# deliberately NOT a gitea arm of _forge_map_state: that function maps a raw
+# VALUE and knows nothing about documents, and _forge_pr_view_build_found's
+# own header promises its body stays forge-independent by construction. So
+# the derivation lives here, in the adapter, and _forge_map_state stays
+# gitea-free -- the same separation of "name the key" from "normalize the
+# value" the build_found body already keeps (:4509-4514).
+#
+# has("hasMerged") rather than a bare index mirrors _forge_pr_view_build_found's
+# own rule (:4474-4477): an absent key must not be collapsed with an explicit
+# null, and neither may invent `merged`. A document that carries no hasMerged
+# at all passes its raw state through untouched.
+#
+# Ceiling and source citations: see _forge_map_pr_field_gitea's header above.
+# Usage: _forge_map_pr_state_gitea <detail-json>
+_forge_map_pr_state_gitea() {
+  local doc="${1:-}" merged raw
+
+  merged=$(printf '%s' "$doc" | jq -r \
+    'if has("hasMerged") then (.hasMerged | tostring) else "" end' 2>/dev/null) || merged=""
+  if [ "$merged" = "true" ]; then
+    printf 'merged'
+    return 0
+  fi
+
+  raw=$(printf '%s' "$doc" | jq -r \
+    'if has("state") then (.state | if . == null then "" else tostring end) else "" end' 2>/dev/null) || raw=""
+  _forge_map_state gitea "$raw"
+}
+
 # THE ONE found-envelope construction, shared by every forge-pr-view adapter.
 # Takes a forge label, the adapter's RAW response document, and the caller's
 # requested contract-field list, and emits the finished
@@ -4492,6 +4642,7 @@ _forge_pr_view_build_found() {
     case "$forge" in
       github) native=$(_forge_map_pr_field_github "$field") ;;
       gitlab) native=$(_forge_map_pr_field_gitlab "$field") ;;
+      gitea)  native=$(_forge_map_pr_field_gitea "$field") ;;
       *)      native="" ;;
     esac
     [ -n "$native" ] || continue
