@@ -7542,9 +7542,260 @@ _forge_pr_review_threads_gitlab() {
   _forge_emit_status found "$data_json"
 }
 
+# ----------------------------------------------------------------------------
+# GITEA REVIEW-THREAD ADAPTERS (phase 4). This header covers BOTH
+# _forge_pr_review_threads_gitea (immediately below) and
+# _forge_resolve_review_thread_gitea (beside its gitlab sibling further down),
+# because every constraint here applies to the pair.
+#
+# VERIFICATION CEILING -- READ BEFORE TRUSTING ANY FLAG OR KEY BELOW. `tea` is
+# NOT installed on the machine this was written on. Not one subcommand, flag
+# or JSON key below has ever been observed coming out of the real binary:
+# every one was read off `gitea/tea` `main` source on 2026-08-06, file and
+# line cited per claim. This is the same ceiling phase 3 declared for glab
+# (:4380) and that this phase's own field mapper already declared for tea
+# (:4497). The tests prove WHICH ARGV this file emits and HOW it parses a
+# fixture, never what real tea does with either.
+#
+# The two halves are NOT equally well covered by that, and saying so is the
+# point of declaring the ceiling rather than merely noting it. Argv-shape
+# assertions are SOUND against a fake -- the defect this adapter can plausibly
+# ship on the emitting side is a wrong flag, and a wrong flag is visible in
+# the recorded argv. Key names and document shapes are the opposite: the stub
+# emits whatever the author believed, so the assertion only confirms the
+# author agrees with themselves and a wrong key passes green on both sides.
+# tea's output shape is this section's unobservable.
+#
+# VERSION FLOOR: tea >= v0.14.0. `tea pulls review-comments`, `tea pulls
+# resolve` and `tea pulls unresolve` all landed in tea v0.14.0; the current
+# release is v0.15.1 (2026-08-02). An older tea answers with an unknown-
+# subcommand error, which is a non-zero exit carrying tea's own stderr and is
+# therefore reported as cli_failed -- never as a confirmed not_found.
+#
+# THE LIST PATH MARSHALS EVERY VALUE AS A STRING. tea emits two different JSON
+# shapes for the same resource: a purpose-built typed object on the DETAIL
+# path (`tea pulls <index> -o json`) and, on the LIST path, an array of rows
+# whose keys are snake_cased and whose values are ALWAYS JSON strings
+# (orderedRow.MarshalJSON, modules/print/table.go:187-208, marshals a
+# map[string]string). `review-comments` is a LIST path. That is why `line` is
+# coerced to a number below and why `isResolved` is derived from a STRING
+# comparison. _forge_map_pr_field_gitea (:4548) works the DETAIL path; its
+# assumptions do not carry across.
+#
+# NO SERVER-SIDE RESOLUTION FILTER EXISTS, so the filter is LOCAL -- the exact
+# opposite of the gitlab arm above, which asks GitLab for `--state
+# unresolved` (:6600) and says so in its own header. `tea pulls
+# review-comments` carries only flags.AllDefaultFlags plus `--fields`
+# (cmd/pulls/review_comments.go:31); there is no `--state` and no other
+# resolution-state selector to pass. The default (unresolved-only) view is
+# therefore produced by dropping rows whose `resolver` is non-empty AFTER the
+# call, and `--all` skips that drop. Reading the returned list can never tell
+# a local filter from a server-side one, which is why the accompanying test
+# asserts the ABSENCE of `--state` from the recorded argv and drives a fixture
+# that carries both a resolved and an unresolved row.
+#
+# EVERY THREAD IS DEGENERATE: EXACTLY ONE COMMENT. tea lists review COMMENTS,
+# flattened across every review (modules/task/pull_review_comment.go:16-44
+# iterates the pull request's reviews and concatenates their comments), and
+# exposes no thread/conversation object anywhere. So one review comment
+# becomes one thread with comments.totalCount == 1. Inventing grouping by
+# `path`, by reviewer or by timestamp would fabricate a structure the forge
+# does not have; the gap is DECLARED instead, as `threads[].grouping`.
+#
+# `threads[].grouping` IS EMITTED AS AN EXPLICIT null KEY, not merely named.
+# It is the one gap this forge has that neither other forge has, and it names
+# a missing STRUCTURE rather than a missing field -- which is exactly why it
+# is spelled out as a key: forge-contract.md's rule is "null PLUS its name
+# recorded in unsupported_fields, never a bare unmarked null", and a name in
+# the array with no key in the payload would be the mirror-image omission. A
+# reader who dumps one gitea thread sees `"grouping": null` and can look the
+# name up. The key is gitea-only by construction and no consumer reads it.
+#
+# `threads[].diffSide` IS PERMANENTLY UNRECOVERABLE HERE, and the reason is
+# NOT the usual "the forge has no such field". tea prints ONE `line` column,
+# collapsing LineNum and OldLineNum into it (modules/print/
+# pull_review_comment.go:52-59 falls back from the one to the other), so by
+# the time the value reaches this adapter there is nothing left to say whether
+# it was the post-image or the pre-image side. The gitlab arm CAN derive
+# RIGHT/LEFT because GitLab hands it separate new_line and old_line keys
+# (:6680-6685). Do not port that derivation here -- there is no second number
+# to branch on, and guessing RIGHT would be a fabricated answer.
+#
+# NO ACCOUNT OVERRIDE IS APPLIED, AND THAT IS A SAFETY PROPERTY, NOT AN
+# OMISSION. tea reads GH_TOKEN as a fallback credential
+# (modules/context/context_login.go:15-51: it prefers GITEA_TOKEN and falls
+# back to GH_TOKEN when GITEA_TOKEN is empty), while
+# _forge_account_override_slots (:2983-2997) deliberately defaults an empty
+# override slot to the AMBIENT GH_TOKEN and every routed github write
+# prefix-assigns it. Copying that prefix-assignment shape onto a tea
+# invocation would hand a GitHub token to a Gitea instance. Neither gitea
+# function below assigns or exports GH_TOKEN, GH_ENTERPRISE_TOKEN,
+# GITEA_TOKEN or GITEA_INSTANCE_URL, and a test counts those assignments over
+# both function bodies to keep it that way.
+#
+# --owner/--repo ARE NOT FORWARDED, for the same reason the gitlab arm gives:
+# they are gh's flat owner/repo pair, and tea addresses the repository through
+# the current working directory's remote. Both gitea arms therefore return
+# BEFORE _forge_pr_review_threads' gh-specific owner/repo resolution block.
+#
+# FAILURE CLASSIFICATION. tea exits 1 uniformly for every error (main.go:18-30
+# prints `Error: %v` and calls os.Exit(1)) with no distinct not-found code, so
+# a `404` in stderr is the ONLY confirmed negative -- matched on the HTTP
+# status code rather than on English wording, exactly as the gitlab arms
+# above. Every other non-zero exit stays status=error/reason=cli_failed
+# carrying tea's own stderr. Misreading a could-not-attempt failure as a
+# confirmed answer is the dangerous direction; the catch-all points the safe
+# way.
+#
+# CAPABILITY GAPS, all reported through unsupported_fields per
+# forge-contract.md:
+#   pr.title / pr.url                   `tea pulls review-comments` returns
+#     comments only; supplying these would cost a SECOND `tea pulls <index>`
+#     round trip this verb deliberately does not make -- the same argument
+#     the gitlab arm makes at :6579-6581.
+#   threads[].startLine                 tea has no start-line field at all.
+#   threads[].diffSide                  unrecoverable, see above.
+#   threads[].isOutdated / isCollapsed  no field; GitHub review-UI concepts.
+#   threads[].grouping                  no conversation object, see above.
+#   threads[].comments.nodes[].outdated same gap as isOutdated, per comment.
+#
+# AND ONE FIELD THAT IS *NOT* A GAP HERE, though it is on GitLab:
+#   threads[].comments.nodes[].url      tea's review-comment field allowlist
+#     carries `url` (modules/print/pull_review_comment.go:13-23), so it is
+#     REQUESTED, populated and deliberately absent from unsupported_fields.
+#     GitLab lists it as a gap (:6721); copying that array wholesale is the
+#     expected mistake, and a test asserts the name appears nowhere in the
+#     gitea array.
+# ----------------------------------------------------------------------------
+
+# gitea adapter for forge-pr-review-threads. <index> is already validated as a
+# positive integer by cmd_forge_pr_review_threads before this ever runs;
+# <all_threads> is the literal string "true"/"false". See the GITEA
+# REVIEW-THREAD ADAPTERS header directly above for the verification ceiling,
+# the tea >= v0.14.0 version floor, and every capability gap named below.
+_forge_pr_review_threads_gitea() {
+  local index="$1" all_threads="$2"
+  local stdout rc=0
+  local stderr_out
+
+  # `-f` is tea's OWN field selector (--fields, cmd/flags/generic.go:157), a
+  # CSV over a fixed allowlist -- never a gh-style `--json <field-list>`,
+  # which tea does not have. `-o json` selects the output format. The list is
+  # the full review-comment allowlist (modules/print/
+  # pull_review_comment.go:13-23) rather than the subcommand's own narrower
+  # default (id,path,line,body,reviewer,resolver), because `created`,
+  # `updated` and `url` are all contract fields this verb must populate.
+  #
+  # No account override, no GH_TOKEN prefix assignment -- see the header.
+  _forge_capture stdout stderr_out rc -- tea pulls review-comments "$index" \
+    -f id,path,line,body,reviewer,resolver,created,updated,url -o json || true
+
+  if [ "$rc" -ne 0 ]; then
+    # tea has ONE exit code for every failure, so `404` in stderr is the only
+    # confirmed negative. Everything else is a could-not-attempt.
+    if printf '%s' "$stderr_out" | grep -q "404"; then
+      _forge_emit_status not_found
+      return 0
+    fi
+    _forge_emit_status error "" "tea pulls review-comments exited $rc: ${stderr_out:-unknown error}" cli_failed
+    return 0
+  fi
+
+  # ZERO REVIEW COMMENTS IS A `found` RESULT CARRYING AN EMPTY LIST, never
+  # not_found -- not_found means the PULL REQUEST itself could not be located.
+  # Go marshals an empty slice as `[]` and a nil slice as `null`, and a
+  # command that printed nothing at all is the same fact again, so all three
+  # collapse here rather than to an error.
+  local comments_json=""
+  if [ -n "$stdout" ]; then
+    comments_json=$(printf '%s' "$stdout" | jq -c '. // []' 2>/dev/null) || comments_json=""
+    if [ -z "$comments_json" ]; then
+      _forge_emit_status error "" "tea pulls review-comments returned output that is not JSON" cli_failed
+      return 0
+    fi
+  else
+    comments_json='[]'
+  fi
+
+  local all_flag_json
+  if [ "$all_threads" = "true" ]; then all_flag_json=true; else all_flag_json=false; fi
+
+  # The one place a tea review COMMENT becomes a contract THREAD.
+  #
+  # The select() is the LOCAL resolution filter tea offers no server-side
+  # equivalent for. `resolver` is a username or the empty string -- there is
+  # no boolean anywhere in the payload -- so isResolved is DERIVED from it by
+  # the same comparison, and the two can never disagree.
+  #
+  # `line` is coerced to a NUMBER because the LIST path marshals it as the
+  # string tea printed; `tonumber?` yields nothing for a non-numeric value,
+  # which `// null` then turns into an honest null rather than a zero.
+  # `id` goes the other way and is cast to STRING, so the contract's thread
+  # and comment ids stay one type across all three forges.
+  #
+  # comments.totalCount is the literal 1: tea exposes no conversation object,
+  # so one comment is the whole thread. See the header.
+  local threads_json
+  threads_json=$(printf '%s' "$comments_json" | jq -c --argjson all "$all_flag_json" '
+    [ .[]
+      | select($all or (((.resolver // "") | tostring) == ""))
+      | {
+          id: (.id | tostring),
+          isResolved: (((.resolver // "") | tostring) != ""),
+          isOutdated: null,
+          isCollapsed: null,
+          grouping: null,
+          path: (if ((.path // "") | tostring) == "" then null else (.path | tostring) end),
+          line: ((.line | tonumber?) // null),
+          startLine: null,
+          diffSide: null,
+          comments: {
+            totalCount: 1,
+            nodes: [ {
+              id: (.id | tostring),
+              author: {login: (if ((.reviewer // "") | tostring) == "" then null else (.reviewer | tostring) end)},
+              body: (if ((.body // "") | tostring) == "" then null else (.body | tostring) end),
+              createdAt: (if ((.created // "") | tostring) == "" then null else (.created | tostring) end),
+              updatedAt: (if ((.updated // "") | tostring) == "" then null else (.updated | tostring) end),
+              url: (if ((.url // "") | tostring) == "" then null else (.url | tostring) end),
+              outdated: null
+            } ]
+          }
+        } ]
+  ' 2>/dev/null) || threads_json=""
+
+  # A payload that parsed as JSON but is not the ARRAY OF COMMENTS the
+  # transform above expects (an error object, say) would otherwise reach
+  # `jq --argjson threads ""` below and spill a raw jq error onto stderr --
+  # unacceptable on a verb whose degrade mode is QUIET. Caught here instead,
+  # exactly as the gitlab arm does.
+  if [ -z "$threads_json" ]; then
+    _forge_emit_status error "" "tea pulls review-comments returned JSON that is not a review-comment array" cli_failed
+    return 0
+  fi
+
+  local data_json
+  data_json=$(jq -nc \
+    --arg number "$index" \
+    --argjson threads "$threads_json" \
+    '{
+      pr: {number: ($number | tonumber), title: null, url: null},
+      threads: $threads,
+      unsupported_fields: ["pr.title",
+                           "pr.url",
+                           "threads[].startLine",
+                           "threads[].diffSide",
+                           "threads[].isOutdated",
+                           "threads[].isCollapsed",
+                           "threads[].grouping",
+                           "threads[].comments.nodes[].outdated"]
+    }')
+  _forge_emit_status found "$data_json"
+}
+
 # Resolves forge/owner/repo, routes a forge with no adapter or a missing
 # forge CLI to a QUIET status=error result, and otherwise delegates to the
-# github or gitlab adapter. Owner/repo are resolved via US-003's
+# github, gitlab or gitea adapter. Owner/repo are resolved via US-003's
 # _forge_repo_info as a direct function call (never a `$AIMI_CLI
 # forge-repo-info` subprocess, never a second private gh-repo-view call)
 # whenever --owner/--repo are not both supplied, replacing
@@ -7573,8 +7824,24 @@ _forge_pr_review_threads() {
     return 0
   fi
 
+  # Gitea returns HERE too, and for the same reason: `tea` addresses the
+  # repository through the cwd remote and has no owner/repo pair to be given.
+  # Same shared _forge_bin_check gate, same quiet mode, naming `tea`.
+  if [ "$forge" = "gitea" ]; then
+    if ! _forge_bin_check tea quiet "$forge"; then
+      _forge_emit_status error "" "tea not found -- this review-thread lookup did not run automatically." cli_missing
+      return 0
+    fi
+    _forge_pr_review_threads_gitea "$pr_number" "$all_threads"
+    return 0
+  fi
+
+  # Still reachable: `unknown`, the classification _detect_forge_classify_host
+  # answers for any host that is not one of the three named adapters. It is
+  # now the ONLY forge word that reaches this branch, since AIMI_FORGE_TYPE
+  # validates against github|gitlab|gitea (:2130).
   if [ "$forge" != "github" ]; then
-    _forge_emit_status error "" "forge-pr-review-threads: no adapter for forge \"$forge\" yet -- GitHub and GitLab are the only adapters." no_adapter
+    _forge_emit_status error "" "forge-pr-review-threads: no adapter for forge \"$forge\" yet -- GitHub, GitLab and Gitea are the only adapters." no_adapter
     return 0
   fi
 
@@ -7615,11 +7882,15 @@ _forge_pr_review_threads() {
 # comments: {totalCount, nodes: [{id, author: {login}, body, createdAt,
 # updatedAt, url, outdated}]}.
 #
-# On GitLab the SHAPE is identical -- same keys, same three-way status -- but
-# several fields are capability-gated and come back null with their names in
-# `unsupported_fields`; see _forge_pr_review_threads_gitlab's header for the
-# list and the reason for each. A merge request with zero unresolved
-# discussions is `found` with an empty `threads` array, NOT `not_found`.
+# On GitLab and on Gitea the SHAPE is identical -- same keys, same three-way
+# status -- but several fields are capability-gated and come back null with
+# their names in `unsupported_fields`; see _forge_pr_review_threads_gitlab's
+# and _forge_pr_review_threads_gitea's headers for the list and the reason for
+# each. A merge request with zero unresolved discussions, or a Gitea pull
+# request with zero unresolved review comments, is `found` with an empty
+# `threads` array, NOT `not_found`. Gitea threads additionally carry a
+# `grouping` key, always null and always declared in `unsupported_fields`:
+# tea exposes no conversation object, so each thread is exactly one comment.
 # --owner/--repo are honored on GitHub only.
 # Usage: aimi-cli.sh forge-pr-review-threads --pr <number> [--owner <owner>
 # --repo <repo>] [--all] [--project <path>]
@@ -7672,18 +7943,50 @@ cmd_forge_pr_review_threads() {
 }
 
 # ----------------------------------------------------------------------------
-# GITEA CAPABILITY-GAP NOTE (documentation only -- no gitea/glab code path is
-# added or tested in this phase-1, GitHub-only story): a Gitea/Forgejo `tea`
-# adapter is expected to have NO equivalent for resolving a review thread at
-# all -- unlike a missing gh binary or an unwritten adapter, both of which
-# are TEMPORARY states, `tea` simply has no reviewThread/conversation-
-# resolution concept to call. Whichever future adapter lands for this verb
-# should report that permanent gap through the `unsupported_fields` array
-# naming the operation (e.g. `["resolveReviewThread"]`), never by reusing
-# the generic no-adapter `message` text an unwritten adapter produces today
-# -- "this forge cannot do this at all" and "nobody wrote the adapter yet"
-# are two different facts, and collapsing them would make a permanent gap
-# look like a temporary one.
+# GITEA CAPABILITY-GAP NOTE -- REWRITTEN IN PHASE 4, BECAUSE ITS FACTUAL
+# CLAIM WAS FALSE.
+#
+# WHAT THIS NOTE USED TO SAY, and what is now retracted: written in phase 1
+# as documentation only, it ruled that a Gitea/Forgejo `tea` adapter could
+# not resolve a review thread by any means, and that this was a PERMANENT
+# capability gap rather than the temporary state an unwritten adapter is in.
+# Source falsifies both halves. `tea pulls review-comments <pull index>`
+# (cmd/pulls/review_comments.go:24-32) lists a pull request's review
+# comments, and `tea pulls resolve <comment id>` / `tea pulls unresolve`
+# (cmd/pulls/resolve.go, unresolve.go) mark one resolved or unresolved. All
+# three landed in tea v0.14.0; the current release is v0.15.1. Both verbs are
+# ROUTED for gitea today -- see the GITEA REVIEW-THREAD ADAPTERS section
+# above.
+#
+# WHAT THE REAL GAP IS: GROUPING, not resolution, and it is both narrower and
+# different from the ruling it replaces. tea lists review COMMENTS, flattened
+# across every review (modules/task/pull_review_comment.go:16-44), and
+# exposes no thread/conversation object at all, so the adapter emits one
+# DEGENERATE single-comment thread per review comment. Alongside it,
+# `threads[].diffSide` is unrecoverable, and for a reason that is not the
+# usual absence: tea collapses LineNum and OldLineNum into one printed
+# column (modules/print/pull_review_comment.go:52-59), leaving nothing to
+# tell the post-image side from the pre-image one -- unlike GitLab, whose
+# separate new_line/old_line keys the gitlab arm above genuinely does derive
+# RIGHT/LEFT from. Add `threads[].startLine`, `threads[].isOutdated`,
+# `threads[].isCollapsed`, `pr.title` and `pr.url`, and that is the whole
+# gap.
+#
+# WHAT THE ADVICE STILL SAYS, UNCHANGED, because only the factual claim was
+# wrong: a PERMANENT capability gap is reported through the
+# `unsupported_fields` array naming the thing that is missing, never by
+# reusing the generic no-adapter `message` text an unwritten adapter
+# produces. "This forge cannot do this at all" and "nobody wrote the adapter
+# yet" are two different facts, and collapsing them would make a permanent
+# gap look like a temporary one. Applying that advice is what
+# `threads[].grouping` in the gitea listing arm's own unsupported_fields is.
+#
+# WHAT CHANGED IS THE WORKED EXAMPLE. The old note offered an
+# unsupported_fields entry naming the resolveReviewThread mutation as the
+# value to emit. That is now exactly the WRONG answer: resolution is
+# supported on this forge, so naming it as a gap would report a capability
+# the adapter has as one it lacks -- the same collapse the advice above
+# exists to prevent, pointing the other way.
 # ----------------------------------------------------------------------------
 # github adapter for forge-resolve-review-thread. <thread_id> is already
 # validated by cmd_forge_resolve_review_thread before this ever runs. Binds
@@ -7778,6 +8081,71 @@ _forge_resolve_review_thread_gitlab() {
   }')"
 }
 
+# gitea adapter for forge-resolve-review-thread (phase 4). <thread_id> is
+# already validated by cmd_forge_resolve_review_thread before this ever runs.
+# See the GITEA REVIEW-THREAD ADAPTERS header above _forge_pr_review_threads_
+# gitea for the verification ceiling, the tea >= v0.14.0 version floor, and
+# the GH_TOKEN hazard that forbids any account override on this path.
+#
+# RESOLVES ONLY; POSTS NO REPLY. `tea pulls resolve` marks the review comment
+# resolved and writes no comment of its own, which is this verb's established
+# meaning here -- the same property the gitlab arm above insists on. This
+# adapter issues ONE tea invocation and it is not a comment-creating one.
+#
+# THE PULL REQUEST IS NOT NAMED, because it is not part of the identifier.
+# `tea pulls resolve` takes a COMMENT id, which is what makes the round trip
+# work: _forge_pr_review_threads_gitea emits tea's own `id` and this hands
+# that exact string back (ResolvePullReviewComment consumes the same id,
+# modules/task/pull_review_comment.go:47-57). Nothing here re-derives,
+# truncates or re-formats it. A numeric id also passes
+# cmd_forge_resolve_review_thread's existing ^[A-Za-z0-9+/=_-]+$ guard
+# unchanged, so that guard needed no edit for this forge.
+#
+# Always QUIET and always returns 0, same as the other two adapters.
+_forge_resolve_review_thread_gitea() {
+  local thread_id="$1"
+  local stdout rc=0
+  local stderr_out
+
+  # No account override, no GH_TOKEN prefix assignment: tea reads GH_TOKEN as
+  # a fallback credential, so the github arm's shape would hand a GitHub token
+  # to a Gitea instance. See the section header.
+  _forge_capture stdout stderr_out rc -- tea pulls resolve "$thread_id" || true
+
+  if [ "$rc" -ne 0 ]; then
+    # A comment id Gitea cannot find is a CONFIRMED negative (the call ran;
+    # the answer is "no such comment"), reported as status="found" with
+    # resolved=false -- byte-identical to the other two adapters' own
+    # confirmed-invalid-id result, per forge-contract.md's Three-Way Status
+    # Convention. Matched on the HTTP status code `404` only, never on
+    # English wording, and every other failure stays status="error" so the
+    # wrapper prints its manual instruction and exits non-zero.
+    if printf '%s' "$stderr_out" | grep -q "404"; then
+      _forge_emit_status found "$(jq -nc '{resolved: false, thread: null, unsupported_fields: []}')"
+      return 0
+    fi
+    # cli_failed hard-coded rather than classified, for the same reason the
+    # gitlab arm gives: the shared classifier is gh-specific and there is no
+    # tea auth probe in this repository.
+    _forge_emit_status error "" "tea pulls resolve exited $rc: ${stderr_out:-unknown error}" cli_failed
+    return 0
+  fi
+
+  # tea reports success by exit status, not by a JSON document: it prints
+  # `Comment %d resolved` to stdout (modules/task/pull_review_comment.go:55)
+  # and returns nothing structured. So the thread object is rebuilt from what
+  # is known for certain -- the id that was just resolved, and the fact that
+  # it now is -- reusing the shape `glab mr note resolve` already established
+  # directly above. path/line are GitHub's, come from the GraphQL mutation's
+  # own response there, and have no counterpart in tea's output: null plus
+  # unsupported_fields, per forge-contract.md.
+  _forge_emit_status found "$(jq -nc --arg id "$thread_id" '{
+    resolved: true,
+    thread: {id: $id, isResolved: true, path: null, line: null},
+    unsupported_fields: ["thread.path", "thread.line"]
+  }')"
+}
+
 _forge_resolve_review_thread() {
   local thread_id="$1"
   local forge_info forge host
@@ -7800,8 +8168,21 @@ _forge_resolve_review_thread() {
     return 0
   fi
 
+  # Same gate again for gitea, naming `tea`. The wrapper below stays the only
+  # layer that prints and exits non-zero, so a missing tea degrades through
+  # exactly the path a missing gh already does.
+  if [ "$forge" = "gitea" ]; then
+    if ! _forge_bin_check tea quiet "$forge"; then
+      _forge_emit_status error "" "tea not found -- this thread could not be resolved automatically." cli_missing
+      return 0
+    fi
+    _forge_resolve_review_thread_gitea "$thread_id"
+    return 0
+  fi
+
+  # Still reachable by `unknown` -- the only forge word left with no adapter.
   if [ "$forge" != "github" ]; then
-    _forge_emit_status error "" "forge-resolve-review-thread: no adapter for forge \"$forge\" yet -- GitHub and GitLab are the only adapters." no_adapter
+    _forge_emit_status error "" "forge-resolve-review-thread: no adapter for forge \"$forge\" yet -- GitHub, GitLab and Gitea are the only adapters." no_adapter
     return 0
   fi
 
@@ -7940,7 +8321,7 @@ cmd_forge_resolve_review_thread() {
     message=$(printf '%s' "$result" | jq -r '.message // "unknown error"')
     {
       echo "Warning: could not resolve this review thread automatically ($message)."
-      echo "There is no automatic fallback once the forge CLI itself cannot run this -- resolve it manually in the pull/merge request's diff view (GitHub: Files changed; GitLab: Changes) and mark the conversation/thread resolved."
+      echo "There is no automatic fallback once the forge CLI itself cannot run this -- resolve it manually in the pull/merge request's diff view (GitHub: Files changed; GitLab: Changes; Gitea/Forgejo: Files changed) and mark the conversation/thread resolved."
     } >&2
     printf '%s\n' "$result"
     exit 1
