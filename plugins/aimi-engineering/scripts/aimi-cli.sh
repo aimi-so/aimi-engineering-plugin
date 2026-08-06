@@ -4552,12 +4552,31 @@ _forge_map_pr_field_github() {
 # (MergeRequestsService.GetMergeRequestApprovals). Do not conflate
 # reviewers with reviews.
 #
-# VERIFICATION CEILING -- READ BEFORE TRUSTING ANY KEY BELOW. glab was NOT
-# installed on the machine this was written on, so not one key here was
+# VERIFICATION CEILING -- READ BEFORE TRUSTING ANY KEY BELOW, AND NOTE WHAT
+# HAS SINCE BEEN LIFTED. glab was NOT installed on the machine this was
+# written on, so when this table was authored not one key here had been
 # observed coming out of the real binary. The phase-2 github mapper was
 # verified against a real gh v2.94.0 before a line of it was written; this
-# function cannot make that claim. Every key is instead read off glab's own
-# source and GitLab's API docs: gitlab-org/cli (the glab CLI) and
+# function could not make that claim at the time.
+#
+# WHAT WAS LATER OBSERVED, and is therefore no longer under that ceiling: on
+# 2026-08-06 every key in this table was checked against a real GitLab CE in
+# a container with a real glab 1.112.0. `glab mr view <iid> -F json` returned
+# all nine -- iid (a number), web_url, title, description, state,
+# source_branch, target_branch, draft (a real boolean) and
+# detailed_merge_status -- with the names and types this table asserts, in a
+# 64-key document, which is itself the whole-document claim below confirmed.
+# `state` came back `opened`, which _forge_map_state already normalizes to
+# `open` for gitlab. Nothing in this table needed correcting. (The same run
+# against Gitea DID correct a claim there -- see
+# _forge_map_pr_field_gitea's header -- so this is a measured result, not a
+# rubber stamp.)
+#
+# WHAT REMAINS UNDER THE CEILING: the review-thread and issue paths, whose
+# keys were not exercised. For those the stub still emits whatever its author
+# believed, so a wrong key name passes green on both sides.
+#
+# Every key was originally read off glab's own source and GitLab's API docs: gitlab-org/cli (the glab CLI) and
 # gitlab-org/api/client-go (go-gitlab), whose struct tags ARE glab's JSON
 # keys precisely because glab marshals *gitlab.MergeRequest directly rather
 # than projecting it. Line numbers below are client-go's merge_requests.go

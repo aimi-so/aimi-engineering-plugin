@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The GitLab adapter's PR key mapping was verified against a real binary, and every claim held.** Phase 3 shipped it with `glab` absent, so all nine key names rested on reading `gitlab-org/cli` and `gitlab-org/api/client-go` source. A container running **GitLab CE** with a real **glab 1.112.0** was stood up to check: `glab mr view <iid> -F json` returned `iid` (a number), `web_url`, `title`, `description`, `state`, `source_branch`, `target_branch`, `draft` (a real boolean) and `detailed_merge_status` — every name and type this adapter asserts. The document carried 64 keys, which is the "no field selector, `-F json` prints the whole marshalled document" claim confirmed from the other side. `state` came back `opened`, which `_forge_map_state` already normalizes to `open` for GitLab.
+  - **Nothing needed correcting.** That matters because the same method, run against Gitea, *did* correct a claim — so this is a measured result rather than a rubber stamp.
+  - **The ceiling is narrowed, not removed**, in `_forge_map_pr_field_gitlab`'s own header alongside the Gitea one. Still unverified against a real binary on both adapters: the review-thread and issue paths. For those the stub emits whatever its author believed, so a wrong key name still passes green on both sides.
+  - **Docker's healthcheck is not a readiness signal for GitLab.** The container reported `healthy` at 45s; the API only answered at ~320s, with 502s in between. Anything automating this must poll the API itself, not the health status.
+
 ### Fixed
 
 - **`detect-parent-branch` now keeps searching after a candidate is rejected, instead of giving up on the first one.** `_detect_parent_branch_candidate` took the first decoration token that normalized and broke out of both loops; verification ran afterwards, in the caller. A rejected first candidate therefore ended the search — not the next token on the same line, not the next commit — and the verb fell straight through to the default branch. It now emits every candidate in `--first-parent` walk order, deduplicated, and the caller takes the first that survives `merge-base`.
