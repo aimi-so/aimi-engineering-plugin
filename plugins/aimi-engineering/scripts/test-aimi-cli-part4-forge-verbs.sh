@@ -11009,7 +11009,7 @@ gtr_test_gitea_detection_is_preexisting_and_unmodified() {
   assert_eq "gitea" "$(_detect_forge_classify_host gitea.com)" "gtr detection: gitea.com already classifies as gitea (aimi-cli.sh:1841), no change required by this story"
   assert_eq "gitea" "$(_detect_forge_classify_host codeberg.org)" "gtr detection: codeberg.org classifies as gitea too -- Forgejo is deliberately not distinguished"
   assert_eq "gitea" "$(_detect_forge_classify_host git.gitea.com)" "gtr detection: a *.gitea.com subdomain classifies as gitea"
-  assert_eq "unknown" "$(_detect_forge_classify_host git.example.com)" "gtr detection: an unrecognized host classifies as unknown -- the ONLY remaining stand-in for a forge with no adapter, now that gitea is routed"
+  assert_eq "unknown" "$(_detect_forge_classify_host git.example.com)" "gtr detection: an unrecognized host classifies as unknown -- the ONLY remaining stand-in for a forge the abstraction has not yet routed"
 
   setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
   pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
