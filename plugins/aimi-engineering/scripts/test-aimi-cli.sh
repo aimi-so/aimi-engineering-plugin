@@ -95,6 +95,12 @@ set -uo pipefail
 # a host with a small /proc/sys/kernel/pid_max is the first suspect if that
 # single assertion ever goes intermittent — re-run with --serial to confirm.
 #
+# WHAT IT COSTS. The last thing every run prints is a fixed-shape `suite-cost`
+# line — CLI size, test-corpus size, assertion count, wall seconds, and the
+# mode and frame those were measured in. `grep suite-cost` two transcripts and
+# the trend is a diff rather than an investigation. See the comment above the
+# emit at the bottom of this file for why that is worth a line of output.
+#
 # ADDING TESTS: put the test function and its main() call in the part that owns
 # that concern (each part's header lists its sections), and raise
 # EXPECTED_ASSERTIONS below by the number of assertions you added. The
@@ -160,10 +166,16 @@ done
 # CLI under test is worktree-resident (write_global_cli_cache deliberately
 # refuses to cache a */.worktrees/* path) and THREE otherwise. The same tree
 # therefore reads 3080 from a linked worktree and 3082 from a normal checkout.
+# RUN_FRAME names which of the two this run is, so the suite-cost line at the
+# bottom can say so out loud rather than leaving the reader to work it out.
 EXPECTED_ASSERTIONS=3082
+RUN_FRAME=checkout
 _resolved_cli="$(realpath "$SCRIPT_DIR/aimi-cli.sh" 2>/dev/null || printf '%s' "$SCRIPT_DIR/aimi-cli.sh")"
 case "$_resolved_cli" in
-  */.worktrees/*) EXPECTED_ASSERTIONS=3080 ;;
+  */.worktrees/*)
+    EXPECTED_ASSERTIONS=3080
+    RUN_FRAME=worktree
+    ;;
 esac
 
 RESULT_DIR="$(mktemp -d)"
@@ -347,6 +359,46 @@ else
 fi
 
 printf '  wall clock: %dm%02ds (%s)\n' "$((ELAPSED / 60))" "$((ELAPSED % 60))" "$MODE_LABEL"
+
+# THE SUITE'S OWN COST POSITION. This one line exists because the cost of this
+# suite compounds and is invisible: phase 3 of forge-abstraction added ~5,900
+# lines to aimi-cli.sh and ~11,000 to the test corpus, and that made the 1,544
+# assertions that already existed ~9% slower — 148.75ms to 162.08ms each — for
+# tests with no relationship to the code that was added. Nobody noticed until
+# somebody asked why the suite was slow, and answering that took hours; printed
+# every run, the same regression is visible on the day it lands instead.
+#
+# It costs two line counts and one clock read, which is why it is on by default
+# and why there is deliberately NO calibration or benchmark loop here — a
+# per-run benchmark would itself be the sort of cost this line exists to expose.
+#
+# The field order is fixed on purpose: `grep suite-cost` two transcripts and
+# diff them mechanically rather than by eye. `mode` and `frame` are on the line
+# because two of the numbers are only comparable within their own environment —
+# wall_seconds is not comparable across mode=serial and mode=concurrent, and
+# assertions is 2 lower under frame=worktree (see EXPECTED_ASSERTIONS above).
+COST_FILES=(
+  "$SCRIPT_DIR/test-aimi-cli.sh"
+  "$SCRIPT_DIR/test-aimi-cli-common.sh"
+  "$SCRIPT_DIR/test-aimi-cli-fixtures.sh"
+)
+for cost_part in "${PARTS[@]}"; do
+  COST_FILES+=("$SCRIPT_DIR/$cost_part")
+done
+
+# `wc -l` over the whole set in one call, reading its trailing `total` row; with
+# a single surviving file wc prints no total row and awk's END still holds that
+# file's own count, and with none it holds nothing and `+ 0` yields 0. Reading
+# through awk rather than `wc -l <file` also drops the leading padding that BSD
+# wc emits and GNU wc does not.
+CLI_LINES="$(wc -l < "$SCRIPT_DIR/aimi-cli.sh" 2>/dev/null | awk 'END { print $1 + 0 }')"
+TEST_LINES="$(wc -l "${COST_FILES[@]}" 2>/dev/null | awk 'END { print $1 + 0 }')"
+
+printf '  suite-cost cli_lines=%s test_lines=%s assertions=%s wall_seconds=%s mode=%s frame=%s\n' \
+  "$CLI_LINES" "$TEST_LINES" "$TOTAL_ASSERTIONS" "$ELAPSED" "$MODE_LABEL" "$RUN_FRAME"
+echo "    frame=worktree legitimately scores 2 FEWER assertions than frame=checkout on the"
+echo "    same tree (worktree-resident CLI: 1 assertion where a checkout emits 3), so compare"
+echo "    a container run against a container run — two tests did not vanish."
 
 if [ "$TOTAL_FAILED" -gt 0 ] || [ "$PARTS_BROKEN" -gt 0 ] || [ "$INVARIANT_OK" -eq 0 ]; then
   exit 1
