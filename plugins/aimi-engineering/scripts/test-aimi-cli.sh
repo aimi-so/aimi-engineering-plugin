@@ -21,6 +21,22 @@ set -uo pipefail
 # navigable ones, and so the parts can later run in parallel, which is where
 # the actual saving is. Do not cite it as a serial speedup.
 #
+# PARALLEL SAFETY — all four parts are cleared to run concurrently. Audited by
+# resource class, not by counting mktemp calls (worktree-manager has 132 of
+# those and is still unsafe): no part binds or connects a port; every fixed
+# /tmp literal is a value handed to a pure resolver or written as file content,
+# never a path created on disk; every git fixture is its own mktemp -d and
+# nothing writes git config --global; and the one file all four parts really
+# did write — the global cli-path cache, via write_global_cli_cache inside
+# init-session and check-version --fix — is now redirected per part by
+# test-aimi-cli-common.sh's AIMI_CONFIG_DIR default. Measured: serial and three
+# concurrent runs agree at 522/636/951/971, and a deliberately planted
+# cross-part collision was confirmed to pass serially and fail concurrently
+# before that clean result was accepted. One caveat that this machine cannot
+# reproduce: test_roadmap_claim_stale_release depends on a killed PID still
+# reading as dead, so a host with a small /proc/sys/kernel/pid_max is where to
+# look first if that single assertion ever goes intermittent under concurrency.
+#
 # ADDING TESTS: put the test function and its main() call in the part that owns
 # that concern (each part's header lists its sections), and raise
 # EXPECTED_ASSERTIONS below by the number of assertions you added. The
