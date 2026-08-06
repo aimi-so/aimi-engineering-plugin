@@ -5428,9 +5428,13 @@ _forge_pr_write_print_manual() {
   if [ -z "$host" ]; then
     # Per-forge default rather than a single github.com constant: on a GitLab
     # repository whose host could not be resolved, printing a github.com URL
-    # would be actively misleading rather than merely unhelpful.
+    # would be actively misleading rather than merely unhelpful. The same
+    # applies to Gitea/Forgejo -- gitea.com is Gitea's own SaaS host, and
+    # falling through to github.com here was a live wrong-output bug for every
+    # Gitea remote whose host could not be resolved, not a cosmetic default.
     case "$forge" in
       gitlab) host="gitlab.com" ;;
+      gitea)  host="gitea.com" ;;
       *)      host="github.com" ;;
     esac
   fi
@@ -5459,6 +5463,34 @@ _forge_pr_write_print_manual() {
         echo "  glab mr update $head_or_number -y --description ..."
         if [ -n "$owner" ] && [ -n "$repo" ]; then
           echo "  Or open: https://$host/$owner/$repo/-/merge_requests/$head_or_number"
+        fi
+      fi
+    elif [ "$forge" = "gitea" ]; then
+      # Gitea/Forgejo arm. THE NOUN STAYS "pull request" -- do NOT "fix" this
+      # into merge-request wording by symmetry with the gitlab arm above.
+      # Gitea calls them pull requests, exactly like GitHub; only GitLab says
+      # merge request. Three things do differ from the github arm below, and
+      # every one of them is a correctness matter:
+      #   - the CLI is tea, and its flag names are tea's own: -t/--title and
+      #     -d/--description, never gh's --body, plus --head in its LONG FORM
+      #     ONLY (tea gives it no short alias, and -h is urfave/cli's help
+      #     flag) and -b/--base. See the Gitea write adapters section header.
+      #   - Gitea's compare form is /<owner>/<repo>/compare/<base>...<head>
+      #     with no ?expand=1 -- that query parameter is GitHub's.
+      #   - Gitea's pull-request path is /<owner>/<repo>/pulls/<number>, with
+      #     an "s". GitHub's singular /pull/<number> 404s on a Gitea instance.
+      if [ "$mode" = "create" ]; then
+        echo "Warning: could not create this gitea pull request automatically -- create it yourself with:"
+        echo "  git push -u origin $head_or_number"
+        echo "  tea pulls create -t \"$title\" --head $head_or_number -b $base -d ..."
+        if [ -n "$owner" ] && [ -n "$repo" ]; then
+          echo "  Or open: https://$host/$owner/$repo/compare/$base...$head_or_number"
+        fi
+      else
+        echo "Warning: could not edit this gitea pull request automatically -- edit it yourself with:"
+        echo "  tea pulls edit $head_or_number -d ..."
+        if [ -n "$owner" ] && [ -n "$repo" ]; then
+          echo "  Or open: https://$host/$owner/$repo/pulls/$head_or_number"
         fi
       fi
     elif [ "$mode" = "create" ]; then
@@ -5785,6 +5817,346 @@ _forge_issue_create_gitlab() {
   _forge_emit_write_status created "$(_forge_build_write_data "$issue_url" "$issue_number")"
 }
 
+# ============================================================================
+# Gitea write adapters — forge-pr-create, forge-pr-edit, forge-issue-create
+# ============================================================================
+# The gitea arms of this file's THREE write verbs, kept together in one
+# section for the same reason the GitLab section above is: the one rule they
+# all obey is stated once, where a reviewer meets it before any code.
+#
+# THE RULE: EVERY tea WRITE INVOCATION CARRIES AT LEAST ONE FLAG. NO
+# EXCEPTIONS.
+#
+# This is the gitea analogue of the GitLab section's "-y FIRST" rule, and its
+# shape is DIFFERENT and worse if hit -- do not go looking for a -y here.
+# `tea` has NO -y/--yes/--confirm flag anywhere; inventing one by analogy with
+# glab would just be an unknown flag. What tea has instead is
+# cmd/pulls/create.go:75-81:
+#
+#     if ctx.IsInteractiveMode() { … interact.CreatePull(…) }
+#
+# and modules/context/context.go:55-59:
+#
+#     // IsInteractiveMode returns true if the command is running in
+#     // interactive mode (no flags provided and stdout is a terminal)
+#     func (ctx *TeaContext) IsInteractiveMode() bool {
+#         return ctx.Command.NumFlags() == 0
+#     }
+#
+# THE DOC COMMENT CLAIMS A TTY CHECK; THE IMPLEMENTATION PERFORMS NONE. The
+# sole condition is NumFlags() == 0, so a zero-flag `tea pulls create` enters
+# an interactive survey EVEN WITH A NON-TTY STDIN -- a hang, forever, with no
+# output explaining why, in an autonomous run with nobody present to answer.
+# Every write below passes -t/-d/--head/-b anyway, so the invariant costs
+# nothing; it is written down because the cheapest way to break it is an
+# innocent-looking refactor that moves a flag behind a conditional.
+#
+# The invariant is asserted from RECORDED ARGV, never from an exit status: a
+# fake tea never prompts, so it exits 0 whether or not a flag was passed and
+# an exit-status assertion would pass vacuously.
+#
+# TEA'S FLAG NAMES ARE NEITHER gh'S NOR glab'S. Read off `gitea/tea` `main`
+# source on 2026-08-06 (cmd/flags/issue_pr.go:94-118 for the shared
+# create/edit set, cmd/pulls/create.go:26-55 for the pull-specific pair):
+#   -t/--title           (same spelling as gh and glab)
+#   -d/--description     NOT gh's --body -- the same gotcha glab has
+#   --head               LONG FORM ONLY. tea gives it no short alias, and -h
+#                        is urfave/cli's help flag, so a "-h" here would print
+#                        help instead of naming a branch.
+#   -b/--base            NOT glab's --target-branch, and note that glab spells
+#                        its OWN -b as --target-branch while tea's -b is
+#                        --base -- the short letters agree by coincidence.
+# `tea pulls edit` takes the pull request as a POSITIONAL argument and reuses
+# IssuePREditFlags (cmd/flags/issue_pr.go:179-202), so -d again.
+#
+# ⚠️ GH_TOKEN HAZARD -- WHY NO tea CALL BELOW CARRIES A TOKEN PREFIX, AND WHY
+# NONE BLANKS ONE EITHER. tea honours GH_TOKEN, not only GITEA_TOKEN
+# (modules/context/context_login.go:15-51 reads both and falls back to the
+# GitHub one when GITEA_TOKEN is empty). Meanwhile
+# _forge_account_override_slots (:2983-2997) deliberately defaults an empty
+# slot to the AMBIENT GH_TOKEN. Copying the github arm's prefix-assignment
+# shape onto a tea call would therefore hand a GITHUB token to a GITEA
+# instance. So no tea invocation below carries a GH_TOKEN= or
+# GH_ENTERPRISE_TOKEN= prefix assignment.
+#
+# Blanking is refused for the OPPOSITE reason: a bare `GITEA_TOKEN=` prefix
+# would revoke the one account-selection mechanism a Gitea operator actually
+# has, exactly as phase 2's bare TOKEN="" prefix did on the gh side. So this
+# path sets nothing and unsets nothing -- an operator-exported GITEA_TOKEN
+# reaches tea untouched, and every call runs as the machine's active tea
+# session. `export` stays forbidden here for the same process-wide-state
+# reason it is forbidden on the gh and glab sides.
+#
+# VERIFICATION CEILING -- READ BEFORE TRUSTING ANY BEHAVIOR BELOW. tea is NOT
+# installed on the machine this was written on; that is this phase's declared
+# ceiling, not an oversight. Not one invocation here has been observed against
+# the real binary. Every flag, subcommand and JSON key was read off
+# `gitea/tea` `main` source on 2026-08-06, file and line cited per claim. The
+# tests drive a fake tea that records its argv, so what is actually PROVEN is
+# WHICH ARGUMENTS THIS FILE EMITS and HOW IT PARSES A FIXTURE -- never what
+# real tea does with them.
+#
+# KNOWN, DELIBERATE DUPLICATE READ PATH -- NOT AN ACCIDENT, AWAITING
+# UNIFICATION. _forge_pr_create_gitea's idempotency probe below reads Gitea
+# pull requests through its own `tea pulls list --state all -o json` call and
+# a local head filter, and does NOT call _forge_pr_view_gitea. That is a
+# scheduling fact, not a design preference: _forge_pr_view_gitea lands in the
+# SAME wave as this section, so depending on it would make this story
+# unbuildable. The result is a second Gitea PR read path in this file --
+# recorded here by name so a later reader finds a known debt rather than
+# inferring a mistake. It is the same debt the GitLab arm still owes
+# (_forge_pr_view_gitlab plus the inline `glab mr view` in
+# _forge_pr_create_gitlab), and both should be unified together.
+#
+# WHY THE PROBE CANNOT ASK THE SERVER, AND WHAT THAT COSTS. `tea pulls list`
+# has NO --head / --source-branch filter at all -- its flags are --fields plus
+# PRListingFlags (cmd/pulls/list.go:31) = --state (all|open|closed only),
+# --page, --limit, --repo, --remote, --login, --output. `gh pr list --head`
+# and `glab mr list --source-branch` have no counterpart, so the filter has to
+# run locally, and the LIST document it filters differs from the DETAIL
+# document in two ways a naive implementation gets wrong:
+#
+#   (a) EVERY LIST VALUE IS A JSON STRING and every key is snake_cased
+#       (modules/print/table.go:175-208 marshals a map[string]string), so
+#       `index` arrives as "42", never 42. Comparisons here are therefore
+#       string comparisons, and the number reaches _forge_build_write_data as
+#       a string it turns into a JSON int with `tonumber`.
+#   (b) THE LIST `head` MAY CARRY AN `owner:` PREFIX for a cross-fork pull
+#       request (formatPRHead, modules/print/pull.go:83-93), while the DETAIL
+#       `head` is a bare ref (cmd/pulls.go:176). So the match cannot be plain
+#       equality -- `forkuser:feat-x` must still match the branch `feat-x`.
+#
+# ONLY AN OPEN PULL REQUEST BLOCKS CREATION. tea's LIST `state` can literally
+# be `merged` (formatPRState, modules/print/pull.go:95-100 returns it whenever
+# pr.Merged != nil), so a closed or merged pull request on the same branch
+# falls through to creation exactly as it does on the github and gitlab arms.
+# A reused branch is never blocked forever by a dead pull request.
+
+# Extracts the pull-request/issue URL from a tea write command's stdout.
+#
+# A SIBLING of _forge_glab_write_url rather than a rename of it, deliberately:
+# tea's two write paths have genuinely different framings that this header has
+# to state, and renaming the glab one would touch phase 3's shipped gitlab
+# arms while sibling stories hold this file open. Duplication over conflict.
+#
+#   `tea pulls create` ends in print.PullDetails (modules/task/pull_create.go:89)
+#   -- a MARKDOWN block whose URL line is appended only when the URL is
+#   NON-EMPTY (modules/print/pull.go:76-78), and `--output json` is not
+#   consulted on the create path at all. So "created but no parseable URL" is
+#   a REAL branch here, not a hypothetical: callers must treat an empty result
+#   as a genuine degraded outcome rather than as a parse bug.
+#
+#   `tea issues create` is friendlier: markdown PLUS a bare `issue.HTMLURL`
+#   line (modules/task/issue_create.go:28-30), so a URL is reliably present.
+#
+# Deliberately NOT `tail -n1` -- both paths wrap the URL in markdown, so the
+# URL is not reliably the last LINE. Scanning for the last http(s) TOKEN is
+# tolerant of that framing without depending on its exact wording.
+#
+# Prints the empty string when no URL is present -- callers treat that as a
+# degraded outcome rather than guessing one.
+# Usage: _forge_tea_write_url <captured-stdout>
+_forge_tea_write_url() {
+  local out="${1:-}" url=""
+  url=$(printf '%s' "$out" | tr -d '\r' | grep -oE 'https?://[^[:space:]]+' | tail -n1) || url=""
+  printf '%s' "$url"
+}
+
+# gitea adapter for forge-pr-create. Same contract as the github and gitlab
+# arms in _forge_pr_create: shared write envelope, MANDATORY-PRINT
+# degradation, non-zero exit on every degraded branch, never retries, never
+# prompts.
+#
+# IDEMPOTENCY is structural, like the github arm's and unlike the gitlab
+# arm's, but it is built from a LIST-plus-local-filter rather than from a
+# server-side head query -- see this section's header for why tea offers no
+# such query, for the two ways its LIST document differs from its DETAIL
+# document, and for why only an OPEN pull request blocks.
+#
+# A FAILED LOOKUP FALLS THROUGH TO CREATION rather than degrading, matching
+# the gitlab arm. tea has no distinct exit code for "not found" -- main.go:18-30
+# prints `Error: %v` and exits 1 for every error alike -- so a failed
+# `tea pulls list` is structurally indistinguishable from an empty one, and
+# refusing to create on it would strand every run whose listing hiccuped. Do
+# not "fix" this into a stderr match; that is exactly the fragility
+# forge-pr-view's structural not_found detection exists to avoid.
+_forge_pr_create_gitea() {
+  local title="$1" base="$2" head="$3" body="$4"
+
+  if ! _forge_bin_check tea mandatory gitea; then
+    _forge_pr_write_print_manual create gitea "$base" "$head" "$body" "$title"
+    _forge_emit_write_status degraded "" "tea not found -- this pull request was not created automatically."
+    return 1
+  fi
+
+  # Existing-PR probe, as the same account the create below will run as.
+  # --state all, because the local filter -- not the server -- decides which
+  # states block, and a merged pull request must be SEEN in order to be
+  # deliberately ignored.
+  local list_out="" list_err="" list_rc=0 existing_row="" existing_url="" existing_number=""
+  _forge_capture list_out list_err list_rc -- tea pulls list --state all -o json || true
+
+  if [ "$list_rc" -eq 0 ]; then
+    # The whole local filter, in one jq program:
+    #   - tostring on every value, because LIST values are strings already and
+    #     a future typed shape must not change the comparison's meaning;
+    #   - head matches either exactly or after an `owner:` prefix;
+    #   - state must fold to `open` -- `closed` and `merged` fall through.
+    existing_row=$(printf '%s' "$list_out" | jq -c --arg h "$head" '
+      [ .[]?
+        | select(type == "object")
+        | select((((.head // "") | tostring) == $h)
+                 or (((.head // "") | tostring) | endswith(":" + $h)))
+        | select((((.state // "") | tostring) | ascii_downcase) == "open")
+      ] | .[0] // empty' 2>/dev/null) || existing_row=""
+
+    if [ -n "$existing_row" ]; then
+      existing_url=$(printf '%s' "$existing_row" | jq -r '.url // empty' 2>/dev/null) || existing_url=""
+      existing_number=$(printf '%s' "$existing_row" | jq -r 'if has("index") then (.index | tostring) else "" end' 2>/dev/null) || existing_number=""
+      if [ -n "$existing_number" ]; then
+        _forge_emit_write_status unchanged "$(_forge_build_write_data "$existing_url" "$existing_number")"
+        return 0
+      fi
+    fi
+  fi
+
+  # WRITE 1 (gitea). Four flags, so NumFlags() is never 0 -- see this
+  # section's header for why a zero-flag invocation hangs rather than fails.
+  # No token prefix assignment: see the GH_TOKEN hazard in the same header.
+  local stdout="" stderr_out="" rc=0
+  _forge_capture stdout stderr_out rc -- tea pulls create -t "$title" -d "$body" --head "$head" -b "$base" || true
+
+  if [ "$rc" -ne 0 ]; then
+    _forge_pr_write_print_manual create gitea "$base" "$head" "$body" "$title"
+    echo "Error: forge-pr-create: tea pulls create exited $rc: ${stderr_out:-unknown error}" >&2
+    _forge_emit_write_status degraded "" "tea pulls create exited $rc: ${stderr_out:-unknown error}"
+    return 1
+  fi
+
+  local pr_url=""
+  pr_url=$(_forge_tea_write_url "$stdout")
+
+  if [ -z "$pr_url" ]; then
+    _forge_pr_write_print_manual create gitea "$base" "$head" "$body" "$title"
+    echo "Error: forge-pr-create: tea pulls create succeeded but its output did not contain a parseable pull request URL." >&2
+    _forge_emit_write_status degraded "" "tea pulls create succeeded but its output did not contain a parseable pull request URL."
+    return 1
+  fi
+
+  # PAST THIS POINT THE PULL REQUEST EXISTS AND ITS URL IS IN HAND -- the same
+  # rule the github and gitlab arms state at length: never discard $pr_url,
+  # never print the create-it-yourself instructions again, never downgrade to
+  # degraded (which would force data to null and throw the created pull
+  # request's URL away). Only the number is unconfirmed, so it comes back null
+  # with a Warning, at exit 0.
+  #
+  # The URL's trailing segment is only an ADDRESS for the re-read, never the
+  # answer: the number reported below is `index`, read out of the DETAIL
+  # document tea returns, so a URL shape this file guessed wrong yields a null
+  # number rather than a wrong one.
+  local candidate="" reread_out="" reread_err="" reread_rc=0 pr_number=""
+  candidate=$(printf '%s' "$pr_url" | grep -oE '[0-9]+$') || candidate=""
+  if [ -n "$candidate" ]; then
+    _forge_capture reread_out reread_err reread_rc -- tea pulls "$candidate" -o json || true
+    if [ "$reread_rc" -eq 0 ]; then
+      pr_number=$(printf '%s' "$reread_out" | jq -r 'if has("index") then (.index | tostring) else "" end' 2>/dev/null) || pr_number=""
+    fi
+  fi
+
+  if [ -z "$pr_number" ]; then
+    echo "Warning: forge-pr-create: the pull request WAS created at $pr_url, but the post-create tea pulls re-read did not confirm its number -- only the number is unconfirmed. Do NOT create it again." >&2
+    _forge_emit_write_status created "$(_forge_build_write_data "$pr_url" "")"
+    return 0
+  fi
+
+  _forge_emit_write_status created "$(_forge_build_write_data "$pr_url" "$pr_number")"
+}
+
+# gitea adapter for forge-pr-edit. Same contract as the github and gitlab arms
+# in _forge_pr_edit, including its status word: a successful edit reports
+# "unchanged", never "created", because editing mints no new identifier.
+# The pull request is a POSITIONAL argument to `tea pulls edit`, like
+# `glab mr update <id>` and unlike `gh pr edit <number>`'s flag-shaped body.
+_forge_pr_edit_gitea() {
+  local number="$1" body="$2"
+
+  if ! _forge_bin_check tea mandatory gitea; then
+    _forge_pr_write_print_manual edit gitea "" "$number" "$body"
+    _forge_emit_write_status degraded "" "tea not found -- this pull request was not edited automatically."
+    return 1
+  fi
+
+  # WRITE 2 (gitea). -d keeps NumFlags() non-zero here; same invariant, same
+  # header. No token prefix assignment, same GH_TOKEN hazard.
+  local stdout="" stderr_out="" rc=0
+  _forge_capture stdout stderr_out rc -- tea pulls edit "$number" -d "$body" || true
+
+  if [ "$rc" -ne 0 ]; then
+    _forge_pr_write_print_manual edit gitea "" "$number" "$body"
+    echo "Error: forge-pr-edit: tea pulls edit exited $rc: ${stderr_out:-unknown error}" >&2
+    _forge_emit_write_status degraded "" "tea pulls edit exited $rc: ${stderr_out:-unknown error}"
+    return 1
+  fi
+
+  # Structured re-read, as the same account that just wrote. The DETAIL shape
+  # (`tea pulls <index> -o json`), whose `index` is a real JSON int and whose
+  # `url` is pr.HTMLURL -- NOT the LIST shape the create probe filters.
+  local reread_out="" reread_err="" reread_rc=0 pr_url="" pr_number=""
+  _forge_capture reread_out reread_err reread_rc -- tea pulls "$number" -o json || true
+  if [ "$reread_rc" -eq 0 ]; then
+    pr_url=$(printf '%s' "$reread_out" | jq -r '.url // empty' 2>/dev/null) || pr_url=""
+    pr_number=$(printf '%s' "$reread_out" | jq -r 'if has("index") then (.index | tostring) else "" end' 2>/dev/null) || pr_number=""
+  fi
+
+  if [ -z "$pr_number" ]; then
+    _forge_pr_write_print_manual edit gitea "" "$number" "$body"
+    echo "Error: forge-pr-edit: tea pulls edit succeeded but the pull request could not be re-read afterward." >&2
+    _forge_emit_write_status degraded "" "tea pulls edit succeeded but the pull request could not be re-read afterward."
+    return 1
+  fi
+
+  _forge_emit_write_status unchanged "$(_forge_build_write_data "$pr_url" "$pr_number")"
+}
+
+# gitea adapter for forge-issue-create. Keeps the github and gitlab arms'
+# SOFT-FAIL contract byte for byte: ALWAYS returns 0, on every branch
+# including degraded, so a failed issue never blocks PR creation. The caller
+# branches on the envelope's `status` field, never on an exit code. Giving the
+# gitea branch a different exit-code contract would silently reintroduce
+# exactly the coupling this verb exists to prevent.
+_forge_issue_create_gitea() {
+  local title="$1" body="$2"
+
+  if ! _forge_bin_check tea mandatory gitea; then
+    _forge_issue_create_print_manual "$title" "$body" gitea
+    _forge_emit_write_status degraded "" "tea not found -- this issue was not created automatically."
+    return 0
+  fi
+
+  # WRITE 3 (gitea). Two flags, same invariant, same header. No token prefix
+  # assignment, same GH_TOKEN hazard.
+  local stdout="" stderr_out="" rc=0
+  _forge_capture stdout stderr_out rc -- tea issues create -t "$title" -d "$body" || true
+
+  if [ "$rc" -ne 0 ]; then
+    _forge_issue_create_print_manual "$title" "$body" gitea
+    _forge_emit_write_status degraded "" "tea issues create exited $rc: ${stderr_out:-unknown error}"
+    return 0
+  fi
+
+  local issue_url="" issue_number=""
+  issue_url=$(_forge_tea_write_url "$stdout")
+  issue_number=$(printf '%s' "$issue_url" | grep -oE '[0-9]+$') || issue_number=""
+
+  if [ -z "$issue_url" ] || [ -z "$issue_number" ]; then
+    _forge_issue_create_print_manual "$title" "$body" gitea
+    _forge_emit_write_status degraded "" "tea issues create succeeded but its output did not contain a parseable issue URL: ${issue_url:-<empty>}"
+    return 0
+  fi
+
+  _forge_emit_write_status created "$(_forge_build_write_data "$issue_url" "$issue_number")"
+}
+
 # Shells `gh pr create --title <t> --base <b> --head <h> --body <b>`,
 # capturing stdout as the created PR's URL -- gh pr create has NO --json
 # flag (confirmed on this machine, exactly like gh issue create: only a
@@ -5856,9 +6228,14 @@ _forge_pr_create() {
       _forge_pr_create_gitlab "$title" "$base" "$head" "$body" || gl_rc=$?
       return "$gl_rc"
       ;;
+    gitea)
+      local gt_rc=0
+      _forge_pr_create_gitea "$title" "$base" "$head" "$body" || gt_rc=$?
+      return "$gt_rc"
+      ;;
     *)
       _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
-      _forge_emit_write_status degraded "" "forge-pr-create: no adapter for forge \"$forge\" yet -- GitHub and GitLab are the only adapters."
+      _forge_emit_write_status degraded "" "forge-pr-create: no adapter for forge \"$forge\" yet -- GitHub, GitLab and Gitea are the only adapters."
       return 1
       ;;
   esac
@@ -6093,9 +6470,14 @@ _forge_pr_edit() {
       _forge_pr_edit_gitlab "$number" "$body" || gl_rc=$?
       return "$gl_rc"
       ;;
+    gitea)
+      local gt_rc=0
+      _forge_pr_edit_gitea "$number" "$body" || gt_rc=$?
+      return "$gt_rc"
+      ;;
     *)
       _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
-      _forge_emit_write_status degraded "" "forge-pr-edit: no adapter for forge \"$forge\" yet -- GitHub and GitLab are the only adapters."
+      _forge_emit_write_status degraded "" "forge-pr-edit: no adapter for forge \"$forge\" yet -- GitHub, GitLab and Gitea are the only adapters."
       return 1
       ;;
   esac
@@ -6689,9 +7071,13 @@ _forge_issue_create() {
       _forge_issue_create_gitlab "$title" "$body"
       return 0
       ;;
+    gitea)
+      _forge_issue_create_gitea "$title" "$body"
+      return 0
+      ;;
     *)
       _forge_issue_create_print_manual "$title" "$body" "$forge"
-      _forge_emit_write_status degraded "" "forge-issue-create: no adapter for forge \"$forge\" yet -- GitHub and GitLab are the only adapters."
+      _forge_emit_write_status degraded "" "forge-issue-create: no adapter for forge \"$forge\" yet -- GitHub, GitLab and Gitea are the only adapters."
       return 0
       ;;
   esac
