@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`detect-parent-branch` now keeps searching after a candidate is rejected, instead of giving up on the first one.** `_detect_parent_branch_candidate` took the first decoration token that normalized and broke out of both loops; verification ran afterwards, in the caller. A rejected first candidate therefore ended the search — not the next token on the same line, not the next commit — and the verb fell straight through to the default branch. It now emits every candidate in `--first-parent` walk order, deduplicated, and the caller takes the first that survives `merge-base`.
+  - **Reproduced before fixing, in an isolated fixture.** A leftover story branch pointing at the same tip as the branch being resolved normalizes (its name differs), then fails the caller's own "candidate must not be the branch's own tip" rule — and a genuine parent further down, carrying a valid decoration, was never consulted. Before: `Error: Could not detect default branch` in a fixture with no `origin` (or `main`/unverified where one exists). After: the real parent, `verified: true`, `source: decoration`. Deleting that one ref was enough to make the old code answer correctly, which is what identified the defect.
+  - **This bit in real use during phase 4.** `detect-parent-branch` answered `main`/unverified for a branch cut from `feat/forge-abstraction`, which would have opened a 63-commit pull request against the wrong base. `open-pr.md` warns on `verified != true` but does not stop, so the flow would have proceeded.
+  - Case (f) of the `detect-parent-branch` suite now expects `decoration`/`true` where it expected `default-branch`/`false`. The **base is unchanged** — that assertion never moved. Only the provenance did, and toward the truth: the branch it names was verifiable all along, and the old answer claimed a fallback it had not attempted.
+- **A merge conflict mid-wave no longer deletes the branch refs of stories that did not merge.** `/aimi:execute`'s wave-loop conflict path removed every worktree from the wave without `--keep-branch`, including the conflicting story and everything after it that `merge-all` never reached — running `git branch -D` on the only ref naming those commits. Merged worktrees are still removed; unmerged ones now keep both worktree and branch, and are reported by name. This is the rule the Phase-Mode Paired Split conflict path already applied to its own members, and the two paths disagreed about the same scenario.
+
 ## [1.124.0] - 2026-08-06
 
 ### Fixed

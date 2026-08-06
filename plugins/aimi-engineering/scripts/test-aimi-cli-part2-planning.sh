@@ -453,7 +453,24 @@ test_detect_parent_branch() {
   #     normalization (origin/feat/sibling -> feat/sibling) but a LOCAL
   #     branch of that same normalized name points to an unrelated,
   #     divergent commit not on the target's first-parent lineage.
-  #     merge-base must reject it and fall back to the default branch. ---
+  #     merge-base must reject it.
+  #
+  #     WHAT HAPPENS AFTER THE REJECTION CHANGED, AND WHY THIS CASE NOW
+  #     EXPECTS decoration/true. The rejected candidate used to end the
+  #     search outright -- the verb took the first normalized token, and a
+  #     merge-base rejection sent it straight to the default branch,
+  #     reporting verified:false because it had genuinely not verified
+  #     anything. It now keeps walking, and `main` decorates a real ancestor
+  #     of feat/fbranch, so it verifies THAT.
+  #
+  #     The base is `main` either way -- the load-bearing assertion below is
+  #     unchanged. What moved is only the provenance, and it moved toward the
+  #     truth: `main` IS a verifiable ancestor here, and the old answer said
+  #     "could not verify, using the default" about a branch it could have
+  #     verified had it looked. open-pr.md warns whenever verified is not
+  #     true, so this stops emitting a warning about a guess it is no longer
+  #     making. See _detect_parent_branch_candidate's header for the defect
+  #     this fixed and how it was reproduced. ---
   setup_parent_branch_fixture
   pushd "$GIT_FIXTURE_LOCAL" >/dev/null
 
@@ -476,8 +493,8 @@ test_detect_parent_branch() {
   source_out=$(echo "$stdout" | jq -r '.source')
   assert_exit_code "0" "$exit_code" "detect-parent-branch (f) merge-base rejection: exit code"
   assert_eq "main" "$base_out" "detect-parent-branch (f): rejected candidate falls back to default branch"
-  assert_eq "false" "$verified_out" "detect-parent-branch (f): verified false on merge-base rejection"
-  assert_eq "default-branch" "$source_out" "detect-parent-branch (f): source is default-branch"
+  assert_eq "true" "$verified_out" "detect-parent-branch (f): verified true -- the walk continues past the rejected candidate and verifies main, rather than reporting an unverified fallback it never attempted"
+  assert_eq "decoration" "$source_out" "detect-parent-branch (f): source is decoration -- main was found by walking, not by falling back"
 
   popd >/dev/null
   teardown_git_fixture

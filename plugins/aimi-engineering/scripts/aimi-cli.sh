@@ -2190,12 +2190,28 @@ _normalize_decoration_token() {
 # token-by-token, nearest ancestor first, and return the first surviving
 # candidate parent-branch name after _normalize_decoration_token. Prints
 # nothing when no candidate survives across the whole history.
+# Emits EVERY decoration candidate in --first-parent walk order, one per
+# line, deduplicated -- not just the first. The caller verifies them in that
+# order and takes the first that survives merge-base.
+#
+# WHY THIS EMITS A LIST RATHER THAN ONE VALUE. It used to return the first
+# token that normalized and stop there, with verification happening
+# afterwards in the caller. A rejected first candidate therefore ended the
+# search: not the next token on the same line, not the next commit, straight
+# to the default branch. Reproduced: a leftover story-branch ref pointing at
+# the same tip as the branch being resolved is normalized (its name differs),
+# then rejected by the caller's own "candidate must not be the branch's own
+# tip" rule -- and a genuine parent nine commits further down, carrying a
+# valid decoration, was never consulted. detect-parent-branch answered
+# `main`/unverified for a branch cut from a feature branch; removing that one
+# ref made it answer correctly with nothing else changed. A search that
+# discards a candidate without resuming is not a search.
 _detect_parent_branch_candidate() {
   local branch="$1"
   local log_output
   log_output=$(git log "$branch" --pretty=format:'%D' --first-parent 2>/dev/null) || true
 
-  local line raw_token normalized candidate=""
+  local line raw_token normalized seen=""
   while IFS= read -r line; do
     [ -z "$line" ] && continue
 
@@ -2209,14 +2225,16 @@ _detect_parent_branch_candidate() {
       # Decoration tokens are separated by ", " -- trim the leading space.
       raw_token="${raw_token# }"
       normalized=$(_normalize_decoration_token "$raw_token" "$branch")
-      if [ -n "$normalized" ]; then
-        candidate="$normalized"
-        break 2
-      fi
+      [ -n "$normalized" ] || continue
+      # Dedupe: the same branch name can decorate more than one commit on the
+      # walk, and re-verifying it would cost a git call per repeat.
+      case "$seen" in
+        *"|${normalized}|"*) continue ;;
+      esac
+      seen="${seen}|${normalized}|"
+      printf '%s\n' "$normalized"
     done
   done <<< "$log_output"
-
-  printf '%s' "$candidate"
 }
 
 # Verify a decoration candidate is a genuine ancestor of branch via
@@ -2296,15 +2314,22 @@ cmd_detect_parent_branch() {
   fi
 
   local raw_candidate
-  raw_candidate=$(_detect_parent_branch_candidate "$branch")
-
   local base="" verified="false" source="default-branch"
 
-  if [ -n "$raw_candidate" ] && _verify_parent_candidate "$branch" "$raw_candidate"; then
-    base="$raw_candidate"
-    verified="true"
-    source="decoration"
-  else
+  # Try every candidate in walk order and take the first that verifies. A
+  # rejected candidate no longer ends the search -- see
+  # _detect_parent_branch_candidate's header for what that cost.
+  while IFS= read -r raw_candidate; do
+    [ -n "$raw_candidate" ] || continue
+    if _verify_parent_candidate "$branch" "$raw_candidate"; then
+      base="$raw_candidate"
+      verified="true"
+      source="decoration"
+      break
+    fi
+  done <<< "$(_detect_parent_branch_candidate "$branch")"
+
+  if [ -z "$base" ]; then
     base=$(_resolve_default_branch)
   fi
 

@@ -2753,12 +2753,31 @@ while true:
                 "[conflict output from merge-all]"
                 ""
                 "Resolve the conflict on branch [merge_target] in [merge_cwd] and re-run `/aimi:execute` to continue."
-                "[merge_cwd] itself — this group's execution root, whichever mode created it — and any live dev server running inside it are left untouched by this failure; only this wave's story worktrees (cleaned up below) are removed, so the conflict can be resolved directly in the still-live working tree."
+                "[merge_cwd] itself — this group's execution root, whichever mode created it — and any live dev server running inside it are left untouched by this failure, so the conflict can be resolved directly in the still-live working tree."
+                "Merged story worktrees were removed; the ones that did NOT merge keep both their worktree and their branch, so the retry has something to retry."
 
-                # Cleanup ALL worktrees from this wave (across all project groups) before stopping
+                # Cleanup this wave's worktrees -- but ONLY the ones whose work
+                # is already reachable from the merge target. merge_all_worktrees
+                # processes its argv in order and stops at the first conflict
+                # without attempting the rest, so a story from the conflicting
+                # one onward has NOT been merged: removing it without
+                # --keep-branch would run `git branch -D` on the only ref naming
+                # its commits, stranding them. This is the same rule the
+                # Phase-Mode Paired Split conflict path already applies to its
+                # own members (see "Merge Split Branches Into the Phase Branch"),
+                # and the two must not disagree about the same scenario.
                 for full_story_id, wt in all_worktrees:
                     cd EXEC_ROOT[wt.group_key]
-                    $WORKTREE_MGR remove [wt.worktree_name]
+                    if git -C [EXEC_ROOT[wt.group_key]] merge-base --is-ancestor [wt.worktree_name] [EXEC_BRANCH[wt.group_key]]:
+                        # Merged: its commits live on the target branch, so the
+                        # branch ref has no remaining consumer.
+                        $WORKTREE_MGR remove [wt.worktree_name]
+                    else:
+                        # Unmerged -- the conflicting story, anything after it
+                        # merge-all never reached, and every story that failed
+                        # earlier in this wave. Leave the worktree AND the branch
+                        # in place; report the branch so the user can find it.
+                        Report: "  kept (unmerged): [wt.worktree_name]"
 
                 # PHASE_MODE with PHASE_ID set (this session itself ran Step 1.7 --
                 # never true inside a Phase-Mode Paired Split sub-orchestrator):
