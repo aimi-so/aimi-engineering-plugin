@@ -4225,9 +4225,9 @@ _forge_repo_info_gitlab() {
 # used when gh is absent, unauthenticated, or the forge has no adapter yet.
 # Every path segment before the last becomes owner (not just the
 # second-to-last), so a GitLab-style nested subgroup path
-# (group/subgroup/repo) survives intact for a future GitLab adapter, even
-# though phase 1 ships GitHub only. Prints {owner, repo}, both null when the
-# path never yields at least two segments.
+# (group/subgroup/repo) survives intact for the GitLab adapter phase 3 later
+# shipped. Prints {owner, repo}, both null when the path never yields at
+# least two segments.
 _forge_repo_info_parse_url() {
   local url="$1" path=""
 
@@ -4683,16 +4683,16 @@ _forge_map_pr_field_gitlab() {
 # DIFFERENT key (`hasMerged`) and so cannot live in a one-field-one-key
 # table.
 #
-# CONTRADICTS commands/references/forge-contract.md:100-107, KNOWINGLY. That
-# document states tea "does not expose a distinct `merged` value", that a
-# merged PR "reads as `closed` under tea's own field list", and that an
-# adapter "should normalize tea's `closed` straight through". Both halves are
-# falsified by source: formatPRState (modules/print/pull.go:95-100) returns
-# "merged" whenever pr.Merged != nil, and the DETAIL path carries
-# `hasMerged`/`mergedAt` alongside the raw state (cmd/pulls.go:33,46,47).
-# The correct behaviour is implemented here; correcting that document is
-# outline:06's job, not this story's, so the two disagree on purpose until
-# then.
+# THIS ONCE CONTRADICTED commands/references/forge-contract.md, AND NO LONGER
+# DOES. That document used to state tea "does not expose a distinct `merged`
+# value", that a merged PR "reads as `closed` under tea's own field list", and
+# that an adapter "should normalize tea's `closed` straight through". All
+# three are falsified by source: formatPRState (modules/print/pull.go:95-100)
+# returns "merged" whenever pr.Merged != nil, and the DETAIL path carries
+# `hasMerged`/`mergedAt` alongside the raw state (cmd/pulls.go:33,46,47). The
+# correct behaviour was implemented here first and the ruling was deleted
+# afterwards, so the contract's State Mapping section now describes this code
+# rather than misdirecting the next adapter author away from it.
 #
 # Usage: _forge_map_pr_field_gitea <contract-field>
 _forge_map_pr_field_gitea() {
@@ -6599,11 +6599,13 @@ cmd_forge_pr_edit() {
 # what lets a future caller preserve that behavior once it migrates off a
 # raw `gh issue create` shell-out.
 #
-# GitHub was the only adapter in phase 1; phase 3 added GitLab to the READ
-# verb (forge-issue-view -> `glab issue view <n> -F json`). forge-issue-create
-# is unchanged and still GitHub-only. A detected forge with no adapter still
-# degrades exactly like a missing CLI binary rather than attempting a call
-# that could only fail.
+# GitHub was the only adapter in phase 1. Phase 3 added GitLab and phase 4
+# added Gitea, to the READ verb (forge-issue-view -> `glab issue view <n> -F
+# json` / `tea issues <n> -o json`) AND to forge-issue-create itself
+# (_forge_issue_create_gitlab / _forge_issue_create_gitea), so this verb is no
+# longer GitHub-only. A detected forge with no adapter still degrades exactly
+# like a missing CLI binary rather than attempting a call that could only
+# fail.
 
 # Forge-native issue/PR state strings, normalized per forge-contract.md's
 # "State Mapping" table. Case-folded first because GitHub's gh CLI returns
@@ -15976,8 +15978,10 @@ COMMANDS:
                               found) carries {forge, host, authenticated, account,
                               identityRequested, identityHonored}. authenticated:false
                               with status="found" is a confirmed logged-out session;
-                              status="error" means the check itself could not run (gh
-                              missing, or the forge has no adapter). Set
+                              status="error" means the check itself could not run --
+                              the binary the DETECTED forge needs is missing (gh,
+                              glab or tea), or it ran and could not answer, or the
+                              forge has no adapter at all. Set
                               AIMI_FORGE_IDENTITY=<login> (env var only, never a flag)
                               to compare against the active account -- this does not
                               switch accounts.
@@ -16023,25 +16027,32 @@ COMMANDS:
                               (AIMI_FORGE_IDENTITY / GH_TOKEN), never a flag.
     forge-repo-info [--project <path>]
                               Resolve the active forge's owner/repo via a single
-                              `gh repo view` call, falling back to parsing the git
-                              remote URL when gh is unavailable. Output:
-                              {status ("found"|"not_found"), data, message}. data
-                              (when found) carries {forge, host, owner, repo,
-                              nameWithOwner, source ("gh"|"local-parse")}.
+                              forge-CLI call -- `gh repo view` on github, `glab
+                              repo view -F json` on gitlab -- falling back to
+                              parsing the git remote URL whenever that CLI is
+                              unavailable or the forge has no such tier. gitea
+                              always takes the fallback, by decision: tea has no
+                              "show THIS repository as JSON" command to call.
+                              Output: {status ("found"|"not_found"), data,
+                              message}. data (when found) carries {forge, host,
+                              owner, repo, nameWithOwner,
+                              source ("gh"|"glab"|"local-parse")}.
     forge-pr-view --pr <branch-or-number> [--include <fields>] [--project <path>]
                               Field-selectable PR lookup with a three-way
                               found|not_found|error status, fixing the
                               exit-code conflation `gh pr view --json url`
                               carries today (a broken token reads as "no PR
                               yet"). Output: {status, pr, unsupported_fields,
-                              evidence}. --include is a comma-separated
+                              message}. --include is a comma-separated
                               subset of: number, url, title, body, state,
-                              headRefName, baseRefName, files, reviews,
-                              comments -- defaults to the portable core
-                              (excludes files/reviews/comments) when omitted.
-                              Only github ships in this phase; gitlab, gitea,
-                              unknown, or a missing gh binary degrade to
-                              status=error with no stderr output.
+                              headRefName, baseRefName, files, isDraft,
+                              mergeable -- defaults to the portable core
+                              (excludes files/isDraft/mergeable) when
+                              omitted. Any other name exits 1. github,
+                              gitlab and gitea each have an adapter; only
+                              `unknown`, or a missing gh/glab/tea binary,
+                              degrades to status=error with no stderr
+                              output.
     forge-pr-create --title <t> --base <branch> --head <branch> [--body <text>] [--project <path>]
                               Write verb -- shells gh pr create (no --json
                               flag exists on it; the URL is captured and the
@@ -16061,9 +16072,10 @@ COMMANDS:
                               stderr (MANDATORY-PRINT degrade mode) and
                               EXITS NON-ZERO -- a hard failure, so a
                               caller's own per-repository failure isolation
-                              can react. GitHub only in phase 1. Identity,
-                              when needed, is read from an env var (e.g.
-                              AIMI_FORGE_IDENTITY / GH_TOKEN), never a flag.
+                              can react. github, gitlab and gitea each have
+                              an adapter. Identity, when needed, is read from
+                              an env var (e.g. AIMI_FORGE_IDENTITY /
+                              GH_TOKEN), never a flag.
     forge-pr-edit --number <n> --body <text> [--project <path>]
                               Write verb -- shells gh pr edit <number>
                               --body, then re-reads the PR via forge-pr-view
@@ -16073,16 +16085,17 @@ COMMANDS:
                               mutates an existing number and mints no new
                               identifier. Same guards, degrade contract, and
                               non-zero-exit-on-failure as forge-pr-create.
-                              GitHub only in phase 1.
+                              github, gitlab and gitea each have an adapter.
     forge-issue-view (--number <n> | --url <issue-url>) [--project <path>]
                               Read verb -- shells gh issue view, normalized to
                               {status: "found"|"not_found"|"error", data, message}
                               (forge-contract.md's Three-Way Status Convention).
                               data carries {number, url, title, body, state,
                               labels, comments, unsupported_fields, raw} on
-                              found. QUIET degrade mode: a missing/unauthenticated
-                              gh yields status "error" with no stderr output.
-                              GitHub only in phase 1.
+                              found. QUIET degrade mode: a missing or
+                              unauthenticated forge CLI yields status "error"
+                              with no stderr output. github, gitlab and gitea
+                              each have an adapter.
     forge-issue-create --title <t> --body <b> [--project <path>]
                               Write verb -- shells gh issue create (no --json
                               flag exists on it; the URL/number are captured
@@ -16097,8 +16110,8 @@ COMMANDS:
                               (exit stays 0) -- it prints a manual "create
                               this yourself" instruction to stderr
                               (MANDATORY-PRINT degrade mode) and lets the
-                              caller branch on status instead. GitHub only
-                              in phase 1.
+                              caller branch on status instead. github, gitlab
+                              and gitea each have an adapter.
     forge-pr-review-threads --pr <number> [--owner <owner> --repo <repo>] [--all] [--project <path>]
                               Read verb -- ports get-pr-comments' reviewThreads
                               GraphQL query verbatim; owner, repo and the PR
@@ -16116,9 +16129,9 @@ COMMANDS:
                               existing filter; --all returns every thread.
                               Owner/repo auto-detected via forge-repo-info
                               when not both supplied. QUIET degrade mode: a
-                              missing gh, unsupported forge, or gh failure
-                              yields status=error with no stderr. GitHub only
-                              in phase 1.
+                              missing forge CLI, unsupported forge, or CLI
+                              failure yields status=error with no stderr.
+                              github, gitlab and gitea each have an adapter.
     forge-resolve-review-thread --thread-id <id> [--project <path>]
                               Write verb -- ports resolve-pr-thread's
                               resolveReviewThread GraphQL mutation verbatim;
@@ -16136,7 +16149,7 @@ COMMANDS:
                               changed tab" instruction to stderr and exits
                               non-zero, since there is no gh subcommand or
                               REST fallback for resolving a review thread.
-                              GitHub only in phase 1.
+                              github, gitlab and gitea each have an adapter.
     detect-interactivity [--non-interactive]
                               Print resolved interactivity mode (picker|agent)
                               Returns picker by default; returns agent only when

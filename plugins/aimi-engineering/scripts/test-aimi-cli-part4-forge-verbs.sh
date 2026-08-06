@@ -11680,6 +11680,267 @@ gtr_test_tea_whoami_is_never_invoked() {
   gtr_teardown_fake_tea_read_fixture
 }
 
+# ---------------------------------------------------------------------------
+# Forge Documentation Correctness Tests (phase 4 outline:06)
+# ---------------------------------------------------------------------------
+# Guards the three documentation defects this story fixed, so none of them can
+# come back silently:
+#   1. forge-contract.md's State Mapping ruled that `tea` has no distinct
+#      `merged` value and told a future adapter to normalize `closed` straight
+#      through. Source falsifies both halves; outline:01 shipped the correct
+#      derivation. A spec that misdirects an implementer is worse than a stale
+#      one, so its removal is asserted by name.
+#   2. Four places under commands/ still claimed GitHub was the only adapter,
+#      false since phase 3 shipped GitLab.
+#   3. Four `cmd_help` blocks disagreed with the code that produces them --
+#      two of them (`--include` naming reviews/comments, output key
+#      `evidence`) never right rather than merely stale.
+#
+# EVERY COUNT HERE IS EARNED. The prefix is `gtd_`, disjoint from `gl*`
+# (phase 3) and from every phase-4 sibling. Three rules hold throughout, and
+# each exists because breaking it produced a false zero in this repository:
+#   - COUNTING FORM ONLY -- `count=$(grep ... | grep -c '^') || count=0`
+#     compared with assert_eq. Never `grep -q` inside an `if`: under
+#     `set -o pipefail` that shape SIGPIPEs its left half and fails OPEN,
+#     reporting "clean" for a file that contains the pattern.
+#   - NOTHING REDIRECTED TO /dev/null. A hidden error message is how an
+#     unmatched query becomes indistinguishable from a real zero.
+#   - EVERY VARIABLE QUOTED. These blocks are read under bash here, but the
+#     same shape is written in command files that run under zsh, where an
+#     unquoted list variable is passed as ONE argument and matches nothing.
+# The falsifiability proof and the traversal control therefore both run BEFORE
+# any assertion that trusts a zero -- the convention this file already follows
+# at :167, :585, :3670, :4379 and :6199.
+# ---------------------------------------------------------------------------
+
+# The stale-scope regex, written once and shared by the falsifiability proof
+# and the guard so the two provably exercise the SAME query -- a control that
+# tests a different pattern from the one it vouches for is not a control.
+# Three alternations because the four sites phrased the same false claim three
+# different ways ("only adapter shipping in phase 1", "phase 1 ships GitHub
+# only" / "phase 1 ships only GitHub", "the only adapter this verb ships in
+# phase 1").
+GTD_STALE_SCOPE_RE='only adapter|phase 1 ships|ships in phase 1'
+
+# Counts matching LINES under a directory tree. The `| grep -c '^'` half is
+# what makes a no-match run report the number 0 instead of leaving the caller
+# to interpret grep's exit status, and the `|| count=0` catches the exit 1
+# that a no-match pipeline still returns under `set -o pipefail`.
+gtd_count_in_dir() {
+  local dir="$1" pattern="$2" count
+  count=$(grep -rE -- "$pattern" "$dir" | grep -c '^') || count=0
+  printf '%s' "$count"
+}
+
+# The same counting discipline over a string already in hand, for slicing a
+# single help block out of captured stdout.
+gtd_count_in_text() {
+  local text="$1" pattern="$2" count
+  count=$(printf '%s\n' "$text" | grep -cE -- "$pattern") || count=0
+  printf '%s' "$count"
+}
+
+# Slices ONE verb's block out of `--help` stdout: the line introducing the
+# verb (4-space indent) plus its continuation lines (30-space indent), stopping
+# at the next verb. Scoping matters for at least one assertion below --
+# `evidence` is a legitimate key in verify-creates' own help further down the
+# same output, so an unscoped check on that word could be satisfied, or
+# defeated, by a block this story never touched.
+gtd_help_block() {
+  printf '%s\n' "$1" | awk -v verb="$2" '
+    $0 ~ ("^    " verb "( |$)") { inblock = 1; print; next }
+    inblock && /^    [^ ]/     { inblock = 0 }
+    inblock                    { print }
+  '
+}
+
+# RUNS FIRST, ON PURPOSE. Before any assertion below trusts gtd_count_in_dir
+# returning 0, the reader is shown returning NON-zero for a directory that
+# genuinely holds the stale claim -- rebuilt by planting one of the deleted
+# sentences back into a copy of the file it was deleted from. A clean zero
+# from a reader never observed matching anything proves only that the reader
+# ran.
+gtd_test_the_stale_claim_reader_can_return_non_zero() {
+  echo ""
+  echo "=== docs: the stale-scope reader is proven able to return non-zero BEFORE any zero is believed ==="
+
+  local planted contract
+  contract="$SCRIPT_DIR/../commands/references/forge-contract.md"
+  planted=$(mktemp -d)
+  cp "$contract" "$planted/forge-contract.md"
+
+  # The sentence exactly as it read before this story deleted it.
+  printf '%s\n' 'and every forge verb built on top of them. GitHub is the' \
+                'only adapter shipping in phase 1; this contract is written so GitLab (`glab`)' \
+                >> "$planted/forge-contract.md"
+
+  local planted_hits
+  planted_hits=$(gtd_count_in_dir "$planted" "$GTD_STALE_SCOPE_RE")
+  assert_eq "yes" "$([ "$planted_hits" -ge 1 ] && echo yes || echo no)" "gtd falsifiability: the reader DOES find the stale claim when one is planted back -- so the zero asserted later means absent, not unmatched"
+
+  # And it counts LINES, not files: the planted copy carries exactly the one
+  # line, which is what makes the real directory's 0 a meaningful number
+  # rather than a coincidence of aggregation.
+  assert_eq "1" "$planted_hits" "gtd falsifiability: exactly one line matched in the planted copy"
+
+  rm -rf "$planted"
+}
+
+# THE SECOND CONTROL: the reader is shown reaching real files under the real
+# commands/ directory. The proof above used a temp directory; this one proves
+# the traversal that the guard actually runs is not silently walking nothing.
+gtd_test_the_reader_reaches_the_real_commands_directory() {
+  echo ""
+  echo "=== docs: a pattern known to be present in commands/ counts non-zero, proving the traversal reaches files ==="
+
+  local commands_dir control_hits
+  commands_dir="$SCRIPT_DIR/../commands"
+
+  control_hits=$(gtd_count_in_dir "$commands_dir" 'Gitea/Forgejo')
+  assert_eq "yes" "$([ "$control_hits" -gt 0 ] && echo yes || echo no)" "gtd traversal control: \`Gitea/Forgejo\` is present under commands/ and the reader finds it"
+}
+
+# THE GUARD ITSELF, and the only assertion here that asserts a zero. Both
+# controls above have already run.
+gtd_test_no_command_file_claims_github_is_the_only_adapter() {
+  echo ""
+  echo "=== docs: no file under commands/ still claims GitHub is the only forge backend ==="
+
+  local commands_dir
+  commands_dir="$SCRIPT_DIR/../commands"
+
+  assert_eq "0" "$(gtd_count_in_dir "$commands_dir" "$GTD_STALE_SCOPE_RE")" "gtd scope guard: zero lines under commands/ match the stale-scope regex"
+
+  # The two individually named files, checked one at a time so a failure says
+  # WHICH document regressed rather than only that the total moved.
+  assert_eq "0" "$(gtd_count_in_dir "$commands_dir/references/forge-contract.md" "$GTD_STALE_SCOPE_RE")" "gtd scope guard: forge-contract.md carries none of them"
+  assert_eq "0" "$(gtd_count_in_dir "$commands_dir/open-pr.md" "$GTD_STALE_SCOPE_RE")" "gtd scope guard: and neither does open-pr.md"
+}
+
+# THE SUBSTANTIVE FIX. forge-contract.md used to rule that `tea` cannot
+# distinguish a merged pull request and that an adapter should normalize
+# `closed` straight through. An implementer following that would have shipped
+# a PR that reports `closed` after it was merged.
+gtd_test_contract_merged_state_ruling_matches_the_shipped_adapter() {
+  echo ""
+  echo "=== docs: forge-contract.md's merged-state ruling now describes what tea reports and what the adapter derives ==="
+
+  local contract
+  contract="$SCRIPT_DIR/../commands/references/forge-contract.md"
+
+  # Control first: a phrase the section still legitimately carries, so a zero
+  # below cannot be a mis-pointed path or an unreadable file.
+  local heading_hits
+  heading_hits=$(gtd_count_in_dir "$contract" '^### State Mapping$')
+  assert_eq "1" "$heading_hits" "gtd merged control: the State Mapping heading is found exactly once -- the file is being read"
+
+  # The falsified claims, gone.
+  assert_eq "0" "$(gtd_count_in_dir "$contract" 'does not expose a distinct .merged. value')" "gtd merged: the claim that tea exposes no distinct merged value is deleted"
+  assert_eq "0" "$(gtd_count_in_dir "$contract" 'A merged PR reads as .closed.')" "gtd merged: and so is the claim that a merged PR reads as closed"
+  assert_eq "0" "$(gtd_count_in_dir "$contract" 'straight through as')" "gtd merged: the instruction to normalize tea's closed straight through is DELETED, not softened -- it is the line that would have produced the wrong behaviour"
+  assert_eq "0" "$(gtd_count_in_dir "$contract" 'not distinguished')" "gtd merged: the State Mapping table's merged row no longer reads (not distinguished)"
+
+  # The sourced facts that replace them, each cited to the file and lines it
+  # was read from.
+  assert_eq "yes" "$([ "$(gtd_count_in_dir "$contract" 'modules/print/pull\.go:95-100')" -ge 1 ] && echo yes || echo no)" "gtd merged: formatPRState is cited at modules/print/pull.go:95-100 for the list path printing merged literally"
+  assert_eq "yes" "$([ "$(gtd_count_in_dir "$contract" 'cmd/pulls\.go:33')" -ge 1 ] && echo yes || echo no)" "gtd merged: cmd/pulls.go:33 is cited for the detail path's raw open/closed state"
+  assert_eq "yes" "$([ "$(gtd_count_in_dir "$contract" 'cmd/pulls\.go:46,47')" -ge 1 ] && echo yes || echo no)" "gtd merged: and cmd/pulls.go:46,47 for hasMerged and mergedAt beside it"
+  assert_eq "yes" "$([ "$(gtd_count_in_dir "$contract" 'hasMerged')" -ge 1 ] && echo yes || echo no)" "gtd merged: hasMerged is named as the key the derivation reads"
+
+  # And it names the function that actually ships the derivation, in the
+  # adapter rather than in the shared value-normalizer.
+  assert_eq "yes" "$([ "$(gtd_count_in_dir "$contract" '_forge_map_pr_state_gitea')" -ge 1 ] && echo yes || echo no)" "gtd merged: the shipped derivation _forge_map_pr_state_gitea is named by the contract"
+  assert_eq "yes" "$([ "$(gtd_count_in_dir "$contract" 'lives in the adapter, not in ._forge_map_state')" -ge 1 ] && echo yes || echo no)" "gtd merged: and the contract states the derivation lives in the adapter rather than in _forge_map_state"
+
+  # The function the contract now names must exist in the CLI -- otherwise the
+  # doc would be citing something that shipped under a different name.
+  assert_eq "yes" "$([ "$(gtd_count_in_dir "$CLI" '^_forge_map_pr_state_gitea\(\) \{')" -ge 1 ] && echo yes || echo no)" "gtd merged: and that function is really defined in aimi-cli.sh, so the citation is not aspirational"
+}
+
+# THE HELP BLOCKS, read out of `--help` STDOUT rather than out of the source
+# file, so what is pinned is what a user actually reads.
+gtd_test_help_pr_view_block_matches_the_code() {
+  echo ""
+  echo "=== help: forge-pr-view's block agrees with the validator and the emitter that produce it ==="
+
+  local help_out block
+  help_out=$(bash "$CLI" --help)
+  block=$(gtd_help_block "$help_out" "forge-pr-view")
+
+  # Extraction controls, before any zero from the slice is trusted: the slice
+  # is non-empty, it starts at the right verb, and it TERMINATED -- a runaway
+  # slice would swallow later blocks and make every zero below meaningless.
+  local block_lines
+  block_lines=$(printf '%s\n' "$block" | grep -c '^') || block_lines=0
+  assert_eq "yes" "$([ "$block_lines" -ge 8 ] && echo yes || echo no)" "gtd help control: the forge-pr-view block sliced out of --help is a real block of text"
+  assert_eq "1" "$(gtd_count_in_text "$block" '^    forge-pr-view --pr ')" "gtd help control: it starts at forge-pr-view's own heading line"
+  assert_eq "0" "$(gtd_count_in_text "$block" '^    forge-pr-create ')" "gtd help control: and stops before the next verb, so these counts describe one block only"
+
+  # (b) the --include list, equal to the set cmd_forge_pr_view validates.
+  assert_eq "0" "$(gtd_count_in_text "$block" 'reviews')" "gtd help (pr-view): \`reviews\` is gone from the --include list -- the verb exits 1 on it"
+  assert_eq "0" "$(gtd_count_in_text "$block" 'comments')" "gtd help (pr-view): and so is \`comments\`, for the same reason"
+  assert_contains "files, isDraft," "$block" "gtd help (pr-view): the list now names isDraft"
+  assert_contains "mergeable" "$block" "gtd help (pr-view): and mergeable"
+  assert_contains "excludes files/isDraft/mergeable" "$block" "gtd help (pr-view): the documented default correctly names what the portable core excludes"
+
+  # (b, second half) the output key, equal to what _forge_pr_view_emit emits.
+  assert_eq "0" "$(gtd_count_in_text "$block" 'evidence')" "gtd help (pr-view): the output key \`evidence\` is gone from THIS block"
+  assert_eq "1" "$(gtd_count_in_text "$block" 'unsupported_fields,$')" "gtd help (pr-view): the envelope line is present exactly once"
+  assert_contains "message}" "$block" "gtd help (pr-view): and the fourth key is spelled message, which is what the emitter emits"
+
+  # The scoping control for the assertion just above: `evidence` IS present
+  # elsewhere in the same --help output, legitimately, so a check that did not
+  # slice would have been answering a different question.
+  assert_eq "yes" "$([ "$(gtd_count_in_text "$help_out" 'evidence')" -ge 1 ] && echo yes || echo no)" "gtd help control: \`evidence\` still appears in the full --help output (verify-creates' own key) -- proving the zero above came from the slice, not from an unmatchable pattern"
+
+  # (a) adapter availability.
+  assert_eq "0" "$(gtd_count_in_text "$block" 'Only github ships in this phase')" "gtd help (pr-view): the claim that only github ships is gone"
+  assert_contains "github," "$block" "gtd help (pr-view): github is named among the backends that ship"
+  assert_contains "gitlab and gitea each have an adapter" "$block" "gtd help (pr-view): alongside gitlab and gitea"
+  assert_contains "unknown" "$block" "gtd help (pr-view): leaving \`unknown\` as what still degrades to status=error"
+}
+
+gtd_test_help_repo_info_block_matches_the_code() {
+  echo ""
+  echo "=== help: forge-repo-info's block enumerates every source value the verb can emit ==="
+
+  local help_out block block_lines
+  help_out=$(bash "$CLI" --help)
+  block=$(gtd_help_block "$help_out" "forge-repo-info")
+
+  block_lines=$(printf '%s\n' "$block" | grep -c '^') || block_lines=0
+  assert_eq "yes" "$([ "$block_lines" -ge 6 ] && echo yes || echo no)" "gtd help control: the forge-repo-info block sliced out of --help is a real block of text"
+  assert_eq "0" "$(gtd_count_in_text "$block" '^    forge-pr-view ')" "gtd help control: and it stops before the next verb"
+
+  # (c) the source enumeration, equal to what _forge_repo_info can assign.
+  assert_contains '("gh"|"glab"|"local-parse")' "$block" "gtd help (repo-info): the source enumeration names all three tiers, glab included"
+  assert_eq "0" "$(gtd_count_in_text "$block" 'gh repo view` call,')" "gtd help (repo-info): the gh-only \"via a single \`gh repo view\` call, falling back ...\" phrasing is gone"
+  assert_contains "glab" "$block" "gtd help (repo-info): glab is named as a call this verb can make"
+  assert_contains "gitea" "$block" "gtd help (repo-info): and gitea is named as the forge that always takes the local-parse fallback"
+
+  # The enumeration must not over-promise either: there is no gitea tier in
+  # _forge_repo_info, so no such source value may be advertised.
+  assert_eq "0" "$(gtd_count_in_text "$block" '"tea"')" "gtd help (repo-info): and no \"tea\" source value is advertised, because that tier was deliberately not written"
+}
+
+gtd_test_help_auth_status_block_matches_the_code() {
+  echo ""
+  echo "=== help: forge-auth-status's block no longer names gh as the only binary whose absence errors ==="
+
+  local help_out block block_lines
+  help_out=$(bash "$CLI" --help)
+  block=$(gtd_help_block "$help_out" "forge-auth-status")
+
+  block_lines=$(printf '%s\n' "$block" | grep -c '^') || block_lines=0
+  assert_eq "yes" "$([ "$block_lines" -ge 8 ] && echo yes || echo no)" "gtd help control: the forge-auth-status block sliced out of --help is a real block of text"
+  assert_eq "0" "$(gtd_count_in_text "$block" '^    forge-account-select ')" "gtd help control: and it stops before the next verb"
+
+  # (d) the error clause.
+  assert_eq "0" "$(gtd_count_in_text "$block" 'missing, or the forge has no adapter')" "gtd help (auth-status): the clause naming gh alone as the missing binary is gone"
+  assert_contains "glab or tea" "$block" "gtd help (auth-status): glab and tea are named alongside gh as binaries whose absence produces status=error"
+  assert_contains "DETECTED forge" "$block" "gtd help (auth-status): and the block says the binary is chosen from the DETECTED forge"
+}
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -12021,6 +12282,22 @@ main() {
   gtr_test_gitea_read_verbs_bind_no_credentials
   gtr_test_gitea_read_verbs_mutation_matrix
   gtr_test_tea_whoami_is_never_invoked
+
+  # Forge Documentation Correctness Tests (phase 4 outline:06) -- the three
+  # documentation defects phases 3 and 4 falsified: forge-contract.md's
+  # merged-state ruling, four "GitHub is the only adapter" scope claims under
+  # commands/, and four cmd_help blocks that disagreed with the code producing
+  # them. The falsifiability proof and the traversal control run FIRST, before
+  # any assertion trusts a zero.
+  echo ""
+  echo "--- Forge Documentation Correctness Tests (phase 4 outline:06) ---"
+  gtd_test_the_stale_claim_reader_can_return_non_zero
+  gtd_test_the_reader_reaches_the_real_commands_directory
+  gtd_test_no_command_file_claims_github_is_the_only_adapter
+  gtd_test_contract_merged_state_ruling_matches_the_shipped_adapter
+  gtd_test_help_pr_view_block_matches_the_code
+  gtd_test_help_repo_info_block_matches_the_code
+  gtd_test_help_auth_status_block_matches_the_code
 
   cleanup
 
