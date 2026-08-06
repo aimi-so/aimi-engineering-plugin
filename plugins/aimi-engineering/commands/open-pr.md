@@ -8,7 +8,7 @@ allowed-tools: Bash(git:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*)
 
 # Aimi Open PR
 
-Automatically detect the parent branch, build the PR title and description from git commits and the diff against the base branch, and create a pull request via the `forge-pr-create` verb (`plugins/aimi-engineering/commands/references/forge-contract.md`) — GitHub is the only adapter this verb ships in phase 1.
+Automatically detect the parent branch, build the PR title and description from git commits and the diff against the base branch, and create a pull request via the `forge-pr-create` verb (`plugins/aimi-engineering/commands/references/forge-contract.md`) — GitHub, GitLab and Gitea/Forgejo each have an adapter for this verb today.
 
 ## Project Conventions
 

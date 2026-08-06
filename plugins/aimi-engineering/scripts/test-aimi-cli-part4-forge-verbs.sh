@@ -25,7 +25,9 @@ set -uo pipefail
 #   - Forge Dispatch-Order Tests (phase 1.1 US-006)
 #   - Forge Derivation Memo + PR-View Probe-Order Tests (phase 1.1 US-010)
 #   - GitLab PR-field Mapping Tests (phase 3 US-001)
+#   - Gitea PR-field Mapping Tests (phase 4 outline:01)
 #   - GitLab READ-verb Routing Tests (phase 3 US-002)
+#   - Gitea READ-verb Routing Tests (phase 4 outline:02)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLI="$SCRIPT_DIR/aimi-cli.sh"
@@ -326,6 +328,527 @@ test_forge_map_pr_field_gitlab() {
   assert_eq "9" "$covered" "gitlab map: the gitlab mapper answers for nine of the ten -- files alone is silently empty, by determination not omission"
 
   teardown_fake_glab_fixture
+}
+
+# ============================================================================
+# Gitea PR-field Mapping Tests (phase 4 outline:01)
+# ============================================================================
+# Covers the gitea arm of the _forge_map_pr_field_* seam, the sibling
+# _forge_map_pr_state_gitea derivation, and the `gitea)` arm added to
+# _forge_pr_view_build_found.
+#
+# EVERY function and control variable this section introduces is prefixed
+# `gtm_`/`GTM_` (Gitea Map). That is not decoration. Sibling stories in this
+# same phase are editing this same file for the read verbs, the write verbs
+# and the review threads, on branches none of us can see, and bash silently
+# keeps the LAST definition of a duplicated function -- so three
+# individually-green branches can merge into a red one. The phase-2 founding
+# incident: two wave-1 stories both defined source_forge_account_functions
+# and six assertions failed with exit 127 only on the merge. `gtm_` is
+# verified disjoint from the existing `gla_`, `glr_`, `glt_`, `glw_` and
+# `run_` prefixes here, and the siblings have reserved `gtr_`, `gtw_`, `gtt_`.
+#
+# tea is genuinely NOT INSTALLED on this machine. That is the phase's declared
+# verification ceiling, the same one phase 3 declared for glab: the stub below
+# is the only tea these tests ever see, and its payloads are modelled on
+# `gitea/tea` `main` source read on 2026-08-06 rather than on a captured
+# real-binary response. These tests prove WHICH arguments the adapter emits
+# and HOW it parses a fixture -- never what real tea does with them.
+#
+# The gitea) arm added to _forge_pr_view_build_found has no production caller
+# until outline:02 routes cmd_forge_pr_view, which is why every test here
+# calls the functions directly rather than through the CLI, and why the
+# existing `no adapter for forge "gitea"` control assertions stay green.
+
+# A fake `tea` covering the two pull-request invocations this story needs:
+# the DETAIL form `tea pulls <index> -o json` and the LIST form
+# `tea pulls list ... -f <csv> -o json`. They serve from SEPARATE control
+# variables on purpose -- the whole point of AC2 is that the two shapes are
+# genuinely different documents, which a single shared payload variable would
+# quietly erase.
+#
+# Written to its own `mktemp -d` and prepends nothing to PATH itself --
+# callers do `PATH="$GTM_TEA_DIR:$PATH" tea …` per invocation, the same
+# pattern all four fake-glab stubs above follow. Driven entirely by GTM_TEA_*
+# environment variables:
+#   GTM_TEA_LOG             optional file; every invocation's argv appended,
+#                           one line per call -- lets an assertion prove WHICH
+#                           flags were passed (`-o json` and tea's own `-f`
+#                           selector, never a gh-style `--json <field-list>`)
+#   GTM_TEA_DETAIL_JSON     `tea pulls <index> -o json` stdout (default '{}')
+#   GTM_TEA_DETAIL_JSON_SECOND  when set together with GTM_TEA_CALL_COUNTER,
+#                           stdout for the SECOND and every later detail call,
+#                           so one fixture can report DIFFERING output across
+#                           two calls and a before/after comparison is proven
+#                           able to move rather than passing vacuously
+#   GTM_TEA_CALL_COUNTER    path to a counter file incremented once per detail
+#                           call; required for DETAIL_JSON_SECOND to fire
+#   GTM_TEA_DETAIL_EXIT     detail-call exit code (default 0)
+#   GTM_TEA_DETAIL_STDERR   stderr emitted when that exit is non-zero
+#   GTM_TEA_LIST_JSON       `tea pulls list … -o json` stdout (default '[]')
+gtm_setup_fake_tea_fixture() {
+  GTM_TEA_DIR=$(mktemp -d)
+  cat > "$GTM_TEA_DIR/tea" << 'GTM_FAKE_TEA_SCRIPT'
+#!/usr/bin/env bash
+if [ -n "${GTM_TEA_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$GTM_TEA_LOG"
+fi
+
+case "$1" in
+  pulls)
+    case "$2" in
+      list)
+        body="${GTM_TEA_LIST_JSON:-}"
+        [ -z "$body" ] && body='[]'
+        printf '%s' "$body"
+        exit 0
+        ;;
+      *)
+        call=1
+        if [ -n "${GTM_TEA_CALL_COUNTER:-}" ]; then
+          call=$(cat "$GTM_TEA_CALL_COUNTER" 2>/dev/null || echo 0)
+          call=$((call + 1))
+          printf '%s\n' "$call" > "$GTM_TEA_CALL_COUNTER"
+        fi
+        code="${GTM_TEA_DETAIL_EXIT:-0}"
+        if [ "$code" != "0" ]; then
+          printf '%s' "${GTM_TEA_DETAIL_STDERR:-}" >&2
+          exit "$code"
+        fi
+        body="${GTM_TEA_DETAIL_JSON:-}"
+        if [ "$call" -gt 1 ] && [ -n "${GTM_TEA_DETAIL_JSON_SECOND:-}" ]; then
+          body="$GTM_TEA_DETAIL_JSON_SECOND"
+        fi
+        [ -z "$body" ] && body='{}'
+        printf '%s' "$body"
+        exit 0
+        ;;
+    esac
+    ;;
+  *)
+    echo "fake-tea: unhandled invocation: $*" >&2
+    exit 127
+    ;;
+esac
+GTM_FAKE_TEA_SCRIPT
+  chmod +x "$GTM_TEA_DIR/tea"
+}
+
+# Removes the fake-tea temp dir and every GTM_TEA_* control variable, so a
+# stray export never leaks into an unrelated later test. It deliberately does
+# NOT unset AIMI_CONFIG_DIR: this section never sets it, and unsetting it here
+# would hand the rest of part 4 back to the real ~/.config/aimi.
+gtm_teardown_fake_tea_fixture() {
+  rm -rf "$GTM_TEA_DIR"
+  unset GTM_TEA_DIR GTM_TEA_LOG GTM_TEA_DETAIL_JSON GTM_TEA_DETAIL_JSON_SECOND \
+    GTM_TEA_CALL_COUNTER GTM_TEA_DETAIL_EXIT GTM_TEA_DETAIL_STDERR GTM_TEA_LIST_JSON
+}
+
+# The DETAIL shape: `tea pulls <index> -o json` emits ONE OBJECT with TYPED
+# values, built from cmd/pulls.go:29-52's purpose-built `pullData` struct.
+# Four properties are load-bearing for the assertions below, so do not "tidy"
+# them away:
+#   - `id` (98765) DIFFERS from `index` (42), so mapping number -> id instead
+#     of number -> index produces a visibly wrong number rather than an
+#     accident that happens to pass.
+#   - `index` is a JSON NUMBER and `mergeable`/`hasMerged` are real BOOLEANS
+#     -- the typed half of the detail-vs-list split.
+#   - `head` and `base` are BARE branch names with no `owner:` prefix
+#     (cmd/pulls.go:174-177 uses pr.Head.Ref/pr.Base.Ref directly).
+#   - There is NO `draft` key and NO per-file list anywhere in the document,
+#     which is what settles isDraft/files mapping to nothing by ABSENCE in
+#     the data rather than by the author's preference. `diffUrl` is present
+#     because the real struct carries it, and it is a URL -- not something
+#     `files` could have mapped to.
+gtm_fake_tea_pull_detail_json() {
+  printf '%s' '{
+    "id": 98765,
+    "index": 42,
+    "title": "Add the Gitea adapter",
+    "state": "open",
+    "created": "2026-08-01T09:00:00Z",
+    "updated": "2026-08-02T09:00:00Z",
+    "labels": [],
+    "user": "octocat",
+    "body": "Body text of the pull request.",
+    "assignees": [],
+    "url": "https://gitea.com/acme/widgets/pulls/42",
+    "base": "main",
+    "head": "feat/gitea-adapter",
+    "headSha": "deadbeefcafe1234567890abcdefdeadbeefcafe",
+    "diffUrl": "https://gitea.com/acme/widgets/pulls/42.diff",
+    "mergeable": true,
+    "hasMerged": false,
+    "mergedAt": null,
+    "closedAt": null,
+    "reviews": [],
+    "comments": []
+  }'
+}
+
+# The LIST shape, for the SAME pull request: `tea pulls list -o json -f <csv>`
+# emits a JSON ARRAY whose keys are the --fields names SNAKE-CASED
+# (modules/print/table.go:175-179) and whose every value is a JSON STRING,
+# because orderedRow.MarshalJSON (:187-208) marshals a map[string]string.
+# Three differences from the detail fixture above are the whole point:
+#   - `"index": "42"` is a STRING where the detail document has a number, and
+#     `"mergeable": "true"` a STRING where the detail document has a boolean.
+#   - `head` carries an `owner:branch` prefix (formatPRHead,
+#     modules/print/pull.go:83-93, prefixes the owner for a cross-fork PR).
+#   - `state` is literally "merged", which the detail path never prints --
+#     formatPRState (:95-100) returns it whenever pr.Merged != nil, while
+#     cmd/pulls.go:33 hands back pr.State raw.
+# It exists so AC2's "the adapter reads the DETAIL path" is a TEST rather
+# than a comment.
+gtm_fake_tea_pull_list_json() {
+  printf '%s' '[
+    {
+      "index": "42",
+      "title": "Add the Gitea adapter",
+      "state": "merged",
+      "url": "https://gitea.com/acme/widgets/pulls/42",
+      "body": "Body text of the pull request.",
+      "mergeable": "true",
+      "base": "main",
+      "head": "contributor:feat/gitea-adapter",
+      "author": "octocat",
+      "updated": "2026-08-02T09:00:00Z"
+    }
+  ]'
+}
+
+# Sources the gitea field mapper plus every helper the assertions below reach
+# through it: the state derivation and _forge_map_state it delegates to, the
+# two sibling mappers (to cross-check that all three answer over the SAME ten
+# contract fields), and the whole _forge_pr_view_build_found ->
+# _forge_build_pr_json -> _forge_pr_view_emit chain the envelope assertions
+# drive. Same "eval every helper the code under test reaches" rule
+# source_cache_functions follows -- a missing eval here surfaces as exit 127
+# inside a subshell, which reads as a wrong VALUE rather than a missing
+# function.
+gtm_source_forge_gitea_map_functions() {
+  eval "$(sed -n '/^_forge_map_pr_field_gitea()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_map_pr_field_gitlab()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_map_pr_field_github()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_map_pr_state_gitea()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_map_state()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_pr_view_build_found()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_build_pr_json()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_pr_view_emit()/,/^}/p' "$CLI")"
+}
+
+# RUNS BEFORE ANY OTHER GITEA ASSERTION, ON PURPOSE. An assertion that passes
+# regardless of the code under test is not evidence, and this repository has
+# shipped that exact defect twice. So before a single mapping assertion trusts
+# this stub, prove it can turn a test RED: drive the identical pipeline (fake
+# tea payload -> mapper key -> jq pick -> compare) twice with two different
+# index values and show the verdict moves.
+gtm_test_fake_tea_stub_can_produce_a_failing_result() {
+  echo ""
+  echo "=== fake tea: the stub CAN produce a failing result (falsifiability proof, runs first) ==="
+
+  gtm_source_forge_gitea_map_functions
+  gtm_setup_fake_tea_fixture
+
+  local key matching differing would_have_gone_red
+  key=$(_forge_map_pr_field_gitea number)
+
+  # Payload whose index IS the expected 42 -- the green case.
+  matching=$(GTM_TEA_DETAIL_JSON='{"index":42,"id":98765}' PATH="$GTM_TEA_DIR:$PATH" \
+    tea pulls 42 -o json | jq -r --arg k "$key" '.[$k]')
+
+  # SAME code path, SAME mapper key, payload whose index DIFFERS. If the
+  # pipeline were insensitive to the stub's output, these two would be equal.
+  differing=$(GTM_TEA_DETAIL_JSON='{"index":7,"id":98765}' PATH="$GTM_TEA_DIR:$PATH" \
+    tea pulls 42 -o json | jq -r --arg k "$key" '.[$k]')
+
+  assert_eq "42" "$matching" "fake tea falsifiability: the matching payload yields the expected index (green case)"
+  assert_eq "7" "$differing" "fake tea falsifiability: the differing payload yields the OTHER index, so output really does track the fixture"
+
+  # The proof stated as a check rather than left as a comment: had `differing`
+  # been asserted against 42, assert_eq would have gone red. Written this way
+  # so a future edit that makes the stub ignore GTM_TEA_DETAIL_JSON fails
+  # HERE, loudly, instead of quietly making every assertion below vacuous.
+  would_have_gone_red=no
+  if [ "$differing" != "42" ]; then
+    would_have_gone_red=yes
+  fi
+  assert_eq "yes" "$would_have_gone_red" "fake tea falsifiability: asserting the differing payload against 42 WOULD have gone red -- the stub is not a rubber stamp"
+
+  gtm_teardown_fake_tea_fixture
+}
+
+# The mapping table itself: one assertion per contract field naming the exact
+# tea key, plus the unmappable-field-yields-empty rule. Every key is then
+# resolved against a real-shaped `tea pulls <index> -o json` DETAIL document
+# served through the stub, so a wrong key fails twice -- once on its name,
+# once because it picks nothing (or the wrong value) out of a real-shaped
+# payload.
+gtm_test_forge_map_pr_field_gitea() {
+  echo ""
+  echo "=== _forge_map_pr_field_gitea: the ten contract fields -> tea's own DETAIL vocabulary ==="
+
+  gtm_source_forge_gitea_map_functions
+  gtm_setup_fake_tea_fixture
+
+  local doc out field
+  doc=$(gtm_fake_tea_pull_detail_json)
+  # Serve that fixture through the stub, so the values below are picked out of
+  # something a `tea pulls 42 -o json` call actually produced rather than out
+  # of a local string the mapper never met.
+  out=$(GTM_TEA_DETAIL_JSON="$doc" PATH="$GTM_TEA_DIR:$PATH" tea pulls 42 -o json)
+
+  # --- the exact tea key, one assertion per contract field -----------------
+  assert_eq "index"     "$(_forge_map_pr_field_gitea number)"      "gitea map: number -> index (the per-repo number, not the instance-wide id)"
+  assert_eq "url"       "$(_forge_map_pr_field_gitea url)"         "gitea map: url -> url"
+  assert_eq "title"     "$(_forge_map_pr_field_gitea title)"       "gitea map: title -> title"
+  assert_eq "body"      "$(_forge_map_pr_field_gitea body)"        "gitea map: body -> body (tea spells it body, unlike glab's description)"
+  assert_eq "state"     "$(_forge_map_pr_field_gitea state)"       "gitea map: state -> state"
+  assert_eq "head"      "$(_forge_map_pr_field_gitea headRefName)" "gitea map: headRefName -> head"
+  assert_eq "base"      "$(_forge_map_pr_field_gitea baseRefName)" "gitea map: baseRefName -> base"
+  assert_eq "mergeable" "$(_forge_map_pr_field_gitea mergeable)"   "gitea map: mergeable -> mergeable"
+
+  # --- each mapped key resolves the right VALUE out of a real-shaped doc ---
+  assert_eq "42" "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitea number)" '.[$k]')" \
+    "gitea map: the number key picks 42 out of a tea DETAIL document"
+  assert_eq "https://gitea.com/acme/widgets/pulls/42" \
+    "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitea url)" '.[$k]')" \
+    "gitea map: the url key picks the HTML URL"
+  assert_eq "Add the Gitea adapter" \
+    "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitea title)" '.[$k]')" \
+    "gitea map: the title key picks the title"
+  assert_eq "Body text of the pull request." \
+    "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitea body)" '.[$k]')" \
+    "gitea map: the body key picks body, not a description key tea does not have"
+  assert_eq "open" "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitea state)" '.[$k]')" \
+    "gitea map: the state key picks tea's raw DETAIL state"
+  assert_eq "feat/gitea-adapter" \
+    "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitea headRefName)" '.[$k]')" \
+    "gitea map: the headRefName key picks head"
+  assert_eq "main" "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitea baseRefName)" '.[$k]')" \
+    "gitea map: the baseRefName key picks base"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r --arg k "$(_forge_map_pr_field_gitea mergeable)" '.[$k]')" \
+    "gitea map: the mergeable key picks the mergeable boolean"
+
+  # --- the two capability-gated fields emit NOTHING, settled by absence ----
+  assert_eq "" "$(_forge_map_pr_field_gitea files)" \
+    "gitea map: files emits nothing -- diff/patch/diffUrl are URLs, not a parsed per-file list"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r 'has("files")')" \
+    "gitea map: and the DETAIL document indeed has no files key that could have been mapped"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r 'has("changedFiles")')" \
+    "gitea map: nor a changedFiles key -- the omission is settled by the data, not by preference"
+  assert_eq "https://gitea.com/acme/widgets/pulls/42.diff" "$(printf '%s' "$out" | jq -r '.diffUrl')" \
+    "gitea map: diffUrl exists but is a URL, which is exactly why files maps to nothing rather than to it"
+
+  assert_eq "" "$(_forge_map_pr_field_gitea isDraft)" \
+    "gitea map: isDraft emits nothing -- Gitea models a draft as a 'WIP: ' title prefix, not a field"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r 'has("draft")')" \
+    "gitea map: and the DETAIL document carries no draft key at all"
+
+  assert_eq "" "$(_forge_map_pr_field_gitea bogusField)" "gitea map: an unknown field name emits nothing, never a pass-through to tea"
+  assert_eq "" "$(_forge_map_pr_field_gitea '')"         "gitea map: an empty field name emits nothing"
+
+  # --- the distinctions a wrong-but-plausible key would have blurred -------
+  assert_eq "98765" "$(printf '%s' "$out" | jq -r '.id')" \
+    "gitea map: id is present and DIFFERS from index, so number -> id would resolve to another pull request"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.id != .index')" \
+    "gitea map: id and index are not interchangeable in this document"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.head | contains(":")')" \
+    "gitea map: the DETAIL head is a BARE branch name -- no owner: prefix, unlike the list shape"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.base | contains(":")')" \
+    "gitea map: the DETAIL base is a bare branch name too"
+
+  # --- all three mappers, measured over the same ten contract fields -------
+  # Asserted together in ONE test so a later edit that quietly widens or
+  # narrows the gitea table goes red against its two siblings rather than
+  # drifting alone.
+  local covered=0
+  for field in number url title body state headRefName baseRefName files isDraft mergeable; do
+    if [ -n "$(_forge_map_pr_field_github "$field")" ]; then
+      covered=$((covered + 1))
+    fi
+  done
+  assert_eq "10" "$covered" "gitea map: the github mapper answers for all ten contract fields (the set this table had to cover)"
+
+  covered=0
+  for field in number url title body state headRefName baseRefName files isDraft mergeable; do
+    if [ -n "$(_forge_map_pr_field_gitlab "$field")" ]; then
+      covered=$((covered + 1))
+    fi
+  done
+  assert_eq "9" "$covered" "gitea map: the gitlab mapper answers for nine of the ten -- files alone is silently empty there"
+
+  covered=0
+  for field in number url title body state headRefName baseRefName files isDraft mergeable; do
+    if [ -n "$(_forge_map_pr_field_gitea "$field")" ]; then
+      covered=$((covered + 1))
+    fi
+  done
+  assert_eq "8" "$covered" "gitea map: the gitea mapper answers for exactly eight of the ten -- files AND isDraft are silently empty, by determination not omission"
+
+  gtm_teardown_fake_tea_fixture
+}
+
+# AC2: the detail-vs-list JSON split, pinned by test rather than only by the
+# mapper's header comment. Two fixtures for the SAME pull request, proven to
+# be genuinely different shapes, and then fed to the same adapter entry point
+# so an implementation that pointed a gitea verb at `tea pulls list` output
+# is caught here rather than shipped.
+gtm_test_tea_detail_and_list_shapes_differ() {
+  echo ""
+  echo "=== tea DETAIL vs LIST: two shapes for one pull request, and the adapter reads DETAIL ==="
+
+  gtm_source_forge_gitea_map_functions
+  gtm_setup_fake_tea_fixture
+
+  local log detail_doc list_doc detail_out list_out fields probe_rc
+  log=$(mktemp)
+  detail_doc=$(gtm_fake_tea_pull_detail_json)
+  list_doc=$(gtm_fake_tea_pull_list_json)
+
+  detail_out=$(GTM_TEA_LOG="$log" GTM_TEA_DETAIL_JSON="$detail_doc" PATH="$GTM_TEA_DIR:$PATH" \
+    tea pulls 42 -o json)
+  list_out=$(GTM_TEA_LOG="$log" GTM_TEA_LIST_JSON="$list_doc" PATH="$GTM_TEA_DIR:$PATH" \
+    tea pulls list --state all -f index,title,state,url,body,mergeable,base,head -o json)
+
+  # --- the two shapes are genuinely different documents --------------------
+  assert_eq "object" "$(printf '%s' "$detail_out" | jq -r 'type')" "tea shapes: the DETAIL response is one object"
+  assert_eq "array"  "$(printf '%s' "$list_out" | jq -r 'type')"   "tea shapes: the LIST response is an array"
+  assert_eq "number" "$(printf '%s' "$detail_out" | jq -r '.index | type')"    "tea shapes: DETAIL .index is a JSON number"
+  assert_eq "string" "$(printf '%s' "$list_out" | jq -r '.[0].index | type')"  "tea shapes: LIST .index is a JSON string -- every list value is stringified"
+  assert_eq "boolean" "$(printf '%s' "$detail_out" | jq -r '.mergeable | type')"   "tea shapes: DETAIL .mergeable is a real boolean"
+  assert_eq "string"  "$(printf '%s' "$list_out" | jq -r '.[0].mergeable | type')" "tea shapes: LIST .mergeable is the string \"true\""
+  assert_eq "false" "$(printf '%s' "$detail_out" | jq -r '.head | contains(":")')"   "tea shapes: DETAIL .head carries no owner: prefix"
+  assert_eq "true"  "$(printf '%s' "$list_out" | jq -r '.[0].head | contains(":")')" "tea shapes: LIST .head DOES carry an owner: prefix (formatPRHead)"
+  assert_eq "open"   "$(printf '%s' "$detail_out" | jq -r '.state')"   "tea shapes: DETAIL .state is pr.State raw -- open/closed only"
+  assert_eq "merged" "$(printf '%s' "$list_out" | jq -r '.[0].state')" "tea shapes: LIST .state can literally be 'merged' (formatPRState), which DETAIL never prints"
+
+  # --- has() on an array really does fail, which is what makes the LIST
+  # --- document produce an all-null pr rather than a wrong-value one -------
+  probe_rc=0
+  printf '%s' "$list_out" | jq -r --arg k index 'has($k)' >/dev/null 2>&1 || probe_rc=$?
+  assert_eq "5" "$probe_rc" "tea shapes: jq has(\"index\") on an ARRAY exits 5 -- build_found's 2>/dev/null || present=false turns that into skip-this-field"
+
+  # --- the adapter reads DETAIL: same call, two documents, opposite results
+  fields="number,url,title,body,state,headRefName,baseRefName,files,isDraft,mergeable"
+  local from_detail from_list
+  from_detail=$(_forge_pr_view_build_found gitea "$detail_out" "$fields")
+  from_list=$(_forge_pr_view_build_found gitea "$list_out" "$fields")
+
+  assert_eq "0" "$(printf '%s' "$from_list" | jq -r '[.pr[] | select(. != null)] | length')" \
+    "tea shapes: feeding the LIST array to build_found yields a pr whose EVERY key is null"
+  assert_eq "null" "$(printf '%s' "$from_list" | jq -r '.pr.number')" "tea shapes: LIST -> .pr.number is null, not the string 42"
+  assert_eq "null" "$(printf '%s' "$from_list" | jq -r '.pr.headRefName')" "tea shapes: LIST -> .pr.headRefName is null, not an owner:branch string"
+  assert_eq '["files","isDraft","mergeable"]' "$(printf '%s' "$from_list" | jq -c '.unsupported_fields | sort')" \
+    "tea shapes: LIST -> even mergeable is reported unsupported, because no field was resolvable at all"
+
+  assert_eq "8" "$(printf '%s' "$from_detail" | jq -r '[.pr[] | select(. != null)] | length')" \
+    "tea shapes: the DETAIL object populates eight of the ten keys -- the same call, the other shape"
+  assert_eq "42" "$(printf '%s' "$from_detail" | jq -r '.pr.number')" "tea shapes: DETAIL -> .pr.number is 42"
+  assert_eq "feat/gitea-adapter" "$(printf '%s' "$from_detail" | jq -r '.pr.headRefName')" "tea shapes: DETAIL -> .pr.headRefName is the bare ref"
+
+  # --- argv: the adapter's own vocabulary reached the stub -----------------
+  # The control assertion comes FIRST and MUST match, so the zero below is a
+  # measurement rather than a grep that silently matched nothing.
+  assert_eq "2" "$(grep -c -- '-o json' "$log")" "tea argv control: both calls carried tea's own -o json (this MUST match, so the zero below is trustworthy)"
+  assert_eq "1" "$(grep -c -- ' -f index,' "$log")" "tea argv: the list call carried tea's own -f field selector"
+  assert_eq "0" "$(grep -c -- '--json' "$log")" "tea argv: no gh-style --json field-list flag was passed anywhere (tea has none)"
+  assert_eq "pulls 42 -o json" "$(head -1 "$log")" "tea argv: the DETAIL call is the bare index form -- tea pulls 42 -o json, no field list"
+
+  rm -f "$log"
+  gtm_teardown_fake_tea_fixture
+}
+
+# AC3: `merged` is DERIVED in the gitea adapter from hasMerged, and
+# _forge_map_state gains no gitea branch for it.
+gtm_test_forge_map_pr_state_gitea() {
+  echo ""
+  echo "=== _forge_map_pr_state_gitea: merged comes from hasMerged, never from an invented state ==="
+
+  gtm_source_forge_gitea_map_functions
+
+  assert_eq "merged" "$(_forge_map_pr_state_gitea '{"state":"closed","hasMerged":true,"mergedAt":"2026-08-01T10:00:00Z"}')" \
+    "gitea state: hasMerged true -> merged, even though tea's own DETAIL state says closed"
+  assert_eq "closed" "$(_forge_map_pr_state_gitea '{"state":"closed","hasMerged":false}')" \
+    "gitea state: hasMerged false -> the raw closed, never merged"
+  assert_eq "open" "$(_forge_map_pr_state_gitea '{"state":"open","hasMerged":false}')" \
+    "gitea state: an open pull request passes through as open"
+  assert_eq "open" "$(_forge_map_pr_state_gitea '{"state":"OPEN","hasMerged":false}')" \
+    "gitea state: case-folding still comes from _forge_map_state, not from a second hand-rolled tr"
+  assert_eq "closed" "$(_forge_map_pr_state_gitea '{"state":"closed"}')" \
+    "gitea state: a document with NO hasMerged key passes its raw state through -- absence never becomes merged"
+
+  # --- _forge_map_state itself is untouched by this story ------------------
+  # Counting form, not `grep -q` inside an if: a fail-open guard that silently
+  # matches nothing reports success. The gitlab control runs alongside and
+  # MUST be non-zero, which is what makes the gitea zero a measurement.
+  local state_body gitea_hits gitlab_hits
+  state_body=$(mktemp)
+  declare -f _forge_map_state > "$state_body"
+
+  gitea_hits=$(grep -v '^[[:space:]]*#' "$state_body" | grep -cE 'gitea') || gitea_hits=0
+  gitlab_hits=$(grep -v '^[[:space:]]*#' "$state_body" | grep -cE 'gitlab') || gitlab_hits=0
+
+  assert_eq "1" "$gitlab_hits" "gitea state control: the identical query DOES find _forge_map_state's gitlab arm, so the zero below is a measurement"
+  assert_eq "0" "$gitea_hits"  "gitea state: _forge_map_state's body contains ZERO occurrences of gitea -- the derivation lives in the adapter"
+
+  assert_eq "closed" "$(_forge_map_state gitea closed)" "gitea state: _forge_map_state still passes gitea's closed straight through"
+  assert_eq "merged" "$(_forge_map_state gitea merged)" "gitea state: _forge_map_state still passes gitea's merged straight through, case-folded and untouched"
+
+  rm -f "$state_body"
+}
+
+# AC4: the gitea arm of _forge_pr_view_build_found produces a contract-shaped
+# found envelope, with the two capability gaps REPORTED rather than guessed.
+gtm_test_forge_pr_view_build_found_gitea() {
+  echo ""
+  echo "=== _forge_pr_view_build_found gitea: the found envelope, with capability gaps reported ==="
+
+  gtm_source_forge_gitea_map_functions
+  gtm_setup_fake_tea_fixture
+
+  local doc out full subset
+  doc=$(gtm_fake_tea_pull_detail_json)
+  out=$(GTM_TEA_DETAIL_JSON="$doc" PATH="$GTM_TEA_DIR:$PATH" tea pulls 42 -o json)
+
+  full=$(_forge_pr_view_build_found gitea "$out" \
+    "number,url,title,body,state,headRefName,baseRefName,files,isDraft,mergeable")
+
+  assert_eq "found" "$(printf '%s' "$full" | jq -r '.status')" "gitea envelope: status is found"
+  assert_eq '["number","url","title","body","state","headRefName","baseRefName","files","isDraft","mergeable"]' \
+    "$(printf '%s' "$full" | jq -c '.pr | keys_unsorted')" \
+    "gitea envelope: pr carries exactly the ten requested names, in the order they were requested"
+
+  assert_eq "42" "$(printf '%s' "$full" | jq -r '.pr.number')" "gitea envelope: number is 42"
+  assert_eq "number" "$(printf '%s' "$full" | jq -r '.pr.number | type')" \
+    "gitea envelope: number is a JSON NUMBER even though the detail value passes through tostring on the way to the builder"
+  assert_eq "https://gitea.com/acme/widgets/pulls/42" "$(printf '%s' "$full" | jq -r '.pr.url')" "gitea envelope: url is tea's HTML url"
+  assert_eq "open" "$(printf '%s' "$full" | jq -r '.pr.state')" "gitea envelope: state normalized through _forge_map_state gitea"
+  assert_eq "feat/gitea-adapter" "$(printf '%s' "$full" | jq -r '.pr.headRefName')" "gitea envelope: headRefName is tea's bare head ref"
+  assert_eq "main" "$(printf '%s' "$full" | jq -r '.pr.baseRefName')" "gitea envelope: baseRefName is tea's bare base ref"
+  assert_eq "true" "$(printf '%s' "$full" | jq -r '.pr.mergeable')" "gitea envelope: mergeable is carried"
+  assert_eq "string" "$(printf '%s' "$full" | jq -r '.pr.mergeable | type')" \
+    "gitea envelope: mergeable is a JSON STRING (_forge_build_pr_json's --mergeable is --arg) -- a boolean here would be a contract break"
+
+  assert_eq "null" "$(printf '%s' "$full" | jq -r '.pr.files')"   "gitea envelope: files is null"
+  assert_eq "null" "$(printf '%s' "$full" | jq -r '.pr.isDraft')" "gitea envelope: isDraft is null"
+  assert_eq '["files","isDraft"]' "$(printf '%s' "$full" | jq -c '.unsupported_fields | sort')" \
+    "gitea envelope: the two null fields are NAMED in unsupported_fields -- never a bare unmarked null"
+  assert_eq "2" "$(printf '%s' "$full" | jq -r '.unsupported_fields | length')" "gitea envelope: exactly two fields are reported unsupported"
+  assert_eq "false" "$(printf '%s' "$full" | jq -r '.unsupported_fields | index("mergeable") != null')" \
+    "gitea envelope: mergeable is NOT among them -- tea does expose it"
+
+  # --- an --include-style subset still narrows correctly for gitea ---------
+  subset=$(_forge_pr_view_build_found gitea "$out" "number,url,state")
+
+  assert_eq '["number","url","state"]' "$(printf '%s' "$subset" | jq -c '.pr | keys_unsorted')" \
+    "gitea envelope subset: pr carries exactly the three requested keys"
+  assert_eq "[]" "$(printf '%s' "$subset" | jq -c '.unsupported_fields')" \
+    "gitea envelope subset: unsupported_fields is empty -- a field the caller never asked for is not reported unsupported"
+  assert_eq "array" "$(printf '%s' "$subset" | jq -r '.unsupported_fields | type')" \
+    "gitea envelope subset: and it is an ARRAY, never a bare null"
+
+  gtm_teardown_fake_tea_fixture
 }
 
 # ============================================================================
@@ -646,7 +1169,13 @@ glr_test_gitlab_detection_is_preexisting_and_unmodified() {
 
   assert_eq "gitlab" "$(_detect_forge_classify_host gitlab.com)" "glr detection: gitlab.com already classifies as gitlab (aimi-cli.sh:1836), no change required by this story"
   assert_eq "gitlab" "$(_detect_forge_classify_host gitlab.example.gitlab.com)" "glr detection: a *.gitlab.com subdomain already classifies as gitlab too"
-  assert_eq "gitea" "$(_detect_forge_classify_host gitea.com)" "glr detection: gitea is untouched and still has no adapter -- the control for every no_adapter assertion in this file"
+  # The CLASSIFICATION claim is unchanged and still true; only the assertion's
+  # own wording was stale. Phase 4 outline:04 routed gitea's review-thread
+  # verbs, so gitea is no longer "the control for every no_adapter assertion
+  # in this file" -- that role passed to an unrecognized host, which is what
+  # _detect_forge_classify_host answers `unknown` for.
+  assert_eq "gitea" "$(_detect_forge_classify_host gitea.com)" "glr detection: gitea.com already classifies as gitea, unchanged by this story"
+  assert_eq "unknown" "$(_detect_forge_classify_host git.example.com)" "glr detection: an unrecognized host classifies as unknown -- the only stand-in left for a forge with no adapter"
 
   # ...and the same answer arrives through the real verb, on a real fixture.
   setup_detect_forge_fixture origin https://gitlab.com/acme/widgets.git
@@ -2418,21 +2947,25 @@ test_forge_pr_view_missing_gh_binary_quiet_degrade() {
 
 test_forge_pr_view_non_github_forge_quiet_degrade() {
   echo ""
-  echo "=== forge-pr-view: a forge with no adapter (gitea) degrades to status=error with no stderr banner (quiet mode, AC6) ==="
+  echo "=== forge-pr-view: a forge with no adapter (unknown) degrades to status=error with no stderr banner (quiet mode, AC6) ==="
 
-  # gitea, not gitlab: phase 3 US-002 routed gitlab to glab, so this test --
-  # which is about the adapter-less branch -- moves to the forge that still
-  # reaches it.
-  setup_detect_forge_fixture origin https://gitea.com/o/r.git
+  # `unknown`, not gitea: phase 4 outline:02 routed gitea to tea, so this test
+  # -- which is about the adapter-less branch -- moves again to the forge that
+  # still reaches it. RETARGETED, never deleted: the no_adapter path must stay
+  # covered. This is the END of the line, because AIMI_FORGE_TYPE validates
+  # only github|gitlab|gitea (aimi-cli.sh:2130) and all three now have
+  # adapters -- `unknown`, reachable solely through an unrecognized remote
+  # host, is the only control left.
+  setup_detect_forge_fixture origin https://git.example.com/o/r.git
   pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
 
-  local stderr_file="/tmp/forge_pr_view_gitea_stderr.$$"
+  local stderr_file="/tmp/forge_pr_view_no_adapter_stderr.$$"
   local out exit_code
   out=$("$CLI" forge-pr-view --pr feat-x 2>"$stderr_file") && exit_code=0 || exit_code=$?
 
   assert_exit_code "0" "$exit_code" "forge-pr-view non-github forge: exits 0"
   assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-view non-github forge: status is error"
-  assert_contains "gitea" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-view non-github forge: message names the detected forge"
+  assert_contains "unknown" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-view non-github forge: message names the detected forge"
   assert_contains "no forge-pr-view adapter" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-view non-github forge: message is the no-adapter one, not a missing-binary one"
   assert_eq "" "$(cat "$stderr_file")" "forge-pr-view non-github forge: no stderr banner (quiet degrade mode)"
   rm -f "$stderr_file"
@@ -2988,18 +3521,27 @@ test_forge_pr_create_missing_gh_mandatory_print_nonzero_exit() {
   teardown_detect_forge_fixture
 }
 
-# The remote here was gitlab.com until phase 3 gave GitLab a real adapter --
-# which turned this test's own premise ("this forge has no adapter") false and
-# made it assert the wrong thing. codeberg.org classifies as `gitea`
-# (_detect_forge_classify_host), still genuinely adapter-less, so the
-# unsupported-forge arm this test exists to cover stays exercised. The GitLab
-# equivalent -- glab absent rather than no adapter -- is
-# test_glw_forge_pr_create_gitlab_missing_glab_prints_mr_url below.
+# RETARGETED TWICE, NEVER DELETED -- and this is the end of the line.
+#
+# The remote here was gitlab.com until phase 3 gave GitLab a real adapter, and
+# then codeberg.org (-> `gitea`) until phase 4 outline:03 gave Gitea one. Each
+# time, routing that forge turned this test's own premise ("this forge has no
+# adapter") false and made it assert the wrong thing. Deleting it instead
+# would have left the no-adapter arm untested for this verb entirely.
+#
+# git.example.invalid falls to _detect_forge_classify_host's `*)` arm and
+# classifies as `unknown`, which is the ONLY stand-in left: AIMI_FORGE_TYPE
+# validates its value against github|gitlab|gitea and nothing else, so after
+# phase 4 there is no forge WORD still lacking an adapter -- only an
+# unrecognized remote host. The GitLab and Gitea equivalents of this test --
+# the adapter exists but its binary is absent -- are
+# test_glw_forge_pr_create_gitlab_missing_glab_prints_mr_url and
+# gtw_test_forge_pr_create_gitea_missing_tea_prints_manual.
 test_forge_pr_create_non_github_forge_mandatory_print() {
   echo ""
   echo "=== forge-pr-create: non-github forge (no adapter) -- MANDATORY-PRINT degrade, never shells to gh, exit non-zero ==="
 
-  setup_detect_forge_fixture origin https://codeberg.org/o/r.git
+  setup_detect_forge_fixture origin https://git.example.invalid/o/r.git
   pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
 
   local sandbox
@@ -3020,8 +3562,8 @@ FAKE_GH
   assert_exit_code "1" "$exit_code" "forge-pr-create non-github forge: exits non-zero"
   assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-create non-github forge: stdout carries the degraded envelope while the exit code stays 1"
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "forge-pr-create non-github forge: data is null on degraded"
-  assert_contains "no adapter for forge \"gitea\"" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-create non-github forge: message names the unsupported forge"
-  assert_stderr_contains "gitea" "$(cat "$stderr_file")" "forge-pr-create non-github forge: manual instruction names the detected forge"
+  assert_contains "no adapter for forge \"unknown\"" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-create non-github forge: message names the unsupported forge"
+  assert_stderr_contains "unknown" "$(cat "$stderr_file")" "forge-pr-create non-github forge: manual instruction names the detected forge"
   assert_stderr_contains "create it yourself" "$(cat "$stderr_file")" "forge-pr-create non-github forge: manual instruction printed"
   if grep -q "gh should never be invoked" "$stderr_file"; then
     echo -e "${RED}✗${NC} forge-pr-create non-github forge: gh was invoked despite having no adapter for this forge"
@@ -4758,6 +5300,1424 @@ Draft: this merge request is a draft.')" \
 }
 
 # ============================================================================
+# Gitea WRITE-verb tests (phase 4 outline:03) — forge-pr-create /
+# forge-pr-edit / forge-issue-create routed to tea
+# ============================================================================
+# EVERY helper introduced by this section is `gtw_`-prefixed (Gitea Write) and
+# every control variable is `GTW_*`. That is an orchestration constraint, not
+# a style preference: sibling stories are adding gitea READ-verb (`gtr_`) and
+# review-thread (`gtt_`) helpers to THIS SAME FILE in parallel, outline:01 has
+# already landed `gtm_`, and bash silently keeps the LAST definition of a
+# duplicated function name. Three individually-green branches whose helper
+# names collide produce a red container after the merge -- the exact failure
+# that cost this programme a wave-1 merge two phases ago. Grep before naming,
+# and prefix anyway.
+#
+# The section deliberately does NOT extend gtm_setup_fake_tea_fixture (the
+# read-side stub outline:01 owns) with write subcommands, and does not touch
+# any of the five fake-glab installers either: an edit inside a shared stub's
+# case statement is a merge conflict waiting to happen. gtw_install_fake_tea
+# below is a separate, self-contained stub. Duplication over conflict -- the
+# same call phase 3 made when it accepted five near-identical fake glabs.
+#
+# WHAT THESE TESTS ACTUALLY PROVE, AND WHAT THEY CANNOT. tea is NOT installed
+# on this machine -- this phase's declared verification ceiling, stated in
+# aimi-cli.sh's own Gitea write adapters header as well -- so every assertion
+# here is about WHICH ARGV aimi-cli.sh emits and HOW IT PARSES A FIXTURE,
+# never about what the real binary does with either. That is the right thing
+# to pin regardless: the defects this story exists to prevent are a WRONG FLAG
+# NAME and a MISSING FLAG, and both are visible in argv.
+#
+# WHY THE FLAG COUNT IS READ OFF RECORDED ARGV AND NEVER OFF AN EXIT STATUS.
+# `tea pulls create` enters an interactive survey whenever
+# ctx.Command.NumFlags() == 0 (modules/context/context.go:55-59), and that
+# check performs NO TTY test despite its own doc comment claiming one -- so a
+# zero-flag invocation hangs even with a non-TTY stdin, in an autonomous run
+# with nobody present to answer. A fake tea never prompts, so it exits 0
+# whether or not a flag was passed: an exit-status assertion would pass
+# vacuously and prove exactly nothing. gtw_argv_flag_count below therefore
+# reads the stub's argv log, and gtw_test_flag_count_reader_can_go_red proves
+# that reader can answer "no flags" before anything trusts it answering "has
+# flags".
+
+# Writes a fake `tea` into an existing setup_forge_cli_sandbox directory.
+#
+# THE CASE IS NESTED, AND THAT IS LOAD-BEARING RATHER THAN TIDY. glw_install_
+# fake_glab dispatches on "$1 $2" because every glab invocation it models is a
+# two-word subcommand. tea OVERLOADS THE `pulls` NOUN: `pulls create`,
+# `pulls edit` and `pulls list` are subcommands, but `tea pulls 42 -o json` is
+# a DETAIL READ whose second argument is an INDEX (cmd/pulls.go:88-93 routes
+# to runPullDetail when Args().Len() == 1). A flat "$1 $2" dispatch would send
+# every post-write re-read into the unhandled arm, and the re-read is exactly
+# what supplies the number these tests assert on.
+#
+# It emits tea's TWO DISTINCT JSON SHAPES, which are genuinely different
+# documents rather than two renderings of one:
+#   DETAIL  one tab-indented object with TYPED values -- `index` an int,
+#           `mergeable`/`hasMerged` real booleans (cmd/pulls.go:29-52).
+#   LIST    an ARRAY of all-STRING, snake_cased rows, because
+#           orderedRow.MarshalJSON marshals a map[string]string
+#           (modules/print/table.go:187-208).
+# The failure form is uniform because tea's is: main.go:18-30 prints
+# `Error: %v` to stderr and exits 1 for EVERY error alike -- there is no
+# distinct exit code for "not found", which is precisely why the adapter's
+# not_found detection is structural.
+#
+# Records every invocation's argv (one line per call) to $GTW_TEA_LOG, and --
+# on a SEPARATE channel, never argv -- what each child process actually saw
+# for GH_TOKEN and GITEA_TOKEN to $GTW_TEA_TOKEN_LOG. Separate channels keep
+# the "no token reached argv" scan honest. The token log uses ${VAR-<unset>}
+# rather than ${VAR:-<unset>} on purpose: an explicitly BLANKED variable must
+# stay distinguishable from an absent one, since blanking is its own defect
+# here (it would revoke an operator's own GITEA_TOKEN selection).
+#
+# Control variables, all optional:
+#   GTW_TEA_LOG                  argv log file
+#   GTW_TEA_TOKEN_LOG            token-visibility log file
+#   GTW_PULLS_LIST_JSON          `pulls list` stdout (default '[]')
+#   GTW_PULLS_LIST_EXIT/_STDERR  make the listing fail
+#   GTW_PULLS_CREATE_STDOUT      `pulls create` stdout
+#   GTW_PULLS_CREATE_EXIT/_STDERR
+#   GTW_PULLS_EDIT_STDOUT        `pulls edit` stdout
+#   GTW_PULLS_EDIT_EXIT/_STDERR
+#   GTW_PULLS_DETAIL_JSON        `pulls <index> -o json` stdout
+#   GTW_PULLS_DETAIL_AFTER_JSON  same, but only once `pulls create` has run
+#   GTW_ISSUES_CREATE_STDOUT     `issues create` stdout
+#   GTW_ISSUES_CREATE_EXIT/_STDERR
+gtw_install_fake_tea() {
+  local sandbox="$1"
+  cat > "$sandbox/tea" << 'GTW_FAKE_TEA'
+#!/usr/bin/env bash
+if [ -n "${GTW_TEA_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$GTW_TEA_LOG"
+fi
+if [ -n "${GTW_TEA_TOKEN_LOG:-}" ]; then
+  printf '%s %s|GH_TOKEN=%s|GITEA_TOKEN=%s\n' "${1:-}" "${2:-}" "${GH_TOKEN-<unset>}" "${GITEA_TOKEN-<unset>}" >> "$GTW_TEA_TOKEN_LOG"
+fi
+
+GTW_CREATED_FLAG="$(dirname "$0")/gtw_pull_created.flag"
+
+case "$1" in
+  pulls)
+    case "$2" in
+      create)
+        : > "$GTW_CREATED_FLAG"
+        if [ "${GTW_PULLS_CREATE_EXIT:-0}" != "0" ]; then
+          printf 'Error: %s\n' "${GTW_PULLS_CREATE_STDERR:-something went wrong}" >&2
+          exit "${GTW_PULLS_CREATE_EXIT}"
+        fi
+        printf '%s\n' "${GTW_PULLS_CREATE_STDOUT:-}"
+        exit 0
+        ;;
+      edit)
+        if [ "${GTW_PULLS_EDIT_EXIT:-0}" != "0" ]; then
+          printf 'Error: %s\n' "${GTW_PULLS_EDIT_STDERR:-something went wrong}" >&2
+          exit "${GTW_PULLS_EDIT_EXIT}"
+        fi
+        printf '%s\n' "${GTW_PULLS_EDIT_STDOUT:-}"
+        exit 0
+        ;;
+      list)
+        if [ "${GTW_PULLS_LIST_EXIT:-0}" != "0" ]; then
+          printf 'Error: %s\n' "${GTW_PULLS_LIST_STDERR:-could not list pull requests}" >&2
+          exit "${GTW_PULLS_LIST_EXIT}"
+        fi
+        printf '%s' "${GTW_PULLS_LIST_JSON:-[]}"
+        exit 0
+        ;;
+      *)
+        # DETAIL read: `tea pulls <index> -o json`. "$2" is an INDEX here, not
+        # a subcommand -- the whole reason this case is nested.
+        if [ -f "$GTW_CREATED_FLAG" ] && [ -n "${GTW_PULLS_DETAIL_AFTER_JSON:-}" ]; then
+          printf '%s' "$GTW_PULLS_DETAIL_AFTER_JSON"
+          exit 0
+        fi
+        if [ -n "${GTW_PULLS_DETAIL_JSON:-}" ]; then
+          printf '%s' "$GTW_PULLS_DETAIL_JSON"
+          exit 0
+        fi
+        printf 'Error: pull request does not exist [index: %s]\n' "${2:-}" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  issues)
+    case "$2" in
+      create)
+        if [ "${GTW_ISSUES_CREATE_EXIT:-0}" != "0" ]; then
+          printf 'Error: %s\n' "${GTW_ISSUES_CREATE_STDERR:-something went wrong}" >&2
+          exit "${GTW_ISSUES_CREATE_EXIT}"
+        fi
+        printf '%s\n' "${GTW_ISSUES_CREATE_STDOUT:-}"
+        exit 0
+        ;;
+    esac
+    ;;
+esac
+printf 'Error: fake-tea (write): unhandled invocation: %s\n' "$*" >&2
+exit 1
+GTW_FAKE_TEA
+  chmod +x "$sandbox/tea"
+}
+
+# Prints the one recorded argv line whose text starts with <prefix>, so an
+# assertion can pin the ENTIRE invocation -- flag names, flag order and the
+# positional argument -- in a single comparison rather than three loose greps.
+# A wrong spelling (`--body` for `-d`, a short `-h` for `--head`) then fails
+# outright instead of being absorbed by a grep that never looked.
+# Usage: gtw_argv_line <log-file> <prefix, e.g. "pulls create">
+gtw_argv_line() {
+  local log="$1" prefix="$2"
+  grep -E "^${prefix}( |$)" "$log" 2>/dev/null | head -1 || true
+}
+
+# Counts recorded invocations whose text starts with <prefix>. Used to prove a
+# call was NEVER made -- the idempotency assertion, which no output comparison
+# can show.
+# Usage: gtw_argv_count <log-file> <prefix>
+gtw_argv_count() {
+  local log="$1" prefix="$2"
+  grep -cE "^${prefix}( |$)" "$log" 2>/dev/null || true
+}
+
+# Counts recorded DETAIL reads -- `pulls <index> ...`, where the second token
+# is a number rather than a subcommand. Needs its own reader precisely because
+# tea overloads the `pulls` noun.
+gtw_argv_detail_count() {
+  local log="$1"
+  grep -cE '^pulls [0-9]+( |$)' "$log" 2>/dev/null || true
+}
+
+# THE READER THE ALWAYS-PASS-A-FLAG INVARIANT RESTS ON. Counts the flag tokens
+# on the recorded argv line for <prefix>, reading argv and never an exit
+# status -- see this section's header for why an exit-status form would pass
+# vacuously against a fake that cannot prompt.
+#
+# The prefix (the subcommand, plus nothing else) is stripped first, so the
+# `--` separator _forge_capture uses and any positional argument cannot be
+# mistaken for a flag. A token counts only as `-x` or `--xyz` -- one or two
+# dashes followed by a LETTER -- so a negative number, and a bare `--`, never
+# inflate the count. The letter is load-bearing: `^-[A-Za-z-]` would accept
+# `--` as a flag, because the trailing hyphen inside the bracket class is a
+# literal one.
+# Usage: gtw_argv_flag_count <log-file> <prefix>
+gtw_argv_flag_count() {
+  local log="$1" prefix="$2" line rest count
+  line=$(gtw_argv_line "$log" "$prefix")
+  if [ -z "$line" ]; then
+    printf '%s' "0"
+    return 0
+  fi
+  rest="${line#"$prefix"}"
+  count=$(printf '%s' "$rest" | tr ' ' '\n' | grep -cE '^--?[A-Za-z]') || count=0
+  printf '%s' "$count"
+}
+
+# Extracts one function body out of aimi-cli.sh for the static assertions
+# below -- same sed technique glw_fn_body uses, kept private under this
+# section's prefix so a sibling branch renaming its own copy cannot break
+# this one.
+# Usage: gtw_fn_body <function-name>
+gtw_fn_body() {
+  sed -n "/^$1()/,/^}/p" "$CLI"
+}
+
+# The Gitea write-adapter section header, which is where a reader meets the
+# interactivity hazard, the flag spellings, the GH_TOKEN hazard, the declared
+# ceiling and the known duplicate read path, and must find all five answered.
+gtw_write_header() {
+  sed -n '/^# Gitea write adapters/,/^_forge_tea_write_url()/p' "$CLI"
+}
+
+# eval's the pure Gitea write helper for direct, in-process testing.
+gtw_source_write_helpers() {
+  eval "$(sed -n '/^_forge_tea_write_url()/,/^}/p' "$CLI")"
+}
+
+# Counts `export`/`declare -x` of any variable tea would honour as a
+# credential, in a given file.
+#
+# COUNTED WITH `grep -c`, AND THAT IS NOT A STYLE CHOICE. This suite runs
+# under `set -o pipefail`. In the `grep -v ... | grep -q ...` shape, the right
+# half exits the instant it matches, SIGPIPEs the left half, and the pipeline
+# reports FAILURE -- so an `if` on it reads a real hit as "no hit" and the
+# guard fails OPEN. Seven guards of that shape already exist in this suite;
+# this story adds no eighth. `grep -c` consumes all of its input and cannot
+# fire early, and the trailing `|| count=0` absorbs grep's exit 1 on zero
+# matches rather than aborting.
+#
+# GH_TOKEN is in the pattern, not only GITEA_TOKEN, because that is the whole
+# hazard: tea reads GH_TOKEN too (modules/context/context_login.go:15-51), so
+# exporting the GitHub one leaks a GitHub credential to a Gitea instance.
+# Usage: gtw_count_token_exports <file>
+gtw_count_token_exports() {
+  local file="$1" count
+  count=$(grep -v '^[[:space:]]*#' "$file" | grep -cE '(export|declare -x)[[:space:]]+(GH_TOKEN|GH_ENTERPRISE_TOKEN|GITEA_TOKEN|GITEA_INSTANCE_URL)') || count=0
+  printf '%s' "$count"
+}
+
+# Counts `tea` invocations carrying a token PREFIX ASSIGNMENT, in the same
+# counting form and for the same reason. This catches the specific mistake the
+# section header warns about: copying the github arm's
+# `GH_TOKEN="$gh_token_override" _forge_capture ... -- gh ...` shape onto a tea
+# call. It also catches a BLANKING prefix (`GITEA_TOKEN= ... tea ...`), which
+# is the opposite defect and equally forbidden -- it would revoke an
+# operator's own account selection.
+# Usage: gtw_count_token_prefixed_tea_calls <file>
+gtw_count_token_prefixed_tea_calls() {
+  local file="$1" count
+  count=$(grep -v '^[[:space:]]*#' "$file" | grep -cE '(GH_TOKEN|GH_ENTERPRISE_TOKEN|GITEA_TOKEN)=.*[[:space:]]tea[[:space:]]') || count=0
+  printf '%s' "$count"
+}
+
+# Writes a copy of aimi-cli.sh to <dest> with ONE verb's `gitea)` routing arm
+# renamed so it can never match, and prints "changed" or "unchanged" so the
+# caller can PROVE the mutation landed. A mutation test whose patch silently
+# missed is worse than no mutation test: it passes for the wrong reason.
+#
+# The arm is identified by its FOLLOWING line rather than by its own text,
+# because all three verbs spell the arm identically (`    gitea)`) -- a plain
+# full-line replacement would unroute all three at once and destroy the
+# per-verb isolation the matrix exists to provide. The marker is compared for
+# exact full-line equality, never as a regex, and is looked for at either of
+# the next two lines so a verb that declares a local first is still reachable.
+# Usage: gtw_mutate_unroute <exact-marker-line> <dest>
+gtw_mutate_unroute() {
+  local marker="$1" dest="$2"
+  awk -v m="$marker" '
+    { l[NR] = $0 }
+    END {
+      for (i = 1; i <= NR; i++) {
+        if (l[i] == "    gitea)" && (l[i+1] == m || l[i+2] == m)) {
+          print "    gitea-unrouted)"
+        } else {
+          print l[i]
+        }
+      }
+    }' "$CLI" > "$dest"
+  chmod +x "$dest"
+  if cmp -s "$CLI" "$dest"; then
+    printf 'unchanged'
+  else
+    printf 'changed'
+  fi
+}
+
+# Writes a copy of aimi-cli.sh to <dest> with a deliberate process-wide
+# `export GH_TOKEN` planted as the FIRST statement of _forge_pr_create_gitea.
+# This is the teeth behind the live token probe: without it, an assertion that
+# the environment is unchanged before and after a write is indistinguishable
+# from an assertion that nothing was ever read.
+# Usage: gtw_plant_export_in_gitea_create <dest>
+gtw_plant_export_in_gitea_create() {
+  local dest="$1"
+  awk '
+    { print }
+    $0 == "_forge_pr_create_gitea() {" { print "  export GH_TOKEN=\"planted-into-the-process\"" }
+  ' "$CLI" > "$dest"
+  chmod +x "$dest"
+  if cmp -s "$CLI" "$dest"; then
+    printf 'unchanged'
+  else
+    printf 'changed'
+  fi
+}
+
+# eval's the gitea pr-create path and its dependencies into the CURRENT shell,
+# out of <source-file> (aimi-cli.sh by default, or a planted copy).
+#
+# Sourced rather than driven through `$CLI` for one reason, and it is the
+# whole reason the before/after check below means anything: a separate `$CLI`
+# process per reading makes a process-wide `export` UNDETECTABLE, because the
+# export dies with the process that made it. Phase 3's US-005 shipped that
+# exact tautology -- twice over, since it also ran the write inside `$( )`,
+# which is its own subshell. In one shell, with the write as a plain statement
+# redirected to a file, an export survives from the write into the
+# after-reading and the comparison can actually fail.
+# Usage: gtw_source_gitea_write_path [source-file]
+gtw_source_gitea_write_path() {
+  local src="${1:-$CLI}" fn
+  for fn in _forge_bin_check _forge_capture _forge_build_write_data \
+            _forge_emit_write_status _forge_tea_write_url _forge_pr_create_gitea; do
+    eval "$(sed -n "/^${fn}()/,/^}/p" "$src")"
+  done
+}
+
+# RUNS BEFORE EVERY OTHER ASSERTION IN THIS SECTION, ON PURPOSE. The
+# always-pass-a-flag invariant turns on one predicate -- "how many flags did
+# this invocation carry" -- so that predicate must be shown able to answer
+# ZERO before a single test trusts it answering more. Without this, a
+# gtw_argv_flag_count that always returned a positive number would make every
+# invariant assertion below pass while the real defect (a forever-hang in
+# production, on a code path with no TTY check to save it) shipped untouched.
+gtw_test_flag_count_reader_can_go_red() {
+  echo ""
+  echo "=== gitea write: the flag-count reader CAN answer 'no flags' (falsifiability proof, runs first) ==="
+
+  local log
+  log=$(mktemp)
+
+  # Hand-written ZERO-FLAG argv lines -- exactly the shape that makes
+  # tea's NumFlags() == 0 fire and the run hang.
+  {
+    printf '%s\n' 'pulls create'
+    printf '%s\n' 'pulls edit 303'
+    printf '%s\n' 'issues create'
+  } > "$log"
+
+  assert_eq "0" "$(gtw_argv_flag_count "$log" "pulls create")"  "flag-count reader: a recorded zero-flag 'pulls create' answers 0 -- the hang shape is visible"
+  assert_eq "0" "$(gtw_argv_flag_count "$log" "pulls edit")"    "flag-count reader: a recorded 'pulls edit 303' with only a positional answers 0 -- a positional is not a flag"
+  assert_eq "0" "$(gtw_argv_flag_count "$log" "issues create")" "flag-count reader: a recorded zero-flag 'issues create' answers 0"
+
+  # ...and the SAME lines with flags move the verdict, so both answers are
+  # shown to be reachable rather than one of them being a constant.
+  {
+    printf '%s\n' 'pulls create -t My PR -d the body --head feat-x -b main'
+    printf '%s\n' 'pulls edit 303 -d updated body'
+    printf '%s\n' 'issues create -t Backend spec -d the body'
+  } > "$log"
+
+  assert_eq "4" "$(gtw_argv_flag_count "$log" "pulls create")"  "flag-count reader: the same 'pulls create' WITH -t/-d/--head/-b answers 4"
+  assert_eq "1" "$(gtw_argv_flag_count "$log" "pulls edit")"    "flag-count reader: 'pulls edit 303 -d ...' answers 1 -- one flag is all the invariant needs"
+  assert_eq "2" "$(gtw_argv_flag_count "$log" "issues create")" "flag-count reader: 'issues create -t ... -d ...' answers 2"
+
+  # A bare `--` separator and a numeric argument are not flags. Without these
+  # boundaries the reader would rubber-stamp an invocation that really did
+  # reach tea with NumFlags() == 0.
+  printf '%s\n' 'pulls create -- 42' > "$log"
+  assert_eq "0" "$(gtw_argv_flag_count "$log" "pulls create")" "flag-count reader: a bare '--' and a number are NOT counted as flags"
+
+  # An invocation that never happened must not read as "carried flags".
+  assert_eq "0" "$(gtw_argv_flag_count "$log" "issues create")" "flag-count reader: a subcommand with no recorded invocation answers 0, never a stale count"
+
+  rm -f "$log"
+}
+
+gtw_test_tea_write_url_extraction() {
+  echo ""
+  echo "=== _forge_tea_write_url: finds the URL inside tea's markdown write output, empty when there is none ==="
+
+  gtw_source_write_helpers
+
+  # `tea issues create` prints markdown PLUS a bare HTMLURL line
+  # (modules/task/issue_create.go:28-30) -- the friendly case.
+  assert_eq "https://gitea.com/acme/widgets/issues/7" \
+    "$(_forge_tea_write_url '# #7 Backend spec
+Body text.
+https://gitea.com/acme/widgets/issues/7')" \
+    "tea url: picks the URL out of issues create's markdown-plus-bare-URL output"
+
+  # `tea pulls create` ends in print.PullDetails -- a markdown block whose URL
+  # line is appended only when non-empty. Deliberately NOT tail -n1: a
+  # trailing markdown line after the URL would defeat that habit.
+  assert_eq "https://gitea.com/acme/widgets/pulls/42" \
+    "$(_forge_tea_write_url '# #42 Add the Gitea adapter (open)
+@octocat created 2026-08-06
+
+https://gitea.com/acme/widgets/pulls/42')" \
+    "tea url: picks the URL out of pulls create's markdown block"
+
+  assert_eq "https://gitea.com/acme/widgets/pulls/42" \
+    "$(_forge_tea_write_url '# #42 Add the Gitea adapter
+https://gitea.com/acme/widgets/pulls/42
+---')" \
+    "tea url: a trailing line after the URL does not hide it"
+
+  # THE BRANCH THAT MAKES "created but no parseable URL" REAL RATHER THAN
+  # HYPOTHETICAL: print.PullDetails appends the URL line ONLY when the URL is
+  # non-empty (modules/print/pull.go:76-78), and --output json is not
+  # consulted on the create path at all.
+  assert_eq "" "$(_forge_tea_write_url '# #42 Add the Gitea adapter (open)
+@octocat created 2026-08-06')" \
+    "tea url: a PullDetails block with no URL line yields the empty string -- a real degraded outcome, never a guess"
+  assert_eq "" "$(_forge_tea_write_url '')" "tea url: empty output yields the empty string"
+}
+
+gtw_test_forge_pr_create_gitea_creates_pr() {
+  echo ""
+  echo "=== forge-pr-create (gitea): opens a PR via tea pulls create -- tea's own flag names, number from a structured DETAIL re-read ==="
+
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  gtw_install_fake_tea "$sandbox"
+
+  local log="$sandbox/tea.log"
+  : > "$log"
+  rm -f "$sandbox/gtw_pull_created.flag"
+
+  local out exit_code
+  out=$(GTW_TEA_LOG="$log" \
+    GTW_PULLS_CREATE_STDOUT='# #42 Add the Gitea adapter (open)
+@octocat created 2026-08-06
+
+https://gitea.com/acme/widgets/pulls/42' \
+    GTW_PULLS_DETAIL_AFTER_JSON='{"id":98765,"index":42,"state":"open","url":"https://gitea.com/acme/widgets/pulls/42","head":"feat-x","base":"main","mergeable":true,"hasMerged":false}' \
+    PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-create gitea: exit 0"
+  assert_eq '{"status":"created","data":{"url":"https://gitea.com/acme/widgets/pulls/42","number":42},"message":null}' \
+    "$out" "forge-pr-create gitea: the SHARED write envelope, status created, number 42 from the re-read's index (not its id 98765)"
+
+  # THE WHOLE INVOCATION PINNED IN ONE COMPARISON. A gh-shaped --body, a
+  # glab-shaped -s/--source-branch, or a short -h for --head all fail here
+  # outright rather than slipping past a loose grep.
+  assert_eq 'pulls create -t My PR -d the body --head feat-x -b main' "$(gtw_argv_line "$log" "pulls create")" \
+    "forge-pr-create gitea: exact argv -- -t/--title, -d/--description, --head in LONG FORM, -b/--base"
+
+  # THE INVARIANT THIS SECTION EXISTS FOR. Recorded argv, never exit status.
+  assert_eq "4" "$(gtw_argv_flag_count "$log" "pulls create")" \
+    "forge-pr-create gitea: the recorded argv carries 4 flags -- with zero, tea's NumFlags()==0 opens an interactive survey and the run hangs forever"
+
+  assert_eq "0" "$(grep -c -- '--body' "$log" || true)"          "forge-pr-create gitea: gh's --body never reaches tea (tea calls it -d/--description)"
+  assert_eq "0" "$(grep -c -- '--source-branch' "$log" || true)" "forge-pr-create gitea: glab's --source-branch never reaches tea (tea calls it --head)"
+  assert_eq "0" "$(grep -c -- '--target-branch' "$log" || true)" "forge-pr-create gitea: glab's --target-branch never reaches tea (tea calls it -b/--base)"
+  assert_eq "0" "$(grep -cE -- '(^| )-h( |$)' "$log" || true)"   "forge-pr-create gitea: --head is never abbreviated to -h -- that is urfave/cli's help flag, not a branch name"
+  assert_eq "0" "$(grep -cE -- '(^| )-y( |$)' "$log" || true)"   "forge-pr-create gitea: glab's -y never reaches tea -- tea has no such flag to accept"
+
+  # The probe is a LIST plus a local filter, because tea pulls list has no
+  # --head/--source-branch filter at all (cmd/pulls/list.go:31).
+  assert_eq 'pulls list --state all -o json' "$(gtw_argv_line "$log" "pulls list")" \
+    "forge-pr-create gitea: the idempotency probe is 'pulls list --state all -o json' -- tea offers no server-side head filter to ask instead"
+  assert_eq "1" "$(gtw_argv_count "$log" "pulls list")" "forge-pr-create gitea: exactly one listing call -- the pre-create probe"
+  assert_eq "1" "$(gtw_argv_detail_count "$log")"       "forge-pr-create gitea: exactly one DETAIL read -- the post-create structured re-read"
+  assert_eq 'pulls 42 -o json' "$(gtw_argv_line "$log" "pulls 42")" \
+    "forge-pr-create gitea: the re-read is the DETAIL form, whose index is a real int -- not the all-string LIST shape"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+gtw_test_forge_pr_create_gitea_existing_open_pr_is_unchanged() {
+  echo ""
+  echo "=== forge-pr-create (gitea): an OPEN pull request already exists for --head -- reports unchanged, never calls tea pulls create ==="
+
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  gtw_install_fake_tea "$sandbox"
+
+  local log="$sandbox/tea.log"
+  : > "$log"
+  rm -f "$sandbox/gtw_pull_created.flag"
+
+  # ALL-STRING, snake_cased LIST row -- `"index": "55"`, not 55. A fixture
+  # that typed index as a number would let a naive implementation that
+  # assumes the DETAIL shape pass unnoticed.
+  local out exit_code
+  out=$(GTW_TEA_LOG="$log" \
+    GTW_PULLS_LIST_JSON='[{"index":"55","title":"Existing","state":"open","url":"https://gitea.com/acme/widgets/pulls/55","head":"feat-x","base":"main","mergeable":"true"}]' \
+    PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-create gitea idempotent: exit 0"
+  assert_eq '{"status":"unchanged","data":{"url":"https://gitea.com/acme/widgets/pulls/55","number":55},"message":null}' \
+    "$out" "forge-pr-create gitea idempotent: status unchanged with the EXISTING PR under data, and number is a JSON INT 55 despite arriving as the string \"55\""
+
+  # THE ASSERTION NO OUTPUT COMPARISON CAN MAKE: the create really was never
+  # invoked, so a retried phase cannot open a second pull request.
+  assert_eq "0" "$(gtw_argv_count "$log" "pulls create")" \
+    "forge-pr-create gitea idempotent: tea pulls create was NEVER invoked (invocation count 0)"
+  assert_eq "0" "$(gtw_argv_detail_count "$log")" \
+    "forge-pr-create gitea idempotent: and no DETAIL re-read either -- the listing row already carried url and index"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+gtw_test_forge_pr_create_gitea_owner_prefixed_head_matches() {
+  echo ""
+  echo "=== forge-pr-create (gitea): a cross-fork LIST head of 'forkuser:feat-x' still matches the branch feat-x ==="
+
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  gtw_install_fake_tea "$sandbox"
+
+  local log="$sandbox/tea.log"
+  : > "$log"
+  rm -f "$sandbox/gtw_pull_created.flag"
+
+  # formatPRHead (modules/print/pull.go:83-93) prefixes the OWNER for a
+  # cross-fork pull request, so the LIST head is not the branch name. Plain
+  # equality here would miss the match and open a DUPLICATE pull request --
+  # the precise failure this fixture exists to prevent.
+  local out exit_code
+  out=$(GTW_TEA_LOG="$log" \
+    GTW_PULLS_LIST_JSON='[{"index":"55","state":"open","url":"https://gitea.com/acme/widgets/pulls/55","head":"forkuser:feat-x","base":"main"}]' \
+    PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-create gitea owner-prefixed head: exit 0"
+  assert_eq "unchanged" "$(printf '%s' "$out" | jq -r '.status')" \
+    "forge-pr-create gitea owner-prefixed head: 'forkuser:feat-x' matches the branch feat-x -- plain equality would have opened a duplicate"
+  assert_eq "55" "$(printf '%s' "$out" | jq -r '.data.number')" "forge-pr-create gitea owner-prefixed head: the EXISTING pull request's number is reported"
+  assert_eq "0" "$(gtw_argv_count "$log" "pulls create")" "forge-pr-create gitea owner-prefixed head: tea pulls create was never invoked"
+
+  # ...and the suffix match is not so loose that a DIFFERENT branch ending in
+  # the same text matches. `feat-x` must not be found inside `other-feat-x`.
+  : > "$log"
+  out=$(GTW_TEA_LOG="$log" \
+    GTW_PULLS_LIST_JSON='[{"index":"55","state":"open","url":"https://gitea.com/acme/widgets/pulls/55","head":"forkuser:other-feat-x","base":"main"}]' \
+    GTW_PULLS_CREATE_STDOUT='https://gitea.com/acme/widgets/pulls/91' \
+    GTW_PULLS_DETAIL_AFTER_JSON='{"index":91,"url":"https://gitea.com/acme/widgets/pulls/91"}' \
+    PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body") && exit_code=0 || exit_code=$?
+  assert_eq "created" "$(printf '%s' "$out" | jq -r '.status')" \
+    "forge-pr-create gitea owner-prefixed head: 'forkuser:other-feat-x' does NOT match feat-x -- the owner prefix is matched at the colon, not by substring"
+  assert_eq "1" "$(gtw_argv_count "$log" "pulls create")" "forge-pr-create gitea owner-prefixed head: an unrelated branch therefore does not block creation"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+gtw_test_forge_pr_create_gitea_dead_pr_does_not_block() {
+  echo ""
+  echo "=== forge-pr-create (gitea): a CLOSED or MERGED pull request on --head does not block -- a fresh one is opened ==="
+
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  gtw_install_fake_tea "$sandbox"
+
+  # "merged" is spelled literally on the LIST path -- formatPRState
+  # (modules/print/pull.go:95-100) returns it whenever pr.Merged != nil, which
+  # the DETAIL path never prints. A reused branch must not be blocked forever
+  # by a dead pull request.
+  local log="$sandbox/tea.log" dead out exit_code
+  for dead in closed merged; do
+    : > "$log"
+    rm -f "$sandbox/gtw_pull_created.flag"
+
+    out=$(GTW_TEA_LOG="$log" \
+      GTW_PULLS_LIST_JSON="[{\"index\":\"12\",\"state\":\"$dead\",\"url\":\"https://gitea.com/acme/widgets/pulls/12\",\"head\":\"feat-x\",\"base\":\"main\"}]" \
+      GTW_PULLS_CREATE_STDOUT='https://gitea.com/acme/widgets/pulls/91' \
+      GTW_PULLS_DETAIL_AFTER_JSON='{"index":91,"url":"https://gitea.com/acme/widgets/pulls/91"}' \
+      PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body") && exit_code=0 || exit_code=$?
+
+    assert_exit_code "0" "$exit_code" "forge-pr-create gitea $dead PR: exit 0"
+    assert_eq "1" "$(gtw_argv_count "$log" "pulls create")" "forge-pr-create gitea $dead PR: tea pulls create WAS invoked -- a $dead pull request must not block a new one forever"
+    assert_eq '{"status":"created","data":{"url":"https://gitea.com/acme/widgets/pulls/91","number":91},"message":null}' \
+      "$out" "forge-pr-create gitea $dead PR: only the NEW pull request's identity is reported -- the dead one never leaks"
+    assert_eq "4" "$(gtw_argv_flag_count "$log" "pulls create")" "forge-pr-create gitea $dead PR: the create still carried its four flags"
+  done
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+gtw_test_forge_pr_create_gitea_missing_tea_prints_manual() {
+  echo ""
+  echo "=== forge-pr-create (gitea): tea absent -- MANDATORY-PRINT degrade in Gitea's own wording, exit non-zero ==="
+
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # No tea written into the sandbox. This is the ONE criterion in this story
+  # testable against reality rather than against a stub: tea genuinely is not
+  # installed on this machine.
+
+  local stderr_file="/tmp/gtw_pr_create_no_tea_stderr.$$"
+  local out exit_code stderr_text
+  out=$(PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_text=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+
+  assert_exit_code "1" "$exit_code" "forge-pr-create gitea tea-absent: exits non-zero (hard-fail, same contract as the github and gitlab arms)"
+  assert_eq '{"status":"degraded","data":null,"message":"tea not found -- this pull request was not created automatically."}' \
+    "$out" "forge-pr-create gitea tea-absent: degraded envelope naming tea, not gh and not glab"
+  assert_stderr_contains "tea not found" "$stderr_text" "forge-pr-create gitea tea-absent: _forge_bin_check's mandatory warning names tea"
+  assert_stderr_contains "create it yourself" "$stderr_text" "forge-pr-create gitea tea-absent: manual instruction printed (MANDATORY-PRINT)"
+
+  # THE NOUN STAYS "pull request". Gitea calls them pull requests, exactly
+  # like GitHub -- only GitLab says merge request.
+  assert_stderr_contains "gitea pull request" "$stderr_text" "forge-pr-create gitea tea-absent: the noun is pull request, NOT merge request"
+  assert_eq "0" "$(printf '%s' "$stderr_text" | grep -c 'merge request' || true)" \
+    "forge-pr-create gitea tea-absent: the word 'merge request' never appears -- that is GitLab's noun, not Gitea's"
+
+  # tea's own command, with tea's own flag spellings.
+  assert_stderr_contains "tea pulls create" "$stderr_text" "forge-pr-create gitea tea-absent: the printed manual command is tea pulls create"
+  assert_stderr_contains "--head feat-x" "$stderr_text" "forge-pr-create gitea tea-absent: the printed command uses --head in its LONG FORM"
+  assert_stderr_contains "-b main" "$stderr_text" "forge-pr-create gitea tea-absent: the printed command uses -b/--base"
+  assert_stderr_contains "-d ..." "$stderr_text" "forge-pr-create gitea tea-absent: the printed command uses -d/--description"
+  assert_stderr_contains "git push -u origin feat-x" "$stderr_text" "forge-pr-create gitea tea-absent: the git push command is printed too"
+
+  # Gitea's compare path, with no GitHub ?expand=1 query parameter.
+  assert_stderr_contains "https://gitea.com/acme/widgets/compare/main...feat-x" "$stderr_text" \
+    "forge-pr-create gitea tea-absent: stderr prints Gitea's compare URL the user can open by hand"
+
+  # These negatives fail against the pre-change code, which fell through to
+  # the github arm's wording -- verified by running this test against a copy
+  # of aimi-cli.sh at the previous commit.
+  #
+  # ONE EXCEPTION, STATED SO IT IS NOT MISREAD AS EVIDENCE: the github.com
+  # negative directly below is NOT load-bearing here. This fixture's remote is
+  # gitea.com, so _forge_repo_info resolves that host and github.com would not
+  # have appeared even before this story -- it is a cheap regression pin, not
+  # a demonstration. The host DEFAULT is the half that was actually wrong, and
+  # gtw_test_manual_fallback_gitea_host_default is where that negative has
+  # teeth: it stubs an unresolvable host and goes red against the old code.
+  assert_eq "0" "$(printf '%s' "$stderr_text" | grep -c 'github.com' || true)"   "forge-pr-create gitea tea-absent: github.com never appears"
+  assert_eq "0" "$(printf '%s' "$stderr_text" | grep -c 'gh pr create' || true)" "forge-pr-create gitea tea-absent: 'gh pr create' never appears"
+  assert_eq "0" "$(printf '%s' "$stderr_text" | grep -c -- '--body' || true)"    "forge-pr-create gitea tea-absent: gh's --body never appears"
+  assert_eq "0" "$(printf '%s' "$stderr_text" | grep -c 'expand=1' || true)"     "forge-pr-create gitea tea-absent: GitHub's ?expand=1 compare parameter never appears"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+gtw_test_forge_pr_create_gitea_create_failure_degrades() {
+  echo ""
+  echo "=== forge-pr-create (gitea): tea pulls create itself fails -- degraded envelope, manual instruction, exit non-zero ==="
+
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  gtw_install_fake_tea "$sandbox"
+
+  local log="$sandbox/tea.log"
+  : > "$log"
+  rm -f "$sandbox/gtw_pull_created.flag"
+
+  local stderr_file="/tmp/gtw_pr_create_fail_stderr.$$"
+  local out exit_code
+  out=$(GTW_TEA_LOG="$log" GTW_PULLS_CREATE_EXIT=1 \
+    GTW_PULLS_CREATE_STDERR="pull request already exists [index: 42]" \
+    PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-create gitea create-failure: exits non-zero"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-create gitea create-failure: degraded envelope"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "forge-pr-create gitea create-failure: data is null on degraded"
+  assert_contains "tea pulls create exited 1" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-create gitea create-failure: message names the tea exit code"
+  assert_stderr_contains "create it yourself" "$(cat "$stderr_file")" "forge-pr-create gitea create-failure: manual instruction printed"
+
+  # Even the FAILING call carried its flags: this branch is a genuine tea
+  # failure, never a prompt the run silently sat on.
+  assert_eq "4" "$(gtw_argv_flag_count "$log" "pulls create")" "forge-pr-create gitea create-failure: the failing invocation still carried four flags"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+gtw_test_forge_pr_create_gitea_unparseable_url_degrades() {
+  echo ""
+  echo "=== forge-pr-create (gitea): create succeeded but PullDetails printed no URL line -- degraded, exit non-zero ==="
+
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  gtw_install_fake_tea "$sandbox"
+
+  local log="$sandbox/tea.log"
+  : > "$log"
+  rm -f "$sandbox/gtw_pull_created.flag"
+
+  # A REAL branch, not a hypothetical: print.PullDetails appends the URL only
+  # when it is non-empty (modules/print/pull.go:76-78), and `--output json` is
+  # not consulted on the create path at all (modules/task/pull_create.go:89).
+  local stderr_file="/tmp/gtw_pr_create_nourl_stderr.$$"
+  local out exit_code
+  out=$(GTW_TEA_LOG="$log" \
+    GTW_PULLS_CREATE_STDOUT='# #42 Add the Gitea adapter (open)
+@octocat created 2026-08-06' \
+    PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-create gitea no-URL: exits non-zero"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-create gitea no-URL: degraded envelope"
+  assert_contains "did not contain a parseable pull request URL" "$(printf '%s' "$out" | jq -r '.message')" \
+    "forge-pr-create gitea no-URL: message says the URL could not be parsed, not that the create failed"
+  assert_stderr_contains "create it yourself" "$(cat "$stderr_file")" "forge-pr-create gitea no-URL: manual instruction printed"
+  assert_eq "0" "$(gtw_argv_detail_count "$log")" "forge-pr-create gitea no-URL: no DETAIL re-read is attempted -- there is no index to address it with"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+gtw_test_forge_pr_create_gitea_reread_failure_keeps_created_url() {
+  echo ""
+  echo "=== forge-pr-create (gitea): the PR was created but the re-read cannot confirm its number -- keeps the url, status created, exit 0 ==="
+
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  gtw_install_fake_tea "$sandbox"
+
+  local log="$sandbox/tea.log"
+  : > "$log"
+  rm -f "$sandbox/gtw_pull_created.flag"
+
+  # GTW_PULLS_DETAIL_AFTER_JSON deliberately unset, so the post-create re-read
+  # falls to the stub's `Error: ...` + exit 1 arm.
+  local stderr_file="/tmp/gtw_pr_create_reread_stderr.$$"
+  local out exit_code stderr_text
+  out=$(GTW_TEA_LOG="$log" \
+    GTW_PULLS_CREATE_STDOUT='# #42 Add the Gitea adapter (open)
+
+https://gitea.com/acme/widgets/pulls/42' \
+    PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_text=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+
+  assert_exit_code "0" "$exit_code" "forge-pr-create gitea re-read failure: exit 0 -- the pull request really was created"
+  assert_eq '{"status":"created","data":{"url":"https://gitea.com/acme/widgets/pulls/42","number":null},"message":null}' \
+    "$out" "forge-pr-create gitea re-read failure: the url survives under data with number:null, status stays created -- never degraded, which would null data and throw the url away"
+  assert_stderr_contains "Warning:" "$stderr_text" "forge-pr-create gitea re-read failure: warns rather than erroring"
+  assert_stderr_contains "https://gitea.com/acme/widgets/pulls/42" "$stderr_text" "forge-pr-create gitea re-read failure: the Warning names the created PR's url"
+  assert_eq "1" "$(gtw_argv_detail_count "$log")" "forge-pr-create gitea re-read failure: the re-read WAS attempted -- the URL supplied its address"
+  if printf '%s' "$stderr_text" | grep -qE "create it yourself|git push -u origin"; then
+    echo -e "${RED}✗${NC} forge-pr-create gitea re-read failure: the create-it-yourself fallback was printed for a PR that already exists -- following it would open a duplicate"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} forge-pr-create gitea re-read failure: the create-it-yourself fallback is never printed once a url is in hand"
+    ((TESTS_PASSED++))
+  fi
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+gtw_test_forge_pr_edit_gitea_updates() {
+  echo ""
+  echo "=== forge-pr-edit (gitea): updates a PR via tea pulls edit -- positional index, -d not --body, status unchanged ==="
+
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  gtw_install_fake_tea "$sandbox"
+
+  local log="$sandbox/tea.log"
+  : > "$log"
+  rm -f "$sandbox/gtw_pull_created.flag"
+
+  local out exit_code
+  out=$(GTW_TEA_LOG="$log" \
+    GTW_PULLS_EDIT_STDOUT='# #303 Add the Gitea adapter (open)' \
+    GTW_PULLS_DETAIL_JSON='{"id":11111,"index":303,"state":"open","url":"https://gitea.com/acme/widgets/pulls/303","head":"feat-x","base":"main"}' \
+    PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --body "updated body") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-edit gitea: exit 0"
+  assert_eq '{"status":"unchanged","data":{"url":"https://gitea.com/acme/widgets/pulls/303","number":303},"message":null}' \
+    "$out" "forge-pr-edit gitea: status unchanged (the identifier already existed) with {url, number} from the structured DETAIL re-read"
+
+  # The pull request is a POSITIONAL argument, like glab mr update and unlike
+  # gh pr edit's flag-shaped body, and the body flag is -d.
+  assert_eq 'pulls edit 303 -d updated body' "$(gtw_argv_line "$log" "pulls edit")" \
+    "forge-pr-edit gitea: exact argv -- positional index, then -d/--description"
+  assert_eq "1" "$(gtw_argv_flag_count "$log" "pulls edit")" \
+    "forge-pr-edit gitea: the recorded argv carries at least one flag -- a zero-flag tea write can enter an interactive survey"
+  assert_eq "0" "$(grep -c -- '--body' "$log" || true)" "forge-pr-edit gitea: gh's --body never reaches tea"
+  assert_eq 'pulls 303 -o json' "$(gtw_argv_line "$log" "pulls 303")" \
+    "forge-pr-edit gitea: the re-read is the DETAIL form addressed by index -- the nested stub case is what keeps this from falling into the unhandled arm"
+  assert_eq "1" "$(gtw_argv_detail_count "$log")" "forge-pr-edit gitea: exactly one DETAIL re-read"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+gtw_test_forge_pr_edit_gitea_missing_tea_prints_manual() {
+  echo ""
+  echo "=== forge-pr-edit (gitea): tea absent -- MANDATORY-PRINT degrade naming Gitea's /pulls/ path, exit non-zero ==="
+
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # No tea in the sandbox.
+
+  local stderr_file="/tmp/gtw_pr_edit_no_tea_stderr.$$"
+  local out exit_code stderr_text
+  out=$(PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --body "updated body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_text=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+
+  assert_exit_code "1" "$exit_code" "forge-pr-edit gitea tea-absent: exits non-zero"
+  assert_eq '{"status":"degraded","data":null,"message":"tea not found -- this pull request was not edited automatically."}' \
+    "$out" "forge-pr-edit gitea tea-absent: degraded envelope naming tea"
+  assert_stderr_contains "edit it yourself" "$stderr_text" "forge-pr-edit gitea tea-absent: manual instruction printed"
+  assert_stderr_contains "tea pulls edit 303 -d" "$stderr_text" "forge-pr-edit gitea tea-absent: the printed manual command is tea pulls edit with -d"
+
+  # GITEA'S PULL-REQUEST PATH IS /pulls/<number>, WITH AN "s". GitHub's
+  # singular /pull/<number> 404s on a Gitea instance.
+  assert_stderr_contains "https://gitea.com/acme/widgets/pulls/303" "$stderr_text" \
+    "forge-pr-edit gitea tea-absent: stderr prints Gitea's own /pulls/<number> URL"
+  assert_eq "0" "$(printf '%s' "$stderr_text" | grep -c '/pull/' || true)" \
+    "forge-pr-edit gitea tea-absent: GitHub's singular /pull/<number> never appears -- it 404s on Gitea"
+  # Same exception as on the create arm above: this fixture resolves a
+  # gitea.com host, so the github.com negative is a regression pin rather than
+  # a demonstration -- gtw_test_manual_fallback_gitea_host_default is where it
+  # goes red against the old code.
+  assert_eq "0" "$(printf '%s' "$stderr_text" | grep -c 'github.com' || true)"  "forge-pr-edit gitea tea-absent: github.com never appears"
+  assert_eq "0" "$(printf '%s' "$stderr_text" | grep -c 'gh pr edit' || true)"  "forge-pr-edit gitea tea-absent: 'gh pr edit' never appears"
+  assert_eq "0" "$(printf '%s' "$stderr_text" | grep -c -- '--body' || true)"   "forge-pr-edit gitea tea-absent: gh's --body never appears"
+  assert_eq "0" "$(printf '%s' "$stderr_text" | grep -c 'merge request' || true)" "forge-pr-edit gitea tea-absent: the noun is pull request, never merge request"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+gtw_test_forge_pr_edit_gitea_failure_degrades() {
+  echo ""
+  echo "=== forge-pr-edit (gitea): tea pulls edit fails, and a failed re-read after a successful edit also degrades ==="
+
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  gtw_install_fake_tea "$sandbox"
+
+  local log="$sandbox/tea.log"
+  : > "$log"
+  rm -f "$sandbox/gtw_pull_created.flag"
+
+  local stderr_file="/tmp/gtw_pr_edit_fail_stderr.$$"
+  local out exit_code
+  out=$(GTW_TEA_LOG="$log" GTW_PULLS_EDIT_EXIT=1 GTW_PULLS_EDIT_STDERR="pull request does not exist [index: 303]" \
+    PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --body "updated body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-edit gitea edit-failure: exits non-zero"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-edit gitea edit-failure: degraded envelope"
+  assert_contains "tea pulls edit exited 1" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-edit gitea edit-failure: message names the tea exit code"
+  assert_stderr_contains "edit it yourself" "$(cat "$stderr_file")" "forge-pr-edit gitea edit-failure: manual instruction printed"
+  assert_eq "1" "$(gtw_argv_flag_count "$log" "pulls edit")" "forge-pr-edit gitea edit-failure: the failing invocation still carried its flag"
+
+  # The other failure shape: the edit succeeded but the structured re-read
+  # could not confirm the pull request. Unlike pr-create, no new identifier
+  # was minted here, so there is no url to protect -- this branch degrades.
+  : > "$log"
+  out=$(GTW_TEA_LOG="$log" GTW_PULLS_EDIT_STDOUT='# #303 edited' \
+    PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --body "updated body" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-edit gitea re-read failure: exits non-zero"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-edit gitea re-read failure: degraded envelope"
+  assert_contains "could not be re-read afterward" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-edit gitea re-read failure: message says the re-read failed, not that the edit did"
+  assert_eq "1" "$(gtw_argv_count "$log" "pulls edit")" "forge-pr-edit gitea re-read failure: the edit itself really was attempted"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+gtw_test_forge_issue_create_gitea_creates_issue() {
+  echo ""
+  echo "=== forge-issue-create (gitea): tea issues create -t/-d, number from the bare HTMLURL line ==="
+
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  gtw_install_fake_tea "$sandbox"
+
+  local log="$sandbox/tea.log"
+  : > "$log"
+
+  # task.CreateIssue prints markdown PLUS a bare issue.HTMLURL line
+  # (modules/task/issue_create.go:28-30) -- friendlier than the pull path.
+  local out exit_code
+  out=$(GTW_TEA_LOG="$log" \
+    GTW_ISSUES_CREATE_STDOUT='# #7 Backend spec (open)
+@octocat created 2026-08-06
+https://gitea.com/acme/widgets/issues/7' \
+    PATH="$sandbox" "$CLI" forge-issue-create --title "Backend spec" --body "the body") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-create gitea: exit 0"
+  assert_eq '{"status":"created","data":{"url":"https://gitea.com/acme/widgets/issues/7","number":7},"message":null}' \
+    "$out" "forge-issue-create gitea: the SHARED write envelope, status created, number parsed from the issue URL"
+
+  assert_eq 'issues create -t Backend spec -d the body' "$(gtw_argv_line "$log" "issues create")" \
+    "forge-issue-create gitea: exact argv -- -t/--title, -d/--description"
+  assert_eq "2" "$(gtw_argv_flag_count "$log" "issues create")" \
+    "forge-issue-create gitea: the recorded argv carries at least one flag"
+  assert_eq "0" "$(grep -c -- '--body' "$log" || true)" "forge-issue-create gitea: gh's --body never reaches tea"
+  assert_eq "0" "$(grep -cE -- '(^| )-y( |$)' "$log" || true)" "forge-issue-create gitea: glab's -y never reaches tea"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+gtw_test_forge_issue_create_gitea_always_exits_zero() {
+  echo ""
+  echo "=== forge-issue-create (gitea): the always-exit-0 soft-fail contract survives on the gitea branch ==="
+
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  gtw_install_fake_tea "$sandbox"
+
+  local log="$sandbox/tea.log"
+  : > "$log"
+
+  # SOFT-FAIL, all three ways it can be reached. A failed issue must NEVER
+  # block PR creation, so the gitea branch may not acquire a different
+  # exit-code contract from the github and gitlab ones.
+  local fail_out fail_rc nourl_out nourl_rc absent_out absent_rc
+  fail_out=$(GTW_TEA_LOG="$log" GTW_ISSUES_CREATE_EXIT=1 GTW_ISSUES_CREATE_STDERR="issues are disabled for this repository" \
+    PATH="$sandbox" "$CLI" forge-issue-create --title "Backend spec" --body "the body" 2>/dev/null) && fail_rc=0 || fail_rc=$?
+  assert_exit_code "0" "$fail_rc" "forge-issue-create gitea tea-failure: EXITS 0 (soft-fail preserved -- a failed issue never blocks a PR)"
+  assert_eq "degraded" "$(printf '%s' "$fail_out" | jq -r '.status')" "forge-issue-create gitea tea-failure: the outcome is reported in status, not in the exit code"
+  assert_contains "tea issues create exited 1" "$(printf '%s' "$fail_out" | jq -r '.message')" "forge-issue-create gitea tea-failure: message names the tea exit code"
+
+  : > "$log"
+  nourl_out=$(GTW_TEA_LOG="$log" GTW_ISSUES_CREATE_STDOUT='# #7 Backend spec (open)' \
+    PATH="$sandbox" "$CLI" forge-issue-create --title "Backend spec" --body "the body" 2>/dev/null) && nourl_rc=0 || nourl_rc=$?
+  assert_exit_code "0" "$nourl_rc" "forge-issue-create gitea no-URL: EXITS 0 (soft-fail preserved)"
+  assert_eq "degraded" "$(printf '%s' "$nourl_out" | jq -r '.status')" "forge-issue-create gitea no-URL: degraded in the envelope"
+  assert_contains "did not contain a parseable issue URL" "$(printf '%s' "$nourl_out" | jq -r '.message')" "forge-issue-create gitea no-URL: message says the URL could not be parsed"
+
+  rm -f "$sandbox/tea"
+  absent_out=$(PATH="$sandbox" "$CLI" forge-issue-create --title "Backend spec" --body "the body" 2>/dev/null) && absent_rc=0 || absent_rc=$?
+  assert_exit_code "0" "$absent_rc" "forge-issue-create gitea tea-absent: EXITS 0 (soft-fail preserved)"
+  assert_eq '{"status":"degraded","data":null,"message":"tea not found -- this issue was not created automatically."}' \
+    "$absent_out" "forge-issue-create gitea tea-absent: degraded envelope naming tea, not gh and not glab"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+# The per-forge HOST DEFAULT in isolation. The end-to-end tests above always
+# have a resolvable host (the fixture's own gitea.com remote), so the default
+# branch they cannot reach is the one that was actually WRONG before this
+# story: a Gitea repository whose host could not be resolved was told
+# github.com.
+#
+# _forge_pr_write_print_manual is sourced and its _forge_repo_info dependency
+# stubbed INSIDE A SUBSHELL, so neither definition leaks into any later test
+# in this part; the assertions then read the captured stderr in the parent.
+gtw_test_manual_fallback_gitea_host_default() {
+  echo ""
+  echo "=== manual fallback (gitea): an unresolvable host defaults to gitea.com, never github.com ==="
+
+  local create_file edit_file github_file
+  create_file=$(mktemp)
+  edit_file=$(mktemp)
+  github_file=$(mktemp)
+
+  # host is JSON null -- exactly what _forge_repo_info emits when _detect_forge
+  # could not resolve one -- while owner/repo ARE resolvable, which is what
+  # makes the URL line print at all.
+  (
+    eval "$(sed -n '/^_forge_pr_write_print_manual()/,/^}/p' "$CLI")"
+    _forge_repo_info() {
+      printf '%s' '{"status":"found","data":{"forge":"gitea","host":null,"owner":"acme","repo":"widgets","nameWithOwner":"acme/widgets","source":"local-parse"},"message":null,"reason":null}'
+    }
+    _forge_pr_write_print_manual create gitea main feat-x "the body" "My PR"
+  ) 2> "$create_file"
+
+  (
+    eval "$(sed -n '/^_forge_pr_write_print_manual()/,/^}/p' "$CLI")"
+    _forge_repo_info() {
+      printf '%s' '{"status":"found","data":{"forge":"gitea","host":null,"owner":"acme","repo":"widgets","nameWithOwner":"acme/widgets","source":"local-parse"},"message":null,"reason":null}'
+    }
+    _forge_pr_write_print_manual edit gitea "" 303 "the body"
+  ) 2> "$edit_file"
+
+  # The control: the SAME unresolvable host on a github repository still
+  # defaults to github.com, so this is a per-forge default rather than a
+  # global rename.
+  (
+    eval "$(sed -n '/^_forge_pr_write_print_manual()/,/^}/p' "$CLI")"
+    _forge_repo_info() {
+      printf '%s' '{"status":"found","data":{"forge":"github","host":null,"owner":"acme","repo":"widgets","nameWithOwner":"acme/widgets","source":"local-parse"},"message":null,"reason":null}'
+    }
+    _forge_pr_write_print_manual create github main feat-x "the body" "My PR"
+  ) 2> "$github_file"
+
+  local create_text edit_text github_text
+  create_text=$(cat "$create_file")
+  edit_text=$(cat "$edit_file")
+  github_text=$(cat "$github_file")
+  rm -f "$create_file" "$edit_file" "$github_file"
+
+  assert_contains "https://gitea.com/acme/widgets/compare/main...feat-x" "$create_text" \
+    "manual fallback gitea host default: an unresolvable host yields gitea.com, and Gitea's compare path"
+  assert_eq "0" "$(printf '%s' "$create_text" | grep -c 'github.com' || true)" \
+    "manual fallback gitea host default: github.com never appears on the create arm -- this is the live wrong-output bug this story fixes"
+  assert_contains "https://gitea.com/acme/widgets/pulls/303" "$edit_text" \
+    "manual fallback gitea host default: the edit arm yields gitea.com and Gitea's /pulls/ path"
+  assert_eq "0" "$(printf '%s' "$edit_text" | grep -c 'github.com' || true)" \
+    "manual fallback gitea host default: github.com never appears on the edit arm either"
+  assert_eq "0" "$(printf '%s' "$edit_text" | grep -c '/pull/' || true)" \
+    "manual fallback gitea host default: GitHub's singular /pull/ never appears"
+
+  assert_contains "https://github.com/acme/widgets/compare/main...feat-x" "$github_text" \
+    "manual fallback host default control: a github repository with an unresolvable host still defaults to github.com -- the default is per forge, not renamed"
+  assert_contains "gh pr create" "$github_text" \
+    "manual fallback host default control: and the github arm still prints gh's own command, unchanged by this story"
+}
+
+# The two token guards, in COUNTING form, plus the proof that each can go red.
+gtw_test_gitea_write_token_source_guards() {
+  echo ""
+  echo "=== gitea writes: no tea invocation carries or blanks a token, counted so neither guard can fail open ==="
+
+  assert_eq "0" "$(gtw_count_token_exports "$CLI")" \
+    "gitea token guard: aimi-cli.sh exports no GH_TOKEN, GH_ENTERPRISE_TOKEN, GITEA_TOKEN or GITEA_INSTANCE_URL anywhere"
+  assert_eq "0" "$(gtw_count_token_prefixed_tea_calls "$CLI")" \
+    "gitea token guard: not one tea invocation carries a token PREFIX ASSIGNMENT -- tea honours GH_TOKEN, so the github arm's shape would hand a GitHub credential to a Gitea instance"
+
+  # Nothing inside the three gitea write adapters touches a token variable in
+  # ANY form -- neither forwarding nor blanking. Comment lines are dropped
+  # first, because this section's own comments name GH_TOKEN on purpose.
+  local bodies token_lines
+  bodies=$(gtw_fn_body _forge_pr_create_gitea; gtw_fn_body _forge_pr_edit_gitea; gtw_fn_body _forge_issue_create_gitea)
+  token_lines=$(printf '%s\n' "$bodies" | grep -v '^[[:space:]]*#' | grep -cE '(GH_TOKEN|GH_ENTERPRISE_TOKEN|GITEA_TOKEN)') || token_lines=0
+  assert_eq "0" "$token_lines" \
+    "gitea token guard: no executable line in the three gitea write adapters mentions a token variable at all -- neither forwarded nor blanked"
+  assert_eq "0" "$(printf '%s\n' "$bodies" | grep -cE '_forge_account_(override|override_slots|store_path|stored_entry|select)')" \
+    "gitea token guard: and none of them reads the account store, whose empty slot defaults to the AMBIENT GH_TOKEN"
+
+  # FALSIFIABILITY, BOTH GUARDS. A guard asserting "zero" against a file that
+  # has zero is indistinguishable from a guard that always prints zero, so
+  # each counter is shown to move on a copy with a deliberately planted
+  # violation -- at the TOP of the copy, which is the experiment rather than a
+  # detail: the discarded `grep -v | grep -q` shape must exit while the left
+  # half still has thousands of lines to write, or there is nothing to
+  # SIGPIPE and the demonstration would be timing-dependent.
+  local early_export early_prefix
+  early_export=$(mktemp)
+  printf '%s\n' 'export GH_TOKEN="$gh_token_override"' > "$early_export"
+  cat "$CLI" >> "$early_export"
+  assert_eq "1" "$(gtw_count_token_exports "$early_export")" \
+    'gitea token guard proof: a planted "export GH_TOKEN" on line 1 is COUNTED -- the guard can go red'
+
+  early_prefix=$(mktemp)
+  printf '%s\n' '  GH_TOKEN="$gh_token_override" _forge_capture stdout stderr_out rc -- tea pulls create -t "$title"' > "$early_prefix"
+  cat "$CLI" >> "$early_prefix"
+  assert_eq "1" "$(gtw_count_token_prefixed_tea_calls "$early_prefix")" \
+    "gitea token guard proof: a planted GH_TOKEN= prefix on a tea call is COUNTED -- the guard can go red"
+
+  # A BLANKING prefix is the opposite defect and equally forbidden: it would
+  # revoke an operator's own GITEA_TOKEN selection, exactly as phase 2's bare
+  # TOKEN="" prefix did on the gh side.
+  local early_blank
+  early_blank=$(mktemp)
+  printf '%s\n' '  GITEA_TOKEN= _forge_capture stdout stderr_out rc -- tea pulls create -t "$title"' > "$early_blank"
+  cat "$CLI" >> "$early_blank"
+  assert_eq "1" "$(gtw_count_token_prefixed_tea_calls "$early_blank")" \
+    "gitea token guard proof: a BLANKING GITEA_TOKEN= prefix is counted too -- revoking the operator's selection is its own defect"
+
+  # And why `grep -c` rather than `grep -v | grep -q`, demonstrated rather
+  # than asserted: under pipefail the -q form reads a real hit as "no hit".
+  local short_circuit_verdict="absent"
+  if (set -o pipefail; grep -v '^[[:space:]]*#' "$early_export" | grep -qE '(export|declare -x)[[:space:]]+GH_TOKEN') >/dev/null 2>&1; then
+    short_circuit_verdict="present"
+  fi
+  assert_eq "absent" "$short_circuit_verdict" \
+    'gitea token guard proof: the discarded "grep -v | grep -q" shape reports ABSENT on that same file -- fail-open, which is why both guards count instead'
+
+  # A comment mentioning the forbidden form is not a violation of it. The
+  # section header this story wrote names GH_TOKEN several times, on purpose.
+  local commented
+  commented=$(mktemp)
+  cp "$CLI" "$commented"
+  printf '%s\n' '#   export GH_TOKEN="..."   <- never do this on a tea call' >> "$commented"
+  printf '%s\n' '#   GH_TOKEN="$x" _forge_capture a b c -- tea pulls create   <- nor this' >> "$commented"
+  assert_eq "0" "$(gtw_count_token_exports "$commented")" \
+    "gitea token guard: a commented-out export is not counted, so the section header can name the forbidden form in prose"
+  assert_eq "0" "$(gtw_count_token_prefixed_tea_calls "$commented")" \
+    "gitea token guard: a commented-out prefix assignment is not counted either"
+
+  rm -f "$early_export" "$early_prefix" "$early_blank" "$commented"
+}
+
+# The LIVE token probe. Phase 3's US-005 shipped this assertion tautological
+# in BOTH of the two ways it can be: it read the state through a separate
+# forge-auth-status PROCESS, and it ran the write inside `$( )`. An `export`
+# dies with the process or the subshell that made it, so nothing could ever be
+# observed. Here the write is a PLAIN STATEMENT REDIRECTED TO A FILE, in the
+# same shell that reads the environment before and after -- and the last
+# assertion PROVES that shape has teeth by planting the very thing it looks
+# for.
+gtw_test_gitea_write_live_token_probe() {
+  echo ""
+  echo "=== gitea writes: no token is exported into the process, proven in the SAME shell the write ran in ==="
+
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  gtw_install_fake_tea "$sandbox"
+
+  local log="$sandbox/tea.log" toklog="$sandbox/tea-token.log" writeout
+  : > "$log"
+  : > "$toklog"
+  rm -f "$sandbox/gtw_pull_created.flag"
+  writeout=$(mktemp)
+
+  local probe before_gh before_gitea status after_gh after_gitea
+  probe=$(
+    unset GH_TOKEN GH_ENTERPRISE_TOKEN GITEA_TOKEN AIMI_FORGE_IDENTITY AIMI_FORGE_TYPE
+    export PATH="$sandbox:$PATH"
+    export GTW_TEA_LOG="$log" GTW_TEA_TOKEN_LOG="$toklog"
+    export GTW_PULLS_CREATE_STDOUT='# #42 Add the Gitea adapter (open)
+
+https://gitea.com/acme/widgets/pulls/42'
+    export GTW_PULLS_DETAIL_AFTER_JSON='{"index":42,"url":"https://gitea.com/acme/widgets/pulls/42"}'
+    gtw_source_gitea_write_path
+
+    local b_gh b_gt a_gh a_gt s
+    b_gh="${GH_TOKEN-<unset>}"
+    b_gt="${GITEA_TOKEN-<unset>}"
+    # PLAIN STATEMENT, REDIRECTED TO A FILE -- never s=$(...). A command
+    # substitution is its own subshell, so an export the function made inside
+    # it would die there and the after-reading would be clean no matter what.
+    _forge_pr_create_gitea "My PR" main feat-x "the body" > "$writeout" 2>/dev/null || true
+    s=$(jq -r '.status' < "$writeout" 2>/dev/null) || s="<unparseable>"
+    a_gh="${GH_TOKEN-<unset>}"
+    a_gt="${GITEA_TOKEN-<unset>}"
+    printf '%s\t%s\t%s\t%s\t%s' "$b_gh" "$b_gt" "$s" "$a_gh" "$a_gt"
+  )
+  before_gh=$(printf '%s' "$probe" | cut -f1)
+  before_gitea=$(printf '%s' "$probe" | cut -f2)
+  status=$(printf '%s' "$probe" | cut -f3)
+  after_gh=$(printf '%s' "$probe" | cut -f4)
+  after_gitea=$(printf '%s' "$probe" | cut -f5)
+
+  assert_eq "created" "$status" "live token probe: the write really happened, so the after-readings are not vacuous"
+  assert_eq "<unset>" "$before_gh"    "live token probe: GH_TOKEN is unset before the write (baseline)"
+  assert_eq "<unset>" "$before_gitea" "live token probe: GITEA_TOKEN is unset before the write (baseline)"
+  assert_eq "<unset>" "$after_gh" \
+    "live token probe: GH_TOKEN is STILL unset after the write, read in the SAME shell the write ran in -- an export would have been visible here"
+  assert_eq "<unset>" "$after_gitea" "live token probe: GITEA_TOKEN is still unset after the write"
+
+  # The child's own view, on its own channel: tea itself was handed nothing.
+  assert_eq "3" "$(grep -c 'GH_TOKEN=<unset>|GITEA_TOKEN=<unset>' "$toklog")" \
+    "live token probe: all three tea calls -- the listing, the create and the re-read -- ran with NO token supplied by this CLI"
+  assert_eq "0" "$(grep -cvE 'GH_TOKEN=<unset>\|GITEA_TOKEN=<unset>' "$toklog")" \
+    "live token probe: not one tea call received a token from this CLI"
+  assert_eq "0" "$(grep -cE 'GH_TOKEN|GITEA_TOKEN|gh[po]_' "$log")" \
+    "live token probe: no token and no token variable appears in any recorded tea argv line"
+
+  # THE TEETH. The identical probe against a copy of aimi-cli.sh with a
+  # deliberate process-wide export planted inside _forge_pr_create_gitea DOES
+  # move the after-reading. Without this, an assertion that the environment is
+  # unchanged is indistinguishable from an assertion that nothing was read.
+  local planted planted_after
+  planted=$(mktemp)
+  assert_eq "changed" "$(gtw_plant_export_in_gitea_create "$planted")" \
+    "live token probe: the planted-export patch landed (guards against a vacuous teeth check)"
+
+  planted_after=$(
+    unset GH_TOKEN GH_ENTERPRISE_TOKEN GITEA_TOKEN AIMI_FORGE_IDENTITY AIMI_FORGE_TYPE
+    export PATH="$sandbox:$PATH"
+    export GTW_PULLS_CREATE_STDOUT='https://gitea.com/acme/widgets/pulls/42'
+    export GTW_PULLS_DETAIL_AFTER_JSON='{"index":42,"url":"https://gitea.com/acme/widgets/pulls/42"}'
+    gtw_source_gitea_write_path "$planted"
+    _forge_pr_create_gitea "My PR" main feat-x "the body" > /dev/null 2>&1 || true
+    printf '%s' "${GH_TOKEN-<unset>}"
+  )
+  assert_eq "planted-into-the-process" "$planted_after" \
+    "live token probe: with an export planted in the gitea write path this probe GOES RED -- the assertion above is a real observation, not a tautology"
+
+  # And the other half of the degradation: an operator-exported GITEA_TOKEN
+  # reaches tea untouched, on EVERY call, never blanked. Driven through the
+  # real CLI, because what is being observed is the CHILD's environment.
+  : > "$log"
+  : > "$toklog"
+  rm -f "$sandbox/gtw_pull_created.flag"
+  local inherited_out inherited_rc
+  inherited_out=$(env GITEA_TOKEN=operator-selected-token \
+    GTW_TEA_LOG="$log" GTW_TEA_TOKEN_LOG="$toklog" \
+    GTW_PULLS_CREATE_STDOUT='https://gitea.com/acme/widgets/pulls/42' \
+    GTW_PULLS_DETAIL_AFTER_JSON='{"index":42,"url":"https://gitea.com/acme/widgets/pulls/42"}' \
+    PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body") && inherited_rc=0 || inherited_rc=$?
+  assert_exit_code "0" "$inherited_rc" "inherited token: forge-pr-create still succeeds"
+  assert_eq "created" "$(printf '%s' "$inherited_out" | jq -r '.status')" "inherited token: the write really happened"
+  assert_eq "3" "$(grep -c 'GITEA_TOKEN=operator-selected-token' "$toklog")" \
+    "inherited token: all three tea calls received the operator's exported GITEA_TOKEN untouched -- never blanked, and never on only some of them"
+  assert_eq "0" "$(grep -c 'GITEA_TOKEN=<unset>' "$toklog")" \
+    "inherited token: not one tea call had the inherited token stripped from its environment"
+  assert_eq "3" "$(grep -c 'GH_TOKEN=<unset>' "$toklog")" \
+    "inherited token: and GH_TOKEN stayed unset throughout -- a Gitea instance is never handed a GitHub credential"
+
+  rm -f "$writeout" "$planted"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+# The Gitea write-adapter section header is where a reader meets every hazard
+# this story had to resolve, so each answer has to be THERE and has to be
+# concrete. A hazard rediscovered from the code alone costs a debugging
+# session; the interactivity one costs a hung autonomous run.
+gtw_test_gitea_write_header_states_its_invariants() {
+  echo ""
+  echo "=== gitea write header: states the flag invariant, the flag spellings, the GH_TOKEN hazard, the ceiling and the known duplicate read path ==="
+
+  local header
+  header=$(gtw_write_header)
+
+  assert_contains "EVERY tea WRITE INVOCATION CARRIES AT LEAST ONE FLAG" "$header" \
+    "header: the always-pass-a-flag invariant is stated, in the section header, before any code"
+  assert_contains "NumFlags() == 0" "$header" "header: names the exact condition that triggers tea's interactive survey"
+  assert_contains "THE DOC COMMENT CLAIMS A TTY CHECK; THE IMPLEMENTATION PERFORMS NONE" "$header" \
+    "header: records that tea's own doc comment is wrong about the TTY check, which is why non-TTY stdin does not save the run"
+  assert_contains "do not go looking for a -y here" "$header" \
+    "header: says outright that tea has no -y, so a reader does not add one by analogy with glab"
+
+  assert_contains "NOT gh's --body" "$header"    "header: names the -d/--description spelling against gh's --body"
+  assert_contains "LONG FORM ONLY" "$header"     "header: records that --head has no short alias"
+  assert_contains "urfave/cli's help flag" "$header" "header: and why -h could not be one"
+
+  assert_contains "GH_TOKEN HAZARD" "$header"    "header: the GH_TOKEN hazard is named as a hazard, not a style rule"
+  assert_contains "context_login.go" "$header"   "header: cites the tea source that reads GH_TOKEN"
+  assert_contains "Blanking is refused" "$header" "header: states the opposite refusal too -- blanking would revoke the operator's own selection"
+
+  assert_contains "VERIFICATION CEILING" "$header" "header: the declared ceiling is stated in the code, in the same shape phase 3's glab header carries its own"
+  assert_contains "tea is NOT" "$header"           "header: says plainly that tea is not installed"
+  assert_contains "2026-08-06" "$header"           "header: dates the source reading"
+
+  assert_contains "KNOWN, DELIBERATE DUPLICATE READ PATH" "$header" \
+    "header: the second Gitea PR read path is recorded by name as a known, deliberate debt rather than left to be mistaken for an accident"
+  assert_contains "_forge_pr_view_gitea" "$header" "header: names the function this probe deliberately does not call, and why"
+
+  # The two LIST-vs-DETAIL traps a naive implementation gets wrong.
+  assert_contains "EVERY LIST VALUE IS A JSON STRING" "$header" "header: records that LIST values are strings, so index arrives as \"42\""
+  assert_contains "owner:" "$header" "header: records the cross-fork owner: prefix on the LIST head"
+  assert_contains "ONLY AN OPEN PULL REQUEST BLOCKS CREATION" "$header" "header: records that a merged or closed pull request must not block a reused branch forever"
+
+  # The source-level half of the flag invariant: EVERY tea write in the file,
+  # including one a future edit adds without a test of its own.
+  local write_lines total=0 flagless=0 line rest flags
+  write_lines=$(grep -nE '_forge_capture .* -- tea (pulls create|pulls edit|issues create)' "$CLI" \
+    | grep -vE '^[0-9]+:[[:space:]]*#' || true)
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    total=$((total + 1))
+    rest=$(printf '%s' "$line" | sed 's/.* -- tea [a-z]* [a-z]*//')
+    flags=$(printf '%s' "$rest" | tr ' ' '\n' | grep -cE '^--?[A-Za-z]') || flags=0
+    if [ "$flags" -eq 0 ]; then
+      flagless=$((flagless + 1))
+      echo -e "${RED}✗${NC} source guard: a tea write invocation carries NO flag: $line"
+    fi
+  done <<< "$write_lines"
+
+  assert_eq "3" "$total"    "source guard: all three tea write invocations are present (pulls create, pulls edit, issues create)"
+  assert_eq "0" "$flagless" "source guard: every tea write invocation carries at least one flag -- with zero, tea opens an interactive survey and the run hangs"
+
+  # gh's and glab's flag vocabularies must never appear inside a tea call.
+  local tea_calls
+  tea_calls=$(grep -E '_forge_capture .* -- tea ' "$CLI" || true)
+  assert_eq "0" "$(printf '%s' "$tea_calls" | grep -c -- '--body' || true)"          "source guard: no tea invocation passes gh's --body"
+  assert_eq "0" "$(printf '%s' "$tea_calls" | grep -c -- '--source-branch' || true)" "source guard: no tea invocation passes glab's --source-branch"
+  assert_eq "0" "$(printf '%s' "$tea_calls" | grep -c -- '--target-branch' || true)" "source guard: no tea invocation passes glab's --target-branch"
+  assert_eq "0" "$(printf '%s' "$tea_calls" | grep -cE -- ' -y( |$)' || true)"       "source guard: no tea invocation passes glab's -y, which tea does not define"
+}
+
+# ONE MUTATION PER ROUTED WRITE VERB. For each of the three, a FRESH copy of
+# aimi-cli.sh has that verb's gitea arm -- and only that verb's -- unrouted,
+# restoring the pre-story behaviour in which gitea fell through to the
+# no-adapter path, and a SPECIFIC, NAMED assertion is shown to go red. Three
+# verbs, three distinct named assertions.
+#
+# Each mutation also asserts that its patch actually landed ("changed"),
+# because a mutation test whose patch silently missed passes for the wrong
+# reason -- the worst possible failure mode for this particular check.
+gtw_test_gitea_write_verbs_mutation_matrix() {
+  echo ""
+  echo "=== gitea write verbs: unrouting each verb in turn turns a specific named assertion RED ==="
+
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  gtw_install_fake_tea "$sandbox"
+
+  local mut_dir mut live mutant mutant_rc
+  mut_dir=$(mktemp -d)
+  mut="$mut_dir/aimi-cli.sh"
+
+  # --- 1/3: forge-pr-create ------------------------------------------------
+  # Named assertion under test:
+  #   "forge-pr-create gitea: the SHARED write envelope, status created"
+  rm -f "$sandbox/gtw_pull_created.flag"
+  assert_eq "changed" "$(gtw_mutate_unroute '      _forge_pr_create_gitea "$title" "$base" "$head" "$body" || gt_rc=$?' "$mut")" \
+    "MUTATION 1/3 forge-pr-create: the unroute patch landed (guards against a vacuous mutation test)"
+  live=$(GTW_PULLS_CREATE_STDOUT='https://gitea.com/acme/widgets/pulls/42' \
+    GTW_PULLS_DETAIL_AFTER_JSON='{"index":42,"url":"https://gitea.com/acme/widgets/pulls/42"}' \
+    PATH="$sandbox" "$CLI" forge-pr-create --title "My PR" --base main --head feat-x --body "the body" 2>/dev/null | jq -r '.status')
+  rm -f "$sandbox/gtw_pull_created.flag"
+  mutant=$(GTW_PULLS_CREATE_STDOUT='https://gitea.com/acme/widgets/pulls/42' \
+    GTW_PULLS_DETAIL_AFTER_JSON='{"index":42,"url":"https://gitea.com/acme/widgets/pulls/42"}' \
+    PATH="$sandbox" bash "$mut" forge-pr-create --title "My PR" --base main --head feat-x --body "the body" 2>/dev/null) && mutant_rc=0 || mutant_rc=$?
+  assert_eq "created" "$live" "MUTATION 1/3 forge-pr-create: routed, the named assertion 'status created' is GREEN"
+  assert_eq "degraded" "$(printf '%s' "$mutant" | jq -r '.status')" "MUTATION 1/3 forge-pr-create: UNROUTED, that same named assertion goes RED -- status is degraded, not created"
+  assert_contains 'no adapter for forge "gitea"' "$(printf '%s' "$mutant" | jq -r '.message')" "MUTATION 1/3 forge-pr-create: the unrouted build reverts to the no-adapter message"
+  assert_exit_code "1" "$mutant_rc" "MUTATION 1/3 forge-pr-create: and the unrouted build exits non-zero, as the no-adapter branch always did"
+
+  # --- 2/3: forge-pr-edit --------------------------------------------------
+  # Named assertion under test:
+  #   "forge-pr-edit gitea: status unchanged with {url, number} from the re-read"
+  assert_eq "changed" "$(gtw_mutate_unroute '      _forge_pr_edit_gitea "$number" "$body" || gt_rc=$?' "$mut")" \
+    "MUTATION 2/3 forge-pr-edit: the unroute patch landed"
+  live=$(GTW_PULLS_EDIT_STDOUT='# #303 edited' \
+    GTW_PULLS_DETAIL_JSON='{"index":303,"url":"https://gitea.com/acme/widgets/pulls/303"}' \
+    PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --body "updated body" 2>/dev/null | jq -r '.status')
+  mutant=$(GTW_PULLS_EDIT_STDOUT='# #303 edited' \
+    GTW_PULLS_DETAIL_JSON='{"index":303,"url":"https://gitea.com/acme/widgets/pulls/303"}' \
+    PATH="$sandbox" bash "$mut" forge-pr-edit --number 303 --body "updated body" 2>/dev/null) && mutant_rc=0 || mutant_rc=$?
+  assert_eq "unchanged" "$live" "MUTATION 2/3 forge-pr-edit: routed, the named assertion 'status unchanged' is GREEN"
+  assert_eq "degraded" "$(printf '%s' "$mutant" | jq -r '.status')" "MUTATION 2/3 forge-pr-edit: UNROUTED, that same named assertion goes RED -- status is degraded, not unchanged"
+  assert_contains 'no adapter for forge "gitea"' "$(printf '%s' "$mutant" | jq -r '.message')" "MUTATION 2/3 forge-pr-edit: the unrouted build reverts to the no-adapter message"
+  assert_exit_code "1" "$mutant_rc" "MUTATION 2/3 forge-pr-edit: and the unrouted build exits non-zero"
+
+  # --- 3/3: forge-issue-create ---------------------------------------------
+  # Named assertion under test:
+  #   "forge-issue-create gitea: status created, number parsed from the issue URL"
+  assert_eq "changed" "$(gtw_mutate_unroute '      _forge_issue_create_gitea "$title" "$body"' "$mut")" \
+    "MUTATION 3/3 forge-issue-create: the unroute patch landed"
+  live=$(GTW_ISSUES_CREATE_STDOUT='https://gitea.com/acme/widgets/issues/7' \
+    PATH="$sandbox" "$CLI" forge-issue-create --title "Backend spec" --body "the body" 2>/dev/null | jq -r '.status')
+  mutant=$(GTW_ISSUES_CREATE_STDOUT='https://gitea.com/acme/widgets/issues/7' \
+    PATH="$sandbox" bash "$mut" forge-issue-create --title "Backend spec" --body "the body" 2>/dev/null) && mutant_rc=0 || mutant_rc=$?
+  assert_eq "created" "$live" "MUTATION 3/3 forge-issue-create: routed, the named assertion 'status created' is GREEN"
+  assert_eq "degraded" "$(printf '%s' "$mutant" | jq -r '.status')" "MUTATION 3/3 forge-issue-create: UNROUTED, that same named assertion goes RED -- status is degraded, not created"
+  assert_contains 'no adapter for forge "gitea"' "$(printf '%s' "$mutant" | jq -r '.message')" "MUTATION 3/3 forge-issue-create: the unrouted build reverts to the no-adapter message"
+  assert_exit_code "0" "$mutant_rc" "MUTATION 3/3 forge-issue-create: and the unrouted build STILL exits 0 -- the soft-fail contract survives even the no-adapter branch"
+
+  rm -rf "$mut_dir"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+# ============================================================================
 # Forge Issue Verb Tests (US-006)
 # ============================================================================
 # forge-issue-view / forge-issue-create are the first forge-* verbs that
@@ -4929,11 +6889,14 @@ test_forge_issue_view_degraded_missing_gh() {
 
 test_forge_issue_view_non_github_forge_degrades() {
   echo ""
-  echo "=== forge-issue-view: a forge with no adapter (Gitea) degrades, does not crash ==="
+  echo "=== forge-issue-view: a forge with no adapter (unknown) degrades, does not crash ==="
 
-  # gitea, not gitlab: phase 3 US-002 routed gitlab to glab, so the
-  # adapter-less branch this test pins is now reached by gitea.
-  setup_detect_forge_fixture origin https://gitea.com/owner/repo.git
+  # `unknown`, not gitea: phase 4 outline:02 routed gitea to tea, so the
+  # adapter-less branch this test pins is now reached only by an unrecognized
+  # host. RETARGETED, never deleted -- the no_adapter path must stay covered,
+  # and `unknown` is the last control there is (AIMI_FORGE_TYPE validates only
+  # github|gitlab|gitea, aimi-cli.sh:2130, and all three now have adapters).
+  setup_detect_forge_fixture origin https://git.example.com/owner/repo.git
   pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
 
   local sandbox
@@ -4945,7 +6908,7 @@ test_forge_issue_view_non_github_forge_degrades() {
 
   assert_exit_code "0" "$exit_code" "forge-issue-view non-github: exit 0"
   assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "forge-issue-view non-github: status error"
-  assert_contains "gitea" "$(printf '%s' "$out" | jq -r '.message')" "forge-issue-view non-github: message names the detected forge"
+  assert_contains "unknown" "$(printf '%s' "$out" | jq -r '.message')" "forge-issue-view non-github: message names the detected forge"
   assert_eq "no_adapter" "$(printf '%s' "$out" | jq -r '.reason')" "forge-issue-view non-github: reason is no_adapter"
 
   popd >/dev/null
@@ -5548,14 +7511,23 @@ test_forge_pr_review_threads_degraded_missing_gh() {
 
 test_forge_pr_review_threads_non_github_forge_degrades() {
   echo ""
-  echo "=== forge-pr-review-threads: a forge with STILL no adapter (gitea) degrades, does not crash ==="
+  echo "=== forge-pr-review-threads: a forge with no adapter (an UNRECOGNIZED host) degrades, does not crash ==="
 
-  # Retargeted from gitlab to codeberg.org in phase 3 US-004: gitlab is now a
-  # routed adapter (see the GitLab Review-Thread Routing Tests block), so it is
-  # no longer an example of the no_adapter branch. Gitea/Forgejo still is, and
-  # the branch still needs a live case guarding it -- deleting this test
-  # instead would have left `no_adapter` untested for this verb entirely.
-  setup_detect_forge_fixture origin https://codeberg.org/owner/repo.git
+  # RETARGETED TWICE, NEVER DELETED. Phase 3 US-004 moved it from gitlab to
+  # codeberg.org once glab routing landed; phase 4 outline:04 moves it again,
+  # to an unrecognized host, now that `tea` routing has landed and codeberg.org
+  # classifies as the routed forge `gitea`. Deleting it instead would leave
+  # the no_adapter branch untested for this verb entirely.
+  #
+  # THIS IS THE END OF THE LINE FOR FORGE-NAME RETARGETING. AIMI_FORGE_TYPE
+  # validates against github|gitlab|gitea (aimi-cli.sh:2130) and all three are
+  # routed, so there is no forge word left to point this test at. The only
+  # remaining stand-in for "a forge with no adapter" is `unknown`, which
+  # _detect_forge_classify_host answers for any host outside its three
+  # exact-or-subdomain families -- reachable only through a remote URL like
+  # the one below. Any future story needing this control must build its own
+  # unrecognized-host fixture; there is nothing else to inherit.
+  setup_detect_forge_fixture origin https://git.example.com/owner/repo.git
   pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
 
   local sandbox
@@ -5567,7 +7539,7 @@ test_forge_pr_review_threads_non_github_forge_degrades() {
 
   assert_exit_code "0" "$exit_code" "pr-review-threads adapterless forge: exit 0"
   assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "pr-review-threads adapterless forge: status error"
-  assert_contains "gitea" "$(printf '%s' "$out" | jq -r '.message')" "pr-review-threads adapterless forge: message names the detected forge"
+  assert_contains "unknown" "$(printf '%s' "$out" | jq -r '.message')" "pr-review-threads adapterless forge: message names the detected forge, which is now unknown -- the last stand-in available"
   assert_eq "no_adapter" "$(printf '%s' "$out" | jq -r '.reason')" "pr-review-threads adapterless forge: reason is no_adapter"
 
   popd >/dev/null
@@ -6756,6 +8728,1112 @@ glt_test_mutation_unrouting_the_resolve_verb_turns_an_assertion_red() {
 }
 
 # ============================================================================
+# Gitea Review-Thread Routing Tests (phase 4 outline:04)
+# ============================================================================
+# forge-pr-review-threads and forge-resolve-review-thread routed to
+# `tea pulls review-comments` / `tea pulls resolve`.
+#
+# NAMING: every function and control variable this story adds is prefixed
+# `gtt_`/`GTT_` (GiTea Threads), INCLUDING the test functions themselves.
+# That is an orchestration constraint, not a style preference: sibling
+# stories in this same phase edit this same file for the read verbs and the
+# write verbs, on branches none of us can see, and bash silently keeps the
+# LAST definition of a duplicated function name -- so individually-green
+# branches merge into a red one. The phase-2 founding incident: two wave-1
+# stories both defined source_forge_account_functions and six assertions
+# failed with exit 127 only on the merge. `gtt_` is the prefix the phase's
+# own naming table reserved for this story (see the Gitea PR-field Mapping
+# section header above), verified disjoint from `gla_`, `glr_`, `glt_`,
+# `glw_`, `gtm_` and `run_`, and this section installs its OWN fake tea
+# rather than extending `gtm_setup_fake_tea_fixture`.
+#
+# VERIFICATION CEILING. `tea` is genuinely NOT INSTALLED on this machine --
+# which is also what makes the tea-absent degrade test below the ONE
+# assertion in this section measured against reality rather than against a
+# stub. Everything else is measured against `gtt_write_fake_tea`, whose
+# payloads are modelled on `gitea/tea` `main` source read on 2026-08-06 and
+# never on a captured real-binary response. These tests prove WHICH ARGV the
+# adapter emits and HOW it parses a fixture; they can never prove what real
+# tea does with either. The argv half is sound against a fake -- a wrong flag
+# is visible in the log. The parsing half is not: the stub emits whatever the
+# author believed, so a wrong KEY NAME passes green on both sides.
+
+# Writes an argv-recording fake `tea` into an existing forge CLI sandbox and
+# prints nothing. Every invocation's argv is appended to <sandbox>/tea.log,
+# one line per call, so an assertion can prove WHICH flags were passed rather
+# than merely that a call happened -- load-bearing here, because tea has no
+# server-side resolution filter and the returned list therefore cannot tell a
+# local filter from a server-side one. Only the argv can.
+#
+# Failures are modelled on tea's uniform failure shape (main.go:18-30): the
+# message on stderr, exit 1, no distinct not-found code.
+#
+# Driven entirely by GTT_* environment variables, all optional:
+#   GTT_LIST_PAYLOAD_FILE   file whose contents are `pulls review-comments`
+#                           stdout
+#   GTT_LIST_STDOUT         literal `pulls review-comments` stdout (used when
+#                           no file is given)
+#   GTT_LIST_FAIL_STDERR    when set, `pulls review-comments` writes it to
+#                           stderr and exits 1 instead of printing anything
+#   GTT_RESOLVE_FAIL_STDERR same, for `pulls resolve`
+gtt_write_fake_tea() {
+  local sandbox="$1"
+  cat > "$sandbox/tea" << 'GTT_FAKE_TEA'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GTT_TEA_LOG"
+case "$1 $2" in
+  "pulls review-comments")
+    if [ -n "${GTT_LIST_FAIL_STDERR:-}" ]; then
+      printf '%s' "$GTT_LIST_FAIL_STDERR" >&2
+      exit 1
+    fi
+    if [ -n "${GTT_LIST_PAYLOAD_FILE:-}" ]; then
+      cat "$GTT_LIST_PAYLOAD_FILE"
+    else
+      printf '%s' "${GTT_LIST_STDOUT-[]}"
+    fi
+    exit 0
+    ;;
+  "pulls resolve")
+    if [ -n "${GTT_RESOLVE_FAIL_STDERR:-}" ]; then
+      printf '%s' "$GTT_RESOLVE_FAIL_STDERR" >&2
+      exit 1
+    fi
+    # tea reports success with a sentence on stdout and no JSON at all
+    # (modules/task/pull_review_comment.go:55).
+    echo "Comment $3 resolved"
+    exit 0
+    ;;
+esac
+echo "Error: unhandled invocation: $*" >&2
+exit 1
+GTT_FAKE_TEA
+  chmod +x "$sandbox/tea"
+}
+
+# The recorded argv log, or the empty string when tea was never invoked.
+gtt_tea_argv() {
+  cat "${1}/tea.log" 2>/dev/null || true
+}
+
+# How many times the fake tea was invoked. Load-bearing for the "resolves and
+# does NOT post a reply" proof: the count must be exactly one.
+gtt_tea_call_count() {
+  local log="${1}/tea.log" count
+  if [ ! -f "$log" ]; then
+    printf '0'
+    return 0
+  fi
+  count=$(grep -c '' "$log" 2>/dev/null) || count=0
+  printf '%s' "$count"
+}
+
+# One realistic `tea pulls review-comments <index> -f <csv> -o json` document.
+# Four properties are load-bearing and must not be "tidied" away:
+#   - EVERY value is a JSON STRING, including `line`. That is not sloppiness:
+#     tea's LIST output path marshals a map[string]string
+#     (modules/print/table.go:187-208), so a fixture with a numeric `line`
+#     would let a missing coercion pass green.
+#   - The second row's `resolver` is a USERNAME and the other two are EMPTY.
+#     tea exposes no resolved boolean at all, and there is no server-side
+#     state filter to ask, so both the local filter and the isResolved
+#     derivation are read off this one field. A fixture carrying only
+#     unresolved rows would make a broken filter pass -- the mix is what makes
+#     the test able to fail.
+#   - Rows one and three share `src/main.go`. Grouping by path would collapse
+#     them into one thread, so the three-thread assertion catches an invented
+#     grouping the forge does not have.
+#   - `url` is populated on every row: it is SUPPORTED on gitea, unlike on
+#     GitLab, and the unsupported_fields assertion below depends on there
+#     being a real value to compare against.
+gtt_review_comment_fixture() {
+  printf '%s' '[
+    {"id": "1126", "path": "src/main.go", "line": "17",
+     "body": "please rename this", "reviewer": "monalisa", "resolver": "",
+     "created": "2026-01-01T10:00:00Z", "updated": "2026-01-01T10:30:00Z",
+     "url": "https://gitea.com/acme/widgets/pulls/42/files#issuecomment-1126"},
+    {"id": "1127", "path": "src/util.go", "line": "3",
+     "body": "already handled", "reviewer": "octocat", "resolver": "hubot",
+     "created": "2026-01-02T10:00:00Z", "updated": "2026-01-02T11:00:00Z",
+     "url": "https://gitea.com/acme/widgets/pulls/42/files#issuecomment-1127"},
+    {"id": "1128", "path": "src/main.go", "line": "42",
+     "body": "and one more on the same file", "reviewer": "monalisa", "resolver": "",
+     "created": "2026-01-03T10:00:00Z", "updated": "2026-01-03T10:00:00Z",
+     "url": "https://gitea.com/acme/widgets/pulls/42/files#issuecomment-1128"}
+  ]'
+}
+
+# A hermetic PATH sandbox with the argv-recording fake tea installed in it.
+# Prints the sandbox path, so it is safe inside $(...) -- which is why the
+# sandbox is created HERE and not inside the runner below: the runner is
+# always called in a command substitution, and a value written from inside one
+# dies with that subshell.
+gtt_new_sandbox() {
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  gtt_write_fake_tea "$sandbox"
+  printf '%s' "$sandbox"
+}
+
+# The same sandbox WITHOUT the fake tea. This is the one fixture in this
+# section that is not a simulation: setup_forge_cli_sandbox's allowlist has no
+# tea entry, AND tea is genuinely not installed anywhere on this machine, so
+# `command -v tea` fails inside it for the real reason rather than a staged
+# one.
+gtt_new_sandbox_without_tea() {
+  setup_forge_cli_sandbox
+}
+
+# Runs one aimi-cli.sh invocation inside the throwaway gitea-remote
+# repository, under <sandbox> as the entire PATH. Prints the command's stdout;
+# its stderr goes to <stderr-file>. GTT_TEA_LOG is pointed at
+# <sandbox>/tea.log so gtt_tea_argv can read the recorded argv afterwards.
+#
+# Usage: gtt_run_cli <sandbox> <stderr-file> [ENV=VAL ...] -- <args...>
+gtt_run_cli() {
+  local sandbox="$1" stderr_file="$2"
+  shift 2
+
+  local assignments=()
+  while [ $# -gt 0 ] && [ "$1" != "--" ]; do
+    assignments+=("$1")
+    shift
+  done
+  [ "${1:-}" = "--" ] && shift
+
+  (
+    cd "$GTT_REPO_DIR" || exit 1
+    export PATH="$sandbox"
+    export GTT_TEA_LOG="$sandbox/tea.log"
+    if [ "${#assignments[@]}" -gt 0 ]; then
+      for _gtt_assignment in "${assignments[@]}"; do
+        export "${_gtt_assignment?}"
+      done
+    fi
+    "$CLI" "$@" 2>"$stderr_file"
+  )
+}
+
+# Creates the gitea-remote repository every test below runs inside, exported
+# as GTT_REPO_DIR. Deliberately NOT setup_detect_forge_fixture: that helper
+# pushd's the whole test process into the fixture, and these tests instead run
+# the CLI in a subshell so a failing assertion can never leave the suite
+# standing in a deleted directory.
+gtt_setup_repo() {
+  local remote_url="${1:-https://gitea.com/acme/widgets.git}"
+  GTT_REPO_DIR=$(mktemp -d)
+  (
+    cd "$GTT_REPO_DIR" || exit 1
+    git init >/dev/null 2>&1
+    git checkout -b main >/dev/null 2>&1
+    echo "init" > README.md
+    git add README.md
+    git commit -m "Initial commit" >/dev/null 2>&1
+    git remote add origin "$remote_url"
+    mkdir -p .aimi/tasks
+  )
+}
+
+# RESTORES nothing and unsets only GTT_REPO_DIR: this section never sets
+# AIMI_CONFIG_DIR, and unsetting that here would hand the rest of part 4 back
+# to the real ~/.config/aimi.
+gtt_teardown_repo() {
+  rm -rf "$GTT_REPO_DIR"
+  unset GTT_REPO_DIR
+}
+
+# Copies aimi-cli.sh, applies one sed mutation to the copy, and prints the
+# copy's path. The mutation harness for the two "prove the routing is what
+# makes the assertion pass" tests at the end of this section.
+gtt_mutated_cli() {
+  local sed_expr="$1"
+  local mutant
+  mutant=$(mktemp)
+  sed "$sed_expr" "$CLI" > "$mutant"
+  chmod +x "$mutant"
+  printf '%s' "$mutant"
+}
+
+# Runs a MUTATED copy of the CLI through the same sandbox/repo/fake-tea the
+# real assertions use, so the only difference between the green run and the
+# red run is the one routing line the mutation removed.
+gtt_run_mutated_cli() {
+  local mutant="$1" sandbox="$2"
+  shift 2
+  (
+    cd "$GTT_REPO_DIR" || exit 1
+    export PATH="$sandbox"
+    export GTT_TEA_LOG="$sandbox/tea.log"
+    "$mutant" "$@" 2>/dev/null
+  )
+}
+
+# COUNTING FORM, never `grep -v ... | grep -q ...` inside an `if`. Under
+# `set -o pipefail` the short-circuiting form reports ABSENT for a file that
+# does contain the pattern, which is a fail-OPEN guard -- the class outline:05
+# is removing seven of. This helper returns a number for assert_eq to compare,
+# so a broken invocation shows up as a wrong count rather than as a silent
+# pass. Comment lines are NOT stripped: several of the strings this story
+# asserts on live in comments on purpose.
+gtt_count_matches() {
+  local file="$1" pattern="$2" count
+  count=$(grep -cE -- "$pattern" "$file" 2>/dev/null) || count=0
+  printf '%s' "$count"
+}
+
+# The same counting discipline for a needle that is easier to state as a
+# FIXED string than as a regex -- notably the thread-id guard's own character
+# class, which is nearly all metacharacters.
+gtt_count_fixed() {
+  local file="$1" needle="$2" count
+  count=$(grep -cF -- "$needle" "$file" 2>/dev/null) || count=0
+  printf '%s' "$count"
+}
+
+# Same counting discipline, restricted to ONE function body extracted from
+# aimi-cli.sh -- so an assertion about what a function does cannot be
+# satisfied (or broken) by the prose in the comment block above it.
+gtt_count_matches_in_function() {
+  local fn="$1" pattern="$2" body count
+  body=$(sed -n "/^${fn}() {\$/,/^}\$/p" "$CLI")
+  count=$(printf '%s\n' "$body" | grep -cE -- "$pattern") || count=0
+  printf '%s' "$count"
+}
+
+# Function-scoped counting over EXECUTABLE lines only -- comment lines
+# dropped first. The token assertions need this: both gitea arms carry a
+# comment saying they deliberately assign no GH_TOKEN, and a counter that
+# could not tell that comment from an actual assignment would make the
+# property untestable.
+#
+# This is the counting form AC-32 endorses -- `count=$(grep -v ... | grep -cE
+# ...) || count=0` compared with assert_eq -- and NOT the `grep -v ... |
+# grep -q ...`-inside-an-`if` shape outline:05 is removing, which under
+# `set -o pipefail` reports ABSENT for a file that contains the pattern.
+gtt_count_in_function_code() {
+  local fn="$1" pattern="$2" body count
+  body=$(sed -n "/^${fn}() {\$/,/^}\$/p" "$CLI")
+  count=$(printf '%s\n' "$body" | grep -v '^[[:space:]]*#' | grep -cE -- "$pattern") || count=0
+  printf '%s' "$count"
+}
+
+# The ERE for "this line assigns or exports one of the four credential
+# variables tea would read". Named once so the assertion and its control ask
+# literally the same question.
+GTT_TOKEN_ASSIGNMENT_RE='(^|[^A-Za-z0-9_])(GH_TOKEN|GH_ENTERPRISE_TOKEN|GITEA_TOKEN|GITEA_INSTANCE_URL)=|export[[:space:]]+(GH_TOKEN|GH_ENTERPRISE_TOKEN|GITEA_TOKEN|GITEA_INSTANCE_URL)'
+
+# Function-scoped counting for a FIXED needle. Same reason gtt_count_fixed
+# exists: the thread-id guard is nearly all regex metacharacters, and it lives
+# in a function whose header comment also names it -- so the count has to be
+# taken over the body, not over the file.
+gtt_count_fixed_in_function() {
+  local fn="$1" needle="$2" body count
+  body=$(sed -n "/^${fn}() {\$/,/^}\$/p" "$CLI")
+  count=$(printf '%s\n' "$body" | grep -cF -- "$needle") || count=0
+  printf '%s' "$count"
+}
+
+# Counts assert_* calls in <file> whose TRAILING MESSAGE ARGUMENT pairs a
+# forge word (gitea/codeberg) with a no-adapter claim. The message is the last
+# double-quoted string on the line, which is this suite's universal assertion
+# shape.
+#
+# WHY A MESSAGE-SCOPED COUNT RATHER THAN A LINE-SCOPED ONE: a line like
+# `assert_contains "no adapter for forge \"gitea\"" "$msg" "..."` asserts on
+# the CLI's own emitted text for a verb another wave story owns, and is
+# correct until that story routes it. What this invariant is about is the
+# suite's own PROSE claiming gitea has no adapter -- which is now false for
+# these two verbs and will be false for the rest as the wave lands.
+gtt_count_stale_no_adapter_messages() {
+  awk '
+    {
+      line = $0
+      sub(/[[:space:]]+$/, "", line)
+      if (line !~ /assert_[a-z_]+[[:space:]]/) next
+      if (match(line, /"[^"]*"$/) == 0) next
+      msg = tolower(substr(line, RSTART + 1, RLENGTH - 2))
+      if ((index(msg, "gitea") || index(msg, "codeberg")) \
+          && (index(msg, "no adapter") || index(msg, "no_adapter"))) n++
+    }
+    END { print n + 0 }
+  ' "$1"
+}
+
+# ---------------------------------------------------------------------------
+# RUNS FIRST, ON PURPOSE: prove the fake tea can turn these tests RED before a
+# single routing assertion trusts it. An assertion that passes regardless of
+# what the stub returns is not evidence -- that exact defect class is why
+# phase 2's machine-account check had to be rebuilt, and it is the convention
+# every phase-3 and phase-4 stub section here opens with.
+# ---------------------------------------------------------------------------
+gtt_test_fake_tea_can_produce_a_failing_result() {
+  echo ""
+  echo "=== gitea review threads: the fake tea CAN turn an assertion red (falsifiability proof, runs first) ==="
+
+  gtt_setup_repo
+
+  local sandbox_a sandbox_b out_a out_b id_a id_b would_have_gone_red
+  local stderr_file="/tmp/gtt_falsifiability_stderr.$$"
+
+  sandbox_a=$(gtt_new_sandbox)
+  sandbox_b=$(gtt_new_sandbox)
+
+  # Same code path, same flags, two DIFFERENT comment ids. If the emitted
+  # thread id did not actually track the stub's payload, these would be equal.
+  out_a=$(gtt_run_cli "$sandbox_a" "$stderr_file" \
+    'GTT_LIST_STDOUT=[{"id":"1111","path":"a.go","line":"1","body":"b","reviewer":"r","resolver":"","created":"c","updated":"u","url":"h"}]' \
+    -- forge-pr-review-threads --pr 42)
+  out_b=$(gtt_run_cli "$sandbox_b" "$stderr_file" \
+    'GTT_LIST_STDOUT=[{"id":"2222","path":"a.go","line":"1","body":"b","reviewer":"r","resolver":"","created":"c","updated":"u","url":"h"}]' \
+    -- forge-pr-review-threads --pr 42)
+
+  id_a=$(printf '%s' "$out_a" | jq -r '.data.threads[0].id')
+  id_b=$(printf '%s' "$out_b" | jq -r '.data.threads[0].id')
+
+  assert_eq "1111" "$id_a" "gtt falsifiability: the first payload's comment id is what comes out"
+  assert_eq "2222" "$id_b" "gtt falsifiability: the second payload's DIFFERENT id comes out, so output really does track the stub"
+
+  # Stated as a check rather than left as a comment: had id_b been asserted
+  # against id_a, assert_eq would have gone red. Written this way so a future
+  # edit that makes the stub ignore its own payload fails HERE, loudly,
+  # instead of quietly making every assertion below vacuous.
+  would_have_gone_red=no
+  if [ "$id_b" != "$id_a" ]; then
+    would_have_gone_red=yes
+  fi
+  assert_eq "yes" "$would_have_gone_red" "gtt falsifiability: asserting the second id against the first WOULD have gone red -- the stub is not a rubber stamp"
+
+  teardown_forge_cli_sandbox "$sandbox_a"
+  teardown_forge_cli_sandbox "$sandbox_b"
+  rm -f "$stderr_file"
+  gtt_teardown_repo
+}
+
+# THE ARGV ASSERTION. tea's field selector is `-f` (its own --fields,
+# cmd/flags/generic.go:157) and its output selector is `-o json`. A gh-style
+# `--json <field-list>` does not exist on tea at all, and copying gh's shape
+# here is the mistake that would survive every envelope assertion in this
+# section -- the emitted document would be identical, because the stub answers
+# regardless. Only the recorded argv can catch it.
+gtt_test_pr_review_threads_argv_is_teas_own_field_selector() {
+  echo ""
+  echo "=== forge-pr-review-threads (gitea): the call is \`tea pulls review-comments <index> -f <csv> -o json\` ==="
+
+  gtt_setup_repo
+
+  local sandbox out payload_file argv
+  local stderr_file="/tmp/gtt_argv_stderr.$$"
+  payload_file=$(mktemp)
+  gtt_review_comment_fixture > "$payload_file"
+  sandbox=$(gtt_new_sandbox)
+
+  # --owner/--repo are passed deliberately: tea addresses the repository
+  # through the cwd remote and has no owner/repo pair, so the gitea arm must
+  # return BEFORE the gh-specific owner/repo resolution block and neither
+  # value may reach tea's argv.
+  out=$(gtt_run_cli "$sandbox" "$stderr_file" "GTT_LIST_PAYLOAD_FILE=$payload_file" \
+    -- forge-pr-review-threads --pr 42 --owner acme --repo widgets)
+  argv=$(gtt_tea_argv "$sandbox")
+
+  assert_eq "pulls review-comments 42 -f id,path,line,body,reviewer,resolver,created,updated,url -o json" "$argv" "gtt argv: the listing call is exactly \`tea pulls review-comments <index> -f <csv> -o json\`"
+  assert_eq "1" "$(gtt_tea_call_count "$sandbox")" "gtt argv: exactly one tea invocation -- no second call"
+  assert_eq "0" "$(printf '%s\n' "$argv" | grep -c -- '--json')" "gtt argv: no gh-style --json field-list selector -- tea has none, it has -f"
+  assert_eq "1" "$(printf '%s\n' "$argv" | grep -cE -- '(^| )-f( |$)')" "gtt argv: the field selector really is tea's own -f"
+  assert_eq "1" "$(printf '%s\n' "$argv" | grep -cE -- '(^| )-o json( |$)')" "gtt argv: and the output flag is -o json"
+  assert_eq "0" "$(printf '%s\n' "$argv" | grep -c -- '--state')" "gtt argv: no --state -- tea's review-comments has no server-side resolution filter to pass one to"
+  assert_eq "0" "$(printf '%s\n' "$argv" | grep -cE -- '(^| )-s( |$)')" "gtt argv: nor its short form"
+  assert_eq "0" "$(printf '%s\n' "$argv" | grep -c 'acme')" "gtt argv: --owner never reaches tea -- the gitea arm returns before the gh-specific owner/repo resolution"
+  assert_eq "0" "$(printf '%s\n' "$argv" | grep -c 'widgets')" "gtt argv: and neither does --repo"
+
+  # And the envelope the argv produced.
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "gtt listing: status found"
+  assert_eq "42" "$(printf '%s' "$out" | jq -r '.data.pr.number')" "gtt listing: pr.number is the index the caller asked for"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "gtt listing: message null on found"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.reason')" "gtt listing: reason null on found"
+  assert_eq "" "$(cat "$stderr_file")" "gtt listing: QUIET -- zero stderr output"
+
+  rm -f "$payload_file" "$stderr_file"
+  teardown_forge_cli_sandbox "$sandbox"
+  gtt_teardown_repo
+}
+
+# THE FILTER IS LOCAL, AND THAT IS THE OPPOSITE OF THE GITLAB ARM. `tea pulls
+# review-comments` carries only flags.AllDefaultFlags plus --fields, so there
+# is no --state to ask the server with; the default view drops resolved rows
+# after the call. The mixed fixture is what makes this testable: with only
+# unresolved rows, a filter that did nothing at all would pass.
+gtt_test_pr_review_threads_filters_locally_on_resolver() {
+  echo ""
+  echo "=== forge-pr-review-threads (gitea): the unresolved-only default is filtered LOCALLY on resolver, with no --state to ask for ==="
+
+  gtt_setup_repo
+
+  local sandbox_default sandbox_all out_default out_all payload_file argv_default argv_all
+  local stderr_file="/tmp/gtt_local_filter_stderr.$$"
+  payload_file=$(mktemp)
+  gtt_review_comment_fixture > "$payload_file"
+  sandbox_default=$(gtt_new_sandbox)
+  sandbox_all=$(gtt_new_sandbox)
+
+  out_default=$(gtt_run_cli "$sandbox_default" "$stderr_file" "GTT_LIST_PAYLOAD_FILE=$payload_file" \
+    -- forge-pr-review-threads --pr 42)
+  out_all=$(gtt_run_cli "$sandbox_all" "$stderr_file" "GTT_LIST_PAYLOAD_FILE=$payload_file" \
+    -- forge-pr-review-threads --pr 42 --all)
+  argv_default=$(gtt_tea_argv "$sandbox_default")
+  argv_all=$(gtt_tea_argv "$sandbox_all")
+
+  # The fixture is genuinely mixed -- asserted, not assumed, because a fixture
+  # that quietly lost its resolved row would make the filter untestable.
+  assert_eq "3" "$(jq 'length' "$payload_file")" "gtt filter: the fixture carries three review comments"
+  assert_eq "1" "$(jq '[.[] | select(.resolver != "")] | length' "$payload_file")" "gtt filter: exactly one of them has a NON-EMPTY resolver, so the filter has something to drop"
+  assert_eq "2" "$(jq '[.[] | select(.resolver == "")] | length' "$payload_file")" "gtt filter: and two have an empty one"
+
+  assert_eq "2" "$(printf '%s' "$out_default" | jq '.data.threads | length')" "gtt filter: the default call returns only the two unresolved comments"
+  assert_eq "3" "$(printf '%s' "$out_all" | jq '.data.threads | length')" "gtt filter: --all returns all three, resolved one included"
+  assert_eq "0" "$(printf '%s' "$out_default" | jq '[.data.threads[] | select(.isResolved)] | length')" "gtt filter: no resolved thread survives the default call"
+  assert_eq "1" "$(printf '%s' "$out_all" | jq '[.data.threads[] | select(.isResolved)] | length')" "gtt filter: and exactly one does under --all"
+  assert_eq "1127" "$(printf '%s' "$out_all" | jq -r '[.data.threads[] | select(.isResolved)][0].id')" "gtt filter: the resolved one is the row whose resolver is a username"
+
+  # The proof that the filter is LOCAL: both calls emit byte-identical argv.
+  # A server-side filter could not possibly produce two different lists from
+  # the same request.
+  assert_eq "$argv_default" "$argv_all" "gtt filter: --all and the default emit IDENTICAL argv -- the two lists differ only because the filtering happened locally"
+  assert_eq "0" "$(printf '%s\n' "$argv_all" | grep -c -- '--state')" "gtt filter: --all does NOT become a --state all request, unlike the gitlab arm"
+
+  rm -f "$payload_file" "$stderr_file"
+  teardown_forge_cli_sandbox "$sandbox_default"
+  teardown_forge_cli_sandbox "$sandbox_all"
+  gtt_teardown_repo
+}
+
+# The row-to-thread translation, including the two coercions the LIST path
+# forces: `line` back to a NUMBER and `isResolved` derived from a STRING.
+gtt_test_pr_review_threads_maps_comment_to_degenerate_thread() {
+  echo ""
+  echo "=== forge-pr-review-threads (gitea): one review comment becomes one DEGENERATE single-comment thread ==="
+
+  gtt_setup_repo
+
+  local sandbox out payload_file
+  local stderr_file="/tmp/gtt_mapping_stderr.$$"
+  payload_file=$(mktemp)
+  gtt_review_comment_fixture > "$payload_file"
+  sandbox=$(gtt_new_sandbox)
+
+  out=$(gtt_run_cli "$sandbox" "$stderr_file" "GTT_LIST_PAYLOAD_FILE=$payload_file" \
+    -- forge-pr-review-threads --pr 42 --all)
+
+  # tea exposes no conversation object, so there is exactly one comment per
+  # thread and three comments produce three threads -- even though two of them
+  # share a path, which is what an invented grouping would have collapsed.
+  assert_eq "3" "$(printf '%s' "$out" | jq '.data.threads | length')" "gtt degenerate: three review comments become THREE threads"
+  assert_eq "1" "$(printf '%s' "$out" | jq '.data.threads[0].comments.totalCount')" "gtt degenerate: totalCount is 1 on the first thread"
+  assert_eq "1" "$(printf '%s' "$out" | jq '.data.threads[1].comments.totalCount')" "gtt degenerate: 1 on the second"
+  assert_eq "1" "$(printf '%s' "$out" | jq '.data.threads[2].comments.totalCount')" "gtt degenerate: 1 on the third"
+  assert_eq "1" "$(printf '%s' "$out" | jq '[.data.threads[] | .comments.nodes | length] | unique | .[0]')" "gtt degenerate: and every comments.nodes array holds exactly one element"
+  assert_eq "2" "$(printf '%s' "$out" | jq '[.data.threads[] | select(.path == "src/main.go")] | length')" "gtt degenerate: the two comments on src/main.go stay TWO threads -- grouping by path is not invented"
+
+  # The LIST path marshals every value as a string. `line` must come back a
+  # JSON number anyway; `id` must stay a string, as on every other forge.
+  assert_eq "number" "$(printf '%s' "$out" | jq -r '.data.threads[0].line | type')" "gtt coercion: line is a JSON NUMBER, not the string tea printed"
+  assert_eq "17" "$(printf '%s' "$out" | jq -r '.data.threads[0].line')" "gtt coercion: and it is the fixture's own value"
+  assert_eq "string" "$(printf '%s' "$out" | jq -r '.data.threads[0].id | type')" "gtt coercion: thread id is a string, matching every other forge"
+  assert_eq "string" "$(printf '%s' "$out" | jq -r '.data.threads[0].comments.nodes[0].id | type')" "gtt coercion: and so is the comment id"
+
+  # isResolved is DERIVED: tea has no boolean, only a resolver username.
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.data.threads[0].isResolved')" "gtt derived: an EMPTY resolver is isResolved false"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.threads[1].isResolved')" "gtt derived: a resolver USERNAME is isResolved true"
+  assert_eq "boolean" "$(printf '%s' "$out" | jq -r '.data.threads[1].isResolved | type')" "gtt derived: and it is a JSON boolean, never the raw resolver string"
+  assert_eq "0" "$(printf '%s' "$out" | grep -c 'resolver')" "gtt derived: tea's own key name never leaks into the normalized envelope"
+
+  # The rest of the per-comment translation.
+  assert_eq "src/main.go" "$(printf '%s' "$out" | jq -r '.data.threads[0].path')" "gtt mapping: path carried through"
+  assert_eq "monalisa" "$(printf '%s' "$out" | jq -r '.data.threads[0].comments.nodes[0].author.login')" "gtt mapping: tea's reviewer becomes the contract's author.login"
+  assert_eq "please rename this" "$(printf '%s' "$out" | jq -r '.data.threads[0].comments.nodes[0].body')" "gtt mapping: body carried through"
+  assert_eq "2026-01-01T10:00:00Z" "$(printf '%s' "$out" | jq -r '.data.threads[0].comments.nodes[0].createdAt')" "gtt mapping: created becomes createdAt"
+  assert_eq "2026-01-01T10:30:00Z" "$(printf '%s' "$out" | jq -r '.data.threads[0].comments.nodes[0].updatedAt')" "gtt mapping: updated becomes updatedAt"
+
+  rm -f "$payload_file" "$stderr_file"
+  teardown_forge_cli_sandbox "$sandbox"
+  gtt_teardown_repo
+}
+
+# THE GAP LIST, asserted as a whole array in one comparison so an entry that
+# quietly appears or disappears is caught. The single most likely defect this
+# catches is copying the gitlab arm's array wholesale, which would wrongly
+# declare comments.nodes[].url unsupported -- the one field gitea has and
+# GitLab does not.
+gtt_test_pr_review_threads_declares_its_capability_gaps() {
+  echo ""
+  echo "=== forge-pr-review-threads (gitea): unsupported_fields names every gap, and url is NOT one of them ==="
+
+  gtt_setup_repo
+
+  local sandbox out payload_file
+  local stderr_file="/tmp/gtt_gaps_stderr.$$"
+  payload_file=$(mktemp)
+  gtt_review_comment_fixture > "$payload_file"
+  sandbox=$(gtt_new_sandbox)
+
+  out=$(gtt_run_cli "$sandbox" "$stderr_file" "GTT_LIST_PAYLOAD_FILE=$payload_file" \
+    -- forge-pr-review-threads --pr 42)
+
+  assert_eq '["pr.title","pr.url","threads[].startLine","threads[].diffSide","threads[].isOutdated","threads[].isCollapsed","threads[].grouping","threads[].comments.nodes[].outdated"]' \
+    "$(printf '%s' "$out" | jq -c '.data.unsupported_fields')" \
+    "gtt gaps: unsupported_fields is exactly the eight gitea gaps, compared as a whole array"
+
+  # Every named path is also null in the payload -- null PLUS the name, never
+  # a bare unmarked null, per forge-contract.md.
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.pr.title')" "gtt gaps: pr.title is null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.pr.url')" "gtt gaps: pr.url is null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.threads[0].startLine')" "gtt gaps: startLine is null -- tea has no such field"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.threads[0].diffSide')" "gtt gaps: diffSide is null -- tea collapses LineNum and OldLineNum into one printed column"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.threads[0].isOutdated')" "gtt gaps: isOutdated is null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.threads[0].isCollapsed')" "gtt gaps: isCollapsed is null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.threads[0].grouping')" "gtt gaps: grouping is null -- and present as a key, so the gap is declared at the point a reader meets it"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.threads[0] | has("grouping")')" "gtt gaps: grouping really is an explicit key, not merely an absent path that reads null"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.threads[0].comments.nodes[0].outdated')" "gtt gaps: comments.nodes[].outdated is null"
+
+  # THE ONE PLACE GITEA IS RICHER THAN GITLAB. Copying the gitlab array
+  # wholesale is the expected mistake; this is what catches it.
+  assert_eq "https://gitea.com/acme/widgets/pulls/42/files#issuecomment-1126" \
+    "$(printf '%s' "$out" | jq -r '.data.threads[0].comments.nodes[0].url')" \
+    "gtt gaps: comments.nodes[].url is POPULATED verbatim from tea's own url field"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.data.unsupported_fields | index("threads[].comments.nodes[].url") != null')" \
+    "gtt gaps: and it is NOT listed unsupported -- unlike GitLab's arm, which does list it"
+
+  rm -f "$payload_file" "$stderr_file"
+  teardown_forge_cli_sandbox "$sandbox"
+  gtt_teardown_repo
+}
+
+# THE DISTINCTION THAT MAKES A CLEAN REVIEW READABLE: zero review comments is
+# a `found` result carrying an empty list. not_found means the PULL REQUEST
+# itself could not be located.
+gtt_test_pr_review_threads_zero_comments_is_found_with_empty_list() {
+  echo ""
+  echo "=== forge-pr-review-threads (gitea): zero review comments is FOUND with an empty list, never not_found ==="
+
+  gtt_setup_repo
+
+  local sandbox_empty sandbox_blank sandbox_missing out_empty out_blank out_missing
+  local stderr_file="/tmp/gtt_empty_stderr.$$"
+
+  sandbox_empty=$(gtt_new_sandbox)
+  sandbox_blank=$(gtt_new_sandbox)
+  sandbox_missing=$(gtt_new_sandbox)
+
+  out_empty=$(gtt_run_cli "$sandbox_empty" "$stderr_file" 'GTT_LIST_STDOUT=[]' \
+    -- forge-pr-review-threads --pr 42)
+  out_blank=$(gtt_run_cli "$sandbox_blank" "$stderr_file" 'GTT_LIST_STDOUT=' \
+    -- forge-pr-review-threads --pr 42)
+
+  assert_eq "found" "$(printf '%s' "$out_empty" | jq -r '.status')" "gtt empty: an empty JSON array is FOUND"
+  assert_eq "[]" "$(printf '%s' "$out_empty" | jq -c '.data.threads')" "gtt empty: carrying an empty threads list"
+  assert_eq "42" "$(printf '%s' "$out_empty" | jq -r '.data.pr.number')" "gtt empty: and still naming the pull request it looked at"
+  assert_eq "found" "$(printf '%s' "$out_blank" | jq -r '.status')" "gtt empty: printing nothing at all is FOUND too"
+  assert_eq "[]" "$(printf '%s' "$out_blank" | jq -c '.data.threads')" "gtt empty: and also collapses to an empty list"
+
+  # The contrast that gives the assertion its meaning.
+  out_missing=$(gtt_run_cli "$sandbox_missing" "$stderr_file" \
+    'GTT_LIST_FAIL_STDERR=Error: GET https://gitea.com/api/v1/...: 404 Not Found' \
+    -- forge-pr-review-threads --pr 999999)
+
+  assert_eq "not_found" "$(printf '%s' "$out_missing" | jq -r '.status')" "gtt empty: a 404 from tea IS not_found -- the pull request itself could not be located"
+  assert_eq "null" "$(printf '%s' "$out_missing" | jq -r '.data')" "gtt empty: not_found carries no data"
+  local differ=no
+  if [ "$(printf '%s' "$out_empty" | jq -r '.status')" != "$(printf '%s' "$out_missing" | jq -r '.status')" ]; then
+    differ=yes
+  fi
+  assert_eq "yes" "$differ" "gtt empty: 'no comments' and 'no pull request' produce DIFFERENT statuses -- they are not conflated"
+
+  rm -f "$stderr_file"
+  teardown_forge_cli_sandbox "$sandbox_empty"
+  teardown_forge_cli_sandbox "$sandbox_blank"
+  teardown_forge_cli_sandbox "$sandbox_missing"
+  gtt_teardown_repo
+}
+
+# tea exits 1 for EVERY error with no distinct not-found code, so `404` in
+# stderr is the only confirmed negative and everything else must stay a
+# could-not-attempt. Reading a broken call as "the pull request does not
+# exist" is the dangerous direction.
+gtt_test_pr_review_threads_failure_classification() {
+  echo ""
+  echo "=== forge-pr-review-threads (gitea): only a 404 is a confirmed negative; every other exit stays cli_failed ==="
+
+  gtt_setup_repo
+
+  local sandbox_net sandbox_old out_net out_old
+  local stderr_file="/tmp/gtt_list_broken_stderr.$$"
+
+  sandbox_net=$(gtt_new_sandbox)
+  sandbox_old=$(gtt_new_sandbox)
+
+  out_net=$(gtt_run_cli "$sandbox_net" "$stderr_file" \
+    'GTT_LIST_FAIL_STDERR=Error: Get "https://gitea.com/api/v1/...": dial tcp: connection refused' \
+    -- forge-pr-review-threads --pr 42)
+
+  assert_eq "error" "$(printf '%s' "$out_net" | jq -r '.status')" "gtt broken: status error"
+  assert_eq "cli_failed" "$(printf '%s' "$out_net" | jq -r '.reason')" "gtt broken: reason cli_failed -- a could-not-attempt failure is never read as not_found"
+  assert_contains "tea pulls review-comments exited 1" "$(printf '%s' "$out_net" | jq -r '.message')" "gtt broken: message names the failing tea call and its exit status"
+  assert_contains "connection refused" "$(printf '%s' "$out_net" | jq -r '.message')" "gtt broken: and carries tea's own stderr text through"
+  assert_eq "" "$(cat "$stderr_file")" "gtt broken: still QUIET -- a read verb prints nothing"
+
+  # A tea older than the v0.14.0 version floor answers with an
+  # unknown-subcommand error, which is exactly this branch: cli_failed, never
+  # a confirmed "this pull request has no review comments".
+  out_old=$(gtt_run_cli "$sandbox_old" "$stderr_file" \
+    'GTT_LIST_FAIL_STDERR=Error: No help topic for '"'"'review-comments'"'"'' \
+    -- forge-pr-review-threads --pr 42)
+
+  assert_eq "error" "$(printf '%s' "$out_old" | jq -r '.status')" "gtt version floor: a tea older than v0.14.0 (unknown subcommand) is an ERROR"
+  assert_eq "cli_failed" "$(printf '%s' "$out_old" | jq -r '.reason')" "gtt version floor: classified cli_failed, never not_found and never an empty thread list"
+
+  rm -f "$stderr_file"
+  teardown_forge_cli_sandbox "$sandbox_net"
+  teardown_forge_cli_sandbox "$sandbox_old"
+  gtt_teardown_repo
+}
+
+gtt_test_resolve_review_thread_via_tea() {
+  echo ""
+  echo "=== forge-resolve-review-thread (gitea): resolves via \`tea pulls resolve <comment id>\`, one call, no reply ==="
+
+  gtt_setup_repo
+
+  local sandbox out argv
+  local stderr_file="/tmp/gtt_resolve_ok_stderr.$$"
+
+  sandbox=$(gtt_new_sandbox)
+  out=$(gtt_run_cli "$sandbox" "$stderr_file" -- forge-resolve-review-thread --thread-id 1126)
+  argv=$(gtt_tea_argv "$sandbox")
+
+  assert_eq "pulls resolve 1126" "$argv" "gtt resolve: the call is exactly \`tea pulls resolve <comment id>\`, with the pull request never named"
+  assert_eq "1" "$(gtt_tea_call_count "$sandbox")" "gtt resolve: exactly ONE tea invocation -- no second call could have posted anything"
+  assert_eq "0" "$(printf '%s\n' "$argv" | grep -c 'comment create')" "gtt resolve: no comment-creating subcommand anywhere in the recorded argv"
+  assert_eq "0" "$(printf '%s\n' "$argv" | grep -cE -- '(^| )(-d|--description|--body|-m)( |$)')" "gtt resolve: no body/description flag -- nothing carried comment text"
+
+  # tea prints `Comment <id> resolved` and no JSON, so the envelope is rebuilt
+  # from the id and the exit status. Asserted as a WHOLE document.
+  assert_eq '{"resolved":true,"thread":{"id":"1126","isResolved":true,"path":null,"line":null},"unsupported_fields":["thread.path","thread.line"]}' \
+    "$(printf '%s' "$out" | jq -c '.data')" \
+    "gtt resolve: the whole success envelope, rebuilt in the shape \`glab mr note resolve\` already established"
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "gtt resolve: status found"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "gtt resolve: message null"
+  assert_eq "" "$(cat "$stderr_file")" "gtt resolve: nothing printed on the success path"
+
+  rm -f "$stderr_file"
+  teardown_forge_cli_sandbox "$sandbox"
+  gtt_teardown_repo
+}
+
+gtt_test_resolve_review_thread_failure_classification() {
+  echo ""
+  echo "=== forge-resolve-review-thread (gitea): a 404 is a CONFIRMED negative (found/resolved:false), a broken call is not ==="
+
+  gtt_setup_repo
+
+  local sandbox_404 sandbox_broken out_404 out_broken exit_404 exit_broken
+  local stderr_404="/tmp/gtt_resolve_404_stderr.$$"
+  local stderr_broken="/tmp/gtt_resolve_broken_stderr.$$"
+
+  sandbox_404=$(gtt_new_sandbox)
+  sandbox_broken=$(gtt_new_sandbox)
+
+  out_404=$(gtt_run_cli "$sandbox_404" "$stderr_404" \
+    'GTT_RESOLVE_FAIL_STDERR=Error: GET https://gitea.com/api/v1/...: 404 Not Found' \
+    -- forge-resolve-review-thread --thread-id 999999) && exit_404=0 || exit_404=$?
+
+  assert_exit_code "0" "$exit_404" "gtt resolve-404: exit 0 -- the call ran and returned a definitive answer"
+  assert_eq "found" "$(printf '%s' "$out_404" | jq -r '.status')" "gtt resolve-404: status found, matching the other two adapters' confirmed-invalid-id result"
+  assert_eq '{"resolved":false,"thread":null,"unsupported_fields":[]}' "$(printf '%s' "$out_404" | jq -c '.data')" "gtt resolve-404: the whole confirmed-negative envelope"
+  assert_eq "null" "$(printf '%s' "$out_404" | jq -r '.reason')" "gtt resolve-404: no reason -- a confirmed answer is not a degradation"
+  assert_eq "" "$(cat "$stderr_404")" "gtt resolve-404: nothing printed"
+
+  out_broken=$(gtt_run_cli "$sandbox_broken" "$stderr_broken" \
+    'GTT_RESOLVE_FAIL_STDERR=Error: Get "https://gitea.com/api/v1/...": dial tcp: connection refused' \
+    -- forge-resolve-review-thread --thread-id 1126) && exit_broken=0 || exit_broken=$?
+
+  assert_exit_code "1" "$exit_broken" "gtt resolve-broken: exits non-zero (write verb, no fallback path)"
+  assert_eq "error" "$(printf '%s' "$out_broken" | jq -r '.status')" "gtt resolve-broken: status error, NOT a found/resolved:false that would claim the comment was checked"
+  assert_eq "cli_failed" "$(printf '%s' "$out_broken" | jq -r '.reason')" "gtt resolve-broken: reason cli_failed"
+  assert_contains "tea pulls resolve exited 1" "$(printf '%s' "$out_broken" | jq -r '.message')" "gtt resolve-broken: message names the failing tea call"
+  assert_stderr_contains "resolve it manually" "$(cat "$stderr_broken")" "gtt resolve-broken: the mandatory manual instruction is printed"
+
+  rm -f "$stderr_404" "$stderr_broken"
+  teardown_forge_cli_sandbox "$sandbox_404"
+  teardown_forge_cli_sandbox "$sandbox_broken"
+  gtt_teardown_repo
+}
+
+# THE ROUND TRIP. Whatever identifier the listing verb emits must be accepted
+# VERBATIM by the resolve verb. The id is never retyped here -- it is read out
+# of the listing's own output and fed straight back in.
+gtt_test_thread_id_round_trips_from_listing_to_resolve() {
+  echo ""
+  echo "=== gitea review threads: the id the listing emits is accepted VERBATIM by the resolve call (round trip) ==="
+
+  gtt_setup_repo
+
+  local sandbox_list sandbox_resolve list_out resolve_out emitted_id resolve_argv payload_file last_arg
+  local stderr_file="/tmp/gtt_round_trip_stderr.$$"
+  payload_file=$(mktemp)
+  gtt_review_comment_fixture > "$payload_file"
+  sandbox_list=$(gtt_new_sandbox)
+  sandbox_resolve=$(gtt_new_sandbox)
+
+  list_out=$(gtt_run_cli "$sandbox_list" "$stderr_file" "GTT_LIST_PAYLOAD_FILE=$payload_file" \
+    -- forge-pr-review-threads --pr 42)
+  emitted_id=$(printf '%s' "$list_out" | jq -r '.data.threads[0].id')
+
+  # Deliberately NOT a literal -- the value comes from the listing verb's own
+  # output, so a change to what the listing emits is felt here immediately.
+  resolve_out=$(gtt_run_cli "$sandbox_resolve" "$stderr_file" \
+    -- forge-resolve-review-thread --thread-id "$emitted_id")
+  resolve_argv=$(gtt_tea_argv "$sandbox_resolve")
+  last_arg=$(printf '%s' "$resolve_argv" | awk '{print $NF}')
+
+  assert_eq "$emitted_id" "$last_arg" "gtt round trip: the emitted id is tea's LAST recorded argument, byte for byte"
+  assert_eq "pulls resolve $emitted_id" "$resolve_argv" "gtt round trip: and nothing else was added, reformatted or truncated around it"
+  assert_eq "found" "$(printf '%s' "$resolve_out" | jq -r '.status')" "gtt round trip: the resolve call succeeded on that id"
+  assert_eq "$emitted_id" "$(printf '%s' "$resolve_out" | jq -r '.data.thread.id')" "gtt round trip: and the resolve result reports the same id back"
+
+  # Pinned independently against the fixture so the round trip is not merely
+  # self-consistent: had the listing emitted something derived, the argv
+  # assertion above would have compared against that derived value and passed.
+  assert_eq "1126" "$emitted_id" "gtt round trip: the emitted id is the fixture's own comment id, not a re-derivation"
+
+  # A numeric id passes cmd_forge_resolve_review_thread's existing thread-id
+  # guard unchanged -- asserted against the guard's source text, so a story
+  # that widened it to accommodate gitea would be caught here.
+  assert_eq "1" "$(gtt_count_fixed_in_function "cmd_forge_resolve_review_thread" '^[A-Za-z0-9+/=_-]+$')" "gtt round trip: cmd_forge_resolve_review_thread's thread-id guard still reads ^[A-Za-z0-9+/=_-]+\$ -- a numeric gitea id passes it unchanged, so this story widened nothing"
+
+  rm -f "$payload_file" "$stderr_file"
+  teardown_forge_cli_sandbox "$sandbox_list"
+  teardown_forge_cli_sandbox "$sandbox_resolve"
+  gtt_teardown_repo
+}
+
+# THE ONE ASSERTION IN THIS SECTION MEASURED AGAINST REALITY. tea is genuinely
+# not installed on this machine, so `command -v tea` fails for the real reason
+# rather than a staged one. Both a stripped allowlist PATH and the machine's
+# own PATH are checked, so a future machine that DOES install tea makes the
+# reality check visibly stop applying instead of silently passing.
+gtt_test_tea_absent_degrades_through_the_shared_gate() {
+  echo ""
+  echo "=== gitea review threads: tea absent -- same shared _forge_bin_check gate, naming tea not gh ==="
+
+  gtt_setup_repo
+
+  local sandbox stripped_path out resolve_out exit_code tea_really_absent
+  local stderr_file="/tmp/gtt_no_tea_stderr.$$"
+  local stderr_resolve="/tmp/gtt_no_tea_resolve_stderr.$$"
+
+  tea_really_absent=yes
+  command -v tea >/dev/null 2>&1 && tea_really_absent=no
+  assert_eq "yes" "$tea_really_absent" "gtt no-tea: tea is genuinely absent from this machine's PATH -- this is the story's one reality-measured assertion, and it stops applying loudly if tea is ever installed"
+
+  # A PATH built by stripping tea from the caller's real one, the same
+  # setup_forge_no_gh_fixture shape, plus the allowlist sandbox that never had
+  # a tea entry at all. Both must produce the same degradation.
+  stripped_path=$(_path_without_binary tea)
+  sandbox=$(gtt_new_sandbox_without_tea)
+
+  out=$(gtt_run_cli "$sandbox" "$stderr_file" -- forge-pr-review-threads --pr 42)
+
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "gtt no-tea: status error"
+  assert_eq "cli_missing" "$(printf '%s' "$out" | jq -r '.reason')" "gtt no-tea: reason cli_missing -- the same enum value the gh and glab paths use"
+  assert_contains "tea not found" "$(printf '%s' "$out" | jq -r '.message')" "gtt no-tea: the message names tea, not gh"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.message' | grep -c 'gh not found')" "gtt no-tea: and does NOT name gh -- the wrong binary would send a Gitea user hunting for the wrong install"
+  assert_eq "" "$(cat "$stderr_file")" "gtt no-tea: QUIET mode -- ZERO stderr from the listing verb"
+
+  # The same scenario through the genuinely-stripped PATH rather than the
+  # allowlist sandbox.
+  local stripped_out
+  stripped_out=$(cd "$GTT_REPO_DIR" && PATH="$stripped_path" "$CLI" forge-pr-review-threads --pr 42 2>/dev/null)
+  assert_eq "cli_missing" "$(printf '%s' "$stripped_out" | jq -r '.reason')" "gtt no-tea: a PATH with tea stripped out reaches the identical cli_missing result"
+
+  # The resolve verb is the MANDATORY-PRINT half: same envelope, but the
+  # public wrapper prints and exits non-zero.
+  resolve_out=$(gtt_run_cli "$sandbox" "$stderr_resolve" \
+    -- forge-resolve-review-thread --thread-id 1126) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "gtt resolve no-tea: exits non-zero, exactly like the gh-absent path"
+  assert_eq "error" "$(printf '%s' "$resolve_out" | jq -r '.status')" "gtt resolve no-tea: status error"
+  assert_eq "cli_missing" "$(printf '%s' "$resolve_out" | jq -r '.reason')" "gtt resolve no-tea: reason cli_missing"
+  assert_contains "tea not found" "$(printf '%s' "$resolve_out" | jq -r '.message')" "gtt resolve no-tea: the message names tea"
+  assert_stderr_contains "resolve it manually" "$(cat "$stderr_resolve")" "gtt resolve no-tea: cmd_forge_resolve_review_thread is still the ONLY layer that prints the manual instruction"
+
+  rm -rf "$stripped_path"
+  rm -f "$stderr_file" "$stderr_resolve"
+  teardown_forge_cli_sandbox "$sandbox"
+  gtt_teardown_repo
+}
+
+# `unknown` is now the ONLY forge word with no adapter -- AIMI_FORGE_TYPE
+# validates against github|gitlab|gitea, so an unrecognized remote host is the
+# only way to reach the no_adapter branch at all.
+gtt_test_no_adapter_message_names_all_three_adapters() {
+  echo ""
+  echo "=== review-thread verbs: the no_adapter message names all THREE adapters, and only \`unknown\` still reaches it ==="
+
+  gtt_setup_repo https://git.example.com/owner/repo.git
+
+  local sandbox list_out resolve_out exit_code
+  local stderr_file="/tmp/gtt_no_adapter_stderr.$$"
+
+  sandbox=$(gtt_new_sandbox)
+
+  list_out=$(gtt_run_cli "$sandbox" "$stderr_file" -- forge-pr-review-threads --pr 42)
+  assert_eq "error" "$(printf '%s' "$list_out" | jq -r '.status')" "gtt no_adapter (listing): status error"
+  assert_eq "no_adapter" "$(printf '%s' "$list_out" | jq -r '.reason')" "gtt no_adapter (listing): reason no_adapter"
+  assert_contains "unknown" "$(printf '%s' "$list_out" | jq -r '.message')" "gtt no_adapter (listing): the message names the detected forge, which for an unrecognized host is \`unknown\`"
+  assert_contains "GitHub, GitLab and Gitea are the only adapters" "$(printf '%s' "$list_out" | jq -r '.message')" "gtt no_adapter (listing): and names all three adapters, not the stale two"
+  assert_eq "0" "$(gtt_tea_call_count "$sandbox")" "gtt no_adapter (listing): tea is never invoked for an unrecognized host"
+
+  resolve_out=$(gtt_run_cli "$sandbox" "$stderr_file" \
+    -- forge-resolve-review-thread --thread-id 1126) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "gtt no_adapter (resolve): the write verb still exits non-zero"
+  assert_eq "no_adapter" "$(printf '%s' "$resolve_out" | jq -r '.reason')" "gtt no_adapter (resolve): reason no_adapter"
+  assert_contains "GitHub, GitLab and Gitea are the only adapters" "$(printf '%s' "$resolve_out" | jq -r '.message')" "gtt no_adapter (resolve): names all three adapters too"
+
+  rm -f "$stderr_file"
+  teardown_forge_cli_sandbox "$sandbox"
+  gtt_teardown_repo
+}
+
+# THE STALENESS CATCH. The phase-1 GITEA CAPABILITY-GAP NOTE ruled that tea
+# could not resolve a review thread at all. This story disproves that ruling,
+# and leaving the note in place would let the next reader trust it -- so the
+# rewrite is asserted rather than left to the eye.
+#
+# COUNTING FORM THROUGHOUT: `count=$(grep -c ...) || count=0` compared with
+# assert_eq, never `grep -v ... | grep -q ...` inside an `if`, which under
+# `set -o pipefail` reports ABSENT for a file that contains the pattern.
+gtt_test_capability_gap_note_is_rewritten() {
+  echo ""
+  echo "=== GITEA CAPABILITY-GAP NOTE: the falsified ruling is gone, the advice survives, and the version floor is recorded ==="
+
+  local note
+  note=$(sed -n '/^# GITEA CAPABILITY-GAP NOTE/,/^# -\{20,\}$/p' "$CLI")
+
+  # A control that MUST match, run before any zero is trusted: a query that
+  # returns 0 because it was malformed is indistinguishable from one that
+  # returns 0 because the string is gone.
+  assert_eq "1" "$(gtt_count_matches "$CLI" 'GITEA CAPABILITY-GAP NOTE')" "gtt note control: the note itself is findable exactly once -- proving the counting query works before any zero below is believed"
+  local note_lines
+  note_lines=$(printf '%s\n' "$note" | grep -c '') || note_lines=0
+  assert_eq "yes" "$([ "$note_lines" -gt 10 ] && echo yes || echo no)" "gtt note control: and the extracted note is a real block of text, not an empty sed result"
+
+  # The falsified claims, gone.
+  assert_eq "0" "$(gtt_count_matches "$CLI" 'NO equivalent for resolving a review thread')" "gtt note: the ruling that tea has NO equivalent for resolving a review thread is gone from aimi-cli.sh"
+  assert_eq "0" "$(gtt_count_matches "$CLI" 'no reviewThread/conversation-resolution concept')" "gtt note: and so is the claim that tea has no reviewThread/conversation-resolution concept"
+
+  # The facts that replace them.
+  assert_eq "yes" "$([ "$(gtt_count_matches "$CLI" 'tea pulls review-comments')" -ge 1 ] && echo yes || echo no)" "gtt note: \`tea pulls review-comments\` is named in the file"
+  assert_eq "yes" "$([ "$(gtt_count_matches "$CLI" 'tea pulls resolve')" -ge 1 ] && echo yes || echo no)" "gtt note: and so is \`tea pulls resolve\`"
+  assert_eq "yes" "$([ "$(gtt_count_matches "$CLI" 'v0\.14\.0')" -ge 1 ] && echo yes || echo no)" "gtt note: the tea v0.14.0 version floor is recorded"
+
+  # The narrowed real gap, stated inside the note itself.
+  assert_contains "GROUPING" "$note" "gtt note: the rewritten note names GROUPING as the real gap"
+  assert_contains "no thread/conversation object" "$note" "gtt note: and says tea exposes no thread/conversation object"
+  assert_contains "DEGENERATE" "$note" "gtt note: so one review comment becomes one degenerate thread"
+  assert_contains "diffSide" "$note" "gtt note: diffSide is named as part of the narrowed gap"
+  assert_contains "collapses LineNum and OldLineNum" "$note" "gtt note: with the reason -- tea collapses the two line numbers into one printed field"
+
+  # THE ADVICE SURVIVES. Only the factual claim changed.
+  assert_eq "yes" "$([ "$(printf '%s\n' "$note" | grep -c 'unsupported_fields')" -ge 1 ] && echo yes || echo no)" "gtt note: the note still routes a permanent gap through unsupported_fields"
+  assert_contains "nobody wrote the adapter" "$note" "gtt note: and still distinguishes 'this forge cannot do this at all' from 'nobody wrote the adapter yet'"
+
+  # The stale note's own worked example is now the WRONG answer, because
+  # resolution IS supported. Counted over the whole file: a quoted
+  # resolveReviewThread would only ever appear as an unsupported_fields entry,
+  # since the GraphQL mutation and the jq path both use it unquoted.
+  assert_eq "0" "$(gtt_count_matches "$CLI" '"resolveReviewThread"')" "gtt note: resolveReviewThread appears in NO unsupported_fields array anywhere -- resolution is supported now"
+  assert_eq "yes" "$([ "$(gtt_count_matches "$CLI" 'resolveReviewThread')" -ge 1 ] && echo yes || echo no)" "gtt note control: the bare word still appears (the GraphQL mutation), so the zero above is a scoped absence rather than a broken query"
+}
+
+# The section header carries the phase's declared ceiling and version floor in
+# the same shape as the six that already exist, asserted so neither can be
+# deleted silently.
+gtt_test_section_header_declares_ceiling_and_version_floor() {
+  echo ""
+  echo "=== gitea review-thread adapters: the section header carries the VERIFICATION CEILING and the tea >= v0.14.0 version floor ==="
+
+  local header
+  header=$(sed -n '/^# GITEA REVIEW-THREAD ADAPTERS/,/^_forge_pr_review_threads_gitea/p' "$CLI")
+
+  local header_lines
+  header_lines=$(printf '%s\n' "$header" | grep -c '') || header_lines=0
+  assert_eq "yes" "$([ "$header_lines" -gt 20 ] && echo yes || echo no)" "gtt header control: the header block really was extracted, so the assertions below are not reading an empty string"
+
+  assert_contains "VERIFICATION CEILING" "$header" "gtt header: the ceiling is declared in as many words"
+  assert_contains "NOT installed on the machine" "$header" "gtt header: stating that tea is not installed here"
+  assert_contains "2026-08-06" "$header" "gtt header: and naming the date the source was read"
+  assert_contains "never what real tea does" "$header" "gtt header: the tests prove emitted argv and fixture parsing, never real tea behaviour"
+  assert_contains "VERSION FLOOR" "$header" "gtt header: the version floor is declared"
+  assert_contains "v0.14.0" "$header" "gtt header: naming v0.14.0 as the floor"
+  assert_contains "v0.15.1" "$header" "gtt header: and v0.15.1 as the release read"
+  assert_contains "GH_TOKEN" "$header" "gtt header: the GH_TOKEN hazard is recorded"
+  assert_contains "grouping" "$header" "gtt header: and so is the grouping gap that neither other forge has"
+}
+
+# NO TOKEN IS EVER HANDED TO tea. tea reads GH_TOKEN as a fallback credential,
+# and _forge_account_override_slots defaults an empty slot to the AMBIENT
+# GH_TOKEN, so copying the github arm's prefix-assignment shape onto a tea
+# invocation would hand a GitHub token to a Gitea instance.
+gtt_test_neither_gitea_arm_hands_a_token_to_tea() {
+  echo ""
+  echo "=== gitea review-thread adapters: neither function assigns or exports a token variable ==="
+
+  # THE CONTROL, run first and required to be non-zero: the github arm of
+  # _forge_resolve_review_thread genuinely does prefix-assign GH_TOKEN, so a
+  # counting query that cannot find it there is broken, and every zero below
+  # would be a false negative.
+  local github_arm_assignments
+  github_arm_assignments=$(gtt_count_in_function_code "_forge_resolve_review_thread" "$GTT_TOKEN_ASSIGNMENT_RE")
+  assert_eq "yes" "$([ "$github_arm_assignments" -ge 1 ] && echo yes || echo no)" "gtt token control: the counting query DOES find a token assignment inside _forge_resolve_review_thread's github arm -- so a zero below means absent, not unmatched"
+
+  assert_eq "0" "$(gtt_count_in_function_code "_forge_pr_review_threads_gitea" "$GTT_TOKEN_ASSIGNMENT_RE")" "gtt token: _forge_pr_review_threads_gitea assigns or exports no credential variable tea could read"
+  assert_eq "0" "$(gtt_count_in_function_code "_forge_resolve_review_thread_gitea" "$GTT_TOKEN_ASSIGNMENT_RE")" "gtt token: nor does _forge_resolve_review_thread_gitea"
+  assert_eq "0" "$(gtt_count_in_function_code "_forge_pr_review_threads_gitea" '(GH_TOKEN|GH_ENTERPRISE_TOKEN|GITEA_TOKEN|GITEA_INSTANCE_URL)')" "gtt token: stronger still -- the listing arm's executable lines do not so much as NAME one of those variables"
+  assert_eq "0" "$(gtt_count_in_function_code "_forge_resolve_review_thread_gitea" '(GH_TOKEN|GH_ENTERPRISE_TOKEN|GITEA_TOKEN|GITEA_INSTANCE_URL)')" "gtt token: and neither do the resolve arm's"
+  assert_eq "0" "$(gtt_count_in_function_code "_forge_pr_review_threads_gitea" '_forge_account_override_slots')" "gtt token: neither arm calls _forge_account_override_slots, whose empty slot defaults to the AMBIENT GH_TOKEN"
+  assert_eq "0" "$(gtt_count_in_function_code "_forge_resolve_review_thread_gitea" '_forge_account_override_slots')" "gtt token: confirmed for the resolve arm too"
+}
+
+# THE RETARGET CLASS, CLOSED BY INVARIANT RATHER THAN BY LINE NUMBER. Phase 3
+# retargeted three tests from `gitlab` onto `gitea`; this phase does the same
+# to `gitea`, and after it there is no forge word left to retarget to. Chasing
+# the individual line numbers would collide with the sibling stories editing
+# this same file, so the property is asserted instead: no assertion MESSAGE in
+# part 3 or part 4 may claim gitea (or codeberg) has no adapter.
+gtt_test_no_assertion_message_claims_gitea_has_no_adapter() {
+  echo ""
+  echo "=== part3/part4: no assertion message pairs gitea or codeberg with 'no adapter' ==="
+
+  local part3="$SCRIPT_DIR/test-aimi-cli-part3-roadmap-forge.sh"
+  local part4="$SCRIPT_DIR/test-aimi-cli-part4-forge-verbs.sh"
+
+  # THE CONTROL THAT MUST MATCH, run before either zero is believed. Nine
+  # false zeros in this repository have come from a query that silently
+  # matched nothing, so the counter is first shown returning 1 for a line it
+  # must catch.
+  local probe
+  probe=$(mktemp)
+  printf '%s\n' '  assert_eq "gitea" "$out" "detection: gitea is untouched and still has no adapter"' > "$probe"
+  assert_eq "1" "$(gtt_count_stale_no_adapter_messages "$probe")" "gtt retarget control: the counter DOES find a stale message when one is present -- so the zeros below mean absent, not unmatched"
+  printf '%s\n' '  assert_eq "gitea" "$out" "detection: gitea.com classifies as gitea"' > "$probe"
+  assert_eq "0" "$(gtt_count_stale_no_adapter_messages "$probe")" "gtt retarget control: and does NOT fire on a message that merely mentions gitea"
+  rm -f "$probe"
+
+  # NOTE TO WHOEVER READS A FAILURE HERE: the two messages below are worded so
+  # they do not themselves trip the counter. That is not evasion -- an
+  # assertion message asserting the property must not be an instance of the
+  # property, or the invariant could never reach zero. Keep any replacement
+  # wording free of the forbidden pairing for the same reason.
+  assert_eq "0" "$(gtt_count_stale_no_adapter_messages "$part4")" "gtt retarget: part 4 carries zero stale assertion messages of the retargeted class"
+  assert_eq "0" "$(gtt_count_stale_no_adapter_messages "$part3")" "gtt retarget: and part 3 carries zero as well"
+}
+
+# ---------------------------------------------------------------------------
+# MUTATION TESTS. Each unroutes ONE verb in a COPY of the CLI -- by disabling
+# that verb's own `forge == gitea` gate and nothing else -- and confirms a
+# SPECIFIC NAMED assertion above goes red, so the assertions are known to be
+# load-bearing rather than merely green.
+#
+# The gate CONDITION is what is mutated, not the adapter call below it:
+# deleting the call alone would leave the gate's trailing `return 0` in place
+# and the verb would emit nothing at all. Changing the condition makes the
+# verb behave exactly as it did before this story -- the adapterless
+# `no_adapter` envelope -- which is the honest counterfactual. Each mutation
+# asserts its own patch landed before trusting the red.
+# ---------------------------------------------------------------------------
+gtt_test_mutation_unrouting_the_listing_verb_turns_an_assertion_red() {
+  echo ""
+  echo "=== mutation: unrouting forge-pr-review-threads (gitea) makes the named argv assertion go red ==="
+
+  gtt_setup_repo
+
+  local sandbox mutant argv_green argv_red mutant_out payload_file
+  local stderr_file="/tmp/gtt_mutation_list_stderr.$$"
+  payload_file=$(mktemp)
+  gtt_review_comment_fixture > "$payload_file"
+
+  sandbox=$(gtt_new_sandbox)
+  gtt_run_cli "$sandbox" "$stderr_file" "GTT_LIST_PAYLOAD_FILE=$payload_file" \
+    -- forge-pr-review-threads --pr 42 >/dev/null
+  argv_green=$(gtt_tea_argv "$sandbox")
+  assert_eq "pulls review-comments 42 -f id,path,line,body,reviewer,resolver,created,updated,url -o json" "$argv_green" "gtt mutation (listing): the UNMUTATED CLI emits that argv -- the assertion being mutated"
+
+  mutant=$(gtt_mutated_cli '/^_forge_pr_review_threads() {$/,/^}$/ s/^  if \[ "\$forge" = "gitea" \]; then$/  if [ "$forge" = "gitea-unrouted-by-mutation" ]; then/')
+  assert_eq "1" "$(diff "$CLI" "$mutant" | grep -c '^> ')" "gtt mutation (listing): the mutation changed EXACTLY one line, scoped to this verb's own function body -- a broad edit would not localize the failure"
+
+  rm -f "$sandbox/tea.log"
+  gtt_run_mutated_cli "$mutant" "$sandbox" forge-pr-review-threads --pr 42 >/dev/null || true
+  argv_red=$(gtt_tea_argv "$sandbox")
+
+  assert_eq "" "$argv_red" "gtt mutation (listing): with the gitea gate disabled, tea is never invoked -- so \"the listing call is exactly tea pulls review-comments <index> -f <csv> -o json\" goes RED"
+  local moved=no
+  if [ "$argv_red" != "$argv_green" ]; then moved=yes; fi
+  assert_eq "yes" "$moved" "gtt mutation (listing): the verdict MOVED between the real and the mutated CLI, so that assertion is load-bearing, not decorative"
+
+  rm -f "$sandbox/tea.log"
+  mutant_out=$(gtt_run_mutated_cli "$mutant" "$sandbox" forge-pr-review-threads --pr 42 || true)
+  assert_eq "error" "$(printf '%s' "$mutant_out" | jq -r '.status')" "gtt mutation (listing): the mutated CLI answers error, so \"gtt listing: status found\" goes RED too"
+  assert_eq "no_adapter" "$(printf '%s' "$mutant_out" | jq -r '.reason')" "gtt mutation (listing): with reason no_adapter -- exactly the pre-story behavior this routing replaced"
+
+  # And the OTHER verb is untouched by this mutation, which is what makes the
+  # two mutation tests independent evidence rather than one fact counted twice.
+  rm -f "$sandbox/tea.log"
+  gtt_run_mutated_cli "$mutant" "$sandbox" forge-resolve-review-thread --thread-id 1126 >/dev/null || true
+  assert_contains "pulls resolve" "$(gtt_tea_argv "$sandbox")" "gtt mutation (listing): the RESOLVE verb still reaches tea under this mutation -- the unrouting is scoped to one verb"
+
+  rm -f "$mutant" "$payload_file" "$stderr_file"
+  teardown_forge_cli_sandbox "$sandbox"
+  gtt_teardown_repo
+}
+
+gtt_test_mutation_unrouting_the_resolve_verb_turns_an_assertion_red() {
+  echo ""
+  echo "=== mutation: unrouting forge-resolve-review-thread (gitea) makes the named resolve-argv assertion go red ==="
+
+  gtt_setup_repo
+
+  local sandbox mutant argv_green argv_red mutant_out
+  local stderr_file="/tmp/gtt_mutation_resolve_stderr.$$"
+
+  sandbox=$(gtt_new_sandbox)
+  gtt_run_cli "$sandbox" "$stderr_file" -- forge-resolve-review-thread --thread-id 1126 >/dev/null
+  argv_green=$(gtt_tea_argv "$sandbox")
+  assert_eq "pulls resolve 1126" "$argv_green" "gtt mutation (resolve): the UNMUTATED CLI calls tea pulls resolve -- the assertion being mutated"
+
+  mutant=$(gtt_mutated_cli '/^_forge_resolve_review_thread() {$/,/^}$/ s/^  if \[ "\$forge" = "gitea" \]; then$/  if [ "$forge" = "gitea-unrouted-by-mutation" ]; then/')
+  assert_eq "1" "$(diff "$CLI" "$mutant" | grep -c '^> ')" "gtt mutation (resolve): the mutation changed EXACTLY one line, scoped to this verb's own function body"
+
+  rm -f "$sandbox/tea.log"
+  mutant_out=$(gtt_run_mutated_cli "$mutant" "$sandbox" forge-resolve-review-thread --thread-id 1126 || true)
+  argv_red=$(gtt_tea_argv "$sandbox")
+
+  assert_eq "" "$argv_red" "gtt mutation (resolve): with the gitea gate disabled, tea is never invoked -- so \"the call is exactly tea pulls resolve <comment id>\" goes RED"
+  local moved=no
+  if [ "$argv_red" != "$argv_green" ]; then moved=yes; fi
+  assert_eq "yes" "$moved" "gtt mutation (resolve): the verdict MOVED between the real and the mutated CLI, so that assertion is load-bearing"
+  assert_eq "error" "$(printf '%s' "$mutant_out" | jq -r '.status')" "gtt mutation (resolve): the mutated CLI answers error, so \"gtt resolve: status found\" goes RED too"
+  assert_eq "no_adapter" "$(printf '%s' "$mutant_out" | jq -r '.reason')" "gtt mutation (resolve): with reason no_adapter -- the pre-story behavior this routing replaced"
+
+  # The mirror image of the listing mutation's own cross-check.
+  rm -f "$sandbox/tea.log"
+  gtt_run_mutated_cli "$mutant" "$sandbox" forge-pr-review-threads --pr 42 >/dev/null || true
+  assert_contains "review-comments" "$(gtt_tea_argv "$sandbox")" "gtt mutation (resolve): the LISTING verb still reaches tea under this mutation -- the unrouting is scoped to one verb"
+
+  rm -f "$mutant" "$stderr_file"
+  teardown_forge_cli_sandbox "$sandbox"
+  gtt_teardown_repo
+}
+
+# ============================================================================
 # Forge Dispatch-Order Tests (phase 1.1 US-006)
 # ============================================================================
 # Every forge-* verb used to be dispatched from main()'s SECOND case block --
@@ -7124,13 +10202,30 @@ test_detect_forge_type_never_builds_or_parses_json() {
 
   # ...and the control: the function this one exists to avoid DOES use jq,
   # so the grep above is proven capable of failing.
-  if sed -n '/^_detect_forge()/,/^}/p' "$CLI" | grep -v '^\s*#' | grep -q "jq"; then
-    echo -e "${GREEN}✓${NC} _detect_forge_type jq-free: control -- _detect_forge itself does use jq, so the grep can fail"
-    ((TESTS_PASSED++))
-  else
-    echo -e "${RED}✗${NC} _detect_forge_type jq-free: control failed -- _detect_forge no longer uses jq, so the check above proves nothing"
-    ((TESTS_FAILED++))
+  #
+  # COUNTED, like every other scan in this suite -- but for the opposite
+  # reason, and calling this one fail-open would be a fresh false claim
+  # replacing an old one. Its polarity is INVERTED: here a match is the GREEN
+  # case. So when `grep -q` short-circuits and SIGPIPEs its feeder, this
+  # assertion goes RED on a tree that is perfectly fine. It fails CLOSED --
+  # spurious failure, not a spurious pass. That is the benign direction, and
+  # it is still worth removing: a control that can cry wolf gets ignored, and
+  # then the five assertions it underwrites stop meaning anything.
+  #
+  # It also cannot be proven by planting, since the property it checks is
+  # already true. It was proven instead by temporarily retargeting the `sed`
+  # range below at `_detect_forge_type()` -- the function the loop just above
+  # proved jq-free -- which turned this control red, and then reverting.
+  #
+  # assert_eq cannot express "> 0", so the count is mapped to a verdict word
+  # first and the word is what gets compared.
+  local control_jq_hits control_verdict="absent"
+  control_jq_hits=$(sed -n '/^_detect_forge()/,/^}/p' "$CLI" | grep -v '^\s*#' | grep -c "jq") || control_jq_hits=0
+  if [ "$control_jq_hits" -gt 0 ]; then
+    control_verdict="present"
   fi
+  assert_eq "present" "$control_verdict" \
+    "_detect_forge_type jq-free: control -- _detect_forge itself does use jq, so the grep can fail"
 }
 
 test_detect_forge_type_matches_detect_forge_across_fixtures() {
@@ -7447,6 +10542,1406 @@ test_forge_pr_view_list_confirms_but_view_fails_is_error_never_not_found() {
 }
 
 # ============================================================================
+# Gitea READ-verb Routing Tests (phase 4 outline:02)
+# ============================================================================
+# Covers exactly three verbs -- forge-auth-status, forge-pr-view and
+# forge-issue-view -- routing to `tea` when _detect_forge reports gitea, plus
+# the deliberate NON-routing of forge-repo-info.
+#
+# EVERY helper this section introduces is prefixed `gtr_` (GiTea Read) and
+# every control variable `GTR_TEA_*`. That is not decoration. Sibling stories
+# in this same wave are editing this same file for the WRITE verbs (`gtw_`)
+# and the REVIEW-THREAD verbs (`gtt_`), on branches none of us can see, and
+# bash silently keeps the LAST definition of a duplicated function -- so
+# three individually-green branches can merge into a red one. The phase-2
+# founding incident: two wave-1 stories both defined
+# source_forge_account_functions and six assertions failed with exit 127 only
+# on the merge. The prefix, plus a PRIVATE fake-tea stub rather than an edit
+# to outline:01's `gtm_` one, is what makes that collision structurally
+# impossible rather than merely unlikely.
+#
+# WHY THE forge-auth-status TESTS LIVE IN PART 4 AND NOT PART 3, where every
+# other forge-auth-status test sits: the dispatcher runs the parts
+# CONCURRENTLY and part 3 IS the wall clock (40-46% of the serial total;
+# measured concurrent wall time equals part 3's runtime to the second). A new
+# assertion here costs ~nothing; in part 3 it extends the whole suite
+# one-for-one. Phase 3's own read-verbs story made the same call for
+# glr_test_forge_auth_status_gitlab. The one part-3 edit this story makes is
+# the mandatory no-adapter retarget.
+#
+# DETECTION IS NOT UNDER TEST HERE AND IS NOT MODIFIED BY THIS STORY.
+# _detect_forge_classify_host (aimi-cli.sh:1836) already answers `gitea` for
+# gitea.com, *.gitea.com, codeberg.org and *.codeberg.org, and deliberately
+# folds Forgejo under that single adapter word. Every fixture below simply
+# relies on it.
+#
+# THE CONTROL FOR "a forge with NO adapter" MOVED, and had to. Three tests
+# used `gitea` as that stand-in; routing gitea makes that premise false, so
+# they were RETARGETED (never deleted -- the no_adapter path must stay
+# covered) onto an unrecognized host that classifies as `unknown`:
+# test_forge_auth_status_no_adapter_is_error (part 3),
+# test_forge_pr_view_non_github_forge_quiet_degrade and
+# test_forge_issue_view_non_github_forge_degrades (this file). This is the
+# end of the line: AIMI_FORGE_TYPE validates only github|gitlab|gitea
+# (aimi-cli.sh:2130), so after phase 4 no forge WORD is left to retarget to
+# and `unknown` -- reachable solely through an unrecognized remote host -- is
+# the only remaining control.
+#
+# `tea` is genuinely NOT INSTALLED on this machine. That is the phase's
+# declared verification ceiling: the stub below is the only tea these tests
+# ever see, and its payloads are modelled on `gitea/tea` `main` source read
+# on 2026-08-06 rather than on a captured real-binary response. What these
+# tests prove is WHICH ARGV aimi-cli.sh emits and HOW it parses a fixture --
+# never what the real binary does with either. Where that under-verifies is
+# the JSON key NAMES: the stub emits whatever the author believed, so a wrong
+# key would pass green on both sides. The one criterion here testable against
+# reality is the missing-binary degrade, and
+# gtr_test_gitea_read_verbs_name_tea_when_binary_absent tests it.
+
+# A fake `tea` covering the four invocations the three routed READ verbs make:
+# `login list`, `pulls list`, `pulls <index>` and `issues <index>`.
+#
+# DELIBERATELY SEPARATE from outline:01's gtm_setup_fake_tea_fixture, which
+# serves the two pull-request forms only. Extending that shared stub would put
+# this story's edits on lines two sibling stories are editing right now; a
+# private stub in a private variable namespace cannot collide with either.
+#
+# Written to a fresh temp dir and prepends nothing to PATH itself -- callers
+# do `PATH="$GTR_TEA_DIR:$PATH" ...` per invocation. Driven entirely by
+# GTR_TEA_* environment variables:
+#   GTR_TEA_LOG            optional per-test file; every invocation's argv
+#                          appended, one line per call -- lets an assertion
+#                          prove WHICH flags were passed (`-o json` and tea's
+#                          own `-f` selector, never a gh-style `--json`)
+#   GTR_TEA_AUDIT          SECTION-WIDE argv log, created once and never torn
+#                          down between tests, so a single counting query can
+#                          state what was never invoked across the whole
+#                          section (see gtr_test_tea_whoami_is_never_invoked)
+#   GTR_TEA_LOGIN_JSON     `tea login list -o json` stdout (default '[]')
+#   GTR_TEA_LOGIN_EXIT     its exit code (default 0)
+#   GTR_TEA_LOGIN_COUNTER  path to a counter file bumped once per login call
+#   GTR_TEA_PULL_JSON      `tea pulls <index> -o json` stdout (default '{}')
+#   GTR_TEA_PULL_EXIT      its exit code (default 0)
+#   GTR_TEA_PULL_STDERR    stderr emitted when that exit is non-zero
+#   GTR_TEA_PULL_COUNTER   path to a counter file bumped once per detail call
+#   GTR_TEA_LIST_JSON      `tea pulls list ... -o json` stdout (default '[]')
+#   GTR_TEA_LIST_EXIT      its exit code (default 0)
+#   GTR_TEA_LIST_COUNTER   path to a counter file bumped once per list call --
+#                          this is what PROVES the probe was skipped for a
+#                          numeric ref, which no exit status could show
+#   GTR_TEA_ISSUE_JSON     `tea issues <index> -o json` stdout (default '{}')
+#   GTR_TEA_ISSUE_EXIT     its exit code (default 0)
+#   GTR_TEA_ISSUE_STDERR   stderr emitted when that exit is non-zero
+#
+# THE DEFAULT ARM EXITS 127 WITH A DIAGNOSTIC. That is load-bearing: `tea
+# whoami` is a subcommand this adapter must never call (it round-trips the
+# network and then discards its own error), and an unhandled invocation that
+# quietly exited 0 would let such a call slip through green.
+gtr_setup_fake_tea_read_fixture() {
+  GTR_TEA_DIR=$(mktemp -d)
+  # Created ONCE for the whole section and deliberately not torn down between
+  # tests -- gtr_test_tea_whoami_is_never_invoked reads the accumulated log.
+  if [ -z "${GTR_TEA_AUDIT:-}" ]; then
+    GTR_TEA_AUDIT=$(mktemp)
+    export GTR_TEA_AUDIT
+  fi
+  cat > "$GTR_TEA_DIR/tea" << 'GTR_FAKE_TEA_SCRIPT'
+#!/usr/bin/env bash
+[ -n "${GTR_TEA_AUDIT:-}" ] && printf '%s\n' "$*" >> "$GTR_TEA_AUDIT"
+[ -n "${GTR_TEA_LOG:-}" ] && printf '%s\n' "$*" >> "$GTR_TEA_LOG"
+
+gtr_tea_bump() {
+  local file="$1" n
+  [ -n "$file" ] || return 0
+  n=$(cat "$file" 2>/dev/null || echo 0)
+  printf '%s\n' "$((n + 1))" > "$file"
+}
+
+case "$1" in
+  login)
+    case "$2" in
+      list)
+        gtr_tea_bump "${GTR_TEA_LOGIN_COUNTER:-}"
+        code="${GTR_TEA_LOGIN_EXIT:-0}"
+        if [ "$code" != "0" ]; then
+          echo "Error: could not read login list" >&2
+          exit "$code"
+        fi
+        body="${GTR_TEA_LOGIN_JSON:-[]}"
+        printf '%s' "$body"
+        exit 0
+        ;;
+    esac
+    ;;
+  pulls)
+    case "$2" in
+      list)
+        gtr_tea_bump "${GTR_TEA_LIST_COUNTER:-}"
+        code="${GTR_TEA_LIST_EXIT:-0}"
+        if [ "$code" != "0" ]; then
+          echo "Error: could not list pulls" >&2
+          exit "$code"
+        fi
+        body="${GTR_TEA_LIST_JSON:-[]}"
+        printf '%s' "$body"
+        exit 0
+        ;;
+      *)
+        gtr_tea_bump "${GTR_TEA_PULL_COUNTER:-}"
+        code="${GTR_TEA_PULL_EXIT:-0}"
+        if [ "$code" != "0" ]; then
+          printf '%s' "${GTR_TEA_PULL_STDERR:-Error: pulls failed}" >&2
+          exit "$code"
+        fi
+        body="${GTR_TEA_PULL_JSON:-}"
+        [ -z "$body" ] && body='{}'
+        printf '%s' "$body"
+        exit 0
+        ;;
+    esac
+    ;;
+  issues)
+    case "$2" in
+      list) ;;
+      *)
+        code="${GTR_TEA_ISSUE_EXIT:-0}"
+        if [ "$code" != "0" ]; then
+          printf '%s' "${GTR_TEA_ISSUE_STDERR:-Error: issues failed}" >&2
+          exit "$code"
+        fi
+        body="${GTR_TEA_ISSUE_JSON:-}"
+        [ -z "$body" ] && body='{}'
+        printf '%s' "$body"
+        exit 0
+        ;;
+    esac
+    ;;
+esac
+
+echo "gtr-fake-tea: unhandled invocation: $*" >&2
+exit 127
+GTR_FAKE_TEA_SCRIPT
+  chmod +x "$GTR_TEA_DIR/tea"
+}
+
+# Removes the private fake-tea temp dir and every GTR_TEA_* control variable
+# EXCEPT GTR_TEA_AUDIT, which is section-scoped by design.
+#
+# It also deliberately does NOT touch AIMI_CONFIG_DIR: this section never sets
+# it, and `unset AIMI_CONFIG_DIR` here would hand the rest of part 4 back to
+# the developer's real ~/.config/aimi -- the one cross-part shared resource
+# the concurrency audit found.
+gtr_teardown_fake_tea_read_fixture() {
+  rm -rf "$GTR_TEA_DIR"
+  unset GTR_TEA_DIR GTR_TEA_LOG \
+    GTR_TEA_LOGIN_JSON GTR_TEA_LOGIN_EXIT GTR_TEA_LOGIN_COUNTER \
+    GTR_TEA_PULL_JSON GTR_TEA_PULL_EXIT GTR_TEA_PULL_STDERR GTR_TEA_PULL_COUNTER \
+    GTR_TEA_LIST_JSON GTR_TEA_LIST_EXIT GTR_TEA_LIST_COUNTER \
+    GTR_TEA_ISSUE_JSON GTR_TEA_ISSUE_EXIT GTR_TEA_ISSUE_STDERR
+}
+
+# A realistic `tea pulls <index> -o json` DETAIL document (cmd/pulls.go:29-52's
+# `pullData`). Load-bearing properties, not to be "tidied" away:
+#   - `id` (98765) DIFFERS from `index` (42), so an implementation reading id
+#     produces a visibly wrong number rather than an accidental pass.
+#   - `index` is a JSON NUMBER and `mergeable`/`hasMerged` are real BOOLEANS.
+#   - `head`/`base` are BARE refs -- no owner: prefix, unlike the LIST shape.
+gtr_tea_pull_detail_json() {
+  printf '%s' '{
+    "id": 98765,
+    "index": 42,
+    "title": "Add the Gitea adapter",
+    "state": "open",
+    "created": "2026-08-01T09:00:00Z",
+    "updated": "2026-08-02T09:00:00Z",
+    "labels": [],
+    "user": "octotea",
+    "body": "Body text of the pull request.",
+    "assignees": [],
+    "url": "https://gitea.com/acme/widgets/pulls/42",
+    "base": "main",
+    "head": "feat-x",
+    "headSha": "deadbeefcafe1234567890abcdefdeadbeefcafe",
+    "diffUrl": "https://gitea.com/acme/widgets/pulls/42.diff",
+    "mergeable": true,
+    "hasMerged": false,
+    "mergedAt": null,
+    "closedAt": null,
+    "reviews": [],
+    "comments": []
+  }'
+}
+
+# The SAME document with the pull request merged. tea's DETAIL `state` is
+# pr.State raw -- `closed`, never `merged` (cmd/pulls.go:33) -- so the
+# contract's "merged" can only come from the separate `hasMerged` boolean.
+# An adapter that read `state` alone would report this as closed.
+gtr_tea_pull_detail_merged_json() {
+  printf '%s' '{
+    "id": 98765,
+    "index": 42,
+    "title": "Add the Gitea adapter",
+    "state": "closed",
+    "url": "https://gitea.com/acme/widgets/pulls/42",
+    "body": "Body text of the pull request.",
+    "base": "main",
+    "head": "feat-x",
+    "mergeable": false,
+    "hasMerged": true,
+    "mergedAt": "2026-08-03T09:00:00Z",
+    "closedAt": "2026-08-03T09:00:00Z"
+  }'
+}
+
+# The SAME merged document with hasMerged flipped to false: state is still
+# `closed`, so this is the half of the pair that must NOT read as merged. A
+# separate fixture rather than an in-place string substitution, so the
+# difference between the two is visible as data rather than hidden in a bash
+# expansion.
+gtr_tea_pull_detail_closed_json() {
+  printf '%s' '{
+    "id": 98765,
+    "index": 42,
+    "title": "Add the Gitea adapter",
+    "state": "closed",
+    "url": "https://gitea.com/acme/widgets/pulls/42",
+    "body": "Body text of the pull request.",
+    "base": "main",
+    "head": "feat-x",
+    "mergeable": false,
+    "hasMerged": false,
+    "mergedAt": null,
+    "closedAt": "2026-08-03T09:00:00Z"
+  }'
+}
+
+# A realistic `tea pulls list --state all -f index,head -o json` LIST document.
+# Every value is a STRING and every key snake-cased (table.go:175-208), and
+# `head` carries a CROSS-FORK `owner:branch` prefix (formatPRHead,
+# print/pull.go:83-93). That prefix is the whole point: plain equality against
+# the branch name would report an existing pull request as absent and invite a
+# duplicate.
+gtr_tea_pull_list_json() {
+  printf '%s' '[
+    {"index": "42", "head": "contributor:feat-x"}
+  ]'
+}
+
+# The same LIST shape for a DIFFERENT contributor branch, so the cross-fork
+# comparison is proven to discriminate rather than to match everything with a
+# colon in it.
+gtr_tea_pull_list_other_json() {
+  printf '%s' '[
+    {"index": "99", "head": "contributor:other"}
+  ]'
+}
+
+# A realistic `tea issues <index> -o json` document (cmd/issues.go:25-38's
+# `issueData`). Two load-bearing properties:
+#   - `comments` is an EMPTY ARRAY. That is what tea returns when --comments
+#     was NOT passed (cmd/issues.go:148-154), so deriving a count from its
+#     length would report 0 for every issue in existence.
+#   - `labels` mixes a plain STRING and a `{name}` OBJECT, so the either-shape
+#     expression is exercised on both halves in one document.
+gtr_tea_issue_json() {
+  printf '%s' '{
+    "id": 55501,
+    "index": 7,
+    "title": "Login button does nothing",
+    "state": "open",
+    "created": "2026-08-01T09:00:00Z",
+    "labels": ["bug", {"name": "frontend"}],
+    "user": "octotea",
+    "body": "Steps to reproduce: click it.",
+    "assignees": [],
+    "url": "https://gitea.com/acme/widgets/issues/7",
+    "closedAt": null,
+    "comments": []
+  }'
+}
+
+# A realistic `tea login list -o json` document (print/login.go:34-54): an
+# array of ALL-STRING rows keyed name, url, ssh_host, user, default. It holds
+# ONLY a gitea.com login, which is what makes the host-filter pair meaningful
+# -- the identical payload must read as authenticated on a gitea.com fixture
+# and as a definitive negative on a codeberg.org one.
+gtr_tea_login_list_json() {
+  printf '%s' '[
+    {"name": "gitea", "url": "https://gitea.com", "ssh_host": "gitea.com", "user": "octotea", "default": "true"}
+  ]'
+}
+
+# Two logins for the SAME host, the non-first one flagged default, so
+# "prefers the default entry" is distinguishable from "takes entry zero".
+gtr_tea_login_list_default_second_json() {
+  printf '%s' '[
+    {"name": "first", "url": "https://gitea.com", "ssh_host": "gitea.com", "user": "not-default", "default": "false"},
+    {"name": "second", "url": "https://gitea.com/", "ssh_host": "gitea.com", "user": "the-default", "default": "true"}
+  ]'
+}
+
+# Writes a copy of aimi-cli.sh to <dest> with ONE full line replaced, and
+# prints `<changed|unchanged> <replaced-line-count>` so a caller can PROVE
+# both that the mutation landed AND that it landed exactly once.
+#
+# The COUNT is the addition over phase 3's glr_mutate_cli, and it is now
+# necessary rather than decorative: several gitea arms exist across this wave,
+# so an anchor that also matched a sibling story's arm would silently unroute
+# three verbs at once and make the matrix prove less than it claims. Exact
+# full-line comparison (awk `$0 == a`), never a regex.
+# Usage: gtr_mutate_cli <exact-line> <replacement-line> <dest>
+gtr_mutate_cli() {
+  local anchor="$1" replacement="$2" dest="$3" count_file count verdict
+  count_file=$(mktemp)
+  awk -v a="$anchor" -v r="$replacement" -v cf="$count_file" \
+    '$0 == a { print r; n++; next } { print } END { printf "%d\n", n+0 > cf }' "$CLI" > "$dest"
+  chmod +x "$dest"
+  count=$(cat "$count_file")
+  rm -f "$count_file"
+  if cmp -s "$CLI" "$dest"; then
+    verdict="unchanged"
+  else
+    verdict="changed"
+  fi
+  printf '%s %s' "$verdict" "$count"
+}
+
+# Counts credential BINDINGS -- prefix assignments and exports of the three
+# variables `tea` reads for authentication -- in a given file.
+#
+# COUNTED WITH `grep -c`, AND THAT IS NOT A STYLE CHOICE. This suite runs
+# under `set -o pipefail`. In the `grep -v ... | grep -q ...` shape the right
+# half exits the instant it matches, SIGPIPEs the left half, and the pipeline
+# reports FAILURE -- so an `if` on it reads a real hit as "no hit" and the
+# guard fails OPEN. `grep -c` consumes all of its input and cannot fire early;
+# the trailing `|| count=0` absorbs grep's exit 1 on zero matches.
+#
+# WHY THESE THREE NAMES: tea honours GH_TOKEN, not only GITEA_TOKEN, whenever
+# GITEA_INSTANCE_URL is also set (modules/context/context_login.go:15-51).
+# _forge_account_override_slots already defaults an empty slot to the ambient
+# GH_TOKEN and every routed GitHub write prefix-assigns it, so copying that
+# habit onto a `tea` invocation would hand a GitHub token to a Gitea instance.
+# Usage: gtr_count_credential_bindings <file>
+gtr_count_credential_bindings() {
+  local file="$1" count
+  count=$(grep -v '^[[:space:]]*#' "$file" | grep -cE '((export|declare -x)[[:space:]]+(GH_TOKEN|GITEA_TOKEN|GITEA_INSTANCE_URL))|((GH_TOKEN|GITEA_TOKEN|GITEA_INSTANCE_URL)[[:space:]]*=)') || count=0
+  printf '%s' "$count"
+}
+
+# Concatenates the THREE function bodies this story adds into one file, so the
+# credential guard above is scoped to this story's own code rather than to the
+# whole 15k-line CLI (which legitimately binds GH_TOKEN elsewhere, in the
+# GitHub account-override path).
+gtr_write_gitea_read_bodies() {
+  local dest="$1"
+  {
+    sed -n '/^_forge_auth_status_gitea()/,/^}/p' "$CLI"
+    sed -n '/^_forge_pr_view_gitea()/,/^}/p' "$CLI"
+    sed -n '/^_forge_issue_view_gitea()/,/^}/p' "$CLI"
+  } > "$dest"
+}
+
+# RUNS BEFORE ANY OTHER ASSERTION IN THIS SECTION, ON PURPOSE.
+#
+# An assertion that passes regardless of what the code under test does is not
+# evidence, and this repository has shipped that exact defect twice. So before
+# a single routing assertion trusts this stub, drive all THREE routed verbs
+# end to end -- real CLI, real dispatch, private fake tea -- twice each with a
+# payload that SHOULD move the verdict, and show it actually moves. Each verb
+# records a would_have_gone_red flag, so a future edit that makes the stub
+# ignore its own fixture fails HERE, loudly, rather than quietly making every
+# assertion below vacuous.
+gtr_test_gitea_read_stub_can_produce_a_failing_result() {
+  echo ""
+  echo "=== gitea read verbs: the stub CAN produce a failing result, per verb (falsifiability proof, runs first) ==="
+
+  gtr_setup_fake_tea_read_fixture
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local green red flag
+
+  # --- forge-auth-status ---------------------------------------------------
+  green=$(GTR_TEA_LOGIN_JSON='[{"url":"https://gitea.com","user":"octotea","default":"true"}]' \
+    PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-auth-status | jq -r '.data.account')
+  red=$(GTR_TEA_LOGIN_JSON='[{"url":"https://gitea.com","user":"someone-else","default":"true"}]' \
+    PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-auth-status | jq -r '.data.account')
+  assert_eq "octotea" "$green" "gtr falsifiability auth-status: the matching payload yields the expected account"
+  assert_eq "someone-else" "$red" "gtr falsifiability auth-status: the differing payload yields the OTHER account, so data.account really tracks tea's own output"
+  flag=no; [ "$red" != "octotea" ] && flag=yes
+  assert_eq "yes" "$flag" "gtr falsifiability auth-status: asserting the differing payload against the first account WOULD have gone red"
+
+  # --- forge-pr-view -------------------------------------------------------
+  green=$(GTR_TEA_PULL_JSON='{"index":42,"id":98765}' \
+    PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-pr-view --pr 42 --include number | jq -r '.pr.number')
+  red=$(GTR_TEA_PULL_JSON='{"index":7,"id":98765}' \
+    PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-pr-view --pr 42 --include number | jq -r '.pr.number')
+  assert_eq "42" "$green" "gtr falsifiability pr-view: the matching payload yields the expected number"
+  assert_eq "7" "$red" "gtr falsifiability pr-view: the differing payload yields the OTHER number"
+  flag=no; [ "$red" != "42" ] && flag=yes
+  assert_eq "yes" "$flag" "gtr falsifiability pr-view: asserting the differing payload against 42 WOULD have gone red"
+
+  # --- forge-issue-view ----------------------------------------------------
+  green=$(GTR_TEA_ISSUE_JSON='{"index":7,"title":"Real title"}' \
+    PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-issue-view --number 7 | jq -r '.data.title')
+  red=$(GTR_TEA_ISSUE_JSON='{"index":7,"title":"Some other title"}' \
+    PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-issue-view --number 7 | jq -r '.data.title')
+  assert_eq "Real title" "$green" "gtr falsifiability issue-view: the matching payload yields the expected title"
+  assert_eq "Some other title" "$red" "gtr falsifiability issue-view: the differing payload yields the OTHER title"
+  flag=no; [ "$red" != "Real title" ] && flag=yes
+  assert_eq "yes" "$flag" "gtr falsifiability issue-view: asserting the differing payload against the first title WOULD have gone red"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  gtr_teardown_fake_tea_read_fixture
+}
+
+# Detection is CITED, not re-implemented and not modified. This story changes
+# no line of _detect_forge_classify_host; the assertion below proves the
+# classification it already performs is what routes these three verbs, and
+# that the retargeted no-adapter control really does reach `unknown`.
+gtr_test_gitea_detection_is_preexisting_and_unmodified() {
+  echo ""
+  echo "=== gitea routing: detection is _detect_forge_classify_host's existing answer, unchanged by this story ==="
+
+  eval "$(sed -n '/^_detect_forge_classify_host()/,/^}/p' "$CLI")"
+
+  assert_eq "gitea" "$(_detect_forge_classify_host gitea.com)" "gtr detection: gitea.com already classifies as gitea (aimi-cli.sh:1841), no change required by this story"
+  assert_eq "gitea" "$(_detect_forge_classify_host codeberg.org)" "gtr detection: codeberg.org classifies as gitea too -- Forgejo is deliberately not distinguished"
+  assert_eq "gitea" "$(_detect_forge_classify_host git.gitea.com)" "gtr detection: a *.gitea.com subdomain classifies as gitea"
+  assert_eq "unknown" "$(_detect_forge_classify_host git.example.com)" "gtr detection: an unrecognized host classifies as unknown -- the ONLY remaining stand-in for a forge the abstraction has not yet routed"
+
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+  assert_eq "gitea" "$("$CLI" detect-forge | jq -r '.forge')" "gtr detection: detect-forge reports gitea for the fixture every test below uses"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+gtr_test_forge_auth_status_gitea() {
+  echo ""
+  echo "=== forge-auth-status: gitea answers through tea login list -- found or error, never not_found ==="
+
+  gtr_setup_fake_tea_read_fixture
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local log out exit_code doc
+  log=$(mktemp)
+  doc=$(gtr_tea_login_list_json)
+
+  out=$(GTR_TEA_LOG="$log" GTR_TEA_LOGIN_JSON="$doc" PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-auth-status) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "gitea auth-status: exits 0"
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "gitea auth-status: the check ran, so status is found"
+  assert_eq "true" "$(printf '%s' "$out" | jq -r '.data.authenticated')" "gitea auth-status: data.authenticated is true"
+  assert_eq "octotea" "$(printf '%s' "$out" | jq -r '.data.account')" "gitea auth-status: the acting account is the matching login entry's own user field"
+  assert_eq "gitea" "$(printf '%s' "$out" | jq -r '.data.forge')" "gitea auth-status: data.forge names gitea, so a caller printing .data.forge (open-pr.md Step 1a) renders it correctly"
+  assert_eq "gitea.com" "$(printf '%s' "$out" | jq -r '.data.host')" "gitea auth-status: data.host is the detected host"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.reason')" "gitea auth-status: a successful check carries no reason"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "gitea auth-status: ...and no message"
+
+  # --- ARGV. The control comes FIRST and MUST match, so the zeros below are
+  # --- measurements rather than greps that silently matched nothing.
+  assert_eq "1" "$(grep -c -- '-o json' "$log")" "gitea auth-status argv control: the call carried tea's own -o json (this MUST match, so the zeros below are trustworthy)"
+  assert_eq "1" "$(grep -c '^login list -o json$' "$log")" "gitea auth-status argv: the call is exactly 'login list -o json'"
+  assert_eq "0" "$(grep -c -- '--json' "$log")" "gitea auth-status argv: no gh-style --json field-list selector (tea has none)"
+  assert_eq "0" "$(grep -c 'whoami' "$log")" "gitea auth-status argv: tea whoami is NEVER invoked -- it round-trips the network and discards its own error"
+  assert_eq "0" "$(grep -c -- '--login' "$log")" "gitea auth-status argv: no --login is passed -- this call is what DECIDES which login is active"
+
+  # --- HOST FILTERING, the pair that an entry-zero implementation fails ----
+  # One and the same payload, holding only a gitea.com login, read from two
+  # fixtures. An implementation that accepted the first entry answers true for
+  # both and fails the second half.
+  local cb_out
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  setup_detect_forge_fixture origin https://codeberg.org/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  cb_out=$(GTR_TEA_LOGIN_JSON="$doc" PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-auth-status)
+  assert_eq "gitea" "$(printf '%s' "$cb_out" | jq -r '.data.forge')" "gitea auth-status host filter: codeberg.org is still the gitea adapter"
+  assert_eq "codeberg.org" "$(printf '%s' "$cb_out" | jq -r '.data.host')" "gitea auth-status host filter: ...with codeberg.org as the detected host"
+  assert_eq "found" "$(printf '%s' "$cb_out" | jq -r '.status')" "gitea auth-status host filter: a definitive negative is still status=found -- the lookup succeeded"
+  assert_eq "false" "$(printf '%s' "$cb_out" | jq -r '.data.authenticated')" "gitea auth-status host filter: a gitea.com-only login does NOT authenticate codeberg.org"
+  assert_eq "null" "$(printf '%s' "$cb_out" | jq -r '.data.account')" "gitea auth-status host filter: ...and reports no acting account"
+  assert_eq "null" "$(printf '%s' "$cb_out" | jq -r '.reason')" "gitea auth-status host filter: a confirmed negative is not a degradation, so reason stays null"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  # The default entry wins over entry zero.
+  local def_out
+  def_out=$(GTR_TEA_LOGIN_JSON="$(gtr_tea_login_list_default_second_json)" PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-auth-status)
+  assert_eq "the-default" "$(printf '%s' "$def_out" | jq -r '.data.account')" "gitea auth-status: among two logins for the same host, the one flagged default wins -- not entry zero"
+
+  # --- THE TWO FAILURE SHAPES, each asserted independently ----------------
+  # This is the one place the gitea arm deliberately does NOT copy
+  # _forge_auth_status_gitlab, whose non-zero exit IS glab's confirmed
+  # "not authenticated" answer. tea exits 1 uniformly for EVERY error, so the
+  # same reading would manufacture a false clean negative -- and a false clean
+  # negative is what lets a broken session open a duplicate pull request.
+  local fail_out unparseable_out
+  fail_out=$(GTR_TEA_LOGIN_EXIT=1 PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-auth-status)
+  assert_eq "error" "$(printf '%s' "$fail_out" | jq -r '.status')" "gitea auth-status failure 1 (non-zero exit): status is error, NOT a clean authenticated:false"
+  assert_eq "cli_failed" "$(printf '%s' "$fail_out" | jq -r '.reason')" "gitea auth-status failure 1: reason is cli_failed"
+  assert_eq "null" "$(printf '%s' "$fail_out" | jq -r '.data')" "gitea auth-status failure 1: data is null, so authenticated cannot be read at all"
+  assert_contains "tea" "$(printf '%s' "$fail_out" | jq -r '.message')" "gitea auth-status failure 1: the message names tea"
+
+  unparseable_out=$(GTR_TEA_LOGIN_JSON='this is not json' PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-auth-status)
+  assert_eq "error" "$(printf '%s' "$unparseable_out" | jq -r '.status')" "gitea auth-status failure 2 (exit 0, unparseable stdout): status is error"
+  assert_eq "cli_failed" "$(printf '%s' "$unparseable_out" | jq -r '.reason')" "gitea auth-status failure 2: reason is cli_failed"
+  assert_eq "null" "$(printf '%s' "$unparseable_out" | jq -r '.data')" "gitea auth-status failure 2: data is null too -- a folded authenticated:false here would turn this red"
+
+  # An EMPTY but cleanly parsed list is the one definitive negative.
+  local empty_out
+  empty_out=$(GTR_TEA_LOGIN_JSON='[]' PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-auth-status)
+  assert_eq "found" "$(printf '%s' "$empty_out" | jq -r '.status')" "gitea auth-status: a cleanly parsed EMPTY login list is a definitive negative -- found, not error"
+  assert_eq "false" "$(printf '%s' "$empty_out" | jq -r '.data.authenticated')" "gitea auth-status: ...with authenticated false"
+
+  # Its contract permits exactly TWO statuses. Sweep every path this verb can
+  # take on gitea and prove not_found is unreachable on all of them.
+  local scenario statuses="" no_tea_path
+  no_tea_path=$(_path_without_binary tea)
+  for scenario in ok negative broken unparseable missing; do
+    case "$scenario" in
+      ok)          statuses="$statuses $(GTR_TEA_LOGIN_JSON="$doc" PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-auth-status | jq -r '.status')" ;;
+      negative)    statuses="$statuses $(GTR_TEA_LOGIN_JSON='[]' PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-auth-status | jq -r '.status')" ;;
+      broken)      statuses="$statuses $(GTR_TEA_LOGIN_EXIT=1 PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-auth-status | jq -r '.status')" ;;
+      unparseable) statuses="$statuses $(GTR_TEA_LOGIN_JSON='nope' PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-auth-status | jq -r '.status')" ;;
+      missing)     statuses="$statuses $(PATH="$no_tea_path" "$CLI" forge-auth-status | jq -r '.status')" ;;
+    esac
+  done
+  rm -rf "$no_tea_path"
+  assert_eq "0" "$(printf '%s' "$statuses" | grep -c 'not_found')" "gitea auth-status: not_found never appears on ANY of its gitea paths (its contract is found-or-error only)"
+  assert_eq " found found error error error" "$statuses" "gitea auth-status: the five gitea paths are exactly found / found / error / error / error"
+
+  rm -f "$log"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  gtr_teardown_fake_tea_read_fixture
+}
+
+gtr_test_forge_pr_view_gitea_found() {
+  echo ""
+  echo "=== forge-pr-view: gitea reads the DETAIL path and returns the found envelope ==="
+
+  gtr_setup_fake_tea_read_fixture
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local doc log out
+  doc=$(gtr_tea_pull_detail_json)
+  log=$(mktemp)
+
+  # Default --include: the seven-field portable core. Exact envelope, literal
+  # for literal.
+  out=$(GTR_TEA_LOG="$log" GTR_TEA_LIST_JSON="$(gtr_tea_pull_list_json)" GTR_TEA_PULL_JSON="$doc" \
+    PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x)
+  assert_eq '{"status":"found","pr":{"number":42,"url":"https://gitea.com/acme/widgets/pulls/42","title":"Add the Gitea adapter","body":"Body text of the pull request.","state":"open","headRefName":"feat-x","baseRefName":"main"},"unsupported_fields":[],"message":null}' \
+    "$out" "gitea pr-view: an existing pull request resolves to status=found with the exact envelope"
+
+  # number came from index, NOT id -- the document's id is 98765 and would
+  # have resolved to a different pull request entirely.
+  assert_eq "42" "$(printf '%s' "$out" | jq -r '.pr.number')" "gitea pr-view: number is the per-repository index"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.pr.number == 98765')" "gitea pr-view: number is NOT the instance-wide id the document also carries"
+  assert_eq "feat-x" "$(printf '%s' "$out" | jq -r '.pr.headRefName')" "gitea pr-view: headRefName comes from the DETAIL head, a BARE ref"
+  assert_eq "main" "$(printf '%s' "$out" | jq -r '.pr.baseRefName')" "gitea pr-view: baseRefName comes from base"
+
+  # --- THE ARGV PROOF -----------------------------------------------------
+  # The control comes FIRST and MUST match, so every zero below is a
+  # measurement rather than a grep that silently matched nothing.
+  assert_eq "2" "$(grep -c -- '-o json' "$log")" "gitea pr-view argv control: both calls carried tea's own -o json (this MUST match, so the zeros below are trustworthy)"
+  assert_eq "1" "$(grep -c '^pulls 42 -o json$' "$log")" "gitea pr-view argv: the DETAIL call is exactly 'pulls <index> -o json' -- no field list of any kind"
+  assert_eq "1" "$(grep -c '^pulls list --state all -f index,head -o json$' "$log")" "gitea pr-view argv: the probe is 'pulls list --state all -f index,head -o json' -- tea HAS a selector, so only the two consumed fields are asked for"
+  assert_eq "0" "$(grep -c '^pulls [0-9][0-9]* .*-f ' "$log")" "gitea pr-view argv: the DETAIL call carries NO -f -- tea's selector does not extend to the detail path"
+  assert_eq "0" "$(grep -c -- '--fields' "$log")" "gitea pr-view argv: nor the long --fields spelling"
+  assert_eq "0" "$(grep -c -- '--json' "$log")" "gitea pr-view argv: no gh-style --json field-list selector anywhere (tea has none)"
+  assert_eq "0" "$(grep -c -- '--head ' "$log")" "gitea pr-view argv: gh's --head flag never leaks into a tea invocation (tea pulls list has no head filter at all)"
+  assert_eq "0" "$(grep -c -- '--source-branch' "$log")" "gitea pr-view argv: nor glab's --source-branch"
+  assert_eq "0" "$(grep -c 'whoami' "$log")" "gitea pr-view argv: tea whoami is never invoked"
+
+  # --- --include of the three capability-gated fields ----------------------
+  out=$(GTR_TEA_LIST_JSON="$(gtr_tea_pull_list_json)" GTR_TEA_PULL_JSON="$doc" \
+    PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include files,isDraft,mergeable)
+  assert_eq '{"status":"found","pr":{"files":null,"isDraft":null,"mergeable":"true"},"unsupported_fields":["files","isDraft"],"message":null}' \
+    "$out" "gitea pr-view: files and isDraft are reported ABSENT (null + named in unsupported_fields), mergeable is answered"
+
+  # --- THE MERGED DERIVATION, one pair -------------------------------------
+  # tea's DETAIL state is `closed` on both halves; only hasMerged separates
+  # them. An adapter reading `state` alone reports both as closed.
+  local merged_out closed_out merged_doc
+  merged_doc=$(gtr_tea_pull_detail_merged_json)
+  merged_out=$(GTR_TEA_PULL_JSON="$merged_doc" PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-pr-view --pr 42 --include number,state)
+  closed_out=$(GTR_TEA_PULL_JSON="$(gtr_tea_pull_detail_closed_json)" \
+    PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-pr-view --pr 42 --include number,state)
+  assert_eq "merged" "$(printf '%s' "$merged_out" | jq -r '.pr.state')" "gitea pr-view merged: state==closed + hasMerged==true yields the contract's 'merged'"
+  assert_eq "closed" "$(printf '%s' "$closed_out" | jq -r '.pr.state')" "gitea pr-view merged: the SAME document with hasMerged==false yields 'closed'"
+  assert_eq "closed" "$(printf '%s' "$merged_doc" | jq -r '.state')" "gitea pr-view merged: tea's own DETAIL state really does say closed on the merged document -- the contract value is derived, not copied"
+
+  # `merged` is derived in EXACTLY ONE place in the whole CLI. Counting form,
+  # with a control that MUST be non-zero so the exact-1 below is a
+  # measurement.
+  local derivation_sites hasmerged_mentions
+  hasmerged_mentions=$(grep -c 'hasMerged' "$CLI") || hasmerged_mentions=0
+  derivation_sites=$(grep -v '^[[:space:]]*#' "$CLI" | grep -c 'hasMerged') || derivation_sites=0
+  assert_eq "yes" "$([ "$hasmerged_mentions" -gt 0 ] && echo yes || echo no)" "gitea pr-view merged control: hasMerged appears in aimi-cli.sh at all (so the count below is a measurement, not a silent miss)"
+  assert_eq "1" "$derivation_sites" "gitea pr-view merged: exactly ONE non-comment hasMerged derivation site exists in aimi-cli.sh -- this story and outline:01 cannot both have added one"
+
+  # --- A NUMERIC ref skips the probe entirely ------------------------------
+  local pull_counter list_counter
+  pull_counter=$(mktemp); list_counter=$(mktemp)
+  printf '0\n' > "$pull_counter"; printf '0\n' > "$list_counter"
+  out=$(GTR_TEA_PULL_COUNTER="$pull_counter" GTR_TEA_LIST_COUNTER="$list_counter" \
+    GTR_TEA_PULL_JSON="$doc" PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-pr-view --pr 42 --include number)
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "gitea pr-view numeric ref: resolves found"
+  assert_eq "0" "$(cat "$list_counter")" "gitea pr-view numeric ref: the pulls list probe is skipped ENTIRELY -- the counter stays at 0"
+  assert_eq "1" "$(cat "$pull_counter")" "gitea pr-view numeric ref: exactly one detail call"
+
+  # ...and a BRANCH ref does pay for it, which is what makes the zero above a
+  # measurement rather than a stub that never counts anything.
+  printf '0\n' > "$pull_counter"; printf '0\n' > "$list_counter"
+  out=$(GTR_TEA_PULL_COUNTER="$pull_counter" GTR_TEA_LIST_COUNTER="$list_counter" \
+    GTR_TEA_LIST_JSON="$(gtr_tea_pull_list_json)" GTR_TEA_PULL_JSON="$doc" \
+    PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include number)
+  assert_eq "1" "$(cat "$list_counter")" "gitea pr-view branch ref: the probe counter IS non-zero for a branch ref -- the counter works, so the 0 above is real"
+  assert_eq "1" "$(cat "$pull_counter")" "gitea pr-view branch ref: one probe, then one detail call"
+
+  rm -f "$log" "$pull_counter" "$list_counter"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  gtr_teardown_fake_tea_read_fixture
+}
+
+gtr_test_forge_pr_view_gitea_not_found_and_error_never_conflated() {
+  echo ""
+  echo "=== forge-pr-view: on gitea, a missing pull request is not_found and a broken tea is error -- never conflated ==="
+
+  gtr_setup_fake_tea_read_fixture
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local ref="feat-x" pull_counter not_found_out error_out not_found_status error_status
+  pull_counter=$(mktemp); printf '0\n' > "$pull_counter"
+
+  # Run 1: no pull request exists. The structural probe returns [] at exit 0
+  # -- a fact in JSON, not a string in a message.
+  not_found_out=$(GTR_TEA_PULL_COUNTER="$pull_counter" GTR_TEA_LIST_JSON='[]' \
+    PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-pr-view --pr "$ref")
+
+  # Run 2: SAME ref -- tea itself is broken on both calls. This must resolve
+  # to error. Reading it as not_found is exactly the defect that lets a broken
+  # check report "no PR yet" and open a duplicate.
+  error_out=$(GTR_TEA_LIST_EXIT=1 GTR_TEA_PULL_EXIT=1 GTR_TEA_PULL_STDERR="Error: authentication failed, run tea login add" \
+    PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-pr-view --pr "$ref")
+
+  not_found_status=$(printf '%s' "$not_found_out" | jq -r '.status')
+  error_status=$(printf '%s' "$error_out" | jq -r '.status')
+
+  assert_eq "not_found" "$not_found_status" "gitea pr-view conflation guard: run 1 (no pull request) resolves to not_found"
+  assert_eq "error" "$error_status" "gitea pr-view conflation guard: run 2 (broken tea) resolves to error"
+
+  if [ "$not_found_status" != "$error_status" ]; then
+    echo -e "${GREEN}✓${NC} gitea pr-view conflation guard: not_found and error produce different status literals for the same ref"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} gitea pr-view conflation guard: not_found and error produced the SAME status literal ($not_found_status) -- the exact conflation this verb exists to prevent"
+    ((TESTS_FAILED++))
+  fi
+
+  assert_eq "null" "$(printf '%s' "$not_found_out" | jq -r '.pr')" "gitea pr-view conflation guard: not_found -- pr is null"
+  assert_contains "$ref" "$(printf '%s' "$not_found_out" | jq -r '.message')" "gitea pr-view conflation guard: not_found -- message names the searched ref"
+  assert_eq "0" "$(cat "$pull_counter")" "gitea pr-view conflation guard: a structural [] answers absence WITHOUT paying for a doomed detail call"
+  assert_contains "authentication failed" "$(printf '%s' "$error_out" | jq -r '.message')" "gitea pr-view conflation guard: error -- message carries tea's own failure text"
+
+  # --- THE CROSS-FORK PAIR ------------------------------------------------
+  # tea's LIST head may be `owner:branch`. Plain string equality against the
+  # branch name fails the first half of this pair -- which would report an
+  # EXISTING pull request as absent and invite a duplicate.
+  local fork_found fork_absent
+  fork_found=$(GTR_TEA_LIST_JSON="$(gtr_tea_pull_list_json)" GTR_TEA_PULL_JSON="$(gtr_tea_pull_detail_json)" \
+    PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include number)
+  fork_absent=$(GTR_TEA_LIST_JSON="$(gtr_tea_pull_list_other_json)" GTR_TEA_PULL_JSON="$(gtr_tea_pull_detail_json)" \
+    PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include number)
+  assert_eq "found" "$(printf '%s' "$fork_found" | jq -r '.status')" "gitea pr-view cross-fork: a head of 'contributor:feat-x' MATCHES --pr feat-x and resolves found"
+  assert_eq "42" "$(printf '%s' "$fork_found" | jq -r '.pr.number')" "gitea pr-view cross-fork: ...and the detail call was addressed with the index the probe resolved"
+  assert_eq "not_found" "$(printf '%s' "$fork_absent" | jq -r '.status')" "gitea pr-view cross-fork: a head of 'contributor:other' does NOT match feat-x -- the suffix comparison discriminates rather than matching any colon"
+
+  # --- 404-AFTER-CONFIRMED-EXISTENCE --------------------------------------
+  # The probe said the pull request exists; the detail call then failed with
+  # text that literally contains 404. Absence has been positively DISPROVEN,
+  # so this is error. A structural fact outranks stderr prose.
+  local confirmed_out numeric_out
+  confirmed_out=$(GTR_TEA_LIST_JSON="$(gtr_tea_pull_list_json)" \
+    GTR_TEA_PULL_EXIT=1 GTR_TEA_PULL_STDERR="Error: GET /api/v1/repos/acme/widgets/pulls/42: 404 Not Found" \
+    PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-pr-view --pr "$ref")
+  assert_eq "error" "$(printf '%s' "$confirmed_out" | jq -r '.status')" "gitea pr-view: a probe-confirmed pull request whose detail call fails is error, even when the stderr literally says 404"
+  assert_contains "404" "$(printf '%s' "$confirmed_out" | jq -r '.message')" "gitea pr-view: ...and the 404-bearing stderr is carried as the message, proving the test really did exercise the 404 text"
+
+  # The 404 backstop IS used when the probe could not confirm anything (here:
+  # a numeric ref, which never probes).
+  numeric_out=$(GTR_TEA_PULL_EXIT=1 GTR_TEA_PULL_STDERR="Error: GET /api/v1/repos/acme/widgets/pulls/999: 404 Not Found" \
+    PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-pr-view --pr 999)
+  assert_eq "not_found" "$(printf '%s' "$numeric_out" | jq -r '.status')" "gitea pr-view: a numeric ref tea answers 404 for resolves to not_found via the stderr backstop"
+
+  # An UNPARSEABLE probe response proves nothing and must not be read as
+  # absence.
+  local unparseable_out
+  unparseable_out=$(GTR_TEA_LIST_JSON='not json at all' GTR_TEA_PULL_EXIT=1 GTR_TEA_PULL_STDERR="Error: boom" \
+    PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-pr-view --pr "$ref")
+  assert_eq "error" "$(printf '%s' "$unparseable_out" | jq -r '.status')" "gitea pr-view: an unparseable probe response leaves existence unproven -- error, never not_found"
+
+  rm -f "$pull_counter"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  gtr_teardown_fake_tea_read_fixture
+}
+
+gtr_test_forge_issue_view_gitea() {
+  echo ""
+  echo "=== forge-issue-view: gitea routes to tea issues <index> -o json, same three-way envelope ==="
+
+  gtr_setup_fake_tea_read_fixture
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local doc log out
+  doc=$(gtr_tea_issue_json)
+  log=$(mktemp)
+
+  out=$(GTR_TEA_LOG="$log" GTR_TEA_ISSUE_JSON="$doc" PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-issue-view --number 7)
+
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "gitea issue-view: an existing issue resolves to status=found"
+  assert_eq "7" "$(printf '%s' "$out" | jq -r '.data.number')" "gitea issue-view: number is the per-repository index, not the instance-wide id (55501)"
+  assert_eq "Login button does nothing" "$(printf '%s' "$out" | jq -r '.data.title')" "gitea issue-view: title"
+  assert_eq "Steps to reproduce: click it." "$(printf '%s' "$out" | jq -r '.data.body')" "gitea issue-view: body comes from body -- tea spells it body, unlike glab's description"
+  assert_eq "https://gitea.com/acme/widgets/issues/7" "$(printf '%s' "$out" | jq -r '.data.url')" "gitea issue-view: url"
+  assert_eq "open" "$(printf '%s' "$out" | jq -r '.data.state')" "gitea issue-view: state, normalized through _forge_map_state gitea"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.message')" "gitea issue-view: found carries no message"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.reason')" "gitea issue-view: found carries no reason"
+
+  # labels accepted in BOTH shapes from one document, so neither half can be
+  # silently dropped.
+  assert_eq '["bug","frontend"]' "$(printf '%s' "$out" | jq -c '.data.labels')" "gitea issue-view: labels survive as plain strings AND as {name} objects -- the same either-shape expression the gitlab arm uses"
+
+  # comments is reported ABSENT, not zero. The fixture's comments array is
+  # EMPTY -- which is what tea returns when --comments was not passed -- so an
+  # implementation deriving a count from its length would emit comments:0 for
+  # every issue in existence.
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data.comments')" "gitea issue-view: comments is null"
+  assert_eq '["comments"]' "$(printf '%s' "$out" | jq -c '.data.unsupported_fields')" "gitea issue-view: ...and NAMED in unsupported_fields -- reported absent, never a wrong zero"
+  assert_eq "false" "$(printf '%s' "$out" | jq -r '.data.comments == 0')" "gitea issue-view: comments is specifically NOT 0, even though the fixture's comments array is empty"
+  assert_eq "0" "$(printf '%s' "$doc" | jq -r '.comments | length')" "gitea issue-view: ...and the fixture really does carry an empty comments array, so that distinction was exercised"
+
+  # --- ARGV. Control first, then the zeros. -------------------------------
+  assert_eq "1" "$(grep -c -- '-o json' "$log")" "gitea issue-view argv control: the call carried tea's own -o json (this MUST match, so the zeros below are trustworthy)"
+  assert_eq "1" "$(grep -c '^issues 7 -o json$' "$log")" "gitea issue-view argv: exactly 'issues <index> -o json'"
+  assert_eq "0" "$(grep -c -- '--json' "$log")" "gitea issue-view argv: no gh-style --json field-list selector"
+  assert_eq "0" "$(grep -c -- '--comments' "$log")" "gitea issue-view argv: --comments is deliberately NOT passed, which is why comments is reported absent"
+  assert_eq "0" "$(grep -c 'whoami' "$log")" "gitea issue-view argv: tea whoami is never invoked"
+
+  # The five contract fields this call site resolves are read out of
+  # _forge_map_pr_field_gitea rather than hard-coded here. That reuse is only
+  # legitimate because Gitea spells them identically on an issue and on a pull
+  # request -- pinned here so a future divergence fails loudly.
+  eval "$(sed -n '/^_forge_map_pr_field_gitea()/,/^}/p' "$CLI")"
+  assert_eq "7" "$(printf '%s' "$doc" | jq -r --arg k "$(_forge_map_pr_field_gitea number)" '.[$k]')" "gitea issue-view mapper reuse: the number key (index) resolves on an ISSUE document too"
+  assert_eq "Login button does nothing" "$(printf '%s' "$doc" | jq -r --arg k "$(_forge_map_pr_field_gitea title)" '.[$k]')" "gitea issue-view mapper reuse: the title key resolves on an issue document"
+  assert_eq "Steps to reproduce: click it." "$(printf '%s' "$doc" | jq -r --arg k "$(_forge_map_pr_field_gitea body)" '.[$k]')" "gitea issue-view mapper reuse: the body key resolves on an issue document"
+  assert_eq "https://gitea.com/acme/widgets/issues/7" "$(printf '%s' "$doc" | jq -r --arg k "$(_forge_map_pr_field_gitea url)" '.[$k]')" "gitea issue-view mapper reuse: the url key resolves on an issue document"
+  assert_eq "open" "$(printf '%s' "$doc" | jq -r --arg k "$(_forge_map_pr_field_gitea state)" '.[$k]')" "gitea issue-view mapper reuse: the state key resolves on an issue document"
+
+  # --- not_found is claimed ONLY on a positive 404/not-found match ---------
+  local nf_out
+  nf_out=$(GTR_TEA_ISSUE_EXIT=1 GTR_TEA_ISSUE_STDERR="Error: GET /api/v1/repos/acme/widgets/issues/4242: 404 Not Found" \
+    PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-issue-view --number 4242)
+  assert_eq "not_found" "$(printf '%s' "$nf_out" | jq -r '.status')" "gitea issue-view: a 404 resolves to not_found, not error"
+  assert_eq "null" "$(printf '%s' "$nf_out" | jq -r '.data')" "gitea issue-view not_found: data is null"
+  assert_eq "null" "$(printf '%s' "$nf_out" | jq -r '.reason')" "gitea issue-view not_found: reason stays null -- not_found is a result, not a degradation"
+
+  # --- every OTHER failure is error, classified STRUCTURALLY ---------------
+  local unauth_out broken_out probe_broken_out
+  unauth_out=$(GTR_TEA_ISSUE_EXIT=1 GTR_TEA_ISSUE_STDERR="Error: 401 Unauthorized" GTR_TEA_LOGIN_JSON='[]' \
+    PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-issue-view --number 7)
+  assert_eq "error" "$(printf '%s' "$unauth_out" | jq -r '.status')" "gitea issue-view: a non-404 failure resolves to error, never an invented not_found"
+  assert_eq "not_authenticated" "$(printf '%s' "$unauth_out" | jq -r '.reason')" "gitea issue-view: with NO matching login entry, the reason is not_authenticated"
+  assert_contains "tea issues exited" "$(printf '%s' "$unauth_out" | jq -r '.message')" "gitea issue-view: the message names tea, never gh and never glab"
+
+  broken_out=$(GTR_TEA_ISSUE_EXIT=1 GTR_TEA_ISSUE_STDERR="Error: dial tcp: lookup gitea.com: no such host" \
+    GTR_TEA_LOGIN_JSON="$(gtr_tea_login_list_json)" PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-issue-view --number 7)
+  assert_eq "cli_failed" "$(printf '%s' "$broken_out" | jq -r '.reason')" "gitea issue-view: WITH a valid login entry, the same shape of failure is cli_failed -- the classifier is structural, not textual"
+
+  # The auth probe ITSELF failing proves nothing, so it must not be read as a
+  # negative: cli_failed is the safe direction for an already-known failure.
+  probe_broken_out=$(GTR_TEA_ISSUE_EXIT=1 GTR_TEA_ISSUE_STDERR="Error: dial tcp: no such host" GTR_TEA_LOGIN_EXIT=1 \
+    PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-issue-view --number 7)
+  assert_eq "cli_failed" "$(printf '%s' "$probe_broken_out" | jq -r '.reason')" "gitea issue-view: when the auth probe itself cannot run, the reason is cli_failed -- an unreadable login list is not a confirmed logout"
+
+  # There is deliberately NO structural issue probe: tea issues list is
+  # paginated with no index filter, so a local scan could invent a FALSE
+  # not_found. Counting form with a control that MUST match.
+  local issue_body listing_hits control_hits
+  issue_body=$(mktemp)
+  sed -n '/^_forge_issue_view_gitea()/,/^}/p' "$CLI" > "$issue_body"
+  listing_hits=$(grep -v '^[[:space:]]*#' "$issue_body" | grep -c 'issues list') || listing_hits=0
+  control_hits=$(grep -v '^[[:space:]]*#' "$issue_body" | grep -c 'tea issues') || control_hits=0
+  assert_eq "yes" "$([ "$control_hits" -gt 0 ] && echo yes || echo no)" "gitea issue-view control: the identical query DOES find 'tea issues' in the body, so the zero below is a measurement"
+  assert_eq "0" "$listing_hits" "gitea issue-view: the adapter body invokes no 'issues list' scan -- a paginated scan could report a real issue as missing"
+  assert_contains "PAGINATED" "$(sed -n '/^# gitea adapter for forge-issue-view/,/^_forge_issue_view_gitea()/p' "$CLI")" "gitea issue-view: the function header RECORDS why there is no structural probe, so it is not later 'improved' into a scan"
+
+  rm -f "$log" "$issue_body"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  gtr_teardown_fake_tea_read_fixture
+}
+
+# The mapper-reuse claim, proven NON-GAMEABLY by mutation: a build whose
+# _forge_map_pr_field_gitea answers a DIFFERENT native key for `number`
+# produces a different data.number out of forge-issue-view. An issue arm with
+# its own hand-written key table would be unmoved by this patch.
+gtr_test_forge_issue_view_gitea_reads_keys_through_the_mapper() {
+  echo ""
+  echo "=== forge-issue-view gitea: the five portable-core keys come from outline:01's mapper, proven by mutation ==="
+
+  gtr_setup_fake_tea_read_fixture
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local mut_dir mut doc live mutant mut_res
+  mut_dir=$(mktemp -d)
+  mut="$mut_dir/aimi-cli.sh"
+  doc=$(gtr_tea_issue_json)
+
+  mut_res=$(gtr_mutate_cli "    number)      printf 'index' ;;" "    number)      printf 'id' ;;" "$mut")
+  assert_eq "changed" "${mut_res%% *}" "gitea issue-view mapper mutation: the patch landed"
+  assert_eq "1" "${mut_res##* }" "gitea issue-view mapper mutation: it replaced EXACTLY ONE line of aimi-cli.sh"
+
+  live=$(GTR_TEA_ISSUE_JSON="$doc" PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-issue-view --number 7 | jq -r '.data.number')
+  mutant=$(GTR_TEA_ISSUE_JSON="$doc" PATH="$GTR_TEA_DIR:$PATH" bash "$mut" forge-issue-view --number 7 | jq -r '.data.number')
+
+  assert_eq "7" "$live" "gitea issue-view mapper mutation: the live build reads number through the mapper's own index answer"
+  assert_eq "55501" "$mutant" "gitea issue-view mapper mutation: repointing the MAPPER alone changes data.number to the document's id -- so this arm has no key table of its own"
+  assert_eq "no" "$([ "$live" = "$mutant" ] && echo yes || echo no)" "gitea issue-view mapper mutation: the live and mutant answers genuinely differ"
+
+  rm -rf "$mut_dir"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  gtr_teardown_fake_tea_read_fixture
+}
+
+# THE ABSENCE OF _forge_repo_info_gitea IS A DECISION, AND THIS PINS IT.
+# tea has no repo-as-JSON command: `tea repos <owner>/<name>` requires the
+# slug this code would have to local-parse first and does not honour --output
+# at all (cmd/repos.go:47-65). A gitea tier would therefore local-parse the
+# answer, ask tea about it, and learn nothing.
+gtr_test_forge_repo_info_gitea_is_local_parse_by_decision() {
+  echo ""
+  echo "=== forge-repo-info: gitea deliberately has NO adapter and answers from the local remote parse ==="
+
+  gtr_setup_fake_tea_read_fixture
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local log out
+  log=$(mktemp)
+  out=$(GTR_TEA_LOG="$log" PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-repo-info)
+
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "gitea repo-info: status is found -- this verb never degrades on gitea"
+  assert_eq "local-parse" "$(printf '%s' "$out" | jq -r '.data.source')" "gitea repo-info: data.source is local-parse, and says so rather than implying a CLI answered"
+  assert_eq "gitea" "$(printf '%s' "$out" | jq -r '.data.forge')" "gitea repo-info: data.forge names gitea"
+  assert_eq "gitea.com" "$(printf '%s' "$out" | jq -r '.data.host')" "gitea repo-info: data.host is the detected host"
+  assert_eq "acme" "$(printf '%s' "$out" | jq -r '.data.owner')" "gitea repo-info: owner is parsed from the remote URL"
+  assert_eq "widgets" "$(printf '%s' "$out" | jq -r '.data.repo')" "gitea repo-info: repo is parsed from the remote URL"
+  assert_eq "acme/widgets" "$(printf '%s' "$out" | jq -r '.data.nameWithOwner')" "gitea repo-info: nameWithOwner recomposes them"
+  assert_eq "0" "$(wc -l < "$log" | tr -d ' ')" "gitea repo-info: the fake tea's argv log is EMPTY -- this verb invokes tea zero times"
+
+  # The absence is structural, not accidental. Control first: the gitlab
+  # sibling DOES exist, so the zero below is a measurement.
+  local gitlab_arm gitea_arm
+  gitlab_arm=$(grep -c '^_forge_repo_info_gitlab()' "$CLI") || gitlab_arm=0
+  gitea_arm=$(grep -c '^_forge_repo_info_gitea()' "$CLI") || gitea_arm=0
+  assert_eq "1" "$gitlab_arm" "gitea repo-info control: _forge_repo_info_gitlab DOES exist, so the zero below is a measurement"
+  assert_eq "0" "$gitea_arm" "gitea repo-info: there is NO _forge_repo_info_gitea function in aimi-cli.sh"
+
+  # ...and the reason is recorded at the decision site, so the next reader
+  # meets a decision rather than an oversight.
+  local repo_info_body
+  repo_info_body=$(sed -n '/^_forge_repo_info()/,/^}/p' "$CLI")
+  assert_contains "tea repos" "$repo_info_body" "gitea repo-info: the decision comment at the CLI-tier chain names 'tea repos' as the command that cannot answer"
+  assert_contains "ITS ABSENCE IS A DECISION" "$repo_info_body" "gitea repo-info: ...and states outright that the absence is a decision"
+
+  rm -f "$log"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  gtr_teardown_fake_tea_read_fixture
+}
+
+# THE ONE CRITERION IN THIS STORY TESTABLE AGAINST REALITY ON THIS MACHINE:
+# tea genuinely is not installed, so "the binary is absent" needs no stub at
+# all. _path_without_binary is used anyway so this still holds on a machine
+# where a developer HAS installed tea.
+gtr_test_gitea_read_verbs_name_tea_when_binary_absent() {
+  echo ""
+  echo "=== gitea read verbs: with tea absent, each degrades naming tea -- never gh, never glab ==="
+
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local no_tea stderr_file="/tmp/gtr_no_tea_stderr.$$"
+  no_tea=$(_path_without_binary tea)
+
+  # Sanity guard: prove the scenario is real before anything is read into it.
+  assert_eq "no" "$(PATH="$no_tea" command -v tea >/dev/null 2>&1 && echo yes || echo no)" "tea-absent fixture: tea is genuinely unresolvable on this PATH"
+
+  local out exit_code
+
+  out=$(PATH="$no_tea" "$CLI" forge-pr-view --pr feat-x 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "tea absent, pr-view: exits 0"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "tea absent, pr-view: status is error"
+  assert_contains "tea not found on PATH" "$(printf '%s' "$out" | jq -r '.message')" "tea absent, pr-view: the message names tea"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.message' | grep -c 'gh not found')" "tea absent, pr-view: the message does NOT tell a Gitea user to install gh"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.message' | grep -c 'glab not found')" "tea absent, pr-view: nor glab"
+  assert_eq "" "$(cat "$stderr_file")" "tea absent, pr-view: quiet degrade -- no stderr banner"
+
+  out=$(PATH="$no_tea" "$CLI" forge-issue-view --number 7 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "tea absent, issue-view: exits 0"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "tea absent, issue-view: status is error"
+  assert_eq "cli_missing" "$(printf '%s' "$out" | jq -r '.reason')" "tea absent, issue-view: reason is cli_missing, not no_adapter -- the adapter exists, the binary does not"
+  assert_contains "tea not found" "$(printf '%s' "$out" | jq -r '.message')" "tea absent, issue-view: the message names tea"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.message' | grep -c 'gh not found')" "tea absent, issue-view: the message does NOT name gh"
+  assert_eq "" "$(cat "$stderr_file")" "tea absent, issue-view: quiet degrade -- no stderr banner"
+
+  out=$(PATH="$no_tea" "$CLI" forge-auth-status 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "tea absent, auth-status: exits 0"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" "tea absent, auth-status: status is error (the check could not run)"
+  assert_eq "cli_missing" "$(printf '%s' "$out" | jq -r '.reason')" "tea absent, auth-status: reason is cli_missing"
+  assert_contains "tea not found on PATH" "$(printf '%s' "$out" | jq -r '.message')" "tea absent, auth-status: the message names tea"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.message' | grep -c 'gh not found')" "tea absent, auth-status: the message does NOT name gh"
+  assert_eq "" "$(cat "$stderr_file")" "tea absent, auth-status: quiet degrade -- no stderr banner"
+
+  # repo-info has an offline tier, so a missing tea is not a degradation for
+  # it at all -- and on gitea it never had a CLI tier to lose.
+  out=$(PATH="$no_tea" "$CLI" forge-repo-info 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  assert_eq "found" "$(printf '%s' "$out" | jq -r '.status')" "tea absent, repo-info: still answers found -- its offline tier needs no CLI"
+  assert_eq "local-parse" "$(printf '%s' "$out" | jq -r '.data.source')" "tea absent, repo-info: ...and says so through data.source"
+
+  rm -f "$stderr_file"
+  rm -rf "$no_tea"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+# NO CREDENTIAL REACHES A `tea` INVOCATION. tea honours GH_TOKEN whenever
+# GITEA_INSTANCE_URL is also set, so copying the GitHub write path's
+# prefix-assignment habit would hand a GitHub token to a Gitea instance.
+#
+# The checker is PROVEN ABLE TO RETURN NON-ZERO before its zero is trusted --
+# a guard that can only ever say "clean" is not a guard.
+gtr_test_gitea_read_verbs_bind_no_credentials() {
+  echo ""
+  echo "=== gitea read verbs: no GH_TOKEN / GITEA_TOKEN / GITEA_INSTANCE_URL binding in any of the three function bodies ==="
+
+  local bodies planted body_lines
+  bodies=$(mktemp)
+  planted=$(mktemp)
+  gtr_write_gitea_read_bodies "$bodies"
+
+  # Guard the guard: prove the extraction actually captured all three bodies,
+  # or a zero below would mean "nothing was scanned" rather than "nothing was
+  # found".
+  body_lines=$(wc -l < "$bodies" | tr -d ' ')
+  assert_eq "yes" "$([ "$body_lines" -gt 60 ] && echo yes || echo no)" "gitea credential guard: the three function bodies were actually extracted ($body_lines lines), so the count below scans real code"
+  assert_eq "3" "$(grep -c '^_forge_.*_gitea() {$' "$bodies")" "gitea credential guard: all three function definitions are present in the scanned text"
+
+  assert_eq "0" "$(gtr_count_credential_bindings "$bodies")" "gitea credential guard: ZERO prefix assignments or exports of GH_TOKEN, GITEA_TOKEN or GITEA_INSTANCE_URL in the three new bodies"
+
+  # The falsifiability half: the same checker, run over a copy with ONE
+  # planted binding, must report it.
+  {
+    printf '%s\n' 'GH_TOKEN="$leaked" tea pulls 1 -o json'
+    cat "$bodies"
+  } > "$planted"
+  assert_eq "1" "$(gtr_count_credential_bindings "$planted")" "gitea credential guard falsifiability: the SAME checker reports 1 against a copy with one planted GH_TOKEN prefix assignment -- so the 0 above is a measurement"
+
+  # The counting form itself, not the short-circuiting one. A `grep -v | grep -q`
+  # inside an `if` fails OPEN under pipefail; this section uses `grep -c` with
+  # `|| count=0` everywhere and adds no eighth instance of the broken shape.
+  local checker_body short_circuit_hits count_hits
+  checker_body=$(declare -f gtr_count_credential_bindings)
+  short_circuit_hits=$(printf '%s\n' "$checker_body" | grep -c 'grep -q') || short_circuit_hits=0
+  count_hits=$(printf '%s\n' "$checker_body" | grep -c 'grep -c') || count_hits=0
+  assert_eq "1" "$count_hits" "gitea credential guard shape control: the checker DOES use the counting form, so the zero below is a measurement"
+  assert_eq "0" "$short_circuit_hits" "gitea credential guard shape: the checker uses no 'grep -q' short-circuit -- it adds no eighth fail-open guard"
+
+  rm -f "$bodies" "$planted"
+}
+
+# ONE MUTATION PER ROUTED VERB. For each of the three, a copy of aimi-cli.sh
+# has that verb's gitea arm UNROUTED -- restoring the pre-story behaviour --
+# and a SPECIFIC, NAMED assertion is shown to go red. Three verbs, three
+# distinct named assertions.
+#
+# Each mutation asserts BOTH that its patch landed AND that it replaced
+# exactly ONE line. The second half is new in phase 4 and is not decoration:
+# several gitea arms exist across this wave, so an anchor that also matched
+# outline:03's or outline:04's would silently unroute three verbs at once and
+# make this matrix prove less than it claims.
+gtr_test_gitea_read_verbs_mutation_matrix() {
+  echo ""
+  echo "=== gitea read verbs: unrouting each verb in turn turns a specific named assertion RED ==="
+
+  gtr_setup_fake_tea_read_fixture
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local mut_dir mut pull_doc issue_doc login_doc live mutant mut_res
+  mut_dir=$(mktemp -d)
+  mut="$mut_dir/aimi-cli.sh"
+  pull_doc=$(gtr_tea_pull_detail_json)
+  issue_doc=$(gtr_tea_issue_json)
+  login_doc=$(gtr_tea_login_list_json)
+
+  # --- 1/3: forge-auth-status ----------------------------------------------
+  # Named assertion under test:
+  #   "gitea auth-status: data.authenticated is true"
+  mut_res=$(gtr_mutate_cli '    gitea)  adapter_bin="tea" ;;' '    gitea-unrouted)  adapter_bin="tea" ;;' "$mut")
+  assert_eq "changed" "${mut_res%% *}" "MUTATION 1/3 forge-auth-status: the unroute patch landed"
+  assert_eq "1" "${mut_res##* }" "MUTATION 1/3 forge-auth-status: it replaced EXACTLY ONE line of aimi-cli.sh"
+  live=$(GTR_TEA_LOGIN_JSON="$login_doc" PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-auth-status | jq -r '.data.authenticated')
+  mutant=$(GTR_TEA_LOGIN_JSON="$login_doc" PATH="$GTR_TEA_DIR:$PATH" bash "$mut" forge-auth-status | jq -r '.data.authenticated')
+  assert_eq "true" "$live" "MUTATION 1/3 forge-auth-status: routed, the named assertion 'data.authenticated is true' is GREEN"
+  assert_eq "null" "$mutant" "MUTATION 1/3 forge-auth-status: UNROUTED, that same named assertion goes RED -- data is null, so authenticated cannot be read at all"
+  assert_eq "no_adapter" "$(GTR_TEA_LOGIN_JSON="$login_doc" PATH="$GTR_TEA_DIR:$PATH" bash "$mut" forge-auth-status | jq -r '.reason')" "MUTATION 1/3 forge-auth-status: the unrouted build reverts to reason=no_adapter"
+
+  # --- 2/3: forge-pr-view --------------------------------------------------
+  # Named assertion under test:
+  #   "gitea pr-view: an existing pull request resolves to status=found"
+  mut_res=$(gtr_mutate_cli '        _forge_pr_view_gitea "$pr_ref" "$fields_csv"' '        _forge_pr_view_emit "error" "null" "null" "no forge-pr-view adapter for the unrouted forge."' "$mut")
+  assert_eq "changed" "${mut_res%% *}" "MUTATION 2/3 forge-pr-view: the unroute patch landed"
+  assert_eq "1" "${mut_res##* }" "MUTATION 2/3 forge-pr-view: it replaced EXACTLY ONE line of aimi-cli.sh"
+  live=$(GTR_TEA_PULL_JSON="$pull_doc" PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-pr-view --pr 42 | jq -r '.status')
+  mutant=$(GTR_TEA_PULL_JSON="$pull_doc" PATH="$GTR_TEA_DIR:$PATH" bash "$mut" forge-pr-view --pr 42 | jq -r '.status')
+  assert_eq "found" "$live" "MUTATION 2/3 forge-pr-view: routed, the named assertion 'an existing pull request resolves to status=found' is GREEN"
+  assert_eq "error" "$mutant" "MUTATION 2/3 forge-pr-view: UNROUTED, that same named assertion goes RED -- status is error, not found"
+  assert_contains "no forge-pr-view adapter" "$(GTR_TEA_PULL_JSON="$pull_doc" PATH="$GTR_TEA_DIR:$PATH" bash "$mut" forge-pr-view --pr 42 | jq -r '.message')" "MUTATION 2/3 forge-pr-view: the unrouted build reverts to the no-adapter message"
+
+  # --- 3/3: forge-issue-view -----------------------------------------------
+  # Named assertion under test:
+  #   "gitea issue-view: an existing issue resolves to status=found"
+  mut_res=$(gtr_mutate_cli '    _forge_issue_view_gitea "$number" "$host"' '    _forge_emit_status error "" "forge-issue-view: unrouted." no_adapter' "$mut")
+  assert_eq "changed" "${mut_res%% *}" "MUTATION 3/3 forge-issue-view: the unroute patch landed"
+  assert_eq "1" "${mut_res##* }" "MUTATION 3/3 forge-issue-view: it replaced EXACTLY ONE line of aimi-cli.sh"
+  live=$(GTR_TEA_ISSUE_JSON="$issue_doc" PATH="$GTR_TEA_DIR:$PATH" "$CLI" forge-issue-view --number 7 | jq -r '.status')
+  mutant=$(GTR_TEA_ISSUE_JSON="$issue_doc" PATH="$GTR_TEA_DIR:$PATH" bash "$mut" forge-issue-view --number 7 | jq -r '.status')
+  assert_eq "found" "$live" "MUTATION 3/3 forge-issue-view: routed, the named assertion 'an existing issue resolves to status=found' is GREEN"
+  assert_eq "error" "$mutant" "MUTATION 3/3 forge-issue-view: UNROUTED, that same named assertion goes RED -- status is error, not found"
+  assert_eq "no_adapter" "$(GTR_TEA_ISSUE_JSON="$issue_doc" PATH="$GTR_TEA_DIR:$PATH" bash "$mut" forge-issue-view --number 7 | jq -r '.reason')" "MUTATION 3/3 forge-issue-view: the unrouted build reverts to reason=no_adapter"
+
+  rm -rf "$mut_dir"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+  gtr_teardown_fake_tea_read_fixture
+}
+
+# RUNS LAST IN THIS SECTION, ON PURPOSE -- it reads the SECTION-WIDE argv log
+# every test above appended to, so it can only state its claim once they have
+# all run. (The per-test GTR_TEA_LOG files are torn down; GTR_TEA_AUDIT is
+# not.)
+#
+# `tea whoami` makes a network round trip and then DISCARDS its own error
+# (cmd/whoami.go:22-31, `user, _, _ :=`), so it cannot serve as an auth probe.
+# No code path in this story invokes it, and this is where that is measured.
+gtr_test_tea_whoami_is_never_invoked() {
+  echo ""
+  echo "=== gitea read verbs: tea whoami is invoked by no code path in this story (section-wide argv audit) ==="
+
+  local total whoami_hits login_hits
+  assert_eq "yes" "$([ -n "${GTR_TEA_AUDIT:-}" ] && [ -f "$GTR_TEA_AUDIT" ] && echo yes || echo no)" "gitea whoami audit: the section-wide argv log exists"
+
+  total=$(wc -l < "$GTR_TEA_AUDIT" | tr -d ' ')
+  assert_eq "yes" "$([ "$total" -gt 20 ] && echo yes || echo no)" "gitea whoami audit: it recorded the whole section's invocations ($total lines), so the zero below is a measurement rather than an empty file"
+
+  # Control first: a subcommand that IS invoked must be found by the identical
+  # counting query.
+  login_hits=$(grep -c '^login list' "$GTR_TEA_AUDIT") || login_hits=0
+  assert_eq "yes" "$([ "$login_hits" -gt 0 ] && echo yes || echo no)" "gitea whoami audit control: the identical query DOES find 'login list' invocations, so the zero below is trustworthy"
+
+  whoami_hits=$(grep -c 'whoami' "$GTR_TEA_AUDIT") || whoami_hits=0
+  assert_eq "0" "$whoami_hits" "gitea whoami audit: ZERO whoami invocations across every test in this section"
+
+  # ...and the stub would not have let one pass quietly: its default arm exits
+  # 127 with a diagnostic on any unhandled invocation.
+  gtr_setup_fake_tea_read_fixture
+  local rc=0
+  GTR_TEA_AUDIT= PATH="$GTR_TEA_DIR:$PATH" tea whoami >/dev/null 2>&1 || rc=$?
+  assert_eq "127" "$rc" "gitea whoami audit: the fake tea exits 127 on an unhandled invocation, so a stray whoami could not have passed silently"
+  gtr_teardown_fake_tea_read_fixture
+}
+
+# ---------------------------------------------------------------------------
+# Forge Documentation Correctness Tests (phase 4 outline:06)
+# ---------------------------------------------------------------------------
+# Guards the three documentation defects this story fixed, so none of them can
+# come back silently:
+#   1. forge-contract.md's State Mapping ruled that `tea` has no distinct
+#      `merged` value and told a future adapter to normalize `closed` straight
+#      through. Source falsifies both halves; outline:01 shipped the correct
+#      derivation. A spec that misdirects an implementer is worse than a stale
+#      one, so its removal is asserted by name.
+#   2. Four places under commands/ still claimed GitHub was the only adapter,
+#      false since phase 3 shipped GitLab.
+#   3. Four `cmd_help` blocks disagreed with the code that produces them --
+#      two of them (`--include` naming reviews/comments, output key
+#      `evidence`) never right rather than merely stale.
+#
+# EVERY COUNT HERE IS EARNED. The prefix is `gtd_`, disjoint from `gl*`
+# (phase 3) and from every phase-4 sibling. Three rules hold throughout, and
+# each exists because breaking it produced a false zero in this repository:
+#   - COUNTING FORM ONLY -- `count=$(grep ... | grep -c '^') || count=0`
+#     compared with assert_eq. Never `grep -q` inside an `if`: under
+#     `set -o pipefail` that shape SIGPIPEs its left half and fails OPEN,
+#     reporting "clean" for a file that contains the pattern.
+#   - NOTHING REDIRECTED TO /dev/null. A hidden error message is how an
+#     unmatched query becomes indistinguishable from a real zero.
+#   - EVERY VARIABLE QUOTED. These blocks are read under bash here, but the
+#     same shape is written in command files that run under zsh, where an
+#     unquoted list variable is passed as ONE argument and matches nothing.
+# The falsifiability proof and the traversal control therefore both run BEFORE
+# any assertion that trusts a zero -- the convention this file already follows
+# at :167, :585, :3670, :4379 and :6199.
+# ---------------------------------------------------------------------------
+
+# The stale-scope regex, written once and shared by the falsifiability proof
+# and the guard so the two provably exercise the SAME query -- a control that
+# tests a different pattern from the one it vouches for is not a control.
+# Three alternations because the four sites phrased the same false claim three
+# different ways ("only adapter shipping in phase 1", "phase 1 ships GitHub
+# only" / "phase 1 ships only GitHub", "the only adapter this verb ships in
+# phase 1").
+GTD_STALE_SCOPE_RE='only adapter|phase 1 ships|ships in phase 1'
+
+# Counts matching LINES under a directory tree. The `| grep -c '^'` half is
+# what makes a no-match run report the number 0 instead of leaving the caller
+# to interpret grep's exit status, and the `|| count=0` catches the exit 1
+# that a no-match pipeline still returns under `set -o pipefail`.
+gtd_count_in_dir() {
+  local dir="$1" pattern="$2" count
+  count=$(grep -rE -- "$pattern" "$dir" | grep -c '^') || count=0
+  printf '%s' "$count"
+}
+
+# The same counting discipline over a string already in hand, for slicing a
+# single help block out of captured stdout.
+gtd_count_in_text() {
+  local text="$1" pattern="$2" count
+  count=$(printf '%s\n' "$text" | grep -cE -- "$pattern") || count=0
+  printf '%s' "$count"
+}
+
+# Slices ONE verb's block out of `--help` stdout: the line introducing the
+# verb (4-space indent) plus its continuation lines (30-space indent), stopping
+# at the next verb. Scoping matters for at least one assertion below --
+# `evidence` is a legitimate key in verify-creates' own help further down the
+# same output, so an unscoped check on that word could be satisfied, or
+# defeated, by a block this story never touched.
+gtd_help_block() {
+  printf '%s\n' "$1" | awk -v verb="$2" '
+    $0 ~ ("^    " verb "( |$)") { inblock = 1; print; next }
+    inblock && /^    [^ ]/     { inblock = 0 }
+    inblock                    { print }
+  '
+}
+
+# RUNS FIRST, ON PURPOSE. Before any assertion below trusts gtd_count_in_dir
+# returning 0, the reader is shown returning NON-zero for a directory that
+# genuinely holds the stale claim -- rebuilt by planting one of the deleted
+# sentences back into a copy of the file it was deleted from. A clean zero
+# from a reader never observed matching anything proves only that the reader
+# ran.
+gtd_test_the_stale_claim_reader_can_return_non_zero() {
+  echo ""
+  echo "=== docs: the stale-scope reader is proven able to return non-zero BEFORE any zero is believed ==="
+
+  local planted contract
+  contract="$SCRIPT_DIR/../commands/references/forge-contract.md"
+  planted=$(mktemp -d)
+  cp "$contract" "$planted/forge-contract.md"
+
+  # The sentence exactly as it read before this story deleted it.
+  printf '%s\n' 'and every forge verb built on top of them. GitHub is the' \
+                'only adapter shipping in phase 1; this contract is written so GitLab (`glab`)' \
+                >> "$planted/forge-contract.md"
+
+  local planted_hits
+  planted_hits=$(gtd_count_in_dir "$planted" "$GTD_STALE_SCOPE_RE")
+  assert_eq "yes" "$([ "$planted_hits" -ge 1 ] && echo yes || echo no)" "gtd falsifiability: the reader DOES find the stale claim when one is planted back -- so the zero asserted later means absent, not unmatched"
+
+  # And it counts LINES, not files: the planted copy carries exactly the one
+  # line, which is what makes the real directory's 0 a meaningful number
+  # rather than a coincidence of aggregation.
+  assert_eq "1" "$planted_hits" "gtd falsifiability: exactly one line matched in the planted copy"
+
+  rm -rf "$planted"
+}
+
+# THE SECOND CONTROL: the reader is shown reaching real files under the real
+# commands/ directory. The proof above used a temp directory; this one proves
+# the traversal that the guard actually runs is not silently walking nothing.
+gtd_test_the_reader_reaches_the_real_commands_directory() {
+  echo ""
+  echo "=== docs: a pattern known to be present in commands/ counts non-zero, proving the traversal reaches files ==="
+
+  local commands_dir control_hits
+  commands_dir="$SCRIPT_DIR/../commands"
+
+  control_hits=$(gtd_count_in_dir "$commands_dir" 'Gitea/Forgejo')
+  assert_eq "yes" "$([ "$control_hits" -gt 0 ] && echo yes || echo no)" "gtd traversal control: \`Gitea/Forgejo\` is present under commands/ and the reader finds it"
+}
+
+# THE GUARD ITSELF, and the only assertion here that asserts a zero. Both
+# controls above have already run.
+gtd_test_no_command_file_claims_github_is_the_only_adapter() {
+  echo ""
+  echo "=== docs: no file under commands/ still claims GitHub is the only forge backend ==="
+
+  local commands_dir
+  commands_dir="$SCRIPT_DIR/../commands"
+
+  assert_eq "0" "$(gtd_count_in_dir "$commands_dir" "$GTD_STALE_SCOPE_RE")" "gtd scope guard: zero lines under commands/ match the stale-scope regex"
+
+  # The two individually named files, checked one at a time so a failure says
+  # WHICH document regressed rather than only that the total moved.
+  assert_eq "0" "$(gtd_count_in_dir "$commands_dir/references/forge-contract.md" "$GTD_STALE_SCOPE_RE")" "gtd scope guard: forge-contract.md carries none of them"
+  assert_eq "0" "$(gtd_count_in_dir "$commands_dir/open-pr.md" "$GTD_STALE_SCOPE_RE")" "gtd scope guard: and neither does open-pr.md"
+}
+
+# THE SUBSTANTIVE FIX. forge-contract.md used to rule that `tea` cannot
+# distinguish a merged pull request and that an adapter should normalize
+# `closed` straight through. An implementer following that would have shipped
+# a PR that reports `closed` after it was merged.
+gtd_test_contract_merged_state_ruling_matches_the_shipped_adapter() {
+  echo ""
+  echo "=== docs: forge-contract.md's merged-state ruling now describes what tea reports and what the adapter derives ==="
+
+  local contract
+  contract="$SCRIPT_DIR/../commands/references/forge-contract.md"
+
+  # Control first: a phrase the section still legitimately carries, so a zero
+  # below cannot be a mis-pointed path or an unreadable file.
+  local heading_hits
+  heading_hits=$(gtd_count_in_dir "$contract" '^### State Mapping$')
+  assert_eq "1" "$heading_hits" "gtd merged control: the State Mapping heading is found exactly once -- the file is being read"
+
+  # The falsified claims, gone.
+  assert_eq "0" "$(gtd_count_in_dir "$contract" 'does not expose a distinct .merged. value')" "gtd merged: the claim that tea exposes no distinct merged value is deleted"
+  assert_eq "0" "$(gtd_count_in_dir "$contract" 'A merged PR reads as .closed.')" "gtd merged: and so is the claim that a merged PR reads as closed"
+  assert_eq "0" "$(gtd_count_in_dir "$contract" 'straight through as')" "gtd merged: the instruction to normalize tea's closed straight through is DELETED, not softened -- it is the line that would have produced the wrong behaviour"
+  assert_eq "0" "$(gtd_count_in_dir "$contract" 'not distinguished')" "gtd merged: the State Mapping table's merged row no longer reads (not distinguished)"
+
+  # The sourced facts that replace them, each cited to the file and lines it
+  # was read from.
+  assert_eq "yes" "$([ "$(gtd_count_in_dir "$contract" 'modules/print/pull\.go:95-100')" -ge 1 ] && echo yes || echo no)" "gtd merged: formatPRState is cited at modules/print/pull.go:95-100 for the list path printing merged literally"
+  assert_eq "yes" "$([ "$(gtd_count_in_dir "$contract" 'cmd/pulls\.go:33')" -ge 1 ] && echo yes || echo no)" "gtd merged: cmd/pulls.go:33 is cited for the detail path's raw open/closed state"
+  assert_eq "yes" "$([ "$(gtd_count_in_dir "$contract" 'cmd/pulls\.go:46,47')" -ge 1 ] && echo yes || echo no)" "gtd merged: and cmd/pulls.go:46,47 for hasMerged and mergedAt beside it"
+  assert_eq "yes" "$([ "$(gtd_count_in_dir "$contract" 'hasMerged')" -ge 1 ] && echo yes || echo no)" "gtd merged: hasMerged is named as the key the derivation reads"
+
+  # And it names the function that actually ships the derivation, in the
+  # adapter rather than in the shared value-normalizer.
+  assert_eq "yes" "$([ "$(gtd_count_in_dir "$contract" '_forge_map_pr_state_gitea')" -ge 1 ] && echo yes || echo no)" "gtd merged: the shipped derivation _forge_map_pr_state_gitea is named by the contract"
+  assert_eq "yes" "$([ "$(gtd_count_in_dir "$contract" 'lives in the adapter, not in ._forge_map_state')" -ge 1 ] && echo yes || echo no)" "gtd merged: and the contract states the derivation lives in the adapter rather than in _forge_map_state"
+
+  # The function the contract now names must exist in the CLI -- otherwise the
+  # doc would be citing something that shipped under a different name.
+  assert_eq "yes" "$([ "$(gtd_count_in_dir "$CLI" '^_forge_map_pr_state_gitea\(\) \{')" -ge 1 ] && echo yes || echo no)" "gtd merged: and that function is really defined in aimi-cli.sh, so the citation is not aspirational"
+}
+
+# THE HELP BLOCKS, read out of `--help` STDOUT rather than out of the source
+# file, so what is pinned is what a user actually reads.
+gtd_test_help_pr_view_block_matches_the_code() {
+  echo ""
+  echo "=== help: forge-pr-view's block agrees with the validator and the emitter that produce it ==="
+
+  local help_out block
+  help_out=$(bash "$CLI" --help)
+  block=$(gtd_help_block "$help_out" "forge-pr-view")
+
+  # Extraction controls, before any zero from the slice is trusted: the slice
+  # is non-empty, it starts at the right verb, and it TERMINATED -- a runaway
+  # slice would swallow later blocks and make every zero below meaningless.
+  local block_lines
+  block_lines=$(printf '%s\n' "$block" | grep -c '^') || block_lines=0
+  assert_eq "yes" "$([ "$block_lines" -ge 8 ] && echo yes || echo no)" "gtd help control: the forge-pr-view block sliced out of --help is a real block of text"
+  assert_eq "1" "$(gtd_count_in_text "$block" '^    forge-pr-view --pr ')" "gtd help control: it starts at forge-pr-view's own heading line"
+  assert_eq "0" "$(gtd_count_in_text "$block" '^    forge-pr-create ')" "gtd help control: and stops before the next verb, so these counts describe one block only"
+
+  # (b) the --include list, equal to the set cmd_forge_pr_view validates.
+  assert_eq "0" "$(gtd_count_in_text "$block" 'reviews')" "gtd help (pr-view): \`reviews\` is gone from the --include list -- the verb exits 1 on it"
+  assert_eq "0" "$(gtd_count_in_text "$block" 'comments')" "gtd help (pr-view): and so is \`comments\`, for the same reason"
+  assert_contains "files, isDraft," "$block" "gtd help (pr-view): the list now names isDraft"
+  assert_contains "mergeable" "$block" "gtd help (pr-view): and mergeable"
+  assert_contains "excludes files/isDraft/mergeable" "$block" "gtd help (pr-view): the documented default correctly names what the portable core excludes"
+
+  # (b, second half) the output key, equal to what _forge_pr_view_emit emits.
+  assert_eq "0" "$(gtd_count_in_text "$block" 'evidence')" "gtd help (pr-view): the output key \`evidence\` is gone from THIS block"
+  assert_eq "1" "$(gtd_count_in_text "$block" 'unsupported_fields,$')" "gtd help (pr-view): the envelope line is present exactly once"
+  assert_contains "message}" "$block" "gtd help (pr-view): and the fourth key is spelled message, which is what the emitter emits"
+
+  # The scoping control for the assertion just above: `evidence` IS present
+  # elsewhere in the same --help output, legitimately, so a check that did not
+  # slice would have been answering a different question.
+  assert_eq "yes" "$([ "$(gtd_count_in_text "$help_out" 'evidence')" -ge 1 ] && echo yes || echo no)" "gtd help control: \`evidence\` still appears in the full --help output (verify-creates' own key) -- proving the zero above came from the slice, not from an unmatchable pattern"
+
+  # (a) adapter availability.
+  assert_eq "0" "$(gtd_count_in_text "$block" 'Only github ships in this phase')" "gtd help (pr-view): the claim that only github ships is gone"
+  assert_contains "github," "$block" "gtd help (pr-view): github is named among the backends that ship"
+  assert_contains "gitlab and gitea each have an adapter" "$block" "gtd help (pr-view): alongside gitlab and gitea"
+  assert_contains "unknown" "$block" "gtd help (pr-view): leaving \`unknown\` as what still degrades to status=error"
+}
+
+gtd_test_help_repo_info_block_matches_the_code() {
+  echo ""
+  echo "=== help: forge-repo-info's block enumerates every source value the verb can emit ==="
+
+  local help_out block block_lines
+  help_out=$(bash "$CLI" --help)
+  block=$(gtd_help_block "$help_out" "forge-repo-info")
+
+  block_lines=$(printf '%s\n' "$block" | grep -c '^') || block_lines=0
+  assert_eq "yes" "$([ "$block_lines" -ge 6 ] && echo yes || echo no)" "gtd help control: the forge-repo-info block sliced out of --help is a real block of text"
+  assert_eq "0" "$(gtd_count_in_text "$block" '^    forge-pr-view ')" "gtd help control: and it stops before the next verb"
+
+  # (c) the source enumeration, equal to what _forge_repo_info can assign.
+  assert_contains '("gh"|"glab"|"local-parse")' "$block" "gtd help (repo-info): the source enumeration names all three tiers, glab included"
+  assert_eq "0" "$(gtd_count_in_text "$block" 'gh repo view` call,')" "gtd help (repo-info): the gh-only \"via a single \`gh repo view\` call, falling back ...\" phrasing is gone"
+  assert_contains "glab" "$block" "gtd help (repo-info): glab is named as a call this verb can make"
+  assert_contains "gitea" "$block" "gtd help (repo-info): and gitea is named as the forge that always takes the local-parse fallback"
+
+  # The enumeration must not over-promise either: there is no gitea tier in
+  # _forge_repo_info, so no such source value may be advertised.
+  assert_eq "0" "$(gtd_count_in_text "$block" '"tea"')" "gtd help (repo-info): and no \"tea\" source value is advertised, because that tier was deliberately not written"
+}
+
+gtd_test_help_auth_status_block_matches_the_code() {
+  echo ""
+  echo "=== help: forge-auth-status's block no longer names gh as the only binary whose absence errors ==="
+
+  local help_out block block_lines
+  help_out=$(bash "$CLI" --help)
+  block=$(gtd_help_block "$help_out" "forge-auth-status")
+
+  block_lines=$(printf '%s\n' "$block" | grep -c '^') || block_lines=0
+  assert_eq "yes" "$([ "$block_lines" -ge 8 ] && echo yes || echo no)" "gtd help control: the forge-auth-status block sliced out of --help is a real block of text"
+  assert_eq "0" "$(gtd_count_in_text "$block" '^    forge-account-select ')" "gtd help control: and it stops before the next verb"
+
+  # (d) the error clause.
+  assert_eq "0" "$(gtd_count_in_text "$block" 'missing, or the forge has no adapter')" "gtd help (auth-status): the clause naming gh alone as the missing binary is gone"
+  assert_contains "glab or tea" "$block" "gtd help (auth-status): glab and tea are named alongside gh as binaries whose absence produces status=error"
+  assert_contains "DETECTED forge" "$block" "gtd help (auth-status): and the block says the binary is chosen from the DETECTED forge"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -7570,6 +12065,34 @@ main() {
   test_gla_gitlab_write_header_records_the_determination
   test_gla_agent_mode_persists_no_gitlab_account_answer
 
+  # Gitea WRITE-verb tests (phase 4 outline:03) -- the three write verbs routed
+  # to tea, plus the gitea arm of _forge_pr_write_print_manual. The
+  # flag-count falsifiability proof runs FIRST, before anything trusts the
+  # reader every always-pass-a-flag assertion in this block depends on; the
+  # three-way mutation matrix runs LAST.
+  echo ""
+  echo "--- Gitea Write-Verb Tests (phase 4 outline:03) ---"
+  gtw_test_flag_count_reader_can_go_red
+  gtw_test_tea_write_url_extraction
+  gtw_test_forge_pr_create_gitea_creates_pr
+  gtw_test_forge_pr_create_gitea_existing_open_pr_is_unchanged
+  gtw_test_forge_pr_create_gitea_owner_prefixed_head_matches
+  gtw_test_forge_pr_create_gitea_dead_pr_does_not_block
+  gtw_test_forge_pr_create_gitea_missing_tea_prints_manual
+  gtw_test_forge_pr_create_gitea_create_failure_degrades
+  gtw_test_forge_pr_create_gitea_unparseable_url_degrades
+  gtw_test_forge_pr_create_gitea_reread_failure_keeps_created_url
+  gtw_test_forge_pr_edit_gitea_updates
+  gtw_test_forge_pr_edit_gitea_missing_tea_prints_manual
+  gtw_test_forge_pr_edit_gitea_failure_degrades
+  gtw_test_forge_issue_create_gitea_creates_issue
+  gtw_test_forge_issue_create_gitea_always_exits_zero
+  gtw_test_manual_fallback_gitea_host_default
+  gtw_test_gitea_write_token_source_guards
+  gtw_test_gitea_write_live_token_probe
+  gtw_test_gitea_write_header_states_its_invariants
+  gtw_test_gitea_write_verbs_mutation_matrix
+
   # Forge Issue Verb Tests (US-006) -- forge-issue-view / forge-issue-create,
   # the first forge-* verbs that actually shell out to a forge CLI
   echo ""
@@ -7640,6 +12163,33 @@ main() {
   glt_test_mutation_unrouting_the_listing_verb_turns_an_assertion_red
   glt_test_mutation_unrouting_the_resolve_verb_turns_an_assertion_red
 
+  # Gitea Review-Thread Routing Tests (phase 4 outline:04) --
+  # forge-pr-review-threads and forge-resolve-review-thread routed to
+  # `tea pulls review-comments` / `tea pulls resolve`, plus the rewrite of the
+  # phase-1 GITEA CAPABILITY-GAP NOTE this story disproves. The falsifiability
+  # proof runs FIRST, before any routing assertion trusts the private fake-tea
+  # stub; the two mutation tests run LAST, unrouting each verb in turn.
+  echo ""
+  echo "--- Gitea Review-Thread Routing Tests (phase 4 outline:04) ---"
+  gtt_test_fake_tea_can_produce_a_failing_result
+  gtt_test_pr_review_threads_argv_is_teas_own_field_selector
+  gtt_test_pr_review_threads_filters_locally_on_resolver
+  gtt_test_pr_review_threads_maps_comment_to_degenerate_thread
+  gtt_test_pr_review_threads_declares_its_capability_gaps
+  gtt_test_pr_review_threads_zero_comments_is_found_with_empty_list
+  gtt_test_pr_review_threads_failure_classification
+  gtt_test_resolve_review_thread_via_tea
+  gtt_test_resolve_review_thread_failure_classification
+  gtt_test_thread_id_round_trips_from_listing_to_resolve
+  gtt_test_tea_absent_degrades_through_the_shared_gate
+  gtt_test_no_adapter_message_names_all_three_adapters
+  gtt_test_capability_gap_note_is_rewritten
+  gtt_test_section_header_declares_ceiling_and_version_floor
+  gtt_test_neither_gitea_arm_hands_a_token_to_tea
+  gtt_test_no_assertion_message_claims_gitea_has_no_adapter
+  gtt_test_mutation_unrouting_the_listing_verb_turns_an_assertion_red
+  gtt_test_mutation_unrouting_the_resolve_verb_turns_an_assertion_red
+
   # Forge Dispatch-Order Tests (phase 1.1 US-006) -- all ten forge verbs
   # dispatched ahead of find_aimi_root, so a caller with no .aimi/ anywhere
   # (resolve-pr-parallel) and a multi-repo child repo both get a working
@@ -7676,6 +12226,20 @@ main() {
   test_fake_glab_records_argv_and_can_differ_across_calls
   test_forge_map_pr_field_gitlab
 
+  # Gitea PR-field Mapping Tests (phase 4 outline:01) -- the gitea arm of the
+  # _forge_map_pr_field_* seam, the _forge_map_pr_state_gitea derivation that
+  # reads hasMerged, and the gitea) arm of _forge_pr_view_build_found, plus
+  # the fake-tea PATH stub every later gitea-adapter story in this phase
+  # reuses. The falsifiability proof runs FIRST, before any mapping assertion
+  # trusts that stub.
+  echo ""
+  echo "--- Gitea PR-field Mapping Tests (phase 4 outline:01) ---"
+  gtm_test_fake_tea_stub_can_produce_a_failing_result
+  gtm_test_forge_map_pr_field_gitea
+  gtm_test_tea_detail_and_list_shapes_differ
+  gtm_test_forge_map_pr_state_gitea
+  gtm_test_forge_pr_view_build_found_gitea
+
   # GitLab READ-verb Routing Tests (phase 3 US-002) -- forge-pr-view,
   # forge-issue-view, forge-repo-info and forge-auth-status routed to glab.
   # The per-verb falsifiability proof runs FIRST, before any routing
@@ -7692,6 +12256,48 @@ main() {
   glr_test_forge_auth_status_gitlab
   glr_test_gitlab_read_verbs_name_glab_when_binary_absent
   glr_test_gitlab_read_verbs_mutation_matrix
+
+  # Gitea READ-verb Routing Tests (phase 4 outline:02) -- forge-auth-status,
+  # forge-pr-view and forge-issue-view routed to tea, plus the deliberate
+  # NON-routing of forge-repo-info. The per-verb falsifiability proof runs
+  # FIRST, before any routing assertion trusts the private fake-tea stub. The
+  # section-wide whoami audit runs LAST because it reads the argv log every
+  # test above it appended to -- including the mutation matrix's.
+  #
+  # The forge-auth-status tests live here rather than in part 3 (where every
+  # other one does) because the parts run concurrently and part 3 is the wall
+  # clock; phase 3's read-verbs story made the same call for
+  # glr_test_forge_auth_status_gitlab.
+  echo ""
+  echo "--- Gitea READ-verb Routing Tests (phase 4 outline:02) ---"
+  gtr_test_gitea_read_stub_can_produce_a_failing_result
+  gtr_test_gitea_detection_is_preexisting_and_unmodified
+  gtr_test_forge_auth_status_gitea
+  gtr_test_forge_pr_view_gitea_found
+  gtr_test_forge_pr_view_gitea_not_found_and_error_never_conflated
+  gtr_test_forge_issue_view_gitea
+  gtr_test_forge_issue_view_gitea_reads_keys_through_the_mapper
+  gtr_test_forge_repo_info_gitea_is_local_parse_by_decision
+  gtr_test_gitea_read_verbs_name_tea_when_binary_absent
+  gtr_test_gitea_read_verbs_bind_no_credentials
+  gtr_test_gitea_read_verbs_mutation_matrix
+  gtr_test_tea_whoami_is_never_invoked
+
+  # Forge Documentation Correctness Tests (phase 4 outline:06) -- the three
+  # documentation defects phases 3 and 4 falsified: forge-contract.md's
+  # merged-state ruling, four "GitHub is the only adapter" scope claims under
+  # commands/, and four cmd_help blocks that disagreed with the code producing
+  # them. The falsifiability proof and the traversal control run FIRST, before
+  # any assertion trusts a zero.
+  echo ""
+  echo "--- Forge Documentation Correctness Tests (phase 4 outline:06) ---"
+  gtd_test_the_stale_claim_reader_can_return_non_zero
+  gtd_test_the_reader_reaches_the_real_commands_directory
+  gtd_test_no_command_file_claims_github_is_the_only_adapter
+  gtd_test_contract_merged_state_ruling_matches_the_shipped_adapter
+  gtd_test_help_pr_view_block_matches_the_code
+  gtd_test_help_repo_info_block_matches_the_code
+  gtd_test_help_auth_status_block_matches_the_code
 
   cleanup
 

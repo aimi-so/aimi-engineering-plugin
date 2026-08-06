@@ -22,10 +22,12 @@ degradation signal stays forbidden.
 **Consumed by:** `aimi-cli.sh`'s shared jq builder functions
 (`_forge_build_pr_json`, `_forge_build_issue_json`, `_forge_emit_status`,
 `_forge_emit_write_status`, `_forge_build_write_data`, `_forge_bin_check`)
-and every forge verb built on top of them. GitHub is the
-only adapter shipping in phase 1; this contract is written so GitLab (`glab`)
-and Gitea/Forgejo (`tea`) can be added later without changing the shape any
-existing caller already depends on.
+and every forge verb built on top of them. Three adapters ship today: GitHub
+(`gh`) from phase 1, GitLab (`glab`) added in phase 3, and Gitea/Forgejo
+(`tea`) added in phase 4. This contract was written when only the first
+existed, and neither later addition changed the shape any existing caller
+already depended on — which is the property a fourth adapter must preserve
+too.
 
 ## Result Envelope Shapes — the complete list
 
@@ -90,21 +92,39 @@ GitLab's `locked` value has no GitHub or Gitea/Forgejo equivalent.
 |---|---|---|---|
 | `open` | `state: OPEN` | `state: opened` | `state: open` |
 | `closed` | `state: CLOSED` | `state: closed` | `state: closed` |
-| `merged` | `state: MERGED` | `state: merged` | *(not distinguished — see note)* |
+| `merged` | `state: MERGED` | `state: merged` | `state: merged` on the list path; derived from `hasMerged: true` on the detail path — see note |
 | `locked` | *(no equivalent)* | `state: locked` | *(no equivalent)* |
 
 - **GitLab's `locked`** describes a merged-and-lock-protected MR. Neither
   GitHub nor Gitea/Forgejo expose an equivalent fourth value — normalize it
   through unchanged as `"locked"` rather than collapsing it into `"merged"`,
   since collapsing would silently discard a real GitLab-only signal.
-- **Gitea/Forgejo's `tea` state field** is documented as `open`/`closed`
-  only — it does not expose a distinct `merged` value the way GitHub's and
-  GitLab's do. A merged PR reads as `closed` under `tea`'s own field list.
-  This is a capability gap in the source data, not a mapping bug in this
-  contract: a Gitea adapter that needs to distinguish "closed" from "merged"
-  must derive it from a different field (e.g. a merge-commit field) when
-  that adapter is built, and until then should normalize `tea`'s `closed`
-  straight through as `"closed"` rather than guessing `"merged"`.
+- **Gitea/Forgejo's `tea` reports a merged pull request distinctly**, but
+  which key carries that fact depends on which of `tea`'s two JSON shapes an
+  adapter read — so there is no single "the `tea` state field" to describe.
+  On the LIST path (`tea pulls list -o json`), `formatPRState` prints the
+  literal string `merged` whenever `pr.Merged != nil` (`gitea/tea`
+  `modules/print/pull.go:95-100`), so the value already arrives in this
+  table's vocabulary. On the DETAIL path (`tea pulls <index> -o json`) it
+  does not: `state` is `pr.State` raw, `open`/`closed` only
+  (`cmd/pulls.go:33`), and merged-ness lives in a separate `hasMerged`
+  boolean beside a `mergedAt` timestamp (`cmd/pulls.go:46,47`). An adapter on
+  the detail path therefore **derives** `merged`: read `hasMerged`, emit
+  `"merged"` when it is `true`, and otherwise normalize the raw `state`. A
+  document carrying no `hasMerged` key at all passes its raw `state` through
+  untouched: an absent key is not the same as an explicit `false`, and
+  neither of them licenses inventing `merged`.
+- **That derivation lives in the adapter, not in `_forge_map_state`.** The
+  shipped Gitea adapter puts it in `_forge_map_pr_state_gitea`, a sibling of
+  `_forge_map_pr_field_gitea` rather than a branch inside it: a
+  one-field-one-key mapper answers "which native key spells `state`" and
+  cannot express "answer `state` by reading `hasMerged` as well".
+  `_forge_map_state` is handed one raw VALUE and no document, so it cannot
+  reach a second key either — and manufacturing `merged` there would
+  invent a value the raw `state` never carried. This is the same separation
+  `_forge_pr_view_build_found` already keeps everywhere else: name the key in
+  `_forge_map_pr_field_*`, normalize the value separately. A future adapter
+  for a fourth forge with the same split should follow the same shape.
 
 ## Capability-Gated Fields
 
@@ -114,9 +134,9 @@ cannot, or can only partially.
 
 | Field | GitHub | GitLab | Gitea/Forgejo (`tea`) |
 |---|---|---|---|
-| `files` | Yes — a single `--json files` call returns a structured per-file array (`path`, `additions`, `deletions`). | No single cheap call. The MR resource itself exposes only `changes_count` (an async-populated string count); the full file list needs a second `Get single MR changes`/diffs call. | Only raw `diff`/`patch` text fields — not a parsed per-file list. |
-| `isDraft` | Yes — `isDraft` boolean. | Yes — `draft` boolean. | **Not exposed by the CLI at all.** `tea`'s documented PR field list has no `draft`/`is-draft` entry; Gitea/Forgejo support draft PRs in the web UI but `tea` cannot report it. |
-| `mergeable` (merge-status detail) | Yes — a plain boolean. | Yes, but richer: `detailed_merge_status` is a 16-value enum (`mergeable`, `conflict`, `ci_must_pass`, `ci_still_running`, `discussions_not_resolved`, `draft_status`, `checking`, `unchecked`, `commits_status`, `merge_request_blocked`, `status_checks_must_pass`, `jira_association_missing`, `title_regex`, `locked_paths`, `locked_lfs_files`, `approvals_syncing`) describing *why* it's blocked, not just whether. | Yes — a plain boolean. |
+| `files` | Yes — a single `--json files` call returns a structured per-file array (`path`, `additions`, `deletions`). | No single cheap call. The MR resource itself exposes only `changes_count` (an async-populated string count); the full file list needs a second `Get single MR changes`/diffs call. | Only raw `diff`/`patch` fields — not a parsed per-file list. Sharper still: both resolve to `x.DiffURL`/`x.PatchURL` (`modules/print/pull.go:277-280`), so they are **URLs**, not inline diff text, and the detail shape's `diffUrl` likewise. There is no key to name either way. |
+| `isDraft` | Yes — `isDraft` boolean. | Yes — `draft` boolean. | **Not exposed by the CLI at all.** `tea`'s documented PR field list has no `draft`/`is-draft` entry; Gitea/Forgejo support draft PRs in the web UI but `tea` cannot report it. The reason there is nothing to read back: `tea` *writes* a draft as a `"WIP: "` TITLE PREFIX (`cmd/pulls/create.go`, `utils.AddDraftPrefix`), not as a field. Deriving `isDraft` by string-matching that prefix would be a guess, so this stays capability-gated. |
+| `mergeable` (merge-status detail) | Yes — a plain boolean. | Yes, but richer: `detailed_merge_status` is a 16-value enum (`mergeable`, `conflict`, `ci_must_pass`, `ci_still_running`, `discussions_not_resolved`, `draft_status`, `checking`, `unchecked`, `commits_status`, `merge_request_blocked`, `status_checks_must_pass`, `jira_association_missing`, `title_regex`, `locked_paths`, `locked_lfs_files`, `approvals_syncing`) describing *why* it's blocked, not just whether. | Yes — a plain boolean, on the DETAIL shape (`tea pulls <index> -o json`), which is the shape the shipped adapter reads. On the LIST shape it is the string `"true"`/`"false"` and is forced false for any non-open PR (`modules/print/pull.go:268-270`), so a list-path reading would be both mistyped and wrong for a merged PR. |
 
 An unpopulated capability-gated field is **always** represented as `null`
 **plus its name recorded in `unsupported_fields`** — never a bare, unmarked
@@ -134,7 +154,7 @@ existing caller re-touched the day a stricter distinction becomes necessary.
 | `title` | string | yes | Direct 1:1 across all three. |
 | `body` | string | yes | GitHub/Gitea `body` / GitLab `description`. |
 | `state` | string | yes | `open`/`closed` — issues do not carry the PR-only `merged`/`locked` values. |
-| `comments` | int \| null | **capability-gated** | GitHub: a comment count from the discussion thread. GitLab's `notes`/`discussions` model conflates PR/issue discussion with system-generated events ("changed the description") unless explicitly filtered, so a naive pass-through would double-count noise as comments. `tea` exposes a `comments` field on both its `pr` and `tea issue` field lists, but its counting semantics are not guaranteed to match GitHub's filtered count. Capability-gated for this reason, not because any forge lacks the concept entirely. |
+| `comments` | int \| null | **capability-gated** | GitHub: a comment count from the discussion thread. GitLab's `notes`/`discussions` model conflates PR/issue discussion with system-generated events ("changed the description") unless explicitly filtered, so a naive pass-through would double-count noise as comments. `tea` exposes a `comments` field on both its `pr` and `tea issue` field lists, but its counting semantics are not guaranteed to match GitHub's filtered count — and on the PR detail path the `comments` array is empty unless `--comments` is passed (`cmd/pulls.go:188-195`), so a pass-through would read as "zero comments" for a PR that has many. Capability-gated for these reasons, not because any forge lacks the concept entirely. |
 | `unsupported_fields` | array of string | — | Same convention as the PR object. |
 | `raw` | object \| null | — | Same convention as the PR object. |
 
@@ -226,7 +246,7 @@ whole reason a caller can branch on it instead of grepping `message` prose:
 
 | `reason` | Meaning | What the caller should do |
 |---|---|---|
-| `no_adapter` | The active forge has no adapter written for it yet (phase 1 ships GitHub only). A **permanent** gap for this install — retrying will not fix it, and neither will installing anything. | Stop. Do not retry. |
+| `no_adapter` | The active forge has no adapter written for it yet. `github`, `gitlab` and `gitea` each have one today, so in practice this is `detect-forge`'s `unknown` verdict — a host none of the three matched. A **permanent** gap for this install — retrying will not fix it, and neither will installing anything. | Stop. Do not retry. |
 | `cli_missing` | The forge CLI binary is not on `PATH` at all. | Install it, or complete the operation manually. |
 | `not_authenticated` | The forge CLI ran, but a live re-check of auth state against the same host — the same authenticated/account check `forge-auth-status` already performs — reports no valid credentials. Determined **structurally**, by re-querying auth state; **never** by pattern-matching the failing command's own stderr text, which reworks between CLI releases and varies by locale. | Re-authenticate, then retry. |
 | `cli_failed` | The forge CLI ran and failed for any other reason — network unreachable, malformed response, an owner/repo that could not be auto-resolved, or an unexpected exit code the structural auth re-check did not attribute to `not_authenticated`. | Read `message` for the detail. |
@@ -341,17 +361,31 @@ forge adapter may decline to support:
   that one account's token without touching the active-account pointer, and
   exporting it as `GH_TOKEN` for one invocation makes that single call act
   as `<username>` while the globally active account is untouched.
-- `glab` cannot match this exactly — it is host-scoped, not identity-scoped;
-  the closest mechanism is an externally-supplied `GITLAB_TOKEN` env var
-  override, which requires the caller to already hold that token rather
+- `glab` cannot match this exactly. Phase 3 established the reason precisely
+  (`aimi-cli.sh:5058-5106`): `glab` has **no `auth token` subcommand at all**,
+  so there is no `gh auth token --user`-shaped way to ask it for one stored
+  identity's token, and its credential store is `ScopePerHost` — keyed by
+  host, not by identity, so two accounts on the same host cannot both be
+  held. The closest mechanism is an externally-supplied `GITLAB_TOKEN` env
+  var override, which requires the caller to already hold that token rather
   than pulling it from a `glab`-native multi-identity vault.
 - `tea` supports it natively via `--login <name>` per invocation.
 
-**Whatever identity value is used, it is passed to a forge CLI only via an
+**Whatever CREDENTIAL is used, it is passed to a forge CLI only via an
 environment variable, never as a command-line argument.** A token passed as
 a CLI argument leaks through `ps` and shell history; an environment variable
 does not. This applies to every current and future forge verb, with no
 exception for a "just this once" convenience call.
+
+The rule is scoped to credentials deliberately, because `tea`'s `--login
+<name>` above **is** a command-line argument and does not violate it: it
+names a login entry `tea` already holds and carries no secret, so nothing it
+puts in `ps` is worth reading. A non-secret account SELECTOR is therefore out
+of scope for this rule. That is a licence, not an instruction — no shipped
+verb passes `--login` today (`_forge_auth_status_gitea` deliberately omits
+it, since the login list is instance-wide and scoping the query to one login
+would beg the question it exists to answer), and a verb that wants it must
+still justify it on its own terms.
 
 ### The Remembered Answer — `forge-account-select`
 
@@ -564,7 +598,8 @@ is introduced by any of this.
 ## Degradation Contract
 
 A forge CLI (`gh`, `glab`, `tea`) may not be installed at all, and a forge
-with no adapter yet (phase 1 ships only GitHub) must not crash a caller that
+with no adapter yet — every host `detect-forge` classifies as `unknown`, now
+that all three named forges have one — must not crash a caller that
 tries to use it anyway. `_forge_bin_check` (see **Shared Builder Functions**
 below) is the one shared presence check every forge verb uses instead of a
 raw, unguarded `command -v` or a bare invocation that would fail with an
