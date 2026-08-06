@@ -6088,15 +6088,28 @@ test_forge_account_select_mode_flags_are_mutually_exclusive() {
   assert_eq "1" "$dispatch_arms" "mode flags: exactly one forge-account-* dispatcher arm exists -- reselect is a flag, not a verb"
 
   # No credential-shaped flag anywhere in the verb or its private helpers.
-  local section
+  #
+  # COUNTED WITH `grep -c`, NOT `grep -v ... | grep -q ...`, AND THAT IS NOT A
+  # STYLE CHOICE. This file runs `set -o pipefail`. In the `-q` shape the right
+  # half exits the instant it matches, SIGPIPEs the `grep -v` still feeding it,
+  # and the whole pipeline reports failure -- so an `if` on it can read a real
+  # hit as "no hit" and the guard fails OPEN.
+  #
+  # Be precise about the exposure at THIS site rather than about the family:
+  # the input here is a `printf` of two function bodies, small enough to fit
+  # the pipe buffer, so `grep -v` finishes writing before `grep -q` can
+  # SIGPIPE it and the old form was very likely still reporting correctly
+  # today. What it was NOT was safe -- it would have started failing open the
+  # moment the scanned bodies outgrew the buffer, silently and with no test
+  # turning red to say so. `grep -c` consumes all of its input and cannot fire
+  # early, `|| hits=0` absorbs grep's exit 1 on zero matches, and asserting a
+  # NUMBER through assert_eq removes the boolean branch the SIGPIPE corrupted.
+  # (The whole-file scan in test_forge_auth_status_no_identity_flag_anywhere
+  # is the one that genuinely failed open; see the note there.)
+  local section cred_flag_hits
   section=$(sed -n '/^_forge_account_store_read()/,/^cmd_forge_account_select()/p' "$CLI"; sed -n '/^cmd_forge_account_select()/,/^}/p' "$CLI")
-  if printf '%s' "$section" | grep -v '^[[:space:]]*#' | grep -qE -- '--token|--identity|--secret|--password'; then
-    echo -e "${RED}✗${NC} forge-account-select: no credential-shaped flag may be parsed by this verb"
-    ((TESTS_FAILED++))
-  else
-    echo -e "${GREEN}✓${NC} forge-account-select: parses no --token/--identity/--secret/--password flag"
-    ((TESTS_PASSED++))
-  fi
+  cred_flag_hits=$(printf '%s' "$section" | grep -v '^[[:space:]]*#' | grep -cE -- '--token|--identity|--secret|--password') || cred_flag_hits=0
+  assert_eq "0" "$cred_flag_hits" "forge-account-select: parses no --token/--identity/--secret/--password flag"
 
   teardown_forge_account_select_env
   teardown_fake_gh_fixture
@@ -6131,27 +6144,31 @@ test_forge_account_select_has_exactly_one_write_path() {
   fi
   assert_eq "chmod-first" "$ordering" "one write path: chmod 0600 precedes the first content write"
 
+  # The four containment guards below COUNT with `grep -c` instead of branching
+  # on `grep -v ... | grep -q ...`. Under `set -o pipefail` the `-q` form exits
+  # on its first match, SIGPIPEs the `grep -v` feeding it, and turns the
+  # pipeline non-zero -- an `if` on that reads a real hit as "no hit" and the
+  # guard fails OPEN. Each of these four scans a `printf` of a single function
+  # body, which fits the pipe buffer, so the old form was probably still
+  # reporting correctly today; the defect it carried was latent, waiting for
+  # one of these bodies to outgrow the buffer. Counting removes the race
+  # rather than betting the bodies stay small: `grep -c` reads all of its
+  # input, `|| hits=0` absorbs grep's exit 1 on zero matches, and the verdict
+  # is a NUMBER compared by assert_eq rather than a corruptible boolean.
+
   # The document must never be rebuilt from nothing.
-  local rebuild="absent"
-  if printf '%s' "$merge_body" | grep -v '^[[:space:]]*#' | grep -q 'jq -n'; then
-    rebuild="present"
-  fi
-  assert_eq "absent" "$rebuild" "one write path: the writer never reconstructs the document with jq -n"
+  local rebuild_hits
+  rebuild_hits=$(printf '%s' "$merge_body" | grep -v '^[[:space:]]*#' | grep -c 'jq -n') || rebuild_hits=0
+  assert_eq "0" "$rebuild_hits" "one write path: the writer never reconstructs the document with jq -n"
 
   # No other function in this story may write the store itself.
-  local record_writes="none" reselect_writes="none" check_writes="none"
-  if printf '%s' "$record_body" | grep -v '^[[:space:]]*#' | grep -qE 'mv |> "\$store"|mkdir -p'; then
-    record_writes="direct"
-  fi
-  if printf '%s' "$reselect_body" | grep -v '^[[:space:]]*#' | grep -qE 'mv |> "\$store"|mkdir -p'; then
-    reselect_writes="direct"
-  fi
-  if printf '%s' "$check_body" | grep -v '^[[:space:]]*#' | grep -qE 'mv |> "\$store"|mkdir -p|_forge_account_store_merge'; then
-    check_writes="direct"
-  fi
-  assert_eq "none" "$record_writes" "one write path: --record does not write on its own, it goes through the merge helper"
-  assert_eq "none" "$reselect_writes" "one write path: --reselect does not write on its own either"
-  assert_eq "none" "$check_writes" "one write path: --check reaches no write helper at all"
+  local record_write_hits reselect_write_hits check_write_hits
+  record_write_hits=$(printf '%s' "$record_body" | grep -v '^[[:space:]]*#' | grep -cE 'mv |> "\$store"|mkdir -p') || record_write_hits=0
+  reselect_write_hits=$(printf '%s' "$reselect_body" | grep -v '^[[:space:]]*#' | grep -cE 'mv |> "\$store"|mkdir -p') || reselect_write_hits=0
+  check_write_hits=$(printf '%s' "$check_body" | grep -v '^[[:space:]]*#' | grep -cE 'mv |> "\$store"|mkdir -p|_forge_account_store_merge') || check_write_hits=0
+  assert_eq "0" "$record_write_hits" "one write path: --record does not write on its own, it goes through the merge helper"
+  assert_eq "0" "$reselect_write_hits" "one write path: --reselect does not write on its own either"
+  assert_eq "0" "$check_write_hits" "one write path: --check reaches no write helper at all"
 
   # read_state/write_state are scoped to AIMI_ROOT/.aimi/ and must not be used
   # for a path under the aimi config directory.
@@ -6288,13 +6305,26 @@ test_forge_auth_status_no_identity_flag_anywhere() {
   # header above, which documents the absence of the flag by naming it) --
   # the guarantee this check enforces is "no --identity flag in actual code
   # ever parses a value", not "the four characters never appear in prose".
-  if grep -v '^[[:space:]]*#' "$CLI" | grep -q -- '--identity'; then
-    echo -e "${RED}✗${NC} aimi-cli.sh: --identity must never appear in code (a value that may later carry a credential must stay env-var-only)"
-    ((TESTS_FAILED++))
-  else
-    echo -e "${GREEN}✓${NC} aimi-cli.sh: --identity does not appear in any code line (comments excluded)"
-    ((TESTS_PASSED++))
-  fi
+  #
+  # THIS IS THE ONE THAT ACTUALLY FAILED OPEN, and it was measured rather than
+  # reasoned about. It scans the whole of aimi-cli.sh -- over 15,000 lines,
+  # far more than a 64 KB pipe buffer holds. In the old
+  # `grep -v ... | grep -q ...` shape the `grep -q` exited on its first match
+  # while `grep -v` still had thousands of lines to write; the SIGPIPE made
+  # the pipeline non-zero under `set -o pipefail`, and the `if` read that as
+  # "no match". Planting a real code line `_aimi_identity_flag_probe="--identity"`
+  # on line 3 of aimi-cli.sh and running this part reproduced it exactly: the
+  # old form printed a GREEN mark with the violation sitting in the file, and
+  # the counting form below printed RED for the same tree. The plant belongs
+  # near the TOP of the file or there is nothing left to SIGPIPE and the race
+  # goes the other way -- a bottom-of-file plant would prove nothing.
+  #
+  # The comment filter is load-bearing and must stay: `--identity` appears
+  # twice in aimi-cli.sh and BOTH occurrences are comment lines, so dropping
+  # `grep -v` would pin this guard permanently red.
+  local identity_hits
+  identity_hits=$(grep -v '^[[:space:]]*#' "$CLI" | grep -c -- '--identity') || identity_hits=0
+  assert_eq "0" "$identity_hits" "aimi-cli.sh: --identity does not appear in any code line (comments excluded)"
 }
 
 test_forge_auth_status_gh_absent_is_error() {

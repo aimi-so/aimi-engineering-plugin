@@ -7124,13 +7124,30 @@ test_detect_forge_type_never_builds_or_parses_json() {
 
   # ...and the control: the function this one exists to avoid DOES use jq,
   # so the grep above is proven capable of failing.
-  if sed -n '/^_detect_forge()/,/^}/p' "$CLI" | grep -v '^\s*#' | grep -q "jq"; then
-    echo -e "${GREEN}✓${NC} _detect_forge_type jq-free: control -- _detect_forge itself does use jq, so the grep can fail"
-    ((TESTS_PASSED++))
-  else
-    echo -e "${RED}✗${NC} _detect_forge_type jq-free: control failed -- _detect_forge no longer uses jq, so the check above proves nothing"
-    ((TESTS_FAILED++))
+  #
+  # COUNTED, like every other scan in this suite -- but for the opposite
+  # reason, and calling this one fail-open would be a fresh false claim
+  # replacing an old one. Its polarity is INVERTED: here a match is the GREEN
+  # case. So when `grep -q` short-circuits and SIGPIPEs its feeder, this
+  # assertion goes RED on a tree that is perfectly fine. It fails CLOSED --
+  # spurious failure, not a spurious pass. That is the benign direction, and
+  # it is still worth removing: a control that can cry wolf gets ignored, and
+  # then the five assertions it underwrites stop meaning anything.
+  #
+  # It also cannot be proven by planting, since the property it checks is
+  # already true. It was proven instead by temporarily retargeting the `sed`
+  # range below at `_detect_forge_type()` -- the function the loop just above
+  # proved jq-free -- which turned this control red, and then reverting.
+  #
+  # assert_eq cannot express "> 0", so the count is mapped to a verdict word
+  # first and the word is what gets compared.
+  local control_jq_hits control_verdict="absent"
+  control_jq_hits=$(sed -n '/^_detect_forge()/,/^}/p' "$CLI" | grep -v '^\s*#' | grep -c "jq") || control_jq_hits=0
+  if [ "$control_jq_hits" -gt 0 ]; then
+    control_verdict="present"
   fi
+  assert_eq "present" "$control_verdict" \
+    "_detect_forge_type jq-free: control -- _detect_forge itself does use jq, so the grep can fail"
 }
 
 test_detect_forge_type_matches_detect_forge_across_fixtures() {
