@@ -4623,8 +4623,13 @@ _forge_map_pr_field_gitlab() {
 #     with no `owner:` prefix (cmd/pulls.go:174-177).
 #
 #   LIST -- `tea pulls list -o json -f <csv>`. A JSON ARRAY whose keys are
-#     the --fields names SNAKE-CASED (modules/print/table.go:175-179,
-#     toSnakeCase) and whose values are ALWAYS JSON STRINGS, because
+#     the --fields names VERBATIM. An earlier revision of this header said
+#     SNAKE-CASED, citing toSnakeCase (modules/print/table.go:175-179). That
+#     function exists but never fires: no valid --fields name is camelCase,
+#     and the two that carry a hyphen keep it. VERIFIED AGAINST A REAL
+#     BINARY: `-f index,author-id,base-commit` against Gitea 1.27.1 with tea
+#     0.15.1 returned the keys `index`, `author-id`, `base-commit` unchanged.
+#     Values are ALWAYS JSON STRINGS, because
 #     orderedRow.MarshalJSON (:187-208) marshals a map[string]string. `index`
 #     comes back "42", `mergeable` "true", `head` may carry an `owner:branch`
 #     prefix for a cross-fork PR (formatPRHead, modules/print/pull.go:83-93).
@@ -4644,14 +4649,26 @@ _forge_map_pr_field_gitlab() {
 # selector at all; that is a workaround for a missing feature, not a house
 # style, and a gitea read verb must not inherit it.
 #
-# VERIFICATION CEILING -- READ BEFORE TRUSTING ANY KEY BELOW. tea is NOT
-# installed on the machine this was written on, so not one key here was
-# observed coming out of the real binary -- the same ceiling phase 3
-# declared for glab at :4380-4389, and for the same reason. Every flag,
-# subcommand and JSON key below was read off `gitea/tea` `main` source on
-# 2026-08-06, file and line cited per claim. The tests can prove WHICH
-# arguments this file emits and HOW it parses a fixture; they can never
-# prove what real tea does with them.
+# VERIFICATION CEILING -- READ BEFORE TRUSTING ANY KEY BELOW, AND NOTE WHAT
+# HAS SINCE BEEN LIFTED. Every flag, subcommand and JSON key below was first
+# read off `gitea/tea` `main` source on 2026-08-06, file and line cited per
+# claim, with no binary present -- the same ceiling phase 3 declared for glab
+# at :4380-4389, and for the same reason. The suite still only proves WHICH
+# arguments this file emits and HOW it parses a fixture.
+#
+# WHAT WAS LATER OBSERVED, and is therefore no longer under that ceiling:
+# on 2026-08-06 the PR shape was checked against a real Gitea 1.27.1 in a
+# container with a real tea 0.15.1. `tea pulls <index> -o json` returned
+# exactly the 21 keys named below, with `index` a number, `mergeable` and
+# `hasMerged` real booleans, and `base`/`head` bare refs. `tea pulls list`
+# returned an array whose values are all JSON strings. That run also
+# CORRECTED one claim this header had made -- see the LIST note below on
+# key names, which source reading had got wrong.
+#
+# WHAT REMAINS UNDER THE CEILING: the issue-side key names, the review-comment
+# listing and resolve round trip, the `owner:` prefix on a cross-fork head,
+# and every glab key. For those the stub still emits whatever its author
+# believed, so a wrong key name passes green on both sides.
 #
 # THE THREE MAPPINGS THAT HAD TO BE DETERMINED RATHER THAN ASSUMED:
 #
@@ -5105,7 +5122,9 @@ _forge_pr_view_gitlab() {
 #     (index is a number, mergeable/hasMerged are real booleans), head/base
 #     are BARE refs (cmd/pulls.go:174-177).
 #   LIST -- `tea pulls list -o json -f <csv>`: a JSON ARRAY whose keys are
-#     snake-cased and whose values are ALWAYS STRINGS
+#     the --fields names VERBATIM -- NOT snake-cased; see
+#     _forge_map_pr_field_gitea's header for the measurement that corrected
+#     this -- and whose values are ALWAYS STRINGS
 #     (modules/print/table.go:175-208), and whose `head` may carry an
 #     `owner:` prefix for a cross-fork pull request (formatPRHead,
 #     modules/print/pull.go:83-93).
