@@ -38,7 +38,8 @@ Before touching container, branch, or split-detection logic, read:
 Five independent test suites — four plain Bash, one Python (pytest) for the `hooks/` directory:
 
 ```bash
-bash plugins/aimi-engineering/scripts/test-aimi-cli.sh
+bash plugins/aimi-engineering/scripts/test-aimi-cli.sh            # four parts, concurrent
+bash plugins/aimi-engineering/scripts/test-aimi-cli.sh --serial   # same tests, one part at a time
 bash plugins/aimi-engineering/scripts/test-worktree-manager.sh
 bash plugins/aimi-engineering/scripts/test-command-blocks.sh
 bash plugins/aimi-engineering/scripts/test-resolve-pr-parallel.sh
@@ -47,7 +48,11 @@ python3 -m pytest plugins/aimi-engineering/hooks/tests/ -q
 
 `plugins/aimi-engineering/hooks/` is the one Python component in this repo; everything else has no build step, no lint step, no package manager and stays plain Bash. The pytest suite requires Python 3.10+ (hook source and tests use `X | None` and `list[int]` union/generic syntax) and `pytest` installed via `pip install pytest`.
 
-- Run `test-aimi-cli.sh` after any change to `plugins/aimi-engineering/scripts/aimi-cli.sh` or files it sources.
+- Run `test-aimi-cli.sh` after any change to `plugins/aimi-engineering/scripts/aimi-cli.sh` or files it sources. It is a **dispatcher**: it runs `test-aimi-cli-part{1..4}-*.sh` **concurrently** and aggregates their counts. Each part sources the 179-line `test-aimi-cli-common.sh` preamble (the `assert_*` family, `setup`, `cleanup`) plus `test-aimi-cli-fixtures.sh` for the fixtures more than one part needs, and is runnable on its own for a focused loop. A new test goes in the part that owns its concern — each part's header comment lists its sections — and `EXPECTED_ASSERTIONS` in the dispatcher must be raised to match, because the dispatcher asserts the total and fails the run when it moves.
+  - **Serial escape hatch: `--serial` (or `-s`, or `AIMI_TEST_SERIAL=1`).** Concurrent is the default and is ~2.2x faster. Serial mode streams each part's output live instead of buffering it — reach for it when bisecting an intermittent failure, when a part hangs and you need to see how far it got, or on a host where four concurrent parts would thrash. `--parallel`/`-p` forces concurrency back on when `AIMI_TEST_SERIAL` is set in the environment. Counts, the invariant and the exit status are identical either way; only wall time and buffering differ.
+  - The run is bounded by its slowest part, not by core count — part 3 (`roadmap-forge`) is ~40-46% of the serial total on its own, which is why four parts on 16 cores gives ~2.2x rather than 4x. The summary prints each part's wall time beside its counts so that imbalance stays visible.
+  - Concurrency applies to **this suite only**. `test-worktree-manager.sh` is not parallel-safe — five `serve` assertions collide on a fixed port — and stays serial.
+  - **The run ends with a fixed-shape `suite-cost` line** — `cli_lines`, `test_lines`, `assertions`, `wall_seconds`, `mode`, `frame`, always in that order. `grep suite-cost` two transcripts to see the trend mechanically. Two of its fields are environment-scoped and the line names which environment it measured: `wall_seconds` is not comparable across `mode=serial`/`mode=concurrent`, and `assertions` is **2 lower** under `frame=worktree` than `frame=checkout` for the same tree (the worktree-resident CLI case emits 1 assertion where a checkout emits 3, which is also why `EXPECTED_ASSERTIONS` is 3080 vs 3082). Comparing a container run against a main-tree run without reading `frame` looks like two tests vanished.
 - Run `test-worktree-manager.sh` after any change to `plugins/aimi-engineering/skills/git-worktree/scripts/worktree-manager.sh`.
 - **Run `test-command-blocks.sh` after any change under `plugins/aimi-engineering/commands/`** — including changes that touch only prose. Command files are executed, not read: an agent runs their ` ```bash ` blocks literally, each in its own isolated shell, so a "documentation-only" edit is a code change. This suite extracts every bash-fenced block and checks it parses, avoids bash-only constructs (blocks may run under zsh), does not read a variable that only exists inside a loop, and introduces no variable that nothing in the file assigns. Known findings are grandfathered in `scripts/command-blocks-baseline.txt`; the suite fails when a baselined entry stops firing, so that file shrinks as things are fixed. It cannot see a variable that a *prose sentence* reads — that class is only fixed by moving the logic into `aimi-cli.sh`.
 - Run `test-resolve-pr-parallel.sh` after any change to `plugins/aimi-engineering/skills/resolve-pr-parallel/scripts/`. It exists specifically because `test-command-blocks.sh`'s own scope is `commands/*.md` and it does not scan `skills/` at all, leaving these scripts with no other static-analysis safety net.
@@ -83,7 +88,7 @@ After resolution, commands call `$AIMI_CLI check-version --quiet --fix` for self
 When editing resolution logic, mirror changes in:
 - `plugins/aimi-engineering/commands/references/cli-path-resolution.md` (command-facing docs)
 - `plugins/aimi-engineering/scripts/aimi-cli.sh` (`read_global_cli_cache`, `read_global_worktree_cache`, `cmd_check_version`, `cmd_cleanup_versions`)
-- `plugins/aimi-engineering/scripts/test-aimi-cli.sh` (`source_cache_functions` must eval every helper used by the code under test)
+- `plugins/aimi-engineering/scripts/test-aimi-cli-fixtures.sh` (`source_cache_functions` must eval every helper used by the code under test)
 
 ## Where Things Live
 
