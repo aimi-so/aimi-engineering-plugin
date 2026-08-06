@@ -1835,7 +1835,8 @@ setup_global_cache_env() {
 teardown_global_cache_env() {
   rm -rf "$GLOBAL_CACHE_TMPDIR"
   unset CLAUDE_CONFIG_DIR
-  unset AIMI_CONFIG_DIR
+  # Restore, never unset — see test-aimi-cli-common.sh's AIMI_CONFIG_DIR_DEFAULT.
+  export AIMI_CONFIG_DIR="$AIMI_CONFIG_DIR_DEFAULT"
   unset GLOBAL_CACHE_TMPDIR
   unset MOCK_CLI_PATH
   unset MOCK_WORKTREE_PATH
@@ -2379,7 +2380,9 @@ setup_xdg_cache_env() {
 
 teardown_xdg_cache_env() {
   rm -rf "$AIMI_CONFIG_TMPDIR" "$LEGACY_CONFIG_TMPDIR"
-  unset AIMI_CONFIG_DIR CLAUDE_CONFIG_DIR
+  unset CLAUDE_CONFIG_DIR
+  # Restore, never unset — see test-aimi-cli-common.sh's AIMI_CONFIG_DIR_DEFAULT.
+  export AIMI_CONFIG_DIR="$AIMI_CONFIG_DIR_DEFAULT"
   unset AIMI_CONFIG_TMPDIR LEGACY_CONFIG_TMPDIR
   unset MOCK_CLI_PATH MOCK_WORKTREE_PATH
 }
@@ -3896,7 +3899,8 @@ test_prime_cache_not_found() {
 
   unset CLAUDECODE
   unset CLAUDE_CONFIG_DIR
-  unset AIMI_CONFIG_DIR
+  # Restore, never unset — see test-aimi-cli-common.sh's AIMI_CONFIG_DIR_DEFAULT.
+  export AIMI_CONFIG_DIR="$AIMI_CONFIG_DIR_DEFAULT"
   rm -rf "$empty_tmp" "$aimi_tmp"
 }
 
@@ -3942,7 +3946,8 @@ test_prime_cache_rejects_bad_path() {
 
   unset CLAUDECODE
   unset CLAUDE_CONFIG_DIR
-  unset AIMI_CONFIG_DIR
+  # Restore, never unset — see test-aimi-cli-common.sh's AIMI_CONFIG_DIR_DEFAULT.
+  export AIMI_CONFIG_DIR="$AIMI_CONFIG_DIR_DEFAULT"
   rm -rf "$bad_tmp" "$cfg_tmp" "$aimi_tmp"
 }
 

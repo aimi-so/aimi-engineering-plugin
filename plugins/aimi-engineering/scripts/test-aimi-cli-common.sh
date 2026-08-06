@@ -14,6 +14,23 @@ TEST_DIR="$(mktemp -d)"
 AIMI_DIR=".aimi"
 TASKS_DIR="$AIMI_DIR/tasks"
 
+# The one resource all four parts wrote in common, and the only one the
+# concurrency audit found. `init-session` and `check-version --fix` both call
+# write_global_cli_cache, and most of their ~120 call sites across the parts do
+# not redirect the config dir — so the write landed in the real
+# ~/.config/aimi/cli-path. No assertion ever read it, which is why it never
+# failed a run, but it is a file every part writes (a cross-part shared
+# resource once the parts run concurrently) and it silently rewrote the
+# developer's own global CLI-path cache on every suite run. Give each part its
+# own, inside its private TEST_DIR so the existing EXIT trap removes it.
+#
+# This is a default, not an override: _aimi_config_dir reads AIMI_CONFIG_DIR,
+# so a test that exports its own still wins. Teardown helpers must RESTORE this
+# value rather than `unset` it — unsetting hands the rest of the part back to
+# the real ~/.config/aimi.
+AIMI_CONFIG_DIR_DEFAULT="$TEST_DIR/aimi-config"
+export AIMI_CONFIG_DIR="$AIMI_CONFIG_DIR_DEFAULT"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
