@@ -7,13 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.0.0] - 2026-08-07
+## [1.121.0] - 2026-08-07
 
 > Phase 5 of forge abstraction: **confirm before publishing.** Finishing the work and publishing it are two decisions now, not one. Every completion path asks once before a branch reaches `origin` or a pull request is opened, an unattended run never publishes, and `--push` — the flag that let a command line authorize a publish — is gone.
 >
 > **What did NOT change, stated first, because "the push was removed" reads worse than it is.** The `git merge` that moves each story worktree's work onto the feature branch is local and untouched — `worktree-manager.sh` contains zero `git push`, only `git merge`. Commits, branch refs, container teardown with `--keep-branch`, and story and phase status all behave exactly as before. Nothing about how the work gets *made* moved; only how it gets *published*.
 >
-> **Why MAJOR and not MINOR.** `plugins/aimi-engineering/CLAUDE.md` defines MAJOR as a breaking change to command syntax or output format, and this is both at once. `/aimi:execute --push` no longer runs at all — it exits non-zero in Step 0, before any state is touched — and an unattended run that used to finish with a branch on `origin` now finishes with a local one. What makes the number MAJOR rather than a footnote on a MINOR is that **there is nothing a caller can add to keep the old outcome**: the escape hatch is deliberately absent, not merely renamed, so no invocation exists that reproduces the previous behavior. The previous release argued its own level in prose rather than applying the rule mechanically; this one reaches the opposite answer by the same method.
+> **Read this before upgrading if anything you run passes `--push`.** The flag removal below is breaking on its own terms: `/aimi:execute --push` no longer runs at all — it exits non-zero in Step 0, before any state is touched — and there is nothing a caller can add to keep the old outcome, because the escape hatch is deliberately absent rather than renamed. An unattended run that used to finish with a branch on `origin` now finishes with a local one.
+>
+> **Why the level is MINOR anyway.** `plugins/aimi-engineering/CLAUDE.md` defines MAJOR as a breaking change to command syntax or output format, which by the letter of the rule this is. The number was set deliberately below that: the flag was an agent-mode-only opt-in with a narrow surface, and the plugin argues its release levels case by case rather than applying the rule mechanically — the previous entry did the same in the opposite direction. That judgment does not soften the paragraph above; it is why the breaking change is announced here in the first sentence rather than left to be discovered from the version number.
 
 ### Removed
 
