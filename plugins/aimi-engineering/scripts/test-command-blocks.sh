@@ -26,6 +26,15 @@ set -uo pipefail
 #   8. plan.md's branchName derivations use the dot-slugified phase id
 #   9. the forge-account picker records ONLY from a human answer, never in
 #      agent mode
+#  10. the phase-completion publish gate: execute.md asks before the phase
+#      branch reaches origin, fails closed, and names /aimi:open-pr on decline
+#  11. the flat-container push confirmation lives in the command body, and
+#      container-execution.md's agent branch publishes nothing
+#  12. --push is removed loudly: gone from the argument-hint, PUSH_FLAG gone
+#      from commands/, every surviving literal inside the refusal branch
+#  13. no completion report in execute.md or next.md recommends a raw
+#      `gh pr create`, and next.md publishes nothing at all
+#  14. no picker markup survives under commands/references/
 #
 # Checks 1-5 are static. Check 6 is the first one that RUNS a block: it pulls
 # execute.md's phase-branch derivation out of the extracted set and executes it
@@ -53,6 +62,13 @@ set -uo pipefail
 # not "this command works". The durable mitigation for that class is moving
 # logic out of the prose and into aimi-cli.sh, where the other suite can reach
 # it — not adding more linting to the prose.
+#
+# Checks 10-14 sit squarely inside that limit and say so at their own section
+# header: they pin the confirm-before-publishing contract TEXTUALLY — the
+# question is written above the push, the gate normalizes to "publish nothing",
+# the removed flag fails loudly — and none of them can execute a gate and
+# observe a refusal. Read that block before quoting a green run as evidence
+# that anything asked before it published.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMMANDS_DIR="$SCRIPT_DIR/../commands"
@@ -892,6 +908,458 @@ EOF
     "commands/references/ is never run through install.sh's translate_command_body. Put the picker in a command body instead."
 }
 
+# ===========================================================================
+# Checks 10-14 — confirm before publishing.
+#
+# WHAT THESE COVER, AND WHAT THEY CANNOT
+#
+# The phase these were written for has six success criteria. Read this before
+# reading a green run as proof of any of them:
+#
+#   1. "asks before pushing and before opening a PR, publishes only when
+#      approved"           — PARTIAL, textual only. Checks 10 and 11 prove the
+#      question is WRITTEN DOWN above the push, that the gate normalizes
+#      anything that is not an explicit approval to "publish nothing", and that
+#      the push sits below the decline branch. They cannot prove the agent
+#      obeys any of it.
+#   2. "the confirmation covers the push itself, not only the PR"
+#                          — TEXTUAL. Check 10c pins the push-only option and
+#      the decline branch that returns before `git push` is ever reached.
+#   3. "agent mode never publishes, and no flag re-enables it"
+#                          — TEXTUAL. Checks 11b and 12a.
+#   4. "--push is removed, and passing it FAILS"
+#                          — TEXTUAL. Check 12 (argument-hint, PUSH_FLAG,
+#      refusal-branch confinement, non-zero exit, message naming the
+#      replacement).
+#   5. "every completion path names /aimi:open-pr"
+#                          — TEXTUAL. Check 13.
+#   6. "the suites would fail if any of the above regressed"
+#                          — this is what checks 10-14 are. Each was verified
+#      to FAIL against the phase's base commit, not merely to pass here.
+#
+# NOT COVERED BY ANY OF THEM: no static check can execute the gate and observe
+# a refusal. The whole gate is prose plus a picker literal; the agent, not the
+# shell, decides. This suite's HONEST LIMIT above applies with full force —
+# `PHASE_PUBLISH` and `SKIP_PUSH` are both set by an English sentence telling
+# the model what to substitute, and per the repo's CLAUDE.md a variable a prose
+# sentence reads is invisible to this suite by construction. Checks 10 and 11
+# assert that the right sentences are present and in the right ORDER. They
+# assert nothing about what happens at runtime, and a green run here is not
+# evidence that a phase ever declined to publish. The durable fix for that
+# class is the same one the header names: move the decision into aimi-cli.sh,
+# where test-aimi-cli.sh can execute it.
+# ===========================================================================
+
+# Prints a markdown section: the heading line through the line before the next
+# heading at the same or SHALLOWER level, each line prefixed with its 1-based
+# number in the file.
+#
+# Two differences from check 9's forge_account_region, both load-bearing here.
+# It stops at the next same-or-shallower heading rather than at the very next
+# heading of any level, because the publish gate spans several #### subsections
+# under one ### and the ordering property below needs the whole subtree. And it
+# tracks fences with the same rule extract_blocks uses (a closing fence carries
+# no info string and is not indented deeper than its opener), because these
+# command files print report templates containing literal `##` lines inside
+# fenced blocks — a fence-blind scan ends the section on the first one and the
+# check then fails for a reason that has nothing to do with publishing.
+md_section() {
+  awk -v H="$2" '
+    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+    {
+      n = n + 1
+      probe = $0; sub(/^[ \t]+/, "", probe)
+      if (probe ~ /^```/) {
+        ind = match($0, /[^ \t]/) - 1
+        info = probe; sub(/^`+/, "", info); info = trim(info)
+        if (infence == 0)                              { infence = 1; openind = ind }
+        else if (info == "" && ind <= openind)         { infence = 0 }
+        if (inside) print n "\t" $0
+        next
+      }
+      if (infence == 1) { if (inside) print n "\t" $0; next }
+      if (!inside && index($0, H) == 1) {
+        inside = 1; lvl = 0
+        while (substr(probe, lvl + 1, 1) == "#") lvl++
+        print n "\t" $0; next
+      }
+      if (inside && probe ~ /^#{1,6}[ \t]/) {
+        l = 0; while (substr(probe, l + 1, 1) == "#") l++
+        if (l <= lvl) exit
+      }
+      if (inside) print n "\t" $0
+    }
+  ' "$1"
+}
+
+# Translates the first region line matching a literal into the FILE line number
+# that region line carries in its first field. Empty in, empty out: `sed -n 0p`
+# is an error rather than a no-op, so the offset is tested before it is used —
+# every caller here can legitimately find nothing.
+region_lineno() {
+  local region="$1" pattern="$2" off
+  off="$(printf '%s\n' "$region" | grep -nF "$pattern" | head -1 | cut -d: -f1)"
+  [ -n "$off" ] || return 0
+  printf '%s\n' "$region" | sed -n "${off}p" | cut -f1
+}
+
+# Line numbers of the region lines that INVOKE git push, as opposed to naming
+# it. The discriminator is the command position: an invocation starts the line,
+# a recovery instruction the loop prints for the user is an argument to `echo`,
+# and prose mentions it mid-sentence. All three shapes are live in the region
+# this is pointed at, which is why a bare `grep 'git push'` is wrong here.
+region_push_invocations() {
+  awk -F'\t' '
+    {
+      num = $0; sub(/\t.*$/, "", num)
+      line = $0; sub(/^[0-9]+\t/, "", line)
+      if (line ~ /^[ \t]*git([ \t]+-C[ \t]+[^ \t]+)?[ \t]+push([ \t]|$)/) print num
+    }
+  '
+}
+
+# ---------------------------------------------------------------------------
+# Check 10 — execute.md's phase-completion publish gate.
+#
+# Measured yield: 3 of its 3 assertions fail against the phase base commit
+# (3bde8f6), 0 here. On that tree Phase Completion pushed every participating
+# repository's branch and opened its PR with no question asked anywhere — the
+# `#### Confirm before publishing this phase` subsection did not exist, so 10a
+# reports every required literal missing, 10b reports the push sitting in a
+# section with no gate above it, and 10c reports the fail-closed normalization
+# and the decline branch both absent.
+#
+# WHY THE ORDERING PROPERTY IS THE LOAD-BEARING HALF
+#
+# Same reason check 9's is. Every literal 10a looks for could be present and
+# the gate still be worthless if the push ran above it: a question asked after
+# the branch is already on origin is not a confirmation, it is a notification.
+# So the property asserted is positional — every `git push` INVOCATION in
+# `### Offer a Pull Request` must sit BELOW the gate's heading, and below the
+# decline branch that returns before reaching it. Moving the push up, dropping
+# the `*) PHASE_PUBLISH="none" ;;` default, or deleting the early `continue`
+# each fail it independently.
+#
+# Fail-closed is asserted explicitly rather than assumed: the gate's inputs are
+# a human answer and an orchestrator substitution, and both can go missing.
+# `PHASE_PUBLISH` arriving unsubstituted must decline, never publish.
+# ---------------------------------------------------------------------------
+PHASE_PUBLISH_SECTION='### Offer a Pull Request'
+PHASE_PUBLISH_GATE='#### Confirm before publishing this phase'
+
+check_phase_publish_gate() {
+  local md="$COMMANDS_DIR/execute.md"
+  local region gate_line decline_line pushes p
+  local missing="" ordering="" closed=""
+  local literal why
+
+  region="$(md_section "$md" "$PHASE_PUBLISH_SECTION")"
+  if [ -z "$region" ]; then
+    assert_no_findings "execute.md has no '$PHASE_PUBLISH_SECTION' section" \
+      "Check 10 — the phase-completion publish gate is present" \
+      "The gate is addressed by that heading; renaming it silently disables checks 10a-10c."
+    return 0
+  fi
+
+  # --- 10a: the gate says what publish-confirmation.md requires of a call site
+  while IFS='|' read -r literal why; do
+    [ -n "$literal" ] || continue
+    printf '%s\n' "$region" | grep -qF "$literal" \
+      || missing="$missing execute.md: the publish gate never writes '$literal' — $why"$'\n'
+  done <<'GATE_LITERALS'
+#### Confirm before publishing this phase|there is no per-phase confirmation subsection at all
+Use **AskUserQuestion**|interactivity.md's exact picker literal, and the string install.sh rewrites for OpenCode
+PHASE_PUBLISH|the single variable the publish loop reads
+INTERACTIVE_MODE=agent|an unattended run must have a branch of its own that cannot publish
+publish-confirmation.md|the gate must cite the contract rather than restate it
+/aimi:open-pr|every outcome, including the decline, must name the command that publishes later
+GATE_LITERALS
+
+  assert_no_findings "$(printf '%s' "$missing")" \
+    "Check 10a — the phase publish gate asks, branches on agent mode, and names /aimi:open-pr" \
+    "publish-confirmation.md requires a question, an agent-mode branch that declines, and the follow-up command on every path."
+
+  # --- 10b: the push sits below the gate, not above it ----------------------
+  gate_line="$(region_lineno "$region" "$PHASE_PUBLISH_GATE")"
+  pushes="$(printf '%s\n' "$region" | region_push_invocations)"
+
+  if [ -z "$gate_line" ]; then
+    ordering="$ordering execute.md: '$PHASE_PUBLISH_SECTION' opens no confirmation subsection, so nothing bounds where a push may appear"$'\n'
+  fi
+  if [ -z "$(printf '%s' "$pushes" | grep -c . || true)" ] || [ "$(printf '%s' "$pushes" | grep -c . || true)" = "0" ]; then
+    ordering="$ordering execute.md: no git push invocation found in '$PHASE_PUBLISH_SECTION' — the publish loop was moved or renamed and this check no longer guards it"$'\n'
+  fi
+  for p in $pushes; do
+    [ -n "$gate_line" ] || break
+    [ "$p" -gt "$gate_line" ] \
+      || ordering="$ordering execute.md:$p — a git push invocation sits at or above the publish gate (execute.md:$gate_line); a question asked after the branch reaches origin is a notification, not a confirmation"$'\n'
+  done
+
+  assert_no_findings "$(printf '%s' "$ordering")" \
+    "Check 10b — every phase-completion push sits below the confirmation gate" \
+    "Move the push back under '$PHASE_PUBLISH_GATE', or the gate is decorative."
+
+  # --- 10c: fail closed, and the decline returns before the push ------------
+  printf '%s\n' "$region" | grep -qF '*) PHASE_PUBLISH="none" ;;' \
+    || closed="$closed execute.md: the publish loop has no catch-all normalizing PHASE_PUBLISH to none — an unsubstituted value would fall through to the push"$'\n'
+  printf '%s\n' "$region" | grep -qF 'if [ "$PHASE_PUBLISH" = "push" ]' \
+    || closed="$closed execute.md: no push-only branch — the confirmation would cover the pull request but not the push it depends on"$'\n'
+
+  decline_line="$(region_lineno "$region" 'if [ "$PHASE_PUBLISH" = "none" ]')"
+  if [ -z "$decline_line" ]; then
+    closed="$closed execute.md: the publish loop has no PHASE_PUBLISH=none branch, so declining still reaches the forge and the push"$'\n'
+  else
+    for p in $pushes; do
+      [ "$p" -gt "$decline_line" ] \
+        || closed="$closed execute.md:$p — a git push invocation sits at or above the decline branch (execute.md:$decline_line)"$'\n'
+    done
+  fi
+
+  assert_no_findings "$(printf '%s' "$closed")" \
+    "Check 10c — the publish gate fails closed and the decline returns before any push" \
+    "Anything that is not an explicit approval must normalize to none, and none must exit the iteration above the push."
+}
+
+# ---------------------------------------------------------------------------
+# Check 11 — the flat-container push confirmation.
+#
+# Measured yield: both assertions fail against 3bde8f6, 0 here. There the
+# picker lived in container-execution.md and its agent branch pushed whenever
+# `--push` had been passed, so 11a reports Step 5 carrying no question at all
+# and 11b reports the reference still holding the picker and still gating on a
+# flag.
+#
+# WHY THE PICKER'S FILE MATTERS AS MUCH AS ITS CONTENT
+#
+# `commands/references/` is delivered to OpenCode by install.sh's verbatim
+# whole-tree copy, and both of its command-install loops skip that subdirectory
+# by name — so translate_command_body(), which is what rewrites the picker's
+# tool name for that host, never sees a reference file. A picker written there
+# reaches OpenCode naming a tool that host does not have. That is why story 05
+# moved this one question up into the command body, and why 11a asserts it is
+# in execute.md while check 14 asserts it is nowhere under references/.
+#
+# 11b's other half is criterion 3: the reference's agent-mode branch must set
+# SKIP_PUSH unconditionally. "Unconditionally" is the whole claim — the branch
+# it replaced was one `if` away from publishing.
+# ---------------------------------------------------------------------------
+CONTAINER_PUSH_SECTION='### If all stories complete:'
+CONTAINER_PUSH_REF_SECTION='## Container Mode: Push the Branch'
+
+check_container_push_confirmation() {
+  local md="$COMMANDS_DIR/execute.md"
+  local ref="$COMMANDS_DIR/references/container-execution.md"
+  local region literal why body="" refs=""
+
+  region="$(md_section "$md" "$CONTAINER_PUSH_SECTION")"
+  if [ -z "$region" ]; then
+    body="execute.md has no '$CONTAINER_PUSH_SECTION' section"$'\n'
+  else
+    while IFS='|' read -r literal why; do
+      [ -n "$literal" ] || continue
+      printf '%s\n' "$region" | grep -qF "$literal" \
+        || body="$body execute.md: Step 5's completion branch never writes '$literal' — $why"$'\n'
+    done <<'CONTAINER_LITERALS'
+Use **AskUserQuestion**|the container push question must live in a command body, where install.sh translates it
+SKIP_PUSH=true|the decline must set the same variable container-execution.md's push block gates on
+publish-confirmation.md|the question must cite the contract rather than restate it
+/aimi:open-pr|a declined push still has to name the command that publishes later
+CONTAINER_LITERALS
+  fi
+
+  assert_no_findings "$(printf '%s' "$body")" \
+    "Check 11a — the flat-container push question lives in execute.md's completion branch" \
+    "A picker written into commands/references/ is never translated by install.sh and reaches OpenCode naming a tool that host does not have."
+
+  region="$(md_section "$ref" "$CONTAINER_PUSH_REF_SECTION")"
+  if [ -z "$region" ]; then
+    refs="container-execution.md has no '$CONTAINER_PUSH_REF_SECTION' section"$'\n'
+  else
+    printf '%s\n' "$region" | grep -qF 'Set `SKIP_PUSH=true` unconditionally' \
+      || refs="$refs container-execution.md: the agent-mode branch no longer sets SKIP_PUSH unconditionally — an unattended run must have no path to origin"$'\n'
+    printf '%s\n' "$region" | grep -qF 'the picker markup itself lives there, in that command body, never in this file' \
+      || refs="$refs container-execution.md: the section no longer records that the picker belongs in the command body, which is the reason it is not written here"$'\n'
+  fi
+
+  assert_no_findings "$(printf '%s' "$refs")" \
+    "Check 11b — container-execution.md's agent branch publishes nothing and hosts no picker" \
+    "Agent mode has no consent to give and no flag may stand in for it; the question belongs in the command body."
+}
+
+# ---------------------------------------------------------------------------
+# Check 12 — --push is removed, and its removal is loud.
+#
+# Measured yield: 3 of its 3 assertions fail against 3bde8f6, 0 here. There the
+# frontmatter advertised `[--push]`, `PUSH_FLAG` was parsed in execute.md and
+# consumed in container-execution.md, and no refusal branch existed — so 12c
+# reports every one of the four surviving literals as unconfined.
+#
+# WHY SILENCE WOULD HAVE BEEN THE WORSE OUTCOME
+#
+# A pipeline that passed `--push` to the previous version got a published
+# branch out of it. Accepting the flag and quietly doing nothing hands that
+# same pipeline silence — the one failure mode nobody notices. So the check
+# does not merely assert the flag is gone; it asserts the refusal EXITS
+# NON-ZERO and that its message names the replacement, because a refusal that
+# does neither is indistinguishable from the silent no-op it replaced.
+#
+# The `--push` literal is confined to execute.md's refusal branch, not banned
+# from commands/ outright: publish-confirmation.md names `--push`-style
+# arguments when explaining why no argument can carry consent, which is the
+# rule being stated rather than an acceptance of the flag.
+# ---------------------------------------------------------------------------
+PUSH_REFUSAL_SECTION='### Refuse --push'
+
+check_push_flag_removed() {
+  local md="$COMMANDS_DIR/execute.md"
+  local region first last hint hits n stray="" loud="" flag=""
+
+  # --- 12a: the flag's variable is gone from every command file -------------
+  flag="$(grep -rn 'PUSH_FLAG' "$COMMANDS_DIR" 2>/dev/null | sed -e "s|^$COMMANDS_DIR/||" | cut -c1-160)"
+  assert_no_findings "$flag" \
+    "Check 12a — PUSH_FLAG appears nowhere under commands/" \
+    "The flag is removed, not deprecated. Nothing may read it, in a command body or a reference."
+
+  # --- 12b: the frontmatter no longer advertises it ------------------------
+  hint="$(grep -n '^argument-hint:' "$md" | grep -F -- '--push' | sed 's|^|execute.md:|' | cut -c1-160)"
+  assert_no_findings "$hint" \
+    "Check 12b — execute.md's argument-hint no longer advertises --push" \
+    "Autocomplete would keep offering a flag whose only remaining behavior is to fail the run."
+
+  # --- 12c: every surviving literal sits inside the refusal branch ----------
+  region="$(md_section "$md" "$PUSH_REFUSAL_SECTION")"
+  if [ -z "$region" ]; then
+    # Both legs must report. A missing section leaves 12d with nothing to grep,
+    # and an assertion that passes because it found nowhere to look is not
+    # coverage — it is the exact shape this check exists to reject elsewhere.
+    stray="execute.md has no '$PUSH_REFUSAL_SECTION' section, so nothing confines the flag's remaining literals"$'\n'
+    loud="execute.md has no '$PUSH_REFUSAL_SECTION' section, so there is no refusal to exit non-zero or to name a replacement"$'\n'
+  else
+    first="$(printf '%s\n' "$region" | head -1 | cut -f1)"
+    last="$(printf '%s\n' "$region" | tail -1 | cut -f1)"
+    hits="$(grep -n -- '--push' "$md" | cut -d: -f1)"
+    for n in $hits; do
+      { [ "$n" -ge "$first" ] && [ "$n" -le "$last" ]; } \
+        || stray="$stray execute.md:$n — a --push literal sits outside the refusal branch (execute.md:$first-$last)"$'\n'
+    done
+
+    printf '%s\n' "$region" | grep -qF 'exit 1' \
+      || loud="$loud execute.md: the refusal branch does not exit non-zero — a pipeline that used to get a push would get silence instead"$'\n'
+    printf '%s\n' "$region" | grep -qF '/aimi:open-pr' \
+      || loud="$loud execute.md: the refusal message never names /aimi:open-pr, so it says what stopped working without saying what replaced it"$'\n'
+    printf '%s\n' "$region" | grep -qF 'no flag re-enables it' \
+      || loud="$loud execute.md: the refusal message no longer states that no flag re-enables publishing"$'\n'
+  fi
+
+  assert_no_findings "$(printf '%s' "$stray")" \
+    "Check 12c — every surviving --push literal in execute.md sits inside the refusal branch" \
+    "A literal outside it means the flag is still parsed, hinted at, or documented as usable somewhere."
+
+  assert_no_findings "$(printf '%s' "$loud")" \
+    "Check 12d — the refusal exits non-zero and its message names the replacement behavior" \
+    "A refusal that matches the token but emits no actionable message is the silent no-op this phase removed."
+}
+
+# ---------------------------------------------------------------------------
+# Check 13 — completion reports name /aimi:open-pr, and next.md publishes
+# nothing.
+#
+# Measured yield: 2 of its 3 assertions fail against 3bde8f6 (13a on execute.md
+# lines 555, 3729 and 3946; 13c on next.md's `git push -u origin` at 352), 0
+# here. 13b holds on both trees by design — it exists so that a future edit
+# cannot swap an /aimi:open-pr recommendation back to a raw forge command
+# without tripping something.
+#
+# THE EXEMPTIONS ARE THE DELICATE PART
+#
+# `gh pr create` is banned as a RECOMMENDATION, not as a string. It is the
+# GitHub adapter's own implementation in commands/references/forge-contract.md
+# and the call open-pr.md documents, and both are correct there — so the scan
+# is deliberately scoped to the two files that address the user at the end of a
+# run, rather than written as a directory sweep with a denylist. Widening it
+# later means widening the file list, not loosening the pattern.
+# ---------------------------------------------------------------------------
+COMPLETION_REPORT_FILES='execute.md next.md'
+
+check_completion_names_open_pr() {
+  local f path raw="" recs="" pushes=""
+  local line
+
+  # --- 13a: no raw forge command is recommended to the user ----------------
+  raw="$(
+    for f in $COMPLETION_REPORT_FILES; do
+      grep -n 'gh pr create' "$COMMANDS_DIR/$f" 2>/dev/null | cut -c1-160 | sed "s|^|$f:|"
+    done
+  )"
+  assert_no_findings "$raw" \
+    "Check 13a — no completion path in execute.md or next.md recommends a raw gh pr create" \
+    "/aimi:open-pr is the only publish entry point; a raw forge command bypasses the confirmation and works on exactly one forge."
+
+  # --- 13b: every PR recommendation names the command instead --------------
+  for f in $COMPLETION_REPORT_FILES; do
+    path="$COMMANDS_DIR/$f"
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      case "$line" in
+        *'/aimi:open-pr'*) ;;
+        *) recs="$recs $f:$line"$'\n' ;;
+      esac
+    done <<EOF
+$(grep -nE '^[[:space:]]*(-[[:space:]]+)?(Open|Create) (a )?PRs?([ :])' "$path" 2>/dev/null | cut -c1-160)
+EOF
+  done
+  assert_no_findings "$(printf '%s' "$recs")" \
+    "Check 13b — every pull-request recommendation in those files names /aimi:open-pr" \
+    "Write the short /aimi:open-pr form; publish-confirmation.md § Always Name /aimi:open-pr requires it on every completion path."
+
+  # --- 13c: next.md publishes nothing at all -------------------------------
+  pushes="$(grep -n 'git push' "$COMMANDS_DIR/next.md" 2>/dev/null \
+    | grep -vF 'never pushes' | cut -c1-160 | sed 's|^|next.md:|')"
+  assert_no_findings "$pushes" \
+    "Check 13c — next.md contains no git push at all" \
+    "/aimi:next completes stories; publishing is /aimi:open-pr's job and needs a confirmation next.md does not raise."
+}
+
+# ---------------------------------------------------------------------------
+# Check 14 — no picker markup under commands/references/.
+#
+# Measured yield: 1 hit against 3bde8f6 (container-execution.md's own
+# `use **AskUserQuestion**` at :160), 0 here. This generalizes check 9's
+# forge-contract.md-only assertion to the whole directory, so a reference file
+# added later is covered without a code change.
+#
+# SCOPED TO WHAT IS ACTUALLY TRUE, DELIBERATELY
+#
+# The banned token is the BOLD picker-invocation form, which is the exact
+# string interactivity.md mandates for a call site and the first pattern
+# install.sh's rewriter keys on. `interactivity.md` itself is exempt: it is the
+# contract that DEFINES that literal and has to quote it to do so.
+#
+# Bare, unbolded `AskUserQuestion` mentions are NOT banned here and several
+# survive: user-communication.md and interactivity.md discuss the tool by name,
+# and container-execution.md's agent branch says "skip AskUserQuestion", which
+# is a statement that no question is asked. One genuine exception is recorded
+# rather than papered over — cli-path-resolution.md:211-226 instructs a real
+# picker inside a reference file, predating this phase and untouched by it.
+# This check does not cover that, and a green run here is not a claim that the
+# directory is free of untranslated pickers.
+# ---------------------------------------------------------------------------
+PICKER_LITERAL_EXEMPT='interactivity.md'
+
+check_references_carry_no_picker() {
+  local findings f rel
+  findings="$(
+    find "$COMMANDS_DIR/references" -name '*.md' | sort | while IFS= read -r f; do
+      rel="${f##*/}"
+      [ "$rel" = "$PICKER_LITERAL_EXEMPT" ] && continue
+      grep -nF '**AskUserQuestion**' "$f" 2>/dev/null | cut -c1-160 | sed "s|^|references/$rel:|"
+    done
+  )"
+  assert_no_findings "$findings" \
+    "Check 14 — no reference file carries picker markup (interactivity.md defines the literal and is exempt)" \
+    "install.sh copies commands/references/ verbatim and never runs translate_command_body over it, so this picker reaches OpenCode naming a tool that host does not have. Move it into a command body."
+}
+
 # ---------------------------------------------------------------------------
 # The baseline is only honest if it shrinks. An entry that no longer matches
 # anything means the underlying issue was fixed (or a heading was renamed) and
@@ -940,6 +1408,11 @@ main() {
   check_reverify_branch
   check_plan_branchname_slugified
   check_forge_account_picker
+  check_phase_publish_gate
+  check_container_push_confirmation
+  check_push_flag_removed
+  check_completion_names_open_pr
+  check_references_carry_no_picker
 
   echo ""
   echo "--- Baseline Hygiene ---"
