@@ -3839,7 +3839,29 @@ When execution ends (all stories complete, or deadlock detected):
 
 ### If all stories complete:
 
-**When `CONTAINER_MODE=true`:** read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Container Mode: Stop the Dev Server, § Container Mode: Push the Branch, and § Container Mode: Remove the Container, and run all three, in that order, before continuing below. When `CONTAINER_MODE=false` (inline mode), skip all three and continue directly below.
+**When `CONTAINER_MODE=true`:** read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Container Mode: Stop the Dev Server, § Container Mode: Push the Branch, and § Container Mode: Remove the Container, and run all three, in that order, before continuing below — raising the push confirmation immediately below in between, after every dev-server stop has completed and before anything is pushed. When `CONTAINER_MODE=false` (inline mode), skip all three, skip the confirmation with them, and continue directly below.
+
+**Confirm before this container's branch reaches `origin`.** The contract this question satisfies is defined once in `${CLAUDE_PLUGIN_ROOT}/commands/references/publish-confirmation.md` and is not restated here. The question itself lives in this command body rather than in that reference — or in `container-execution.md`, which owns the push it gates — because reference files reach OpenCode through a verbatim whole-tree copy that never translates the interactive-question tool's name, so a picker written into one would name a tool that host does not have. Resolve interactivity fresh — each Bash call is an isolated shell:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
+echo "$INTERACTIVE_MODE"
+```
+
+**When `INTERACTIVE_MODE=picker`:** Use **AskUserQuestion** exactly once for the whole run, with exactly two options:
+
+```
+All stories are complete. Push [branchName] to origin now?
+
+A — Push now
+B — Skip (push it yourself later, or run /aimi:open-pr)
+```
+
+**Option A:** proceed to the push in § Container Mode: Push the Branch. **Option B:** set `SKIP_PUSH=true` — the same variable that reference's own push block gates on — and skip straight to § Container Mode: Remove the Container. Anything that is not an explicit A — a dismissed prompt, an unparseable answer, no answer at all — is B: silence is not approval. Ask once for the whole run, not once per project group; one answer governs every participating group (`publish-confirmation.md`). Write the question and its option text in whatever language the person is writing in, never a hardcoded one (`${CLAUDE_PLUGIN_ROOT}/commands/references/user-communication.md`'s Adaptive Language Rule).
+
+*Agent-mode fallback: if `INTERACTIVE_MODE=agent`, raise no question at all — § Container Mode: Push the Branch's own `INTERACTIVE_MODE=agent` branch decides whether that run pushes and logs its own `agent-mode: container-push …` line.*
 
 Count commits on this branch:
 

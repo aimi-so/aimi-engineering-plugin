@@ -149,7 +149,7 @@ CWD is the same project-root conditional Container Dev Server Bootstrap (Step 3.
 
 ## Container Mode: Push the Branch
 
-**Runs only when `CONTAINER_MODE=true`, after every dev-server stop above has completed.** Pushing publishes `[branchName]` to `origin` — an outward-facing action, and `CONTAINER_MODE` itself is just a field inside the tasks file, so a tasks file must never be able to trigger a publish on its own. Confirm before pushing, the same interactivity-gated pattern Phase Completion's **Next Phase** (in `commands/execute.md`) uses for its own AskUserQuestion/agent-mode branching. Resolve interactivity fresh — each Bash call is an isolated shell (Step 0):
+**Runs only when `CONTAINER_MODE=true`, after every dev-server stop above has completed.** Pushing publishes `[branchName]` to `origin` — an outward-facing action, and `CONTAINER_MODE` itself is just a field inside the tasks file, so a tasks file must never be able to trigger a publish on its own. Confirm before pushing. The contract that confirmation satisfies — what counts as publishing, why nothing in a file is consent, what each interactivity mode owes the user, and why a decline is a normal outcome rather than a failure — is defined once in `commands/references/publish-confirmation.md` and is not restated here. Resolve interactivity fresh — each Bash call is an isolated shell (Step 0):
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -157,14 +157,9 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
 ```
 
-- **`INTERACTIVE_MODE=picker`:** use **AskUserQuestion** with exactly two options:
-  ```
-  All stories are complete. Push [branchName] to origin now?
+**When `INTERACTIVE_MODE=picker`:** the calling command asks before this section pushes, and this section pushes only on an explicit approval. The question is raised by `commands/execute.md`'s Step 5 **If all stories complete** branch — after **Container Mode: Stop the Dev Server** above has finished and before the push below — and the picker markup itself lives there, in that command body, never in this file. That placement is mechanical, not stylistic: reference files are delivered to OpenCode by `install.sh`'s verbatim whole-tree copy (`install.sh:481-485`), and both of its command-install loops skip the `references` subdirectory by name (`install.sh:530` and `install.sh:580`), so the interactive-question tool named in a reference file is never translated and would reach that host naming a tool it does not have. `commands/references/forge-contract.md` carries its own account-selection contract in prose for exactly this reason; this section follows it.
 
-  A — Push now
-  B — Skip (push it yourself later, or run /aimi:open-pr)
-  ```
-  **Option A:** proceed to the push below. **Option B:** set `SKIP_PUSH=true` and skip straight to **Container Mode: Remove the Container**.
+An approval proceeds to the push below. A decline — and anything that is not an explicit approval, since silence is not approval — sets `SKIP_PUSH=true`, the same variable the push block below gates on, and skips straight to **Container Mode: Remove the Container**. Declining is a normal outcome, not a failure: nothing is retried, no error is raised, and no story's completed status is rolled back.
 
 - **`INTERACTIVE_MODE=agent`:** skip AskUserQuestion — an unattended run cannot answer a prompt. Push only when `--push` was passed on `$ARGUMENTS` (see Parse --push Override in Step 1 of `commands/execute.md`):
   ```bash
