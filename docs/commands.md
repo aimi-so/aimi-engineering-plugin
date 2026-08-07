@@ -114,7 +114,11 @@ With `metadata.execution: "container"`, the whole run happens inside a git workt
 4. Runs the wave loop inside the container.
 5. On completion, stops the dev server and removes the container while keeping the branch.
 
-Pushing the branch to `origin` needs confirmation. An interactive session is asked; an unattended one pushes only when `--push` was passed. Because nothing is left checked out locally afterward, the final report suggests `/aimi:open-pr --branch <branchName>` and `/aimi:review <branchName>` rather than the usual `gh pr create`.
+Publishing is a decision of its own, asked on every `/aimi:execute` path and not only this one. Before the branch reaches `origin`, and before any pull request is opened, you are asked once: a container run offers push or skip, a phase run offers push and open the pull request, push only, or neither. Anything that is not an explicit approval — a dismissed prompt, an unreadable answer, no answer at all — publishes nothing. An unattended run (`--non-interactive`, `AIMI_AGENT_MODE=true`, or `CI=true`) never publishes, and there is no flag that re-enables it. Declining is a normal outcome, not a failure: nothing is retried, and no story or phase status is rolled back. A multi-repo phase is asked once for the whole phase, not once per repository.
+
+Every ending names `/aimi:open-pr`, whether the run published or not — `/aimi:open-pr --branch <branchName>` when the container has been removed and the branch is checked out nowhere, and the bare `/aimi:open-pr` after an inline run, where the branch is still under your feet and the command's own uncommitted-changes check still applies. It is safe to suggest in every case because it pushes the named branch itself before opening anything. `/aimi:review <branchName>` sits alongside it as before. `/aimi:next` publishes nothing at all: when its last story completes it removes the container, keeps the branch, and points you at the same command.
+
+**Only publication moved behind that question.** Everything that delivers the work is untouched: each story worktree is still merged into the feature branch locally — a `git merge`, never a push — and the commits, the branch ref, the container teardown that keeps the branch (`--keep-branch`), and story and phase status all behave exactly as before. A run you decline to publish has lost nothing; the branch is complete on your machine, waiting for `/aimi:open-pr`.
 
 ### Choosing the mode
 
