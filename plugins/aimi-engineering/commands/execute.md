@@ -1,7 +1,7 @@
 ---
 name: aimi:execute
 description: Execute all pending stories autonomously with wave-based parallelism
-argument-hint: "[--phase <N>] [--base <branch>] [--container|--inline] [--push]"
+argument-hint: "[--phase <N>] [--base <branch>] [--container|--inline]"
 disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Bash(git:*), Bash(mkdir:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Bash(WORKTREE_MGR=*), Bash($WORKTREE_MGR:*), Task
 ---
@@ -56,7 +56,26 @@ A non-zero exit here stops the run before any git, worktree, or CLI call consume
 
 When `--base` was not passed, `$BASE_BRANCH` stays empty and every `resolve-base-branch`/`setup-branch` call below omits `--base` — or passes it empty, which those verbs treat identically to omission — falling back to the verb's own resolution order. When it was passed, this runs in Step 0, before Step 0.9's split loop and Step 1.6's picker, so the value is available to be carried into every call site that threads it, including the multi-repo split path that has no other opportunity to learn it before its own worktrees are created. An explicit `--base` also short-circuits Step 1.6's own gating and any per-repo picker Step 2 would otherwise run: `resolve-base-branch` reports `reason: "explicit-base"` and `promptNeeded: false` whenever `--base` is supplied, so no `AskUserQuestion` fires on top of a choice the user already made — see Step 1.6 below.
 
-`--base` is matched on its own literal token, independently of `--phase`'s (numeric-only) and `--container`/`--inline`/`--push`'s (bare-token) extractions above and below — passing several of these flags in one invocation is unaffected, exactly as `--container`/`--inline`/`--push` already coexist without either stripping the raw `$ARGUMENTS` string.
+`--base` is matched on its own literal token, independently of `--phase`'s (numeric-only) and `--container`/`--inline`'s (bare-token) extractions above and below — passing several of these flags in one invocation is unaffected, exactly as `--container` and `--inline` already coexist without either stripping the raw `$ARGUMENTS` string.
+
+### Refuse --push
+
+`--push` was removed. It is not accepted, not ignored and not deprecated: an invocation still carrying it STOPS here, in Step 0, before `init-session` mutates any state. The contract that removal enforces — what counts as publishing, why nothing in a file or on a command line is consent, and why agent mode therefore has no flag that re-enables a push — is defined in `${CLAUDE_PLUGIN_ROOT}/commands/references/publish-confirmation.md` and is not restated here.
+
+Scan and exit in the **same** block, for the same reason the `--base` validation above does: each Bash tool call is an isolated shell, so a gate living in a fence of its own would test an unset variable and pass vacuously. The bare-token `case` is the shape Parse --container/--inline Override below already uses:
+
+```bash
+case " $ARGUMENTS " in
+  *" --push "*) PUSH_REFUSED=true ;;
+  *) PUSH_REFUSED=false ;;
+esac
+if [ "$PUSH_REFUSED" = "true" ]; then
+  echo "Removed flag: --push. An agent-mode run never publishes to origin, and no flag re-enables it. Publish with /aimi:open-pr --branch <branchName>." >&2
+  exit 1
+fi
+```
+
+The non-zero exit is the whole point, not a side effect. A pipeline that passed `--push` on the previous version got a published branch out of it; accepting the flag and quietly doing nothing would hand that same pipeline silence instead — the one outcome nobody notices. Failing is the only result that cannot be misread. Report the refusal to the person in whatever language they are writing in, never a hardcoded one (`${CLAUDE_PLUGIN_ROOT}/commands/references/user-communication.md`'s Adaptive Language Rule), and STOP.
 
 ## Multi-Repo Handling
 
@@ -552,8 +571,10 @@ Total commits: [TOTAL_COMMITS from the loop above]
 
 - Review [branch] commits: git -C [root] log --oneline [default]..[branch]   (one line per plan record)
 - Run /aimi:review for code review
-- Create PRs when ready: gh pr create
+- Open a PR for [branch] from [root]: /aimi:open-pr --branch [branch]   (one line per plan record)
 ```
+
+The PR line is per plan record and names that record's own `[root]` because `/aimi:open-pr` resolves its repository from the current directory — it has no `--project` flag — so in a multi-repo split a line naming only the branch would not be actionable. It uses the `--branch` argument form for the same reason the container report below does: Pass 4 removes every split worktree, leaving each branch checked out nowhere. Naming the command at all is the obligation `${CLAUDE_PLUGIN_ROOT}/commands/references/publish-confirmation.md` § Always Name /aimi:open-pr states; it is not restated here.
 
 Both `Total` lines are sums across **all** plan records, not two named Frontend/Backend slots. For a legacy pair every root is `$AIMI_ROOT` and every default is that repo's own default branch, so the two blocks render the same lines the paired-mode report produced before.
 
@@ -652,17 +673,6 @@ fi
 ```
 
 If `EXECUTION_OVERRIDE` is `"conflict"`, report `--container and --inline are mutually exclusive — pass at most one.` and STOP. Otherwise `EXECUTION_OVERRIDE` is `"container"`, `"inline"`, or empty (no flag passed) — consumed by Execution Mode Detection below.
-
-### Parse --push Override
-
-Scan `$ARGUMENTS` for an explicit `--push` token, the same way. `PUSH_FLAG` is consumed later, only in flat container mode, at container-execution.md's **Container Mode: Push the Branch** (invoked from Step 5) — it is agent mode's explicit opt-in to publish `[branchName]` to `origin` on completion; see that section for why an opt-in is required at all:
-
-```bash
-case " $ARGUMENTS " in
-  *" --push "*) PUSH_FLAG=true ;;
-  *) PUSH_FLAG=false ;;
-esac
-```
 
 ### Execution Mode Detection
 
@@ -3667,11 +3677,57 @@ agent-mode: forge-account auto-selected active account (not recorded) — projec
 
 Whatever was recorded here is applied by the forge verbs themselves through the credential mechanism `commands/references/forge-contract.md`'s **Credential/Identity Model** describes — the loop below neither reads the answer nor passes it along, and is unchanged by this subsection.
 
-For each group, resolve its own repository root, container, and default branch, then push and open a PR against that repository — never a value assumed to survive from Step 1.7 or from Mark Phase Completed above:
+#### Confirm before publishing this phase
+
+Read `${CLAUDE_PLUGIN_ROOT}/commands/references/publish-confirmation.md` — it is the single source of truth for what counts as publishing, why nothing inside a file may authorize one, what each interactivity mode owes the reader, and why every outcome still names `/aimi:open-pr`. That contract is not restated here; this subsection only applies it at this call site.
+
+Asked **once per phase, never once per participating repository.** The forge-account question above is per repository because accounts genuinely differ per repository; "should this phase's work go out" is one decision by one person, and the single answer governs every group in `PHASE_GROUP_PROJECTS`. Someone who wants only one of several repositories published declines here and runs `/aimi:open-pr --branch [PHASE_BRANCH]` inside that repository afterwards.
+
+Resolve interactivity fresh — re-resolved here when still unset, the same cheap idempotent safety net the account picker above uses, since each Bash call is an isolated shell:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+if [ -z "$INTERACTIVE_MODE" ]; then
+  INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
+fi
+echo "$INTERACTIVE_MODE"
+```
+
+**When `INTERACTIVE_MODE=picker`:** Use **AskUserQuestion** exactly once for the whole phase, with three options:
+
+```
+Phase [PHASE_ID] ([PHASE_SLUG]) is complete on [PHASE_BRANCH]. Publish this phase's work now?
+
+A — Push and open the pull request
+B — Push only — no pull request yet
+C — Neither — publish later with /aimi:open-pr
+```
+
+Each option sets exactly one value of `PHASE_PUBLISH`, the single variable the loop below reads: **option A** sets `pr`, **option B** sets `push`, **option C** sets `none`. Option C is the escape hatch and is therefore last, per `commands/references/interactivity.md`'s Option Format. Anything that is not an explicit A or B — a dismissed prompt, an unparseable answer, no answer at all — is `none`: silence is not approval. Write the question and its option text in whatever language the person is writing in, never a hardcoded one (`commands/references/user-communication.md`'s Adaptive Language Rule).
+
+*Agent-mode fallback: if `INTERACTIVE_MODE=agent`, auto-decline — set `PHASE_PUBLISH=none` and publish nothing. Log: `agent-mode: phase-publish skipped (nothing pushed, no pull request) — run /aimi:open-pr --branch [PHASE_BRANCH]`.*
+
+**When `INTERACTIVE_MODE=agent`** (`--non-interactive`, `AIMI_AGENT_MODE=true`, or `CI=true`): no picker, and **no flag re-enables publishing here** — an unattended run cannot obtain consent, and nothing is permitted to stand in for it. Set `PHASE_PUBLISH=none` and print exactly one line, naming both what was not done and the command that does it:
+
+```
+agent-mode: phase-publish skipped (nothing pushed, no pull request) — run /aimi:open-pr --branch [PHASE_BRANCH]
+```
+
+Declining is a normal outcome, not a failure. On `none` — whether from option C or from agent mode — nothing is retried, no error is raised, no claim is re-taken, and the phase's already-`completed` status stays exactly as **Mark Phase Completed** wrote it; execution continues to **Next Phase** below unchanged. That is the same best-effort discipline this section's opening sentence already states, now covering the new branches too.
+
+#### Publish each participating repository
+
+For each group, resolve its own repository root, container, and default branch, then act on the one `PHASE_PUBLISH` outcome the gate above recorded — never a value assumed to survive from Step 1.7 or from Mark Phase Completed above. `PHASE_PUBLISH` crosses into this call as a literal the orchestrator substitutes, exactly as the forge-account record block above takes its own two values, since each Bash call is an isolated shell; anything that is not `pr` or `push` normalizes to `none`, so a substitution that never happened declines rather than publishes:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+PHASE_PUBLISH="[pr, push or none — the one outcome Confirm before publishing this phase recorded above]"
+case "$PHASE_PUBLISH" in
+  pr|push) ;;
+  *) PHASE_PUBLISH="none" ;;
+esac
 while IFS= read -r GROUP_PROJECT; do
   [ -n "$GROUP_PROJECT" ] || continue
   if [ "$GROUP_PROJECT" = "." ]; then
@@ -3689,16 +3745,28 @@ while IFS= read -r GROUP_PROJECT; do
   GROUP_CONTAINER="$GROUP_TOPLEVEL/.worktrees/$PHASE_BRANCH"
   GROUP_DEFAULT=$($AIMI_CLI detect-default-branch --project "$GROUP_TOPLEVEL") || GROUP_DEFAULT=""
 
+  if [ "$PHASE_PUBLISH" = "none" ]; then
+    echo "Nothing published for $GROUP_LABEL — no push, no pull request. Publish it when you are ready:"
+    echo "  /aimi:open-pr --branch $PHASE_BRANCH"
+    continue
+  fi
+
   GROUP_FORGE_STATUS=$($AIMI_CLI forge-auth-status --project "$GROUP_TOPLEVEL" | jq -r '.status // empty')
   if [ "$GROUP_FORGE_STATUS" != "found" ]; then
     echo "No usable forge for $GROUP_LABEL — skipping the push and the pull request. Do both manually:"
     echo "  git -C \"$GROUP_CONTAINER\" push -u origin $PHASE_BRANCH"
     echo "  Then open a PR: $GROUP_DEFAULT...$PHASE_BRANCH"
+    echo "  Once a forge CLI is installed and authenticated for this repository, run this from $GROUP_TOPLEVEL instead: /aimi:open-pr --branch $PHASE_BRANCH"
     continue
   fi
 
   cd "$GROUP_CONTAINER"
   git push -u origin "$PHASE_BRANCH"
+  if [ "$PHASE_PUBLISH" = "push" ]; then
+    echo "Pushed $PHASE_BRANCH for $GROUP_LABEL — no pull request opened. Open one when you are ready:"
+    echo "  /aimi:open-pr --branch $PHASE_BRANCH"
+    continue
+  fi
   GROUP_PR_JSON=$($AIMI_CLI forge-pr-create --base "$GROUP_DEFAULT" --head "$PHASE_BRANCH" \
     --title "Phase [PHASE_ID]: [PHASE_NAME]" \
     --body "Completes phase [PHASE_ID] of [FEATURE]. See [PHASE_DIR]/handoff.md for details." \
@@ -3718,7 +3786,9 @@ done <<< "$PHASE_GROUP_PROJECTS"
 cd "$AIMI_ROOT"
 ```
 
-`forge-auth-status` is this loop's own actionability check, and it deliberately runs **before** the push rather than after it. It reports `status: "found"` if and only if the repository's remote resolves to a forge that has a working write adapter **and** that adapter's CLI is present on `PATH` — precisely the two conditions `forge-pr-create` gates its own write on (`commands/references/forge-contract.md`). This loop therefore reads that one `status` field and never re-derives the forge type or probes for a CLI binary itself, which is also why the check extends for free: the moment a GitLab or Gitea write adapter makes `forge-auth-status` report `found` for those remotes, they start pushing and opening PRs here with no change to this file. `data.authenticated` is deliberately **not** consulted — an installed-but-unauthenticated CLI still reaches the create call and fails there, which is an ordinary per-repository failure this loop already reports, not a reason to withhold the branch. Any status other than `found` means nothing here can open a pull request for that repository, so its branch is not published either: the loop prints that repository's own recovery block — its label, the container-scoped `git push -u origin` command, and the `$GROUP_DEFAULT...$PHASE_BRANCH` compare range — and moves to the next repository without ever touching `origin`.
+`PHASE_PUBLISH` is the only thing in this loop that decides **whether** to publish, and it decides nothing else. On `none` the repository's own decline line is printed with the `/aimi:open-pr --branch` command that publishes it later, and the iteration ends before `forge-auth-status` is even consulted — no forge is queried, no `origin` is contacted, and the branch stays exactly where the container left it. On `push` the branch is pushed and the iteration ends before `forge-pr-create`, printing the same `/aimi:open-pr --branch` command, which is safe to suggest for an already-pushed branch precisely because `/aimi:open-pr` re-attempts the push itself (`${CLAUDE_PLUGIN_ROOT}/commands/references/publish-confirmation.md` § Always Name /aimi:open-pr). On `pr` the loop body runs end to end exactly as it did before this gate existed. Every other decision in the loop is untouched by all three: the not-a-git-repository skip, the `forge-auth-status` pre-push check and its recovery block, the `created`/`unchanged` reporting, the blank-`GROUP_PR_JSON` else branch, and the closing `cd "$AIMI_ROOT"` — which still runs after the loop no matter which branch each repository took. No branch here reverts, re-reads or rewrites the phase's `completed` status, and none re-claims the phase.
+
+`forge-auth-status` is this loop's own actionability check, and it deliberately runs **before** the push rather than after it. It reports `status: "found"` if and only if the repository's remote resolves to a forge that has a working write adapter **and** that adapter's CLI is present on `PATH` — precisely the two conditions `forge-pr-create` gates its own write on (`commands/references/forge-contract.md`). This loop therefore reads that one `status` field and never re-derives the forge type or probes for a CLI binary itself, which is also why the check extends for free: the moment a GitLab or Gitea write adapter makes `forge-auth-status` report `found` for those remotes, they start pushing and opening PRs here with no change to this file. `data.authenticated` is deliberately **not** consulted — an installed-but-unauthenticated CLI still reaches the create call and fails there, which is an ordinary per-repository failure this loop already reports, not a reason to withhold the branch. Any status other than `found` means nothing here can open a pull request for that repository, so its branch is not published either: the loop prints that repository's own recovery block — its label, the container-scoped `git push -u origin` command, the `$GROUP_DEFAULT...$PHASE_BRANCH` compare range, and the `/aimi:open-pr --branch` line to run from that repository's own root once a forge CLI is installed and authenticated there — and moves to the next repository without ever touching `origin`. That last line is deliberately conditional: this branch fires precisely because no forge adapter or CLI is usable here, and `/aimi:open-pr` routes through the same forge verbs, so it would stop on the same condition if it were run right now. The push command and the compare range above it are the fallback that works with no forge at all, which is why both stay.
 
 **This is stricter than the binary-presence gate phase 1 deleted, not a restoration of it.** That gate tested only whether a GitHub CLI existed on `PATH`, so a GitLab or Gitea remote on a machine that happened to have one installed *did* get its branch pushed; only the PR call failed, leaving a merge request openable from the forge's web UI. Routing the decision through `forge-auth-status` withdraws that push, on the principle that whether a branch reaches `origin` should not depend on an unrelated binary being installed. The recovery block above is what keeps that a defensible change rather than a regression — those users lose one pasted command, not the push itself.
 
@@ -3726,7 +3796,7 @@ cd "$AIMI_ROOT"
 
 If `git push` or `forge-pr-create` fails for a given repository (no permissions, offline, branch already has an open PR the tool itself cannot read, etc.), that repository's failure is what `forge-pr-create` already reported on stderr — report it verbatim, echo the loop's own per-repository line naming it, and continue on to the next repository — do not retry, do not prompt interactively, and never revert the phase's `completed` status. The `forge-auth-status` skip above obeys the same isolation contract: it is reported for that one repository, it consumes no other repository's turn, and the phase stays `completed` no matter how many of the participating repositories are skipped or fail.
 
-With exactly one participating group — today's only previously-supported case — `PHASE_GROUP_PROJECTS` resolves to exactly `.`, `GROUP_TOPLEVEL` resolves to the same repository `$PHASE_CONTAINER_PATH` was built from, so `GROUP_CONTAINER` equals `$PHASE_CONTAINER_PATH` exactly, and `GROUP_DEFAULT` — detected fresh via the identical `--project`-scoped call Step 1.5's own `$DEFAULT_BRANCH` detection uses — equals `$DEFAULT_BRANCH`. The push and the forge call issued are therefore the same single-repository push and PR creation as before, now routed through `forge-pr-create` instead of a direct `gh pr create`. That single repository is subject to the `forge-auth-status` check like any other: when its own status is not `found`, neither the push nor the PR call runs at all — the one group prints its recovery block, the loop body ends there, and the phase still finishes `completed`, exactly as the skip behaves for one repository out of many. When more than one group participates, the loop runs once per repository, each against its own container, its own default branch, its own actionability check, and its own pull request.
+With exactly one participating group — today's only previously-supported case — `PHASE_GROUP_PROJECTS` resolves to exactly `.`, `GROUP_TOPLEVEL` resolves to the same repository `$PHASE_CONTAINER_PATH` was built from, so `GROUP_CONTAINER` equals `$PHASE_CONTAINER_PATH` exactly, and `GROUP_DEFAULT` — detected fresh via the identical `--project`-scoped call Step 1.5's own `$DEFAULT_BRANCH` detection uses — equals `$DEFAULT_BRANCH`. Under the approving `pr` answer the push and the forge call issued are therefore the same single-repository push and PR creation as before, now routed through `forge-pr-create` instead of a direct GitHub-CLI invocation. That single repository is subject to the `forge-auth-status` check like any other: when its own status is not `found`, neither the push nor the PR call runs at all — the one group prints its recovery block, the loop body ends there, and the phase still finishes `completed`, exactly as the skip behaves for one repository out of many. When more than one group participates, the loop runs once per repository, each against its own container, its own default branch, its own actionability check, and its own pull request.
 
 ### Next Phase
 
@@ -3780,7 +3850,29 @@ When execution ends (all stories complete, or deadlock detected):
 
 ### If all stories complete:
 
-**When `CONTAINER_MODE=true`:** read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Container Mode: Stop the Dev Server, § Container Mode: Push the Branch, and § Container Mode: Remove the Container, and run all three, in that order, before continuing below. When `CONTAINER_MODE=false` (inline mode), skip all three and continue directly below.
+**When `CONTAINER_MODE=true`:** read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Container Mode: Stop the Dev Server, § Container Mode: Push the Branch, and § Container Mode: Remove the Container, and run all three, in that order, before continuing below — raising the push confirmation immediately below in between, after every dev-server stop has completed and before anything is pushed. When `CONTAINER_MODE=false` (inline mode), skip all three, skip the confirmation with them, and continue directly below.
+
+**Confirm before this container's branch reaches `origin`.** The contract this question satisfies is defined once in `${CLAUDE_PLUGIN_ROOT}/commands/references/publish-confirmation.md` and is not restated here. The question itself lives in this command body rather than in that reference — or in `container-execution.md`, which owns the push it gates — because reference files reach OpenCode through a verbatim whole-tree copy that never translates the interactive-question tool's name, so a picker written into one would name a tool that host does not have. Resolve interactivity fresh — each Bash call is an isolated shell:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
+echo "$INTERACTIVE_MODE"
+```
+
+**When `INTERACTIVE_MODE=picker`:** Use **AskUserQuestion** exactly once for the whole run, with exactly two options:
+
+```
+All stories are complete. Push [branchName] to origin now?
+
+A — Push now
+B — Skip (push it yourself later, or run /aimi:open-pr)
+```
+
+**Option A:** proceed to the push in § Container Mode: Push the Branch. **Option B:** set `SKIP_PUSH=true` — the same variable that reference's own push block gates on — and skip straight to § Container Mode: Remove the Container. Anything that is not an explicit A — a dismissed prompt, an unparseable answer, no answer at all — is B: silence is not approval. Ask once for the whole run, not once per project group; one answer governs every participating group (`publish-confirmation.md`). Write the question and its option text in whatever language the person is writing in, never a hardcoded one (`${CLAUDE_PLUGIN_ROOT}/commands/references/user-communication.md`'s Adaptive Language Rule).
+
+*Agent-mode fallback: if `INTERACTIVE_MODE=agent`, raise no question at all — § Container Mode: Push the Branch's own `INTERACTIVE_MODE=agent` branch decides whether that run pushes and logs its own `agent-mode: container-push …` line.*
 
 Count commits on this branch:
 
@@ -3937,13 +4029,13 @@ Decision gates ([pending_decision_gates]):
 Resolve gates with: $AIMI_CLI gate-pass <story-id> [--option 'value']
 ```
 
-**When `CONTAINER_MODE=false` (inline mode, unchanged):**
+**When `CONTAINER_MODE=false` (inline mode):** no container was ever created and nothing was torn down, so the branch is still checked out right here — use the bare form, with no `--branch`, so that `/aimi:open-pr` still runs its uncommitted-changes check (it skips that check whenever `--branch` names a branch, since that branch is checked out elsewhere or nowhere). Naming the command at all is the obligation `${CLAUDE_PLUGIN_ROOT}/commands/references/publish-confirmation.md` § Always Name /aimi:open-pr states.
 ```
 ### Next Steps
 
 - Review commits: `git log --oneline -[count]`
 - Run `/aimi:review` for code review
-- Create PR when ready: `gh pr create`
+- Open a PR when ready: `/aimi:open-pr`
 ```
 
 **When `CONTAINER_MODE=true`:** the container was already removed above and nothing is checked out anywhere, so use the argument forms that work for a branch checked out nowhere instead:

@@ -343,22 +343,11 @@ Run /aimi:status to see overall progress.
 
 #### Container Mode: Complete the Run
 
-**Runs only when `CONTAINER_MODE` is true and `count-pending` above returned 0.** Push the branch and remove the container while keeping the branch — same push-never-blocks contract and same ordering as execute.md's own Container Mode: Push the Branch / Remove the Container in its Step 5, minus the dev server stop (next.md never starts one — see notes above).
+**Runs only when `CONTAINER_MODE` is true and `count-pending` above returned 0.** Remove the container while keeping the branch, count the commits that branch accumulated, and report — the same removal `commands/references/container-execution.md`'s **Container Mode: Remove the Container** performs, minus the dev server stop (next.md never starts one — see notes above).
 
-1. **Push the branch (best-effort).** From inside the container:
+**This section publishes nothing.** `/aimi:next` never pushes `$BRANCH_NAME` to `origin`; `commands/references/publish-confirmation.md` is the confirm-before-publishing contract it follows, and states it once for every completion path rather than each restating it. Nothing is lost by not pushing here: `/aimi:open-pr` performs the push itself when the user runs `/aimi:open-pr --branch [BRANCH_NAME]`, which is why the report below names that command. Because nothing is published, the contract's ask-first obligation never engages — do not add a confirmation prompt to this section.
 
-```bash
-cd "$CONTAINER_PATH"
-PUSH_OUTPUT=$(git push -u origin "$BRANCH_NAME" 2>&1)
-PUSH_EXIT=$?
-if [ "$PUSH_EXIT" -ne 0 ]; then
-  echo "$PUSH_OUTPUT"
-fi
-```
-
-If the push fails (offline, no remote permission, branch rejected, etc.), `$PUSH_OUTPUT` is reported verbatim — never retried automatically, and never reverts the `mark-complete` above. Continue unconditionally to the next step regardless of `$PUSH_EXIT`: `/aimi:open-pr`'s own push step retries the push when the user later runs `/aimi:open-pr --branch [BRANCH_NAME]`, so the Next Steps suggestions below stay safe to print either way.
-
-2. **Remove the container, keeping the branch.** A worktree cannot be removed while CWD sits inside it, so return to `$CONTAINER_ROOT` first:
+1. **Remove the container, keeping the branch.** A worktree cannot be removed while CWD sits inside it, so return to `$CONTAINER_ROOT` first:
 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
@@ -369,19 +358,21 @@ $WORKTREE_MGR remove "$BRANCH_NAME" --keep-branch
 
 `--keep-branch` preserves the local branch ref: this container is the deliverable the report below points the user at for review and a PR, not a throwaway per-story worktree — removing it without `--keep-branch` would delete the very branch the Next Steps suggestions tell the user to open a PR from.
 
-3. **Count commits against the default branch.** The branch is no longer checked out anywhere after the removal above, so count against the branch name directly, from `$CONTAINER_ROOT`:
+2. **Count commits against the default branch.** The branch is no longer checked out anywhere after the removal above, so count against the branch name directly, from `$CONTAINER_ROOT`:
 
 ```bash
 cd "$CONTAINER_ROOT"
 git log --oneline "$DEFAULT_BRANCH".."$BRANCH_NAME" | wc -l
 ```
 
-4. Report:
+3. Report:
 ```
 All stories complete! [STORY_ID] - [STORY_TITLE] completed successfully.
 
 Branch: [BRANCH_NAME]
 Commits: [count]
+
+This branch is local only — it has not been published to origin.
 
 Review commits: `git log --oneline -[count]`
 Open a PR: `/aimi:open-pr --branch [BRANCH_NAME]`

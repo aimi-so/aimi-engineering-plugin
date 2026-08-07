@@ -256,7 +256,8 @@ The flags you are most likely to reach for, all on `/aimi:execute`:
 | `--inline` | Run against your working tree rather than a container |
 | `--container` | Force container mode when the plan is set to inline |
 | `--phase <N>` | Run one phase of a roadmap |
-| `--push` | Publish the branch to `origin` when the run completes |
+
+There is no flag for publishing. Finishing the work and publishing it are two separate decisions: every path asks you once, when the run completes, before the branch reaches `origin` and before any pull request is opened. An unattended run never publishes — nothing re-enables it — and every ending names `/aimi:open-pr`, which pushes the branch itself when you are ready.
 
 ---
 
