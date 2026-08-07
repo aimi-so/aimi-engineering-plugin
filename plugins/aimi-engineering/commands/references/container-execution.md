@@ -161,14 +161,10 @@ INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
 
 An approval proceeds to the push below. A decline — and anything that is not an explicit approval, since silence is not approval — sets `SKIP_PUSH=true`, the same variable the push block below gates on, and skips straight to **Container Mode: Remove the Container**. Declining is a normal outcome, not a failure: nothing is retried, no error is raised, and no story's completed status is rolled back.
 
-- **`INTERACTIVE_MODE=agent`:** skip AskUserQuestion — an unattended run cannot answer a prompt. Push only when `--push` was passed on `$ARGUMENTS` (see Parse --push Override in Step 1 of `commands/execute.md`):
+- **`INTERACTIVE_MODE=agent`:** skip AskUserQuestion — an unattended run cannot answer a prompt, and it therefore never publishes. There is no argument that re-enables the push; that absence is the rule, not a gap, per `commands/references/publish-confirmation.md`. Set `SKIP_PUSH=true` unconditionally, and name what was not done alongside the command that does it:
   ```bash
-  if [ "$PUSH_FLAG" = "true" ]; then
-    echo "agent-mode: container-push [branchName]"
-  else
-    echo "agent-mode: container-push skipped (no --push flag)"
-    SKIP_PUSH=true
-  fi
+  SKIP_PUSH=true
+  echo "agent-mode: [branchName] not pushed to origin — publish with /aimi:open-pr --branch [branchName]"
   ```
 
 **When `SKIP_PUSH` is not set:** for each unique `group_key`, push `[branchName]` to `origin` from inside that group's container. Read and validate `branchName` first — defense in depth, mirroring `PHASE_BRANCH`'s validate-once-quote-everywhere discipline (`cmd_init_session` already rejected an invalid `branchName` in Step 1):

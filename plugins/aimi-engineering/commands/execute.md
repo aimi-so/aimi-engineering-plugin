@@ -1,7 +1,7 @@
 ---
 name: aimi:execute
 description: Execute all pending stories autonomously with wave-based parallelism
-argument-hint: "[--phase <N>] [--base <branch>] [--container|--inline] [--push]"
+argument-hint: "[--phase <N>] [--base <branch>] [--container|--inline]"
 disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Bash(git:*), Bash(mkdir:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Bash(WORKTREE_MGR=*), Bash($WORKTREE_MGR:*), Task
 ---
@@ -56,7 +56,26 @@ A non-zero exit here stops the run before any git, worktree, or CLI call consume
 
 When `--base` was not passed, `$BASE_BRANCH` stays empty and every `resolve-base-branch`/`setup-branch` call below omits `--base` — or passes it empty, which those verbs treat identically to omission — falling back to the verb's own resolution order. When it was passed, this runs in Step 0, before Step 0.9's split loop and Step 1.6's picker, so the value is available to be carried into every call site that threads it, including the multi-repo split path that has no other opportunity to learn it before its own worktrees are created. An explicit `--base` also short-circuits Step 1.6's own gating and any per-repo picker Step 2 would otherwise run: `resolve-base-branch` reports `reason: "explicit-base"` and `promptNeeded: false` whenever `--base` is supplied, so no `AskUserQuestion` fires on top of a choice the user already made — see Step 1.6 below.
 
-`--base` is matched on its own literal token, independently of `--phase`'s (numeric-only) and `--container`/`--inline`/`--push`'s (bare-token) extractions above and below — passing several of these flags in one invocation is unaffected, exactly as `--container`/`--inline`/`--push` already coexist without either stripping the raw `$ARGUMENTS` string.
+`--base` is matched on its own literal token, independently of `--phase`'s (numeric-only) and `--container`/`--inline`'s (bare-token) extractions above and below — passing several of these flags in one invocation is unaffected, exactly as `--container` and `--inline` already coexist without either stripping the raw `$ARGUMENTS` string.
+
+### Refuse --push
+
+`--push` was removed. It is not accepted, not ignored and not deprecated: an invocation still carrying it STOPS here, in Step 0, before `init-session` mutates any state. The contract that removal enforces — what counts as publishing, why nothing in a file or on a command line is consent, and why agent mode therefore has no flag that re-enables a push — is defined in `${CLAUDE_PLUGIN_ROOT}/commands/references/publish-confirmation.md` and is not restated here.
+
+Scan and exit in the **same** block, for the same reason the `--base` validation above does: each Bash tool call is an isolated shell, so a gate living in a fence of its own would test an unset variable and pass vacuously. The bare-token `case` is the shape Parse --container/--inline Override below already uses:
+
+```bash
+case " $ARGUMENTS " in
+  *" --push "*) PUSH_REFUSED=true ;;
+  *) PUSH_REFUSED=false ;;
+esac
+if [ "$PUSH_REFUSED" = "true" ]; then
+  echo "Removed flag: --push. An agent-mode run never publishes to origin, and no flag re-enables it. Publish with /aimi:open-pr --branch <branchName>." >&2
+  exit 1
+fi
+```
+
+The non-zero exit is the whole point, not a side effect. A pipeline that passed `--push` on the previous version got a published branch out of it; accepting the flag and quietly doing nothing would hand that same pipeline silence instead — the one outcome nobody notices. Failing is the only result that cannot be misread. Report the refusal to the person in whatever language they are writing in, never a hardcoded one (`${CLAUDE_PLUGIN_ROOT}/commands/references/user-communication.md`'s Adaptive Language Rule), and STOP.
 
 ## Multi-Repo Handling
 
@@ -652,17 +671,6 @@ fi
 ```
 
 If `EXECUTION_OVERRIDE` is `"conflict"`, report `--container and --inline are mutually exclusive — pass at most one.` and STOP. Otherwise `EXECUTION_OVERRIDE` is `"container"`, `"inline"`, or empty (no flag passed) — consumed by Execution Mode Detection below.
-
-### Parse --push Override
-
-Scan `$ARGUMENTS` for an explicit `--push` token, the same way. `PUSH_FLAG` is consumed later, only in flat container mode, at container-execution.md's **Container Mode: Push the Branch** (invoked from Step 5) — it is agent mode's explicit opt-in to publish `[branchName]` to `origin` on completion; see that section for why an opt-in is required at all:
-
-```bash
-case " $ARGUMENTS " in
-  *" --push "*) PUSH_FLAG=true ;;
-  *) PUSH_FLAG=false ;;
-esac
-```
 
 ### Execution Mode Detection
 

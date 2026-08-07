@@ -233,7 +233,7 @@ translate_command_body() {
   # Coverage re-verified (bug/container-base-branch-resolution US-005):
   # execute.md's Step 0 `--base` extraction (a plain `case " $ARGUMENTS " in`
   # scan + `sed`/`grep` pair, mirroring the pre-existing `--phase`/`--container`/
-  # `--inline`/`--push` extractions) and every `resolve-base-branch`/
+  # `--inline` extractions) and every `resolve-base-branch`/
   # `setup-branch --base "$BASE_BRANCH"` call site it threads into need no new
   # rule — none of the substitutions above rewrite flag parsing or CLI
   # subcommand/flag names, so `--base` and its call sites survive translation
