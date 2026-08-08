@@ -13931,16 +13931,22 @@ def _rm_candidates($phases; $allowed; $work):
 # (ignore previous / system: / INSTRUCTIONS / code fences / "$("), because it is
 # not human-only prose: /aimi:plan collects every completed phase's handoff.md
 # into phaseHandoffBlocks (commands/plan.md:583 and :587) and threads it verbatim
-# into every story-expander sub-agent prompt (commands/plan.md:1834-1838). Freeing
-# the description of the character class is a legibility fix; freeing it of the
-# injection patterns would reopen a prompt-injection path that is closed today.
+# into every story-expander sub-agent prompt (grep phaseHandoffBlocks in
+# commands/plan.md; line numbers there drift). Freeing the description of the
+# character class is a legibility fix; freeing it of the injection patterns
+# would reopen a prompt-injection path that is closed today.
 #
-# Two of the five class characters can never actually reach (e) from either
-# caller: _rm_sanitize(500) runs over creates/needs FIRST in both cmd_roadmap_init
-# and cmd_roadmap_amend_phase, and it already deletes backticks and the "$("
-# opener. They stay in the class anyway so this rule and _cv_shell_chars remain
-# one table read twice rather than two tables that happen to agree; the
-# characters that actually arrive here are ";" "|" "&" and a lone "$".
+# EXACTLY ONE of the five class characters cannot reach (e): the backtick.
+# _rm_sanitize_contract runs over creates/needs first in both callers, and its
+# marker-normalization half unwraps a backticked span and drops a stray marker,
+# so no backtick survives into a stored identity. The other four -- ";" "|" "&"
+# and "$" -- all arrive here and are all refused.
+#
+# "$(" is NOT a sixth class member and never was: it is a two-character
+# SEQUENCE, and the class member it starts with, "$", reaches this rule like any
+# other. Counting it as a member is what made an earlier draft of this comment
+# say "two of the five", which is wrong by one and reads as though a "$" were
+# somehow exempt. It is not.
 #
 # RETROACTIVITY IS THE CALLER'S PROPERTY, NOT THIS HELPER'S. Nothing here scopes
 # anything; this judges every phase object it is handed. Existing roadmaps stay
@@ -14189,6 +14195,7 @@ cmd_roadmap_init() {
         if [ -n "$identity_errors" ]; then
           echo "Error: roadmap-init: malformed creates/needs identity in new phase(s):" >&2
           printf '%s\n' "$identity_errors" >&2
+          echo "Note: an entry is quoted after backtick normalization -- a `x` span becomes x -- so one submitted with backticks appears here without them. Nothing else about an identity is rewritten; locate it by its position in the list." >&2
           exit 1
         fi
 
@@ -14218,6 +14225,7 @@ cmd_roadmap_init() {
         if [ -n "$identity_errors" ]; then
           echo "Error: roadmap-init: malformed creates/needs identity in new phase(s):" >&2
           printf '%s\n' "$identity_errors" >&2
+          echo "Note: an entry is quoted after backtick normalization -- a `x` span becomes x -- so one submitted with backticks appears here without them. Nothing else about an identity is rewritten; locate it by its position in the list." >&2
           exit 1
         fi
 
@@ -14507,6 +14515,7 @@ cmd_roadmap_amend_phase() {
       if [ -n "$identity_errors" ]; then
         echo "Error: roadmap-amend-phase: malformed creates/needs identity in the amended phase:" >&2
         printf '%s\n' "$identity_errors" >&2
+        echo "Note: an entry is quoted after backtick normalization -- a `x` span becomes x -- so one submitted with backticks appears here without them. Nothing else about an identity is rewritten; locate it by its position in the list." >&2
         exit 1
       fi
 
@@ -16749,6 +16758,16 @@ COMMANDS:
                               or a computed dir that fails ^phase-[0-9]+(\.[0-9]+)?
                               (-[a-z0-9][a-z0-9-]*)?$. Free-text fields are sanitized
                               and length-capped per commands/references/sanitization.md.
+                              Also rejects, per entry, a creates/needs IDENTITY (the
+                              text before the first "(") that is empty, carries
+                              whitespace, a ".." segment, a leading "/", one of
+                              [$`;|&], or matches an injection pattern -- and an
+                              areas[] glob that is absolute or traverses. The
+                              identity is what verify-creates greps for literally;
+                              the parenthesised description is judged only for
+                              injection patterns and may hold the rest. Full rules
+                              and rationale: commands/references/scope-contexts.md
+                              section "Creates/Needs Contracts".
     roadmap-amend-phase --feature <slug> --phase <id> [--goal <text>] [--branch <name>]
                               [--file <path>] [--retarget-needs "<old>=<new>"]...
                               Correct an EXISTING phase's contract in place --

@@ -141,25 +141,59 @@ a search will look for. Only the identity is searched, so only the identity
 carries the ban.
 
 **The description is not exempt from the injection patterns.** It still refuses
-`ignore previous`, `system:`, `INSTRUCTIONS`, code fences and `$(`, because it
+`ignore previous`, `system:`, `INSTRUCTIONS:`, code fences and `$(`, because it
 is not human-only prose: `/aimi:plan` reads every completed phase's `handoff.md`
 into its `phaseHandoffBlocks` and threads that text verbatim into every
 story-expander sub-agent prompt. A description is therefore LLM-prompt input,
 and the injection guard covers it for the same reason it covers any other
 prompt-bound field.
 
+Both instruction markers are matched in their **marker** form, not as bare
+words — a colon after `INSTRUCTIONS`, a non-identifier character before
+`system:`. Unanchored they matched ordinary English and ordinary names, so
+`docs/instructions.md (setup instructions)` and `design-system:tokens` were
+written and then refused. Those are legal entries.
+
+**The identity is never rewritten — only refused.** The two rulers govern
+mutation as well as judgement. The identity gets formatting normalization only
+(a fenced block goes, a backticked span unwraps, newlines fold); the description
+additionally gets the tag and instruction-override strips. That asymmetry is
+the point: those strips **delete content**, and an identity is grepped for
+literally, so rewriting one produces a name the phase will never deliver. Before
+the split, `design-system:tokens (a token file)` was stored as
+`design-tokens (a token file)` and `parseList<T>` as `parseList` — silently,
+with `validate-contracts` then passing, so the contract read as undelivered a
+whole phase later. Namespaced, templated and globbed identities are declared on
+purpose here (`queue:emails`, `Generic<T>`, `db/migrations/*.sql`) and survive
+verbatim.
+
 **The refusal happens at write time.** `roadmap-init` and `roadmap-amend-phase`
 reject a malformed identity before anything reaches `roadmap.json`, naming the
-phase, the list, the entry and the offending character:
+phase, the list, the entry's position, the entry and every reason it failed:
 
 ```
-phase 2: creates entry "cmd_a;cmd_b (two verbs)" is not a usable artifact identity: contains the shell metacharacter ";", which validate-contracts refuses in an identity -- move that text into the parenthesised description, which is judged only for injection patterns
+phase 2: creates entry #1 "cmd_a;cmd_b (two verbs)" is not a usable artifact identity: contains the shell metacharacter ";", which validate-contracts refuses in an identity -- move that text into the parenthesised description, or, for an endpoint, declare the route without its query string
 ```
 
-`validate-contracts` and `roadmap-sweep` apply the same class to the same
-identity when they *read* a roadmap. That reader-side check is defence in depth
-now, not the place an author is meant to meet the rule: it should not fire on a
-roadmap this CLI wrote, and if it does, the write path is what to look at.
+An entry that matched an injection pattern is reported by position with its
+content **withheld**: that stderr is read by the agent that will act on it, so
+replaying the payload would be the delivery the check exists to block.
+
+`areas[]` is judged too, by its own narrow rule — a glob may not be absolute
+and may not traverse. It is not an identity, so none of the rules above apply
+to it; it is checked because `/aimi:plan` appends phase `areas` to its research
+path hints as-is, exempting them from the filter it applies to user-typed
+tokens on the grounds that this verb already sanitized them.
+
+`validate-contracts` and `roadmap-sweep` apply the same rules when they *read* a
+roadmap. That reader-side check is defence in depth, not the place an author is
+meant to meet the rule: it should not fire on a roadmap this CLI wrote, and if
+it does, the write path is what to look at. When it does fire — on a roadmap
+written before these rules, or hand-edited — it names the phase, the field, the
+entry's position and the reason, and points at `roadmap-amend-phase` to repair
+it. `roadmap-sweep` additionally reports **what it dropped**: it removes a
+flagged entry before computing orphans and deferred needs, so a downstream
+`needs` that cited it would otherwise read as unmet with no trace of why.
 
 ### Two behaviours to know before writing an entry
 

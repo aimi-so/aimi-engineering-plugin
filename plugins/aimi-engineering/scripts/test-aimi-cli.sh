@@ -168,12 +168,12 @@ done
 # therefore reads 3837 from a linked worktree and 3839 from a normal checkout.
 # RUN_FRAME names which of the two this run is, so the suite-cost line at the
 # bottom can say so out loud rather than leaving the reader to work it out.
-EXPECTED_ASSERTIONS=3848
+EXPECTED_ASSERTIONS=3850
 RUN_FRAME=checkout
 _resolved_cli="$(realpath "$SCRIPT_DIR/aimi-cli.sh" 2>/dev/null || printf '%s' "$SCRIPT_DIR/aimi-cli.sh")"
 case "$_resolved_cli" in
   */.worktrees/*)
-    EXPECTED_ASSERTIONS=3846
+    EXPECTED_ASSERTIONS=3848
     RUN_FRAME=worktree
     ;;
 esac

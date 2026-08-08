@@ -4092,6 +4092,20 @@ test_verify_creates_reuses_existing_identity_definition() {
   identity_defs=$(grep -c 'def _cv_identity:' "$CLI" || true)
   assert_eq "1" "$identity_defs" "identity: exactly one _cv_identity definition in aimi-cli.sh"
 
+  # The class itself needs the same guard, and needs it more: it is short enough
+  # to retype from memory, so the likely drift is not a second def but a raw
+  # "[$`;|&]" literal appearing somewhere new and quietly diverging from this
+  # one. Both the def and the literal are counted.
+  local class_defs class_literals
+  class_defs=$(grep -c 'def _cv_shell_class:' "$CLI" || true)
+  assert_eq "1" "$class_defs" "identity: exactly one _cv_shell_class definition in aimi-cli.sh"
+  # Three legitimate occurrences of the raw class, and only three: the def, the
+  # header comment that explains it, and the roadmap-init --help text that
+  # tells an author which characters are refused. Anything else is a copy that
+  # can drift out of step with the def while every test still passes.
+  class_literals=$(grep -cF '[$`;|&]' "$CLI" || true)
+  assert_eq "3" "$class_literals" "identity: the raw shell class appears only in its def, its explaining comment and --help"
+
   # The verb must read creates[] through those shared defs.
   if grep -q '_CONTRACT_JQ_DEFS' <(sed -n '/^cmd_verify_creates()/,/^}/p' "$CLI"); then
     echo -e "${GREEN}✓${NC} identity: cmd_verify_creates reads creates[] through _CONTRACT_JQ_DEFS"

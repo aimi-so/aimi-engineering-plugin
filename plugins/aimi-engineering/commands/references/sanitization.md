@@ -8,11 +8,28 @@ says "sanitize" or "apply the sanitization rules from this file."
 
 Before interpolating any user-supplied string into a prompt or file, strip:
 
-1. Code fences and backtick content
+1. Fenced code blocks (triple backticks) — deleted whole, contents included.
+   A **single** backticked span is **unwrapped, not deleted**: `` `x` `` becomes
+   `x`. A stray unmatched backtick is dropped. The marker is formatting; the
+   words inside it are content, and deleting them silently destroyed the very
+   token a later step needed — see `scope-contexts.md` § Creates/Needs Contracts
+   for the failure this caused.
 2. HTML/XML tags
-3. Instruction-override patterns (`ignore previous`, `you are now`, and similar)
+3. Instruction-override patterns (`ignore previous`, `you are now`, and
+   `system:` / `INSTRUCTIONS:` in their **marker** form — a colon after
+   `INSTRUCTIONS`, a non-identifier character before `system:`. Unanchored, these
+   matched ordinary text such as `docs/instructions.md` and
+   `design-system:tokens`.)
 
 Apply all three rules in order. The result replaces the original string.
+
+**One exception, and it is narrow.** A `creates`/`needs` entry is
+`identity (description)`, and only the description gets rules 2 and 3. The
+identity gets rule 1 alone, because rules 2 and 3 delete content and an identity
+is grepped for literally — rewriting it produces a name the phase will never
+deliver. That entry is instead **refused** if its identity is malformed. The
+split lives in `aimi-cli.sh`'s `_rm_sanitize_contract`; everything else in the
+system uses all three rules as written above.
 
 ## Path-Hints Extension
 
