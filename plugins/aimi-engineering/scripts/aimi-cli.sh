@@ -13638,6 +13638,59 @@ def _rm_sanitize(maxlen):
     | gsub("(?<b>^|[^a-zA-Z0-9_-])system\\s*:"; .b; "i")
     | if (length > maxlen) then .[0:maxlen] else . end
   ) end;
+
+# The INTENDED-mutation prefix of _rm_sanitize: formatting normalization only.
+# Fenced blocks go, a backticked span unwraps to its inner text, a stray marker
+# goes, newlines collapse, the cap applies -- and nothing else. Every rule
+# _rm_sanitize applies beyond this point DELETES CONTENT (an HTML/XML-looking
+# tag, "$(", an instruction-override phrase), which is fine for prose but
+# rewrites an identity into a token the phase will not deliver.
+#
+# _roadmap_identity_errors compares the two: same identity, nothing was lost;
+# different identity, a content rule fired and the entry is refused rather than
+# quietly stored under a name verify-creates will never find. Keep this in step
+# with _rm_sanitize -- a new formatting rule belongs in both, a new content rule
+# in _rm_sanitize alone.
+def _rm_markers_only(maxlen):
+  if . == null then null else
+  ( .
+    | gsub("```[\\s\\S]*?```"; "")
+    | gsub("`(?<inner>[^`\n]*)`"; .inner)
+    | gsub("`"; "")
+    | gsub("\r\n|\r|\n"; " ")
+    | if (length > maxlen) then .[0:maxlen] else . end
+  ) end;
+
+# The two rulers, applied to MUTATION as well as to judgement. A creates/needs
+# entry is "identity (human description)": the identity is the token
+# verify-creates greps for literally, and the description is prose that reaches
+# a sub-agent prompt. They need opposite treatment, and running one sanitizer
+# over the whole string gave the identity the prose treatment.
+#
+# The identity gets formatting normalization ONLY. The content rules are what
+# rewrote "parseList<T>" into "parseList" and "design-system:tokens" into
+# "design-tokens" -- silently, with validate-contracts then passing, so
+# verify-creates went looking for a name the phase never produces and the
+# failure surfaced a whole phase away from its cause. This repository declares
+# templated and namespaced identities on purpose (see the identity-kinds test:
+# "queue:emails", "Generic<T>", "db/migrations/*.sql"), so destroying them was
+# never right and refusing them would not be either. They now survive verbatim.
+#
+# The description keeps the full sanitizer, unchanged: a tag, an override
+# phrase or a "$(" in prose is exactly what those rules exist for.
+#
+# Nothing here weakens what an identity may CONTAIN. _roadmap_identity_errors
+# still refuses whitespace, "..", a leading "/", the shell class and every
+# injection pattern -- on the whole entry -- before any of this is stored.
+def _rm_sanitize_contract(maxlen):
+  if . == null then null else
+  ( (_rm_markers_only(maxlen)) as $m
+    | ($m | index("(")) as $i
+    | (if $i == null then $m else $m[0:$i] end) as $ident
+    | (if $i == null then "" else ($m[$i:] | _rm_sanitize(maxlen)) end) as $desc
+    | ($ident + $desc)
+    | if (length > maxlen) then .[0:maxlen] else . end
+  ) end;
 '
 
 # Process-liveness probe, ported from guard-runtime-state.py is_alive() (lines 26-34):
@@ -13933,6 +13986,8 @@ _roadmap_identity_errors() {
       | (($p[$list] // []) | to_entries[]) as $slot
       | ($slot.value | if type == "string" then . else "" end) as $entry
       | ($slot.key + 1) as $pos
+      | ({"creates": "__mkCreates", "needs": "__mkNeeds"}[$list]) as $mk_key
+      | (($p[$mk_key] // []) | .[$slot.key]) as $marker_form
       | ($entry | _cv_identity) as $ident
       | ($ident | [match(_cv_shell_class) | .string] | first) as $shell_char
       | (
@@ -13942,7 +13997,10 @@ _roadmap_identity_errors() {
             (if ($ident | test("^/")) then "begins with \"/\"" else empty end),
             (if ($ident | _roadmap_reject_unfindable_identity) then "contains whitespace, so no source token could match it -- name the symbol, path, table or \"METHOD /path\" endpoint the phase will actually produce" else empty end),
             (if $shell_char != null then "contains the shell metacharacter \"" + $shell_char + "\", which validate-contracts refuses in an identity -- move that text into the parenthesised description, or, for an endpoint, declare the route without its query string" else empty end),
-            (if ($entry | _cv_injection) then "matches an instruction-injection pattern validate-contracts refuses (ignore previous / system: / INSTRUCTIONS: / code fence / \"$(\") -- reword it; the description reaches a sub-agent prompt, so this half is judged on the whole entry, not just the identity" else empty end)
+            (if ($entry | _cv_injection) then "matches an instruction-injection pattern validate-contracts refuses (ignore previous / system: / INSTRUCTIONS: / code fence / \"$(\") -- reword it; the description reaches a sub-agent prompt, so this half is judged on the whole entry, not just the identity" else empty end),
+            (if ($marker_form != null) and (($marker_form | _cv_identity) != $ident)
+               then "would be stored under a DIFFERENT identity than the one written: \"" + ($marker_form | _cv_identity) + "\" becomes \"" + $ident + "\". A sanitizer rule that deletes content (an HTML/XML-looking tag such as \"<T>\", a \"$(\" opener, or an instruction-override phrase) rewrote it, and verify-creates would then grep for a name this phase never produces -- rename the artifact so it survives verbatim"
+               else empty end)
           ]
         ) as $reasons
       | select(($reasons | length) > 0)
@@ -13950,7 +14008,31 @@ _roadmap_identity_errors() {
       | "phase " + ($p.id|tostring) + ": " + $list + " entry #" + ($pos|tostring)
         + (if $is_injection then " (content withheld -- it matches an injection pattern)" else " \"" + $entry + "\"" end)
         + " is not a usable artifact identity: " + ($reasons | join("; and it "))
-    ] | .[]
+    ]
+    +
+    # areas[] is a glob list, not an identity list, so none of the rules above
+    # applies to it -- but it IS joined onto a filesystem path downstream and is
+    # explicitly exempted from /aimi:plan pathHints six-check filter on the
+    # grounds that "roadmap-init already sanitized it". It never checked
+    # traversal. That was masked while the sanitizer deleted a backticked span
+    # whole; unwrapping the span to its inner text (the correct fix for the
+    # handoff) removed the accidental cover and let "`../../../etc/**`" through.
+    # Only the two path shapes are judged here.
+    [ .[]
+      | . as $p
+      | (($p["areas"] // []) | to_entries[]) as $slot
+      | ($slot.value | if type == "string" then . else "" end) as $area
+      | ($slot.key + 1) as $pos
+      | (
+          [
+            (if ($area | test("(^|/)\\.\\.($|/)")) then "contains a \"..\" path segment" else empty end),
+            (if ($area | test("^/")) then "is an absolute path" else empty end)
+          ]
+        ) as $reasons
+      | select(($reasons | length) > 0)
+      | "phase " + ($p.id|tostring) + ": areas entry #" + ($pos|tostring) + " \"" + $area + "\" is not a usable scope hint: it " + ($reasons | join("; and it ")) + " -- areas are repo-relative globs and are appended to research path hints as-is"
+    ]
+    | .[]
   '
 }
 
@@ -14028,8 +14110,10 @@ cmd_roadmap_init() {
       .slug = ((.slug // "") | _rm_sanitize(100)) |
       .notes = (if .notes != null then (.notes | _rm_sanitize(5000)) else null end) |
       .successCriteria = ((.successCriteria // []) | map(_rm_sanitize(2000))) |
-      .creates = ((.creates // []) | map(_rm_sanitize(500))) |
-      .needs = ((.needs // []) | map(_rm_sanitize(500))) |
+      .__mkCreates = ((.creates // []) | map(_rm_markers_only(500))) |
+      .__mkNeeds = ((.needs // []) | map(_rm_markers_only(500))) |
+      .creates = ((.creates // []) | map(_rm_sanitize_contract(500))) |
+      .needs = ((.needs // []) | map(_rm_sanitize_contract(500))) |
       .areas = ((.areas // []) | map(_rm_sanitize(500))) |
       .dependsOn = (.dependsOn // []) |
       .branch = (if .branch != null then (.branch | _rm_sanitize(200)) else null end) |
@@ -14108,8 +14192,11 @@ cmd_roadmap_init() {
           exit 1
         fi
 
+        # __mk* are the marker-only comparison forms the identity guard just
+        # consumed; they are scratch, never schema. Dropped here so they cannot
+        # reach disk.
         merged_phases=$(jq --argjson add "$filtered_new" '
-          (.phases + $add) | sort_by(.id)
+          (.phases + ($add | map(del(.__mkCreates, .__mkNeeds)))) | sort_by(.id)
         ' "$roadmap_path")
         roadmap_doc=$(printf '%s' "$existing_meta" | jq --argjson phases "$merged_phases" '. + {phases: $phases}')
         added_count=$(printf '%s' "$filtered_new" | jq 'length')
@@ -14134,7 +14221,8 @@ cmd_roadmap_init() {
           exit 1
         fi
 
-        merged_phases=$(printf '%s' "$new_phases" | jq 'sort_by(.id)')
+        # See the --sync branch above: __mk* is scratch for the identity guard.
+        merged_phases=$(printf '%s' "$new_phases" | jq 'map(del(.__mkCreates, .__mkNeeds)) | sort_by(.id)')
         roadmap_doc=$(jq -n --arg feature "$feature" --arg bp "$brainstorm_path" --argjson phases "$merged_phases" "$_ROADMAP_SANITIZE_JQ"'
           {
             roadmapVersion: "1.0",
@@ -14354,8 +14442,10 @@ cmd_roadmap_amend_phase() {
   sanitized=$(printf '%s' "$payload" | jq -c "$_ROADMAP_SANITIZE_JQ"'
     (if has("goal") then .goal = (.goal | _rm_sanitize(2000)) else . end)
     | (if has("successCriteria") then .successCriteria = (.successCriteria | map(_rm_sanitize(2000))) else . end)
-    | (if has("creates") then .creates = (.creates | map(_rm_sanitize(500))) else . end)
-    | (if has("needs") then .needs = (.needs | map(_rm_sanitize(500))) else . end)
+    | (if has("creates") then .__mkCreates = (.creates | map(_rm_markers_only(500))) else . end)
+    | (if has("needs") then .__mkNeeds = (.needs | map(_rm_markers_only(500))) else . end)
+    | (if has("creates") then .creates = (.creates | map(_rm_sanitize_contract(500))) else . end)
+    | (if has("needs") then .needs = (.needs | map(_rm_sanitize_contract(500))) else . end)
     | (if has("areas") then .areas = (.areas | map(_rm_sanitize(500))) else . end)
     | (if has("branch") then .branch = (if .branch == null then null else (.branch | _rm_sanitize(200)) end) else . end)
   ')
@@ -14396,7 +14486,9 @@ cmd_roadmap_amend_phase() {
       # stored phase already had -- id, dir, slug, name, dependsOn, status and
       # claim included -- at its original position and value; only the keys the
       # payload actually carries are replaced, and each is replaced wholesale.
-      amended_phase=$(printf '%s' "$stored_phase" | jq -c --argjson patch "$sanitized" '. + $patch')
+      # __mk* is scratch for the identity guard's mutation check below, never
+      # schema -- dropped from the phase that actually merges into the roadmap.
+      amended_phase=$(printf '%s' "$stored_phase" | jq -c --argjson patch "$sanitized" '. + ($patch | del(.__mkCreates, .__mkNeeds))')
 
       # Judge ONLY the lists this call actually writes. Handing over the merged
       # phase would re-judge a list the amendment never touched, which turns
@@ -14407,8 +14499,9 @@ cmd_roadmap_amend_phase() {
       # yields an empty list inside the helper, so no helper change is needed.
       identity_check_phase=$(jq -c -n --argjson amended "$amended_phase" --argjson patch "$sanitized" '
         {id: $amended.id}
-        + (if ($patch | has("creates")) then {creates: ($amended.creates // [])} else {} end)
-        + (if ($patch | has("needs")) then {needs: ($amended.needs // [])} else {} end)
+        + (if ($patch | has("creates")) then {creates: ($amended.creates // []), __mkCreates: ($patch.__mkCreates // [])} else {} end)
+        + (if ($patch | has("needs")) then {needs: ($amended.needs // []), __mkNeeds: ($patch.__mkNeeds // [])} else {} end)
+        + (if ($patch | has("areas")) then {areas: ($amended.areas // [])} else {} end)
       ')
       identity_errors=$(printf '%s' "$identity_check_phase" | jq -c '[.]' | _roadmap_identity_errors)
       if [ -n "$identity_errors" ]; then
