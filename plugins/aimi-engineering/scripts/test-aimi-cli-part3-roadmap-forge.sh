@@ -1105,6 +1105,267 @@ test_roadmap_init_accepts_documented_identity_kinds() {
   rm -rf ".aimi/tasks/$feature"
 }
 
+# ---------------------------------------------------------------------------
+# Identity contract: the character-table round trip
+# ---------------------------------------------------------------------------
+#
+# Three sides decide what a creates/needs identity is, and they used to
+# disagree: _rm_sanitize (roadmap-init and roadmap-write-handoff, the WRITE
+# side), _roadmap_identity_errors (roadmap-init's write-time guard) and
+# _cv_injection/_cv_shell_chars (validate-contracts, the READ side). Three
+# symptom tests pin three known disagreements and are blind to a fourth. A
+# TABLE is not: every character in the class is driven through all three sides
+# in both positions from one declared list, so a future edit that moves any
+# one side out of step fails here instead of shipping.
+#
+# TWO CLASSES, because the pipeline does two different things and a table that
+# treated all six characters uniformly would assert something impossible:
+#
+#   CLASS A -- ";" "|" "&" and a lone "$". _rm_sanitize does not touch these,
+#     so they reach _roadmap_identity_errors' fifth rule in IDENTITY position
+#     (refused, by name) and land verbatim in DESCRIPTION position (accepted,
+#     and the read side must not condemn them there).
+#   CLASS B -- the backtick and the "$(" opener. _rm_sanitize(500) runs over
+#     creates/needs FIRST in cmd_roadmap_init and deletes both, so neither
+#     character can ever reach the identity rule from this caller. That
+#     deletion is what makes the identity rule's narrow scope correct, so it
+#     is PINNED here rather than filed as a gap: a backtick that started
+#     surviving into a stored identity would silently widen what
+#     verify-creates has to grep for.
+#
+# The expectation for a cell is a function of its class and nothing else --
+# class A keeps the entry verbatim, class B has the character sequence
+# deleted -- which is what makes adding a seventh character a one-line edit to
+# the table below and nothing more.
+
+# The character matrix. ONE row per character, "~"-separated:
+#   <class A|B>~<human label>~<the literal character(s)>
+#
+# "~" and not "|": the pipe is itself a row. Single-quoted so "$" and the
+# backtick stay literal without escaping.
+_RT_CHAR_TABLE=(
+  'A~semicolon~;'
+  'A~pipe~|'
+  'A~ampersand~&'
+  'A~lone dollar sign~$'
+  'B~backtick~`'
+  'B~dollar-paren opener~$('
+)
+
+# The injection alternation _cv_injection judges over the WHOLE raw entry,
+# same row shape minus the class column: <human label>~<the pattern>.
+_RT_INJECTION_TABLE=(
+  'instruction override~ignore previous'
+  'system prompt marker~system:'
+  'INSTRUCTIONS keyword~INSTRUCTIONS'
+  'triple-backtick fence~```x```'
+  'command substitution~$(whoami)'
+)
+
+# One feature slug for every cell; each cell tears it down before and after,
+# so cells never see each other's roadmap.
+_RT_FEATURE="rm-identity-roundtrip"
+
+# Seed a one-phase roadmap.json straight to disk, bypassing roadmap-init.
+# Needed for the injection rows only: _rm_sanitize DELETES four of those five
+# patterns at write time, so roadmap-init cannot be used to place them on disk
+# and a test that tried would be measuring the sanitizer, not the read side.
+# Same shape test_validate_contracts_rejects_suspicious_contract_strings uses.
+_rt_seed_single_phase_roadmap() {
+  rm -rf ".aimi/tasks/$_RT_FEATURE"
+  mkdir -p ".aimi/tasks/$_RT_FEATURE"
+  jq -n --arg f "$_RT_FEATURE" --arg c "$1" '{
+    roadmapVersion: "1.0", feature: $f, createdAt: "2026-01-01T00:00:00Z", brainstormPath: null,
+    phases: [
+      {id: 1, name: "A", goal: "g", slug: "a", dir: "phase-1-a", status: "pending",
+       dependsOn: [], creates: [$c], needs: [], areas: [], successCriteria: [],
+       notes: null, branch: null, claim: null}
+    ]
+  }' > ".aimi/tasks/$_RT_FEATURE/roadmap.json"
+}
+
+# Drive ONE table row through the whole pipeline in ONE position, and fail the
+# cell when any of the three sides disagrees with the other two. Every message
+# names both the character and the position, so a red transcript identifies the
+# disagreeing side without re-running anything by hand.
+#   $1 = class (A|B)   $2 = human label   $3 = literal char(s)
+#   $4 = position (identity|description)
+_rt_roundtrip_cell() {
+  local class="$1" label="$2" char="$3" position="$4"
+  local where="$label \"$char\" in $position position"
+
+  local entry
+  if [ "$position" = "identity" ]; then
+    entry="cmd_probe${char}tail (round trip probe)"
+  else
+    entry="cmd_probe (round trip probe ${char} tail)"
+  fi
+
+  # THE EXPECTATION RULE -- derived from the class, so a new row needs no new
+  # assertion block. Class A survives the sanitizer untouched; class B has its
+  # character sequence deleted by it.
+  local expected
+  if [ "$class" = "A" ]; then
+    expected="$entry"
+  else
+    expected="${entry//"$char"/}"
+  fi
+
+  # Class A in IDENTITY position is the matrix's one refusal. Reuses the
+  # established reject-and-leave-no-file shape; the reason string is what
+  # proves the diagnostic names WHICH character, not "suspicious content".
+  if [ "$class" = "A" ] && [ "$position" = "identity" ]; then
+    _assert_roadmap_identity_rejected "$_RT_FEATURE" \
+      "$(jq -n --arg c "$entry" '[{id: 1, name: "P", goal: "g", slug: "p", dependsOn: [], creates: [$c], needs: []}]')" \
+      "round trip, $where" \
+      "contains the shell metacharacter \"$char\""
+    return
+  fi
+
+  # Every other cell is accepted, and must round-trip: producer writes it as
+  # creates, consumer cites the same string as needs, the handoff records it,
+  # and validate-contracts resolves the need against the producer.
+  rm -rf ".aimi/tasks/$_RT_FEATURE"
+
+  local init_exit
+  jq -n --arg c "$entry" '[
+    {id: 1, name: "Producer", goal: "g", slug: "producer", dependsOn: [], creates: [$c], needs: []},
+    {id: 2, name: "Consumer", goal: "g", slug: "consumer", dependsOn: [1], creates: [], needs: [$c]}
+  ]' | "$CLI" roadmap-init --feature "$_RT_FEATURE" >/dev/null 2>&1 && init_exit=0 || init_exit=$?
+  assert_exit_code "0" "$init_exit" "identity round trip: $where -- roadmap-init exits 0"
+
+  local roadmap_file=".aimi/tasks/$_RT_FEATURE/roadmap.json"
+  local stored_creates stored_needs
+  stored_creates=$(jq -r '(.phases[] | select(.id == 1) | .creates[0]) // ""' "$roadmap_file" 2>/dev/null)
+  stored_needs=$(jq -r '(.phases[] | select(.id == 2) | .needs[0]) // ""' "$roadmap_file" 2>/dev/null)
+  assert_eq "$expected" "$stored_creates" "identity round trip: $where -- creates lands exactly as the write side promises"
+  # _cv_creates_in_scope matches a need against a provider's creates by exact
+  # byte equality, so the two lists drifting apart is a deadlock, not a nit.
+  assert_eq "$stored_creates" "$stored_needs" "identity round trip: $where -- needs matches creates byte-for-byte"
+
+  # The handoff side. The artifact line is fed the RAW entry, exactly as an
+  # executing phase would report it, so _rm_sanitize is exercised a second
+  # time on the same string through a different verb.
+  "$CLI" roadmap-set-status --feature "$_RT_FEATURE" --phase 1 --status planned >/dev/null 2>&1
+  "$CLI" roadmap-set-status --feature "$_RT_FEATURE" --phase 1 --status in_progress >/dev/null 2>&1
+  jq -n --arg a "$entry -- src/probe.ts" '{artifacts: [$a]}' \
+    | "$CLI" roadmap-write-handoff --feature "$_RT_FEATURE" --phase 1 >/dev/null 2>&1
+  "$CLI" roadmap-set-status --feature "$_RT_FEATURE" --phase 1 --status completed >/dev/null 2>&1
+
+  # The identity is the text before the first " (" -- the same token
+  # _cv_identity yields and _cv_handoff_lists_artifact greps for.
+  local ident="${stored_creates%% (*}"
+  local artifacts_section
+  artifacts_section=$(awk '
+    /^#+[ \t]+Artifacts Created/ { flag=1; next }
+    /^#+[ \t]/ { flag=0 }
+    flag { print }
+  ' ".aimi/tasks/$_RT_FEATURE/phase-1-producer/handoff.md" 2>/dev/null)
+  assert_contains "$ident" "$artifacts_section" "identity round trip: $where -- handoff Artifacts Created carries the stored identity"
+
+  local vc_out vc_exit
+  vc_out=$("$CLI" validate-contracts "$_RT_FEATURE" --phase 2 2>&1) && vc_exit=0 || vc_exit=$?
+  assert_exit_code "0" "$vc_exit" "identity round trip: $where -- validate-contracts --phase 2 exits 0"
+  assert_eq "true" "$(printf '%s' "$vc_out" | jq -r '.valid' 2>/dev/null)" \
+    "identity round trip: $where -- read side reports valid"
+  assert_eq "1" "$(printf '%s' "$vc_out" | jq -r --arg i "$ident" '.providers[$i] // "unresolved"' 2>/dev/null)" \
+    "identity round trip: $where -- consumer need resolves to the producer phase"
+
+  rm -rf ".aimi/tasks/$_RT_FEATURE"
+}
+
+test_roadmap_identity_character_round_trip() {
+  echo ""
+  echo "=== identity contract: character matrix round trip (roadmap-init -> roadmap-write-handoff -> validate-contracts) ==="
+
+  local row class label char
+  for row in "${_RT_CHAR_TABLE[@]}"; do
+    IFS='~' read -r class label char <<< "$row"
+    _rt_roundtrip_cell "$class" "$label" "$char" "identity"
+    _rt_roundtrip_cell "$class" "$label" "$char" "description"
+  done
+
+  # --- The injection half of the guard SURVIVED the split ---------------
+  # _cv_suspicious is now _cv_injection (whole raw entry) or _cv_shell_chars
+  # (identity only). Freeing the description of the CHARACTER class must not
+  # have freed it of the injection alternation: a creates/needs description is
+  # LLM-prompt input -- /aimi:plan threads every completed phase's handoff.md
+  # verbatim into every story-expander sub-agent prompt (commands/plan.md:583,
+  # :587, :1834-1838) -- so a test that let these pass would silently license a
+  # prompt-injection path.
+  #
+  # Seeded to disk, not written through roadmap-init, for the reason recorded
+  # on _rt_seed_single_phase_roadmap: measured on this tree, _rm_sanitize
+  # deletes "ignore previous", "system:", the triple-backtick fence and "$("
+  # before they can be stored, so four of these five cannot be placed on disk
+  # by the writer at all. (The fifth, INSTRUCTIONS, the writer does store and
+  # the reader then refuses -- a live writer/reader asymmetry this test pins
+  # by measurement and does not attempt to fix; the fix belongs to the write
+  # side, which this story does not own.)
+  local irow ilabel ipattern ivc_out ivc_exit
+  for irow in "${_RT_INJECTION_TABLE[@]}"; do
+    IFS='~' read -r ilabel ipattern <<< "$irow"
+    _rt_seed_single_phase_roadmap "cmd_probe (round trip probe $ipattern tail)"
+    ivc_out=$("$CLI" validate-contracts "$_RT_FEATURE" 2>&1) && ivc_exit=0 || ivc_exit=$?
+    assert_exit_code "1" "$ivc_exit" "identity round trip: $ilabel in description position -- validate-contracts still refuses the whole entry"
+    assert_contains "contains suspicious content" "$ivc_out" "identity round trip: $ilabel in description position -- diagnostic names suspicious content"
+    rm -rf ".aimi/tasks/$_RT_FEATURE"
+  done
+
+  # --- The backtick-WRAPPED identity cell --------------------------------
+  # Distinct from the lone-backtick row above: a paired span is UNWRAPPED to
+  # its inner text, not deleted. "## Artifacts Created" is exactly what
+  # _cv_handoff_lists_artifact greps to resolve a later phase's needs, so a
+  # deleted identity surfaced as a permanently unmet contract one phase after
+  # its cause. This is the whole round trip in one cell.
+  local bt_feature="rm-identity-backtick-handoff"
+  local bt_entry='`shared_widget` (a backticked identity)'
+  local bt_stored="shared_widget (a backticked identity)"
+  rm -rf ".aimi/tasks/$bt_feature"
+
+  local bt_exit
+  jq -n --arg c "$bt_entry" '[
+    {id: 1, name: "Producer", goal: "g", slug: "producer", dependsOn: [], creates: [$c], needs: []},
+    {id: 2, name: "Consumer", goal: "g", slug: "consumer", dependsOn: [1], creates: [], needs: [$c]}
+  ]' | "$CLI" roadmap-init --feature "$bt_feature" >/dev/null 2>&1 && bt_exit=0 || bt_exit=$?
+  assert_exit_code "0" "$bt_exit" "identity round trip: backtick-wrapped identity -- roadmap-init exits 0 (the span is unwrapped, not emptied)"
+  assert_eq "$bt_stored" "$(jq -r '(.phases[] | select(.id == 1) | .creates[0]) // ""' ".aimi/tasks/$bt_feature/roadmap.json" 2>/dev/null)" \
+    "identity round trip: backtick-wrapped identity -- inner text is what lands in creates"
+
+  "$CLI" roadmap-set-status --feature "$bt_feature" --phase 1 --status planned >/dev/null 2>&1
+  "$CLI" roadmap-set-status --feature "$bt_feature" --phase 1 --status in_progress >/dev/null 2>&1
+  jq -n --arg a "$bt_entry -- src/widget.ts" '{artifacts: [$a]}' \
+    | "$CLI" roadmap-write-handoff --feature "$bt_feature" --phase 1 >/dev/null 2>&1
+  "$CLI" roadmap-set-status --feature "$bt_feature" --phase 1 --status completed >/dev/null 2>&1
+
+  local bt_section
+  bt_section=$(awk '
+    /^#+[ \t]+Artifacts Created/ { flag=1; next }
+    /^#+[ \t]/ { flag=0 }
+    flag { print }
+  ' ".aimi/tasks/$bt_feature/phase-1-producer/handoff.md" 2>/dev/null)
+  assert_contains "$bt_stored" "$bt_section" "identity round trip: backtick-wrapped identity -- Artifacts Created carries the bare inner text"
+  # The unwrap keeps the CONTENT; the marker itself is still removed, which is
+  # the invariant the trailing lone-backtick strip exists to hold.
+  if [[ "$bt_section" == *'`'* ]]; then
+    echo -e "${RED}✗${NC} identity round trip: backtick-wrapped identity -- no backtick may reach handoff output"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} identity round trip: backtick-wrapped identity -- no backtick reached handoff output"
+    ((TESTS_PASSED++))
+  fi
+
+  local bt_vc_out bt_vc_exit
+  bt_vc_out=$("$CLI" validate-contracts "$bt_feature" --phase 2 2>&1) && bt_vc_exit=0 || bt_vc_exit=$?
+  assert_exit_code "0" "$bt_vc_exit" "identity round trip: backtick-wrapped identity -- consumer needs check exits 0"
+  assert_eq "true" "$(printf '%s' "$bt_vc_out" | jq -r '.valid' 2>/dev/null)" \
+    "identity round trip: backtick-wrapped identity -- read side reports valid"
+  assert_eq "1" "$(printf '%s' "$bt_vc_out" | jq -r '.providers["shared_widget"] // "unresolved"' 2>/dev/null)" \
+    "identity round trip: backtick-wrapped identity -- need resolves against the producer's unwrapped creates"
+
+  rm -rf ".aimi/tasks/$bt_feature"
+}
+
 test_roadmap_init_sanitizes_fields() {
   echo ""
   echo "=== roadmap-init: sanitizes free-text fields before write ==="
@@ -6601,6 +6862,7 @@ main() {
   test_roadmap_init_rejects_malformed_identity
   test_roadmap_init_sync_ignores_legacy_identities
   test_roadmap_init_accepts_documented_identity_kinds
+  test_roadmap_identity_character_round_trip
   test_roadmap_init_sanitizes_fields
   test_roadmap_amend_phase_partial_merge
   test_roadmap_amend_phase_rejects_unamendable_keys

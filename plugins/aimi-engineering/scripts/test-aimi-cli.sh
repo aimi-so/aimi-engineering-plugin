@@ -165,15 +165,15 @@ done
 # reason: test_init_session_writes_global_cache emits ONE assertion when the
 # CLI under test is worktree-resident (write_global_cli_cache deliberately
 # refuses to cache a */.worktrees/* path) and THREE otherwise. The same tree
-# therefore reads 3748 from a linked worktree and 3750 from a normal checkout.
+# therefore reads 3837 from a linked worktree and 3839 from a normal checkout.
 # RUN_FRAME names which of the two this run is, so the suite-cost line at the
 # bottom can say so out loud rather than leaving the reader to work it out.
-EXPECTED_ASSERTIONS=3750
+EXPECTED_ASSERTIONS=3839
 RUN_FRAME=checkout
 _resolved_cli="$(realpath "$SCRIPT_DIR/aimi-cli.sh" 2>/dev/null || printf '%s' "$SCRIPT_DIR/aimi-cli.sh")"
 case "$_resolved_cli" in
   */.worktrees/*)
-    EXPECTED_ASSERTIONS=3748
+    EXPECTED_ASSERTIONS=3837
     RUN_FRAME=worktree
     ;;
 esac
