@@ -3149,14 +3149,35 @@ test_validate_contracts_rejects_suspicious_contract_strings() {
   local feature="cv-suspicious"
   rm -rf ".aimi/tasks/$feature"
 
-  # This payload's suspicious marker is a shell metacharacter (";"), not one
-  # of the instruction-override phrases _rm_sanitize strips at roadmap-init
-  # write time -- it must still reach validate-contracts/roadmap-sweep intact
-  # so their independent _cv_suspicious check (which runs on top of, not
-  # instead of, write-time sanitization) has something to flag.
-  jq -n '[
-    {id: 1, name: "A", goal: "g", slug: "a", dependsOn: [], creates: ["evil;rm-rf/#widget"], needs: []}
-  ]' | "$CLI" roadmap-init --feature "$feature" >/dev/null
+  # Seeded straight to disk instead of through roadmap-init, because
+  # roadmap-init now REFUSES a ";" sitting in an identity at write time
+  # (_roadmap_identity_errors' fifth rule). That refusal is the write-side
+  # contract working as intended, not an obstacle to route around.
+  #
+  # What this test owns is the other half of that contract: a roadmap ALREADY
+  # ON DISK carrying a legacy semicolon identity must stay readable, and the
+  # reader must still flag it. Nothing scopes _cv_suspicious to freshly written
+  # phases -- only the WRITE-side callers are phase-scoped -- so
+  # validate-contracts and roadmap-sweep judge a stored phase exactly as they
+  # judge a new one. That is the retroactivity guarantee which lets roadmaps
+  # written before the write-side rule tightened keep loading, and seeding the
+  # file directly is the only way to exercise it.
+  #
+  # The marker is a shell metacharacter (";") in IDENTITY position, so it is
+  # the character class _cv_shell_chars reads, not one of the
+  # instruction-override phrases _rm_sanitize strips.
+  mkdir -p ".aimi/tasks/$feature"
+  jq -n --arg feature "$feature" '{
+    roadmapVersion: "1.0",
+    feature: $feature,
+    createdAt: "2026-01-01T00:00:00Z",
+    brainstormPath: null,
+    phases: [
+      {id: 1, name: "A", goal: "g", slug: "a", dir: "phase-1-a", status: "pending",
+       dependsOn: [], creates: ["evil;rm-rf/#widget"], needs: [], areas: [],
+       successCriteria: [], notes: null, branch: null, claim: null}
+    ]
+  }' > ".aimi/tasks/$feature/roadmap.json"
 
   local vc_output vc_exit
   vc_output=$("$CLI" validate-contracts "$feature" 2>&1) && vc_exit=0 || vc_exit=$?

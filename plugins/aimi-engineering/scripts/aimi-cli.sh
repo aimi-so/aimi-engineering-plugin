@@ -13801,7 +13801,7 @@ def _rm_candidates($phases; $allowed; $work):
 # Read a phases JSON array on stdin; print one human-readable error line per
 # creates[]/needs[] entry whose *identity* can never name a real artifact.
 #
-# The rule is deliberately narrow -- exactly four shapes are rejected, judged
+# The rule is deliberately narrow -- exactly five shapes are rejected, judged
 # over the identity (text before the first "(", trimmed) and nothing else:
 #   (a) empty after _cv_identity
 #   (b) a ".." PATH SEGMENT, i.e. (^|/)\.\.($|/) -- not any byte pair "..",
@@ -13812,6 +13812,9 @@ def _rm_candidates($phases; $allowed; $work):
 #   (d) whitespace in the token verify-creates will actually SEARCH, judged
 #       after the same METHOD-space-slash strip verify-creates step 2 performs
 #       (see _roadmap_reject_unfindable_identity below)
+#   (e) a shell metacharacter from _cv_shell_class -- the class [$`;|&] that
+#       validate-contracts reads through _cv_shell_chars -- so the writer and
+#       the reader consult one table rather than two that overlap by accident
 # Identity *strength* is explicitly not judged: at declaration time research has
 # not run, so a bare Table name ("notifications") or a bare directory
 # ("db/migrations") must pass -- guessing a path here fails at phase close for a
@@ -13840,6 +13843,32 @@ def _rm_candidates($phases; $allowed; $work):
 # ("src/My Component.tsx"). It is refusable and the author's only workaround is
 # to rename the file. That is the deliberate trade -- see
 # commands/references/scope-contexts.md, which teaches the rule and its limit.
+#
+# Why (e) judges the IDENTITY and not the whole entry. Before it existed the two
+# sides disagreed twice over. The writer let ";" "|" "&" and a lone "$" through
+# untouched while validate-contracts refused that whole class, so roadmap-init
+# wrote phases its own contract gate then hard-failed; and the reader judged the
+# RAW entry, so a semicolon anywhere in the parenthesised human description
+# killed an identity that was itself clean ("cmd_clean (does x; then y)").
+# Both sides now judge the same text -- the identity carries the class ban and
+# the description does not -- which is also what verify-creates has always done:
+# it searches by identity alone, so a check scoped to anything wider was talking
+# about a different string than the search it guards.
+#
+# The description nevertheless KEEPS validate-contracts' injection half
+# (ignore previous / system: / INSTRUCTIONS / code fences / "$("), because it is
+# not human-only prose: /aimi:plan collects every completed phase's handoff.md
+# into phaseHandoffBlocks (commands/plan.md:583 and :587) and threads it verbatim
+# into every story-expander sub-agent prompt (commands/plan.md:1834-1838). Freeing
+# the description of the character class is a legibility fix; freeing it of the
+# injection patterns would reopen a prompt-injection path that is closed today.
+#
+# Two of the five class characters can never actually reach (e) from either
+# caller: _rm_sanitize(500) runs over creates/needs FIRST in both cmd_roadmap_init
+# and cmd_roadmap_amend_phase, and it already deletes backticks and the "$("
+# opener. They stay in the class anyway so this rule and _cv_shell_chars remain
+# one table read twice rather than two tables that happen to agree; the
+# characters that actually arrive here are ";" "|" "&" and a lone "$".
 #
 # RETROACTIVITY IS THE CALLER'S PROPERTY, NOT THIS HELPER'S. Nothing here scopes
 # anything; this judges every phase object it is handed. Existing roadmaps stay
@@ -13885,11 +13914,13 @@ _roadmap_identity_errors() {
       | (($p[$list] // [])[]) as $raw
       | ($raw | if type == "string" then . else "" end) as $entry
       | ($entry | _cv_identity) as $ident
+      | ($ident | [match(_cv_shell_class) | .string] | first) as $shell_char
       | (
           if ($ident | length) == 0 then "empty once the description is stripped"
           elif ($ident | test("(^|/)\\.\\.($|/)")) then "contains a \"..\" path segment"
           elif ($ident | test("^/")) then "begins with \"/\""
           elif ($ident | _roadmap_reject_unfindable_identity) then "contains whitespace, so no source token could match it -- name the symbol, path, table or \"METHOD /path\" endpoint the phase will actually produce"
+          elif $shell_char != null then "contains the shell metacharacter \"" + $shell_char + "\", which validate-contracts refuses in an identity -- move that text into the parenthesised description, which is judged only for injection patterns"
           else empty end
         ) as $reason
       | "phase " + ($p.id|tostring) + ": " + $list + " entry \"" + $entry + "\" is not a usable artifact identity: " + $reason
@@ -15146,10 +15177,33 @@ cmd_roadmap_write_handoff() {
 # undefined "deferred" status value, per this story's authoritative notes
 # reconciling the schema gap against outline 02/outline 14.
 
-# jq `def`s shared by validate-contracts and roadmap-sweep.
+# jq `def`s shared by validate-contracts and roadmap-sweep -- and, for
+# _cv_identity and _cv_shell_class, by _roadmap_identity_errors' write-time
+# guard, so the writer and the reader cannot drift apart on what an identity is
+# or which characters an identity may not hold.
+#
+# _cv_suspicious is deliberately two halves with two different scopes:
+#   * _cv_injection judges the WHOLE raw entry, description included. A
+#     creates/needs description is not human-only prose -- /aimi:plan threads
+#     every completed phase's handoff.md verbatim into every story-expander
+#     sub-agent prompt (commands/plan.md:583, :587, :1834-1838) -- so the
+#     instruction-override alternation, the code-fence pattern and the "$("
+#     command-substitution opener must keep covering it.
+#   * _cv_shell_chars judges only the IDENTITY (_cv_identity: the text before
+#     the first "(", trimmed). That is the token verify-creates actually greps
+#     and the token every contract match keys on. Applying the class to the raw
+#     entry instead refused "cmd_clean (does x; then y)" -- an identity that is
+#     itself clean, killed by a semicolon sitting in the human description --
+#     and refused it on a phase roadmap-init had just written.
+# _roadmap_identity_errors rejects the same class at write time, so this reader
+# check is defence in depth that should no longer be the place authors meet the
+# rule.
 _CONTRACT_JQ_DEFS='
 def _cv_identity: sub("\\(.*"; "") | gsub("^[ \t]+|[ \t]+$"; "");
-def _cv_suspicious: test("ignore previous|system:|INSTRUCTIONS|```|\\$\\("; "i") or test("[$`;|&]");
+def _cv_shell_class: "[$`;|&]";
+def _cv_injection: test("ignore previous|system:|INSTRUCTIONS|```|\\$\\("; "i");
+def _cv_shell_chars: test(_cv_shell_class);
+def _cv_suspicious: _cv_injection or (_cv_identity | _cv_shell_chars);
 '
 
 # Print newline-separated phase ids reachable via transitive dependsOn
