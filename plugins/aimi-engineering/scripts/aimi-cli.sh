@@ -13600,16 +13600,35 @@ _ROADMAP_BRANCH_REGEX='^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'
 
 # jq `def` spliced into programs that sanitize free-text roadmap fields
 # (name, goal, successCriteria entries, notes, branch, brainstormPath).
-# Strips code fences/backtick content, newlines, "$(" command-substitution
-# openers, HTML/XML tags, and common instruction-override phrases, then
-# truncates to maxlen. Mirrors commands/references/sanitization.md plus the
-# explicit newline/dollar-paren stripping called for in this story's notes.
+# Deletes triple-fenced code blocks wholesale, UNWRAPS a single-backtick span
+# to its inner text, then strips newlines, "$(" command-substitution openers,
+# HTML/XML tags, and common instruction-override phrases, and truncates to
+# maxlen. Mirrors commands/references/sanitization.md plus the explicit
+# newline/dollar-paren stripping called for in this story's notes.
+#
+# The span rule unwraps rather than deletes because a backtick is a formatting
+# marker, not content: deleting the span took the identity with it, and
+# "## Artifacts Created" in handoff.md is exactly what _cv_handoff_lists_artifact
+# greps to resolve a later phase's needs, so a deleted identity surfaced as an
+# unresolvable contract one phase after its cause. A fenced block is not an
+# identity, so the triple-fence rule stays a deletion.
+#
+# ORDER IS LOAD-BEARING in two places. The fence rule must precede the span rule
+# so ``` is consumed as a fence and not as two spans. The span rule must precede
+# the newline collapse: its character class excludes \n on purpose, so running it
+# after newlines became spaces would let one span straddle what were two lines
+# and change which text counts as wrapped.
+#
+# The lone-backtick strip on the next line is KEPT deliberately. Unwrapping only
+# consumes PAIRED markers; an odd or unmatched backtick still reaches it, and
+# without it that character would land in output. Two assertions depend on it
+# (zero backticks in handoff content, and in story-merge droppedDeps titles).
 _ROADMAP_SANITIZE_JQ='
 def _rm_sanitize(maxlen):
   if . == null then null else
   ( .
     | gsub("```[\\s\\S]*?```"; "")
-    | gsub("`[^`\n]*`"; "")
+    | gsub("`(?<inner>[^`\n]*)`"; .inner)
     | gsub("`"; "")
     | gsub("\r\n|\r|\n"; " ")
     | gsub("\\$\\("; "")

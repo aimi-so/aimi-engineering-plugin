@@ -1147,7 +1147,7 @@ test_roadmap_init_sanitizes_fields() {
     echo -e "${RED}✗${NC} roadmap-init sanitize: backtick must be stripped from name"
     ((TESTS_FAILED++))
   else
-    echo -e "${GREEN}✓${NC} roadmap-init sanitize: backtick content stripped from name"
+    echo -e "${GREEN}✓${NC} roadmap-init sanitize: backtick markers stripped from name (span unwrapped, inner text kept)"
     ((TESTS_PASSED++))
   fi
 
