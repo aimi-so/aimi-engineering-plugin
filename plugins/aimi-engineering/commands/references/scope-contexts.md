@@ -99,9 +99,9 @@ Every entry uses the string format `"<artifact-name> (<one-line description>)"`.
 **The artifact name must be a single token.** It is searched as a literal string,
 so it has to be a symbol, a path, a table name, or the `METHOD /path` endpoint
 form — that endpoint form is the *only* shape with a space in it that is
-accepted, and only with exactly one space before the `/`. `roadmap-init` refuses
-an entry whose name carries whitespace and names the phase, the list and the
-entry when it does. Write `_forge_account_override` or
+accepted, and only with exactly one space before the `/`. `roadmap-init` and
+`roadmap-amend-phase` refuse an entry whose name carries whitespace and name the
+phase, the list and the entry when they do. Write `_forge_account_override` or
 `services/forge/account.ts`, never `account override applied inside the forge
 command surface`. The reason is mechanical rather than stylistic: verification
 searches tracked source for that literal, and a multi-word phrase can only match
@@ -118,6 +118,71 @@ Contracts are checked deterministically, never by LLM judgment alone: a phase's
 `creates` entries are verified to exist in code at that phase's close, and a
 phase's `needs` entries are checked against prior phases' fulfilled `creates` at
 next-phase planning time.
+
+### Two rulers: the identity and the description
+
+One entry, two halves, two different rules. The split is the one
+`verify-creates` has always used: the **identity** is the text before the first
+`(`, trimmed; the **description** is the parenthesised remainder.
+
+**The identity may not carry whitespace, and may not carry any of**
+``$``, `` ` ``, `;`, `|`, `&`. That is not a style preference — the identity is
+grepped as a literal string against tracked source (see *What verification
+looks for* below), so a character that no source token would ever hold makes
+the entry unresolvable by construction. The whitespace half of the rule is
+judged after the same method-plus-space strip verification performs, which is
+why `POST /api/notifications` passes and `POST  /api/x` with two spaces does
+not: the second is not the endpoint form, so it would be searched whole.
+
+**The description is exempt from that character class.**
+`"cmd_clean (does x; then y)"` is a legal entry — the identity `cmd_clean` is
+clean, and a semicolon sitting in human prose has nothing to do with the token
+a search will look for. Only the identity is searched, so only the identity
+carries the ban.
+
+**The description is not exempt from the injection patterns.** It still refuses
+`ignore previous`, `system:`, `INSTRUCTIONS`, code fences and `$(`, because it
+is not human-only prose: `/aimi:plan` reads every completed phase's `handoff.md`
+into its `phaseHandoffBlocks` and threads that text verbatim into every
+story-expander sub-agent prompt. A description is therefore LLM-prompt input,
+and the injection guard covers it for the same reason it covers any other
+prompt-bound field.
+
+**The refusal happens at write time.** `roadmap-init` and `roadmap-amend-phase`
+reject a malformed identity before anything reaches `roadmap.json`, naming the
+phase, the list, the entry and the offending character:
+
+```
+phase 2: creates entry "cmd_a;cmd_b (two verbs)" is not a usable artifact identity: contains the shell metacharacter ";", which validate-contracts refuses in an identity -- move that text into the parenthesised description, which is judged only for injection patterns
+```
+
+`validate-contracts` and `roadmap-sweep` apply the same class to the same
+identity when they *read* a roadmap. That reader-side check is defence in depth
+now, not the place an author is meant to meet the rule: it should not fire on a
+roadmap this CLI wrote, and if it does, the write path is what to look at.
+
+### Two behaviours to know before writing an entry
+
+**A backticked identity is unwrapped, not deleted.** Write
+`` "`cmd_foo` (a backticked name)" `` and the roadmap stores
+`"cmd_foo (a backticked name)"` — the markers go, the name stays, and the
+identity reaches a phase's `handoff.md` under `## Artifacts Created`, which is
+exactly the section a later phase's `needs` is resolved against. The sanitizer
+used to delete the span *together with its contents*, so the identity vanished
+and the failure surfaced one phase later as a `needs` entry nothing could ever
+fulfil — an error arbitrarily far from its cause. Triple-fenced blocks are
+still deleted whole; a fenced block is not an identity.
+
+**The rule binds new writes only.** Nothing re-judges a roadmap already on
+disk. `roadmap-init` judges only the phases it is creating — under `--sync`,
+only the ids not already stored — and `roadmap-amend-phase` judges only the
+lists a given call actually amends, so a phase whose stored `creates` holds a
+legacy whitespace identity can still have its `needs` corrected. Repairing
+exactly those phases is what that verb exists for. This repository's own phases
+2, 3 and 4 carry whitespace-bearing `creates` today and stay readable and
+amendable. The discipline is stated in full in `aimi-cli.sh`, in
+`_roadmap_identity_errors`' header under *"RETROACTIVITY IS THE CALLER'S
+PROPERTY, NOT THIS HELPER'S"*.
 
 ### What verification looks for
 
@@ -161,11 +226,12 @@ source. Neither `roadmap-init` nor the close check prefers one of those shapes
 over the other, and at declaration time an author often cannot know the eventual
 path — a wrong guessed path fails at close for a reason nobody can debug.
 
-Exactly one shape *is* judged, and it is not about strength: an artifact name
-carrying whitespace in the token that will be searched is refused at write time,
-because no search this verb can run would ever resolve it (see the single-token
-rule above). Everything else — how specific the name is, how likely it is to
-exist, whether it looks like a path — is left to the author.
+Two shapes *are* judged, and neither is about strength: an identity carrying
+whitespace in the token that will be searched, and an identity carrying a shell
+metacharacter, are both refused at write time, because no search this verb can
+run would ever resolve either (see the single-token rule and *Two rulers*
+above). Everything else — how specific the name is, how likely it is to exist,
+whether it looks like a path — is left to the author.
 
 One limit applies to every step: git sees tracked files only, so work that is
 not committed on the phase branch reads as missing. Every `missing` verdict says
