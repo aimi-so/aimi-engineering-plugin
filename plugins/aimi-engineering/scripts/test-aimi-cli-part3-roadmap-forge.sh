@@ -1271,11 +1271,18 @@ _rt_roundtrip_cell() {
   # The handoff side. The artifact line is fed the RAW entry, exactly as an
   # executing phase would report it, so _rm_sanitize is exercised a second
   # time on the same string through a different verb.
-  "$CLI" roadmap-set-status --feature "$_RT_FEATURE" --phase 1 --status planned >/dev/null 2>&1
-  "$CLI" roadmap-set-status --feature "$_RT_FEATURE" --phase 1 --status in_progress >/dev/null 2>&1
+  # One status spawn, not three. The planned/in_progress pair was pure
+  # scaffolding: roadmap-write-handoff has no status precondition (verified),
+  # and --force skips the transition-order check while still enforcing the one
+  # that matters here -- handoff.md must already be on disk, which is exactly
+  # what this cell just wrote. Nothing below asserts the status ladder.
+  #
+  # This runs once per accepted cell, and part 3 is the suite's critical path
+  # with no slack left, so two saved subprocess spawns per cell is the whole
+  # reason the shape changed.
   jq -n --arg a "$entry -- src/probe.ts" '{artifacts: [$a]}' \
     | "$CLI" roadmap-write-handoff --feature "$_RT_FEATURE" --phase 1 >/dev/null 2>&1
-  "$CLI" roadmap-set-status --feature "$_RT_FEATURE" --phase 1 --status completed >/dev/null 2>&1
+  "$CLI" roadmap-set-status --feature "$_RT_FEATURE" --phase 1 --status completed --force >/dev/null 2>&1
 
   # The identity is the text before the first " (" -- the same token
   # _cv_identity yields and _cv_handoff_lists_artifact greps for.
@@ -1390,11 +1397,10 @@ test_roadmap_identity_character_round_trip() {
   assert_eq "$bt_stored" "$(jq -r '(.phases[] | select(.id == 1) | .creates[0]) // ""' ".aimi/tasks/$bt_feature/roadmap.json" 2>/dev/null)" \
     "identity round trip: backtick-wrapped identity -- inner text is what lands in creates"
 
-  "$CLI" roadmap-set-status --feature "$bt_feature" --phase 1 --status planned >/dev/null 2>&1
-  "$CLI" roadmap-set-status --feature "$bt_feature" --phase 1 --status in_progress >/dev/null 2>&1
+  # Same one-spawn scaffolding as the table cells above; see the note there.
   jq -n --arg a "$bt_entry -- src/widget.ts" '{artifacts: [$a]}' \
     | "$CLI" roadmap-write-handoff --feature "$bt_feature" --phase 1 >/dev/null 2>&1
-  "$CLI" roadmap-set-status --feature "$bt_feature" --phase 1 --status completed >/dev/null 2>&1
+  "$CLI" roadmap-set-status --feature "$bt_feature" --phase 1 --status completed --force >/dev/null 2>&1
 
   local bt_section
   bt_section=$(awk '

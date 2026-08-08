@@ -13930,7 +13930,7 @@ def _rm_candidates($phases; $allowed; $work):
 # The description nevertheless KEEPS validate-contracts' injection half
 # (ignore previous / system: / INSTRUCTIONS / code fences / "$("), because it is
 # not human-only prose: /aimi:plan collects every completed phase's handoff.md
-# into phaseHandoffBlocks (commands/plan.md:583 and :587) and threads it verbatim
+# into phaseHandoffBlocks (grep that symbol in commands/plan.md) and threads it verbatim
 # into every story-expander sub-agent prompt (grep phaseHandoffBlocks in
 # commands/plan.md; line numbers there drift). Freeing the description of the
 # character class is a legibility fix; freeing it of the injection patterns
