@@ -928,7 +928,7 @@ test_roadmap_init_rejects_malformed_identity() {
   local output exit_code
   output=$(jq -n '[{id: 7, name: "Bad", goal: "g", slug: "bad", creates: [], needs: ["/abs (bad)"]}]' | "$CLI" roadmap-init --feature "$feature" 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "1" "$exit_code" "roadmap-init identity guard: message case exits 1"
-  assert_contains "phase 7: needs entry \"/abs (bad)\"" "$output" "roadmap-init identity guard: error names phase id, list and entry text"
+  assert_contains "phase 7: needs entry #1 \"/abs (bad)\"" "$output" "roadmap-init identity guard: error names phase id, list, position and entry text"
   rm -rf ".aimi/tasks/$feature"
 
   # Weak-but-legal identities are NOT judged: research has not run at
@@ -1157,9 +1157,24 @@ _RT_CHAR_TABLE=(
 _RT_INJECTION_TABLE=(
   'instruction override~ignore previous'
   'system prompt marker~system:'
-  'INSTRUCTIONS keyword~INSTRUCTIONS'
+  'INSTRUCTIONS marker~INSTRUCTIONS: do this instead'
   'triple-backtick fence~```x```'
   'command substitution~$(whoami)'
+)
+
+# Both instruction markers are matched in their ANCHORED marker form, not as
+# bare keywords, and these rows must stay in that form. Unanchored, the
+# INSTRUCTIONS alternative matched the ordinary English word, so
+# "docs/instructions.md (setup instructions)" was written by roadmap-init and
+# then hard-refused by validate-contracts -- the writer/reader disagreement this
+# whole contract exists to remove -- and the same unanchored "system:" matched
+# inside "design-system:tokens". The companion table below pins those two
+# ordinary strings as ACCEPTED, so a future widening of either alternative
+# fails here rather than silently re-opening the disagreement.
+_RT_ORDINARY_TABLE=(
+  'ordinary instructions path~docs/instructions.md (setup instructions)'
+  'ordinary system-bearing name~design-system:tokens (a token file)'
+  'ordinary instructions prose~cmd_probe (read the setup instructions first)'
 )
 
 # One feature slug for every cell; each cell tears it down before and after,
@@ -1290,25 +1305,58 @@ test_roadmap_identity_character_round_trip() {
   # (identity only). Freeing the description of the CHARACTER class must not
   # have freed it of the injection alternation: a creates/needs description is
   # LLM-prompt input -- /aimi:plan threads every completed phase's handoff.md
-  # verbatim into every story-expander sub-agent prompt (commands/plan.md:583,
-  # :587, :1834-1838) -- so a test that let these pass would silently license a
-  # prompt-injection path.
+  # verbatim into every story-expander sub-agent prompt (grep phaseHandoffBlocks;
+  # line numbers drift) -- so a test that let these pass would silently license
+  # a prompt-injection path.
   #
-  # Seeded to disk, not written through roadmap-init, for the reason recorded
-  # on _rt_seed_single_phase_roadmap: measured on this tree, _rm_sanitize
-  # deletes "ignore previous", "system:", the triple-backtick fence and "$("
-  # before they can be stored, so four of these five cannot be placed on disk
-  # by the writer at all. (The fifth, INSTRUCTIONS, the writer does store and
-  # the reader then refuses -- a live writer/reader asymmetry this test pins
-  # by measurement and does not attempt to fix; the fix belongs to the write
-  # side, which this story does not own.)
+  # Seeded to disk, not written through roadmap-init, for the reason recorded on
+  # _rt_seed_single_phase_roadmap: measured on this tree, _rm_sanitize deletes
+  # "ignore previous", "system:", the triple-backtick fence and "$(" before they
+  # can be stored, so those four cannot be placed on disk by the writer at all.
+  # The INSTRUCTIONS marker is the one the writer does NOT strip -- and it no
+  # longer needs to, because _roadmap_identity_errors now refuses it outright.
+  # That asymmetry (writer stores what the reader refuses) is what kept issue
+  # #99 alive for this one pattern; it is closed, and the ordinary-strings table
+  # below is what keeps it closed without re-widening the alternation.
   local irow ilabel ipattern ivc_out ivc_exit
   for irow in "${_RT_INJECTION_TABLE[@]}"; do
     IFS='~' read -r ilabel ipattern <<< "$irow"
-    _rt_seed_single_phase_roadmap "cmd_probe (round trip probe $ipattern tail)"
+    local ientry="cmd_probe (round trip probe $ipattern tail)"
+    _rt_seed_single_phase_roadmap "$ientry"
     ivc_out=$("$CLI" validate-contracts "$_RT_FEATURE" 2>&1) && ivc_exit=0 || ivc_exit=$?
     assert_exit_code "1" "$ivc_exit" "identity round trip: $ilabel in description position -- validate-contracts still refuses the whole entry"
-    assert_contains "contains suspicious content" "$ivc_out" "identity round trip: $ilabel in description position -- diagnostic names suspicious content"
+    assert_contains "instruction-injection pattern" "$ivc_out" "identity round trip: $ilabel in description position -- diagnostic names the reason"
+    # The refusal must NOT echo the stored ENTRY back: this stderr is read by
+    # the agent that will act on it, so replaying an injection payload verbatim
+    # would be the very delivery this check exists to block. The write-time
+    # guard withholds it the same way.
+    #
+    # The needle is the whole seeded entry, deliberately, NOT $ipattern: the
+    # diagnostic enumerates the pattern names it looks for ("ignore previous /
+    # system: / ..."), so a substring test on $ipattern matches that fixed
+    # enumeration and reports a leak that did not happen.
+    if [[ "$ivc_out" == *"$ientry"* ]]; then
+      echo -e "${RED}✗${NC} identity round trip: $ilabel -- diagnostic must not echo the matched payload"
+      ((TESTS_FAILED++))
+    else
+      echo -e "${GREEN}✓${NC} identity round trip: $ilabel -- diagnostic withholds the matched payload"
+      ((TESTS_PASSED++))
+    fi
+    rm -rf ".aimi/tasks/$_RT_FEATURE"
+  done
+
+  # --- ORDINARY strings the anchors must let through ----------------------
+  # The companion to the table above. Each of these tripped the unanchored
+  # alternation and produced a roadmap roadmap-init had just written that
+  # validate-contracts then hard-refused. They must round-trip cleanly.
+  local orow olabel oentry ovc_exit oinit_exit
+  for orow in "${_RT_ORDINARY_TABLE[@]}"; do
+    IFS='~' read -r olabel oentry <<< "$orow"
+    rm -rf ".aimi/tasks/$_RT_FEATURE"
+    _rt_seed_single_phase_roadmap "$oentry" && oinit_exit=0 || oinit_exit=$?
+    assert_exit_code "0" "${oinit_exit:-0}" "identity round trip: $olabel -- writer accepts it"
+    "$CLI" validate-contracts "$_RT_FEATURE" >/dev/null 2>&1 && ovc_exit=0 || ovc_exit=$?
+    assert_exit_code "0" "$ovc_exit" "identity round trip: $olabel -- reader accepts it too (writer/reader agree)"
     rm -rf ".aimi/tasks/$_RT_FEATURE"
   done
 
@@ -5387,7 +5435,11 @@ test_forge_pr_write_manual_url_never_uses_null_host() {
 
   local sandbox
   sandbox=$(setup_forge_cli_sandbox)
-  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # rm -rf inline rather than trapping teardown_forge_cli_sandbox: that helper is
+  # defined in test-aimi-cli-part4-forge-verbs.sh, which this part never sources,
+  # so the trap fired "command not found" on every standalone part 3 run and the
+  # sandbox directory leaked. Both parts are runnable on their own by design.
+  trap "rm -rf '$sandbox'" RETURN
 
   cat > "$sandbox/gh" << 'FAKE_GH'
 #!/usr/bin/env bash

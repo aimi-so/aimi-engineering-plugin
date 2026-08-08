@@ -1349,8 +1349,8 @@ cmd_validate_stories() {
         (if ($s.title | length) > 200 then ["\($s.id): title exceeds 200 chars"] else [] end) +
         (if ($s.description | length) > 500 then ["\($s.id): description exceeds 500 chars"] else [] end) +
         ([$s.acceptanceCriteria[] | select(length > 5000)] | if length > 0 then ["\($s.id): acceptance criterion exceeds 5000 chars"] else [] end) +
-        (if ($s.title | test("ignore previous|system:|INSTRUCTIONS|```|\\$\\("; "i")) then ["\($s.id): title contains suspicious content"] else [] end) +
-        (if ($s.description | test("ignore previous|system:|INSTRUCTIONS|```|\\$\\("; "i")) then ["\($s.id): description contains suspicious content"] else [] end) +
+        (if ($s.title | test("ignore previous|(^|[^a-zA-Z0-9_-])system\\s*:|INSTRUCTIONS\\s*:|```|\\$\\("; "i")) then ["\($s.id): title contains suspicious content"] else [] end) +
+        (if ($s.description | test("ignore previous|(^|[^a-zA-Z0-9_-])system\\s*:|INSTRUCTIONS\\s*:|```|\\$\\("; "i")) then ["\($s.id): description contains suspicious content"] else [] end) +
         (if ($s.project != null) then
           (if ($s.project | test("^/")) then ["\($s.id): project must not be an absolute path"]
            elif ($s.project | test("\\.\\.")) then ["\($s.id): project must not contain path traversal (..)"]
@@ -1376,7 +1376,7 @@ cmd_validate_stories() {
              (if ($s.tasks | length) > 50 then ["\($s.id): tasks array exceeds 50 entries"] else [] end) +
              [$s.tasks[] | select(type != "string") | "\($s.id): tasks[] element must be a string"] +
              [$s.tasks[] | select(type == "string" and length > 5000) | "\($s.id): tasks[] entry exceeds 5000 chars"] +
-             [$s.tasks[] | select(type == "string" and test("ignore previous|system:|INSTRUCTIONS|```|\\$\\("; "i")) | "\($s.id): tasks[] entry contains suspicious content"]
+             [$s.tasks[] | select(type == "string" and test("ignore previous|(^|[^a-zA-Z0-9_-])system\\s*:|INSTRUCTIONS\\s*:|```|\\$\\("; "i")) | "\($s.id): tasks[] entry contains suspicious content"]
            end)
          else [] end) +
         (if has("gates") then ["\($s.id): gate: 'gates' field is invalid; use singular 'gate' (see plan.md L687-692)"] else [] end) +
@@ -13635,7 +13635,7 @@ def _rm_sanitize(maxlen):
     | gsub("<[^>]*>"; "")
     | gsub("ignore previous( instructions)?"; ""; "i")
     | gsub("you are now"; ""; "i")
-    | gsub("system\\s*:"; ""; "i")
+    | gsub("(?<b>^|[^a-zA-Z0-9_-])system\\s*:"; .b; "i")
     | if (length > maxlen) then .[0:maxlen] else . end
   ) end;
 '
@@ -13930,19 +13930,26 @@ _roadmap_identity_errors() {
     [ .[]
       | . as $p
       | (["creates", "needs"][]) as $list
-      | (($p[$list] // [])[]) as $raw
-      | ($raw | if type == "string" then . else "" end) as $entry
+      | (($p[$list] // []) | to_entries[]) as $slot
+      | ($slot.value | if type == "string" then . else "" end) as $entry
+      | ($slot.key + 1) as $pos
       | ($entry | _cv_identity) as $ident
       | ($ident | [match(_cv_shell_class) | .string] | first) as $shell_char
       | (
-          if ($ident | length) == 0 then "empty once the description is stripped"
-          elif ($ident | test("(^|/)\\.\\.($|/)")) then "contains a \"..\" path segment"
-          elif ($ident | test("^/")) then "begins with \"/\""
-          elif ($ident | _roadmap_reject_unfindable_identity) then "contains whitespace, so no source token could match it -- name the symbol, path, table or \"METHOD /path\" endpoint the phase will actually produce"
-          elif $shell_char != null then "contains the shell metacharacter \"" + $shell_char + "\", which validate-contracts refuses in an identity -- move that text into the parenthesised description, which is judged only for injection patterns"
-          else empty end
-        ) as $reason
-      | "phase " + ($p.id|tostring) + ": " + $list + " entry \"" + $entry + "\" is not a usable artifact identity: " + $reason
+          [
+            (if ($ident | length) == 0 then "empty once the description is stripped" else empty end),
+            (if ($ident | test("(^|/)\\.\\.($|/)")) then "contains a \"..\" path segment" else empty end),
+            (if ($ident | test("^/")) then "begins with \"/\"" else empty end),
+            (if ($ident | _roadmap_reject_unfindable_identity) then "contains whitespace, so no source token could match it -- name the symbol, path, table or \"METHOD /path\" endpoint the phase will actually produce" else empty end),
+            (if $shell_char != null then "contains the shell metacharacter \"" + $shell_char + "\", which validate-contracts refuses in an identity -- move that text into the parenthesised description, or, for an endpoint, declare the route without its query string" else empty end),
+            (if ($entry | _cv_injection) then "matches an instruction-injection pattern validate-contracts refuses (ignore previous / system: / INSTRUCTIONS: / code fence / \"$(\") -- reword it; the description reaches a sub-agent prompt, so this half is judged on the whole entry, not just the identity" else empty end)
+          ]
+        ) as $reasons
+      | select(($reasons | length) > 0)
+      | ($entry | _cv_injection) as $is_injection
+      | "phase " + ($p.id|tostring) + ": " + $list + " entry #" + ($pos|tostring)
+        + (if $is_injection then " (content withheld -- it matches an injection pattern)" else " \"" + $entry + "\"" end)
+        + " is not a usable artifact identity: " + ($reasons | join("; and it "))
     ] | .[]
   '
 }
@@ -15201,28 +15208,43 @@ cmd_roadmap_write_handoff() {
 # guard, so the writer and the reader cannot drift apart on what an identity is
 # or which characters an identity may not hold.
 #
-# _cv_suspicious is deliberately two halves with two different scopes:
-#   * _cv_injection judges the WHOLE raw entry, description included. A
-#     creates/needs description is not human-only prose -- /aimi:plan threads
-#     every completed phase's handoff.md verbatim into every story-expander
-#     sub-agent prompt (commands/plan.md:583, :587, :1834-1838) -- so the
-#     instruction-override alternation, the code-fence pattern and the "$("
-#     command-substitution opener must keep covering it.
-#   * _cv_shell_chars judges only the IDENTITY (_cv_identity: the text before
-#     the first "(", trimmed). That is the token verify-creates actually greps
-#     and the token every contract match keys on. Applying the class to the raw
-#     entry instead refused "cmd_clean (does x; then y)" -- an identity that is
-#     itself clean, killed by a semicolon sitting in the human description --
-#     and refused it on a phase roadmap-init had just written.
-# _roadmap_identity_errors rejects the same class at write time, so this reader
-# check is defence in depth that should no longer be the place authors meet the
-# rule.
+# _cv_suspicious is deliberately two halves with two different scopes. The full
+# argument for why -- and why the description keeps the injection guard -- lives
+# in commands/references/scope-contexts.md, "Two rulers". In short:
+#   * _cv_injection judges the WHOLE raw entry, description included, because a
+#     description reaches a story-expander sub-agent prompt via /aimi:plan's
+#     phaseHandoffBlocks (grep that symbol; do not cite line numbers here, they
+#     drift).
+#   * The shell class judges only the IDENTITY (_cv_identity: the text before
+#     the first "(", trimmed) -- the token verify-creates greps and every
+#     contract match keys on. Applying it to the raw entry refused
+#     "cmd_clean (does x; then y)", an identity that is itself clean.
+#
+# Both instruction markers are ANCHORED, and the anchors are load-bearing:
+# unanchored, "INSTRUCTIONS" matched the ordinary English word, so
+# "docs/instructions.md (setup instructions)" was written by roadmap-init and
+# then refused by validate-contracts; and unanchored "system:" matched inside
+# "design-system:tokens". Requiring a colon after INSTRUCTIONS, and requiring
+# start-or-non-identifier before system:, keeps every real marker form
+# ("### INSTRUCTIONS: ...", "system: you are now ...") while letting ordinary
+# names through. Widening either one back re-opens a writer/reader disagreement,
+# not just a false positive. Keep them in step with _rm_sanitize, which strips
+# the same two markers using the same anchors.
+#
+# The shell-class half is written as a cheap necessary condition first:
+# an identity is a trimmed prefix of the raw entry, so a class character in the
+# identity implies one in the entry. Testing the raw entry first lets the common
+# case (a clean entry) skip _cv_identity's sub()+gsub() entirely.
+#
+# _roadmap_identity_errors rejects both halves at write time, so this reader
+# check is defence in depth and should not be the place authors meet the rule.
 _CONTRACT_JQ_DEFS='
 def _cv_identity: sub("\\(.*"; "") | gsub("^[ \t]+|[ \t]+$"; "");
 def _cv_shell_class: "[$`;|&]";
-def _cv_injection: test("ignore previous|system:|INSTRUCTIONS|```|\\$\\("; "i");
-def _cv_shell_chars: test(_cv_shell_class);
-def _cv_suspicious: _cv_injection or (_cv_identity | _cv_shell_chars);
+def _cv_injection: test("ignore previous|(^|[^a-zA-Z0-9_-])system\\s*:|INSTRUCTIONS\\s*:|```|\\$\\("; "i");
+def _cv_suspicious:
+  _cv_injection
+  or (test(_cv_shell_class) and (_cv_identity | test(_cv_shell_class)));
 '
 
 # Print newline-separated phase ids reachable via transitive dependsOn
@@ -15634,19 +15656,34 @@ cmd_validate_contracts() {
 
   # --- Sanitization pass: always blocks; never demoted by --agent-mode ---
   # (a duplicate-creates finding is the only check this story demotes)
+  # One line per offending ENTRY, naming the entry and why -- not one line per
+  # (phase, field) saying only "suspicious content". This is the diagnostic an
+  # author actually reaches when a stored roadmap trips the reader, and it used
+  # to be the least informative message in the system while the write-time guard
+  # one screen up named the entry, the character and the remedy. Same shape as
+  # _roadmap_identity_errors, deliberately: the two are the same rule, and a
+  # reader who has seen one should recognise the other.
   local sanitize_hits
   sanitize_hits=$(jq -r "$_CONTRACT_JQ_DEFS"'
     [.phases[] | . as $p |
       ("creates","needs") as $field |
-      select(($p[$field] // []) | any(_cv_suspicious)) |
-      {phase: $p.id, field: $field}
-    ] | unique_by([.phase,.field]) | .[] | "\(.phase)\t\(.field)"
+      (($p[$field] // []) | to_entries[]) as $e |
+      select($e.value | type == "string") |
+      select($e.value | _cv_suspicious) |
+      (($e.value | _cv_identity | [match(_cv_shell_class) | .string] | first) // null) as $char |
+      (if $char != null
+         then "its identity carries the shell metacharacter \"" + $char + "\", which verify-creates cannot grep for"
+         else "it matches an instruction-injection pattern (ignore previous / system: / INSTRUCTIONS: / code fence / \"$(\")"
+       end) as $reason |
+      "phase \($p.id) field '"'"'\($field)'"'"' entry #\($e.key + 1): \($reason)"
+    ] | unique | .[]
   ' "$roadmap_path")
   if [ -n "$sanitize_hits" ]; then
-    while IFS=$'\t' read -r hit_phase hit_field; do
-      [ -z "$hit_phase" ] && continue
-      echo "Error: validate-contracts: phase $hit_phase field '$hit_field' contains suspicious content" >&2
+    while IFS= read -r hit_line; do
+      [ -z "$hit_line" ] && continue
+      echo "Error: validate-contracts: $hit_line" >&2
     done <<< "$sanitize_hits"
+    echo "Error: validate-contracts: roadmap-init and roadmap-amend-phase refuse these at write time, so a roadmap this CLI wrote should not reach here. Repair with: roadmap-amend-phase --feature <slug> --phase <id>" >&2
     exit 1
   fi
 
@@ -15862,14 +15899,24 @@ cmd_roadmap_sweep() {
 
   # Single-pass, advisory-only computation: never exits non-zero. Suspicious
   # creates/needs entries are dropped from $clean_phases before orphan/deferred
-  # computation so a flagged entry can never leak into any other output field
-  # -- only its owning phase id and field name are reported, via $warnings.
+  # computation so a flagged entry can never leak into any other output field.
+  #
+  # The DROP IS REPORTED, not silent. A dropped creates entry is invisible to
+  # the orphan/deferred analysis that follows, so a downstream phase whose needs
+  # cited it reads as unmet with no trace of why -- exactly the phase-late,
+  # cause-far-away failure this contract exists to remove. Each warning now
+  # carries droppedCount and the offending entries, so a reader can tell
+  # "nothing declared it" apart from "it was declared and then discarded here".
   jq "$_CONTRACT_JQ_DEFS"'
     (
       [.phases[] | . as $p |
         ("creates","needs") as $field |
-        select(($p[$field] // []) | any(_cv_suspicious)) |
-        {phase: $p.id, field: $field, message: "contains suspicious content"}
+        (($p[$field] // []) | to_entries | map(select(.value | type == "string" and _cv_suspicious))) as $bad |
+        select(($bad | length) > 0) |
+        {phase: $p.id, field: $field,
+         message: "contains suspicious content -- dropped from this sweep, so anything downstream that cited it now reads as unmet",
+         droppedCount: ($bad | length),
+         droppedIndexes: ($bad | map(.key + 1))}
       ] | unique_by([.phase,.field])
     ) as $warnings |
 
