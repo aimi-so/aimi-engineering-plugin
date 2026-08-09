@@ -15272,18 +15272,53 @@ cmd_roadmap_write_handoff() {
     fi
   done
 
+  # The identities this phase declared, read through _cv_identity itself and
+  # never a second copy of the split rule -- the two must not drift.
+  #
+  # WHY THIS FUNCTION NEEDS THEM. "## Artifacts Created" is exactly what
+  # _cv_handoff_lists_artifact greps to resolve a later phase's needs, and this
+  # verb was running the full prose sanitizer over the artifacts it renders.
+  # Measured: creates ["parseList<T> (a generic helper)"] is stored verbatim in
+  # roadmap.json and lands in handoff.md as "parseList", so validate-contracts
+  # reports {"need":"parseList<T>","reason":"not-delivered"} forever. The tag
+  # rule is right for prose and wrong for a token that is grepped literally --
+  # the same two-rulers split roadmap-init already makes, one boundary later.
+  local declared_ids
+  declared_ids=$(jq -c --argjson pid "$phase_id" "$_CONTRACT_JQ_DEFS"'
+    [ .phases[] | select(.id == $pid) | (.creates // [])[] | _cv_identity ]
+  ' "$roadmap_path" 2>/dev/null) || declared_ids='[]'
+  [ -n "$declared_ids" ] || declared_ids='[]'
+
   local body
-  body=$(printf '%s' "$input_json" | jq -r "$_ROADMAP_SANITIZE_JQ"'
+  body=$(printf '%s' "$input_json" | jq -r --argjson ids "$declared_ids" "$_ROADMAP_SANITIZE_JQ"'
     def clean: map(_rm_sanitize(2000));
+
+    # Prose sanitizer, except that a declared identity at the head of the line
+    # survives byte-for-byte. Longest match wins so a phase declaring both
+    # "alpha" and "alphabet" keeps the longer one whole. A line matching no
+    # declared identity is ordinary prose and gets the full treatment.
+    def clean_delivery: map(
+      . as $line
+      # ". as $i" first, deliberately: inside "select($line | startswith(.))"
+      # the pipe rebinds "." to $line, so the test becomes
+      # "$line startswith $line" -- true for every id, and the longest declared
+      # identity is then spliced onto a line it does not begin. This file warns
+      # about that exact rebinding twice elsewhere ($work | has(.id|tostring),
+      # $allowed | index(.status)); it caught this function too, in review.
+      | ([ $ids[] | . as $i | select($line | startswith($i)) ] | sort_by(length) | last) as $id
+      | if $id == null then ($line | _rm_sanitize(2000))
+        else $id + ($line[($id | length):] | _rm_sanitize(2000)) end
+      | if (length > 2000) then .[0:2000] else . end
+    );
     def section(title; items):
       "## " + title + "\n\n" +
       (if (items | length) == 0 then "_None._\n" else ((items | map("- " + .)) | join("\n")) + "\n" end);
     {
       decisions: ((.decisions // []) | clean),
-      artifacts: ((.artifacts // []) | clean),
+      artifacts: ((.artifacts // []) | clean_delivery),
       deviations: ((.deviations // []) | clean),
       deferred: ((.deferred // []) | clean),
-      contracts: ((.contracts // []) | clean)
+      contracts: ((.contracts // []) | clean_delivery)
     } as $s |
     section("Decisions Made"; $s.decisions) + "\n" +
     section("Artifacts Created"; $s.artifacts) + "\n" +
@@ -15296,6 +15331,33 @@ cmd_roadmap_write_handoff() {
   feature_dir=$(dirname "$roadmap_path")
   handoff_path="$feature_dir/$phase_dir/handoff.md"
   validate_path_in_project "$handoff_path"
+
+  # Tripwire, before the write. Every declared identity a payload line claimed
+  # to deliver must still be findable, byte-for-byte, in the rendered body --
+  # under the same fixed-string match _cv_handoff_lists_artifact uses to resolve
+  # a downstream needs.
+  #
+  # With the renderer above this can never fire, and that is the point: it is
+  # not a check on today's code, it is a guard against a future sanitizer edit
+  # silently reopening the defect this commit closes. Refusing beats writing a
+  # handoff that reads complete and resolves nothing a phase later. It only
+  # judges identities some line actually claimed, so a phase reporting fewer
+  # artifacts than it declared -- a legitimate partial delivery -- is untouched.
+  local lost_ids
+  lost_ids=$(printf '%s' "$input_json" | jq -r --argjson ids "$declared_ids" --arg body "$body" '
+    ((.artifacts // []) + (.contracts // [])) as $lines
+    | [ $ids[]
+        | . as $id
+        | select(any($lines[]; startswith($id)))
+        | select(($body | contains($id)) | not) ]
+    | .[]
+  ')
+  if [ -n "$lost_ids" ]; then
+    echo "Error: roadmap-write-handoff: the rendered handoff lost a declared identity it was asked to report:" >&2
+    printf '  %s\n' $lost_ids >&2
+    echo "Error: roadmap-write-handoff: '## Artifacts Created' is what validate-contracts greps to resolve a downstream needs, so writing this would leave that contract permanently unmet. Nothing was written." >&2
+    exit 1
+  fi
 
   local out
   out=$(
