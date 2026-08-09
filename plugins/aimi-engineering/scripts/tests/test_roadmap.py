@@ -318,6 +318,37 @@ def test_every_refusal_in_the_capture_left_the_file_alone():
     assert all(c["unchanged"] for c in refusals)
 
 
+def test_the_amended_field_no_longer_leaks_the_scratch_keys():
+    """The SECOND place where this code deliberately differs from the golden.
+
+    The jq reported `.amended` as the payload's raw key list, so amending
+    creates returned ["__mkCreates","creates"] -- the marker forms the identity
+    guard consumes, which are scratch and never schema. The port reproduced it
+    faithfully so that commit's zero delta kept meaning "nothing changed"; this
+    is the separate fix, and the golden below is left showing the old output
+    because it records what jq did, not what we do.
+
+    The first such divergence is dependson-nao-array (see the init section):
+    there, jq crashed with exit 5 and the message the code writes was
+    unreachable. Both are named on both sides rather than discovered later.
+    """
+    assert AMEND_CASES["retarget-ok"]["stdout"].count("__mkCreates") == 1, "the golden is history"
+    for label in ("retarget-ok", "handoff-avisa"):
+        assert "__mk" in AMEND_CASES[label]["stdout"]
+    # And what the code does now: only amendable keys, by intersection.
+    patch = {"creates": [], "__mkCreates": [], "needs": [], "__mkNeeds": [], "goal": "g"}
+    assert sorted(k for k in patch if k in R.AMENDABLE_KEYS) == ["creates", "goal", "needs"]
+
+
+def test_the_scratch_keys_never_reached_disk_in_any_captured_case():
+    """The property that was always true and that the fix must not break: the
+    leak was in the report, never in roadmap.json. 70 captured cases across both
+    writers, zero occurrences on disk."""
+    cases = GOLDEN["init_cases"] + GOLDEN["amend_cases"]
+    assert len(cases) == 70
+    assert not [c for c in cases if "__mk" in json.dumps(c.get("file"))]
+
+
 def test_the_orphan_suggestion_guesses_only_when_there_is_nothing_to_guess():
     """The set difference proves an identity was dropped but never which new one
     replaced it. With exactly one added identity the pairing is complete; with

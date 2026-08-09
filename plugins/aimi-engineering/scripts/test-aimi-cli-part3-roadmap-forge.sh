@@ -1804,6 +1804,20 @@ test_roadmap_amend_phase_partial_merge() {
   assert_eq "the corrected outcome" "$(jq -r '.phases[] | select(.id == 2) | .goal' "$roadmap_file")" \
     "roadmap-amend-phase merge: the earlier goal amend survived the second amend"
 
+  # creates/needs are the ONLY keys that produce the __mk* marker forms the
+  # identity guard consumes, which is why neither assertion above could catch
+  # them leaking into a report whose whole job is to name what changed.
+  #
+  # creates KEEPS _forge_account_override: phases 3 and 4 both need it, so
+  # dropping it here is an orphan refusal, not a merge. Adding beside it is the
+  # amendment shape this assertion is about.
+  output=$(jq -n '{creates: ["_forge_account_override (the override)", "cli/z.sh (a new one)"],
+                   needs: ["forge/base.sh (the base adapter)"]}' \
+    | "$CLI" roadmap-amend-phase --feature "$feature" --phase 2 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-amend-phase merge: contract-list amend exits 0"
+  assert_eq '["creates","needs"]' "$(printf '%s' "$output" | jq -c '.amended')" \
+    "roadmap-amend-phase merge: amended names only amendable fields, never the __mk* scratch"
+
   rm -rf ".aimi/tasks/$feature"
 }
 

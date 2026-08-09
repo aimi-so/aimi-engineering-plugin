@@ -1125,10 +1125,14 @@ def op_amend_write(argv):
         {
             "roadmap": path,
             "phase": phase_id,
-            # __mkCreates/__mkNeeds leak into this list. Reproduced deliberately:
-            # the fix ships separately so this port's zero delta keeps meaning
-            # "nothing changed" rather than "no test noticed".
-            "amended": sorted(patch.keys()),
+            # Intersected with the allowlist rather than filtered by name. This
+            # field can only ever name an amendable key -- amend_key_errors
+            # refused everything else at the door -- so the intersection is the
+            # true statement and it maintains itself: a future scratch key stays
+            # out without anyone remembering it exists. Before this, __mkCreates
+            # and __mkNeeds rode along, and neither of the two assertions on this
+            # field noticed, because neither amended creates or needs.
+            "amended": sorted(k for k in patch if k in AMENDABLE_KEYS),
             "retargeted": retargeted,
         },
         sys.stdout,
