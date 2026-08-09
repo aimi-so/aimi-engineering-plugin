@@ -35,7 +35,7 @@ Before touching container, branch, or split-detection logic, read:
 
 ### Testing
 
-Five independent test suites — four plain Bash, one Python (pytest) for the `hooks/` directory:
+Six independent test suites — four plain Bash, two Python (pytest):
 
 ```bash
 bash plugins/aimi-engineering/scripts/test-aimi-cli.sh            # four parts, concurrent
@@ -44,9 +44,14 @@ bash plugins/aimi-engineering/scripts/test-worktree-manager.sh
 bash plugins/aimi-engineering/scripts/test-command-blocks.sh
 bash plugins/aimi-engineering/scripts/test-resolve-pr-parallel.sh
 python3 -m pytest plugins/aimi-engineering/hooks/tests/ -q
+python3 -m pytest plugins/aimi-engineering/scripts/tests/ -q
 ```
 
-`plugins/aimi-engineering/hooks/` is the one Python component in this repo; everything else has no build step, no lint step, no package manager and stays plain Bash. The pytest suite requires Python 3.10+ (hook source and tests use `X | None` and `list[int]` union/generic syntax) and `pytest` installed via `pip install pytest`.
+There are two Python components: `plugins/aimi-engineering/hooks/` (the hook dispatcher and guards) and `plugins/aimi-engineering/scripts/roadmap.py` (the roadmap.json document logic behind aimi-cli.sh's `roadmap-*` verbs). Everything else has no build step, no lint step, no package manager and stays plain Bash. Both pytest suites require Python 3.10+ and `pytest` installed via `pip install pytest`.
+
+**`python3` is a runtime requirement, not only a test-time one.** Claude Code already invokes `hooks/*.py` directly on every session, and `aimi-cli.sh`'s roadmap verbs now shell out to `roadmap.py`. `check_python3()` in `aimi-cli.sh` fails with an install hint, and it is called by the roadmap verbs only — every other verb stays pure Bash + jq and works on a host without python3. On OpenCode this is new: `install.sh` copies `scripts/` wholesale (`cp -R "$src/."`), so the file travels with no installer change, but the host now needs python3 to run a roadmap verb.
+
+- Run `python3 -m pytest plugins/aimi-engineering/scripts/tests/ -q` after any change to `roadmap.py`. Its `tests/golden_from_jq.json` was captured from the jq implementations that used to live in `aimi-cli.sh`, **before they were deleted**, and is the evidence that the port changed nothing. Never regenerate it from `roadmap.py` — that would turn it into a snapshot of whatever the code does today. When a rule genuinely changes, the golden file changes in the same commit, with the reason in the message.
 
 - Run `test-aimi-cli.sh` after any change to `plugins/aimi-engineering/scripts/aimi-cli.sh` or files it sources. It is a **dispatcher**: it runs `test-aimi-cli-part{1..4}-*.sh` **concurrently** and aggregates their counts. Each part sources the 179-line `test-aimi-cli-common.sh` preamble (the `assert_*` family, `setup`, `cleanup`) plus `test-aimi-cli-fixtures.sh` for the fixtures more than one part needs, and is runnable on its own for a focused loop. A new test goes in the part that owns its concern — each part's header comment lists its sections — and `EXPECTED_ASSERTIONS` in the dispatcher must be raised to match, because the dispatcher asserts the total and fails the run when it moves.
   - **Serial escape hatch: `--serial` (or `-s`, or `AIMI_TEST_SERIAL=1`).** Concurrent is the default and is ~2.2x faster. Serial mode streams each part's output live instead of buffering it — reach for it when bisecting an intermittent failure, when a part hangs and you need to see how far it got, or on a host where four concurrent parts would thrash. `--parallel`/`-p` forces concurrency back on when `AIMI_TEST_SERIAL` is set in the environment. Counts, the invariant and the exit status are identical either way; only wall time and buffering differ.

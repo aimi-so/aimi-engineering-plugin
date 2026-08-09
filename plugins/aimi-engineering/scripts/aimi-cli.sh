@@ -144,6 +144,29 @@ check_jq() {
   fi
 }
 
+# Ensure python3 is available. Mirrors check_jq, and is called by the roadmap
+# verbs only -- every other verb in this file is pure bash + jq and must keep
+# working on a host without python3.
+check_python3() {
+  if ! command -v python3 &> /dev/null; then
+    echo "Error: python3 is required by the roadmap verbs but is not installed." >&2
+    echo "Install with: brew install python (macOS) or apt install python3 (Linux)" >&2
+    exit 1
+  fi
+}
+
+# Absolute path to roadmap.py, which sits beside this script.
+#
+# Same ${BASH_SOURCE[0]:-$0} idiom cmd_version already uses to find plugin.json
+# one directory up. It has to be resolved rather than assumed because this file
+# is invoked through a cached path, through $AIMI_PLUGIN_DIR, and from a
+# worktree, and only its own location is reliable in all three.
+_aimi_roadmap_py() {
+  local script_path
+  script_path="${BASH_SOURCE[0]:-$0}"
+  printf '%s/roadmap.py\n' "$(cd "$(dirname "$script_path")" && pwd)"
+}
+
 # Ensure state directory exists
 ensure_state_dir() {
   mkdir -p "$AIMI_DIR"
@@ -14027,84 +14050,19 @@ _roadmap_identity_note() {
   printf '%s\n' 'Note: an entry is quoted after backtick normalization -- a `x` span becomes x -- so one submitted with backticks appears here without them. Nothing else about an identity is rewritten; locate it by its position in the list.' >&2
 }
 
+# Reads a phases array on stdin, prints one diagnostic line per indefensible
+# creates/needs/areas entry. The rule itself lives in roadmap.py's judge_phases;
+# this is the call site, and there is no second copy of the rule here.
+#
+# The port was verified differentially rather than by inspection: 36 adversarial
+# entries built into 36 phases, run through the jq original and through Python,
+# 49 diagnostic lines each, byte-identical. tests/test_roadmap.py keeps that
+# corpus.
 _roadmap_identity_errors() {
-  # _roadmap_reject_unfindable_identity lives HERE, not in $_CONTRACT_JQ_DEFS:
-  # that block is the shared vocabulary of validate-contracts and roadmap-sweep,
-  # and neither of them enforces this rule -- defining it there would imply they
-  # do. Input is an identity, output is true when the entry must be refused.
-  #
-  # The method alternation and the single-space-then-slash shape are byte-for-byte
-  # the ones verify-creates step 2 strips (`case` over 'GET /'*|'POST /'*|...
-  # then "${identity#* }"), so the token judged at write time is exactly the
-  # token searched at close time. "POST  /api/x" with two spaces does not match
-  # that shape there and must not match it here -- verify-creates would search
-  # it whole. CR and LF are in the class as insurance: roadmap-init's
-  # _rm_sanitize already folds newlines to spaces, but the amend path reaches
-  # this helper too and may sanitize differently.
-  jq -r "$_CONTRACT_JQ_DEFS"'
-    def _roadmap_reject_unfindable_identity:
-      (if test("^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) /")
-         then sub("^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) "; "")
-         else . end)
-      | test("[ \t\r\n]");
-    [ .[]
-      | . as $p
-      | (["creates", "needs"][]) as $list
-      | (($p[$list] // []) | to_entries[]) as $slot
-      | ($slot.value | if type == "string" then . else "" end) as $entry
-      | ($slot.key + 1) as $pos
-      | ({"creates": "__mkCreates", "needs": "__mkNeeds"}[$list]) as $mk_key
-      | (($p[$mk_key] // []) | .[$slot.key]) as $marker_form
-      | ($entry | _cv_identity) as $ident
-      | ($ident | [match(_cv_shell_class) | .string] | first) as $shell_char
-      | (
-          [
-            (if ($ident | length) == 0 then "empty once the description is stripped" else empty end),
-            (if ($ident | test("(^|/)\\.\\.($|/)")) then "contains a \"..\" path segment" else empty end),
-            (if ($ident | test("^/")) then "begins with \"/\"" else empty end),
-            (if ($ident | _roadmap_reject_unfindable_identity) then "contains whitespace, so no source token could match it -- name the symbol, path, table or \"METHOD /path\" endpoint the phase will actually produce" else empty end),
-            (if $shell_char != null then "contains the shell metacharacter \"" + $shell_char + "\", which validate-contracts refuses in an identity -- move that text into the parenthesised description, or, for an endpoint, declare the route without its query string" else empty end),
-            (if ($entry | _cv_injection) then "matches an instruction-injection pattern validate-contracts refuses (ignore previous / system: / INSTRUCTIONS: / code fence / \"$(\") -- reword it; the description reaches a sub-agent prompt, so this half is judged on the whole entry, not just the identity" else empty end),
-            (if ($marker_form != null) and (($marker_form | _cv_identity) != $ident)
-               then "would be stored under a DIFFERENT identity than the one written: \"" + ($marker_form | _cv_identity) + "\" becomes \"" + $ident + "\". A sanitizer rule that deletes content (an HTML/XML-looking tag such as \"<T>\", a \"$(\" opener, or an instruction-override phrase) rewrote it, and verify-creates would then grep for a name this phase never produces -- rename the artifact so it survives verbatim"
-               else empty end),
-            (if ($ident | length) > 0 and (($ident | gsub("[*?\\[\\]/ ]"; "")) | test("[a-zA-Z0-9]") | not)
-               then "names nothing in particular -- it is only separators and glob metacharacters, so verify-creates would match whatever the repository happens to contain and report the phase verified without it having built anything. Name the symbol, path, table or \"METHOD /path\" endpoint the phase actually produces; a glob is fine as PART of a path (\"db/migrations/*.sql\") but not as the whole identity"
-               else empty end)
-          ]
-        ) as $reasons
-      | select(($reasons | length) > 0)
-      | ($entry | _cv_injection) as $is_injection
-      | "phase " + ($p.id|tostring) + ": " + $list + " entry #" + ($pos|tostring)
-        + (if $is_injection then " (content withheld -- it matches an injection pattern)" else " \"" + $entry + "\"" end)
-        + " is not a usable artifact identity: " + ($reasons | join("; and it "))
-    ]
-    +
-    # areas[] is a glob list, not an identity list, so none of the rules above
-    # applies to it -- but it IS joined onto a filesystem path downstream and is
-    # explicitly exempted from /aimi:plan pathHints six-check filter on the
-    # grounds that "roadmap-init already sanitized it". It never checked
-    # traversal. That was masked while the sanitizer deleted a backticked span
-    # whole; unwrapping the span to its inner text (the correct fix for the
-    # handoff) removed the accidental cover and let "`../../../etc/**`" through.
-    # Only the two path shapes are judged here.
-    [ .[]
-      | . as $p
-      | (($p["areas"] // []) | to_entries[]) as $slot
-      | ($slot.value | if type == "string" then . else "" end) as $area
-      | ($slot.key + 1) as $pos
-      | (
-          [
-            (if ($area | test("(^|/)\\.\\.($|/)")) then "contains a \"..\" path segment" else empty end),
-            (if ($area | test("^/")) then "is an absolute path" else empty end)
-          ]
-        ) as $reasons
-      | select(($reasons | length) > 0)
-      | "phase " + ($p.id|tostring) + ": areas entry #" + ($pos|tostring) + " \"" + $area + "\" is not a usable scope hint: it " + ($reasons | join("; and it ")) + " -- areas are repo-relative globs and are appended to research path hints as-is"
-    ]
-    | .[]
-  '
+  check_python3
+  python3 "$(_aimi_roadmap_py)" judge-phases
 }
+
 
 cmd_roadmap_init() {
   local feature="" file="" sync_mode=false brainstorm_path=""
@@ -15514,14 +15472,6 @@ def _cv_suspicious:
 # the first "(" on, minus one leading "(" and one trailing ")". An entry with
 # no "(" at all yields "" -- absent description, not null, so no reader needs a
 # string-or-null branch.
-_NORMALIZE_CONTRACTS_JQ='
-def _nc_description:
-  sub("^[^(]*"; "")
-  | if length == 0 then "" else (sub("^\\("; "") | sub("\\)$"; "")) end;
-def _nc_entry:
-  if type == "string" then {identity: _cv_identity, description: _nc_description} else . end;
-'
-
 cmd_normalize_contracts() {
   local feature=""
   while [ $# -gt 0 ]; do
@@ -15542,35 +15492,15 @@ cmd_normalize_contracts() {
   local roadmap_path
   roadmap_path=$(_roadmap_require normalize-contracts "$feature" " (run roadmap-init first)")
 
+  check_python3
+  # Bash holds the lock; roadmap.py does the whole read-modify-write inside it,
+  # including the re-read that catches a file which turned malformed between
+  # _roadmap_require's check and lock acquisition. One crossing, not four.
   local out
   out=$(
     (
       _lock "${roadmap_path}.lock"
-      # Re-read under the lock: the file can turn malformed between
-      # _roadmap_require's check and lock acquisition.
-      if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
-        echo "Error: normalize-contracts: malformed roadmap.json: $roadmap_path" >&2
-        exit 1
-      fi
-
-      # Counted BEFORE the rewrite, so a second run reports 0 rather than
-      # re-reporting the first run's work. This is the idempotence signal.
-      converted=$(jq '[.phases[]? | ((.creates // [])[]?, (.needs // [])[]?) | select(type == "string")] | length' "$roadmap_path") || exit 1
-
-      migrated_doc=$(jq --arg v "$_ROADMAP_CONTRACT_VERSION" "$_CONTRACT_JQ_DEFS$_NORMALIZE_CONTRACTS_JQ"'
-        .roadmapVersion = $v
-        | .phases |= map(
-            (if has("creates") then .creates |= map(_nc_entry) else . end)
-            | (if has("needs") then .needs |= map(_nc_entry) else . end)
-          )
-      ' "$roadmap_path") || exit 1
-
-      tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
-      printf '%s\n' "$migrated_doc" > "$tmp_file"
-      mv "$tmp_file" "$roadmap_path"
-
-      jq -n --arg path "$roadmap_path" --argjson n "$converted" --arg v "$_ROADMAP_CONTRACT_VERSION" \
-        '{roadmap: $path, converted: $n, roadmapVersion: $v}'
+      python3 "$(_aimi_roadmap_py)" normalize-contracts --roadmap "$roadmap_path"
     ) 200>"${roadmap_path}.lock"
   ) || exit $?
   printf '%s\n' "$out"
