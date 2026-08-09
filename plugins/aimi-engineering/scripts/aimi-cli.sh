@@ -13598,6 +13598,16 @@ _ROADMAP_FEATURE_REGEX='^[a-zA-Z0-9][a-zA-Z0-9_-]*$'
 # Reused branchName convention (see plugins/aimi-engineering/CLAUDE.md)
 _ROADMAP_BRANCH_REGEX='^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'
 
+# The stored roadmap.json shape every contract READER in this file requires.
+#
+# It tracks the shape of one creates/needs entry and nothing else -- not the
+# CLI version, not the plugin version, not any other roadmap.json field. "1.0"
+# means an entry is the single string "identity (description)"; "2.0" means it
+# is {identity, description}, two fields judged by two different rules. Bump it
+# only when that entry shape changes again, and ship the normalize-contracts
+# migration in the same commit.
+_ROADMAP_CONTRACT_VERSION="2.0"
+
 # jq `def` spliced into programs that sanitize free-text roadmap fields
 # (name, goal, successCriteria entries, notes, branch, brainstormPath).
 # Deletes triple-fenced code blocks wholesale, UNWRAPS a single-backtick span
@@ -13762,6 +13772,38 @@ _roadmap_require() {
     fi
   fi
   printf '%s\n' "$path"
+}
+
+# Refuse a roadmap whose stored creates/needs entries pre-date
+# $_ROADMAP_CONTRACT_VERSION. Callers: every verb that READS a contract.
+#   _roadmap_require_contracts <verb> <roadmap_path> <feature>
+#
+# IT REFUSES, IT DOES NOT SKIP, and that is the whole design of this helper.
+# The tempting alternative -- treat an old roadmap as "nothing to check" and
+# carry on -- makes validate-contracts answer valid:true about a document it
+# never parsed. A gate that reports success for an unread file is worse than
+# no gate: the caller acts on the verdict either way, and only one of the two
+# outcomes tells them the truth is unknown.
+#
+# The comparison is the sort -V idiom cmd_validate_tasks already uses for
+# schemaVersion, with a "0" floor so an absent or null roadmapVersion sorts
+# below every real one and is refused rather than silently accepted. A version
+# ABOVE the required one passes: this CLI can read a document a newer CLI
+# wrote for as long as the entry shape is compatible, and refusing it here
+# would strand a user mid-upgrade for no gain.
+_roadmap_require_contracts() {
+  local verb="$1" roadmap_path="$2" feature="$3"
+  local stored
+  stored=$(jq -r '.roadmapVersion // "0"' "$roadmap_path" 2>/dev/null) || stored="0"
+  if [ -z "$stored" ] || [ "$stored" = "null" ]; then
+    stored="0"
+  fi
+  if [ "$(printf '%s\n' "$stored" "$_ROADMAP_CONTRACT_VERSION" | sort -V | head -n1)" != "$_ROADMAP_CONTRACT_VERSION" ]; then
+    echo "Error: $verb: this roadmap stores creates/needs in the pre-$_ROADMAP_CONTRACT_VERSION form, where one entry is the single string \"identity (description)\". Nothing was read and nothing was checked. Migrate it once, in place:" >&2
+    echo "    aimi-cli.sh normalize-contracts --feature $feature" >&2
+    echo "The migration is idempotent and computes each identity with the same function every reader used before, so no identity changes by a byte. (found roadmapVersion $stored, need $_ROADMAP_CONTRACT_VERSION)" >&2
+    exit 1
+  fi
 }
 
 # Validate --phase is present and a bare numeric id (int or one-decimal-place).
@@ -15444,6 +15486,96 @@ def _cv_suspicious:
   or (test(_cv_shell_class) and (_cv_identity | test(_cv_shell_class)));
 '
 
+# ============================================================================
+# normalize-contracts — migrate stored creates/needs from 1.0 to 2.0
+# ============================================================================
+#
+# 1.0 stores one entry as the string "identity (description)"; 2.0 stores
+# {identity, description}. This verb is the only writer of that transition, and
+# it exists rather than "just regenerate the roadmap" because roadmaps live
+# outside this repository too -- a phases array is authored once, by hand or by
+# /aimi:brainstorm, and re-deriving one loses every amendment made since.
+#
+# THE CORRECTNESS ARGUMENT IS THAT IT CALLS _cv_identity, NOT A COPY OF IT.
+# Every reader in this file has always computed the identity as
+# `sub("\\(.*"; "")` then trim. A migration that re-derived that split with its
+# own regex would be a fourth ruler, and any disagreement -- even on one entry
+# in one roadmap -- silently repoints a downstream needs at nothing, because
+# needs are matched against creates by exact byte equality. Reusing the
+# function makes the migrated identity byte-identical to what the pre-migration
+# readers saw, by construction rather than by testing.
+#
+# It therefore does NOT judge. A whitespace-bearing prose identity the current
+# writer would refuse migrates unchanged; the reader gate is what surfaces it
+# afterwards, in a diagnostic that names the entry. Repairing on the way past
+# would silently change what a phase promises.
+#
+# _nc_description is the exact inverse of _cv_identity's sub(): everything from
+# the first "(" on, minus one leading "(" and one trailing ")". An entry with
+# no "(" at all yields "" -- absent description, not null, so no reader needs a
+# string-or-null branch.
+_NORMALIZE_CONTRACTS_JQ='
+def _nc_description:
+  sub("^[^(]*"; "")
+  | if length == 0 then "" else (sub("^\\("; "") | sub("\\)$"; "")) end;
+def _nc_entry:
+  if type == "string" then {identity: _cv_identity, description: _nc_description} else . end;
+'
+
+cmd_normalize_contracts() {
+  local feature=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature)
+        feature="${2:-}"
+        shift 2
+        ;;
+      *)
+        echo "Error: normalize-contracts: unknown argument: $1" >&2
+        echo "Usage: aimi-cli.sh normalize-contracts --feature <slug>" >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  _roadmap_validate_feature "$feature" "normalize-contracts"
+  local roadmap_path
+  roadmap_path=$(_roadmap_require normalize-contracts "$feature" " (run roadmap-init first)")
+
+  local out
+  out=$(
+    (
+      _lock "${roadmap_path}.lock"
+      # Re-read under the lock: the file can turn malformed between
+      # _roadmap_require's check and lock acquisition.
+      if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
+        echo "Error: normalize-contracts: malformed roadmap.json: $roadmap_path" >&2
+        exit 1
+      fi
+
+      # Counted BEFORE the rewrite, so a second run reports 0 rather than
+      # re-reporting the first run's work. This is the idempotence signal.
+      converted=$(jq '[.phases[]? | ((.creates // [])[]?, (.needs // [])[]?) | select(type == "string")] | length' "$roadmap_path") || exit 1
+
+      migrated_doc=$(jq --arg v "$_ROADMAP_CONTRACT_VERSION" "$_CONTRACT_JQ_DEFS$_NORMALIZE_CONTRACTS_JQ"'
+        .roadmapVersion = $v
+        | .phases |= map(
+            (if has("creates") then .creates |= map(_nc_entry) else . end)
+            | (if has("needs") then .needs |= map(_nc_entry) else . end)
+          )
+      ' "$roadmap_path") || exit 1
+
+      tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
+      printf '%s\n' "$migrated_doc" > "$tmp_file"
+      mv "$tmp_file" "$roadmap_path"
+
+      jq -n --arg path "$roadmap_path" --argjson n "$converted" --arg v "$_ROADMAP_CONTRACT_VERSION" \
+        '{roadmap: $path, converted: $n, roadmapVersion: $v}'
+    ) 200>"${roadmap_path}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
+}
+
 # Print newline-separated phase ids reachable via transitive dependsOn
 # closure from $2 (excluding $2 itself). $1 = roadmap_path.
 _cv_reachable_ids() {
@@ -16932,6 +17064,26 @@ COMMANDS:
                               only (exit 0): a completed phase whose handoff.md
                               omits a newly introduced identity.
                               Prints {roadmap, phase, amended[], retargeted[]}.
+    normalize-contracts --feature <slug>
+                              Migrate a roadmap's stored creates/needs entries from
+                              the 1.0 form -- one string, "identity (description)" --
+                              to the 2.0 form {identity, description}, in place,
+                              under the same lock and mktemp-then-mv swap every
+                              other roadmap writer uses.
+                              Each identity is computed by the SAME function every
+                              reader used before the migration, so no identity
+                              changes by a byte and no downstream needs is
+                              repointed. An entry with no "(" gets description ""
+                              (never null). An entry already in object form is left
+                              untouched, which is what makes a second run a no-op.
+                              It does not judge: a prose or whitespace-bearing
+                              identity the current writer would refuse migrates
+                              unchanged, and the reader reports it afterwards by
+                              name. Repairing silently would change what a phase
+                              promises.
+                              Prints {roadmap, converted, roadmapVersion}, where
+                              converted counts entries that were strings BEFORE
+                              this run -- so a second run prints 0.
     roadmap-get --feature <slug> [--phase <id>] [--next-eligible]
                               Read-only. Bare: print the full roadmap.json.
                               --phase <id>: print one phase object.
@@ -17193,6 +17345,7 @@ main() {
     split-detect)      shift; cmd_split_detect "$@" ;;
     roadmap-init)          shift; cmd_roadmap_init "$@" ;;
     roadmap-amend-phase)   shift; cmd_roadmap_amend_phase "$@" ;;
+    normalize-contracts)   shift; cmd_normalize_contracts "$@" ;;
     roadmap-get)           shift; cmd_roadmap_get "$@" ;;
     roadmap-set-status)    shift; cmd_roadmap_set_status "$@" ;;
     roadmap-claim)         shift; cmd_roadmap_claim "$@" ;;

@@ -1031,6 +1031,156 @@ LEGACY_EOF
   rm -rf ".aimi/tasks/$feature"
 }
 
+# ============================================================================
+# normalize-contracts — the 1.0 → 2.0 migration
+# ============================================================================
+#
+# The rows below are declared as three separate fields -- original entry,
+# expected identity, expected description -- and NOT derived from each other by
+# the test. Deriving the expectation with the same split the CLI uses would
+# make this pass whatever that split does; writing all three out by hand is
+# what lets it disagree.
+#
+# Row 1 is this repository's own phase 1 creates string, prose and all: the
+# current writer refuses it, the migration must carry it through untouched.
+# Row 3 is the nesting case -- a balanced "(...)" INSIDE the description, where
+# a naive "split on every paren" or "cut at the last paren" drops text.
+_NC_ROWS=(
+  'forge command surface in aimi-cli.sh (open/view/diff/edit PR)~forge command surface in aimi-cli.sh~open/view/diff/edit PR'
+  'foo.rb~foo.rb~'
+  'cmd_x (parses (a,b) pairs)~cmd_x~parses (a,b) pairs'
+  'db/migrations/*.sql (the glob)~db/migrations/*.sql~the glob'
+)
+
+test_normalize_contracts_migrates_v1_in_place() {
+  echo ""
+  echo "=== normalize-contracts: migrates a 1.0 roadmap in place, losslessly ==="
+
+  local feature="nc-migrate"
+  local originals='[]' row original
+  for row in "${_NC_ROWS[@]}"; do
+    IFS='~' read -r original _ _ <<< "$row"
+    originals=$(jq -c --arg o "$original" '. + [$o]' <<< "$originals")
+  done
+
+  _seed_v1_roadmap_on_disk "$feature" "$originals" '["cmd_x (upstream thing)"]'
+  local roadmap=".aimi/tasks/$feature/roadmap.json"
+
+  local out rc
+  out=$("$CLI" normalize-contracts --feature "$feature" 2>&1) && rc=0 || rc=$?
+  assert_exit_code "0" "$rc" "normalize-contracts: exits 0 on a 1.0 roadmap"
+  assert_eq "5" "$(printf '%s' "$out" | jq -r '.converted')" "normalize-contracts: reports every string entry it converted (4 creates + 1 needs)"
+  assert_eq "2.0" "$(jq -r '.roadmapVersion' "$roadmap")" "normalize-contracts: stamps roadmapVersion 2.0"
+
+  local i=0 exp_id exp_desc
+  for row in "${_NC_ROWS[@]}"; do
+    IFS='~' read -r original exp_id exp_desc <<< "$row"
+    assert_eq "$exp_id" "$(jq -r --argjson i "$i" '.phases[0].creates[$i].identity' "$roadmap")" \
+      "normalize-contracts: identity of \"$original\""
+    assert_eq "$exp_desc" "$(jq -r --argjson i "$i" '.phases[0].creates[$i].description' "$roadmap")" \
+      "normalize-contracts: description of \"$original\""
+    i=$((i + 1))
+  done
+
+  # An entry with no "(" gets "" -- absent description, never null. A null here
+  # would force every reader downstream to carry a string-or-null branch.
+  assert_eq "string" "$(jq -r '.phases[0].creates[1].description | type' "$roadmap")" \
+    "normalize-contracts: a description-less entry gets \"\", not null"
+
+  # Losslessness for the ordinary shape, stated as the recomposition rather
+  # than as a second split: gluing the two fields back together reproduces the
+  # stored 1.0 string, nested parens and all.
+  assert_eq "cmd_x (parses (a,b) pairs)" \
+    "$(jq -r '.phases[0].creates[2] | .identity + " (" + .description + ")"' "$roadmap")" \
+    "normalize-contracts: identity + description recompose to the original entry"
+
+  # And the honest limit of that property. An entry whose text after the first
+  # "(" does not END in ")" is not re-gluable -- "a (b) c" migrates to the same
+  # pair as "a (b) c)", so one unbalanced trailing paren is dropped.
+  #
+  # This is recorded rather than fixed, because nothing re-glues: the migration
+  # is one-way, and the half that IS compared byte-for-byte downstream -- the
+  # identity, which needs entries are matched against -- is unaffected either
+  # way. What is lost is at most a stray paren from prose an agent reads.
+  local unbal="nc-migrate-unbalanced"
+  _seed_v1_roadmap_on_disk "$unbal" '["a (b) c"]'
+  "$CLI" normalize-contracts --feature "$unbal" >/dev/null 2>&1
+  assert_eq "a" "$(jq -r '.phases[0].creates[0].identity' ".aimi/tasks/$unbal/roadmap.json")" \
+    "normalize-contracts: an unbalanced entry still yields the identity every reader computed"
+  assert_eq "b) c" "$(jq -r '.phases[0].creates[0].description' ".aimi/tasks/$unbal/roadmap.json")" \
+    "normalize-contracts: its description keeps every character after the first \"(\""
+  rm -rf ".aimi/tasks/$unbal"
+
+  # needs migrates by the same rule -- a rule applied to creates alone would
+  # leave the two lists in different shapes, and needs are matched against
+  # creates by exact byte equality.
+  assert_eq "cmd_x" "$(jq -r '.phases[0].needs[0].identity' "$roadmap")" "normalize-contracts: needs entries migrate too"
+  assert_eq "upstream thing" "$(jq -r '.phases[0].needs[0].description' "$roadmap")" "normalize-contracts: needs description carried across"
+
+  # Idempotence, checked two ways: the report must not re-claim the first run's
+  # work, and the bytes must not move. The count alone would pass if the verb
+  # rewrote the file identically-but-not-byte-identically (key reordering).
+  cp "$roadmap" "$roadmap.first"
+  local out2 rc2
+  out2=$("$CLI" normalize-contracts --feature "$feature" 2>&1) && rc2=0 || rc2=$?
+  assert_exit_code "0" "$rc2" "normalize-contracts: second run exits 0"
+  assert_eq "0" "$(printf '%s' "$out2" | jq -r '.converted')" "normalize-contracts: second run converts nothing"
+  if cmp -s "$roadmap" "$roadmap.first"; then
+    echo -e "${GREEN}✓${NC} normalize-contracts: second run leaves the file byte-identical"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} normalize-contracts: second run must leave the file byte-identical"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_require_contracts_refuses_not_skips() {
+  echo ""
+  echo "=== _roadmap_require_contracts: refuses an old roadmap, never skips it ==="
+
+  # Sourced in the sed+eval style source_cache_functions uses. The gate is not
+  # wired to any verb yet -- it is wired in the reader commit -- and an
+  # unwired, untested guard is exactly the class this whole branch exists to
+  # remove, so it is exercised directly here rather than left for later.
+  eval "$(sed -n '/^_ROADMAP_CONTRACT_VERSION=/p' "$CLI")"
+  eval "$(sed -n '/^_roadmap_require_contracts()/,/^}/p' "$CLI")"
+
+  local dir="$TEST_DIR/nc-gate"
+  mkdir -p "$dir"
+
+  local out rc
+  # (a) A 1.0 document: refused, and the message must carry the repair.
+  jq -n '{roadmapVersion: "1.0", phases: []}' > "$dir/v1.json"
+  out=$( (_roadmap_require_contracts "validate-contracts" "$dir/v1.json" "my-feature") 2>&1 ) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "contract gate: a 1.0 roadmap is refused"
+  assert_contains "normalize-contracts --feature my-feature" "$out" "contract gate: the message is the copy-pasteable repair, with the caller's own slug"
+  assert_contains "Nothing was read" "$out" "contract gate: the message says the document was not read, so no verdict is implied"
+  assert_contains "validate-contracts" "$out" "contract gate: the message names the verb that refused"
+
+  # (b) No roadmapVersion at all sorts below every real version and is refused.
+  # A "// 0" floor rather than a permissive default: an absent version is an
+  # unknown shape, and guessing it is how a reader ends up parsing garbage.
+  jq -n '{phases: []}' > "$dir/none.json"
+  out=$( (_roadmap_require_contracts "verify-creates" "$dir/none.json" "f") 2>&1 ) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "contract gate: an absent roadmapVersion is refused, not assumed current"
+
+  # (c) Exactly the required version passes.
+  jq -n --arg v "$_ROADMAP_CONTRACT_VERSION" '{roadmapVersion: $v, phases: []}' > "$dir/cur.json"
+  ( _roadmap_require_contracts "verify-creates" "$dir/cur.json" "f" ) >/dev/null 2>&1 && rc=0 || rc=$?
+  assert_exit_code "0" "$rc" "contract gate: the current version passes"
+
+  # (d) A HIGHER version passes. This CLI reading a document a newer CLI wrote
+  # is not an error while the entry shape is compatible; refusing it would
+  # strand a user mid-upgrade in exchange for nothing.
+  jq -n '{roadmapVersion: "99.0", phases: []}' > "$dir/future.json"
+  ( _roadmap_require_contracts "verify-creates" "$dir/future.json" "f" ) >/dev/null 2>&1 && rc=0 || rc=$?
+  assert_exit_code "0" "$rc" "contract gate: a newer version passes (forward-compatible)"
+
+  rm -rf "$dir"
+}
+
 test_roadmap_init_accepts_documented_identity_kinds() {
   echo ""
   echo "=== roadmap-init: accepts every documented identity kind, all non-suspicious ==="
@@ -3664,10 +3814,10 @@ _vc_roadmap() {
 # is a write-time decision; it must never change how an already-written roadmap
 # is read.
 _seed_v1_roadmap_on_disk() {
-  local feature="$1" creates_json="$2"
+  local feature="$1" creates_json="$2" needs_json="${3:-[]}"
   rm -rf ".aimi/tasks/$feature"
   mkdir -p ".aimi/tasks/$feature"
-  jq -n --arg f "$feature" --argjson c "$creates_json" '{
+  jq -n --arg f "$feature" --argjson c "$creates_json" --argjson n "$needs_json" '{
     roadmapVersion: "1.0",
     feature: $f,
     createdAt: "2026-01-01T00:00:00Z",
@@ -3675,7 +3825,7 @@ _seed_v1_roadmap_on_disk() {
     phases: [{
       id: 1, name: "P", goal: "g", slug: "p", dir: "phase-1-p",
       status: "pending", dependsOn: [], branch: null, notes: null,
-      successCriteria: [], creates: $c, needs: [], areas: [], claim: null
+      successCriteria: [], creates: $c, needs: $n, areas: [], claim: null
     }]
   }' > ".aimi/tasks/$feature/roadmap.json"
 }
@@ -7282,6 +7432,8 @@ main() {
   test_roadmap_init_rejects_invalid_dir_slug
   test_roadmap_init_rejects_malformed_identity
   test_roadmap_init_sync_ignores_legacy_identities
+  test_normalize_contracts_migrates_v1_in_place
+  test_roadmap_require_contracts_refuses_not_skips
   test_roadmap_init_accepts_documented_identity_kinds
   test_roadmap_identity_character_round_trip
   test_roadmap_init_sanitizes_fields
