@@ -1301,9 +1301,29 @@ _rt_roundtrip_cell() {
     | "$CLI" roadmap-write-handoff --feature "$_RT_FEATURE" --phase 1 >/dev/null 2>&1
   "$CLI" roadmap-set-status --feature "$_RT_FEATURE" --phase 1 --status completed --force >/dev/null 2>&1
 
-  # The identity is the text before the first " (" -- the same token
-  # _cv_identity yields and _cv_handoff_lists_artifact greps for.
-  local ident="${stored_creates%% (*}"
+  local vc_out vc_exit
+  vc_out=$("$CLI" validate-contracts "$_RT_FEATURE" --phase 2 2>&1) && vc_exit=0 || vc_exit=$?
+  assert_exit_code "0" "$vc_exit" "identity round trip: $where -- validate-contracts --phase 2 exits 0"
+  assert_eq "true" "$(printf '%s' "$vc_out" | jq -r '.valid' 2>/dev/null)" \
+    "identity round trip: $where -- read side reports valid"
+
+  # The identity comes from the VERB, not from parsing the stored entry. This
+  # line used to be "${stored_creates%% (*}" -- a third, independent
+  # paren-splitter, whose comment claimed it produced "the same token
+  # _cv_identity yields". It does not: it splits on space-then-paren, while
+  # _cv_identity splits on the first paren anywhere and then trims. They
+  # disagree on "cmd_foo(desc)", on "parseList<T>(raw) (desc)" and on a double
+  # space before the paren. It passed only because every row this cell feeds
+  # happens to be spelled "cmd_probe... (round trip probe)".
+  #
+  # .providers is keyed by the identity the reader actually resolved, so taking
+  # it from there tests the real contract instead of re-deriving it -- and it
+  # keeps this cell working whatever an entry looks like on disk.
+  local ident
+  ident=$(printf '%s' "$vc_out" | jq -r '.providers | keys[0] // ""' 2>/dev/null)
+  assert_eq "1" "$(printf '%s' "$vc_out" | jq -r --arg i "$ident" '.providers[$i] // "unresolved"' 2>/dev/null)" \
+    "identity round trip: $where -- consumer need resolves to the producer phase"
+
   local artifacts_section
   artifacts_section=$(awk '
     /^#+[ \t]+Artifacts Created/ { flag=1; next }
@@ -1311,14 +1331,6 @@ _rt_roundtrip_cell() {
     flag { print }
   ' ".aimi/tasks/$_RT_FEATURE/phase-1-producer/handoff.md" 2>/dev/null)
   assert_contains "$ident" "$artifacts_section" "identity round trip: $where -- handoff Artifacts Created carries the stored identity"
-
-  local vc_out vc_exit
-  vc_out=$("$CLI" validate-contracts "$_RT_FEATURE" --phase 2 2>&1) && vc_exit=0 || vc_exit=$?
-  assert_exit_code "0" "$vc_exit" "identity round trip: $where -- validate-contracts --phase 2 exits 0"
-  assert_eq "true" "$(printf '%s' "$vc_out" | jq -r '.valid' 2>/dev/null)" \
-    "identity round trip: $where -- read side reports valid"
-  assert_eq "1" "$(printf '%s' "$vc_out" | jq -r --arg i "$ident" '.providers[$i] // "unresolved"' 2>/dev/null)" \
-    "identity round trip: $where -- consumer need resolves to the producer phase"
 
   rm -rf ".aimi/tasks/$_RT_FEATURE"
 }
@@ -1535,9 +1547,22 @@ test_roadmap_init_sanitizes_fields() {
   fi
 
   # Guard against the vacuous pass this check used to give: an empty string
-  # satisfies every "does not contain" test below, so assert the entry exists
-  # and kept its identity before asserting what was removed from it.
-  assert_eq "evil-entry" "${creates_entry%% (*}" "roadmap-init sanitize: creates identity survives verbatim"
+  # satisfies every "does not contain" test below, so assert the entry kept its
+  # identity before asserting what was removed from it.
+  #
+  # startswith, not a paren split. Four independent splitters had accumulated in
+  # this file, none of them agreeing with _cv_identity on inputs none of them
+  # was tested against; this one was mine. Asking "does the stored entry still
+  # begin with the declared name" needs no split at all, and stays true whatever
+  # an entry looks like on disk.
+  if [[ "$creates_entry" == "evil-entry"* ]]; then
+    echo -e "${GREEN}✓${NC} roadmap-init sanitize: creates identity survives verbatim"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} roadmap-init sanitize: creates identity was rewritten"
+    echo "  got: $creates_entry"
+    ((TESTS_FAILED++))
+  fi
 
   if [[ "$creates_entry" == *$'\n'* || "$creates_entry" == *'`'* || "$creates_entry" == *'$('* || "$creates_entry" == *'<b>'* ]]; then
     echo -e "${RED}✗${NC} roadmap-init sanitize: creates description must have newline/backtick/\$(/tag stripped"
@@ -3600,10 +3625,20 @@ _vc_commit() {
 }
 
 # Create a one-phase roadmap whose phase 1 declares $2 (a JSON array) as creates.
+# _vc_roadmap <feature> "<identity>|<description>" ...
+#
+# Takes identity/description PAIRS, not pre-built entries, and builds them with
+# aimi_contract_list -- the one constructor that knows the wire format. Every
+# caller here wants "a phase that declares these artifacts"; none of them cares
+# how an entry is spelled on disk, and the ones that DO care (the malformed-
+# identity refusals) deliberately do not use this helper.
+#
+# That is the whole point: when the wire format changes, these eighteen call
+# sites do not.
 _vc_roadmap() {
-  local feature="$1" creates_json="$2"
+  local feature="$1"; shift
   rm -rf ".aimi/tasks/$feature"
-  jq -n --argjson c "$creates_json" \
+  jq -n --argjson c "$(aimi_contract_list "$@")" \
     '[{id: 1, name: "P", goal: "g", slug: "p", dependsOn: [], creates: $c, needs: []}]' \
     | "$CLI" roadmap-init --feature "$feature" >/dev/null
 }
@@ -3839,7 +3874,7 @@ test_verify_creates_identity_is_a_path_not_a_pathspec() {
 
   # ':!nope' does carry alphanumerics, so the write rule lets it through -- and
   # the read side must then report it missing rather than matching everything.
-  _vc_roadmap "vc-pathspec" '[":!nope"]'
+  _vc_roadmap "vc-pathspec" ':!nope'
   _vc_run "vc-pathspec" "$dir" "pathspec exclude identity"
   assert_eq "missing" "$(printf '%s' "$VC_OUT" | jq -r '.[0].status')" \
     "verify-creates: ':!nope' is missing, not matched against every tracked file"
@@ -3849,7 +3884,7 @@ test_verify_creates_identity_is_a_path_not_a_pathspec() {
   # the magic AND kill a legal path glob.
   local kind
   for kind in 'docs' 'db/migrations/*.sql' 'src/app.ts'; do
-    _vc_roadmap "vc-pathspec" "$(jq -n --arg k "$kind" '[$k]')"
+    _vc_roadmap "vc-pathspec" "$kind"
     _vc_run "vc-pathspec" "$dir" "declared kind \"$kind\""
     assert_eq "verified" "$(printf '%s' "$VC_OUT" | jq -r '.[0].status')" \
       "verify-creates: declared identity kind \"$kind\" still verifies by path"
@@ -3857,7 +3892,7 @@ test_verify_creates_identity_is_a_path_not_a_pathspec() {
 
   # A directory identity resolves through its tracked contents with ONE
   # pathspec -- the old companion "$identity/*" was measured redundant.
-  _vc_roadmap "vc-pathspec" '["docs"]'
+  _vc_roadmap "vc-pathspec" 'docs'
   _vc_run "vc-pathspec" "$dir" "directory identity"
   assert_contains "docs/" "$(printf '%s' "$VC_OUT" | jq -r '.[0].evidence')" \
     "verify-creates: a directory identity reports a tracked path inside it"
@@ -3879,7 +3914,7 @@ test_verify_creates_row_a_table_in_source_verified_by_text() {
   echo "a tabela notifications guarda as notificacoes" > "$dir/docs/plano.md"
   _vc_commit "$dir"
 
-  _vc_roadmap "vc-row-a" '["notifications (stores per-user notification rows)"]'
+  _vc_roadmap "vc-row-a" 'notifications|stores per-user notification rows'
   _vc_run "vc-row-a" "$dir" "row A"
   out="$VC_OUT"
 
@@ -3910,7 +3945,7 @@ test_verify_creates_row_b_docs_only_is_missing() {
   echo "export const unrelated = 1;" > "$dir/src/index.ts"
   _vc_commit "$dir"
 
-  _vc_roadmap "vc-row-b" '["notifications (stores per-user notification rows)"]'
+  _vc_roadmap "vc-row-b" 'notifications|stores per-user notification rows'
   _vc_run "vc-row-b" "$dir" "row B"
   out="$VC_OUT"
 
@@ -3936,7 +3971,7 @@ test_verify_creates_row_c_endpoint_path_extraction() {
   printf "%s\n" "POST /api/notifications creates a notification for a user" > "$dir/docs/api.md"
   _vc_commit "$dir"
 
-  _vc_roadmap "vc-row-c" '["POST /api/notifications (creates a notification for a user)"]'
+  _vc_roadmap "vc-row-c" 'POST /api/notifications|creates a notification for a user'
   _vc_run "vc-row-c" "$dir" "row C"
   out="$VC_OUT"
 
@@ -3995,7 +4030,7 @@ test_verify_creates_row_d_directory_verified_by_path() {
   echo "-- create notifications" > "$dir/db/migrations/001_init.sql"
   _vc_commit "$dir"
 
-  _vc_roadmap "vc-row-d" '["db/migrations (versioned schema migrations)"]'
+  _vc_roadmap "vc-row-d" 'db/migrations|versioned schema migrations'
   _vc_run "vc-row-d" "$dir" "row D"
   out="$VC_OUT"
 
@@ -4017,7 +4052,7 @@ test_verify_creates_row_h_tests_only_is_missing_and_git_never_128() {
   echo "export const unrelated = 1;" > "$dir/src/index.ts"
   _vc_commit "$dir"
 
-  _vc_roadmap "vc-row-h" '["notifications (stores per-user notification rows)"]'
+  _vc_roadmap "vc-row-h" 'notifications|stores per-user notification rows'
   _vc_run "vc-row-h" "$dir" "row H"
   out="$VC_OUT"
 
@@ -4073,7 +4108,7 @@ test_verify_creates_row_f_doc_file_verified_by_path() {
   echo "# Notifications API" > "$dir/docs/api/notifications.md"
   _vc_commit "$dir"
 
-  _vc_roadmap "vc-row-f" '["docs/api/notifications.md (public notifications API reference)"]'
+  _vc_roadmap "vc-row-f" 'docs/api/notifications.md|public notifications API reference'
   _vc_run "vc-row-f" "$dir" "row F"
   out="$VC_OUT"
 
@@ -4095,7 +4130,7 @@ test_verify_creates_doc_identity_bypasses_exclusions() {
   echo "export const unrelated = 1;" > "$dir/src/index.ts"
   _vc_commit "$dir"
 
-  _vc_roadmap "vc-doc-bypass" '["README.md (project readme)"]'
+  _vc_roadmap "vc-doc-bypass" 'README.md|project readme'
   _vc_run "vc-doc-bypass" "$dir" "doc bypass"
   out="$VC_OUT"
 
@@ -4116,7 +4151,7 @@ test_verify_creates_row_g_file_verified_by_path() {
   echo "export function NotificationBell() { return null; }" > "$dir/components/NotificationBell.tsx"
   _vc_commit "$dir"
 
-  _vc_roadmap "vc-row-g" '["components/NotificationBell.tsx (header bell icon with unread badge)"]'
+  _vc_roadmap "vc-row-g" 'components/NotificationBell.tsx|header bell icon with unread badge'
   _vc_run "vc-row-g" "$dir" "row G"
   out="$VC_OUT"
 
@@ -4137,7 +4172,7 @@ test_verify_creates_row_e_todo_marker_only_is_missing() {
   printf "%s\n" "// TODO: create the notifications table" > "$dir/src/todo.ts"
   _vc_commit "$dir"
 
-  _vc_roadmap "vc-row-e" '["notifications (stores per-user notification rows)"]'
+  _vc_roadmap "vc-row-e" 'notifications|stores per-user notification rows'
   _vc_run "vc-row-e" "$dir" "row E"
   out="$VC_OUT"
 
@@ -4161,7 +4196,7 @@ test_verify_creates_absent_everywhere_is_missing() {
   echo "export const unrelated = 1;" > "$dir/src/index.ts"
   _vc_commit "$dir"
 
-  _vc_roadmap "vc-absent" '["notifications (stores per-user notification rows)"]'
+  _vc_roadmap "vc-absent" 'notifications|stores per-user notification rows'
   _vc_run "vc-absent" "$dir" "absent"
   out="$VC_OUT"
 
@@ -4197,7 +4232,7 @@ test_verify_creates_row_i_committed_aimi_does_not_self_verify() {
   echo "export const unrelated = 1;" > "$dir/src/index.ts"
   _vc_commit "$dir"
 
-  _vc_roadmap "vc-row-i" '["notifications (stores per-user notification rows)"]'
+  _vc_roadmap "vc-row-i" 'notifications|stores per-user notification rows'
   _vc_run "vc-row-i" "$dir" "row I"
   out="$VC_OUT"
 
@@ -4221,7 +4256,7 @@ test_verify_creates_git_failure_is_error_not_missing() {
   mkdir -p "$dir/src"
   echo "export const unrelated = 1;" > "$dir/src/index.ts"
 
-  _vc_roadmap "vc-git-error" '["notifications (stores per-user notification rows)"]'
+  _vc_roadmap "vc-git-error" 'notifications|stores per-user notification rows'
   _vc_run "vc-git-error" "$dir" "git error"
   out="$VC_OUT"
 
@@ -4246,7 +4281,7 @@ test_verify_creates_all_missing_still_exits_zero() {
   echo "export const unrelated = 1;" > "$dir/src/index.ts"
   _vc_commit "$dir"
 
-  _vc_roadmap "vc-all-missing" '["alpha (one)", "beta (two)", "gamma (three)"]'
+  _vc_roadmap "vc-all-missing" 'alpha|one' 'beta|two' 'gamma|three'
 
   out=$("$CLI" verify-creates --feature "vc-all-missing" --phase 1 --dir "$dir" 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "all-missing: exits 0 even though every entry is missing"
@@ -4265,7 +4300,7 @@ test_verify_creates_empty_creates_yields_empty_array() {
   echo "x" > "$dir/a.txt"
   _vc_commit "$dir"
 
-  _vc_roadmap "vc-empty" '[]'
+  _vc_roadmap "vc-empty"
 
   out=$("$CLI" verify-creates --feature "vc-empty" --phase 1 --dir "$dir" 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "empty creates: exits 0"
@@ -4282,7 +4317,7 @@ test_verify_creates_error_exit_codes() {
   dir=$(_vc_repo "vc-errors")
   echo "x" > "$dir/a.txt"
   _vc_commit "$dir"
-  _vc_roadmap "vc-errors" '["alpha (one)"]'
+  _vc_roadmap "vc-errors" 'alpha|one'
 
   "$CLI" verify-creates --feature "vc-errors" --phase 1 --bogus x >/dev/null 2>&1 && exit_code=0 || exit_code=$?
   assert_exit_code "1" "$exit_code" "errors: unknown flag exits 1"
