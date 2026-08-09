@@ -6,6 +6,50 @@
 
 # shellcheck shell=bash
 
+# ---------------------------------------------------------------------------
+# creates/needs entry constructors -- THE ONLY PLACE THE TEST CORPUS KNOWS WHAT
+# A CONTRACT ENTRY LOOKS LIKE.
+#
+# That is the whole reason they exist, and it is worth stating plainly because
+# the temptation to inline `"name (desc)"` is constant: there are 146 such
+# literals in part 3 today, and they are why 3,875 green assertions failed to
+# notice that an identity was being rewritten between roadmap.json and
+# handoff.md. A test that pins the SHAPE cannot catch a change of shape.
+#
+# Route every fixture through these two and the wire format becomes one function
+# body. Callers pass the pieces and consume the result with --argjson; never
+# concatenate an entry by hand, and never split one apart to recover an identity
+# (part 3 already grew three independent paren-splitters that disagree with the
+# CLI's own on inputs none of them is tested against).
+#
+# The current wire format is a single string, "<identity> (<description>)". If
+# that becomes a structured object, this file is where it changes.
+
+# aimi_contract_entry <identity> [description]  -> one JSON value on stdout
+aimi_contract_entry() {
+  local identity="$1" description="${2:-}"
+  if [ -n "$description" ]; then
+    jq -n --arg i "$identity" --arg d "$description" '$i + " (" + $d + ")"'
+  else
+    jq -n --arg i "$identity" '$i'
+  fi
+}
+
+# aimi_contract_list "<identity>|<description>" ...  -> a JSON array on stdout
+#
+# "|" separates the two halves because "|" is in the shell class an identity may
+# never contain, so no legal identity can split a row by accident. A row with no
+# "|" is an identity with no description.
+aimi_contract_list() {
+  local row identity description out='[]'
+  for row in "$@"; do
+    identity="${row%%|*}"
+    if [ "$row" = "$identity" ]; then description=""; else description="${row#*|}"; fi
+    out=$(printf '%s' "$out" | jq -c --argjson e "$(aimi_contract_entry "$identity" "$description")" '. + [$e]')
+  done
+  printf '%s' "$out"
+}
+
 # Source the global cache functions from aimi-cli.sh for direct testing.
 # We extract the needed functions using sed so we can call them directly.
 source_cache_functions() {

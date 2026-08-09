@@ -3628,6 +3628,167 @@ _vc_run() {
   assert_exit_code "0" "$VC_RC" "$label: verb exits 0 (query, not gate)"
 }
 
+# ============================================================================
+# Identity invariant: declaration -> storage -> handoff -> verification
+# ============================================================================
+
+# The rows are IDENTITIES, never entries. Four |-separated columns:
+#   <identity>|<description>|<fixture path>|<fixture file content>
+#
+# "|" is the separator because "|" is in the shell class an identity may never
+# contain, so a future row cannot silently split in the wrong place. (The
+# character table above uses "~", which carries no such guarantee.)
+#
+# Every row is a shape this repository declares legal in scope-contexts.md and
+# that some rule in this file has, at some point, silently rewritten.
+_INV_ROWS=(
+  'parseList<T>|a generic list parser|src/parse.ts|export function parseList<T>(raw: string): T[] { return [] }'
+  'queue:emails|the outbound email queue|src/queue.ts|const QUEUE = "queue:emails";'
+  'db/migrations/*.sql|the migration set|src/migrate.ts|const GLOB = "db/migrations/*.sql";'
+  'POST /api/notifications|creates a notification|src/routes.ts|router.post("/api/notifications", handler)'
+  'design-system:tokens|the token file|src/tokens.ts|export const NS = "design-system:tokens";'
+  'shared_widget|a plain symbol|src/widget.ts|export const shared_widget = 1;'
+)
+
+test_identity_survives_declaration_to_verification() {
+  echo ""
+  echo "=== identity invariant: a declared name survives to verification, byte-for-byte ==="
+
+  # THE POINT OF THIS TEST, stated because it is easy to "improve" it back into
+  # the thing it replaces. Every other test here pins a SHAPE -- 146 literal
+  # "name (description)" constants and a character matrix -- and that is exactly
+  # why a full green suite did not notice that parseList<T> was stored correctly
+  # in roadmap.json and rewritten to parseList in handoff.md, leaving the
+  # downstream needs permanently unresolvable.
+  #
+  # This one pins the INVARIANT instead: a name declared in creates comes back,
+  # unchanged, from the two verbs that decide whether a phase delivered it. Four
+  # rules keep it shape-agnostic, so it survives a change of wire format without
+  # being edited -- which is what makes it a safety net for that change rather
+  # than another thing to migrate:
+  #
+  #   1. The table holds identities. The string " (" appears nowhere below.
+  #   2. Entries are built only by aimi_contract_entry/aimi_contract_list.
+  #   3. Identities come back ONLY from verb output -- verify-creates' .identity
+  #      and validate-contracts' .providers keys. Never parsed out of a stored
+  #      string, and deliberately not via eval of _CONTRACT_JQ_DEFS, which would
+  #      recouple this test to the CLI's internals.
+  #   4. It asserts against the DECLARED name only. Never against stored text,
+  #      never against .method/.evidence/a diagnostic -- those are shapes.
+  #
+  # This imposes one requirement on the CLI: verify-creates keeps emitting
+  # .[].identity and validate-contracts keeps .providers keyed by the identity.
+  # If those outputs ever become structured too, this test changes and the net
+  # was never a net.
+  #
+  # Six CLI spawns total, not six per row: part 3 is the suite's critical path
+  # and its runtime IS the suite's wall clock.
+
+  local feature="inv-identity"
+  local dir row identity description fpath content
+  dir=$(_vc_repo "$feature")
+
+  local rows_json='[]'
+  for row in "${_INV_ROWS[@]}"; do
+    identity="${row%%|*}"; row="${row#*|}"
+    description="${row%%|*}"; row="${row#*|}"
+    fpath="${row%%|*}"; content="${row#*|}"
+    mkdir -p "$dir/$(dirname "$fpath")"
+    printf '%s\n' "$content" > "$dir/$fpath"
+    rows_json=$(printf '%s' "$rows_json" | jq -c --arg i "$identity" --arg d "$description" '. + [{identity: $i, description: $d}]')
+  done
+  # db/migrations/*.sql resolves by PATH, so the fixture needs real files there
+  # as well as the literal glob in source; without them the row would prove only
+  # the text fallback and quietly stop testing the pathspec behaviour.
+  mkdir -p "$dir/db/migrations"
+  printf -- '-- init\n' > "$dir/db/migrations/001_init.sql"
+  _vc_commit "$dir"
+
+  local rows_spec=() r
+  for r in "${_INV_ROWS[@]}"; do
+    identity="${r%%|*}"; r="${r#*|}"; description="${r%%|*}"
+    rows_spec+=("$identity|$description")
+  done
+  local contracts_json
+  contracts_json=$(aimi_contract_list "${rows_spec[@]}")
+
+  local row_count
+  row_count=$(printf '%s' "$contracts_json" | jq 'length')
+
+  # --- 1. declaration ------------------------------------------------------
+  rm -rf ".aimi/tasks/$feature"
+  local init_exit=0
+  jq -n --argjson c "$contracts_json" '[
+    {id: 1, name: "Producer", goal: "g", slug: "producer", dependsOn: [], creates: $c, needs: []},
+    {id: 2, name: "Consumer", goal: "g", slug: "consumer", dependsOn: [1], creates: [], needs: $c}
+  ]' | "$CLI" roadmap-init --feature "$feature" >/dev/null 2>&1 || init_exit=$?
+  assert_exit_code "0" "$init_exit" "identity invariant: every declared kind is accepted by the writer"
+
+  # --- 2. verification -----------------------------------------------------
+  _vc_run "$feature" "$dir" "identity invariant"
+  local verdicts="$VC_OUT"
+
+  # Anti-vacuity: a writer that silently dropped every entry would satisfy every
+  # per-row assertion below by having nothing to contradict them. This suite has
+  # a recorded history of exactly that.
+  assert_eq "$row_count" "$(printf '%s' "$verdicts" | jq 'length')" \
+    "identity invariant: verify-creates returns one verdict per declared identity"
+
+  # --- 3. handoff, built from the VERBS' OWN identities --------------------
+  # Deliberately not from the table: this mirrors what execute.md really does
+  # (VERIFIED_ARTIFACTS is derived from verify-creates' output), so the hop
+  # under test is the real one.
+  local artifacts_json
+  artifacts_json=$(printf '%s' "$verdicts" | jq -c '[.[] | .identity + " -- src/fixture.ts"]')
+  jq -n --argjson a "$artifacts_json" '{artifacts: $a}' \
+    | "$CLI" roadmap-write-handoff --feature "$feature" --phase 1 >/dev/null 2>&1
+  "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status completed --force >/dev/null 2>&1
+
+  local handoff_section
+  handoff_section=$(awk '/^#+[ \t]+Artifacts Created/{f=1;next} /^#+[ \t]/{f=0} f' \
+    ".aimi/tasks/$feature/phase-1-producer/handoff.md" 2>/dev/null)
+
+  # --- 4. downstream resolution -------------------------------------------
+  local vc_out vc_exit=0
+  vc_out=$("$CLI" validate-contracts "$feature" --phase 2 2>&1) || vc_exit=$?
+  assert_exit_code "0" "$vc_exit" "identity invariant: the consumer's needs all resolve"
+  assert_eq "true" "$(printf '%s' "$vc_out" | jq -r '.valid')" \
+    "identity invariant: the read side reports valid"
+  assert_eq "$row_count" "$(printf '%s' "$vc_out" | jq '.providers | length')" \
+    "identity invariant: one provider per declared identity"
+
+  # --- per row -------------------------------------------------------------
+  local i=0
+  while [ "$i" -lt "$row_count" ]; do
+    identity=$(printf '%s' "$rows_json" | jq -r --argjson n "$i" '.[$n].identity')
+
+    assert_eq "$identity" \
+      "$(printf '%s' "$verdicts" | jq -r --arg id "$identity" '[.[] | select(.identity == $id) | .identity][0] // "MISSING"')" \
+      "identity invariant: \"$identity\" comes back from verify-creates byte-for-byte"
+
+    assert_eq "verified" \
+      "$(printf '%s' "$verdicts" | jq -r --arg id "$identity" '[.[] | select(.identity == $id) | .status][0] // "MISSING"')" \
+      "identity invariant: \"$identity\" verifies against the fixture repo"
+
+    if printf '%s' "$handoff_section" | grep -qF -- "$identity"; then
+      echo -e "${GREEN}✓${NC} identity invariant: \"$identity\" survives into Artifacts Created"
+      ((TESTS_PASSED++))
+    else
+      echo -e "${RED}✗${NC} identity invariant: \"$identity\" was rewritten on its way into Artifacts Created"
+      echo "  section: $handoff_section"
+      ((TESTS_FAILED++))
+    fi
+
+    assert_eq "1" \
+      "$(printf '%s' "$vc_out" | jq -r --arg id "$identity" '.providers[$id] // "MISSING"')" \
+      "identity invariant: the consumer's need on \"$identity\" resolves to the producer"
+
+    i=$((i + 1))
+  done
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
 test_verify_creates_identity_is_a_path_not_a_pathspec() {
   echo ""
   echo "=== verify-creates: an identity is a path, never git pathspec magic ==="
@@ -7164,6 +7325,7 @@ main() {
   # isolated git repository per row, each asserting status AND method
   echo ""
   echo "--- verify-creates Tests (US-001) ---"
+  test_identity_survives_declaration_to_verification
   test_verify_creates_identity_is_a_path_not_a_pathspec
   test_verify_creates_row_a_table_in_source_verified_by_text
   test_verify_creates_row_b_docs_only_is_missing
