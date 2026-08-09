@@ -45,6 +45,7 @@ is the fidelity net: a faithful port does not move a single one of them.
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -663,6 +664,271 @@ def amend_orphan_rows(stored, amended, doc, authorized):
 
 
 # ---------------------------------------------------------------------------
+# verify-creates — prove a phase's creates[] exist in code, not in prose
+# ---------------------------------------------------------------------------
+#
+# Every pattern uses the LONG ":(exclude)" form. The short "!" form is not
+# interchangeable -- git reads the character after the colon as pathspec magic,
+# so ':!__tests__/*' aborts the whole invocation with
+#   fatal: Unimplemented pathspec magic '_' in ':!__tests__/*'
+# and exit 128, which would turn every artifact of every phase into "missing".
+#
+# Default pathspec matching is fnmatch without FNM_PATHNAME -- "*" crosses "/"
+# -- so "*.md" excludes .md files at any depth, while "docs/*" is anchored at
+# the search root and needs the "*/docs/*" companion for nested copies.
+#
+# .aimi/* is excluded for a specific reason: roadmap.json holds the creates[]
+# strings themselves, so without it every identity would find itself in the very
+# file that declared it.
+VERIFY_CREATES_EXCLUDES = [
+    ":(exclude)*.md",
+    ":(exclude)*.mdx",
+    ":(exclude)*.rst",
+    ":(exclude)*.adoc",
+    ":(exclude)*.txt",
+    ":(exclude)docs/*",
+    ":(exclude)doc/*",
+    ":(exclude)documentation/*",
+    ":(exclude)*/docs/*",
+    ":(exclude)*/doc/*",
+    ":(exclude)*/documentation/*",
+    ":(exclude)README*",
+    ":(exclude)CHANGELOG*",
+    ":(exclude)CONTRIBUTING*",
+    ":(exclude).aimi/*",
+    ":(exclude)*_test.*",
+    ":(exclude)*.test.*",
+    ":(exclude)*_spec.*",
+    ":(exclude)*.spec.*",
+    ":(exclude)test/*",
+    ":(exclude)tests/*",
+    ":(exclude)spec/*",
+    ":(exclude)__tests__/*",
+    ":(exclude)*/test/*",
+    ":(exclude)*/tests/*",
+    ":(exclude)*/spec/*",
+    ":(exclude)*/__tests__/*",
+]
+
+# The tracked-files caveat, stated in every "missing" verdict so the caller
+# reports the limit instead of silently owning it.
+VERIFY_CREATES_TRACKED_NOTE = (
+    "Note: git ls-files and git grep see tracked (committed) files only, so "
+    "uncommitted work reads as missing."
+)
+
+_HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
+
+_MARKER_LINE = re.compile(
+    r"^[ \t]*(//+|#+|--+|\*+|/\*+|<!--)[ \t]*(TODO|FIXME|XXX|HACK)([^A-Za-z0-9_]|$)"
+)
+
+
+def _git(directory, *args):
+    """Run git and return (stdout, returncode).
+
+    Argument-list form, never a shell string. The pathspecs below carry ":", "*"
+    and "(" -- characters a shell would be free to reinterpret -- and the
+    pathspec defect this verb was fixed for came from exactly that. There is no
+    quoting layer here to get wrong.
+    """
+    proc = subprocess.run(
+        ["git", "-C", directory] + list(args),
+        capture_output=True,
+        text=True,
+    )
+    return proc.stdout, proc.returncode
+
+
+def is_doc_identity(identity):
+    """True when the identity names documentation ITSELF.
+
+    For those, a hit under docs/ IS the artifact rather than a mention of it, so
+    the exclusion list is bypassed for that one entry.
+    """
+    return (
+        identity.startswith("docs/")
+        or identity.startswith("doc/")
+        or "/docs/" in identity
+        or "/doc/" in identity
+        or identity.endswith((".md", ".rst", ".adoc", ".txt"))
+    )
+
+
+def is_marker_line(content):
+    """True when a matched line is nothing but a TODO/FIXME/XXX/HACK marker in a
+    comment -- a note that the work is still owed, which must never count as the
+    work being done."""
+    return _MARKER_LINE.search(content) is not None
+
+
+def _verdict(identity, status, method, evidence, git_status):
+    return {
+        "identity": identity,
+        "status": status,
+        "method": method or None,
+        "evidence": evidence,
+        "gitStatus": git_status,
+    }
+
+
+def verify_creates_one(directory, identity):
+    """Verify ONE creates identity against <directory>'s tracked files.
+
+    Always returns a verdict: "missing" or "error" is data, not failure.
+    gitStatus is the HIGHEST exit status any git invocation returned for this
+    entry -- 0 or 1 in normal operation, above 1 only on tool failure, and that
+    is the line between "the phase did not build it" and "we could not look".
+    """
+    git_max = 0
+    if not identity:
+        return _verdict(
+            identity,
+            "missing",
+            "",
+            "Malformed creates entry: empty artifact identity (expected "
+            '"<artifact-name> (<description>)"). ' + VERIFY_CREATES_TRACKED_NOTE,
+            0,
+        )
+
+    # --- Step 1: tracked path ------------------------------------------------
+    # Matches a FILE and a DIRECTORY alike. An absolute or traversing identity is
+    # never handed to git as a pathspec (same escape-prevention posture
+    # validate_path_in_project enforces); it falls through to the content search
+    # instead, which cannot leave the repo.
+    #
+    # ":(glob)" is not decoration -- without a magic prefix git parses the
+    # identity AS pathspec, and this is the gate that proves a phase built what
+    # it declared. Measured: `ls-files -- '*'`, `-- ':'` and `-- ':!nope'` each
+    # returned every tracked file, so a phase could close on an artifact that
+    # does not exist. Not ":(literal)", which would also kill
+    # "db/migrations/*.sql", a declared-legal identity kind. The residue -- a
+    # bare "*" over-matching the text search -- is closed at WRITE time instead,
+    # by requiring an identity to carry an alphanumeric character.
+    path_safe = not (
+        identity.startswith("/")
+        or identity.startswith("../")
+        or "/../" in identity
+        or identity.endswith("/..")
+    )
+    if path_safe:
+        ls_out, rc = _git(directory, "ls-files", "--", ":(glob)" + identity)
+        git_max = max(git_max, rc)
+        if rc > 1:
+            return _verdict(
+                identity,
+                "error",
+                "",
+                "git ls-files exited " + str(rc) + " under " + directory
+                + " — tool failure, not an absent artifact.",
+                git_max,
+            )
+        if ls_out:
+            first_path = ls_out.split("\n", 1)[0]
+            return _verdict(identity, "verified", "path", "tracked path: " + first_path, git_max)
+
+    # --- Step 2: endpoint path extraction -----------------------------------
+    # Load-bearing, not a nicety. In a repository that genuinely serves the
+    # route, the literal "POST /api/notifications" lives in docs and nowhere
+    # else -- real code writes router.post('/api/notifications', ...). Excluding
+    # documentation without this step turns every endpoint-kind phase into
+    # verification_failed.
+    #
+    # Only a leading HTTP method token followed by a space and a "/" is
+    # stripped. "DELETE user_sessions" is a table-shaped identity, not an
+    # endpoint, and searching it for "user_sessions" alone would weaken the
+    # check. Two spaces is not this shape either -- that is why the writer
+    # refuses "POST  /api/x".
+    search = identity
+    for method in _HTTP_METHODS:
+        if identity.startswith(method + " /"):
+            search = identity[len(method) + 1 :]
+            break
+    searched_note = ' (searched "' + search + '")' if search != identity else ""
+
+    # --- Step 3: text search over tracked source ----------------------------
+    if is_doc_identity(identity):
+        grep_out, rc = _git(directory, "grep", "-n", "-I", "-F", "-e", search)
+    else:
+        grep_out, rc = _git(
+            directory, "grep", "-n", "-I", "-F", "-e", search, "--", *VERIFY_CREATES_EXCLUDES
+        )
+    git_max = max(git_max, rc)
+    if rc > 1:
+        return _verdict(
+            identity,
+            "error",
+            "",
+            "git grep exited " + str(rc) + " under " + directory
+            + " — tool failure, not an absent artifact.",
+            git_max,
+        )
+
+    # --- Step 4: drop marker-only comment lines -----------------------------
+    kept = ""
+    first_marker = ""
+    for line in grep_out.split("\n"):
+        if not line:
+            continue
+        hit_file, _, rest = line.partition(":")
+        hit_num, _, hit_content = rest.partition(":")
+        if is_marker_line(hit_content):
+            if not first_marker:
+                first_marker = hit_file + ":" + hit_num
+            continue
+        kept = hit_file + ":" + hit_num
+        break
+
+    if kept:
+        return _verdict(
+            identity, "verified", "text", "tracked source: " + kept + searched_note, git_max
+        )
+
+    # --- Missing: name what was found and rejected, not just "not found" ----
+    rejected = ""
+    if first_marker:
+        rejected = (
+            " Found and rejected at " + first_marker
+            + ": TODO/FIXME marker comment, not an implementation."
+        )
+    else:
+        all_out, rc = _git(directory, "grep", "-n", "-I", "-F", "-e", search)
+        git_max = max(git_max, rc)
+        if rc > 1:
+            return _verdict(
+                identity,
+                "error",
+                "",
+                "git grep exited " + str(rc) + " under " + directory
+                + " — tool failure, not an absent artifact.",
+                git_max,
+            )
+        if all_out:
+            aline = all_out.split("\n", 1)[0]
+            afile, _, arest = aline.partition(":")
+            anum, _, acontent = arest.partition(":")
+            if is_marker_line(acontent):
+                rejected = (
+                    " Found and rejected at " + afile + ":" + anum
+                    + ": TODO/FIXME marker comment, not an implementation."
+                )
+            else:
+                rejected = (
+                    " Found and rejected at " + afile + ":" + anum
+                    + ": documentation or test path, excluded from the source search."
+                )
+
+    return _verdict(
+        identity,
+        "missing",
+        "",
+        'No tracked artifact for "' + identity + '" under ' + directory + searched_note
+        + "." + rejected + " " + VERIFY_CREATES_TRACKED_NOTE,
+        git_max,
+    )
+
+
+# ---------------------------------------------------------------------------
 # I/O — the only filesystem this file is allowed to touch
 # ---------------------------------------------------------------------------
 
@@ -1142,8 +1408,35 @@ def op_amend_write(argv):
     return 0
 
 
+def op_verify_creates(argv):
+    """One process for the whole phase. The bash it replaces spent two git and
+    two jq per identity -- one jq only to build the verdict, another only to
+    append it to the array."""
+    path = _flag(argv, "--roadmap")
+    directory = _flag(argv, "--dir")
+    phase_raw = _flag(argv, "--phase")
+    if not path or not directory or phase_raw is None:
+        die("Usage: roadmap.py verify-creates --roadmap <path> --phase <id> --dir <path>")
+    phase_id = jq_numbers(json.loads(phase_raw))
+
+    doc = read_doc(path, "verify-creates")
+    phase = next((p for p in (doc.get("phases") or []) if p.get("id") == phase_id), None)
+    if phase is None:
+        die("Error: verify-creates: phase " + _num(phase_id) + " not found in " + path)
+
+    # Identities come from the one existing definition, never a second copy.
+    verdicts = [
+        verify_creates_one(directory, cv_identity(entry))
+        for entry in _v1_string_entries(phase.get("creates") or [])
+    ]
+    json.dump(verdicts, sys.stdout, indent=2, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return 0
+
+
 _OPS = {
     "judge-phases": op_judge_phases,
+    "verify-creates": op_verify_creates,
     "normalize-contracts": op_normalize_contracts,
     "init-validate": op_init_validate,
     "init-write": op_init_write,

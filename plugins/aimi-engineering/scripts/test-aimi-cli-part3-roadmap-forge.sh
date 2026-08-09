@@ -4257,12 +4257,16 @@ test_verify_creates_exclusions_use_long_form_only() {
   echo ""
   echo "=== verify-creates: every exclusion pattern uses the long :(exclude) form ==="
 
+  # The list lives in roadmap.py now. The question it answers did not move:
+  # git reads the character after ":" as pathspec magic, so the short "!" form
+  # aborts the whole invocation with exit 128 and turns every artifact of every
+  # phase into "missing". Long form only, for every pattern.
   local block pattern_lines short_form_count long_form_count
-  block=$(sed -n '/^_VERIFY_CREATES_EXCLUDES=(/,/^)/p' "$CLI")
+  block=$(sed -n '/^VERIFY_CREATES_EXCLUDES = \[/,/^\]/p' "$(dirname "$CLI")/roadmap.py")
 
-  pattern_lines=$(printf '%s\n' "$block" | grep -c "^[[:space:]]*':" || true)
-  short_form_count=$(printf '%s\n' "$block" | grep -c "':!" || true)
-  long_form_count=$(printf '%s\n' "$block" | grep -c "':(exclude)" || true)
+  pattern_lines=$(printf '%s\n' "$block" | grep -c '^[[:space:]]*":' || true)
+  short_form_count=$(printf '%s\n' "$block" | grep -c '":!' || true)
+  long_form_count=$(printf '%s\n' "$block" | grep -c '":(exclude)' || true)
 
   assert_eq "0" "$short_form_count" "exclusions: no short ':!' pathspec form in the exclusion list"
   assert_eq "$pattern_lines" "$long_form_count" "exclusions: every pattern in the list uses the long ':(exclude)' form"
@@ -4611,12 +4615,13 @@ test_verify_creates_reuses_existing_identity_definition() {
   class_literals=$(grep -cF '[$`;|&]' "$CLI" || true)
   assert_eq "3" "$class_literals" "identity: the raw shell class appears only in its def, its explaining comment and --help"
 
-  # The verb must read creates[] through those shared defs.
-  if grep -q '_CONTRACT_JQ_DEFS' <(sed -n '/^cmd_verify_creates()/,/^}/p' "$CLI"); then
-    echo -e "${GREEN}✓${NC} identity: cmd_verify_creates reads creates[] through _CONTRACT_JQ_DEFS"
+  # The verb must read creates[] through the shared definition, not a second
+  # copy. It moved to roadmap.py; the requirement is the same one.
+  if grep -q 'cv_identity(' <(sed -n '/^def op_verify_creates(/,/^_OPS/p' "$(dirname "$CLI")/roadmap.py"); then
+    echo -e "${GREEN}✓${NC} identity: op_verify_creates reads creates[] through cv_identity"
     ((TESTS_PASSED++))
   else
-    echo -e "${RED}✗${NC} identity: cmd_verify_creates must reuse _CONTRACT_JQ_DEFS/_cv_identity"
+    echo -e "${RED}✗${NC} identity: op_verify_creates must reuse cv_identity, never a second copy"
     ((TESTS_FAILED++))
   fi
 }

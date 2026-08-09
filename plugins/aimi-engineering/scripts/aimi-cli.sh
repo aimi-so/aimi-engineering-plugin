@@ -2517,7 +2517,7 @@ _forge_build_issue_json() {
 }
 
 # Shared three-way status envelope (forge-contract.md "Three-Way Status
-# Convention"), modeled directly on _verify_creates_emit's own
+# Convention"), modeled directly on roadmap.py's verify_creates_one verdict shape's own
 # verified/missing/error trio: found/not_found/error are three genuinely
 # distinct outcomes and must never be conflated the way `gh pr view --json
 # url` today exits non-zero for both "no PR exists" and "auth/network
@@ -3128,9 +3128,9 @@ _forge_account_override_slots() {
 # Model").
 #
 # "Not authenticated" and "could not check at all" are different facts and
-# must stay distinguishable, the same discipline _verify_creates_one already
+# must stay distinguishable, the same discipline roadmap.py's verify_creates_one already
 # applies by distinguishing a "missing" identity from a git tool failure
-# before ever calling _verify_creates_emit:
+# before ever building a verdict:
 #   - gh present, ran, reports no active session for this host -> a
 #     CONFIRMED negative. status="found", data.authenticated=false,
 #     data.account=null, message=null -- forge-contract.md's "found" covers
@@ -4950,7 +4950,7 @@ _forge_pr_view_build_found() {
 # the value out of gh's response). Captures gh's stdout and stderr on
 # separate variables (this file runs under set -euo pipefail -- rc is
 # pre-initialized and captured with `|| rc=$?`, mirroring
-# _verify_creates_one's own capture pattern) so a legitimate non-zero gh
+# roadmap.py's verify_creates_one capture pattern) so a legitimate non-zero gh
 # exit never aborts the script.
 _forge_pr_view_github() {
   local ref="$1" fields_csv="$2"
@@ -6753,7 +6753,7 @@ _forge_extract_issue_number_from_url() {
 # and verify-creates): gh conflates "no such issue" and "tool is broken"
 # into the same non-zero exit, so gh's own stderr text is pattern-matched
 # here to tell the two apart BEFORE calling _forge_emit_status -- the same
-# discipline _verify_creates_one already applies to git's ambiguous exit
+# discipline roadmap.py's verify_creates_one already applies to git's ambiguous exit
 # codes. (The AC's "found (boolean)" language maps onto this three-way
 # `status` field: status=="found" is the found:true case, status==
 # "not_found" is the found:false case -- forge-contract.md's Three-Way
@@ -15064,294 +15064,18 @@ _cv_handoff_lists_artifact() {
 # verify-creates — prove a phase's creates[] exist in code, not in prose
 # ============================================================================
 #
-# Creates verification used to live as executable prose in /aimi:execute's
-# "Creates Verification" section: an orchestrator read a numbered procedure and
-# ran `[ -f "$PHASE_CONTAINER_PATH/$identity" ]`, then a bare `git grep -l -F`.
-# No Bash suite could reach it, and the procedure was wrong in three ways a
-# test would have caught the day it shipped:
+# The whole rule lives in roadmap.py: the ':(glob)' pathspec, the 27-entry
+# exclusion list, the endpoint-prefix strip, the TODO/FIXME marker rejection and
+# the git exit-code ladder that separates "the phase did not build it" from "we
+# could not look". It moved there because every one of those pathspecs carries
+# ':', '*' and '(' -- characters a shell is free to reinterpret -- and the
+# pathspec defect this verb was fixed for came from exactly that. An argument
+# list has no quoting layer to get wrong.
 #
-#   * `[ -f ]` is false for a directory, so a creates entry naming one
-#     ("db/migrations") could never verify by path.
-#   * The text search carried no exclusions, so an identity mentioned once in
-#     docs/plano.md, in a test file, or in a `// TODO:` comment closed the
-#     phase — a phase could pass on a mention of the work instead of the work.
-#   * An endpoint identity is written "POST /api/notifications" (see the
-#     Creates/Needs Contracts table in commands/references/scope-contexts.md),
-#     but source code holds the path, not the method-plus-path literal, so a
-#     delivered endpoint read as missing while its documentation read as done.
-#
-# This is the move split-detect already made (see its header above): pure,
-# deterministic, file-only logic belongs where both Bash suites can reach it,
-# in exactly one copy, with every rule a test case.
-#
-# It is a QUERY, not a gate. Producing a verdict array exits 0 — including an
-# array where every entry is "missing". Non-zero is reserved for real errors
-# (unknown flag, absent/non-numeric --phase, absent/malformed roadmap.json,
-# --dir that is not a directory), which is what lets the caller loop over the
-# result instead of branching on the exit status.
-#
-# Deliberately NOT kind-aware: it does not try to map a table identity to a
-# migration file or an endpoint identity to a route file. Every identity runs
-# the same four steps; the kind column in scope-contexts.md stays a naming
-# convention, not a dispatch table.
-
-# Paths whose content is a MENTION of an artifact rather than the artifact:
-# documentation and tests.
-#
-# Every pattern uses the LONG ":(exclude)" form. The short "!" form is not
-# interchangeable — git reads the character after the colon as pathspec magic,
-# so ':!__tests__/*' aborts the whole invocation with
-#   fatal: Unimplemented pathspec magic '_' in ':!__tests__/*'
-# and exit 128, which would turn every artifact of every phase into "missing".
-# Long form only, for all patterns, so no future edit reintroduces the short
-# form by copying a neighbour.
-#
-# Default pathspec matching is fnmatch without FNM_PATHNAME — "*" crosses "/"
-# — so "*.md" excludes .md files at any depth, while "docs/*" is anchored at
-# the search root and needs the "*/docs/*" companion for nested copies.
-#
-# .aimi/* is excluded for a specific reason: roadmap.json holds the creates[]
-# strings themselves, so without it every identity would find itself in the
-# very file that declared it.
-_VERIFY_CREATES_EXCLUDES=(
-  ':(exclude)*.md'
-  ':(exclude)*.mdx'
-  ':(exclude)*.rst'
-  ':(exclude)*.adoc'
-  ':(exclude)*.txt'
-  ':(exclude)docs/*'
-  ':(exclude)doc/*'
-  ':(exclude)documentation/*'
-  ':(exclude)*/docs/*'
-  ':(exclude)*/doc/*'
-  ':(exclude)*/documentation/*'
-  ':(exclude)README*'
-  ':(exclude)CHANGELOG*'
-  ':(exclude)CONTRIBUTING*'
-  ':(exclude).aimi/*'
-  ':(exclude)*_test.*'
-  ':(exclude)*.test.*'
-  ':(exclude)*_spec.*'
-  ':(exclude)*.spec.*'
-  ':(exclude)test/*'
-  ':(exclude)tests/*'
-  ':(exclude)spec/*'
-  ':(exclude)__tests__/*'
-  ':(exclude)*/test/*'
-  ':(exclude)*/tests/*'
-  ':(exclude)*/spec/*'
-  ':(exclude)*/__tests__/*'
-)
-
-# The tracked-files caveat, stated in every "missing" verdict so the caller
-# reports the limit instead of silently owning it.
-_VERIFY_CREATES_TRACKED_NOTE='Note: git ls-files and git grep see tracked (committed) files only, so uncommitted work reads as missing.'
-
-# True (exit 0) when the identity names documentation itself. For those, a hit
-# under docs/ IS the artifact rather than a mention of it, so the exclusion
-# list is bypassed for that one entry.
-_verify_creates_is_doc_identity() {
-  local identity="$1"
-  case "$identity" in
-    docs/*|doc/*|*/docs/*|*/doc/*|*.md|*.rst|*.adoc|*.txt) return 0 ;;
-  esac
-  return 1
-}
-
-# True (exit 0) when a matched line is nothing but a TODO/FIXME/XXX/HACK
-# marker inside a comment — a note that the work is still owed, which must
-# never count as the work being done.
-_verify_creates_is_marker_line() {
-  local content="$1"
-  grep -Eq '^[[:space:]]*(//+|#+|--+|\*+|/\*+|<!--)[[:space:]]*(TODO|FIXME|XXX|HACK)([^A-Za-z0-9_]|$)' <<< "$content"
-}
-
-# Verify ONE creates identity against <dir>'s tracked files.
-# Prints one compact JSON object: {identity, status, method, evidence, gitStatus}.
-#   status    verified | missing | error
-#   method    "path" (step 1) | "text" (step 3) | null (not verified)
-#   gitStatus the highest exit status any git invocation returned for this
-#             entry — 0 or 1 in normal operation, above 1 only on tool failure.
-# Always returns 0: a verdict of "missing" or "error" is data, not failure.
-_verify_creates_one() {
-  local dir="$1" identity="$2"
-  local status="missing" method="" evidence=""
-  local git_max=0 rc=0
-
-  if [ -z "$identity" ]; then
-    _verify_creates_emit "$identity" "missing" "" \
-      "Malformed creates entry: empty artifact identity (expected \"<artifact-name> (<description>)\"). $_VERIFY_CREATES_TRACKED_NOTE" 0
-    return 0
-  fi
-
-  # --- Step 1: tracked path ------------------------------------------------
-  # Matches a FILE and a DIRECTORY alike. `[ -f ]`, which this replaces, is
-  # false on a directory, so a directory identity could only ever verify by
-  # text search — and usually did not verify at all.
-  # An absolute or traversing identity is never handed to git as a pathspec
-  # (same escape-prevention posture validate_path_in_project enforces); it
-  # falls through to the content search instead, which cannot leave the repo.
-  local path_safe=true
-  case "$identity" in
-    /*|../*|*/../*|*/..) path_safe=false ;;
-  esac
-  if [ "$path_safe" = true ]; then
-    local ls_out=""
-    rc=0
-    # ":(glob)" is not decoration -- without a magic prefix git parses the
-    # identity AS pathspec, and this is the gate that proves a phase built what
-    # it declared. Measured, against a repo holding only src/ docs/ db/ README:
-    #
-    #   ls-files -- '*'         -> every tracked file    verdict: verified
-    #   ls-files -- ':'         -> every tracked file    verdict: verified
-    #   ls-files -- ':!nope'    -> every tracked file    verdict: verified
-    #
-    # Each of those is a storable identity: none carries whitespace, "..", a
-    # leading "/", a shell-class character or an injection pattern. So a phase
-    # could close on an artifact that does not exist.
-    #
-    # ":(glob)" and not ":(literal)": literal would kill the magic but also kill
-    # "db/migrations/*.sql", which scope-contexts.md declares a legal identity
-    # kind. Measured, glob keeps every declared kind working (a plain path, a
-    # directory, a path glob), returns nothing for ":" and ":!nope", and refuses
-    # to leave the repository at all ("fatal: outside repository" for '../*').
-    # The residue -- a bare "*" or "**" still over-matching -- is closed at write
-    # time instead, by requiring an identity to carry an alphanumeric character.
-    #
-    # The old "$identity/*" companion is gone: measured, ':(glob)docs' already
-    # lists the directory's tracked contents, so the second pathspec only ever
-    # duplicated the first.
-    ls_out=$(git -C "$dir" ls-files -- ":(glob)$identity" 2>/dev/null) || rc=$?
-    if [ "$rc" -gt "$git_max" ]; then git_max=$rc; fi
-    if [ "$rc" -gt 1 ]; then
-      _verify_creates_emit "$identity" "error" "" \
-        "git ls-files exited $rc under $dir — tool failure, not an absent artifact." "$git_max"
-      return 0
-    fi
-    if [ -n "$ls_out" ]; then
-      local first_path="${ls_out%%$'\n'*}"
-      _verify_creates_emit "$identity" "verified" "path" \
-        "tracked path: $first_path" "$git_max"
-      return 0
-    fi
-  fi
-
-  # --- Step 2: endpoint path extraction -----------------------------------
-  # Load-bearing, not a nicety. In a repository that genuinely serves the
-  # route, the literal "POST /api/notifications" was found in docs/plano.md
-  # and nowhere else — real code writes router.post('/api/notifications', …).
-  # Excluding documentation without this step turns every endpoint-kind phase
-  # into verification_failed, and the only way to unblock it would be to write
-  # the literal into a comment: exactly the hole this verb closes.
-  #
-  # Only a leading HTTP method token followed by a space and a "/" is
-  # stripped. Every other identity reaches the search untouched — "DELETE
-  # user_sessions" is a table-shaped identity, not an endpoint, and searching
-  # it for "user_sessions" alone would weaken the check.
-  local search="$identity"
-  case "$identity" in
-    'GET /'*|'POST /'*|'PUT /'*|'PATCH /'*|'DELETE /'*|'HEAD /'*|'OPTIONS /'*)
-      search="${identity#* }"
-      ;;
-  esac
-  local searched_note=""
-  if [ "$search" != "$identity" ]; then
-    searched_note=" (searched \"$search\")"
-  fi
-
-  # --- Step 3: text search over tracked source ----------------------------
-  # rc is pre-initialized and captured with `|| rc=$?` because this script
-  # runs under `set -euo pipefail` (line 2) and git grep exits 1 on a
-  # legitimate no-match. `local rc=$?` would mask the status behind local's
-  # own success and is used nowhere here.
-  local grep_out=""
-  rc=0
-  if _verify_creates_is_doc_identity "$identity"; then
-    grep_out=$(git -C "$dir" grep -n -I -F -e "$search" 2>/dev/null) || rc=$?
-  else
-    grep_out=$(git -C "$dir" grep -n -I -F -e "$search" -- "${_VERIFY_CREATES_EXCLUDES[@]}" 2>/dev/null) || rc=$?
-  fi
-  if [ "$rc" -gt "$git_max" ]; then git_max=$rc; fi
-  if [ "$rc" -gt 1 ]; then
-    _verify_creates_emit "$identity" "error" "" \
-      "git grep exited $rc under $dir — tool failure, not an absent artifact." "$git_max"
-    return 0
-  fi
-
-  # --- Step 4: drop marker-only comment lines -----------------------------
-  local kept="" first_marker=""
-  if [ -n "$grep_out" ]; then
-    local gline rest hit_file hit_num hit_content
-    while IFS= read -r gline; do
-      [ -n "$gline" ] || continue
-      hit_file="${gline%%:*}"
-      rest="${gline#*:}"
-      hit_num="${rest%%:*}"
-      hit_content="${rest#*:}"
-      if _verify_creates_is_marker_line "$hit_content"; then
-        if [ -z "$first_marker" ]; then first_marker="$hit_file:$hit_num"; fi
-        continue
-      fi
-      kept="$hit_file:$hit_num"
-      break
-    done <<< "$grep_out"
-  fi
-
-  if [ -n "$kept" ]; then
-    _verify_creates_emit "$identity" "verified" "text" \
-      "tracked source: ${kept}${searched_note}" "$git_max"
-    return 0
-  fi
-
-  # --- Missing: name what was found and rejected, not just "not found" ----
-  local rejected=""
-  if [ -n "$first_marker" ]; then
-    rejected=" Found and rejected at $first_marker: TODO/FIXME marker comment, not an implementation."
-  else
-    local all_out=""
-    rc=0
-    all_out=$(git -C "$dir" grep -n -I -F -e "$search" 2>/dev/null) || rc=$?
-    if [ "$rc" -gt "$git_max" ]; then git_max=$rc; fi
-    if [ "$rc" -gt 1 ]; then
-      _verify_creates_emit "$identity" "error" "" \
-        "git grep exited $rc under $dir — tool failure, not an absent artifact." "$git_max"
-      return 0
-    fi
-    if [ -n "$all_out" ]; then
-      local aline afile arest anum acontent
-      aline="${all_out%%$'\n'*}"
-      afile="${aline%%:*}"
-      arest="${aline#*:}"
-      anum="${arest%%:*}"
-      acontent="${arest#*:}"
-      if _verify_creates_is_marker_line "$acontent"; then
-        rejected=" Found and rejected at $afile:$anum: TODO/FIXME marker comment, not an implementation."
-      else
-        rejected=" Found and rejected at $afile:$anum: documentation or test path, excluded from the source search."
-      fi
-    fi
-  fi
-
-  status="missing"
-  method=""
-  evidence="No tracked artifact for \"$identity\" under ${dir}${searched_note}.${rejected} $_VERIFY_CREATES_TRACKED_NOTE"
-  _verify_creates_emit "$identity" "$status" "$method" "$evidence" "$git_max"
-  return 0
-}
-
-# Emit one verdict object. jq builds it so an identity carrying quotes,
-# spaces or backslashes cannot break the array.
-_verify_creates_emit() {
-  jq -nc \
-    --arg identity "$1" \
-    --arg status "$2" \
-    --arg method "$3" \
-    --arg evidence "$4" \
-    --argjson gitStatus "$5" \
-    '{identity: $identity, status: $status,
-      method: (if $method == "" then null else $method end),
-      evidence: $evidence, gitStatus: $gitStatus}'
-}
+# Verified against 24 captured cases before the jq was deleted: every documented
+# identity kind, the doc and test exclusions, the marker rejection, an empty
+# repository, and the three pathspec-magic forms. 72 of 72 field comparisons
+# identical. tests/golden_from_jq.json keeps them.
 
 cmd_verify_creates() {
   local feature="" phase_id="" dir=""
@@ -15393,23 +15117,9 @@ cmd_verify_creates() {
   dir=$(resolve_path "$dir")
   validate_path_in_project "$dir"
 
-  # Identities come from the one existing definition (_cv_identity), never a
-  # second copy: the substring before the first "(", trimmed.
-  local creates_raw
-  creates_raw=$(jq -r --argjson pid "$phase_id" "$_CONTRACT_JQ_DEFS"'
-    .phases[] | select(.id == $pid) | (.creates // [])[] | _cv_identity
-  ' "$roadmap_path")
-
-  local result='[]'
-  if [ -n "$creates_raw" ]; then
-    local identity entry
-    while IFS= read -r identity; do
-      entry=$(_verify_creates_one "$dir" "$identity")
-      result=$(printf '%s' "$result" | jq -c --argjson e "$entry" '. + [$e]')
-    done <<< "$creates_raw"
-  fi
-
-  printf '%s' "$result" | jq '.'
+  check_python3
+  python3 "$(_aimi_roadmap_py)" verify-creates \
+    --roadmap "$roadmap_path" --phase "$phase_id" --dir "$dir"
 }
 
 cmd_validate_contracts() {

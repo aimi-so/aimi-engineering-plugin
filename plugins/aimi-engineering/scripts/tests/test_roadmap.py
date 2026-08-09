@@ -435,6 +435,105 @@ def test_handoff_advisory_fired_and_stayed_silent_in_the_capture():
 
 
 # ---------------------------------------------------------------------------
+# verify-creates
+# ---------------------------------------------------------------------------
+
+VERIFY_CASES = {c["label"]: c for c in GOLDEN["verify_cases"]}
+
+
+def _verdicts(label):
+    return VERIFY_CASES[label]["stdout"]
+
+
+def test_every_documented_identity_kind_verifies():
+    """scope-contexts.md declares these kinds legal. If one of them stopped
+    verifying, phases would fail their own gate for declaring what they were
+    told to declare."""
+    for label, method in [
+        ("kind-file", "path"),
+        ("kind-dir", "path"),
+        ("kind-path-glob", "path"),
+        ("kind-symbol", "text"),
+        ("kind-table", "text"),
+        ("kind-endpoint", "text"),
+        ("kind-namespaced", "text"),
+    ]:
+        v = _verdicts(label)[0]
+        assert v["status"] == "verified", label
+        assert v["method"] == method, label
+
+
+def test_git_exit_status_separates_absent_from_unreadable():
+    """gitStatus is the highest code any git call returned. 1 is a legitimate
+    no-match and stays "missing"; above 1 is tool failure and becomes "error".
+    Confusing the two would report an unreadable repository as a phase that
+    built nothing."""
+    assert _verdicts("ausente")[0]["status"] == "missing"
+    assert _verdicts("ausente")[0]["gitStatus"] == 1
+    assert _verdicts("kind-file")[0]["gitStatus"] == 0
+    # And the ladder itself, exercised directly.
+    assert R._verdict("x", "error", "", "e", 128)["method"] is None
+
+
+def test_prose_and_tests_do_not_count_as_delivery():
+    """The whole point of the exclusion list: a name mentioned only in docs or
+    only in a test file is not an artifact. The evidence says which."""
+    doc = _verdicts("so-em-doc")[0]
+    assert doc["status"] == "missing"
+    assert "documentation or test path" in doc["evidence"]
+    assert _verdicts("so-em-teste")[0]["status"] == "missing"
+    # ...unless the identity names the documentation itself.
+    assert _verdicts("identidade-doc")[0]["status"] == "verified"
+
+
+def test_a_todo_marker_is_never_the_work_being_done():
+    v = _verdicts("marcador-todo")[0]
+    assert v["status"] == "missing"
+    assert "TODO/FIXME marker comment, not an implementation" in v["evidence"]
+
+
+def test_marker_line_recognises_the_comment_syntaxes_it_claims():
+    for line in ("// TODO: x", "# FIXME x", "-- XXX x", " * HACK x", "<!-- TODO x"):
+        assert R.is_marker_line(line), line
+    # A line that merely contains the word is not a marker comment.
+    assert not R.is_marker_line("const TODO_COUNT = 3")
+    assert not R.is_marker_line("// TODOS is a different word")
+
+
+def test_the_endpoint_strip_is_exactly_one_space_then_slash():
+    """verify-creates strips a leading method token so the search hits the route
+    real code writes. Two spaces is not that shape -- and the writer refuses it
+    for the same reason, so the two halves agree."""
+    assert _verdicts("kind-endpoint")[0]["status"] == "verified"
+    assert '(searched "/api/notifications")' in _verdicts("kind-endpoint")[0]["evidence"]
+    assert _verdicts("endpoint-2-barras")[0]["status"] == "missing"
+
+
+def test_pathspec_magic_cannot_verify_a_phase_that_built_nothing():
+    """':(glob)' is the gate. Without it, `ls-files -- '*'` returned every
+    tracked file and any of these would have verified by PATH."""
+    for label in ("glob-estrela", "glob-exclude"):
+        assert _verdicts(label)[0]["method"] != "path", label
+    # The honest residue, recorded rather than papered over: a bare ":" still
+    # verifies by TEXT, because `git grep -F ':'` finds a colon in any source
+    # file. That is closed at WRITE time -- an identity must carry an
+    # alphanumeric -- not here. Do not "fix" the reader for it.
+    assert _verdicts("glob-doispontos")[0]["status"] == "verified"
+    assert _verdicts("glob-doispontos")[0]["method"] == "text"
+
+
+def test_one_verdict_per_declared_identity_in_declaration_order():
+    """Anti-vacuum: the invariant test depends on this array lining up with the
+    declared list, and an empty array would pass a length check that never ran."""
+    assert [v["identity"] for v in _verdicts("varias")] == [
+        "src/parse.ts",
+        "notifications",
+        "never_written",
+    ]
+    assert _verdicts("creates-vazio") == []
+
+
+# ---------------------------------------------------------------------------
 # The two constants that must not drift apart
 # ---------------------------------------------------------------------------
 

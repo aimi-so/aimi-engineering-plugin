@@ -4240,5 +4240,310 @@
       "unchanged": true
     }
   ],
-  "_comment_amend": "roadmap-amend-phase captured the same way, before its jq was deleted: 41 payloads covering partial merge by key presence, every unamendable key with its named redirect, every type error, the orphan refusal with its suggestion line in BOTH forms (one added identity fills it in, two leave a placeholder), both unusable-pair reasons, a successful retarget with the downstream rewrite, the cross-phase duplicate block, and the handoff advisory. 205 of 205 field comparisons identical after the port. The 'unchanged' field records that all 32 refusals left roadmap.json byte-for-byte alone."
+  "_comment_amend": "roadmap-amend-phase captured the same way, before its jq was deleted: 41 payloads covering partial merge by key presence, every unamendable key with its named redirect, every type error, the orphan refusal with its suggestion line in BOTH forms (one added identity fills it in, two leave a placeholder), both unusable-pair reasons, a successful retarget with the downstream rewrite, the cross-phase duplicate block, and the handoff advisory. 205 of 205 field comparisons identical after the port. The 'unchanged' field records that all 32 refusals left roadmap.json byte-for-byte alone.",
+  "verify_cases": [
+    {
+      "label": "kind-file",
+      "exit": 0,
+      "stdout": [
+        {
+          "identity": "src/parse.ts",
+          "status": "verified",
+          "method": "path",
+          "evidence": "tracked path: src/parse.ts",
+          "gitStatus": 0
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "label": "kind-dir",
+      "exit": 0,
+      "stdout": [
+        {
+          "identity": "db/migrations",
+          "status": "verified",
+          "method": "path",
+          "evidence": "tracked path: db/migrations/001_init.sql",
+          "gitStatus": 0
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "label": "kind-path-glob",
+      "exit": 0,
+      "stdout": [
+        {
+          "identity": "db/migrations/*.sql",
+          "status": "verified",
+          "method": "path",
+          "evidence": "tracked path: db/migrations/001_init.sql",
+          "gitStatus": 0
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "label": "kind-symbol",
+      "exit": 0,
+      "stdout": [
+        {
+          "identity": "parseList<T>",
+          "status": "verified",
+          "method": "text",
+          "evidence": "tracked source: src/parse.ts:1",
+          "gitStatus": 0
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "label": "kind-table",
+      "exit": 0,
+      "stdout": [
+        {
+          "identity": "notifications",
+          "status": "verified",
+          "method": "text",
+          "evidence": "tracked source: db/schema.sql:1",
+          "gitStatus": 0
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "label": "kind-endpoint",
+      "exit": 0,
+      "stdout": [
+        {
+          "identity": "POST /api/notifications",
+          "status": "verified",
+          "method": "text",
+          "evidence": "tracked source: src/router.ts:1 (searched \"/api/notifications\")",
+          "gitStatus": 0
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "label": "kind-namespaced",
+      "exit": 0,
+      "stdout": [
+        {
+          "identity": "queue:emails",
+          "status": "verified",
+          "method": "text",
+          "evidence": "tracked source: src/queue.ts:1",
+          "gitStatus": 0
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "label": "so-em-doc",
+      "exit": 0,
+      "stdout": [
+        {
+          "identity": "only_in_docs",
+          "status": "missing",
+          "method": null,
+          "evidence": "No tracked artifact for \"only_in_docs\" under /WORK/repo. Found and rejected at docs/only-doc.md:1: documentation or test path, excluded from the source search. Note: git ls-files and git grep see tracked (committed) files only, so uncommitted work reads as missing.",
+          "gitStatus": 1
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "label": "identidade-doc",
+      "exit": 0,
+      "stdout": [
+        {
+          "identity": "docs/only-doc.md",
+          "status": "verified",
+          "method": "path",
+          "evidence": "tracked path: docs/only-doc.md",
+          "gitStatus": 0
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "label": "so-em-teste",
+      "exit": 0,
+      "stdout": [
+        {
+          "identity": "only_in_tests",
+          "status": "missing",
+          "method": null,
+          "evidence": "No tracked artifact for \"only_in_tests\" under /WORK/repo. Found and rejected at tests/thing_test.rb:1: documentation or test path, excluded from the source search. Note: git ls-files and git grep see tracked (committed) files only, so uncommitted work reads as missing.",
+          "gitStatus": 1
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "label": "marcador-todo",
+      "exit": 0,
+      "stdout": [
+        {
+          "identity": "marker_only_symbol",
+          "status": "missing",
+          "method": null,
+          "evidence": "No tracked artifact for \"marker_only_symbol\" under /WORK/repo. Found and rejected at src/todo.ts:1: TODO/FIXME marker comment, not an implementation. Note: git ls-files and git grep see tracked (committed) files only, so uncommitted work reads as missing.",
+          "gitStatus": 0
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "label": "ausente",
+      "exit": 0,
+      "stdout": [
+        {
+          "identity": "never_written_anywhere",
+          "status": "missing",
+          "method": null,
+          "evidence": "No tracked artifact for \"never_written_anywhere\" under /WORK/repo. Note: git ls-files and git grep see tracked (committed) files only, so uncommitted work reads as missing.",
+          "gitStatus": 1
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "label": "endpoint-2-barras",
+      "exit": 0,
+      "stdout": [
+        {
+          "identity": "POST  /api/notifications",
+          "status": "missing",
+          "method": null,
+          "evidence": "No tracked artifact for \"POST  /api/notifications\" under /WORK/repo. Note: git ls-files and git grep see tracked (committed) files only, so uncommitted work reads as missing.",
+          "gitStatus": 1
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "label": "glob-estrela",
+      "exit": 0,
+      "stdout": [
+        {
+          "identity": "*",
+          "status": "missing",
+          "method": null,
+          "evidence": "No tracked artifact for \"*\" under /WORK/repo. Note: git ls-files and git grep see tracked (committed) files only, so uncommitted work reads as missing.",
+          "gitStatus": 1
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "label": "glob-doispontos",
+      "exit": 0,
+      "stdout": [
+        {
+          "identity": ":",
+          "status": "verified",
+          "method": "text",
+          "evidence": "tracked source: src/parse.ts:1",
+          "gitStatus": 0
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "label": "glob-exclude",
+      "exit": 0,
+      "stdout": [
+        {
+          "identity": ":!nope",
+          "status": "missing",
+          "method": null,
+          "evidence": "No tracked artifact for \":!nope\" under /WORK/repo. Note: git ls-files and git grep see tracked (committed) files only, so uncommitted work reads as missing.",
+          "gitStatus": 1
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "label": "varias",
+      "exit": 0,
+      "stdout": [
+        {
+          "identity": "src/parse.ts",
+          "status": "verified",
+          "method": "path",
+          "evidence": "tracked path: src/parse.ts",
+          "gitStatus": 0
+        },
+        {
+          "identity": "notifications",
+          "status": "verified",
+          "method": "text",
+          "evidence": "tracked source: db/schema.sql:1",
+          "gitStatus": 0
+        },
+        {
+          "identity": "never_written",
+          "status": "missing",
+          "method": null,
+          "evidence": "No tracked artifact for \"never_written\" under /WORK/repo. Note: git ls-files and git grep see tracked (committed) files only, so uncommitted work reads as missing.",
+          "gitStatus": 1
+        }
+      ],
+      "stderr": ""
+    },
+    {
+      "label": "creates-vazio",
+      "exit": 0,
+      "stdout": [],
+      "stderr": ""
+    },
+    {
+      "label": "fase-inexistente",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: verify-creates: phase 99 not found in /WORK/.aimi/tasks/f/roadmap.json"
+    },
+    {
+      "label": "dir-inexistente",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: verify-creates: --dir is not a directory: /WORK/nao-existe"
+    },
+    {
+      "label": "dir-fora-do-projeto",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: Path escapes project root — access denied\n  Path:         /etc\n  Project root: /WORK"
+    },
+    {
+      "label": "flag-desconhecida",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: verify-creates: unknown flag: --nope"
+    },
+    {
+      "label": "sem-feature",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: roadmap: --feature <slug> is required"
+    },
+    {
+      "label": "repo-sem-commits",
+      "exit": 0,
+      "stdout": [
+        {
+          "identity": "src/parse.ts",
+          "status": "missing",
+          "method": null,
+          "evidence": "No tracked artifact for \"src/parse.ts\" under /WORK/empty. Note: git ls-files and git grep see tracked (committed) files only, so uncommitted work reads as missing.",
+          "gitStatus": 1
+        }
+      ],
+      "stderr": ""
+    }
+  ],
+  "_comment_verify": "verify-creates captured the same way, before its jq was deleted: 24 cases covering every documented identity kind, the doc/test exclusions, the endpoint prefix strip, the TODO/FIXME marker rejection, an empty repository, and the three pathspec-magic forms. 72 of 72 field comparisons identical after the port. Note glob-doispontos: a bare ':' verifies by TEXT, not path -- ':(glob):' matches nothing but `git grep -F ':'` finds a colon in any source file. That residue is closed at WRITE time (an identity must carry an alphanumeric), not here, and the capture records it so nobody 'fixes' the reader later."
 }
