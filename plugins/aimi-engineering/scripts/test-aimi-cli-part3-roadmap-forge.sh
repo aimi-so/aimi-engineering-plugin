@@ -1199,11 +1199,16 @@ _RT_ORDINARY_TABLE=(
 _RT_FEATURE="rm-identity-roundtrip"
 
 # Seed a one-phase roadmap.json straight to disk, bypassing roadmap-init.
-# Needed for the injection rows only: _rm_sanitize DELETES four of those five
-# patterns at write time, so roadmap-init cannot be used to place them on disk
-# and a test that tried would be measuring the sanitizer, not the read side.
-# Same shape test_validate_contracts_rejects_suspicious_contract_strings uses.
-_rt_seed_single_phase_roadmap() {
+#
+# "v1" in the name is a rule, not a label: this helper emits the stored format
+# as it was and must NOT be migrated when that format changes. See the longer
+# note on _seed_v1_roadmap_on_disk -- these two are the only evidence that a
+# roadmap written before today's rules still reads.
+#
+# Needed for the injection rows because _rm_sanitize DELETES four of those five
+# patterns at write time, so roadmap-init cannot place them on disk at all and a
+# test that tried would be measuring the sanitizer, not the read side.
+_seed_v1_single_phase_on_disk() {
   rm -rf ".aimi/tasks/$_RT_FEATURE"
   mkdir -p ".aimi/tasks/$_RT_FEATURE"
   jq -n --arg f "$_RT_FEATURE" --arg c "$1" '{
@@ -1356,7 +1361,7 @@ test_roadmap_identity_character_round_trip() {
   # a prompt-injection path.
   #
   # Seeded to disk, not written through roadmap-init, for the reason recorded on
-  # _rt_seed_single_phase_roadmap: measured on this tree, _rm_sanitize deletes
+  # _seed_v1_single_phase_on_disk: measured on this tree, _rm_sanitize deletes
   # "ignore previous", "system:", the triple-backtick fence and "$(" before they
   # can be stored, so those four cannot be placed on disk by the writer at all.
   # The INSTRUCTIONS marker is the one the writer does NOT strip -- and it no
@@ -1368,7 +1373,7 @@ test_roadmap_identity_character_round_trip() {
   for irow in "${_RT_INJECTION_TABLE[@]}"; do
     IFS='~' read -r ilabel ipattern <<< "$irow"
     local ientry="cmd_probe (round trip probe $ipattern tail)"
-    _rt_seed_single_phase_roadmap "$ientry"
+    _seed_v1_single_phase_on_disk "$ientry"
     ivc_out=$("$CLI" validate-contracts "$_RT_FEATURE" 2>&1) && ivc_exit=0 || ivc_exit=$?
     assert_exit_code "1" "$ivc_exit" "identity round trip: $ilabel in description position -- validate-contracts still refuses the whole entry"
     assert_contains "instruction-injection pattern" "$ivc_out" "identity round trip: $ilabel in description position -- diagnostic names the reason"
@@ -1399,7 +1404,7 @@ test_roadmap_identity_character_round_trip() {
   for orow in "${_RT_ORDINARY_TABLE[@]}"; do
     IFS='~' read -r olabel oentry <<< "$orow"
     rm -rf ".aimi/tasks/$_RT_FEATURE"
-    _rt_seed_single_phase_roadmap "$oentry" && oinit_exit=0 || oinit_exit=$?
+    _seed_v1_single_phase_on_disk "$oentry" && oinit_exit=0 || oinit_exit=$?
     assert_exit_code "0" "${oinit_exit:-0}" "identity round trip: $olabel -- writer accepts it"
     "$CLI" validate-contracts "$_RT_FEATURE" >/dev/null 2>&1 && ovc_exit=0 || ovc_exit=$?
     assert_exit_code "0" "$ovc_exit" "identity round trip: $olabel -- reader accepts it too (writer/reader agree)"
@@ -3644,13 +3649,21 @@ _vc_roadmap() {
 }
 
 # Same fixture, written straight to disk instead of through roadmap-init.
-# For whitespace-bearing identities ONLY: roadmap-init refuses to mint those now
-# (see _roadmap_identity_errors reason (d)), but verify-creates still has to
-# read them correctly -- every roadmap written before that rule existed carries
-# them, including this repository's own phases 2, 3 and 4. Refusing to write a
-# shape is a write-time decision; it must never change how an already-written
-# roadmap is read.
-_vc_roadmap_legacy() {
+#
+# THE NAME SAYS "v1" BECAUSE IT MUST NEVER BE MIGRATED. This helper and its
+# sibling above are the only proof that a roadmap written before today's rules
+# still READS correctly, so they deliberately emit the wire format as it was,
+# not as it is. When the stored format changes, every other fixture in this file
+# moves with it and these two stay exactly where they are -- that is what makes
+# them evidence rather than duplication.
+#
+# Why they bypass roadmap-init at all: for whitespace-bearing identities the
+# writer now refuses to mint what these tests must read (_roadmap_identity_errors
+# reason (d)), and every roadmap written before that rule carries them --
+# including this repository's own phases 2, 3 and 4. Refusing to write a shape
+# is a write-time decision; it must never change how an already-written roadmap
+# is read.
+_seed_v1_roadmap_on_disk() {
   local feature="$1" creates_json="$2"
   rm -rf ".aimi/tasks/$feature"
   mkdir -p ".aimi/tasks/$feature"
@@ -4005,7 +4018,7 @@ test_verify_creates_only_http_method_token_is_stripped() {
   # so roadmap-init would now refuse to write them. That refusal is the point of
   # reason (d) -- and it is exactly why this read-time behaviour still has to
   # work, because roadmaps holding these shapes already exist on disk.
-  _vc_roadmap_legacy "vc-strip" '["SELECT /api/x (not an http method)", "OPTIONS /api/x (preflight handler)", "DELETE user_sessions (table, not a route)"]'
+  _seed_v1_roadmap_on_disk "vc-strip" '["SELECT /api/x (not an http method)", "OPTIONS /api/x (preflight handler)", "DELETE user_sessions (table, not a route)"]'
   _vc_run "vc-strip" "$dir" "method-strip"
   out="$VC_OUT"
 
