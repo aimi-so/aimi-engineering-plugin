@@ -289,13 +289,118 @@ def test_dangling_dependson_names_the_phase_and_the_missing_id():
     assert errors == ["phase 1: dependsOn references unknown phase id 99"]
 
 
-def test_the_identity_note_matches_the_one_bash_still_prints():
-    """roadmap-amend-phase still prints this from _roadmap_identity_note. Two
-    copies of a literal drift; this is the guard for as long as both exist."""
-    cli = os.path.join(SCRIPTS, "aimi-cli.sh")
-    with open(cli, encoding="utf-8") as handle:
-        body = handle.read()
-    assert R.IDENTITY_NOTE in body
+def test_the_identity_note_survived_the_move_with_its_example_intact():
+    """This note used to be three copies of an `echo "..."` whose illustrative
+    example was itself a backticked span -- so every refusal forked a lookup for
+    a command named `x` and printed the sentence with the example missing.
+
+    In a Python string literal a backtick is inert, so that failure mode is gone
+    by construction. What still has to hold is that the example is there at all:
+    a note about how backticks are handled is worthless without one.
+    """
+    assert "`x` span becomes x" in R.IDENTITY_NOTE
+    assert R.IDENTITY_NOTE.startswith("Note: an entry is quoted after backtick normalization")
+
+
+# ---------------------------------------------------------------------------
+# roadmap-amend-phase
+# ---------------------------------------------------------------------------
+
+AMEND_CASES = {c["label"]: c for c in GOLDEN["amend_cases"]}
+
+
+def test_every_refusal_in_the_capture_left_the_file_alone():
+    """32 of the 41 captured cases refuse. Not one of them wrote. This is the
+    property the verb's own comment claims and the one a port is most likely to
+    break, because it depends on every check running before the write."""
+    refusals = [c for c in AMEND_CASES.values() if c["exit"] != 0]
+    assert len(refusals) >= 30
+    assert all(c["unchanged"] for c in refusals)
+
+
+def test_the_orphan_suggestion_guesses_only_when_there_is_nothing_to_guess():
+    """The set difference proves an identity was dropped but never which new one
+    replaced it. With exactly one added identity the pairing is complete; with
+    two, the new side stays a placeholder rather than a guess."""
+    assert 'shared_widget=renamed_widget' in AMEND_CASES["orfao-um-added"]["stderr"]
+    assert 'shared_widget=<new identity>' in AMEND_CASES["orfao-dois-added"]["stderr"]
+
+
+def test_retarget_matches_by_exact_equality_never_by_containment():
+    """Phase 2 needs both "shared_widget" and "shared". Retargeting the first
+    must not touch the second -- this repository's own roadmap has phases citing
+    overlapping identities verbatim, and a substring rule would corrupt both."""
+    needs = AMEND_CASES["retarget-ok"]["file"]["phases"][1]["needs"]
+    assert needs == ["renamed_widget (renomeado)", "shared (a shorter one)"]
+
+
+def test_the_orphan_guard_still_fires():
+    """The regression that worries me most: a guard that stops guarding is
+    silent. Reproduced here against the captured baseline."""
+    stored = {"id": 1, "creates": ["shared_widget (the widget)"]}
+    amended = {"id": 1, "creates": ["renamed_widget (r)"]}
+    doc = {"phases": [stored, {"id": 2, "needs": ["shared_widget (the widget)"]}]}
+    assert R.amend_orphan_rows(stored, amended, doc, []) == [(2, "shared_widget")]
+    # ...and an authorized drop is not an orphan.
+    assert R.amend_orphan_rows(stored, amended, doc, ["shared_widget"]) == []
+
+
+def test_unamendable_keys_are_redirected_to_their_owner_by_name():
+    assert R.amend_key_errors({"status": 1}) == [
+        '  "status" is not amendable -- phase status is owned by roadmap-set-status'
+    ]
+    assert R.amend_key_errors({"claim": 1}) == [
+        '  "claim" is not amendable -- phase claims are owned by roadmap-claim / roadmap-release-claim'
+    ]
+    assert R.amend_key_errors({"id": 1}) == [
+        '  "id" is not amendable -- it is phase identity, written once by roadmap-init'
+    ]
+    assert R.amend_key_errors({"goal": "g", "creates": []}) == []
+
+
+def test_the_v1_string_filter_is_named_so_the_schema_commit_can_find_it():
+    """Thirteen call sites, one helper. Today it discards nothing -- in 1.0
+    every entry IS a string -- and after the schema change it must be gone, or a
+    malformed entry vanishes instead of raising."""
+    assert R._v1_string_entries(["a", "b"]) == ["a", "b"]
+    assert R._v1_string_entries([{"identity": "a"}, "b"]) == ["b"]
+    source = open(os.path.join(SCRIPTS, "roadmap.py"), encoding="utf-8").read()
+    assert source.count("_v1_string_entries") >= 4
+    assert "DELETED IN THE SCHEMA COMMIT" in source
+
+
+# --- the handoff advisory, which had no test at all until now --------------
+
+
+def test_handoff_advisory_reads_only_the_artifacts_created_section(tmp_path):
+    handoff = tmp_path / "handoff.md"
+    handoff.write_text(
+        "# Phase\n"
+        "## Decisions\n"
+        "- decided_thing was considered\n"
+        "## Artifacts Created\n"
+        "- real_thing -- built\n"
+        "## Deferred\n"
+        "- deferred_thing\n",
+        encoding="utf-8",
+    )
+    assert R.handoff_lists_artifact(str(handoff), "real_thing")
+    # A name that appears only OUTSIDE the section does not count as delivered:
+    # that is the whole reason the section is scoped rather than grepped whole.
+    assert not R.handoff_lists_artifact(str(handoff), "decided_thing")
+    assert not R.handoff_lists_artifact(str(handoff), "deferred_thing")
+    assert not R.handoff_lists_artifact(str(handoff), "never_mentioned")
+
+
+def test_handoff_advisory_is_silent_when_the_file_is_missing(tmp_path):
+    assert not R.handoff_lists_artifact(str(tmp_path / "nope.md"), "anything")
+
+
+def test_handoff_advisory_fired_and_stayed_silent_in_the_capture():
+    assert "does not list \"novo_artefato\"" in AMEND_CASES["handoff-avisa"]["stderr"]
+    assert AMEND_CASES["handoff-avisa"]["exit"] == 0, "advisory never gates the amend"
+    assert AMEND_CASES["handoff-silencia"]["stderr"] == ""
+    assert AMEND_CASES["handoff-ausente"]["stderr"] == ""
 
 
 # ---------------------------------------------------------------------------

@@ -14031,39 +14031,6 @@ def _rm_candidates($phases; $allowed; $work):
 #
 # Reuses $_CONTRACT_JQ_DEFS so the guard and validate-contracts agree on what an
 # identity is; a second copy of _cv_identity would drift.
-# The trailing note every identity refusal prints, in ONE place and inside SINGLE
-# quotes.
-#
-# It was three copies of an `echo "..."` whose own illustrative example was a
-# backticked span -- and backticks inside a double-quoted string are command
-# substitution. Every refusal forked a PATH lookup for a command named `x`,
-# leaked `x: command not found` into the diagnostic, and printed the sentence
-# with the example missing: "a  span becomes x". A note about how backticks are
-# handled, destroyed by a backtick.
-#
-# printf with a single-quoted literal is what makes the backticks inert. Do not
-# convert this to echo with double quotes, and do not interpolate into it -- the
-# whole point is that this string reaches stderr byte-for-byte. That stderr is
-# also what commands/plan.md now parses and repairs from, so noise in it is not
-# cosmetic.
-_roadmap_identity_note() {
-  printf '%s\n' 'Note: an entry is quoted after backtick normalization -- a `x` span becomes x -- so one submitted with backticks appears here without them. Nothing else about an identity is rewritten; locate it by its position in the list.' >&2
-}
-
-# Reads a phases array on stdin, prints one diagnostic line per indefensible
-# creates/needs/areas entry. The rule itself lives in roadmap.py's judge_phases;
-# this is the call site, and there is no second copy of the rule here.
-#
-# The port was verified differentially rather than by inspection: 36 adversarial
-# entries built into 36 phases, run through the jq original and through Python,
-# 49 diagnostic lines each, byte-identical. tests/test_roadmap.py keeps that
-# corpus.
-_roadmap_identity_errors() {
-  check_python3
-  python3 "$(_aimi_roadmap_py)" judge-phases
-}
-
-
 cmd_roadmap_init() {
   local feature="" file="" sync_mode=false brainstorm_path=""
 
@@ -14137,66 +14104,6 @@ cmd_roadmap_init() {
 # the caller to "the roadmap-* verbs". This verb is what makes that redirect
 # truthful.
 #
-# The amendable set is exactly six keys, and the discriminator is "contract
-# field with no other writer":
-#   * branch IS amendable, for precisely that reason -- roadmap-init sets it at
-#     creation and --sync never revisits it, which is why a decimal phase's null
-#     branch could not be filled in.
-#   * status and claim are NOT, on the opposite ground: roadmap-set-status owns
-#     status (transition graph plus the handoff.md precondition) and
-#     roadmap-claim / roadmap-release-claim own claim (PID liveness,
-#     self-reclaim). A second writer would duplicate those guarantees rather
-#     than reuse them, so both keys are rejected by name with their owner named.
-#   * id, dir, slug, name and dependsOn are phase identity, written once by
-#     roadmap-init; they are rejected by name too. name and notes are outside
-#     the six deliberately -- widening the set later is one entry here plus its
-#     sanitize cap.
-_ROADMAP_AMENDABLE_KEYS='["goal","successCriteria","creates","needs","areas","branch"]'
-
-# jq `def` used wherever roadmap-amend-phase asks whether an artifact identity
-# is a member of a set. Written as explicit `==` equality rather than `index`
-# because the entire orphan check hinges on never treating a longer or shorter
-# identity as a match: phases 3 and 4 of this repo's own forge-abstraction
-# roadmap both cite "account override applied inside the forge command surface"
-# verbatim, and a substring rule would let a partial-word rewrite silently
-# corrupt both of them.
-_ROADMAP_AMEND_JQ_DEFS='
-def _ra_in($arr): . as $v | ($arr | map(select(. == $v)) | length) > 0;
-'
-
-# Print one indented line per downstream needs entry that cites a creates
-# identity this amendment drops without authorization.
-#   $1 = stored phase object (JSON)   $2 = amended phase object (JSON)
-#   $3 = roadmap.json path            $4 = JSON array of authorized old identities
-# Dropped identities are the _cv_identity set difference stored-creates minus
-# amended-creates; comparison is exact equality via _ra_in throughout. A dropped
-# identity nobody cites produces no line, which is what lets an unreferenced
-# creates entry be removed without a --retarget-needs pair.
-_roadmap_amend_orphan_errors() {
-  local stored_phase="$1" amended_phase="$2" roadmap_path="$3" authorized_json="${4:-[]}"
-  jq -r \
-    --argjson stored "$stored_phase" \
-    --argjson amended "$amended_phase" \
-    --argjson authorized "$authorized_json" \
-    "$_CONTRACT_JQ_DEFS$_ROADMAP_AMEND_JQ_DEFS"'
-    ([ ($amended.creates // [])[] | select(type == "string") | _cv_identity ] | unique) as $new |
-    ([ ($stored.creates // [])[] | select(type == "string") | _cv_identity ] | unique
-      | map(select((_ra_in($new)) | not))
-      | map(select((_ra_in($authorized)) | not))) as $orphaned |
-    [ .phases[]
-      | select(.id != $amended.id)
-      | . as $p
-      | (($p.needs // [])[] | select(type == "string") | _cv_identity) as $ident
-      | select($ident | _ra_in($orphaned))
-      | {phase: $p.id, identity: $ident}
-    ]
-    | unique_by([.phase, .identity])
-    | sort_by(.phase)
-    | .[]
-    | "  phase " + (.phase|tostring) + " needs \"" + .identity + "\""
-  ' "$roadmap_path"
-}
-
 cmd_roadmap_amend_phase() {
   local feature="" phase_id="" file="" goal_flag="" branch_flag=""
   local have_goal=false have_branch=false
@@ -14259,274 +14166,31 @@ cmd_roadmap_amend_phase() {
     payload='{}'
   fi
 
-  if ! printf '%s' "$payload" | jq -e 'type == "object"' >/dev/null 2>&1; then
-    echo "Error: roadmap-amend-phase: amendment payload must be a JSON object, got: $(printf '%s' "$payload" | tr -d '\n' | cut -c1-200)" >&2
-    exit 1
-  fi
-
-  # Scalar flags fold into the same object so there is exactly one validation,
-  # sanitization and merge path -- no second code path to keep in step.
-  if [ "$have_goal" = true ]; then
-    payload=$(printf '%s' "$payload" | jq -c --arg v "$goal_flag" '. + {goal: $v}')
-  fi
-  if [ "$have_branch" = true ]; then
-    payload=$(printf '%s' "$payload" | jq -c --arg v "$branch_flag" '. + {branch: $v}')
-  fi
-
-  # --- Six-key allowlist, with the two owned keys redirected by name -------
-  local key_errors
-  key_errors=$(printf '%s' "$payload" | jq -r --argjson allowed "$_ROADMAP_AMENDABLE_KEYS" "$_ROADMAP_AMEND_JQ_DEFS"'
-    [ keys_unsorted[]
-      | select((_ra_in($allowed)) | not)
-      | . as $k
-      | "  \"" + $k + "\" is not amendable" +
-        (if $k == "status" then " -- phase status is owned by roadmap-set-status"
-         elif $k == "claim" then " -- phase claims are owned by roadmap-claim / roadmap-release-claim"
-         elif ($k | _ra_in(["id","dir","slug","name","dependsOn"])) then " -- it is phase identity, written once by roadmap-init"
-         else " -- amendable fields are: " + ($allowed | join(", ")) end)
-    ] | .[]
-  ')
-  if [ -n "$key_errors" ]; then
-    echo "Error: roadmap-amend-phase: unamendable key(s) in the amendment payload:" >&2
-    printf '%s\n' "$key_errors" >&2
-    exit 1
-  fi
-
-  if [ "$(printf '%s' "$payload" | jq 'keys | length')" -eq 0 ]; then
-    echo "Error: roadmap-amend-phase: the amendment carries no field to change -- pass at least one of $(printf '%s' "$_ROADMAP_AMENDABLE_KEYS" | jq -r 'join(", ")')" >&2
-    exit 1
-  fi
-
-  local type_errors
-  type_errors=$(printf '%s' "$payload" | jq -r '
-    [ (if has("goal") and (((.goal|type) != "string") or ((.goal|length) == 0)) then "  goal must be a non-empty string" else empty end),
-      (if has("branch") and ((.branch != null) and ((.branch|type) != "string")) then "  branch must be a string or null" else empty end),
-      ( . as $o
-        | (["successCriteria","creates","needs","areas"][]) as $k
-        | select($o | has($k))
-        | if (($o[$k]|type) != "array") then "  " + $k + " must be an array of strings"
-          elif (($o[$k] | map(select(type != "string")) | length) > 0) then "  " + $k + " entries must all be strings"
-          else empty end
-      )
-    ] | .[]
-  ')
-  if [ -n "$type_errors" ]; then
-    echo "Error: roadmap-amend-phase: invalid amendment value(s):" >&2
-    printf '%s\n' "$type_errors" >&2
-    exit 1
-  fi
-
-  # --- Same sanitizer and same caps roadmap-init applies to a fresh phase ---
+  # --- Everything judged BEFORE the lock ----------------------------------
+  # Same split, and for the same reason, as roadmap-init: a refusal must not
+  # take the lock and must not touch the file.
+  check_python3
+  local goal_args=() branch_args=()
+  [ "$have_goal" = true ] && goal_args=(--goal "$goal_flag")
+  [ "$have_branch" = true ] && branch_args=(--branch "$branch_flag")
   local sanitized
-  sanitized=$(printf '%s' "$payload" | jq -c "$_ROADMAP_SANITIZE_JQ"'
-    (if has("goal") then .goal = (.goal | _rm_sanitize(2000)) else . end)
-    | (if has("successCriteria") then .successCriteria = (.successCriteria | map(_rm_sanitize(2000))) else . end)
-    | (if has("creates") then .__mkCreates = (.creates | map(_rm_markers_only(500))) else . end)
-    | (if has("needs") then .__mkNeeds = (.needs | map(_rm_markers_only(500))) else . end)
-    | (if has("creates") then .creates = (.creates | map(_rm_sanitize_contract(500))) else . end)
-    | (if has("needs") then .needs = (.needs | map(_rm_sanitize_contract(500))) else . end)
-    | (if has("areas") then .areas = (.areas | map(_rm_sanitize(500))) else . end)
-    | (if has("branch") then .branch = (if .branch == null then null else (.branch | _rm_sanitize(200)) end) else . end)
-  ')
-
-  local branch_present branch_value
-  branch_present=$(printf '%s' "$sanitized" | jq -r 'if (has("branch") and .branch != null) then "yes" else "no" end')
-  if [ "$branch_present" = "yes" ]; then
-    branch_value=$(printf '%s' "$sanitized" | jq -r '.branch')
-    if ! [[ "$branch_value" =~ $_ROADMAP_BRANCH_REGEX ]]; then
-      echo "Error: roadmap-amend-phase: branch \"$branch_value\" contains invalid characters" >&2
-      exit 1
-    fi
-  fi
+  sanitized=$(printf '%s' "$payload" | python3 "$(_aimi_roadmap_py)" amend-validate \
+    "${goal_args[@]}" "${branch_args[@]}") || exit $?
 
   local roadmap_path
   roadmap_path=$(_roadmap_require "roadmap-amend-phase" "$feature")
 
-  # --- Locked read-modify-write: every remaining check reads the file under
-  # the lock, and every refusal happens before mktemp, so a refused amendment
-  # leaves roadmap.json byte-for-byte unchanged. ---
+  # --- Locked read-modify-write ------------------------------------------
+  # Bash holds the lock; roadmap.py does the whole read-modify-write inside it.
+  # Every refusal still happens before the file is touched, so a refused
+  # amendment leaves roadmap.json byte-for-byte unchanged.
   local out
   out=$(
     (
       _lock "${roadmap_path}.lock"
-
-      if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
-        echo "Error: roadmap-amend-phase: malformed roadmap.json: $roadmap_path" >&2
-        exit 1
-      fi
-
-      stored_phase=$(jq -c --argjson pid "$phase_id" '(.phases[] | select(.id == $pid)) // empty' "$roadmap_path")
-      if [ -z "$stored_phase" ]; then
-        echo "Error: roadmap-amend-phase: phase $phase_id not found in $roadmap_path" >&2
-        exit 1
-      fi
-
-      # Partial merge by key presence. A shallow object merge keeps every key the
-      # stored phase already had -- id, dir, slug, name, dependsOn, status and
-      # claim included -- at its original position and value; only the keys the
-      # payload actually carries are replaced, and each is replaced wholesale.
-      # __mk* is scratch for the identity guard's mutation check below, never
-      # schema -- dropped from the phase that actually merges into the roadmap.
-      amended_phase=$(printf '%s' "$stored_phase" | jq -c --argjson patch "$sanitized" '. + ($patch | del(.__mkCreates, .__mkNeeds))')
-
-      # Judge ONLY the lists this call actually writes. Handing over the merged
-      # phase would re-judge a list the amendment never touched, which turns
-      # every tightening of _roadmap_identity_errors into a retroactive refusal:
-      # a phase whose stored creates holds a legacy whitespace identity could no
-      # longer have its needs amended at all -- and repairing exactly those
-      # phases is what this verb exists for. An absent creates/needs key already
-      # yields an empty list inside the helper, so no helper change is needed.
-      identity_check_phase=$(jq -c -n --argjson amended "$amended_phase" --argjson patch "$sanitized" '
-        {id: $amended.id}
-        + (if ($patch | has("creates")) then {creates: ($amended.creates // []), __mkCreates: ($patch.__mkCreates // [])} else {} end)
-        + (if ($patch | has("needs")) then {needs: ($amended.needs // []), __mkNeeds: ($patch.__mkNeeds // [])} else {} end)
-        + (if ($patch | has("areas")) then {areas: ($amended.areas // [])} else {} end)
-      ')
-      identity_errors=$(printf '%s' "$identity_check_phase" | jq -c '[.]' | _roadmap_identity_errors)
-      if [ -n "$identity_errors" ]; then
-        echo "Error: roadmap-amend-phase: malformed creates/needs identity in the amended phase:" >&2
-        printf '%s\n' "$identity_errors" >&2
-        _roadmap_identity_note
-        exit 1
-      fi
-
-      dropped=$(jq -c -n --argjson stored "$stored_phase" --argjson amended "$amended_phase" \
-        "$_CONTRACT_JQ_DEFS$_ROADMAP_AMEND_JQ_DEFS"'
-        ([ ($amended.creates // [])[] | select(type == "string") | _cv_identity ] | unique) as $new |
-        [ ($stored.creates // [])[] | select(type == "string") | _cv_identity ] | unique | map(select((_ra_in($new)) | not))
-      ')
-      added=$(jq -c -n --argjson stored "$stored_phase" --argjson amended "$amended_phase" \
-        "$_CONTRACT_JQ_DEFS$_ROADMAP_AMEND_JQ_DEFS"'
-        ([ ($stored.creates // [])[] | select(type == "string") | _cv_identity ] | unique) as $old |
-        [ ($amended.creates // [])[] | select(type == "string") | _cv_identity ] | unique | map(select((_ra_in($old)) | not))
-      ')
-
-      # A pair that authorizes nothing is a caller mistake, not a no-op: it means
-      # the rename they meant to make did not happen the way they thought.
-      pair_errors=$(jq -r -n --argjson pairs "$retarget_pairs" --argjson dropped "$dropped" --argjson amended "$amended_phase" \
-        "$_CONTRACT_JQ_DEFS$_ROADMAP_AMEND_JQ_DEFS"'
-        ([ ($amended.creates // [])[] | select(type == "string") | _cv_identity ]) as $newidents |
-        [ $pairs[]
-          | . as $p
-          | if (($p.old | _ra_in($dropped)) | not) then
-              "  \"" + $p.old + "=" + $p.new + "\": this amendment does not drop the creates identity \"" + $p.old + "\""
-            elif (($p.new | _ra_in($newidents)) | not) then
-              "  \"" + $p.old + "=" + $p.new + "\": the amended phase declares no creates entry whose identity is \"" + $p.new + "\""
-            else empty end
-        ] | .[]
-      ')
-      if [ -n "$pair_errors" ]; then
-        echo "Error: roadmap-amend-phase: unusable --retarget-needs pair(s):" >&2
-        printf '%s\n' "$pair_errors" >&2
-        exit 1
-      fi
-
-      authorized=$(printf '%s' "$retarget_pairs" | jq -c '[.[].old] | unique')
-
-      orphan_errors=$(_roadmap_amend_orphan_errors "$stored_phase" "$amended_phase" "$roadmap_path" "$authorized")
-      if [ -n "$orphan_errors" ]; then
-        echo "Error: roadmap-amend-phase: this amendment drops creates identities other phases still cite in needs:" >&2
-        printf '%s\n' "$orphan_errors" >&2
-        echo "Re-run with the pairing that authorizes the rewrite:" >&2
-        # The set difference proves an identity was dropped but never which new
-        # identity replaced it, so the pairing is the caller's to state. When the
-        # amendment adds exactly one identity the suggestion is filled in
-        # completely; otherwise the new side stays a placeholder rather than a guess.
-        jq -r -n --argjson stored "$stored_phase" --argjson amended "$amended_phase" \
-          --argjson added "$added" --argjson authorized "$authorized" \
-          --arg feature "$feature" --arg pid "$phase_id" \
-          "$_CONTRACT_JQ_DEFS$_ROADMAP_AMEND_JQ_DEFS"'
-          ([ ($amended.creates // [])[] | select(type == "string") | _cv_identity ] | unique) as $new |
-          (if ($added | length) == 1 then $added[0] else "<new identity>" end) as $target |
-          [ ($stored.creates // [])[] | select(type == "string") | _cv_identity ] | unique
-          | map(select((_ra_in($new)) | not))
-          | map(select((_ra_in($authorized)) | not))
-          | map("  aimi-cli.sh roadmap-amend-phase --feature " + $feature + " --phase " + $pid +
-                " ... --retarget-needs \"" + . + "=" + $target + "\"")
-          | .[]
-        ' >&2
-        exit 1
-      fi
-
-      # Duplicate creates is a hard block because validate-contracts hard-fails on
-      # it outside --agent-mode, and that halts /aimi:plan -- writing the amendment
-      # would produce a roadmap its own consumer rejects. Scope is the identities
-      # THIS amendment introduces: a collision that predates it is not this verb's
-      # to adjudicate, and blocking on one would wall off the very repair the verb exists for.
-      dup_errors=$(jq -r --argjson pid "$phase_id" --argjson added "$added" \
-        "$_CONTRACT_JQ_DEFS$_ROADMAP_AMEND_JQ_DEFS"'
-        [ .phases[]
-          | select(.id != $pid)
-          | . as $p
-          | (($p.creates // [])[] | select(type == "string") | _cv_identity) as $ident
-          | select($ident | _ra_in($added))
-          | {phase: $p.id, identity: $ident}
-        ]
-        | unique_by([.phase, .identity]) | sort_by(.phase) | .[]
-        | "  phase " + (.phase|tostring) + " already declares \"" + .identity + "\""
-      ' "$roadmap_path")
-      if [ -n "$dup_errors" ]; then
-        echo "Error: roadmap-amend-phase: phase $phase_id would declare a creates identity another phase already declares:" >&2
-        printf '%s\n' "$dup_errors" >&2
-        echo "  Convert the collision into a creates/needs contract between the two phases, or promote the artifact to a shared foundation phase." >&2
-        exit 1
-      fi
-
-      # old identity -> the amended phase's new creates entry VERBATIM (identity
-      # plus its parenthetical), so provider and consumer stay byte-identical.
-      retarget_map=$(jq -c -n --argjson pairs "$retarget_pairs" --argjson amended "$amended_phase" "$_CONTRACT_JQ_DEFS"'
-        ($amended.creates // []) as $creates |
-        reduce $pairs[] as $p ({};
-          . + { ($p.old): ([ $creates[] | select(type == "string") | select(_cv_identity == $p.new) ][0]) })
-      ')
-
-      retargeted=$(jq -c --argjson pid "$phase_id" --argjson retargets "$retarget_map" "$_CONTRACT_JQ_DEFS"'
-        [ .phases[]
-          | select(.id != $pid)
-          | . as $p
-          | (($p.needs // [])[] | select(type == "string")) as $entry
-          | ($entry | _cv_identity) as $i
-          | select($retargets | has($i))
-          | {phase: $p.id, from: $entry, to: $retargets[$i]}
-        ]
-      ' "$roadmap_path")
-
-      # One write: the phase swap and every authorized downstream needs rewrite.
-      roadmap_doc=$(jq --argjson pid "$phase_id" --argjson amended "$amended_phase" --argjson retargets "$retarget_map" \
-        "$_CONTRACT_JQ_DEFS"'
-        .phases |= map(
-          if .id == $pid then $amended
-          elif (($retargets | length) > 0) and has("needs") and ((.needs | type) == "array") then
-            .needs |= map(if type == "string" then (. as $e | ($retargets[($e | _cv_identity)] // $e)) else . end)
-          else . end
-        )
-      ' "$roadmap_path")
-
-      tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
-      printf '%s\n' "$roadmap_doc" > "$tmp_file"
-      mv "$tmp_file" "$roadmap_path"
-
-      # Advisory only, exit status stays 0: correcting an already-completed
-      # phase's prose creates is precisely the repair this verb exists for, so no
-      # status value gates the amend in either direction.
-      phase_status=$(printf '%s' "$amended_phase" | jq -r '.status // ""')
-      if [ "$phase_status" = "completed" ] && [ "$(printf '%s' "$added" | jq 'length')" -gt 0 ]; then
-        handoff_path="$(dirname "$roadmap_path")/$(printf '%s' "$amended_phase" | jq -r '.dir // ""')/handoff.md"
-        if [ -f "$handoff_path" ]; then
-          added_idents=$(printf '%s' "$added" | jq -r '.[]')
-          while IFS= read -r ident; do
-            [ -z "$ident" ] && continue
-            if ! _cv_handoff_lists_artifact "$handoff_path" "$ident"; then
-              echo "Advisory: roadmap-amend-phase: phase $phase_id is completed and its handoff.md does not list \"$ident\" under Artifacts Created -- update the handoff so the phase's prose matches its contract." >&2
-            fi
-          done <<< "$added_idents"
-        fi
-      fi
-
-      jq -n --arg path "$roadmap_path" --argjson pid "$phase_id" \
-        --argjson amended "$(printf '%s' "$sanitized" | jq -c 'keys')" \
-        --argjson retargeted "$retargeted" \
-        '{roadmap: $path, phase: $pid, amended: $amended, retargeted: $retargeted}'
+      printf '%s' "$sanitized" | python3 "$(_aimi_roadmap_py)" amend-write \
+        --roadmap "$roadmap_path" --feature "$feature" --phase "$phase_id" \
+        --retargets "$retarget_pairs"
     ) 200>"${roadmap_path}.lock"
   ) || exit $?
   printf '%s\n' "$out"

@@ -985,5 +985,3260 @@
       "dirExists": true
     }
   ],
-  "_comment_init": "roadmap-init captured the same way, before its jq was deleted. Temp paths normalized to /TMP and createdAt frozen -- the only two non-deterministic fields. The dependson-nao-array case records jq EXITING 5 with a raw engine error: the 'dependsOn must be an array' message the code writes was unreachable, because the jq collected it in the same array as the per-entry check and iterating a string aborts. That one case is deliberately NOT reproduced -- there is no faithful port of a crash."
+  "_comment_init": "roadmap-init captured the same way, before its jq was deleted. Temp paths normalized to /TMP and createdAt frozen -- the only two non-deterministic fields. The dependson-nao-array case records jq EXITING 5 with a raw engine error: the 'dependsOn must be an array' message the code writes was unreachable, because the jq collected it in the same array as the per-entry check and iterating a string aborts. That one case is deliberately NOT reproduced -- there is no faithful port of a crash.",
+  "amend_cases": [
+    {
+      "label": "so-goal",
+      "exit": 0,
+      "stdout": "{\n  \"roadmap\": \"/TMP/so-goal/.aimi/tasks/f/roadmap.json\",\n  \"phase\": 1,\n  \"amended\": [\n    \"goal\"\n  ],\n  \"retargeted\": []\n}",
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "novo objetivo",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": false
+    },
+    {
+      "label": "so-branch",
+      "exit": 0,
+      "stdout": "{\n  \"roadmap\": \"/TMP/so-branch/.aimi/tasks/f/roadmap.json\",\n  \"phase\": 1,\n  \"amended\": [\n    \"branch\"\n  ],\n  \"retargeted\": []\n}",
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": "feat/x",
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": false
+    },
+    {
+      "label": "branch-null",
+      "exit": 0,
+      "stdout": "{\n  \"roadmap\": \"/TMP/branch-null/.aimi/tasks/f/roadmap.json\",\n  \"phase\": 1,\n  \"amended\": [\n    \"branch\"\n  ],\n  \"retargeted\": []\n}",
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": false
+    },
+    {
+      "label": "areas-e-criterios",
+      "exit": 0,
+      "stdout": "{\n  \"roadmap\": \"/TMP/areas-e-criterios/.aimi/tasks/f/roadmap.json\",\n  \"phase\": 1,\n  \"amended\": [\n    \"areas\",\n    \"successCriteria\"\n  ],\n  \"retargeted\": []\n}",
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "s1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "a",
+              "b"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": false
+    },
+    {
+      "label": "goal-por-stdin",
+      "exit": 0,
+      "stdout": "{\n  \"roadmap\": \"/TMP/goal-por-stdin/.aimi/tasks/f/roadmap.json\",\n  \"phase\": 1,\n  \"amended\": [\n    \"goal\"\n  ],\n  \"retargeted\": []\n}",
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "por stdin",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": false
+    },
+    {
+      "label": "chave-status",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: unamendable key(s) in the amendment payload:\n  \"status\" is not amendable -- phase status is owned by roadmap-set-status",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "chave-claim",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: unamendable key(s) in the amendment payload:\n  \"claim\" is not amendable -- phase claims are owned by roadmap-claim / roadmap-release-claim",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "chave-id",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: unamendable key(s) in the amendment payload:\n  \"id\" is not amendable -- it is phase identity, written once by roadmap-init",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "chave-dir",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: unamendable key(s) in the amendment payload:\n  \"dir\" is not amendable -- it is phase identity, written once by roadmap-init",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "chave-slug",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: unamendable key(s) in the amendment payload:\n  \"slug\" is not amendable -- it is phase identity, written once by roadmap-init",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "chave-name",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: unamendable key(s) in the amendment payload:\n  \"name\" is not amendable -- it is phase identity, written once by roadmap-init",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "chave-dependson",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: unamendable key(s) in the amendment payload:\n  \"dependsOn\" is not amendable -- it is phase identity, written once by roadmap-init",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "chave-inventada",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: unamendable key(s) in the amendment payload:\n  \"qualquer\" is not amendable -- amendable fields are: goal, successCriteria, creates, needs, areas, branch",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "payload-vazio",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: the amendment carries no field to change -- pass at least one of goal, successCriteria, creates, needs, areas, branch",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "payload-nao-objeto",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: amendment payload must be a JSON object, got: [\"x\"]",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "payload-nao-json",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: amendment payload must be a JSON object, got: nao e json",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "goal-nao-string",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: invalid amendment value(s):\n  goal must be a non-empty string",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "goal-vazio",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: invalid amendment value(s):\n  goal must be a non-empty string",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "branch-nao-string",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: invalid amendment value(s):\n  branch must be a string or null",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "creates-nao-array",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: invalid amendment value(s):\n  creates must be an array of strings",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "creates-nao-string",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: invalid amendment value(s):\n  creates entries must all be strings",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "branch-regex",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: branch \"bad branch!\" contains invalid characters",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "fase-inexistente",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: phase 99 not found in /TMP/fase-inexistente/.aimi/tasks/f/roadmap.json",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "roadmap-quebrado",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: malformed roadmap.json: /TMP/roadmap-quebrado/.aimi/tasks/f/roadmap.json",
+      "file": "UNPARSEABLE",
+      "unchanged": true
+    },
+    {
+      "label": "identidade-ma",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: malformed creates/needs identity in the amended phase:\nphase 1: creates entry #1 \"/etc/passwd (abs)\" is not a usable artifact identity: begins with \"/\"\nNote: an entry is quoted after backtick normalization -- a `x` span becomes x -- so one submitted with backticks appears here without them. Nothing else about an identity is rewritten; locate it by its position in the list.",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "identidade-prosa",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: malformed creates/needs identity in the amended phase:\nphase 1: creates entry #1 \"forge command surface in x (y)\" is not a usable artifact identity: contains whitespace, so no source token could match it -- name the symbol, path, table or \"METHOD /path\" endpoint the phase will actually produce\nNote: an entry is quoted after backtick normalization -- a `x` span becomes x -- so one submitted with backticks appears here without them. Nothing else about an identity is rewritten; locate it by its position in the list.",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "orfao-um-added",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: this amendment drops creates identities other phases still cite in needs:\n  phase 2 needs \"shared_widget\"\nRe-run with the pairing that authorizes the rewrite:\n  aimi-cli.sh roadmap-amend-phase --feature f --phase 1 ... --retarget-needs \"shared_widget=renamed_widget\"",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "orfao-dois-added",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: this amendment drops creates identities other phases still cite in needs:\n  phase 2 needs \"shared_widget\"\nRe-run with the pairing that authorizes the rewrite:\n  aimi-cli.sh roadmap-amend-phase --feature f --phase 1 ... --retarget-needs \"shared_widget=<new identity>\"",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "orfao-zero-added",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: this amendment drops creates identities other phases still cite in needs:\n  phase 2 needs \"shared_widget\"\nRe-run with the pairing that authorizes the rewrite:\n  aimi-cli.sh roadmap-amend-phase --feature f --phase 1 ... --retarget-needs \"shared_widget=<new identity>\"",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "par-nao-largado",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: unusable --retarget-needs pair(s):\n  \"nao_existe=other_thing\": this amendment does not drop the creates identity \"nao_existe\"",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "par-novo-ausente",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: unusable --retarget-needs pair(s):\n  \"shared_widget=nao_declarado\": the amended phase declares no creates entry whose identity is \"nao_declarado\"",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "retarget-ok",
+      "exit": 0,
+      "stdout": "{\n  \"roadmap\": \"/TMP/retarget-ok/.aimi/tasks/f/roadmap.json\",\n  \"phase\": 1,\n  \"amended\": [\n    \"__mkCreates\",\n    \"creates\"\n  ],\n  \"retargeted\": [\n    {\n      \"phase\": 2,\n      \"from\": \"shared_widget (the widget)\",\n      \"to\": \"renamed_widget (renomeado)\"\n    }\n  ]\n}",
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "renamed_widget (renomeado)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "renamed_widget (renomeado)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": false
+    },
+    {
+      "label": "duplicata",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: phase 1 would declare a creates identity another phase already declares:\n  phase 3 already declares \"dup_target\"\n  Convert the collision into a creates/needs contract between the two phases, or promote the artifact to a shared foundation phase.",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "handoff-avisa",
+      "exit": 0,
+      "stdout": "{\n  \"roadmap\": \"/TMP/handoff-avisa/.aimi/tasks/f/roadmap.json\",\n  \"phase\": 3,\n  \"amended\": [\n    \"__mkCreates\",\n    \"creates\"\n  ],\n  \"retargeted\": []\n}",
+      "stderr": "Advisory: roadmap-amend-phase: phase 3 is completed and its handoff.md does not list \"novo_artefato\" under Artifacts Created -- update the handoff so the phase's prose matches its contract.",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)",
+              "novo_artefato (n)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": false
+    },
+    {
+      "label": "handoff-silencia",
+      "exit": 0,
+      "stdout": "{\n  \"roadmap\": \"/TMP/handoff-silencia/.aimi/tasks/f/roadmap.json\",\n  \"phase\": 3,\n  \"amended\": [\n    \"__mkCreates\",\n    \"creates\"\n  ],\n  \"retargeted\": []\n}",
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)",
+              "novo_artefato (n)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": false
+    },
+    {
+      "label": "handoff-ausente",
+      "exit": 0,
+      "stdout": "{\n  \"roadmap\": \"/TMP/handoff-ausente/.aimi/tasks/f/roadmap.json\",\n  \"phase\": 3,\n  \"amended\": [\n    \"__mkCreates\",\n    \"creates\"\n  ],\n  \"retargeted\": []\n}",
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)",
+              "novo_artefato (n)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": false
+    },
+    {
+      "label": "retarget-sem-igual",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: --retarget-needs expects \"<old identity>=<new identity>\", got: semigual",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "retarget-lado-vazio",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: --retarget-needs requires a non-empty identity on both sides of the first \"=\", got: =x",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "flag-desconhecida",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: unknown flag: --nao-existe",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "sem-phase",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: --phase <id> must be a numeric phase id",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    },
+    {
+      "label": "phase-nao-numerica",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-amend-phase: --phase <id> must be a numeric phase id",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "One",
+            "goal": "g1",
+            "slug": "one",
+            "dir": "phase-1-one",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [
+              "sc1"
+            ],
+            "creates": [
+              "shared_widget (the widget)",
+              "other_thing (o)"
+            ],
+            "needs": [],
+            "areas": [
+              "src"
+            ],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "Two",
+            "goal": "g2",
+            "slug": "two",
+            "dir": "phase-2-two",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "p2.rb (x)"
+            ],
+            "needs": [
+              "shared_widget (the widget)",
+              "shared (a shorter one)"
+            ],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "Three",
+            "goal": "g3",
+            "slug": "three",
+            "dir": "phase-3-three",
+            "status": "completed",
+            "dependsOn": [
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [
+              "dup_target (already declared here)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "unchanged": true
+    }
+  ],
+  "_comment_amend": "roadmap-amend-phase captured the same way, before its jq was deleted: 41 payloads covering partial merge by key presence, every unamendable key with its named redirect, every type error, the orphan refusal with its suggestion line in BOTH forms (one added identity fills it in, two leave a placeholder), both unusable-pair reasons, a successful retarget with the downstream rewrite, the cross-phase duplicate block, and the handoff advisory. 205 of 205 field comparisons identical after the port. The 'unchanged' field records that all 32 refusals left roadmap.json byte-for-byte alone."
 }

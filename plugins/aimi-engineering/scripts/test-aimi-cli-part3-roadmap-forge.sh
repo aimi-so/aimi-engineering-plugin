@@ -4551,12 +4551,19 @@ test_cli_never_command_substitutes_in_a_diagnostic() {
     ((TESTS_PASSED++))
   fi
 
-  # The note itself: one definition, and its example intact when it actually runs.
+  # The note itself: one definition, and its example intact when it actually
+  # runs. It lives in roadmap.py now -- the subject moved with the port, the
+  # question did not. A backtick in a Python string literal is inert, so the
+  # command-substitution half of this check can no longer fail by construction;
+  # it is kept anyway, because a future caller could route the note back through
+  # a shell and this is the assertion that would notice.
   local note_defs note_out
-  note_defs=$(grep -c '^_roadmap_identity_note()' "$CLI" || true)
-  assert_eq "1" "$note_defs" "diagnostics: exactly one _roadmap_identity_note definition"
+  note_defs=$(grep -c '^IDENTITY_NOTE = ($' "$(dirname "$CLI")/roadmap.py" || true)
+  assert_eq "1" "$note_defs" "diagnostics: exactly one IDENTITY_NOTE definition"
 
-  note_out=$(bash -c "source '$CLI' 2>/dev/null; _roadmap_identity_note" 2>&1 || true)
+  rm -rf ".aimi/tasks/diag-note"
+  note_out=$(printf '[{"id":1,"name":"N","goal":"g","creates":["/etc/x (a)"],"needs":[]}]' \
+    | "$CLI" roadmap-init --feature diag-note 2>&1 || true)
   if [ -n "$note_out" ] && [[ "$note_out" == *'`x` span becomes x'* ]] && [[ "$note_out" != *"command not found"* ]]; then
     echo -e "${GREEN}✓${NC} diagnostics: the note prints its backticked example verbatim, with no forked command"
     ((TESTS_PASSED++))
@@ -4565,6 +4572,7 @@ test_cli_never_command_substitutes_in_a_diagnostic() {
     echo "  got: $note_out"
     ((TESTS_FAILED++))
   fi
+  rm -rf ".aimi/tasks/diag-note"
 }
 
 test_verify_creates_reuses_existing_identity_definition() {

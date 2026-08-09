@@ -543,6 +543,126 @@ def _without_markers(phases):
 
 
 # ---------------------------------------------------------------------------
+# roadmap-amend-phase
+# ---------------------------------------------------------------------------
+#
+# The amendable set is exactly six keys, and the discriminator is "contract
+# field with no other writer". branch IS amendable for precisely that reason --
+# roadmap-init sets it at creation and --sync never revisits it, which is why a
+# decimal phase's null branch could not be filled in. status and claim are NOT,
+# on the opposite ground: roadmap-set-status owns status and roadmap-claim owns
+# claim, and a second writer would duplicate those guarantees rather than reuse
+# them.
+AMENDABLE_KEYS = ["goal", "successCriteria", "creates", "needs", "areas", "branch"]
+
+_PHASE_IDENTITY_KEYS = ["id", "dir", "slug", "name", "dependsOn"]
+
+
+def _v1_string_entries(entries):
+    """Reproduces `select(type == "string")` from the 1.0 schema.
+
+    DELETED IN THE SCHEMA COMMIT -- on one line, because that is the grep.
+
+    Today it discards nothing: in 1.0 every creates/needs entry IS a string. It
+    only becomes a hazard when an entry becomes {identity, description}, at
+    which point this filter would silently drop every entry instead of failing
+    -- disabling the orphan check, the dropped/added diff, retarget resolution,
+    the duplicate check and the downstream rewrite, without one line of error.
+    That was measured, not theorised.
+
+    It exists as a named helper rather than thirteen filters buried in
+    pipelines so that removing it is `grep _v1_string_entries` rather than
+    archaeology. When it goes, `entry["identity"]` raises on a malformed entry,
+    which is the entire reason this file is in Python.
+    """
+    return [e for e in entries if isinstance(e, str)]
+
+
+def _identities(phase, key):
+    return [cv_identity(e) for e in _v1_string_entries(phase.get(key) or [])]
+
+
+def amend_key_errors(payload):
+    """Six-key allowlist, with the two owned keys redirected to their owner."""
+    errors = []
+    for key in payload.keys():  # insertion order, like jq's keys_unsorted
+        if key in AMENDABLE_KEYS:
+            continue
+        if key == "status":
+            why = " -- phase status is owned by roadmap-set-status"
+        elif key == "claim":
+            why = " -- phase claims are owned by roadmap-claim / roadmap-release-claim"
+        elif key in _PHASE_IDENTITY_KEYS:
+            why = " -- it is phase identity, written once by roadmap-init"
+        else:
+            why = " -- amendable fields are: " + ", ".join(AMENDABLE_KEYS)
+        errors.append('  "' + key + '" is not amendable' + why)
+    return errors
+
+
+def amend_type_errors(payload):
+    errors = []
+    if "goal" in payload and (not isinstance(payload["goal"], str) or len(payload["goal"]) == 0):
+        errors.append("  goal must be a non-empty string")
+    if "branch" in payload and payload["branch"] is not None and not isinstance(
+        payload["branch"], str
+    ):
+        errors.append("  branch must be a string or null")
+    for key in ("successCriteria", "creates", "needs", "areas"):
+        if key not in payload:
+            continue
+        if not isinstance(payload[key], list):
+            errors.append("  " + key + " must be an array of strings")
+        elif any(not isinstance(e, str) for e in payload[key]):
+            errors.append("  " + key + " entries must all be strings")
+    return errors
+
+
+def amend_sanitize(payload):
+    """The same sanitizer and the same caps roadmap-init applies to a fresh phase."""
+    p = dict(payload)
+    if "goal" in p:
+        p["goal"] = rm_sanitize(p["goal"], 2000)
+    if "successCriteria" in p:
+        p["successCriteria"] = [rm_sanitize(s, 2000) for s in p["successCriteria"]]
+    if "creates" in p:
+        p["__mkCreates"] = [rm_markers_only(s, 500) for s in p["creates"]]
+    if "needs" in p:
+        p["__mkNeeds"] = [rm_markers_only(s, 500) for s in p["needs"]]
+    if "creates" in p:
+        p["creates"] = [rm_sanitize_contract(s, 500) for s in p["creates"]]
+    if "needs" in p:
+        p["needs"] = [rm_sanitize_contract(s, 500) for s in p["needs"]]
+    if "areas" in p:
+        p["areas"] = [rm_sanitize(s, 500) for s in p["areas"]]
+    if "branch" in p:
+        p["branch"] = None if p["branch"] is None else rm_sanitize(p["branch"], 200)
+    return p
+
+
+def amend_orphan_rows(stored, amended, doc, authorized):
+    """Downstream needs entries that cite a creates identity this drop removes.
+
+    Comparison is exact equality throughout, never substring containment: this
+    repository's own roadmap has phases citing "account override applied inside
+    the forge command surface" verbatim, and a substring rule would let a
+    partial-word rewrite corrupt both.
+    """
+    new = set(_identities(amended, "creates"))
+    orphaned = {
+        i for i in _identities(stored, "creates") if i not in new and i not in set(authorized)
+    }
+    rows = {
+        (p.get("id"), ident)
+        for p in doc.get("phases") or []
+        if p.get("id") != amended.get("id")
+        for ident in _identities(p, "needs")
+        if ident in orphaned
+    }
+    return sorted(rows, key=lambda t: (jq_sort_key(t[0]), t[1]))
+
+
+# ---------------------------------------------------------------------------
 # I/O — the only filesystem this file is allowed to touch
 # ---------------------------------------------------------------------------
 
@@ -746,11 +866,285 @@ def op_init_write(argv):
     return 0
 
 
+def handoff_lists_artifact(path, identity):
+    """Fixed-string search inside handoff.md's "## Artifacts Created" section.
+
+    Ported from _cv_handoff_lists_artifact's awk, which aimi-cli.sh still uses
+    from validate-contracts; that copy goes when the readers move. The section
+    ends at the next heading of any level, and the heading line itself is not
+    part of the section in either implementation.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return False
+    inside = False
+    for line in lines:
+        if re.match(r"^#+[ \t]+Artifacts Created", line):
+            inside = True
+            continue
+        if re.match(r"^#+[ \t]", line):
+            inside = False
+        if inside and identity in line:
+            return True
+    return False
+
+
+def op_amend_validate(argv):
+    """Everything roadmap-amend-phase checks BEFORE it takes the lock."""
+    raw = sys.stdin.read()
+    payload = None
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            payload = jq_numbers(parsed)
+    except ValueError:
+        payload = None
+    if payload is None:
+        flat = raw.replace("\n", "")[:200]
+        die("Error: roadmap-amend-phase: amendment payload must be a JSON object, got: " + flat)
+
+    # Scalar flags fold into the same object so there is exactly one validation,
+    # sanitization and merge path -- no second code path to keep in step.
+    if "--goal" in argv:
+        payload["goal"] = _flag(argv, "--goal")
+    if "--branch" in argv:
+        payload["branch"] = _flag(argv, "--branch")
+
+    key_errors = amend_key_errors(payload)
+    if key_errors:
+        _die_list(
+            "Error: roadmap-amend-phase: unamendable key(s) in the amendment payload:", key_errors
+        )
+
+    if not payload:
+        die(
+            "Error: roadmap-amend-phase: the amendment carries no field to change "
+            "-- pass at least one of " + ", ".join(AMENDABLE_KEYS)
+        )
+
+    type_errors = amend_type_errors(payload)
+    if type_errors:
+        _die_list("Error: roadmap-amend-phase: invalid amendment value(s):", type_errors)
+
+    sanitized = amend_sanitize(payload)
+    branch = sanitized.get("branch")
+    if "branch" in sanitized and branch is not None and not BRANCH_REGEX.search(branch):
+        die('Error: roadmap-amend-phase: branch "' + branch + '" contains invalid characters')
+
+    json.dump(sanitized, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return 0
+
+
+def op_amend_write(argv):
+    """The locked read-modify-write. Every refusal happens before the file is
+    touched, so a refused amendment leaves roadmap.json byte-for-byte alone."""
+    path = _flag(argv, "--roadmap")
+    feature = _flag(argv, "--feature")
+    phase_raw = _flag(argv, "--phase")
+    retargets_raw = _flag(argv, "--retargets") or "[]"
+    if not path or not feature or phase_raw is None:
+        die("Usage: roadmap.py amend-write --roadmap <path> --feature <slug> --phase <id>")
+    phase_id = jq_numbers(json.loads(phase_raw))
+    pairs = json.loads(retargets_raw)
+
+    patch = jq_numbers(json.load(sys.stdin))
+    doc = read_doc(path, "roadmap-amend-phase")
+
+    stored = next((p for p in (doc.get("phases") or []) if p.get("id") == phase_id), None)
+    if stored is None:
+        die(
+            "Error: roadmap-amend-phase: phase "
+            + _num(phase_id)
+            + " not found in "
+            + path
+        )
+
+    # Shallow merge: every key the stored phase already had keeps its position
+    # and value -- id, dir, slug, name, dependsOn, status and claim included --
+    # and only the keys the payload carries are replaced, each wholesale.
+    amended = dict(stored)
+    for key, value in patch.items():
+        if key in ("__mkCreates", "__mkNeeds"):
+            continue
+        amended[key] = value
+
+    # Judge ONLY the lists this call actually writes. Handing over the merged
+    # phase would re-judge a list the amendment never touched, turning every
+    # tightening of the identity rule into a retroactive refusal -- a phase whose
+    # stored creates holds a legacy whitespace identity could no longer have its
+    # needs amended, and repairing exactly those phases is what this verb is for.
+    check = {"id": amended.get("id")}
+    if "creates" in patch:
+        check["creates"] = amended.get("creates") or []
+        check["__mkCreates"] = patch.get("__mkCreates") or []
+    if "needs" in patch:
+        check["needs"] = amended.get("needs") or []
+        check["__mkNeeds"] = patch.get("__mkNeeds") or []
+    if "areas" in patch:
+        check["areas"] = amended.get("areas") or []
+    identity_errors = judge_phases([check])
+    if identity_errors:
+        _die_list(
+            "Error: roadmap-amend-phase: malformed creates/needs identity in the amended phase:",
+            identity_errors,
+            note=True,
+        )
+
+    new_idents = _identities(amended, "creates")
+    old_idents = _identities(stored, "creates")
+    dropped = sorted({i for i in old_idents if i not in set(new_idents)})
+    added = sorted({i for i in new_idents if i not in set(old_idents)})
+
+    # A pair that authorizes nothing is a caller mistake, not a no-op: the
+    # rename they meant to make did not happen the way they thought.
+    pair_errors = []
+    for pair in pairs:
+        if pair["old"] not in dropped:
+            pair_errors.append(
+                '  "' + pair["old"] + "=" + pair["new"] + '": this amendment does not drop '
+                'the creates identity "' + pair["old"] + '"'
+            )
+        elif pair["new"] not in new_idents:
+            pair_errors.append(
+                '  "' + pair["old"] + "=" + pair["new"] + '": the amended phase declares no '
+                'creates entry whose identity is "' + pair["new"] + '"'
+            )
+    if pair_errors:
+        _die_list("Error: roadmap-amend-phase: unusable --retarget-needs pair(s):", pair_errors)
+
+    authorized = sorted({p["old"] for p in pairs})
+
+    orphans = amend_orphan_rows(stored, amended, doc, authorized)
+    if orphans:
+        sys.stderr.write(
+            "Error: roadmap-amend-phase: this amendment drops creates identities other "
+            "phases still cite in needs:\n"
+        )
+        for phase, ident in orphans:
+            sys.stderr.write("  phase " + _num(phase) + ' needs "' + ident + '"\n')
+        sys.stderr.write("Re-run with the pairing that authorizes the rewrite:\n")
+        # The set difference proves an identity was dropped but never which new
+        # identity replaced it, so the pairing is the caller's to state. With
+        # exactly one added identity the suggestion is complete; otherwise the
+        # new side stays a placeholder rather than a guess.
+        target = added[0] if len(added) == 1 else "<new identity>"
+        unique_new = set(new_idents)
+        for ident in sorted({i for i in old_idents if i not in unique_new and i not in set(authorized)}):
+            sys.stderr.write(
+                "  aimi-cli.sh roadmap-amend-phase --feature "
+                + feature
+                + " --phase "
+                + phase_raw
+                + ' ... --retarget-needs "'
+                + ident
+                + "="
+                + target
+                + '"\n'
+            )
+        sys.exit(1)
+
+    # Hard block because validate-contracts hard-fails on a duplicate outside
+    # --agent-mode, and that halts /aimi:plan: writing the amendment would
+    # produce a roadmap its own consumer rejects. Scope is the identities THIS
+    # amendment introduces -- a collision that predates it is not this verb's to
+    # adjudicate, and blocking on one would wall off the very repair it exists for.
+    dup_rows = sorted(
+        {
+            (p.get("id"), ident)
+            for p in doc.get("phases") or []
+            if p.get("id") != phase_id
+            for ident in _identities(p, "creates")
+            if ident in set(added)
+        },
+        key=lambda t: (jq_sort_key(t[0]), t[1]),
+    )
+    if dup_rows:
+        sys.stderr.write(
+            "Error: roadmap-amend-phase: phase "
+            + _num(phase_id)
+            + " would declare a creates identity another phase already declares:\n"
+        )
+        for phase, ident in dup_rows:
+            sys.stderr.write("  phase " + _num(phase) + ' already declares "' + ident + '"\n')
+        sys.stderr.write(
+            "  Convert the collision into a creates/needs contract between the two phases, "
+            "or promote the artifact to a shared foundation phase.\n"
+        )
+        sys.exit(1)
+
+    # old identity -> the amended phase's new creates entry VERBATIM (identity
+    # plus its parenthetical), so provider and consumer stay byte-identical.
+    retarget_map = {}
+    for pair in pairs:
+        match = next(
+            (e for e in _v1_string_entries(amended.get("creates") or []) if cv_identity(e) == pair["new"]),
+            None,
+        )
+        retarget_map[pair["old"]] = match
+
+    retargeted = [
+        {"phase": p.get("id"), "from": entry, "to": retarget_map[cv_identity(entry)]}
+        for p in doc.get("phases") or []
+        if p.get("id") != phase_id
+        for entry in _v1_string_entries(p.get("needs") or [])
+        if cv_identity(entry) in retarget_map
+    ]
+
+    # One write: the phase swap and every authorized downstream needs rewrite.
+    for index, phase in enumerate(doc.get("phases") or []):
+        if phase.get("id") == phase_id:
+            doc["phases"][index] = amended
+        elif retarget_map and isinstance(phase.get("needs"), list):
+            phase["needs"] = [
+                retarget_map.get(cv_identity(e), e) if isinstance(e, str) else e
+                for e in phase["needs"]
+            ]
+    write_doc_atomically(path, doc)
+
+    # Advisory only, exit status stays 0: correcting an already-completed phase's
+    # prose creates is precisely the repair this verb exists for, so no status
+    # value gates the amend in either direction.
+    if amended.get("status") == "completed" and added:
+        handoff = os.path.join(os.path.dirname(path), amended.get("dir") or "", "handoff.md")
+        if os.path.isfile(handoff):
+            for ident in added:
+                if not handoff_lists_artifact(handoff, ident):
+                    sys.stderr.write(
+                        "Advisory: roadmap-amend-phase: phase "
+                        + _num(phase_id)
+                        + " is completed and its handoff.md does not list \""
+                        + ident
+                        + '" under Artifacts Created -- update the handoff so the phase\'s '
+                        "prose matches its contract.\n"
+                    )
+
+    json.dump(
+        {
+            "roadmap": path,
+            "phase": phase_id,
+            # __mkCreates/__mkNeeds leak into this list. Reproduced deliberately:
+            # the fix ships separately so this port's zero delta keeps meaning
+            # "nothing changed" rather than "no test noticed".
+            "amended": sorted(patch.keys()),
+            "retargeted": retargeted,
+        },
+        sys.stdout,
+        indent=2,
+    )
+    sys.stdout.write("\n")
+    return 0
+
+
 _OPS = {
     "judge-phases": op_judge_phases,
     "normalize-contracts": op_normalize_contracts,
     "init-validate": op_init_validate,
     "init-write": op_init_write,
+    "amend-validate": op_amend_validate,
+    "amend-write": op_amend_write,
 }
 
 
