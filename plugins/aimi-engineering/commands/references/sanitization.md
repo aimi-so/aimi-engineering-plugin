@@ -15,21 +15,45 @@ Before interpolating any user-supplied string into a prompt or file, strip:
    token a later step needed — see `scope-contexts.md` § Creates/Needs Contracts
    for the failure this caused.
 2. HTML/XML tags
-3. Instruction-override patterns (`ignore previous`, `you are now`, and
-   `system:` / `INSTRUCTIONS:` in their **marker** form — a colon after
-   `INSTRUCTIONS`, a non-identifier character before `system:`. Unanchored, these
-   matched ordinary text such as `docs/instructions.md` and
-   `design-system:tokens`.)
+3. Instruction-override patterns — `ignore previous`, `you are now`, and
+   `system:` / `INSTRUCTIONS` in their **marker** form, matched by position
+   (start or whitespace, then any punctuation run) rather than by the character
+   next to them. `scope-contexts.md` § *Two rulers* is the normative statement
+   of that rule and of why both a wider and a narrower version were wrong; do
+   not restate the pattern here.
 
 Apply all three rules in order. The result replaces the original string.
 
-**One exception, and it is narrow.** A `creates`/`needs` entry is
-`identity (description)`, and only the description gets rules 2 and 3. The
-identity gets rule 1 alone, because rules 2 and 3 delete content and an identity
-is grepped for literally — rewriting it produces a name the phase will never
-deliver. That entry is instead **refused** if its identity is malformed. The
-split lives in `aimi-cli.sh`'s `_rm_sanitize_contract`; everything else in the
-system uses all three rules as written above.
+## Contract Entries
+
+**A `creates`/`needs` entry is not free text, and the rules above do not apply
+to it whole.** It is `identity (description)`: the identity is the token
+`verify-creates` greps for *literally*, and the description is prose. They need
+opposite treatment.
+
+- **The identity is never modified — by anything, anywhere.** Not tag stripping,
+  not `$(` removal, not instruction-override stripping. Rules 2 and 3 delete
+  content, and deleting content from a name produces a name the phase will never
+  deliver.
+- **The description gets all three rules**, unchanged.
+- **You never have to judge whether an identity is legal.** Submit it verbatim
+  and let `roadmap-init` refuse it. Its diagnostic names the phase, the list, the
+  entry's position and every reason, and `/aimi:plan` already repairs and
+  retries once against exactly that message.
+
+**This applies to every layer, including the agent that composes the entry —
+not only to the CLI.** Sanitizing a contract entry upstream does not duplicate
+the CLI's work, it *defeats* it: the write-time guard compares the submitted
+entry against its own normalized form, so an entry already damaged upstream
+makes both sides agree on the damage and the refusal is laundered away. Measured
+consequence: an agent applying rule 2 to `parseList<T> (a generic helper)` hands
+over `parseList (a generic helper)`, which the CLI stores without complaint, and
+the contract is unresolvable a phase later.
+
+The normative statement of the split, its rationale and the diagnostics live in
+`scope-contexts.md` § *Two rulers: the identity and the description*. This
+section exists so a reader of the base rules learns that contract entries are
+carved out of them; it is not a second copy of the rule.
 
 ## Path-Hints Extension
 

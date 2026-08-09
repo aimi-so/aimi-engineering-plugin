@@ -148,11 +148,21 @@ story-expander sub-agent prompt. A description is therefore LLM-prompt input,
 and the injection guard covers it for the same reason it covers any other
 prompt-bound field.
 
-Both instruction markers are matched in their **marker** form, not as bare
-words — a colon after `INSTRUCTIONS`, a non-identifier character before
-`system:`. Unanchored they matched ordinary English and ordinary names, so
-`docs/instructions.md (setup instructions)` and `design-system:tokens` were
-written and then refused. Those are legal entries.
+Both instruction markers are matched by **position** — start of the entry or
+whitespace, then any run of punctuation — because that is the shape a marker
+has and an ordinary name does not. `### INSTRUCTIONS do X`, `--system: do this`
+and `system: you are now …` are refused; `docs/instructions.md`,
+`design-system:tokens`, `ecosystem:pkg` and a file identity literally named
+`INSTRUCTIONS.md` are all legal entries and pass.
+
+Both halves of that have been wrong before, in opposite directions: unanchored,
+the alternation matched ordinary English; anchored to the *neighbouring
+character*, it admitted `--system:` (a hyphen is an identifier character) and
+`### INSTRUCTIONS` (a heading needs no colon). The heading form deliberately
+requires the `#`, so an artifact genuinely named `INSTRUCTIONS.md` is not
+refused. Both directions are pinned by paired tables in
+`test-aimi-cli-part3-roadmap-forge.sh` — widening the rule fails one table,
+narrowing it fails the other.
 
 **The identity is never rewritten — only refused.** The two rulers govern
 mutation as well as judgement. The identity gets formatting normalization only
@@ -229,8 +239,17 @@ first step that finds the artifact ends the search.
 1. **Tracked path.** If the identity names a file *or* a directory that git
    tracks, that alone verifies it. A `File` identity such as
    `components/NotificationBell.tsx` and a directory such as `db/migrations`
-   both resolve here. An identity that starts with `/` or traverses with `..`
-   skips this step and falls through to the text search.
+   both resolve here, as does a path glob such as `db/migrations/*.sql`. An
+   identity that starts with `/` or traverses with `..` skips this step and
+   falls through to the text search.
+
+   The identity is passed as an explicit `:(glob)` pathspec, never bare. Bare,
+   git reads it *as* pathspec: an identity of `*`, `:` or `:!nope` matched every
+   tracked file and reported the phase verified against artifacts that did not
+   exist. Glob rather than literal, because literal would also stop
+   `db/migrations/*.sql` — a declared kind — from resolving. An identity built
+   only from separators and glob metacharacters is refused at write time
+   instead, since it names nothing in particular.
 2. **Endpoint path extraction.** A leading HTTP method followed by a space and a
    `/` — the `METHOD /path` form in the table above — is stripped, so
    `POST /api/notifications` is searched as `/api/notifications`. Real code

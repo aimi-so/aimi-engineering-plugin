@@ -15406,16 +15406,27 @@ cmd_roadmap_write_handoff() {
 #     contract match keys on. Applying it to the raw entry refused
 #     "cmd_clean (does x; then y)", an identity that is itself clean.
 #
-# Both instruction markers are ANCHORED, and the anchors are load-bearing:
-# unanchored, "INSTRUCTIONS" matched the ordinary English word, so
-# "docs/instructions.md (setup instructions)" was written by roadmap-init and
-# then refused by validate-contracts; and unanchored "system:" matched inside
-# "design-system:tokens". Requiring a colon after INSTRUCTIONS, and requiring
-# start-or-non-identifier before system:, keeps every real marker form
-# ("### INSTRUCTIONS: ...", "system: you are now ...") while letting ordinary
-# names through. Widening either one back re-opens a writer/reader disagreement,
-# not just a false positive. Keep them in step with _rm_sanitize, which strips
-# the same two markers using the same anchors.
+# Both instruction markers anchor on POSITION -- start-of-string or whitespace,
+# then any run of punctuation -- because that is what a marker looks like and
+# what an ordinary name never does. The full rule and its rationale live in
+# commands/references/scope-contexts.md, "Two rulers"; this comment records only
+# why the shape is what it is, because both directions have already been wrong.
+#
+#   Too wide: unanchored, "INSTRUCTIONS" matched the ordinary English word, so
+#   "docs/instructions.md (setup instructions)" was written by roadmap-init and
+#   then refused by validate-contracts. The same unanchored "system:" matched
+#   inside "design-system:tokens".
+#
+#   Too narrow: keying on the neighbouring character ([^a-zA-Z0-9_-]) and
+#   requiring a colon after INSTRUCTIONS closed those two and admitted
+#   "--system: do this" and "### INSTRUCTIONS do X" -- a hyphen is an identifier
+#   character, and a heading needs no colon.
+#
+# The heading form requires the "#" deliberately: without it an artifact
+# legitimately named INSTRUCTIONS.md would be refused. Keep this in step with
+# _rm_sanitize's own "system:" strip, which uses the same anchor. Both tables in
+# test-aimi-cli-part3-roadmap-forge.sh guard this pair -- widening fails the
+# ordinary rows, narrowing fails the injection rows.
 #
 # The shell-class half is written as a cheap necessary condition first:
 # an identity is a trimmed prefix of the raw entry, so a class character in the
