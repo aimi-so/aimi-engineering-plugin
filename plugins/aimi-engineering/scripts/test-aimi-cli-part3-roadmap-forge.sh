@@ -4090,6 +4090,48 @@ test_verify_creates_registered_in_help_and_dispatcher() {
   fi
 }
 
+test_cli_never_command_substitutes_in_a_diagnostic() {
+  echo ""
+  echo "=== aimi-cli.sh: no diagnostic string executes a command ==="
+
+  # A double-quoted string containing a backtick is command substitution, not a
+  # literal backtick. Three identity-refusal notes shipped that way: each forked
+  # a PATH lookup for `x`, leaked "x: command not found" into the diagnostic, and
+  # printed its own illustrative example with the example deleted. Every test
+  # passed, because the assertions matched substrings and nothing asserted the
+  # absence of noise.
+  #
+  # This is a source check rather than a behavioural one on purpose: the defect
+  # is in a string an error path prints, and error paths are exactly what nobody
+  # exercises. Grepping the source catches the next one at the moment it is
+  # written instead of the first time a user hits it.
+  local offenders
+  offenders=$(grep -nE '^[[:space:]]*echo[[:space:]]+"[^"]*`' "$CLI" || true)
+  if [ -n "$offenders" ]; then
+    echo -e "${RED}✗${NC} diagnostics: a double-quoted echo contains an unescaped backtick (command substitution)"
+    printf '%s\n' "$offenders" | sed 's/^/    /'
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} diagnostics: no double-quoted echo in aimi-cli.sh carries an unescaped backtick"
+    ((TESTS_PASSED++))
+  fi
+
+  # The note itself: one definition, and its example intact when it actually runs.
+  local note_defs note_out
+  note_defs=$(grep -c '^_roadmap_identity_note()' "$CLI" || true)
+  assert_eq "1" "$note_defs" "diagnostics: exactly one _roadmap_identity_note definition"
+
+  note_out=$(bash -c "source '$CLI' 2>/dev/null; _roadmap_identity_note" 2>&1 || true)
+  if [ -n "$note_out" ] && [[ "$note_out" == *'`x` span becomes x'* ]] && [[ "$note_out" != *"command not found"* ]]; then
+    echo -e "${GREEN}✓${NC} diagnostics: the note prints its backticked example verbatim, with no forked command"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} diagnostics: the note lost its example or forked a command"
+    echo "  got: $note_out"
+    ((TESTS_FAILED++))
+  fi
+}
+
 test_verify_creates_reuses_existing_identity_definition() {
   echo ""
   echo "=== verify-creates: consumes the existing _cv_identity def, never a second copy ==="
@@ -7081,6 +7123,7 @@ main() {
   test_verify_creates_empty_creates_yields_empty_array
   test_verify_creates_error_exit_codes
   test_verify_creates_registered_in_help_and_dispatcher
+  test_cli_never_command_substitutes_in_a_diagnostic
   test_verify_creates_reuses_existing_identity_definition
 
   # Phase Completion Tests: completed-requires-handoff, verification_failed,

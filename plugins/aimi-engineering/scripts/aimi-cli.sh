@@ -13966,6 +13966,25 @@ def _rm_candidates($phases; $allowed; $work):
 #
 # Reuses $_CONTRACT_JQ_DEFS so the guard and validate-contracts agree on what an
 # identity is; a second copy of _cv_identity would drift.
+# The trailing note every identity refusal prints, in ONE place and inside SINGLE
+# quotes.
+#
+# It was three copies of an `echo "..."` whose own illustrative example was a
+# backticked span -- and backticks inside a double-quoted string are command
+# substitution. Every refusal forked a PATH lookup for a command named `x`,
+# leaked `x: command not found` into the diagnostic, and printed the sentence
+# with the example missing: "a  span becomes x". A note about how backticks are
+# handled, destroyed by a backtick.
+#
+# printf with a single-quoted literal is what makes the backticks inert. Do not
+# convert this to echo with double quotes, and do not interpolate into it -- the
+# whole point is that this string reaches stderr byte-for-byte. That stderr is
+# also what commands/plan.md now parses and repairs from, so noise in it is not
+# cosmetic.
+_roadmap_identity_note() {
+  printf '%s\n' 'Note: an entry is quoted after backtick normalization -- a `x` span becomes x -- so one submitted with backticks appears here without them. Nothing else about an identity is rewritten; locate it by its position in the list.' >&2
+}
+
 _roadmap_identity_errors() {
   # _roadmap_reject_unfindable_identity lives HERE, not in $_CONTRACT_JQ_DEFS:
   # that block is the shared vocabulary of validate-contracts and roadmap-sweep,
@@ -14195,7 +14214,7 @@ cmd_roadmap_init() {
         if [ -n "$identity_errors" ]; then
           echo "Error: roadmap-init: malformed creates/needs identity in new phase(s):" >&2
           printf '%s\n' "$identity_errors" >&2
-          echo "Note: an entry is quoted after backtick normalization -- a `x` span becomes x -- so one submitted with backticks appears here without them. Nothing else about an identity is rewritten; locate it by its position in the list." >&2
+          _roadmap_identity_note
           exit 1
         fi
 
@@ -14225,7 +14244,7 @@ cmd_roadmap_init() {
         if [ -n "$identity_errors" ]; then
           echo "Error: roadmap-init: malformed creates/needs identity in new phase(s):" >&2
           printf '%s\n' "$identity_errors" >&2
-          echo "Note: an entry is quoted after backtick normalization -- a `x` span becomes x -- so one submitted with backticks appears here without them. Nothing else about an identity is rewritten; locate it by its position in the list." >&2
+          _roadmap_identity_note
           exit 1
         fi
 
@@ -14515,7 +14534,7 @@ cmd_roadmap_amend_phase() {
       if [ -n "$identity_errors" ]; then
         echo "Error: roadmap-amend-phase: malformed creates/needs identity in the amended phase:" >&2
         printf '%s\n' "$identity_errors" >&2
-        echo "Note: an entry is quoted after backtick normalization -- a `x` span becomes x -- so one submitted with backticks appears here without them. Nothing else about an identity is rewritten; locate it by its position in the list." >&2
+        _roadmap_identity_note
         exit 1
       fi
 
