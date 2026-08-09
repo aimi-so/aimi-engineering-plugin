@@ -1349,8 +1349,8 @@ cmd_validate_stories() {
         (if ($s.title | length) > 200 then ["\($s.id): title exceeds 200 chars"] else [] end) +
         (if ($s.description | length) > 500 then ["\($s.id): description exceeds 500 chars"] else [] end) +
         ([$s.acceptanceCriteria[] | select(length > 5000)] | if length > 0 then ["\($s.id): acceptance criterion exceeds 5000 chars"] else [] end) +
-        (if ($s.title | test("ignore previous|(^|[^a-zA-Z0-9_-])system\\s*:|INSTRUCTIONS\\s*:|```|\\$\\("; "i")) then ["\($s.id): title contains suspicious content"] else [] end) +
-        (if ($s.description | test("ignore previous|(^|[^a-zA-Z0-9_-])system\\s*:|INSTRUCTIONS\\s*:|```|\\$\\("; "i")) then ["\($s.id): description contains suspicious content"] else [] end) +
+        (if ($s.title | test("ignore previous|(^|\\s)[^a-zA-Z0-9]*system\\s*:|(^|\\s)[^a-zA-Z0-9]*#{1,6}\\s*INSTRUCTIONS\\b|INSTRUCTIONS\\s*:|```|\\$\\("; "i")) then ["\($s.id): title contains suspicious content"] else [] end) +
+        (if ($s.description | test("ignore previous|(^|\\s)[^a-zA-Z0-9]*system\\s*:|(^|\\s)[^a-zA-Z0-9]*#{1,6}\\s*INSTRUCTIONS\\b|INSTRUCTIONS\\s*:|```|\\$\\("; "i")) then ["\($s.id): description contains suspicious content"] else [] end) +
         (if ($s.project != null) then
           (if ($s.project | test("^/")) then ["\($s.id): project must not be an absolute path"]
            elif ($s.project | test("\\.\\.")) then ["\($s.id): project must not contain path traversal (..)"]
@@ -1376,7 +1376,7 @@ cmd_validate_stories() {
              (if ($s.tasks | length) > 50 then ["\($s.id): tasks array exceeds 50 entries"] else [] end) +
              [$s.tasks[] | select(type != "string") | "\($s.id): tasks[] element must be a string"] +
              [$s.tasks[] | select(type == "string" and length > 5000) | "\($s.id): tasks[] entry exceeds 5000 chars"] +
-             [$s.tasks[] | select(type == "string" and test("ignore previous|(^|[^a-zA-Z0-9_-])system\\s*:|INSTRUCTIONS\\s*:|```|\\$\\("; "i")) | "\($s.id): tasks[] entry contains suspicious content"]
+             [$s.tasks[] | select(type == "string" and test("ignore previous|(^|\\s)[^a-zA-Z0-9]*system\\s*:|(^|\\s)[^a-zA-Z0-9]*#{1,6}\\s*INSTRUCTIONS\\b|INSTRUCTIONS\\s*:|```|\\$\\("; "i")) | "\($s.id): tasks[] entry contains suspicious content"]
            end)
          else [] end) +
         (if has("gates") then ["\($s.id): gate: 'gates' field is invalid; use singular 'gate' (see plan.md L687-692)"] else [] end) +
@@ -13635,7 +13635,7 @@ def _rm_sanitize(maxlen):
     | gsub("<[^>]*>"; "")
     | gsub("ignore previous( instructions)?"; ""; "i")
     | gsub("you are now"; ""; "i")
-    | gsub("(?<b>^|[^a-zA-Z0-9_-])system\\s*:"; .b; "i")
+    | gsub("(?<b>(^|\\s)[^a-zA-Z0-9]*)system\\s*:"; .b; "i")
     | if (length > maxlen) then .[0:maxlen] else . end
   ) end;
 
@@ -15427,7 +15427,7 @@ cmd_roadmap_write_handoff() {
 _CONTRACT_JQ_DEFS='
 def _cv_identity: sub("\\(.*"; "") | gsub("^[ \t]+|[ \t]+$"; "");
 def _cv_shell_class: "[$`;|&]";
-def _cv_injection: test("ignore previous|(^|[^a-zA-Z0-9_-])system\\s*:|INSTRUCTIONS\\s*:|```|\\$\\("; "i");
+def _cv_injection: test("ignore previous|(^|\\s)[^a-zA-Z0-9]*system\\s*:|(^|\\s)[^a-zA-Z0-9]*#{1,6}\\s*INSTRUCTIONS\\b|INSTRUCTIONS\\s*:|```|\\$\\("; "i");
 def _cv_suspicious:
   _cv_injection
   or (test(_cv_shell_class) and (_cv_identity | test(_cv_shell_class)));

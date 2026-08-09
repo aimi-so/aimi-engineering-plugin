@@ -1157,24 +1157,41 @@ _RT_CHAR_TABLE=(
 _RT_INJECTION_TABLE=(
   'instruction override~ignore previous'
   'system prompt marker~system:'
+  'punctuation-prefixed system marker~--system: do this'
   'INSTRUCTIONS marker~INSTRUCTIONS: do this instead'
+  'heading-form INSTRUCTIONS marker~### INSTRUCTIONS do this instead'
   'triple-backtick fence~```x```'
   'command substitution~$(whoami)'
 )
 
-# Both instruction markers are matched in their ANCHORED marker form, not as
-# bare keywords, and these rows must stay in that form. Unanchored, the
-# INSTRUCTIONS alternative matched the ordinary English word, so
-# "docs/instructions.md (setup instructions)" was written by roadmap-init and
-# then hard-refused by validate-contracts -- the writer/reader disagreement this
-# whole contract exists to remove -- and the same unanchored "system:" matched
-# inside "design-system:tokens". The companion table below pins those two
-# ordinary strings as ACCEPTED, so a future widening of either alternative
-# fails here rather than silently re-opening the disagreement.
+# Both instruction markers are matched by POSITION -- start-of-string or
+# whitespace, then any run of punctuation -- rather than by the single character
+# next to them, and these rows must stay in their marker form.
+#
+# THE PAIRING RULE, and it is not optional: every row added above gets a
+# companion here. Each of the two tables has taken a turn being wrong, in
+# opposite directions, and only the pair catches both.
+#
+#   Too wide: an unanchored "INSTRUCTIONS" matched the ordinary English word, so
+#   "docs/instructions.md (setup instructions)" was written by roadmap-init and
+#   then hard-refused by validate-contracts -- the writer/reader disagreement
+#   this whole contract exists to remove. The same unanchored "system:" matched
+#   inside "design-system:tokens".
+#
+#   Too narrow: the first fix keyed on the neighbouring character
+#   ([^a-zA-Z0-9_-]) and required a colon after INSTRUCTIONS. That let
+#   "--system: do this" and "### INSTRUCTIONS do X" straight through -- real
+#   marker forms, silently admitted while closing the false positives.
+#
+# The tables are two halves of one rule. Widening either alternative fails the
+# ordinary rows; narrowing it fails the injection rows.
 _RT_ORDINARY_TABLE=(
   'ordinary instructions path~docs/instructions.md (setup instructions)'
   'ordinary system-bearing name~design-system:tokens (a token file)'
   'ordinary instructions prose~cmd_probe (read the setup instructions first)'
+  'ordinary hyphenated system name~a-system:tokens (a hyphenated namespace)'
+  'ordinary INSTRUCTIONS file~docs/INSTRUCTIONS.md (a documentation file)'
+  'ordinary system-bearing suffix~ecosystem:pkg (a package namespace)'
 )
 
 # One feature slug for every cell; each cell tears it down before and after,
