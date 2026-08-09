@@ -164,16 +164,23 @@ done
 # The assertion-count invariant. It is environment-aware for exactly one
 # reason: test_init_session_writes_global_cache emits ONE assertion when the
 # CLI under test is worktree-resident (write_global_cli_cache deliberately
-# refuses to cache a */.worktrees/* path) and THREE otherwise. The same tree
-# therefore reads 3837 from a linked worktree and 3839 from a normal checkout.
-# RUN_FRAME names which of the two this run is, so the suite-cost line at the
-# bottom can say so out loud rather than leaving the reader to work it out.
+# refuses to cache a */.worktrees/* path) and THREE otherwise. RUN_FRAME names
+# which of the two this run is, so the suite-cost line at the bottom can say so
+# out loud rather than leaving the reader to work it out.
+#
+# ONE literal, and the worktree frame is DERIVED from it. It used to be two, and
+# they drifted: three consecutive commits moved both numbers and left the
+# sentence above them naming a third pair, eleven behind. Two numbers that must
+# differ by a fixed amount are one number and an arithmetic rule -- write the
+# rule down and the pair cannot disagree. A commit that adds assertions now
+# edits exactly one line here.
+_WORKTREE_FRAME_DELTA=2   # 3 assertions minus the 1 a worktree-resident CLI emits
 EXPECTED_ASSERTIONS=3850
 RUN_FRAME=checkout
 _resolved_cli="$(realpath "$SCRIPT_DIR/aimi-cli.sh" 2>/dev/null || printf '%s' "$SCRIPT_DIR/aimi-cli.sh")"
 case "$_resolved_cli" in
   */.worktrees/*)
-    EXPECTED_ASSERTIONS=3848
+    EXPECTED_ASSERTIONS=$((EXPECTED_ASSERTIONS - _WORKTREE_FRAME_DELTA))
     RUN_FRAME=worktree
     ;;
 esac
