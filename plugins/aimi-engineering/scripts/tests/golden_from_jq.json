@@ -378,5 +378,612 @@
     "phase 22: areas entry #1 \"/etc/passwd (absolute)\" is not a usable scope hint: it is an absolute path -- areas are repo-relative globs and are appended to research path hints as-is",
     "phase 23: areas entry #1 \"../outside (traversal)\" is not a usable scope hint: it contains a \"..\" path segment -- areas are repo-relative globs and are appended to research path hints as-is",
     "phase 24: areas entry #1 \"src/../../etc (mid)\" is not a usable scope hint: it contains a \"..\" path segment -- areas are repo-relative globs and are appended to research path hints as-is"
-  ]
+  ],
+  "init_cases": [
+    {
+      "label": "criacao-simples",
+      "exit": 0,
+      "stdout": "{\n  \"roadmap\": \"/TMP/criacao-simples/.aimi/tasks/f/roadmap.json\",\n  \"added\": 1,\n  \"phases\": 1\n}",
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "FROZEN",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "A",
+            "goal": "g",
+            "slug": "a",
+            "dependsOn": [],
+            "creates": [
+              "a.rb (x)"
+            ],
+            "needs": [],
+            "notes": null,
+            "successCriteria": [],
+            "areas": [],
+            "branch": null,
+            "dir": "phase-1-a",
+            "status": "pending",
+            "claim": null
+          }
+        ]
+      },
+      "dirExists": true
+    },
+    {
+      "label": "criacao-duas-fases",
+      "exit": 0,
+      "stdout": "{\n  \"roadmap\": \"/TMP/criacao-duas-fases/.aimi/tasks/f/roadmap.json\",\n  \"added\": 2,\n  \"phases\": 2\n}",
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "FROZEN",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "A",
+            "goal": "g",
+            "slug": "a",
+            "dependsOn": [],
+            "creates": [
+              "a.rb (x)"
+            ],
+            "needs": [],
+            "notes": null,
+            "successCriteria": [],
+            "areas": [],
+            "branch": null,
+            "dir": "phase-1-a",
+            "status": "pending",
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "B",
+            "goal": "g",
+            "slug": "b",
+            "dependsOn": [
+              1
+            ],
+            "creates": [
+              "b.rb (y)"
+            ],
+            "needs": [
+              "a.rb (x)"
+            ],
+            "notes": null,
+            "successCriteria": [],
+            "areas": [],
+            "branch": null,
+            "dir": "phase-2-b",
+            "status": "pending",
+            "claim": null
+          }
+        ]
+      },
+      "dirExists": true
+    },
+    {
+      "label": "com-brainstorm-path",
+      "exit": 0,
+      "stdout": "{\n  \"roadmap\": \"/TMP/com-brainstorm-path/.aimi/tasks/f/roadmap.json\",\n  \"added\": 1,\n  \"phases\": 1\n}",
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "FROZEN",
+        "brainstormPath": ".aimi/brainstorms/x.md",
+        "phases": [
+          {
+            "id": 1,
+            "name": "A",
+            "goal": "g",
+            "slug": "a",
+            "dependsOn": [],
+            "creates": [
+              "a.rb (x)"
+            ],
+            "needs": [],
+            "notes": null,
+            "successCriteria": [],
+            "areas": [],
+            "branch": null,
+            "dir": "phase-1-a",
+            "status": "pending",
+            "claim": null
+          }
+        ]
+      },
+      "dirExists": true
+    },
+    {
+      "label": "payload-nao-array",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-init: phases payload must be a JSON array",
+      "file": null,
+      "dirExists": false
+    },
+    {
+      "label": "payload-invalido",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-init: phases payload must be a JSON array",
+      "file": null,
+      "dirExists": false
+    },
+    {
+      "label": "id-duplicado",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-init: invalid phase payload:\nduplicate phase id: 1",
+      "file": null,
+      "dirExists": false
+    },
+    {
+      "label": "id-nao-numero",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-init: invalid phase payload:\nphase um: id must be a number",
+      "file": null,
+      "dirExists": false
+    },
+    {
+      "label": "sem-name",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-init: invalid phase payload:\nphase 1: name is required",
+      "file": null,
+      "dirExists": false
+    },
+    {
+      "label": "sem-goal",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-init: invalid phase payload:\nphase 1: goal is required",
+      "file": null,
+      "dirExists": false
+    },
+    {
+      "label": "name-vazio",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-init: invalid phase payload:\nphase 1: name is required",
+      "file": null,
+      "dirExists": false
+    },
+    {
+      "label": "dependson-nao-array",
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at <stdin>:0): Cannot iterate over string (\"1\")",
+      "file": null,
+      "dirExists": false
+    },
+    {
+      "label": "dependson-nao-numero",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-init: invalid phase payload:\nphase 1: dependsOn entries must be numbers",
+      "file": null,
+      "dirExists": false
+    },
+    {
+      "label": "dependson-pendente",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-init: dangling dependsOn reference(s):\nphase 1: dependsOn references unknown phase id 99",
+      "file": null,
+      "dirExists": true
+    },
+    {
+      "label": "slug-invalido",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-init: invalid phase directory slug(s):\nphase 1: computed dir \"phase-1-Bad Slug\" fails required pattern",
+      "file": null,
+      "dirExists": false
+    },
+    {
+      "label": "branch-invalido",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-init: invalid branch name(s):\nphase 1: branch \"bad branch!\" contains invalid characters",
+      "file": null,
+      "dirExists": false
+    },
+    {
+      "label": "identidade-ma",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-init: malformed creates/needs identity in new phase(s):\nphase 1: creates entry #1 \"/etc/passwd (abs)\" is not a usable artifact identity: begins with \"/\"\nNote: an entry is quoted after backtick normalization -- a `x` span becomes x -- so one submitted with backticks appears here without them. Nothing else about an identity is rewritten; locate it by its position in the list.",
+      "file": null,
+      "dirExists": true
+    },
+    {
+      "label": "identidade-prosa",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-init: malformed creates/needs identity in new phase(s):\nphase 1: creates entry #1 \"forge command surface in aimi-cli.sh (x)\" is not a usable artifact identity: contains whitespace, so no source token could match it -- name the symbol, path, table or \"METHOD /path\" endpoint the phase will actually produce\nNote: an entry is quoted after backtick normalization -- a `x` span becomes x -- so one submitted with backticks appears here without them. Nothing else about an identity is rewritten; locate it by its position in the list.",
+      "file": null,
+      "dirExists": true
+    },
+    {
+      "label": "areas-traversal",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-init: malformed creates/needs identity in new phase(s):\nphase 1: areas entry #1 \"../etc\" is not a usable scope hint: it contains a \"..\" path segment -- areas are repo-relative globs and are appended to research path hints as-is\nNote: an entry is quoted after backtick normalization -- a `x` span becomes x -- so one submitted with backticks appears here without them. Nothing else about an identity is rewritten; locate it by its position in the list.",
+      "file": null,
+      "dirExists": true
+    },
+    {
+      "label": "id-decimal",
+      "exit": 0,
+      "stdout": "{\n  \"roadmap\": \"/TMP/id-decimal/.aimi/tasks/f/roadmap.json\",\n  \"added\": 1,\n  \"phases\": 1\n}",
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "FROZEN",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 2.1,
+            "name": "A",
+            "goal": "g",
+            "slug": "a",
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "dependsOn": [],
+            "branch": null,
+            "dir": "phase-2.1-a",
+            "status": "pending",
+            "claim": null
+          }
+        ]
+      },
+      "dirExists": true
+    },
+    {
+      "label": "id-float-inteiro",
+      "exit": 0,
+      "stdout": "{\n  \"roadmap\": \"/TMP/id-float-inteiro/.aimi/tasks/f/roadmap.json\",\n  \"added\": 1,\n  \"phases\": 1\n}",
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "FROZEN",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 2,
+            "name": "A",
+            "goal": "g",
+            "slug": "a",
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "dependsOn": [],
+            "branch": null,
+            "dir": "phase-2-a",
+            "status": "pending",
+            "claim": null
+          }
+        ]
+      },
+      "dirExists": true
+    },
+    {
+      "label": "sem-slug",
+      "exit": 0,
+      "stdout": "{\n  \"roadmap\": \"/TMP/sem-slug/.aimi/tasks/f/roadmap.json\",\n  \"added\": 1,\n  \"phases\": 1\n}",
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "FROZEN",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 3,
+            "name": "A",
+            "goal": "g",
+            "slug": "",
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "dependsOn": [],
+            "branch": null,
+            "dir": "phase-3",
+            "status": "pending",
+            "claim": null
+          }
+        ]
+      },
+      "dirExists": true
+    },
+    {
+      "label": "notes-e-criterios",
+      "exit": 0,
+      "stdout": "{\n  \"roadmap\": \"/TMP/notes-e-criterios/.aimi/tasks/f/roadmap.json\",\n  \"added\": 1,\n  \"phases\": 1\n}",
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "FROZEN",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "A",
+            "goal": "g",
+            "notes": "n",
+            "successCriteria": [
+              "c1",
+              "c2"
+            ],
+            "slug": "",
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "dependsOn": [],
+            "branch": null,
+            "dir": "phase-1",
+            "status": "pending",
+            "claim": null
+          }
+        ]
+      },
+      "dirExists": true
+    },
+    {
+      "label": "sanitiza-prosa",
+      "exit": 0,
+      "stdout": "{\n  \"roadmap\": \"/TMP/sanitiza-prosa/.aimi/tasks/f/roadmap.json\",\n  \"added\": 1,\n  \"phases\": 1\n}",
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "FROZEN",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "A x ",
+            "goal": " g",
+            "slug": "a",
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "dependsOn": [],
+            "branch": null,
+            "dir": "phase-1-a",
+            "status": "pending",
+            "claim": null
+          }
+        ]
+      },
+      "dirExists": true
+    },
+    {
+      "label": "existe-sem-sync",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-init: /TMP/existe-sem-sync/.aimi/tasks/f/roadmap.json already exists; pass --sync to merge additively",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "FROZEN",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "Old",
+            "goal": "og",
+            "slug": "old",
+            "dir": "phase-1-old",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": "feat/old",
+            "notes": "on",
+            "successCriteria": [
+              "s"
+            ],
+            "creates": [
+              "old.rb (o)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "dirExists": true
+    },
+    {
+      "label": "sync-aditivo",
+      "exit": 0,
+      "stdout": "{\n  \"roadmap\": \"/TMP/sync-aditivo/.aimi/tasks/f/roadmap.json\",\n  \"added\": 1,\n  \"phases\": 2\n}",
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "FROZEN",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "Old",
+            "goal": "og",
+            "slug": "old",
+            "dir": "phase-1-old",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": "feat/old",
+            "notes": "on",
+            "successCriteria": [
+              "s"
+            ],
+            "creates": [
+              "old.rb (o)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "New",
+            "goal": "g",
+            "slug": "new",
+            "dependsOn": [
+              1
+            ],
+            "creates": [
+              "n.rb (n)"
+            ],
+            "needs": [
+              "old.rb (o)"
+            ],
+            "notes": null,
+            "successCriteria": [],
+            "areas": [],
+            "branch": null,
+            "dir": "phase-2-new",
+            "status": "pending",
+            "claim": null
+          }
+        ]
+      },
+      "dirExists": true
+    },
+    {
+      "label": "sync-anticlobber",
+      "exit": 0,
+      "stdout": "{\n  \"roadmap\": \"/TMP/sync-anticlobber/.aimi/tasks/f/roadmap.json\",\n  \"added\": 0,\n  \"phases\": 1\n}",
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "FROZEN",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "Old",
+            "goal": "og",
+            "slug": "old",
+            "dir": "phase-1-old",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": "feat/old",
+            "notes": "on",
+            "successCriteria": [
+              "s"
+            ],
+            "creates": [
+              "old.rb (o)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "dirExists": true
+    },
+    {
+      "label": "sync-dangling",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-init: dangling dependsOn reference(s):\nphase 2: dependsOn references unknown phase id 99",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "FROZEN",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "Old",
+            "goal": "og",
+            "slug": "old",
+            "dir": "phase-1-old",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": "feat/old",
+            "notes": "on",
+            "successCriteria": [
+              "s"
+            ],
+            "creates": [
+              "old.rb (o)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "dirExists": true
+    },
+    {
+      "label": "sync-id-ma",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-init: malformed creates/needs identity in new phase(s):\nphase 2: creates entry #1 \"../x (t)\" is not a usable artifact identity: contains a \"..\" path segment\nNote: an entry is quoted after backtick normalization -- a `x` span becomes x -- so one submitted with backticks appears here without them. Nothing else about an identity is rewritten; locate it by its position in the list.",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "FROZEN",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "Old",
+            "goal": "og",
+            "slug": "old",
+            "dir": "phase-1-old",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": "feat/old",
+            "notes": "on",
+            "successCriteria": [
+              "s"
+            ],
+            "creates": [
+              "old.rb (o)"
+            ],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "dirExists": true
+    },
+    {
+      "label": "existente-quebrado",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-init: existing roadmap.json is malformed: /TMP/existente-quebrado/.aimi/tasks/f/roadmap.json",
+      "file": "UNPARSEABLE",
+      "dirExists": true
+    }
+  ],
+  "_comment_init": "roadmap-init captured the same way, before its jq was deleted. Temp paths normalized to /TMP and createdAt frozen -- the only two non-deterministic fields. The dependson-nao-array case records jq EXITING 5 with a raw engine error: the 'dependsOn must be an array' message the code writes was unreachable, because the jq collected it in the same array as the per-entry check and iterating a string aborts. That one case is deliberately NOT reproduced -- there is no faithful port of a crash."
 }

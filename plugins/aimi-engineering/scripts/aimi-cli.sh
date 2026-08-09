@@ -14100,177 +14100,26 @@ cmd_roadmap_init() {
     input_json=$(cat)
   fi
 
-  if ! printf '%s' "$input_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
-    echo "Error: roadmap-init: phases payload must be a JSON array" >&2
-    exit 1
-  fi
-
-  # --- Structural validation (payload-only; no I/O yet). Dangling dependsOn refs
-  # are checked later, inside the lock, against existing-file ids unioned with
-  # this payload's ids -- so a --sync phase may legitimately depend on a phase
-  # materialized by an earlier roadmap-init call. ---
-  local validation_errors
-  validation_errors=$(printf '%s' "$input_json" | jq -r '
-    . as $phases |
-    ([$phases[] | .id]) as $ids |
-    ([$ids | group_by(.) | map(select(length > 1)) | map(.[0])[]]) as $dup_ids |
-    [
-      ($dup_ids[] | "duplicate phase id: " + (.|tostring)),
-      ($phases[] | . as $p | if ($p.id == null or ($p.id|type) != "number") then "phase " + ($p.id|tostring) + ": id must be a number" else empty end),
-      ($phases[] | . as $p | if ($p.name == null or ($p.name|type) != "string" or ($p.name|length) == 0) then "phase " + ($p.id|tostring) + ": name is required" else empty end),
-      ($phases[] | . as $p | if ($p.goal == null or ($p.goal|type) != "string" or ($p.goal|length) == 0) then "phase " + ($p.id|tostring) + ": goal is required" else empty end),
-      ($phases[] | . as $p | if ($p.dependsOn != null and ($p.dependsOn|type) != "array") then "phase " + ($p.id|tostring) + ": dependsOn must be an array" else empty end),
-      ($phases[] | . as $p | (($p.dependsOn // [])[] | select(type != "number") | "phase " + ($p.id|tostring) + ": dependsOn entries must be numbers"))
-    ] | .[]
-  ')
-  if [ -n "$validation_errors" ]; then
-    echo "Error: roadmap-init: invalid phase payload:" >&2
-    printf '%s\n' "$validation_errors" >&2
-    exit 1
-  fi
-
-  # --- Sanitize free-text fields, compute dir, validate dir + branch patterns ---
+  # --- Everything that must be judged BEFORE the lock ---------------------
+  # The split is not cosmetic: today an invalid payload never reaches the
+  # mkdir -p below, so a refusal creates no feature directory. Validating
+  # inside the lock would create one as a side effect of saying no.
+  check_python3
   local new_phases
-  new_phases=$(printf '%s' "$input_json" | jq "$_ROADMAP_SANITIZE_JQ"'
-    map(
-      .name = (.name | _rm_sanitize(200)) |
-      .goal = (.goal | _rm_sanitize(2000)) |
-      .slug = ((.slug // "") | _rm_sanitize(100)) |
-      .notes = (if .notes != null then (.notes | _rm_sanitize(5000)) else null end) |
-      .successCriteria = ((.successCriteria // []) | map(_rm_sanitize(2000))) |
-      .__mkCreates = ((.creates // []) | map(_rm_markers_only(500))) |
-      .__mkNeeds = ((.needs // []) | map(_rm_markers_only(500))) |
-      .creates = ((.creates // []) | map(_rm_sanitize_contract(500))) |
-      .needs = ((.needs // []) | map(_rm_sanitize_contract(500))) |
-      .areas = ((.areas // []) | map(_rm_sanitize(500))) |
-      .dependsOn = (.dependsOn // []) |
-      .branch = (if .branch != null then (.branch | _rm_sanitize(200)) else null end) |
-      .dir = ("phase-" + (.id|tostring) + (if (.slug|length) > 0 then "-" + .slug else "" end)) |
-      .status = "pending" |
-      .claim = null
-    )
-  ')
-
-  local dir_errors
-  dir_errors=$(printf '%s' "$new_phases" | jq -r --arg re "$_ROADMAP_DIR_REGEX" '
-    [.[] | select((.dir | test($re)) | not) | "phase " + (.id|tostring) + ": computed dir \"" + .dir + "\" fails required pattern"] | .[]
-  ')
-  if [ -n "$dir_errors" ]; then
-    echo "Error: roadmap-init: invalid phase directory slug(s):" >&2
-    printf '%s\n' "$dir_errors" >&2
-    exit 1
-  fi
-
-  local branch_errors
-  branch_errors=$(printf '%s' "$new_phases" | jq -r --arg re "$_ROADMAP_BRANCH_REGEX" '
-    [.[] | select(.branch != null and ((.branch | test($re)) | not)) | "phase " + (.id|tostring) + ": branch \"" + .branch + "\" contains invalid characters"] | .[]
-  ')
-  if [ -n "$branch_errors" ]; then
-    echo "Error: roadmap-init: invalid branch name(s):" >&2
-    printf '%s\n' "$branch_errors" >&2
-    exit 1
-  fi
+  new_phases=$(printf '%s' "$input_json" | python3 "$(_aimi_roadmap_py)" init-validate) || exit $?
 
   mkdir -p "$(dirname "$roadmap_path")"
 
   # --- Locked read-modify-write: existence/--sync check, additive merge, atomic write ---
+  local sync_flag=""
+  [ "$sync_mode" = true ] && sync_flag="--sync"
   local out
   out=$(
     (
       _lock "${roadmap_path}.lock"
-
-      if [ -f "$roadmap_path" ]; then
-        if [ "$sync_mode" != true ]; then
-          echo "Error: roadmap-init: $roadmap_path already exists; pass --sync to merge additively" >&2
-          exit 1
-        fi
-        if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
-          echo "Error: roadmap-init: existing roadmap.json is malformed: $roadmap_path" >&2
-          exit 1
-        fi
-
-        existing_meta=$(jq '{roadmapVersion, feature, createdAt, brainstormPath}' "$roadmap_path")
-        filtered_new=$(jq --argjson new "$new_phases" '
-          [.phases[].id] as $eids | [$new[] | select((.id as $i | $eids | index($i)) == null)]
-        ' "$roadmap_path")
-
-        # Dangling dependsOn check: allowed ids are existing-file ids unioned with
-        # this payload's own ids (covers both already-materialized phases and
-        # sibling phases introduced in this same call).
-        dangling=$(jq --argjson new "$new_phases" --argjson add "$filtered_new" -r '
-          ([.phases[].id] + [$new[].id] | unique) as $ids |
-          [$add[] | . as $p | ($p.dependsOn // [])[] | select((. as $d | $ids | index($d)) == null) | "phase " + ($p.id|tostring) + ": dependsOn references unknown phase id " + (.|tostring)] | .[]
-        ' "$roadmap_path")
-        if [ -n "$dangling" ]; then
-          echo "Error: roadmap-init: dangling dependsOn reference(s):" >&2
-          printf '%s\n' "$dangling" >&2
-          exit 1
-        fi
-
-        # Identity well-formedness, over filtered_new ONLY -- the phases this
-        # call actually writes. Never over the whole payload: plan.md always
-        # submits the full phase array and both call sites downgrade a
-        # roadmap-init failure to a warning, so a check that fired on a legacy
-        # phase would silently drop the new one instead of reporting anything.
-        identity_errors=""
-        identity_errors=$(printf '%s' "$filtered_new" | _roadmap_identity_errors)
-        if [ -n "$identity_errors" ]; then
-          echo "Error: roadmap-init: malformed creates/needs identity in new phase(s):" >&2
-          printf '%s\n' "$identity_errors" >&2
-          _roadmap_identity_note
-          exit 1
-        fi
-
-        # __mk* are the marker-only comparison forms the identity guard just
-        # consumed; they are scratch, never schema. Dropped here so they cannot
-        # reach disk.
-        merged_phases=$(jq --argjson add "$filtered_new" '
-          (.phases + ($add | map(del(.__mkCreates, .__mkNeeds)))) | sort_by(.id)
-        ' "$roadmap_path")
-        roadmap_doc=$(printf '%s' "$existing_meta" | jq --argjson phases "$merged_phases" '. + {phases: $phases}')
-        added_count=$(printf '%s' "$filtered_new" | jq 'length')
-      else
-        dangling=$(printf '%s' "$new_phases" | jq -r '
-          ([.[].id] | unique) as $ids |
-          [.[] | . as $p | ($p.dependsOn // [])[] | select((. as $d | $ids | index($d)) == null) | "phase " + ($p.id|tostring) + ": dependsOn references unknown phase id " + (.|tostring)] | .[]
-        ')
-        if [ -n "$dangling" ]; then
-          echo "Error: roadmap-init: dangling dependsOn reference(s):" >&2
-          printf '%s\n' "$dangling" >&2
-          exit 1
-        fi
-
-        # Creation mode: every phase in new_phases is by definition new, so the
-        # same guard applies to the whole array here.
-        identity_errors=""
-        identity_errors=$(printf '%s' "$new_phases" | _roadmap_identity_errors)
-        if [ -n "$identity_errors" ]; then
-          echo "Error: roadmap-init: malformed creates/needs identity in new phase(s):" >&2
-          printf '%s\n' "$identity_errors" >&2
-          _roadmap_identity_note
-          exit 1
-        fi
-
-        # See the --sync branch above: __mk* is scratch for the identity guard.
-        merged_phases=$(printf '%s' "$new_phases" | jq 'map(del(.__mkCreates, .__mkNeeds)) | sort_by(.id)')
-        roadmap_doc=$(jq -n --arg feature "$feature" --arg bp "$brainstorm_path" --argjson phases "$merged_phases" "$_ROADMAP_SANITIZE_JQ"'
-          {
-            roadmapVersion: "1.0",
-            feature: $feature,
-            createdAt: (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
-            brainstormPath: (if ($bp|length) == 0 then null else ($bp | _rm_sanitize(500)) end),
-            phases: $phases
-          }
-        ')
-        added_count=$(printf '%s' "$merged_phases" | jq 'length')
-      fi
-
-      tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
-      printf '%s\n' "$roadmap_doc" > "$tmp_file"
-      mv "$tmp_file" "$roadmap_path"
-
-      jq -n --arg path "$roadmap_path" --argjson added "$added_count" --argjson total "$(printf '%s' "$merged_phases" | jq 'length')" \
-        '{roadmap: $path, added: $added, phases: $total}'
+      printf '%s' "$new_phases" | python3 "$(_aimi_roadmap_py)" init-write \
+        --roadmap "$roadmap_path" --feature "$feature" \
+        --brainstorm-path "$brainstorm_path" $sync_flag
     ) 200>"${roadmap_path}.lock"
   ) || exit $?
   printf '%s\n' "$out"

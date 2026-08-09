@@ -212,6 +212,93 @@ def test_the_one_way_loss_is_confined_to_the_description():
 
 
 # ---------------------------------------------------------------------------
+# roadmap-init
+# ---------------------------------------------------------------------------
+#
+# The end-to-end behaviour of this verb is covered twice over: 52 black-box
+# calls in test-aimi-cli-part3-roadmap-forge.sh, and golden_from_jq.json's
+# init_cases, which recorded the jq's exit/stdout/stderr/file for 29 payloads
+# before that jq was deleted. What the tests below add is the parts of the rule
+# that are awkward to reach through a shell.
+
+INIT_CASES = {c["label"]: c for c in GOLDEN["init_cases"]}
+
+
+def test_the_one_case_the_port_deliberately_does_not_reproduce():
+    """jq exited 5 on `dependsOn: "1"` with a raw engine error, and the message
+    the code takes the trouble to write was unreachable: it lived in the same
+    collected array as the per-entry check, and iterating a string aborts jq.
+
+    There is no faithful port of a crash. The golden file records what jq did;
+    this records what we do instead, so the deviation is stated in both places.
+    """
+    assert INIT_CASES["dependson-nao-array"]["exit"] == 5
+    assert "Cannot iterate over string" in INIT_CASES["dependson-nao-array"]["stderr"]
+    errors = R.init_validation_errors([{"id": 1, "name": "A", "goal": "g", "dependsOn": "1"}])
+    assert errors == ["phase 1: dependsOn must be an array"]
+
+
+def test_validation_errors_are_grouped_by_check_not_by_phase():
+    """The order callers have been reading: every duplicate id, then every bad
+    id, then every missing name, and so on."""
+    errors = R.init_validation_errors(
+        [{"id": 1, "goal": "g"}, {"id": 1, "name": "B"}]
+    )
+    assert errors == [
+        "duplicate phase id: 1",
+        "phase 1: name is required",
+        "phase 1: goal is required",
+    ]
+
+
+@pytest.mark.parametrize(
+    "raw,stored,expected_dir",
+    [(2, 2, "phase-2-a"), (2.0, 2, "phase-2-a"), (2.1, 2.1, "phase-2.1-a"), (1e3, 1000, "phase-1000-a")],
+)
+def test_an_integral_float_id_is_stored_the_way_jq_rendered_it(raw, stored, expected_dir):
+    """jq puts every number through a double and prints the shortest round-trip
+    form, so 2.0 lands as 2. Python keeps int and float apart and would write
+    2.0 -- and phases[].id genuinely accepts decimals, so this is a real path."""
+    phases = R.init_sanitize(R.jq_numbers([{"id": raw, "name": "A", "goal": "g", "slug": "a"}]))
+    assert phases[0]["id"] == stored
+    assert phases[0]["dir"] == expected_dir
+
+
+def test_the_deliberate_precision_divergence_is_left_alone():
+    """jq renders this as 1e+19 because a double cannot hold it. Reproducing a
+    precision loss would be indefensible; no test in the bash suite reaches it."""
+    assert R.jq_numbers([10000000000000000001]) == [10000000000000000001]
+
+
+def test_sort_survives_a_hand_seeded_phase_with_no_id():
+    """roadmap.json is a file people edit. sort_by(.id) in jq tolerated a null
+    id (nulls sort first); a bare Python sort would raise on the mixed list."""
+    ids = [3, None, 1, "x", 2.5]
+    assert sorted(ids, key=R.jq_sort_key) == [None, 1, 2.5, 3, "x"]
+
+
+def test_markers_are_scratch_and_never_reach_disk():
+    phases = R.init_sanitize([{"id": 1, "name": "A", "goal": "g", "creates": ["a.rb (x)"]}])
+    assert "__mkCreates" in phases[0]
+    assert "__mkCreates" not in R._without_markers(phases)[0]
+    assert "__mkNeeds" not in R._without_markers(phases)[0]
+
+
+def test_dangling_dependson_names_the_phase_and_the_missing_id():
+    errors = R.dangling_errors([{"id": 1, "dependsOn": [99]}], [1])
+    assert errors == ["phase 1: dependsOn references unknown phase id 99"]
+
+
+def test_the_identity_note_matches_the_one_bash_still_prints():
+    """roadmap-amend-phase still prints this from _roadmap_identity_note. Two
+    copies of a literal drift; this is the guard for as long as both exist."""
+    cli = os.path.join(SCRIPTS, "aimi-cli.sh")
+    with open(cli, encoding="utf-8") as handle:
+        body = handle.read()
+    assert R.IDENTITY_NOTE in body
+
+
+# ---------------------------------------------------------------------------
 # The two constants that must not drift apart
 # ---------------------------------------------------------------------------
 

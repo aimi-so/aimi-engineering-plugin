@@ -47,6 +47,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 
 # ---------------------------------------------------------------------------
 # The sanitizer, ported from _ROADMAP_SANITIZE_JQ
@@ -310,6 +311,63 @@ def _num(value):
     return str(value)
 
 
+def jq_numbers(value):
+    """Collapse integral floats to ints, the way jq renders every number.
+
+    jq puts every number through a double and prints the shortest form that
+    round-trips, so 2.0 comes back out as 2 and 1e3 as 1000. Python keeps int
+    and float apart and would write 2.0 and 1000.0. phases[].id genuinely
+    accepts decimals (phase 2.1), so this is a real path, not a curiosity.
+
+    ONE DELIBERATE DIVERGENCE: jq renders 10000000000000000001 as 1e+19,
+    because the double cannot hold it. Python keeps it exact and this function
+    does not undo that. Reproducing a precision loss would be indefensible, no
+    test exercises it, and a phase id that large is not a thing.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {k: jq_numbers(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [jq_numbers(v) for v in value]
+    return value
+
+
+def jq_sort_key(value):
+    """jq's total order: null < false < true < numbers < strings < arrays < objects.
+
+    sort_by(.id) has to survive a hand-seeded roadmap whose id is missing or is
+    a string, because roadmap.json is a file people edit. Sorting would raise on
+    a mixed list without this.
+    """
+    if value is None:
+        return (0, 0)
+    if value is False:
+        return (1, 0)
+    if value is True:
+        return (2, 0)
+    if isinstance(value, (int, float)):
+        return (3, value)
+    if isinstance(value, str):
+        return (4, value)
+    if isinstance(value, list):
+        return (5, 0)
+    return (6, 0)
+
+
+# The note aimi-cli.sh prints under every identity refusal. Duplicated from
+# _roadmap_identity_note in aimi-cli.sh for exactly as long as roadmap-amend-phase
+# still prints it from bash; test_roadmap.py asserts the two are identical so the
+# copy cannot drift while it exists.
+IDENTITY_NOTE = (
+    "Note: an entry is quoted after backtick normalization -- a `x` span becomes x "
+    "-- so one submitted with backticks appears here without them. Nothing else "
+    "about an identity is rewritten; locate it by its position in the list."
+)
+
+
 # ---------------------------------------------------------------------------
 # normalize-contracts — the 1.0 -> 2.0 migration
 # ---------------------------------------------------------------------------
@@ -357,6 +415,131 @@ def normalize_contracts(doc):
             phase[list_name] = [nc_entry(e) for e in entries]
     doc["roadmapVersion"] = CONTRACT_VERSION
     return converted
+
+
+# ---------------------------------------------------------------------------
+# roadmap-init — payload validation, sanitization, additive merge
+# ---------------------------------------------------------------------------
+
+DIR_REGEX = re.compile(r"^phase-[0-9]+(\.[0-9]+)?(-[a-z0-9][a-z0-9-]*)?$")
+BRANCH_REGEX = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9/_-]*$")
+
+
+def init_validation_errors(phases):
+    """Structural validation of the payload. No I/O.
+
+    Grouped by CHECK rather than by phase -- every duplicate id first, then
+    every bad id, then every missing name, and so on -- because that is the
+    order the jq built its array in and the order callers have been reading.
+
+    ONE DEVIATION FROM THE JQ, DELIBERATE. The jq collected the "dependsOn must
+    be an array" message and the per-entry "dependsOn entries must be numbers"
+    messages in the same array, so it iterated dependsOn before it could print
+    anything -- and iterating a string aborts jq. The result was that passing
+    dependsOn: "1" exited 5 with `jq: error ... Cannot iterate over string`, and
+    the message the code takes the trouble to write was unreachable. No test
+    covers it. There is no faithful port of a crash, so this prints the message
+    the code intends and exits 1 like every other validation failure.
+    """
+    errors = []
+
+    ids = [p.get("id") for p in phases]
+    seen, dups = {}, []
+    for value in ids:
+        key = json.dumps(value, sort_keys=True)
+        seen[key] = seen.get(key, 0) + 1
+    for value in sorted({json.dumps(v, sort_keys=True): v for v in ids}.values(), key=jq_sort_key):
+        if seen[json.dumps(value, sort_keys=True)] > 1:
+            dups.append(value)
+    for value in dups:
+        errors.append("duplicate phase id: " + _num(value))
+
+    for phase in phases:
+        if phase.get("id") is None or not isinstance(phase.get("id"), (int, float)) or isinstance(
+            phase.get("id"), bool
+        ):
+            errors.append("phase " + _num(phase.get("id")) + ": id must be a number")
+    for phase in phases:
+        name = phase.get("name")
+        if name is None or not isinstance(name, str) or len(name) == 0:
+            errors.append("phase " + _num(phase.get("id")) + ": name is required")
+    for phase in phases:
+        goal = phase.get("goal")
+        if goal is None or not isinstance(goal, str) or len(goal) == 0:
+            errors.append("phase " + _num(phase.get("id")) + ": goal is required")
+    for phase in phases:
+        depends = phase.get("dependsOn")
+        if depends is not None and not isinstance(depends, list):
+            errors.append("phase " + _num(phase.get("id")) + ": dependsOn must be an array")
+    for phase in phases:
+        depends = phase.get("dependsOn")
+        if not isinstance(depends, list):
+            continue
+        for entry in depends:
+            if not isinstance(entry, (int, float)) or isinstance(entry, bool):
+                errors.append(
+                    "phase " + _num(phase.get("id")) + ": dependsOn entries must be numbers"
+                )
+    return errors
+
+
+def init_sanitize(phases):
+    """Sanitize free text, compute dir, and stash the marker forms for the judge.
+
+    __mkCreates/__mkNeeds are scratch for the identity guard's mutation check and
+    are never schema -- init_merge drops them before anything reaches disk.
+    """
+    out = []
+    for phase in phases:
+        p = dict(phase)
+        p["name"] = rm_sanitize(p.get("name"), 200)
+        p["goal"] = rm_sanitize(p.get("goal"), 2000)
+        p["slug"] = rm_sanitize(p.get("slug") if p.get("slug") is not None else "", 100)
+        p["notes"] = rm_sanitize(p["notes"], 5000) if p.get("notes") is not None else None
+        p["successCriteria"] = [rm_sanitize(s, 2000) for s in (p.get("successCriteria") or [])]
+        p["__mkCreates"] = [rm_markers_only(s, 500) for s in (p.get("creates") or [])]
+        p["__mkNeeds"] = [rm_markers_only(s, 500) for s in (p.get("needs") or [])]
+        p["creates"] = [rm_sanitize_contract(s, 500) for s in (p.get("creates") or [])]
+        p["needs"] = [rm_sanitize_contract(s, 500) for s in (p.get("needs") or [])]
+        p["areas"] = [rm_sanitize(s, 500) for s in (p.get("areas") or [])]
+        p["dependsOn"] = p.get("dependsOn") or []
+        p["branch"] = rm_sanitize(p["branch"], 200) if p.get("branch") is not None else None
+        p["dir"] = "phase-" + _num(p.get("id")) + ("-" + p["slug"] if len(p["slug"]) > 0 else "")
+        p["status"] = "pending"
+        p["claim"] = None
+        out.append(p)
+    return out
+
+
+def init_shape_errors(phases):
+    """dir and branch pattern checks, in the order the two jq blocks ran."""
+    dir_errors = [
+        "phase " + _num(p.get("id")) + ': computed dir "' + p["dir"] + '" fails required pattern'
+        for p in phases
+        if not DIR_REGEX.search(p["dir"])
+    ]
+    branch_errors = [
+        "phase " + _num(p.get("id")) + ': branch "' + p["branch"] + '" contains invalid characters'
+        for p in phases
+        if p.get("branch") is not None and not BRANCH_REGEX.search(p["branch"])
+    ]
+    return dir_errors, branch_errors
+
+
+def dangling_errors(phases_to_check, allowed_ids):
+    return [
+        "phase "
+        + _num(p.get("id"))
+        + ": dependsOn references unknown phase id "
+        + _num(dep)
+        for p in phases_to_check
+        for dep in (p.get("dependsOn") or [])
+        if dep not in allowed_ids
+    ]
+
+
+def _without_markers(phases):
+    return [{k: v for k, v in p.items() if k not in ("__mkCreates", "__mkNeeds")} for p in phases]
 
 
 # ---------------------------------------------------------------------------
@@ -439,9 +622,135 @@ def _flag(argv, name):
     return None
 
 
+def _die_list(header, lines, note=False):
+    sys.stderr.write(header + "\n")
+    for line in lines:
+        sys.stderr.write(line + "\n")
+    if note:
+        sys.stderr.write(IDENTITY_NOTE + "\n")
+    sys.exit(1)
+
+
+def op_init_validate(_argv):
+    """Everything roadmap-init checks BEFORE it takes the lock.
+
+    Split from init-write for one reason: today an invalid payload never
+    reaches `mkdir -p`, so it never creates the feature directory. Doing
+    validation inside the lock would create it as a side effect of a refusal.
+    """
+    raw = sys.stdin.read()
+    try:
+        payload = jq_numbers(json.loads(raw))
+    except ValueError:
+        die("Error: roadmap-init: phases payload must be a JSON array")
+    if not isinstance(payload, list):
+        die("Error: roadmap-init: phases payload must be a JSON array")
+
+    errors = init_validation_errors(payload)
+    if errors:
+        _die_list("Error: roadmap-init: invalid phase payload:", errors)
+
+    phases = init_sanitize(payload)
+    dir_errors, branch_errors = init_shape_errors(phases)
+    if dir_errors:
+        _die_list("Error: roadmap-init: invalid phase directory slug(s):", dir_errors)
+    if branch_errors:
+        _die_list("Error: roadmap-init: invalid branch name(s):", branch_errors)
+
+    json.dump(phases, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return 0
+
+
+def op_init_write(argv):
+    """The locked read-modify-write. stdin is init-validate's sanitized phases."""
+    path = _flag(argv, "--roadmap")
+    feature = _flag(argv, "--feature")
+    brainstorm_path = _flag(argv, "--brainstorm-path") or ""
+    sync_mode = "--sync" in argv
+    if not path or not feature:
+        die("Usage: roadmap.py init-write --roadmap <path> --feature <slug> [--sync]")
+
+    new_phases = jq_numbers(json.load(sys.stdin))
+
+    if os.path.exists(path):
+        if not sync_mode:
+            die("Error: roadmap-init: " + path + " already exists; pass --sync to merge additively")
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                existing = jq_numbers(json.load(handle))
+        except (OSError, ValueError):
+            die("Error: roadmap-init: existing roadmap.json is malformed: " + path)
+
+        existing_phases = existing.get("phases") or []
+        existing_ids = [p.get("id") for p in existing_phases]
+        # Anti-clobber: a phase this roadmap already holds is never revisited.
+        filtered_new = [p for p in new_phases if p.get("id") not in existing_ids]
+
+        # Allowed ids are existing-file ids unioned with this payload's own, so a
+        # --sync phase may depend on one an earlier call materialized AND on a
+        # sibling introduced in the same call.
+        allowed = existing_ids + [p.get("id") for p in new_phases]
+        dangling = dangling_errors(filtered_new, allowed)
+        if dangling:
+            _die_list("Error: roadmap-init: dangling dependsOn reference(s):", dangling)
+
+        # Judged over filtered_new ONLY -- the phases this call actually writes.
+        # Over the whole payload, a legacy phase would make plan.md's full-array
+        # submission fail forever, and both its call sites downgrade the failure
+        # to a warning, so the new phase would vanish with nothing reported.
+        identity = judge_phases(filtered_new)
+        if identity:
+            _die_list(
+                "Error: roadmap-init: malformed creates/needs identity in new phase(s):",
+                identity,
+                note=True,
+            )
+
+        merged = existing_phases + _without_markers(filtered_new)
+        merged.sort(key=lambda p: jq_sort_key(p.get("id")))
+        # Only these four top-level keys survive a --sync, exactly as before.
+        doc = {k: existing.get(k) for k in ("roadmapVersion", "feature", "createdAt", "brainstormPath")}
+        doc["phases"] = merged
+        added_count = len(filtered_new)
+    else:
+        allowed = [p.get("id") for p in new_phases]
+        dangling = dangling_errors(new_phases, allowed)
+        if dangling:
+            _die_list("Error: roadmap-init: dangling dependsOn reference(s):", dangling)
+
+        identity = judge_phases(new_phases)
+        if identity:
+            _die_list(
+                "Error: roadmap-init: malformed creates/needs identity in new phase(s):",
+                identity,
+                note=True,
+            )
+
+        merged = _without_markers(new_phases)
+        merged.sort(key=lambda p: jq_sort_key(p.get("id")))
+        doc = {
+            "roadmapVersion": "1.0",
+            "feature": feature,
+            "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "brainstormPath": rm_sanitize(brainstorm_path, 500) if brainstorm_path else None,
+            "phases": merged,
+        }
+        added_count = len(merged)
+
+    write_doc_atomically(path, doc)
+    json.dump(
+        {"roadmap": path, "added": added_count, "phases": len(merged)}, sys.stdout, indent=2
+    )
+    sys.stdout.write("\n")
+    return 0
+
+
 _OPS = {
     "judge-phases": op_judge_phases,
     "normalize-contracts": op_normalize_contracts,
+    "init-validate": op_init_validate,
+    "init-write": op_init_write,
 }
 
 
