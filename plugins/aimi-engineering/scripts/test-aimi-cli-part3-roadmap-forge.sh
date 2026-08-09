@@ -3628,6 +3628,65 @@ _vc_run() {
   assert_exit_code "0" "$VC_RC" "$label: verb exits 0 (query, not gate)"
 }
 
+test_verify_creates_identity_is_a_path_not_a_pathspec() {
+  echo ""
+  echo "=== verify-creates: an identity is a path, never git pathspec magic ==="
+
+  # The gate that proves a phase built what it declared used to hand the
+  # identity to `git ls-files --` with no magic prefix, so git parsed it AS
+  # pathspec. Measured before the fix, against a repo holding only these files:
+  #   '*'  ':'  ':!nope'  ->  every tracked file  ->  status "verified"
+  # None of those carries whitespace, "..", a leading "/", a shell-class
+  # character or an injection pattern, so all three were storable identities.
+  # A phase could close reporting delivery of an artifact that does not exist.
+  local dir
+  dir=$(_vc_repo "vc-pathspec")
+  mkdir -p "$dir/docs" "$dir/db/migrations" "$dir/src"
+  echo "guide" > "$dir/docs/guide.md"
+  echo "-- migration" > "$dir/db/migrations/001_init.sql"
+  echo "export const app = 1" > "$dir/src/app.ts"
+  echo "readme" > "$dir/README.md"
+  _vc_commit "$dir"
+
+  # An identity made only of separators and glob metacharacters names nothing,
+  # so it is refused at WRITE time -- the residue ":(glob)" alone does not close,
+  # since ':(glob)**' still matches every tracked file.
+  local pathspec_probe
+  for pathspec_probe in '*' '**' ':'; do
+    _assert_roadmap_identity_rejected "vc-pathspec-write" \
+      "$(jq -n --arg c "$pathspec_probe" '[{id: 1, name: "P", goal: "g", slug: "p", dependsOn: [], creates: [$c], needs: []}]')" \
+      "pathspec identity \"$pathspec_probe\"" \
+      "names nothing in particular"
+  done
+
+  # ':!nope' does carry alphanumerics, so the write rule lets it through -- and
+  # the read side must then report it missing rather than matching everything.
+  _vc_roadmap "vc-pathspec" '[":!nope"]'
+  _vc_run "vc-pathspec" "$dir" "pathspec exclude identity"
+  assert_eq "missing" "$(printf '%s' "$VC_OUT" | jq -r '.[0].status')" \
+    "verify-creates: ':!nope' is missing, not matched against every tracked file"
+
+  # Every identity kind scope-contexts.md declares legal still verifies by path.
+  # ':(glob)' and not ':(literal)' exists for the third row: literal would kill
+  # the magic AND kill a legal path glob.
+  local kind
+  for kind in 'docs' 'db/migrations/*.sql' 'src/app.ts'; do
+    _vc_roadmap "vc-pathspec" "$(jq -n --arg k "$kind" '[$k]')"
+    _vc_run "vc-pathspec" "$dir" "declared kind \"$kind\""
+    assert_eq "verified" "$(printf '%s' "$VC_OUT" | jq -r '.[0].status')" \
+      "verify-creates: declared identity kind \"$kind\" still verifies by path"
+  done
+
+  # A directory identity resolves through its tracked contents with ONE
+  # pathspec -- the old companion "$identity/*" was measured redundant.
+  _vc_roadmap "vc-pathspec" '["docs"]'
+  _vc_run "vc-pathspec" "$dir" "directory identity"
+  assert_contains "docs/" "$(printf '%s' "$VC_OUT" | jq -r '.[0].evidence')" \
+    "verify-creates: a directory identity reports a tracked path inside it"
+
+  rm -rf ".aimi/tasks/vc-pathspec" ".aimi/tasks/vc-pathspec-write"
+}
+
 test_verify_creates_row_a_table_in_source_verified_by_text() {
   echo ""
   echo "=== verify-creates row A: table identity present in real source -> verified/text ==="
@@ -7105,6 +7164,7 @@ main() {
   # isolated git repository per row, each asserting status AND method
   echo ""
   echo "--- verify-creates Tests (US-001) ---"
+  test_verify_creates_identity_is_a_path_not_a_pathspec
   test_verify_creates_row_a_table_in_source_verified_by_text
   test_verify_creates_row_b_docs_only_is_missing
   test_verify_creates_row_c_endpoint_path_extraction

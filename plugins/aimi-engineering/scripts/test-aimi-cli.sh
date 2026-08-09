@@ -175,7 +175,7 @@ done
 # rule down and the pair cannot disagree. A commit that adds assertions now
 # edits exactly one line here.
 _WORKTREE_FRAME_DELTA=2   # 3 assertions minus the 1 a worktree-resident CLI emits
-EXPECTED_ASSERTIONS=3853
+EXPECTED_ASSERTIONS=3875
 RUN_FRAME=checkout
 _resolved_cli="$(realpath "$SCRIPT_DIR/aimi-cli.sh" 2>/dev/null || printf '%s' "$SCRIPT_DIR/aimi-cli.sh")"
 case "$_resolved_cli" in

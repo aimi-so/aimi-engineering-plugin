@@ -14025,6 +14025,9 @@ _roadmap_identity_errors() {
             (if ($entry | _cv_injection) then "matches an instruction-injection pattern validate-contracts refuses (ignore previous / system: / INSTRUCTIONS: / code fence / \"$(\") -- reword it; the description reaches a sub-agent prompt, so this half is judged on the whole entry, not just the identity" else empty end),
             (if ($marker_form != null) and (($marker_form | _cv_identity) != $ident)
                then "would be stored under a DIFFERENT identity than the one written: \"" + ($marker_form | _cv_identity) + "\" becomes \"" + $ident + "\". A sanitizer rule that deletes content (an HTML/XML-looking tag such as \"<T>\", a \"$(\" opener, or an instruction-override phrase) rewrote it, and verify-creates would then grep for a name this phase never produces -- rename the artifact so it survives verbatim"
+               else empty end),
+            (if ($ident | length) > 0 and (($ident | gsub("[*?\\[\\]/ ]"; "")) | test("[a-zA-Z0-9]") | not)
+               then "names nothing in particular -- it is only separators and glob metacharacters, so verify-creates would match whatever the repository happens to contain and report the phase verified without it having built anything. Name the symbol, path, table or \"METHOD /path\" endpoint the phase actually produces; a glob is fine as PART of a path (\"db/migrations/*.sql\") but not as the whole identity"
                else empty end)
           ]
         ) as $reasons
@@ -15547,7 +15550,30 @@ _verify_creates_one() {
   if [ "$path_safe" = true ]; then
     local ls_out=""
     rc=0
-    ls_out=$(git -C "$dir" ls-files -- "$identity" "$identity/*" 2>/dev/null) || rc=$?
+    # ":(glob)" is not decoration -- without a magic prefix git parses the
+    # identity AS pathspec, and this is the gate that proves a phase built what
+    # it declared. Measured, against a repo holding only src/ docs/ db/ README:
+    #
+    #   ls-files -- '*'         -> every tracked file    verdict: verified
+    #   ls-files -- ':'         -> every tracked file    verdict: verified
+    #   ls-files -- ':!nope'    -> every tracked file    verdict: verified
+    #
+    # Each of those is a storable identity: none carries whitespace, "..", a
+    # leading "/", a shell-class character or an injection pattern. So a phase
+    # could close on an artifact that does not exist.
+    #
+    # ":(glob)" and not ":(literal)": literal would kill the magic but also kill
+    # "db/migrations/*.sql", which scope-contexts.md declares a legal identity
+    # kind. Measured, glob keeps every declared kind working (a plain path, a
+    # directory, a path glob), returns nothing for ":" and ":!nope", and refuses
+    # to leave the repository at all ("fatal: outside repository" for '../*').
+    # The residue -- a bare "*" or "**" still over-matching -- is closed at write
+    # time instead, by requiring an identity to carry an alphanumeric character.
+    #
+    # The old "$identity/*" companion is gone: measured, ':(glob)docs' already
+    # lists the directory's tracked contents, so the second pathspec only ever
+    # duplicated the first.
+    ls_out=$(git -C "$dir" ls-files -- ":(glob)$identity" 2>/dev/null) || rc=$?
     if [ "$rc" -gt "$git_max" ]; then git_max=$rc; fi
     if [ "$rc" -gt 1 ]; then
       _verify_creates_emit "$identity" "error" "" \
