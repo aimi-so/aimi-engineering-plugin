@@ -929,6 +929,175 @@ def verify_creates_one(directory, identity):
 
 
 # ---------------------------------------------------------------------------
+# validate-contracts — do this phase's needs resolve against what came before
+# ---------------------------------------------------------------------------
+
+
+def reachable_ids(doc, start):
+    """Phase ids reachable from `start` through dependsOn, transitively, excluding
+    `start` itself.
+
+    Transitive and not just direct: a phase may legitimately need what its
+    grandparent built. A provider OUTSIDE this closure is "no-provider" even
+    though it exists in the roadmap -- declaring a need on a phase you do not
+    depend on is a scheduling error, not a resolved contract.
+    """
+    deps = {_num(p.get("id")): (p.get("dependsOn") or []) for p in doc.get("phases") or []}
+    cur = [start]
+    while True:
+        nxt = sorted(set(cur) | {d for c in cur for d in deps.get(_num(c), [])}, key=jq_sort_key)
+        if nxt == cur:
+            break
+        cur = nxt
+    return [i for i in cur if i != start]
+
+
+def creates_in_scope(doc, ids):
+    """(phase id, identity, status, dir) for every creates entry of every phase in
+    `ids`, phase-id ascending.
+
+    The order is the contract: the first row whose identity matches wins, so
+    provider selection is deterministic rather than incidental.
+    """
+    rows = []
+    in_scope = [p for p in (doc.get("phases") or []) if p.get("id") in ids]
+    for phase in sorted(in_scope, key=lambda p: jq_sort_key(p.get("id"))):
+        for entry in _v1_string_entries(phase.get("creates") or []):
+            rows.append(
+                (phase.get("id"), cv_identity(entry), phase.get("status"), phase.get("dir") or "")
+            )
+    return rows
+
+
+def contract_sanitize_hits(doc):
+    """One line per offending ENTRY, naming the entry and why.
+
+    Same shape as the write-time judge, deliberately: the two are the same rule,
+    and a reader who has seen one should recognise the other. Sorted and
+    deduplicated, which is what jq's `unique` did here -- so the order is
+    lexical, not phase order.
+    """
+    hits = set()
+    for phase in doc.get("phases") or []:
+        for field in ("creates", "needs"):
+            for index, entry in enumerate(phase.get(field) or []):
+                if not isinstance(entry, str) or not cv_suspicious(entry):
+                    continue
+                char = cv_shell_char(cv_identity(entry))
+                if char is not None:
+                    reason = (
+                        'its identity carries the shell metacharacter "' + char
+                        + '", which verify-creates cannot grep for'
+                    )
+                else:
+                    reason = (
+                        "it matches an instruction-injection pattern (ignore previous / "
+                        'system: / INSTRUCTIONS: / code fence / "$(")'
+                    )
+                hits.add(
+                    "phase " + _num(phase.get("id")) + " field '" + field + "' entry #"
+                    + str(index + 1) + ": " + reason
+                )
+    return sorted(hits)
+
+
+def duplicate_creates(doc):
+    """Identities declared by more than one phase, whatever their status."""
+    seen = {}
+    for phase in doc.get("phases") or []:
+        for entry in phase.get("creates") or []:
+            seen.setdefault(cv_identity(entry), []).append(phase.get("id"))
+    return [
+        {"identity": ident, "phases": sorted(set(phases), key=jq_sort_key)}
+        for ident, phases in sorted(seen.items())
+        if len(phases) > 1
+    ]
+
+
+def op_validate_contracts(argv):
+    path = _flag(argv, "--roadmap")
+    phase_raw = _flag(argv, "--phase")
+    agent_mode = "--agent-mode" in argv
+    if not path:
+        die("Usage: roadmap.py validate-contracts --roadmap <path> [--phase <id>] [--agent-mode]")
+    doc = read_doc(path, "validate-contracts")
+    feature_dir = os.path.dirname(path)
+
+    scoped = phase_raw is not None and phase_raw != ""
+    phase_id = jq_numbers(json.loads(phase_raw)) if scoped else None
+    if scoped and not any(p.get("id") == phase_id for p in doc.get("phases") or []):
+        die("Error: validate-contracts: phase " + _num(phase_id) + " not found in " + path)
+
+    # --- Sanitization pass: always blocks; never demoted by --agent-mode -----
+    # (a duplicate-creates finding is the only check --agent-mode demotes)
+    hits = contract_sanitize_hits(doc)
+    if hits:
+        for line in hits:
+            sys.stderr.write("Error: validate-contracts: " + line + "\n")
+        sys.stderr.write(
+            "Error: validate-contracts: roadmap-init and roadmap-amend-phase refuse these "
+            "at write time, so a roadmap this CLI wrote should not reach here. Repair with: "
+            "roadmap-amend-phase --feature <slug> --phase <id>\n"
+        )
+        sys.exit(1)
+
+    # --- Duplicate-creates collision check (across all phases, any status) ---
+    dups = duplicate_creates(doc)
+    if dups:
+        lines = [
+            "  phase " + " and phase ".join(_num(p) for p in d["phases"])
+            + ': both declare "' + d["identity"] + '" -- convert the collision into a'
+            " creates/needs contract between the two phases or promote the"
+            " artifact to a shared foundation phase"
+            for d in dups
+        ]
+        if agent_mode:
+            sys.stderr.write(
+                "Warning: validate-contracts: duplicate creates (--agent-mode: proceeding):\n"
+            )
+            sys.stderr.write("\n".join(lines) + "\n")
+        else:
+            sys.stderr.write("Error: validate-contracts: duplicate creates:\n")
+            sys.stderr.write("\n".join(lines) + "\n")
+            sys.exit(1)
+
+    # --- Needs resolution: scope is --phase (if given) or every phase --------
+    scope = [phase_id] if scoped else [p.get("id") for p in doc.get("phases") or []]
+    missing = []
+    providers = {}
+    for sid in scope:
+        rows = creates_in_scope(doc, reachable_ids(doc, sid))
+        phase = next((p for p in doc.get("phases") or [] if p.get("id") == sid), {})
+        for entry in phase.get("needs") or []:
+            need = cv_identity(entry)
+            provider = next((r for r in rows if r[1] == need), None)
+            if provider is None:
+                missing.append({"phase": sid, "need": need, "reason": "no-provider"})
+                continue
+            prov_id, _, prov_status, prov_dir = provider
+            if not scoped:
+                # Unscoped run: identity resolution within the dependsOn closure
+                # is sufficient. The completed+handoff delivery gate only applies
+                # when --phase pins the check to one phase's execution readiness.
+                providers[need] = prov_id
+                continue
+            delivered = prov_status == "completed" and handoff_lists_artifact(
+                os.path.join(feature_dir, prov_dir, "handoff.md"), need
+            )
+            if delivered:
+                providers[need] = prov_id
+            else:
+                missing.append({"phase": sid, "need": need, "reason": "not-delivered"})
+
+    report = {"valid": not missing, "missing": missing, "providers": providers}
+    if dups and agent_mode:
+        report["duplicateWarnings"] = dups
+    json.dump(report, sys.stdout, indent=2, ensure_ascii=False)
+    sys.stdout.write("\n")
+    sys.exit(0 if not missing else 1)
+
+
+# ---------------------------------------------------------------------------
 # I/O — the only filesystem this file is allowed to touch
 # ---------------------------------------------------------------------------
 
@@ -1437,6 +1606,7 @@ def op_verify_creates(argv):
 _OPS = {
     "judge-phases": op_judge_phases,
     "verify-creates": op_verify_creates,
+    "validate-contracts": op_validate_contracts,
     "normalize-contracts": op_normalize_contracts,
     "init-validate": op_init_validate,
     "init-write": op_init_write,

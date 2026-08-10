@@ -4545,5 +4545,270 @@
       "stderr": ""
     }
   ],
-  "_comment_verify": "verify-creates captured the same way, before its jq was deleted: 24 cases covering every documented identity kind, the doc/test exclusions, the endpoint prefix strip, the TODO/FIXME marker rejection, an empty repository, and the three pathspec-magic forms. 72 of 72 field comparisons identical after the port. Note glob-doispontos: a bare ':' verifies by TEXT, not path -- ':(glob):' matches nothing but `git grep -F ':'` finds a colon in any source file. That residue is closed at WRITE time (an identity must carry an alphanumeric), not here, and the capture records it so nobody 'fixes' the reader later."
+  "_comment_verify": "verify-creates captured the same way, before its jq was deleted: 24 cases covering every documented identity kind, the doc/test exclusions, the endpoint prefix strip, the TODO/FIXME marker rejection, an empty repository, and the three pathspec-magic forms. 72 of 72 field comparisons identical after the port. Note glob-doispontos: a bare ':' verifies by TEXT, not path -- ':(glob):' matches nothing but `git grep -F ':'` finds a colon in any source file. That residue is closed at WRITE time (an identity must carry an alphanumeric), not here, and the capture records it so nobody 'fixes' the reader later.",
+  "validate_cases": [
+    {
+      "label": "sem-phase",
+      "exit": 1,
+      "stdout": {
+        "valid": false,
+        "missing": [
+          {
+            "phase": 4,
+            "need": "mid.rb",
+            "reason": "no-provider"
+          },
+          {
+            "phase": 5,
+            "need": "never_declared.rb",
+            "reason": "no-provider"
+          }
+        ],
+        "providers": {
+          "base.rb": 1,
+          "mid.rb": 2
+        }
+      },
+      "stderr": ""
+    },
+    {
+      "label": "phase-2-entregue",
+      "exit": 0,
+      "stdout": {
+        "valid": true,
+        "missing": [],
+        "providers": {
+          "base.rb": 1
+        }
+      },
+      "stderr": ""
+    },
+    {
+      "label": "phase-3-nao-entregue",
+      "exit": 1,
+      "stdout": {
+        "valid": false,
+        "missing": [
+          {
+            "phase": 3,
+            "need": "mid.rb",
+            "reason": "not-delivered"
+          }
+        ],
+        "providers": {
+          "base.rb": 1
+        }
+      },
+      "stderr": ""
+    },
+    {
+      "label": "phase-4-fora-do-fecho",
+      "exit": 1,
+      "stdout": {
+        "valid": false,
+        "missing": [
+          {
+            "phase": 4,
+            "need": "mid.rb",
+            "reason": "no-provider"
+          }
+        ],
+        "providers": {}
+      },
+      "stderr": ""
+    },
+    {
+      "label": "phase-5-sem-provedor",
+      "exit": 1,
+      "stdout": {
+        "valid": false,
+        "missing": [
+          {
+            "phase": 5,
+            "need": "never_declared.rb",
+            "reason": "no-provider"
+          }
+        ],
+        "providers": {}
+      },
+      "stderr": ""
+    },
+    {
+      "label": "phase-3-entregue",
+      "exit": 0,
+      "stdout": {
+        "valid": true,
+        "missing": [],
+        "providers": {
+          "mid.rb": 2,
+          "base.rb": 1
+        }
+      },
+      "stderr": ""
+    },
+    {
+      "label": "handoff-ausente",
+      "exit": 1,
+      "stdout": {
+        "valid": false,
+        "missing": [
+          {
+            "phase": 3,
+            "need": "mid.rb",
+            "reason": "not-delivered"
+          }
+        ],
+        "providers": {
+          "base.rb": 1
+        }
+      },
+      "stderr": ""
+    },
+    {
+      "label": "handoff-fora-da-secao",
+      "exit": 1,
+      "stdout": {
+        "valid": false,
+        "missing": [
+          {
+            "phase": 3,
+            "need": "mid.rb",
+            "reason": "not-delivered"
+          }
+        ],
+        "providers": {
+          "base.rb": 1
+        }
+      },
+      "stderr": ""
+    },
+    {
+      "label": "provedor-pendente-escopado",
+      "exit": 1,
+      "stdout": {
+        "valid": false,
+        "missing": [
+          {
+            "phase": 3,
+            "need": "mid.rb",
+            "reason": "not-delivered"
+          }
+        ],
+        "providers": {
+          "base.rb": 1
+        }
+      },
+      "stderr": ""
+    },
+    {
+      "label": "provedor-pendente-sem-escopo",
+      "exit": 1,
+      "stdout": {
+        "valid": false,
+        "missing": [
+          {
+            "phase": 4,
+            "need": "mid.rb",
+            "reason": "no-provider"
+          },
+          {
+            "phase": 5,
+            "need": "never_declared.rb",
+            "reason": "no-provider"
+          }
+        ],
+        "providers": {
+          "base.rb": 1,
+          "mid.rb": 2
+        }
+      },
+      "stderr": ""
+    },
+    {
+      "label": "duplicata-bloqueia",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: validate-contracts: duplicate creates:\n  phase 1 and phase 3: both declare \"base.rb\" -- convert the collision into a creates/needs contract between the two phases or promote the artifact to a shared foundation phase"
+    },
+    {
+      "label": "duplicata-agent-mode",
+      "exit": 1,
+      "stdout": {
+        "valid": false,
+        "missing": [
+          {
+            "phase": 4,
+            "need": "mid.rb",
+            "reason": "no-provider"
+          },
+          {
+            "phase": 5,
+            "need": "never_declared.rb",
+            "reason": "no-provider"
+          }
+        ],
+        "providers": {
+          "base.rb": 1,
+          "mid.rb": 2
+        },
+        "duplicateWarnings": [
+          {
+            "identity": "base.rb",
+            "phases": [
+              1,
+              3
+            ]
+          }
+        ]
+      },
+      "stderr": "Warning: validate-contracts: duplicate creates (--agent-mode: proceeding):\n  phase 1 and phase 3: both declare \"base.rb\" -- convert the collision into a creates/needs contract between the two phases or promote the artifact to a shared foundation phase"
+    },
+    {
+      "label": "suspeita-metacaractere",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: validate-contracts: phase 1 field 'creates' entry #1: its identity carries the shell metacharacter \"$\", which verify-creates cannot grep for\nError: validate-contracts: roadmap-init and roadmap-amend-phase refuse these at write time, so a roadmap this CLI wrote should not reach here. Repair with: roadmap-amend-phase --feature <slug> --phase <id>"
+    },
+    {
+      "label": "suspeita-injecao",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: validate-contracts: phase 1 field 'creates' entry #1: it matches an instruction-injection pattern (ignore previous / system: / INSTRUCTIONS: / code fence / \"$(\")\nError: validate-contracts: roadmap-init and roadmap-amend-phase refuse these at write time, so a roadmap this CLI wrote should not reach here. Repair with: roadmap-amend-phase --feature <slug> --phase <id>"
+    },
+    {
+      "label": "sem-contratos",
+      "exit": 0,
+      "stdout": {
+        "valid": true,
+        "missing": [],
+        "providers": {}
+      },
+      "stderr": ""
+    },
+    {
+      "label": "fase-inexistente",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: validate-contracts: phase 99 not found in /WORK/.aimi/tasks/f/roadmap.json"
+    },
+    {
+      "label": "flag-desconhecida",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Usage: aimi-cli.sh validate-contracts <feature> [--phase <id>] [--agent-mode]"
+    },
+    {
+      "label": "sem-feature",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: roadmap: --feature <slug> is required"
+    },
+    {
+      "label": "roadmap-inexistente",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: validate-contracts: roadmap not found: /WORK/.aimi/tasks/outro-feature/roadmap.json"
+    }
+  ],
+  "_comment_validate": "validate-contracts captured the same way, before its jq was deleted: 19 cases covering the transitive dependsOn closure, a provider that exists but is OUTSIDE the closure, the completed+handoff delivery gate and the fact that it only applies with --phase, an identity mentioned outside the Artifacts Created section, duplicates with and without --agent-mode (different output shape AND exit code), and both suspicious-entry reasons. 57 of 57 field comparisons identical after the port."
 }

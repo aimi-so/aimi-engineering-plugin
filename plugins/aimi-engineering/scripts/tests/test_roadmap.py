@@ -534,6 +534,108 @@ def test_one_verdict_per_declared_identity_in_declaration_order():
 
 
 # ---------------------------------------------------------------------------
+# validate-contracts
+# ---------------------------------------------------------------------------
+
+VALIDATE_CASES = {c["label"]: c for c in GOLDEN["validate_cases"]}
+
+
+def _reasons(label):
+    return [m["reason"] for m in (VALIDATE_CASES[label]["stdout"] or {}).get("missing", [])]
+
+
+def test_a_need_resolves_through_the_transitive_closure():
+    """Phase 3 depends on 2 depends on 1, and phase 3 needs what phase 1 built.
+    Direct-dependency-only resolution would call that unmet."""
+    assert VALIDATE_CASES["phase-3-entregue"]["exit"] == 0
+    assert "base.rb" in VALIDATE_CASES["phase-3-entregue"]["stdout"]["providers"]
+
+
+def test_a_provider_outside_the_closure_is_no_provider_not_a_resolution():
+    """Phase 4 needs mid.rb, which phase 2 declares -- but phase 4 depends on
+    nothing. Declaring a need on a phase you do not depend on is a scheduling
+    error, and calling it resolved would hide it until execution."""
+    assert _reasons("phase-4-fora-do-fecho") == ["no-provider"]
+    assert VALIDATE_CASES["phase-4-fora-do-fecho"]["stdout"]["providers"] == {}
+
+
+def test_the_two_missing_reasons_are_not_interchangeable():
+    """no-provider means nobody promises it. not-delivered means somebody
+    promised and the handoff does not show it. Collapsing them would point the
+    reader at the wrong phase."""
+    assert _reasons("phase-5-sem-provedor") == ["no-provider"]
+    assert _reasons("phase-3-nao-entregue") == ["not-delivered"]
+
+
+def test_the_delivery_gate_only_exists_when_phase_is_given():
+    """Same roadmap, provider in_progress: scoped says not-delivered, unscoped
+    resolves. The gate is about one phase's execution readiness, not about
+    whether the contract graph is coherent."""
+    assert "not-delivered" in _reasons("provedor-pendente-escopado")
+    unscoped = VALIDATE_CASES["provedor-pendente-sem-escopo"]["stdout"]
+    assert "mid.rb" in unscoped["providers"]
+    assert "not-delivered" not in [m["reason"] for m in unscoped["missing"]]
+
+
+def test_delivery_requires_the_artifacts_created_section_specifically():
+    """A completed provider whose handoff mentions the identity under Decisions
+    or Deferred has not delivered it. Grepping the whole file would pass."""
+    assert _reasons("handoff-fora-da-secao") == ["not-delivered"]
+    assert _reasons("handoff-ausente") == ["not-delivered"]
+
+
+def test_duplicates_block_by_default_and_warn_under_agent_mode():
+    """Same finding, two shapes: --agent-mode demotes it to a warning AND adds
+    duplicateWarnings to the report. It is the only check --agent-mode demotes."""
+    blocked = VALIDATE_CASES["duplicata-bloqueia"]
+    assert blocked["exit"] == 1 and blocked["stdout"] is None
+    assert "Error: validate-contracts: duplicate creates:" in blocked["stderr"]
+    warned = VALIDATE_CASES["duplicata-agent-mode"]
+    assert "Warning: validate-contracts: duplicate creates" in warned["stderr"]
+    assert warned["stdout"]["duplicateWarnings"][0]["identity"] == "base.rb"
+    assert "duplicateWarnings" not in (
+        VALIDATE_CASES["phase-2-entregue"]["stdout"] or {}
+    ), "the key appears only when there IS a duplicate and --agent-mode"
+
+
+def test_the_sanitization_pass_names_the_entry_and_the_reason():
+    """Two distinct reasons, and the anti-vacuum check that both are reached."""
+    meta = VALIDATE_CASES["suspeita-metacaractere"]["stderr"]
+    assert "shell metacharacter" in meta and "entry #1" in meta
+    inject = VALIDATE_CASES["suspeita-injecao"]["stderr"]
+    assert "instruction-injection pattern" in inject
+    for case in ("suspeita-metacaractere", "suspeita-injecao"):
+        assert VALIDATE_CASES[case]["exit"] == 1
+        assert "never demoted" not in VALIDATE_CASES[case]["stderr"]
+
+
+def test_reachable_ids_reaches_a_fixed_point_and_drops_the_start():
+    doc = {"phases": [{"id": 1, "dependsOn": []}, {"id": 2, "dependsOn": [1]},
+                      {"id": 3, "dependsOn": [2]}, {"id": 4, "dependsOn": []}]}
+    assert R.reachable_ids(doc, 3) == [1, 2]
+    assert R.reachable_ids(doc, 1) == []
+    assert R.reachable_ids(doc, 4) == []
+
+
+def test_reachable_ids_terminates_on_a_dependency_cycle():
+    """roadmap.json is a file people edit, and roadmap-init's dangling check does
+    not reject a cycle. Without the fixed-point test this loops forever."""
+    doc = {"phases": [{"id": 1, "dependsOn": [2]}, {"id": 2, "dependsOn": [1]}]}
+    assert R.reachable_ids(doc, 1) == [2]
+
+
+def test_the_first_provider_by_phase_id_wins():
+    """Deterministic rather than incidental: creates_in_scope orders by phase id
+    and the lookup takes the first match."""
+    doc = {"phases": [
+        {"id": 3, "dependsOn": [], "status": "completed", "dir": "d3", "creates": ["x (late)"]},
+        {"id": 1, "dependsOn": [], "status": "pending", "dir": "d1", "creates": ["x (early)"]},
+    ]}
+    rows = R.creates_in_scope(doc, [1, 3])
+    assert [r[0] for r in rows] == [1, 3]
+
+
+# ---------------------------------------------------------------------------
 # The two constants that must not drift apart
 # ---------------------------------------------------------------------------
 
