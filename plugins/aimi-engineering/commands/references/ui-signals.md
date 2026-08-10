@@ -72,7 +72,10 @@ is a structural match:
 **UI-bearing phase definition:** a phase is UI-bearing when any `creates` or
 `areas` entry, or the phase `goal`, matches a file-extension, path-segment, or
 lexical marker above (see the Roadmap File Schema note on `phases[].creates`/
-`areas`/`goal` in the top-level CLAUDE.md).
+`areas`/`goal` in the top-level CLAUDE.md). A `creates`/`needs` entry is
+`{identity, description}` — scan **both** fields: the file-extension and
+path-segment markers live in an identity, the lexical ones almost always in a
+description.
 
 ## How to Combine
 

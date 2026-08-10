@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A `creates`/`needs` entry is now two fields, `{identity, description}`, instead of one string `"identity (description)"`.** The identity is grepped literally to prove a phase built what it promised; the rest is prose. While both lived in one string, every boundary that needed one half had to re-derive the split at the first `(` — and whoever forgot applied prose-cleaning rules to a name. That is the defect, and four independent paren-splitters that disagreed with each other had accumulated around it. There is nothing left to re-derive.
+  - **Existing roadmaps must be migrated once, and are refused until they are.** `aimi-cli.sh normalize-contracts --feature <slug>` rewrites a roadmap in place; it is idempotent, and it computes each identity with the same function every pre-migration reader used, so no identity changes by a byte and no downstream `needs` is repointed. Run against this repository's own roadmap (7 phases, 64 entries), `validate-contracts` and `roadmap-sweep` return byte-identical output before and after.
+  - **Every contract-reading verb refuses a pre-2.0 roadmap by name** — `validate-contracts`, `verify-creates`, `roadmap-sweep`, `roadmap-write-handoff`, `roadmap-amend-phase`, and `roadmap-init --sync` — and names the migration in its message. It refuses rather than skipping deliberately: reporting `valid: true` about a document it never parsed is worse than no check at all.
+  - **The five lifecycle verbs stay readable on an unmigrated roadmap** — `roadmap-get`, `roadmap-set-status`, `roadmap-claim`, `roadmap-release-claim`, `roadmap-reconcile`. None of them reads a contract entry, and a migration must never leave a session already in flight unable to release its own claim.
+  - **A malformed entry now raises instead of vanishing.** Thirteen readers filtered their lists by type first, which against the new shape would have silently dropped every entry and reported a clean roadmap — disabling the orphan check, the duplicate check and the downstream rewrite without printing a line. The filter is gone; the refusal names the phase, the list and the position.
+
+### Fixed
+
+- **A roadmap can no longer end up holding both entry shapes at once.** Measured on the previous code: amending a stored roadmap with an entry of the other shape dropped an identity a later phase still cited, exited 0, and left `validate-contracts` crashing on the file it had just written. Both doors are shut — the amendment is refused before the lock, and a document that already holds a mixed list is refused by every reader.
+
+### Removed
+
+- **Nothing is applied to a `creates`/`needs` identity any more** — no fence strip, no backtick unwrap, no newline fold, no truncation. The two sanitizers that existed only to split one string and treat its halves differently are deleted with it. An identity that breaks a rule is now **refused rather than repaired**, including one over 500 characters, where every other roadmap field is truncated: a truncated goal is still the goal, a truncated name is a search that returns nothing. One behaviour changes visibly — a backticked identity such as `` `cmd_foo` `` is refused, where it used to be unwrapped to `cmd_foo`. The author hears about it at the one moment they can still rename the artifact, rather than finding a roadmap that stores a name they did not type. A backticked span in a **description** still unwraps to its inner text.
+
 ## [1.121.1] - 2026-08-08
 
 > **One rule for what a `creates`/`needs` artifact identity may be, enforced where the text enters the system.** Three places decided what a legal identity was and none of them consulted the others, which produced two failures that looked unrelated and shared one root: a roadmap the CLI itself had just written was rejected by the CLI's own reader (#99, #85), and an identity written with backticks was deleted on its way to disk and resurfaced an entire phase later as a contract nothing could fulfil (#100).

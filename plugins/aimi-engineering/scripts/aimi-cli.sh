@@ -13672,59 +13672,15 @@ def _rm_sanitize(maxlen):
     | if (length > maxlen) then .[0:maxlen] else . end
   ) end;
 
-# The INTENDED-mutation prefix of _rm_sanitize: formatting normalization only.
-# Fenced blocks go, a backticked span unwraps to its inner text, a stray marker
-# goes, newlines collapse, the cap applies -- and nothing else. Every rule
-# _rm_sanitize applies beyond this point DELETES CONTENT (an HTML/XML-looking
-# tag, "$(", an instruction-override phrase), which is fine for prose but
-# rewrites an identity into a token the phase will not deliver.
-#
-# _roadmap_identity_errors compares the two: same identity, nothing was lost;
-# different identity, a content rule fired and the entry is refused rather than
-# quietly stored under a name verify-creates will never find. Keep this in step
-# with _rm_sanitize -- a new formatting rule belongs in both, a new content rule
-# in _rm_sanitize alone.
-def _rm_markers_only(maxlen):
-  if . == null then null else
-  ( .
-    | gsub("```[\\s\\S]*?```"; "")
-    | gsub("`(?<inner>[^`\n]*)`"; .inner)
-    | gsub("`"; "")
-    | gsub("\r\n|\r|\n"; " ")
-    | if (length > maxlen) then .[0:maxlen] else . end
-  ) end;
-
-# The two rulers, applied to MUTATION as well as to judgement. A creates/needs
-# entry is "identity (human description)": the identity is the token
-# verify-creates greps for literally, and the description is prose that reaches
-# a sub-agent prompt. They need opposite treatment, and running one sanitizer
-# over the whole string gave the identity the prose treatment.
-#
-# The identity gets formatting normalization ONLY. The content rules are what
-# rewrote "parseList<T>" into "parseList" and "design-system:tokens" into
-# "design-tokens" -- silently, with validate-contracts then passing, so
-# verify-creates went looking for a name the phase never produces and the
-# failure surfaced a whole phase away from its cause. This repository declares
-# templated and namespaced identities on purpose (see the identity-kinds test:
-# "queue:emails", "Generic<T>", "db/migrations/*.sql"), so destroying them was
-# never right and refusing them would not be either. They now survive verbatim.
-#
-# The description keeps the full sanitizer, unchanged: a tag, an override
-# phrase or a "$(" in prose is exactly what those rules exist for.
-#
-# Nothing here weakens what an identity may CONTAIN. _roadmap_identity_errors
-# still refuses whitespace, "..", a leading "/", the shell class and every
-# injection pattern -- on the whole entry -- before any of this is stored.
-def _rm_sanitize_contract(maxlen):
-  if . == null then null else
-  ( (_rm_markers_only(maxlen)) as $m
-    | ($m | index("(")) as $i
-    | (if $i == null then $m else $m[0:$i] end) as $ident
-    | (if $i == null then "" else ($m[$i:] | _rm_sanitize(maxlen)) end) as $desc
-    | ($ident + $desc)
-    | if (length > maxlen) then .[0:maxlen] else . end
-  ) end;
 '
+# story-merge is the only consumer of the block above, and _rm_sanitize is the
+# only definition it needs. Two more lived here until creates/needs became
+# {identity, description}: a formatting-only variant, and a splitter that found
+# the "(" and applied the two rulers either side of it. Both existed solely
+# because the two halves shared one string. There is no string to split now --
+# roadmap.py sanitizes the description field and leaves the identity field
+# alone -- so keeping them would leave a second, unreachable answer to "what
+# does this CLI do to an identity" for a future reader to find and believe.
 
 # Validate --feature is present and a safe single path component.
 # $2 is the optional verb label used to prefix the error; it defaults to the
@@ -13779,7 +13735,7 @@ _roadmap_require() {
 }
 
 # Refuse a roadmap whose stored creates/needs entries pre-date
-# $_ROADMAP_CONTRACT_VERSION. Callers: every verb that READS a contract.
+# $_ROADMAP_CONTRACT_VERSION.
 #   _roadmap_require_contracts <verb> <roadmap_path> <feature>
 #
 # IT REFUSES, IT DOES NOT SKIP, and that is the whole design of this helper.
@@ -13788,6 +13744,26 @@ _roadmap_require() {
 # never parsed. A gate that reports success for an unread file is worse than
 # no gate: the caller acts on the verdict either way, and only one of the two
 # outcomes tells them the truth is unknown.
+#
+# WHO CALLS IT, AND WHO DELIBERATELY DOES NOT. Every verb that reads or writes
+# a creates/needs entry: validate-contracts, verify-creates, roadmap-sweep,
+# roadmap-write-handoff, roadmap-amend-phase, and roadmap-init --sync (which
+# would otherwise merge a 2.0 phase into a 1.0 document and leave one file
+# holding both shapes -- measured: that mixture drops an identity a later phase
+# still cites and only surfaces a whole phase later).
+#
+# The five LIFECYCLE verbs -- roadmap-get, roadmap-set-status, roadmap-claim,
+# roadmap-release-claim, roadmap-reconcile -- are ungated on purpose. None of
+# them reads an entry; they move status and claims. Gating them would mean a
+# session already in flight when the migration lands could not release its own
+# claim or record the phase it just finished, which is a worse failure than the
+# one this gate exists to prevent. normalize-contracts is ungated for the
+# obvious reason: it is the migration.
+#
+# phase-overlap is ungated too, and that is a judgement rather than an
+# oversight: it reads `dir` from roadmap.json and then two tasks files'
+# implementation.files. Its verdict does not depend on a contract entry, so
+# refusing it would strand a caller for a reason its answer never touched.
 #
 # The comparison is the sort -V idiom cmd_validate_tasks already uses for
 # schemaVersion, with a "0" floor so an absent or null roadmapVersion sorts
@@ -13823,9 +13799,9 @@ _roadmap_validate_phase_id() {
 # Read a phases JSON array on stdin; print one human-readable error line per
 # creates[]/needs[] entry whose *identity* can never name a real artifact.
 #
-# The rule is deliberately narrow -- exactly five shapes are rejected, judged
-# over the identity (text before the first "(", trimmed) and nothing else:
-#   (a) empty after cv_identity
+# The rule is deliberately narrow -- exactly six shapes are rejected, judged
+# over the identity FIELD and nothing else:
+#   (a) empty
 #   (b) a ".." PATH SEGMENT, i.e. (^|/)\.\.($|/) -- not any byte pair "..",
 #       so an identity like services/foo..bar is untouched
 #   (c) a leading "/" anchored at position 0 -- the Endpoint kind
@@ -13837,6 +13813,11 @@ _roadmap_validate_phase_id() {
 #   (e) a shell metacharacter from _SHELL_CLASS -- the class [$`;|&] that
 #       validate-contracts reads through cv_shell_char -- so the writer and
 #       the reader consult one table rather than two that overlap by accident
+#   (f) more than 500 characters. This one is a REFUSAL where every other
+#       roadmap free-text field truncates, and the asymmetry is the point: a
+#       truncated goal is still the goal, while a truncated identity is a name
+#       verify-creates would grep for and never find. Nothing rewrites an
+#       identity, so nothing may shorten one either.
 # Identity *strength* is explicitly not judged: at declaration time research has
 # not run, so a bare Table name ("notifications") or a bare directory
 # ("db/migrations") must pass -- guessing a path here fails at phase close for a
@@ -13866,12 +13847,12 @@ _roadmap_validate_phase_id() {
 # to rename the file. That is the deliberate trade -- see
 # commands/references/scope-contexts.md, which teaches the rule and its limit.
 #
-# Why (e) judges the IDENTITY and not the whole entry. Before it existed the two
+# Why (e) judges the IDENTITY and not both fields. Before it existed the two
 # sides disagreed twice over. The writer let ";" "|" "&" and a lone "$" through
 # untouched while validate-contracts refused that whole class, so roadmap-init
 # wrote phases its own contract gate then hard-failed; and the reader judged the
-# RAW entry, so a semicolon anywhere in the parenthesised human description
-# killed an identity that was itself clean ("cmd_clean (does x; then y)").
+# whole entry, so a semicolon anywhere in the human description killed an
+# identity that was itself clean ("cmd_clean", "does x; then y").
 # Both sides now judge the same text -- the identity carries the class ban and
 # the description does not -- which is also what verify-creates has always done:
 # it searches by identity alone, so a check scoped to anything wider was talking
@@ -13886,11 +13867,12 @@ _roadmap_validate_phase_id() {
 # character class is a legibility fix; freeing it of the injection patterns
 # would reopen a prompt-injection path that is closed today.
 #
-# EXACTLY ONE of the five class characters cannot reach (e): the backtick.
-# _rm_sanitize_contract runs over creates/needs first in both callers, and its
-# marker-normalization half unwraps a backticked span and drops a stray marker,
-# so no backtick survives into a stored identity. The other four -- ";" "|" "&"
-# and "$" -- all arrive here and are all refused.
+# ALL FIVE class characters reach (e), the backtick included. That is new. It
+# used to be unreachable: a splitting sanitizer ran over the entry first and its
+# marker half unwrapped a backticked span, so no backtick survived into a stored
+# identity. Nothing sanitizes an identity now, so a backticked name arrives here
+# intact and is refused by name -- which is the outcome the unwrap was
+# approximating, reached by saying so instead of by rewriting.
 #
 # "$(" is NOT a sixth class member and never was: it is a two-character
 # SEQUENCE, and the class member it starts with, "$", reaches this rule like any
@@ -13959,6 +13941,16 @@ cmd_roadmap_init() {
   check_python3
   local new_phases
   new_phases=$(printf '%s' "$input_json" | python3 "$(_aimi_roadmap_py)" init-validate) || exit $?
+
+  # A --sync merges 2.0 phases into whatever is already there. Into a pre-2.0
+  # document that produces one file holding both entry shapes, which is worse
+  # than either shape alone: the readers see a list they cannot judge uniformly.
+  # Gated only when the file exists, because a fresh roadmap-init has nothing to
+  # be old, and only under --sync, because without it the "already exists; pass
+  # --sync" refusal below is the more actionable message.
+  if [ "$sync_mode" = true ] && [ -f "$roadmap_path" ]; then
+    _roadmap_require_contracts "roadmap-init" "$roadmap_path" "$feature"
+  fi
 
   mkdir -p "$(dirname "$roadmap_path")"
 
@@ -14064,6 +14056,7 @@ cmd_roadmap_amend_phase() {
 
   local roadmap_path
   roadmap_path=$(_roadmap_require "roadmap-amend-phase" "$feature")
+  _roadmap_require_contracts "roadmap-amend-phase" "$roadmap_path" "$feature"
 
   # --- Locked read-modify-write ------------------------------------------
   # Bash holds the lock; roadmap.py does the whole read-modify-write inside it.
@@ -14328,6 +14321,7 @@ cmd_roadmap_write_handoff() {
 
   local roadmap_path
   roadmap_path=$(_roadmap_require "roadmap-write-handoff" "$feature")
+  _roadmap_require_contracts "roadmap-write-handoff" "$roadmap_path" "$feature"
 
   # The one roadmap read that stays here: the handoff path is built from this
   # phase's stored dir, and validate_path_in_project below is a bash rule about
@@ -14385,9 +14379,9 @@ cmd_roadmap_write_handoff() {
 # Cross-check a feature's roadmap.json creates[]/needs[] contracts: an unmet
 # need (no phase in the needing phase's dependsOn closure creates it) and a
 # duplicate creates (the same artifact identity declared by two or more
-# phases). Artifact identity is the substring before a creates/needs entry's
-# first "(", trimmed of surrounding whitespace (see outline 01's shared
-# scope-context reference).
+# phases). Artifact identity is a creates/needs entry's own `identity` field
+# (see outline 01's shared scope-context reference); both verbs refuse a
+# pre-2.0 roadmap outright rather than reporting on entries they cannot read.
 #
 # Both verbs are argument parsing here and one call into roadmap.py; the shared
 # contract vocabulary they used to read through -- what an identity is, which
@@ -14494,6 +14488,7 @@ cmd_verify_creates() {
 
   local roadmap_path
   roadmap_path=$(_roadmap_require "verify-creates" "$feature")
+  _roadmap_require_contracts "verify-creates" "$roadmap_path" "$feature"
 
   if ! jq -e --argjson pid "$phase_id" '.phases[] | select(.id == $pid)' "$roadmap_path" >/dev/null 2>&1; then
     echo "Error: verify-creates: phase $phase_id not found in $roadmap_path" >&2
@@ -14547,6 +14542,9 @@ cmd_validate_contracts() {
 
   local roadmap_path
   roadmap_path=$(_roadmap_require "validate-contracts" "$feature")
+  # Before the phase-exists check, so a pre-2.0 roadmap is named as such rather
+  # than reported as a missing phase.
+  _roadmap_require_contracts "validate-contracts" "$roadmap_path" "$feature"
   if [ -n "$phase_id" ] && ! jq -e --argjson pid "$phase_id" '.phases[] | select(.id == $pid)' "$roadmap_path" >/dev/null 2>&1; then
     echo "Error: validate-contracts: phase $phase_id not found in $roadmap_path" >&2
     exit 1
@@ -14631,6 +14629,9 @@ cmd_roadmap_sweep() {
 
   local roadmap_path
   roadmap_path=$(_roadmap_require "roadmap-sweep" "$feature")
+  # The one non-zero exit this advisory verb has. "Advisory" is about what it
+  # does with a finding, not a licence to report a clean roadmap it never read.
+  _roadmap_require_contracts "roadmap-sweep" "$roadmap_path" "$feature"
 
   # Single-pass, advisory-only computation: never exits non-zero for a roadmap
   # it could read. The drop-and-report rule, and why the drop must be reported
@@ -15353,14 +15354,18 @@ COMMANDS:
                               or a computed dir that fails ^phase-[0-9]+(\.[0-9]+)?
                               (-[a-z0-9][a-z0-9-]*)?$. Free-text fields are sanitized
                               and length-capped per commands/references/sanitization.md.
-                              Also rejects, per entry, a creates/needs IDENTITY (the
-                              text before the first "(") that is empty, carries
-                              whitespace, a ".." segment, a leading "/", one of
-                              [$`;|&], or matches an injection pattern -- and an
-                              areas[] glob that is absolute or traverses. The
-                              identity is what verify-creates greps for literally;
-                              the parenthesised description is judged only for
-                              injection patterns and may hold the rest. Full rules
+                              A creates/needs entry is {identity, description};
+                              an entry that is not that object, or that carries
+                              any other key, is rejected naming the key. Also
+                              rejects, per entry, an IDENTITY that is empty,
+                              carries whitespace, a ".." segment, a leading "/",
+                              one of [$`;|&], runs past 500 characters, or matches
+                              an injection pattern -- and an areas[] glob that is
+                              absolute or traverses. The identity is what
+                              verify-creates greps for literally and is stored
+                              exactly as submitted; the description is judged only
+                              for injection patterns, may hold the rest, and is
+                              the half the prose sanitizer applies to. Full rules
                               and rationale: commands/references/scope-contexts.md
                               section "Creates/Needs Contracts".
     roadmap-amend-phase --feature <slug> --phase <id> [--goal <text>] [--branch <name>]

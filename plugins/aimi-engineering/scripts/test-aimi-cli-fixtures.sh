@@ -22,17 +22,20 @@
 # (part 3 already grew three independent paren-splitters that disagree with the
 # CLI's own on inputs none of them is tested against).
 #
-# The current wire format is a single string, "<identity> (<description>)". If
-# that becomes a structured object, this file is where it changes.
+# THIS FILE IS WHERE THE FORMAT CHANGED, AND IT COST ONE FUNCTION BODY. The wire
+# format was the single string "<identity> (<description>)"; it is now the object
+# {identity, description}. Every fixture that had already been routed through
+# these two moved with them and needed no edit of its own -- which is the whole
+# argument for their existence, made concrete.
 
 # aimi_contract_entry <identity> [description]  -> one JSON value on stdout
+#
+# An omitted description is "", never null and never an absent key: a reader that
+# had to branch on which of the three it got would be the disjunction this schema
+# exists to remove.
 aimi_contract_entry() {
   local identity="$1" description="${2:-}"
-  if [ -n "$description" ]; then
-    jq -n --arg i "$identity" --arg d "$description" '$i + " (" + $d + ")"'
-  else
-    jq -n --arg i "$identity" '$i'
-  fi
+  jq -n --arg i "$identity" --arg d "$description" '{identity: $i, description: $d}'
 }
 
 # aimi_contract_list "<identity>|<description>" ...  -> a JSON array on stdout

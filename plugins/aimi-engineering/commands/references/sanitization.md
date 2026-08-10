@@ -27,28 +27,32 @@ Apply all three rules in order. The result replaces the original string.
 ## Contract Entries
 
 **A `creates`/`needs` entry is not free text, and the rules above do not apply
-to it whole.** It is `identity (description)`: the identity is the token
+to it whole.** It is `{identity, description}`: the identity is the token
 `verify-creates` greps for *literally*, and the description is prose. They need
-opposite treatment.
+opposite treatment, and they are two fields precisely so that no layer has to
+work out where one ends and the other begins before applying the right rule.
 
 - **The identity is never modified — by anything, anywhere.** Not tag stripping,
-  not `$(` removal, not instruction-override stripping. Rules 2 and 3 delete
-  content, and deleting content from a name produces a name the phase will never
-  deliver.
-- **The description gets all three rules**, unchanged.
+  not `$(` removal, not instruction-override stripping, not backtick unwrapping,
+  not newline folding, not truncation. Every one of those changes a name, and a
+  changed name is one the phase will never deliver.
+- **The description gets all three rules**, unchanged, plus its 500-char cap.
+- **An identity that breaks a rule is REFUSED, never repaired** — including one
+  over 500 characters, where every other field would be truncated. That
+  asymmetry is deliberate: a truncated goal is still the goal, a truncated name
+  is a search that returns nothing.
 - **You never have to judge whether an identity is legal.** Submit it verbatim
   and let `roadmap-init` refuse it. Its diagnostic names the phase, the list, the
   entry's position and every reason, and `/aimi:plan` already repairs and
   retries once against exactly that message.
 
 **This applies to every layer, including the agent that composes the entry —
-not only to the CLI.** Sanitizing a contract entry upstream does not duplicate
-the CLI's work, it *defeats* it: the write-time guard compares the submitted
-entry against its own normalized form, so an entry already damaged upstream
-makes both sides agree on the damage and the refusal is laundered away. Measured
-consequence: an agent applying rule 2 to `parseList<T> (a generic helper)` hands
-over `parseList (a generic helper)`, which the CLI stores without complaint, and
-the contract is unresolvable a phase later.
+not only to the CLI.** Sanitizing an identity upstream does not duplicate the
+CLI's work, it *defeats* it: the CLI can only refuse the identity it is given,
+so one already damaged upstream is one it accepts without complaint and the
+refusal is laundered away. Measured consequence: an agent applying rule 2 to an
+identity of `parseList<T>` hands over `parseList`, which is stored, and the
+contract is unresolvable a phase later.
 
 The normative statement of the split, its rationale and the diagnostics live in
 `scope-contexts.md` § *Two rulers: the identity and the description*. This

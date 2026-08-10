@@ -11,22 +11,23 @@ one call per verb -- bash acquires the lock, calls here once, and prints
 whatever comes back.
 
 The reason for the split is a measured difference in how the two languages
-FAIL. A creates/needs entry is about to stop being the string
-"identity (description)" and become {identity, description}, and the question
-every reader asks is "what is the identity of this entry". In jq:
+FAIL. A creates/needs entry stopped being the string "identity (description)"
+and became {identity, description}, and the question every reader asks is "what
+is the identity of this entry". In jq:
 
     [{identity:"x"}] | [ .[] | select(type == "string") | _cv_identity ]
     => []            exit 0, no diagnostic, guard silently disabled
 
-in Python:
+here:
 
-    entry["identity"]  on a str
-    => TypeError: string indices must be integers
+    contract_entries(phase, "creates")  on a stored string
+    => MalformedEntry: phase 2: creates entry #1 must be an object ...
 
-Both are wrong code. Only one of them says so. Three of the five defects found
-while building this contract were of the silent kind -- jq's `.` rebinding
-inside a pipe, that type filter, and a backtick inside a double-quoted `echo`
-forking a command substitution -- and all three are unrepresentable here.
+Both inputs are wrong. Only one of the two reactions says so. Three of the five
+defects found while building this contract were of the silent kind -- jq's `.`
+rebinding inside a pipe, that type filter, and a backtick inside a
+double-quoted `echo` forking a command substitution -- and all three are
+unrepresentable here.
 
 Two things this file must NOT become:
 
@@ -84,40 +85,27 @@ def rm_sanitize(value, maxlen):
     return s[:maxlen] if len(s) > maxlen else s
 
 
-def rm_markers_only(value, maxlen):
-    """The INTENDED-mutation prefix of rm_sanitize: formatting only.
-
-    Every rule rm_sanitize applies beyond this point DELETES CONTENT -- an
-    HTML/XML-looking tag such as "<T>", a "$(" opener, an instruction-override
-    phrase. That is right for prose and wrong for a name: it rewrote
-    "parseList<T>" into "parseList" and then verify-creates went looking for a
-    token the phase never produces.
-
-    Keep in step with rm_sanitize: a new FORMATTING rule belongs in both, a new
-    CONTENT rule in rm_sanitize alone.
-    """
-    if value is None:
-        return None
-    s = value
-    s = re.sub(r"```[\s\S]*?```", "", s)
-    s = re.sub(r"`([^`\n]*)`", r"\1", s)
-    s = s.replace("`", "")
-    s = re.sub(r"\r\n|\r|\n", " ", s)
-    return s[:maxlen] if len(s) > maxlen else s
-
-
-def rm_sanitize_contract(value, maxlen):
-    """The two rulers applied to mutation: identity formatting-only, description full."""
-    if value is None:
-        return None
-    marked = rm_markers_only(value, maxlen)
-    i = marked.find("(")
-    if i < 0:
-        ident, desc = marked, ""
-    else:
-        ident, desc = marked[:i], rm_sanitize(marked[i:], maxlen)
-    s = ident + desc
-    return s[:maxlen] if len(s) > maxlen else s
+# THE TWO RULERS, NOW THAT THE TWO HALVES ARE TWO FIELDS.
+#
+# The description gets rm_sanitize above. The identity gets NOTHING: it is
+# stored exactly as it was submitted, and a name this file will not accept is
+# REFUSED rather than repaired. There used to be a third sanitizer here
+# (rm_sanitize_contract) whose whole job was to find the "(" and apply two
+# different rules either side of it, plus a formatting-only variant
+# (rm_markers_only) so the identity half could be normalized without being
+# rewritten. Both existed only because the two halves shared one string. They
+# are gone with it -- and so is the class of defect where a rule meant for
+# prose reached a name, because there is no longer any code path that can
+# reach one.
+#
+# What "never modified" costs and why it is still right: an identity now keeps
+# its backticks, its newlines and its length instead of having them normalized
+# away. Each of those is refused by name in _identity_reasons below -- a
+# backtick is in the shell class, a newline is whitespace, and an over-long
+# identity has its own reason -- so nothing gets through unjudged. The author
+# sees the refusal at write time, which is the one moment they can still fix
+# it, rather than discovering one phase later that verify-creates is grepping
+# for a token nobody ever wrote.
 
 
 # ---------------------------------------------------------------------------
@@ -131,14 +119,18 @@ def rm_sanitize_contract(value, maxlen):
 # cv_suspicious is deliberately two halves with two different scopes. The full
 # argument for why -- and why the description keeps the injection guard -- lives
 # in commands/references/scope-contexts.md, "Two rulers". In short:
-#   * cv_injection judges the WHOLE raw entry, description included, because a
+#   * cv_injection judges BOTH fields, description included, because a
 #     description reaches a story-expander sub-agent prompt via /aimi:plan's
 #     phaseHandoffBlocks (grep that symbol; do not cite line numbers here, they
 #     drift).
-#   * The shell class judges only the IDENTITY (cv_identity: the text before the
-#     first "(", trimmed) -- the token verify-creates greps and every contract
-#     match keys on. Applying it to the raw entry refused
-#     "cmd_clean (does x; then y)", an identity that is itself clean.
+#   * The shell class judges only the IDENTITY -- the token verify-creates greps
+#     and every contract match keys on. Judging the description too refused
+#     "cmd_clean" described as "does x; then y", an identity that is itself
+#     clean.
+#
+# The two fields are read separately rather than rejoined into one string. A
+# join would have to invent a separator, and a pattern straddling it would match
+# text no field actually holds.
 #
 # Both instruction markers anchor on POSITION -- start-of-string or whitespace,
 # then any run of punctuation -- because that is what a marker looks like and
@@ -160,11 +152,6 @@ def rm_sanitize_contract(value, maxlen):
 # rm_sanitize's own "system:" strip, which uses the same anchor. Both tables in
 # test-aimi-cli-part3-roadmap-forge.sh guard this pair -- widening fails the
 # ordinary rows, narrowing fails the injection rows.
-#
-# The shell-class half is written as a cheap necessary condition first: an
-# identity is a trimmed prefix of the raw entry, so a class character in the
-# identity implies one in the entry. Testing the raw entry first lets the common
-# case (a clean entry) skip cv_identity's two substitutions entirely.
 #
 # judge_phases rejects both halves at write time, so the reader-side check is
 # defence in depth and should not be the place authors meet the rule.
@@ -204,10 +191,128 @@ def cv_shell_char(s):
 
 
 def cv_suspicious(entry):
-    return cv_injection(entry) or (
-        _SHELL_CLASS.search(entry) is not None
-        and _SHELL_CLASS.search(cv_identity(entry)) is not None
+    """The reader-side judgement, over an entry already proven to be 2.0."""
+    identity, description = entry["identity"], entry.get("description") or ""
+    return (
+        cv_injection(identity)
+        or cv_injection(description)
+        or _SHELL_CLASS.search(identity) is not None
     )
+
+
+# ---------------------------------------------------------------------------
+# The 2.0 entry: two fields, and no way to read one without proving both
+# ---------------------------------------------------------------------------
+#
+# WHAT THIS REPLACES, AND WHY IT IS NOT THE SAME THING WITH A NEW NAME. Until
+# the schema split, thirteen call sites read their lists through a
+# `select(type == "string")` filter that reproduced 1.0 exactly. In 1.0 it
+# discarded nothing, because every entry WAS a string. The moment an entry
+# became an object it would have discarded every one of them -- disabling the
+# orphan check, the dropped/added diff, retarget resolution, the duplicate check
+# and the downstream rewrite, without printing one line. That was measured, not
+# theorised, and removing it is the reason this branch exists.
+#
+# So the replacement is not another filter. contract_entries RAISES, and it
+# raises with the phase, the list and the position already in the message,
+# because the caller that can act on the diagnostic is a human reading stderr,
+# not this function. A skip and a raise are the same amount of code; only one of
+# them tells anybody.
+#
+# The gate in aimi-cli.sh (_roadmap_require_contracts) means a pre-2.0 document
+# never reaches here at all -- it is refused by version, before a single entry is
+# read. What DOES reach here is the shape this file can neither prevent nor
+# repair: a document stamped 2.0 whose entries are not, i.e. one that was
+# hand-edited, or written by something that stamped the version without doing
+# the work. MIGRATION_HINT names both possibilities rather than assuming.
+
+CONTRACT_ENTRY_KEYS = ("identity", "description")
+
+# The identity is never truncated -- see the two-rulers note above -- so the cap
+# is a refusal instead, and it is the same 500 the description carries.
+CONTRACT_MAXLEN = 500
+
+MIGRATION_HINT = (
+    "An entry is {identity, description}. If this roadmap predates that shape, "
+    "its roadmapVersion is wrong for what it holds -- migrate it with "
+    "normalize-contracts; otherwise repair the entry with roadmap-amend-phase."
+)
+
+
+class MalformedEntry(Exception):
+    """A creates/needs entry that is not a 2.0 {identity, description} object.
+
+    Raised, never caught inside a rule. main() turns it into one stderr line and
+    a non-zero exit, so a malformed entry stops the verb instead of quietly
+    shrinking what it looked at.
+    """
+
+
+def _json_type(value):
+    """jq's `type`, so a diagnostic names the shape the author actually wrote."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, str):
+        return "a string"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, list):
+        return "an array"
+    return "an object"
+
+
+def entry_shape_reasons(entry):
+    """Why this value is not a 2.0 contract entry. Empty when it is one.
+
+    Every unknown key is named individually rather than counted, because the one
+    the author meant to write is the one the message has to show them.
+    """
+    if not isinstance(entry, dict):
+        return ["must be an object {identity, description}, got " + _json_type(entry)]
+    reasons = []
+    for key in entry:  # insertion order, so the message follows the payload
+        if key not in CONTRACT_ENTRY_KEYS:
+            reasons.append(
+                'carries the unknown key "' + key + '" -- an entry has exactly '
+                "identity and description"
+            )
+    if "identity" not in entry:
+        reasons.append("has no identity")
+    elif not isinstance(entry["identity"], str):
+        reasons.append("identity must be a string, got " + _json_type(entry["identity"]))
+    if "description" in entry and not isinstance(entry["description"], str):
+        reasons.append(
+            "description must be a string, got " + _json_type(entry["description"])
+            + " -- an absent description is \"\", never null"
+        )
+    return reasons
+
+
+def contract_entries(phase, key):
+    """A stored phase's creates or needs, each proven to be a 2.0 entry.
+
+    THE ONE WAY A READER TOUCHES A CONTRACT LIST. Returns the list unchanged so
+    positions and order survive; raises MalformedEntry, naming where, the moment
+    one entry is not the shape the document claims to hold.
+    """
+    entries = phase.get(key) or []
+    for index, entry in enumerate(entries, 1):
+        reasons = entry_shape_reasons(entry)
+        if reasons:
+            raise MalformedEntry(
+                "phase " + _num(phase.get("id")) + ": " + key + " entry #" + str(index)
+                + " " + "; and it ".join(reasons) + ". " + MIGRATION_HINT
+            )
+    return entries
+
+
+def contract_entry(identity, description=""):
+    """The stored form. description is "" when absent, never null: a
+    string-or-null disjunction costs every reader a branch for a distinction
+    nothing consumes."""
+    return {"identity": identity, "description": description}
 
 
 # ---------------------------------------------------------------------------
@@ -219,8 +324,6 @@ _DOTDOT_SEGMENT = re.compile(r"(^|/)\.\.($|/)")
 _ALNUM = re.compile(r"[a-zA-Z0-9]")
 _SEPARATORS_AND_GLOBS = re.compile(r"[*?\[\]/ ]")
 
-_MK_KEY = {"creates": "__mkCreates", "needs": "__mkNeeds"}
-
 
 def _reject_unfindable_identity(ident):
     """True when verify-creates could never match this token against source.
@@ -229,19 +332,25 @@ def _reject_unfindable_identity(ident):
     byte-for-byte the ones verify-creates step 2 strips, so the token judged at
     write time is exactly the token searched at close time. "POST  /api/x" with
     two spaces does not match that shape there and must not match it here.
-    CR and LF are in the class as insurance: roadmap-init's sanitizer already
-    folds newlines to spaces, but the amend path reaches this helper too and may
-    sanitize differently.
+    CR and LF are in the class and are now load-bearing rather than insurance:
+    nothing folds a newline in an identity any more, so this is what refuses one.
     """
     if _METHOD_PREFIX.search(ident):
         ident = re.sub(r"^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) ", "", ident, count=1)
     return re.search(r"[ \t\r\n]", ident) is not None
 
 
-def _identity_reasons(entry, ident, marker_form):
+def _identity_reasons(ident, description):
+    """Every reason this identity cannot name an artifact, in a fixed order.
+
+    The identity carries all of them but one: the injection alternation also
+    reads the description, because a description is threaded verbatim into a
+    story-expander sub-agent prompt and is therefore prompt input, not
+    human-only prose.
+    """
     reasons = []
     if len(ident) == 0:
-        reasons.append("empty once the description is stripped")
+        reasons.append("empty -- the identity field is where the artifact is named")
     if _DOTDOT_SEGMENT.search(ident):
         reasons.append('contains a ".." path segment')
     if ident.startswith("/"):
@@ -258,26 +367,23 @@ def _identity_reasons(entry, ident, marker_form):
             'contains the shell metacharacter "'
             + shell_char
             + '", which validate-contracts refuses in an identity -- move that '
-            "text into the parenthesised description, or, for an endpoint, "
-            "declare the route without its query string"
+            "text into the description field, or, for an endpoint, declare the "
+            "route without its query string"
         )
-    if cv_injection(entry):
+    if cv_injection(ident) or cv_injection(description):
         reasons.append(
             "matches an instruction-injection pattern validate-contracts "
             "refuses (ignore previous / system: / INSTRUCTIONS: / code fence / "
             '"$(") -- reword it; the description reaches a sub-agent prompt, so '
-            "this half is judged on the whole entry, not just the identity"
+            "both fields are judged, not just the identity"
         )
-    if marker_form is not None and cv_identity(marker_form) != ident:
+    if len(ident) > CONTRACT_MAXLEN:
         reasons.append(
-            "would be stored under a DIFFERENT identity than the one written: \""
-            + cv_identity(marker_form)
-            + '" becomes "'
-            + ident
-            + '". A sanitizer rule that deletes content (an HTML/XML-looking tag '
-            'such as "<T>", a "$(" opener, or an instruction-override phrase) '
-            "rewrote it, and verify-creates would then grep for a name this "
-            "phase never produces -- rename the artifact so it survives verbatim"
+            "is longer than "
+            + str(CONTRACT_MAXLEN)
+            + " characters -- an identity is never truncated to fit, because a "
+            "truncated name is one verify-creates would grep for and never find; "
+            "shorten it or move the prose into the description field"
         )
     if len(ident) > 0 and not _ALNUM.search(_SEPARATORS_AND_GLOBS.sub("", ident)):
         reasons.append(
@@ -293,22 +399,25 @@ def _identity_reasons(entry, ident, marker_form):
 
 
 def judge_phases(phases):
-    """Return one diagnostic line per indefensible creates/needs/areas entry."""
+    """Return one diagnostic line per indefensible creates/needs/areas entry.
+
+    Reads its lists through contract_entries, so a payload whose shape never
+    reached the entry validator raises here rather than being judged as though
+    its identity were empty.
+    """
     out = []
     for phase in phases:
         for list_name in ("creates", "needs"):
-            for pos0, raw in enumerate(phase.get(list_name) or []):
-                entry = raw if isinstance(raw, str) else ""
-                marker_list = phase.get(_MK_KEY[list_name]) or []
-                marker_form = marker_list[pos0] if pos0 < len(marker_list) else None
-                ident = cv_identity(entry)
-                reasons = _identity_reasons(entry, ident, marker_form)
+            for pos0, entry in enumerate(contract_entries(phase, list_name)):
+                ident = entry["identity"]
+                description = entry.get("description") or ""
+                reasons = _identity_reasons(ident, description)
                 if not reasons:
                     continue
                 shown = (
                     " (content withheld -- it matches an injection pattern)"
-                    if cv_injection(entry)
-                    else ' "' + entry + '"'
+                    if cv_injection(ident) or cv_injection(description)
+                    else ' "' + ident + '"'
                 )
                 out.append(
                     "phase "
@@ -408,10 +517,18 @@ def jq_sort_key(value):
 # _roadmap_identity_note in aimi-cli.sh for exactly as long as roadmap-amend-phase
 # still prints it from bash; test_roadmap.py asserts the two are identical so the
 # copy cannot drift while it exists.
+#
+# It used to explain a rewrite: an identity was quoted back after backtick
+# normalization, so one submitted with backticks appeared without them, and
+# without the note the author could not find the entry they had written. There
+# is no rewrite left to explain -- an identity is stored and quoted exactly as
+# submitted -- so the note now states that, which is the thing an author needs
+# to know before they go looking for the sanitizer that "must have" changed it.
 IDENTITY_NOTE = (
-    "Note: an entry is quoted after backtick normalization -- a `x` span becomes x "
-    "-- so one submitted with backticks appears here without them. Nothing else "
-    "about an identity is rewritten; locate it by its position in the list."
+    "Note: an identity is quoted back exactly as submitted -- nothing normalizes, "
+    "trims or truncates one. A backticked name such as `x` is refused rather than "
+    "unwrapped to x, so what appears above is the string that was in the payload; "
+    "locate the entry by its position in the list."
 )
 
 
@@ -439,7 +556,7 @@ def nc_description(entry):
 
 def nc_entry(entry):
     if isinstance(entry, str):
-        return {"identity": cv_identity(entry), "description": nc_description(entry)}
+        return contract_entry(cv_identity(entry), nc_description(entry))
     return entry
 
 
@@ -530,12 +647,45 @@ def init_validation_errors(phases):
     return errors
 
 
-def init_sanitize(phases):
-    """Sanitize free text, compute dir, and stash the marker forms for the judge.
+def init_entry_shape_errors(phases):
+    """One line per creates/needs value that is not a 2.0 entry.
 
-    __mkCreates/__mkNeeds are scratch for the identity guard's mutation check and
-    are never schema -- init_merge drops them before anything reaches disk.
+    Runs BEFORE init_sanitize, because sanitizing an entry means reaching into
+    its two fields, and a payload whose entries are still 1.0 strings must be
+    told so by name rather than raising out of a sanitizer.
     """
+    errors = []
+    for phase in phases:
+        for list_name in ("creates", "needs"):
+            entries = phase.get(list_name)
+            if entries is None:
+                continue
+            if not isinstance(entries, list):
+                errors.append(
+                    "phase " + _num(phase.get("id")) + ": " + list_name
+                    + " must be an array of {identity, description} entries"
+                )
+                continue
+            for index, entry in enumerate(entries, 1):
+                for reason in entry_shape_reasons(entry):
+                    errors.append(
+                        "phase " + _num(phase.get("id")) + ": " + list_name
+                        + " entry #" + str(index) + " " + reason
+                    )
+    return errors
+
+
+def sanitize_contract_entry(entry):
+    """The two rulers, applied to one entry: identity untouched, description
+    through the full prose sanitizer and its cap."""
+    return contract_entry(
+        entry["identity"], rm_sanitize(entry.get("description") or "", CONTRACT_MAXLEN)
+    )
+
+
+def init_sanitize(phases):
+    """Sanitize free text and compute dir. Contract identities are not free text
+    and are the one thing here that passes through untouched."""
     out = []
     for phase in phases:
         p = dict(phase)
@@ -544,10 +694,8 @@ def init_sanitize(phases):
         p["slug"] = rm_sanitize(p.get("slug") if p.get("slug") is not None else "", 100)
         p["notes"] = rm_sanitize(p["notes"], 5000) if p.get("notes") is not None else None
         p["successCriteria"] = [rm_sanitize(s, 2000) for s in (p.get("successCriteria") or [])]
-        p["__mkCreates"] = [rm_markers_only(s, 500) for s in (p.get("creates") or [])]
-        p["__mkNeeds"] = [rm_markers_only(s, 500) for s in (p.get("needs") or [])]
-        p["creates"] = [rm_sanitize_contract(s, 500) for s in (p.get("creates") or [])]
-        p["needs"] = [rm_sanitize_contract(s, 500) for s in (p.get("needs") or [])]
+        p["creates"] = [sanitize_contract_entry(e) for e in (p.get("creates") or [])]
+        p["needs"] = [sanitize_contract_entry(e) for e in (p.get("needs") or [])]
         p["areas"] = [rm_sanitize(s, 500) for s in (p.get("areas") or [])]
         p["dependsOn"] = p.get("dependsOn") or []
         p["branch"] = rm_sanitize(p["branch"], 200) if p.get("branch") is not None else None
@@ -585,10 +733,6 @@ def dangling_errors(phases_to_check, allowed_ids):
     ]
 
 
-def _without_markers(phases):
-    return [{k: v for k, v in p.items() if k not in ("__mkCreates", "__mkNeeds")} for p in phases]
-
-
 # ---------------------------------------------------------------------------
 # roadmap-amend-phase
 # ---------------------------------------------------------------------------
@@ -605,41 +749,8 @@ AMENDABLE_KEYS = ["goal", "successCriteria", "creates", "needs", "areas", "branc
 _PHASE_IDENTITY_KEYS = ["id", "dir", "slug", "name", "dependsOn"]
 
 
-def _v1_string_entries_numbered(entries):
-    """`to_entries | select(.value | type == "string")`: the same 1.0 filter,
-    keeping each surviving entry's 1-based position in the stored list.
-
-    Same deadline, same grep, and deliberately the only isinstance of the pair --
-    _v1_string_entries below is written in terms of this one so the schema commit
-    deletes one rule, not two that could disagree. roadmap-sweep needs the
-    positions because it reports droppedIndexes against the list AS STORED, not
-    against the strings that survived the filter.
-    """
-    return [(index + 1, entry) for index, entry in enumerate(entries) if isinstance(entry, str)]
-
-
-def _v1_string_entries(entries):
-    """Reproduces `select(type == "string")` from the 1.0 schema.
-
-    DELETED IN THE SCHEMA COMMIT -- on one line, because that is the grep.
-
-    Today it discards nothing: in 1.0 every creates/needs entry IS a string. It
-    only becomes a hazard when an entry becomes {identity, description}, at
-    which point this filter would silently drop every entry instead of failing
-    -- disabling the orphan check, the dropped/added diff, retarget resolution,
-    the duplicate check and the downstream rewrite, without one line of error.
-    That was measured, not theorised.
-
-    It exists as a named helper rather than thirteen filters buried in
-    pipelines so that removing it is `grep _v1_string_entries` rather than
-    archaeology. When it goes, `entry["identity"]` raises on a malformed entry,
-    which is the entire reason this file is in Python.
-    """
-    return [entry for _, entry in _v1_string_entries_numbered(entries)]
-
-
 def _identities(phase, key):
-    return [cv_identity(e) for e in _v1_string_entries(phase.get(key) or [])]
+    return [entry["identity"] for entry in contract_entries(phase, key)]
 
 
 def amend_key_errors(payload):
@@ -668,13 +779,29 @@ def amend_type_errors(payload):
         payload["branch"], str
     ):
         errors.append("  branch must be a string or null")
-    for key in ("successCriteria", "creates", "needs", "areas"):
+    for key in ("successCriteria", "areas"):
         if key not in payload:
             continue
         if not isinstance(payload[key], list):
             errors.append("  " + key + " must be an array of strings")
         elif any(not isinstance(e, str) for e in payload[key]):
             errors.append("  " + key + " entries must all be strings")
+    # creates/needs carry entries, not strings, and this is the boundary that
+    # keeps a 1.0 string out of a 2.0 document. Without it an amendment could
+    # write one string into a stored list of objects and leave a roadmap whose
+    # own readers refuse it -- measured: the mixed document dropped an identity a
+    # later phase still cited, exited 0, and only surfaced at validate-contracts.
+    for key in ("creates", "needs"):
+        if key not in payload:
+            continue
+        if not isinstance(payload[key], list):
+            errors.append(
+                "  " + key + " must be an array of {identity, description} entries"
+            )
+            continue
+        for index, entry in enumerate(payload[key], 1):
+            for reason in entry_shape_reasons(entry):
+                errors.append("  " + key + " entry #" + str(index) + " " + reason)
     return errors
 
 
@@ -686,13 +813,9 @@ def amend_sanitize(payload):
     if "successCriteria" in p:
         p["successCriteria"] = [rm_sanitize(s, 2000) for s in p["successCriteria"]]
     if "creates" in p:
-        p["__mkCreates"] = [rm_markers_only(s, 500) for s in p["creates"]]
+        p["creates"] = [sanitize_contract_entry(e) for e in p["creates"]]
     if "needs" in p:
-        p["__mkNeeds"] = [rm_markers_only(s, 500) for s in p["needs"]]
-    if "creates" in p:
-        p["creates"] = [rm_sanitize_contract(s, 500) for s in p["creates"]]
-    if "needs" in p:
-        p["needs"] = [rm_sanitize_contract(s, 500) for s in p["needs"]]
+        p["needs"] = [sanitize_contract_entry(e) for e in p["needs"]]
     if "areas" in p:
         p["areas"] = [rm_sanitize(s, 500) for s in p["areas"]]
     if "branch" in p:
@@ -1021,9 +1144,9 @@ def creates_in_scope(doc, ids):
     rows = []
     in_scope = [p for p in (doc.get("phases") or []) if p.get("id") in ids]
     for phase in sorted(in_scope, key=lambda p: jq_sort_key(p.get("id"))):
-        for entry in _v1_string_entries(phase.get("creates") or []):
+        for entry in contract_entries(phase, "creates"):
             rows.append(
-                (phase.get("id"), cv_identity(entry), phase.get("status"), phase.get("dir") or "")
+                (phase.get("id"), entry["identity"], phase.get("status"), phase.get("dir") or "")
             )
     return rows
 
@@ -1039,10 +1162,10 @@ def contract_sanitize_hits(doc):
     hits = set()
     for phase in doc.get("phases") or []:
         for field in ("creates", "needs"):
-            for index, entry in enumerate(phase.get(field) or []):
-                if not isinstance(entry, str) or not cv_suspicious(entry):
+            for index, entry in enumerate(contract_entries(phase, field)):
+                if not cv_suspicious(entry):
                     continue
-                char = cv_shell_char(cv_identity(entry))
+                char = cv_shell_char(entry["identity"])
                 if char is not None:
                     reason = (
                         'its identity carries the shell metacharacter "' + char
@@ -1064,8 +1187,8 @@ def duplicate_creates(doc):
     """Identities declared by more than one phase, whatever their status."""
     seen = {}
     for phase in doc.get("phases") or []:
-        for entry in phase.get("creates") or []:
-            seen.setdefault(cv_identity(entry), []).append(phase.get("id"))
+        for entry in contract_entries(phase, "creates"):
+            seen.setdefault(entry["identity"], []).append(phase.get("id"))
     return [
         {"identity": ident, "phases": sorted(set(phases), key=jq_sort_key)}
         for ident, phases in sorted(seen.items())
@@ -1127,8 +1250,8 @@ def op_validate_contracts(argv):
     for sid in scope:
         rows = creates_in_scope(doc, reachable_ids(doc, sid))
         phase = next((p for p in doc.get("phases") or [] if p.get("id") == sid), {})
-        for entry in phase.get("needs") or []:
-            need = cv_identity(entry)
+        for entry in contract_entries(phase, "needs"):
+            need = entry["identity"]
             provider = next((r for r in rows if r[1] == need), None)
             if provider is None:
                 missing.append({"phase": sid, "need": need, "reason": "no-provider"})
@@ -1190,9 +1313,11 @@ def sweep_warnings(phases):
     rows = []
     for phase in phases:
         for field in ("creates", "needs"):
+            # Positions count against the list AS STORED, which is what a reader
+            # comparing this warning to roadmap.json has in front of them.
             dropped = [
                 position
-                for position, entry in _v1_string_entries_numbered(phase.get(field) or [])
+                for position, entry in enumerate(contract_entries(phase, field), 1)
                 if cv_suspicious(entry)
             ]
             if not dropped:
@@ -1216,9 +1341,7 @@ def sweep_clean_phases(phases):
         copy = dict(phase)
         for field in ("creates", "needs"):
             copy[field] = [
-                entry
-                for entry in _v1_string_entries(phase.get(field) or [])
-                if not cv_suspicious(entry)
+                entry for entry in contract_entries(phase, field) if not cv_suspicious(entry)
             ]
         cleaned.append(copy)
     return cleaned
@@ -1229,23 +1352,23 @@ def sweep(doc):
     stored = doc.get("phases") or []
     phases = sweep_clean_phases(stored)
 
-    needed = {cv_identity(entry) for p in phases for entry in p["needs"]}
+    needed = {entry["identity"] for p in phases for entry in p["needs"]}
     orphans = [
         {"phase": p.get("id"), "creates": identity}
         for p in phases
-        for identity in [cv_identity(entry) for entry in p["creates"]]
+        for identity in [entry["identity"] for entry in p["creates"]]
         if identity not in needed
     ]
 
     providers = [
-        {"identity": cv_identity(entry), "phase": p.get("id"), "status": p.get("status")}
+        {"identity": entry["identity"], "phase": p.get("id"), "status": p.get("status")}
         for p in phases
         for entry in p["creates"]
     ]
     deferred = []
     for phase in phases:
         for entry in phase["needs"]:
-            identity = cv_identity(entry)
+            identity = entry["identity"]
             # Lowest phase id wins, so which provider a need is attributed to is
             # deterministic rather than incidental -- the same rule
             # creates_in_scope applies for validate-contracts.
@@ -1814,6 +1937,12 @@ def op_init_validate(_argv):
     if errors:
         _die_list("Error: roadmap-init: invalid phase payload:", errors)
 
+    # Before init_sanitize, which reaches into an entry's two fields and would
+    # otherwise raise out of a sanitizer on a payload still written in 1.0.
+    shape_errors = init_entry_shape_errors(payload)
+    if shape_errors:
+        _die_list("Error: roadmap-init: malformed creates/needs entry:", shape_errors)
+
     phases = init_sanitize(payload)
     dir_errors, branch_errors = init_shape_errors(phases)
     if dir_errors:
@@ -1871,7 +2000,7 @@ def op_init_write(argv):
                 note=True,
             )
 
-        merged = existing_phases + _without_markers(filtered_new)
+        merged = existing_phases + filtered_new
         merged.sort(key=lambda p: jq_sort_key(p.get("id")))
         # Only these four top-level keys survive a --sync, exactly as before.
         doc = {k: existing.get(k) for k in ("roadmapVersion", "feature", "createdAt", "brainstormPath")}
@@ -1891,10 +2020,13 @@ def op_init_write(argv):
                 note=True,
             )
 
-        merged = _without_markers(new_phases)
+        merged = list(new_phases)
         merged.sort(key=lambda p: jq_sort_key(p.get("id")))
         doc = {
-            "roadmapVersion": "1.0",
+            # A roadmap this verb writes today holds 2.0 entries, so it says so.
+            # Stamping 1.0 here would make the contract gate refuse a document
+            # this CLI had just produced.
+            "roadmapVersion": CONTRACT_VERSION,
             "feature": feature,
             "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "brainstormPath": rm_sanitize(brainstorm_path, 500) if brainstorm_path else None,
@@ -2011,8 +2143,6 @@ def op_amend_write(argv):
     # and only the keys the payload carries are replaced, each wholesale.
     amended = dict(stored)
     for key, value in patch.items():
-        if key in ("__mkCreates", "__mkNeeds"):
-            continue
         amended[key] = value
 
     # Judge ONLY the lists this call actually writes. Handing over the merged
@@ -2023,10 +2153,8 @@ def op_amend_write(argv):
     check = {"id": amended.get("id")}
     if "creates" in patch:
         check["creates"] = amended.get("creates") or []
-        check["__mkCreates"] = patch.get("__mkCreates") or []
     if "needs" in patch:
         check["needs"] = amended.get("needs") or []
-        check["__mkNeeds"] = patch.get("__mkNeeds") or []
     if "areas" in patch:
         check["areas"] = amended.get("areas") or []
     identity_errors = judge_phases([check])
@@ -2119,22 +2247,22 @@ def op_amend_write(argv):
         )
         sys.exit(1)
 
-    # old identity -> the amended phase's new creates entry VERBATIM (identity
-    # plus its parenthetical), so provider and consumer stay byte-identical.
+    # old identity -> the amended phase's new creates entry VERBATIM (both
+    # fields), so provider and consumer stay byte-identical.
     retarget_map = {}
     for pair in pairs:
         match = next(
-            (e for e in _v1_string_entries(amended.get("creates") or []) if cv_identity(e) == pair["new"]),
+            (e for e in contract_entries(amended, "creates") if e["identity"] == pair["new"]),
             None,
         )
         retarget_map[pair["old"]] = match
 
     retargeted = [
-        {"phase": p.get("id"), "from": entry, "to": retarget_map[cv_identity(entry)]}
+        {"phase": p.get("id"), "from": entry, "to": retarget_map[entry["identity"]]}
         for p in doc.get("phases") or []
         if p.get("id") != phase_id
-        for entry in _v1_string_entries(p.get("needs") or [])
-        if cv_identity(entry) in retarget_map
+        for entry in contract_entries(p, "needs")
+        if entry["identity"] in retarget_map
     ]
 
     # One write: the phase swap and every authorized downstream needs rewrite.
@@ -2142,9 +2270,11 @@ def op_amend_write(argv):
         if phase.get("id") == phase_id:
             doc["phases"][index] = amended
         elif retarget_map and isinstance(phase.get("needs"), list):
+            # Guarded on the key EXISTING, not on its contents: a phase with no
+            # needs at all must not acquire an empty one as a side effect of
+            # somebody else's rename.
             phase["needs"] = [
-                retarget_map.get(cv_identity(e), e) if isinstance(e, str) else e
-                for e in phase["needs"]
+                retarget_map.get(e["identity"], e) for e in contract_entries(phase, "needs")
             ]
     write_doc_atomically(path, doc)
 
@@ -2173,9 +2303,10 @@ def op_amend_write(argv):
             # field can only ever name an amendable key -- amend_key_errors
             # refused everything else at the door -- so the intersection is the
             # true statement and it maintains itself: a future scratch key stays
-            # out without anyone remembering it exists. Before this, __mkCreates
-            # and __mkNeeds rode along, and neither of the two assertions on this
-            # field noticed, because neither amended creates or needs.
+            # out without anyone remembering it exists. There were two such keys
+            # here until the schema split (the marker forms the identity guard's
+            # mutation check consumed), and neither of the two assertions on this
+            # field noticed them, because neither amended creates or needs.
             "amended": sorted(k for k in patch if k in AMENDABLE_KEYS),
             "retargeted": retargeted,
         },
@@ -2202,10 +2333,11 @@ def op_verify_creates(argv):
     if phase is None:
         die("Error: verify-creates: phase " + _num(phase_id) + " not found in " + path)
 
-    # Identities come from the one existing definition, never a second copy.
+    # The identity is read from its own field: there is no split left to
+    # re-derive here, which is what this schema change was for.
     verdicts = [
-        verify_creates_one(directory, cv_identity(entry))
-        for entry in _v1_string_entries(phase.get("creates") or [])
+        verify_creates_one(directory, entry["identity"])
+        for entry in contract_entries(phase, "creates")
     ]
     json.dump(verdicts, sys.stdout, indent=2, ensure_ascii=False)
     sys.stdout.write("\n")
@@ -2258,14 +2390,14 @@ def op_write_handoff(argv):
             + "' must be an array of strings"
         )
 
-    # The identities this phase declared, read through cv_identity itself and
-    # never a second copy of the split rule -- the two must not drift.
+    # The identities this phase declared, straight from the field that holds
+    # them -- there is no split rule here to drift from anyone else's.
     doc = read_doc(path, "roadmap-write-handoff")
     identities = [
-        cv_identity(entry)
+        entry["identity"]
         for phase in doc.get("phases") or []
         if phase.get("id") == phase_id
-        for entry in _v1_string_entries(phase.get("creates") or [])
+        for entry in contract_entries(phase, "creates")
     ]
 
     body = handoff_body(payload, identities)
@@ -2729,11 +2861,36 @@ _OPS = {
     "phase-overlap": op_phase_overlap,
 }
 
+# The aimi-cli.sh verb each op serves, for the ops whose names differ. Every
+# other op is named after its verb already. This exists only so a diagnostic
+# names a command the reader can actually run: "Error: sweep:" points at nothing
+# a caller has ever typed, and the agent reading that stream needs the verb.
+_VERB_FOR_OP = {
+    "sweep": "roadmap-sweep",
+    "set-status": "roadmap-set-status",
+    "claim": "roadmap-claim",
+    "release-claim": "roadmap-release-claim",
+    "reconcile": "roadmap-reconcile",
+    "write-handoff": "roadmap-write-handoff",
+    "init-validate": "roadmap-init",
+    "init-write": "roadmap-init",
+    "amend-validate": "roadmap-amend-phase",
+    "amend-write": "roadmap-amend-phase",
+}
+
 
 def main(argv):
     if len(argv) < 2 or argv[1] not in _OPS:
         die("Usage: roadmap.py <" + "|".join(sorted(_OPS)) + "> [flags]", 2)
-    return _OPS[argv[1]](argv[2:])
+    try:
+        return _OPS[argv[1]](argv[2:])
+    except MalformedEntry as malformed:
+        # The ONE exception this file catches, and it is caught here rather than
+        # at any rule so that no rule can be tempted to carry on without it. One
+        # stderr line and a non-zero exit: the verb stops, and it says which
+        # entry stopped it. A traceback would say the same thing to a developer
+        # and nothing at all to the agent reading this stream.
+        die("Error: " + _VERB_FOR_OP.get(argv[1], argv[1]) + ": " + str(malformed))
 
 
 if __name__ == "__main__":

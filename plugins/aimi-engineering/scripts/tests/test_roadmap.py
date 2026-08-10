@@ -39,6 +39,22 @@ with open(os.path.join(HERE, "golden_from_jq.json"), encoding="utf-8") as _handl
 # ---------------------------------------------------------------------------
 
 
+# THREE OF THE SIX GOLDEN SANITIZER COLUMNS ARE 1.0 HISTORY NOW, and this is
+# where that is recorded rather than quietly dropped. "m" and "c" were captured
+# from _rm_markers_only and _rm_sanitize_contract: a formatting-only variant, and
+# a splitter that found the "(" and applied two rules either side of it. Both
+# existed only because the identity and the description shared one string. There
+# is no string to split, so both functions are gone and the two columns have
+# nothing left to compare against. "sus" changed shape rather than value --
+# cv_suspicious takes an entry, and an entry is no longer a string.
+#
+# The columns stay in the golden file, unregenerated, because it records what jq
+# did. What replaces them as evidence is stronger, not weaker: the "i" column is
+# the identity JQ ITSELF computed for every corpus entry, and
+# test_normalize_identity_equals_what_the_jq_itself_computed asserts the
+# migration reproduces every one of them byte-for-byte. The 1.0 sanitizers are
+# not tested any more because nothing runs them; the migration that carries
+# their output forward is tested against the original recording.
 @pytest.mark.parametrize(
     "entry,expected",
     list(zip(GOLDEN["corpus"], GOLDEN["sanitizers"])),
@@ -46,46 +62,80 @@ with open(os.path.join(HERE, "golden_from_jq.json"), encoding="utf-8") as _handl
 )
 def test_sanitizers_match_the_jq_they_replaced(entry, expected):
     assert R.rm_sanitize(entry, 2000) == expected["s"]
-    assert R.rm_markers_only(entry, 500) == expected["m"]
-    assert R.rm_sanitize_contract(entry, 2000) == expected["c"]
     assert R.cv_identity(entry) == expected["i"]
     assert R.cv_injection(entry) is expected["inj"]
-    assert R.cv_suspicious(entry) is expected["sus"]
 
 
 def _phases_from_corpus():
     """Rebuild the phases exactly as roadmap-init builds them before judging.
 
-    __mk* carries the markers-only form and creates/needs the contract-sanitized
-    form; _identity_reasons compares the two, so a test that skipped this step
-    would never exercise the mutation rule at all.
+    Every corpus entry is migrated first, which is precisely the path a roadmap
+    written before the split takes to reach the judge today: normalize-contracts
+    splits it, and the two fields are then judged by their two rules. The
+    description goes through rm_sanitize because that is what init_sanitize does
+    to it; the identity goes through nothing, because that is the rule.
     """
     phases = []
-    for i, entry in enumerate(GOLDEN["corpus"]):
+    for i, raw in enumerate(GOLDEN["corpus"]):
+        entry = R.sanitize_contract_entry(R.nc_entry(raw))
         phases.append(
             {
                 "id": i + 1,
                 "name": "P",
                 "goal": "g",
                 "slug": "p",
-                "__mkCreates": [R.rm_markers_only(entry, 500)],
-                "__mkNeeds": [R.rm_markers_only(entry, 500)],
-                "creates": [R.rm_sanitize_contract(entry, 500)],
-                "needs": [R.rm_sanitize_contract(entry, 500)],
-                "areas": [R.rm_sanitize(entry, 500)],
+                "creates": [entry],
+                "needs": [entry],
+                "areas": [R.rm_sanitize(raw, 500)],
             }
         )
     return phases
 
 
-def test_judge_phases_matches_the_jq_it_replaced():
-    assert R.judge_phases(_phases_from_corpus()) == GOLDEN["judge_lines"]
+def _refusal_sites(lines):
+    """The (phase, list, position) each diagnostic points at, without its text."""
+    return {
+        line.split(" is not a usable")[0].split(" (content withheld")[0].split(' "')[0]
+        for line in lines
+    }
+
+
+def test_judge_phases_refuses_a_strict_superset_of_what_the_jq_refused():
+    """NOT an equality against the golden lines, and every part of that is stated.
+
+    THE TEXT of three diagnostics changed. "empty once the description is
+    stripped" describes a strip that no longer happens; the shell-metacharacter
+    reason used to say "move that text into the parenthesised description"; and
+    the mutation rule is gone entirely, because it compared an entry's stored
+    identity against the submitted one and there is no longer a second form to
+    compare against.
+
+    WHICH ENTRIES are refused may only grow, never shrink -- an entry jq refused
+    that this code accepts is a hole. It grew by exactly four sites, all the same
+    cause: jq's sanitizer ran over the whole entry and unwrapped or dropped a
+    backtick before the guard saw it, so a backticked identity was silently
+    stored under a different name than the one written. Nothing sanitizes an
+    identity now, so the backtick reaches the shell-class rule and is refused --
+    which is what the unwrap was approximating, reached by saying so.
+    """
+    got = _refusal_sites(R.judge_phases(_phases_from_corpus()))
+    recorded = _refusal_sites(GOLDEN["judge_lines"])
+
+    assert recorded - got == set(), "an entry the jq refused is no longer refused"
+    assert got - recorded == {
+        "phase 10: creates entry #1",   # `cmd_foo` (backticked identity)
+        "phase 10: needs entry #1",
+        "phase 30: creates entry #1",   # a`b (stray tick)
+        "phase 30: needs entry #1",
+    }
+    for index in (10, 30):
+        assert "`" in GOLDEN["corpus"][index - 1], "the four new refusals are the backtick ones"
 
 
 def test_the_golden_corpus_actually_exercises_the_judge():
     """Anti-vacuum: a corpus that produced no diagnostics would pass forever."""
     assert len(GOLDEN["judge_lines"]) >= 40
-    reasons = " ".join(GOLDEN["judge_lines"])
+    reasons = " ".join(R.judge_phases(_phases_from_corpus()))
     for fragment in (
         "contains whitespace",
         'begins with "/"',
@@ -98,31 +148,31 @@ def test_the_golden_corpus_actually_exercises_the_judge():
         assert fragment in reasons, fragment + " is never exercised by the corpus"
 
 
-def test_the_mutation_rule_is_unreachable_through_the_real_write_path():
-    """Deliberately NOT in the anti-vacuum list above, and this is why.
+def test_the_mutation_rule_went_with_the_thing_that_made_it_necessary():
+    """It refused an entry whose STORED identity differed from the SUBMITTED one.
 
-    The mutation rule refuses an entry whose stored identity differs from the
-    one submitted. It cannot fire through roadmap-init, because
-    rm_sanitize_contract applies rm_markers_only -- the very function that
-    produces the marker form -- to the identity half and nothing else. The two
-    identities are therefore equal by construction, which is what the review
-    found empirically (zero firings across ~366k entries) stated as its cause.
+    It existed because one sanitizer ran over a string holding both halves, so a
+    content rule meant for prose could reach a name: "parseList<T>" was stored as
+    "parseList" and verify-creates then grepped for a token the phase never
+    produces. The rule caught that -- and a review found it had fired zero times
+    across ~366k entries, because the write path applied the same
+    markers-only pass to the identity on both sides of the comparison.
 
-    The rule is kept rather than deleted because it is defence in depth against
-    a FUTURE caller that sanitizes differently, and the test below proves it
-    still fires for such a caller. When the schema splits the two fields the
-    rule stops being expressible at all and goes with them.
+    Nothing rewrites an identity now, so the rule is not merely unfired but
+    inexpressible: there is no second form of the identity to compare against.
+    This test replaces it, and asserts the property the rule was protecting --
+    stronger, because it is an equality rather than the absence of a diagnostic.
     """
-    for raw in ("parseList<T> (a helper)", "$(x) (y)", "a<b>c (d)", "`t` (d)"):
-        marker = R.rm_markers_only(raw, 500)
-        stored = R.rm_sanitize_contract(raw, 500)
-        assert R.cv_identity(marker) == R.cv_identity(stored), raw
-
-
-def test_the_mutation_rule_still_fires_for_a_caller_that_does_sanitize_differently():
-    reasons = R._identity_reasons("parseList (a helper)", "parseList", "parseList<T> (a helper)")
-    assert any("DIFFERENT identity" in r for r in reasons)
-    assert any("parseList<T>" in r for r in reasons)
+    for raw in ("parseList<T> (a helper)", "$(x) (y)", "a<b>c (d)", "`t` (d)",
+                "design-system:tokens (a token file)"):
+        submitted = R.nc_entry(raw)
+        stored = R.sanitize_contract_entry(submitted)
+        assert stored["identity"] == submitted["identity"], raw
+    # ...and the prose rules that used to reach a name still apply to the half
+    # they were written for.
+    assert R.sanitize_contract_entry(
+        {"identity": "parseList<T>", "description": "a <b>bold</b> helper"}
+    ) == {"identity": "parseList<T>", "description": "a bold helper"}
 
 
 # ---------------------------------------------------------------------------
@@ -137,18 +187,40 @@ def test_identity_is_everything_before_the_first_paren_trimmed():
     assert R.cv_identity("cmd_x (parses (a,b) pairs)") == "cmd_x"
 
 
-def test_markers_only_never_deletes_content():
-    """The whole reason the two sanitizers exist as a pair."""
-    for identity in ("parseList<T>", "design-system:tokens", "db/migrations/*.sql"):
-        assert R.rm_markers_only(identity, 500) == identity
+def test_nothing_at_all_is_applied_to_an_identity():
+    """The two rulers, now that the two halves are two fields.
+
+    There used to be a formatting-only sanitizer here so an identity could be
+    normalized without being rewritten. The rule is simpler and stricter: the
+    identity is stored exactly as submitted, and a name this file will not accept
+    is refused rather than repaired.
+    """
+    for identity in ("parseList<T>", "design-system:tokens", "db/migrations/*.sql",
+                     "`cmd_foo`", "x" * 40):
+        assert R.sanitize_contract_entry({"identity": identity})["identity"] == identity
     # ...while the full sanitizer does delete, which is right for prose.
     assert R.rm_sanitize("parseList<T>", 500) == "parseList"
 
 
+def test_the_identity_is_refused_rather_than_repaired():
+    """Each of these used to be quietly normalized into a different name. The
+    author now hears about it at write time, which is the one moment they can
+    still rename the artifact."""
+    assert any("shell metacharacter" in r for r in R._identity_reasons("`cmd_foo`", ""))
+    assert any("contains whitespace" in r for r in R._identity_reasons("a\nb", ""))
+    assert any("longer than 500" in r for r in R._identity_reasons("x" * 501, ""))
+    # The cap is a refusal precisely because truncating would produce a name
+    # verify-creates greps for and never finds. 500 exactly is fine.
+    assert R._identity_reasons("x" * 500, "") == []
+
+
 def test_a_backticked_span_unwraps_rather_than_disappearing():
-    """Deleting it destroyed the token a later phase greps for."""
-    assert R.rm_markers_only("`cmd_foo`", 500) == "cmd_foo"
+    """In a DESCRIPTION. Deleting the span with its contents destroyed text a
+    later reader needs, and the description is threaded into a sub-agent prompt."""
     assert R.rm_sanitize("a `x` b", 500) == "a x b"
+    assert R.sanitize_contract_entry(
+        {"identity": "cmd_foo", "description": "a `tick` here"}
+    )["description"] == "a tick here"
 
 
 def test_instruction_markers_are_anchored_by_position():
@@ -195,12 +267,23 @@ def test_normalize_does_not_judge():
     assert doc["phases"][0]["creates"][0]["identity"] == "forge command surface in aimi-cli.sh"
 
 
-def test_normalize_identity_equals_what_every_previous_reader_computed():
-    """The migration's entire correctness argument, as an assertion."""
-    for entry in GOLDEN["corpus"]:
+def test_normalize_identity_equals_what_the_jq_itself_computed():
+    """THE MIGRATION'S ENTIRE CORRECTNESS ARGUMENT, AS AN ASSERTION.
+
+    Against the golden "i" column, not against cv_identity: that column is the
+    identity the jq implementation computed for every corpus entry, recorded
+    before it was deleted. Comparing the migration to today's Python would only
+    prove the two agree with each other; comparing it to the recording proves
+    every pre-migration reader would have resolved the same token.
+
+    A needs entry is matched against a creates entry by exact equality, so one
+    identity moving by one byte silently repoints a contract at nothing. This is
+    the assertion that says it did not.
+    """
+    for entry, recorded in zip(GOLDEN["corpus"], GOLDEN["sanitizers"]):
         doc = {"phases": [{"creates": [entry]}]}
         R.normalize_contracts(doc)
-        assert doc["phases"][0]["creates"][0]["identity"] == R.cv_identity(entry)
+        assert doc["phases"][0]["creates"][0]["identity"] == recorded["i"], entry
 
 
 def test_the_one_way_loss_is_confined_to_the_description():
@@ -277,11 +360,40 @@ def test_sort_survives_a_hand_seeded_phase_with_no_id():
     assert sorted(ids, key=R.jq_sort_key) == [None, 1, 2.5, 3, "x"]
 
 
-def test_markers_are_scratch_and_never_reach_disk():
-    phases = R.init_sanitize([{"id": 1, "name": "A", "goal": "g", "creates": ["a.rb (x)"]}])
-    assert "__mkCreates" in phases[0]
-    assert "__mkCreates" not in R._without_markers(phases)[0]
-    assert "__mkNeeds" not in R._without_markers(phases)[0]
+def test_an_entry_reaches_disk_as_exactly_two_keys():
+    """The scratch keys this replaces (__mkCreates/__mkNeeds) carried the marker
+    forms the mutation rule compared against, and had to be stripped before the
+    write. There is no mutation rule and no scratch: what init_sanitize produces
+    IS the stored shape, so nothing has to remember to remove anything."""
+    phases = R.init_sanitize(
+        [{"id": 1, "name": "A", "goal": "g",
+          "creates": [{"identity": "a.rb", "description": "x"}]}]
+    )
+    assert phases[0]["creates"] == [{"identity": "a.rb", "description": "x"}]
+    assert not [k for k in phases[0] if k.startswith("__")]
+
+
+def test_an_unknown_key_in_an_entry_is_refused_by_name():
+    """By name, because the key the author meant to write is the one the message
+    has to show them."""
+    errors = R.init_entry_shape_errors(
+        [{"id": 1, "creates": [{"identity": "a", "desc": "x"}]}]
+    )
+    assert errors == [
+        'phase 1: creates entry #1 carries the unknown key "desc" -- an entry has '
+        "exactly identity and description"
+    ]
+    assert R.init_entry_shape_errors([{"id": 1, "creates": [{"identity": "a"}]}]) == []
+
+
+def test_a_description_may_be_absent_but_never_null():
+    """"" and null would be the same fact spelled two ways, and every reader
+    downstream would carry a branch for the distinction."""
+    assert R.sanitize_contract_entry({"identity": "a"})["description"] == ""
+    reasons = R.entry_shape_reasons({"identity": "a", "description": None})
+    assert reasons == [
+        'description must be a string, got null -- an absent description is "", never null'
+    ]
 
 
 def test_dangling_dependson_names_the_phase_and_the_missing_id():
@@ -296,10 +408,12 @@ def test_the_identity_note_survived_the_move_with_its_example_intact():
 
     In a Python string literal a backtick is inert, so that failure mode is gone
     by construction. What still has to hold is that the example is there at all:
-    a note about how backticks are handled is worthless without one.
+    a note about how backticks are handled is worthless without one. The note's
+    CLAIM changed with the schema -- a backticked name is refused now rather than
+    unwrapped -- and it still has to carry an example of the thing it describes.
     """
-    assert "`x` span becomes x" in R.IDENTITY_NOTE
-    assert R.IDENTITY_NOTE.startswith("Note: an entry is quoted after backtick normalization")
+    assert "such as `x` is refused" in R.IDENTITY_NOTE
+    assert R.IDENTITY_NOTE.startswith("Note: an identity is quoted back exactly as submitted")
 
 
 # ---------------------------------------------------------------------------
@@ -367,13 +481,33 @@ def test_retarget_matches_by_exact_equality_never_by_containment():
 
 def test_the_orphan_guard_still_fires():
     """The regression that worries me most: a guard that stops guarding is
-    silent. Reproduced here against the captured baseline."""
-    stored = {"id": 1, "creates": ["shared_widget (the widget)"]}
-    amended = {"id": 1, "creates": ["renamed_widget (r)"]}
-    doc = {"phases": [stored, {"id": 2, "needs": ["shared_widget (the widget)"]}]}
+    silent. The captured baseline, restated in the shape the guard now reads --
+    its inputs are exactly what this commit changed, since both sides used to be
+    re-derived by splitting a string at its first "(".
+    """
+    widget = R.contract_entry("shared_widget", "the widget")
+    stored = {"id": 1, "creates": [widget]}
+    amended = {"id": 1, "creates": [R.contract_entry("renamed_widget", "r")]}
+    doc = {"phases": [stored, {"id": 2, "needs": [widget]}]}
     assert R.amend_orphan_rows(stored, amended, doc, []) == [(2, "shared_widget")]
     # ...and an authorized drop is not an orphan.
     assert R.amend_orphan_rows(stored, amended, doc, ["shared_widget"]) == []
+
+
+def test_the_orphan_guard_raises_rather_than_skipping_a_malformed_entry():
+    """THE FAILURE MODE THE FILTER USED TO PRODUCE, pinned as a refusal.
+
+    `select(type == "string")` over a 2.0 list dropped every entry, so this guard
+    saw an empty creates on both sides, found nothing orphaned, and let the
+    amendment through -- dropping an identity a later phase still cited, exit 0.
+    A malformed entry has to stop the verb, not shrink what it looked at.
+    """
+    stored = {"id": 1, "creates": ["shared_widget (the widget)"]}
+    amended = {"id": 1, "creates": [R.contract_entry("renamed_widget", "r")]}
+    with pytest.raises(R.MalformedEntry) as caught:
+        R.amend_orphan_rows(stored, amended, {"phases": [stored]}, [])
+    assert "phase 1: creates entry #1" in str(caught.value)
+    assert "normalize-contracts" in str(caught.value)
 
 
 def test_unamendable_keys_are_redirected_to_their_owner_by_name():
@@ -389,15 +523,31 @@ def test_unamendable_keys_are_redirected_to_their_owner_by_name():
     assert R.amend_key_errors({"goal": "g", "creates": []}) == []
 
 
-def test_the_v1_string_filter_is_named_so_the_schema_commit_can_find_it():
-    """Thirteen call sites, one helper. Today it discards nothing -- in 1.0
-    every entry IS a string -- and after the schema change it must be gone, or a
-    malformed entry vanishes instead of raising."""
-    assert R._v1_string_entries(["a", "b"]) == ["a", "b"]
-    assert R._v1_string_entries([{"identity": "a"}, "b"]) == ["b"]
+def test_the_v1_string_filter_is_gone_and_stays_gone():
+    """Thirteen call sites, one helper, and its docstring named this commit as
+    its deadline. Against 2.0 entries the filter would have dropped every one of
+    them and reported a clean roadmap -- disabling the orphan check, the
+    dropped/added diff, retarget resolution, the duplicate check and the
+    downstream rewrite, without printing a line. The grep is the assertion,
+    because a reintroduced filter would pass every behavioural test in this file
+    by making the lists it reads empty."""
     source = open(os.path.join(SCRIPTS, "roadmap.py"), encoding="utf-8").read()
-    assert source.count("_v1_string_entries") >= 4
-    assert "DELETED IN THE SCHEMA COMMIT" in source
+    assert "_v1_string_entries" not in source
+    # ...and what replaced it raises instead of skipping, at every reader.
+    with pytest.raises(R.MalformedEntry):
+        R.contract_entries({"id": 3, "creates": ["a (b)"]}, "creates")
+
+
+def test_a_malformed_entry_names_the_phase_the_list_and_the_position():
+    """The caller who can act on this reads stderr; a bare TypeError would tell a
+    developer where the code broke and tell them nothing about which entry to
+    fix."""
+    with pytest.raises(R.MalformedEntry) as caught:
+        R.contract_entries({"id": 2.1, "needs": [R.contract_entry("ok"), 7]}, "needs")
+    message = str(caught.value)
+    assert message.startswith("phase 2.1: needs entry #2 must be an object")
+    assert "got a number" in message
+    assert "normalize-contracts" in message and "roadmap-amend-phase" in message
 
 
 # --- the handoff advisory, which had no test at all until now --------------
@@ -628,8 +778,10 @@ def test_the_first_provider_by_phase_id_wins():
     """Deterministic rather than incidental: creates_in_scope orders by phase id
     and the lookup takes the first match."""
     doc = {"phases": [
-        {"id": 3, "dependsOn": [], "status": "completed", "dir": "d3", "creates": ["x (late)"]},
-        {"id": 1, "dependsOn": [], "status": "pending", "dir": "d1", "creates": ["x (early)"]},
+        {"id": 3, "dependsOn": [], "status": "completed", "dir": "d3",
+         "creates": [R.contract_entry("x", "late")]},
+        {"id": 1, "dependsOn": [], "status": "pending", "dir": "d1",
+         "creates": [R.contract_entry("x", "early")]},
     ]}
     rows = R.creates_in_scope(doc, [1, 3])
     assert [r[0] for r in rows] == [1, 3]
@@ -719,26 +871,41 @@ def test_a_phase_id_is_reported_the_way_jq_rendered_it():
     ]
 
 
-def test_the_sweep_divergence_is_the_schema_filter_and_nothing_else():
-    """THE ONE PLACE THIS PORT DELIBERATELY DIFFERS FROM THE GOLDEN.
+def test_the_sweep_divergence_closed_and_the_case_is_loud_again():
+    """THE ONE PLACE THE PORT DELIBERATELY DIFFERED FROM THE GOLDEN, now closed.
 
-    An entry that is not a string is outside the 1.0 schema. jq could not match
-    it and aborted the whole sweep (exit 5, its own error text); the Python reads
-    those lists through _v1_string_entries, which drops the entry and reports a
-    clean roadmap. That silent drop is precisely the hazard that helper's
-    docstring names, and deleting it is the schema story's job -- at which point
-    entry["identity"] raises and this case becomes loud again.
+    An entry that is not a string was outside the 1.0 schema. jq could not match
+    it and aborted the whole sweep (exit 5, its own error text). The port read
+    those lists through _v1_string_entries, which DROPPED the entry and reported
+    a clean roadmap -- and the divergence was recorded with this commit named as
+    its deadline, because a silent drop is worse than a crash: a downstream needs
+    that cited the dropped identity reads as unmet with nothing saying why.
+
+    Both golden cases now raise, by name, naming the entry. Note that the shapes
+    have swapped sides: jq aborted on an OBJECT and accepted a string, and this
+    accepts an object and refuses a string. That is the schema change, not a
+    reversal of the rule -- both refuse the shape the document does not hold.
     """
     for label in ("creates-nao-string", "creates-objeto"):
         assert SWEEP_CASES[label]["exit"] == 5, "the golden is history, not a target"
         assert "not a string" in SWEEP_CASES[label]["stderr"]
-    source = open(os.path.join(SCRIPTS, "roadmap.py"), encoding="utf-8").read()
-    assert "_v1_string_entries_numbered" in source
+
+    doc = {"phases": [{"id": 1, "creates": [R.contract_entry("ok"), 42], "needs": []}]}
+    with pytest.raises(R.MalformedEntry) as caught:
+        R.sweep(doc)
+    assert "phase 1: creates entry #2" in str(caught.value)
 
 
-def test_the_numbered_filter_keeps_positions_from_the_stored_list():
-    assert R._v1_string_entries_numbered(["a", {"identity": "b"}, "c"]) == [(1, "a"), (3, "c")]
-    assert R._v1_string_entries(["a", {"identity": "b"}, "c"]) == ["a", "c"]
+def test_dropped_positions_are_counted_against_the_stored_list_not_the_survivors():
+    """roadmap-sweep reports droppedIndexes against the list AS STORED, so a
+    reader comparing the warning to roadmap.json counts to the same entry. The
+    numbered filter this replaces existed for exactly that; enumerate does it
+    without a filter that could also skip something."""
+    doc = {"phases": [{"id": 1, "status": "pending", "needs": [],
+                       "creates": [R.contract_entry("ok.rb"),
+                                   R.contract_entry("evil;x", "shell class")]}]}
+    warning = R.sweep(doc)["warnings"][0]
+    assert warning["droppedCount"] == 1 and warning["droppedIndexes"] == [2]
 
 
 # ---------------------------------------------------------------------------
@@ -1280,15 +1447,46 @@ def test_unknown_op_exits_two_and_says_so():
 
 
 def test_judge_phases_reads_stdin_and_prints_one_line_per_bad_entry():
-    phases = json.dumps([{"id": 1, "creates": ["/etc/passwd (absolute)"], "needs": []}])
+    phases = json.dumps(
+        [{"id": 1, "creates": [R.contract_entry("/etc/passwd", "absolute")], "needs": []}]
+    )
     result = _run(["judge-phases"], stdin=phases)
     assert result.returncode == 0
     assert result.stdout.count("\n") == 1
-    assert 'phase 1: creates entry #1 "/etc/passwd (absolute)"' in result.stdout
+    assert 'phase 1: creates entry #1 "/etc/passwd"' in result.stdout
 
 
 def test_judge_phases_is_silent_on_a_clean_roadmap():
-    phases = json.dumps([{"id": 1, "creates": ["services/foo.Bar (does a thing)"], "needs": []}])
+    phases = json.dumps(
+        [{"id": 1, "creates": [R.contract_entry("services/foo.Bar", "does a thing")], "needs": []}]
+    )
     result = _run(["judge-phases"], stdin=phases)
     assert result.returncode == 0
     assert result.stdout == ""
+
+
+def test_a_malformed_entry_stops_the_verb_with_one_stderr_line_and_no_traceback():
+    """main() catches MalformedEntry and nothing else. The agent reading this
+    stream needs a sentence naming the entry, not a Python stack -- and a
+    traceback exits 1 too, so only the message distinguishes the two."""
+    phases = json.dumps([{"id": 1, "creates": ["a (b)"], "needs": []}])
+    result = _run(["judge-phases"], stdin=phases)
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr.startswith("Error: judge-phases: phase 1: creates entry #1")
+    assert "Traceback" not in result.stderr
+    assert result.stderr.count("\n") == 1
+
+
+def test_the_diagnostic_names_the_verb_a_caller_can_run_not_the_internal_op():
+    """Half the ops are named differently from the aimi-cli.sh verb that invokes
+    them. "Error: sweep:" points at nothing anybody has typed."""
+    assert R._VERB_FOR_OP["sweep"] == "roadmap-sweep"
+    for op in R._VERB_FOR_OP.values():
+        assert op.startswith("roadmap-"), op
+    # Every op either appears in the map or is already named after its verb.
+    for op in R._OPS:
+        assert op in R._VERB_FOR_OP or op in (
+            "judge-phases", "roadmap-get", "verify-creates", "validate-contracts",
+            "normalize-contracts", "phase-overlap",
+        ), op

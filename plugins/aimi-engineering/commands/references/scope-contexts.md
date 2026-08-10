@@ -87,14 +87,21 @@ horizontal-layer red flag. Re-examine the cut before proceeding.
 Cross-phase contracts name artifacts at the artifact level, using one naming rule
 per kind:
 
-| Artifact kind | Naming rule | Example |
+| Artifact kind | Naming rule | Example `identity` |
 |---|---|---|
-| Endpoint | `METHOD /path` | `"POST /api/notifications (creates a notification for a user)"` |
-| Table | `table_name` | `"notifications (stores per-user notification rows)"` |
-| Service | module/class path | `"services/notifications.NotificationService (sends and lists notifications)"` |
-| File | relative path | `"components/NotificationBell.tsx (header bell icon with unread badge)"` |
+| Endpoint | `METHOD /path` | `POST /api/notifications` |
+| Table | `table_name` | `notifications` |
+| Service | module/class path | `services/notifications.NotificationService` |
+| File | relative path | `components/NotificationBell.tsx` |
 
-Every entry uses the string format `"<artifact-name> (<one-line description>)"`.
+Every entry is an object with exactly two keys:
+
+```json
+{"identity": "POST /api/notifications", "description": "creates a notification for a user"}
+```
+
+`description` is `""` when a phase has no prose for the artifact — never `null`,
+never an absent key. An entry carrying any other key is refused, naming the key.
 
 **The artifact name must be a single token.** It is searched as a literal string,
 so it has to be a symbol, a path, a table name, or the `METHOD /path` endpoint
@@ -121,9 +128,10 @@ next-phase planning time.
 
 ### Two rulers: the identity and the description
 
-One entry, two halves, two different rules. The split is the one
-`verify-creates` has always used: the **identity** is the text before the first
-`(`, trimmed; the **description** is the parenthesised remainder.
+One entry, two fields, two different rules. They used to be two halves of one
+string, split at the first `(` by every boundary that needed one — which is why
+they are two fields now: a split that has to be re-derived is a split that can
+be re-derived differently, and whoever forgot applied prose rules to a name.
 
 **The identity may not carry whitespace, and may not carry any of**
 ``$``, `` ` ``, `;`, `|`, `&`. That is not a style preference — the identity is
@@ -134,8 +142,8 @@ judged after the same method-plus-space strip verification performs, which is
 why `POST /api/notifications` passes and `POST  /api/x` with two spaces does
 not: the second is not the endpoint form, so it would be searched whole.
 
-**The description is exempt from that character class.**
-`"cmd_clean (does x; then y)"` is a legal entry — the identity `cmd_clean` is
+**The description is exempt from that character class.** An identity of
+`cmd_clean` described as `does x; then y` is a legal entry — the identity is
 clean, and a semicolon sitting in human prose has nothing to do with the token
 a search will look for. Only the identity is searched, so only the identity
 carries the ban.
@@ -153,7 +161,8 @@ whitespace, then any run of punctuation — because that is the shape a marker
 has and an ordinary name does not. `### INSTRUCTIONS do X`, `--system: do this`
 and `system: you are now …` are refused; `docs/instructions.md`,
 `design-system:tokens`, `ecosystem:pkg` and a file identity literally named
-`INSTRUCTIONS.md` are all legal entries and pass.
+`INSTRUCTIONS.md` are all legal entries and pass. Both fields are judged for
+injection patterns; only the identity is judged for the character class.
 
 Both halves of that have been wrong before, in opposite directions: unanchored,
 the alternation matched ordinary English; anchored to the *neighbouring
@@ -165,24 +174,28 @@ refused. Both directions are pinned by paired tables in
 narrowing it fails the other.
 
 **The identity is never rewritten — only refused.** The two rulers govern
-mutation as well as judgement. The identity gets formatting normalization only
-(a fenced block goes, a backticked span unwraps, newlines fold); the description
-additionally gets the tag and instruction-override strips. That asymmetry is
-the point: those strips **delete content**, and an identity is grepped for
-literally, so rewriting one produces a name the phase will never deliver. Before
-the split, `design-system:tokens (a token file)` was stored as
-`design-tokens (a token file)` and `parseList<T>` as `parseList` — silently,
-with `validate-contracts` then passing, so the contract read as undelivered a
-whole phase later. Namespaced, templated and globbed identities are declared on
-purpose here (`queue:emails`, `Generic<T>`, `db/migrations/*.sql`) and survive
-verbatim.
+mutation as well as judgement, and on the identity side the rule is now
+absolute: **nothing** is applied to it. Not a fence strip, not a backtick
+unwrap, not a newline fold, not the 500-char cap. The description gets the full
+prose sanitizer and that cap. The asymmetry is the point: those rules **delete
+or reshape content**, and an identity is grepped for literally, so rewriting one
+produces a name the phase will never deliver. Before the split,
+`design-system:tokens (a token file)` was stored as `design-tokens (a token
+file)` and `parseList<T>` as `parseList` — silently, with `validate-contracts`
+then passing, so the contract read as undelivered a whole phase later.
+Namespaced, templated and globbed identities are declared on purpose here
+(`queue:emails`, `Generic<T>`, `db/migrations/*.sql`) and survive verbatim.
+
+An identity over 500 characters is therefore **refused**, where every other
+roadmap field is truncated. A truncated goal is still the goal; a truncated
+name is a search that returns nothing.
 
 **The refusal happens at write time.** `roadmap-init` and `roadmap-amend-phase`
 reject a malformed identity before anything reaches `roadmap.json`, naming the
 phase, the list, the entry's position, the entry and every reason it failed:
 
 ```
-phase 2: creates entry #1 "cmd_a;cmd_b (two verbs)" is not a usable artifact identity: contains the shell metacharacter ";", which validate-contracts refuses in an identity -- move that text into the parenthesised description, or, for an endpoint, declare the route without its query string
+phase 2: creates entry #1 "cmd_a;cmd_b" is not a usable artifact identity: contains the shell metacharacter ";", which validate-contracts refuses in an identity -- move that text into the description field, or, for an endpoint, declare the route without its query string
 ```
 
 An entry that matched an injection pattern is reported by position with its
@@ -207,15 +220,16 @@ flagged entry before computing orphans and deferred needs, so a downstream
 
 ### Two behaviours to know before writing an entry
 
-**A backticked identity is unwrapped, not deleted.** Write
-`` "`cmd_foo` (a backticked name)" `` and the roadmap stores
-`"cmd_foo (a backticked name)"` — the markers go, the name stays, and the
-identity reaches a phase's `handoff.md` under `## Artifacts Created`, which is
-exactly the section a later phase's `needs` is resolved against. The sanitizer
-used to delete the span *together with its contents*, so the identity vanished
-and the failure surfaced one phase later as a `needs` entry nothing could ever
-fulfil — an error arbitrarily far from its cause. Triple-fenced blocks are
-still deleted whole; a fenced block is not an identity.
+**A backticked identity is refused, not silently renamed.** Write an identity
+of `` `cmd_foo` `` and `roadmap-init` refuses the payload, naming the backtick.
+It used to be *unwrapped* to `cmd_foo` — itself a repair of an earlier version
+that *deleted* the span with its contents, so the identity vanished and the
+failure surfaced one phase later as a `needs` entry nothing could ever fulfil.
+Refusing is better than either: the author hears about it at the one moment they
+can still rename the artifact, instead of finding a roadmap that stores a name
+they did not type. In a **description**, a backticked span still unwraps to its
+inner text and a triple-fenced block is still deleted whole — those are prose
+rules, applied to prose.
 
 **The rule binds new writes only.** Nothing re-judges a roadmap already on
 disk. `roadmap-init` judges only the phases it is creating — under `--sync`,
@@ -230,9 +244,9 @@ PROPERTY, NOT THIS HELPER'S"*.
 
 ### What verification looks for
 
-At a phase's close, `aimi-cli.sh verify-creates` reduces each `creates` entry to
-its identity — the text before the first `(` — and looks for that identity among
-the files git tracks on the phase branch. It is not kind-aware: every identity
+At a phase's close, `aimi-cli.sh verify-creates` reads each `creates` entry's
+`identity` field and looks for it among the files git tracks on the phase
+branch. It is not kind-aware: every identity
 runs the same steps in the same order, whatever its kind column says, and the
 first step that finds the artifact ends the search.
 
