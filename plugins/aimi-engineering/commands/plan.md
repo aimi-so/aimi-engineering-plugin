@@ -457,70 +457,87 @@ Set `featureSlug` to the chosen slug and `ROADMAP_MODE=true`.
 
 **`ROADMAP_MODE=false`:** skip the rest of this section entirely — no log line. Proceed to Implementation Scope Detection; the rest of the pipeline (Phase 1 through Phase 4.5) runs exactly as it does for a flat feature today.
 
-#### Load the roadmap and compute eligible pending phases
+#### Load the roadmap and ask the CLI which phases may be expanded
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 ROADMAP_JSON=$($AIMI_CLI roadmap-get --feature "$featureSlug")
-ELIGIBLE_JSON=$(printf '%s' "$ROADMAP_JSON" | jq '
-  (reduce .phases[] as $p ({}; . + {($p.id|tostring): $p.status})) as $status_by_id |
-  [.phases[] | select(
-    .status == "pending" and
-    (.claim == null) and
-    ((.dependsOn // []) | all(. as $d | $status_by_id[$d|tostring] == "completed"))
-  )] | sort_by(.id)
-')
+PHASE_VERDICTS_JSON=$($AIMI_CLI roadmap-eligible --feature "$featureSlug" --statuses pending)
 ```
 
-This mirrors `roadmap-get --next-eligible`'s own jq exactly, narrowed to `status == "pending"` only. (`--next-eligible` also accepts `"planned"`, because `/aimi:execute`'s claim consumes it for phases that are either awaiting expansion or already expanded-but-not-yet-run; `/aimi:plan` must never re-expand a phase that is already `planned` or later, so this step computes eligibility itself rather than calling `--next-eligible`.) `sort_by(.id)` sorts numerically because `id` is a JSON number, not a string — this is what gives decimal ids (`2`, `2.1`, `3`) their correct ascending order rather than a lexicographic sort. Ties are impossible in practice (`roadmap-init` rejects duplicate ids), so numeric `sort_by(.id)` is inherently the tie-break too. Note also what this step deliberately does **not** do: it ranks candidates by `id` alone, adopting no notion of how much work a phase has left, so it does not necessarily agree with whatever order `roadmap-claim` uses when it picks a phase to claim. The two coincide only while every `pending` phase counts as having work — which is the case today, so nothing diverges yet. That equivalence is contingent, not structural: redefine "has work" — count a phase whose stories are all `in_progress` as having none, or treat an empty `userStories` array as no-work — and this selector keeps its id order while the claim path's order moves away from it, silently changing which phase `/aimi:plan` offers to expand. Revisit this line together with any such change.
+Two reads of the same `roadmap.json`, each answering a different question, and both are needed. `ROADMAP_JSON` is the document itself — the only place `slug`, `dir`, `goal`, `areas` and `creates` exist, which is why the selection below still takes the chosen phase's full object out of it, and why the Prior Phase Handoff Ingestion step further down walks it too. `PHASE_VERDICTS_JSON` is the eligibility answer, and it comes from the CLI precisely so that this command and `roadmap.py` cannot drift into disagreeing about which phase is next.
+
+**Payload shape** (`roadmap-eligible`): one JSON object — `{phases: [{id, name, status, claim, eligible, unmet: [{id, status}]}], eligible: [ids], eligibleCount: N}`. `phases[]` carries a verdict for **every** phase in the roadmap, not only the eligible ones, so this single call serves both the by-id lookup the `--phase` override needs and the whole-list rendering the blocked report needs. `eligible[]` holds the ids of the eligible ones, already ordered.
+
+**Branch on the payload, never on the exit code.** `roadmap-eligible` exits **0** when nothing is eligible and says so in the payload (`eligible: []`, `eligibleCount: 0`) — deliberately unlike `roadmap-get --next-eligible`, which exits 1 for that case. An empty list is the STOP-with-report path below, and it must stay distinguishable from a broken CLI: a non-zero exit, or stdout that does not parse as JSON, is a genuine failure and is reported as one rather than as "no phase is ready".
+
+**`--statuses pending` is passed explicitly and is not optional here.** The verb defaults to `pending,planned`, which is what `/aimi:execute`'s claim wants — it consumes phases that are either awaiting expansion or already expanded-but-not-yet-run. `/aimi:plan` must never adopt that default: re-expanding a phase already marked `planned` would overwrite the stories a previous invocation wrote.
+
+**Ordering is a choice this command makes when it calls the verb, not a property it inherits.** `roadmap-eligible` orders by numeric `id` alone — `2`, `2.1`, `3` ascending, decimal ids in their true position rather than a lexicographic one, and ties impossible because `roadmap-init` rejects duplicate ids. Two reasons that is what `/aimi:plan` asks for. First, expansion order is a narrative a human reads: phases are cut so each one builds on the one before it, and offering them out of numeric order asks the reader to follow a story told out of sequence. Second, an id-only request reads no tasks file at all, so the answer depends on `roadmap.json` alone and does not move between two reads of the same roadmap while a concurrent `/aimi:execute` is rewriting those files underneath it.
+
+That is a deliberate divergence from a sibling call site, not an oversight. `/aimi:execute`'s end-of-phase "Plan phase [N] now?" prompt (`commands/execute.md`) consumes `roadmap-get --next-eligible`, which ranks by remaining work first and ascending id only second — so it can offer a higher-numbered phase that still has work ahead of a lower-numbered one whose stories are all complete. The two orders coincide whenever every eligible phase has work; where they part, each is right for its own caller, because `/aimi:execute` is choosing what to *run* next while `/aimi:plan` is choosing what to *narrate* next.
+
+**No new python3 dependency on this path.** `roadmap-get` on the line directly above already shells out to `scripts/roadmap.py`, so this block required python3 before `roadmap-eligible` was added to it and requires exactly as much now.
+
+**Every user-facing sentence in this section is composed here, in plan.md.** The verb emits structured fields only — not one of them carries a sentence — because the plugin's output follows whatever language the person is writing in, and a sentence composed inside `roadmap.py` cannot be re-worded from the command layer. Read `${CLAUDE_PLUGIN_ROOT}/commands/references/user-communication.md` (the `${CLAUDE_PLUGIN_ROOT}` prefix is required — it is the only form `install.sh` rewrites to `${AIMI_PLUGIN_DIR}` for OpenCode) and apply its **Adaptive Language Rule** to every refusal and every report below.
 
 #### Select the target phase
 
 **With `--phase <N>` override:**
 
 ```bash
-SELECTED_PHASE_JSON=$(printf '%s' "$ROADMAP_JSON" | jq --arg n "$PHASE_OVERRIDE" '.phases[] | select((.id|tostring) == $n)')
+case "$PHASE_OVERRIDE" in
+  ''|*[!0-9.]*)
+    echo "Invalid --phase value: $PHASE_OVERRIDE. Must be a numeric phase id." >&2
+    exit 1
+    ;;
+esac
+PHASE_VERDICT_JSON=$(printf '%s' "$PHASE_VERDICTS_JSON" | jq -c ".phases[] | select(.id == $PHASE_OVERRIDE)")
+SELECTED_PHASE_JSON=$(printf '%s' "$ROADMAP_JSON" | jq ".phases[] | select(.id == $PHASE_OVERRIDE)")
 ```
 
-- **Not found:** report `Phase [PHASE_OVERRIDE] not found in [featureSlug]'s roadmap.` and STOP.
-- **Found but not eligible** (status != `pending`, or `claim` is non-null, or one or more `dependsOn` entries are not `status: completed`): refuse **before any research or expansion Task is spawned**. Compose the refusal from the phase's own fields — never a generic message:
-  ```
-  Phase [id] ([name]) is not eligible for expansion: status is '[status]' (expected 'pending').
-  ```
-  or, when status is `pending` but one or more dependencies are unmet:
-  ```
-  Phase [id] ([name]) is not eligible for expansion — unmet dependencies:
-    phase [depId]: status '[depStatus]' (expected 'completed')
-    ...
-  ```
-  List **every** unmet `dependsOn` entry, not just the first. STOP — never fall through to a different phase.
-- **Eligible:** proceed with this phase as `SELECTED_PHASE_JSON`.
+The id is interpolated from the shell rather than bound as a jq variable, and the `case` above is the gate that makes that safe **in this same block** — blocks are executed one per isolated shell, so the `^[0-9]+(\.[0-9]+)?$` check in the argument-parsing step near the top of this file cannot protect this one. Digits and dots are all that survives it, which leaves nothing for jq or the shell to interpret.
+
+Matching is therefore **numeric**, against the phase id as a JSON number: `--phase 2.10` selects phase `2.1`, and `--phase 02` selects phase `2`. That is correct — `2.10` and `2.1` are the same number — and it is the same reading every other `--phase` consumer in the CLI already applies.
+
+- **Not found:** `PHASE_VERDICT_JSON` is empty — no phase in the roadmap carries that id. Report `Phase [PHASE_OVERRIDE] not found in [featureSlug]'s roadmap.` and STOP.
+- **Found but not eligible** (`PHASE_VERDICT_JSON`'s `.eligible` is `false`): refuse **before any research or expansion Task is spawned**. Compose the refusal from that record's own fields — never a generic message — taking the first reason that applies:
+  - `.status` is not `pending`:
+    ```
+    Phase [id] ([name]) is not eligible for expansion: status is '[status]' (expected 'pending').
+    ```
+  - `.claim` is non-null:
+    ```
+    Phase [id] ([name]) is not eligible for expansion — already claimed by [claim.claimedBy].
+    ```
+  - `.unmet` is non-empty:
+    ```
+    Phase [id] ([name]) is not eligible for expansion — unmet dependencies:
+      phase [unmet[].id]: status '[unmet[].status]' (expected 'completed')
+      ...
+    ```
+  List **every** `.unmet` entry, not just the first. STOP — never fall through to a different phase.
+- **Eligible:** `SELECTED_PHASE_JSON`, assigned above, is the phase to expand. Note where it comes from: the **roadmap document**, not the verdict record. The verdict carries `{id, name, status, claim, eligible, unmet}` and no `slug`, `dir`, `goal`, `areas` or `creates` — the very fields the working-memory extraction below and the `frontendBearing` signal read out of it.
 
 **Bare invocation (no `--phase`):**
 
 ```bash
-ELIGIBLE_COUNT=$(printf '%s' "$ELIGIBLE_JSON" | jq 'length')
+SELECTED_PHASE_ID=$(printf '%s' "$PHASE_VERDICTS_JSON" | jq -r '.eligible[0] // ""')
+if [ -n "$SELECTED_PHASE_ID" ]; then
+  SELECTED_PHASE_JSON=$(printf '%s' "$ROADMAP_JSON" | jq ".phases[] | select(.id == $SELECTED_PHASE_ID)")
+fi
 ```
 
-- `ELIGIBLE_COUNT > 0` → `SELECTED_PHASE_JSON=$(printf '%s' "$ELIGIBLE_JSON" | jq '.[0]')` — the lowest numeric id.
-- `ELIGIBLE_COUNT == 0` → no phase is ready. List every still-`pending` phase together with its specific blocking reason (mirrors `/aimi:execute` Step 1.7's "No phase is ready to claim" style):
+- **`SELECTED_PHASE_ID` non-empty** → it is the eligible phase with the lowest numeric id, and `SELECTED_PHASE_JSON` is that phase's full object from the roadmap document — again the document, for the same reason as the override path above.
+- **`SELECTED_PHASE_ID` empty** (`eligible[]` was `[]`, on an exit-0 call) → no phase is ready. List every still-`pending` phase together with its own blocking reason (mirrors `/aimi:execute` Step 1.7's "No phase is ready to claim" style):
   ```bash
-  printf '%s' "$ROADMAP_JSON" | jq -r '
-    (reduce .phases[] as $p ({}; . + {($p.id|tostring): $p.status})) as $status_by_id |
-    .phases[] | select(.status == "pending") | . as $p |
-    (($p.dependsOn // []) | map(select($status_by_id[(.|tostring)] != "completed"))) as $unmet |
-    if ($unmet | length) > 0 then
-      "phase \($p.id) (\($p.name)): blocked on " + ($unmet | map("phase \(.) (\($status_by_id[(.|tostring)]))") | join(", "))
-    elif $p.claim != null then
-      "phase \($p.id) (\($p.name)): claimed by another session"
-    else empty end
-  '
+  printf '%s' "$PHASE_VERDICTS_JSON" | jq -c '.phases[] | select(.status == "pending" and .eligible == false)'
   ```
-  Report:
+  That prints one verdict record per line. Compose one sentence per record here, from its own fields, with the same precedence the override refusal uses: `.unmet` non-empty → name every unmet dependency by id and status; otherwise `.claim` non-null → claimed by another session. Report:
   ```
   No eligible pending phase in [featureSlug]'s roadmap:
-  [one line per blocked phase from the jq above]
+  [one composed line per blocked phase]
 
   Every phase is already planned, in progress, completed, or blocked. Run /aimi:plan --phase <N> to override, or resolve the blocking dependency first.
   ```
@@ -538,6 +555,8 @@ PHASE_AREAS_JSON=$(printf '%s' "$SELECTED_PHASE_JSON" | jq -c '.areas // []')
 ```
 
 `PHASE_DIR` is the `phase-<id>[-<slug>]` directory segment `roadmap-init` already computed and validated at materialization time — reuse it verbatim here; never re-derive it.
+
+`SELECTED_PHASE_ID` is re-read from the selected phase object here rather than carried over from whatever the selection step matched on, and that is what canonicalizes it: `--phase 2.10` leaves this block holding `2.1`, the roadmap's own spelling of that id. Everything downstream depends on it — the tasks-file path, every `--phase` argument passed back to the CLI, and the slugified branch name — and all of them must name what `roadmap.json` actually contains, not what the user typed.
 
 #### Pre-Expansion Contract Gate
 
