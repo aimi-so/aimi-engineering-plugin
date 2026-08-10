@@ -27,37 +27,30 @@ Apply all three rules in order. The result replaces the original string.
 ## Contract Entries
 
 **A `creates`/`needs` entry is not free text, and the rules above do not apply
-to it whole.** It is `{identity, description}`: the identity is the token
-`verify-creates` greps for *literally*, and the description is prose. They need
-opposite treatment, and they are two fields precisely so that no layer has to
-work out where one ends and the other begins before applying the right rule.
+to it whole.** It is `{identity, description}` — two fields precisely so that no
+layer has to work out where one ends and the other begins before applying the
+right rule. Which rule each field takes:
 
-- **The identity is never modified — by anything, anywhere.** Not tag stripping,
-  not `$(` removal, not instruction-override stripping, not backtick unwrapping,
-  not newline folding, not truncation. Every one of those changes a name, and a
-  changed name is one the phase will never deliver.
-- **The description gets all three rules**, unchanged, plus its 500-char cap.
-- **An identity that breaks a rule is REFUSED, never repaired** — including one
-  over 500 characters, where every other field would be truncated. That
-  asymmetry is deliberate: a truncated goal is still the goal, a truncated name
-  is a search that returns nothing.
-- **You never have to judge whether an identity is legal.** Submit it verbatim
-  and let `roadmap-init` refuse it. Its diagnostic names the phase, the list, the
-  entry's position and every reason, and `/aimi:plan` already repairs and
-  retries once against exactly that message.
+| Field | The three rules above | Newline fold, `$(` strip, truncation |
+|---|---|---|
+| `identity` | none | none |
+| `description` | all three | all of them, cap 500 chars |
+
+Nothing is applied to an identity, by any layer, anywhere.
 
 **This applies to every layer, including the agent that composes the entry —
 not only to the CLI.** Sanitizing an identity upstream does not duplicate the
 CLI's work, it *defeats* it: the CLI can only refuse the identity it is given,
 so one already damaged upstream is one it accepts without complaint and the
-refusal is laundered away. Measured consequence: an agent applying rule 2 to an
-identity of `parseList<T>` hands over `parseList`, which is stored, and the
-contract is unresolvable a phase later.
+refusal is laundered away. Never judge an identity here — submit it as authored
+and let `roadmap-init` refuse it.
 
-The normative statement of the split, its rationale and the diagnostics live in
-`scope-contexts.md` § *Two rulers: the identity and the description*. This
-section exists so a reader of the base rules learns that contract entries are
-carved out of them; it is not a second copy of the rule.
+Everything else about the split — why the two halves are ruled differently, what
+makes an identity legal, what happens to one that is not, and the diagnostics
+that say so — is stated once, in `scope-contexts.md` § *Two rulers: the identity
+and the description*. This section exists so a reader of the base rules learns
+that contract entries are carved out of them; it is not a second copy of the
+rule, and must not become one.
 
 ## Path-Hints Extension
 

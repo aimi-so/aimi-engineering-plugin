@@ -46,8 +46,10 @@ Only runs when a brainstorm was loaded above — a `phases:` frontmatter key can
 
 Apply the base rules in `commands/references/sanitization.md` (strip code fences/backtick content, HTML/XML tags, instruction-override patterns) plus the newline/`$(`-stripping extension used elsewhere in this pipeline, to every free-text field, before it is used in any directory-segment derivation, CLI argument, or downstream prompt:
 
+**A `creates`/`needs` entry is not a free-text field.** Each is `{identity, description}`, and the two halves take opposite treatment — `commands/references/sanitization.md` § *Contract Entries* states the carve-out that governs this step, and points in turn at the rule's normative home. Applied here: pass each `identity` through verbatim (no sanitization, no trimming, no truncation) and treat the `description` beside it as free text subject to the rules below. Submit an identity as authored and let `roadmap-init` refuse it rather than judging it here.
+
 - Replace newlines/carriage returns with spaces; strip `$(` sequences and backtick characters.
-- Truncate: `name` 200 chars, `goal` 2000 chars, each `successCriteria` entry 2000 chars, each `creates`/`needs`/`areas` entry 500 chars (matches the server-side `_ROADMAP_SANITIZE_JQ` caps `aimi-cli.sh` re-applies: 2000 for `successCriteria`, 500 for the three contract lists — they do not share one cap).
+- Truncate: `name` 200 chars, `goal` 2000 chars, each `successCriteria` entry 2000 chars, each `creates`/`needs` **description** and each `areas` entry 500 chars (matches the caps `roadmap.py` re-applies server-side: 2000 for `successCriteria`, 500 for descriptions and `areas` — they do not share one cap). Never truncate an `identity`; the CLI refuses one over 500 characters rather than clipping it.
 - `successCriteria`, `dependsOn`, `creates`, `needs`, `areas` default to `[]` when absent.
 - `id` and each `dependsOn` entry are numbers — validate `id` is present and numeric; drop (with a warning) any entry that fails.
 - **Discard the frontmatter's own `slug` value entirely.** It is never trusted — the next step derives a fresh one from the sanitized `name`.
@@ -79,12 +81,14 @@ Payload shape (one object per phase, fixed key order):
 
 ```json
 [
-  {"id": 1, "name": "Foundation", "slug": "foundation", "goal": "...", "successCriteria": ["..."], "dependsOn": [], "creates": ["..."], "needs": [], "areas": ["..."]},
-  {"id": 2, "name": "Notifications", "slug": "notifications", "goal": "...", "successCriteria": ["..."], "dependsOn": [1], "creates": [], "needs": ["..."], "areas": ["..."]}
+  {"id": 1, "name": "Foundation", "slug": "foundation", "goal": "...", "successCriteria": ["..."], "dependsOn": [], "creates": [{"identity": "...", "description": "..."}], "needs": [], "areas": ["..."]},
+  {"id": 2, "name": "Notifications", "slug": "notifications", "goal": "...", "successCriteria": ["..."], "dependsOn": [1], "creates": [], "needs": [{"identity": "...", "description": "..."}], "areas": ["..."]}
 ]
 ```
 
-If `roadmap-init` exits non-zero for any other reason (e.g. a dangling `dependsOn` reference from a hand-edited brainstorm), surface its stderr as a warning and continue the rest of the plan pipeline unchanged — do not abort the whole run over a roadmap-materialization failure.
+Emit `description: ""` when a phase has no prose for an artifact — never omit the key, and never write `null`.
+
+If `roadmap-init` exits non-zero with a stderr beginning `Error: roadmap-init: malformed creates/needs entry` or `Error: roadmap-init: malformed creates/needs identity`, the failure is one this pipeline authored: apply `commands/plan.md` Roadmap Materialization's repair-and-retry-once rule, which those two diagnostics are written for. If `roadmap-init` exits non-zero for any other reason (e.g. a dangling `dependsOn` reference from a hand-edited brainstorm), or that single retry also fails, surface its stderr as a warning and continue the rest of the plan pipeline unchanged — do not abort the whole run over a roadmap-materialization failure.
 
 ### Rolling-Wave Phase Selection
 

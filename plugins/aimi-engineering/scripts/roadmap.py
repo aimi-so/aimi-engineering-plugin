@@ -968,8 +968,9 @@ def verify_creates_one(directory, identity):
             identity,
             "missing",
             "",
-            "Malformed creates entry: empty artifact identity (expected "
-            '"<artifact-name> (<description>)"). ' + VERIFY_CREATES_TRACKED_NOTE,
+            "Malformed creates entry: empty artifact identity (an entry is "
+            '{identity, description}, and the identity names the artifact). '
+            + VERIFY_CREATES_TRACKED_NOTE,
             0,
         )
 
