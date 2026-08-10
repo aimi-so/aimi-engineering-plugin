@@ -1694,7 +1694,7 @@ cmd_get_state() {
 # cmd_resolve_base_branch share this guard by behaviour, not by domain. A forge
 # prefix would misdescribe a quarter of its own callers, so the name follows
 # this file's other domain-neutral private helpers (_local_has_branch,
-# _is_merged_into_default, _is_pid_alive).
+# _is_merged_into_default, _file_size_bytes).
 #
 # Usage: _require_git_repo "$project_dir"
 _require_git_repo() {
@@ -13726,25 +13726,6 @@ def _rm_sanitize_contract(maxlen):
   ) end;
 '
 
-# Process-liveness probe, ported from guard-runtime-state.py is_alive() (lines 26-34):
-# signal-zero kill probe. "No such process" -> not alive. "Exists, no permission
-# to signal" -> alive (mirrors ProcessLookupError=False / PermissionError=True).
-_is_pid_alive() {
-  local pid="$1"
-  if ! [[ "$pid" =~ ^[0-9]+$ ]] || [ "$pid" -le 0 ]; then
-    return 1
-  fi
-  if kill -0 "$pid" 2>/dev/null; then
-    return 0
-  fi
-  local err
-  err=$(kill -0 "$pid" 2>&1 >/dev/null) || true
-  if printf '%s' "$err" | grep -qi "not permitted"; then
-    return 0
-  fi
-  return 1
-}
-
 # Validate --feature is present and a safe single path component.
 # $2 is the optional verb label used to prefix the error; it defaults to the
 # historical "roadmap" so every pre-existing caller's message is byte-identical.
@@ -13838,102 +13819,6 @@ _roadmap_validate_phase_id() {
     exit 1
   fi
 }
-
-# ---------------------------------------------------------------------------
-# Phase ground truth, has-work, and candidate selection
-#
-# One phase's status per roadmap.json is a claim about a session; what a phase
-# still has to DO is a fact on disk, in its own tasks file. These three pieces
-# turn that fact into the ordering both selectors use.
-# ---------------------------------------------------------------------------
-
-# Classify a phase from its own tasks file's story statuses. This is
-# roadmap-reconcile's original inline expression, lifted verbatim so reconcile
-# and the has-work map below cannot drift into two different answers about the
-# same file. Callers guarantee the file exists and parses.
-_ROADMAP_GROUND_TRUTH_JQ='
-  [.userStories[].status] as $statuses |
-  if ($statuses | length) == 0 then "unknown"
-  elif ($statuses | all(. == "completed")) then "completed"
-  elif ($statuses | any(. == "failed")) then "verification_failed"
-  else "in_progress"
-  end
-'
-
-# Emit {"<phase id>": <has work bool>} for every phase in a roadmap.
-#   $1 roadmap.json path   $2 feature slug
-#
-# A phase has NO work only when its own tasks file exists, parses, holds at
-# least one story, and every story is "completed" -- i.e. exactly when the
-# classification above says "completed". Every other case is has-work:
-#   - no tasks file: a pending phase /aimi:plan has not expanded yet. Demoting
-#     a phase for being unplanned would rank the whole front of the roadmap
-#     last, which is the opposite of the intent.
-#   - unparseable: nothing is known, so nothing is demoted.
-#   - zero userStories ("unknown"): same reasoning reconcile already applies --
-#     it declines to correct a status from an empty story list.
-_roadmap_has_work_map() {
-  local roadmap_path="$1" feature="$2"
-  local feature_dir hw_id hw_dir hw_file hw_truth hw_map
-  feature_dir=$(dirname "$roadmap_path")
-  hw_map='{}'
-
-  while IFS=$'\t' read -r hw_id hw_dir; do
-    [ -z "$hw_id" ] && continue
-    hw_file="$feature_dir/$hw_dir/$feature-phase-$hw_id-tasks.json"
-    hw_truth="unknown"
-    if [ -f "$hw_file" ] && jq -e . "$hw_file" >/dev/null 2>&1; then
-      hw_truth=$(jq -r "$_ROADMAP_GROUND_TRUTH_JQ" "$hw_file")
-    fi
-    if [ "$hw_truth" = "completed" ]; then
-      hw_map=$(printf '%s' "$hw_map" | jq --arg k "$hw_id" '. + {($k): false}')
-    else
-      hw_map=$(printf '%s' "$hw_map" | jq --arg k "$hw_id" '. + {($k): true}')
-    fi
-  done < <(jq -r '.phases[] | [(.id|tostring), .dir] | @tsv' "$roadmap_path")
-
-  printf '%s' "$hw_map"
-}
-
-# The single dependency-eligibility + ordering implementation, spliced into
-# both roadmap-get --next-eligible and roadmap-claim's auto-mode branch so the
-# two cannot drift apart again. Takes the phases array, the allowed status set,
-# and the has-work side map; returns the eligible candidates in claim order.
-#
-# The caller supplies the array it wants judged, and that is deliberate: it is
-# the second axis on which the two selectors differ. roadmap-claim passes
-# $cleared_phases (dead-PID claims already nulled, inside its own flock);
-# roadmap-get --next-eligible passes .phases raw, because it holds no lock and
-# clearing stale claims is a decision that belongs where the lock is. So a
-# phase held by a dead session stays claimable by one and invisible to the
-# other, exactly as before -- unifying the ordering was never meant to change
-# that, and a read-only verb has no business inferring liveness.
-#
-# ORDER, not the set, was the defect (issue #90). Two jq hazards live in the
-# rank helper, both of which silently make the ranking a no-op:
-#   - `$work[$k] // true` is wrong: `//` fires on false as well as null, so
-#     every legitimate false collapses to true and nothing is ever demoted.
-#   - `$work | has(.id|tostring)` is wrong: the pipe rebinds `.` to $work, so
-#     `.id` is null and every lookup misses.
-# Binding the key first and testing has() explicitly avoids both.
-_ROADMAP_SELECT_JQ='
-def _rm_rank($work):
-  (.id|tostring) as $k
-  | if ($work | has($k)) then (if $work[$k] then 0 else 1 end) else 0 end;
-
-def _rm_candidates($phases; $allowed; $work):
-  (reduce $phases[] as $p ({}; . + {($p.id|tostring): $p.status})) as $status_by_id
-  | [ $phases[]
-      # `.status` is bound BEFORE the pipe into $allowed. Written the obvious
-      # way -- `$allowed | index(.status)` -- the pipe rebinds `.` to $allowed
-      # and jq dies with "Cannot index array with string". Same hazard as the
-      # rank helper above, different expression.
-      | select(.status as $st | ($allowed | index($st)) != null)
-      | select(.claim == null)
-      | select(((.dependsOn // []) | all(. as $d | $status_by_id[$d|tostring] == "completed")))
-    ]
-  | sort_by([_rm_rank($work), .id]);
-'
 
 # Read a phases JSON array on stdin; print one human-readable error line per
 # creates[]/needs[] entry whose *identity* can never name a real artifact.
@@ -14196,6 +14081,11 @@ cmd_roadmap_amend_phase() {
   printf '%s\n' "$out"
 }
 
+# The only lifecycle verb that takes no lock: it reads and reports, so there is
+# nothing for a lock to protect. That is also why it never clears a stale
+# dead-PID claim the way roadmap-claim does -- inferring liveness is a decision
+# that belongs where the lock is, and a phase held by a dead session therefore
+# stays claimable by roadmap-claim and invisible here, exactly as before.
 cmd_roadmap_get() {
   local feature="" phase_id="" next_eligible=false
 
@@ -14217,38 +14107,16 @@ cmd_roadmap_get() {
   local roadmap_path
   roadmap_path=$(_roadmap_require "roadmap-get" "$feature")
 
+  local phase_args=() next_args=()
   if [ -n "$phase_id" ]; then
     _roadmap_validate_phase_id "$phase_id" "roadmap-get"
-    if ! jq -e --argjson pid "$phase_id" '.phases[] | select(.id == $pid)' "$roadmap_path" >/dev/null 2>&1; then
-      echo "Error: roadmap-get: phase $phase_id not found in $roadmap_path" >&2
-      exit 1
-    fi
-    jq --argjson pid "$phase_id" '.phases[] | select(.id == $pid)' "$roadmap_path"
-    return 0
+    phase_args=(--phase "$phase_id")
   fi
+  [ "$next_eligible" = true ] && next_args=(--next-eligible)
 
-  if [ "$next_eligible" = true ]; then
-    # Same selection implementation roadmap-claim's auto branch uses, narrowed
-    # to the two statuses this verb reports. `.phases` is passed raw: this verb
-    # holds no lock, so it never clears stale dead-PID claims (see the note on
-    # _ROADMAP_SELECT_JQ). Reading one tasks file per phase is new cost for a
-    # verb that previously touched only roadmap.json, and it is unsynchronized
-    # -- a tasks file rewritten mid-read yields "has work", the safe answer,
-    # since only an all-completed file demotes anything.
-    local eligible has_work
-    has_work=$(_roadmap_has_work_map "$roadmap_path" "$feature")
-    eligible=$(jq --argjson work "$has_work" "$_ROADMAP_SELECT_JQ"'
-      _rm_candidates(.phases; ["pending","planned"]; $work) | (.[0] // null)
-    ' "$roadmap_path")
-    if [ "$eligible" = "null" ]; then
-      echo "Error: roadmap-get: no eligible phase found" >&2
-      exit 1
-    fi
-    printf '%s\n' "$eligible"
-    return 0
-  fi
-
-  cat "$roadmap_path"
+  check_python3
+  python3 "$(_aimi_roadmap_py)" roadmap-get \
+    --roadmap "$roadmap_path" --feature "$feature" "${phase_args[@]}" "${next_args[@]}"
 }
 
 cmd_roadmap_set_status() {
@@ -14282,82 +14150,24 @@ cmd_roadmap_set_status() {
   local roadmap_path
   roadmap_path=$(_roadmap_require "roadmap-set-status" "$feature")
 
+  # One crossing, not the two roadmap-init and roadmap-amend-phase make. Their
+  # split exists because a payload arrives on stdin and can be refused without
+  # reading roadmap.json at all -- refusing inside the lock would create the
+  # feature directory as a side effect of saying no. This verb has no payload:
+  # every refusal it can reach without the document (feature, phase id, status
+  # enum) has already happened above, and every remaining one needs the file, so
+  # a second call could only re-read what the first one holds.
+  check_python3
+  local force_args=()
+  [ "$force" = true ] && force_args=(--force)
+
   local out
   out=$(
     (
       _lock "${roadmap_path}.lock"
-
-      if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
-        echo "Error: roadmap-set-status: malformed roadmap.json: $roadmap_path" >&2
-        exit 1
-      fi
-
-      current_status=$(jq -r --argjson pid "$phase_id" '(.phases[] | select(.id == $pid) | .status) // empty' "$roadmap_path")
-      if [ -z "$current_status" ]; then
-        echo "Error: roadmap-set-status: phase $phase_id not found in $roadmap_path" >&2
-        exit 1
-      fi
-
-      # verification_failed is reachable from any non-terminal state (execute
-      # sets it when creates-verification fails). The rest of the graph:
-      #   pending -> planned            plan expands the phase
-      #   pending -> in_progress        execute claims a phase whose planned
-      #                                 transition was lost (plan aborted after
-      #                                 writing tasks.json but before setting
-      #                                 planned) -- allowing it makes execute
-      #                                 self-healing instead of silently
-      #                                 diverging from roadmap.json
-      #   planned -> in_progress        normal start
-      #   in_progress -> in_progress    idempotent resume of a crashed session
-      #   verification_failed -> in_progress   re-verify retry
-      #   in_progress|verification_failed -> completed
-      allowed=false
-      if [ "$new_status" = "verification_failed" ]; then
-        allowed=true
-      else
-        case "$current_status:$new_status" in
-          pending:planned|pending:in_progress|planned:in_progress|in_progress:in_progress|verification_failed:in_progress|in_progress:completed|verification_failed:completed) allowed=true ;;
-        esac
-      fi
-
-      if [ "$allowed" != true ] && [ "$force" != true ]; then
-        echo "Error: roadmap-set-status: transition $current_status -> $new_status is not allowed without --force" >&2
-        exit 1
-      fi
-
-      # Hard rule, not an --force-able ordering convention: a phase can never
-      # reach "completed" without handoff.md already on disk at its phase dir
-      # (see outline 11). handoff.md is written only via roadmap-write-handoff,
-      # which is the guard-protected path guard-runtime-state.py points callers
-      # at. This check runs even when --force is set -- --force overrides
-      # transition *order*, never this physical artifact precondition.
-      if [ "$new_status" = "completed" ]; then
-        phase_dir=$(jq -r --argjson pid "$phase_id" '(.phases[] | select(.id == $pid) | .dir) // empty' "$roadmap_path")
-        feature_dir=$(dirname "$roadmap_path")
-        if [ ! -f "$feature_dir/$phase_dir/handoff.md" ]; then
-          echo "Error: roadmap-set-status: phase $phase_id cannot transition to completed -- no handoff.md found at $feature_dir/$phase_dir/handoff.md. Write it first with roadmap-write-handoff." >&2
-          exit 1
-        fi
-      fi
-
-      # Completing a phase also releases its claim in the same atomic write --
-      # no window where status reads completed while the phase still shows
-      # claimed (see outline 11; mirrors cmd_mark_complete's single-write pattern).
-      if [ "$new_status" = "completed" ]; then
-        roadmap_doc=$(jq --argjson pid "$phase_id" --arg status "$new_status" '
-          .phases |= map(if .id == $pid then .status = $status | .claim = null else . end)
-        ' "$roadmap_path")
-      else
-        roadmap_doc=$(jq --argjson pid "$phase_id" --arg status "$new_status" '
-          .phases |= map(if .id == $pid then .status = $status else . end)
-        ' "$roadmap_path")
-      fi
-
-      tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
-      printf '%s\n' "$roadmap_doc" > "$tmp_file"
-      mv "$tmp_file" "$roadmap_path"
-
-      jq -n --argjson pid "$phase_id" --arg from "$current_status" --arg to "$new_status" '{phase: $pid, from: $from, to: $to}'
+      python3 "$(_aimi_roadmap_py)" set-status \
+        --roadmap "$roadmap_path" --phase "$phase_id" --status "$new_status" \
+        "${force_args[@]}"
     ) 200>"${roadmap_path}.lock"
   ) || exit $?
   printf '%s\n' "$out"
@@ -14392,187 +14202,28 @@ cmd_roadmap_claim() {
   if [ -n "$phase_override" ]; then
     _roadmap_validate_phase_id "$phase_override" "roadmap-claim"
   fi
-  # Sanitize the caller-supplied session id before it is ever written to roadmap.json.
-  session_id=$(printf '%s' "$session_id" | jq -Rr "$_ROADMAP_SANITIZE_JQ"'_rm_sanitize(200)')
 
   local roadmap_path
   roadmap_path=$(_roadmap_require "roadmap-claim" "$feature" " (run roadmap-init first)")
 
-  # --phase is a bare numeric id at this point (validated above); pass it through
-  # to jq as a number, or JSON null when no override was given.
-  local phase_override_json="null"
-  [ -n "$phase_override" ] && phase_override_json="$phase_override"
+  # The session id is sanitized on the far side, with the same _rm_sanitize
+  # every other free-text roadmap field goes through, before it is ever written
+  # to roadmap.json.
+  #
+  # The exit statuses are the contract, not a detail: execute.md branches on 4
+  # ("there is nothing left to claim") and 3 ("there is, and you cannot have
+  # it"), so they travel out of the subshell through `|| exit $?` unchanged.
+  check_python3
+  local phase_args=()
+  [ -n "$phase_override" ] && phase_args=(--phase "$phase_override")
 
   local out
   out=$(
     (
       _lock "${roadmap_path}.lock"
-
-      if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
-        echo "Error: roadmap-claim: malformed roadmap.json: $roadmap_path" >&2
-        exit 1
-      fi
-
-      # Identify stale claims (claimedPid no longer alive) inside this locked pass.
-      # sessionId travels alongside pid here so the release report line below
-      # ("released stale claim on phase <id> (session <sid> pid <pid> not
-      # alive)") can be built without a second read of roadmap.json.
-      # _is_pid_alive is a bash kill(2) probe, not something jq can do, so
-      # the loop itself stays bash -- but it only accumulates plain phase-id
-      # lines while the lock is held, then converts them to a JSON array in
-      # one jq pass at the end, instead of spawning one jq process per stale
-      # claim to grow the array incrementally.
-      claimed_pids=$(jq -c '[.phases[] | select(.claim != null) | {id: .id, pid: .claim.claimedPid, sessionId: .claim.claimedBy}]' "$roadmap_path")
-      stale_id_lines=""
-      while IFS=$'\t' read -r pid_phase_id pid_val; do
-        [ -z "$pid_phase_id" ] && continue
-        if ! _is_pid_alive "$pid_val"; then
-          stale_id_lines="${stale_id_lines}${pid_phase_id}"$'\n'
-        fi
-      done < <(printf '%s' "$claimed_pids" | jq -r '.[] | [(.id|tostring), (.pid|tostring)] | @tsv')
-      stale_ids=$(printf '%s' "$stale_id_lines" | jq -R -s 'split("\n") | map(select(length > 0) | tonumber)')
-      stale_released=$(printf '%s' "$claimed_pids" | jq --argjson stale_ids "$stale_ids" '
-        [.[] | select((.id) as $id | ($stale_ids | index($id)) != null)]
-      ')
-
-      now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-      # Has-work pre-pass, inside this same lock, so the ordering below reads a
-      # tasks-file snapshot no concurrent claim can move under it. It is a SIDE
-      # MAP handed to jq as one --argjson, never a field merged onto the phase
-      # objects: $cleared_phases is the very array written back to roadmap.json
-      # at the end of this function, so a synthetic key added here would be
-      # persisted forever and would then flow into validate-contracts,
-      # roadmap-sweep and roadmap-reconcile.
-      has_work=$(_roadmap_has_work_map "$roadmap_path" "$feature")
-
-      result=$(jq -n \
-        --slurpfile cur "$roadmap_path" \
-        --argjson stale_ids "$stale_ids" \
-        --argjson stale_released "$stale_released" \
-        --arg session_id "$session_id" \
-        --arg now "$now" \
-        --argjson session_pid "$session_pid" \
-        --argjson phase_override "$phase_override_json" \
-        --argjson work "$has_work" \
-        "$_ROADMAP_SELECT_JQ"'
-          ($cur[0]) as $current |
-          ($current.phases | map(if ((.id) as $id | ($stale_ids | index($id)) != null) then .claim = null else . end)) as $cleared_phases |
-          (reduce $cleared_phases[] as $p ({}; . + {($p.id|tostring): $p.status})) as $status_by_id |
-          # Self-reclaim: this exact session already owns an unreleased claim on a
-          # still-active phase (matching the requested --phase when given). Return
-          # it again instead of erroring or re-running eligibility -- this is what
-          # makes re-running /aimi:execute on an already-claimed phase idempotent.
-          ($cleared_phases | map(select(
-            .claim != null and .claim.claimedBy == $session_id and
-            (.status == "pending" or .status == "planned" or .status == "in_progress") and
-            ($phase_override == null or .id == $phase_override)
-          ))) as $self_claimed |
-          (if ($self_claimed | length) > 0 then
-            ($self_claimed | sort_by(.id) | .[0]) as $mine |
-            {claimed: true, phase: $mine, phases: $cleared_phases}
-          elif $phase_override != null then
-            ($cleared_phases | map(select(.id == $phase_override))) as $target_arr |
-            if ($target_arr | length) == 0 then
-              {claimed: false, reason: "phase-not-found", phases: null}
-            else
-              ($target_arr[0]) as $target |
-              if ((["pending","planned","in_progress","verification_failed"] | index($target.status)) == null) then
-                {claimed: false, reason: "not-claimable", detail: ("phase status is " + $target.status), phases: null}
-              elif $target.claim != null then
-                {claimed: false, reason: "claimed", detail: "claimed by a live session", phases: null}
-              elif ((($target.dependsOn // []) | all(. as $d | $status_by_id[$d|tostring] == "completed")) | not) then
-                {claimed: false, reason: "blocked", detail: ("depends on incomplete phase(s): " + ((($target.dependsOn // []) | map(select($status_by_id[(.|tostring)] != "completed")) | map(tostring) | join(", ")))), phases: null}
-              else
-                ($cleared_phases | map(if .id == $target.id then . + {claim: {claimedBy: $session_id, claimedAt: $now, claimedPid: $session_pid}} else . end)) as $final_phases |
-                {claimed: true, phase: ($final_phases[] | select(.id == $target.id)), phases: $final_phases}
-              end
-            end
-          else
-            # Resumable = not yet terminal AND carrying no live claim. Stale
-            # claims were already cleared above, so an unclaimed in_progress
-            # phase is leftover from a crashed session and verification_failed
-            # is awaiting a re-verify run -- both must be re-claimable or crash
-            # recovery and verification retry are dead ends, which is exactly
-            # what execute.md tells the user to recover by re-running.
-            #
-            # The ORDER within that set, not the set itself, was issue #90. A
-            # stuck phase is by construction older and therefore lower-id than
-            # whatever came after it, so plain sort_by(.id) made it win every
-            # auto-claim indefinitely, ahead of the phase genuinely ready to
-            # run. Candidates are now ranked by remaining work first and id
-            # second. Ranking DEMOTES, it never excludes: the moment a zero-work
-            # phase is the only eligible candidate it is claimed, which is what
-            # keeps crash recovery and the verification retry reachable.
-            (_rm_candidates($cleared_phases; ["pending","planned","in_progress","verification_failed"]; $work)) as $eligible |
-            if ($eligible | length) > 0 then
-              ($eligible | .[0]) as $chosen |
-              ($cleared_phases | map(if .id == $chosen.id then . + {claim: {claimedBy: $session_id, claimedAt: $now, claimedPid: $session_pid}} else . end)) as $final_phases |
-              {claimed: true, phase: ($final_phases[] | select(.id == $chosen.id)), phases: $final_phases}
-            else
-              ($cleared_phases | map(select(.status == "pending" or .status == "planned" or .status == "in_progress" or .status == "verification_failed"))) as $remaining |
-              if ($remaining | length) == 0 then
-                {claimed: false, reason: "none-eligible", phases: null}
-              else
-                ($remaining | map(
-                  if .claim != null then
-                    {id: .id, reason: ("claimed by session " + .claim.claimedBy)}
-                  else
-                    {id: .id, reason: ("depends on incomplete phase(s): " + (((.dependsOn // []) | map(select($status_by_id[(.|tostring)] != "completed")) | map(tostring) | join(", "))))}
-                  end
-                )) as $blocked_reasons |
-                {claimed: false, reason: "all-blocked", blocked: $blocked_reasons, phases: null}
-              end
-            end
-          end) as $outcome |
-          # INTERNAL envelope, never stdout. This attaches staleReleased to the
-          # $outcome wrapper ({claimed, phase, phases, reason...}) that the bash
-          # below destructures. Actual stdout is the SECOND `+ {staleReleased`
-          # further down -- `.phase + {staleReleased: .staleReleased}` -- and
-          # that one is the claim envelope execute.md Step 1.7 reads
-          # .id/.dir/.slug/.branch/.status off. So a grep for `+ {staleReleased`
-          # returns two hits, and always has; only the lower one is a contract.
-          # Projecting it would silently disable the re-verify branch in
-          # execute.md Step 3, which is why test-aimi-cli.sh pins all six of
-          # those fields on the auto path.
-          $outcome + {staleReleased: $stale_released}
-        ')
-
-      claimed=$(printf '%s' "$result" | jq -r '.claimed')
-
-      if [ "$claimed" = "true" ]; then
-        new_phases_out=$(printf '%s' "$result" | jq '.phases')
-        roadmap_doc=$(jq --argjson phases "$new_phases_out" '.phases = $phases' "$roadmap_path")
-
-        tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
-        printf '%s\n' "$roadmap_doc" > "$tmp_file"
-        mv "$tmp_file" "$roadmap_path"
-
-        printf '%s' "$result" | jq '.phase + {staleReleased: .staleReleased}'
-        exit 0
-      fi
-
-      reason=$(printf '%s' "$result" | jq -r '.reason')
-      case "$reason" in
-        none-eligible)
-          echo "Error: roadmap-claim: no phase remains in pending, planned, in_progress or verification_failed status" >&2
-          exit 4
-          ;;
-        phase-not-found)
-          echo "Error: roadmap-claim: phase $phase_override not found in $roadmap_path" >&2
-          exit 4
-          ;;
-        not-claimable|claimed|blocked)
-          detail=$(printf '%s' "$result" | jq -r '.detail')
-          echo "Error: roadmap-claim: phase $phase_override is not claimable: $detail" >&2
-          exit 3
-          ;;
-        *)
-          echo "Error: roadmap-claim: all remaining pending/planned phases are blocked:" >&2
-          printf '%s' "$result" | jq -r '.blocked[] | "  phase " + (.id|tostring) + ": " + .reason' >&2
-          exit 3
-          ;;
-      esac
+      python3 "$(_aimi_roadmap_py)" claim \
+        --roadmap "$roadmap_path" --feature "$feature" \
+        --session-id "$session_id" --session-pid "$session_pid" "${phase_args[@]}"
     ) 200>"${roadmap_path}.lock"
   ) || exit $?
   printf '%s\n' "$out"
@@ -14599,25 +14250,13 @@ cmd_roadmap_release_claim() {
   local roadmap_path
   roadmap_path=$(_roadmap_require "roadmap-release-claim" "$feature" "" --skip-malformed)
 
+  check_python3
   local out
   out=$(
     (
       _lock "${roadmap_path}.lock"
-
-      if ! jq -e --argjson pid "$phase_id" '.phases[] | select(.id == $pid)' "$roadmap_path" >/dev/null 2>&1; then
-        echo "Error: roadmap-release-claim: phase $phase_id not found in $roadmap_path" >&2
-        exit 1
-      fi
-
-      roadmap_doc=$(jq --argjson pid "$phase_id" '
-        .phases |= map(if .id == $pid then .claim = null else . end)
-      ' "$roadmap_path")
-
-      tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
-      printf '%s\n' "$roadmap_doc" > "$tmp_file"
-      mv "$tmp_file" "$roadmap_path"
-
-      jq -n --argjson pid "$phase_id" '{released: $pid}'
+      python3 "$(_aimi_roadmap_py)" release-claim \
+        --roadmap "$roadmap_path" --phase "$phase_id"
     ) 200>"${roadmap_path}.lock"
   ) || exit $?
   printf '%s\n' "$out"
@@ -14642,76 +14281,13 @@ cmd_roadmap_reconcile() {
   local roadmap_path
   roadmap_path=$(_roadmap_require "roadmap-reconcile" "$feature")
 
-  local feature_dir
-  feature_dir=$(dirname "$roadmap_path")
-
+  check_python3
   local out
   out=$(
     (
       _lock "${roadmap_path}.lock"
-
-      if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
-        echo "Error: roadmap-reconcile: malformed roadmap.json: $roadmap_path" >&2
-        exit 1
-      fi
-
-      phase_dirs=$(jq -c '[.phases[] | {id: .id, dir: .dir, status: .status}]' "$roadmap_path")
-      corrections='[]'
-
-      blocked='[]'
-
-      while IFS=$'\t' read -r rc_id rc_dir rc_status; do
-        [ -z "$rc_id" ] && continue
-        # Phase tasks files follow <feature>-phase-<id>-tasks.json (the same
-        # convention phase-overlap, execute.md Step 1.7, plan.md Phase 3e and
-        # status.md use). Reading a bare tasks.json here made every lookup miss,
-        # so reconcile silently reported zero corrections.
-        rc_tasks_file="$feature_dir/$rc_dir/$feature-phase-$rc_id-tasks.json"
-        if [ ! -f "$rc_tasks_file" ]; then
-          continue
-        fi
-        if ! jq -e . "$rc_tasks_file" >/dev/null 2>&1; then
-          continue
-        fi
-        # Shared with the has-work map roadmap-claim ranks on
-        # (_ROADMAP_GROUND_TRUTH_JQ) -- one rule, so the two cannot disagree
-        # about the same tasks file.
-        ground_truth=$(jq -r "$_ROADMAP_GROUND_TRUTH_JQ" "$rc_tasks_file")
-        if [ "$ground_truth" != "unknown" ] && [ "$ground_truth" != "$rc_status" ]; then
-          # Same hard precondition roadmap-set-status enforces: a phase never
-          # reaches "completed" without handoff.md on disk. Reconcile must not
-          # be a second write path with weaker invariants -- an otherwise-valid
-          # completed correction is reported as blocked instead of applied, so
-          # the divergence stays visible rather than silently healed wrong.
-          if [ "$ground_truth" = "completed" ] && [ ! -f "$feature_dir/$rc_dir/handoff.md" ]; then
-            blocked=$(printf '%s' "$blocked" | jq --argjson id "$rc_id" --arg from "$rc_status" --arg to "$ground_truth" \
-              '. + [{id: $id, from: $from, to: $to, reason: "no handoff.md -- write it with roadmap-write-handoff, then re-run"}]')
-          else
-            corrections=$(printf '%s' "$corrections" | jq --argjson id "$rc_id" --arg from "$rc_status" --arg to "$ground_truth" '. + [{id: $id, from: $from, to: $to}]')
-          fi
-        fi
-      done < <(printf '%s' "$phase_dirs" | jq -r '.[] | [(.id|tostring), .dir, .status] | @tsv')
-
-      if [ "$(printf '%s' "$corrections" | jq 'length')" -gt 0 ]; then
-        # Reaching "completed" also releases the claim in the same atomic write,
-        # mirroring roadmap-set-status -- otherwise a reconciled phase reads as
-        # done while still showing claimed by a dead session.
-        roadmap_doc=$(jq --argjson corr "$corrections" '
-          .phases |= map(
-            . as $p |
-            (($corr | map(select(.id == $p.id)) | .[0]) // null) as $c |
-            if $c != null then
-              ($p + {status: $c.to} | if $c.to == "completed" then .claim = null else . end)
-            else $p end
-          )
-        ' "$roadmap_path")
-
-        tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
-        printf '%s\n' "$roadmap_doc" > "$tmp_file"
-        mv "$tmp_file" "$roadmap_path"
-      fi
-
-      jq -n --argjson corr "$corrections" --argjson blocked "$blocked" '{corrections: $corr, blocked: $blocked}'
+      python3 "$(_aimi_roadmap_py)" reconcile \
+        --roadmap "$roadmap_path" --feature "$feature"
     ) 200>"${roadmap_path}.lock"
   ) || exit $?
   printf '%s\n' "$out"

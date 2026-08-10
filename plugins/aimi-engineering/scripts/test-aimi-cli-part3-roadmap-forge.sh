@@ -2611,10 +2611,10 @@ FIXTURES
   "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status verification_failed >/dev/null
   "$CLI" roadmap-set-status --feature "$feature" --phase 1.1 --status planned >/dev/null
 
-  # The reorder itself. Under the old lowest-id rule this returned 1; a
-  # ranking that silently no-ops (either jq hazard in _ROADMAP_SELECT_JQ)
-  # returns 1 as well, which is why this asserts the id and not merely that
-  # something was claimed.
+  # The reorder itself. Under the old lowest-id rule this returned 1; a ranking
+  # that silently no-ops (roadmap.py's _rank collapsing to a constant, which is
+  # what both jq hazards its comment records used to do) returns 1 as well,
+  # which is why this asserts the id and not merely that something was claimed.
   local next_id claimed_id
   next_id=$("$CLI" roadmap-get --feature "$feature" --next-eligible | jq -r '.id')
   claimed_id=$("$CLI" roadmap-claim --feature "$feature" --session-id sess-rank --session-pid $$ | jq -r '.id')

@@ -5599,5 +5599,6750 @@
       "stderr": "Error: phase-overlap: phase 1 not found in /WORK/.aimi/tasks/f/roadmap.json"
     }
   ],
-  "_comment_overlap": "phase-overlap captured the same way, before its jq was deleted: 26 cases covering the intersection itself and its sort, deduplication on both sides, stories with no implementation or no files at all, jq's total order over a non-string file entry, decimal phase ids in both the directory and the tasks filename, and every refusal -- phase not found, tasks file missing, tasks file malformed, the two ids equal, and the argument-count usage line."
+  "_comment_overlap": "phase-overlap captured the same way, before its jq was deleted: 26 cases covering the intersection itself and its sort, deduplication on both sides, stories with no implementation or no files at all, jq's total order over a non-string file entry, decimal phase ids in both the directory and the tasks filename, and every refusal -- phase not found, tasks file missing, tasks file malformed, the two ids equal, and the argument-count usage line.",
+  "lifecycle_cases": [
+    {
+      "label": "get-flag-desconhecida",
+      "verb": "roadmap-get",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-get: unknown flag: --bogus",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-sem-feature",
+      "verb": "roadmap-get",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap: --feature <slug> is required",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-feature-travessia",
+      "verb": "roadmap-get",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap: --feature must be a single path component matching ^[a-zA-Z0-9][a-zA-Z0-9_-]*$, got: ../x",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-feature-vazia",
+      "verb": "roadmap-get",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap: --feature <slug> is required",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-roadmap-ausente",
+      "verb": "roadmap-get",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-get: roadmap not found: /TMP/get-roadmap-ausente/.aimi/tasks/f/roadmap.json",
+      "file": null,
+      "tree": []
+    },
+    {
+      "label": "get-roadmap-malformado",
+      "verb": "roadmap-get",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-get: malformed roadmap.json: /TMP/get-roadmap-malformado/.aimi/tasks/f/roadmap.json",
+      "file": {
+        "__raw": "{ not json at all"
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-documento-inteiro",
+      "verb": "roadmap-get",
+      "exit": 0,
+      "stdout": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-fase-unica",
+      "verb": "roadmap-get",
+      "exit": 0,
+      "stdout": {
+        "id": 2,
+        "name": "P2",
+        "goal": "g",
+        "slug": "p2",
+        "dir": "phase-2",
+        "status": "pending",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": null
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-fase-inexistente",
+      "verb": "roadmap-get",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-get: phase 9 not found in /TMP/get-fase-inexistente/.aimi/tasks/f/roadmap.json",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-fase-nao-numerica",
+      "verb": "roadmap-get",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-get: --phase <id> must be a numeric phase id",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-fase-vazia",
+      "verb": "roadmap-get",
+      "exit": 0,
+      "stdout": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-fase-decimal",
+      "verb": "roadmap-get",
+      "exit": 0,
+      "stdout": {
+        "id": 2.1,
+        "name": "P2.1",
+        "goal": "g",
+        "slug": "p2-1",
+        "dir": "phase-2.1",
+        "status": "pending",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": null
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2.1,
+            "name": "P2.1",
+            "goal": "g",
+            "slug": "p2-1",
+            "dir": "phase-2.1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-fase-inteira-como-float",
+      "verb": "roadmap-get",
+      "exit": 0,
+      "stdout": {
+        "id": 3,
+        "name": "P3",
+        "goal": "g",
+        "slug": "p3",
+        "dir": "phase-3",
+        "status": "pending",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": null
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 3,
+            "name": "P3",
+            "goal": "g",
+            "slug": "p3",
+            "dir": "phase-3",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-fase-vence-next-eligible",
+      "verb": "roadmap-get",
+      "exit": 0,
+      "stdout": {
+        "id": 2,
+        "name": "P2",
+        "goal": "g",
+        "slug": "p2",
+        "dir": "phase-2",
+        "status": "pending",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": null
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-next-basico",
+      "verb": "roadmap-get",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "P1",
+        "goal": "g",
+        "slug": "p1",
+        "dir": "phase-1",
+        "status": "pending",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": null
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-next-ordem-numerica",
+      "verb": "roadmap-get",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "P1",
+        "goal": "g",
+        "slug": "p1",
+        "dir": "phase-1",
+        "status": "pending",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": null
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 10,
+            "name": "P10",
+            "goal": "g",
+            "slug": "p10",
+            "dir": "phase-10",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2.1,
+            "name": "P2.1",
+            "goal": "g",
+            "slug": "p2-1",
+            "dir": "phase-2.1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-next-pula-reivindicada",
+      "verb": "roadmap-get",
+      "exit": 0,
+      "stdout": {
+        "id": 2,
+        "name": "P2",
+        "goal": "g",
+        "slug": "p2",
+        "dir": "phase-2",
+        "status": "pending",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": null
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-old",
+              "claimedAt": "2020-01-01T00:00:00Z",
+              "claimedPid": "<DEADPID>"
+            }
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-next-pid-morto-continua-invisivel",
+      "verb": "roadmap-get",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-get: no eligible phase found",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-old",
+              "claimedAt": "2020-01-01T00:00:00Z",
+              "claimedPid": "<DEADPID>"
+            }
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-next-dependencia-nao-cumprida",
+      "verb": "roadmap-get",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-get: no eligible phase found",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-next-nenhuma-elegivel",
+      "verb": "roadmap-get",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-get: no eligible phase found",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "completed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-next-status-fora-do-conjunto",
+      "verb": "roadmap-get",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-get: no eligible phase found",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "verification_failed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-next-rank-sem-trabalho-desce",
+      "verb": "roadmap-get",
+      "exit": 0,
+      "stdout": {
+        "id": 2,
+        "name": "P2",
+        "goal": "g",
+        "slug": "p2",
+        "dir": "phase-2",
+        "status": "planned",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": null
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/f-phase-1-tasks.json",
+        "phase-2/f-phase-2-tasks.json",
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-next-rank-arquivo-malformado-tem-trabalho",
+      "verb": "roadmap-get",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "P1",
+        "goal": "g",
+        "slug": "p1",
+        "dir": "phase-1",
+        "status": "planned",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": null
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/f-phase-1-tasks.json",
+        "phase-2/f-phase-2-tasks.json",
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-next-rank-sem-stories-tem-trabalho",
+      "verb": "roadmap-get",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "P1",
+        "goal": "g",
+        "slug": "p1",
+        "dir": "phase-1",
+        "status": "planned",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": null
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/f-phase-1-tasks.json",
+        "phase-2/f-phase-2-tasks.json",
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-next-rank-sem-arquivo-tem-trabalho",
+      "verb": "roadmap-get",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "P1",
+        "goal": "g",
+        "slug": "p1",
+        "dir": "phase-1",
+        "status": "planned",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": null
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "phase-2/f-phase-2-tasks.json",
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-next-rank-decimal-no-nome-do-arquivo",
+      "verb": "roadmap-get",
+      "exit": 0,
+      "stdout": {
+        "id": 2.1,
+        "name": "P2.1",
+        "goal": "g",
+        "slug": "p2-1",
+        "dir": "phase-2.1",
+        "status": "planned",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": null
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2.1,
+            "name": "P2.1",
+            "goal": "g",
+            "slug": "p2-1",
+            "dir": "phase-2.1",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/f-phase-1-tasks.json",
+        "phase-2.1/f-phase-2.1-tasks.json",
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-next-sem-dependson",
+      "verb": "roadmap-get",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "N",
+        "status": "pending",
+        "dir": "phase-1",
+        "claim": null
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "N",
+            "status": "pending",
+            "dir": "phase-1",
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-phases-vazio",
+      "verb": "roadmap-get",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-get: no eligible phase found",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": []
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-phases-vazio-documento",
+      "verb": "roadmap-get",
+      "exit": 0,
+      "stdout": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": []
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-sem-chave-phases",
+      "verb": "roadmap-get",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-get: phase 1 not found in /TMP/get-sem-chave-phases/.aimi/tasks/f/roadmap.json",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f"
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-next-sem-chave-phases",
+      "verb": "roadmap-get",
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/get-next-sem-chave-phases/.aimi/tasks/f/roadmap.json:4): Cannot iterate over null (null)\njq: error (at /TMP/get-next-sem-chave-phases/.aimi/tasks/f/roadmap.json:4): Cannot iterate over null (null)",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f"
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-documento-sem-chave-phases",
+      "verb": "roadmap-get",
+      "exit": 0,
+      "stdout": {
+        "roadmapVersion": "1.0",
+        "feature": "f"
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f"
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-next-tasks-sem-userstories",
+      "verb": "roadmap-get",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "P1",
+        "goal": "g",
+        "slug": "p1",
+        "dir": "phase-1",
+        "status": "planned",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": null
+      },
+      "stderr": "jq: error (at /TMP/get-next-tasks-sem-userstories/.aimi/tasks/f/phase-1/f-phase-1-tasks.json:3): Cannot iterate over null (null)",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/f-phase-1-tasks.json",
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "get-next-tasks-userstories-objeto",
+      "verb": "roadmap-get",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "P1",
+        "goal": "g",
+        "slug": "p1",
+        "dir": "phase-1",
+        "status": "planned",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": null
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/f-phase-1-tasks.json",
+        "phase-2/f-phase-2-tasks.json",
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "ss-flag-desconhecida",
+      "verb": "roadmap-set-status",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-set-status: unknown flag: --bogus",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "ss-sem-feature",
+      "verb": "roadmap-set-status",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap: --feature <slug> is required",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "ss-sem-phase",
+      "verb": "roadmap-set-status",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-set-status: --phase <id> must be a numeric phase id",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "ss-phase-nao-numerica",
+      "verb": "roadmap-set-status",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-set-status: --phase <id> must be a numeric phase id",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "ss-status-invalido",
+      "verb": "roadmap-set-status",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-set-status: --status must be one of pending|planned|in_progress|completed|verification_failed, got: done",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "ss-status-vazio",
+      "verb": "roadmap-set-status",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-set-status: --status must be one of pending|planned|in_progress|completed|verification_failed, got: ",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "ss-roadmap-ausente",
+      "verb": "roadmap-set-status",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-set-status: roadmap not found: /TMP/ss-roadmap-ausente/.aimi/tasks/f/roadmap.json",
+      "file": null,
+      "tree": []
+    },
+    {
+      "label": "ss-roadmap-malformado",
+      "verb": "roadmap-set-status",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-set-status: malformed roadmap.json: /TMP/ss-roadmap-malformado/.aimi/tasks/f/roadmap.json",
+      "file": {
+        "__raw": "{ not json at all"
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "ss-fase-inexistente",
+      "verb": "roadmap-set-status",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-set-status: phase 9 not found in /TMP/ss-fase-inexistente/.aimi/tasks/f/roadmap.json",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-pending-planned",
+      "verb": "roadmap-set-status",
+      "exit": 0,
+      "stdout": {
+        "phase": 1,
+        "from": "pending",
+        "to": "planned"
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-pending-in-progress",
+      "verb": "roadmap-set-status",
+      "exit": 0,
+      "stdout": {
+        "phase": 1,
+        "from": "pending",
+        "to": "in_progress"
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-planned-in-progress",
+      "verb": "roadmap-set-status",
+      "exit": 0,
+      "stdout": {
+        "phase": 1,
+        "from": "planned",
+        "to": "in_progress"
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-in-progress-in-progress",
+      "verb": "roadmap-set-status",
+      "exit": 0,
+      "stdout": {
+        "phase": 1,
+        "from": "in_progress",
+        "to": "in_progress"
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-vf-in-progress",
+      "verb": "roadmap-set-status",
+      "exit": 0,
+      "stdout": {
+        "phase": 1,
+        "from": "verification_failed",
+        "to": "in_progress"
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-in-progress-completed-com-handoff",
+      "verb": "roadmap-set-status",
+      "exit": 0,
+      "stdout": {
+        "phase": 1,
+        "from": "in_progress",
+        "to": "completed"
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "completed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/handoff.md",
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-in-progress-completed-sem-handoff",
+      "verb": "roadmap-set-status",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-set-status: phase 1 cannot transition to completed -- no handoff.md found at /TMP/ss-in-progress-completed-sem-handoff/.aimi/tasks/f/phase-1/handoff.md. Write it first with roadmap-write-handoff.",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-completed-sem-handoff-com-force",
+      "verb": "roadmap-set-status",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-set-status: phase 1 cannot transition to completed -- no handoff.md found at /TMP/ss-completed-sem-handoff-com-force/.aimi/tasks/f/phase-1/handoff.md. Write it first with roadmap-write-handoff.",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-vf-completed-com-handoff",
+      "verb": "roadmap-set-status",
+      "exit": 0,
+      "stdout": {
+        "phase": 1,
+        "from": "verification_failed",
+        "to": "completed"
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "completed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/handoff.md",
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-pending-completed-sem-force",
+      "verb": "roadmap-set-status",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-set-status: transition pending -> completed is not allowed without --force",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/handoff.md",
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-pending-completed-com-force",
+      "verb": "roadmap-set-status",
+      "exit": 0,
+      "stdout": {
+        "phase": 1,
+        "from": "pending",
+        "to": "completed"
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "completed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/handoff.md",
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-completed-vf-sempre-permitido",
+      "verb": "roadmap-set-status",
+      "exit": 0,
+      "stdout": {
+        "phase": 1,
+        "from": "completed",
+        "to": "verification_failed"
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "verification_failed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-old",
+              "claimedAt": "2020-01-01T00:00:00Z",
+              "claimedPid": "<DEADPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-completed-planned-sem-force",
+      "verb": "roadmap-set-status",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-set-status: transition completed -> planned is not allowed without --force",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "completed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-completed-planned-com-force",
+      "verb": "roadmap-set-status",
+      "exit": 0,
+      "stdout": {
+        "phase": 1,
+        "from": "completed",
+        "to": "planned"
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-old",
+              "claimedAt": "2020-01-01T00:00:00Z",
+              "claimedPid": "<DEADPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-planned-pending-sem-force",
+      "verb": "roadmap-set-status",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-set-status: transition planned -> pending is not allowed without --force",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-planned-pending-com-force",
+      "verb": "roadmap-set-status",
+      "exit": 0,
+      "stdout": {
+        "phase": 1,
+        "from": "planned",
+        "to": "pending"
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-decimal",
+      "verb": "roadmap-set-status",
+      "exit": 0,
+      "stdout": {
+        "phase": 2.1,
+        "from": "pending",
+        "to": "planned"
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2.1,
+            "name": "P2.1",
+            "goal": "g",
+            "slug": "p2-1",
+            "dir": "phase-2.1",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-inteira-como-float",
+      "verb": "roadmap-set-status",
+      "exit": 0,
+      "stdout": {
+        "phase": 3,
+        "from": "pending",
+        "to": "planned"
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 3,
+            "name": "P3",
+            "goal": "g",
+            "slug": "p3",
+            "dir": "phase-3",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-outras-fases-intocadas",
+      "verb": "roadmap-set-status",
+      "exit": 0,
+      "stdout": {
+        "phase": 2,
+        "from": "pending",
+        "to": "planned"
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-old",
+              "claimedAt": "2020-01-01T00:00:00Z",
+              "claimedPid": "<DEADPID>"
+            }
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "P3",
+            "goal": "g",
+            "slug": "p3",
+            "dir": "phase-3",
+            "status": "completed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-completed-sem-dir",
+      "verb": "roadmap-set-status",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-set-status: phase 1 cannot transition to completed -- no handoff.md found at /TMP/ss-completed-sem-dir/.aimi/tasks/f//handoff.md. Write it first with roadmap-write-handoff.",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "N",
+            "status": "in_progress",
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-completed-dir-vazio",
+      "verb": "roadmap-set-status",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-set-status: phase 1 cannot transition to completed -- no handoff.md found at /TMP/ss-completed-dir-vazio/.aimi/tasks/f//handoff.md. Write it first with roadmap-write-handoff.",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-status-null-armazenado",
+      "verb": "roadmap-set-status",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-set-status: phase 1 not found in /TMP/ss-status-null-armazenado/.aimi/tasks/f/roadmap.json",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": null,
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-fase-duplicada",
+      "verb": "roadmap-set-status",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-set-status: transition pending\npending -> planned is not allowed without --force",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 1,
+            "name": "Segunda",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-fase-duplicada-um-status-null",
+      "verb": "roadmap-set-status",
+      "exit": 0,
+      "stdout": {
+        "phase": 1,
+        "from": "planned",
+        "to": "in_progress"
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 1,
+            "name": "Segunda",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "ss-sem-chave-phases",
+      "verb": "roadmap-set-status",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/ss-sem-chave-phases/.aimi/tasks/f/roadmap.json:4): Cannot iterate over null (null)\nError: roadmap-set-status: phase 1 not found in /TMP/ss-sem-chave-phases/.aimi/tasks/f/roadmap.json",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f"
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-flag-desconhecida",
+      "verb": "roadmap-claim",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-claim: unknown flag: --bogus",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "cl-sem-feature",
+      "verb": "roadmap-claim",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap: --feature <slug> is required",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "cl-sem-session-id",
+      "verb": "roadmap-claim",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-claim: --session-id <id> is required",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "cl-pid-nao-numerico",
+      "verb": "roadmap-claim",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-claim: --session-pid <pid> must be a positive integer",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "cl-pid-ausente",
+      "verb": "roadmap-claim",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-claim: --session-pid <pid> must be a positive integer",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "cl-phase-nao-numerica",
+      "verb": "roadmap-claim",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-claim: --phase <id> must be a numeric phase id",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "cl-roadmap-ausente",
+      "verb": "roadmap-claim",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-claim: roadmap not found: /TMP/cl-roadmap-ausente/.aimi/tasks/f/roadmap.json (run roadmap-init first)",
+      "file": null,
+      "tree": []
+    },
+    {
+      "label": "cl-roadmap-malformado",
+      "verb": "roadmap-claim",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-claim: malformed roadmap.json: /TMP/cl-roadmap-malformado/.aimi/tasks/f/roadmap.json",
+      "file": {
+        "__raw": "{ not json at all"
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "cl-auto-basico",
+      "verb": "roadmap-claim",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "P1",
+        "goal": "g",
+        "slug": "p1",
+        "dir": "phase-1",
+        "status": "pending",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": {
+          "claimedBy": "sess-new",
+          "claimedAt": "FROZEN",
+          "claimedPid": "<LIVEPID>"
+        },
+        "staleReleased": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-new",
+              "claimedAt": "FROZEN",
+              "claimedPid": "<LIVEPID>"
+            }
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-auto-ordem-numerica",
+      "verb": "roadmap-claim",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "P1",
+        "goal": "g",
+        "slug": "p1",
+        "dir": "phase-1",
+        "status": "pending",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": {
+          "claimedBy": "sess-new",
+          "claimedAt": "FROZEN",
+          "claimedPid": "<LIVEPID>"
+        },
+        "staleReleased": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 10,
+            "name": "P10",
+            "goal": "g",
+            "slug": "p10",
+            "dir": "phase-10",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-new",
+              "claimedAt": "FROZEN",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-auto-vf-reivindicavel",
+      "verb": "roadmap-claim",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "P1",
+        "goal": "g",
+        "slug": "p1",
+        "dir": "phase-1",
+        "status": "verification_failed",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": {
+          "claimedBy": "sess-new",
+          "claimedAt": "FROZEN",
+          "claimedPid": "<LIVEPID>"
+        },
+        "staleReleased": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "verification_failed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-new",
+              "claimedAt": "FROZEN",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-auto-in-progress-reivindicavel",
+      "verb": "roadmap-claim",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "P1",
+        "goal": "g",
+        "slug": "p1",
+        "dir": "phase-1",
+        "status": "in_progress",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": {
+          "claimedBy": "sess-new",
+          "claimedAt": "FROZEN",
+          "claimedPid": "<LIVEPID>"
+        },
+        "staleReleased": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-new",
+              "claimedAt": "FROZEN",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-auto-nenhuma-elegivel",
+      "verb": "roadmap-claim",
+      "exit": 4,
+      "stdout": "",
+      "stderr": "Error: roadmap-claim: no phase remains in pending, planned, in_progress or verification_failed status",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "completed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-auto-todas-bloqueadas",
+      "verb": "roadmap-claim",
+      "exit": 3,
+      "stdout": "",
+      "stderr": "Error: roadmap-claim: all remaining pending/planned phases are blocked:\n  phase 1: claimed by session outro\n  phase 2: depends on incomplete phase(s): 1",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "outro",
+              "claimedAt": "2020-01-01T00:00:00Z",
+              "claimedPid": "<LIVEPID>"
+            }
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-auto-bloqueada-por-dependencia-multipla",
+      "verb": "roadmap-claim",
+      "exit": 3,
+      "stdout": "",
+      "stderr": "Error: roadmap-claim: all remaining pending/planned phases are blocked:\n  phase 2: claimed by session x\n  phase 3: claimed by session y\n  phase 4: depends on incomplete phase(s): 2, 3",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "completed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "x",
+              "claimedAt": "2020-01-01T00:00:00Z",
+              "claimedPid": "<LIVEPID>"
+            }
+          },
+          {
+            "id": 3,
+            "name": "P3",
+            "goal": "g",
+            "slug": "p3",
+            "dir": "phase-3",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "y",
+              "claimedAt": "2020-01-01T00:00:00Z",
+              "claimedPid": "<LIVEPID>"
+            }
+          },
+          {
+            "id": 4,
+            "name": "P4",
+            "goal": "g",
+            "slug": "p4",
+            "dir": "phase-4",
+            "status": "pending",
+            "dependsOn": [
+              2,
+              3
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-auto-rank-sem-trabalho-desce",
+      "verb": "roadmap-claim",
+      "exit": 0,
+      "stdout": {
+        "id": 1.1,
+        "name": "P1.1",
+        "goal": "g",
+        "slug": "p1-1",
+        "dir": "phase-1.1",
+        "status": "planned",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": {
+          "claimedBy": "sess-new",
+          "claimedAt": "FROZEN",
+          "claimedPid": "<LIVEPID>"
+        },
+        "staleReleased": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "verification_failed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 1.1,
+            "name": "P1.1",
+            "goal": "g",
+            "slug": "p1-1",
+            "dir": "phase-1.1",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-new",
+              "claimedAt": "FROZEN",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "phase-1.1/f-phase-1.1-tasks.json",
+        "phase-1/f-phase-1-tasks.json",
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-auto-rank-sem-trabalho-unica-candidata",
+      "verb": "roadmap-claim",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "P1",
+        "goal": "g",
+        "slug": "p1",
+        "dir": "phase-1",
+        "status": "verification_failed",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": {
+          "claimedBy": "sess-new",
+          "claimedAt": "FROZEN",
+          "claimedPid": "<LIVEPID>"
+        },
+        "staleReleased": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "verification_failed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-new",
+              "claimedAt": "FROZEN",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/f-phase-1-tasks.json",
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-stale-liberada-e-reivindicada",
+      "verb": "roadmap-claim",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "P1",
+        "goal": "g",
+        "slug": "p1",
+        "dir": "phase-1",
+        "status": "in_progress",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": {
+          "claimedBy": "sess-new",
+          "claimedAt": "FROZEN",
+          "claimedPid": "<LIVEPID>"
+        },
+        "staleReleased": [
+          {
+            "id": 1,
+            "pid": "<DEADPID>",
+            "sessionId": "morta"
+          }
+        ]
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-new",
+              "claimedAt": "FROZEN",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-stale-em-outra-fase-reportada",
+      "verb": "roadmap-claim",
+      "exit": 0,
+      "stdout": {
+        "id": 2,
+        "name": "P2",
+        "goal": "g",
+        "slug": "p2",
+        "dir": "phase-2",
+        "status": "pending",
+        "dependsOn": [
+          1
+        ],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": {
+          "claimedBy": "sess-new",
+          "claimedAt": "FROZEN",
+          "claimedPid": "<LIVEPID>"
+        },
+        "staleReleased": [
+          {
+            "id": 1,
+            "pid": "<DEADPID>",
+            "sessionId": "morta"
+          }
+        ]
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "completed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-new",
+              "claimedAt": "FROZEN",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-stale-pid-zero",
+      "verb": "roadmap-claim",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "P1",
+        "goal": "g",
+        "slug": "p1",
+        "dir": "phase-1",
+        "status": "in_progress",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": {
+          "claimedBy": "sess-new",
+          "claimedAt": "FROZEN",
+          "claimedPid": "<LIVEPID>"
+        },
+        "staleReleased": [
+          {
+            "id": 1,
+            "pid": 0,
+            "sessionId": "zero"
+          }
+        ]
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-new",
+              "claimedAt": "FROZEN",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-stale-pid-string",
+      "verb": "roadmap-claim",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "P1",
+        "goal": "g",
+        "slug": "p1",
+        "dir": "phase-1",
+        "status": "in_progress",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": {
+          "claimedBy": "sess-new",
+          "claimedAt": "FROZEN",
+          "claimedPid": "<LIVEPID>"
+        },
+        "staleReleased": [
+          {
+            "id": 1,
+            "pid": "nao-um-pid",
+            "sessionId": "str"
+          }
+        ]
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-new",
+              "claimedAt": "FROZEN",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-stale-pid-null",
+      "verb": "roadmap-claim",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "P1",
+        "goal": "g",
+        "slug": "p1",
+        "dir": "phase-1",
+        "status": "in_progress",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": {
+          "claimedBy": "sess-new",
+          "claimedAt": "FROZEN",
+          "claimedPid": "<LIVEPID>"
+        },
+        "staleReleased": [
+          {
+            "id": 1,
+            "pid": null,
+            "sessionId": "nulo"
+          }
+        ]
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-new",
+              "claimedAt": "FROZEN",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-autoreivindicacao",
+      "verb": "roadmap-claim",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "P1",
+        "goal": "g",
+        "slug": "p1",
+        "dir": "phase-1",
+        "status": "in_progress",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": {
+          "claimedBy": "sess-mine",
+          "claimedAt": "2020-01-01T00:00:00Z",
+          "claimedPid": "<LIVEPID>"
+        },
+        "staleReleased": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-mine",
+              "claimedAt": "2020-01-01T00:00:00Z",
+              "claimedPid": "<LIVEPID>"
+            }
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-autoreivindicacao-com-phase-igual",
+      "verb": "roadmap-claim",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "P1",
+        "goal": "g",
+        "slug": "p1",
+        "dir": "phase-1",
+        "status": "in_progress",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": {
+          "claimedBy": "sess-mine",
+          "claimedAt": "2020-01-01T00:00:00Z",
+          "claimedPid": "<LIVEPID>"
+        },
+        "staleReleased": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-mine",
+              "claimedAt": "2020-01-01T00:00:00Z",
+              "claimedPid": "<LIVEPID>"
+            }
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-autoreivindicacao-com-phase-diferente",
+      "verb": "roadmap-claim",
+      "exit": 0,
+      "stdout": {
+        "id": 2,
+        "name": "P2",
+        "goal": "g",
+        "slug": "p2",
+        "dir": "phase-2",
+        "status": "pending",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": {
+          "claimedBy": "sess-mine",
+          "claimedAt": "FROZEN",
+          "claimedPid": "<LIVEPID>"
+        },
+        "staleReleased": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-mine",
+              "claimedAt": "2020-01-01T00:00:00Z",
+              "claimedPid": "<LIVEPID>"
+            }
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-mine",
+              "claimedAt": "FROZEN",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-autoreivindicacao-fase-completed-nao-conta",
+      "verb": "roadmap-claim",
+      "exit": 0,
+      "stdout": {
+        "id": 2,
+        "name": "P2",
+        "goal": "g",
+        "slug": "p2",
+        "dir": "phase-2",
+        "status": "pending",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": {
+          "claimedBy": "sess-mine",
+          "claimedAt": "FROZEN",
+          "claimedPid": "<LIVEPID>"
+        },
+        "staleReleased": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "completed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-mine",
+              "claimedAt": "2020-01-01T00:00:00Z",
+              "claimedPid": "<LIVEPID>"
+            }
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-mine",
+              "claimedAt": "FROZEN",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-autoreivindicacao-menor-id-vence",
+      "verb": "roadmap-claim",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "P1",
+        "goal": "g",
+        "slug": "p1",
+        "dir": "phase-1",
+        "status": "in_progress",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": {
+          "claimedBy": "sess-mine",
+          "claimedAt": "2020-01-01T00:00:00Z",
+          "claimedPid": "<LIVEPID>"
+        },
+        "staleReleased": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-mine",
+              "claimedAt": "2020-01-01T00:00:00Z",
+              "claimedPid": "<LIVEPID>"
+            }
+          },
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-mine",
+              "claimedAt": "2020-01-01T00:00:00Z",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-phase-ok",
+      "verb": "roadmap-claim",
+      "exit": 0,
+      "stdout": {
+        "id": 2,
+        "name": "P2",
+        "goal": "g",
+        "slug": "p2",
+        "dir": "phase-2",
+        "status": "pending",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": {
+          "claimedBy": "sess-new",
+          "claimedAt": "FROZEN",
+          "claimedPid": "<LIVEPID>"
+        },
+        "staleReleased": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-new",
+              "claimedAt": "FROZEN",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-phase-inexistente",
+      "verb": "roadmap-claim",
+      "exit": 4,
+      "stdout": "",
+      "stderr": "Error: roadmap-claim: phase 9 not found in /TMP/cl-phase-inexistente/.aimi/tasks/f/roadmap.json",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-phase-nao-reivindicavel",
+      "verb": "roadmap-claim",
+      "exit": 3,
+      "stdout": "",
+      "stderr": "Error: roadmap-claim: phase 1 is not claimable: phase status is completed",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "completed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-phase-ja-reivindicada",
+      "verb": "roadmap-claim",
+      "exit": 3,
+      "stdout": "",
+      "stderr": "Error: roadmap-claim: phase 1 is not claimable: claimed by a live session",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "outro",
+              "claimedAt": "2020-01-01T00:00:00Z",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-phase-bloqueada",
+      "verb": "roadmap-claim",
+      "exit": 3,
+      "stdout": "",
+      "stderr": "Error: roadmap-claim: phase 2 is not claimable: depends on incomplete phase(s): 1",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "pending",
+            "dependsOn": [
+              1
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-phase-bloqueada-varias-deps",
+      "verb": "roadmap-claim",
+      "exit": 3,
+      "stdout": "",
+      "stderr": "Error: roadmap-claim: phase 3 is not claimable: depends on incomplete phase(s): 1, 2",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 3,
+            "name": "P3",
+            "goal": "g",
+            "slug": "p3",
+            "dir": "phase-3",
+            "status": "pending",
+            "dependsOn": [
+              1,
+              2
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-phase-stale-liberada",
+      "verb": "roadmap-claim",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "P1",
+        "goal": "g",
+        "slug": "p1",
+        "dir": "phase-1",
+        "status": "in_progress",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": {
+          "claimedBy": "sess-new",
+          "claimedAt": "FROZEN",
+          "claimedPid": "<LIVEPID>"
+        },
+        "staleReleased": [
+          {
+            "id": 1,
+            "pid": "<DEADPID>",
+            "sessionId": "morta"
+          }
+        ]
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-new",
+              "claimedAt": "FROZEN",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-phase-decimal",
+      "verb": "roadmap-claim",
+      "exit": 0,
+      "stdout": {
+        "id": 2.1,
+        "name": "P2.1",
+        "goal": "g",
+        "slug": "p2-1",
+        "dir": "phase-2.1",
+        "status": "pending",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": {
+          "claimedBy": "sess-new",
+          "claimedAt": "FROZEN",
+          "claimedPid": "<LIVEPID>"
+        },
+        "staleReleased": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2.1,
+            "name": "P2.1",
+            "goal": "g",
+            "slug": "p2-1",
+            "dir": "phase-2.1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-new",
+              "claimedAt": "FROZEN",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-session-id-sanitizado",
+      "verb": "roadmap-claim",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "P1",
+        "goal": "g",
+        "slug": "p1",
+        "dir": "phase-1",
+        "status": "pending",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": {
+          "claimedBy": "sess whoami id) ",
+          "claimedAt": "FROZEN",
+          "claimedPid": "<LIVEPID>"
+        },
+        "staleReleased": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess whoami id) ",
+              "claimedAt": "FROZEN",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-session-id-com-newline",
+      "verb": "roadmap-claim",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "P1",
+        "goal": "g",
+        "slug": "p1",
+        "dir": "phase-1",
+        "status": "pending",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": {
+          "claimedBy": "linha1\nlinha2",
+          "claimedAt": "FROZEN",
+          "claimedPid": "<LIVEPID>"
+        },
+        "staleReleased": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "linha1\nlinha2",
+              "claimedAt": "FROZEN",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-phases-vazio",
+      "verb": "roadmap-claim",
+      "exit": 4,
+      "stdout": "",
+      "stderr": "Error: roadmap-claim: no phase remains in pending, planned, in_progress or verification_failed status",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": []
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-sem-dependson",
+      "verb": "roadmap-claim",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "N",
+        "status": "pending",
+        "dir": "phase-1",
+        "claim": {
+          "claimedBy": "sess-new",
+          "claimedAt": "FROZEN",
+          "claimedPid": "<LIVEPID>"
+        },
+        "staleReleased": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "N",
+            "status": "pending",
+            "dir": "phase-1",
+            "claim": {
+              "claimedBy": "sess-new",
+              "claimedAt": "FROZEN",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-dependencia-inexistente",
+      "verb": "roadmap-claim",
+      "exit": 3,
+      "stdout": "",
+      "stderr": "Error: roadmap-claim: all remaining pending/planned phases are blocked:\n  phase 1: depends on incomplete phase(s): 99",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [
+              99
+            ],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-sem-chave-phases",
+      "verb": "roadmap-claim",
+      "exit": 3,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/cl-sem-chave-phases/.aimi/tasks/f/roadmap.json:4): Cannot iterate over null (null)\njq: error (at /TMP/cl-sem-chave-phases/.aimi/tasks/f/roadmap.json:4): Cannot iterate over null (null)\njq: invalid JSON text passed to --argjson\nUse jq --help for help with command-line options,\nor see the jq manpage, or online docs  at https://stedolan.github.io/jq\nError: roadmap-claim: all remaining pending/planned phases are blocked:",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f"
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-tasks-sem-userstories",
+      "verb": "roadmap-claim",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "P1",
+        "goal": "g",
+        "slug": "p1",
+        "dir": "phase-1",
+        "status": "planned",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": {
+          "claimedBy": "sess-new",
+          "claimedAt": "FROZEN",
+          "claimedPid": "<LIVEPID>"
+        },
+        "staleReleased": []
+      },
+      "stderr": "jq: error (at /TMP/cl-tasks-sem-userstories/.aimi/tasks/f/phase-1/f-phase-1-tasks.json:3): Cannot iterate over null (null)",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-new",
+              "claimedAt": "FROZEN",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/f-phase-1-tasks.json",
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "cl-pid-zero-do-chamador",
+      "verb": "roadmap-claim",
+      "exit": 0,
+      "stdout": {
+        "id": 1,
+        "name": "P1",
+        "goal": "g",
+        "slug": "p1",
+        "dir": "phase-1",
+        "status": "pending",
+        "dependsOn": [],
+        "branch": null,
+        "notes": null,
+        "successCriteria": [],
+        "creates": [],
+        "needs": [],
+        "areas": [],
+        "claim": {
+          "claimedBy": "s",
+          "claimedAt": "FROZEN",
+          "claimedPid": 0
+        },
+        "staleReleased": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "s",
+              "claimedAt": "FROZEN",
+              "claimedPid": 0
+            }
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "rc-flag-desconhecida",
+      "verb": "roadmap-release-claim",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-release-claim: unknown flag: --bogus",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "rc-sem-feature",
+      "verb": "roadmap-release-claim",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap: --feature <slug> is required",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "rc-sem-phase",
+      "verb": "roadmap-release-claim",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-release-claim: --phase <id> must be a numeric phase id",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "rc-phase-nao-numerica",
+      "verb": "roadmap-release-claim",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-release-claim: --phase <id> must be a numeric phase id",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "rc-roadmap-ausente",
+      "verb": "roadmap-release-claim",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-release-claim: roadmap not found: /TMP/rc-roadmap-ausente/.aimi/tasks/f/roadmap.json",
+      "file": null,
+      "tree": []
+    },
+    {
+      "label": "rc-roadmap-malformado",
+      "verb": "roadmap-release-claim",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-release-claim: phase 1 not found in /TMP/rc-roadmap-malformado/.aimi/tasks/f/roadmap.json",
+      "file": {
+        "__raw": "{ not json at all"
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "rc-libera",
+      "verb": "roadmap-release-claim",
+      "exit": 0,
+      "stdout": {
+        "released": 1
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "outro",
+              "claimedAt": "2020-01-01T00:00:00Z",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "rc-idempotente-sem-claim",
+      "verb": "roadmap-release-claim",
+      "exit": 0,
+      "stdout": {
+        "released": 1
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "rc-fase-inexistente",
+      "verb": "roadmap-release-claim",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-release-claim: phase 9 not found in /TMP/rc-fase-inexistente/.aimi/tasks/f/roadmap.json",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "rc-decimal",
+      "verb": "roadmap-release-claim",
+      "exit": 0,
+      "stdout": {
+        "released": 2.1
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "sess-old",
+              "claimedAt": "2020-01-01T00:00:00Z",
+              "claimedPid": "<DEADPID>"
+            }
+          },
+          {
+            "id": 2.1,
+            "name": "P2.1",
+            "goal": "g",
+            "slug": "p2-1",
+            "dir": "phase-2.1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "rc-inteira-como-float",
+      "verb": "roadmap-release-claim",
+      "exit": 0,
+      "stdout": {
+        "released": 3
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 3,
+            "name": "P3",
+            "goal": "g",
+            "slug": "p3",
+            "dir": "phase-3",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "rc-status-preservado",
+      "verb": "roadmap-release-claim",
+      "exit": 0,
+      "stdout": {
+        "released": 1
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "completed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "rc-sem-chave-phases",
+      "verb": "roadmap-release-claim",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-release-claim: phase 1 not found in /TMP/rc-sem-chave-phases/.aimi/tasks/f/roadmap.json",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f"
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "rc-duas-fases-mesmo-id",
+      "verb": "roadmap-release-claim",
+      "exit": 0,
+      "stdout": {
+        "released": 1
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 1,
+            "name": "Segunda",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "re-flag-desconhecida",
+      "verb": "roadmap-reconcile",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-reconcile: unknown flag: --bogus",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "re-sem-feature",
+      "verb": "roadmap-reconcile",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap: --feature <slug> is required",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "re-roadmap-ausente",
+      "verb": "roadmap-reconcile",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-reconcile: roadmap not found: /TMP/re-roadmap-ausente/.aimi/tasks/f/roadmap.json",
+      "file": null,
+      "tree": []
+    },
+    {
+      "label": "re-roadmap-malformado",
+      "verb": "roadmap-reconcile",
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: roadmap-reconcile: malformed roadmap.json: /TMP/re-roadmap-malformado/.aimi/tasks/f/roadmap.json",
+      "file": {
+        "__raw": "{ not json at all"
+      },
+      "tree": [
+        "roadmap.json"
+      ]
+    },
+    {
+      "label": "re-sem-arquivos-de-tarefa",
+      "verb": "roadmap-reconcile",
+      "exit": 0,
+      "stdout": {
+        "corrections": [],
+        "blocked": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "pending",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "re-completed-com-handoff",
+      "verb": "roadmap-reconcile",
+      "exit": 0,
+      "stdout": {
+        "corrections": [
+          {
+            "id": 1,
+            "from": "in_progress",
+            "to": "completed"
+          }
+        ],
+        "blocked": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "completed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/f-phase-1-tasks.json",
+        "phase-1/handoff.md",
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "re-completed-sem-handoff-bloqueado",
+      "verb": "roadmap-reconcile",
+      "exit": 0,
+      "stdout": {
+        "corrections": [],
+        "blocked": [
+          {
+            "id": 1,
+            "from": "in_progress",
+            "to": "completed",
+            "reason": "no handoff.md -- write it with roadmap-write-handoff, then re-run"
+          }
+        ]
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "alguem",
+              "claimedAt": "2020-01-01T00:00:00Z",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/f-phase-1-tasks.json",
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "re-falha-vira-verification-failed",
+      "verb": "roadmap-reconcile",
+      "exit": 0,
+      "stdout": {
+        "corrections": [
+          {
+            "id": 1,
+            "from": "in_progress",
+            "to": "verification_failed"
+          }
+        ],
+        "blocked": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "verification_failed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "alguem",
+              "claimedAt": "2020-01-01T00:00:00Z",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/f-phase-1-tasks.json",
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "re-misto-vira-in-progress",
+      "verb": "roadmap-reconcile",
+      "exit": 0,
+      "stdout": {
+        "corrections": [
+          {
+            "id": 1,
+            "from": "planned",
+            "to": "in_progress"
+          }
+        ],
+        "blocked": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/f-phase-1-tasks.json",
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "re-sem-stories-unknown",
+      "verb": "roadmap-reconcile",
+      "exit": 0,
+      "stdout": {
+        "corrections": [],
+        "blocked": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/f-phase-1-tasks.json",
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "re-arquivo-malformado-ignorado",
+      "verb": "roadmap-reconcile",
+      "exit": 0,
+      "stdout": {
+        "corrections": [],
+        "blocked": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/f-phase-1-tasks.json",
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "re-status-ja-correto",
+      "verb": "roadmap-reconcile",
+      "exit": 0,
+      "stdout": {
+        "corrections": [],
+        "blocked": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/f-phase-1-tasks.json",
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "re-varias-fases-mistas",
+      "verb": "roadmap-reconcile",
+      "exit": 0,
+      "stdout": {
+        "corrections": [
+          {
+            "id": 1,
+            "from": "in_progress",
+            "to": "completed"
+          },
+          {
+            "id": 3,
+            "from": "planned",
+            "to": "verification_failed"
+          },
+          {
+            "id": 4,
+            "from": "pending",
+            "to": "in_progress"
+          }
+        ],
+        "blocked": [
+          {
+            "id": 2,
+            "from": "in_progress",
+            "to": "completed",
+            "reason": "no handoff.md -- write it with roadmap-write-handoff, then re-run"
+          }
+        ]
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "completed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 2,
+            "name": "P2",
+            "goal": "g",
+            "slug": "p2",
+            "dir": "phase-2",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "b",
+              "claimedAt": "2020-01-01T00:00:00Z",
+              "claimedPid": "<LIVEPID>"
+            }
+          },
+          {
+            "id": 3,
+            "name": "P3",
+            "goal": "g",
+            "slug": "p3",
+            "dir": "phase-3",
+            "status": "verification_failed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 4,
+            "name": "P4",
+            "goal": "g",
+            "slug": "p4",
+            "dir": "phase-4",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/f-phase-1-tasks.json",
+        "phase-1/handoff.md",
+        "phase-2/f-phase-2-tasks.json",
+        "phase-3/f-phase-3-tasks.json",
+        "phase-4/f-phase-4-tasks.json",
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "re-correcao-nao-completed-preserva-claim",
+      "verb": "roadmap-reconcile",
+      "exit": 0,
+      "stdout": {
+        "corrections": [
+          {
+            "id": 1,
+            "from": "planned",
+            "to": "in_progress"
+          }
+        ],
+        "blocked": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "in_progress",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "viva",
+              "claimedAt": "2020-01-01T00:00:00Z",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/f-phase-1-tasks.json",
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "re-decimal-no-nome-do-arquivo",
+      "verb": "roadmap-reconcile",
+      "exit": 0,
+      "stdout": {
+        "corrections": [
+          {
+            "id": 2.1,
+            "from": "planned",
+            "to": "completed"
+          }
+        ],
+        "blocked": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 2.1,
+            "name": "P2.1",
+            "goal": "g",
+            "slug": "p2-1",
+            "dir": "phase-2.1",
+            "status": "completed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "phase-2.1/f-phase-2.1-tasks.json",
+        "phase-2.1/handoff.md",
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "re-nome-de-arquivo-errado-nunca-encontrado",
+      "verb": "roadmap-reconcile",
+      "exit": 0,
+      "stdout": {
+        "corrections": [],
+        "blocked": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/tasks.json",
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "re-phases-vazio",
+      "verb": "roadmap-reconcile",
+      "exit": 0,
+      "stdout": {
+        "corrections": [],
+        "blocked": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": []
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "re-sem-dir",
+      "verb": "roadmap-reconcile",
+      "exit": 0,
+      "stdout": {
+        "corrections": [],
+        "blocked": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "N",
+            "status": "planned",
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "re-status-null-armazenado",
+      "verb": "roadmap-reconcile",
+      "exit": 0,
+      "stdout": {
+        "corrections": [
+          {
+            "id": 1,
+            "from": "",
+            "to": "completed"
+          }
+        ],
+        "blocked": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "completed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/f-phase-1-tasks.json",
+        "phase-1/handoff.md",
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "re-completed-para-completed-sem-correcao",
+      "verb": "roadmap-reconcile",
+      "exit": 0,
+      "stdout": {
+        "corrections": [],
+        "blocked": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "completed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": {
+              "claimedBy": "viva",
+              "claimedAt": "2020-01-01T00:00:00Z",
+              "claimedPid": "<LIVEPID>"
+            }
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/f-phase-1-tasks.json",
+        "phase-1/handoff.md",
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "re-sem-chave-phases",
+      "verb": "roadmap-reconcile",
+      "exit": 0,
+      "stdout": {
+        "corrections": [],
+        "blocked": []
+      },
+      "stderr": "jq: error (at /TMP/re-sem-chave-phases/.aimi/tasks/f/roadmap.json:4): Cannot iterate over null (null)",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f"
+      },
+      "tree": [
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "re-tasks-sem-userstories",
+      "verb": "roadmap-reconcile",
+      "exit": 0,
+      "stdout": {
+        "corrections": [
+          {
+            "id": 1,
+            "from": "planned",
+            "to": ""
+          }
+        ],
+        "blocked": []
+      },
+      "stderr": "jq: error (at /TMP/re-tasks-sem-userstories/.aimi/tasks/f/phase-1/f-phase-1-tasks.json:3): Cannot iterate over null (null)",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/f-phase-1-tasks.json",
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "re-userstories-objeto",
+      "verb": "roadmap-reconcile",
+      "exit": 0,
+      "stdout": {
+        "corrections": [],
+        "blocked": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "planned",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/f-phase-1-tasks.json",
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    },
+    {
+      "label": "re-duas-fases-mesmo-id",
+      "verb": "roadmap-reconcile",
+      "exit": 0,
+      "stdout": {
+        "corrections": [
+          {
+            "id": 1,
+            "from": "planned",
+            "to": "completed"
+          },
+          {
+            "id": 1,
+            "from": "pending",
+            "to": "completed"
+          }
+        ],
+        "blocked": []
+      },
+      "stderr": "",
+      "file": {
+        "roadmapVersion": "1.0",
+        "feature": "f",
+        "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": null,
+        "phases": [
+          {
+            "id": 1,
+            "name": "P1",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "completed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          },
+          {
+            "id": 1,
+            "name": "Segunda",
+            "goal": "g",
+            "slug": "p1",
+            "dir": "phase-1",
+            "status": "completed",
+            "dependsOn": [],
+            "branch": null,
+            "notes": null,
+            "successCriteria": [],
+            "creates": [],
+            "needs": [],
+            "areas": [],
+            "claim": null
+          }
+        ]
+      },
+      "tree": [
+        "phase-1/f-phase-1-tasks.json",
+        "phase-1/handoff.md",
+        "roadmap.json",
+        "roadmap.json.lock"
+      ]
+    }
+  ],
+  "_comment_lifecycle": "The five lifecycle verbs -- roadmap-get, roadmap-set-status, roadmap-claim, roadmap-release-claim and roadmap-reconcile -- captured the same way, before their jq was deleted: 149 cases over one adversarial corpus, recording exit code, stdout, stderr, the roadmap.json left on disk, and the whole feature directory listing so a refusal that wrote something as a side effect could not hide. Temp roots normalize to /TMP/<label>; a claimedAt this run wrote is FROZEN while fixture timestamps are dated 2020 and survive verbatim, so an untouched claim stays distinguishable from a rewritten one; the two pids are <LIVEPID> (a process alive for the whole run) and <DEADPID> (one that had already exited). 736 of 745 field comparisons identical after the port -- every stdout, every written file and every directory listing matched in all 149 cases. The nine that differ are stderr and two exit codes, every one of them from jq aborting mid-expression, and they are named here so nobody has to rediscover them. (1) get-next-tasks-sem-userstories, cl-tasks-sem-userstories, re-tasks-sem-userstories, ss-sem-chave-phases and re-sem-chave-phases: jq printed 'Cannot iterate over null' and the bash carried on with the empty capture. The Python reaches the same answer without the engine line. re-tasks-sem-userstories is the one that shows what the empty capture COSTS: reconcile compares \"\" against the stored status, finds them different, and writes status: \"\" into roadmap.json. ground_truth() reproduces that on purpose -- it is a defect, and a port is not where a defect is fixed. (2) get-next-sem-chave-phases (exit 5 -> 1) and cl-sem-chave-phases (exit 3 -> 4): a roadmap.json carrying no phases key at all. jq aborted before the verb's own diagnostic could run, so the exit status was the engine's and the message the code was written to print was unreachable; the Python prints it. Both remain refusals that write nothing, which the file and tree fields confirm. Recorded rather than reproduced: synthesizing an engine error would be the only way to match, and that is not a thing to write on purpose. Same shape as dependson-nao-array in the init capture."
 }

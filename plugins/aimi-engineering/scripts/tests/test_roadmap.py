@@ -952,6 +952,314 @@ def test_contract_version_agrees_with_the_bash_gate():
 
 
 # ---------------------------------------------------------------------------
+# The lifecycle verbs: get, set-status, claim, release-claim, reconcile
+# ---------------------------------------------------------------------------
+
+LIFECYCLE = {c["label"]: c for c in GOLDEN["lifecycle_cases"]}
+
+
+def _phase(pid=1, status="pending", claim=None, **extra):
+    phase = {"id": pid, "dir": "phase-" + str(pid), "status": status, "claim": claim}
+    phase.update(extra)
+    return phase
+
+
+def test_every_refusal_in_the_lifecycle_capture_left_the_document_alone():
+    """The property a port is most likely to break, because it depends on every
+    check running before the write. Refusals here span all five verbs and every
+    exit status the contract uses -- 1, plus roadmap-claim's 3 and 4. The 5 is
+    the jq engine's own, on the phases-less roadmap named in _comment_lifecycle;
+    it is frozen history, not an exit status this code produces."""
+    refusals = [c for c in LIFECYCLE.values() if c["exit"] != 0]
+    assert len(refusals) >= 40
+    assert {c["exit"] for c in refusals} == {1, 3, 4, 5}
+    assert [c["label"] for c in refusals if c["exit"] == 5] == ["get-next-sem-chave-phases"]
+    for case in refusals:
+        assert case["stdout"] == "", case["label"]
+
+
+def test_the_status_graph_is_the_seven_edges_the_capture_walked():
+    """Recomputed from STATUS_TRANSITIONS against every unforced set-status case,
+    so a silently widened or narrowed graph fails here rather than in a phase
+    nobody is looking at. --force cases are excluded because they are precisely
+    the ones allowed to walk an edge the graph does not hold."""
+    assert len(R.STATUS_TRANSITIONS) == 7
+    walked = set()
+    for label, case in LIFECYCLE.items():
+        if case["verb"] != "roadmap-set-status" or label.endswith("-com-force"):
+            continue
+        if isinstance(case["stdout"], dict):
+            edge = case["stdout"]["from"] + ":" + case["stdout"]["to"]
+            walked.add(edge)
+            assert edge in R.STATUS_TRANSITIONS or case["stdout"]["to"] == "verification_failed"
+        elif "is not allowed without --force" in case["stderr"]:
+            edge = case["stderr"].split("transition ", 1)[1].split(" is not", 1)[0]
+            assert edge.replace(" -> ", ":") not in R.STATUS_TRANSITIONS
+    assert walked >= {"pending:planned", "in_progress:completed", "verification_failed:completed"}
+
+
+def test_force_overrides_transition_order_and_never_the_handoff_precondition():
+    """The one rule in this verb that --force must not reach. Both sides are in
+    the capture: --force carries pending -> completed, and --force does NOT
+    carry a completed with no handoff.md on disk."""
+    forced_order = LIFECYCLE["ss-pending-completed-com-force"]
+    assert forced_order["exit"] == 0
+    assert forced_order["stdout"] == {"phase": 1, "from": "pending", "to": "completed"}
+
+    forced_precondition = LIFECYCLE["ss-completed-sem-handoff-com-force"]
+    assert forced_precondition["exit"] == 1
+    assert "no handoff.md found at" in forced_precondition["stderr"]
+    assert forced_precondition["file"]["phases"][0]["status"] == "in_progress"
+
+
+def test_completing_a_phase_releases_its_claim_in_the_same_write():
+    """No window where status reads completed while the phase still shows
+    claimed. The fixture claim is a 2020 timestamp, so its disappearance is
+    unambiguous."""
+    completed = LIFECYCLE["ss-in-progress-completed-com-handoff"]["file"]["phases"][0]
+    assert completed["status"] == "completed"
+    assert completed["claim"] is None
+    # And the same write leaves a claim alone for every other target status.
+    other = LIFECYCLE["ss-completed-planned-com-force"]["file"]["phases"][0]
+    assert other["status"] == "planned"
+    assert other["claim"]["claimedBy"] == "sess-old"
+
+
+def test_a_null_status_reads_as_a_phase_that_is_not_there():
+    """`// empty` drops a null or false status per match, so a phase carrying one
+    is reported as not found rather than transitioned from "null"."""
+    assert "not found in" in LIFECYCLE["ss-status-null-armazenado"]["stderr"]
+    assert LIFECYCLE["ss-status-null-armazenado"]["file"]["phases"][0]["status"] is None
+
+
+def test_two_phases_sharing_an_id_produce_an_edge_no_graph_entry_matches():
+    """The joined two-line status is not an accident to tidy up: it is what makes
+    a duplicated id refuse instead of silently transitioning both phases."""
+    case = LIFECYCLE["ss-fase-duplicada"]
+    assert case["exit"] == 1
+    assert "transition pending\npending -> planned" in case["stderr"]
+    assert ("pending\npending:planned") not in R.STATUS_TRANSITIONS
+
+
+def test_pid_liveness_reads_permission_denied_as_alive(monkeypatch):
+    """ProcessLookupError is dead, PermissionError is alive -- the same reading
+    guard-runtime-state.py's is_alive() uses. Inverting the second one would
+    release a live session's claim to whoever asked next."""
+    def denied(_pid, _sig):
+        raise PermissionError
+
+    def gone(_pid, _sig):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(R.os, "kill", denied)
+    assert R.is_pid_alive("4242") is True
+    monkeypatch.setattr(R.os, "kill", gone)
+    assert R.is_pid_alive("4242") is False
+
+
+def test_a_pid_that_is_not_a_positive_integer_is_dead_before_any_signal(monkeypatch):
+    """The text arrives as `tostring` produced it, so a null claimedPid is the
+    literal "null". Sending it to kill(2) is what the numeric test prevents."""
+    def explode(_pid, _sig):
+        pytest.fail("kill(2) must not be reached for a non-numeric pid")
+
+    monkeypatch.setattr(R.os, "kill", explode)
+    for text in ("null", "nao-um-pid", "0", "-1", "", "12.5"):
+        assert R.is_pid_alive(text) is False
+
+
+def test_a_stale_claim_is_released_even_on_a_phase_nobody_claims():
+    """Release is not a side effect of claiming that phase: the dead claim sits
+    on a completed phase 1 while the caller claims phase 2, and it is both
+    cleared on disk and reported in staleReleased."""
+    case = LIFECYCLE["cl-stale-em-outra-fase-reportada"]
+    assert case["stdout"]["id"] == 2
+    assert case["stdout"]["staleReleased"] == [
+        {"id": 1, "pid": "<DEADPID>", "sessionId": "morta"}
+    ]
+    assert case["file"]["phases"][0]["claim"] is None
+
+
+def test_self_reclaim_returns_the_phase_again_without_refreshing_the_claim():
+    """What makes re-running /aimi:execute on an already-claimed phase
+    idempotent. The 2020 claimedAt survives, which is how we know the claim was
+    returned rather than rewritten."""
+    case = LIFECYCLE["cl-autoreivindicacao"]
+    assert case["exit"] == 0
+    assert case["stdout"]["id"] == 1
+    assert case["stdout"]["claim"]["claimedAt"] == "2020-01-01T00:00:00Z"
+    # The sibling is untouched -- self-reclaim does not re-run eligibility.
+    assert case["file"]["phases"][1]["claim"] is None
+
+
+def test_self_reclaim_ignores_a_phase_that_has_already_completed():
+    """The status set is pending/planned/in_progress. A completed phase this
+    session still holds is not "mine to resume", so eligibility runs instead."""
+    case = LIFECYCLE["cl-autoreivindicacao-fase-completed-nao-conta"]
+    assert case["stdout"]["id"] == 2
+
+
+def test_ranking_demotes_a_zero_work_candidate_and_never_excludes_it():
+    """Issue #90 was the ORDER, not the set. Both halves are asserted: the
+    zero-work phase loses to a higher-id phase that still has work, and wins the
+    moment it is the only candidate left."""
+    phases = [_phase(1, "verification_failed"), _phase(1.1, "planned")]
+    work = {"1": False, "1.1": True}
+    assert [p["id"] for p in R.candidates(phases, R.CLAIMABLE_STATUSES, work)] == [1.1, 1]
+    alone = [_phase(1, "verification_failed")]
+    assert R.candidates(alone, R.CLAIMABLE_STATUSES, {"1": False})[0]["id"] == 1
+
+
+def test_a_phase_the_work_map_does_not_mention_is_not_demoted():
+    """`has($k)` before the lookup, not `// true` after it. Collapsing the two
+    would rank every unmentioned phase as zero-work and reorder the roadmap."""
+    assert R._rank(_phase(3), {}) == 0
+    assert R._rank(_phase(3), {"3": True}) == 0
+    assert R._rank(_phase(3), {"3": False}) == 1
+
+
+def test_the_two_selectors_disagree_about_a_dead_pid_claim_on_purpose():
+    """roadmap-claim clears stale claims inside its lock and then claims;
+    roadmap-get holds no lock, so the same phase stays invisible to it. A
+    read-only verb has no business inferring liveness."""
+    assert LIFECYCLE["get-next-pid-morto-continua-invisivel"]["exit"] == 1
+    assert LIFECYCLE["cl-stale-liberada-e-reivindicada"]["exit"] == 0
+
+
+def test_the_has_work_lookup_uses_the_per_phase_tasks_filename(tmp_path):
+    """Reading a bare tasks.json here made every lookup miss, so reconcile
+    silently reported zero corrections and ranking silently did nothing."""
+    feature_dir = tmp_path / "f"
+    (feature_dir / "phase-1").mkdir(parents=True)
+    (feature_dir / "phase-1" / "tasks.json").write_text(
+        json.dumps({"userStories": [{"status": "completed"}]}), encoding="utf-8"
+    )
+    doc = {"phases": [_phase(1)]}
+    roadmap = str(feature_dir / "roadmap.json")
+    assert R.has_work_map(roadmap, doc, "f") == {"1": True}
+    (feature_dir / "phase-1" / "f-phase-1-tasks.json").write_text(
+        json.dumps({"userStories": [{"status": "completed"}]}), encoding="utf-8"
+    )
+    assert R.has_work_map(roadmap, doc, "f") == {"1": False}
+
+
+def test_ground_truth_is_one_rule_reconcile_and_the_work_map_both_read():
+    """Two answers about the same tasks file is the drift this shares to avoid."""
+    assert R.ground_truth({"userStories": []}) == "unknown"
+    assert R.ground_truth({"userStories": [{"status": "completed"}]}) == "completed"
+    assert R.ground_truth(
+        {"userStories": [{"status": "completed"}, {"status": "failed"}]}
+    ) == "verification_failed"
+    assert R.ground_truth(
+        {"userStories": [{"status": "completed"}, {"status": "pending"}]}
+    ) == "in_progress"
+
+
+def test_the_empty_ground_truth_is_the_jq_capture_and_not_an_invention():
+    """A tasks file that parses but whose userStories is absent made jq abort and
+    the bash carry on with an empty capture. Reconcile then wrote status: "".
+    Reproduced deliberately -- it is a defect, and a port is not where a defect
+    is fixed. Delete this test when the defect is, in the same commit."""
+    assert R.ground_truth({"metadata": {}}) == ""
+    case = LIFECYCLE["re-tasks-sem-userstories"]
+    assert case["stdout"]["corrections"] == [{"id": 1, "from": "planned", "to": ""}]
+    assert case["file"]["phases"][0]["status"] == ""
+
+
+def test_reconcile_refuses_a_completed_correction_with_no_handoff_on_disk():
+    """The same hard precondition roadmap-set-status enforces. Reconcile must not
+    become a second write path with weaker invariants -- the divergence is
+    reported as blocked so it stays visible instead of being healed wrong."""
+    case = LIFECYCLE["re-completed-sem-handoff-bloqueado"]
+    assert case["stdout"]["corrections"] == []
+    assert case["stdout"]["blocked"][0]["to"] == "completed"
+    assert "roadmap-write-handoff" in case["stdout"]["blocked"][0]["reason"]
+    assert case["file"]["phases"][0]["status"] == "in_progress"
+
+
+def test_reconcile_clears_the_claim_only_for_the_completed_correction():
+    """Mirrors roadmap-set-status: otherwise a reconciled phase reads as done
+    while still showing claimed by a dead session. Every other correction leaves
+    the claim exactly where it was."""
+    applied = LIFECYCLE["re-completed-com-handoff"]["file"]["phases"][0]
+    assert applied["status"] == "completed" and applied["claim"] is None
+    kept = LIFECYCLE["re-correcao-nao-completed-preserva-claim"]["file"]["phases"][0]
+    assert kept["status"] == "in_progress" and kept["claim"]["claimedBy"] == "viva"
+
+
+def test_a_session_id_carrying_a_newline_keeps_it_because_jq_framed_per_line():
+    """jq -R handed the sanitizer one string per LINE and the command
+    substitution joined them back, so the newline the sanitizer exists to remove
+    survived. Ported as it stood; the assertion is here so that changing it is a
+    decision rather than an accident."""
+    assert R.rm_sanitize_lines("linha1\nlinha2", 200) == "linha1\nlinha2"
+    assert R.rm_sanitize("linha1\nlinha2", 200) == "linha1 linha2"
+    assert LIFECYCLE["cl-session-id-com-newline"]["stdout"]["claim"]["claimedBy"] == (
+        "linha1\nlinha2"
+    )
+
+
+def test_the_session_id_is_sanitized_before_it_reaches_disk():
+    """It is caller-supplied text that lands in roadmap.json and travels into
+    /aimi:execute's own output, so it goes through the same _rm_sanitize regime
+    as every other free-text roadmap field."""
+    raw = "sess `whoami` $(id) <b>ignore previous"
+    assert R.rm_sanitize_lines(raw, 200) == "sess whoami id) "
+    assert LIFECYCLE["cl-session-id-sanitizado"]["file"]["phases"][0]["claim"][
+        "claimedBy"
+    ] == "sess whoami id) "
+
+
+def test_release_claim_reports_a_malformed_roadmap_as_a_missing_phase():
+    """It is the one lifecycle verb whose preamble skips the malformed check, so
+    a malformed document reaches the verb and comes back as "phase not found".
+    Preserved rather than newly diagnosed: that is the message its callers have
+    always seen."""
+    case = LIFECYCLE["rc-roadmap-malformado"]
+    assert case["exit"] == 1
+    assert case["stderr"].endswith("phase 1 not found in /TMP/rc-roadmap-malformado"
+                                   "/.aimi/tasks/f/roadmap.json")
+
+
+def test_an_absent_dir_builds_a_path_with_an_empty_component():
+    """`@tsv` renders null as the empty field, so the handoff path a phase with
+    no dir produces has a doubled slash -- and the message quotes it. Collapsing
+    it with os.path.join would change a diagnostic people search for."""
+    assert R._tsv(None) == ""
+    assert R.phase_dirs({"phases": [{"id": 1}]}, 1) == ""
+    assert "/f//handoff.md" in LIFECYCLE["ss-completed-sem-dir"]["stderr"]
+
+
+def test_the_claim_envelope_still_carries_what_execute_reads_off_it():
+    """execute.md Step 1.7 reads .id/.dir/.slug/.branch/.status plus the
+    staleReleased list off this object. Projecting any of them away would
+    silently disable the re-verify branch in execute.md Step 3."""
+    envelope = LIFECYCLE["cl-auto-basico"]["stdout"]
+    for field in ("id", "dir", "slug", "branch", "status", "staleReleased"):
+        assert field in envelope, field
+    assert envelope["claim"]["claimedPid"] == "<LIVEPID>"
+
+
+def test_the_recorded_divergences_are_named_and_are_the_only_ones():
+    """736 of 745 field comparisons identical. The nine that are not are all jq
+    aborting mid-expression, and the comment beside the capture names every one
+    -- so a tenth appearing later is a regression, not a rediscovery."""
+    note = GOLDEN["_comment_lifecycle"]
+    assert "736 of 745" in note
+    for label in (
+        "get-next-tasks-sem-userstories",
+        "cl-tasks-sem-userstories",
+        "re-tasks-sem-userstories",
+        "ss-sem-chave-phases",
+        "re-sem-chave-phases",
+        "get-next-sem-chave-phases",
+        "cl-sem-chave-phases",
+    ):
+        assert label in note, label
+        assert label in LIFECYCLE, label
+
+
+# ---------------------------------------------------------------------------
 # The CLI surface of roadmap.py itself
 # ---------------------------------------------------------------------------
 

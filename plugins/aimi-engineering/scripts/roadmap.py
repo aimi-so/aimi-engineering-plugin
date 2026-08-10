@@ -1447,6 +1447,266 @@ def overlap_files(doc):
 
 
 # ---------------------------------------------------------------------------
+# Phase lifecycle — ground truth, has-work, and candidate selection
+# ---------------------------------------------------------------------------
+#
+# One phase's status per roadmap.json is a claim about a session; what a phase
+# still has to DO is a fact on disk, in its own tasks file. These pieces turn
+# that fact into the ordering both selectors -- roadmap-get --next-eligible and
+# roadmap-claim's auto branch -- read.
+
+CLAIMABLE_STATUSES = ["pending", "planned", "in_progress", "verification_failed"]
+
+# roadmap-get reports the two statuses a phase can be in before anyone has
+# started it. roadmap-claim's set is wider on purpose (see op_claim).
+GET_ELIGIBLE_STATUSES = ["pending", "planned"]
+
+
+def _tsv(value):
+    """One `@tsv` field as bash's `read -r` received it.
+
+    null is the empty field, which is why a phase with no `dir` builds a path
+    with an empty component (`.../f//handoff.md`) rather than being skipped, and
+    why a phase whose status is null reconciles `from: ""`. The escapes are jq's
+    own: without them a tab would end the field and a newline the whole record.
+    """
+    if value is None:
+        return ""
+    return (
+        _jq_raw(value)
+        .replace("\\", "\\\\")
+        .replace("\t", "\\t")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+    )
+
+
+def _story_statuses(doc):
+    """`[.userStories[].status]`, or None where the jq aborted mid-expression.
+
+    None is not "no stories" -- it is "the expression raised". A tasks file that
+    parses but whose userStories is absent or holds a scalar made jq exit 5 with
+    a raw engine error, and the bash captured its empty stdout and carried on.
+    That empty string is load-bearing: reconcile compares it against the stored
+    status, finds them different, and writes `status: ""` into roadmap.json.
+    Ported as it stands rather than repaired -- see ground_truth.
+    """
+    if not isinstance(doc, dict):
+        return None
+    stories = doc.get("userStories")
+    if isinstance(stories, dict):
+        stories = list(stories.values())
+    if not isinstance(stories, list):
+        return None
+    statuses = []
+    for story in stories:
+        if story is None:
+            statuses.append(None)
+        elif isinstance(story, dict):
+            statuses.append(story.get("status"))
+        else:
+            return None
+    return statuses
+
+
+def ground_truth(doc):
+    """Classify a phase from its own tasks file's story statuses.
+
+    The one rule reconcile and the has-work map both read, so they cannot drift
+    into two different answers about the same file.
+
+    The empty-string return is the jq-era behaviour described in
+    _story_statuses, kept because it is observable: reconcile turns it into a
+    correction to "" rather than declining to correct. It is a defect, and
+    fixing it is a behaviour change that does not belong in a port.
+    """
+    statuses = _story_statuses(doc)
+    if statuses is None:
+        return ""
+    if not statuses:
+        return "unknown"
+    if all(status == "completed" for status in statuses):
+        return "completed"
+    if any(status == "failed" for status in statuses):
+        return "verification_failed"
+    return "in_progress"
+
+
+def _read_tasks(path):
+    """A phase's tasks file, or None when nothing is known about it.
+
+    None covers every case bash's `[ -f ] && jq -e .` rejected, including the
+    two `jq -e` treats as false rather than as a parse failure: a file holding
+    literally `null` or `false`.
+    """
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            doc = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if doc is None or doc is False:
+        return None
+    return doc
+
+
+def has_work_map(roadmap_path, doc, feature):
+    """{"<phase id>": <has work>} for every phase in a roadmap.
+
+    A phase has NO work only when its own tasks file exists, parses, holds at
+    least one story, and every story is "completed" -- i.e. exactly when
+    ground_truth says "completed". Every other case is has-work:
+      - no tasks file: a pending phase /aimi:plan has not expanded yet. Demoting
+        a phase for being unplanned would rank the whole front of the roadmap
+        last, which is the opposite of the intent.
+      - unparseable: nothing is known, so nothing is demoted.
+      - zero userStories ("unknown"): same reasoning reconcile already applies --
+        it declines to correct a status from an empty story list.
+    """
+    feature_dir = os.path.dirname(roadmap_path)
+    work = {}
+    for phase in doc.get("phases") or []:
+        key = _jq_raw(phase.get("id"))
+        path = (
+            feature_dir + "/" + _tsv(phase.get("dir")) + "/"
+            + feature + "-phase-" + key + "-tasks.json"
+        )
+        tasks = _read_tasks(path)
+        truth = "unknown" if tasks is None else ground_truth(tasks)
+        work[key] = truth != "completed"
+    return work
+
+
+def _status_by_id(phases):
+    """{"<id>": status}. A later phase with a repeated id wins, as jq's reduce did."""
+    return {_jq_raw(phase.get("id")): phase.get("status") for phase in phases}
+
+
+def _depends_on(phase):
+    """`.dependsOn // []` -- the alternative fires on false as well as null."""
+    value = phase.get("dependsOn")
+    if isinstance(value, dict):
+        return list(value.values())
+    return value if isinstance(value, list) else []
+
+
+def _unmet(phase, status_by_id):
+    """The dependency ids that have not reached completed, in declared order."""
+    return [
+        dep for dep in _depends_on(phase)
+        if status_by_id.get(_jq_raw(dep)) != "completed"
+    ]
+
+
+def _rank(phase, work):
+    """0 for a phase that still has work, 1 for one that does not.
+
+    ORDER, not the set, was the defect (issue #90). A phase stuck in
+    in_progress or verification_failed is by construction older, and therefore
+    lower-id, than whatever came after it, so ordering by id alone made it win
+    every auto-claim indefinitely ahead of the phase genuinely ready to run.
+    Ranking DEMOTES, it never excludes: the moment a zero-work phase is the only
+    eligible candidate it is claimed, which is what keeps crash recovery and the
+    verification retry reachable.
+
+    A phase the map does not mention ranks 0. That is deliberate and is what the
+    jq's `has($k)` test meant: an unknown phase is not demoted.
+    """
+    key = _jq_raw(phase.get("id"))
+    if key in work:
+        return 0 if work[key] else 1
+    return 0
+
+
+def candidates(phases, allowed, work):
+    """The claimable phases, in claim order.
+
+    The caller supplies the array it wants judged, and that is deliberate: it is
+    the axis on which the two selectors differ. roadmap-claim passes phases
+    whose dead-PID claims it has already cleared, inside its own lock;
+    roadmap-get --next-eligible passes them untouched, because it holds no lock
+    and clearing stale claims is a decision that belongs where the lock is. So a
+    phase held by a dead session stays claimable by one and invisible to the
+    other -- unifying the ordering was never meant to change that, and a
+    read-only verb has no business inferring liveness.
+    """
+    status_by_id = _status_by_id(phases)
+    eligible = [
+        phase for phase in phases
+        if phase.get("status") in allowed
+        and phase.get("claim") is None
+        and not _unmet(phase, status_by_id)
+    ]
+    return sorted(eligible, key=lambda p: (_rank(p, work), jq_sort_key(p.get("id"))))
+
+
+def is_pid_alive(pid_text):
+    """Signal-zero liveness probe, the same reading guard-runtime-state.py uses.
+
+    "No such process" is not alive; "exists, but this user may not signal it" is
+    alive -- ProcessLookupError False, PermissionError True. The text arrives as
+    `tostring` produced it, so a null claimedPid is the literal "null" and fails
+    the numeric test before any signal is sent, which is what makes a
+    hand-edited claim releasable rather than fatal.
+    """
+    if not re.fullmatch(r"[0-9]+", pid_text):
+        return False
+    pid = int(pid_text)
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OverflowError, OSError):
+        return False
+    return True
+
+
+def rm_sanitize_lines(value, maxlen):
+    """`jq -Rr _rm_sanitize` over raw input, whose framing is per LINE.
+
+    jq -R hands the filter one string per input line and the command
+    substitution that captured its output joined those lines back with newlines,
+    so a session id carrying a newline keeps it -- even though removing newlines
+    is one of the things the sanitizer exists to do. Ported as it stood: this is
+    what is stored in claimedBy today, and a port is not where a rule changes.
+    """
+    lines = value.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return "\n".join(rm_sanitize(line, maxlen) for line in lines)
+
+
+# The status graph. verification_failed is reachable from any non-terminal state
+# (execute sets it when creates-verification fails) and is therefore not listed.
+#   pending -> planned            plan expands the phase
+#   pending -> in_progress        execute claims a phase whose planned transition
+#                                 was lost (plan aborted after writing tasks.json
+#                                 but before setting planned) -- allowing it makes
+#                                 execute self-healing instead of silently
+#                                 diverging from roadmap.json
+#   planned -> in_progress        normal start
+#   in_progress -> in_progress    idempotent resume of a crashed session
+#   verification_failed -> in_progress   re-verify retry
+#   in_progress|verification_failed -> completed
+STATUS_TRANSITIONS = frozenset(
+    [
+        "pending:planned",
+        "pending:in_progress",
+        "planned:in_progress",
+        "in_progress:in_progress",
+        "verification_failed:in_progress",
+        "in_progress:completed",
+        "verification_failed:completed",
+    ]
+)
+
+
+# ---------------------------------------------------------------------------
 # I/O — the only filesystem this file is allowed to touch
 # ---------------------------------------------------------------------------
 
@@ -2082,8 +2342,381 @@ def op_phase_overlap(argv):
     return 0
 
 
+def _emit(value):
+    """One JSON value on stdout, rendered the way jq's default output did."""
+    json.dump(value, sys.stdout, indent=2, ensure_ascii=False)
+    sys.stdout.write("\n")
+
+
+def _joined(values):
+    """jq's `join(", ")` over ids, each through `tostring`."""
+    return ", ".join(_jq_raw(value) for value in values)
+
+
+def op_roadmap_get(argv):
+    """Read-only, so this is the one lifecycle verb bash calls outside a lock.
+
+    --phase wins over --next-eligible, and with neither the whole file is copied
+    byte for byte -- it is the document the caller asked for, not a
+    re-serialization of it.
+    """
+    path = _flag(argv, "--roadmap")
+    feature = _flag(argv, "--feature")
+    phase_raw = _flag(argv, "--phase")
+    if not path or not feature:
+        die("Usage: roadmap.py roadmap-get --roadmap <path> --feature <slug> "
+            "[--phase <id>] [--next-eligible]")
+
+    if phase_raw:
+        doc = read_doc(path, "roadmap-get")
+        phase_id = jq_numbers(json.loads(phase_raw))
+        matches = [p for p in (doc.get("phases") or []) if p.get("id") == phase_id]
+        if not matches:
+            die("Error: roadmap-get: phase " + phase_raw + " not found in " + path)
+        for phase in matches:
+            _emit(phase)
+        return 0
+
+    if "--next-eligible" in argv:
+        doc = read_doc(path, "roadmap-get")
+        # Reading one tasks file per phase is cost for a verb that once touched
+        # only roadmap.json, and it is unsynchronized -- a tasks file rewritten
+        # mid-read yields "has work", the safe answer, since only an
+        # all-completed file demotes anything.
+        eligible = candidates(
+            doc.get("phases") or [],
+            GET_ELIGIBLE_STATUSES,
+            has_work_map(path, doc, feature),
+        )
+        if not eligible:
+            die("Error: roadmap-get: no eligible phase found")
+        _emit(eligible[0])
+        return 0
+
+    with open(path, "rb") as handle:
+        sys.stdout.buffer.write(handle.read())
+    return 0
+
+
+def op_set_status(argv):
+    """The locked read-modify-write. Bash holds the lock and has already refused
+    every argument it can judge on its own, so what is left here needs the
+    document: which statuses the phase currently has, whether the transition is
+    in the graph, and whether handoff.md exists."""
+    path = _flag(argv, "--roadmap")
+    phase_raw = _flag(argv, "--phase")
+    new_status = _flag(argv, "--status")
+    force = "--force" in argv
+    if not path or phase_raw is None or new_status is None:
+        die("Usage: roadmap.py set-status --roadmap <path> --phase <id> --status <s> [--force]")
+    phase_id = jq_numbers(json.loads(phase_raw))
+
+    doc = read_doc(path, "roadmap-set-status")
+    phases = doc.get("phases") or []
+
+    # `(.phases[] | select(.id == $pid) | .status) // empty`, joined the way a
+    # command substitution joins jq's output lines. The alternative drops a null
+    # or false status per match, so a phase carrying one reads as not found --
+    # and two phases sharing an id produce a two-line "status" that matches no
+    # transition, which is the shape the graph check below then refuses.
+    current = "\n".join(
+        _jq_raw(phase.get("status"))
+        for phase in phases
+        if phase.get("id") == phase_id
+        and phase.get("status") is not None
+        and phase.get("status") is not False
+    )
+    if current == "":
+        die("Error: roadmap-set-status: phase " + phase_raw + " not found in " + path)
+
+    allowed = new_status == "verification_failed" or (
+        current + ":" + new_status
+    ) in STATUS_TRANSITIONS
+    if not allowed and not force:
+        die(
+            "Error: roadmap-set-status: transition "
+            + current
+            + " -> "
+            + new_status
+            + " is not allowed without --force"
+        )
+
+    # Hard rule, not a --force-able ordering convention: a phase can never reach
+    # "completed" without handoff.md already on disk at its phase dir. handoff.md
+    # is written only via roadmap-write-handoff, the guard-protected path
+    # guard-runtime-state.py points callers at. This check runs even when --force
+    # is set -- --force overrides transition ORDER, never this physical artifact
+    # precondition.
+    if new_status == "completed":
+        handoff = (
+            os.path.dirname(path) + "/" + phase_dirs(doc, phase_id) + "/handoff.md"
+        )
+        if not os.path.isfile(handoff):
+            die(
+                "Error: roadmap-set-status: phase "
+                + phase_raw
+                + " cannot transition to completed -- no handoff.md found at "
+                + handoff
+                + ". Write it first with roadmap-write-handoff."
+            )
+
+    # Completing a phase also releases its claim in the same atomic write -- no
+    # window where status reads completed while the phase still shows claimed.
+    for phase in phases:
+        if phase.get("id") == phase_id:
+            phase["status"] = new_status
+            if new_status == "completed":
+                phase["claim"] = None
+
+    write_doc_atomically(path, doc)
+    _emit({"phase": phase_id, "from": current, "to": new_status})
+    return 0
+
+
+def op_claim(argv):
+    """The locked check-and-set: release what is stale, then choose.
+
+    Bash still owns the lock and the session-pid pattern; everything below needs
+    the document. Exit statuses are part of the contract -- 4 for "there is
+    nothing to claim", 3 for "there is, and you cannot have it" -- because
+    execute.md branches on them.
+    """
+    path = _flag(argv, "--roadmap")
+    feature = _flag(argv, "--feature")
+    session_raw = _flag(argv, "--session-id")
+    pid_raw = _flag(argv, "--session-pid")
+    phase_raw = _flag(argv, "--phase")
+    if not path or not feature or session_raw is None or pid_raw is None:
+        die("Usage: roadmap.py claim --roadmap <path> --feature <slug> "
+            "--session-id <id> --session-pid <pid> [--phase <id>]")
+
+    doc = read_doc(path, "roadmap-claim")
+    phases = doc.get("phases") or []
+    session_id = rm_sanitize_lines(session_raw, 200)
+    session_pid = jq_numbers(json.loads(pid_raw))
+    override = jq_numbers(json.loads(phase_raw)) if phase_raw else None
+
+    # sessionId travels alongside pid so the caller's release report can be built
+    # without a second read: staleReleased is what execute.md prints as "released
+    # stale claim on phase <id> (session <sid> pid <pid> not alive)".
+    claimed = [
+        {
+            "id": phase.get("id"),
+            "pid": (phase.get("claim") or {}).get("claimedPid"),
+            "sessionId": (phase.get("claim") or {}).get("claimedBy"),
+        }
+        for phase in phases
+        if phase.get("claim") is not None
+    ]
+    stale = [row for row in claimed if not is_pid_alive(_jq_raw(row["pid"]))]
+    stale_ids = [row["id"] for row in stale]
+
+    # Clearing in place is the same array the write below persists, which is why
+    # a stale claim on a phase nobody claims this run is still released.
+    for phase in phases:
+        if phase.get("id") in stale_ids:
+            phase["claim"] = None
+
+    status_by_id = _status_by_id(phases)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    def succeed(phase, refresh):
+        """Write, then print the claim envelope.
+
+        The envelope is the phase object itself plus staleReleased, and that is
+        a contract: execute.md Step 1.7 reads .id/.dir/.slug/.branch/.status off
+        it and Step 3 branches on .status. Projecting it down to a summary would
+        silently disable the re-verify branch, which is why the suite pins all
+        six fields on the auto path.
+
+        `refresh` is false for a self-reclaim: the phase comes back with the
+        claim it already carried, not a rewritten one.
+        """
+        if refresh:
+            phase["claim"] = {
+                "claimedBy": session_id,
+                "claimedAt": now,
+                "claimedPid": session_pid,
+            }
+        write_doc_atomically(path, doc)
+        report = dict(phase)
+        report["staleReleased"] = stale
+        _emit(report)
+        return 0
+
+    # Self-reclaim: this exact session already owns an unreleased claim on a
+    # still-active phase (matching the requested --phase when given). Return it
+    # again instead of erroring or re-running eligibility -- this is what makes
+    # re-running /aimi:execute on an already-claimed phase idempotent.
+    mine = [
+        phase for phase in phases
+        if phase.get("claim") is not None
+        and (phase["claim"] or {}).get("claimedBy") == session_id
+        and phase.get("status") in ("pending", "planned", "in_progress")
+        and (override is None or phase.get("id") == override)
+    ]
+    if mine:
+        return succeed(sorted(mine, key=lambda p: jq_sort_key(p.get("id")))[0], False)
+
+    if override is not None:
+        targets = [phase for phase in phases if phase.get("id") == override]
+        if not targets:
+            die("Error: roadmap-claim: phase " + phase_raw + " not found in " + path, 4)
+        target = targets[0]
+        detail = None
+        if target.get("status") not in CLAIMABLE_STATUSES:
+            detail = "phase status is " + (target.get("status") or "")
+        elif target.get("claim") is not None:
+            detail = "claimed by a live session"
+        elif _unmet(target, status_by_id):
+            detail = "depends on incomplete phase(s): " + _joined(
+                _unmet(target, status_by_id)
+            )
+        if detail is not None:
+            die(
+                "Error: roadmap-claim: phase " + phase_raw + " is not claimable: " + detail,
+                3,
+            )
+        return succeed(target, True)
+
+    # Resumable = not yet terminal AND carrying no live claim. Stale claims were
+    # already cleared above, so an unclaimed in_progress phase is leftover from a
+    # crashed session and verification_failed is awaiting a re-verify run -- both
+    # must be re-claimable or crash recovery and verification retry are dead
+    # ends, which is exactly what execute.md tells the user to recover by
+    # re-running.
+    # Has-work pre-pass inside the same lock, so the ordering reads a tasks-file
+    # snapshot no concurrent claim can move under it. It stays a SIDE MAP and is
+    # never merged onto the phase objects: `phases` is the very array written
+    # back below, so a synthetic key added here would be persisted forever and
+    # would then flow into validate-contracts, roadmap-sweep and reconcile.
+    eligible = candidates(phases, CLAIMABLE_STATUSES, has_work_map(path, doc, feature))
+    if eligible:
+        return succeed(eligible[0], True)
+
+    remaining = [p for p in phases if p.get("status") in CLAIMABLE_STATUSES]
+    if not remaining:
+        die(
+            "Error: roadmap-claim: no phase remains in pending, planned, "
+            "in_progress or verification_failed status",
+            4,
+        )
+    sys.stderr.write(
+        "Error: roadmap-claim: all remaining pending/planned phases are blocked:\n"
+    )
+    for phase in remaining:
+        if phase.get("claim") is not None:
+            reason = "claimed by session " + ((phase["claim"] or {}).get("claimedBy") or "")
+        else:
+            reason = "depends on incomplete phase(s): " + _joined(
+                _unmet(phase, status_by_id)
+            )
+        sys.stderr.write("  phase " + _jq_raw(phase.get("id")) + ": " + reason + "\n")
+    sys.exit(3)
+
+
+def op_release_claim(argv):
+    """The manual escape hatch, in addition to automatic stale-claim recovery.
+
+    It is the one lifecycle verb that never checked the document parses before
+    taking the lock, so a malformed roadmap arrives here and reports the phase as
+    not found. Preserved rather than newly diagnosed: the message is what its
+    callers have always seen.
+    """
+    path = _flag(argv, "--roadmap")
+    phase_raw = _flag(argv, "--phase")
+    if not path or phase_raw is None:
+        die("Usage: roadmap.py release-claim --roadmap <path> --phase <id>")
+    phase_id = jq_numbers(json.loads(phase_raw))
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            doc = json.load(handle)
+    except (OSError, ValueError):
+        doc = None
+
+    phases = doc.get("phases") or [] if isinstance(doc, dict) else []
+    matches = [p for p in phases if isinstance(p, dict) and p.get("id") == phase_id]
+    if not matches:
+        die("Error: roadmap-release-claim: phase " + phase_raw + " not found in " + path)
+
+    for phase in matches:
+        phase["claim"] = None
+    write_doc_atomically(path, doc)
+    _emit({"released": phase_id})
+    return 0
+
+
+def op_reconcile(argv):
+    """Every phase's status against its own tasks file's ground truth.
+
+    A correction to "completed" is applied only when handoff.md already exists;
+    otherwise it is reported as blocked rather than applied. Reconcile must not
+    be a second write path with weaker invariants than roadmap-set-status -- an
+    otherwise-valid completed correction stays visible as a divergence instead of
+    being silently healed wrong.
+    """
+    path = _flag(argv, "--roadmap")
+    feature = _flag(argv, "--feature")
+    if not path or not feature:
+        die("Usage: roadmap.py reconcile --roadmap <path> --feature <slug>")
+
+    doc = read_doc(path, "roadmap-reconcile")
+    feature_dir = os.path.dirname(path)
+    corrections = []
+    blocked = []
+
+    for phase in doc.get("phases") or []:
+        key = _jq_raw(phase.get("id"))
+        directory = _tsv(phase.get("dir"))
+        status = _tsv(phase.get("status"))
+        # Phase tasks files follow <feature>-phase-<id>-tasks.json, the same
+        # convention phase-overlap, execute.md Step 1.7, plan.md Phase 3e and
+        # status.md use. Reading a bare tasks.json here made every lookup miss,
+        # so reconcile silently reported zero corrections.
+        tasks = _read_tasks(
+            feature_dir + "/" + directory + "/" + feature + "-phase-" + key + "-tasks.json"
+        )
+        if tasks is None:
+            continue
+        truth = ground_truth(tasks)
+        if truth == "unknown" or truth == status:
+            continue
+        row = {"id": jq_numbers(phase.get("id")), "from": status, "to": truth}
+        if truth == "completed" and not os.path.isfile(
+            feature_dir + "/" + directory + "/handoff.md"
+        ):
+            row["reason"] = "no handoff.md -- write it with roadmap-write-handoff, then re-run"
+            blocked.append(row)
+        else:
+            corrections.append(row)
+
+    if corrections:
+        # Reaching "completed" also releases the claim in the same atomic write,
+        # mirroring roadmap-set-status -- otherwise a reconciled phase reads as
+        # done while still showing claimed by a dead session.
+        for phase in doc.get("phases") or []:
+            row = next(
+                (c for c in corrections if c["id"] == jq_numbers(phase.get("id"))), None
+            )
+            if row is None:
+                continue
+            phase["status"] = row["to"]
+            if row["to"] == "completed":
+                phase["claim"] = None
+        write_doc_atomically(path, doc)
+
+    _emit({"corrections": corrections, "blocked": blocked})
+    return 0
+
+
 _OPS = {
     "judge-phases": op_judge_phases,
+    "roadmap-get": op_roadmap_get,
+    "set-status": op_set_status,
+    "claim": op_claim,
+    "release-claim": op_release_claim,
+    "reconcile": op_reconcile,
     "verify-creates": op_verify_creates,
     "validate-contracts": op_validate_contracts,
     "normalize-contracts": op_normalize_contracts,
