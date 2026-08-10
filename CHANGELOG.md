@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.121.3] - 2026-08-10
+
+> **A refactor. No behaviour a caller can see changes, no flag moves, and nothing needs migrating.** `story-merge` used to be ~1520 lines of Bash and ~90 jq invocations in `aimi-cli.sh`; it is now `scripts/story_merge.py`, ported rule for rule. What made it worth doing is narrow: the prose sanitizer existed **twice**, once as Python and once as the jq blob `_ROADMAP_SANITIZE_JQ`, and the only four call sites keeping the jq copy alive were inside this verb. There is one implementation of that rule now, in `scripts/sanitize.py`, imported by both readers.
+
+### Changed
+
+- **`story-merge`'s merge, both split axes and its writes moved to `scripts/story_merge.py`.** `aimi-cli.sh` keeps the shell-shaped half — flag parsing, path confinement, and the `--phase-aware` basename precondition — and calls the module once. Locking moved with the writers rather than staying in Bash: on the PROJECT axis the output paths are derived from the stories themselves, and Bash cannot hold a lock on a name it has not computed yet. Every rule was captured from the jq it replaces, case by case, over a 92-case adversarial corpus **before** the jq was deleted; 440 of 460 recorded field comparisons are identical, and the 20 that differ are named one by one in `tests/golden_from_jq.json`. `aimi-cli.sh` is 1532 lines shorter and the planning half of the test suite runs in roughly half the wall time it did.
+- **The prose sanitizer lives in one file, `scripts/sanitize.py`, and neither importer owns it.** `roadmap.py` held it while it was the only caller; `story_merge.py` needs the same rule for the sub-agent-authored titles it puts into a dropped-dependency warning, and a story title is not a roadmap concern. The function, its caps and its rule order are unchanged.
+- **`python3` is now required by `story-merge` as well as by the roadmap verbs.** `check_python3()` covers both and its message names both. Every other verb stays pure Bash + jq and still runs on a host without python3. `install.sh` copies `scripts/` wholesale, so the new modules travel with no installer change.
+
+### Fixed
+
+- **A staging file holding an ARRAY of stories now merges, instead of aborting the whole run with a jq engine error.** Arrays are documented as supported and the Bash had a complete flattening loop for them — directly underneath a first attempt that called jq's `path` with no argument. That is a compile error; its failure was redirected to `/dev/null` and its empty output was assigned over the accumulator the loop was about to append to, so the merge collapsed to `jq: error … null (null) has no keys` and exit 5 with nothing written. Nothing exercised it. The port runs the loop the file was written to run.
+- **A staging file whose top-level value is a number, a string, or two JSON values is refused by name.** Each used to abort inside jq — mid-`--argjson`, or adding a scalar to an object — so the exit status was the engine's and no message said which file was at fault.
+- **A failed write in legacy or `--split full-stack` SIDE mode now says so and cleans up after itself.** `set -e` killed the shell on the failing lock redirect before either writer's own `failed to write output file` branch could run, leaving an orphaned `mktemp` scratch file and no diagnostic at all. Both remain refusals that write no tasks file; they just say which one and remove the scratch file. The PROJECT axis, whose report was already reachable, is byte-identical.
+
 ## [1.121.2] - 2026-08-10
 
 > **A `creates`/`needs` entry is now two fields, `{identity, description}`, and a roadmap already on disk stops being readable by the contract verbs until it is migrated once.** The identity is grepped literally against tracked source to prove a phase built what it promised; the rest is prose. While both halves lived in one string, every boundary that needed one of them re-derived the split at the first `(` — four splitters that disagreed with each other had accumulated — and whoever forgot applied prose-cleaning rules to a name.
