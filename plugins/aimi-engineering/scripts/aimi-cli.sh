@@ -12255,10 +12255,19 @@ _roadmap_require_contracts() {
 }
 
 # Validate --phase is present and a bare numeric id (int or one-decimal-place).
+#
+# The integer half refuses a LEADING ZERO on purpose: every --phase consumer
+# hands the id to roadmap.py, which parses it with json.loads(), and JSON has
+# no "02". Admitting it here bought a 12-line uncaught JSONDecodeError instead
+# of the one readable line below. "0" itself is still a legal id -- the
+# alternation spells that out rather than leaving it to a lucky quantifier.
+# The decimal half is deliberately untouched: it is the only thing separating
+# 2.1 from 2.10, and both must keep passing (they are the same number, and the
+# Python side normalizes them to one).
 _roadmap_validate_phase_id() {
   local phase_id="$1"
   local label="$2"
-  if [ -z "$phase_id" ] || ! [[ "$phase_id" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+  if [ -z "$phase_id" ] || ! [[ "$phase_id" =~ ^(0|[1-9][0-9]*)(\.[0-9]+)?$ ]]; then
     echo "Error: $label: --phase <id> must be a numeric phase id" >&2
     exit 1
   fi
@@ -12667,9 +12676,9 @@ cmd_roadmap_claim() {
   local roadmap_path
   roadmap_path=$(_roadmap_require "roadmap-claim" "$feature" " (run roadmap-init first)")
 
-  # The session id is sanitized on the far side, with the same _rm_sanitize
-  # every other free-text roadmap field goes through, before it is ever written
-  # to roadmap.json.
+  # The session id is sanitized on the far side, by rm_sanitize in
+  # scripts/sanitize.py -- the same function every other free-text roadmap
+  # field goes through -- before it is ever written to roadmap.json.
   #
   # The exit statuses are the contract, not a detail: execute.md branches on 4
   # ("there is nothing left to claim") and 3 ("there is, and you cannot have
@@ -12760,8 +12769,9 @@ cmd_roadmap_reconcile() {
 # back at this verb -- this is the only path that may create or overwrite
 # that file. Reads a JSON object from --file or stdin with five optional
 # array-of-string fields (decisions, artifacts, deviations, deferred,
-# contracts); each entry is sanitized and length-capped with the same
-# _rm_sanitize regime as every other free-text roadmap field. Always emits
+# contracts); each entry is sanitized and length-capped by rm_sanitize in
+# scripts/sanitize.py, the same regime every other free-text roadmap field
+# goes through. Always emits
 # exactly five "## " headings in the fixed order
 # "Decisions Made" / "Artifacts Created" / "Deviations" / "Deferred Items" /
 # "Contracts Delivered" -- the order roadmap-set-status's completed-requires-
@@ -12958,10 +12968,15 @@ cmd_verify_creates() {
   roadmap_path=$(_roadmap_require "verify-creates" "$feature")
   _roadmap_require_contracts "verify-creates" "$roadmap_path" "$feature"
 
-  if ! jq -e --argjson pid "$phase_id" '.phases[] | select(.id == $pid)' "$roadmap_path" >/dev/null 2>&1; then
-    echo "Error: verify-creates: phase $phase_id not found in $roadmap_path" >&2
-    exit 1
-  fi
+  # No phase-exists check here: roadmap.py's verify_creates owns it and prints
+  # the same bytes through die(msg, code=1). Keeping a bash copy meant two
+  # readers of .phases[].id, and only one of them normalized the number.
+  #
+  # It follows that the phase check now runs AFTER the three guards below --
+  # the --dir directory test, validate_path_in_project, and check_python3 --
+  # so a bad --dir or a host with no python3 is reported first. That is the
+  # intended order: those three are statements about this process's own
+  # environment, and none of them can be answered by reading the roadmap.
 
   # --dir is the phase container's absolute path. It defaults to PROJECT_ROOT
   # rather than erroring, so the only --dir failure is a path that is not a
@@ -13011,12 +13026,11 @@ cmd_validate_contracts() {
   local roadmap_path
   roadmap_path=$(_roadmap_require "validate-contracts" "$feature")
   # Before the phase-exists check, so a pre-2.0 roadmap is named as such rather
-  # than reported as a missing phase.
+  # than reported as a missing phase. The check itself now lives in roadmap.py's
+  # validate_contracts, which prints the same bytes through die(msg, code=1) --
+  # but this call must stay ABOVE the python3 hand-off for the same reason it
+  # was written above the deleted jq block.
   _roadmap_require_contracts "validate-contracts" "$roadmap_path" "$feature"
-  if [ -n "$phase_id" ] && ! jq -e --argjson pid "$phase_id" '.phases[] | select(.id == $pid)' "$roadmap_path" >/dev/null 2>&1; then
-    echo "Error: validate-contracts: phase $phase_id not found in $roadmap_path" >&2
-    exit 1
-  fi
 
   check_python3
   local phase_args=()

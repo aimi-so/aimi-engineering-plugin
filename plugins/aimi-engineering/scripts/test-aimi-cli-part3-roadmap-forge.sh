@@ -4047,6 +4047,29 @@ test_validate_contracts_rejects_suspicious_contract_strings() {
   rm -rf ".aimi/tasks/$feature"
 }
 
+# The ordering this pins is a bash decision, and only bash can make it: the
+# phase-exists check itself moved into roadmap.py, but _roadmap_require_contracts
+# still runs in the shell, ahead of the python3 hand-off. If a later edit ever
+# reorders those two, a pre-2.0 roadmap starts answering "phase N not found" --
+# a true sentence about a document nobody read, and the exact failure the
+# require-contracts helper exists to prevent.
+test_validate_contracts_pre_2_0_precedes_missing_phase() {
+  echo ""
+  echo "=== validate-contracts: a pre-2.0 roadmap is named as such, never as a missing phase ==="
+
+  local feature="cv-pre20-phase" output exit_code phase_hits
+  _seed_v1_roadmap_on_disk "$feature" '["legacy_thing (desc)"]'
+
+  output=$("$CLI" validate-contracts "$feature" --phase 99 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "pre-2.0 + absent phase: exits 1"
+  assert_contains "normalize-contracts --feature $feature" "$output" \
+    "pre-2.0 + absent phase: the migration message is the one reported"
+  phase_hits=$(printf '%s' "$output" | grep -c "phase 99 not found" || true)
+  assert_eq "0" "$phase_hits" "pre-2.0 + absent phase: no phase-not-found text reaches the caller"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
 # ============================================================================
 # verify-creates Tests (US-001)
 # ============================================================================
@@ -4805,6 +4828,85 @@ test_verify_creates_error_exit_codes() {
   assert_exit_code "1" "$exit_code" "errors: unknown phase id exits 1"
 
   rm -rf ".aimi/tasks/vc-errors" "$dir"
+}
+
+# Deleting the bash phase-exists check moved that check behind three guards --
+# the --dir directory test, validate_path_in_project, and check_python3 -- and
+# nothing in this suite asserted the resulting order. The order is deliberate:
+# those three are statements about this process's own environment, and none of
+# them can be answered by reading the roadmap. This test is what would notice
+# a later commit quietly restoring the old precedence.
+test_verify_creates_dir_error_precedes_missing_phase() {
+  echo ""
+  echo "=== verify-creates: a bad --dir is reported before a phase that does not exist ==="
+
+  local dir out exit_code phase_hits
+  dir=$(_vc_repo "vc-dir-precedence")
+  echo "x" > "$dir/a.txt"
+  _vc_commit "$dir"
+  _vc_roadmap "vc-dir-precedence" 'alpha|one'
+
+  out=$("$CLI" verify-creates --feature "vc-dir-precedence" --phase 99 \
+    --dir "$TEST_DIR/vc-no-such-container" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "dir precedence: exits 1"
+  assert_contains "--dir is not a directory" "$out" \
+    "dir precedence: the --dir error is the one reported"
+  phase_hits=$(printf '%s' "$out" | grep -c "not found" || true)
+  assert_eq "0" "$phase_hits" "dir precedence: no phase-not-found text reaches the caller"
+
+  rm -rf ".aimi/tasks/vc-dir-precedence" "$dir"
+}
+
+# The --phase guard is shared by ten call sites; these two exercise it through
+# roadmap-get because that verb reaches roadmap.py with nothing else in the way,
+# so what the guard admits is exactly what json.loads() receives.
+#
+# "02" is not a JSON number. Admitting it bought a 12-line uncaught
+# JSONDecodeError where the guard's own single line belongs -- and the line
+# count is asserted, not just the message, because the old failure printed that
+# message nowhere at all.
+test_roadmap_phase_id_guard_refuses_leading_zero() {
+  echo ""
+  echo "=== --phase 02: one readable line, never a JSONDecodeError traceback ==="
+
+  local feature="ph-leading-zero" out exit_code line_count traceback_hits
+  rm -rf ".aimi/tasks/$feature"
+  jq -n '[{id: 1, name: "P", goal: "g", slug: "p", dependsOn: [], creates: [], needs: []}]' \
+    | "$CLI" roadmap-init --feature "$feature" >/dev/null
+
+  out=$("$CLI" roadmap-get --feature "$feature" --phase 02 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "leading zero: exits 1"
+  assert_contains "must be a numeric phase id" "$out" \
+    "leading zero: the guard's own message is what the caller sees"
+  line_count=$(printf '%s\n' "$out" | wc -l | tr -d ' ')
+  assert_eq "1" "$line_count" "leading zero: exactly one line of output"
+  traceback_hits=$(printf '%s' "$out" | grep -cE 'Traceback|JSONDecodeError' || true)
+  assert_eq "0" "$traceback_hits" "leading zero: no Python traceback reaches the caller"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+# 2.10 and 2.1 are the same number, and every --phase consumer normalizes
+# through jq_numbers(json.loads(...)), so resolving one to the other is the
+# correct answer rather than a tolerated one. Pinned here because the guard's
+# decimal half is the only thing keeping 2.10 admissible at all, and a future
+# tightening of the integer half must not take the decimal half with it.
+test_roadmap_phase_id_2_10_resolves_to_2_1() {
+  echo ""
+  echo "=== --phase 2.10 resolves phase 2.1: the same number, normalized once ==="
+
+  local feature="ph-decimal-norm" out exit_code
+  rm -rf ".aimi/tasks/$feature"
+  jq -n '[
+    {id: 1, name: "A", goal: "g", slug: "a", dependsOn: [], creates: [], needs: []},
+    {id: 2.1, name: "B", goal: "g", slug: "b", dependsOn: [], creates: [], needs: []}
+  ]' | "$CLI" roadmap-init --feature "$feature" >/dev/null
+
+  out=$("$CLI" roadmap-get --feature "$feature" --phase 2.10 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "2.10: resolves rather than erroring"
+  assert_eq "2.1" "$(printf '%s' "$out" | jq -r '.id')" "2.10: the phase returned is 2.1"
+
+  rm -rf ".aimi/tasks/$feature"
 }
 
 test_verify_creates_registered_in_help_and_dispatcher() {
@@ -7874,6 +7976,7 @@ main() {
   test_roadmap_sweep_reports_orphan_creates
   test_roadmap_sweep_reports_deferred_needs
   test_validate_contracts_rejects_suspicious_contract_strings
+  test_validate_contracts_pre_2_0_precedes_missing_phase
 
   # verify-creates Tests (US-001) — the measured nine-scenario matrix, one
   # isolated git repository per row, each asserting status AND method
@@ -7898,6 +8001,9 @@ main() {
   test_verify_creates_all_missing_still_exits_zero
   test_verify_creates_empty_creates_yields_empty_array
   test_verify_creates_error_exit_codes
+  test_verify_creates_dir_error_precedes_missing_phase
+  test_roadmap_phase_id_guard_refuses_leading_zero
+  test_roadmap_phase_id_2_10_resolves_to_2_1
   test_verify_creates_registered_in_help_and_dispatcher
   test_cli_never_command_substitutes_in_a_diagnostic
   test_verify_creates_reuses_existing_identity_definition
