@@ -1487,6 +1487,365 @@ def test_the_diagnostic_names_the_verb_a_caller_can_run_not_the_internal_op():
     # Every op either appears in the map or is already named after its verb.
     for op in R._OPS:
         assert op in R._VERB_FOR_OP or op in (
-            "judge-phases", "roadmap-get", "verify-creates", "validate-contracts",
-            "normalize-contracts", "phase-overlap",
+            "judge-phases", "roadmap-get", "roadmap-eligible", "verify-creates",
+            "validate-contracts", "normalize-contracts", "phase-overlap",
         ), op
+
+
+# ---------------------------------------------------------------------------
+# roadmap-eligible: one structured verdict per phase, and what blocks the rest
+# ---------------------------------------------------------------------------
+#
+# THE CORPUS IS THE TEST. Every shape this verb has to survive lives in it once,
+# and test_the_corpus_exercises_every_shape_it_claims_to asserts each one is
+# actually reached -- without that, a filter that quietly selects nothing would
+# leave every assertion below iterating an empty list and passing.
+
+_LIVE_PID = os.getpid()
+
+
+def _claim(session="outra-sessao"):
+    """A claim held by a LIVE pid, so the stale sweep in roadmap-claim leaves it
+    alone and the corpus means the same thing to both selectors."""
+    return {"claimedBy": session, "claimedAt": "2020-01-01T00:00:00Z", "claimedPid": _LIVE_PID}
+
+
+ELIGIBLE_CORPUS = {
+    # An eligible phase, a dependency-blocked one, and a claim-blocked one, in
+    # one document so the ordered eligible list has something to order.
+    "elegivel-bloqueada-e-reivindicada": {
+        "phases": [
+            _phase(1, "pending", None, name="Um", dependsOn=[]),
+            _phase(2, "pending", None, name="Dois", dependsOn=[1]),
+            _phase(3, "planned", _claim(), name="Tres", dependsOn=[]),
+        ]
+    },
+    # Status exclusion: in_progress is claimable but never expandable, so it is
+    # out of the default set while carrying no claim and no unmet dependency --
+    # the case a wider filter would wrongly admit.
+    "status-fora-do-conjunto": {
+        "phases": [
+            _phase(1, "in_progress", None, name="Em curso", dependsOn=[]),
+            _phase(2, "planned", None, name="Planeada", dependsOn=[]),
+        ]
+    },
+    # Nothing left to expand, and nothing wrong either.
+    "tudo-completed": {
+        "phases": [
+            _phase(1, "completed", None, name="Um", dependsOn=[]),
+            _phase(2, "completed", None, name="Dois", dependsOn=[1]),
+        ]
+    },
+    "sem-fases": {"phases": []},
+    # Hand-edited shapes. `phases` as a scalar raised an AttributeError inside
+    # has_work_map before this verb existed.
+    "phases-escalar": {"phases": 5},
+    "phases-texto": {"phases": "phase-1"},
+    "phases-com-entrada-nao-objeto": {"phases": [_phase(1, "pending", None, name="Um"), 7]},
+    "sem-chave-phases": {"roadmapVersion": "2.0"},
+    # A dependency naming a phase the roadmap does not hold: unmet, with a null
+    # status rather than an invented word for "unknown".
+    "dependencia-inexistente": {
+        "phases": [_phase(1, "pending", None, name="Um", dependsOn=[99])]
+    },
+}
+
+# Every corpus document whose `phases` is a list at all -- the new verb reports
+# on all of them, stray entries and empty lists included.
+_LIST_PHASES = [
+    label for label, doc in ELIGIBLE_CORPUS.items() if isinstance(doc.get("phases"), list)
+]
+
+# The subset roadmap-get --next-eligible and roadmap-claim can be run against.
+# Both walk .phases[] expecting objects and neither has ever tolerated anything
+# else there; hardening them is not this story's job, so the stray-entry fixture
+# is deliberately out of the regression proof and covered by the new verb alone.
+_WELL_FORMED = [
+    label for label in _LIST_PHASES
+    if all(isinstance(p, dict) for p in ELIGIBLE_CORPUS[label]["phases"])
+]
+
+
+def _write(tmp_path, label, doc):
+    path = tmp_path / (label + ".json")
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    return str(path)
+
+
+def _eligible(tmp_path, label, *flags):
+    """Run the verb over one corpus document; return (result, parsed payload)."""
+    path = _write(tmp_path, label, ELIGIBLE_CORPUS[label])
+    result = _run(["roadmap-eligible", "--roadmap", path] + list(flags))
+    payload = json.loads(result.stdout) if result.returncode == 0 else None
+    return result, payload
+
+
+def _payloads(tmp_path, *flags):
+    return {label: _eligible(tmp_path, label, *flags)[1] for label in ELIGIBLE_CORPUS}
+
+
+def _strings(value):
+    """Every string VALUE anywhere in a document, keys excluded."""
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, dict):
+        return set().union(*[_strings(v) for v in value.values()]) if value else set()
+    if isinstance(value, list):
+        return set().union(*[_strings(v) for v in value]) if value else set()
+    return set()
+
+
+def test_every_phase_carries_its_own_verdict_and_the_eligible_ids_are_id_ordered(tmp_path):
+    """One call has to serve both a list rendering and a by-id lookup, which it
+    only does if the blocked phases are in the payload too."""
+    result, payload = _eligible(tmp_path, "elegivel-bloqueada-e-reivindicada")
+    assert result.returncode == 0
+    assert len(payload["phases"]) == 3
+    assert [p["id"] for p in payload["phases"]] == [1, 2, 3]
+    assert [p["eligible"] for p in payload["phases"]] == [True, False, False]
+    assert payload["eligible"] == [1]
+    assert payload["eligibleCount"] == 1
+    # The blocked phase says what blocks it, in ids and statuses -- not prose.
+    assert payload["phases"][1]["unmet"] == [{"id": 1, "status": "pending"}]
+    # The claimed one is blocked by its own claim object, with an empty unmet.
+    assert payload["phases"][2]["unmet"] == []
+    assert payload["phases"][2]["claim"]["claimedBy"] == "outra-sessao"
+
+
+def test_the_record_count_equals_the_phase_count_for_every_corpus_roadmap(tmp_path):
+    for label in _LIST_PHASES:
+        payload = _eligible(tmp_path, label)[1]
+        stored = [p for p in ELIGIBLE_CORPUS[label]["phases"] if isinstance(p, dict)]
+        assert len(payload["phases"]) == len(stored), label
+
+
+def test_zero_eligible_is_a_normal_answer_and_exits_zero(tmp_path):
+    """The behaviour roadmap-get --next-eligible deliberately does NOT have. Its
+    caller captures stdout in a command substitution: an empty list and a broken
+    CLI have to look different, and only the exit status separates them."""
+    for label in ("tudo-completed", "sem-fases"):
+        result, payload = _eligible(tmp_path, label)
+        assert result.returncode == 0, label
+        assert payload["eligible"] == [], label
+        assert payload["eligibleCount"] == 0, label
+    # The verb it is NOT copying, on the same all-completed document.
+    path = _write(tmp_path, "tudo-completed-get", ELIGIBLE_CORPUS["tudo-completed"])
+    refused = _run(["roadmap-get", "--roadmap", path, "--feature", "f", "--next-eligible"])
+    assert refused.returncode == 1
+    assert "no eligible phase found" in refused.stderr
+
+
+def test_stdout_is_one_json_object_and_the_success_path_is_silent(tmp_path):
+    """op_claim streams its blocking reasons to stderr; this verb must not, and
+    it must not print a second document either -- the caller parses stdout."""
+    for label in ELIGIBLE_CORPUS:
+        result, payload = _eligible(tmp_path, label)
+        assert result.returncode == 0, label
+        assert result.stderr == "", label
+        assert isinstance(payload, dict), label
+        assert set(payload) == {"phases", "eligible", "eligibleCount"}, label
+        # json.loads already refused trailing content; the newline is _emit's.
+        assert result.stdout.endswith("}\n"), label
+
+
+def test_not_one_string_in_the_payload_was_composed_by_python(tmp_path):
+    """The Adaptive Language Rule (commands/references/user-communication.md)
+    makes user-facing wording follow the reader's own language, so a sentence
+    built here could not be re-worded by the command that prints it. Every
+    string in the payload must therefore already exist in roadmap.json."""
+    for label, doc in ELIGIBLE_CORPUS.items():
+        payload = _eligible(tmp_path, label)[1]
+        source = _strings(doc)
+        for text in _strings(payload):
+            assert text in source, (label, text)
+        keys = set()
+        for record in payload["phases"]:
+            keys |= set(record)
+            for entry in record["unmet"]:
+                keys |= set(entry)
+        assert keys <= {"id", "name", "status", "claim", "eligible", "unmet"}, label
+
+
+def test_the_corpus_exercises_every_shape_it_claims_to(tmp_path):
+    """The anti-vacuum guard. Without it a filter that selects nothing leaves
+    every loop above iterating an empty list and passing."""
+    payloads = _payloads(tmp_path)
+    records = [record for payload in payloads.values() for record in payload["phases"]]
+
+    assert any(r["eligible"] for r in records), "no eligible phase in the corpus"
+    assert any(r["unmet"] for r in records), "no dependency-blocked phase in the corpus"
+    assert any(
+        r["claim"] is not None and not r["eligible"] for r in records
+    ), "no claim-blocked phase in the corpus"
+    assert any(
+        r["status"] not in R.GET_ELIGIBLE_STATUSES and r["claim"] is None and not r["unmet"]
+        for r in records
+    ), "no status-excluded phase in the corpus"
+    assert any(
+        payload["eligibleCount"] == 0 and payload["phases"]
+        and all(r["status"] == "completed" for r in payload["phases"])
+        for payload in payloads.values()
+    ), "no all-completed roadmap in the corpus"
+    assert any(not payload["phases"] for payload in payloads.values()), "no zero-phase roadmap"
+    assert not isinstance(
+        ELIGIBLE_CORPUS["phases-escalar"]["phases"], list
+    ), "the scalar-phases fixture stopped being scalar"
+    assert payloads["phases-escalar"]["phases"] == []
+
+
+def test_a_dependency_on_a_phase_that_is_not_there_is_unmet_with_a_null_status(tmp_path):
+    """`null` is the absence of a status, and it is the caller's to word. An
+    invented token like "unknown" would be Python composing prose in a field."""
+    payload = _eligible(tmp_path, "dependencia-inexistente")[1]
+    assert payload["phases"][0]["unmet"] == [{"id": 99, "status": None}]
+    assert payload["eligibleCount"] == 0
+
+
+def test_a_hand_edited_phases_value_answers_instead_of_raising(tmp_path):
+    """roadmap.json is a file people edit. A scalar `phases` reached .get() on an
+    int inside has_work_map and printed an AttributeError traceback, which told
+    the agent reading that stream nothing it could act on."""
+    for label in ("phases-escalar", "phases-texto", "sem-chave-phases"):
+        result, payload = _eligible(tmp_path, label)
+        assert result.returncode == 0, label
+        assert payload["phases"] == [], label
+        assert "Traceback" not in result.stderr, label
+    # A list with a stray entry keeps the entries that ARE phases.
+    payload = _eligible(tmp_path, "phases-com-entrada-nao-objeto")[1]
+    assert [p["id"] for p in payload["phases"]] == [1]
+
+
+def test_the_work_map_answers_the_same_malformed_shapes_rather_than_raising(tmp_path):
+    """The guard lives in has_work_map, not only in the new op, because the
+    ranking both selectors use reads it."""
+    roadmap = str(tmp_path / "f" / "roadmap.json")
+    for phases in (5, "phase-1", {"a": 1}, None):
+        assert R.has_work_map(roadmap, {"phases": phases}, "f") == {}
+    assert R.has_work_map(roadmap, {}, "f") == {}
+    assert R.has_work_map(roadmap, [], "f") == {}
+    # A stray entry is skipped; the real phase beside it still gets an answer.
+    assert R.has_work_map(roadmap, {"phases": [_phase(1), 7]}, "f") == {"1": True}
+
+
+def test_statuses_defaults_to_the_pair_and_narrows_only_when_asked(tmp_path):
+    """GET_ELIGIBLE_STATUSES is NOT narrowed to make /aimi:plan's pending-only
+    filter work -- an assertion in test-aimi-cli-part3 pins that
+    roadmap-get --next-eligible still returns a planned phase."""
+    assert R.GET_ELIGIBLE_STATUSES == ["pending", "planned"]
+    assert _eligible(tmp_path, "status-fora-do-conjunto")[1]["eligible"] == [2]
+    narrowed = _eligible(tmp_path, "status-fora-do-conjunto", "--statuses", "pending")[1]
+    assert narrowed["eligible"] == []
+    assert narrowed["eligibleCount"] == 0
+    widened = _eligible(
+        tmp_path, "status-fora-do-conjunto", "--statuses", "pending,planned,in_progress"
+    )[1]
+    assert widened["eligible"] == [1, 2]
+
+
+def test_an_unknown_status_is_refused_by_name_rather_than_returning_nothing(tmp_path):
+    """Filtering on a typo returns zero eligible phases, which is a legitimate
+    answer the caller cannot tell apart from the typo. So it stops instead."""
+    path = _write(tmp_path, "tipo", ELIGIBLE_CORPUS["elegivel-bloqueada-e-reivindicada"])
+    result = _run(["roadmap-eligible", "--roadmap", path, "--statuses", "Pending"])
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert '"Pending"' in result.stderr
+    for name in R.PHASE_STATUSES:
+        assert name in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_the_status_vocabulary_is_the_one_the_transition_graph_is_built_over():
+    """Two names for the same five statuses would let --statuses accept a value
+    no phase can ever hold, or refuse one it can."""
+    from_graph = set()
+    for edge in R.STATUS_TRANSITIONS:
+        from_graph.update(edge.split(":"))
+    assert from_graph <= set(R.PHASE_STATUSES)
+    assert set(R.CLAIMABLE_STATUSES) <= set(R.PHASE_STATUSES)
+    assert set(R.GET_ELIGIBLE_STATUSES) <= set(R.PHASE_STATUSES)
+
+
+# --- The ordering parameter changed nothing for the callers that had one -----
+
+
+def _legacy_order(phases, allowed, work):
+    """candidates() as it read before the sort key became a parameter. Written
+    out rather than referenced, so it keeps saying what the old code said even
+    after the new one is edited."""
+    status_by_id = R._status_by_id(phases)
+    eligible = [
+        phase for phase in phases
+        if phase.get("status") in allowed
+        and phase.get("claim") is None
+        and not R._unmet(phase, status_by_id)
+    ]
+    return sorted(eligible, key=lambda p: (R._rank(p, work), R.jq_sort_key(p.get("id"))))
+
+
+def test_the_default_sort_key_is_byte_for_byte_the_one_it_replaced():
+    """Across the corpus, both status sets, and four work maps -- including the
+    two alternating ones, the only shape where rank and id disagree (issue #90)
+    and therefore the only shape that can catch the default key being swapped."""
+    seen_reorder = False
+    for label in _WELL_FORMED:
+        phases = [p for p in ELIGIBLE_CORPUS[label]["phases"] if isinstance(p, dict)]
+        ids = [R._jq_raw(p.get("id")) for p in phases]
+        maps = [
+            {},
+            {key: True for key in ids},
+            {key: (index % 2 == 0) for index, key in enumerate(ids)},
+            {key: (index % 2 == 1) for index, key in enumerate(ids)},
+        ]
+        for allowed in (R.GET_ELIGIBLE_STATUSES, R.CLAIMABLE_STATUSES):
+            for work in maps:
+                assert R.candidates(phases, allowed, work) == _legacy_order(
+                    phases, allowed, work
+                ), (label, allowed, work)
+                by_id = R.candidates(phases, allowed, work, R.id_only_key)
+                assert [p["id"] for p in by_id] == sorted(
+                    [p["id"] for p in by_id], key=R.jq_sort_key
+                )
+                if [p["id"] for p in by_id] != [
+                    p["id"] for p in _legacy_order(phases, allowed, work)
+                ]:
+                    seen_reorder = True
+    assert seen_reorder, "no corpus case where rank-first and id-only disagree"
+
+
+def test_the_two_existing_selectors_still_choose_what_they_always_chose(tmp_path):
+    """End-to-end, through the ops themselves: roadmap-get --next-eligible and
+    roadmap-claim keep the rank-first key, so neither answer moved when the new
+    verb asked for a different order."""
+    checked_success = 0
+    for label in _WELL_FORMED:
+        doc = ELIGIBLE_CORPUS[label]
+        phases = [p for p in doc["phases"] if isinstance(p, dict)]
+
+        # No tasks files exist beside these fixtures, so every phase has work --
+        # the same map both ops build for themselves.
+        work = {R._jq_raw(p.get("id")): True for p in phases}
+
+        expected_get = _legacy_order(phases, R.GET_ELIGIBLE_STATUSES, work)
+        path = _write(tmp_path, label + "-get", doc)
+        got = _run(["roadmap-get", "--roadmap", path, "--feature", "f", "--next-eligible"])
+        if expected_get:
+            assert got.returncode == 0, label
+            assert json.loads(got.stdout)["id"] == expected_get[0]["id"], label
+            checked_success += 1
+        else:
+            assert got.returncode == 1, label
+
+        expected_claim = _legacy_order(phases, R.CLAIMABLE_STATUSES, work)
+        path = _write(tmp_path, label + "-claim", doc)
+        claimed = _run([
+            "claim", "--roadmap", path, "--feature", "f",
+            "--session-id", "sessao-do-teste", "--session-pid", str(_LIVE_PID),
+        ])
+        if expected_claim:
+            assert claimed.returncode == 0, label
+            assert json.loads(claimed.stdout)["id"] == expected_claim[0]["id"], label
+            checked_success += 1
+        else:
+            assert claimed.returncode in (3, 4), label
+    assert checked_success >= 4, "the regression proof never saw a successful selection"

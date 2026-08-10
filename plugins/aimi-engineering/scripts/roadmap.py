@@ -1558,6 +1558,14 @@ CLAIMABLE_STATUSES = ["pending", "planned", "in_progress", "verification_failed"
 # started it. roadmap-claim's set is wider on purpose (see op_claim).
 GET_ELIGIBLE_STATUSES = ["pending", "planned"]
 
+# Every status a phase may carry, in lifecycle order. It exists so --statuses
+# can REFUSE a name rather than silently returning zero eligible phases: a
+# caller who types "Pending" gets a message naming what they typed and what is
+# accepted, instead of an empty answer indistinguishable from "nothing is
+# ready". Kept in one place so the vocabulary cannot drift away from
+# STATUS_TRANSITIONS, which is the graph over these same five names.
+PHASE_STATUSES = ["pending", "planned", "in_progress", "completed", "verification_failed"]
+
 
 def _tsv(value):
     """One `@tsv` field as bash's `read -r` received it.
@@ -1660,10 +1668,21 @@ def has_work_map(roadmap_path, doc, feature):
       - unparseable: nothing is known, so nothing is demoted.
       - zero userStories ("unknown"): same reasoning reconcile already applies --
         it declines to correct a status from an empty story list.
+
+    A `phases` that is not a list of dicts contributes nothing rather than
+    raising. roadmap.json is a file people hand-edit and every other malformed
+    shape in this module is already answered with an empty result; a scalar
+    `phases` used to reach `.get` on an int here and print an AttributeError
+    traceback, which told the agent reading the stream nothing it could act on.
+    An empty map is also the SAFE answer: _rank leaves a phase the map does not
+    mention undemoted, so a roadmap nobody can read reorders nothing.
     """
     feature_dir = os.path.dirname(roadmap_path)
+    phases = doc.get("phases") if isinstance(doc, dict) else None
     work = {}
-    for phase in doc.get("phases") or []:
+    for phase in phases if isinstance(phases, list) else []:
+        if not isinstance(phase, dict):
+            continue
         key = _jq_raw(phase.get("id"))
         path = (
             feature_dir + "/" + _tsv(phase.get("dir")) + "/"
@@ -1716,8 +1735,25 @@ def _rank(phase, work):
     return 0
 
 
-def candidates(phases, allowed, work):
-    """The claimable phases, in claim order.
+def rank_first_key(phase, work):
+    """Remaining work first, numeric id second -- the claim order (issue #90)."""
+    return (_rank(phase, work), jq_sort_key(phase.get("id")))
+
+
+def id_only_key(phase, _work):
+    """Numeric id alone, consulting no work map.
+
+    The answer a caller gets from this key depends on roadmap.json and nothing
+    else, which is the point: /aimi:plan reports which phases it may expand
+    while an /aimi:execute run is rewriting tasks files underneath it, and a
+    ranking that reads those files would move its answer between two reads of
+    the same roadmap.
+    """
+    return jq_sort_key(phase.get("id"))
+
+
+def candidates(phases, allowed, work, sort_key=rank_first_key):
+    """The claimable phases, in the order the caller asked for.
 
     The caller supplies the array it wants judged, and that is deliberate: it is
     the axis on which the two selectors differ. roadmap-claim passes phases
@@ -1727,6 +1763,13 @@ def candidates(phases, allowed, work):
     phase held by a dead session stays claimable by one and invisible to the
     other -- unifying the ordering was never meant to change that, and a
     read-only verb has no business inferring liveness.
+
+    ORDER is the second such axis, and it defaults to the one the two selectors
+    already used, so neither of them moves a byte. roadmap-eligible passes
+    id_only_key with an empty work map: it answers "which phases MAY be
+    expanded", a question with no notion of how much is left to do, and buying
+    a ranking it does not use would cost it one tasks-file read per phase and
+    the determinism that comes with reading none.
     """
     status_by_id = _status_by_id(phases)
     eligible = [
@@ -1735,7 +1778,7 @@ def candidates(phases, allowed, work):
         and phase.get("claim") is None
         and not _unmet(phase, status_by_id)
     ]
-    return sorted(eligible, key=lambda p: (_rank(p, work), jq_sort_key(p.get("id"))))
+    return sorted(eligible, key=lambda p: sort_key(p, work))
 
 
 def is_pid_alive(pid_text):
@@ -2504,6 +2547,93 @@ def op_roadmap_get(argv):
     return 0
 
 
+def parse_statuses(raw):
+    """`--statuses a,b,c`, refused rather than silently narrowed.
+
+    An unknown name is the failure mode worth spending a message on: filtering
+    on it returns zero eligible phases, which is a legitimate answer the caller
+    cannot tell apart from a typo. So the offending value AND the accepted
+    vocabulary both go in the message, and the verb stops.
+    """
+    names = [name.strip() for name in raw.split(",")]
+    unknown = [name for name in names if name not in PHASE_STATUSES]
+    if unknown:
+        die(
+            "Error: roadmap-eligible: --statuses: unknown status "
+            + ", ".join('"' + name + '"' for name in unknown)
+            + " (accepted: "
+            + ", ".join(PHASE_STATUSES)
+            + ")"
+        )
+    return names
+
+
+def op_roadmap_eligible(argv):
+    """Every phase's eligibility verdict, and for the rest, what is holding it.
+
+    THREE THINGS THIS VERB DELIBERATELY DOES NOT DO.
+
+    It does not die when nothing is eligible. "No phase is ready" is a normal
+    answer here, unlike in roadmap-get --next-eligible, where the caller wanted
+    one phase and got none. This one's caller captures stdout in a command
+    substitution and has to be able to tell an empty eligible list from a CLI
+    that broke, so an empty list exits 0 and says so in the payload.
+
+    It writes no prose. Not one field carries a sentence, because the plugin's
+    user-facing wording follows whatever language the person is writing in
+    (commands/references/user-communication.md) and a sentence composed here
+    cannot be re-worded by the command that prints it. A blocked phase is
+    `eligible: false` plus its own unmet ids and its own claim object; the
+    caller composes the sentence.
+
+    It reads no tasks file. See id_only_key: this answer must not move while a
+    concurrent /aimi:execute rewrites the very files a work-ranking would read.
+
+    The payload covers EVERY phase, not just the eligible ones, so one call
+    serves both a list rendering and a by-id lookup.
+    """
+    path = _flag(argv, "--roadmap")
+    statuses_raw = _flag(argv, "--statuses")
+    if not path:
+        die("Usage: roadmap.py roadmap-eligible --roadmap <path> [--statuses <a,b>]")
+    allowed = GET_ELIGIBLE_STATUSES if statuses_raw is None else parse_statuses(statuses_raw)
+
+    doc = read_doc(path, "roadmap-eligible")
+    stored = doc.get("phases") if isinstance(doc, dict) else None
+    # Same tolerance has_work_map applies: a hand-edited roadmap whose phases is
+    # a scalar, a string, or a list with a stray entry in it answers "no phases"
+    # rather than raising at the caller.
+    phases = [p for p in stored if isinstance(p, dict)] if isinstance(stored, list) else []
+
+    status_by_id = _status_by_id(phases)
+    ordered = candidates(phases, allowed, {}, id_only_key)
+    chosen = {id(phase) for phase in ordered}
+
+    records = [
+        {
+            "id": phase.get("id"),
+            "name": phase.get("name"),
+            "status": phase.get("status"),
+            "claim": phase.get("claim"),
+            "eligible": id(phase) in chosen,
+            "unmet": [
+                {"id": dep, "status": status_by_id.get(_jq_raw(dep))}
+                for dep in _unmet(phase, status_by_id)
+            ],
+        }
+        for phase in phases
+    ]
+
+    _emit(
+        {
+            "phases": records,
+            "eligible": [phase.get("id") for phase in ordered],
+            "eligibleCount": len(ordered),
+        }
+    )
+    return 0
+
+
 def op_set_status(argv):
     """The locked read-modify-write. Bash holds the lock and has already refused
     every argument it can judge on its own, so what is left here needs the
@@ -2819,6 +2949,7 @@ def op_reconcile(argv):
 _OPS = {
     "judge-phases": op_judge_phases,
     "roadmap-get": op_roadmap_get,
+    "roadmap-eligible": op_roadmap_eligible,
     "set-status": op_set_status,
     "claim": op_claim,
     "release-claim": op_release_claim,

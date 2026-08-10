@@ -1263,6 +1263,13 @@ test_contract_gate_is_wired_to_every_reader() {
   _seed_v1_two_phase_roadmap "$feature"
   "$CLI" roadmap-get --feature "$feature" --phase 1 >/dev/null 2>&1 && rc=0 || rc=$?
   assert_exit_code "0" "$rc" "contract gate wiring: roadmap-get still reads a 1.0 roadmap"
+  # roadmap-eligible is ungated for the same reason and it matters more here
+  # than for the others: /aimi:plan asks it which phase it may expand, so a gate
+  # would make every pre-2.0 roadmap unexpandable rather than merely unreadable.
+  out=$("$CLI" roadmap-eligible --feature "$feature" 2>&1) && rc=0 || rc=$?
+  assert_exit_code "0" "$rc" "contract gate wiring: roadmap-eligible still reads a 1.0 roadmap"
+  assert_eq "2" "$(printf '%s' "$out" | jq '.phases | length')" \
+    "contract gate wiring: the 1.0 roadmap yields a complete roadmap-eligible payload, not a partial one"
   "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status planned >/dev/null 2>&1 && rc=0 || rc=$?
   assert_exit_code "0" "$rc" "contract gate wiring: roadmap-set-status still writes to a 1.0 roadmap"
   "$CLI" roadmap-claim --feature "$feature" --session-id s1 --session-pid $$ >/dev/null 2>&1 && rc=0 || rc=$?
@@ -2597,6 +2604,167 @@ test_roadmap_decimal_sort() {
   assert_eq "1" "$next_id" "roadmap-get --next-eligible: lowest numeric-id eligible phase is id 1"
 
   rm -rf ".aimi/tasks/$feature"
+}
+
+# roadmap-eligible answers a different question from roadmap-get --next-eligible
+# and therefore has a different contract: EVERY phase gets a verdict (so one
+# call serves both a list and a by-id lookup), the answer is structured data
+# only (the calling command owns the wording, per the Adaptive Language Rule),
+# and zero eligible exits 0 (the caller captures stdout in a command
+# substitution and must be able to tell that apart from a broken CLI).
+test_roadmap_eligible_verdict_for_every_phase() {
+  echo ""
+  echo "=== roadmap-eligible: one verdict per phase, with what blocks the rest ==="
+
+  local feature="rm-eligible" out rc
+  rm -rf ".aimi/tasks/$feature"
+
+  jq -n '[
+    {id: 1, name: "Um", goal: "g", slug: "um", dependsOn: []},
+    {id: 2, name: "Dois", goal: "g", slug: "dois", dependsOn: [1]},
+    {id: 3, name: "Tres", goal: "g", slug: "tres", dependsOn: []},
+    {id: 4, name: "Quatro", goal: "g", slug: "quatro", dependsOn: []}
+  ]' | "$CLI" roadmap-init --feature "$feature" >/dev/null
+
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+
+  # Phase 3 held by a LIVE claim ($$ is this test shell) so it is claim-blocked
+  # rather than stale; phase 4 moved out of the default status set.
+  "$CLI" roadmap-set-status --feature "$feature" --phase 3 --status planned >/dev/null
+  "$CLI" roadmap-claim --feature "$feature" --session-id sess-holder --session-pid $$ --phase 3 >/dev/null
+  "$CLI" roadmap-set-status --feature "$feature" --phase 4 --status planned >/dev/null
+  "$CLI" roadmap-set-status --feature "$feature" --phase 4 --status in_progress >/dev/null
+
+  out=$("$CLI" roadmap-eligible --feature "$feature" 2>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "0" "$rc" "roadmap-eligible: exits 0 on a roadmap with a ready phase"
+
+  # ONE json object and nothing else -- jq -s collects the stream, so any second
+  # document or stray line makes this 2 (or makes jq fail outright).
+  assert_eq "1" "$(printf '%s' "$out" | jq -s 'length')" \
+    "roadmap-eligible: stdout carries exactly one JSON object"
+  assert_eq "4" "$(printf '%s' "$out" | jq '.phases | length')" \
+    "roadmap-eligible: every phase gets a record, not only the eligible ones"
+  assert_eq "[1]" "$(printf '%s' "$out" | jq -c '.eligible')" \
+    "roadmap-eligible: the eligible ids are listed in numeric id order"
+  assert_eq "1" "$(printf '%s' "$out" | jq '.eligibleCount')" \
+    "roadmap-eligible: the count agrees with the list"
+  assert_eq '[{"id":1,"status":"pending"}]' \
+    "$(printf '%s' "$out" | jq -c '.phases[] | select(.id == 2) | .unmet')" \
+    "roadmap-eligible: a dependency-blocked phase names the unmet id and its status"
+  assert_eq "false sess-holder" \
+    "$(printf '%s' "$out" | jq -r '.phases[] | select(.id == 3) | "\(.eligible) \(.claim.claimedBy)"')" \
+    "roadmap-eligible: a claim-blocked phase carries its own claim object"
+  assert_eq "false in_progress" \
+    "$(printf '%s' "$out" | jq -r '.phases[] | select(.id == 4) | "\(.eligible) \(.status)"')" \
+    "roadmap-eligible: a phase outside the status set is reported, not dropped"
+
+  # NOTHING on stderr on the success path. op_claim streams its blocking reasons
+  # there; this verb must not, because its caller reads stdout only.
+  local err
+  err=$("$CLI" roadmap-eligible --feature "$feature" 2>&1 >/dev/null)
+  assert_eq "" "$err" "roadmap-eligible: the success path writes nothing to stderr"
+
+  rm -f "$roadmap_file"
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_eligible_zero_eligible_exits_zero() {
+  echo ""
+  echo "=== roadmap-eligible: zero eligible is an answer, not a failure ==="
+
+  local feature="rm-eligible-zero" out rc
+  rm -rf ".aimi/tasks/$feature"
+
+  jq -n '[
+    {id: 1, name: "Um", goal: "g", slug: "um", dependsOn: []},
+    {id: 2, name: "Dois", goal: "g", slug: "dois", dependsOn: [1]}
+  ]' | "$CLI" roadmap-init --feature "$feature" >/dev/null
+
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+
+  # Straight to the stored statuses: reaching completed through the CLI needs a
+  # handoff.md per phase, and this test is about the reader, not the writer.
+  jq '.phases |= map(.status = "completed")' "$roadmap_file" > "${roadmap_file}.tmp" \
+    && mv "${roadmap_file}.tmp" "$roadmap_file"
+
+  out=$("$CLI" roadmap-eligible --feature "$feature" 2>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "0" "$rc" "roadmap-eligible: an all-completed roadmap exits 0"
+  assert_eq "[]" "$(printf '%s' "$out" | jq -c '.eligible')" \
+    "roadmap-eligible: an all-completed roadmap reports an empty eligible list"
+  assert_eq "0" "$(printf '%s' "$out" | jq '.eligibleCount')" \
+    "roadmap-eligible: an all-completed roadmap reports count 0"
+
+  # A roadmap with no phases at all -- the shape a caller's command
+  # substitution must still be able to parse.
+  jq '.phases = []' "$roadmap_file" > "${roadmap_file}.tmp" && mv "${roadmap_file}.tmp" "$roadmap_file"
+  out=$("$CLI" roadmap-eligible --feature "$feature" 2>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "0" "$rc" "roadmap-eligible: a zero-phase roadmap exits 0"
+  assert_eq "0" "$(printf '%s' "$out" | jq '.phases | length')" \
+    "roadmap-eligible: a zero-phase roadmap reports zero records"
+  assert_eq "0" "$(printf '%s' "$out" | jq '.eligibleCount')" \
+    "roadmap-eligible: a zero-phase roadmap reports count 0"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_eligible_statuses_flag() {
+  echo ""
+  echo "=== roadmap-eligible --statuses: narrows on request, refuses a typo ==="
+
+  local feature="rm-eligible-statuses" out rc
+  rm -rf ".aimi/tasks/$feature"
+
+  jq -n '[
+    {id: 1, name: "Um", goal: "g", slug: "um", dependsOn: []},
+    {id: 2, name: "Dois", goal: "g", slug: "dois", dependsOn: []}
+  ]' | "$CLI" roadmap-init --feature "$feature" >/dev/null
+  "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status planned >/dev/null
+
+  # The default is GET_ELIGIBLE_STATUSES, which is NOT narrowed to make a
+  # pending-only caller work -- roadmap-get --next-eligible still returns a
+  # planned phase, pinned by test_roadmap_claim_ranks_work_before_id below.
+  out=$("$CLI" roadmap-eligible --feature "$feature")
+  assert_eq "[1,2]" "$(printf '%s' "$out" | jq -c '.eligible')" \
+    "roadmap-eligible: the default status set is pending plus planned"
+
+  out=$("$CLI" roadmap-eligible --feature "$feature" --statuses pending)
+  assert_eq "[2]" "$(printf '%s' "$out" | jq -c '.eligible')" \
+    "roadmap-eligible --statuses pending: the planned phase drops out"
+
+  # A TYPO MUST NOT LOOK LIKE AN ANSWER. Filtering on "Pending" selects nothing,
+  # which is indistinguishable from a roadmap where nothing is ready.
+  out=$("$CLI" roadmap-eligible --feature "$feature" --statuses Pending 2>&1 >/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "roadmap-eligible --statuses: an unknown status exits non-zero"
+  assert_contains 'unknown status "Pending"' "$out" \
+    "roadmap-eligible --statuses: the message names the offending value"
+  assert_contains "pending, planned, in_progress, completed, verification_failed" "$out" \
+    "roadmap-eligible --statuses: the message lists the accepted names"
+  assert_eq "" "$("$CLI" roadmap-eligible --feature "$feature" --statuses Pending 2>/dev/null)" \
+    "roadmap-eligible --statuses: a refusal prints no payload"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_eligible_registered_in_help_and_dispatcher() {
+  echo ""
+  echo "=== roadmap-eligible: listed in help with its flags and routed by the dispatcher ==="
+
+  local help_out
+  help_out=$("$CLI" help 2>&1)
+  assert_contains "roadmap-eligible --feature <slug> [--statuses <a,b>]" "$help_out" \
+    "help: documents roadmap-eligible with its flags"
+  assert_contains "eligibleCount" "$help_out" \
+    "help: names the payload fields a caller has to read"
+
+  local dispatch_out
+  dispatch_out=$("$CLI" roadmap-eligible --feature "re-no-such-feature" 2>&1) || true
+  if printf '%s' "$dispatch_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: roadmap-eligible is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: roadmap-eligible is routed"
+    ((TESTS_PASSED++))
+  fi
 }
 
 test_roadmap_claim_dependency_not_done() {
@@ -7887,6 +8055,10 @@ main() {
   test_roadmap_amend_phase_judges_only_the_lists_it_writes
   test_roadmap_amend_phase_concurrent_writes_stay_atomic
   test_roadmap_decimal_sort
+  test_roadmap_eligible_verdict_for_every_phase
+  test_roadmap_eligible_zero_eligible_exits_zero
+  test_roadmap_eligible_statuses_flag
+  test_roadmap_eligible_registered_in_help_and_dispatcher
   test_roadmap_claim_dependency_not_done
   test_roadmap_claim_stale_release
   test_roadmap_claim_race

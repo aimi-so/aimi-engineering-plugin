@@ -168,7 +168,7 @@ _aimi_script_py() {
   printf '%s/%s\n' "$(cd "$(dirname "$script_path")" && pwd)" "$1"
 }
 
-# The thirteen roadmap call sites name their module through this, so none of
+# The fourteen roadmap call sites name their module through this, so none of
 # them had to change when a second module arrived.
 _aimi_roadmap_py() {
   _aimi_script_py roadmap.py
@@ -12589,6 +12589,47 @@ cmd_roadmap_get() {
     --roadmap "$roadmap_path" --feature "$feature" "${phase_args[@]}" "${next_args[@]}"
 }
 
+# Which phases may be expanded, and for each of the rest, what is holding it.
+#
+# Structurally cmd_roadmap_get, and that is the whole decision: no
+# _roadmap_require_contracts. Eligibility reads id, status, claim and dependsOn,
+# not one creates/needs entry, so the 2.0 contract gate would refuse a
+# pre-migration roadmap over a shape this verb never looks at -- and refusing
+# here means /aimi:plan cannot expand any phase of it. The five lifecycle verbs
+# are ungated for the same reason, spelled out at _roadmap_require_contracts.
+#
+# It takes no lock (nothing to protect, it only reads) and passes no --feature
+# to roadmap.py: unlike roadmap-get --next-eligible it reads no per-phase tasks
+# file, which is what makes its answer depend on roadmap.json alone while a
+# concurrent /aimi:execute rewrites those files.
+cmd_roadmap_eligible() {
+  local feature="" statuses=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      --statuses) shift; statuses="${1:-}" ;;
+      *)
+        echo "Error: roadmap-eligible: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature" "roadmap-eligible"
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_require "roadmap-eligible" "$feature")
+
+  local status_args=()
+  [ -n "$statuses" ] && status_args=(--statuses "$statuses")
+
+  check_python3
+  python3 "$(_aimi_roadmap_py)" roadmap-eligible \
+    --roadmap "$roadmap_path" "${status_args[@]}"
+}
+
 cmd_roadmap_set_status() {
   local feature="" phase_id="" new_status="" force=false
 
@@ -13927,6 +13968,26 @@ COMMANDS:
                               last, not first. Exits 1 if none. Does not clear
                               stale dead-PID claims (roadmap-claim does that,
                               under its lock); reads one tasks file per phase.
+    roadmap-eligible --feature <slug> [--statuses <a,b>]
+                              Read-only. Print ONE JSON object naming every
+                              phase in roadmap order --
+                              {id, name, status, claim, eligible, unmet[]} --
+                              plus the ordered ids of the eligible ones and
+                              their count: {phases, eligible, eligibleCount}.
+                              A phase is eligible when its status is in the
+                              requested set, it carries no claim, and every
+                              dependsOn phase is completed; each unmet entry is
+                              {id, status}. Structured fields only, no prose --
+                              the caller composes the wording.
+                              Zero eligible is a normal answer, not an error:
+                              it exits 0 with an empty list, so a command
+                              substitution can tell "no phase ready" apart from
+                              a broken CLI.
+                              --statuses defaults to pending,planned; an
+                              unknown name is refused by name rather than
+                              silently returning nothing.
+                              Reads no tasks file, so its answer depends on
+                              roadmap.json alone and is ordered by numeric id.
     roadmap-set-status --feature <slug> --phase <id> --status <status> [--force]
                               Locked read-modify-write. Enforces the guarded order
                               pending -> planned -> in_progress -> completed, plus
@@ -14179,6 +14240,7 @@ main() {
     roadmap-amend-phase)   shift; cmd_roadmap_amend_phase "$@" ;;
     normalize-contracts)   shift; cmd_normalize_contracts "$@" ;;
     roadmap-get)           shift; cmd_roadmap_get "$@" ;;
+    roadmap-eligible)      shift; cmd_roadmap_eligible "$@" ;;
     roadmap-set-status)    shift; cmd_roadmap_set_status "$@" ;;
     roadmap-claim)         shift; cmd_roadmap_claim "$@" ;;
     roadmap-release-claim) shift; cmd_roadmap_release_claim "$@" ;;
