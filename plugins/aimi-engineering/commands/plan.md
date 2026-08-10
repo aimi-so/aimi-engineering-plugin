@@ -410,6 +410,8 @@ Only meaningful for phased features — but unlike Roadmap Materialization above
 #### Resolve `featureSlug` and detect roadmap mode
 
 ```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 CANDIDATE_SLUG=""
 if [ -n "$featureSlug" ]; then
   # Roadmap Materialization above already derived and validated featureSlug
@@ -428,32 +430,75 @@ if [ -n "$CANDIDATE_SLUG" ] && [ -f "$AIMI_ROOT/.aimi/tasks/$CANDIDATE_SLUG/road
   featureSlug="$CANDIDATE_SLUG"
   ROADMAP_MODE=true
 else
-  ROADMAP_GLOB_COUNT=$(ls -1 "$AIMI_ROOT"/.aimi/tasks/*/roadmap.json 2>/dev/null | wc -l | tr -d ' ')
+  # ONE traversal. The count, the single match and the candidate slug list all
+  # fall out of the same expansion, so no concurrent session can add or remove a
+  # roadmap between counting and choosing, and a directory name carrying a space
+  # or a newline survives intact instead of being re-split out of a second `ls`.
+  ROADMAP_GLOB_COUNT=0
+  ROADMAP_MATCH=""
+  ROADMAP_CANDIDATE_SLUGS=""
+  for ROADMAP_CANDIDATE in "$AIMI_ROOT"/.aimi/tasks/*/roadmap.json; do
+    [ -f "$ROADMAP_CANDIDATE" ] || continue
+    ROADMAP_GLOB_COUNT=$((ROADMAP_GLOB_COUNT + 1))
+    ROADMAP_MATCH="$ROADMAP_CANDIDATE"
+    ROADMAP_CANDIDATE_DIR=${ROADMAP_CANDIDATE%/roadmap.json}
+    ROADMAP_CANDIDATE_SLUGS="$ROADMAP_CANDIDATE_SLUGS ${ROADMAP_CANDIDATE_DIR##*/}"
+  done
   case "$ROADMAP_GLOB_COUNT" in
     0) ROADMAP_MODE=false ;;
     1)
-      ROADMAP_MATCH=$(ls -1 "$AIMI_ROOT"/.aimi/tasks/*/roadmap.json)
-      featureSlug=$(basename "$(dirname "$ROADMAP_MATCH")")
-      ROADMAP_MODE=true
-      echo "[plan] rolling-wave: continuing feature '$featureSlug' (single roadmap.json found in .aimi/tasks/)"
+      ROADMAP_ONLY_DIR=${ROADMAP_MATCH%/roadmap.json}
+      ROADMAP_ONLY_SLUG=${ROADMAP_ONLY_DIR##*/}
+      ROADMAP_ONLY_VERDICTS=$($AIMI_CLI roadmap-eligible --feature "$ROADMAP_ONLY_SLUG" --statuses pending)
+      ROADMAP_PHASE_TOTAL=$(printf '%s' "$ROADMAP_ONLY_VERDICTS" | jq '.phases | length')
+      ROADMAP_PHASE_DONE=$(printf '%s' "$ROADMAP_ONLY_VERDICTS" | jq '[.phases[] | select(.status == "completed")] | length')
+      ROADMAP_PHASE_OPEN=$(printf '%s' "$ROADMAP_ONLY_VERDICTS" | jq '[.phases[] | select(.status != "completed")] | length')
+      if [ "${ROADMAP_PHASE_OPEN:-0}" -gt 0 ]; then
+        featureSlug="$ROADMAP_ONLY_SLUG"
+        ROADMAP_MODE=true
+        echo "[plan] rolling-wave: continuing feature '$featureSlug' (single roadmap.json found in .aimi/tasks/)"
+      else
+        ROADMAP_MODE=false
+      fi
       ;;
     *) : ;; # multiple roadmaps — disambiguate below, do not guess
   esac
 fi
 ```
 
-**Multiple roadmaps found** (`ROADMAP_GLOB_COUNT` > 1, and the exact-match fast path above did not resolve one): list every candidate feature slug with its roadmap's phase names (`jq -r '.phases[].name' <path>` joined by `, `) via **AskUserQuestion**:
+**The single-roadmap arm adopts only a roadmap with work left in it.** One `roadmap.json` on disk is not evidence that it is the feature the person meant — it is only evidence that it is the one they happen to still have. The arm below it already refuses to guess between two roadmaps, on the ground that misfiling a phase's stories into the wrong feature's container is not a recoverable mistake; a count of exactly one does not make the same guess safe, it only makes it invisible. So the arm now asks the roadmap what state it is in before adopting it, and the predicate is **at least one phase whose `status` is not `completed`** (`ROADMAP_PHASE_OPEN`).
+
+That predicate deliberately admits a roadmap whose phases are all `in_progress` or all `planned`. Such a roadmap **is** the feature being continued, so adopting it is right; it then dead-ends at the zero-eligible report further down, which names every phase and why none of them can be expanded. That is the intended path and not an oversight — the alternative, refusing to adopt anything that is not `pending`, would decline the very feature the person is in the middle of.
+
+The statuses come from `roadmap-eligible` rather than a fresh read of `roadmap.json`, so this command and `roadmap.py` cannot drift into two different readings of the same document. Only the `phases[].status` column is read here; the eligible list is not, which is why `--statuses pending` is immaterial on this call and is passed only to match the call further down. **This block therefore needs `python3`, which the detection step did not need before.** That costs nothing real: the very next block already shelled out to `roadmap.py` twice, so any session that reaches roadmap mode already paid for it. And when `python3` is missing the payload is empty, `ROADMAP_PHASE_OPEN` defaults to `0`, and the arm declines — strictly better than the old behavior, which adopted and then failed one block later.
+
+The CLI also validates `--feature` against `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`, so a directory whose name could never have been a feature slug — the whitespace and newline cases the single traversal now counts correctly — is refused by name here and declined rather than silently adopted.
+
+**When the arm declines** (`ROADMAP_MODE=false`, interactive): report one line, then continue as a flat plan. Compose it here from `ROADMAP_ONLY_SLUG`, `ROADMAP_PHASE_TOTAL` and `ROADMAP_PHASE_DONE`, in the reader's own language per the Adaptive Language Rule referenced below — never as a fixed English string:
+
+```
+[plan] rolling-wave: not continuing '[ROADMAP_ONLY_SLUG]' — all [ROADMAP_PHASE_DONE] of its [ROADMAP_PHASE_TOTAL] phases are completed, so it has nothing left to expand. Planning this description as a flat feature instead.
+To work on that roadmap on purpose, re-run /aimi:plan with a description that matches '[ROADMAP_ONLY_SLUG]', or with /aimi:plan --phase <N>.
+```
+
+Both escape hatches belong in that same message. A refusal that says only what did not happen leaves the reader with a roadmap they cannot reach; the two ways to reach it deliberately are a description that slugifies to the roadmap's own directory name (which takes the exact-match arm at the top of this block, where adoption is correct because the person named the feature), and an explicit `--phase <N>`.
+
+**Agent mode (`INTERACTIVE_MODE=agent`) does not continue flat here — it STOPs the entire `/aimi:plan` invocation**, reporting the same composed line naming the feature and its phase counts. The reason is the zero-eligible branch further down in **Select the target phase**: that branch already forbids exactly this fall-through, because dropping into the flat pipeline silently creates an unrelated top-level `tasks.json` instead of expanding the roadmap. Interactively the log line is the safeguard — a person reads it and can re-run with a `--phase` target. In agent mode nobody reads it, so continuing flat would produce an unreviewed artifact that contradicts its own neighbour.
+
+**Multiple roadmaps found** (`ROADMAP_GLOB_COUNT` > 1, and the exact-match fast path above did not resolve one): the candidates are the slugs the traversal already collected in `ROADMAP_CANDIDATE_SLUGS`. For each one, run `$AIMI_CLI roadmap-eligible --feature <slug>` and take two numbers off the payload — `.phases | length` and `[.phases[] | select(.status == "completed")] | length` — then offer them via **AskUserQuestion**:
 
 ```
 Multiple large-scope features have an active roadmap. Which one is /aimi:plan continuing?
-A — <featureSlug1> (<phase names>)
-B — <featureSlug2> (<phase names>)
+A — <featureSlug1> (<total> phases, <completed> completed)
+B — <featureSlug2> (<total> phases, <completed> completed)
 ...
 ```
 
 Set `featureSlug` to the chosen slug and `ROADMAP_MODE=true`.
 
-**Agent-mode fallback:** do NOT guess. Report `[plan] rolling-wave: ambiguous feature — N roadmaps found (<slug1>, <slug2>, ...); re-run with a feature description that matches one of them, or with an unambiguous --phase target once the feature is clear.` and STOP the entire `/aimi:plan` invocation. This is the only place in this section where agent-mode still requires a decision — silently picking the wrong feature's roadmap would misfile an entire phase's stories into the wrong container.
+**The counts replace the phase-name list this picker used to show, and that is the point of them.** Phase names describe what a feature is about, which the slug beside them already said; they cannot tell a roadmap with every phase finished apart from one with work left, so a `7 phases, 7 completed` roadmap rendered identically to an active one and the reader disambiguated blind. The counts are the one fact that separates them. Compose the option labels here, in the reader's own language, from those two numbers per the Adaptive Language Rule referenced below.
+
+**Agent-mode fallback:** do NOT guess. Report `[plan] rolling-wave: ambiguous feature — N roadmaps found (<slug1>: <total> phases, <completed> completed; <slug2>: <total> phases, <completed> completed; ...); re-run with a feature description that matches one of them, or with an unambiguous --phase target once the feature is clear.` — again composed here rather than fixed in English — and STOP the entire `/aimi:plan` invocation. The counts belong on this line too: this branch renders no picker, so without them the caller least able to go look at the roadmaps itself is the one caller that would never see them. This is the only place in this section where agent-mode still requires a decision — silently picking the wrong feature's roadmap would misfile an entire phase's stories into the wrong container.
 
 **`ROADMAP_MODE=false`:** skip the rest of this section entirely — no log line. Proceed to Implementation Scope Detection; the rest of the pipeline (Phase 1 through Phase 4.5) runs exactly as it does for a flat feature today.
 
@@ -530,17 +575,41 @@ fi
 ```
 
 - **`SELECTED_PHASE_ID` non-empty** → it is the eligible phase with the lowest numeric id, and `SELECTED_PHASE_JSON` is that phase's full object from the roadmap document — again the document, for the same reason as the override path above.
-- **`SELECTED_PHASE_ID` empty** (`eligible[]` was `[]`, on an exit-0 call) → no phase is ready. List every still-`pending` phase together with its own blocking reason (mirrors `/aimi:execute` Step 1.7's "No phase is ready to claim" style):
+- **`SELECTED_PHASE_ID` empty** (`eligible[]` was `[]`, on an exit-0 call) → no phase is ready. Enumerate **every** phase in the roadmap with its own reason (mirrors `/aimi:execute` Step 1.7's "No phase is ready to claim" style):
   ```bash
-  printf '%s' "$PHASE_VERDICTS_JSON" | jq -c '.phases[] | select(.status == "pending" and .eligible == false)'
+  PENDING_PHASE_COUNT=$(printf '%s' "$PHASE_VERDICTS_JSON" | jq '[.phases[] | select(.status == "pending")] | length')
+  printf '%s' "$PHASE_VERDICTS_JSON" | jq -c '.phases[]'
   ```
-  That prints one verdict record per line. Compose one sentence per record here, from its own fields, with the same precedence the override refusal uses: `.unmet` non-empty → name every unmet dependency by id and status; otherwise `.claim` non-null → claimed by another session. Report:
-  ```
-  No eligible pending phase in [featureSlug]'s roadmap:
-  [one composed line per blocked phase]
+  **Every phase, not only the `pending` ones — this listing has no filter and no fall-through, because both were how it came to print a heading above an empty list.** The old form selected `.status == "pending"` and then branched on `.unmet`/`.claim` with an `else` that emitted nothing, so a `completed` phase was dropped twice over: once by the filter, and again by the `else`, since a completed phase has met dependencies and carries no claim. On the real 7-of-7-completed roadmap that left the heading with nothing under it. Widening the filter alone would not have fixed it — the reason vocabulary has to have a **status-keyed** category, or the widened rows fall straight through the same `else`.
 
-  Every phase is already planned, in progress, completed, or blocked. Run /aimi:plan --phase <N> to override, or resolve the blocking dependency first.
+  So `jq` emits one verdict record per line for every phase, and each record yields exactly one composed line. Take the first category that applies:
+
+  - `.status` is `"completed"` → this phase is finished; nothing here to expand.
+  - `.status` is `"planned"` → already expanded by an earlier `/aimi:plan`; run `/aimi:execute` to work it, and note that re-expanding it would overwrite the stories that invocation already wrote.
+  - `.status` is `"in_progress"` → being worked right now.
+  - `.status` is `"verification_failed"` → expanded and run, but its verification did not pass; `/aimi:execute` re-verifies it.
+  - `.status` is `"pending"` and `.unmet` is non-empty → blocked; name **every** unmet entry by `id` and its current `status`, never just the first.
+  - `.status` is `"pending"` and `.claim` is non-null → claimed by `[claim.claimedBy]`.
+  - anything else → name the status verbatim. This catch-all exists so that no record can produce zero lines, whatever a hand-edited roadmap carries in `status`.
+
+  `PENDING_PHASE_COUNT` picks the heading, and the split it draws is the one `op_claim` already draws in `roadmap.py` between "nothing remains in a claimable status at all" (its exit 4) and "some remain, but every one of them is blocked" (its exit 3) — a reader has to act differently on the two, so the report must not blur them.
+
+  **`PENDING_PHASE_COUNT` is `0`** — there is nothing to block; the roadmap is simply out of expandable phases, and telling this reader to resolve a dependency would send them looking for one that does not exist:
   ```
+  Nothing left to expand in [featureSlug]'s roadmap — no phase is pending:
+  [one composed line per phase]
+
+  Every phase is already expanded, in progress, or completed. Run /aimi:execute to work them, or start a new feature with a fresh description.
+  ```
+  **`PENDING_PHASE_COUNT` is non-zero** — phases remain and every one of them is held up by something the reader can act on:
+  ```
+  No eligible pending phase in [featureSlug]'s roadmap — [PENDING_PHASE_COUNT] are pending, and all of them are blocked:
+  [one composed line per phase]
+
+  Run /aimi:plan --phase <N> to override, or resolve the blocking dependency first.
+  ```
+  Both are shapes, not strings: compose them here, in the reader's own language, per the Adaptive Language Rule referenced above.
+
   STOP the entire `/aimi:plan` invocation — do not fall back to the flat pipeline (that would silently create an unrelated top-level tasks.json instead of expanding this roadmap).
 
 #### Extract selected-phase working memory
@@ -2858,7 +2927,8 @@ For split-file output (`--split full-stack`), `metadata.smellWarnings` is writte
 | Rolling-Wave Phase Selection | `--phase <N>` does not match `^[0-9]+(\.[0-9]+)?$` | Report `Invalid --phase value: [N]. Must be a numeric phase id.` and STOP |
 | Rolling-Wave Phase Selection | `--phase <N>` not found in roadmap | Report `Phase [N] not found in [featureSlug]'s roadmap.` and STOP |
 | Rolling-Wave Phase Selection | `--phase <N>` found but ineligible (wrong status, unmet dependsOn, or claimed) | Refuse before any research/expansion Task is spawned; name the phase and list every unmet dependency by id and status; STOP |
-| Rolling-Wave Phase Selection | Bare invocation, no eligible pending phase | List every blocked pending phase with its specific reason; STOP — do not fall back to the flat pipeline |
-| Rolling-Wave Phase Selection | Multiple `.aimi/tasks/*/roadmap.json` found, no exact featureSlug match | Interactive: AskUserQuestion to disambiguate. Agent-mode: report the ambiguous candidates and STOP — never guess |
+| Rolling-Wave Phase Selection | Bare invocation, no eligible pending phase | List **every** phase in the roadmap with its own status-keyed reason — never a filtered subset, which is how this report came to print a heading above an empty list; STOP — do not fall back to the flat pipeline |
+| Rolling-Wave Phase Selection | Exactly one `.aimi/tasks/*/roadmap.json` found, no exact featureSlug match, and every one of its phases is `completed` | Do not adopt it. Interactive: report the feature, its phase counts and both deliberate ways to target it (matching description, or `--phase <N>`); set `ROADMAP_MODE=false` and continue as a flat plan. Agent-mode: report the same and STOP — never leave an unreviewed top-level tasks.json behind |
+| Rolling-Wave Phase Selection | Multiple `.aimi/tasks/*/roadmap.json` found, no exact featureSlug match | Interactive: AskUserQuestion to disambiguate, each option carrying that roadmap's phase-status counts. Agent-mode: report the ambiguous candidates with the same counts and STOP — never guess |
 | Rolling-Wave Phase Selection | `validate-contracts` reports duplicate creates (interactive mode) | Surface the CLI's collision message verbatim; STOP before any research/expansion Task is spawned |
 | Rolling-Wave Phase Selection | `validate-contracts` reports unmet needs (either mode) | Surface each `missing[]` entry; STOP — this check is never demoted by `--agent-mode` |
