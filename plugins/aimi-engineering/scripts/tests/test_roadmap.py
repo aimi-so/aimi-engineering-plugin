@@ -636,6 +636,304 @@ def test_the_first_provider_by_phase_id_wins():
 
 
 # ---------------------------------------------------------------------------
+# roadmap-sweep
+# ---------------------------------------------------------------------------
+
+SWEEP_CASES = {c["label"]: c for c in GOLDEN["sweep_cases"]}
+
+
+def _sweep(label):
+    return SWEEP_CASES[label]["stdout"]
+
+
+def test_an_orphan_creates_is_one_no_phase_needs():
+    """The signal is "declared and never consumed", not "declared". base.rb is
+    cited downstream and stays out of the report; extra.rb is not."""
+    assert _sweep("orfao")["orphanCreates"] == [{"phase": 1, "creates": "extra.rb"}]
+    assert _sweep("limpo")["orphanCreates"] == []
+
+
+def test_a_deferred_need_names_the_provider_that_has_not_finished():
+    assert _sweep("provedor-pendente")["deferredNeeds"] == [
+        {"phase": 2, "need": "base.rb", "deferred": 1}
+    ]
+    assert _sweep("limpo")["deferredNeeds"] == [], "a completed provider is not deferred"
+
+
+def test_a_need_nobody_declares_is_not_deferred():
+    """deferredNeeds means "somebody will build it, later". A need with no
+    provider at all is validate-contracts' no-provider, and reporting it here
+    would point the reader at a phase that does not exist."""
+    assert _sweep("needs-sem-provedor") == {
+        "orphanCreates": [],
+        "deferredNeeds": [],
+        "warnings": [],
+    }
+
+
+def test_the_lowest_phase_id_is_the_provider_that_gets_named():
+    """Two phases declare dup.rb; phase 1 is the one reported, whatever order
+    they sit in the document."""
+    assert _sweep("dois-provedores")["deferredNeeds"] == [
+        {"phase": 2, "need": "dup.rb", "deferred": 1}
+    ]
+
+
+def test_a_suspicious_entry_is_dropped_and_the_drop_is_reported():
+    """The drop must not be silent: phase 2 needs exactly what phase 1's dropped
+    creates declared, and without the warning that need would simply vanish from
+    the report with nothing saying why."""
+    case = _sweep("drop-reportado")
+    assert case["orphanCreates"] == [] and case["deferredNeeds"] == []
+    assert [(w["phase"], w["field"]) for w in case["warnings"]] == [(1, "creates"), (2, "needs")]
+    assert all(w["message"] == R.SWEEP_DROP_MESSAGE for w in case["warnings"])
+
+
+def test_dropped_positions_are_counted_against_the_stored_list():
+    """entry #2 of phase 1's creates, not entry #1 of the suspicious ones."""
+    warning = _sweep("suspeito-creates")["warnings"][0]
+    assert warning["droppedCount"] == 1 and warning["droppedIndexes"] == [2]
+    assert _sweep("suspeito-creates")["orphanCreates"] == [{"phase": 1, "creates": "ok.rb"}]
+
+
+def test_warnings_are_sorted_by_phase_then_field():
+    """jq's unique_by([.phase,.field]) never deduplicated anything here -- the
+    pairs are unique by construction -- so the sort was its whole effect, and a
+    document whose phases are out of order proves it."""
+    assert [(w["phase"], w["field"]) for w in _sweep("warnings-ordenados")["warnings"]] == [
+        (1, "creates"),
+        (2, "needs"),
+        (3, "creates"),
+    ]
+    assert [(w["phase"], w["field"]) for w in _sweep("suspeito-dois-campos")["warnings"]] == [
+        (1, "creates"),
+        (1, "needs"),
+    ]
+
+
+def test_a_phase_id_is_reported_the_way_jq_rendered_it():
+    """Phase 3.0 comes back as 3 and phase 2.1 stays 2.1. Without jq_numbers the
+    first would print as 3.0 and no caller matching on the id would find it."""
+    assert _sweep("ids-decimais")["deferredNeeds"] == [
+        {"phase": 3, "need": "a.rb", "deferred": 2.1}
+    ]
+
+
+def test_the_sweep_divergence_is_the_schema_filter_and_nothing_else():
+    """THE ONE PLACE THIS PORT DELIBERATELY DIFFERS FROM THE GOLDEN.
+
+    An entry that is not a string is outside the 1.0 schema. jq could not match
+    it and aborted the whole sweep (exit 5, its own error text); the Python reads
+    those lists through _v1_string_entries, which drops the entry and reports a
+    clean roadmap. That silent drop is precisely the hazard that helper's
+    docstring names, and deleting it is the schema story's job -- at which point
+    entry["identity"] raises and this case becomes loud again.
+    """
+    for label in ("creates-nao-string", "creates-objeto"):
+        assert SWEEP_CASES[label]["exit"] == 5, "the golden is history, not a target"
+        assert "not a string" in SWEEP_CASES[label]["stderr"]
+    source = open(os.path.join(SCRIPTS, "roadmap.py"), encoding="utf-8").read()
+    assert "_v1_string_entries_numbered" in source
+
+
+def test_the_numbered_filter_keeps_positions_from_the_stored_list():
+    assert R._v1_string_entries_numbered(["a", {"identity": "b"}, "c"]) == [(1, "a"), (3, "c")]
+    assert R._v1_string_entries(["a", {"identity": "b"}, "c"]) == ["a", "c"]
+
+
+# ---------------------------------------------------------------------------
+# roadmap-write-handoff
+# ---------------------------------------------------------------------------
+
+HANDOFF_CASES = {c["label"]: c for c in GOLDEN["handoff_cases"]}
+
+HANDOFF_HEADINGS = [
+    "## Decisions Made",
+    "## Artifacts Created",
+    "## Deviations",
+    "## Deferred Items",
+    "## Contracts Delivered",
+]
+
+
+def test_the_five_headings_are_always_all_five_in_the_fixed_order():
+    """roadmap-set-status's completed precondition and handoff_lists_artifact's
+    section lookup both key on this shape, so an empty phase still renders it."""
+    for label in ("pleno", "vazio", "campos-null", "campos-false"):
+        body = HANDOFF_CASES[label]["file"]
+        assert [line for line in body.split("\n") if line.startswith("## ")] == HANDOFF_HEADINGS
+    assert HANDOFF_CASES["vazio"]["file"].count("_None._") == 5
+
+
+def test_a_declared_identity_survives_the_render_byte_for_byte():
+    """The defect this rule closes: the prose sanitizer deletes an HTML-looking
+    tag, so "parseList<T>" landed in handoff.md as "parseList" and
+    validate-contracts reported that need not-delivered forever."""
+    body = HANDOFF_CASES["identidade-verbatim"]["file"]
+    assert "- parseList<T> (um helper generico) — src/p.ts" in body
+    assert "- parseList<T> (um helper generico) entregue" in body
+
+
+def test_a_line_matching_no_declared_identity_is_ordinary_prose():
+    """The exemption is for the identity at the head of the line, not for the
+    delivery lists as a whole -- "<coisa>" in an unclaimed line still goes."""
+    assert "- outra  qualquer" in HANDOFF_CASES["linha-sem-identidade"]["file"]
+    assert "- qualquer  linha" in HANDOFF_CASES["identidade-vazia"]["file"]
+
+
+def test_the_longest_declared_identity_wins():
+    """A phase declaring both "alpha" and "alphabet" must keep the longer one
+    whole; taking the first match would rewrite alphabet<X> into alpha."""
+    body = HANDOFF_CASES["prefixo-mais-longo"]["file"]
+    assert "- alphabet<X> (longo) — feito" in body and "- alpha (curto) — feito" in body
+
+
+def test_the_cap_applies_to_the_spliced_line_as_well_as_to_the_prose():
+    for label in ("cap-2000-com-identidade", "cap-2000-sem-identidade"):
+        bullets = [l for l in HANDOFF_CASES[label]["file"].split("\n") if l.startswith("- ")]
+        assert len(bullets[0]) - len("- ") == 2000
+
+
+def test_null_and_false_fields_mean_no_entries_rather_than_a_refusal():
+    """`(.[$k] // [])` treats both as absent. A caller that sends
+    "artifacts": null is saying "none", not sending a malformed payload."""
+    for label in ("campos-null", "campos-false"):
+        assert HANDOFF_CASES[label]["exit"] == 0
+    assert R.handoff_field({"a": None}, "a") == []
+    assert R.handoff_field({"a": False}, "a") == []
+    assert R.handoff_field({}, "a") == []
+
+
+def test_every_field_refusal_names_its_field_and_writes_nothing():
+    expected = {
+        "decisions-string": "decisions",
+        "artifacts-numero": "artifacts",
+        "contracts-objeto": "contracts",
+        "deviations-item-nao-string": "deviations",
+        "deferred-item-null": "deferred",
+        "dois-campos-ruins": "decisions",
+    }
+    for label, field in expected.items():
+        case = HANDOFF_CASES[label]
+        assert case["exit"] == 1 and case["file"] is None
+        assert "field '" + field + "' must be an array of strings" in case["stderr"]
+
+
+def test_the_fields_are_checked_in_a_fixed_order():
+    """dois-campos-ruins carries a bad decisions AND a bad artifacts and reports
+    decisions, so a caller fixing them one at a time walks a stable order."""
+    assert R.handoff_field_error({"decisions": "x", "artifacts": 5}) == "decisions"
+    assert R.handoff_field_error({"artifacts": 5}) == "artifacts"
+    assert R.handoff_field_error({"decisions": ["ok"]}) is None
+
+
+def test_a_malformed_payload_is_refused_before_anything_is_written():
+    for label in ("payload-array", "payload-string", "payload-invalido"):
+        case = HANDOFF_CASES[label]
+        assert case["exit"] == 1 and case["file"] is None
+        assert "payload must be a JSON object" in case["stderr"]
+
+
+def test_an_empty_payload_still_writes_the_file():
+    """Zero jq inputs meant zero outputs and an empty body, and the file it left
+    behind satisfies roadmap-set-status's completed precondition, which only
+    checks existence. Refusing here would change which phases can complete."""
+    assert HANDOFF_CASES["payload-vazio"]["exit"] == 0
+    assert HANDOFF_CASES["payload-vazio"]["file"] == "\n"
+
+
+def test_the_tripwire_never_fired_in_the_capture():
+    """It is not a check on today's renderer -- with that renderer it cannot
+    fire. It is the guard that notices if a future sanitizer edit reopens the
+    defect, so its value here is precisely that it stayed silent."""
+    for case in GOLDEN["handoff_cases"]:
+        assert "lost a declared identity" not in case["stderr"]
+
+
+def test_the_tripwire_fires_for_a_body_that_lost_a_claimed_identity():
+    payload = {"artifacts": ["parseList<T> — src/p.ts"], "contracts": []}
+    assert R.handoff_lost_identities(payload, ["parseList<T>"], "- parseList — src/p.ts") == [
+        "parseList<T>"
+    ]
+    assert R.handoff_lost_identities(payload, ["parseList<T>"], "- parseList<T> — src/p.ts") == []
+
+
+def test_the_tripwire_ignores_an_identity_no_line_claimed():
+    """A phase reporting fewer artifacts than it declared is a legitimate partial
+    delivery, not a lost identity."""
+    assert R.handoff_lost_identities({"artifacts": ["other"]}, ["never-mentioned"], "") == []
+
+
+# ---------------------------------------------------------------------------
+# phase-overlap
+# ---------------------------------------------------------------------------
+
+OVERLAP_CASES = {c["label"]: c for c in GOLDEN["overlap_cases"]}
+
+
+def _overlap(label):
+    return OVERLAP_CASES[label]["stdout"]["overlapping_files"]
+
+
+def test_the_overlap_is_the_sorted_deduplicated_intersection():
+    assert _overlap("intersecao") == ["src/b.ts", "src/c.ts"]
+    assert _overlap("sem-intersecao") == []
+    assert _overlap("duplicatas") == ["src/a.ts"]
+    assert _overlap("saida-ordenada") == ["a.ts", "m.ts", "z.ts"]
+
+
+def test_the_overlap_does_not_depend_on_which_phase_is_named_first():
+    assert _overlap("intersecao") == _overlap("ordem-invertida")
+
+
+def test_a_phase_that_planned_no_files_is_empty_rather_than_an_error():
+    """A story with no implementation, an implementation with no files, and a
+    document with no userStories at all: a phase may legitimately have planned
+    none of them, and each hop was tolerant in the jq too."""
+    assert _overlap("historias-magras") == ["src/a.ts"]
+    assert _overlap("sem-historias") == []
+    assert _overlap("sem-chave-userstories") == []
+    assert R.overlap_files({}) == []
+    assert R.overlap_files({"userStories": [{}, {"implementation": {}}]}) == []
+
+
+def test_jq_total_order_puts_a_number_before_a_string():
+    """files[] is not schema-checked, and sorting a mixed list is what
+    jq_sort_key exists for -- plain Python would raise."""
+    assert _overlap("files-nao-string") == [7, "src/a.ts"]
+    assert R.jq_unique(["b", 7, "a", 7]) == [7, "a", "b"]
+
+
+def test_the_phase_id_the_caller_typed_is_what_reaches_the_message_and_the_path():
+    """A decimal id has to survive two hops as text: the tasks file it reads is
+    <dir>/f-phase-2.1-tasks.json, and a refusal quotes the id back. ids-decimais
+    resolving an overlap at all is the proof of the first -- the file is only
+    found if "2.1" reached the name -- and fase-sem-dir the proof of the second.
+    """
+    assert OVERLAP_CASES["ids-decimais"]["exit"] == 0
+    assert _overlap("ids-decimais") == ["src/x.ts"]
+    assert "phase 9 not found" in OVERLAP_CASES["fase-a-inexistente"]["stderr"]
+    assert "-phase-2-tasks.json" in OVERLAP_CASES["tasks-b-ausente"]["stderr"]
+
+
+def test_a_missing_or_malformed_tasks_file_names_the_path_and_the_next_step():
+    missing = OVERLAP_CASES["tasks-b-ausente"]
+    assert missing["exit"] == 1
+    assert "has no tasks file yet" in missing["stderr"]
+    assert "run /aimi:plan --phase 2 to materialize it first" in missing["stderr"]
+    for label in ("tasks-a-malformado", "tasks-b-malformado"):
+        assert "malformed tasks file:" in OVERLAP_CASES[label]["stderr"]
+
+
+def test_phase_dirs_answers_with_the_bare_directory():
+    doc = {"phases": [{"id": 1, "dir": "phase-1-a"}, {"id": 2}, {"id": 3, "dir": None}]}
+    assert R.phase_dirs(doc, 1) == "phase-1-a"
+    assert R.phase_dirs(doc, 2) == "", "a phase with no dir reads as not found, as it did"
+    assert R.phase_dirs(doc, 3) == ""
+    assert R.phase_dirs(doc, 99) == ""
+
+
+# ---------------------------------------------------------------------------
 # The two constants that must not drift apart
 # ---------------------------------------------------------------------------
 

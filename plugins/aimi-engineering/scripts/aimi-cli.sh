@@ -13641,7 +13641,7 @@ _ROADMAP_CONTRACT_VERSION="2.0"
 #
 # The span rule unwraps rather than deletes because a backtick is a formatting
 # marker, not content: deleting the span took the identity with it, and
-# "## Artifacts Created" in handoff.md is exactly what _cv_handoff_lists_artifact
+# "## Artifacts Created" in handoff.md is exactly what handoff_lists_artifact
 # greps to resolve a later phase's needs, so a deleted identity surfaced as an
 # unresolvable contract one phase after its cause. A fenced block is not an
 # identity, so the triple-fence rule stays a deletion.
@@ -13940,7 +13940,7 @@ def _rm_candidates($phases; $allowed; $work):
 #
 # The rule is deliberately narrow -- exactly five shapes are rejected, judged
 # over the identity (text before the first "(", trimmed) and nothing else:
-#   (a) empty after _cv_identity
+#   (a) empty after cv_identity
 #   (b) a ".." PATH SEGMENT, i.e. (^|/)\.\.($|/) -- not any byte pair "..",
 #       so an identity like services/foo..bar is untouched
 #   (c) a leading "/" anchored at position 0 -- the Endpoint kind
@@ -13949,8 +13949,8 @@ def _rm_candidates($phases; $allowed; $work):
 #   (d) whitespace in the token verify-creates will actually SEARCH, judged
 #       after the same METHOD-space-slash strip verify-creates step 2 performs
 #       (see _roadmap_reject_unfindable_identity below)
-#   (e) a shell metacharacter from _cv_shell_class -- the class [$`;|&] that
-#       validate-contracts reads through _cv_shell_chars -- so the writer and
+#   (e) a shell metacharacter from _SHELL_CLASS -- the class [$`;|&] that
+#       validate-contracts reads through cv_shell_char -- so the writer and
 #       the reader consult one table rather than two that overlap by accident
 # Identity *strength* is explicitly not judged: at declaration time research has
 # not run, so a bare Table name ("notifications") or a bare directory
@@ -14029,8 +14029,8 @@ def _rm_candidates($phases; $allowed; $work):
 # two shapes at once -- validate-contracts then reports a permanently unmet
 # need, which halts /aimi:plan, and agent mode never demotes an unmet need.
 #
-# Reuses $_CONTRACT_JQ_DEFS so the guard and validate-contracts agree on what an
-# identity is; a second copy of _cv_identity would drift.
+# The guard and validate-contracts read the same cv_identity in roadmap.py, so
+# they agree on what an identity is; a second copy of it would drift.
 cmd_roadmap_init() {
   local feature="" file="" sync_mode=false brainstorm_path=""
 
@@ -14728,7 +14728,7 @@ cmd_roadmap_reconcile() {
 # exactly five "## " headings in the fixed order
 # "Decisions Made" / "Artifacts Created" / "Deviations" / "Deferred Items" /
 # "Contracts Delivered" -- the order roadmap-set-status's completed-requires-
-# handoff precondition and _cv_handoff_lists_artifact's "Artifacts Created"
+# handoff precondition and handoff_lists_artifact's "Artifacts Created"
 # lookup both depend on. Overwrites any existing handoff.md at that path
 # (idempotent retry after a verification_failed -> completed re-run).
 cmd_roadmap_write_handoff() {
@@ -14753,6 +14753,11 @@ cmd_roadmap_write_handoff() {
   local roadmap_path
   roadmap_path=$(_roadmap_require "roadmap-write-handoff" "$feature")
 
+  # The one roadmap read that stays here: the handoff path is built from this
+  # phase's stored dir, and validate_path_in_project below is a bash rule about
+  # where this process may write. Resolving the dir in roadmap.py would mean
+  # either a second call just to learn the path, or moving path confinement into
+  # a file that has no business owning it.
   local phase_dir
   phase_dir=$(jq -r --argjson pid "$phase_id" '(.phases[] | select(.id == $pid) | .dir) // empty' "$roadmap_path")
   if [ -z "$phase_dir" ]; then
@@ -14772,105 +14777,18 @@ cmd_roadmap_write_handoff() {
     input_json=$(cat)
   fi
 
-  if ! printf '%s' "$input_json" | jq -e 'type == "object"' >/dev/null 2>&1; then
-    echo "Error: roadmap-write-handoff: payload must be a JSON object" >&2
-    exit 1
-  fi
-
-  local key
-  for key in decisions artifacts deviations deferred contracts; do
-    if ! printf '%s' "$input_json" | jq -e --arg k "$key" '(.[$k] // []) as $v | ($v|type) == "array" and ($v | all(type == "string"))' >/dev/null 2>&1; then
-      echo "Error: roadmap-write-handoff: field '$key' must be an array of strings" >&2
-      exit 1
-    fi
-  done
-
-  # The identities this phase declared, read through _cv_identity itself and
-  # never a second copy of the split rule -- the two must not drift.
-  #
-  # WHY THIS FUNCTION NEEDS THEM. "## Artifacts Created" is exactly what
-  # _cv_handoff_lists_artifact greps to resolve a later phase's needs, and this
-  # verb was running the full prose sanitizer over the artifacts it renders.
-  # Measured: creates ["parseList<T> (a generic helper)"] is stored verbatim in
-  # roadmap.json and lands in handoff.md as "parseList", so validate-contracts
-  # reports {"need":"parseList<T>","reason":"not-delivered"} forever. The tag
-  # rule is right for prose and wrong for a token that is grepped literally --
-  # the same two-rulers split roadmap-init already makes, one boundary later.
-  local declared_ids
-  declared_ids=$(jq -c --argjson pid "$phase_id" "$_CONTRACT_JQ_DEFS"'
-    [ .phases[] | select(.id == $pid) | (.creates // [])[] | _cv_identity ]
-  ' "$roadmap_path" 2>/dev/null) || declared_ids='[]'
-  [ -n "$declared_ids" ] || declared_ids='[]'
-
+  # Payload validation, the declared-identity lookup, the render and the
+  # lost-identity tripwire are one call: they are all judgements about the same
+  # document and the tripwire needs the rendered body to make its own.
+  check_python3
   local body
-  body=$(printf '%s' "$input_json" | jq -r --argjson ids "$declared_ids" "$_ROADMAP_SANITIZE_JQ"'
-    def clean: map(_rm_sanitize(2000));
-
-    # Prose sanitizer, except that a declared identity at the head of the line
-    # survives byte-for-byte. Longest match wins so a phase declaring both
-    # "alpha" and "alphabet" keeps the longer one whole. A line matching no
-    # declared identity is ordinary prose and gets the full treatment.
-    def clean_delivery: map(
-      . as $line
-      # ". as $i" first, deliberately: inside "select($line | startswith(.))"
-      # the pipe rebinds "." to $line, so the test becomes
-      # "$line startswith $line" -- true for every id, and the longest declared
-      # identity is then spliced onto a line it does not begin. This file warns
-      # about that exact rebinding twice elsewhere ($work | has(.id|tostring),
-      # $allowed | index(.status)); it caught this function too, in review.
-      | ([ $ids[] | . as $i | select($line | startswith($i)) ] | sort_by(length) | last) as $id
-      | if $id == null then ($line | _rm_sanitize(2000))
-        else $id + ($line[($id | length):] | _rm_sanitize(2000)) end
-      | if (length > 2000) then .[0:2000] else . end
-    );
-    def section(title; items):
-      "## " + title + "\n\n" +
-      (if (items | length) == 0 then "_None._\n" else ((items | map("- " + .)) | join("\n")) + "\n" end);
-    {
-      decisions: ((.decisions // []) | clean),
-      artifacts: ((.artifacts // []) | clean_delivery),
-      deviations: ((.deviations // []) | clean),
-      deferred: ((.deferred // []) | clean),
-      contracts: ((.contracts // []) | clean_delivery)
-    } as $s |
-    section("Decisions Made"; $s.decisions) + "\n" +
-    section("Artifacts Created"; $s.artifacts) + "\n" +
-    section("Deviations"; $s.deviations) + "\n" +
-    section("Deferred Items"; $s.deferred) + "\n" +
-    section("Contracts Delivered"; $s.contracts)
-  ')
+  body=$(printf '%s' "$input_json" | python3 "$(_aimi_roadmap_py)" write-handoff \
+    --roadmap "$roadmap_path" --phase "$phase_id") || exit $?
 
   local feature_dir handoff_path
   feature_dir=$(dirname "$roadmap_path")
   handoff_path="$feature_dir/$phase_dir/handoff.md"
   validate_path_in_project "$handoff_path"
-
-  # Tripwire, before the write. Every declared identity a payload line claimed
-  # to deliver must still be findable, byte-for-byte, in the rendered body --
-  # under the same fixed-string match _cv_handoff_lists_artifact uses to resolve
-  # a downstream needs.
-  #
-  # With the renderer above this can never fire, and that is the point: it is
-  # not a check on today's code, it is a guard against a future sanitizer edit
-  # silently reopening the defect this commit closes. Refusing beats writing a
-  # handoff that reads complete and resolves nothing a phase later. It only
-  # judges identities some line actually claimed, so a phase reporting fewer
-  # artifacts than it declared -- a legitimate partial delivery -- is untouched.
-  local lost_ids
-  lost_ids=$(printf '%s' "$input_json" | jq -r --argjson ids "$declared_ids" --arg body "$body" '
-    ((.artifacts // []) + (.contracts // [])) as $lines
-    | [ $ids[]
-        | . as $id
-        | select(any($lines[]; startswith($id)))
-        | select(($body | contains($id)) | not) ]
-    | .[]
-  ')
-  if [ -n "$lost_ids" ]; then
-    echo "Error: roadmap-write-handoff: the rendered handoff lost a declared identity it was asked to report:" >&2
-    printf '  %s\n' $lost_ids >&2
-    echo "Error: roadmap-write-handoff: '## Artifacts Created' is what validate-contracts greps to resolve a downstream needs, so writing this would leave that contract permanently unmet. Nothing was written." >&2
-    exit 1
-  fi
 
   local out
   out=$(
@@ -14895,67 +14813,10 @@ cmd_roadmap_write_handoff() {
 # first "(", trimmed of surrounding whitespace (see outline 01's shared
 # scope-context reference).
 #
-# Schema note: the roadmap phase status enum is pending/planned/in_progress/
-# completed/verification_failed (see cmd_roadmap_set_status above) -- there
-# is no "deferred" status. roadmap-sweep's deferredNeeds check substitutes
-# the existing "provider resolved but status != completed" signal for the
-# undefined "deferred" status value, per this story's authoritative notes
-# reconciling the schema gap against outline 02/outline 14.
-
-# jq `def`s shared by validate-contracts and roadmap-sweep -- and, for
-# _cv_identity and _cv_shell_class, by _roadmap_identity_errors' write-time
-# guard, so the writer and the reader cannot drift apart on what an identity is
-# or which characters an identity may not hold.
-#
-# _cv_suspicious is deliberately two halves with two different scopes. The full
-# argument for why -- and why the description keeps the injection guard -- lives
-# in commands/references/scope-contexts.md, "Two rulers". In short:
-#   * _cv_injection judges the WHOLE raw entry, description included, because a
-#     description reaches a story-expander sub-agent prompt via /aimi:plan's
-#     phaseHandoffBlocks (grep that symbol; do not cite line numbers here, they
-#     drift).
-#   * The shell class judges only the IDENTITY (_cv_identity: the text before
-#     the first "(", trimmed) -- the token verify-creates greps and every
-#     contract match keys on. Applying it to the raw entry refused
-#     "cmd_clean (does x; then y)", an identity that is itself clean.
-#
-# Both instruction markers anchor on POSITION -- start-of-string or whitespace,
-# then any run of punctuation -- because that is what a marker looks like and
-# what an ordinary name never does. The full rule and its rationale live in
-# commands/references/scope-contexts.md, "Two rulers"; this comment records only
-# why the shape is what it is, because both directions have already been wrong.
-#
-#   Too wide: unanchored, "INSTRUCTIONS" matched the ordinary English word, so
-#   "docs/instructions.md (setup instructions)" was written by roadmap-init and
-#   then refused by validate-contracts. The same unanchored "system:" matched
-#   inside "design-system:tokens".
-#
-#   Too narrow: keying on the neighbouring character ([^a-zA-Z0-9_-]) and
-#   requiring a colon after INSTRUCTIONS closed those two and admitted
-#   "--system: do this" and "### INSTRUCTIONS do X" -- a hyphen is an identifier
-#   character, and a heading needs no colon.
-#
-# The heading form requires the "#" deliberately: without it an artifact
-# legitimately named INSTRUCTIONS.md would be refused. Keep this in step with
-# _rm_sanitize's own "system:" strip, which uses the same anchor. Both tables in
-# test-aimi-cli-part3-roadmap-forge.sh guard this pair -- widening fails the
-# ordinary rows, narrowing fails the injection rows.
-#
-# The shell-class half is written as a cheap necessary condition first:
-# an identity is a trimmed prefix of the raw entry, so a class character in the
-# identity implies one in the entry. Testing the raw entry first lets the common
-# case (a clean entry) skip _cv_identity's sub()+gsub() entirely.
-#
-# _roadmap_identity_errors rejects both halves at write time, so this reader
-# check is defence in depth and should not be the place authors meet the rule.
-_CONTRACT_JQ_DEFS='
-def _cv_identity: sub("\\(.*"; "") | gsub("^[ \t]+|[ \t]+$"; "");
-def _cv_shell_class: "[$`;|&]";
-def _cv_injection: test("ignore previous|(^|\\s)[^a-zA-Z0-9]*system\\s*:|(^|\\s)[^a-zA-Z0-9]*#{1,6}\\s*INSTRUCTIONS\\b|INSTRUCTIONS\\s*:|```|\\$\\("; "i");
-def _cv_suspicious:
-  _cv_injection
-  or (test(_cv_shell_class) and (_cv_identity | test(_cv_shell_class)));
-'
+# Both verbs are argument parsing here and one call into roadmap.py; the shared
+# contract vocabulary they used to read through -- what an identity is, which
+# characters it may not hold, what makes an entry suspicious -- moved there with
+# them, so there is one definition and no bash copy left to drift from it.
 
 # ============================================================================
 # normalize-contracts — migrate stored creates/needs from 1.0 to 2.0
@@ -14967,7 +14828,7 @@ def _cv_suspicious:
 # outside this repository too -- a phases array is authored once, by hand or by
 # /aimi:brainstorm, and re-deriving one loses every amendment made since.
 #
-# THE CORRECTNESS ARGUMENT IS THAT IT CALLS _cv_identity, NOT A COPY OF IT.
+# THE CORRECTNESS ARGUMENT IS THAT IT CALLS cv_identity, NOT A COPY OF IT.
 # Every reader in this file has always computed the identity as
 # `sub("\\(.*"; "")` then trim. A migration that re-derived that split with its
 # own regex would be a fourth ruler, and any disagreement -- even on one entry
@@ -14981,7 +14842,7 @@ def _cv_suspicious:
 # afterwards, in a diagnostic that names the entry. Repairing on the way past
 # would silently change what a phase promises.
 #
-# _nc_description is the exact inverse of _cv_identity's sub(): everything from
+# nc_description is the exact inverse of cv_identity's cut: everything from
 # the first "(" on, minus one leading "(" and one trailing ")". An entry with
 # no "(" at all yields "" -- absent description, not null, so no reader needs a
 # string-or-null branch.
@@ -15165,50 +15026,13 @@ cmd_phase_overlap() {
   local roadmap_path
   roadmap_path=$(_roadmap_require "phase-overlap" "$feature" " (run roadmap-init first)")
 
-  local feature_dir
-  feature_dir=$(dirname "$roadmap_path")
-
-  local dir_a dir_b
-  dir_a=$(jq -r --argjson pid "$phase_a" '(.phases[] | select(.id == $pid) | .dir) // empty' "$roadmap_path")
-  dir_b=$(jq -r --argjson pid "$phase_b" '(.phases[] | select(.id == $pid) | .dir) // empty' "$roadmap_path")
-
-  if [ -z "$dir_a" ]; then
-    echo "Error: phase-overlap: phase $phase_a not found in $roadmap_path" >&2
-    exit 1
-  fi
-  if [ -z "$dir_b" ]; then
-    echo "Error: phase-overlap: phase $phase_b not found in $roadmap_path" >&2
-    exit 1
-  fi
-
-  # Mirrors execute.md Step 1.7's PHASE_TASKS_PATH convention:
-  # <feature_dir>/<phase_dir>/<feature>-phase-<id>-tasks.json
-  local tasks_a tasks_b
-  tasks_a="$feature_dir/$dir_a/$feature-phase-$phase_a-tasks.json"
-  tasks_b="$feature_dir/$dir_b/$feature-phase-$phase_b-tasks.json"
-
-  if [ ! -f "$tasks_a" ]; then
-    echo "Error: phase-overlap: phase $phase_a has no tasks file yet ($tasks_a) -- run /aimi:plan --phase $phase_a to materialize it first" >&2
-    exit 1
-  fi
-  if [ ! -f "$tasks_b" ]; then
-    echo "Error: phase-overlap: phase $phase_b has no tasks file yet ($tasks_b) -- run /aimi:plan --phase $phase_b to materialize it first" >&2
-    exit 1
-  fi
-  if ! jq -e . "$tasks_a" >/dev/null 2>&1; then
-    echo "Error: phase-overlap: malformed tasks file: $tasks_a" >&2
-    exit 1
-  fi
-  if ! jq -e . "$tasks_b" >/dev/null 2>&1; then
-    echo "Error: phase-overlap: malformed tasks file: $tasks_b" >&2
-    exit 1
-  fi
-
-  jq -n --slurpfile a "$tasks_a" --slurpfile b "$tasks_b" '
-    ([$a[0].userStories[]?.implementation.files[]?] | unique) as $files_a |
-    ([$b[0].userStories[]?.implementation.files[]?] | unique) as $files_b |
-    {overlapping_files: ([$files_a[] | select(. as $f | $files_b | index($f) != null)] | unique | sort)}
-  '
+  # Phase directory resolution, the two tasks-file paths and the intersection
+  # itself all live in roadmap.py -- the ids go over as the strings the caller
+  # typed, because every refusal quotes them back and the filename is built from
+  # them.
+  check_python3
+  python3 "$(_aimi_roadmap_py)" phase-overlap \
+    --roadmap "$roadmap_path" --feature "$feature" --phase-a "$phase_a" --phase-b "$phase_b"
 }
 
 cmd_roadmap_sweep() {
@@ -15232,49 +15056,11 @@ cmd_roadmap_sweep() {
   local roadmap_path
   roadmap_path=$(_roadmap_require "roadmap-sweep" "$feature")
 
-  # Single-pass, advisory-only computation: never exits non-zero. Suspicious
-  # creates/needs entries are dropped from $clean_phases before orphan/deferred
-  # computation so a flagged entry can never leak into any other output field.
-  #
-  # The DROP IS REPORTED, not silent. A dropped creates entry is invisible to
-  # the orphan/deferred analysis that follows, so a downstream phase whose needs
-  # cited it reads as unmet with no trace of why -- exactly the phase-late,
-  # cause-far-away failure this contract exists to remove. Each warning now
-  # carries droppedCount and the offending entries, so a reader can tell
-  # "nothing declared it" apart from "it was declared and then discarded here".
-  jq "$_CONTRACT_JQ_DEFS"'
-    (
-      [.phases[] | . as $p |
-        ("creates","needs") as $field |
-        (($p[$field] // []) | to_entries | map(select(.value | type == "string" and _cv_suspicious))) as $bad |
-        select(($bad | length) > 0) |
-        {phase: $p.id, field: $field,
-         message: "contains suspicious content -- dropped from this sweep, so anything downstream that cited it now reads as unmet",
-         droppedCount: ($bad | length),
-         droppedIndexes: ($bad | map(.key + 1))}
-      ] | unique_by([.phase,.field])
-    ) as $warnings |
-
-    (.phases | map(
-      .creates = ((.creates // []) | map(select(_cv_suspicious | not))) |
-      .needs = ((.needs // []) | map(select(_cv_suspicious | not)))
-    )) as $clean_phases |
-
-    ([$clean_phases[] | (.needs // [])[] | _cv_identity] | unique) as $need_idents |
-    ([$clean_phases[] | . as $p | (($p.creates // [])[] | _cv_identity) as $ident |
-      select(($need_idents | index($ident)) == null) |
-      {phase: $p.id, creates: $ident}
-    ]) as $orphan_creates |
-
-    ([$clean_phases[] | . as $p | (($p.creates // [])[] | _cv_identity) as $ident | {identity: $ident, phase: $p.id, status: $p.status}]) as $providers_flat |
-    ([$clean_phases[] | . as $np | (($np.needs // [])[] | _cv_identity) as $ident |
-      ([$providers_flat[] | select(.identity == $ident)] | sort_by(.phase) | .[0]) as $prov |
-      select($prov != null and $prov.status != "completed") |
-      {phase: $np.id, need: $ident, deferred: $prov.phase}
-    ]) as $deferred_needs |
-
-    {orphanCreates: $orphan_creates, deferredNeeds: $deferred_needs, warnings: $warnings}
-  ' "$roadmap_path"
+  # Single-pass, advisory-only computation: never exits non-zero for a roadmap
+  # it could read. The drop-and-report rule, and why the drop must be reported
+  # rather than silent, live with the code in roadmap.py's roadmap-sweep section.
+  check_python3
+  python3 "$(_aimi_roadmap_py)" sweep --roadmap "$roadmap_path"
 
   exit 0
 }

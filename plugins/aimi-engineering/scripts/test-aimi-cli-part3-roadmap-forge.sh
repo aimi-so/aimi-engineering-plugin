@@ -1211,14 +1211,19 @@ test_roadmap_init_accepts_documented_identity_kinds() {
   assert_eq "$expected" "$written" "roadmap-init identity kinds: entries written verbatim"
 
   # Cross-check: anything roadmap-init accepts must also survive
-  # validate-contracts' _cv_suspicious, which is never demoted by agent mode.
-  # Reuse the CLI's own shared defs rather than a second copy.
-  eval "$(sed -n "/^_CONTRACT_JQ_DEFS='/,/^'\$/p" "$CLI")"
-
+  # validate-contracts' cv_suspicious, which is never demoted by agent mode.
+  # Reuse the CLI's own definition rather than a second copy -- it lives in
+  # roadmap.py now, so the entry goes over in the environment rather than
+  # through a quoted argument.
   local entry verdict
   for entry in "$endpoint_entry" "$table_entry" "$service_entry" "$file_entry"; do
-    verdict=$(jq -rn --arg e "$entry" "$_CONTRACT_JQ_DEFS"'if ($e | _cv_suspicious) then "suspicious" else "clean" end')
-    assert_eq "clean" "$verdict" "roadmap-init identity kinds: _cv_suspicious clean for \"$entry\""
+    verdict=$(AIMI_TEST_ENTRY="$entry" python3 -c '
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[1])))
+import roadmap
+print("suspicious" if roadmap.cv_suspicious(os.environ["AIMI_TEST_ENTRY"]) else "clean")
+' "$CLI")
+    assert_eq "clean" "$verdict" "roadmap-init identity kinds: cv_suspicious clean for \"$entry\""
   done
 
   rm -rf ".aimi/tasks/$feature"
@@ -3900,8 +3905,8 @@ test_identity_survives_declaration_to_verification() {
   #   2. Entries are built only by aimi_contract_entry/aimi_contract_list.
   #   3. Identities come back ONLY from verb output -- verify-creates' .identity
   #      and validate-contracts' .providers keys. Never parsed out of a stored
-  #      string, and deliberately not via eval of _CONTRACT_JQ_DEFS, which would
-  #      recouple this test to the CLI's internals.
+  #      string, and deliberately not by importing roadmap.py's own cv_identity,
+  #      which would recouple this test to the CLI's internals.
   #   4. It asserts against the DECLARED name only. Never against stored text,
   #      never against .method/.evidence/a diagnostic -- those are shapes.
   #
@@ -4597,22 +4602,26 @@ test_verify_creates_reuses_existing_identity_definition() {
   echo ""
   echo "=== verify-creates: consumes the existing _cv_identity def, never a second copy ==="
 
-  local identity_defs
-  identity_defs=$(grep -c 'def _cv_identity:' "$CLI" || true)
-  assert_eq "1" "$identity_defs" "identity: exactly one _cv_identity definition in aimi-cli.sh"
+  # Both definitions live in roadmap.py now -- the subject moved with the port,
+  # the question did not: one definition each, and no second copy anywhere.
+  local roadmap_py identity_defs
+  roadmap_py="$(dirname "$CLI")/roadmap.py"
+  identity_defs=$(grep -c '^def cv_identity(' "$roadmap_py" || true)
+  assert_eq "1" "$identity_defs" "identity: exactly one cv_identity definition in roadmap.py"
 
   # The class itself needs the same guard, and needs it more: it is short enough
   # to retype from memory, so the likely drift is not a second def but a raw
   # "[$`;|&]" literal appearing somewhere new and quietly diverging from this
   # one. Both the def and the literal are counted.
   local class_defs class_literals
-  class_defs=$(grep -c 'def _cv_shell_class:' "$CLI" || true)
-  assert_eq "1" "$class_defs" "identity: exactly one _cv_shell_class definition in aimi-cli.sh"
-  # Three legitimate occurrences of the raw class, and only three: the def, the
-  # header comment that explains it, and the roadmap-init --help text that
-  # tells an author which characters are refused. Anything else is a copy that
-  # can drift out of step with the def while every test still passes.
-  class_literals=$(grep -cF '[$`;|&]' "$CLI" || true)
+  class_defs=$(grep -c '^_SHELL_CLASS = re.compile' "$roadmap_py" || true)
+  assert_eq "1" "$class_defs" "identity: exactly one _SHELL_CLASS definition in roadmap.py"
+  # Three legitimate occurrences of the raw class across the two files, and only
+  # three: the def in roadmap.py, aimi-cli.sh's comment that explains which
+  # characters the write-time guard refuses, and the roadmap-init --help text
+  # that tells an author the same. Anything else is a copy that can drift out of
+  # step with the def while every test still passes.
+  class_literals=$(cat "$CLI" "$roadmap_py" | grep -cF '[$`;|&]' || true)
   assert_eq "3" "$class_literals" "identity: the raw shell class appears only in its def, its explaining comment and --help"
 
   # The verb must read creates[] through the shared definition, not a second

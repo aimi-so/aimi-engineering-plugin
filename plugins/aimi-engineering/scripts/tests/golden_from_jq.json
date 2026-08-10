@@ -4810,5 +4810,794 @@
       "stderr": "Error: validate-contracts: roadmap not found: /WORK/.aimi/tasks/outro-feature/roadmap.json"
     }
   ],
-  "_comment_validate": "validate-contracts captured the same way, before its jq was deleted: 19 cases covering the transitive dependsOn closure, a provider that exists but is OUTSIDE the closure, the completed+handoff delivery gate and the fact that it only applies with --phase, an identity mentioned outside the Artifacts Created section, duplicates with and without --agent-mode (different output shape AND exit code), and both suspicious-entry reasons. 57 of 57 field comparisons identical after the port."
+  "_comment_validate": "validate-contracts captured the same way, before its jq was deleted: 19 cases covering the transitive dependsOn closure, a provider that exists but is OUTSIDE the closure, the completed+handoff delivery gate and the fact that it only applies with --phase, an identity mentioned outside the Artifacts Created section, duplicates with and without --agent-mode (different output shape AND exit code), and both suspicious-entry reasons. 57 of 57 field comparisons identical after the port.",
+  "sweep_cases": [
+    {
+      "label": "limpo",
+      "exit": 0,
+      "stdout": {
+        "orphanCreates": [],
+        "deferredNeeds": [],
+        "warnings": []
+      },
+      "stderr": ""
+    },
+    {
+      "label": "orfao",
+      "exit": 0,
+      "stdout": {
+        "orphanCreates": [
+          {
+            "phase": 1,
+            "creates": "extra.rb"
+          }
+        ],
+        "deferredNeeds": [],
+        "warnings": []
+      },
+      "stderr": ""
+    },
+    {
+      "label": "provedor-pendente",
+      "exit": 0,
+      "stdout": {
+        "orphanCreates": [],
+        "deferredNeeds": [
+          {
+            "phase": 2,
+            "need": "base.rb",
+            "deferred": 1
+          }
+        ],
+        "warnings": []
+      },
+      "stderr": ""
+    },
+    {
+      "label": "needs-sem-provedor",
+      "exit": 0,
+      "stdout": {
+        "orphanCreates": [],
+        "deferredNeeds": [],
+        "warnings": []
+      },
+      "stderr": ""
+    },
+    {
+      "label": "dois-provedores",
+      "exit": 0,
+      "stdout": {
+        "orphanCreates": [],
+        "deferredNeeds": [
+          {
+            "phase": 2,
+            "need": "dup.rb",
+            "deferred": 1
+          }
+        ],
+        "warnings": []
+      },
+      "stderr": ""
+    },
+    {
+      "label": "suspeito-creates",
+      "exit": 0,
+      "stdout": {
+        "orphanCreates": [
+          {
+            "phase": 1,
+            "creates": "ok.rb"
+          }
+        ],
+        "deferredNeeds": [],
+        "warnings": [
+          {
+            "phase": 1,
+            "field": "creates",
+            "message": "contains suspicious content -- dropped from this sweep, so anything downstream that cited it now reads as unmet",
+            "droppedCount": 1,
+            "droppedIndexes": [
+              2
+            ]
+          }
+        ]
+      },
+      "stderr": ""
+    },
+    {
+      "label": "suspeito-needs",
+      "exit": 0,
+      "stdout": {
+        "orphanCreates": [],
+        "deferredNeeds": [],
+        "warnings": [
+          {
+            "phase": 1,
+            "field": "needs",
+            "message": "contains suspicious content -- dropped from this sweep, so anything downstream that cited it now reads as unmet",
+            "droppedCount": 1,
+            "droppedIndexes": [
+              1
+            ]
+          }
+        ]
+      },
+      "stderr": ""
+    },
+    {
+      "label": "suspeito-dois-campos",
+      "exit": 0,
+      "stdout": {
+        "orphanCreates": [],
+        "deferredNeeds": [],
+        "warnings": [
+          {
+            "phase": 1,
+            "field": "creates",
+            "message": "contains suspicious content -- dropped from this sweep, so anything downstream that cited it now reads as unmet",
+            "droppedCount": 1,
+            "droppedIndexes": [
+              1
+            ]
+          },
+          {
+            "phase": 1,
+            "field": "needs",
+            "message": "contains suspicious content -- dropped from this sweep, so anything downstream that cited it now reads as unmet",
+            "droppedCount": 1,
+            "droppedIndexes": [
+              1
+            ]
+          }
+        ]
+      },
+      "stderr": ""
+    },
+    {
+      "label": "warnings-ordenados",
+      "exit": 0,
+      "stdout": {
+        "orphanCreates": [],
+        "deferredNeeds": [],
+        "warnings": [
+          {
+            "phase": 1,
+            "field": "creates",
+            "message": "contains suspicious content -- dropped from this sweep, so anything downstream that cited it now reads as unmet",
+            "droppedCount": 1,
+            "droppedIndexes": [
+              1
+            ]
+          },
+          {
+            "phase": 2,
+            "field": "needs",
+            "message": "contains suspicious content -- dropped from this sweep, so anything downstream that cited it now reads as unmet",
+            "droppedCount": 1,
+            "droppedIndexes": [
+              1
+            ]
+          },
+          {
+            "phase": 3,
+            "field": "creates",
+            "message": "contains suspicious content -- dropped from this sweep, so anything downstream that cited it now reads as unmet",
+            "droppedCount": 1,
+            "droppedIndexes": [
+              1
+            ]
+          }
+        ]
+      },
+      "stderr": ""
+    },
+    {
+      "label": "drop-reportado",
+      "exit": 0,
+      "stdout": {
+        "orphanCreates": [],
+        "deferredNeeds": [],
+        "warnings": [
+          {
+            "phase": 1,
+            "field": "creates",
+            "message": "contains suspicious content -- dropped from this sweep, so anything downstream that cited it now reads as unmet",
+            "droppedCount": 1,
+            "droppedIndexes": [
+              1
+            ]
+          },
+          {
+            "phase": 2,
+            "field": "needs",
+            "message": "contains suspicious content -- dropped from this sweep, so anything downstream that cited it now reads as unmet",
+            "droppedCount": 1,
+            "droppedIndexes": [
+              1
+            ]
+          }
+        ]
+      },
+      "stderr": ""
+    },
+    {
+      "label": "chaves-ausentes",
+      "exit": 0,
+      "stdout": {
+        "orphanCreates": [
+          {
+            "phase": 2,
+            "creates": "b.rb"
+          }
+        ],
+        "deferredNeeds": [],
+        "warnings": []
+      },
+      "stderr": ""
+    },
+    {
+      "label": "sem-fases",
+      "exit": 0,
+      "stdout": {
+        "orphanCreates": [],
+        "deferredNeeds": [],
+        "warnings": []
+      },
+      "stderr": ""
+    },
+    {
+      "label": "ids-decimais",
+      "exit": 0,
+      "stdout": {
+        "orphanCreates": [],
+        "deferredNeeds": [
+          {
+            "phase": 3,
+            "need": "a.rb",
+            "deferred": 2.1
+          }
+        ],
+        "warnings": []
+      },
+      "stderr": ""
+    },
+    {
+      "label": "status-null",
+      "exit": 0,
+      "stdout": {
+        "orphanCreates": [],
+        "deferredNeeds": [
+          {
+            "phase": 2,
+            "need": "a.rb",
+            "deferred": 1
+          }
+        ],
+        "warnings": []
+      },
+      "stderr": ""
+    },
+    {
+      "label": "identidades-cruas",
+      "exit": 0,
+      "stdout": {
+        "orphanCreates": [],
+        "deferredNeeds": [],
+        "warnings": []
+      },
+      "stderr": ""
+    },
+    {
+      "label": "creates-nao-string",
+      "exit": 5,
+      "stdout": null,
+      "stderr": "jq: error (at /WORK/.aimi/tasks/f/roadmap.json:3): number (42) cannot be matched, as it is not a string"
+    },
+    {
+      "label": "creates-objeto",
+      "exit": 5,
+      "stdout": null,
+      "stderr": "jq: error (at /WORK/.aimi/tasks/f/roadmap.json:3): object ({\"identity\"...) cannot be matched, as it is not a string"
+    },
+    {
+      "label": "flag-desconhecida",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Usage: aimi-cli.sh roadmap-sweep <feature>"
+    },
+    {
+      "label": "sem-feature",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: roadmap: --feature <slug> is required"
+    },
+    {
+      "label": "roadmap-inexistente",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: roadmap-sweep: roadmap not found: /WORK/.aimi/tasks/outra/roadmap.json"
+    }
+  ],
+  "_comment_sweep": "roadmap-sweep captured the same way, before its jq was deleted: 20 roadmaps covering the orphan and deferred analyses, the suspicious-entry drop with its reported positions, the warning sort jq's unique_by performed, the lowest-phase-id provider rule, and the number rendering that turns a 3.0 phase id back into 3. TWO CASES RECORD A DIVERGENCE THE PORT MAKES DELIBERATELY: creates-nao-string and creates-objeto hold an entry that is not a string, which the jq could not match and aborted on (exit 5, jq's own error). The Python reads those lists through _v1_string_entries and drops the entry instead, which is what the schema story deletes -- see test_the_sweep_divergence_is_the_schema_filter_and_nothing_else.",
+  "handoff_cases": [
+    {
+      "label": "pleno",
+      "exit": 0,
+      "stdout": {
+        "handoff": "/WORK/.aimi/tasks/f/phase-1-p1/handoff.md"
+      },
+      "stderr": "",
+      "file": "## Decisions Made\n\n- Escolhi A\n\n## Artifacts Created\n\n- Widget (um widget) — src/widget.ts\n\n## Deviations\n\n- Desviei de B\n\n## Deferred Items\n\n- Adiado C\n\n## Contracts Delivered\n\n- Widget (um widget) entregue\n"
+    },
+    {
+      "label": "vazio",
+      "exit": 0,
+      "stdout": {
+        "handoff": "/WORK/.aimi/tasks/f/phase-1-p1/handoff.md"
+      },
+      "stderr": "",
+      "file": "## Decisions Made\n\n_None._\n\n## Artifacts Created\n\n_None._\n\n## Deviations\n\n_None._\n\n## Deferred Items\n\n_None._\n\n## Contracts Delivered\n\n_None._\n"
+    },
+    {
+      "label": "so-decisions",
+      "exit": 0,
+      "stdout": {
+        "handoff": "/WORK/.aimi/tasks/f/phase-1-p1/handoff.md"
+      },
+      "stderr": "",
+      "file": "## Decisions Made\n\n- um\n- dois\n\n## Artifacts Created\n\n_None._\n\n## Deviations\n\n_None._\n\n## Deferred Items\n\n_None._\n\n## Contracts Delivered\n\n_None._\n"
+    },
+    {
+      "label": "campos-null",
+      "exit": 0,
+      "stdout": {
+        "handoff": "/WORK/.aimi/tasks/f/phase-1-p1/handoff.md"
+      },
+      "stderr": "",
+      "file": "## Decisions Made\n\n_None._\n\n## Artifacts Created\n\n_None._\n\n## Deviations\n\n_None._\n\n## Deferred Items\n\n_None._\n\n## Contracts Delivered\n\n_None._\n"
+    },
+    {
+      "label": "campos-false",
+      "exit": 0,
+      "stdout": {
+        "handoff": "/WORK/.aimi/tasks/f/phase-1-p1/handoff.md"
+      },
+      "stderr": "",
+      "file": "## Decisions Made\n\n_None._\n\n## Artifacts Created\n\n_None._\n\n## Deviations\n\n_None._\n\n## Deferred Items\n\n_None._\n\n## Contracts Delivered\n\n_None._\n"
+    },
+    {
+      "label": "sanitiza-prosa",
+      "exit": 0,
+      "stdout": {
+        "handoff": "/WORK/.aimi/tasks/f/phase-1-p1/handoff.md"
+      },
+      "stderr": "",
+      "file": "## Decisions Made\n\n- um x span\n-  e depois\n-  root\n-  faça X\n- com subshell)\n- uma  aqui\n- linha um linha dois\n- fim\n\n## Artifacts Created\n\n_None._\n\n## Deviations\n\n_None._\n\n## Deferred Items\n\n_None._\n\n## Contracts Delivered\n\n_None._\n"
+    },
+    {
+      "label": "identidade-verbatim",
+      "exit": 0,
+      "stdout": {
+        "handoff": "/WORK/.aimi/tasks/f/phase-1-p1/handoff.md"
+      },
+      "stderr": "",
+      "file": "## Decisions Made\n\n_None._\n\n## Artifacts Created\n\n- parseList<T> (um helper generico) — src/p.ts\n- Widget (um widget) — src/w.ts\n\n## Deviations\n\n_None._\n\n## Deferred Items\n\n_None._\n\n## Contracts Delivered\n\n- parseList<T> (um helper generico) entregue\n"
+    },
+    {
+      "label": "linha-sem-identidade",
+      "exit": 0,
+      "stdout": {
+        "handoff": "/WORK/.aimi/tasks/f/phase-1-p1/handoff.md"
+      },
+      "stderr": "",
+      "file": "## Decisions Made\n\n_None._\n\n## Artifacts Created\n\n- outra  qualquer\n\n## Deviations\n\n_None._\n\n## Deferred Items\n\n_None._\n\n## Contracts Delivered\n\n_None._\n"
+    },
+    {
+      "label": "prefixo-mais-longo",
+      "exit": 0,
+      "stdout": {
+        "handoff": "/WORK/.aimi/tasks/f/phase-1-p1/handoff.md"
+      },
+      "stderr": "",
+      "file": "## Decisions Made\n\n_None._\n\n## Artifacts Created\n\n- alphabet<X> (longo) — feito\n- alpha (curto) — feito\n\n## Deviations\n\n_None._\n\n## Deferred Items\n\n_None._\n\n## Contracts Delivered\n\n_None._\n"
+    },
+    {
+      "label": "identidade-vazia",
+      "exit": 0,
+      "stdout": {
+        "handoff": "/WORK/.aimi/tasks/f/phase-1-p1/handoff.md"
+      },
+      "stderr": "",
+      "file": "## Decisions Made\n\n_None._\n\n## Artifacts Created\n\n- qualquer  linha\n\n## Deviations\n\n_None._\n\n## Deferred Items\n\n_None._\n\n## Contracts Delivered\n\n_None._\n"
+    },
+    {
+      "label": "sem-creates",
+      "exit": 0,
+      "stdout": {
+        "handoff": "/WORK/.aimi/tasks/f/phase-1-a/handoff.md"
+      },
+      "stderr": "",
+      "file": "## Decisions Made\n\n_None._\n\n## Artifacts Created\n\n- algo  feito\n\n## Deviations\n\n_None._\n\n## Deferred Items\n\n_None._\n\n## Contracts Delivered\n\n_None._\n"
+    },
+    {
+      "label": "creates-nao-string",
+      "exit": 0,
+      "stdout": {
+        "handoff": "/WORK/.aimi/tasks/f/phase-1-a/handoff.md"
+      },
+      "stderr": "",
+      "file": "## Decisions Made\n\n_None._\n\n## Artifacts Created\n\n- 42  feito\n\n## Deviations\n\n_None._\n\n## Deferred Items\n\n_None._\n\n## Contracts Delivered\n\n_None._\n"
+    },
+    {
+      "label": "cap-2000-com-identidade",
+      "exit": 0,
+      "stdout": {
+        "handoff": "/WORK/.aimi/tasks/f/phase-1-p1/handoff.md"
+      },
+      "stderr": "",
+      "file": "## Decisions Made\n\n_None._\n\n## Artifacts Created\n\n- Widget (um widget) zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\n\n## Deviations\n\n_None._\n\n## Deferred Items\n\n_None._\n\n## Contracts Delivered\n\n_None._\n"
+    },
+    {
+      "label": "cap-2000-sem-identidade",
+      "exit": 0,
+      "stdout": {
+        "handoff": "/WORK/.aimi/tasks/f/phase-1-p1/handoff.md"
+      },
+      "stderr": "",
+      "file": "## Decisions Made\n\n- prosa zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\n\n## Artifacts Created\n\n_None._\n\n## Deviations\n\n_None._\n\n## Deferred Items\n\n_None._\n\n## Contracts Delivered\n\n_None._\n"
+    },
+    {
+      "label": "nao-ascii",
+      "exit": 0,
+      "stdout": {
+        "handoff": "/WORK/.aimi/tasks/f/phase-1-p1/handoff.md"
+      },
+      "stderr": "",
+      "file": "## Decisions Made\n\n- acentuação e emoji 🚀\n\n## Artifacts Created\n\n_None._\n\n## Deviations\n\n_None._\n\n## Deferred Items\n\n_None._\n\n## Contracts Delivered\n\n_None._\n"
+    },
+    {
+      "label": "sobrescrita",
+      "exit": 0,
+      "stdout": {
+        "handoff": "/WORK/.aimi/tasks/f/phase-1-p1/handoff.md"
+      },
+      "stderr": "",
+      "file": "## Decisions Made\n\n- segunda\n\n## Artifacts Created\n\n_None._\n\n## Deviations\n\n_None._\n\n## Deferred Items\n\n_None._\n\n## Contracts Delivered\n\n_None._\n"
+    },
+    {
+      "label": "via-file",
+      "exit": 0,
+      "stdout": {
+        "handoff": "/WORK/.aimi/tasks/f/phase-1-p1/handoff.md"
+      },
+      "stderr": "",
+      "file": "## Decisions Made\n\n- de arquivo\n\n## Artifacts Created\n\n_None._\n\n## Deviations\n\n_None._\n\n## Deferred Items\n\n_None._\n\n## Contracts Delivered\n\n_None._\n"
+    },
+    {
+      "label": "file-inexistente",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: roadmap-write-handoff: --file not found: payloads/nao-existe.json",
+      "file": null
+    },
+    {
+      "label": "payload-array",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: roadmap-write-handoff: payload must be a JSON object",
+      "file": null
+    },
+    {
+      "label": "payload-string",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: roadmap-write-handoff: payload must be a JSON object",
+      "file": null
+    },
+    {
+      "label": "payload-invalido",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: roadmap-write-handoff: payload must be a JSON object",
+      "file": null
+    },
+    {
+      "label": "payload-vazio",
+      "exit": 0,
+      "stdout": {
+        "handoff": "/WORK/.aimi/tasks/f/phase-1-p1/handoff.md"
+      },
+      "stderr": "",
+      "file": "\n"
+    },
+    {
+      "label": "decisions-string",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: roadmap-write-handoff: field 'decisions' must be an array of strings",
+      "file": null
+    },
+    {
+      "label": "artifacts-numero",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: roadmap-write-handoff: field 'artifacts' must be an array of strings",
+      "file": null
+    },
+    {
+      "label": "contracts-objeto",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: roadmap-write-handoff: field 'contracts' must be an array of strings",
+      "file": null
+    },
+    {
+      "label": "deviations-item-nao-string",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: roadmap-write-handoff: field 'deviations' must be an array of strings",
+      "file": null
+    },
+    {
+      "label": "deferred-item-null",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: roadmap-write-handoff: field 'deferred' must be an array of strings",
+      "file": null
+    },
+    {
+      "label": "dois-campos-ruins",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: roadmap-write-handoff: field 'decisions' must be an array of strings",
+      "file": null
+    },
+    {
+      "label": "fase-inexistente",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: roadmap-write-handoff: phase 99 not found in /WORK/.aimi/tasks/f/roadmap.json",
+      "file": null
+    },
+    {
+      "label": "flag-desconhecida",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: roadmap-write-handoff: unknown flag: --nope",
+      "file": null
+    },
+    {
+      "label": "sem-feature",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: roadmap: --feature <slug> is required",
+      "file": null
+    },
+    {
+      "label": "sem-phase",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: roadmap-write-handoff: --phase <id> must be a numeric phase id",
+      "file": null
+    },
+    {
+      "label": "phase-nao-numerica",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: roadmap-write-handoff: --phase <id> must be a numeric phase id",
+      "file": null
+    },
+    {
+      "label": "roadmap-inexistente",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: roadmap-write-handoff: roadmap not found: /WORK/.aimi/tasks/outra/roadmap.json",
+      "file": null
+    }
+  ],
+  "_comment_handoff": "roadmap-write-handoff captured the same way, before its jq was deleted: 34 payloads covering the five fixed headings, the prose sanitizer, the delivery rule that keeps a declared identity whole at the head of a line, the longest-match tie-break, the 2000-char cap on both sides of that split, every payload and field type refusal in the order they are checked, and the empty payload that writes a one-newline handoff.md and exits 0. 'file' is the rendered handoff.md; null means nothing was written.",
+  "overlap_cases": [
+    {
+      "label": "intersecao",
+      "exit": 0,
+      "stdout": {
+        "overlapping_files": [
+          "src/b.ts",
+          "src/c.ts"
+        ]
+      },
+      "stderr": ""
+    },
+    {
+      "label": "ordem-invertida",
+      "exit": 0,
+      "stdout": {
+        "overlapping_files": [
+          "src/b.ts",
+          "src/c.ts"
+        ]
+      },
+      "stderr": ""
+    },
+    {
+      "label": "sem-intersecao",
+      "exit": 0,
+      "stdout": {
+        "overlapping_files": []
+      },
+      "stderr": ""
+    },
+    {
+      "label": "listas-identicas",
+      "exit": 0,
+      "stdout": {
+        "overlapping_files": [
+          "src/a.ts",
+          "src/b.ts",
+          "src/c.ts"
+        ]
+      },
+      "stderr": ""
+    },
+    {
+      "label": "duplicatas",
+      "exit": 0,
+      "stdout": {
+        "overlapping_files": [
+          "src/a.ts"
+        ]
+      },
+      "stderr": ""
+    },
+    {
+      "label": "saida-ordenada",
+      "exit": 0,
+      "stdout": {
+        "overlapping_files": [
+          "a.ts",
+          "m.ts",
+          "z.ts"
+        ]
+      },
+      "stderr": ""
+    },
+    {
+      "label": "historias-magras",
+      "exit": 0,
+      "stdout": {
+        "overlapping_files": [
+          "src/a.ts"
+        ]
+      },
+      "stderr": ""
+    },
+    {
+      "label": "sem-historias",
+      "exit": 0,
+      "stdout": {
+        "overlapping_files": []
+      },
+      "stderr": ""
+    },
+    {
+      "label": "sem-chave-userstories",
+      "exit": 0,
+      "stdout": {
+        "overlapping_files": []
+      },
+      "stderr": ""
+    },
+    {
+      "label": "files-nao-string",
+      "exit": 0,
+      "stdout": {
+        "overlapping_files": [
+          7,
+          "src/a.ts"
+        ]
+      },
+      "stderr": ""
+    },
+    {
+      "label": "ids-decimais",
+      "exit": 0,
+      "stdout": {
+        "overlapping_files": [
+          "src/x.ts"
+        ]
+      },
+      "stderr": ""
+    },
+    {
+      "label": "tasks-b-ausente",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: phase-overlap: phase 2 has no tasks file yet (/WORK/.aimi/tasks/f/phase-2-p2/f-phase-2-tasks.json) -- run /aimi:plan --phase 2 to materialize it first"
+    },
+    {
+      "label": "tasks-a-ausente",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: phase-overlap: phase 1 has no tasks file yet (/WORK/.aimi/tasks/f/phase-1-p1/f-phase-1-tasks.json) -- run /aimi:plan --phase 1 to materialize it first"
+    },
+    {
+      "label": "tasks-a-malformado",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: phase-overlap: malformed tasks file: /WORK/.aimi/tasks/f/phase-1-p1/f-phase-1-tasks.json"
+    },
+    {
+      "label": "tasks-b-malformado",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: phase-overlap: malformed tasks file: /WORK/.aimi/tasks/f/phase-2-p2/f-phase-2-tasks.json"
+    },
+    {
+      "label": "fase-a-inexistente",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: phase-overlap: phase 9 not found in /WORK/.aimi/tasks/f/roadmap.json"
+    },
+    {
+      "label": "fase-b-inexistente",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: phase-overlap: phase 9 not found in /WORK/.aimi/tasks/f/roadmap.json"
+    },
+    {
+      "label": "fases-iguais",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: phase-overlap: phase-a and phase-b must differ, got 1 twice"
+    },
+    {
+      "label": "poucos-argumentos",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Usage: aimi-cli.sh phase-overlap <feature> <phase-a> <phase-b>"
+    },
+    {
+      "label": "argumentos-demais",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Usage: aimi-cli.sh phase-overlap <feature> <phase-a> <phase-b>"
+    },
+    {
+      "label": "flag",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Usage: aimi-cli.sh phase-overlap <feature> <phase-a> <phase-b>"
+    },
+    {
+      "label": "sem-argumentos",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Usage: aimi-cli.sh phase-overlap <feature> <phase-a> <phase-b>"
+    },
+    {
+      "label": "feature-invalida",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: roadmap: --feature must be a single path component matching ^[a-zA-Z0-9][a-zA-Z0-9_-]*$, got: ../fuga"
+    },
+    {
+      "label": "fase-nao-numerica",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: phase-overlap: --phase <id> must be a numeric phase id"
+    },
+    {
+      "label": "roadmap-inexistente",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: phase-overlap: roadmap not found: /WORK/.aimi/tasks/outra/roadmap.json (run roadmap-init first)"
+    },
+    {
+      "label": "fase-sem-dir",
+      "exit": 1,
+      "stdout": null,
+      "stderr": "Error: phase-overlap: phase 1 not found in /WORK/.aimi/tasks/f/roadmap.json"
+    }
+  ],
+  "_comment_overlap": "phase-overlap captured the same way, before its jq was deleted: 26 cases covering the intersection itself and its sort, deduplication on both sides, stories with no implementation or no files at all, jq's total order over a non-string file entry, decimal phase ids in both the directory and the tasks filename, and every refusal -- phase not found, tasks file missing, tasks file malformed, the two ids equal, and the argument-count usage line."
 }

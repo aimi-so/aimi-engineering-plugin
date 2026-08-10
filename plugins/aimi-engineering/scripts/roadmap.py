@@ -38,8 +38,9 @@ Two things this file must NOT become:
     transform, write to a temp file beside the target, rename. Never open a
     roadmap this process was not handed.
 
-The bash suite (3944 assertions, 119 of them black-box calls to these verbs)
-is the fidelity net: a faithful port does not move a single one of them.
+The bash suite is the fidelity net: EXPECTED_ASSERTIONS in test-aimi-cli.sh
+pins its total, over a hundred of those assertions drive these verbs as black
+boxes through the CLI, and a faithful port does not move a single one of them.
 """
 
 import json
@@ -122,6 +123,51 @@ def rm_sanitize_contract(value, maxlen):
 # ---------------------------------------------------------------------------
 # The contract vocabulary, ported from _CONTRACT_JQ_DEFS
 # ---------------------------------------------------------------------------
+#
+# One definition, read by the write-time guard and by every reader, so the
+# writer and the reader cannot drift apart on what an identity is or which
+# characters an identity may not hold.
+#
+# cv_suspicious is deliberately two halves with two different scopes. The full
+# argument for why -- and why the description keeps the injection guard -- lives
+# in commands/references/scope-contexts.md, "Two rulers". In short:
+#   * cv_injection judges the WHOLE raw entry, description included, because a
+#     description reaches a story-expander sub-agent prompt via /aimi:plan's
+#     phaseHandoffBlocks (grep that symbol; do not cite line numbers here, they
+#     drift).
+#   * The shell class judges only the IDENTITY (cv_identity: the text before the
+#     first "(", trimmed) -- the token verify-creates greps and every contract
+#     match keys on. Applying it to the raw entry refused
+#     "cmd_clean (does x; then y)", an identity that is itself clean.
+#
+# Both instruction markers anchor on POSITION -- start-of-string or whitespace,
+# then any run of punctuation -- because that is what a marker looks like and
+# what an ordinary name never does. This comment records only why the shape is
+# what it is, because both directions have already been wrong.
+#
+#   Too wide: unanchored, "INSTRUCTIONS" matched the ordinary English word, so
+#   "docs/instructions.md (setup instructions)" was written by roadmap-init and
+#   then refused by validate-contracts. The same unanchored "system:" matched
+#   inside "design-system:tokens".
+#
+#   Too narrow: keying on the neighbouring character ([^a-zA-Z0-9_-]) and
+#   requiring a colon after INSTRUCTIONS closed those two and admitted
+#   "--system: do this" and "### INSTRUCTIONS do X" -- a hyphen is an identifier
+#   character, and a heading needs no colon.
+#
+# The heading form requires the "#" deliberately: without it an artifact
+# legitimately named INSTRUCTIONS.md would be refused. Keep this in step with
+# rm_sanitize's own "system:" strip, which uses the same anchor. Both tables in
+# test-aimi-cli-part3-roadmap-forge.sh guard this pair -- widening fails the
+# ordinary rows, narrowing fails the injection rows.
+#
+# The shell-class half is written as a cheap necessary condition first: an
+# identity is a trimmed prefix of the raw entry, so a class character in the
+# identity implies one in the entry. Testing the raw entry first lets the common
+# case (a clean entry) skip cv_identity's two substitutions entirely.
+#
+# judge_phases rejects both halves at write time, so the reader-side check is
+# defence in depth and should not be the place authors meet the rule.
 
 _SHELL_CLASS = re.compile(r"[$`;|&]")
 
@@ -559,6 +605,19 @@ AMENDABLE_KEYS = ["goal", "successCriteria", "creates", "needs", "areas", "branc
 _PHASE_IDENTITY_KEYS = ["id", "dir", "slug", "name", "dependsOn"]
 
 
+def _v1_string_entries_numbered(entries):
+    """`to_entries | select(.value | type == "string")`: the same 1.0 filter,
+    keeping each surviving entry's 1-based position in the stored list.
+
+    Same deadline, same grep, and deliberately the only isinstance of the pair --
+    _v1_string_entries below is written in terms of this one so the schema commit
+    deletes one rule, not two that could disagree. roadmap-sweep needs the
+    positions because it reports droppedIndexes against the list AS STORED, not
+    against the strings that survived the filter.
+    """
+    return [(index + 1, entry) for index, entry in enumerate(entries) if isinstance(entry, str)]
+
+
 def _v1_string_entries(entries):
     """Reproduces `select(type == "string")` from the 1.0 schema.
 
@@ -576,7 +635,7 @@ def _v1_string_entries(entries):
     archaeology. When it goes, `entry["identity"]` raises on a malformed entry,
     which is the entire reason this file is in Python.
     """
-    return [e for e in entries if isinstance(e, str)]
+    return [entry for _, entry in _v1_string_entries_numbered(entries)]
 
 
 def _identities(phase, key):
@@ -1098,6 +1157,296 @@ def op_validate_contracts(argv):
 
 
 # ---------------------------------------------------------------------------
+# roadmap-sweep — advisory contract/status consistency across a whole roadmap
+# ---------------------------------------------------------------------------
+#
+# Advisory only: it reports and never refuses, so the caller reads the report
+# rather than the exit status. Suspicious creates/needs are dropped before the
+# orphan/deferred analysis so a flagged entry can never leak into another output
+# field -- and THE DROP IS REPORTED, not silent. A dropped creates is invisible
+# to the analysis that follows, so a downstream phase whose needs cited it reads
+# as unmet with no trace of why: exactly the phase-late, cause-far-away failure
+# this contract exists to remove. Each warning carries droppedCount and the
+# offending positions, so a reader can tell "nothing declared it" apart from "it
+# was declared and then discarded here".
+#
+# Schema note: the phase status enum is pending/planned/in_progress/completed/
+# verification_failed -- there is no "deferred" status. deferredNeeds substitutes
+# the existing "provider resolved but status != completed" signal for it.
+
+SWEEP_DROP_MESSAGE = (
+    "contains suspicious content -- dropped from this sweep, so anything "
+    "downstream that cited it now reads as unmet"
+)
+
+
+def sweep_warnings(phases):
+    """One warning per (phase, field) holding at least one suspicious entry.
+
+    Sorted by phase then field, which is the whole observable effect jq's
+    `unique_by([.phase,.field])` had here: the pairs are unique by construction,
+    so nothing was ever deduplicated -- only the sort it performs on the way.
+    """
+    rows = []
+    for phase in phases:
+        for field in ("creates", "needs"):
+            dropped = [
+                position
+                for position, entry in _v1_string_entries_numbered(phase.get(field) or [])
+                if cv_suspicious(entry)
+            ]
+            if not dropped:
+                continue
+            rows.append(
+                {
+                    "phase": phase.get("id"),
+                    "field": field,
+                    "message": SWEEP_DROP_MESSAGE,
+                    "droppedCount": len(dropped),
+                    "droppedIndexes": dropped,
+                }
+            )
+    return sorted(rows, key=lambda row: (jq_sort_key(row["phase"]), row["field"]))
+
+
+def sweep_clean_phases(phases):
+    """Every phase with its suspicious creates/needs removed."""
+    cleaned = []
+    for phase in phases:
+        copy = dict(phase)
+        for field in ("creates", "needs"):
+            copy[field] = [
+                entry
+                for entry in _v1_string_entries(phase.get(field) or [])
+                if not cv_suspicious(entry)
+            ]
+        cleaned.append(copy)
+    return cleaned
+
+
+def sweep(doc):
+    """{orphanCreates, deferredNeeds, warnings} for the whole roadmap."""
+    stored = doc.get("phases") or []
+    phases = sweep_clean_phases(stored)
+
+    needed = {cv_identity(entry) for p in phases for entry in p["needs"]}
+    orphans = [
+        {"phase": p.get("id"), "creates": identity}
+        for p in phases
+        for identity in [cv_identity(entry) for entry in p["creates"]]
+        if identity not in needed
+    ]
+
+    providers = [
+        {"identity": cv_identity(entry), "phase": p.get("id"), "status": p.get("status")}
+        for p in phases
+        for entry in p["creates"]
+    ]
+    deferred = []
+    for phase in phases:
+        for entry in phase["needs"]:
+            identity = cv_identity(entry)
+            # Lowest phase id wins, so which provider a need is attributed to is
+            # deterministic rather than incidental -- the same rule
+            # creates_in_scope applies for validate-contracts.
+            matches = sorted(
+                (row for row in providers if row["identity"] == identity),
+                key=lambda row: jq_sort_key(row["phase"]),
+            )
+            if not matches or matches[0]["status"] == "completed":
+                continue
+            deferred.append(
+                {"phase": phase.get("id"), "need": identity, "deferred": matches[0]["phase"]}
+            )
+
+    return {
+        "orphanCreates": orphans,
+        "deferredNeeds": deferred,
+        "warnings": sweep_warnings(stored),
+    }
+
+
+# ---------------------------------------------------------------------------
+# roadmap-write-handoff — render handoff.md from a structured payload
+# ---------------------------------------------------------------------------
+#
+# Five headings, always all five, always in this order: that order is what
+# roadmap-set-status's completed-requires-handoff precondition and
+# handoff_lists_artifact's "Artifacts Created" lookup both depend on.
+
+HANDOFF_FIELDS = ("decisions", "artifacts", "deviations", "deferred", "contracts")
+
+HANDOFF_SECTIONS = (
+    ("Decisions Made", "decisions"),
+    ("Artifacts Created", "artifacts"),
+    ("Deviations", "deviations"),
+    ("Deferred Items", "deferred"),
+    ("Contracts Delivered", "contracts"),
+)
+
+# The two lists that report DELIVERY, and so must keep their identities whole.
+HANDOFF_DELIVERY_FIELDS = ("artifacts", "contracts")
+
+
+def handoff_field(payload, name):
+    """`(.[$k] // [])`: absent, null and false all mean "no entries"."""
+    value = payload.get(name)
+    return [] if value is None or value is False else value
+
+
+def handoff_field_error(payload):
+    """The first field that is not an array of strings, in the checked order."""
+    for name in HANDOFF_FIELDS:
+        value = handoff_field(payload, name)
+        if not isinstance(value, list) or not all(isinstance(e, str) for e in value):
+            return name
+    return None
+
+
+def handoff_clean(lines):
+    """Ordinary prose: the full sanitizer, capped at 2000."""
+    return [rm_sanitize(line, 2000) for line in lines]
+
+
+def handoff_clean_delivery(lines, identities):
+    """The prose sanitizer, except a declared identity at the head of the line
+    survives byte-for-byte.
+
+    WHY THIS EXISTS. "## Artifacts Created" is exactly what
+    handoff_lists_artifact greps to resolve a later phase's needs, and this verb
+    was running the full prose sanitizer over the artifacts it renders. Measured:
+    creates ["parseList<T> (a generic helper)"] is stored verbatim in
+    roadmap.json and landed in handoff.md as "parseList", so validate-contracts
+    reported {"need":"parseList<T>","reason":"not-delivered"} forever. The tag
+    rule is right for prose and wrong for a token that is grepped literally --
+    the same two-rulers split roadmap-init already makes, one boundary later.
+
+    Longest match wins, so a phase declaring both "alpha" and "alphabet" keeps
+    the longer one whole. A line matching no declared identity is ordinary prose
+    and gets the full treatment.
+    """
+    rendered = []
+    for line in lines:
+        matches = sorted((i for i in identities if line.startswith(i)), key=len)
+        if not matches:
+            out = rm_sanitize(line, 2000)
+        else:
+            head = matches[-1]
+            out = head + rm_sanitize(line[len(head):], 2000)
+        rendered.append(out[:2000] if len(out) > 2000 else out)
+    return rendered
+
+
+def handoff_section(title, items):
+    head = "## " + title + "\n\n"
+    if not items:
+        return head + "_None._\n"
+    return head + "\n".join("- " + item for item in items) + "\n"
+
+
+def handoff_body(payload, identities):
+    rendered = {
+        name: (
+            handoff_clean_delivery(handoff_field(payload, name), identities)
+            if name in HANDOFF_DELIVERY_FIELDS
+            else handoff_clean(handoff_field(payload, name))
+        )
+        for name in HANDOFF_FIELDS
+    }
+    return "\n".join(handoff_section(title, rendered[name]) for title, name in HANDOFF_SECTIONS)
+
+
+def handoff_lost_identities(payload, identities, body):
+    """Declared identities a payload line claimed to deliver that the rendered
+    body no longer holds, under the same fixed-string match
+    handoff_lists_artifact uses to resolve a downstream needs.
+
+    With the renderer above this is always empty, and that is the point: it is
+    not a check on today's code, it is a guard against a future sanitizer edit
+    silently reopening the defect handoff_clean_delivery closes. It only judges
+    identities some line actually claimed, so a phase reporting fewer artifacts
+    than it declared -- a legitimate partial delivery -- is untouched.
+    """
+    lines = handoff_field(payload, "artifacts") + handoff_field(payload, "contracts")
+    return [
+        identity
+        for identity in identities
+        if any(line.startswith(identity) for line in lines) and identity not in body
+    ]
+
+
+# ---------------------------------------------------------------------------
+# phase-overlap — which files two expanded phases both plan to touch
+# ---------------------------------------------------------------------------
+#
+# Stage 2 of the sibling-phase overlap guard: execute.md calls this only after
+# its own stage-1 roadmap.json `areas` comparison finds a non-empty coarse
+# intersection. It reports the overlap and nothing else -- no splitting
+# suggestion, the caller decides what to do with it.
+
+
+def _jq_raw(value):
+    """`jq -r`: a string prints as itself, anything else as its JSON form."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return _num(value)
+    return json.dumps(value, ensure_ascii=False)
+
+
+def phase_dirs(doc, phase_id):
+    """`(.phases[] | select(.id == $pid) | .dir) // empty`, joined the way a
+    command substitution joins jq's output lines.
+
+    Two phases sharing an id is not a shape roadmap-init can write, but
+    roadmap.json is a file people edit, and the answer for one has to stay what
+    it always was: the single dir, unwrapped.
+    """
+    return "\n".join(
+        _jq_raw(phase.get("dir"))
+        for phase in doc.get("phases") or []
+        if phase.get("id") == phase_id and phase.get("dir") is not None
+        and phase.get("dir") is not False
+    )
+
+
+def _jq_key(value):
+    """A hashable stand-in for jq's value equality, for set membership."""
+    return json.dumps(value, sort_keys=True, ensure_ascii=False)
+
+
+def jq_unique(values):
+    """jq's `unique`: deduplicate by value, then sort by jq's total order."""
+    seen = {}
+    for value in values:
+        seen[_jq_key(value)] = value
+    return sorted(seen.values(), key=jq_sort_key)
+
+
+def overlap_files(doc):
+    """Every userStories[].implementation.files[] entry, undeduplicated.
+
+    Tolerant at each hop the way jq's `?` was: a story with no implementation, an
+    implementation with no files and a document with no userStories at all are
+    all simply empty, because a phase may legitimately have planned none.
+    """
+    stories = doc.get("userStories") if isinstance(doc, dict) else None
+    if isinstance(stories, dict):
+        stories = list(stories.values())
+    if not isinstance(stories, list):
+        return []
+    files = []
+    for story in stories:
+        implementation = story.get("implementation") if isinstance(story, dict) else None
+        entries = implementation.get("files") if isinstance(implementation, dict) else None
+        if isinstance(entries, dict):
+            entries = list(entries.values())
+        if isinstance(entries, list):
+            files.extend(entries)
+    return files
+
+
+# ---------------------------------------------------------------------------
 # I/O — the only filesystem this file is allowed to touch
 # ---------------------------------------------------------------------------
 
@@ -1603,6 +1952,136 @@ def op_verify_creates(argv):
     return 0
 
 
+def op_sweep(argv):
+    """Advisory only: this op has no failure verdict, only a report."""
+    path = _flag(argv, "--roadmap")
+    if not path:
+        die("Usage: roadmap.py sweep --roadmap <path>")
+    doc = jq_numbers(read_doc(path, "roadmap-sweep"))
+    json.dump(sweep(doc), sys.stdout, indent=2, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return 0
+
+
+def op_write_handoff(argv):
+    """Validate the payload, render the body, refuse if the render lost an
+    identity. stdout is the body; bash confines the path and writes it under the
+    lock, because a handoff path is built from a `dir` roadmap.json holds and
+    path confinement is bash's rule, not this file's."""
+    path = _flag(argv, "--roadmap")
+    phase_raw = _flag(argv, "--phase")
+    if not path or phase_raw is None:
+        die("Usage: roadmap.py write-handoff --roadmap <path> --phase <id>")
+    phase_id = jq_numbers(json.loads(phase_raw))
+
+    raw = sys.stdin.read()
+    # An empty payload is zero jq inputs, hence zero outputs and an empty body:
+    # the verb wrote a one-newline handoff.md and exited 0. Preserved rather than
+    # turned into a refusal because roadmap-set-status's completed precondition
+    # only checks that the file EXISTS, so refusing here would change which
+    # phases can complete.
+    if raw.strip() == "":
+        return 0
+
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict):
+        die("Error: roadmap-write-handoff: payload must be a JSON object")
+
+    bad_field = handoff_field_error(payload)
+    if bad_field is not None:
+        die(
+            "Error: roadmap-write-handoff: field '"
+            + bad_field
+            + "' must be an array of strings"
+        )
+
+    # The identities this phase declared, read through cv_identity itself and
+    # never a second copy of the split rule -- the two must not drift.
+    doc = read_doc(path, "roadmap-write-handoff")
+    identities = [
+        cv_identity(entry)
+        for phase in doc.get("phases") or []
+        if phase.get("id") == phase_id
+        for entry in _v1_string_entries(phase.get("creates") or [])
+    ]
+
+    body = handoff_body(payload, identities)
+    lost = handoff_lost_identities(payload, identities, body)
+    if lost:
+        sys.stderr.write(
+            "Error: roadmap-write-handoff: the rendered handoff lost a declared "
+            "identity it was asked to report:\n"
+        )
+        for identity in lost:
+            sys.stderr.write("  " + identity + "\n")
+        sys.stderr.write(
+            "Error: roadmap-write-handoff: '## Artifacts Created' is what "
+            "validate-contracts greps to resolve a downstream needs, so writing "
+            "this would leave that contract permanently unmet. Nothing was "
+            "written.\n"
+        )
+        sys.exit(1)
+
+    # No trailing newline of our own: the body already ends with one, and bash
+    # captures this in a command substitution that strips them either way.
+    sys.stdout.write(body)
+    return 0
+
+
+def op_phase_overlap(argv):
+    """The phase ids arrive as the strings the caller typed, because every
+    message quotes them back verbatim ("phase 2.1 not found") and the tasks
+    filename is built from them."""
+    path = _flag(argv, "--roadmap")
+    feature = _flag(argv, "--feature")
+    raw = {"a": _flag(argv, "--phase-a"), "b": _flag(argv, "--phase-b")}
+    if not path or not feature or raw["a"] is None or raw["b"] is None:
+        die(
+            "Usage: roadmap.py phase-overlap --roadmap <path> --feature <slug> "
+            "--phase-a <id> --phase-b <id>"
+        )
+    doc = jq_numbers(read_doc(path, "phase-overlap"))
+    feature_dir = os.path.dirname(path)
+
+    dirs = {side: phase_dirs(doc, jq_numbers(json.loads(raw[side]))) for side in ("a", "b")}
+    for side in ("a", "b"):
+        if not dirs[side]:
+            die("Error: phase-overlap: phase " + raw[side] + " not found in " + path)
+
+    # Mirrors execute.md Step 1.7's PHASE_TASKS_PATH convention:
+    # <feature_dir>/<phase_dir>/<feature>-phase-<id>-tasks.json
+    tasks = {
+        side: feature_dir + "/" + dirs[side] + "/" + feature + "-phase-" + raw[side] + "-tasks.json"
+        for side in ("a", "b")
+    }
+    for side in ("a", "b"):
+        if not os.path.isfile(tasks[side]):
+            die(
+                "Error: phase-overlap: phase " + raw[side] + " has no tasks file yet ("
+                + tasks[side] + ") -- run /aimi:plan --phase " + raw[side]
+                + " to materialize it first"
+            )
+    docs = {}
+    for side in ("a", "b"):
+        try:
+            with open(tasks[side], "r", encoding="utf-8") as handle:
+                docs[side] = jq_numbers(json.load(handle))
+        except (OSError, ValueError):
+            die("Error: phase-overlap: malformed tasks file: " + tasks[side])
+
+    # Both sides are already deduplicated and sorted, so the intersection is too.
+    files_a = jq_unique(overlap_files(docs["a"]))
+    keys_b = {_jq_key(value) for value in jq_unique(overlap_files(docs["b"]))}
+    overlapping = [value for value in files_a if _jq_key(value) in keys_b]
+
+    json.dump({"overlapping_files": overlapping}, sys.stdout, indent=2, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return 0
+
+
 _OPS = {
     "judge-phases": op_judge_phases,
     "verify-creates": op_verify_creates,
@@ -1612,6 +2091,9 @@ _OPS = {
     "init-write": op_init_write,
     "amend-validate": op_amend_validate,
     "amend-write": op_amend_write,
+    "sweep": op_sweep,
+    "write-handoff": op_write_handoff,
+    "phase-overlap": op_phase_overlap,
 }
 
 
