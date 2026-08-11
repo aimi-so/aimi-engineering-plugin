@@ -501,6 +501,38 @@ test_next_story() {
   assert_contains '"id": "US-001"' "$output" "next-story returns first ready by priority"
 }
 
+test_readiness_predicate_has_one_implementation() {
+  echo ""
+  echo "=== Testing list-ready/next-story: one readiness predicate, one ordering ==="
+
+  # The rule these two verbs share was written out twice in aimi-cli.sh, and the
+  # second copy was invisible: cmd_next_story called cmd_list_ready as a shell
+  # FUNCTION and re-sorted its output through a jq of its own, so "one
+  # implementation" held only while nobody touched either. Both crossed into
+  # tasks.py in one commit, and these assertions say so from both ends --
+  # retargeted at the surviving Python symbol the way the maxConcurrency clamp
+  # above was, rather than deleted with the jq they used to scan.
+  #
+  # -F throughout: the deleted text is jq source, full of ( . $ [ ].
+  local tasks_py
+  tasks_py="$(dirname "$CLI")/tasks.py"
+
+  # Scans aimi-cli.sh: neither half of the rule may come back.
+  assert_eq "0" "$(grep -cF 'all(. as $dep_id' "$CLI" || true)" \
+    "list-ready: no jq copy of the dependency walk survives in aimi-cli.sh"
+  assert_eq "0" "$(grep -cF 'sort_by(.priority)' "$CLI" || true)" \
+    "next-story: no jq copy of the priority ordering survives in aimi-cli.sh"
+  # Scans tasks.py: exactly one predicate, which is where it went.
+  assert_eq "1" "$(grep -c '^def is_ready(' "$tasks_py" || true)" \
+    "list-ready: exactly one is_ready definition in tasks.py"
+
+  # And the one rule this port deliberately keeps in BOTH languages. Ten verbs
+  # outside this slice still call the bash function, so it stays until the last
+  # of them crosses; test_tasks.py asserts the two copies print the same bytes.
+  assert_eq "1" "$(grep -c '^validate_story_exists()' "$CLI" || true)" \
+    "validate_story_exists: the bash gate stays for the ten verbs still calling it"
+}
+
 test_mark_in_progress() {
   echo ""
   echo "=== Testing mark-in-progress ==="
@@ -6873,6 +6905,7 @@ main() {
   test_count_pending
   test_list_ready
   test_next_story
+  test_readiness_predicate_has_one_implementation
   test_mark_in_progress
   test_mark_complete
   test_list_ready_after_complete

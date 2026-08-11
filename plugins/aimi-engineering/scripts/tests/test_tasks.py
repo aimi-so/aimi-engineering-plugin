@@ -3,17 +3,19 @@
 THE GOLDEN FILE IS THE POINT OF THIS SUITE, same as it is for test_roadmap.py
 and test_story_merge.py.
 
-`golden_from_jq.json`'s `tasks_read_cases` was captured by running the jq
-implementations that used to live in aimi-cli.sh over 151 adversarial cases,
-BEFORE they were deleted. Like the story-merge capture it records each case's
-INPUT, so every one of them is replayable: test_the_port_reproduces_the_jq
-below re-runs the whole corpus through the CLI and compares every field. That
-test is the evidence the port changed nothing, and it is why the rest of this
-file can stay short -- it asserts the properties a reader would otherwise have
-to reconstruct from 151 recordings by eye.
+`golden_from_jq.json` holds two blocks for this module, each captured by
+running the jq implementations that used to live in aimi-cli.sh, BEFORE they
+were deleted: `tasks_read_cases` (151 cases, the six read verbs) and
+`tasks_ready_cases` (128, list-ready and next-story). Like the story-merge
+capture both record each case's INPUT, so every one is replayable:
+test_the_port_reproduces_the_jq and test_the_ready_port_reproduces_the_jq
+re-run the whole corpus through the CLI and compare every field. Those two
+tests are the evidence the port changed nothing, and they are why the rest of
+this file can stay short -- it asserts the properties a reader would otherwise
+have to reconstruct from 279 recordings by eye.
 
-It must never be regenerated from tasks.py. If a case here goes red, either the
-port drifted or a rule genuinely changed; in the second case the golden file
+Neither must ever be regenerated from tasks.py. If a case here goes red, either
+the port drifted or a rule genuinely changed; in the second case the golden file
 changes in the same commit as the rule, with the reason in the message.
 """
 
@@ -37,6 +39,7 @@ with open(os.path.join(HERE, "golden_from_jq.json"), encoding="utf-8") as _handl
     GOLDEN = json.load(_handle)
 
 CASES = {c["label"]: c for c in GOLDEN["tasks_read_cases"]}
+READY = {c["label"]: c for c in GOLDEN["tasks_ready_cases"]}
 
 
 def _labels(*prefixes):
@@ -144,6 +147,254 @@ def test_each_excused_case_still_refuses(label, tmp_path):
     assert actual["state_after"] == CASES[label]["state_after"], label
 
 
+# ---------------------------------------------------------------------------
+# list-ready, next-story: the same evidence, for the predicate
+# ---------------------------------------------------------------------------
+
+# The 37 cases `_comment_tasks_ready` names, grouped by the shape jq aborted on.
+# Every one of them is an ENGINE message, and they split by verb rather than by
+# input: list-ready surfaced jq's abort as its own exit status, while next-story
+# swallowed it and answered null, so the -next half of each pair diverges on
+# stderr ALONE. test_each_excused_ready_case_keeps_its_answer below asserts that
+# split instead of describing it.
+READY_DIVERGENCES = {}
+_ABORTING = (
+    ("depende-string", "jq aborted iterating a dependsOn that is a string"),
+    ("depende-numero", "jq aborted iterating a dependsOn that is a number"),
+    ("depende-true", "jq aborted taking the length of a boolean dependsOn"),
+    ("gate-string", "jq aborted indexing a gate that is a string"),
+    ("dep-gate-string", "jq aborted indexing a dependency's gate that is a string"),
+    ("historia-string", "jq aborted indexing a story that is a string"),
+    ("us-ausente", "jq aborted iterating a userStories that is absent"),
+    ("us-null", "jq aborted iterating a userStories that is null"),
+    ("us-string", "jq aborted iterating a userStories that is a string"),
+    ("doc-null", "jq aborted iterating .userStories of a null document"),
+    ("doc-array", "jq aborted indexing a document that is an array"),
+    ("doc-malformado", "jq's own parse error, at its own exit 4"),
+)
+for _stem, _why in _ABORTING:
+    for _suffix in ("-ready", "-brief", "-next"):
+        READY_DIVERGENCES[_stem + _suffix] = _why
+# Its own class: nothing aborted, jq was simply handed an empty filename after
+# get_tasks_file had already refused, and complained a second time about it.
+READY_DIVERGENCES["sem-arquivo-next"] = (
+    "jq's extra complaint about the empty filename it was handed"
+)
+
+
+@pytest.mark.parametrize("label", sorted(READY), ids=sorted(READY))
+def test_the_ready_port_reproduces_the_jq(label, tmp_path):
+    case = READY[label]
+    actual = _replay(case, tmp_path)
+    if label in READY_DIVERGENCES:
+        pytest.skip(READY_DIVERGENCES[label])
+    for field in ("exit", "stdout", "stderr", "state_after"):
+        assert actual[field] == case[field], label + " . " + field
+
+
+def test_the_ready_divergence_table_names_only_cases_that_exist():
+    assert set(READY_DIVERGENCES) <= set(READY)
+    assert len(READY_DIVERGENCES) == 37, "the capture's comment names 37; keep the two in step"
+
+
+@pytest.mark.parametrize("label", sorted(READY_DIVERGENCES), ids=sorted(READY_DIVERGENCES))
+def test_each_excused_ready_case_keeps_its_answer(label, tmp_path):
+    """An excused case may lose the engine's WORDING. It may not lose its answer.
+
+    list-ready refused and still refuses, writing nothing to stdout. next-story
+    answered null at exit 0 and still does, down to the state file it cleared --
+    which is the half that matters, because /aimi:next reads that null as "all
+    stories complete" and stops, so a slice that turned it into a non-zero exit
+    would turn a clean stop into a failure.
+    """
+    recorded = READY[label]
+    actual = _replay(recorded, tmp_path)
+    assert actual["stderr"] != recorded["stderr"], label + ": excused for a difference it lacks"
+
+    if label.endswith("-next"):
+        for field in ("exit", "stdout", "state_after"):
+            assert actual[field] == recorded[field], label + " . " + field
+        assert actual["stdout"] == "null\n", label
+        return
+
+    assert recorded["stderr"].startswith(("jq:", "parse error:")), label
+    assert recorded["exit"] in (4, 5), label
+    assert actual["exit"] != 0, label + ": an excused case still has to refuse"
+    assert actual["stdout"] == "", label + ": a refusal writes nothing to stdout"
+    assert actual["stderr"].startswith("Error: "), label
+    assert actual["state_after"] == recorded["state_after"], label
+
+
+def _ready_ids(label):
+    """The ids the RECORDING lists as ready. Read off the capture, never
+    recomputed -- an anti-vacuum check that asked tasks.py what it thinks would
+    be satisfied by any answer it gave."""
+    return [story["id"] for story in json.loads(READY[label]["stdout"])]
+
+
+def _next_id(label):
+    chosen = json.loads(READY[label]["stdout"])
+    return None if chosen is None else chosen["id"]
+
+
+def test_the_ready_corpus_exercises_every_case_it_claims_to():
+    """Eight buckets, each read out of the recording. A corpus missing any one
+    of them would let the replay above pass on nothing -- the comparison is
+    only worth what the inputs cover."""
+    # 1. a plainly ready story
+    assert _ready_ids("pronta-ready") == ["US-001"]
+    # 2. a story held by its OWN pending decision gate, with the near misses
+    #    that must NOT be held: a decision gate already passed or failed, and a
+    #    pending action or verify gate on the story itself.
+    assert _ready_ids("gate-decisao-ready") == ["US-00" + n for n in "2345678"]
+    # 3. a dependency carrying a pending ACTION gate
+    assert _ready_ids("dep-gate-acao-ready") == ["US-004"]
+    # 4. a dependency that is not completed and not skipped
+    assert _ready_ids("dep-status-ready") == ["US-001", "US-009", "US-010", "US-011"]
+    # 5. a dangling dependsOn id, and the ORDER that decides what it does
+    assert "US-001" in _ready_ids("dep-pendurada-ready")
+    assert _ready_ids("dep-pendurada-antes-ready") == ["US-002", "US-005"]
+    # 6. a null priority and an absent one, both ahead of every number
+    assert _next_id("prioridade-nula-next") == "US-002"
+    assert _next_id("prioridade-ausente-next") == "US-001"
+    # 7. a priority tie, broken by tasks.json file order
+    assert _ready_ids("empate-ready") == ["US-007", "US-003", "US-009", "US-002"]
+    assert _next_id("empate-next") == "US-007"
+    # 8. an empty result, from both directions
+    assert _ready_ids("vazio-lista-ready") == []
+    assert _ready_ids("vazio-nada-pendente-ready") == []
+    assert _next_id("vazio-lista-next") is None
+
+
+def test_the_brief_projection_is_six_keys_whatever_the_story_carries():
+    """jq's `{id, title, ...}` emits a key holding null for a field the story
+    does not have, so a story with no project and no gate still yields six.
+    part1-core asserts the count against the CLI; this asserts it against the
+    recording, which is where it was true first."""
+    brief = json.loads(READY["pronta-sem-campos-brief"]["stdout"])
+    assert [list(row) for row in brief] == [list(T.BRIEF_KEYS)]
+    assert brief[0]["project"] is None and brief[0]["gate"] is None
+    # and the raw dependsOn, null and all -- the `// []` belongs to the
+    # predicate, not to this projection
+    assert brief[0]["dependsOn"] is None
+    assert json.loads(READY["dep-pendurada-brief"]["stdout"])[0]["dependsOn"] == ["US-999"]
+
+
+def test_a_dangling_dependency_ends_the_walk_rather_than_merely_not_blocking():
+    """THE trap. jq's `all` stops at the first element whose condition selected
+    nothing and answers true, so ["US-999", "US-001"] is ready while
+    ["US-001", "US-999"] -- same two ids, other order -- is not. A port that
+    treated a dangling id as "not blocking" would agree on the first and be
+    wrong on the second, dropping a story from a wave that runs today."""
+    stories = [
+        {"id": "US-001", "status": "pending"},
+        {"id": "US-002", "status": "pending", "dependsOn": ["US-999", "US-001"]},
+        {"id": "US-003", "status": "pending", "dependsOn": ["US-001", "US-999"]},
+    ]
+    assert T.is_ready(stories[1], stories) is True
+    assert T.is_ready(stories[2], stories) is False
+    # and the same rule inside jq_all_over itself, away from the tasks schema
+    assert T.jq_all_over(["x", "y"], lambda e: [] if e == "x" else [False]) is True
+    assert T.jq_all_over(["y", "x"], lambda e: [] if e == "x" else [False]) is False
+
+
+def test_every_match_of_a_duplicated_dependency_id_is_checked():
+    """`select(.id == $dep_id)` is a filter over a stream, so a tasks file
+    carrying an id twice yields two outputs for one dependsOn entry, and either
+    of them can block."""
+    stories = [
+        {"id": "US-001", "status": "completed"},
+        {"id": "US-001", "status": "completed", "gate": {"type": "action", "status": "pending"}},
+        {"id": "US-002", "status": "pending", "dependsOn": ["US-001"]},
+    ]
+    assert T.is_ready(stories[2], stories) is False
+
+
+def test_a_number_and_an_empty_string_have_length_zero_the_way_jq_said_they_did():
+    """`.dependsOn // []` leaves 0, "" and {} alone -- none of them is null or
+    false -- and all three then have length 0, which short-circuits the whole
+    dependency walk. Recorded as depende-formas, where every one of them is a
+    story the pre-port CLI listed as ready."""
+    assert T.jq_length(0, ".x") == 0
+    assert T.jq_length("", ".x") == 0
+    assert T.jq_length({}, ".x") == 0
+    assert T.jq_length(-3, ".x") == 3
+    with pytest.raises(T.MalformedTasks):
+        T.jq_length(True, ".x")
+    ready = _ready_ids("depende-formas-ready")
+    assert ready == ["US-00" + n for n in "1234678"]
+
+
+def test_the_order_next_story_picks_is_jqs_total_order_and_a_stable_sort():
+    """null < false < true < numbers < strings < arrays < objects, and ties keep
+    file order. Both halves are recorded; this states them as one table so a
+    reader does not have to reconstruct it from six recordings."""
+    assert _next_id("ordem-booleana-next") == "US-003"   # false, below 0 and true
+    assert _next_id("ordem-numero-next") == "US-003"     # true, below every number
+    assert _next_id("ordem-string-next") == "US-002"     # "alta", below an array
+    assert _next_id("ordem-array-next") == "US-002"      # [1], below an object
+    assert _next_id("ordem-negativa-next") == "US-003"   # -1
+    assert _next_id("ordem-float-next") == "US-002"      # 1.0, and printed as 1
+    assert '"priority": 1\n' in READY["ordem-float-next"]["stdout"]
+
+
+VALIDATE_TWINS = ["valida-ausente", "valida-us-string", "valida-doc-malformado"]
+
+
+@pytest.mark.parametrize("label", VALIDATE_TWINS, ids=VALIDATE_TWINS)
+def test_both_validate_story_exists_print_the_same_bytes(label, tmp_path):
+    """The one rule this port writes TWICE, and the only reason that is allowed
+    is that both copies say the same thing.
+
+    Ten bash call sites outlive the slice that ported list-ready, so the bash
+    function stays; a verb already on the Python side needs the same gate
+    without going back. A drift of one byte here would surface three slices
+    later as a test failure with no obvious cause, so it is asserted against
+    the RECORDED jq bytes -- not merely between the two current copies, either
+    of which could have moved together.
+    """
+    recorded = READY[label]
+    root = os.path.realpath(str(tmp_path))
+    tasks_dir = os.path.join(root, ".aimi", "tasks")
+    os.makedirs(tasks_dir, exist_ok=True)
+    target = os.path.join(tasks_dir, recorded["input"]["tasks_file"])
+    with open(target, "w", encoding="utf-8") as handle:
+        handle.write(recorded["input"]["tasks"])
+
+    story_id = recorded["args"][1]
+    twin = subprocess.run(
+        [sys.executable, os.path.join(SCRIPTS, "tasks.py"), "validate-story-exists",
+         "--tasks-file", target, "--story-id", story_id],
+        capture_output=True, text=True,
+    )
+    bash = _replay(recorded, tmp_path)
+
+    expected = "Error: Story " + story_id + " not found in /TMP/.aimi/tasks/" \
+        + recorded["input"]["tasks_file"] + "\n"
+    assert recorded["stderr"] == expected, "the recorded jq bytes"
+    assert bash["stderr"] == expected, "the bash gate, which this slice keeps"
+    assert twin.stderr.replace(root, "/TMP") == expected, "the Python twin"
+    assert recorded["exit"] == bash["exit"] == twin.returncode == 1
+    assert twin.stdout == ""
+
+
+def test_the_twin_stays_quiet_when_the_story_is_there(tmp_path):
+    """A gate that refused EVERYTHING would pass the test above and break every
+    caller, so the passing side is asserted too -- silent, at exit 0, on the
+    same corpus file."""
+    recorded = READY["valida-existe"]
+    assert recorded["exit"] == 0, "the bash side, recorded"
+    target = os.path.join(str(tmp_path), recorded["input"]["tasks_file"])
+    with open(target, "w", encoding="utf-8") as handle:
+        handle.write(recorded["input"]["tasks"])
+    twin = subprocess.run(
+        [sys.executable, os.path.join(SCRIPTS, "tasks.py"), "validate-story-exists",
+         "--tasks-file", target, "--story-id", "US-001"],
+        capture_output=True, text=True,
+    )
+    assert (twin.returncode, twin.stdout, twin.stderr) == (0, "", "")
+
+
 def test_get_story_is_the_verb_the_bash_gate_kept_identical():
     """validate_story_exists stayed in bash, so get-story refuses a broken
     userStories with its OWN message where the other four hit jq's engine. All
@@ -238,9 +489,11 @@ def test_tasks_py_never_names_the_cli_path_cache():
 
 
 def test_tasks_py_opens_nothing_for_writing_and_takes_no_lock():
-    """Six read-only verbs. The one open() in the file is read mode, the only
-    writes go to the two standard streams, and none of the machinery every
-    writer in roadmap.py and story_merge.py needs is here."""
+    """Read-only verbs, every one of them -- list-ready and next-story included,
+    which is why neither closed a race when it crossed. The one open() in the
+    file is read mode, the only writes go to the two standard streams, and none
+    of the machinery every writer in roadmap.py and story_merge.py needs is
+    here."""
     body = _body()
     assert body.count("open(") == 1
     assert 'open(path, "r", encoding="utf-8")' in body
@@ -252,7 +505,11 @@ def test_tasks_py_opens_nothing_for_writing_and_takes_no_lock():
 def test_every_op_is_named_after_the_verb_that_calls_it():
     """roadmap.py needed a _VERB_FOR_OP table because its op names drifted from
     its verb names, and a diagnostic then quoted a command nobody could run.
-    Keeping the names equal is what makes that table unnecessary here."""
+    Keeping the names equal is what makes that table unnecessary here.
+
+    validate-story-exists is the one entry that is not a verb: it names the
+    bash FUNCTION it twins, so `grep validate_story_exists` finds both copies
+    while both exist."""
     assert set(T._OPS) == {
         "status",
         "metadata",
@@ -260,6 +517,9 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "current-story",
         "get-state",
         "count-pending",
+        "list-ready",
+        "next-story",
+        "validate-story-exists",
     }
 
 

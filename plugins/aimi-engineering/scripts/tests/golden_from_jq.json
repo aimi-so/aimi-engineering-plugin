@@ -17211,5 +17211,2112 @@
       "state_after": {}
     }
   ],
-  "_comment_tasks_read": "The six read-only tasks.json verbs -- status (both branches), metadata, get-story, current-story, get-state and count-pending -- captured the same way, before their jq was deleted: 151 cases over one adversarial corpus, at commit 9716146. Recorded per case: the argv, the tasks file the run was given and the .aimi/state/ files it started with (`input`, so the case is REPLAYABLE and not merely described), exit code, stdout, stderr, and every .aimi/ file left behind afterwards (`state_after`), so a read-only verb that wrote something as a side effect could not hide -- 19 cases legitimately leave one, and those recordings are the evidence that get_tasks_file's stale-state self-heal and its .state.lock still run in bash. Each case ran in its own throwaway project root; exactly one normalization rule fired, the temp root to /TMP, and nothing else in the recording is non-deterministic: two runs of the pre-port CLI produce this file byte for byte. The corpus is weighted toward inputs the schema does not allow, because that is the only place jq and Python can differ -- the maxConcurrency value space on all three former call sites (absent, null, false, true, 0, 0.0, -1, -0.5, 20.0, 20.5, 999999, a string, an array, an object), metadata absent / null / {} / a string / an array / a number, userStories absent / null / [] / an object / a string across five verbs, a story that is null and a story that is a string, dependsOn null / false / a string, priority as 1.0, an unknown story id, a duplicated story id, a current-story pointer that is unset / empty / stale / never validated, no tasks file at all, a stale current-tasks pointer, the nested phase-folder layout, and seven whole-document shapes (malformed, empty, null, an array, a number, a string, two concatenated values). 530 of 604 field comparisons identical after the port -- every stdout and every state_after matched in all 151 cases, and 114 of the 151 matched on all four fields. Every clamp case is byte-identical on all three call sites, which is the thing this slice existed to prove: `true` still clamps to 20 because jq orders booleans below numbers so `true <= 0` holds, 0 and 0.0 still clamp because jq's `//` treats both as present, 20.0 still renders as 20 rather than 20.0, and a string, an array or an object still passes through UNCHANGED because jq orders those above numbers and the comparison is simply false -- the case a naive Python `value <= 0` raises TypeError on. The 74 fields that differ fall in 37 cases, are exit code and stderr only, and are ALL of one kind: jq aborting mid-expression, so the exit status was the engine's (5 for a runtime error, 4 for a parse error) and the message the code would otherwise have printed did not exist. Every one of them was, and still is, a refusal that writes nothing to stdout; only the wording and the number moved, to `Error: <verb>: <file>: <expression>: <what went wrong>` at exit 1. Recorded rather than reproduced: synthesizing an engine error would be the only way to match, and that is not a thing to write on purpose -- same shape as the nine named in _comment_lifecycle. They cluster into five classes, and KNOWN_DIVERGENCES in test_tasks.py names all 37 individually. (1) userStories absent, null, an object or a string: 16 cases across status, status --counts-only, count-pending and current-story (`status-us-*`, `counts-us-*`, `count-pending-us-*`, `current-story-us-*`), all of them jq's 'Cannot iterate over null' or 'Cannot iterate over string'. get-story is NOT among them -- validate_story_exists still runs in bash and refuses first, so all five of its us-* cases are byte-identical, which is what keeping that gate out of Python bought. (2) metadata a string, an array or a number: 4 cases (`meta-string`, `meta-array`, `meta-numero`, `status-meta-string`), jq's 'Cannot index ... with string'. (3) a whole document that is not an object: 13 cases (`doc-json-array-*`, `doc-json-numero-*`, `doc-json-string-*`, `doc-json-null-status`, `doc-json-null-count`, `doc-json-dois-valores-status`, `doc-json-dois-valores-count`). doc-json-null-METADATA is deliberately not among them: jq's assignment onto null BUILDS the object, so a null document still yields {\"maxConcurrency\": 20}, and the port does the same. (4) malformed JSON: 3 cases (`doc-json-malformado-*`), jq's own parse error at exit 4. (5) a story that is not an object: 1 case (`historia-nao-objeto`). A story that is NULL is deliberately not among them -- jq indexes null happily and emits a row of nulls, which the port reproduces. Two jq behaviours that have nothing to do with the tasks schema were preserved rather than tidied away, and both are byte-identical here. An EMPTY tasks file makes jq read zero values from its input stream, so the verb prints nothing and exits 0 (`doc-json-vazio-*`, 3 cases): a truncated write reports success, which is a silent hole, ranked and left alone because a port is not where a defect is fixed. And a file holding two concatenated documents runs the verb once per document (`doc-json-dois-valores-metadata`, which prints two objects). tasks.py's read_docs reads the same stream for both reasons; a plain json.load would have broken four otherwise-identical cases to no one's benefit."
+  "_comment_tasks_read": "The six read-only tasks.json verbs -- status (both branches), metadata, get-story, current-story, get-state and count-pending -- captured the same way, before their jq was deleted: 151 cases over one adversarial corpus, at commit 9716146. Recorded per case: the argv, the tasks file the run was given and the .aimi/state/ files it started with (`input`, so the case is REPLAYABLE and not merely described), exit code, stdout, stderr, and every .aimi/ file left behind afterwards (`state_after`), so a read-only verb that wrote something as a side effect could not hide -- 19 cases legitimately leave one, and those recordings are the evidence that get_tasks_file's stale-state self-heal and its .state.lock still run in bash. Each case ran in its own throwaway project root; exactly one normalization rule fired, the temp root to /TMP, and nothing else in the recording is non-deterministic: two runs of the pre-port CLI produce this file byte for byte. The corpus is weighted toward inputs the schema does not allow, because that is the only place jq and Python can differ -- the maxConcurrency value space on all three former call sites (absent, null, false, true, 0, 0.0, -1, -0.5, 20.0, 20.5, 999999, a string, an array, an object), metadata absent / null / {} / a string / an array / a number, userStories absent / null / [] / an object / a string across five verbs, a story that is null and a story that is a string, dependsOn null / false / a string, priority as 1.0, an unknown story id, a duplicated story id, a current-story pointer that is unset / empty / stale / never validated, no tasks file at all, a stale current-tasks pointer, the nested phase-folder layout, and seven whole-document shapes (malformed, empty, null, an array, a number, a string, two concatenated values). 530 of 604 field comparisons identical after the port -- every stdout and every state_after matched in all 151 cases, and 114 of the 151 matched on all four fields. Every clamp case is byte-identical on all three call sites, which is the thing this slice existed to prove: `true` still clamps to 20 because jq orders booleans below numbers so `true <= 0` holds, 0 and 0.0 still clamp because jq's `//` treats both as present, 20.0 still renders as 20 rather than 20.0, and a string, an array or an object still passes through UNCHANGED because jq orders those above numbers and the comparison is simply false -- the case a naive Python `value <= 0` raises TypeError on. The 74 fields that differ fall in 37 cases, are exit code and stderr only, and are ALL of one kind: jq aborting mid-expression, so the exit status was the engine's (5 for a runtime error, 4 for a parse error) and the message the code would otherwise have printed did not exist. Every one of them was, and still is, a refusal that writes nothing to stdout; only the wording and the number moved, to `Error: <verb>: <file>: <expression>: <what went wrong>` at exit 1. Recorded rather than reproduced: synthesizing an engine error would be the only way to match, and that is not a thing to write on purpose -- same shape as the nine named in _comment_lifecycle. They cluster into five classes, and KNOWN_DIVERGENCES in test_tasks.py names all 37 individually. (1) userStories absent, null, an object or a string: 16 cases across status, status --counts-only, count-pending and current-story (`status-us-*`, `counts-us-*`, `count-pending-us-*`, `current-story-us-*`), all of them jq's 'Cannot iterate over null' or 'Cannot iterate over string'. get-story is NOT among them -- validate_story_exists still runs in bash and refuses first, so all five of its us-* cases are byte-identical, which is what keeping that gate out of Python bought. (2) metadata a string, an array or a number: 4 cases (`meta-string`, `meta-array`, `meta-numero`, `status-meta-string`), jq's 'Cannot index ... with string'. (3) a whole document that is not an object: 13 cases (`doc-json-array-*`, `doc-json-numero-*`, `doc-json-string-*`, `doc-json-null-status`, `doc-json-null-count`, `doc-json-dois-valores-status`, `doc-json-dois-valores-count`). doc-json-null-METADATA is deliberately not among them: jq's assignment onto null BUILDS the object, so a null document still yields {\"maxConcurrency\": 20}, and the port does the same. (4) malformed JSON: 3 cases (`doc-json-malformado-*`), jq's own parse error at exit 4. (5) a story that is not an object: 1 case (`historia-nao-objeto`). A story that is NULL is deliberately not among them -- jq indexes null happily and emits a row of nulls, which the port reproduces. Two jq behaviours that have nothing to do with the tasks schema were preserved rather than tidied away, and both are byte-identical here. An EMPTY tasks file makes jq read zero values from its input stream, so the verb prints nothing and exits 0 (`doc-json-vazio-*`, 3 cases): a truncated write reports success, which is a silent hole, ranked and left alone because a port is not where a defect is fixed. And a file holding two concatenated documents runs the verb once per document (`doc-json-dois-valores-metadata`, which prints two objects). tasks.py's read_docs reads the same stream for both reasons; a plain json.load would have broken four otherwise-identical cases to no one's benefit.",
+  "tasks_ready_cases": [
+    {
+      "label": "pronta-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want A.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"project\": \"backend\",\n      \"gate\": {\n        \"type\": \"verify\",\n        \"status\": \"pending\",\n        \"prompt\": \"check\"\n      },\n      \"wave\": 1\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want A.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"project\": \"backend\",\n    \"gate\": {\n      \"type\": \"verify\",\n      \"status\": \"pending\",\n      \"prompt\": \"check\"\n    },\n    \"wave\": 1\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "pronta-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want A.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"project\": \"backend\",\n      \"gate\": {\n        \"type\": \"verify\",\n        \"status\": \"pending\",\n        \"prompt\": \"check\"\n      },\n      \"wave\": 1\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"project\": \"backend\",\n    \"gate\": {\n      \"type\": \"verify\",\n      \"status\": \"pending\",\n      \"prompt\": \"check\"\n    }\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "pronta-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want A.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"project\": \"backend\",\n      \"gate\": {\n        \"type\": \"verify\",\n        \"status\": \"pending\",\n        \"prompt\": \"check\"\n      },\n      \"wave\": 1\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"id\": \"US-001\",\n  \"title\": \"Story US-001\",\n  \"description\": \"As a user, I want A.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"status\": \"pending\",\n  \"priority\": 1,\n  \"dependsOn\": [],\n  \"project\": \"backend\",\n  \"gate\": {\n    \"type\": \"verify\",\n    \"status\": \"pending\",\n    \"prompt\": \"check\"\n  },\n  \"wave\": 1\n}\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": "",
+        "current-story": "US-001\n"
+      }
+    },
+    {
+      "label": "pronta-sem-campos-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\"\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"status\": \"pending\"\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "pronta-sem-campos-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\"\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"priority\": null,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "pronta-sem-campos-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\"\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"id\": \"US-001\",\n  \"title\": \"Story US-001\",\n  \"status\": \"pending\"\n}\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": "",
+        "current-story": "US-001\n"
+      }
+    },
+    {
+      "label": "vazio-nada-pendente-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"completed\",\n      \"priority\": 1\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"skipped\",\n      \"priority\": 2\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"failed\",\n      \"priority\": 3\n    },\n    {\n      \"id\": \"US-004\",\n      \"title\": \"Story US-004\",\n      \"status\": \"in_progress\",\n      \"priority\": 4\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "vazio-nada-pendente-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"completed\",\n      \"priority\": 1\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"skipped\",\n      \"priority\": 2\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"failed\",\n      \"priority\": 3\n    },\n    {\n      \"id\": \"US-004\",\n      \"title\": \"Story US-004\",\n      \"status\": \"in_progress\",\n      \"priority\": 4\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "vazio-nada-pendente-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"completed\",\n      \"priority\": 1\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"skipped\",\n      \"priority\": 2\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"failed\",\n      \"priority\": 3\n    },\n    {\n      \"id\": \"US-004\",\n      \"title\": \"Story US-004\",\n      \"status\": \"in_progress\",\n      \"priority\": 4\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "null\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": ""
+      }
+    },
+    {
+      "label": "vazio-lista-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": []\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "vazio-lista-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": []\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "vazio-lista-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": []\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "null\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": ""
+      }
+    },
+    {
+      "label": "gate-decisao-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"gate\": {\n        \"type\": \"decision\",\n        \"status\": \"pending\"\n      }\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 2,\n      \"gate\": {\n        \"type\": \"decision\",\n        \"status\": \"passed\"\n      }\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": 3,\n      \"gate\": {\n        \"type\": \"decision\",\n        \"status\": \"failed\"\n      }\n    },\n    {\n      \"id\": \"US-004\",\n      \"title\": \"Story US-004\",\n      \"status\": \"pending\",\n      \"priority\": 4,\n      \"gate\": {\n        \"type\": \"action\",\n        \"status\": \"pending\"\n      }\n    },\n    {\n      \"id\": \"US-005\",\n      \"title\": \"Story US-005\",\n      \"status\": \"pending\",\n      \"priority\": 5,\n      \"gate\": {\n        \"type\": \"verify\",\n        \"status\": \"pending\"\n      }\n    },\n    {\n      \"id\": \"US-006\",\n      \"title\": \"Story US-006\",\n      \"status\": \"pending\",\n      \"priority\": 6,\n      \"gate\": null\n    },\n    {\n      \"id\": \"US-007\",\n      \"title\": \"Story US-007\",\n      \"status\": \"pending\",\n      \"priority\": 7,\n      \"gate\": {}\n    },\n    {\n      \"id\": \"US-008\",\n      \"title\": \"Story US-008\",\n      \"status\": \"pending\",\n      \"priority\": 8\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"status\": \"pending\",\n    \"priority\": 2,\n    \"gate\": {\n      \"type\": \"decision\",\n      \"status\": \"passed\"\n    }\n  },\n  {\n    \"id\": \"US-003\",\n    \"title\": \"Story US-003\",\n    \"status\": \"pending\",\n    \"priority\": 3,\n    \"gate\": {\n      \"type\": \"decision\",\n      \"status\": \"failed\"\n    }\n  },\n  {\n    \"id\": \"US-004\",\n    \"title\": \"Story US-004\",\n    \"status\": \"pending\",\n    \"priority\": 4,\n    \"gate\": {\n      \"type\": \"action\",\n      \"status\": \"pending\"\n    }\n  },\n  {\n    \"id\": \"US-005\",\n    \"title\": \"Story US-005\",\n    \"status\": \"pending\",\n    \"priority\": 5,\n    \"gate\": {\n      \"type\": \"verify\",\n      \"status\": \"pending\"\n    }\n  },\n  {\n    \"id\": \"US-006\",\n    \"title\": \"Story US-006\",\n    \"status\": \"pending\",\n    \"priority\": 6,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-007\",\n    \"title\": \"Story US-007\",\n    \"status\": \"pending\",\n    \"priority\": 7,\n    \"gate\": {}\n  },\n  {\n    \"id\": \"US-008\",\n    \"title\": \"Story US-008\",\n    \"status\": \"pending\",\n    \"priority\": 8\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "gate-decisao-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"gate\": {\n        \"type\": \"decision\",\n        \"status\": \"pending\"\n      }\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 2,\n      \"gate\": {\n        \"type\": \"decision\",\n        \"status\": \"passed\"\n      }\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": 3,\n      \"gate\": {\n        \"type\": \"decision\",\n        \"status\": \"failed\"\n      }\n    },\n    {\n      \"id\": \"US-004\",\n      \"title\": \"Story US-004\",\n      \"status\": \"pending\",\n      \"priority\": 4,\n      \"gate\": {\n        \"type\": \"action\",\n        \"status\": \"pending\"\n      }\n    },\n    {\n      \"id\": \"US-005\",\n      \"title\": \"Story US-005\",\n      \"status\": \"pending\",\n      \"priority\": 5,\n      \"gate\": {\n        \"type\": \"verify\",\n        \"status\": \"pending\"\n      }\n    },\n    {\n      \"id\": \"US-006\",\n      \"title\": \"Story US-006\",\n      \"status\": \"pending\",\n      \"priority\": 6,\n      \"gate\": null\n    },\n    {\n      \"id\": \"US-007\",\n      \"title\": \"Story US-007\",\n      \"status\": \"pending\",\n      \"priority\": 7,\n      \"gate\": {}\n    },\n    {\n      \"id\": \"US-008\",\n      \"title\": \"Story US-008\",\n      \"status\": \"pending\",\n      \"priority\": 8\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"priority\": 2,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": {\n      \"type\": \"decision\",\n      \"status\": \"passed\"\n    }\n  },\n  {\n    \"id\": \"US-003\",\n    \"title\": \"Story US-003\",\n    \"priority\": 3,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": {\n      \"type\": \"decision\",\n      \"status\": \"failed\"\n    }\n  },\n  {\n    \"id\": \"US-004\",\n    \"title\": \"Story US-004\",\n    \"priority\": 4,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": {\n      \"type\": \"action\",\n      \"status\": \"pending\"\n    }\n  },\n  {\n    \"id\": \"US-005\",\n    \"title\": \"Story US-005\",\n    \"priority\": 5,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": {\n      \"type\": \"verify\",\n      \"status\": \"pending\"\n    }\n  },\n  {\n    \"id\": \"US-006\",\n    \"title\": \"Story US-006\",\n    \"priority\": 6,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-007\",\n    \"title\": \"Story US-007\",\n    \"priority\": 7,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": {}\n  },\n  {\n    \"id\": \"US-008\",\n    \"title\": \"Story US-008\",\n    \"priority\": 8,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "gate-decisao-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"gate\": {\n        \"type\": \"decision\",\n        \"status\": \"pending\"\n      }\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 2,\n      \"gate\": {\n        \"type\": \"decision\",\n        \"status\": \"passed\"\n      }\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": 3,\n      \"gate\": {\n        \"type\": \"decision\",\n        \"status\": \"failed\"\n      }\n    },\n    {\n      \"id\": \"US-004\",\n      \"title\": \"Story US-004\",\n      \"status\": \"pending\",\n      \"priority\": 4,\n      \"gate\": {\n        \"type\": \"action\",\n        \"status\": \"pending\"\n      }\n    },\n    {\n      \"id\": \"US-005\",\n      \"title\": \"Story US-005\",\n      \"status\": \"pending\",\n      \"priority\": 5,\n      \"gate\": {\n        \"type\": \"verify\",\n        \"status\": \"pending\"\n      }\n    },\n    {\n      \"id\": \"US-006\",\n      \"title\": \"Story US-006\",\n      \"status\": \"pending\",\n      \"priority\": 6,\n      \"gate\": null\n    },\n    {\n      \"id\": \"US-007\",\n      \"title\": \"Story US-007\",\n      \"status\": \"pending\",\n      \"priority\": 7,\n      \"gate\": {}\n    },\n    {\n      \"id\": \"US-008\",\n      \"title\": \"Story US-008\",\n      \"status\": \"pending\",\n      \"priority\": 8\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"id\": \"US-002\",\n  \"title\": \"Story US-002\",\n  \"status\": \"pending\",\n  \"priority\": 2,\n  \"gate\": {\n    \"type\": \"decision\",\n    \"status\": \"passed\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": "",
+        "current-story": "US-002\n"
+      }
+    },
+    {
+      "label": "dep-gate-acao-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"gate\": {\n        \"type\": \"action\",\n        \"status\": \"pending\"\n      }\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"completed\",\n      \"priority\": 2,\n      \"gate\": {\n        \"type\": \"action\",\n        \"status\": \"passed\"\n      }\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": 3,\n      \"dependsOn\": [\n        \"US-001\"\n      ]\n    },\n    {\n      \"id\": \"US-004\",\n      \"title\": \"Story US-004\",\n      \"status\": \"pending\",\n      \"priority\": 4,\n      \"dependsOn\": [\n        \"US-002\"\n      ]\n    },\n    {\n      \"id\": \"US-005\",\n      \"title\": \"Story US-005\",\n      \"status\": \"pending\",\n      \"priority\": 5,\n      \"dependsOn\": [\n        \"US-001\",\n        \"US-002\"\n      ]\n    },\n    {\n      \"id\": \"US-006\",\n      \"title\": \"Story US-006\",\n      \"status\": \"pending\",\n      \"priority\": 6,\n      \"dependsOn\": [\n        \"US-002\",\n        \"US-001\"\n      ]\n    },\n    {\n      \"id\": \"US-007\",\n      \"title\": \"Story US-007\",\n      \"status\": \"pending\",\n      \"priority\": 7,\n      \"dependsOn\": [\n        \"US-002\"\n      ],\n      \"gate\": {\n        \"type\": \"decision\",\n        \"status\": \"pending\"\n      }\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-004\",\n    \"title\": \"Story US-004\",\n    \"status\": \"pending\",\n    \"priority\": 4,\n    \"dependsOn\": [\n      \"US-002\"\n    ]\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "dep-gate-acao-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"gate\": {\n        \"type\": \"action\",\n        \"status\": \"pending\"\n      }\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"completed\",\n      \"priority\": 2,\n      \"gate\": {\n        \"type\": \"action\",\n        \"status\": \"passed\"\n      }\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": 3,\n      \"dependsOn\": [\n        \"US-001\"\n      ]\n    },\n    {\n      \"id\": \"US-004\",\n      \"title\": \"Story US-004\",\n      \"status\": \"pending\",\n      \"priority\": 4,\n      \"dependsOn\": [\n        \"US-002\"\n      ]\n    },\n    {\n      \"id\": \"US-005\",\n      \"title\": \"Story US-005\",\n      \"status\": \"pending\",\n      \"priority\": 5,\n      \"dependsOn\": [\n        \"US-001\",\n        \"US-002\"\n      ]\n    },\n    {\n      \"id\": \"US-006\",\n      \"title\": \"Story US-006\",\n      \"status\": \"pending\",\n      \"priority\": 6,\n      \"dependsOn\": [\n        \"US-002\",\n        \"US-001\"\n      ]\n    },\n    {\n      \"id\": \"US-007\",\n      \"title\": \"Story US-007\",\n      \"status\": \"pending\",\n      \"priority\": 7,\n      \"dependsOn\": [\n        \"US-002\"\n      ],\n      \"gate\": {\n        \"type\": \"decision\",\n        \"status\": \"pending\"\n      }\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-004\",\n    \"title\": \"Story US-004\",\n    \"priority\": 4,\n    \"dependsOn\": [\n      \"US-002\"\n    ],\n    \"project\": null,\n    \"gate\": null\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "dep-gate-acao-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"gate\": {\n        \"type\": \"action\",\n        \"status\": \"pending\"\n      }\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"completed\",\n      \"priority\": 2,\n      \"gate\": {\n        \"type\": \"action\",\n        \"status\": \"passed\"\n      }\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": 3,\n      \"dependsOn\": [\n        \"US-001\"\n      ]\n    },\n    {\n      \"id\": \"US-004\",\n      \"title\": \"Story US-004\",\n      \"status\": \"pending\",\n      \"priority\": 4,\n      \"dependsOn\": [\n        \"US-002\"\n      ]\n    },\n    {\n      \"id\": \"US-005\",\n      \"title\": \"Story US-005\",\n      \"status\": \"pending\",\n      \"priority\": 5,\n      \"dependsOn\": [\n        \"US-001\",\n        \"US-002\"\n      ]\n    },\n    {\n      \"id\": \"US-006\",\n      \"title\": \"Story US-006\",\n      \"status\": \"pending\",\n      \"priority\": 6,\n      \"dependsOn\": [\n        \"US-002\",\n        \"US-001\"\n      ]\n    },\n    {\n      \"id\": \"US-007\",\n      \"title\": \"Story US-007\",\n      \"status\": \"pending\",\n      \"priority\": 7,\n      \"dependsOn\": [\n        \"US-002\"\n      ],\n      \"gate\": {\n        \"type\": \"decision\",\n        \"status\": \"pending\"\n      }\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"id\": \"US-004\",\n  \"title\": \"Story US-004\",\n  \"status\": \"pending\",\n  \"priority\": 4,\n  \"dependsOn\": [\n    \"US-002\"\n  ]\n}\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": "",
+        "current-story": "US-004\n"
+      }
+    },
+    {
+      "label": "dep-status-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"in_progress\",\n      \"priority\": 2\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"failed\",\n      \"priority\": 3\n    },\n    {\n      \"id\": \"US-004\",\n      \"title\": \"Story US-004\",\n      \"status\": \"completed\",\n      \"priority\": 4\n    },\n    {\n      \"id\": \"US-005\",\n      \"title\": \"Story US-005\",\n      \"status\": \"skipped\",\n      \"priority\": 5\n    },\n    {\n      \"id\": \"US-006\",\n      \"title\": \"Story US-006\",\n      \"status\": \"pending\",\n      \"priority\": 6,\n      \"dependsOn\": [\n        \"US-001\"\n      ]\n    },\n    {\n      \"id\": \"US-007\",\n      \"title\": \"Story US-007\",\n      \"status\": \"pending\",\n      \"priority\": 7,\n      \"dependsOn\": [\n        \"US-002\"\n      ]\n    },\n    {\n      \"id\": \"US-008\",\n      \"title\": \"Story US-008\",\n      \"status\": \"pending\",\n      \"priority\": 8,\n      \"dependsOn\": [\n        \"US-003\"\n      ]\n    },\n    {\n      \"id\": \"US-009\",\n      \"title\": \"Story US-009\",\n      \"status\": \"pending\",\n      \"priority\": 9,\n      \"dependsOn\": [\n        \"US-004\"\n      ]\n    },\n    {\n      \"id\": \"US-010\",\n      \"title\": \"Story US-010\",\n      \"status\": \"pending\",\n      \"priority\": 10,\n      \"dependsOn\": [\n        \"US-005\"\n      ]\n    },\n    {\n      \"id\": \"US-011\",\n      \"title\": \"Story US-011\",\n      \"status\": \"pending\",\n      \"priority\": 11,\n      \"dependsOn\": [\n        \"US-004\",\n        \"US-005\"\n      ]\n    },\n    {\n      \"id\": \"US-012\",\n      \"title\": \"Story US-012\",\n      \"status\": \"pending\",\n      \"priority\": 12,\n      \"dependsOn\": [\n        \"US-004\",\n        \"US-001\"\n      ]\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"status\": \"pending\",\n    \"priority\": 1\n  },\n  {\n    \"id\": \"US-009\",\n    \"title\": \"Story US-009\",\n    \"status\": \"pending\",\n    \"priority\": 9,\n    \"dependsOn\": [\n      \"US-004\"\n    ]\n  },\n  {\n    \"id\": \"US-010\",\n    \"title\": \"Story US-010\",\n    \"status\": \"pending\",\n    \"priority\": 10,\n    \"dependsOn\": [\n      \"US-005\"\n    ]\n  },\n  {\n    \"id\": \"US-011\",\n    \"title\": \"Story US-011\",\n    \"status\": \"pending\",\n    \"priority\": 11,\n    \"dependsOn\": [\n      \"US-004\",\n      \"US-005\"\n    ]\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "dep-status-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"in_progress\",\n      \"priority\": 2\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"failed\",\n      \"priority\": 3\n    },\n    {\n      \"id\": \"US-004\",\n      \"title\": \"Story US-004\",\n      \"status\": \"completed\",\n      \"priority\": 4\n    },\n    {\n      \"id\": \"US-005\",\n      \"title\": \"Story US-005\",\n      \"status\": \"skipped\",\n      \"priority\": 5\n    },\n    {\n      \"id\": \"US-006\",\n      \"title\": \"Story US-006\",\n      \"status\": \"pending\",\n      \"priority\": 6,\n      \"dependsOn\": [\n        \"US-001\"\n      ]\n    },\n    {\n      \"id\": \"US-007\",\n      \"title\": \"Story US-007\",\n      \"status\": \"pending\",\n      \"priority\": 7,\n      \"dependsOn\": [\n        \"US-002\"\n      ]\n    },\n    {\n      \"id\": \"US-008\",\n      \"title\": \"Story US-008\",\n      \"status\": \"pending\",\n      \"priority\": 8,\n      \"dependsOn\": [\n        \"US-003\"\n      ]\n    },\n    {\n      \"id\": \"US-009\",\n      \"title\": \"Story US-009\",\n      \"status\": \"pending\",\n      \"priority\": 9,\n      \"dependsOn\": [\n        \"US-004\"\n      ]\n    },\n    {\n      \"id\": \"US-010\",\n      \"title\": \"Story US-010\",\n      \"status\": \"pending\",\n      \"priority\": 10,\n      \"dependsOn\": [\n        \"US-005\"\n      ]\n    },\n    {\n      \"id\": \"US-011\",\n      \"title\": \"Story US-011\",\n      \"status\": \"pending\",\n      \"priority\": 11,\n      \"dependsOn\": [\n        \"US-004\",\n        \"US-005\"\n      ]\n    },\n    {\n      \"id\": \"US-012\",\n      \"title\": \"Story US-012\",\n      \"status\": \"pending\",\n      \"priority\": 12,\n      \"dependsOn\": [\n        \"US-004\",\n        \"US-001\"\n      ]\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"priority\": 1,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-009\",\n    \"title\": \"Story US-009\",\n    \"priority\": 9,\n    \"dependsOn\": [\n      \"US-004\"\n    ],\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-010\",\n    \"title\": \"Story US-010\",\n    \"priority\": 10,\n    \"dependsOn\": [\n      \"US-005\"\n    ],\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-011\",\n    \"title\": \"Story US-011\",\n    \"priority\": 11,\n    \"dependsOn\": [\n      \"US-004\",\n      \"US-005\"\n    ],\n    \"project\": null,\n    \"gate\": null\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "dep-status-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"in_progress\",\n      \"priority\": 2\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"failed\",\n      \"priority\": 3\n    },\n    {\n      \"id\": \"US-004\",\n      \"title\": \"Story US-004\",\n      \"status\": \"completed\",\n      \"priority\": 4\n    },\n    {\n      \"id\": \"US-005\",\n      \"title\": \"Story US-005\",\n      \"status\": \"skipped\",\n      \"priority\": 5\n    },\n    {\n      \"id\": \"US-006\",\n      \"title\": \"Story US-006\",\n      \"status\": \"pending\",\n      \"priority\": 6,\n      \"dependsOn\": [\n        \"US-001\"\n      ]\n    },\n    {\n      \"id\": \"US-007\",\n      \"title\": \"Story US-007\",\n      \"status\": \"pending\",\n      \"priority\": 7,\n      \"dependsOn\": [\n        \"US-002\"\n      ]\n    },\n    {\n      \"id\": \"US-008\",\n      \"title\": \"Story US-008\",\n      \"status\": \"pending\",\n      \"priority\": 8,\n      \"dependsOn\": [\n        \"US-003\"\n      ]\n    },\n    {\n      \"id\": \"US-009\",\n      \"title\": \"Story US-009\",\n      \"status\": \"pending\",\n      \"priority\": 9,\n      \"dependsOn\": [\n        \"US-004\"\n      ]\n    },\n    {\n      \"id\": \"US-010\",\n      \"title\": \"Story US-010\",\n      \"status\": \"pending\",\n      \"priority\": 10,\n      \"dependsOn\": [\n        \"US-005\"\n      ]\n    },\n    {\n      \"id\": \"US-011\",\n      \"title\": \"Story US-011\",\n      \"status\": \"pending\",\n      \"priority\": 11,\n      \"dependsOn\": [\n        \"US-004\",\n        \"US-005\"\n      ]\n    },\n    {\n      \"id\": \"US-012\",\n      \"title\": \"Story US-012\",\n      \"status\": \"pending\",\n      \"priority\": 12,\n      \"dependsOn\": [\n        \"US-004\",\n        \"US-001\"\n      ]\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"id\": \"US-001\",\n  \"title\": \"Story US-001\",\n  \"status\": \"pending\",\n  \"priority\": 1\n}\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": "",
+        "current-story": "US-001\n"
+      }
+    },
+    {
+      "label": "dep-pendurada-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [\n        \"US-999\"\n      ]\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 2,\n      \"dependsOn\": [\n        \"US-999\",\n        \"US-001\"\n      ]\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": 3,\n      \"dependsOn\": [\n        \"US-900\",\n        \"US-901\"\n      ]\n    },\n    {\n      \"id\": \"US-004\",\n      \"title\": \"Story US-004\",\n      \"status\": \"completed\",\n      \"priority\": 4\n    },\n    {\n      \"id\": \"US-005\",\n      \"title\": \"Story US-005\",\n      \"status\": \"pending\",\n      \"priority\": 5,\n      \"dependsOn\": [\n        \"US-004\",\n        \"US-902\"\n      ]\n    },\n    {\n      \"id\": \"US-006\",\n      \"title\": \"Story US-006\",\n      \"status\": \"pending\",\n      \"priority\": 6,\n      \"dependsOn\": [\n        null\n      ]\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [\n      \"US-999\"\n    ]\n  },\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"status\": \"pending\",\n    \"priority\": 2,\n    \"dependsOn\": [\n      \"US-999\",\n      \"US-001\"\n    ]\n  },\n  {\n    \"id\": \"US-003\",\n    \"title\": \"Story US-003\",\n    \"status\": \"pending\",\n    \"priority\": 3,\n    \"dependsOn\": [\n      \"US-900\",\n      \"US-901\"\n    ]\n  },\n  {\n    \"id\": \"US-005\",\n    \"title\": \"Story US-005\",\n    \"status\": \"pending\",\n    \"priority\": 5,\n    \"dependsOn\": [\n      \"US-004\",\n      \"US-902\"\n    ]\n  },\n  {\n    \"id\": \"US-006\",\n    \"title\": \"Story US-006\",\n    \"status\": \"pending\",\n    \"priority\": 6,\n    \"dependsOn\": [\n      null\n    ]\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "dep-pendurada-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [\n        \"US-999\"\n      ]\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 2,\n      \"dependsOn\": [\n        \"US-999\",\n        \"US-001\"\n      ]\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": 3,\n      \"dependsOn\": [\n        \"US-900\",\n        \"US-901\"\n      ]\n    },\n    {\n      \"id\": \"US-004\",\n      \"title\": \"Story US-004\",\n      \"status\": \"completed\",\n      \"priority\": 4\n    },\n    {\n      \"id\": \"US-005\",\n      \"title\": \"Story US-005\",\n      \"status\": \"pending\",\n      \"priority\": 5,\n      \"dependsOn\": [\n        \"US-004\",\n        \"US-902\"\n      ]\n    },\n    {\n      \"id\": \"US-006\",\n      \"title\": \"Story US-006\",\n      \"status\": \"pending\",\n      \"priority\": 6,\n      \"dependsOn\": [\n        null\n      ]\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"priority\": 1,\n    \"dependsOn\": [\n      \"US-999\"\n    ],\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"priority\": 2,\n    \"dependsOn\": [\n      \"US-999\",\n      \"US-001\"\n    ],\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-003\",\n    \"title\": \"Story US-003\",\n    \"priority\": 3,\n    \"dependsOn\": [\n      \"US-900\",\n      \"US-901\"\n    ],\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-005\",\n    \"title\": \"Story US-005\",\n    \"priority\": 5,\n    \"dependsOn\": [\n      \"US-004\",\n      \"US-902\"\n    ],\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-006\",\n    \"title\": \"Story US-006\",\n    \"priority\": 6,\n    \"dependsOn\": [\n      null\n    ],\n    \"project\": null,\n    \"gate\": null\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "dep-pendurada-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [\n        \"US-999\"\n      ]\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 2,\n      \"dependsOn\": [\n        \"US-999\",\n        \"US-001\"\n      ]\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": 3,\n      \"dependsOn\": [\n        \"US-900\",\n        \"US-901\"\n      ]\n    },\n    {\n      \"id\": \"US-004\",\n      \"title\": \"Story US-004\",\n      \"status\": \"completed\",\n      \"priority\": 4\n    },\n    {\n      \"id\": \"US-005\",\n      \"title\": \"Story US-005\",\n      \"status\": \"pending\",\n      \"priority\": 5,\n      \"dependsOn\": [\n        \"US-004\",\n        \"US-902\"\n      ]\n    },\n    {\n      \"id\": \"US-006\",\n      \"title\": \"Story US-006\",\n      \"status\": \"pending\",\n      \"priority\": 6,\n      \"dependsOn\": [\n        null\n      ]\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"id\": \"US-001\",\n  \"title\": \"Story US-001\",\n  \"status\": \"pending\",\n  \"priority\": 1,\n  \"dependsOn\": [\n    \"US-999\"\n  ]\n}\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": "",
+        "current-story": "US-001\n"
+      }
+    },
+    {
+      "label": "dep-pendurada-antes-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"gate\": {\n        \"type\": \"action\",\n        \"status\": \"pending\"\n      }\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 2,\n      \"dependsOn\": [\n        \"US-999\",\n        \"US-001\"\n      ]\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": 3,\n      \"dependsOn\": [\n        \"US-001\",\n        \"US-999\"\n      ]\n    },\n    {\n      \"id\": \"US-004\",\n      \"title\": \"Story US-004\",\n      \"status\": \"in_progress\",\n      \"priority\": 4\n    },\n    {\n      \"id\": \"US-005\",\n      \"title\": \"Story US-005\",\n      \"status\": \"pending\",\n      \"priority\": 5,\n      \"dependsOn\": [\n        \"US-999\",\n        \"US-004\"\n      ]\n    },\n    {\n      \"id\": \"US-006\",\n      \"title\": \"Story US-006\",\n      \"status\": \"pending\",\n      \"priority\": 6,\n      \"dependsOn\": [\n        \"US-004\",\n        \"US-999\"\n      ]\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"status\": \"pending\",\n    \"priority\": 2,\n    \"dependsOn\": [\n      \"US-999\",\n      \"US-001\"\n    ]\n  },\n  {\n    \"id\": \"US-005\",\n    \"title\": \"Story US-005\",\n    \"status\": \"pending\",\n    \"priority\": 5,\n    \"dependsOn\": [\n      \"US-999\",\n      \"US-004\"\n    ]\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "dep-pendurada-antes-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"gate\": {\n        \"type\": \"action\",\n        \"status\": \"pending\"\n      }\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 2,\n      \"dependsOn\": [\n        \"US-999\",\n        \"US-001\"\n      ]\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": 3,\n      \"dependsOn\": [\n        \"US-001\",\n        \"US-999\"\n      ]\n    },\n    {\n      \"id\": \"US-004\",\n      \"title\": \"Story US-004\",\n      \"status\": \"in_progress\",\n      \"priority\": 4\n    },\n    {\n      \"id\": \"US-005\",\n      \"title\": \"Story US-005\",\n      \"status\": \"pending\",\n      \"priority\": 5,\n      \"dependsOn\": [\n        \"US-999\",\n        \"US-004\"\n      ]\n    },\n    {\n      \"id\": \"US-006\",\n      \"title\": \"Story US-006\",\n      \"status\": \"pending\",\n      \"priority\": 6,\n      \"dependsOn\": [\n        \"US-004\",\n        \"US-999\"\n      ]\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"priority\": 2,\n    \"dependsOn\": [\n      \"US-999\",\n      \"US-001\"\n    ],\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-005\",\n    \"title\": \"Story US-005\",\n    \"priority\": 5,\n    \"dependsOn\": [\n      \"US-999\",\n      \"US-004\"\n    ],\n    \"project\": null,\n    \"gate\": null\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "dep-pendurada-antes-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"gate\": {\n        \"type\": \"action\",\n        \"status\": \"pending\"\n      }\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 2,\n      \"dependsOn\": [\n        \"US-999\",\n        \"US-001\"\n      ]\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": 3,\n      \"dependsOn\": [\n        \"US-001\",\n        \"US-999\"\n      ]\n    },\n    {\n      \"id\": \"US-004\",\n      \"title\": \"Story US-004\",\n      \"status\": \"in_progress\",\n      \"priority\": 4\n    },\n    {\n      \"id\": \"US-005\",\n      \"title\": \"Story US-005\",\n      \"status\": \"pending\",\n      \"priority\": 5,\n      \"dependsOn\": [\n        \"US-999\",\n        \"US-004\"\n      ]\n    },\n    {\n      \"id\": \"US-006\",\n      \"title\": \"Story US-006\",\n      \"status\": \"pending\",\n      \"priority\": 6,\n      \"dependsOn\": [\n        \"US-004\",\n        \"US-999\"\n      ]\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"id\": \"US-002\",\n  \"title\": \"Story US-002\",\n  \"status\": \"pending\",\n  \"priority\": 2,\n  \"dependsOn\": [\n    \"US-999\",\n    \"US-001\"\n  ]\n}\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": "",
+        "current-story": "US-002\n"
+      }
+    },
+    {
+      "label": "dep-pendurada-duplicada-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"gate\": {\n        \"type\": \"action\",\n        \"status\": \"pending\"\n      }\n    },\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"completed\",\n      \"priority\": 2\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 3,\n      \"dependsOn\": [\n        \"US-001\"\n      ]\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "dep-pendurada-duplicada-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"gate\": {\n        \"type\": \"action\",\n        \"status\": \"pending\"\n      }\n    },\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"completed\",\n      \"priority\": 2\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 3,\n      \"dependsOn\": [\n        \"US-001\"\n      ]\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "dep-pendurada-duplicada-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"gate\": {\n        \"type\": \"action\",\n        \"status\": \"pending\"\n      }\n    },\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"completed\",\n      \"priority\": 2\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 3,\n      \"dependsOn\": [\n        \"US-001\"\n      ]\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "null\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": ""
+      }
+    },
+    {
+      "label": "empate-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-007\",\n      \"title\": \"Story US-007\",\n      \"status\": \"pending\",\n      \"priority\": 5\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": 5\n    },\n    {\n      \"id\": \"US-009\",\n      \"title\": \"Story US-009\",\n      \"status\": \"pending\",\n      \"priority\": 5\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 9\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-007\",\n    \"title\": \"Story US-007\",\n    \"status\": \"pending\",\n    \"priority\": 5\n  },\n  {\n    \"id\": \"US-003\",\n    \"title\": \"Story US-003\",\n    \"status\": \"pending\",\n    \"priority\": 5\n  },\n  {\n    \"id\": \"US-009\",\n    \"title\": \"Story US-009\",\n    \"status\": \"pending\",\n    \"priority\": 5\n  },\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"status\": \"pending\",\n    \"priority\": 9\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "empate-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-007\",\n      \"title\": \"Story US-007\",\n      \"status\": \"pending\",\n      \"priority\": 5\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": 5\n    },\n    {\n      \"id\": \"US-009\",\n      \"title\": \"Story US-009\",\n      \"status\": \"pending\",\n      \"priority\": 5\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 9\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-007\",\n    \"title\": \"Story US-007\",\n    \"priority\": 5,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-003\",\n    \"title\": \"Story US-003\",\n    \"priority\": 5,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-009\",\n    \"title\": \"Story US-009\",\n    \"priority\": 5,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"priority\": 9,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "empate-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-007\",\n      \"title\": \"Story US-007\",\n      \"status\": \"pending\",\n      \"priority\": 5\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": 5\n    },\n    {\n      \"id\": \"US-009\",\n      \"title\": \"Story US-009\",\n      \"status\": \"pending\",\n      \"priority\": 5\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 9\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"id\": \"US-007\",\n  \"title\": \"Story US-007\",\n  \"status\": \"pending\",\n  \"priority\": 5\n}\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": "",
+        "current-story": "US-007\n"
+      }
+    },
+    {
+      "label": "prioridade-nula-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": null\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\"\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"status\": \"pending\",\n    \"priority\": 1\n  },\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"status\": \"pending\",\n    \"priority\": null\n  },\n  {\n    \"id\": \"US-003\",\n    \"title\": \"Story US-003\",\n    \"status\": \"pending\"\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "prioridade-nula-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": null\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\"\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"priority\": 1,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"priority\": null,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-003\",\n    \"title\": \"Story US-003\",\n    \"priority\": null,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "prioridade-nula-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": null\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\"\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"id\": \"US-002\",\n  \"title\": \"Story US-002\",\n  \"status\": \"pending\",\n  \"priority\": null\n}\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": "",
+        "current-story": "US-002\n"
+      }
+    },
+    {
+      "label": "prioridade-ausente-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\"\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": null\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": 0\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"status\": \"pending\"\n  },\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"status\": \"pending\",\n    \"priority\": null\n  },\n  {\n    \"id\": \"US-003\",\n    \"title\": \"Story US-003\",\n    \"status\": \"pending\",\n    \"priority\": 0\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "prioridade-ausente-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\"\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": null\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": 0\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"priority\": null,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"priority\": null,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-003\",\n    \"title\": \"Story US-003\",\n    \"priority\": 0,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "prioridade-ausente-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\"\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": null\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": 0\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"id\": \"US-001\",\n  \"title\": \"Story US-001\",\n  \"status\": \"pending\"\n}\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": "",
+        "current-story": "US-001\n"
+      }
+    },
+    {
+      "label": "ordem-booleana-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 0\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": true\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": false\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"status\": \"pending\",\n    \"priority\": 0\n  },\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"status\": \"pending\",\n    \"priority\": true\n  },\n  {\n    \"id\": \"US-003\",\n    \"title\": \"Story US-003\",\n    \"status\": \"pending\",\n    \"priority\": false\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "ordem-booleana-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 0\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": true\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": false\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"priority\": 0,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"priority\": true,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-003\",\n    \"title\": \"Story US-003\",\n    \"priority\": false,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "ordem-booleana-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 0\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": true\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": false\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"id\": \"US-003\",\n  \"title\": \"Story US-003\",\n  \"status\": \"pending\",\n  \"priority\": false\n}\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": "",
+        "current-story": "US-003\n"
+      }
+    },
+    {
+      "label": "ordem-numero-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": \"alta\"\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 3\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": true\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"status\": \"pending\",\n    \"priority\": \"alta\"\n  },\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"status\": \"pending\",\n    \"priority\": 3\n  },\n  {\n    \"id\": \"US-003\",\n    \"title\": \"Story US-003\",\n    \"status\": \"pending\",\n    \"priority\": true\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "ordem-numero-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": \"alta\"\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 3\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": true\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"priority\": \"alta\",\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"priority\": 3,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-003\",\n    \"title\": \"Story US-003\",\n    \"priority\": true,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "ordem-numero-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": \"alta\"\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 3\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": true\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"id\": \"US-003\",\n  \"title\": \"Story US-003\",\n  \"status\": \"pending\",\n  \"priority\": true\n}\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": "",
+        "current-story": "US-003\n"
+      }
+    },
+    {
+      "label": "ordem-string-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": [\n        1\n      ]\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": \"alta\"\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"status\": \"pending\",\n    \"priority\": [\n      1\n    ]\n  },\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"status\": \"pending\",\n    \"priority\": \"alta\"\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "ordem-string-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": [\n        1\n      ]\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": \"alta\"\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"priority\": [\n      1\n    ],\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"priority\": \"alta\",\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "ordem-string-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": [\n        1\n      ]\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": \"alta\"\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"id\": \"US-002\",\n  \"title\": \"Story US-002\",\n  \"status\": \"pending\",\n  \"priority\": \"alta\"\n}\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": "",
+        "current-story": "US-002\n"
+      }
+    },
+    {
+      "label": "ordem-array-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": {\n        \"n\": 1\n      }\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": [\n        1\n      ]\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"status\": \"pending\",\n    \"priority\": {\n      \"n\": 1\n    }\n  },\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"status\": \"pending\",\n    \"priority\": [\n      1\n    ]\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "ordem-array-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": {\n        \"n\": 1\n      }\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": [\n        1\n      ]\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"priority\": {\n      \"n\": 1\n    },\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"priority\": [\n      1\n    ],\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "ordem-array-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": {\n        \"n\": 1\n      }\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": [\n        1\n      ]\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"id\": \"US-002\",\n  \"title\": \"Story US-002\",\n  \"status\": \"pending\",\n  \"priority\": [\n    1\n  ]\n}\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": "",
+        "current-story": "US-002\n"
+      }
+    },
+    {
+      "label": "ordem-negativa-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 2\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 0\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": -1\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"status\": \"pending\",\n    \"priority\": 2\n  },\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"status\": \"pending\",\n    \"priority\": 0\n  },\n  {\n    \"id\": \"US-003\",\n    \"title\": \"Story US-003\",\n    \"status\": \"pending\",\n    \"priority\": -1\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "ordem-negativa-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 2\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 0\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": -1\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"priority\": 2,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"priority\": 0,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-003\",\n    \"title\": \"Story US-003\",\n    \"priority\": -1,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "ordem-negativa-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 2\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 0\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": -1\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"id\": \"US-003\",\n  \"title\": \"Story US-003\",\n  \"status\": \"pending\",\n  \"priority\": -1\n}\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": "",
+        "current-story": "US-003\n"
+      }
+    },
+    {
+      "label": "ordem-float-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 2\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 1.0\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": 1.5\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"status\": \"pending\",\n    \"priority\": 2\n  },\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"status\": \"pending\",\n    \"priority\": 1\n  },\n  {\n    \"id\": \"US-003\",\n    \"title\": \"Story US-003\",\n    \"status\": \"pending\",\n    \"priority\": 1.5\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "ordem-float-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 2\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 1.0\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": 1.5\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"priority\": 2,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"priority\": 1,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-003\",\n    \"title\": \"Story US-003\",\n    \"priority\": 1.5,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "ordem-float-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 2\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 1.0\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": 1.5\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"id\": \"US-002\",\n  \"title\": \"Story US-002\",\n  \"status\": \"pending\",\n  \"priority\": 1\n}\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": "",
+        "current-story": "US-002\n"
+      }
+    },
+    {
+      "label": "depende-formas-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": null\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 2,\n      \"dependsOn\": false\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": 3,\n      \"dependsOn\": 0\n    },\n    {\n      \"id\": \"US-004\",\n      \"title\": \"Story US-004\",\n      \"status\": \"pending\",\n      \"priority\": 4,\n      \"dependsOn\": {}\n    },\n    {\n      \"id\": \"US-005\",\n      \"title\": \"Story US-005\",\n      \"status\": \"completed\",\n      \"priority\": 5\n    },\n    {\n      \"id\": \"US-006\",\n      \"title\": \"Story US-006\",\n      \"status\": \"pending\",\n      \"priority\": 6,\n      \"dependsOn\": {\n        \"a\": \"US-005\"\n      }\n    },\n    {\n      \"id\": \"US-007\",\n      \"title\": \"Story US-007\",\n      \"status\": \"pending\",\n      \"priority\": 7,\n      \"dependsOn\": \"\"\n    },\n    {\n      \"id\": \"US-008\",\n      \"title\": \"Story US-008\",\n      \"status\": \"pending\",\n      \"priority\": 8,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": null\n  },\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"status\": \"pending\",\n    \"priority\": 2,\n    \"dependsOn\": false\n  },\n  {\n    \"id\": \"US-003\",\n    \"title\": \"Story US-003\",\n    \"status\": \"pending\",\n    \"priority\": 3,\n    \"dependsOn\": 0\n  },\n  {\n    \"id\": \"US-004\",\n    \"title\": \"Story US-004\",\n    \"status\": \"pending\",\n    \"priority\": 4,\n    \"dependsOn\": {}\n  },\n  {\n    \"id\": \"US-006\",\n    \"title\": \"Story US-006\",\n    \"status\": \"pending\",\n    \"priority\": 6,\n    \"dependsOn\": {\n      \"a\": \"US-005\"\n    }\n  },\n  {\n    \"id\": \"US-007\",\n    \"title\": \"Story US-007\",\n    \"status\": \"pending\",\n    \"priority\": 7,\n    \"dependsOn\": \"\"\n  },\n  {\n    \"id\": \"US-008\",\n    \"title\": \"Story US-008\",\n    \"status\": \"pending\",\n    \"priority\": 8,\n    \"dependsOn\": []\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "depende-formas-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": null\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 2,\n      \"dependsOn\": false\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": 3,\n      \"dependsOn\": 0\n    },\n    {\n      \"id\": \"US-004\",\n      \"title\": \"Story US-004\",\n      \"status\": \"pending\",\n      \"priority\": 4,\n      \"dependsOn\": {}\n    },\n    {\n      \"id\": \"US-005\",\n      \"title\": \"Story US-005\",\n      \"status\": \"completed\",\n      \"priority\": 5\n    },\n    {\n      \"id\": \"US-006\",\n      \"title\": \"Story US-006\",\n      \"status\": \"pending\",\n      \"priority\": 6,\n      \"dependsOn\": {\n        \"a\": \"US-005\"\n      }\n    },\n    {\n      \"id\": \"US-007\",\n      \"title\": \"Story US-007\",\n      \"status\": \"pending\",\n      \"priority\": 7,\n      \"dependsOn\": \"\"\n    },\n    {\n      \"id\": \"US-008\",\n      \"title\": \"Story US-008\",\n      \"status\": \"pending\",\n      \"priority\": 8,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"priority\": 1,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"priority\": 2,\n    \"dependsOn\": false,\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-003\",\n    \"title\": \"Story US-003\",\n    \"priority\": 3,\n    \"dependsOn\": 0,\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-004\",\n    \"title\": \"Story US-004\",\n    \"priority\": 4,\n    \"dependsOn\": {},\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-006\",\n    \"title\": \"Story US-006\",\n    \"priority\": 6,\n    \"dependsOn\": {\n      \"a\": \"US-005\"\n    },\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-007\",\n    \"title\": \"Story US-007\",\n    \"priority\": 7,\n    \"dependsOn\": \"\",\n    \"project\": null,\n    \"gate\": null\n  },\n  {\n    \"id\": \"US-008\",\n    \"title\": \"Story US-008\",\n    \"priority\": 8,\n    \"dependsOn\": [],\n    \"project\": null,\n    \"gate\": null\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "depende-formas-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": null\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 2,\n      \"dependsOn\": false\n    },\n    {\n      \"id\": \"US-003\",\n      \"title\": \"Story US-003\",\n      \"status\": \"pending\",\n      \"priority\": 3,\n      \"dependsOn\": 0\n    },\n    {\n      \"id\": \"US-004\",\n      \"title\": \"Story US-004\",\n      \"status\": \"pending\",\n      \"priority\": 4,\n      \"dependsOn\": {}\n    },\n    {\n      \"id\": \"US-005\",\n      \"title\": \"Story US-005\",\n      \"status\": \"completed\",\n      \"priority\": 5\n    },\n    {\n      \"id\": \"US-006\",\n      \"title\": \"Story US-006\",\n      \"status\": \"pending\",\n      \"priority\": 6,\n      \"dependsOn\": {\n        \"a\": \"US-005\"\n      }\n    },\n    {\n      \"id\": \"US-007\",\n      \"title\": \"Story US-007\",\n      \"status\": \"pending\",\n      \"priority\": 7,\n      \"dependsOn\": \"\"\n    },\n    {\n      \"id\": \"US-008\",\n      \"title\": \"Story US-008\",\n      \"status\": \"pending\",\n      \"priority\": 8,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"id\": \"US-001\",\n  \"title\": \"Story US-001\",\n  \"status\": \"pending\",\n  \"priority\": 1,\n  \"dependsOn\": null\n}\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": "",
+        "current-story": "US-001\n"
+      }
+    },
+    {
+      "label": "depende-string-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": \"US-002\"\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"completed\",\n      \"priority\": 2\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:25): Cannot iterate over string (\"US-002\")\n",
+      "state_after": {}
+    },
+    {
+      "label": "depende-string-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": \"US-002\"\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"completed\",\n      \"priority\": 2\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:25): Cannot iterate over string (\"US-002\")\n",
+      "state_after": {}
+    },
+    {
+      "label": "depende-string-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": \"US-002\"\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"completed\",\n      \"priority\": 2\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "null\n",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:25): Cannot iterate over string (\"US-002\")\n",
+      "state_after": {
+        ".state.lock": ""
+      }
+    },
+    {
+      "label": "depende-numero-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": 2\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:19): Cannot iterate over number (2)\n",
+      "state_after": {}
+    },
+    {
+      "label": "depende-numero-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": 2\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:19): Cannot iterate over number (2)\n",
+      "state_after": {}
+    },
+    {
+      "label": "depende-numero-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": 2\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "null\n",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:19): Cannot iterate over number (2)\n",
+      "state_after": {
+        ".state.lock": ""
+      }
+    },
+    {
+      "label": "depende-true-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": true\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:19): boolean (true) has no length\n",
+      "state_after": {}
+    },
+    {
+      "label": "depende-true-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": true\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:19): boolean (true) has no length\n",
+      "state_after": {}
+    },
+    {
+      "label": "depende-true-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": true\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "null\n",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:19): boolean (true) has no length\n",
+      "state_after": {
+        ".state.lock": ""
+      }
+    },
+    {
+      "label": "gate-string-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"gate\": \"pendente\"\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:19): Cannot index string with string \"type\"\n",
+      "state_after": {}
+    },
+    {
+      "label": "gate-string-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"gate\": \"pendente\"\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:19): Cannot index string with string \"type\"\n",
+      "state_after": {}
+    },
+    {
+      "label": "gate-string-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"gate\": \"pendente\"\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "null\n",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:19): Cannot index string with string \"type\"\n",
+      "state_after": {
+        ".state.lock": ""
+      }
+    },
+    {
+      "label": "dep-gate-string-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"gate\": \"pendente\"\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 2,\n      \"dependsOn\": [\n        \"US-001\"\n      ]\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:28): Cannot index string with string \"type\"\n",
+      "state_after": {}
+    },
+    {
+      "label": "dep-gate-string-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"gate\": \"pendente\"\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 2,\n      \"dependsOn\": [\n        \"US-001\"\n      ]\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:28): Cannot index string with string \"type\"\n",
+      "state_after": {}
+    },
+    {
+      "label": "dep-gate-string-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"gate\": \"pendente\"\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 2,\n      \"dependsOn\": [\n        \"US-001\"\n      ]\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "null\n",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:28): Cannot index string with string \"type\"\n",
+      "state_after": {
+        ".state.lock": ""
+      }
+    },
+    {
+      "label": "historia-null-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    null,\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"status\": \"pending\",\n    \"priority\": 1\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "historia-null-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    null,\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"priority\": 1,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "historia-null-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    null,\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"id\": \"US-001\",\n  \"title\": \"Story US-001\",\n  \"status\": \"pending\",\n  \"priority\": 1\n}\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": "",
+        "current-story": "US-001\n"
+      }
+    },
+    {
+      "label": "historia-string-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    \"solta\",\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:19): Cannot index string with string \"status\"\n",
+      "state_after": {}
+    },
+    {
+      "label": "historia-string-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    \"solta\",\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:19): Cannot index string with string \"status\"\n",
+      "state_after": {}
+    },
+    {
+      "label": "historia-string-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    \"solta\",\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "null\n",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:19): Cannot index string with string \"status\"\n",
+      "state_after": {
+        ".state.lock": ""
+      }
+    },
+    {
+      "label": "us-ausente-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  }\n}\n",
+        "state": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:10): Cannot iterate over null (null)\n",
+      "state_after": {}
+    },
+    {
+      "label": "us-ausente-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  }\n}\n",
+        "state": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:10): Cannot iterate over null (null)\n",
+      "state_after": {}
+    },
+    {
+      "label": "us-ausente-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  }\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "null\n",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:10): Cannot iterate over null (null)\n",
+      "state_after": {
+        ".state.lock": ""
+      }
+    },
+    {
+      "label": "us-null-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": null\n}\n",
+        "state": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:11): Cannot iterate over null (null)\n",
+      "state_after": {}
+    },
+    {
+      "label": "us-null-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": null\n}\n",
+        "state": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:11): Cannot iterate over null (null)\n",
+      "state_after": {}
+    },
+    {
+      "label": "us-null-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": null\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "null\n",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:11): Cannot iterate over null (null)\n",
+      "state_after": {
+        ".state.lock": ""
+      }
+    },
+    {
+      "label": "us-objeto-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": {\n    \"a\": {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 2\n    },\n    \"b\": {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [\n        \"US-001\"\n      ]\n    }\n  }\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"status\": \"pending\",\n    \"priority\": 2\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "us-objeto-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": {\n    \"a\": {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 2\n    },\n    \"b\": {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [\n        \"US-001\"\n      ]\n    }\n  }\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"priority\": 2,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "us-objeto-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": {\n    \"a\": {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 2\n    },\n    \"b\": {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [\n        \"US-001\"\n      ]\n    }\n  }\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"id\": \"US-001\",\n  \"title\": \"Story US-001\",\n  \"status\": \"pending\",\n  \"priority\": 2\n}\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": "",
+        "current-story": "US-001\n"
+      }
+    },
+    {
+      "label": "us-string-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": \"nao-e-uma-lista\"\n}\n",
+        "state": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:11): Cannot iterate over string (\"nao-e-uma-...)\n",
+      "state_after": {}
+    },
+    {
+      "label": "us-string-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": \"nao-e-uma-lista\"\n}\n",
+        "state": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:11): Cannot iterate over string (\"nao-e-uma-...)\n",
+      "state_after": {}
+    },
+    {
+      "label": "us-string-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": \"nao-e-uma-lista\"\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "null\n",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:11): Cannot iterate over string (\"nao-e-uma-...)\n",
+      "state_after": {
+        ".state.lock": ""
+      }
+    },
+    {
+      "label": "doc-malformado-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\"schemaVersion\": \"3.3\", \"userStories\": [\n",
+        "state": {}
+      },
+      "exit": 4,
+      "stdout": "",
+      "stderr": "parse error: Unfinished JSON term at EOF at line 2, column 0\n",
+      "state_after": {}
+    },
+    {
+      "label": "doc-malformado-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\"schemaVersion\": \"3.3\", \"userStories\": [\n",
+        "state": {}
+      },
+      "exit": 4,
+      "stdout": "",
+      "stderr": "parse error: Unfinished JSON term at EOF at line 2, column 0\n",
+      "state_after": {}
+    },
+    {
+      "label": "doc-malformado-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\"schemaVersion\": \"3.3\", \"userStories\": [\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "null\n",
+      "stderr": "parse error: Unfinished JSON term at EOF at line 2, column 0\n",
+      "state_after": {
+        ".state.lock": ""
+      }
+    },
+    {
+      "label": "doc-vazio-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "doc-vazio-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "doc-vazio-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "null\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": ""
+      }
+    },
+    {
+      "label": "doc-null-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "null\n",
+        "state": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:1): Cannot iterate over null (null)\n",
+      "state_after": {}
+    },
+    {
+      "label": "doc-null-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "null\n",
+        "state": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:1): Cannot iterate over null (null)\n",
+      "state_after": {}
+    },
+    {
+      "label": "doc-null-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "null\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "null\n",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:1): Cannot iterate over null (null)\n",
+      "state_after": {
+        ".state.lock": ""
+      }
+    },
+    {
+      "label": "doc-array-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "[1, 2]\n",
+        "state": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:1): Cannot index array with string \"userStories\"\n",
+      "state_after": {}
+    },
+    {
+      "label": "doc-array-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "[1, 2]\n",
+        "state": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:1): Cannot index array with string \"userStories\"\n",
+      "state_after": {}
+    },
+    {
+      "label": "doc-array-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "[1, 2]\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "null\n",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:1): Cannot index array with string \"userStories\"\n",
+      "state_after": {
+        ".state.lock": ""
+      }
+    },
+    {
+      "label": "doc-dois-valores-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    }\n  ]\n}\n{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 2\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"status\": \"pending\",\n    \"priority\": 1\n  }\n]\n[\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"status\": \"pending\",\n    \"priority\": 2\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "doc-dois-valores-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    }\n  ]\n}\n{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 2\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"priority\": 1,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  }\n]\n[\n  {\n    \"id\": \"US-002\",\n    \"title\": \"Story US-002\",\n    \"priority\": 2,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "doc-dois-valores-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    }\n  ]\n}\n{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story US-002\",\n      \"status\": \"pending\",\n      \"priority\": 2\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"id\": \"US-001\",\n  \"title\": \"Story US-001\",\n  \"status\": \"pending\",\n  \"priority\": 1\n}\n{\n  \"id\": \"US-002\",\n  \"title\": \"Story US-002\",\n  \"status\": \"pending\",\n  \"priority\": 2\n}\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": "",
+        "current-story": "US-001\nUS-002\n"
+      }
+    },
+    {
+      "label": "sem-arquivo-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": null,
+        "tasks": null,
+        "state": {}
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "No tasks file found in /TMP/.aimi/tasks/\n",
+      "state_after": {}
+    },
+    {
+      "label": "sem-arquivo-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": null,
+        "tasks": null,
+        "state": {}
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "No tasks file found in /TMP/.aimi/tasks/\n",
+      "state_after": {}
+    },
+    {
+      "label": "sem-arquivo-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": null,
+        "tasks": null,
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "null\n",
+      "stderr": "No tasks file found in /TMP/.aimi/tasks/\njq: error: Could not open file : No such file or directory\n",
+      "state_after": {
+        ".state.lock": ""
+      }
+    },
+    {
+      "label": "ponteiro-obsoleto-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    }\n  ]\n}\n",
+        "state": {
+          "current-tasks": "/nao/existe/velho-tasks.json"
+        }
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"status\": \"pending\",\n    \"priority\": 1\n  }\n]\n",
+      "stderr": "Warning: state file pointed to /nao/existe/velho-tasks.json which no longer exists. Using /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json instead.\n",
+      "state_after": {
+        ".state.lock": "",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      }
+    },
+    {
+      "label": "ponteiro-obsoleto-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    }\n  ]\n}\n",
+        "state": {
+          "current-tasks": "/nao/existe/velho-tasks.json"
+        }
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"priority\": 1,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  }\n]\n",
+      "stderr": "Warning: state file pointed to /nao/existe/velho-tasks.json which no longer exists. Using /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json instead.\n",
+      "state_after": {
+        ".state.lock": "",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      }
+    },
+    {
+      "label": "ponteiro-obsoleto-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    }\n  ]\n}\n",
+        "state": {
+          "current-tasks": "/nao/existe/velho-tasks.json"
+        }
+      },
+      "exit": 0,
+      "stdout": "{\n  \"id\": \"US-001\",\n  \"title\": \"Story US-001\",\n  \"status\": \"pending\",\n  \"priority\": 1\n}\n",
+      "stderr": "Warning: state file pointed to /nao/existe/velho-tasks.json which no longer exists. Using /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json instead.\n",
+      "state_after": {
+        ".state.lock": "",
+        "current-story": "US-001\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      }
+    },
+    {
+      "label": "layout-fase-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "corpus/phase-1-inicio/corpus-phase-1-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"status\": \"pending\",\n    \"priority\": 1\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "layout-fase-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "corpus/phase-1-inicio/corpus-phase-1-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"priority\": 1,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  }\n]\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "layout-fase-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "corpus/phase-1-inicio/corpus-phase-1-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"id\": \"US-001\",\n  \"title\": \"Story US-001\",\n  \"status\": \"pending\",\n  \"priority\": 1\n}\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": "",
+        "current-story": "US-001\n"
+      }
+    },
+    {
+      "label": "ponteiro-substituido-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    }\n  ]\n}\n",
+        "state": {
+          "current-story": "US-042"
+        }
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"status\": \"pending\",\n    \"priority\": 1\n  }\n]\n",
+      "stderr": "",
+      "state_after": {
+        "current-story": "US-042\n"
+      }
+    },
+    {
+      "label": "ponteiro-substituido-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    }\n  ]\n}\n",
+        "state": {
+          "current-story": "US-042"
+        }
+      },
+      "exit": 0,
+      "stdout": "[\n  {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"priority\": 1,\n    \"dependsOn\": null,\n    \"project\": null,\n    \"gate\": null\n  }\n]\n",
+      "stderr": "",
+      "state_after": {
+        "current-story": "US-042\n"
+      }
+    },
+    {
+      "label": "ponteiro-substituido-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    }\n  ]\n}\n",
+        "state": {
+          "current-story": "US-042"
+        }
+      },
+      "exit": 0,
+      "stdout": "{\n  \"id\": \"US-001\",\n  \"title\": \"Story US-001\",\n  \"status\": \"pending\",\n  \"priority\": 1\n}\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": "",
+        "current-story": "US-001\n"
+      }
+    },
+    {
+      "label": "ponteiro-limpo-ready",
+      "args": [
+        "list-ready"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"completed\",\n      \"priority\": 1\n    }\n  ]\n}\n",
+        "state": {
+          "current-story": "US-042"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": "",
+      "state_after": {
+        "current-story": "US-042\n"
+      }
+    },
+    {
+      "label": "ponteiro-limpo-brief",
+      "args": [
+        "list-ready",
+        "--brief"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"completed\",\n      \"priority\": 1\n    }\n  ]\n}\n",
+        "state": {
+          "current-story": "US-042"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": "",
+      "state_after": {
+        "current-story": "US-042\n"
+      }
+    },
+    {
+      "label": "ponteiro-limpo-next",
+      "args": [
+        "next-story"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"completed\",\n      \"priority\": 1\n    }\n  ]\n}\n",
+        "state": {
+          "current-story": "US-042"
+        }
+      },
+      "exit": 0,
+      "stdout": "null\n",
+      "stderr": "",
+      "state_after": {
+        ".state.lock": ""
+      }
+    },
+    {
+      "label": "valida-ausente",
+      "args": [
+        "get-story",
+        "US-999"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: Story US-999 not found in /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n",
+      "state_after": {}
+    },
+    {
+      "label": "valida-existe",
+      "args": [
+        "get-story",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"status\": \"pending\",\n      \"priority\": 1\n    }\n  ]\n}\n",
+        "state": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"id\": \"US-001\",\n  \"title\": \"Story US-001\",\n  \"status\": \"pending\",\n  \"priority\": 1\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "valida-us-string",
+      "args": [
+        "get-story",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null\n  },\n  \"userStories\": \"nao-e-uma-lista\"\n}\n",
+        "state": {}
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: Story US-001 not found in /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n",
+      "state_after": {}
+    },
+    {
+      "label": "valida-doc-malformado",
+      "args": [
+        "get-story",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\"schemaVersion\": \"3.3\", \"userStories\": [\n",
+        "state": {}
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: Story US-001 not found in /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n",
+      "state_after": {}
+    },
+    {
+      "label": "valida-sem-arquivo",
+      "args": [
+        "get-story",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": null,
+        "tasks": null,
+        "state": {}
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "No tasks file found in /TMP/.aimi/tasks/\n",
+      "state_after": {}
+    }
+  ],
+  "_comment_tasks_ready": "list-ready (plain and --brief), next-story, and the bash validate_story_exists gate the get-story arm of it runs -- captured the same way as tasks_read_cases and for the same reason: 128 cases over one adversarial corpus, at commit cfbc7c2, BEFORE the jq was deleted. Recorded per case: the argv, the tasks file the run was given and the .aimi/ state it started with (`input`, so every case is REPLAYABLE and not merely described), exit code, stdout, stderr, and every .aimi/ file left behind (`state_after`) -- which matters more here than it did for the read verbs, because next-story WRITES current-story, and 47 cases leave one. Each case ran in its own throwaway project root; exactly one normalization rule fired, the temp root to /TMP. 451 of 512 field comparisons are identical after the port: every stdout and every state_after matched in all 128 cases, and 91 of the 128 matched on all four fields. THE FOUR ORDERING AND PREDICATE TRAPS, each with the case that pins it. (1) jq's sort_by is STABLE, so stories tied on priority keep tasks.json file order -- `empate` lists US-007, US-003, US-009 all at priority 5 in that file order and next-story picks US-007, which is the determinism /aimi:execute documents. (2) jq's total order puts null BELOW every number, so a story whose priority is null or absent is picked FIRST, ahead of priority 1 -- `prioridade-nula` picks the null one over priority 1, `prioridade-ausente` picks the absent one over the null one on file order, and the `ordem-*` ladder walks the rest of the order one class boundary at a time (false below 0 and true, true below every number, a number below a string, a string below an array, an array below an object). Intra-class comparison of two arrays or two objects is deliberately NOT in the corpus: roadmap.py's jq_sort_key ranks all arrays equal where jq would compare them elementwise, and a priority that is an array is not a thing -- the boundary is named here rather than papered over. (3) jq's `all` ends at the first element whose condition selected NOTHING and answers true, which is stronger than 'a dangling dependsOn id does not block'. `dep-pendurada-antes` is the case that shows it: US-002 depends on [US-999, US-001] and is READY even though US-001 carries a pending action gate, while US-003 depends on [US-001, US-999] -- the same two ids, other order -- and is blocked. A port that treated a dangling id as merely vacuous would agree on the first and silently drop the second from the wave. `dep-pendurada` and `dep-pendurada-duplicada` cover the rest of that walk, including a dependsOn id that matches TWO stories, where either match can block. (4) --brief emits exactly six keys, id/title/priority/dependsOn/project/gate, because jq's object-construction shorthand writes a key holding null for a field the story does not have -- `pronta-sem-campos-brief` is a story carrying none of the four optional ones and it still yields six. dependsOn there is the RAW field, null and all: the `// []` belongs to the predicate, not to the projection. The corpus is otherwise weighted toward inputs the schema does not allow, because that is the only place jq and Python can differ: every gate kind and status on the story itself and on a dependency, every story status as a dependency, dependsOn as null / false / 0 / \"\" / {} / an object of values / a string / a number / true, a story that is null and a story that is a string, userStories absent / null / [] / an object / a string, and seven whole-document shapes. Two jq quirks that decide readiness are preserved rather than tidied and are recorded in `depende-formas`, where all of them are stories the pre-port CLI listed as READY: `//` leaves 0, \"\" and {} alone (none of them is null or false), and jq's `length` then gives a number its ABSOLUTE VALUE and a string its codepoints, so `dependsOn: 0` and `dependsOn: \"\"` both have length 0 and short-circuit the dependency walk exactly as [] does. tasks.py's jq_length is that rule; a plain len() would abort on the first and mis-answer the second. The 61 fields that differ fall in 37 cases and are exit code and stderr only. Twelve document shapes abort mid-expression, and each contributes three cases that split by VERB rather than by input: `-ready` and `-brief` surfaced jq's abort as the CLI's own exit status (5 for a runtime error, 4 for a parse error) and now refuse at exit 1 with `Error: <verb>: <file>: <expression>: <what went wrong>`, while `-next` answered `null` at exit 0 with the pointer cleared and STILL DOES -- only the wording on stderr moved. The twelve are dependsOn as a string / a number / true, a gate that is a string on the story or on a dependency, a story that is a string, userStories absent / null / a string, a document that is null / an array, and malformed JSON. The 37th is `sem-arquivo-next`, its own class: nothing aborted, jq was simply handed an empty filename after get_tasks_file had already refused and complained a second time about it, so the port prints one line where the recording has two. All 37 are named individually in READY_DIVERGENCES in test_tasks.py, and test_each_excused_ready_case_keeps_its_answer holds each to its ANSWER: a refusal still refuses and writes nothing to stdout, and a null still clears the pointer and exits 0. Two behaviours that have nothing to do with the tasks schema are preserved rather than evened out. An EMPTY tasks file makes the verb produce no output at all, and the pre-port code then printed a bare newline without --brief (`result=$(jq ...)` then `echo \"$result\"`) and nothing with it (that newline was piped through a second jq, which read it as no input): `doc-vazio-ready` records \"\\n\" and `doc-vazio-brief` records \"\", and cmd_list_ready keeps the two branches apart to reproduce it. And next-story has always SWALLOWED every failure beneath it -- cmd_list_ready ran on the left of a pipeline inside a command substitution, so neither its exit for a missing tasks file nor jq's abort on a malformed one ever reached the caller; the empty result cleared current-story and printed null at exit 0. /aimi:next reads that null as 'all stories complete' and stops, so the swallow is now written down as `|| story=\"\"` instead of being an accident of pipeline structure. Neither is fixed here: a port is not where a defect gets settled."
 }

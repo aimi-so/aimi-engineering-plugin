@@ -827,7 +827,7 @@ cmd_metadata() {
 
 # List stories that are ready to execute
 # A story is ready when: status == "pending" AND all dependsOn stories have status "completed" or "skipped"
-# Flags: --brief (return only {id, title, priority, dependsOn} per story)
+# Flags: --brief (return only {id, title, priority, dependsOn, project, gate} per story)
 cmd_list_ready() {
   local brief=false
   while [ $# -gt 0 ]; do
@@ -840,42 +840,28 @@ cmd_list_ready() {
   local tasks_file
   tasks_file=$(get_tasks_file)
 
-  local result
-  result=$(jq '
-    . as $root |
-    [
-      .userStories[] |
-      select(.status == "pending") |
-      . as $story |
-      # Gate filtering: exclude stories with pending decision gates
-      select(
-        (.gate.type != "decision") or (.gate.status != "pending")
-      ) |
-      # Gate filtering: exclude stories where any dependency has a pending action gate
-      select(
-        (($story.dependsOn // []) | length == 0) or
-        (($story.dependsOn // []) | all(. as $dep_id |
-          $root.userStories[] | select(.id == $dep_id) |
-          ((.gate.type != "action") or (.gate.status != "pending"))
-        ))
-      ) |
-      . as $story |
-      (
-        ($story.dependsOn // []) | length == 0
-      ) or (
-        ($story.dependsOn // []) |
-        all(. as $dep_id |
-          ($root.userStories[] | select(.id == $dep_id) | .status) as $dep_status |
-          ($dep_status == "completed" or $dep_status == "skipped")
-        )
-      )
-    | if . then $story else empty end
-    ]
-  ' "$tasks_file")
+  # The readiness predicate and the --brief projection both live in tasks.py's
+  # is_ready and brief_row now, at one crossing. The gate rules and the
+  # dependency walk are subtler than they read -- jq's `all` ENDS at the first
+  # dependsOn id that matches no story, so a dangling id makes a story ready
+  # and leaves the ids after it unchecked -- and there is no longer a second
+  # copy of them for next-story to drift from.
+  check_python3
 
+  # The two branches differ by one `echo`, and only an EMPTY tasks file can
+  # tell: the verb produces no output at all for one (jq read zero values from
+  # the stream, and so does read_docs), and the pre-port code then printed a
+  # bare newline without --brief -- `result=$(...)` followed by `echo "$result"`
+  # -- while --brief piped that newline through a second jq, which read it as
+  # no input and printed nothing. Recorded as doc-vazio-ready and
+  # doc-vazio-brief, and reproduced rather than evened out: a port is not where
+  # a cosmetic difference gets settled, and a truncated tasks file printing one
+  # blank line is a hole to rank, not to tidy.
   if [ "$brief" = true ]; then
-    echo "$result" | jq '[.[] | {id, title, priority, dependsOn, project, gate}]'
+    python3 "$(_aimi_tasks_py)" list-ready --tasks-file "$tasks_file" --brief
   else
+    local result
+    result=$(python3 "$(_aimi_tasks_py)" list-ready --tasks-file "$tasks_file")
     echo "$result"
   fi
 }
@@ -884,8 +870,17 @@ cmd_list_ready() {
 cmd_next_story() {
   local story story_id
 
-  # Use list-ready logic, then pick first by priority
-  story=$(cmd_list_ready | jq 'sort_by(.priority) | .[0]')
+  # next-story has ALWAYS answered `null` for every failure underneath it, and
+  # that is preserved rather than tidied: cmd_list_ready used to run on the left
+  # of a pipeline inside this command substitution, so neither its `exit 1` for
+  # a missing tasks file nor jq's abort on a malformed one ever reached this
+  # frame -- $story simply came back empty and the branch below cleared the
+  # pointer and printed null at exit 0. /aimi:next reads that null as "all
+  # stories complete" and stops, so turning it into a non-zero exit would turn
+  # a clean stop into a failure. `|| story=""` is that swallow, now written
+  # down instead of being an accident of pipeline structure (recorded as
+  # sem-arquivo-next, us-null-next and doc-malformado-next).
+  story=$(_next_story_selection) || story=""
 
   if [ "$story" = "null" ] || [ -z "$story" ]; then
     clear_state_file "current-story"
@@ -897,6 +892,22 @@ cmd_next_story() {
   write_state "current-story" "$story_id"
 
   echo "$story"
+}
+
+# The document half of next-story: which story, if any, is next.
+#
+# Split out so the swallow above has something to swallow. The ordering rules
+# live in tasks.py's next_story -- stable on ties so tasks.json file order
+# decides, and null before every number so a story with no priority is picked
+# first -- and the state write stays here with every other .aimi/state/ write.
+_next_story_selection() {
+  local tasks_file
+  # Explicit rather than left to `set -e`: this function runs inside an `||`
+  # list, which is one of the contexts where bash IGNORES -e, so a bare
+  # assignment would carry on and hand an empty path to the crossing.
+  tasks_file=$(get_tasks_file) || return 1
+  check_python3
+  python3 "$(_aimi_tasks_py)" next-story --tasks-file "$tasks_file"
 }
 
 # Get currently active story from state

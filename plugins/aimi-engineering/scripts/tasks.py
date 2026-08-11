@@ -10,13 +10,15 @@ tasks file lives, reading .aimi/state/ -- and this file owns what a verb then
 computes over the document it was handed. The boundary is one crossing per
 verb: bash resolves the path, calls here once, and prints whatever comes back.
 
-It holds the six READ-ONLY verbs and nothing else: `status` (both branches),
-`metadata`, `get-story`, `current-story`, `get-state` and `count-pending`. It
-takes NO lock and performs NO write, which is why it could be the first
-crossing -- there is no writer here to get the lock ordering wrong.
+It holds READ-ONLY verbs and nothing else: `status` (both branches),
+`metadata`, `get-story`, `current-story`, `get-state`, `count-pending`,
+`list-ready` and `next-story`, plus `validate-story-exists`, which is a twin of
+a bash gate rather than a verb and is explained below. Nothing here takes a
+lock and nothing here writes, which is why these could be the first crossings
+-- there is no writer to get the lock ordering wrong.
 
-WHAT THIS SLICE ACTUALLY COLLAPSED
-----------------------------------
+WHAT THESE SLICES ACTUALLY COLLAPSED
+------------------------------------
 
 The maxConcurrency default was written out THREE times in aimi-cli.sh --
 `((.metadata.maxConcurrency // 20) | if . <= 0 then 20 else . end)` in both
@@ -26,13 +28,28 @@ entirely rather than being reduced to one bash copy. It lives once, below, in
 clamp_max_concurrency. A port that only moved code would not have been worth
 running; this is the duplicated rule it was worth running for.
 
+The readiness predicate is the second. cmd_next_story reached it by running
+cmd_list_ready as a shell FUNCTION and re-sorting its output through a second
+jq -- so the two verbs were one implementation only for as long as nobody
+touched them, and porting either alone would have left the other holding a jq
+copy of the same rule. They move together and now stand on one is_ready and one
+next_story, at one crossing each.
+
 WHAT THIS FILE MUST NOT BECOME
 ------------------------------
 
-  * A place that re-derives a rule aimi-cli.sh still owns. Story-id format,
-    "does this story exist", the tasks-file search and its stale-state
-    self-heal all stayed in bash and are NOT reimplemented here. Two opinions
-    about which file is current is the disease this whole branch cures.
+  * A place that re-derives a rule aimi-cli.sh still owns. Story-id FORMAT, the
+    tasks-file search and its stale-state self-heal all stayed in bash and are
+    NOT reimplemented here. Two opinions about which file is current is the
+    disease this whole branch cures.
+  * A second opinion about whether a story exists. That gate is the ONE thing
+    deliberately written twice, because ten bash call sites outlive the slice
+    that ported list-ready -- op_validate_story_exists exists so a verb already
+    on this side need not go back to bash for it, and it prints the bash
+    function's line verbatim. The duplication is temporary and the byte
+    identity is asserted, not assumed: test_tasks.py runs both and compares
+    stderr. The bash copy is deleted by whichever slice moves its last caller,
+    and this op's message dies with it.
   * A writer. Nothing here opens a file for writing, and in particular nothing
     here touches .aimi/state/ -- read_state/write_state carry their own
     .state.lock and their own path confinement, and cmd_get_state hands the
@@ -49,12 +66,15 @@ WHERE jq AND PYTHON PART COMPANY
 --------------------------------
 
 jq indexes null happily, orders values across types, reads a STREAM of JSON
-values rather than one, and aborts with its own engine message on a shape it
-cannot handle. Each of those is reproduced deliberately below -- jq_index,
-clamp_max_concurrency's comparison, read_docs, and MalformedTasks -- and the
-one place fidelity is impossible (the engine's own wording and exit status) is
-recorded case by case in tests/golden_from_jq.json's `tasks_read_cases`, whose
-`_comment_tasks_read` names every divergence and what it cost.
+values rather than one, gives a number a length, ends an `all` at the first
+element that answers nothing, and aborts with its own engine message on a shape
+it cannot handle. Each of those is reproduced deliberately below -- jq_index,
+clamp_max_concurrency's comparison, read_docs, jq_length, jq_all_over, and
+MalformedTasks -- and the one place fidelity is impossible (the engine's own
+wording and exit status) is recorded case by case in
+tests/golden_from_jq.json's `tasks_read_cases` and `tasks_ready_cases`, whose
+`_comment_tasks_read` and `_comment_tasks_ready` name every divergence and what
+it cost.
 """
 
 import json
@@ -142,6 +162,63 @@ def jq_alternative(value, fallback):
     return value
 
 
+def jq_length(value, owner):
+    """jq's `length`, over the values `.dependsOn // []` can actually hold.
+
+    It is not Python's len(), and the difference decides whether a story is
+    ready: a NUMBER's length is its absolute value, so `dependsOn: 0` has
+    length 0 and short-circuits the dependency walk to true exactly as `[]`
+    does, and an empty STRING does the same. Both are recorded (depende-formas)
+    because both are stories the pre-port CLI listed as ready.
+
+    A boolean is the one value with no length at all -- jq aborts there, and so
+    does this. null and false never arrive: `//` replaced them with [] first.
+    """
+    if isinstance(value, bool):
+        raise MalformedTasks(
+            owner + ": boolean (" + ("true" if value else "false") + ") has no length"
+        )
+    if isinstance(value, (int, float)):
+        return abs(value)
+    return len(value)
+
+
+def jq_all_over(elements, outputs_for):
+    """jq's `all(.[]; condition)` AS JQ 1.6 ACTUALLY EVALUATES IT.
+
+    `outputs_for(element)` yields what the condition produced for one element:
+    zero values when the element selected nothing, one per selection otherwise.
+    The walk then follows jq's own three-way rule, and the middle arm is the
+    one no reading of the manual gives you:
+
+      * a falsy output   -> false, immediately; later elements are not reached
+      * NO output at all -> true, immediately; later elements are not reached
+      * otherwise        -> keep going, true if the elements run out
+
+    That middle arm is the whole of trap 3 and it is stronger than "vacuously
+    true for that element". A `dependsOn` of ["US-999", "US-001"] where US-999
+    matches no story is READY today even when US-001 is still pending, because
+    the dangling id ENDS the walk before US-001 is looked at -- while
+    ["US-001", "US-999"] is blocked, same two ids, other order. Both are
+    recorded side by side in tasks_ready_cases as dep-pendurada-antes, because
+    the difference is invisible in the jq source and a port that treated a
+    dangling id as merely "not blocking" would silently drop stories from a
+    wave that runs today.
+
+    Reproduced, not fixed. A dangling dependsOn id is a broken tasks file and
+    what to do about it is a decision, not a port.
+    """
+    for element in elements:
+        empty = True
+        for output in outputs_for(element):
+            empty = False
+            if output is None or output is False:
+                return False
+        if empty:
+            return True
+    return True
+
+
 def clamp_max_concurrency(value):
     """metadata.maxConcurrency, defaulted and floor-guarded, in ONE place.
 
@@ -200,8 +277,8 @@ def _emit(value):
     sys.stdout.write("\n")
 
 
-def read_docs(path, verb):
-    """Every JSON value in the file, in order.
+def load_docs(path):
+    """Every JSON value in the file, in order, RAISING on a file it cannot read.
 
     jq reads a STREAM, not one value, and two behaviours depend on it: an EMPTY
     tasks file yields zero values, so the verb prints nothing and exits 0, and a
@@ -209,12 +286,14 @@ def read_docs(path, verb):
     faithful here rather than convenient -- the empty-file case in particular is
     a silent hole (a truncated write reports success), and reproducing it is
     what keeps this a port. It is ranked, not fixed, and not in this slice.
+
+    Split from read_docs because op_validate_story_exists needs the failure as a
+    VALUE rather than as an exit: the bash gate it twins runs jq with stderr
+    redirected to /dev/null and answers "not found" for every failure it could
+    have had, and a twin that died with a different message would not be one.
     """
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            text = handle.read()
-    except (OSError, UnicodeDecodeError) as err:
-        die("Error: " + verb + ": cannot read tasks file " + path + ": " + str(err))
+    with open(path, "r", encoding="utf-8") as handle:
+        text = handle.read()
 
     decoder = json.JSONDecoder()
     docs = []
@@ -224,11 +303,21 @@ def read_docs(path, verb):
             index += 1
         if index >= len(text):
             return docs
-        try:
-            value, index = decoder.raw_decode(text, index)
-        except ValueError as err:
-            die("Error: " + verb + ": malformed JSON in tasks file " + path + ": " + str(err))
+        value, index = decoder.raw_decode(text, index)
         docs.append(value)
+
+
+def read_docs(path, verb):
+    """load_docs, with a refusal instead of a traceback. What every verb uses."""
+    try:
+        return load_docs(path)
+    # UnicodeDecodeError is a ValueError, so this arm has to come first -- a
+    # file that is not UTF-8 is one the verb could not READ, not one whose JSON
+    # was malformed, and the two messages are told apart in the golden.
+    except (OSError, UnicodeDecodeError) as err:
+        return die("Error: " + verb + ": cannot read tasks file " + path + ": " + str(err))
+    except ValueError as err:
+        return die("Error: " + verb + ": malformed JSON in tasks file " + path + ": " + str(err))
 
 
 # ---------------------------------------------------------------------------
@@ -314,7 +403,146 @@ def stories_with_id(doc, story_id):
 
 
 # ---------------------------------------------------------------------------
-# Ops -- one per verb, each handed an already-resolved tasks_file
+# Readiness -- the predicate list-ready and next-story now SHARE
+# ---------------------------------------------------------------------------
+
+# The jq expression that produced a story, quoted back by every diagnostic
+# these rules raise. One constant because a refusal that names `.userStories[]`
+# in one rule and `.story` in the next reads like two different files.
+STORY = ".userStories[]"
+
+
+def _dependencies(story):
+    """`$story.dependsOn // []`, which the jq wrote out at all four of its
+    sites. Note what `//` does NOT replace: 0, "" and {} all survive it and
+    reach jq_length, where 0 and "" turn out to have length 0 too."""
+    return jq_alternative(jq_index(story, "dependsOn", STORY), [])
+
+
+def _matching_deps(stories, dep_id, condition):
+    """`$root.userStories[] | select(.id == $dep_id) | condition`, lazily.
+
+    Lazy on purpose: jq stops the moment `all` has its answer, so a story
+    AFTER the one that decided it is never indexed and never aborts on a shape
+    it does not like. A list comprehension here would evaluate the rest and
+    turn a story jq listed into a refusal.
+    """
+    for story in stories:
+        if jq_index(story, "id", STORY) == dep_id:
+            yield condition(story)
+
+
+def _no_dependency_blocks(story, stories, condition):
+    """One `(deps | length == 0) or (deps | all(...))` arm.
+
+    The jq wrote this shape out twice, once per walk, and the two copies
+    differed only in the condition -- which is the duplication a shared
+    parameter removes. The length arm is checked first for the reason jq
+    checked it first: `or` short-circuits, so a dependsOn that cannot be
+    iterated (a number, a bare string) is only reached when its length is NOT
+    zero -- which is how `dependsOn: 0` stays readable and `dependsOn: 2`
+    aborts.
+    """
+    deps = _dependencies(story)
+    if jq_length(deps, STORY + ".dependsOn") == 0:
+        return True
+    return jq_all_over(
+        jq_iterate(deps, STORY + ".dependsOn"),
+        lambda dep_id: _matching_deps(stories, dep_id, condition),
+    )
+
+
+def _dep_action_gate_clear(dep):
+    """`(.gate.type != "action") or (.gate.status != "pending")` on a DEPENDENCY.
+    A dependency holding a pending ACTION gate blocks its dependents; every
+    other gate kind and status does not."""
+    gate = jq_index(dep, "gate", STORY)
+    return jq_index(gate, "type", STORY + ".gate") != "action" or (
+        jq_index(gate, "status", STORY + ".gate") != "pending"
+    )
+
+
+def _dep_status_done(dep):
+    """`$dep_status == "completed" or $dep_status == "skipped"`. Anything else
+    -- pending, in_progress, failed, absent -- leaves the dependent blocked."""
+    status = jq_index(dep, "status", STORY)
+    return status == "completed" or status == "skipped"
+
+
+def is_ready(story, stories):
+    """THE readiness predicate, in the order jq applied its four filters.
+
+    The order is load-bearing rather than stylistic: each filter can abort on a
+    shape the one before it never looked at, so running them in a different
+    order would refuse a different file. Same reason the two dependency walks
+    stay separate even though they iterate the same list -- jq ran the gate
+    walk to completion first, and a document that aborts in the gate walk must
+    not get as far as the status walk.
+    """
+    if jq_index(story, "status", STORY) != "pending":
+        return False
+    # The story's OWN gate. Only a pending DECISION gate holds it back: an
+    # action or verify gate on itself is what /aimi:execute resolves after the
+    # story runs, so it never blocks the story that carries it.
+    gate = jq_index(story, "gate", STORY)
+    own_gate_blocks = jq_index(gate, "type", STORY + ".gate") == "decision" and (
+        jq_index(gate, "status", STORY + ".gate") == "pending"
+    )
+    if own_gate_blocks:
+        return False
+    if not _no_dependency_blocks(story, stories, _dep_action_gate_clear):
+        return False
+    return _no_dependency_blocks(story, stories, _dep_status_done)
+
+
+def ready_stories(doc):
+    """The whole list-ready array, in tasks.json FILE ORDER -- jq filtered a
+    stream and never sorted, and execute.md says selection order follows this
+    output, "tasks.json file order, deterministic"."""
+    stories = _stories(doc)
+    return [story for story in stories if is_ready(story, stories)]
+
+
+BRIEF_KEYS = ("id", "title", "priority", "dependsOn", "project", "gate")
+
+
+def brief_row(story):
+    """`{id, title, priority, dependsOn, project, gate}`, all six, always.
+
+    jq's object-construction shorthand emits a key holding null when the story
+    has no such field, so a story with no project and no gate still yields six
+    keys -- which is why this null-fills instead of copying what is present.
+    /aimi:execute's wave selection reads these stubs and part1-core asserts the
+    count is exactly 6. Note `dependsOn` is the RAW field here, null and all: the
+    `// []` above belongs to the predicate, not to this projection, and a story
+    listed with `"dependsOn": null` is what the pre-port CLI printed.
+    """
+    return {key: jq_index(story, key, STORY) for key in BRIEF_KEYS}
+
+
+def next_story(doc):
+    """`sort_by(.priority) | .[0]` over the ready list, with both of its traps.
+
+    jq's sort is STABLE, so stories tied on priority stay in tasks.json file
+    order -- which is the determinism /aimi:execute documents. And jq's total
+    order puts null BELOW every number, so a story whose priority is null or
+    absent is picked FIRST, ahead of priority 1. jq_sort_key is what reproduces
+    the second; `sorted` being stable is what reproduces the first, and both are
+    pinned by recorded cases (empate, prioridade-nula, prioridade-ausente)
+    rather than left to the reader to trust.
+
+    None for an empty list, because `[] | .[0]` is null and bash keys its
+    clear-the-pointer branch off exactly that token.
+    """
+    ready = ready_stories(doc)
+    if not ready:
+        return None
+    ordered = sorted(ready, key=lambda story: jq_sort_key(jq_index(story, "priority", STORY)))
+    return ordered[0]
+
+
+# ---------------------------------------------------------------------------
+# Ops -- one per verb (plus the one twin), each handed an already-resolved path
 # ---------------------------------------------------------------------------
 
 
@@ -402,6 +630,54 @@ def _state_or_null(value):
     return None if value in (None, "") else value
 
 
+def op_list_ready(argv):
+    path = _flag(argv, "--tasks-file")
+    if not path:
+        die("Usage: tasks.py list-ready --tasks-file <path> [--brief]")
+    brief = "--brief" in argv
+    for doc in read_docs(path, "list-ready"):
+        ready = ready_stories(doc)
+        _emit([brief_row(story) for story in ready] if brief else ready)
+    return 0
+
+
+def op_next_story(argv):
+    """The selection only. The current-story write stays in bash with every
+    other .aimi/state/ write, so this verb is as read-only as the other six."""
+    path = _flag(argv, "--tasks-file")
+    if not path:
+        die("Usage: tasks.py next-story --tasks-file <path>")
+    for doc in read_docs(path, "next-story"):
+        _emit(next_story(doc))
+    return 0
+
+
+def op_validate_story_exists(argv):
+    """aimi-cli.sh's validate_story_exists, in Python, for the verbs that have
+    already crossed. NOT a verb -- the twin of a bash gate that ten call sites
+    still use, and the only op here not named after a command.
+
+    Its message is the bash one to the byte, and so is its exit status. The
+    bash gate is `jq -e ... > /dev/null 2>&1`, which answers no differently for
+    a missing id, an unreadable file, a malformed document and a userStories
+    that cannot be iterated -- jq's own message went to /dev/null and the
+    caller saw one line. Reproduced by catching the lot: a twin that refused a
+    malformed file with a better message would diverge from the copy it exists
+    to match, and there are two of these only until the last bash caller moves.
+    """
+    path = _flag(argv, "--tasks-file")
+    story_id = _flag(argv, "--story-id")
+    if not path or story_id is None:
+        die("Usage: tasks.py validate-story-exists --tasks-file <path> --story-id <id>")
+    try:
+        found = any(stories_with_id(doc, story_id) for doc in load_docs(path))
+    except (OSError, ValueError, MalformedTasks):
+        found = False
+    if not found:
+        die("Error: Story " + story_id + " not found in " + path)
+    return 0
+
+
 _OPS = {
     "status": op_status,
     "metadata": op_metadata,
@@ -409,11 +685,17 @@ _OPS = {
     "current-story": op_current_story,
     "get-state": op_get_state,
     "count-pending": op_count_pending,
+    "list-ready": op_list_ready,
+    "next-story": op_next_story,
+    "validate-story-exists": op_validate_story_exists,
 }
 
 # No _VERB_FOR_OP table, unlike roadmap.py: every op here is named after the
 # aimi-cli.sh verb that calls it, so a diagnostic already names a command the
 # reader can run. Keep it that way -- a rename on one side needs the other.
+# The single exception is validate-story-exists, which names the bash FUNCTION
+# it twins for the same reason: `grep validate_story_exists` has to find both
+# copies while both exist.
 
 
 def main(argv):
